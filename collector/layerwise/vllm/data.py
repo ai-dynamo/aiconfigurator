@@ -78,6 +78,8 @@ class WorkUnit:
     includes_moe: bool = False
     router_weight_model: str | None = None
     physical_gpus: int = 1
+    live_step_gen_min_past_kv: int = 8192
+    live_step_gen_min_batch_size: int = 256
 
     @property
     def moe_weight_mode(self) -> str:
@@ -124,6 +126,10 @@ class WorkUnit:
                 "moe_weight_mode": self.moe_weight_mode,
                 "router_weight_model": self.router_weight_model or "",
                 "physical_gpus": self.physical_gpus,
+                "max_num_seqs": self.max_num_seqs or "",
+                "max_num_batched_tokens": self.max_num_batched_tokens or "",
+                "live_step_gen_min_past_kv": self.live_step_gen_min_past_kv,
+                "live_step_gen_min_batch_size": self.live_step_gen_min_batch_size,
                 "phase": dp.phase,
                 "batch_size": dp.batch_size,
                 "new_tokens": dp.new_tokens,

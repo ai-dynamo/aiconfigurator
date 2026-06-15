@@ -58,10 +58,15 @@ graph-node records to attribute decode replay kernels back to the measured
 layer. `--nsys-capture cuda_profiler_api` is a diagnostic speed mode and should
 not be used for AIC-quality layerwise data.
 
-Production decode batch sizes default up to `512`. Use
+Production decode batch sizes default up to `256`. Use
 `--max-decode-batch-size auto` to follow vLLM's hardware-dependent
 `max_num_seqs` default, or use `--gen-batch-sizes` to request an exact decode
 grid.
+
+The full preset uses `--ctx-batch-sizes auto` by default. Auto keeps
+single-request context rows and adds a bounded batched-context grid whose
+aggregate scheduled tokens fit the resolved `max_num_batched_tokens` budget.
+Use an explicit `--ctx-batch-sizes` list only for diagnostic shapes.
 
 ## Scheduler Sizing
 
@@ -143,10 +148,11 @@ in this AIC branch.
 Current validation data is stored under
 `src/aiconfigurator/systems/data/b300_sxm/vllm/0.20.1/layerwise_perf.csv`.
 The public vLLM collector defaults to phase-specific representative depth and
-latency source. Context and dense decode use kernel-span data. High-batch MoE
-decode uses GPU-sum because wrapper span overcounts scheduler/replay gaps there.
-The diagnostic `--latency-source schedule_to_update` path is still available
-when comparing context kernel timing against the full scheduler/update envelope.
+latency source. Canonical context and decode rows use scheduler/worker timing
+envelopes so the backend can consume them as full-step data. Diagnostic
+`--latency-source span`, `gpu`, and `gpu_capped` rows are still available for
+module-level analysis, but they should not be promoted as backend-ready decode
+data without metadata that prevents representative layer scaling.
 `--target-layer-count` overrides both phases; `--ctx-target-layer-count` and
 `--gen-target-layer-count` override them independently.
 

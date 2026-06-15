@@ -21,7 +21,7 @@ CSV_COLUMNS = [
     "batch_size", "new_tokens", "past_kv", "layer_type", "layer_index",
     "measured_layer_count", "layer_multiplier", "latency_ms", "rms_latency_ms",
     "rms_kernel_count", "includes_moe", "moe_weight_mode", "latency_source",
-    "physical_gpus", "max_num_batched_tokens", "vllm_config_hash",
+    "physical_gpus", "max_num_seqs", "max_num_batched_tokens", "vllm_config_hash",
 ]
 
 

@@ -133,7 +133,7 @@ class StatusStore:
         self.status_path = work_dir / "status.jsonl"
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
-    def append_jsonl(self, path: Path, row: dict[str, Any]) -> None:
+    def append_jsonl(self, path: Path, row: dict[str, Any], *, sync: bool = True) -> None:
         """Append one locked JSONL row and fsync it for crash recovery."""
 
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,10 +141,19 @@ class StatusStore:
             fcntl.flock(f, fcntl.LOCK_EX)
             f.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
             f.flush()
-            os.fsync(f.fileno())
+            if sync:
+                os.fsync(f.fileno())
             fcntl.flock(f, fcntl.LOCK_UN)
 
-    def append_event(self, event: str, *, work_unit_id: str, datapoint_id: str | None = None, **extra: Any) -> None:
+    def append_event(
+        self,
+        event: str,
+        *,
+        work_unit_id: str,
+        datapoint_id: str | None = None,
+        sync: bool = True,
+        **extra: Any,
+    ) -> None:
         """Append one scheduler or worker status event."""
 
         row = {
@@ -154,7 +163,7 @@ class StatusStore:
             "ts": _utc_now(),
             **extra,
         }
-        self.append_jsonl(self.status_path, {k: v for k, v in row.items() if v is not None})
+        self.append_jsonl(self.status_path, {k: v for k, v in row.items() if v is not None}, sync=sync)
 
     def load_events(self) -> list[dict[str, Any]]:
         """Load all status events written so far."""
@@ -220,7 +229,7 @@ def _is_oom_text(text: str) -> bool:
         or "cuda oom" in lowered
         or "cublas_status_alloc_failed" in lowered
         or "insufficient kv blocks" in lowered
-        or "failed to prime" in lowered and "prefix" in lowered and "free_blocks=0" in lowered
+        or ("failed to prime" in lowered and "prefix" in lowered and "free_blocks=0" in lowered)
     )
 
 def _is_fatal_cuda_text(text: str) -> bool:
@@ -269,23 +278,11 @@ def oom_dominates(failed: DataPoint, candidate: DataPoint) -> bool:
         candidate.batch_size > failed.batch_size
         or candidate.past_kv > failed.past_kv
     )
-    if same_or_larger and strictly_larger:
-        return True
+    return same_or_larger and strictly_larger
 
-    if candidate.batch_size < failed.batch_size:
-        return False
-    failed_kv_footprint = int(failed.batch_size) * max(
-        1,
-        int(failed.past_kv) + max(1, int(failed.new_tokens)),
-    )
-    candidate_kv_footprint = int(candidate.batch_size) * max(
-        1,
-        int(candidate.past_kv) + max(1, int(candidate.new_tokens)),
-    )
-    return candidate_kv_footprint >= failed_kv_footprint
-
-def _attempt_config_hash(attempt: Attempt, store: StatusStore) -> str:
-    for event in reversed(store.index().events):
+def _attempt_config_hash(attempt: Attempt, store: StatusStore, index: StatusIndex | None = None) -> str:
+    status_index = index or store.index()
+    for event in reversed(status_index.events):
         if event.get("event") != "engine_metadata_written":
             continue
         if event.get("work_unit_id") != attempt.work_unit.work_unit_id:
@@ -309,6 +306,20 @@ def _attempt_max_num_batched_tokens(attempt: Attempt) -> int | None:
         return None
     return int(value)
 
+def _attempt_max_num_seqs(attempt: Attempt) -> int | None:
+    """Return the sequence budget used by a launched attempt."""
+
+    if attempt.work_unit.max_num_seqs is not None:
+        return attempt.work_unit.max_num_seqs
+    try:
+        spec = json.loads(attempt.spec_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    value = spec.get("max_num_seqs")
+    if value in (None, ""):
+        return None
+    return int(value)
+
 def _lookup_scheduler_timing_aggs(
     events: list[dict[str, Any]],
     work_unit_id: str,
@@ -328,53 +339,67 @@ def _lookup_scheduler_timing_aggs(
 
     step, batch_size, past_kv = datapoint.parse_key()
     aggs = []
+    batched_ctx = datapoint.phase == "ctx" and int(batch_size) > 1
 
     model_execute_aggs = []
-    for event in events:
-        if event.get("event") != "completed_execution":
-            continue
-        if event.get("work_unit_id") != work_unit_id:
-            continue
-        if datapoint.phase != "ctx":
-            continue
-        if not event.get("live_step_driver"):
-            continue
-        if not event.get("sync_execute_model_wall_time"):
-            continue
-        event_attempt_id = event.get("attempt_id")
-        if attempt_id is not None and event_attempt_id not in (None, "") and event_attempt_id != attempt_id:
-            continue
-        if event.get("phase") != datapoint.phase:
-            continue
-        if int(event.get("batch_size", -1)) != int(batch_size):
-            continue
-        if int(event.get("past_kv", -1)) != int(past_kv):
-            continue
-        if datapoint.phase == "ctx" and int(event.get("new_tokens", -1)) != int(step):
-            continue
-        if event.get("run") in (None, ""):
-            continue
-        latency_ms = event.get("execute_model_wall_time_ms")
-        if latency_ms in (None, ""):
-            continue
-        latency_us = float(latency_ms) * 1000.0
-        model_execute_aggs.append({
-            "gpu_us": latency_us,
-            "rms_us": 0.0,
-            "span_us": latency_us,
-            "kernel_count": 0,
-            "rms_kernel_count": 0,
-        })
-    if model_execute_aggs:
-        return model_execute_aggs
+    model_execute_counts_by_run: dict[int, int] = {}
+    if datapoint.phase in {"ctx", "gen"}:
+        for event in events:
+            if event.get("event") != "completed_execution":
+                continue
+            if event.get("work_unit_id") != work_unit_id:
+                continue
+            if datapoint.phase == "ctx":
+                if not event.get("live_step_driver"):
+                    continue
+            elif event.get("live_step_driver"):
+                continue
+            if datapoint.phase == "ctx" and not event.get("sync_execute_model_wall_time"):
+                continue
+            event_attempt_id = event.get("attempt_id")
+            if attempt_id is not None and event_attempt_id not in (None, "") and event_attempt_id != attempt_id:
+                continue
+            if event.get("phase") != datapoint.phase:
+                continue
+            if int(event.get("batch_size", -1)) != int(batch_size):
+                continue
+            if int(event.get("past_kv", -1)) != int(past_kv):
+                continue
+            expected_new_tokens = int(step) if datapoint.phase == "ctx" else int(datapoint.new_tokens)
+            if int(event.get("new_tokens", -1)) != expected_new_tokens:
+                continue
+            if event.get("run") in (None, ""):
+                continue
+            run = int(event["run"])
+            latency_ms = (
+                event.get("execute_model_gpu_time_ms")
+                if datapoint.phase == "gen" and not event.get("live_step_driver")
+                else event.get("execute_model_wall_time_ms")
+            )
+            if latency_ms in (None, ""):
+                continue
+            model_execute_counts_by_run[run] = model_execute_counts_by_run.get(run, 0) + 1
+            latency_us = float(latency_ms) * 1000.0
+            model_execute_aggs.append({
+                "gpu_us": latency_us,
+                "rms_us": 0.0,
+                "span_us": latency_us,
+                "kernel_count": 0,
+                "rms_kernel_count": 0,
+            })
+        rank_sharded_gen = datapoint.phase == "gen" and any(
+            count > 1 for count in model_execute_counts_by_run.values()
+        )
+        if model_execute_aggs and not rank_sharded_gen:
+            return model_execute_aggs
 
     live_step_aggs = []
     for event in events:
         if event.get("event") != "live_step_wall_time":
             continue
-        if event.get("work_unit_id") != work_unit_id:
+        if batched_ctx:
             continue
-        if datapoint.phase != "ctx":
+        if event.get("work_unit_id") != work_unit_id:
             continue
         event_attempt_id = event.get("attempt_id")
         if attempt_id is not None and event_attempt_id not in (None, "") and event_attempt_id != attempt_id:
@@ -400,7 +425,7 @@ def _lookup_scheduler_timing_aggs(
             "kernel_count": 0,
             "rms_kernel_count": 0,
         })
-    if live_step_aggs:
+    if live_step_aggs and datapoint.phase != "gen":
         return live_step_aggs
 
     def _event_int(event: dict[str, Any], key: str) -> int | None:
@@ -410,6 +435,7 @@ def _lookup_scheduler_timing_aggs(
         return int(value)
 
     by_run: dict[int, dict[str, float]] = {}
+    gen_by_run: dict[int, dict[str, float]] = {}
     for event in events:
         if event.get("event") != "scheduler_update_wall_time":
             continue
@@ -428,8 +454,19 @@ def _lookup_scheduler_timing_aggs(
             continue
         if datapoint.phase == "ctx":
             scheduled_new_reqs = _event_int(event, "scheduled_new_reqs")
-            if scheduled_new_reqs == 0:
+            if batched_ctx:
+                if not bool(event.get("control_batched_ctx_driver")):
+                    continue
+                scheduled_tokens = _event_int(event, "scheduled_tokens")
+                if scheduled_tokens is None or scheduled_tokens <= 0:
+                    continue
+            elif scheduled_new_reqs == 0:
                 continue
+            else:
+                scheduled_tokens = _event_int(event, "scheduled_tokens")
+                expected_tokens = int(step) * int(batch_size)
+                if scheduled_tokens is not None and scheduled_tokens < expected_tokens:
+                    continue
         if datapoint.phase == "gen":
             scheduled_new_reqs = _event_int(event, "scheduled_new_reqs")
             scheduled_tokens = _event_int(event, "scheduled_tokens")
@@ -445,6 +482,15 @@ def _lookup_scheduler_timing_aggs(
         if latency_ms in (None, ""):
             continue
         latency_us = float(latency_ms) * 1000.0
+        if datapoint.phase == "gen":
+            gen_by_run[run] = {
+                "gpu_us": latency_us,
+                "rms_us": 0.0,
+                "span_us": latency_us,
+                "kernel_count": 0,
+                "rms_kernel_count": 0,
+            }
+            continue
         run_agg = by_run.setdefault(
             run,
             {
@@ -457,6 +503,17 @@ def _lookup_scheduler_timing_aggs(
         )
         run_agg["gpu_us"] += latency_us
         run_agg["span_us"] += latency_us
+    if datapoint.phase == "gen":
+        for _run, run_agg in sorted(gen_by_run.items()):
+            aggs.append({
+                "gpu_us": run_agg["gpu_us"],
+                "rms_us": run_agg["rms_us"],
+                "span_us": run_agg["span_us"],
+                "kernel_count": int(run_agg["kernel_count"]),
+                "rms_kernel_count": int(run_agg["rms_kernel_count"]),
+            })
+        return aggs or live_step_aggs
+
     for _run, run_agg in sorted(by_run.items()):
         aggs.append({
             "gpu_us": run_agg["gpu_us"],
@@ -465,7 +522,7 @@ def _lookup_scheduler_timing_aggs(
             "kernel_count": int(run_agg["kernel_count"]),
             "rms_kernel_count": int(run_agg["rms_kernel_count"]),
         })
-    return aggs
+    return aggs or live_step_aggs
 
 def _lookup_worker_wall_aggs(
     events: list[dict[str, Any]],
@@ -532,14 +589,51 @@ def _effective_latency_source(
         return "span"
     return requested_source
 
-def _live_step_driver_would_handle(datapoint: DataPoint, *, gen_min_past_kv: int = 8192) -> bool:
+def _live_step_driver_would_handle(
+    datapoint: DataPoint,
+    *,
+    gen_min_past_kv: int = 8192,
+    gen_min_batch_size: int = 256,
+) -> bool:
     """Mirror the worker's live-step eligibility without importing worker code."""
 
     if datapoint.phase == "ctx":
-        return datapoint.batch_size == 1 and int(datapoint.new_tokens) > 0
+        return int(datapoint.batch_size) > 0 and int(datapoint.new_tokens) > 0
     if datapoint.phase == "gen":
-        return int(datapoint.past_kv) >= int(gen_min_past_kv)
+        if int(datapoint.past_kv) >= int(gen_min_past_kv):
+            return True
+        return int(gen_min_batch_size) > 0 and int(datapoint.batch_size) >= int(gen_min_batch_size)
     return False
+
+
+def _unit_live_step_gen_min_past_kv(unit: WorkUnit, args: argparse.Namespace) -> int:
+    """Return the per-unit live-step decode past threshold."""
+
+    return int(getattr(unit, "live_step_gen_min_past_kv", getattr(args, "live_step_gen_min_past_kv", 8192)))
+
+
+def _unit_live_step_gen_min_batch_size(unit: WorkUnit, args: argparse.Namespace) -> int:
+    """Return the per-unit live-step decode batch threshold."""
+
+    return int(getattr(unit, "live_step_gen_min_batch_size", getattr(args, "live_step_gen_min_batch_size", 256)))
+
+
+def _has_live_step_gen_datapoint(unit: WorkUnit, args: argparse.Namespace, datapoints: list[DataPoint]) -> bool:
+    """Return whether these datapoints use the live-step generation driver."""
+
+    if not bool(getattr(args, "live_step_driver", False)):
+        return False
+    gen_min_past_kv = _unit_live_step_gen_min_past_kv(unit, args)
+    gen_min_batch_size = _unit_live_step_gen_min_batch_size(unit, args)
+    return any(
+        dp.phase == "gen"
+        and _live_step_driver_would_handle(
+            dp,
+            gen_min_past_kv=gen_min_past_kv,
+            gen_min_batch_size=gen_min_batch_size,
+        )
+        for dp in datapoints
+    )
 
 
 def _lookup_timing_source_aggs(
@@ -587,6 +681,7 @@ class Scheduler:
         self.worker_entrypoint = worker_entrypoint or (_THIS_DIR / "collect.py")
         self.work_units = work_units
         self._validate_capture_mode()
+        self._validate_live_step_mode()
         self.work_dir = Path(args.work_dir).resolve()
         self.store = StatusStore(self.work_dir)
         self.output_path = Path(args.output).resolve()
@@ -594,6 +689,8 @@ class Scheduler:
         if not self.gpus:
             raise RuntimeError("No GPU slots available")
         self.max_workers = args.max_workers
+        live_step_gen_max_workers = int(getattr(args, "live_step_gen_max_workers", 1) or 0)
+        self.live_step_gen_max_workers = live_step_gen_max_workers if live_step_gen_max_workers > 0 else None
         self.attempt_counter = self.store.max_attempt_id()
         self.fatal_streak: dict[tuple[str, str], int] = {}
 
@@ -619,6 +716,38 @@ class Scheduler:
                         "scheduler/worker-wall latency source."
                     )
 
+    def _validate_live_step_mode(self) -> None:
+        """Reject live-step combinations that require an in-process scheduler."""
+
+        if not bool(getattr(self.args, "live_step_driver", False)):
+            return
+        for unit in self.work_units:
+            gen_min_past_kv = _unit_live_step_gen_min_past_kv(unit, self.args)
+            gen_min_batch_size = _unit_live_step_gen_min_batch_size(unit, self.args)
+            if int(unit.physical_gpus or 1) <= 1:
+                continue
+            handled = [
+                dp
+                for dp in unit.datapoints
+                if _live_step_driver_would_handle(
+                    dp,
+                    gen_min_past_kv=gen_min_past_kv,
+                    gen_min_batch_size=gen_min_batch_size,
+                )
+            ]
+            if not handled:
+                continue
+            shapes = ", ".join(dp.shape_key for dp in handled[:3])
+            if len(handled) > 3:
+                shapes += ", ..."
+            raise ValueError(
+                "--live-step-driver requires an in-process vLLM scheduler, "
+                "but physical TP uses a multi-process engine. Use "
+                "--latency-source worker_wall for physical-TP diagnostics or "
+                "drop --physical-tp for canonical one-GPU collection. "
+                f"Unsupported shapes: {shapes}"
+            )
+
     def run(self) -> None:
         """Run all queued work units and append successful CSV rows."""
 
@@ -641,6 +770,8 @@ class Scheduler:
                         queue.pop(queue_index)
                         launched = True
                         break
+                    if not self._can_launch_with_live_step_gen_limit(unit, pending, active):
+                        continue
                     gpu_group = self._acquire_gpu_group(active, max(1, int(unit.physical_gpus or 1)))
                     if gpu_group is None:
                         continue
@@ -666,6 +797,25 @@ class Scheduler:
 
         print(f"[scheduler] Done. Results written to {self.output_path}")
         print(f"[scheduler] Status written to {self.store.status_path}")
+
+    def _can_launch_with_live_step_gen_limit(
+        self,
+        unit: WorkUnit,
+        pending: list[DataPoint],
+        active: dict[str, Attempt],
+    ) -> bool:
+        """Return whether a unit fits the configured live-step-gen concurrency cap."""
+
+        if self.live_step_gen_max_workers is None:
+            return True
+        if not _has_live_step_gen_datapoint(unit, self.args, pending):
+            return True
+        active_live_gen = sum(
+            1
+            for attempt in active.values()
+            if _has_live_step_gen_datapoint(attempt.work_unit, self.args, attempt.work_unit.datapoints)
+        )
+        return active_live_gen < self.live_step_gen_max_workers
 
     def _active_gpu_ids(self, active: dict[str, Attempt]) -> set[str]:
         """Return physical GPU IDs currently reserved by active attempts."""
@@ -727,9 +877,8 @@ class Scheduler:
             env["LAYERWISE_SCHEDULER_TIMING"] = "1"
         if getattr(self.args, "live_step_driver", False):
             env["LAYERWISE_USE_LIVE_STEP_DRIVER"] = "1"
-            env["LAYERWISE_LIVE_STEP_GEN_MIN_PAST_KV"] = str(
-                int(getattr(self.args, "live_step_gen_min_past_kv", 8192))
-            )
+            env["LAYERWISE_LIVE_STEP_GEN_MIN_PAST_KV"] = str(_unit_live_step_gen_min_past_kv(unit, self.args))
+            env["LAYERWISE_LIVE_STEP_GEN_MIN_BATCH_SIZE"] = str(_unit_live_step_gen_min_batch_size(unit, self.args))
         cmd = self._worker_cmd(
             paths["spec"],
             paths["report"],
@@ -779,13 +928,21 @@ class Scheduler:
         has_ctx = any(dp.phase == "ctx" for dp in pending)
         has_gen = any(dp.phase == "gen" for dp in pending)
         gen_datapoints = [dp for dp in pending if dp.phase == "gen"]
-        live_step_gen_min_past_kv = int(getattr(self.args, "live_step_gen_min_past_kv", 8192))
-        has_live_step_gen = (
-            getattr(self.args, "live_step_driver", False)
-            and any(
-                _live_step_driver_would_handle(dp, gen_min_past_kv=live_step_gen_min_past_kv)
-                for dp in gen_datapoints
+        live_step_gen_min_past_kv = _unit_live_step_gen_min_past_kv(unit, self.args)
+        live_step_gen_min_batch_size = _unit_live_step_gen_min_batch_size(unit, self.args)
+        live_step_gen_flags = [
+            bool(getattr(self.args, "live_step_driver", False))
+            and _live_step_driver_would_handle(
+                dp,
+                gen_min_past_kv=live_step_gen_min_past_kv,
+                gen_min_batch_size=live_step_gen_min_batch_size,
             )
+            for dp in gen_datapoints
+        ]
+        has_live_step_gen = any(live_step_gen_flags)
+        has_prefix_cache_gen = (
+            unit.gen_driver == "prefix_cache"
+            and any(not uses_live_step for uses_live_step in live_step_gen_flags)
         )
         live_step_gen_deployment = (
             has_gen
@@ -794,8 +951,16 @@ class Scheduler:
                 or has_live_step_gen
             )
         )
-        needs_prefix_cache = has_gen and unit.gen_driver == "prefix_cache"
-        disables_prefix_cache = live_step_gen_deployment and unit.gen_driver == "live_decode"
+        needs_prefix_cache = has_gen and has_prefix_cache_gen
+        disables_prefix_cache = (
+            has_gen
+            and not has_ctx
+            and not has_prefix_cache_gen
+            and (
+                unit.gen_driver == "live_decode"
+                or has_live_step_gen
+            )
+        )
         runtime_defaults = gpt_oss_runtime_defaults(
             model=unit.row_base["model"],
             system=unit.row_base["system"],
@@ -836,14 +1001,23 @@ class Scheduler:
         live_step_marker = (
             getattr(self.args, "live_step_driver", False)
             and any(
-                _live_step_driver_would_handle(dp, gen_min_past_kv=live_step_gen_min_past_kv)
+                _live_step_driver_would_handle(
+                    dp,
+                    gen_min_past_kv=live_step_gen_min_past_kv,
+                    gen_min_batch_size=live_step_gen_min_batch_size,
+                )
                 for dp in pending
             )
+        )
+        prefix_cache_gen_step_marker = has_prefix_cache_gen and any(
+            dp.phase == "gen" and source == "schedule_to_update"
+            for dp, source in zip(pending, effective_latency_sources, strict=False)
         )
         enable_step_marker = (
             self._attempt_needs_nsys(unit, pending)
             or enable_layerwise_nvtx
             or live_step_marker
+            or prefix_cache_gen_step_marker
             or (enable_layer_patch and self.args.nsys_capture != "none")
         )
         max_num_batched_tokens = unit.max_num_batched_tokens
@@ -874,6 +1048,8 @@ class Scheduler:
             "max_model_len": unit.max_model_len,
             "gpu_memory_utilization": unit.gpu_memory_utilization,
             "gen_driver": unit.gen_driver,
+            "live_step_gen_min_past_kv": live_step_gen_min_past_kv,
+            "live_step_gen_min_batch_size": live_step_gen_min_batch_size,
             "status_path": str(self.store.status_path),
             "extra_vllm_args": extra_vllm_args,
             "router_weight_model": unit.router_weight_model,
@@ -1043,6 +1219,7 @@ class Scheduler:
             meta=meta,
         )
         index = self.store.index()
+        config_hash = _attempt_config_hash(attempt, self.store, index)
         successes = 0
         for dp in attempt.work_unit.datapoints:
             dpid = dp.datapoint_id(attempt.work_unit.work_unit_id)
@@ -1103,8 +1280,9 @@ class Scheduler:
                 "moe_weight_mode": attempt.work_unit.moe_weight_mode,
                 "latency_source": effective_latency_source,
                 "physical_gpus": attempt.work_unit.physical_gpus,
+                "max_num_seqs": _attempt_max_num_seqs(attempt) or "",
                 "max_num_batched_tokens": _attempt_max_num_batched_tokens(attempt) or "",
-                "vllm_config_hash": _attempt_config_hash(attempt, self.store),
+                "vllm_config_hash": config_hash,
             }
             _append_success_row(self.output_path, row)
             self.store.append_event(
@@ -1123,6 +1301,7 @@ class Scheduler:
                 rms_latency_ms=row["rms_latency_ms"],
                 rms_kernel_count=rms_kernel_count,
                 sqlite=str(sqlite_path),
+                sync=False,
             )
             successes += 1
         return successes
@@ -1131,6 +1310,7 @@ class Scheduler:
         """Append schedule-envelope rows when no nsys report was captured."""
 
         index = self.store.index()
+        config_hash = _attempt_config_hash(attempt, self.store, index)
         successes = 0
         for dp in attempt.work_unit.datapoints:
             dpid = dp.datapoint_id(attempt.work_unit.work_unit_id)
@@ -1185,8 +1365,9 @@ class Scheduler:
                 "moe_weight_mode": attempt.work_unit.moe_weight_mode,
                 "latency_source": effective_latency_source,
                 "physical_gpus": attempt.work_unit.physical_gpus,
+                "max_num_seqs": _attempt_max_num_seqs(attempt) or "",
                 "max_num_batched_tokens": _attempt_max_num_batched_tokens(attempt) or "",
-                "vllm_config_hash": _attempt_config_hash(attempt, self.store),
+                "vllm_config_hash": config_hash,
             }
             _append_success_row(self.output_path, row)
             self.store.append_event(
@@ -1205,6 +1386,7 @@ class Scheduler:
                 rms_latency_ms=row["rms_latency_ms"],
                 rms_kernel_count=rms_kernel_count,
                 sqlite="",
+                sync=False,
             )
             successes += 1
         return successes

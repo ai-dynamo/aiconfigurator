@@ -44,16 +44,35 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--models", default=None, help="Comma-separated registry model filter. Defaults to all models.")
     parser.add_argument("--tp-sizes", default="1,2,4,8", help="Comma-separated TP sizes to collect.")
     parser.add_argument("--ep-sizes", default="auto", help="Comma-separated EP sizes, or auto for model defaults.")
+    parser.add_argument(
+        "--parallelism-pairs",
+        default=None,
+        help=(
+            "Optional comma-separated exact TP:EP pairs to collect, for example "
+            "1:1,2:1,2:2. When set, this replaces the --tp-sizes/--ep-sizes product."
+        ),
+    )
     parser.add_argument("--phases", choices=("ctx", "gen", "both"), default="both")
     parser.add_argument("--run-preset", choices=("full", "smoke"), default="full")
     parser.add_argument("--ctx-new-tokens", default=None, help="Override context new-token grid.")
     parser.add_argument("--ctx-past-kv", default=None, help="Override context past-KV grid.")
+    parser.add_argument(
+        "--ctx-batch-sizes",
+        default=None,
+        help=(
+            "Optional context request-count grid. Full preset defaults to auto, "
+            "which collects a bounded batched-CTX grid inside the resolved scheduler "
+            "token budget for FPM mixed-prefill parity. Smoke preset defaults to 1."
+        ),
+    )
     parser.add_argument("--gen-batch-sizes", default=None, help="Override decode batch-size grid.")
     parser.add_argument("--gen-past-kv", default=None, help="Override decode past-KV grid.")
     parser.add_argument(
         "--max-decode-batch-size",
-        default="512",
+        default="256",
         help="Maximum default decode batch size for full presets. "
+        "The default keeps bs=256,past=32768 in the canonical grid; use a "
+        "larger explicit value or 'auto' only for diagnostic sweeps. "
         "Use 'auto' to follow vLLM's hardware-dependent default max_num_seqs.",
     )
     parser.add_argument("--max-workers", type=int, default=None, help="Limit concurrent one-GPU workers.")
@@ -140,6 +159,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Override vLLM scheduler max_num_seqs for FPM parity diagnostics.",
     )
     advanced.add_argument(
+        "--gen-max-num-seqs",
+        type=int,
+        default=None,
+        help=(
+            "Override vLLM scheduler max_num_seqs only for generated decode "
+            "work units. Use this when FPM decode ran with a smaller sequence "
+            "budget than context collection should use."
+        ),
+    )
+    advanced.add_argument(
         "--max-num-batched-tokens",
         type=int,
         default=None,
@@ -169,8 +198,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="auto",
         help=(
             "Latency source for output rows. auto uses scheduler timing for "
-            "context, kernel span timing for decode, and gpu-sum for high-batch "
-            "MoE decode."
+            "context and decode. Use span/gpu/gpu_capped only for diagnostic "
+            "module-level rows that will not be promoted as full-step backend data."
         ),
     )
     advanced.add_argument("--moe-decode-gpu-batch-threshold", type=int, default=8)
@@ -212,7 +241,30 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=8192,
         help=(
             "Minimum decode past-KV for --live-step-driver generation rows. "
-            "Lower-past decode rows stay on the prefix-cache generate path."
+            "Lower-past decode rows stay on the prefix-cache generate path, "
+            "which matches FPM decode timing boundaries."
+        ),
+    )
+    advanced.add_argument(
+        "--live-step-gen-min-batch-size",
+        type=int,
+        default=256,
+        help=(
+            "Minimum decode batch size for --live-step-driver generation rows, "
+            "even below --live-step-gen-min-past-kv. Registry MoE models lower "
+            "the default route to 8 to avoid prefix-cache timing gaps. Use 0 to "
+            "disable this large-batch live-step route."
+        ),
+    )
+    advanced.add_argument(
+        "--live-step-gen-max-workers",
+        type=int,
+        default=1,
+        help=(
+            "Maximum concurrent live-step generation workers. The default "
+            "isolates scheduler-step decode timing while allowing ctx and "
+            "prefix-cache gen workers to run concurrently. Use 0 to disable "
+            "this cap for diagnostics."
         ),
     )
     advanced.add_argument("--timeout", type=int, default=1800)

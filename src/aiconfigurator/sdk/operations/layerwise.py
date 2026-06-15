@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import statistics
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
@@ -24,6 +25,18 @@ _PARALLEL_INDEX_KEY = "__parallel_index__"
 _PARALLEL_MODE_INDEX_KEY = "__parallel_mode_index__"
 _MAX_NUM_BATCHED_PARALLEL_INDEX_KEY = "__max_num_batched_tokens_parallel_index__"
 _MAX_NUM_BATCHED_PARALLEL_MODE_INDEX_KEY = "__max_num_batched_tokens_parallel_mode_index__"
+_CTX_BATCH_INDEX_KEY = "__ctx_batch_index__"
+_CTX_BATCH_MODE_INDEX_KEY = "__ctx_batch_mode_index__"
+_CTX_BATCH_PARALLEL_INDEX_KEY = "__ctx_batch_parallel_index__"
+_CTX_BATCH_PARALLEL_MODE_INDEX_KEY = "__ctx_batch_parallel_mode_index__"
+_MAX_NUM_BATCHED_CTX_BATCH_INDEX_KEY = "__max_num_batched_tokens_ctx_batch_index__"
+_MAX_NUM_BATCHED_CTX_BATCH_MODE_INDEX_KEY = "__max_num_batched_tokens_ctx_batch_mode_index__"
+_MAX_NUM_BATCHED_CTX_BATCH_PARALLEL_INDEX_KEY = "__max_num_batched_tokens_ctx_batch_parallel_index__"
+_MAX_NUM_BATCHED_CTX_BATCH_PARALLEL_MODE_INDEX_KEY = "__max_num_batched_tokens_ctx_batch_parallel_mode_index__"
+_MAX_NUM_SEQS_INDEX_KEY = "__max_num_seqs_index__"
+_MAX_NUM_SEQS_MODE_INDEX_KEY = "__max_num_seqs_mode_index__"
+_MAX_NUM_SEQS_PARALLEL_INDEX_KEY = "__max_num_seqs_parallel_index__"
+_MAX_NUM_SEQS_PARALLEL_MODE_INDEX_KEY = "__max_num_seqs_parallel_mode_index__"
 _ALLOW_PHYSICAL_GPUS_ENV = "AIC_LAYERWISE_ALLOW_PHYSICAL_GPUS"
 
 
@@ -70,6 +83,84 @@ def _entry_scale(entry: dict) -> float:
         return 1.0
     measured = max(float(entry.get("measured_layer_count", 1.0) or 1.0), 1.0)
     return raw_multiplier / measured
+
+
+def _robust_generation_detail(model_data: dict, batch_size: int, seq_len: int) -> dict | float:
+    """Suppress isolated high scheduler-envelope decode outliers."""
+
+    entry = model_data[batch_size][seq_len]
+    if not isinstance(entry, dict):
+        return entry
+    latency_source = str(entry.get("latency_source") or "")
+    if latency_source not in {"schedule_to_update", "worker_wall", "fpm_wall"}:
+        return entry
+    try:
+        latency = float(entry["latency"])
+    except (KeyError, TypeError, ValueError):
+        return entry
+    if latency <= 0.0:
+        return entry
+
+    points: list[tuple[int, float]] = []
+    for candidate_batch, seq_data in model_data.items():
+        if candidate_batch == batch_size or not isinstance(seq_data, dict) or seq_len not in seq_data:
+            continue
+        candidate = seq_data[seq_len]
+        if not isinstance(candidate, dict):
+            continue
+        if str(candidate.get("latency_source") or "") != latency_source:
+            continue
+        if str(candidate.get("moe_weight_mode") or "") != str(entry.get("moe_weight_mode") or ""):
+            continue
+        try:
+            candidate_latency = float(candidate["latency"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if candidate_latency > 0.0:
+            points.append((int(candidate_batch), candidate_latency))
+    if len(points) < 2:
+        return entry
+
+    lower = sorted((point for point in points if point[0] < batch_size), reverse=True)
+    higher = sorted(point for point in points if point[0] > batch_size)
+    if lower and higher:
+        neighbors = lower[:1] + higher[:1]
+    else:
+        neighbors = (lower or higher)[:2]
+    if len(neighbors) < 2:
+        return entry
+    neighbor_median = float(statistics.median(latency for _, latency in neighbors))
+    if neighbor_median <= 0.0:
+        return entry
+    if latency <= neighbor_median * 1.25 or latency - neighbor_median <= 0.5:
+        return entry
+
+    smoothed = dict(entry)
+    smoothed["latency"] = neighbor_median
+    smoothed["diagnostic_smoothed_from_latency"] = latency
+    return smoothed
+
+
+def _robust_generation_model_data(model_data: dict) -> dict:
+    """Return a shallow GEN grid copy with isolated high outliers smoothed."""
+
+    replacements: dict[tuple[int, int], dict | float] = {}
+    for batch_size, seq_data in model_data.items():
+        if not isinstance(seq_data, dict):
+            continue
+        for seq_len in seq_data:
+            smoothed = _robust_generation_detail(model_data, int(batch_size), int(seq_len))
+            if smoothed is not seq_data[seq_len]:
+                replacements[(int(batch_size), int(seq_len))] = smoothed
+    if not replacements:
+        return model_data
+    out = {
+        batch_size: dict(seq_data) if isinstance(seq_data, dict) else seq_data
+        for batch_size, seq_data in model_data.items()
+    }
+    for (batch_size, seq_len), smoothed in replacements.items():
+        out[batch_size][seq_len] = smoothed
+    return out
 
 
 def _entry_component(entry: dict) -> dict:
@@ -119,6 +210,17 @@ def _entry_max_num_batched_tokens(entry: dict | None) -> float | None:
     return float(value)
 
 
+def _entry_max_num_seqs(entry: dict | None) -> float | None:
+    """Return the vLLM scheduler sequence budget represented by an entry."""
+
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("max_num_seqs")
+    if value in (None, ""):
+        return None
+    return float(value)
+
+
 def _store_layerwise_entry(index: dict, keys: tuple, entry: dict) -> None:
     """Merge one layerwise entry into a nested index at ``keys``."""
 
@@ -159,6 +261,16 @@ def _merge_layerwise_entries(existing: dict | None, entry: dict) -> dict:
         result = dict(selected)
         result.setdefault("components", [_entry_component(result)])
         return result
+    existing_max_seqs = _entry_max_num_seqs(existing)
+    entry_max_seqs = _entry_max_num_seqs(entry)
+    if existing_max_seqs != entry_max_seqs:
+        # Different vLLM sequence budgets are alternate engine envelopes for
+        # the same public decode shape. Keep default lookups stable and let
+        # explicit max_num_seqs queries use the side index.
+        selected = existing if existing_max_seqs is None else entry if entry_max_seqs is None else existing
+        result = dict(selected)
+        result.setdefault("components", [_entry_component(result)])
+        return result
     if _entry_mode(existing) and _entry_mode(entry) and _entry_mode(existing) != _entry_mode(entry):
         return _preferred_default_entry(existing, entry)
     if _is_scheduler_envelope_entry(existing) != _is_scheduler_envelope_entry(entry):
@@ -171,11 +283,7 @@ def _merge_layerwise_entries(existing: dict | None, entry: dict) -> dict:
 
     def _copy_uniform_numeric_metrics(result: dict, components: list[dict], metrics: tuple[str, ...]) -> None:
         for metric in metrics:
-            values = {
-                float(component[metric])
-                for component in components
-                if component.get(metric) not in (None, "")
-            }
+            values = {float(component[metric]) for component in components if component.get(metric) not in (None, "")}
             if len(values) == 1:
                 result[metric] = values.pop()
 
@@ -203,6 +311,13 @@ def _merge_layerwise_entries(existing: dict | None, entry: dict) -> dict:
         }
         if len(chunk_sizes) == 1:
             result["max_num_batched_tokens"] = chunk_sizes.pop()
+        max_num_seqs_values = {
+            float(component["max_num_seqs"])
+            for component in components
+            if component.get("max_num_seqs") not in (None, "")
+        }
+        if len(max_num_seqs_values) == 1:
+            result["max_num_seqs"] = max_num_seqs_values.pop()
         sources = {
             str(component.get("latency_source") or "")
             for component in components
@@ -232,6 +347,11 @@ def _merge_layerwise_entries(existing: dict | None, entry: dict) -> dict:
     }
     if len(chunk_sizes) == 1:
         result["max_num_batched_tokens"] = chunk_sizes.pop()
+    max_num_seqs_values = {
+        float(component["max_num_seqs"]) for component in components if component.get("max_num_seqs") not in (None, "")
+    }
+    if len(max_num_seqs_values) == 1:
+        result["max_num_seqs"] = max_num_seqs_values.pop()
     _copy_uniform_numeric_metrics(result, components, ("seq_len_q", "seq_len_kv_cache"))
     return result
 
@@ -270,7 +390,9 @@ def load_layerwise_data(layerwise_file):
     )
     max_batched_mode_data = defaultdict(
         lambda: defaultdict(
-            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
+            lambda: defaultdict(
+                lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+            )
         )
     )
     parallel_data = defaultdict(
@@ -305,6 +427,104 @@ def load_layerwise_data(layerwise_file):
                     lambda: defaultdict(
                         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
                     )
+                )
+            )
+        )
+    )
+    ctx_batch_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
+    )
+    ctx_batch_mode_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+            )
+        )
+    )
+    ctx_batch_parallel_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+                )
+            )
+        )
+    )
+    ctx_batch_parallel_mode_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+                    )
+                )
+            )
+        )
+    )
+    max_batched_ctx_batch_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+            )
+        )
+    )
+    max_batched_ctx_batch_mode_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+                    )
+                )
+            )
+        )
+    )
+    max_batched_ctx_batch_parallel_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+                    )
+                )
+            )
+        )
+    )
+    max_batched_ctx_batch_parallel_mode_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(
+                            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+                        )
+                    )
+                )
+            )
+        )
+    )
+    max_seqs_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
+    )
+    max_seqs_mode_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+            )
+        )
+    )
+    max_seqs_parallel_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+            )
+        )
+    )
+    max_seqs_parallel_mode_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
                 )
             )
         )
@@ -350,6 +570,9 @@ def load_layerwise_data(layerwise_file):
         value = _parse_optional_float(row.get("max_num_batched_tokens"))
         if value is not None:
             entry["max_num_batched_tokens"] = value
+        value = _parse_optional_float(row.get("max_num_seqs"))
+        if value is not None:
+            entry["max_num_seqs"] = value
         entry["moe_tp_size"] = float(moe_tp_size)
         entry["moe_ep_size"] = float(ep_size)
         entry["includes_moe"] = _parse_bool(row.get("includes_moe"))
@@ -359,51 +582,157 @@ def load_layerwise_data(layerwise_file):
             if row.get(metric) not in (None, ""):
                 entry[metric] = str(row[metric])
         if phase == "CTX":
-            existing = data[model][phase][tp_size][seq_len_q].get(seq_len_kv_cache)
-            data[model][phase][tp_size][seq_len_q][seq_len_kv_cache] = _merge_layerwise_entries(existing, entry)
+            max_num_batched_tokens = entry.get("max_num_batched_tokens")
+            max_num_seqs = entry.get("max_num_seqs")
+            use_batchless_index = batch_size == 1
+            if use_batchless_index:
+                existing = data[model][phase][tp_size][seq_len_q].get(seq_len_kv_cache)
+                data[model][phase][tp_size][seq_len_q][seq_len_kv_cache] = _merge_layerwise_entries(existing, entry)
             _store_layerwise_entry(
-                parallel_data,
-                (model, phase, tp_size, moe_tp_size, ep_size, seq_len_q, seq_len_kv_cache),
+                ctx_batch_data,
+                (model, phase, tp_size, batch_size, seq_len_q, seq_len_kv_cache),
                 entry,
             )
-            max_num_batched_tokens = entry.get("max_num_batched_tokens")
+            if use_batchless_index:
+                _store_layerwise_entry(
+                    parallel_data,
+                    (model, phase, tp_size, moe_tp_size, ep_size, seq_len_q, seq_len_kv_cache),
+                    entry,
+                )
+            _store_layerwise_entry(
+                ctx_batch_parallel_data,
+                (model, phase, tp_size, moe_tp_size, ep_size, batch_size, seq_len_q, seq_len_kv_cache),
+                entry,
+            )
             if max_num_batched_tokens not in (None, ""):
                 max_key = int(float(max_num_batched_tokens))
-                existing = max_batched_data[model][phase][tp_size][max_key][seq_len_q].get(seq_len_kv_cache)
-                max_batched_data[model][phase][tp_size][max_key][seq_len_q][seq_len_kv_cache] = (
-                    _merge_layerwise_entries(existing, entry)
+                if use_batchless_index:
+                    existing = max_batched_data[model][phase][tp_size][max_key][seq_len_q].get(seq_len_kv_cache)
+                    max_batched_data[model][phase][tp_size][max_key][seq_len_q][seq_len_kv_cache] = (
+                        _merge_layerwise_entries(existing, entry)
+                    )
+                    _store_layerwise_entry(
+                        max_batched_parallel_data,
+                        (model, phase, tp_size, max_key, moe_tp_size, ep_size, seq_len_q, seq_len_kv_cache),
+                        entry,
+                    )
+                _store_layerwise_entry(
+                    max_batched_ctx_batch_data,
+                    (model, phase, tp_size, max_key, batch_size, seq_len_q, seq_len_kv_cache),
+                    entry,
                 )
                 _store_layerwise_entry(
-                    max_batched_parallel_data,
-                    (model, phase, tp_size, max_key, moe_tp_size, ep_size, seq_len_q, seq_len_kv_cache),
+                    max_batched_ctx_batch_parallel_data,
+                    (model, phase, tp_size, max_key, moe_tp_size, ep_size, batch_size, seq_len_q, seq_len_kv_cache),
                     entry,
                 )
             if entry.get("moe_weight_mode") not in (None, ""):
                 mode = str(entry["moe_weight_mode"])
-                existing = mode_data[model][phase][tp_size][mode][seq_len_q].get(seq_len_kv_cache)
-                mode_data[model][phase][tp_size][mode][seq_len_q][seq_len_kv_cache] = _merge_layerwise_entries(
-                    existing,
+                if use_batchless_index:
+                    existing = mode_data[model][phase][tp_size][mode][seq_len_q].get(seq_len_kv_cache)
+                    mode_data[model][phase][tp_size][mode][seq_len_q][seq_len_kv_cache] = _merge_layerwise_entries(
+                        existing,
+                        entry,
+                    )
+                _store_layerwise_entry(
+                    ctx_batch_mode_data,
+                    (model, phase, tp_size, mode, batch_size, seq_len_q, seq_len_kv_cache),
                     entry,
                 )
+                if use_batchless_index:
+                    _store_layerwise_entry(
+                        parallel_mode_data,
+                        (model, phase, tp_size, mode, moe_tp_size, ep_size, seq_len_q, seq_len_kv_cache),
+                        entry,
+                    )
                 _store_layerwise_entry(
-                    parallel_mode_data,
-                    (model, phase, tp_size, mode, moe_tp_size, ep_size, seq_len_q, seq_len_kv_cache),
+                    ctx_batch_parallel_mode_data,
+                    (model, phase, tp_size, mode, moe_tp_size, ep_size, batch_size, seq_len_q, seq_len_kv_cache),
                     entry,
                 )
                 if max_num_batched_tokens not in (None, ""):
                     max_key = int(float(max_num_batched_tokens))
-                    existing = max_batched_mode_data[model][phase][tp_size][mode][max_key][seq_len_q].get(
-                        seq_len_kv_cache
-                    )
-                    max_batched_mode_data[model][phase][tp_size][mode][max_key][seq_len_q][seq_len_kv_cache] = (
-                        _merge_layerwise_entries(existing, entry)
-                    )
+                    if use_batchless_index:
+                        existing = max_batched_mode_data[model][phase][tp_size][mode][max_key][seq_len_q].get(
+                            seq_len_kv_cache
+                        )
+                        max_batched_mode_data[model][phase][tp_size][mode][max_key][seq_len_q][seq_len_kv_cache] = (
+                            _merge_layerwise_entries(existing, entry)
+                        )
+                        _store_layerwise_entry(
+                            max_batched_parallel_mode_data,
+                            (
+                                model,
+                                phase,
+                                tp_size,
+                                mode,
+                                max_key,
+                                moe_tp_size,
+                                ep_size,
+                                seq_len_q,
+                                seq_len_kv_cache,
+                            ),
+                            entry,
+                        )
                     _store_layerwise_entry(
-                        max_batched_parallel_mode_data,
-                        (model, phase, tp_size, mode, max_key, moe_tp_size, ep_size, seq_len_q, seq_len_kv_cache),
+                        max_batched_ctx_batch_mode_data,
+                        (model, phase, tp_size, mode, max_key, batch_size, seq_len_q, seq_len_kv_cache),
                         entry,
                     )
+                    _store_layerwise_entry(
+                        max_batched_ctx_batch_parallel_mode_data,
+                        (
+                            model,
+                            phase,
+                            tp_size,
+                            mode,
+                            max_key,
+                            moe_tp_size,
+                            ep_size,
+                            batch_size,
+                            seq_len_q,
+                            seq_len_kv_cache,
+                        ),
+                        entry,
+                    )
+            if max_num_seqs not in (None, ""):
+                maxseq_key = int(float(max_num_seqs))
+                if use_batchless_index:
+                    _store_layerwise_entry(
+                        max_seqs_data,
+                        (model, phase, tp_size, maxseq_key, seq_len_q, seq_len_kv_cache),
+                        entry,
+                    )
+                    _store_layerwise_entry(
+                        max_seqs_parallel_data,
+                        (model, phase, tp_size, maxseq_key, moe_tp_size, ep_size, seq_len_q, seq_len_kv_cache),
+                        entry,
+                    )
+                if entry.get("moe_weight_mode") not in (None, ""):
+                    mode = str(entry["moe_weight_mode"])
+                    if use_batchless_index:
+                        _store_layerwise_entry(
+                            max_seqs_mode_data,
+                            (model, phase, tp_size, mode, maxseq_key, seq_len_q, seq_len_kv_cache),
+                            entry,
+                        )
+                        _store_layerwise_entry(
+                            max_seqs_parallel_mode_data,
+                            (
+                                model,
+                                phase,
+                                tp_size,
+                                mode,
+                                maxseq_key,
+                                moe_tp_size,
+                                ep_size,
+                                seq_len_q,
+                                seq_len_kv_cache,
+                            ),
+                            entry,
+                        )
         else:
+            max_num_seqs = entry.get("max_num_seqs")
             existing = data[model][phase][tp_size][batch_size].get(seq_len_kv_cache)
             data[model][phase][tp_size][batch_size][seq_len_kv_cache] = _merge_layerwise_entries(existing, entry)
             _store_layerwise_entry(
@@ -411,6 +740,18 @@ def load_layerwise_data(layerwise_file):
                 (model, phase, tp_size, moe_tp_size, ep_size, batch_size, seq_len_kv_cache),
                 entry,
             )
+            if max_num_seqs not in (None, ""):
+                maxseq_key = int(float(max_num_seqs))
+                _store_layerwise_entry(
+                    max_seqs_data,
+                    (model, phase, tp_size, maxseq_key, batch_size, seq_len_kv_cache),
+                    entry,
+                )
+                _store_layerwise_entry(
+                    max_seqs_parallel_data,
+                    (model, phase, tp_size, maxseq_key, moe_tp_size, ep_size, batch_size, seq_len_kv_cache),
+                    entry,
+                )
             if entry.get("moe_weight_mode") not in (None, ""):
                 mode = str(entry["moe_weight_mode"])
                 existing = mode_data[model][phase][tp_size][mode][batch_size].get(seq_len_kv_cache)
@@ -423,6 +764,28 @@ def load_layerwise_data(layerwise_file):
                     (model, phase, tp_size, mode, moe_tp_size, ep_size, batch_size, seq_len_kv_cache),
                     entry,
                 )
+                if max_num_seqs not in (None, ""):
+                    maxseq_key = int(float(max_num_seqs))
+                    _store_layerwise_entry(
+                        max_seqs_mode_data,
+                        (model, phase, tp_size, mode, maxseq_key, batch_size, seq_len_kv_cache),
+                        entry,
+                    )
+                    _store_layerwise_entry(
+                        max_seqs_parallel_mode_data,
+                        (
+                            model,
+                            phase,
+                            tp_size,
+                            mode,
+                            maxseq_key,
+                            moe_tp_size,
+                            ep_size,
+                            batch_size,
+                            seq_len_kv_cache,
+                        ),
+                        entry,
+                    )
 
     if mode_data:
         data[_MODE_INDEX_KEY] = mode_data
@@ -438,6 +801,30 @@ def load_layerwise_data(layerwise_file):
         data[_MAX_NUM_BATCHED_PARALLEL_INDEX_KEY] = max_batched_parallel_data
     if max_batched_parallel_mode_data:
         data[_MAX_NUM_BATCHED_PARALLEL_MODE_INDEX_KEY] = max_batched_parallel_mode_data
+    if ctx_batch_data:
+        data[_CTX_BATCH_INDEX_KEY] = ctx_batch_data
+    if ctx_batch_mode_data:
+        data[_CTX_BATCH_MODE_INDEX_KEY] = ctx_batch_mode_data
+    if ctx_batch_parallel_data:
+        data[_CTX_BATCH_PARALLEL_INDEX_KEY] = ctx_batch_parallel_data
+    if ctx_batch_parallel_mode_data:
+        data[_CTX_BATCH_PARALLEL_MODE_INDEX_KEY] = ctx_batch_parallel_mode_data
+    if max_batched_ctx_batch_data:
+        data[_MAX_NUM_BATCHED_CTX_BATCH_INDEX_KEY] = max_batched_ctx_batch_data
+    if max_batched_ctx_batch_mode_data:
+        data[_MAX_NUM_BATCHED_CTX_BATCH_MODE_INDEX_KEY] = max_batched_ctx_batch_mode_data
+    if max_batched_ctx_batch_parallel_data:
+        data[_MAX_NUM_BATCHED_CTX_BATCH_PARALLEL_INDEX_KEY] = max_batched_ctx_batch_parallel_data
+    if max_batched_ctx_batch_parallel_mode_data:
+        data[_MAX_NUM_BATCHED_CTX_BATCH_PARALLEL_MODE_INDEX_KEY] = max_batched_ctx_batch_parallel_mode_data
+    if max_seqs_data:
+        data[_MAX_NUM_SEQS_INDEX_KEY] = max_seqs_data
+    if max_seqs_mode_data:
+        data[_MAX_NUM_SEQS_MODE_INDEX_KEY] = max_seqs_mode_data
+    if max_seqs_parallel_data:
+        data[_MAX_NUM_SEQS_PARALLEL_INDEX_KEY] = max_seqs_parallel_data
+    if max_seqs_parallel_mode_data:
+        data[_MAX_NUM_SEQS_PARALLEL_MODE_INDEX_KEY] = max_seqs_parallel_mode_data
     return data
 
 
@@ -601,6 +988,7 @@ class Layerwise(Operation):
         seq_len_kv_cache: int = 0,
         moe_weight_mode: str | None = None,
         max_num_batched_tokens: int | None = None,
+        max_num_seqs: int | None = None,
         moe_tp_size: int | None = None,
         moe_ep_size: int | None = None,
     ) -> dict[str, float]:
@@ -617,6 +1005,8 @@ class Layerwise(Operation):
         mode = str(moe_weight_mode or "")
         parallel_requested = moe_tp_size is not None or moe_ep_size is not None
         parallel_fallback_ep_size: int | None = None
+        maxseq_key = int(max_num_seqs) if max_num_seqs is not None else None
+        use_maxseq_index = maxseq_key is not None and (phase != "CTX" or max_num_batched_tokens is None)
         if parallel_requested:
             query_moe_tp = int(moe_tp_size or 1)
             query_ep = int(moe_ep_size or 1)
@@ -624,7 +1014,7 @@ class Layerwise(Operation):
             def _select_parallel_family(family: dict | None) -> tuple[dict | None, int | None]:
                 if not family:
                     return None, None
-                if query_ep in family and family[query_ep]:
+                if family.get(query_ep):
                     return family[query_ep], None
                 candidates = [
                     (int(candidate_ep), candidate_data)
@@ -642,7 +1032,15 @@ class Layerwise(Operation):
                 return candidates[0][1], candidates[0][0]
 
             try:
-                if phase == "CTX" and max_num_batched_tokens is not None and mode:
+                if use_maxseq_index and mode:
+                    parallel_family = data[_MAX_NUM_SEQS_PARALLEL_MODE_INDEX_KEY][model][phase][tp_size][mode][
+                        maxseq_key
+                    ][query_moe_tp]
+                elif use_maxseq_index:
+                    parallel_family = data[_MAX_NUM_SEQS_PARALLEL_INDEX_KEY][model][phase][tp_size][maxseq_key][
+                        query_moe_tp
+                    ]
+                elif phase == "CTX" and max_num_batched_tokens is not None and mode:
                     max_key = int(max_num_batched_tokens)
                     parallel_family = data[_MAX_NUM_BATCHED_PARALLEL_MODE_INDEX_KEY][model][phase][tp_size][mode][
                         max_key
@@ -661,8 +1059,72 @@ class Layerwise(Operation):
                 tp_data = None
         else:
             tp_data = None
+        if phase == "CTX" and int(batch_size) > 1:
+            batch_tp_data = None
+            batch_parallel_fallback_ep_size: int | None = None
+            try:
+                if parallel_requested:
+                    if max_num_batched_tokens is not None and mode:
+                        max_key = int(max_num_batched_tokens)
+                        parallel_family = data[_MAX_NUM_BATCHED_CTX_BATCH_PARALLEL_MODE_INDEX_KEY][model][phase][
+                            tp_size
+                        ][mode][max_key][query_moe_tp]
+                    elif max_num_batched_tokens is not None:
+                        max_key = int(max_num_batched_tokens)
+                        parallel_family = data[_MAX_NUM_BATCHED_CTX_BATCH_PARALLEL_INDEX_KEY][model][phase][tp_size][
+                            max_key
+                        ][query_moe_tp]
+                    elif mode:
+                        parallel_family = data[_CTX_BATCH_PARALLEL_MODE_INDEX_KEY][model][phase][tp_size][mode][
+                            query_moe_tp
+                        ]
+                    else:
+                        parallel_family = data[_CTX_BATCH_PARALLEL_INDEX_KEY][model][phase][tp_size][query_moe_tp]
+                    selected, batch_parallel_fallback_ep_size = _select_parallel_family(parallel_family)
+                    if selected is not None:
+                        batch_tp_data = selected.get(int(batch_size))
+                if batch_tp_data is None and max_num_batched_tokens is not None and mode:
+                    max_key = int(max_num_batched_tokens)
+                    batch_tp_data = data[_MAX_NUM_BATCHED_CTX_BATCH_MODE_INDEX_KEY][model][phase][tp_size][mode][
+                        max_key
+                    ].get(int(batch_size))
+                elif batch_tp_data is None and max_num_batched_tokens is not None:
+                    max_key = int(max_num_batched_tokens)
+                    batch_tp_data = data[_MAX_NUM_BATCHED_CTX_BATCH_INDEX_KEY][model][phase][tp_size][max_key].get(
+                        int(batch_size)
+                    )
+                elif batch_tp_data is None and mode:
+                    batch_tp_data = data[_CTX_BATCH_MODE_INDEX_KEY][model][phase][tp_size][mode].get(int(batch_size))
+                elif batch_tp_data is None:
+                    batch_tp_data = data[_CTX_BATCH_INDEX_KEY][model][phase][tp_size].get(int(batch_size))
+            except KeyError:
+                batch_tp_data = None
+            if batch_tp_data:
+                tp_data = batch_tp_data
+                if batch_parallel_fallback_ep_size is not None:
+                    parallel_fallback_ep_size = batch_parallel_fallback_ep_size
         if tp_data is not None:
             pass
+        elif use_maxseq_index:
+            if mode:
+                maxseq_mode_index = data.get(_MAX_NUM_SEQS_MODE_INDEX_KEY, {})
+                try:
+                    data = maxseq_mode_index[model][phase][tp_size][mode][maxseq_key]
+                    tp_data = data
+                except KeyError as exc:
+                    raise PerfDataNotAvailableError(
+                        f"Layerwise data for moe_weight_mode={mode!r}, max_num_seqs={maxseq_key} "
+                        f"not found for {model}/{phase}/tp{tp_size}"
+                    ) from exc
+            else:
+                maxseq_index = data.get(_MAX_NUM_SEQS_INDEX_KEY, {})
+                try:
+                    data = maxseq_index[model][phase][tp_size][maxseq_key]
+                    tp_data = data
+                except KeyError as exc:
+                    raise PerfDataNotAvailableError(
+                        f"Layerwise data for max_num_seqs={maxseq_key} not found for {model}/{phase}/tp{tp_size}"
+                    ) from exc
         elif phase == "CTX" and max_num_batched_tokens is not None:
             max_key = int(max_num_batched_tokens)
             if mode:
@@ -682,8 +1144,7 @@ class Layerwise(Operation):
                     tp_data = data
                 except KeyError as exc:
                     raise PerfDataNotAvailableError(
-                        f"Layerwise data for max_num_batched_tokens={max_key} not found for "
-                        f"{model}/{phase}/tp{tp_size}"
+                        f"Layerwise data for max_num_batched_tokens={max_key} not found for {model}/{phase}/tp{tp_size}"
                     ) from exc
         elif mode:
             mode_index = data.get(_MODE_INDEX_KEY, {})
@@ -703,6 +1164,8 @@ class Layerwise(Operation):
                 raise PerfDataNotAvailableError(f"tp_size={tp_size} not found in layerwise data for {model}/{phase}")
 
             tp_data = data[model][phase][tp_size]
+        if phase != "CTX":
+            tp_data = _robust_generation_model_data(tp_data)
         if phase == "CTX":
             if seq_len in tp_data and seq_len_kv_cache in tp_data[seq_len]:
                 result = tp_data[seq_len][seq_len_kv_cache]
@@ -732,6 +1195,7 @@ class Layerwise(Operation):
                     result["measured_layer_count"] = _uniform_float_metric(tp_data, "measured_layer_count", 1.0)
                     result["layer_multiplier"] = _uniform_float_metric(tp_data, "layer_multiplier")
                 result["max_num_batched_tokens"] = _uniform_float_metric(tp_data, "max_num_batched_tokens")
+                result["max_num_seqs"] = _uniform_float_metric(tp_data, "max_num_seqs")
                 result["physical_gpus"] = _uniform_float_metric(tp_data, "physical_gpus")
                 result["latency_source"] = _uniform_str_metric(tp_data, "latency_source")
                 result["components"] = _representative_components(tp_data)
@@ -756,6 +1220,7 @@ class Layerwise(Operation):
                 result["measured_layer_count"] = _uniform_float_metric(tp_data, "measured_layer_count", 1.0)
                 result["layer_multiplier"] = _uniform_float_metric(tp_data, "layer_multiplier")
             result["max_num_batched_tokens"] = _uniform_float_metric(tp_data, "max_num_batched_tokens")
+            result["max_num_seqs"] = _uniform_float_metric(tp_data, "max_num_seqs")
             result["physical_gpus"] = _uniform_float_metric(tp_data, "physical_gpus")
             result["latency_source"] = _uniform_str_metric(tp_data, "latency_source")
             result["components"] = _representative_components(tp_data)
@@ -778,6 +1243,7 @@ class Layerwise(Operation):
             "measured_layer_count",
             "layer_multiplier",
             "max_num_batched_tokens",
+            "max_num_seqs",
             "seq_len_q",
             "seq_len_kv_cache",
             "query_seq_len_q",

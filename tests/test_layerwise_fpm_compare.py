@@ -339,13 +339,62 @@ def test_mixed_pathology_filter_flags_high_latency_large_context_row() -> None:
 
 def test_mixed_pathology_filter_flags_tiny_fresh_latency_spike() -> None:
     rows = [
-        {"phase": "mixed", "ctx_tokens": "100", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "30", "latency_ms": "30.4"},
-        {"phase": "mixed", "ctx_tokens": "101", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "31", "latency_ms": "20.8"},
-        {"phase": "mixed", "ctx_tokens": "103", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "31", "latency_ms": "22.1"},
-        {"phase": "mixed", "ctx_tokens": "112", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "31", "latency_ms": "23.2"},
-        {"phase": "mixed", "ctx_tokens": "123", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "31", "latency_ms": "20.3"},
-        {"phase": "mixed", "ctx_tokens": "140", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "30", "latency_ms": "25.0"},
-        {"phase": "mixed", "ctx_tokens": "147", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "31", "latency_ms": "22.0"},
+        {
+            "phase": "mixed",
+            "ctx_tokens": "100",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "30",
+            "latency_ms": "30.4",
+        },
+        {
+            "phase": "mixed",
+            "ctx_tokens": "101",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "31",
+            "latency_ms": "20.8",
+        },
+        {
+            "phase": "mixed",
+            "ctx_tokens": "103",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "31",
+            "latency_ms": "22.1",
+        },
+        {
+            "phase": "mixed",
+            "ctx_tokens": "112",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "31",
+            "latency_ms": "23.2",
+        },
+        {
+            "phase": "mixed",
+            "ctx_tokens": "123",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "31",
+            "latency_ms": "20.3",
+        },
+        {
+            "phase": "mixed",
+            "ctx_tokens": "140",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "30",
+            "latency_ms": "25.0",
+        },
+        {
+            "phase": "mixed",
+            "ctx_tokens": "147",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "31",
+            "latency_ms": "22.0",
+        },
     ]
 
     reasons = _mixed_pathology_reasons(
@@ -365,10 +414,38 @@ def test_mixed_pathology_filter_flags_tiny_fresh_latency_spike() -> None:
 
 def test_mixed_pathology_filter_keeps_tiny_fresh_low_latency_row() -> None:
     rows = [
-        {"phase": "mixed", "ctx_tokens": "105", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "8", "latency_ms": "19.3"},
-        {"phase": "mixed", "ctx_tokens": "185", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "8", "latency_ms": "69.6"},
-        {"phase": "mixed", "ctx_tokens": "256", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "8", "latency_ms": "69.8"},
-        {"phase": "mixed", "ctx_tokens": "313", "ctx_requests": "1", "ctx_kv_tokens": "0", "decode_requests": "7", "latency_ms": "80.9"},
+        {
+            "phase": "mixed",
+            "ctx_tokens": "105",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "8",
+            "latency_ms": "19.3",
+        },
+        {
+            "phase": "mixed",
+            "ctx_tokens": "185",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "8",
+            "latency_ms": "69.6",
+        },
+        {
+            "phase": "mixed",
+            "ctx_tokens": "256",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "8",
+            "latency_ms": "69.8",
+        },
+        {
+            "phase": "mixed",
+            "ctx_tokens": "313",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
+            "decode_requests": "7",
+            "latency_ms": "80.9",
+        },
     ]
 
     reasons = _mixed_pathology_reasons(
@@ -390,8 +467,8 @@ def test_mixed_pathology_filter_flags_duplicate_shape_spike() -> None:
         {
             "phase": "mixed",
             "ctx_tokens": "1856",
-            "ctx_requests": "2",
-            "ctx_kv_tokens": "6336",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
             "decode_requests": "2",
             "mean_decode_kv_tokens": "4096.5",
             "latency_ms": "867.115",
@@ -399,8 +476,8 @@ def test_mixed_pathology_filter_flags_duplicate_shape_spike() -> None:
         {
             "phase": "mixed",
             "ctx_tokens": "1856",
-            "ctx_requests": "2",
-            "ctx_kv_tokens": "6336",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "0",
             "decode_requests": "2",
             "mean_decode_kv_tokens": "4096.5",
             "latency_ms": "41.194",
@@ -540,6 +617,90 @@ def test_mixed_pathology_filter_flags_sub320_continuation_tail() -> None:
 
     reasons = _mixed_pathology_reasons(
         rows,
+        tiny_ctx_tokens=320,
+        min_ctx_tokens=1024,
+        peer_ctx_fraction=0.05,
+        peer_ctx_min_window=128,
+        min_peer_count=5,
+        latency_fraction=0.25,
+        high_latency_factor=1.75,
+    )
+
+    assert set(reasons) == {0}
+    assert reasons[0].startswith("mixed_tiny_continuation_tail:")
+
+
+def test_mixed_pathology_filter_flags_over_budget_mixed_context() -> None:
+    rows = [
+        {
+            "phase": "mixed",
+            "ctx_tokens": "2912",
+            "ctx_requests": "3",
+            "ctx_kv_tokens": "8448",
+            "decode_requests": "12",
+            "latency_ms": "40.1",
+        },
+    ]
+
+    reasons = _mixed_pathology_reasons(
+        rows,
+        max_num_batched_tokens=2048,
+        tiny_ctx_tokens=320,
+        min_ctx_tokens=1024,
+        peer_ctx_fraction=0.05,
+        peer_ctx_min_window=128,
+        min_peer_count=5,
+        latency_fraction=0.25,
+        high_latency_factor=1.75,
+    )
+
+    assert set(reasons) == {0}
+    assert reasons[0].startswith("mixed_context_tokens_exceed_scheduler_budget:")
+
+
+def test_mixed_pathology_filter_flags_batched_continuation_mixed_row() -> None:
+    rows = [
+        {
+            "phase": "mixed",
+            "ctx_tokens": "1856",
+            "ctx_requests": "2",
+            "ctx_kv_tokens": "6336",
+            "decode_requests": "12",
+            "latency_ms": "40.1",
+        },
+    ]
+
+    reasons = _mixed_pathology_reasons(
+        rows,
+        max_num_batched_tokens=2048,
+        tiny_ctx_tokens=320,
+        min_ctx_tokens=1024,
+        peer_ctx_fraction=0.05,
+        peer_ctx_min_window=128,
+        min_peer_count=5,
+        latency_fraction=0.25,
+        high_latency_factor=1.75,
+    )
+
+    assert set(reasons) == {0}
+    assert reasons[0].startswith("mixed_batched_continuation_not_reconstructable:")
+
+
+def test_mixed_pathology_filter_uses_per_request_tiny_continuation_threshold() -> None:
+    rows = [
+        {
+            "phase": "mixed",
+            "ctx_tokens": "448",
+            "ctx_requests": "1",
+            "ctx_kv_tokens": "10608",
+            "decode_requests": "28",
+            "latency_ms": "19.8",
+        },
+    ]
+
+    reasons = _mixed_pathology_reasons(
+        rows,
+        max_num_batched_tokens=2048,
         tiny_ctx_tokens=320,
         min_ctx_tokens=1024,
         peer_ctx_fraction=0.05,
@@ -1010,7 +1171,7 @@ decode,3,0,0,0,2,4096,4.0
     assert _load_fpm_max_num_batched_tokens(phase_csv) == 4096
 
 
-def test_fpm_context_budget_prefers_fpm_metadata_scheduler_config(tmp_path: Path) -> None:
+def test_fpm_context_budget_uses_observed_rows_as_fpm_metadata_lower_bound(tmp_path: Path) -> None:
     phase_csv = tmp_path / "fpm_metrics_phase.csv"
     _write(
         phase_csv,
@@ -1033,7 +1194,7 @@ decode,2,0,0,0,1,4096,4.0
     )
 
     assert _infer_observed_fpm_context_budget(phase_csv) == 4096
-    assert _load_fpm_max_num_batched_tokens(phase_csv) == 2048
+    assert _load_fpm_max_num_batched_tokens(phase_csv) == 4096
 
 
 def test_fpm_context_budget_prefers_fpm_metadata_over_dynamo_discovery(tmp_path: Path) -> None:
@@ -1073,7 +1234,7 @@ decode,2,0,0,0,1,4096,4.0
 """,
     )
 
-    assert _load_fpm_max_num_batched_tokens(phase_csv) == 2048
+    assert _load_fpm_max_num_batched_tokens(phase_csv) == 4096
 
 
 def test_fpm_context_budget_prefers_dynamo_runtime_discovery(tmp_path: Path) -> None:
@@ -1240,7 +1401,7 @@ def test_interpolated_layer_scale_metadata_preserves_legacy_missing_scale() -> N
                 "latency": 66.8,
                 "measured_layer_count": 64,
                 "layer_multiplier": 64,
-            }
+            },
         },
     }
 
@@ -1456,9 +1617,7 @@ decode,real,5,w,0,0,0,0,1,1,4097,4097.000,0,0,0,0,4.0
     assert (1, 147, 0) not in context
     assert len(filtered) == 1
     assert filtered[0]["counter_id"] == "4"
-    assert filtered[0]["reason"].startswith(
-        "context_singleton_workload_transition_above_support_envelope:"
-    )
+    assert filtered[0]["reason"].startswith("context_singleton_workload_transition_above_support_envelope:")
 
 
 def test_context_workload_transition_filter_requires_singleton_fresh_context() -> None:

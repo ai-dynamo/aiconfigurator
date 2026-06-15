@@ -114,6 +114,10 @@ def _install_patch() -> None:
                 "control_bs": control.get("bs"),
                 "control_past": control.get("past"),
                 "control_run": control.get("run"),
+                "control_batched_ctx_driver": bool(control.get("batched_ctx_driver")),
+                "control_requested_new_tokens": control.get("requested_new_tokens"),
+                "control_requested_past_kv": control.get("requested_past_kv"),
+                "control_scheduler_token_budget": control.get("scheduler_token_budget"),
             }
             if fpm_wall_ms is not None:
                 event["fpm_wall_time_ms"] = fpm_wall_ms

@@ -118,6 +118,8 @@ class RuntimeConfig:
     # Optional vLLM scheduler chunk size for layerwise/FPM parity. Leave unset
     # to use the direct layerwise context surface.
     vllm_max_num_batched_tokens: int | None = None
+    # Optional vLLM scheduler sequence budget for decode layerwise lookup.
+    vllm_max_num_seqs: int | None = None
     image_height: int = 0
     image_width: int = 0
     num_images_per_request: int = 1

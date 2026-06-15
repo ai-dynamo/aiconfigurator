@@ -49,13 +49,15 @@ except ImportError:  # pragma: no cover - direct script compatibility
 CTX_NEW_TOKENS = [1, 16, 128, 256, 512, 1024, 2048, 4096, 8192]
 PAST_KV_TOKENS = [16, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
 CTX_PAST_KV = [0, *PAST_KV_TOKENS]
+CTX_BATCH_SIZES = [1, 2, 4, 8, 16]
 GEN_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 GEN_PAST_KV = [1, *PAST_KV_TOKENS]
 SMOKE_CTX_NEW_TOKENS = [1024, 4096]
 SMOKE_CTX_PAST_KV = [0]
+SMOKE_CTX_BATCH_SIZES = [1]
 SMOKE_GEN_BATCH_SIZES = [1, 8]
 SMOKE_GEN_PAST_KV = [1024]
-LIVE_DECODE_OUTPUT_TOKENS = 2
+LIVE_DECODE_OUTPUT_TOKENS = 4
 
 
 def _batch_sizes_up_to(max_batch_size: int) -> list[int]:
@@ -77,6 +79,7 @@ def values_for_preset(preset: str, *, max_decode_batch_size: int | None = None) 
         return {
             "ctx_new_tokens": ",".join(map(str, CTX_NEW_TOKENS)),
             "ctx_past_kv": ",".join(map(str, CTX_PAST_KV)),
+            "ctx_batch_sizes": "auto",
             "gen_batch_sizes": ",".join(map(str, gen_batch_sizes)),
             "gen_past_kv": ",".join(map(str, GEN_PAST_KV)),
         }
@@ -84,6 +87,7 @@ def values_for_preset(preset: str, *, max_decode_batch_size: int | None = None) 
         return {
             "ctx_new_tokens": ",".join(map(str, SMOKE_CTX_NEW_TOKENS)),
             "ctx_past_kv": ",".join(map(str, SMOKE_CTX_PAST_KV)),
+            "ctx_batch_sizes": ",".join(map(str, SMOKE_CTX_BATCH_SIZES)),
             "gen_batch_sizes": ",".join(map(str, SMOKE_GEN_BATCH_SIZES)),
             "gen_past_kv": ",".join(map(str, SMOKE_GEN_PAST_KV)),
         }
@@ -117,6 +121,30 @@ def parse_csv_ints_or_auto(raw: str) -> list[int] | str:
     if raw == "auto":
         return "auto"
     return _parse_ints(raw)
+
+
+def _parse_parallelism_pairs(raw: str | None) -> list[tuple[int, int]]:
+    """Parse comma-separated TP:EP pairs from the public collector CLI."""
+
+    if raw in (None, ""):
+        return []
+    pairs: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for item in str(raw).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        separator = ":" if ":" in item else "/" if "/" in item else None
+        if separator is None:
+            raise ValueError(f"parallelism pair {item!r} must use TP:EP syntax")
+        left, right = item.split(separator, 1)
+        pair = (int(left), int(right))
+        if pair[0] < 1 or pair[1] < 1:
+            raise ValueError(f"parallelism pair values must be >= 1, got {item!r}")
+        if pair not in seen:
+            pairs.append(pair)
+            seen.add(pair)
+    return pairs
 
 
 def _resolve_real_weight_model_dir(model: str) -> str:
@@ -188,11 +216,19 @@ def make_work_unit_args(
         moe_tp = tp_size if ep_size == 1 else 1
     else:
         moe_tp = 1
+    live_step_gen_min_batch_size = int(public_args.live_step_gen_min_batch_size)
+    if model.is_moe and live_step_gen_min_batch_size == 256:
+        live_step_gen_min_batch_size = 8
+    max_num_seqs = public_args.max_num_seqs
+    if phases == "gen" and getattr(public_args, "gen_max_num_seqs", None) is not None:
+        max_num_seqs = public_args.gen_max_num_seqs
     moe_dummy_router = bool(getattr(public_args, "moe_dummy_router", False))
+    physical_tp_real_weights = bool(getattr(public_args, "physical_tp_real_weights", False))
     use_moe_noop = public_args.moe_noop or (
         model.is_moe
         and not public_args.moe_real_router
         and not moe_dummy_router
+        and not physical_tp_real_weights
     )
     return argparse.Namespace(
         model=model.model,
@@ -212,16 +248,18 @@ def make_work_unit_args(
         phases=phases,
         ctx_new_tokens=public_args.ctx_new_tokens or preset_values["ctx_new_tokens"],
         ctx_past_kv=public_args.ctx_past_kv or preset_values["ctx_past_kv"],
+        ctx_batch_sizes=public_args.ctx_batch_sizes or preset_values["ctx_batch_sizes"],
         no_filter_model_max_len=public_args.no_filter_model_max_len,
         gen_batch_sizes=public_args.gen_batch_sizes or preset_values["gen_batch_sizes"],
         gen_past_kv=public_args.gen_past_kv or model_full_gen_past_kv or preset_values["gen_past_kv"],
-        max_num_seqs=public_args.max_num_seqs,
+        max_num_seqs=max_num_seqs,
         max_num_batched_tokens=public_args.max_num_batched_tokens,
         max_model_len=public_args.max_model_len,
         gpu_memory_utilization=public_args.gpu_memory_utilization,
         gen_driver=model.gen_driver,
         live_step_driver=public_args.live_step_driver,
         live_step_gen_min_past_kv=public_args.live_step_gen_min_past_kv,
+        live_step_gen_min_batch_size=live_step_gen_min_batch_size,
         latency_source=public_args.latency_source,
         gemm_quant=model.gemm_quant,
         moe_quant=model.moe_quant,
@@ -230,7 +268,7 @@ def make_work_unit_args(
         moe_real_router=bool(public_args.moe_real_router),
         physical_tp=public_args.physical_tp,
         allow_multi_gpu_diagnostic=bool(getattr(public_args, "allow_multi_gpu_diagnostic", False)),
-        physical_tp_real_weights=public_args.physical_tp_real_weights,
+        physical_tp_real_weights=physical_tp_real_weights,
         default_gen_target_layer_count=(
             public_args.target_layer_count is None
             and phases == "gen"
@@ -243,18 +281,30 @@ def build_public_work_units(public_args: argparse.Namespace, models: list[Layerw
     """Expand public model and TP/EP filters into scheduler work units."""
     work_units: list[WorkUnit] = []
     requested_tp_sizes = _parse_ints(public_args.tp_sizes)
+    requested_pairs = _parse_parallelism_pairs(getattr(public_args, "parallelism_pairs", None))
     phases = ("ctx", "gen") if public_args.phases == "both" else (public_args.phases,)
     for model in models:
-        for tp in requested_tp_sizes:
+        model_pairs = (
+            requested_pairs
+            if requested_pairs
+            else [
+                (tp, ep)
+                for tp in requested_tp_sizes
+                if tp in model.tp_sizes
+                for ep in ep_sizes_for_model(model, public_args.ep_sizes, tp)
+            ]
+        )
+        for tp, ep in model_pairs:
             if tp not in model.tp_sizes:
                 continue
-            for ep in ep_sizes_for_model(model, public_args.ep_sizes, tp):
-                if not _passes_stub_memory_filter(model, tp_size=tp, ep_size=ep):
-                    continue
-                for phase in phases:
-                    work_units.extend(
-                        build_work_units(make_work_unit_args(public_args, model, tp_size=tp, ep_size=ep, phase=phase))
-                    )
+            if ep not in ep_sizes_for_model(model, str(ep), tp):
+                continue
+            if not _passes_stub_memory_filter(model, tp_size=tp, ep_size=ep):
+                continue
+            for phase in phases:
+                work_units.extend(
+                    build_work_units(make_work_unit_args(public_args, model, tp_size=tp, ep_size=ep, phase=phase))
+                )
     return work_units
 
 
@@ -309,10 +359,12 @@ def _detect_layer_schedule(
 
     if target_layer_count < 1:
         raise ValueError(f"target_layer_count must be >= 1, got {target_layer_count}")
+    full_depth_requested = bool(max_config_layers and target_layer_count >= max_config_layers)
+
     if not _is_moe_config(config):
         typed_representatives = (
             _representatives_from_layer_types(config, suffix="dense")
-            if expand_layer_types
+            if expand_layer_types and not full_depth_requested
             else None
         )
         if typed_representatives is not None:
@@ -341,7 +393,11 @@ def _detect_layer_schedule(
         ], num_hidden_layers, _layer_types_override(config, num_hidden_layers)
 
     if _is_all_moe_config(config):
-        typed_representatives = _representatives_from_layer_types(config, suffix="moe") if expand_layer_types else None
+        typed_representatives = (
+            _representatives_from_layer_types(config, suffix="moe")
+            if expand_layer_types and not full_depth_requested
+            else None
+        )
         if typed_representatives is not None:
             return typed_representatives
         num_hidden_layers = target_layer_count
@@ -426,25 +482,6 @@ def _is_moe_config(config: dict[str, Any]) -> bool:
     config = _decoder_config_view(config)
     return any((config.get(k, 0) or 0) > 0 for k in EXPERT_COUNT_KEYS)
 
-def _has_shared_expert_moe_config(config: dict[str, Any]) -> bool:
-    config = _decoder_config_view(config)
-    for key in (
-        "n_shared_experts",
-        "num_shared_experts",
-        "shared_expert_intermediate_size",
-        "shared_expert_inter_size",
-        "moe_shared_expert_intermediate_size",
-    ):
-        raw = config.get(key)
-        if raw in (None, "") or isinstance(raw, bool):
-            continue
-        try:
-            if float(raw) > 0:
-                return True
-        except (TypeError, ValueError):
-            continue
-    return False
-
 def _is_all_moe_config(config: dict[str, Any]) -> bool:
     config = _decoder_config_view(config)
     model_type = str(config.get("model_type") or "").lower()
@@ -483,6 +520,7 @@ def _partition_gen_datapoints_for_live_step(
     *,
     live_step_driver: bool,
     live_step_gen_min_past_kv: int,
+    live_step_gen_min_batch_size: int,
 ) -> list[tuple[str, list[DataPoint]]]:
     """Split prefix-cache decode rows from live-step decode rows when mixed."""
 
@@ -491,11 +529,19 @@ def _partition_gen_datapoints_for_live_step(
 
     prefix_datapoints = [
         dp for dp in datapoints
-        if not _live_step_gen_would_handle(dp, min_past_kv=live_step_gen_min_past_kv)
+        if not _live_step_gen_would_handle(
+            dp,
+            min_past_kv=live_step_gen_min_past_kv,
+            min_batch_size=live_step_gen_min_batch_size,
+        )
     ]
     live_step_datapoints = [
         dp for dp in datapoints
-        if _live_step_gen_would_handle(dp, min_past_kv=live_step_gen_min_past_kv)
+        if _live_step_gen_would_handle(
+            dp,
+            min_past_kv=live_step_gen_min_past_kv,
+            min_batch_size=live_step_gen_min_batch_size,
+        )
     ]
     if not prefix_datapoints or not live_step_datapoints:
         return [("", datapoints)]
@@ -537,24 +583,91 @@ def _build_datapoints(
     phases: str,
     ctx_new_tokens: list[int],
     ctx_past_kv: list[int],
+    ctx_batch_sizes: list[int],
     gen_batch_sizes: list[int],
     gen_past_kv: list[int],
 ) -> list[DataPoint]:
     datapoints: list[DataPoint] = []
     if phases in ("ctx", "both"):
-        for past_kv in ctx_past_kv:
-            for new_tokens in ctx_new_tokens:
-                datapoints.append(DataPoint("ctx", 1, new_tokens, past_kv))
+        for batch_size in ctx_batch_sizes:
+            for past_kv in ctx_past_kv:
+                for new_tokens in ctx_new_tokens:
+                    datapoints.append(DataPoint("ctx", batch_size, new_tokens, past_kv))
     if phases in ("gen", "both"):
         for batch_size in gen_batch_sizes:
             for past_kv in gen_past_kv:
                 datapoints.append(DataPoint("gen", batch_size, 1, past_kv))
     return datapoints
 
-def _live_step_gen_would_handle(datapoint: DataPoint, *, min_past_kv: int = 8192) -> bool:
+def _filter_auto_ctx_batch_datapoints(
+    datapoints: list[DataPoint],
+    *,
+    max_num_batched_tokens: int | None,
+) -> tuple[list[DataPoint], int]:
+    """Keep auto batched context rows inside one scheduler-token budget."""
+
+    filtered: list[DataPoint] = []
+    skipped = 0
+    for dp in datapoints:
+        if dp.phase != "ctx" or int(dp.batch_size) <= 1:
+            filtered.append(dp)
+            continue
+        if max_num_batched_tokens is None:
+            skipped += 1
+            continue
+        if int(dp.batch_size) * int(dp.new_tokens) <= int(max_num_batched_tokens):
+            filtered.append(dp)
+            continue
+        skipped += 1
+    return filtered, skipped
+
+def _resolve_decode_max_num_seqs(
+    datapoints: list[DataPoint],
+    max_num_seqs: int | None,
+) -> tuple[list[DataPoint], int | None]:
+    """Return datapoints and a vLLM sequence cap consistent with GEN rows."""
+
+    max_gen_batch_size = max(
+        (int(dp.batch_size) for dp in datapoints if dp.phase == "gen"),
+        default=None,
+    )
+    if max_gen_batch_size is None:
+        return datapoints, max_num_seqs
+    if max_num_seqs is None:
+        return datapoints, max_gen_batch_size
+
+    resolved_max_num_seqs = int(max_num_seqs)
+    if resolved_max_num_seqs < 1:
+        raise ValueError(f"max_num_seqs must be >= 1, got {resolved_max_num_seqs}")
+    if max_gen_batch_size <= resolved_max_num_seqs:
+        return datapoints, resolved_max_num_seqs
+
+    filtered = [
+        dp
+        for dp in datapoints
+        if dp.phase != "gen" or int(dp.batch_size) <= resolved_max_num_seqs
+    ]
+    skipped = len(datapoints) - len(filtered)
+    if skipped:
+        print(
+            f"[filter] skipped {skipped} decode datapoints with batch_size > "
+            f"max_num_seqs={resolved_max_num_seqs}"
+        )
+    return filtered, resolved_max_num_seqs
+
+def _live_step_gen_would_handle(
+    datapoint: DataPoint,
+    *,
+    min_past_kv: int = 1,
+    min_batch_size: int = 256,
+) -> bool:
     """Mirror live-step decode deployment eligibility without importing worker."""
 
-    return datapoint.phase == "gen" and int(datapoint.past_kv) >= int(min_past_kv)
+    if datapoint.phase != "gen":
+        return False
+    if int(datapoint.past_kv) >= int(min_past_kv):
+        return True
+    return int(min_batch_size) > 0 and int(datapoint.batch_size) >= int(min_batch_size)
 
 def _model_max_position_embeddings(config: dict[str, Any]) -> int | None:
     config = _decoder_config_view(config)
@@ -599,6 +712,9 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
 
     ctx_new_tokens = _parse_ints(args.ctx_new_tokens)
     ctx_past_kv = _parse_ints(args.ctx_past_kv)
+    raw_ctx_batch_sizes = str(getattr(args, "ctx_batch_sizes", "1") or "1")
+    auto_ctx_batch_sizes = raw_ctx_batch_sizes == "auto"
+    ctx_batch_sizes = CTX_BATCH_SIZES if auto_ctx_batch_sizes else _parse_ints(raw_ctx_batch_sizes)
     gen_batch_sizes = _parse_ints(args.gen_batch_sizes)
     gen_past_kv = _parse_ints(args.gen_past_kv)
     tp_sizes = _parse_ints(args.tp_sizes)
@@ -624,11 +740,10 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
     )
     moe_noop = bool(getattr(args, "moe_noop", False) and is_moe)
     requested_latency_source = str(getattr(args, "latency_source", "span"))
-    shared_moe_gen_schedule_envelope = (
+    moe_gen_schedule_envelope = (
         args.phases == "gen"
         and is_moe
         and moe_noop
-        and _has_shared_expert_moe_config(orig_config)
         and requested_latency_source in {"auto", "schedule_to_update", "worker_wall"}
         and bool(getattr(args, "default_gen_target_layer_count", False))
         and explicit_target_layers is None
@@ -642,16 +757,13 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
         and explicit_target_layers is None
         and getattr(args, "target_layer_config_depth", None) is None
     )
-    if target_layer_count == 0 or shared_moe_gen_schedule_envelope or dense_gen_schedule_envelope:
+    if target_layer_count == 0 or moe_gen_schedule_envelope or dense_gen_schedule_envelope:
         if orig_layer_count < 1:
             raise ValueError("target_layer_count=0 requires config num_hidden_layers")
         target_layer_count = orig_layer_count
     context_schedule_envelope = (
         args.phases == "ctx"
         and requested_latency_source in {"auto", "schedule_to_update", "worker_wall"}
-    )
-    moe_gen_schedule_envelope = (
-        shared_moe_gen_schedule_envelope
     )
     layer_schedule, num_hidden_layers, extra_overrides = _detect_layer_schedule(
         orig_config, target_layer_count,
@@ -664,13 +776,15 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
 
     system = args.system or _get_system_name()
     version = args.framework_version or _get_vllm_version()
-    datapoints = _build_datapoints(
+    base_datapoints = _build_datapoints(
         phases=args.phases,
         ctx_new_tokens=ctx_new_tokens,
         ctx_past_kv=ctx_past_kv,
+        ctx_batch_sizes=ctx_batch_sizes,
         gen_batch_sizes=gen_batch_sizes,
         gen_past_kv=gen_past_kv,
     )
+    base_datapoints, resolved_max_num_seqs = _resolve_decode_max_num_seqs(base_datapoints, max_num_seqs)
     gen_driver = str(
         getattr(args, "gen_driver", "")
         or os.environ.get("LAYERWISE_GEN_DRIVER")
@@ -678,13 +792,13 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
     )
     if not getattr(args, "no_filter_model_max_len", False):
         model_max_len = _model_max_position_embeddings(orig_config)
-        datapoints, skipped = _filter_datapoints_for_model_max_len(datapoints, model_max_len)
+        base_datapoints, skipped = _filter_datapoints_for_model_max_len(base_datapoints, model_max_len)
         if skipped:
             print(
                 f"[skip] {skipped} datapoints require more than "
                 f"model_max_len={model_max_len} tokens"
             )
-        if not datapoints:
+        if not base_datapoints:
             raise ValueError("all datapoints exceed the model's configured max length")
     work_units: list[WorkUnit] = []
     for tp in tp_sizes:
@@ -709,16 +823,27 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
         else:
             moe_tp = 1
             ep = 1
+        physical_dp_size = 1
+        if physical_tp and is_moe and ep > 1 and moe_tp == 1 and not moe_noop:
+            physical_dp_size = ep // tp
         deployment_extra_args = list(getattr(args, "extra_vllm_arg", ()) or ())
         if is_moe and ep > 1:
             deployment_extra_args.append("--enable-expert-parallel")
+            if physical_tp and physical_dp_size > 1:
+                deployment_extra_args.extend(["--data-parallel-size", str(physical_dp_size)])
+        datapoints = list(base_datapoints)
         gen_datapoints = [dp for dp in datapoints if dp.phase == "gen"]
         live_step_gen_min_past_kv = int(getattr(args, "live_step_gen_min_past_kv", 8192))
+        live_step_gen_min_batch_size = int(getattr(args, "live_step_gen_min_batch_size", 256))
         has_live_step_gen = (
             bool(getattr(args, "live_step_driver", False))
             and bool(gen_datapoints)
             and any(
-                _live_step_gen_would_handle(dp, min_past_kv=live_step_gen_min_past_kv)
+                _live_step_gen_would_handle(
+                    dp,
+                    min_past_kv=live_step_gen_min_past_kv,
+                    min_batch_size=live_step_gen_min_batch_size,
+                )
                 for dp in gen_datapoints
             )
         )
@@ -738,11 +863,21 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
             resolved_max_num_batched_tokens = _get_vllm_deployment_max_num_batched_tokens(
                 model=args.model,
                 tensor_parallel_size=tp,
-                max_num_seqs=max_num_seqs,
+                max_num_seqs=resolved_max_num_seqs,
                 max_model_len=max_model_len,
                 gpu_memory_utilization=gpu_memory_utilization,
                 extra_args=runtime_defaults.extra_args,
             )
+        if auto_ctx_batch_sizes:
+            datapoints, skipped_ctx_batch = _filter_auto_ctx_batch_datapoints(
+                datapoints,
+                max_num_batched_tokens=resolved_max_num_batched_tokens,
+            )
+            if skipped_ctx_batch:
+                print(
+                    f"[skip] {skipped_ctx_batch} auto batched-context datapoints exceed "
+                    f"max_num_batched_tokens={resolved_max_num_batched_tokens}"
+                )
         resolved_cache_block_size = None
         if physical_tp and ep != 1 and (not is_moe or moe_tp != 1):
             print(
@@ -791,6 +926,12 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
                         *work_unit_extra_vllm_args,
                         "--enable-expert-parallel",
                     )
+                    if physical_dp_size > 1:
+                        work_unit_extra_vllm_args = (
+                            *work_unit_extra_vllm_args,
+                            "--data-parallel-size",
+                            str(physical_dp_size),
+                        )
                 if physical_tp_real_weights:
                     work_unit_extra_vllm_args = (
                         *work_unit_extra_vllm_args,
@@ -847,20 +988,22 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
                 moe_noop,
                 physical_tp,
             )
+            phase_work_unit_id = f"{base_work_unit_id}_{args.phases}"
             for id_suffix, partitioned_datapoints in _partition_gen_datapoints_for_live_step(
                 datapoints,
                 live_step_driver=bool(getattr(args, "live_step_driver", False)),
                 live_step_gen_min_past_kv=live_step_gen_min_past_kv,
+                live_step_gen_min_batch_size=live_step_gen_min_batch_size,
             ):
                 work_units.append(WorkUnit(
-                    work_unit_id=f"{base_work_unit_id}{id_suffix}",
+                    work_unit_id=f"{phase_work_unit_id}{id_suffix}",
                     model_dir=model_dir,
                     row_base=row_base,
                     representative=representative,
                     target_layers=target_layers,
                     datapoints=partitioned_datapoints,
                     model_layer_count=num_hidden_layers,
-                    max_num_seqs=max_num_seqs,
+                    max_num_seqs=resolved_max_num_seqs,
                     max_num_batched_tokens=resolved_max_num_batched_tokens,
                     cache_block_size=resolved_cache_block_size,
                     max_model_len=max_model_len,
@@ -870,6 +1013,8 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
                     moe_noop=moe_noop,
                     includes_moe=includes_moe,
                     router_weight_model=router_weight_model,
-                    physical_gpus=tp if physical_tp else 1,
+                    physical_gpus=tp * physical_dp_size if physical_tp else 1,
+                    live_step_gen_min_past_kv=live_step_gen_min_past_kv,
+                    live_step_gen_min_batch_size=live_step_gen_min_batch_size,
                 ))
     return work_units

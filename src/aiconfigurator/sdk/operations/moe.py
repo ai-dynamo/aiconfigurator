@@ -57,6 +57,33 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _is_vllm_module_level_moe_row(kernel_source: str, op_name: str) -> bool:
+    """Return True when a vLLM MoE row times a module/block, not just experts."""
+
+    source = str(kernel_source or "").lower()
+    op = str(op_name or "moe").lower()
+    if not source.startswith("vllm_"):
+        return False
+    if op and op != "moe":
+        return True
+    return "module" in source or "shared" in source or source == "vllm_mxfp4_moe"
+
+
+def _moe_leaf_metadata(value: dict | float) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        return {}
+    metadata: dict[str, bool] = {}
+    if float(value.get("module_level", 0.0) or 0.0) >= 0.5:
+        metadata["moe_module_level"] = True
+    if float(value.get("includes_shared_expert", 0.0) or 0.0) >= 0.5:
+        metadata["moe_includes_shared_expert"] = True
+    return metadata
+
+
+def _moe_performance_result(latency: float, energy: float, value: dict | float) -> PerformanceResult:
+    return PerformanceResult(latency, energy=energy, source="silicon", metadata=_moe_leaf_metadata(value))
+
+
 def _cache_key(database: PerfDatabase) -> tuple:
     """Shared cache key — same shape as every other migrated op family."""
     return (
@@ -357,7 +384,7 @@ class MoE(Operation):
             # Overflow estimate anchored on the last silicon point's utilization
             # and scaled by SOL ratio. It is still silicon-derived, not a pure
             # formula fallback, so keep the source tag aligned with _interp_pr.
-            return database._interp_pr(est_latency, energy=est_energy)
+            return _moe_performance_result(est_latency, est_energy, last_point)
 
         def _require_moe_token_points(
             moe_dict: dict,
@@ -418,7 +445,7 @@ class MoE(Operation):
             else:
                 lat = result
                 energy = 0.0
-            return database._interp_pr(lat, energy=energy)
+            return _moe_performance_result(lat, energy, result)
 
         def _nonempty_moe_dict(moe_tp_data: dict, query_moe_tp_size: int, query_moe_ep_size: int) -> dict | None:
             if query_moe_tp_size not in moe_tp_data:
@@ -513,9 +540,95 @@ class MoE(Operation):
                 used_workload_distribution,
                 scale,
             )
-            return database._interp_pr(
+            return PerformanceResult(
                 float(reference) * scale,
                 energy=float(getattr(reference, "energy", 0.0)) * scale,
+                source=str(getattr(reference, "source", "silicon")),
+                metadata=getattr(reference, "metadata", {}),
+            )
+
+        def _query_scaled_from_same_ep_silicon(
+            moe_tp_data: dict,
+            query_tokens: int,
+            used_workload_distribution: str,
+        ) -> PerformanceResult | None:
+            """Scale a same-EP silicon row to a missing TP with the SOL ratio."""
+
+            if moe_tp_size <= 0 or moe_tp_size & (moe_tp_size - 1):
+                return None
+            available = [
+                int(candidate_tp)
+                for candidate_tp, candidate_ep_data in moe_tp_data.items()
+                if int(candidate_tp) != int(moe_tp_size)
+                and int(candidate_tp) > 0
+                and not (int(candidate_tp) & (int(candidate_tp) - 1))
+                and isinstance(candidate_ep_data, dict)
+                and candidate_ep_data.get(moe_ep_size)
+            ]
+            if not available:
+                return None
+
+            reference_tp = min(
+                available,
+                key=lambda candidate_tp: (
+                    abs(math.log2(max(float(candidate_tp), 1.0) / max(float(moe_tp_size), 1.0))),
+                    candidate_tp,
+                ),
+            )
+            reference_dict = moe_tp_data[reference_tp][moe_ep_size]
+            reference = _query_moe_dict(
+                reference_dict,
+                query_tokens,
+                used_workload_distribution,
+                reference_tp,
+                moe_ep_size,
+            )
+            reference_sol = get_sol(
+                query_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                reference_tp,
+                moe_ep_size,
+                quant_mode,
+                used_workload_distribution,
+            )[0]
+            target_sol = get_sol(
+                query_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                used_workload_distribution,
+            )[0]
+            if reference_sol <= 0.0:
+                return None
+
+            scale = target_sol / reference_sol
+            logger.debug(
+                "Scaling MoE silicon row from moe_tp_size=%s to moe_tp_size=%s for "
+                "num_tokens=%s, hidden_size=%s, inter_size=%s, topk=%s, num_experts=%s, "
+                "moe_ep_size=%s, distribution=%s with SOL ratio %.4f.",
+                reference_tp,
+                moe_tp_size,
+                query_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+                used_workload_distribution,
+                scale,
+            )
+            return PerformanceResult(
+                float(reference) * scale,
+                energy=float(getattr(reference, "energy", 0.0)) * scale,
+                source=str(getattr(reference, "source", "silicon")),
+                metadata=getattr(reference, "metadata", {}),
             )
 
         if database_mode is None:
@@ -719,6 +832,13 @@ class MoE(Operation):
                             moe_ep_size,
                         )
                     scaled_result = _query_scaled_from_same_tp_silicon(
+                        moe_tp_data,
+                        num_tokens,
+                        used_workload_distribution,
+                    )
+                    if scaled_result is not None:
+                        return scaled_result
+                    scaled_result = _query_scaled_from_same_ep_silicon(
                         moe_tp_data,
                         num_tokens,
                         used_workload_distribution,
@@ -2214,6 +2334,7 @@ def load_moe_data(moe_file):
             row["latency"],
         )
         kernel_source = row["kernel_source"]  # moe_torch_flow, moe_torch_flow_min_latency, moe_torch_flow
+        op_name = row.get("op_name", "moe")
         num_tokens = int(num_tokens)
         hidden_size = int(hidden_size)
         inter_size = int(inter_size)
@@ -2232,6 +2353,8 @@ def load_moe_data(moe_file):
         quant_mode = common.MoEQuantMode[quant_mode]
 
         moe_data = moe_low_latency_data if kernel_source == "moe_torch_flow_min_latency" else moe_default_data
+        module_level = _is_vllm_module_level_moe_row(kernel_source, op_name)
+        includes_shared_expert = module_level and "shared" in str(kernel_source or "").lower()
 
         try:
             # Check for conflict
@@ -2251,6 +2374,8 @@ def load_moe_data(moe_file):
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
+                "module_level": float(module_level),
+                "includes_shared_expert": float(includes_shared_expert),
             }
 
     return moe_default_data, moe_low_latency_data

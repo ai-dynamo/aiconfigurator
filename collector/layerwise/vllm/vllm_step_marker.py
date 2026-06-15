@@ -423,11 +423,23 @@ def _run_marked_step(
     )
     nvtx.range_push(label)
     try:
+        measure_gpu_time = bool(control.get("measure_execute_model_gpu_time"))
+        start_event = end_event = None
+        if measure_gpu_time:
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
         execute_start = time.perf_counter()
         ret = orig(runner, scheduler_output, intermediate_tensors)
+        if end_event is not None:
+            end_event.record()
+            end_event.synchronize()
         if control.get("sync_execute_model_wall_time"):
             torch.cuda.synchronize()
         execute_model_wall_time_ms = (time.perf_counter() - execute_start) * 1000.0
+        progress_timing = {}
+        if start_event is not None and end_event is not None:
+            progress_timing["execute_model_gpu_time_ms"] = float(start_event.elapsed_time(end_event))
         _write_progress(
             "completed_execution",
             step=label_step,
@@ -435,6 +447,7 @@ def _run_marked_step(
             past_kv=label_past,
             phase=forced_phase,
             execute_model_wall_time_ms=execute_model_wall_time_ms,
+            **progress_timing,
             **progress_extra,
         )
         return ret

@@ -510,6 +510,33 @@ def test_load_moe_data_basic(tmp_path):
     assert 2 in data[qm]["uniform"][2][4][16][32][2]  # moe_ep_size
     assert 1 in data[qm]["uniform"][2][4][16][32][2][2]  # num_tokens
     assert data[qm]["uniform"][2][4][16][32][2][2][1]["latency"] == pytest.approx(1.23)
+    assert data[qm]["uniform"][2][4][16][32][2][2][1]["module_level"] == 0.0
+
+
+def test_load_moe_data_tags_vllm_module_level_rows(tmp_path):
+    csv_file = tmp_path / "moe.csv"
+    csv_file.write_text(
+        "\n".join(
+            [
+                "framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,"
+                "inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency",
+                "VLLM,0.20.1,b300,moe,vllm_mxfp4_moe,w4a8_mxfp4_mxfp8,128,4096,2048,6,256,1,4,"
+                "power_law_1.2,0.25",
+                "VLLM,0.20.1,b300,moe,vllm_qwen_fused_moe_shared,bfloat16,128,2048,256,8,256,1,1,"
+                "power_law_1.2,0.30",
+            ]
+        )
+        + "\n"
+    )
+
+    data, _ = load_moe_data(str(csv_file))
+
+    dsv4_row = data[MoEQuantMode.w4a8_mxfp4_mxfp8]["power_law_1.2"][6][256][4096][2048][1][4][128]
+    qwen_row = data[MoEQuantMode.bfloat16]["power_law_1.2"][8][256][2048][256][1][1][128]
+    assert dsv4_row["module_level"] == 1.0
+    assert dsv4_row["includes_shared_expert"] == 0.0
+    assert qwen_row["module_level"] == 1.0
+    assert qwen_row["includes_shared_expert"] == 1.0
 
 
 def _dsv4_megamoe_row(

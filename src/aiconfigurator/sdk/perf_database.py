@@ -1939,6 +1939,7 @@ class PerfDatabase:
         seq_len_kv_cache: int = 0,
         moe_weight_mode: str | None = None,
         max_num_batched_tokens: int | None = None,
+        max_num_seqs: int | None = None,
         moe_tp_size: int | None = None,
         moe_ep_size: int | None = None,
     ) -> dict[str, float]:
@@ -1955,6 +1956,7 @@ class PerfDatabase:
             seq_len_kv_cache,
             moe_weight_mode,
             max_num_batched_tokens,
+            max_num_seqs,
             moe_tp_size,
             moe_ep_size,
         )

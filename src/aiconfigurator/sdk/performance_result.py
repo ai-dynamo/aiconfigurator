@@ -62,7 +62,7 @@ class PerformanceResult(float):
     # scalar arithmetic operators (__mul__/__rmul__/__truediv__/__rtruediv__)
     # are currently annotated.
 
-    def __new__(cls, latency, energy=0.0, source="silicon"):
+    def __new__(cls, latency, energy=0.0, source="silicon", metadata=None):
         """
         Create a new PerformanceResult.
 
@@ -77,7 +77,7 @@ class PerformanceResult(float):
         instance = float.__new__(cls, latency)
         return instance
 
-    def __init__(self, latency, energy=0.0, source="silicon"):
+    def __init__(self, latency, energy=0.0, source="silicon", metadata=None):
         """
         Initialize the PerformanceResult.
 
@@ -89,6 +89,7 @@ class PerformanceResult(float):
         """
         self.energy = energy  # W·ms (watt-milliseconds)
         self.source = source
+        self.metadata = dict(metadata or {})
 
     @property
     def power(self):
@@ -130,10 +131,16 @@ class PerformanceResult(float):
                 float(self) + float(other),
                 energy=self.energy + other.energy,
                 source=source,
+                metadata=self.metadata if self.metadata == other.metadata else {},
             )
         else:
             # Add to latency only, keep same energy and source.
-            return PerformanceResult(float(self) + other, energy=self.energy, source=self.source)
+            return PerformanceResult(
+                float(self) + other,
+                energy=self.energy,
+                source=self.source,
+                metadata=self.metadata,
+            )
 
     def __radd__(self, other):
         """Right addition for sum() support.
@@ -148,7 +155,12 @@ class PerformanceResult(float):
 
     def __mul__(self, other: int | float) -> "PerformanceResult":
         """Multiply PerformanceResult by a scalar; preserve source."""
-        return PerformanceResult(float(self) * other, energy=self.energy * other, source=self.source)
+        return PerformanceResult(
+            float(self) * other,
+            energy=self.energy * other,
+            source=self.source,
+            metadata=self.metadata,
+        )
 
     def __rmul__(self, other: int | float) -> "PerformanceResult":
         """Right multiplication."""
@@ -156,7 +168,12 @@ class PerformanceResult(float):
 
     def __truediv__(self, other: int | float) -> "PerformanceResult":
         """Divide PerformanceResult by a scalar; preserve source."""
-        return PerformanceResult(float(self) / other, energy=self.energy / other, source=self.source)
+        return PerformanceResult(
+            float(self) / other,
+            energy=self.energy / other,
+            source=self.source,
+            metadata=self.metadata,
+        )
 
     def __rtruediv__(self, other: int | float) -> float:
         """Right division: other / self. Returns plain float (no source on scalar)."""
@@ -195,7 +212,12 @@ class PerformanceResult(float):
 
     def __abs__(self):
         """Absolute value of latency and energy."""
-        return PerformanceResult(abs(float(self)), energy=abs(self.energy), source=self.source)
+        return PerformanceResult(
+            abs(float(self)),
+            energy=abs(self.energy),
+            source=self.source,
+            metadata=self.metadata,
+        )
 
     def __hash__(self):
         """Hash based on latency and energy for use in sets/dicts."""

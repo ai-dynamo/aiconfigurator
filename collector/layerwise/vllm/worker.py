@@ -8,6 +8,7 @@ from __future__ import annotations
 import fcntl
 import gc
 import json
+import math
 import os
 import random
 import re
@@ -434,10 +435,13 @@ def _use_live_step_driver(dp: DataPoint) -> bool:
     if os.environ.get("LAYERWISE_USE_LIVE_STEP_DRIVER", "0") != "1":
         return False
     if dp.phase == "ctx":
-        return dp.batch_size == 1 and int(dp.new_tokens) > 0
+        return int(dp.batch_size) > 0 and int(dp.new_tokens) > 0
     if dp.phase == "gen":
         min_past_kv = int(os.environ.get("LAYERWISE_LIVE_STEP_GEN_MIN_PAST_KV", "8192"))
-        return int(dp.past_kv) >= min_past_kv
+        if int(dp.past_kv) >= min_past_kv:
+            return True
+        min_batch_size = int(os.environ.get("LAYERWISE_LIVE_STEP_GEN_MIN_BATCH_SIZE", "256"))
+        return min_batch_size > 0 and int(dp.batch_size) >= min_batch_size
     return False
 
 def _make_final_only_sampling_params(sampling_cls, **kwargs):
@@ -478,10 +482,19 @@ def _engine_requests_by_id(llm, request_ids: list[str]) -> dict[str, Any]:
 
     scheduler = _engine_core_scheduler(llm)
     requests = dict(getattr(scheduler, "requests", {}))
-    for req in getattr(scheduler, "running", []):
-        req_id = getattr(req, "request_id", getattr(req, "req_id", None))
-        if req_id is not None:
-            requests[str(req_id)] = req
+
+    def _track_request_container(container: Any) -> None:
+        if isinstance(container, dict):
+            iterable = container.values()
+        else:
+            iterable = container or []
+        for req in iterable:
+            req_id = getattr(req, "request_id", getattr(req, "req_id", None))
+            if req_id is not None:
+                requests[str(req_id)] = req
+
+    _track_request_container(getattr(scheduler, "running", []))
+    _track_request_container(getattr(scheduler, "waiting", []))
     return {request_id: requests[request_id] for request_id in request_ids if request_id in requests}
 
 def _all_requests_computed_at_least(llm, request_ids: list[str], token_count: int) -> bool:
@@ -491,6 +504,27 @@ def _all_requests_computed_at_least(llm, request_ids: list[str], token_count: in
     if len(requests) != len(request_ids):
         return False
     return all(int(getattr(req, "num_computed_tokens", 0)) >= token_count for req in requests.values())
+
+def _all_requests_done_or_computed_at_least(
+    llm,
+    request_ids: list[str],
+    token_count: int,
+    *,
+    seen_request_ids: set[str] | None = None,
+) -> bool:
+    """Return whether requests are finished or have reached ``token_count``."""
+
+    requests = _engine_requests_by_id(llm, request_ids)
+    if seen_request_ids is not None:
+        seen_request_ids.update(requests)
+        if any(request_id not in seen_request_ids for request_id in request_ids):
+            return False
+    elif len(requests) != len(request_ids):
+        return False
+    return all(
+        request_id not in requests or int(getattr(requests[request_id], "num_computed_tokens", 0)) >= token_count
+        for request_id in request_ids
+    )
 
 def _add_engine_requests(llm, prompts: list[dict[str, Any]], sampling_params, *, request_prefix: str) -> list[str]:
     """Submit prompts directly to the lower-level vLLM engine."""
@@ -630,6 +664,21 @@ def _prime_engine_requests_for_decode(llm, request_ids: list[str], past_kv: int)
         append_decode_token=True,
     )
 
+def _live_decode_past_tolerance(dp: DataPoint, total_decode_steps: int, decode_headroom: int) -> float:
+    """Return the existing live-decode past tolerance for a datapoint."""
+
+    return max(
+        1.0,
+        float(dp.past_kv) * 0.01,
+        float((total_decode_steps + decode_headroom) * max(1, dp.new_tokens)),
+    )
+
+def _short_retry_past_kv(dp: DataPoint, past_tolerance: float) -> int:
+    """Return a shorter prompt length that remains in the target past bucket."""
+
+    retry_delta = max(1, int(past_tolerance))
+    return max(1, int(dp.past_kv) - retry_delta)
+
 def _abort_engine_requests(llm, request_ids: list[str]) -> None:
     """Abort live engine requests, ignoring already-finished IDs."""
 
@@ -767,20 +816,30 @@ def _live_ctx_chunk_plan(
     dp: DataPoint,
     max_num_batched_tokens: int | None,
 ) -> list[tuple[int, int]]:
-    """Return ``(new_tokens, past_kv)`` scheduler chunks for a live ctx row."""
+    """Return per-request ``(new_tokens, past_kv)`` scheduler chunks."""
 
     if dp.phase != "ctx":
         raise ValueError(f"live ctx chunk plan requires ctx datapoint, got {dp.phase}")
     if dp.new_tokens <= 0:
         raise ValueError(f"ctx new_tokens must be positive, got {dp.new_tokens}")
-    budget = int(max_num_batched_tokens or 0)
-    if budget <= 0:
-        budget = int(dp.new_tokens)
+    request_count = int(dp.batch_size)
+    if request_count < 1:
+        raise ValueError(f"ctx batch_size must be positive, got {dp.batch_size}")
+
+    step_budget = int(max_num_batched_tokens or 0)
+    if step_budget > 0 and step_budget < request_count:
+        raise ValueError(
+            "live ctx batch cannot fit one token per request within "
+            f"max_num_batched_tokens={step_budget}, batch_size={request_count}"
+        )
+    if request_count == 1:
+        return [(int(dp.new_tokens), int(dp.past_kv))]
+    per_request_budget = int(dp.new_tokens) if step_budget <= 0 else max(1, step_budget // request_count)
     remaining = int(dp.new_tokens)
     past_kv = int(dp.past_kv)
     chunks = []
     while remaining > 0:
-        chunk_tokens = min(budget, remaining)
+        chunk_tokens = min(per_request_budget, remaining)
         chunks.append((chunk_tokens, past_kv))
         remaining -= chunk_tokens
         past_kv += chunk_tokens
@@ -1523,10 +1582,10 @@ def _run_live_ctx_iteration(
     datapoint_id: str | None = None,
     max_num_batched_tokens: int | None = None,
 ) -> None:
-    """Measure a ctx row by stepping one live chunked-prefill request."""
+    """Measure a ctx row by stepping live chunked-prefill request(s)."""
 
-    if dp.batch_size != 1:
-        raise ValueError("live ctx driver currently supports batch_size=1 only")
+    if dp.batch_size < 1:
+        raise ValueError(f"live ctx driver requires batch_size >= 1, got {dp.batch_size}")
     cache_salt_prefix = _ctx_cache_salt_prefix(work_unit_id, dp)
     prefix_stream_key = _ctx_prefix_stream_key(work_unit_id, dp)
     prompts = _prefix_suffix_prompts(
@@ -1558,10 +1617,77 @@ def _run_live_ctx_iteration(
             rounds=prime_rounds,
         )
         live_start = time.perf_counter()
+        if dp.batch_size > 1:
+            scheduler_token_budget = int(max_num_batched_tokens or 0)
+            if scheduler_token_budget <= 0:
+                scheduler_token_budget = int(dp.batch_size) * int(dp.new_tokens)
+            target_prompt_tokens = int(dp.past_kv) + int(dp.new_tokens)
+            total_requested_tokens = int(dp.batch_size) * int(dp.new_tokens)
+            max_steps = max(
+                8,
+                math.ceil(total_requested_tokens / max(1, scheduler_token_budget)) + int(dp.batch_size) + 4,
+            )
+            with _temporary_scheduler_token_budget(llm, scheduler_token_budget):
+                if warmup:
+                    _set_marker_state(marker_mod, active_iterations="", phase="ctx")
+                else:
+                    _set_marker_state(
+                        marker_mod,
+                        active_iterations="",
+                        trigger="ctx_batch",
+                        phase="ctx",
+                        step=dp.new_tokens,
+                        bs=dp.batch_size,
+                        past=dp.past_kv,
+                        run=run_idx,
+                        live_step_driver=True,
+                        sync_execute_model_wall_time=True,
+                        batched_ctx_driver=True,
+                        requested_new_tokens=dp.new_tokens,
+                        requested_past_kv=dp.past_kv,
+                        scheduler_token_budget=scheduler_token_budget,
+                    )
+                executed_steps = 0
+                seen_request_ids: set[str] = set()
+                for _step_idx in range(max_steps):
+                    llm.llm_engine.step()
+                    executed_steps += 1
+                    if _all_requests_done_or_computed_at_least(
+                        llm,
+                        request_ids,
+                        target_prompt_tokens,
+                        seen_request_ids=seen_request_ids,
+                    ):
+                        break
+                else:
+                    raise RuntimeError(
+                        "live batched ctx driver did not finish target prompt "
+                        f"for {dp.shape_key}: target_prompt_tokens={target_prompt_tokens}, "
+                        f"scheduler_token_budget={scheduler_token_budget}, max_steps={max_steps}"
+                    )
+            if not warmup:
+                _worker_append_event(
+                    status_path,
+                    "live_step_wall_time",
+                    work_unit_id=work_unit_id,
+                    datapoint_id=datapoint_id,
+                    phase="ctx",
+                    batch_size=dp.batch_size,
+                    new_tokens=dp.new_tokens,
+                    past_kv=dp.past_kv,
+                    run=run_idx,
+                    live_step_driver=True,
+                    batched_ctx_driver=True,
+                    chunks=executed_steps,
+                    steps=executed_steps,
+                    wall_latency_ms=(time.perf_counter() - live_start) * 1000.0,
+                )
+            return
         chunks = _live_ctx_chunk_plan(dp, max_num_batched_tokens)
         executed_steps = 0
         for chunk_index, (chunk_tokens, chunk_past_kv) in enumerate(chunks):
-            with _temporary_scheduler_token_budget(llm, chunk_tokens):
+            scheduler_token_budget = int(chunk_tokens) * int(dp.batch_size)
+            with _temporary_scheduler_token_budget(llm, scheduler_token_budget):
                 if warmup:
                     _set_marker_state(marker_mod, active_iterations="", phase="ctx")
                 else:
@@ -1580,6 +1706,7 @@ def _run_live_ctx_iteration(
                         requested_past_kv=dp.past_kv,
                         chunk_index=chunk_index,
                         chunk_count=len(chunks),
+                        scheduler_token_budget=scheduler_token_budget,
                     )
                 marker_mod._LAST_CTX_MATCH_META = {}
                 max_steps = 8
@@ -1840,6 +1967,7 @@ def _worker_run_gen(
                         bs=batch_size,
                         past=dp.past_kv,
                         run=run_idx,
+                        measure_execute_model_gpu_time=True,
                     )
                     _run_prefix_cached_gen_iteration(
                         llm,
@@ -1879,6 +2007,7 @@ def _run_live_gen_datapoint(
     if total_decode_steps < 1:
         return
     decode_headroom = 64 if int(dp.past_kv) <= 16384 else 1
+    past_tolerance = _live_decode_past_tolerance(dp, total_decode_steps, decode_headroom)
     sampling_params = _make_final_only_sampling_params(
         sampling_cls,
         temperature=0.0,
@@ -1886,24 +2015,63 @@ def _run_live_gen_datapoint(
         max_tokens=total_decode_steps + decode_headroom,
         detokenize=False,
     )
-    prompts = _token_prompts(
-        dp.batch_size,
-        dp.past_kv,
-        token_config,
-        prompt_factory=prompt_factory,
-        stream_key_prefix=_gen_prefix_stream_key(work_unit_id),
-        cache_salt_prefix=_gen_cache_salt_prefix(work_unit_id, dp),
-    )
-    request_ids = _add_engine_requests(
-        llm,
-        prompts,
-        sampling_params,
-        request_prefix=f"gen-live:{work_unit_id}:bs{dp.batch_size}:past{dp.past_kv}",
-    )
+    request_ids: list[str] = []
+    primed_past_kv = int(dp.past_kv)
     try:
         _set_marker_state(marker_mod, active_iterations="", phase="gen")
         prefill_start = time.perf_counter()
-        prime_chunks = _prime_engine_requests_for_decode(llm, request_ids, dp.past_kv)
+        retry_past_kv = _short_retry_past_kv(dp, past_tolerance)
+        retry_candidates = [int(dp.past_kv)]
+        if retry_past_kv < int(dp.past_kv):
+            retry_candidates.append(retry_past_kv)
+        prime_chunks = 0
+        last_error: RuntimeError | None = None
+        for candidate_past_kv in retry_candidates:
+            prompts = _token_prompts(
+                dp.batch_size,
+                candidate_past_kv,
+                token_config,
+                prompt_factory=prompt_factory,
+                stream_key_prefix=_gen_prefix_stream_key(work_unit_id),
+                cache_salt_prefix=_gen_cache_salt_prefix(work_unit_id, dp),
+            )
+            request_ids = _add_engine_requests(
+                llm,
+                prompts,
+                sampling_params,
+                request_prefix=f"gen-live:{work_unit_id}:bs{dp.batch_size}:past{candidate_past_kv}",
+            )
+            try:
+                prime_chunks = _prime_engine_requests_for_decode(llm, request_ids, candidate_past_kv)
+                primed_past_kv = candidate_past_kv
+                last_error = None
+                break
+            except RuntimeError as exc:
+                last_error = exc
+                if (
+                    candidate_past_kv == int(dp.past_kv)
+                    and retry_past_kv < int(dp.past_kv)
+                    and _is_oom_text(str(exc))
+                ):
+                    _abort_engine_requests(llm, request_ids)
+                    request_ids = []
+                    if status_path is not None and work_unit_id is not None:
+                        _worker_append_event(
+                            status_path,
+                            "live_decode_prefix_retry",
+                            work_unit_id=work_unit_id,
+                            datapoint_id=datapoint_id,
+                            phase="gen_prefill",
+                            batch_size=dp.batch_size,
+                            requested_past_kv=dp.past_kv,
+                            retry_past_kv=retry_past_kv,
+                            past_tolerance=past_tolerance,
+                            reason="kv_block_exhaustion",
+                        )
+                    continue
+                raise
+        if last_error is not None:
+            raise last_error
         if status_path is not None and work_unit_id is not None:
             _worker_append_event(
                 status_path,
@@ -1913,6 +2081,7 @@ def _run_live_gen_datapoint(
                 phase="gen_prefill",
                 batch_size=dp.batch_size,
                 past_kv=dp.past_kv,
+                primed_past_kv=primed_past_kv,
                 prime_chunks=prime_chunks,
                 wall_latency_ms=(time.perf_counter() - prefill_start) * 1000.0,
             )
@@ -1921,11 +2090,6 @@ def _run_live_gen_datapoint(
             _set_marker_state(marker_mod, active_iterations="", phase="gen")
             llm.llm_engine.step()
 
-        past_tolerance = max(
-            1.0,
-            float(dp.past_kv) * 0.01,
-            float((total_decode_steps + decode_headroom) * max(1, dp.new_tokens)),
-        )
         for run_idx in range(measured_runs):
             _set_marker_state(
                 marker_mod,
