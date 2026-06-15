@@ -23,6 +23,7 @@ import math
 
 import numpy as np
 from scipy import interpolate
+from scipy.spatial import QhullError
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
@@ -223,16 +224,6 @@ def nearest_1d_point_helper(x: int, values: list[int], inner_only: bool = True) 
     return start, end
 
 
-def nearest_1d_point_allow_singleton_axis(x: int, values: list[int]) -> tuple[int, int]:
-    """Return strict brackets, but allow sparse singleton axes to collapse."""
-    try:
-        return nearest_1d_point_helper(x, values)
-    except ValueError:
-        if len(values) == 1:
-            return values[0], values[0]
-        raise
-
-
 # ---------------------------------------------------------------------------
 # Metric extraction
 # ---------------------------------------------------------------------------
@@ -420,7 +411,6 @@ def interp_2d_1d(
     z: int,
     data: dict,
     method: str = "bilinear",
-    allow_singleton_axes: bool = False,
 ) -> float:
     """3-D interpolation done as 2-D (over y, z) followed by 1-D (over x)."""
     exact = _get_exact_3d(data, x, y, z)
@@ -428,7 +418,7 @@ def interp_2d_1d(
         return exact
 
     x_values = []
-    point_helper = nearest_1d_point_allow_singleton_axis if allow_singleton_axes else nearest_1d_point_helper
+    point_helper = nearest_1d_point_helper
     x_left, x_right = point_helper(x, list(data.keys()))
     slice_bounds = []
 
@@ -440,8 +430,7 @@ def interp_2d_1d(
             z_bounds.append((j, z_left, z_right))
         slice_bounds.append((i, y_left, y_right, z_bounds))
 
-    if not allow_singleton_axes:
-        _require_3d_axis_coverage(data, context=f"3-D {method} interpolation")
+    _require_3d_axis_coverage(data, context=f"3-D {method} interpolation")
 
     for i, y_left, y_right, z_bounds in slice_bounds:
         points_list = []
@@ -454,19 +443,11 @@ def interp_2d_1d(
         if method == "cubic":
             try:
                 value = _reduced_griddata(points_list, values_list, (y, z), "cubic")
-            except ValueError as exc:
-                if not allow_singleton_axes:
-                    raise
-                logger.debug("Falling back to rectangular interpolation for degenerate cubic slice: %s", exc)
-                value = interp_2d_rectangular_slice(
-                    y_left,
-                    y_right,
-                    z_bounds[0][1],
-                    z_bounds[0][2],
-                    y,
-                    z,
-                    data[i],
-                )
+            except QhullError as exc:
+                # Degenerate slice (collinear/coplanar/too few points): no usable
+                # cubic surface. Re-raise as ValueError so the perf DB classifies
+                # this as missing data instead of letting a raw RuntimeError escape.
+                raise ValueError(f"degenerate cubic slice: {exc}") from exc
             x_values.append(validate_interpolation_result(value))
         elif method == "bilinear":
             x_values.append(
@@ -521,7 +502,6 @@ def interp_3d(
     data: dict,
     method: str,
     extracted_metrics_cache: dict | None = None,
-    allow_singleton_axes: bool = False,
 ) -> dict:
     """3-D interpolation. Returns a metrics dict (latency/power/energy).
 
@@ -541,14 +521,14 @@ def interp_3d(
             latency = interp_3d_linear(x, y, z, latency_data)
             energy = interp_3d_linear(x, y, z, energy_data)
         else:
-            latency = interp_2d_1d(x, y, z, latency_data, method, allow_singleton_axes=allow_singleton_axes)
-            energy = interp_2d_1d(x, y, z, energy_data, method, allow_singleton_axes=allow_singleton_axes)
+            latency = interp_2d_1d(x, y, z, latency_data, method)
+            energy = interp_2d_1d(x, y, z, energy_data, method)
         return {"latency": latency, "power": 0.0, "energy": energy}
 
     if method == "linear":
         latency = interp_3d_linear(x, y, z, data)
     else:
-        latency = interp_2d_1d(x, y, z, data, method, allow_singleton_axes=allow_singleton_axes)
+        latency = interp_2d_1d(x, y, z, data, method)
     return {"latency": latency, "power": 0.0, "energy": 0.0}
 
 

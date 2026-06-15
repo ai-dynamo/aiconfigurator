@@ -24,7 +24,7 @@ databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
-_MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError)
+_MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError, ValueError)
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
