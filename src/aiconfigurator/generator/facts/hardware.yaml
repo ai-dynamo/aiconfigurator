@@ -32,6 +32,9 @@ profiles:
       NCCL_CUMEM_ENABLE: "1"
     shared_memory:
       default: 64Gi
+    # Provenance: qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml explicitly shows
+    # tolerations: [] for Hopper x86 nodes; no H100-specific recipe contradicts this.
+    tolerations: []
     moe_backend:
       # Hopper (sm90): CUTLASS is the recommended TRT-LLM MoE kernel.
       # Source: extra_engine_args templates default to CUTLASS; no WIDEEP data collected for H100.
@@ -54,6 +57,14 @@ profiles:
       NCCL_CUMEM_ENABLE: "1"
     shared_memory:
       default: 64Gi
+    # Provenance: nemotron-3-super/vllm/agg-h200-chat/deploy.yaml and
+    # nemotron-3-ultra/vllm/agg-h200-chat-nomtp/deploy.yaml both show:
+    #   key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
     moe_backend:
       # Hopper (sm90): CUTLASS is the recommended TRT-LLM MoE kernel.
       # WIDEEP requires sm100+ (Blackwell FP4 tensor core path); wideep_moe_perf data
@@ -79,6 +90,13 @@ profiles:
       NCCL_CUMEM_ENABLE: "1"
     shared_memory:
       default: 64Gi
+    # Provenance: deepseek-v4/deepseek-v4-pro/sglang/disagg-b200/deploy.yaml shows:
+    #   key: nvidia.com/gpu, operator: Exists, effect: NoSchedule
+    # B200 is x86_64 so no kubernetes.io/arch toleration needed (only gb200/arm64 needs it).
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
     moe_backend:
       # Blackwell (sm100): WIDEEP uses FP4 tensor cores available on B200/GB200.
       # Crashes on Hopper (no FP4 path). Source: guard_rails.md §WIDEEP,
@@ -101,6 +119,18 @@ profiles:
       nvidia.com/gpu.product: NVIDIA-GB200
     # arch override: Grace-Blackwell superchip uses ARM64 (Grace CPU + Blackwell GPU)
     arch: arm64
+    # Provenance: glm-5-nvfp4/sglang/disagg/efa/deploy.yaml (arm64/GB200 recipe) shows:
+    #   key: nvidia.com/gpu, operator: Exists, effect: NoSchedule
+    #   key: kubernetes.io/arch, operator: Equal, value: arm64, effect: NoSchedule
+    # The arm64 toleration is required because GB200 nodes carry the arch taint.
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      - key: kubernetes.io/arch
+        operator: Equal
+        value: arm64
+        effect: NoSchedule
     nccl_env:
       # HARDWARE: All of the following follow from the GB200 silicon topology —
       # NVLink5, MNNVL (multi-node NVLink), NVLS, and P2P via NVSwitch.
