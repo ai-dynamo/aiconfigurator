@@ -332,6 +332,66 @@ class MoE(Operation):
                 )[0],
                 depth=1,
             )
+
+            if grid is None or not grid.samples:
+                # cross-shape transfer (obs 5): borrow the nearest collected MoE
+                # config's util curve, reconstructed with this query's own SOL.
+                def _moe_candidates():
+                    cls.load_data(database)
+                    if database.backend == common.BackendName.sglang.value and moe_backend == "deepep_moe":
+                        md = database._wideep_context_moe_data if is_context else database._wideep_generation_moe_data
+                    else:
+                        md = database._moe_data
+                    md.raise_if_not_loaded()
+                    wl = workload_distribution if workload_distribution in md[quant_mode] else "uniform"
+                    wl_data = md[quant_mode][wl]
+                    cands = []
+                    for tk in wl_data:
+                        for ne in wl_data[tk]:
+                            for hs in wl_data[tk][ne]:
+                                for isz in wl_data[tk][ne][hs]:
+                                    node = wl_data[tk][ne][hs][isz].get(moe_tp_size, {}).get(moe_ep_size)
+                                    if not node:
+                                        continue
+                                    cands.append(
+                                        util_empirical.ReferenceCandidate(
+                                            features=(tk, ne, hs, isz),
+                                            node=node,
+                                            sol_fn=(
+                                                lambda c, _hs=hs, _isz=isz, _tk=tk, _ne=ne: get_sol(
+                                                    c[0],
+                                                    _hs,
+                                                    _isz,
+                                                    _tk,
+                                                    _ne,
+                                                    moe_tp_size,
+                                                    moe_ep_size,
+                                                    quant_mode,
+                                                    workload_distribution,
+                                                )[0]
+                                            ),
+                                        )
+                                    )
+                    return cands
+
+                grid = util_empirical.grid_from_reference(
+                    (
+                        "moe_xshape",
+                        database.system,
+                        database.backend,
+                        database.version,
+                        quant_mode.name,
+                        topk,
+                        num_experts,
+                        hidden_size,
+                        inter_size,
+                        moe_tp_size,
+                        moe_ep_size,
+                    ),
+                    (topk, num_experts, hidden_size, inter_size),
+                    _moe_candidates,
+                    depth=1,
+                )
             latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, fallback_scale=0.4)
             return latency
 

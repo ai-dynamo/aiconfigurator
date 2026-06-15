@@ -133,3 +133,55 @@ def estimate(sol_query: float, query: Coords, grid: UtilGrid | None, fallback_sc
     if util and util > 0:
         return sol_query / util, util
     return sol_query / fallback_scale, None
+
+
+# ---------------------------------------------------------------------------
+# Cross-shape transfer (observation 5): when an op's own slice has no data,
+# borrow the util curve of the *nearest* collected sibling slice (matched on
+# categorical shape features), reconstructed with the query's own SOL:
+#
+#     latency_query(c) = SOL_query(c) / util_ref(c),  util_ref = SOL_ref / measured_ref
+#
+# SOL absorbs the structural difference (experts/topk/hidden/...); util carries
+# only the shared kernel-efficiency. ``ReferenceCandidate.sol_fn`` MUST compute
+# SOL with the *reference* slice's shape (not the query's), or the ratio is wrong.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReferenceCandidate:
+    features: Coords  # categorical shape features for the nearest-neighbour match
+    node: object  # the reference slice's nested data sub-grid
+    sol_fn: Callable[[Coords], float]  # SOL bound to THIS reference's shape
+
+
+def _nearest_candidate(query_features: Coords, candidates: list[ReferenceCandidate]) -> ReferenceCandidate:
+    feats = np.log(np.maximum(np.asarray([c.features for c in candidates], dtype=float), 1e-9))
+    mins = feats.min(axis=0)
+    spans = np.where(feats.max(axis=0) - mins > 0, feats.max(axis=0) - mins, 1.0)
+    q = (np.log(np.maximum(np.asarray(query_features, dtype=float), 1e-9)) - mins) / spans
+    dist2 = (((feats - mins) / spans) - q) ** 2
+    return candidates[int(dist2.sum(axis=1).argmin())]
+
+
+def grid_from_reference(cache_key, query_features: Coords, candidates_fn: Callable[[], list], depth: int):
+    """Best-effort util grid borrowed from the nearest sibling slice.
+
+    ``candidates_fn()`` returns a list of :class:`ReferenceCandidate` (the op
+    enumerates its sibling slices). Picks the nearest by ``features`` in per-dim
+    normalised log space and builds the grid from that sibling's data using the
+    sibling's own ``sol_fn``. Returns ``None`` on any failure / no candidates so
+    the caller still falls back to its constant.
+    """
+
+    def build() -> UtilGrid:
+        candidates = candidates_fn()
+        if not candidates:
+            return UtilGrid([])
+        ref = _nearest_candidate(query_features, candidates)
+        return UtilGrid(build_samples(ref.node, depth, ref.sol_fn))
+
+    try:
+        return get_grid(cache_key, build)
+    except Exception:
+        return None
