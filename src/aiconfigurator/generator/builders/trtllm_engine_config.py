@@ -150,9 +150,10 @@ def build_engine_config(
         cfg["max_seq_len"] = max_seq_len
 
     kv_src = _dict_at(context, "kv_cache_config")
+    _kv_dtype = _present_or(kv_src, "dtype", "auto")
     kv_cache_config: dict[str, Any] = {
         "free_gpu_memory_fraction": _present_or(kv_src, "free_gpu_memory_fraction", 0.80),
-        "dtype": _present_or(kv_src, "dtype", "auto"),
+        "dtype": "auto" if _kv_dtype in ("float16", "bfloat16") else _kv_dtype,
     }
     if "tokens_per_block" in kv_src:
         kv_cache_config["tokens_per_block"] = kv_src["tokens_per_block"]
