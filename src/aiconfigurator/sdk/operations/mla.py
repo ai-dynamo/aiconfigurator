@@ -37,6 +37,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -227,9 +228,32 @@ class ContextMLA(Operation):
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
-            latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.6
-            return latency / scale_factor
+            # SOL / util from own (num_heads, full_s, b) grid; falls back to 0.6.
+            sol_time = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._context_mla_data
+                wrapper.raise_if_not_loaded()
+                return wrapper[fmha_quant_mode][kvcache_quant_mode]
+
+            grid = util_empirical.grid_for(
+                (
+                    "ctx_mla",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    fmha_quant_mode.name,
+                    kvcache_quant_mode.name,
+                ),
+                _slice,
+                lambda c: get_sol(c[2], c[1], 0, c[0], kvcache_quant_mode, fmha_quant_mode)[
+                    0
+                ],  # c=(num_heads, full_s, b)
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_heads, s + prefix, b), grid, fallback_scale=0.6)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -398,9 +422,23 @@ class GenerationMLA(Operation):
             num_heads: int,
             kvcache_quant_mode: common.KVCacheQuantMode,
         ) -> float:
-            latency = get_sol(b, s, num_heads, kvcache_quant_mode)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
+            # SOL / util from own (num_heads, b, s) grid; falls back to 0.8.
+            sol_time = get_sol(b, s, num_heads, kvcache_quant_mode)[0]
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._generation_mla_data
+                wrapper.raise_if_not_loaded()
+                return wrapper[kvcache_quant_mode]
+
+            grid = util_empirical.grid_for(
+                ("gen_mla", database.system, database.backend, database.version, kvcache_quant_mode.name),
+                _slice,
+                lambda c: get_sol(c[1], c[2], c[0], kvcache_quant_mode)[0],  # c=(num_heads, b, s)
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_heads, b, s), grid, fallback_scale=0.8)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -541,9 +579,25 @@ class MLABmm(Operation):
             quant_mode: common.GEMMQuantMode,
             if_pre: bool,
         ) -> float:
-            latency = get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
+            # SOL / util from own num_tokens curve; falls back to 0.8.
+            sol_time = get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
+            op_name = "mla_gen_pre" if if_pre else "mla_gen_post"
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._mla_bmm_data
+                wrapper.raise_if_not_loaded()
+                qm = quant_mode if quant_mode in wrapper else common.GEMMQuantMode.bfloat16
+                return wrapper[qm][op_name][num_heads]
+
+            grid = util_empirical.grid_for(
+                ("mla_bmm", database.system, database.backend, database.version, quant_mode.name, op_name, num_heads),
+                _slice,
+                lambda c: get_sol(c[0], num_heads, quant_mode, if_pre)[0],  # c=(num_tokens,)
+                depth=1,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, fallback_scale=0.8)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -775,9 +829,33 @@ class MLAModule(Operation):
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
-            latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.6
-            return latency / scale_factor
+            # SOL / util from own (num_heads, full_s, b) grid; falls back to 0.6.
+            sol_time = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._context_mla_module_data
+                wrapper.raise_if_not_loaded()
+                return wrapper[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
+
+            grid = util_empirical.grid_for(
+                (
+                    "ctx_mla_mod",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    fmha_quant_mode.name,
+                    kvcache_quant_mode.name,
+                    gemm_quant_mode.name,
+                ),
+                _slice,
+                lambda c: get_sol(c[2], c[1], 0, c[0], kvcache_quant_mode, fmha_quant_mode)[
+                    0
+                ],  # c=(num_heads, full_s, b)
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_heads, s + prefix, b), grid, fallback_scale=0.6)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -856,9 +934,31 @@ class MLAModule(Operation):
             return sol_time, sol_math, sol_mem
 
         def get_empirical(b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode) -> float:
-            latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
-            scale_factor = 0.5
-            return latency / scale_factor
+            # SOL / util from own (num_heads, b, s) grid; falls back to 0.5.
+            sol_time = get_sol(b, s, num_heads, kv_cache_dtype)[0]
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._generation_mla_module_data
+                wrapper.raise_if_not_loaded()
+                return wrapper[fmha_quant_mode][kv_cache_dtype][gemm_quant_mode]
+
+            grid = util_empirical.grid_for(
+                (
+                    "gen_mla_mod",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    fmha_quant_mode.name,
+                    kv_cache_dtype.name,
+                    gemm_quant_mode.name,
+                ),
+                _slice,
+                lambda c: get_sol(c[1], c[2], c[0], kv_cache_dtype)[0],  # c=(num_heads, b, s)
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_heads, b, s), grid, fallback_scale=0.5)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode

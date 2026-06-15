@@ -39,6 +39,23 @@ CONFIGS = {
         pastkv=[0],
         model_config=lambda: config.ModelConfig(tp_size=8, moe_tp_size=1, moe_ep_size=8),
     ),
+    # DeepSeek-V3: MLA (FallbackOp primary = MLAModule ctx/gen) + MoE.
+    # bf16 quant: MLA-module/context perf tables only collected mla_dtype=bfloat16.
+    "deepseek_v3": dict(
+        model="deepseek-ai/DeepSeek-V3",
+        system="h200_sxm",
+        version="1.3.0rc10",
+        pastkv=[0],
+        model_config=lambda: config.ModelConfig(
+            tp_size=8,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        ),
+    ),
 }
 
 
