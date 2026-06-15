@@ -1,4 +1,3 @@
-
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -11,10 +10,16 @@ spec:
       componentType: frontend
       replicas: 1
       extraPodSpec:
+        nodeSelector: &id001
+          nvidia.com/gpu.product: NVIDIA-H200
+        tolerations: &id002
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: 'true'
+          effect: NoSchedule
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
           imagePullPolicy: IfNotPresent
-
     VllmPrefillWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -22,34 +27,39 @@ spec:
       replicas: 1
       resources:
         limits:
-          gpu: "1"
+          gpu: '1'
+      sharedMemory:
+        size: 64Gi
       extraPodSpec:
-      
+        nodeSelector: *id001
+        tolerations: *id002
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
           workingDir: /workspace/examples/backends/vllm
           imagePullPolicy: IfNotPresent
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+          - python3
+          - -m
+          - dynamo.vllm
           args:
-            - --model
-            - "Qwen/Qwen3-30B-A3B"
-            - "--tensor-parallel-size"
-            - "1"
-            - "--pipeline-parallel-size"
-            - "1"
-            - "--data-parallel-size"
-            - "1"
-            - "--max-num-seqs"
-            - "128"
-            - "--max-num-batched-tokens"
-            - "5500"
-            - --is-prefill-worker
-            - --kv-transfer-config
-            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-
+          - --model
+          - Qwen/Qwen3-30B-A3B
+          - --tensor-parallel-size
+          - '1'
+          - --pipeline-parallel-size
+          - '1'
+          - --data-parallel-size
+          - '1'
+          - --max-num-seqs
+          - '128'
+          - --max-num-batched-tokens
+          - '5500'
+          - --is-prefill-worker
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          env:
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -57,31 +67,36 @@ spec:
       replicas: 7
       resources:
         limits:
-          gpu: "1"
+          gpu: '1'
+      sharedMemory:
+        size: 64Gi
       extraPodSpec:
-      
+        nodeSelector: *id001
+        tolerations: *id002
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
           workingDir: /workspace/examples/backends/vllm
           imagePullPolicy: IfNotPresent
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+          - python3
+          - -m
+          - dynamo.vllm
           args:
-            - --model
-            - "Qwen/Qwen3-30B-A3B"
-            - "--tensor-parallel-size"
-            - "1"
-            - "--pipeline-parallel-size"
-            - "1"
-            - "--data-parallel-size"
-            - "1"
-            - "--max-num-seqs"
-            - "512"
-            - "--max-num-batched-tokens"
-            - "512"
-            - --is-decode-worker
-            - --kv-transfer-config
-            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-
+          - --model
+          - Qwen/Qwen3-30B-A3B
+          - --tensor-parallel-size
+          - '1'
+          - --pipeline-parallel-size
+          - '1'
+          - --data-parallel-size
+          - '1'
+          - --max-num-seqs
+          - '512'
+          - --max-num-batched-tokens
+          - '512'
+          - --is-decode-worker
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          env:
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'

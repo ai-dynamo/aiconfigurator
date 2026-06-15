@@ -1,15 +1,22 @@
 backend: pytorch
-tensor_parallel_size: 1
+moe_expert_parallel_size: 1
+moe_tensor_parallel_size: 4
+moe_config:
+  backend: WIDEEP
+tensor_parallel_size: 4
 pipeline_parallel_size: 1
 enable_attention_dp: false
 enable_chunked_prefill: false
 max_batch_size: 128
-max_num_tokens: 4640
+max_num_tokens: 128
 kv_cache_config:
   free_gpu_memory_fraction: 0.8
   dtype: auto
   tokens_per_block: 32
   enable_block_reuse: false
+cache_transceiver_config:
+  backend: DEFAULT
+  max_tokens_in_buffer: 5504
 cuda_graph_config:
   enable_padding: true
   batch_sizes:

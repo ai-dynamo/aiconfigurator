@@ -6,6 +6,7 @@ import yaml
 from aiconfigurator.generator.api import generate_backend_artifacts
 from aiconfigurator.generator.builders.dgd_model import dgd_documents_to_yaml
 from aiconfigurator.generator.builders.k8s_builder import build_dgd
+from aiconfigurator.generator.facts.request_resolution import resolve_facts_for_request
 from aiconfigurator.generator.rendering.engine import build_k8s_context_for_test
 from tests.baseline.canary import CANARY_CASES
 
@@ -27,7 +28,13 @@ def test_k8s_builder_context_seam_matches_render_path(case):
     ctx = build_k8s_context_for_test(
         copy.deepcopy(case.params), case.backend, backend_version=case.backend_version
     )
-    built = dgd_documents_to_yaml(build_dgd(ctx, case.backend))
+    # The render path emits the Phase 4b-1 hardware/transport pod facts from the
+    # resolved facts; thread the same facts here so the test-seam build mirrors
+    # production (otherwise the seam would omit nodeSelector/tolerations/env/shm).
+    facts = resolve_facts_for_request(
+        copy.deepcopy(case.params), case.backend, case.backend_version
+    )
+    built = dgd_documents_to_yaml(build_dgd(ctx, case.backend, resolved_facts=facts))
     assert list(yaml.safe_load_all(built)) == list(yaml.safe_load_all(render_path)), (
         f"{case.name}: test-seam k8s context diverges from the render path"
     )

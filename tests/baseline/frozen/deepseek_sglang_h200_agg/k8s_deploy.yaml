@@ -10,6 +10,13 @@ spec:
       componentType: frontend
       replicas: 1
       extraPodSpec:
+        nodeSelector: &id001
+          nvidia.com/gpu.product: NVIDIA-H200
+        tolerations: &id002
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: 'true'
+          effect: NoSchedule
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0
           imagePullPolicy: IfNotPresent
@@ -20,7 +27,11 @@ spec:
       resources:
         limits:
           gpu: '8'
+      sharedMemory:
+        size: 64Gi
       extraPodSpec:
+        nodeSelector: *id001
+        tolerations: *id002
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0
           workingDir: /workspace/components/backends/sglang
@@ -39,3 +50,6 @@ spec:
             \ 136 --trust-remote-code --disable-flashinfer-autotune --speculative-algorithm\
             \ EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens\
             \ 4\n)\nexec python3 -m dynamo.sglang \"${args[@]}\"\n"
+          env:
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'

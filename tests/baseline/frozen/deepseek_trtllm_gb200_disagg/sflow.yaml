@@ -13,17 +13,17 @@ variables:
   GPUS_PER_NODE:
     description: GPUs per node
     type: integer
-    value: 8
+    value: 4
   SLURM_NODES:
     description: Number of nodes
     type: integer
-    value: 1
+    value: 2
   SERVED_MODEL_NAME:
     description: Served model name
-    value: "Qwen/Qwen3-30B-A3B"
+    value: "deepseek-ai/DeepSeek-V4-Pro"
   MODEL_NAME:
     description: Model path
-    value: "Qwen/Qwen3-30B-A3B"
+    value: "deepseek-ai/DeepSeek-V4-Pro"
   LOCAL_MODEL_PATH:
     description: Local model artifact URI
     value: "fs:///path/to/local/model"
@@ -51,9 +51,9 @@ variables:
   CONCURRENCY:
     description: Concurrency
     type: integer
-    value: 896
+    value: 128
     domain:
-    - 896
+    - 128
   AIPERF_IMAGE:
     description: AIPerf container image
     value: "python:3.12-slim"
@@ -70,7 +70,7 @@ variables:
   CTX_TP_SIZE:
     description: context/prefill tensor parallel size
     type: integer
-    value: 1
+    value: 4
   CTX_PP_SIZE:
     description: context/prefill pipeline parallel size
     type: integer
@@ -104,14 +104,14 @@ variables:
   NUM_GEN_SERVERS:
     description: Number of generation/decode servers
     type: integer
-    value: 7
+    value: 1
   GEN_REPLICAS_POLICY:
     description: generation/decode replicas policy
     value: "parallel"
   GEN_TP_SIZE:
     description: generation/decode tensor parallel size
     type: integer
-    value: 1
+    value: 4
   GEN_PP_SIZE:
     description: generation/decode pipeline parallel size
     type: integer
@@ -154,17 +154,17 @@ artifacts:
     #!/bin/bash
     set -euo pipefail
 
-    concurrency_array=(1 2 8 16 32 64 128 851 896 940)
+    concurrency_array=(1 2 8 16 32 64 121 128 134)
 
     if [[ -n "${AICONFIGURATOR_BENCH_CONCURRENCY:-}" ]]; then
       concurrency_array=(${AICONFIGURATOR_BENCH_CONCURRENCY})
     fi
 
     ARTIFACT_DIR="${BENCH_ARTIFACT_DIR:-/tmp/bench_artifacts}"
-    BENCH_MODEL="${AICONFIGURATOR_BENCH_MODEL:-Qwen/Qwen3-30B-A3B}"
+    BENCH_MODEL="${AICONFIGURATOR_BENCH_MODEL:-deepseek-ai/DeepSeek-V4-Pro}"
     BENCH_ENDPOINT_TYPE="${AICONFIGURATOR_BENCH_ENDPOINT_TYPE:-chat}"
     BENCH_ENDPOINT_URL="${AICONFIGURATOR_BENCH_ENDPOINT_URL:-http://0.0.0.0:8000}"
-    BENCH_TOKENIZER="${AICONFIGURATOR_BENCH_TOKENIZER:-Qwen/Qwen3-30B-A3B}"
+    BENCH_TOKENIZER="${AICONFIGURATOR_BENCH_TOKENIZER:-deepseek-ai/DeepSeek-V4-Pro}"
     BENCH_ISL="${AICONFIGURATOR_BENCH_ISL:-4000}"
     BENCH_ISL_STDDEV="${AICONFIGURATOR_BENCH_ISL_STDDEV:-0}"
     BENCH_OSL="${AICONFIGURATOR_BENCH_OSL:-1000}"
@@ -205,10 +205,10 @@ artifacts:
   content: |
     backend: pytorch
     moe_expert_parallel_size: 1
-    moe_tensor_parallel_size: 1
+    moe_tensor_parallel_size: 4
     moe_config:
-      backend: CUTLASS
-    tensor_parallel_size: 1
+      backend: WIDEEP
+    tensor_parallel_size: 4
     pipeline_parallel_size: 1
     enable_attention_dp: false
     enable_chunked_prefill: false
@@ -242,10 +242,10 @@ artifacts:
   content: |
     backend: pytorch
     moe_expert_parallel_size: 1
-    moe_tensor_parallel_size: 1
+    moe_tensor_parallel_size: 4
     moe_config:
-      backend: CUTLASS
-    tensor_parallel_size: 1
+      backend: WIDEEP
+    tensor_parallel_size: 4
     pipeline_parallel_size: 1
     enable_attention_dp: false
     enable_chunked_prefill: false

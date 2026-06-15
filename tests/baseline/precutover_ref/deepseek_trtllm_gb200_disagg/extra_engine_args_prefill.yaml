@@ -1,9 +1,9 @@
 backend: pytorch
 moe_expert_parallel_size: 1
-moe_tensor_parallel_size: 1
+moe_tensor_parallel_size: 4
 moe_config:
-  backend: CUTLASS
-tensor_parallel_size: 1
+  backend: WIDEEP
+tensor_parallel_size: 4
 pipeline_parallel_size: 1
 enable_attention_dp: false
 enable_chunked_prefill: false

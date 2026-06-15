@@ -1,5 +1,3 @@
-
-
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -12,72 +10,65 @@ spec:
       componentType: frontend
       replicas: 1
       extraPodSpec:
+        nodeSelector: &id001
+          nvidia.com/gpu.product: NVIDIA-H200
+        tolerations: &id002
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: 'true'
+          effect: NoSchedule
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
           imagePullPolicy: IfNotPresent
-
     TRTLLMWorker:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 8
       resources:
         limits:
-          gpu: "1"
+          gpu: '1'
+      sharedMemory:
+        size: 64Gi
       extraPodSpec:
         volumes:
-          - name: engine-configs
-            emptyDir: {}
-          - name: tmp
-            emptyDir:
-              medium: Memory
-              sizeLimit: 10Gi
+        - name: engine-configs
+          emptyDir: {}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
+        nodeSelector: *id001
+        tolerations: *id002
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
           workingDir: /workspace/components/backends/trtllm
           imagePullPolicy: IfNotPresent
           volumeMounts:
-            - name: engine-configs
-              mountPath: /workspace/engine_configs
-            - name: tmp
-              mountPath: /tmp
-          command: ["/bin/bash","-c"]
+          - name: engine-configs
+            mountPath: /workspace/engine_configs
+          - name: tmp
+            mountPath: /tmp
+          command:
+          - /bin/bash
+          - -c
           args:
-            - |
-              set -euo pipefail
-              mkdir -p /workspace/engine_configs
-              cat > /workspace/engine_configs/agg_config.yaml <<'YAML'
-              backend: pytorch
-
-
-              tensor_parallel_size: 1
-              pipeline_parallel_size: 1
-              enable_attention_dp: False
-              enable_chunked_prefill: False
-
-
-              max_batch_size: 128
-              max_num_tokens: 4640
-
-              kv_cache_config:
-                free_gpu_memory_fraction: 0.8  # Fraction of GPU memory usable for KV-cache
-                dtype: auto
-                tokens_per_block: 32
-                enable_block_reuse: False
-
-
-              cuda_graph_config:
-                enable_padding: True # Pad CUDA graph
-                batch_sizes: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,16,20,24,28,32,32,40,48,56,64,64,80,96,112,128,128,160,192,224,256,256,320,384,448,512,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136]
-
-              disable_overlap_scheduler: False
-              print_iter_log: False
-              YAML
-              args=(
-                --model-path "Qwen/Qwen3-0.6B"
-                --served-model-name "Qwen/Qwen3-0.6B"
-                --extra-engine-args "/workspace/engine_configs/agg_config.yaml"
-              )
-              exec python3 -m dynamo.trtllm "${args[@]}"
+          - "set -euo pipefail\nmkdir -p /workspace/engine_configs\ncat > /workspace/engine_configs/agg_config.yaml\
+            \ <<'YAML'\nbackend: pytorch\ntensor_parallel_size: 1\npipeline_parallel_size:\
+            \ 1\nenable_attention_dp: false\nenable_chunked_prefill: false\nmax_batch_size:\
+            \ 128\nmax_num_tokens: 4640\nkv_cache_config:\n  free_gpu_memory_fraction:\
+            \ 0.8\n  dtype: auto\n  tokens_per_block: 32\n  enable_block_reuse: false\n\
+            cuda_graph_config:\n  enable_padding: true\n  batch_sizes:\n  - 1\n  -\
+            \ 2\n  - 3\n  - 4\n  - 5\n  - 6\n  - 7\n  - 8\n  - 9\n  - 10\n  - 11\n\
+            \  - 12\n  - 13\n  - 14\n  - 15\n  - 16\n  - 16\n  - 20\n  - 24\n  - 28\n\
+            \  - 32\n  - 32\n  - 40\n  - 48\n  - 56\n  - 64\n  - 64\n  - 80\n  - 96\n\
+            \  - 112\n  - 128\n  - 128\n  - 160\n  - 192\n  - 224\n  - 256\n  - 256\n\
+            \  - 320\n  - 384\n  - 448\n  - 512\n  - 120\n  - 121\n  - 122\n  - 123\n\
+            \  - 124\n  - 125\n  - 126\n  - 127\n  - 128\n  - 129\n  - 130\n  - 131\n\
+            \  - 132\n  - 133\n  - 134\n  - 135\n  - 136\ndisable_overlap_scheduler:\
+            \ false\nprint_iter_log: false\nYAML\nargs=(\n  --model-path \"Qwen/Qwen3-0.6B\"\
+            \n  --served-model-name \"Qwen/Qwen3-0.6B\"\n  --extra-engine-args \"\
+            /workspace/engine_configs/agg_config.yaml\"\n)\nexec python3 -m dynamo.trtllm\
+            \ \"${args[@]}\"\n"
           startupProbe:
             httpGet:
               path: /health
@@ -102,5 +93,6 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 10
-
-
+          env:
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'

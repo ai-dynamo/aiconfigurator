@@ -98,4 +98,13 @@ CANARY_CASES: list[CanaryCase] = [
         backend_version="0.5.11",
         params=_make_params("deepseek-ai/DeepSeek-V4-Pro", "sglang", mode="agg", total_gpus=_TOTAL_GPUS, system_name="gb200"),
     ),
+    # GB200 disagg: exercises the disagg_decode shared-memory fact (128Gi on the
+    # decode worker vs 64Gi default on prefill) — the only path that reads
+    # hardware.shared_memory.disagg_decode.
+    CanaryCase(
+        name="deepseek_trtllm_gb200_disagg",
+        backend="trtllm",
+        backend_version="1.3.0rc14",
+        params=_make_params("deepseek-ai/DeepSeek-V4-Pro", "trtllm", mode="disagg", total_gpus=_TOTAL_GPUS, system_name="gb200"),
+    ),
 ]

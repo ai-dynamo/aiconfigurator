@@ -10,6 +10,13 @@ spec:
       componentType: frontend
       replicas: 1
       extraPodSpec:
+        nodeSelector: &id001
+          nvidia.com/gpu.product: NVIDIA-H200
+        tolerations: &id002
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: 'true'
+          effect: NoSchedule
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
           imagePullPolicy: IfNotPresent
@@ -21,6 +28,8 @@ spec:
       resources:
         limits:
           gpu: '1'
+      sharedMemory:
+        size: 64Gi
       extraPodSpec:
         volumes:
         - name: engine-configs
@@ -29,6 +38,8 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 10Gi
+        nodeSelector: *id001
+        tolerations: *id002
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
           workingDir: /workspace/components/backends/trtllm
@@ -80,6 +91,9 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 10
+          env:
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'
     TRTLLMDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -88,6 +102,8 @@ spec:
       resources:
         limits:
           gpu: '1'
+      sharedMemory:
+        size: 64Gi
       extraPodSpec:
         volumes:
         - name: engine-configs
@@ -96,6 +112,8 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 10Gi
+        nodeSelector: *id001
+        tolerations: *id002
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
           workingDir: /workspace/components/backends/trtllm
@@ -152,3 +170,6 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 10
+          env:
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'

@@ -10,6 +10,13 @@ spec:
       componentType: frontend
       replicas: 1
       extraPodSpec:
+        nodeSelector: &id001
+          nvidia.com/gpu.product: NVIDIA-H200
+        tolerations: &id002
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: 'true'
+          effect: NoSchedule
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
           imagePullPolicy: IfNotPresent
@@ -21,7 +28,11 @@ spec:
       resources:
         limits:
           gpu: '1'
+      sharedMemory:
+        size: 64Gi
       extraPodSpec:
+        nodeSelector: *id001
+        tolerations: *id002
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
           workingDir: /workspace/examples/backends/vllm
@@ -46,6 +57,9 @@ spec:
           - --is-prefill-worker
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          env:
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -54,7 +68,11 @@ spec:
       resources:
         limits:
           gpu: '1'
+      sharedMemory:
+        size: 64Gi
       extraPodSpec:
+        nodeSelector: *id001
+        tolerations: *id002
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
           workingDir: /workspace/examples/backends/vllm
@@ -79,3 +97,6 @@ spec:
           - --is-decode-worker
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          env:
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'

@@ -73,6 +73,45 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
     hf_home = k8s.get("k8s_hf_home")
     image_pull_secret = k8s.get("k8s_image_pull_secret")
 
+    # Phase 4b-1 pod facts (hardware/transport). Guard on resolved_facts and
+    # key presence so a None facts / missing key emits nothing (keeps the
+    # crosscheck / no-fact callers byte-identical).
+    hw_facts = getattr(resolved_facts, "hardware", None) if resolved_facts is not None else None
+    tr_facts = getattr(resolved_facts, "transport", None) if resolved_facts is not None else None
+    node_selector_fact = hw_facts.get("node_selector") if isinstance(hw_facts, dict) else None
+    tolerations_fact = (hw_facts.get("tolerations") or None) if isinstance(hw_facts, dict) else None
+
+    def worker_main_env(role: str | None) -> list[dict[str, str]] | None:
+        # NCCL (hardware) first, then transport env not already set (hardware wins).
+        if not isinstance(hw_facts, dict):
+            return None
+        out: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for k, v in (hw_facts.get("nccl_env") or {}).items():
+            out.append({"name": k, "value": str(v)})
+            seen.add(k)
+        tr_env = tr_facts.get("env") if isinstance(tr_facts, dict) else None
+        for k, v in (tr_env or {}).items():
+            if k in seen:
+                continue
+            out.append({"name": k, "value": str(v)})
+            seen.add(k)
+        return out or None
+
+    def worker_shared_memory(role: str | None) -> dict[str, str] | None:
+        if not isinstance(hw_facts, dict):
+            return None
+        shm = hw_facts.get("shared_memory")
+        if not isinstance(shm, dict):
+            return None
+        if role == "decode" and "disagg_decode" in shm:
+            sz = shm["disagg_decode"]
+        elif "default" in shm:
+            sz = shm["default"]
+        else:
+            return None
+        return {"size": sz}
+
     # macro render_worker(component_name, role, replicas, gpu, cli_args_list)
     def render_worker(role: str | None, replicas: Any, gpu: Any, cli_args_list: Any) -> DGDService:
         envs = None
@@ -127,9 +166,12 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
             sub_component_type=role,
             replicas=replicas if replicas is not None else 1,
             resources={"limits": {"gpu": str(gpu)}},
+            shared_memory=worker_shared_memory(role),
             extra_pod_spec=ExtraPodSpec(
                 volumes=volumes,
                 image_pull_secrets=image_pull_secrets,
+                node_selector=node_selector_fact,
+                tolerations=tolerations_fact,
                 main_container=MainContainer(
                     image=k8s.get("k8s_image"),
                     working_dir=runtime_working_dir,
@@ -137,6 +179,7 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
                     volume_mounts=volume_mounts,
                     command=["python3", "-m", "dynamo.vllm"],
                     args=args,
+                    env=worker_main_env(role),
                 ),
             ),
         )
@@ -159,6 +202,8 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
         extra_pod_spec=ExtraPodSpec(
             volumes=fe_volumes,
             image_pull_secrets=[{"name": image_pull_secret}] if image_pull_secret else None,
+            node_selector=node_selector_fact,
+            tolerations=tolerations_fact,
             main_container=MainContainer(
                 image=k8s.get("k8s_image"),
                 image_pull_policy="IfNotPresent",
@@ -221,6 +266,45 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
     image_pull_secret = k8s.get("k8s_image_pull_secret")
     mode = dyn.get("mode", "disagg") or "disagg"
 
+    # Phase 4b-1 pod facts (hardware/transport). Guard on resolved_facts and
+    # key presence so a None facts / missing key emits nothing (keeps the
+    # crosscheck / no-fact callers byte-identical). Replicated per backend (no
+    # shared helper, per PR#314->#340 rule).
+    hw_facts = getattr(resolved_facts, "hardware", None) if resolved_facts is not None else None
+    tr_facts = getattr(resolved_facts, "transport", None) if resolved_facts is not None else None
+    node_selector_fact = hw_facts.get("node_selector") if isinstance(hw_facts, dict) else None
+    tolerations_fact = (hw_facts.get("tolerations") or None) if isinstance(hw_facts, dict) else None
+
+    def worker_main_env(role: str | None) -> list[dict[str, str]] | None:
+        if not isinstance(hw_facts, dict):
+            return None
+        out: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for k, v in (hw_facts.get("nccl_env") or {}).items():
+            out.append({"name": k, "value": str(v)})
+            seen.add(k)
+        tr_env = tr_facts.get("env") if isinstance(tr_facts, dict) else None
+        for k, v in (tr_env or {}).items():
+            if k in seen:
+                continue
+            out.append({"name": k, "value": str(v)})
+            seen.add(k)
+        return out or None
+
+    def worker_shared_memory(role: str | None) -> dict[str, str] | None:
+        if not isinstance(hw_facts, dict):
+            return None
+        shm = hw_facts.get("shared_memory")
+        if not isinstance(shm, dict):
+            return None
+        if role == "decode" and "disagg_decode" in shm:
+            sz = shm["disagg_decode"]
+        elif "default" in shm:
+            sz = shm["default"]
+        else:
+            return None
+        return {"size": sz}
+
     # macro render_worker(component_name, role, replicas, gpu, cli_args)
     def render_worker(role: str | None, replicas: Any, gpu: Any, cli_args: Any) -> DGDService:
         envs = None
@@ -275,9 +359,12 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
             sub_component_type=role,
             replicas=replicas if replicas is not None else 1,
             resources={"limits": {"gpu": str(gpu)}},
+            shared_memory=worker_shared_memory(role),
             extra_pod_spec=ExtraPodSpec(
                 volumes=volumes,
                 image_pull_secrets=image_pull_secrets,
+                node_selector=node_selector_fact,
+                tolerations=tolerations_fact,
                 main_container=MainContainer(
                     image=k8s.get("k8s_image"),
                     working_dir=runtime_working_dir,
@@ -285,6 +372,7 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
                     volume_mounts=volume_mounts,
                     command=["/bin/bash", "-c"],
                     args=[script],
+                    env=worker_main_env(role),
                 ),
             ),
         )
@@ -305,6 +393,8 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
         extra_pod_spec=ExtraPodSpec(
             volumes=fe_volumes,
             image_pull_secrets=[{"name": image_pull_secret}] if image_pull_secret else None,
+            node_selector=node_selector_fact,
+            tolerations=tolerations_fact,
             main_container=MainContainer(
                 image=k8s.get("k8s_image"),
                 image_pull_policy="IfNotPresent",
@@ -363,6 +453,45 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
     hf_home = k8s.get("k8s_hf_home")
     image_pull_secret = k8s.get("k8s_image_pull_secret")
     mode = dyn.get("mode", "disagg") or "disagg"
+
+    # Phase 4b-1 pod facts (hardware/transport). Guard on resolved_facts and
+    # key presence so a None facts / missing key emits nothing (keeps the
+    # crosscheck / no-fact callers byte-identical). Replicated per backend (no
+    # shared helper, per PR#314->#340 rule).
+    hw_facts = getattr(resolved_facts, "hardware", None) if resolved_facts is not None else None
+    tr_facts = getattr(resolved_facts, "transport", None) if resolved_facts is not None else None
+    node_selector_fact = hw_facts.get("node_selector") if isinstance(hw_facts, dict) else None
+    tolerations_fact = (hw_facts.get("tolerations") or None) if isinstance(hw_facts, dict) else None
+
+    def worker_main_env(role: str | None) -> list[dict[str, str]] | None:
+        if not isinstance(hw_facts, dict):
+            return None
+        out: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for k, v in (hw_facts.get("nccl_env") or {}).items():
+            out.append({"name": k, "value": str(v)})
+            seen.add(k)
+        tr_env = tr_facts.get("env") if isinstance(tr_facts, dict) else None
+        for k, v in (tr_env or {}).items():
+            if k in seen:
+                continue
+            out.append({"name": k, "value": str(v)})
+            seen.add(k)
+        return out or None
+
+    def worker_shared_memory(role: str | None) -> dict[str, str] | None:
+        if not isinstance(hw_facts, dict):
+            return None
+        shm = hw_facts.get("shared_memory")
+        if not isinstance(shm, dict):
+            return None
+        if role == "decode" and "disagg_decode" in shm:
+            sz = shm["disagg_decode"]
+        elif "default" in shm:
+            sz = shm["default"]
+        else:
+            return None
+        return {"size": sz}
 
     # macro render_volumes()
     def render_volumes() -> list[dict[str, Any]]:
@@ -472,9 +601,12 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
             sub_component_type=sub_component_type,
             replicas=replicas,
             resources={"limits": {"gpu": str(gpu)}},
+            shared_memory=worker_shared_memory(sub_component_type),
             extra_pod_spec=ExtraPodSpec(
                 volumes=render_volumes(),
                 image_pull_secrets=image_pull_secrets,
+                node_selector=node_selector_fact,
+                tolerations=tolerations_fact,
                 main_container=MainContainer(
                     image=k8s.get("k8s_image"),
                     working_dir=runtime_working_dir,
@@ -485,6 +617,7 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
                     startup_probe=probes["startup_probe"],
                     liveness_probe=probes["liveness_probe"],
                     readiness_probe=probes["readiness_probe"],
+                    env=worker_main_env(sub_component_type),
                 ),
             ),
         )
@@ -526,6 +659,8 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
         extra_pod_spec=ExtraPodSpec(
             volumes=fe_volumes,
             image_pull_secrets=[{"name": image_pull_secret}] if image_pull_secret else None,
+            node_selector=node_selector_fact,
+            tolerations=tolerations_fact,
             main_container=MainContainer(
                 image=k8s.get("k8s_image"),
                 image_pull_policy="IfNotPresent",
