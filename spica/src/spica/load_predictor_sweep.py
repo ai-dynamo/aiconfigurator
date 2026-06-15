@@ -156,6 +156,26 @@ def build_windows(trace_path: str, interval_s: int) -> list[Window]:
     ]
 
 
+def predictor_fields(preset_id: str) -> dict[str, Any]:
+    """Flat planner load-predictor fields a preset id expands to: the
+    ``load_predictor`` family + ``load_predictor_log1p`` + only the family knobs
+    that family reads (``prophet_window_size`` for prophet; the ``kalman_*``
+    params for kalman; nothing extra for constant/arima). Defaults fill knobs the
+    preset does not pin. Used to unroll the sweep's winning preset into a sample.
+    """
+    preset = LOAD_PREDICTOR_PRESETS[preset_id]
+    family = preset["family"]
+    fields: dict[str, Any] = {"load_predictor": family, "load_predictor_log1p": preset["log1p"]}
+    if family == "prophet":
+        fields["prophet_window_size"] = preset.get("prophet_window_size", _DEFAULTS["prophet_window_size"])
+    elif family == "kalman":
+        fields["kalman_q_level"] = preset.get("q_level", _DEFAULTS["q_level"])
+        fields["kalman_q_trend"] = preset.get("q_trend", _DEFAULTS["q_trend"])
+        fields["kalman_r"] = preset.get("r", _DEFAULTS["r"])
+        fields["kalman_min_points"] = preset.get("min_points", _DEFAULTS["min_points"])
+    return fields
+
+
 def _make_config(preset: dict[str, Any], interval_s: int) -> _PredictorConfig:
     return _PredictorConfig(
         load_predictor_log1p=preset["log1p"],

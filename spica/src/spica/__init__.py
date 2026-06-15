@@ -22,6 +22,7 @@ from .kv_estimate import (
 )
 from .load_predictor_sweep import (
     LoadPredictorResult,
+    predictor_fields,
     sweep_load_predictor,
     window_loss,
 )
@@ -33,7 +34,8 @@ from .parallel_enum import (
     enumerate_parallel_configs,
     enumerate_worker_shapes,
 )
-from .planner import SCALING_POLICIES, ScalingPolicy, throughput_intervals
+from .planner import FPM_SAMPLING, LOAD_SENSITIVITY, SCALING_POLICIES, ScalingPolicy, throughput_intervals
+from .sample import unroll_sample
 from .search import run_smart_search
 
 __all__ = [
@@ -53,16 +55,21 @@ __all__ = [
     "enumerate_parallel_configs",
     "enumerate_worker_shapes",
     "enumerate_disagg_configs",
-    # planner scaling-policy decode
+    # planner preset decode
     "SCALING_POLICIES",
     "ScalingPolicy",
     "throughput_intervals",
+    "FPM_SAMPLING",
+    "LOAD_SENSITIVITY",
     # load-predictor sweep
     "LoadPredictorResult",
     "sweep_load_predictor",
     "window_loss",
+    "predictor_fields",
     # KV-cache feasibility
     "NoPerfDatabase",
     "estimate_kv_tokens",
     "feasible_shape_tokens",
+    # sample unroll
+    "unroll_sample",
 ]
