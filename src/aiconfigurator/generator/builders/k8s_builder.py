@@ -291,6 +291,8 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
             name=f"{dgd_name}-compute-domain",
             namespace=k8s.get("k8s_namespace"),
             channel_name=f"{dgd_name}-compute-domain-channel",
+            # numNodes=0 = DRA compute-domain on-demand mode (driver sizes the domain as pods
+            # schedule); intentional, matches the standalone template.
             num_nodes=0,
         ))
     return docs
@@ -524,6 +526,8 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
             name=f"{dgd_name}-compute-domain",
             namespace=k8s.get("k8s_namespace"),
             channel_name=f"{dgd_name}-compute-domain-channel",
+            # numNodes=0 = DRA compute-domain on-demand mode (driver sizes the domain as pods
+            # schedule); intentional, matches the standalone template.
             num_nodes=0,
         ))
     return docs
@@ -859,6 +863,8 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
             name=f"{dgd_name}-compute-domain",
             namespace=k8s.get("k8s_namespace"),
             channel_name=f"{dgd_name}-compute-domain-channel",
+            # numNodes=0 = DRA compute-domain on-demand mode (driver sizes the domain as pods
+            # schedule); intentional, matches the standalone template.
             num_nodes=0,
         ))
     return docs

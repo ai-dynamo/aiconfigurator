@@ -21,6 +21,9 @@ def test_multinode_worker_and_compute_domain_doc():
     dgd = [d for d in docs if d and d.get("kind") == "DynamoGraphDeployment"][0]
     cd = [d for d in docs if d and d.get("kind") == "ComputeDomain"]
     assert cd, "ComputeDomain doc must be emitted for multinode"
+    # numNodes=0 is the intentional DRA on-demand value — the driver sizes the
+    # domain as pods schedule. Do NOT "fix" this to a non-zero value.
+    assert cd[0]["spec"]["numNodes"] == 0, "numNodes must be 0 (DRA on-demand mode)"
     chan = cd[0]["spec"]["channel"]["resourceClaimTemplate"]["name"]
     mn_workers = [v for k, v in dgd["spec"]["services"].items() if v.get("multinode")]
     assert mn_workers, "at least one multinode worker"

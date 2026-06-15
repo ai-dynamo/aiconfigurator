@@ -73,7 +73,25 @@ def test_compute_domain_doc():
     assert doc["apiVersion"] == "resource.nvidia.com/v1beta1"
     assert doc["kind"] == "ComputeDomain"
     assert doc["spec"]["channel"]["resourceClaimTemplate"]["name"] == "d-compute-domain-channel"
+    # numNodes=0 is the intentional DRA on-demand value — the driver sizes the
+    # domain as pods schedule. Do NOT "fix" this to a non-zero value.
     assert doc["spec"]["numNodes"] == 0
+
+
+def test_compute_domain_doc_round_trips():
+    from aiconfigurator.generator.builders.dgd_model import ComputeDomainDoc, dgd_documents_to_yaml
+    import yaml
+    doc = ComputeDomainDoc(name="d-compute-domain", channel_name="d-compute-domain-channel", num_nodes=0)
+    y1 = dgd_documents_to_yaml([doc])
+    # round-trip via from_dict if ComputeDomainDoc has one; else parse-stability
+    parsed = yaml.safe_load(y1)
+    assert parsed["kind"] == "ComputeDomain"
+    # numNodes=0 is the intentional DRA on-demand value (not a missing default).
+    assert parsed["spec"]["numNodes"] == 0
+    assert parsed["spec"]["channel"]["resourceClaimTemplate"]["name"] == "d-compute-domain-channel"
+    # if ComputeDomainDoc.from_dict exists, assert true round-trip:
+    if hasattr(ComputeDomainDoc, "from_dict"):
+        assert dgd_documents_to_yaml([ComputeDomainDoc.from_dict(parsed)]) == y1
 
 
 def test_round_trip_via_from_dict():
