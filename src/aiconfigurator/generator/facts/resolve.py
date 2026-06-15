@@ -37,6 +37,12 @@ class ResolvedFacts:
     model:           The raw model dict from ``models.yaml`` for the requested
                      ``model_profile_id``, or ``None`` when the model has no
                      special profile entry (generic path).
+    hardware_key:    The bare ``hardware.yaml`` profile key (e.g. ``"gb200"``)
+                     that ``hardware`` was resolved from. ``hardware`` itself is
+                     the profile *dict* and carries no key inside it, so this is
+                     stashed for matching model ``defaults`` ``match.system``.
+                     ``None`` when resolved via the pure :func:`resolve_facts`
+                     entrypoint (it does not have the bare key in hand).
     """
 
     backend: str
@@ -45,6 +51,7 @@ class ResolvedFacts:
     hardware: dict
     transport: dict
     model: dict | None
+    hardware_key: str | None = None
 
 
 def resolve_facts(

@@ -125,14 +125,20 @@ def resolve_facts_for_request(
     # when that lookup would fail, resolve with a pivot version that exists
     # purely to obtain the hardware/transport/model facts, then blank out the
     # backend_version on the result so we never surface a bogus value.
+    # ``hardware`` here is the bare profile KEY (e.g. "gb200"); stash it on the
+    # result so the apply step can match model ``defaults`` ``match.system``
+    # (ResolvedFacts.hardware is the profile dict and carries no key inside it).
     matrix = load_backend_version_matrix(str(_FACTS_DIR / "runtimes" / "dynamo.yaml"))
     if version and backend in matrix.get(version, {}):
-        return resolve_facts(
-            model_profile_id=model_profile_id,
-            hardware=hardware,
-            transport=_DEFAULT_TRANSPORT,
-            dynamo_version=version,
-            backend=backend,
+        return dataclasses.replace(
+            resolve_facts(
+                model_profile_id=model_profile_id,
+                hardware=hardware,
+                transport=_DEFAULT_TRANSPORT,
+                dynamo_version=version,
+                backend=backend,
+            ),
+            hardware_key=hardware,
         )
 
     pivot = next((v for v, b in matrix.items() if backend in b), None)
@@ -145,4 +151,4 @@ def resolve_facts_for_request(
     )
     # Reflect the request's (possibly blank/unknown) version, drop the pivot's
     # backend_version since it does not correspond to the requested version.
-    return dataclasses.replace(facts, dynamo_version=version, backend_version="")
+    return dataclasses.replace(facts, dynamo_version=version, backend_version="", hardware_key=hardware)

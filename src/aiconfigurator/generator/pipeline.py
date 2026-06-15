@@ -81,5 +81,6 @@ def run_pipeline(
     artifacts = render_backend_templates(
         params, backend, templates_dir, backend_version,
         deployment_target=deployment_target or "dynamo-j2",
+        resolved_facts=facts,
     )
     return PipelineResult(artifacts=artifacts, ir=ir, facts=facts)

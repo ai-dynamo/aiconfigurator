@@ -235,6 +235,7 @@ def render_backend_templates(
     deployment_target: str = "dynamo-j2",
     _context_sink: Optional[Callable[[dict[str, Any]], None]] = None,
     _engine_context_sink: Optional[Callable[[dict[str, dict[str, Any]]], None]] = None,
+    resolved_facts: Any = None,
 ) -> dict[str, str]:
     """
     Render templates for a specific backend with version-specific template selection.
@@ -245,6 +246,11 @@ def render_backend_templates(
         templates_dir: Directory containing backend-specific template directories
         version: Version string (e.g., '1.1.0rc5'). If None, uses default templates
         deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', or 'llm-d')
+        resolved_facts: Optional ``ResolvedFacts`` (typed ``Any`` to avoid an import
+            cycle). When it carries a matched model profile, model ``defaults:``
+            cli flags are appended (facts-default precedence: fill-if-absent) at the
+            single cli seam so they reach BOTH the ``cli_args_*`` string artifact
+            and the typed k8s builder. ``None`` (or ``model is None``) is a no-op.
 
     Returns:
         Dictionary mapping template names to rendered content
@@ -502,6 +508,31 @@ def render_backend_templates(
             context["agg_cli_args"] = cli
             context["agg_cli_args_list"] = cli_list
             rendered_templates["cli_args_agg"] = cli
+
+    # ── Apply model-default cli flags from resolved facts (facts-default layer) ──
+    # Single seam: after the per-role token lists are built and BEFORE the cli
+    # string formatting / k8s build consume them, so appended flags appear in
+    # BOTH the ``cli_args_*`` string artifact and the typed k8s builder.
+    # Fill-if-absent only (user/recipe/rule values already in the list win).
+    # No-op unless ``resolved_facts`` carries a matched model profile — the
+    # existing canary (model is None) is byte-identical through this block.
+    if resolved_facts is not None and getattr(resolved_facts, "model", None) is not None:
+        from aiconfigurator.generator.facts.apply import apply_facts
+
+        apply_facts(context, resolved_facts, backend)
+        # Re-sync the string artifacts from the (possibly extended) token lists
+        # so appended flags render identically to user-supplied ones. Only runs
+        # on the facts path, so the no-fact path's strings are never rewritten.
+        for worker in worker_plan:
+            list_key = f"{worker}_cli_args_list"
+            str_key = f"{worker}_cli_args"
+            tmpl_key = f"cli_args_{worker}"
+            token_list = context.get(list_key)
+            if not isinstance(token_list, list):
+                continue
+            cli_str = " ".join(shlex.quote(tok) for tok in token_list)
+            context[str_key] = cli_str
+            rendered_templates[tmpl_key] = cli_str
 
     # ── Translate: append --trtllm.* dynamic flags from extra_engine_args ──
     # When the dynamo-python path is active and the backend is trtllm, convert
