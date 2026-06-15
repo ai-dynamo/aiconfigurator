@@ -127,4 +127,25 @@ CANARY_CASES: list[CanaryCase] = [
         backend_version="0.5.11",
         params=_make_params("deepseek-ai/DeepSeek-V4-Pro", "sglang", mode="agg", total_gpus=_TOTAL_GPUS, system_name="gb200", transport="efa"),
     ),
+    # Multinode: a worker whose GPU count exceeds the node's GPU count triggers
+    # ComputeDomain + resourceClaims + multinode.nodeCount emission (NVLink-fabric
+    # / GB200-class deployments). b200_sxm has 8 GPUs/node so naive picks a TP=8
+    # worker; overriding NodeConfig.num_gpus_per_node to 4 makes 8 > 4 multinode
+    # (nodeCount=2). Only path that exercises the compute-domain builder branch.
+    CanaryCase(
+        name="deepseek_trtllm_b200_multinode",
+        backend="trtllm",
+        backend_version="1.3.0rc14",
+        params=build_naive_generator_params(
+            model_name="deepseek-ai/DeepSeek-V4-Pro",
+            total_gpus=16,
+            system_name="b200_sxm",
+            backend_name="trtllm",
+            mode="disagg",
+            generator_overrides={
+                "K8sConfig": {"k8s_namespace": "dynamo"},
+                "NodeConfig": {"num_gpus_per_node": 4},
+            },
+        ),
+    ),
 ]

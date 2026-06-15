@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from typing import Any
 
-from .dgd_model import DGD, ConfigMapDoc, DGDService, ExtraPodSpec, MainContainer
+from .dgd_model import DGD, ComputeDomainDoc, ConfigMapDoc, DGDService, ExtraPodSpec, MainContainer
 
 
 def build_dgd(
@@ -81,6 +82,13 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
     tr_facts = getattr(resolved_facts, "transport", None) if resolved_facts is not None else None
     node_selector_fact = hw_facts.get("node_selector") if isinstance(hw_facts, dict) else None
     tolerations_fact = (hw_facts.get("tolerations") or None) if isinstance(hw_facts, dict) else None
+
+    # Multinode (NVLink-fabric / GB200) detection: a worker is multinode when its
+    # GPU count exceeds the node's GPU count. Opt-in — single-node deployments
+    # emit nothing. Replicated per backend (no shared helper, per PR#314->#340).
+    gpn = int(context.get("NodeConfig", {}).get("num_gpus_per_node", 8) or 8)
+    dgd_name = context.get("name")
+    any_multinode = [False]
 
     def worker_main_env(role: str | None) -> list[dict[str, str]] | None:
         # NCCL (hardware) first, then transport env not already set (hardware wins).
@@ -175,6 +183,21 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
             if efa_pod.get("efa_resource"):
                 resources = {"limits": {"gpu": str(gpu), "custom": {efa_pod["efa_resource"]: str(gpu)}}}
 
+        # Multinode worker: emit ComputeDomain wiring (resourceClaims + channel).
+        multinode = None
+        resource_claims = None
+        try:
+            gpu_count = int(gpu)
+        except (TypeError, ValueError):
+            gpu_count = 0
+        if gpu_count > gpn:
+            any_multinode[0] = True
+            multinode = {"nodeCount": math.ceil(gpu_count / gpn)}
+            resources = copy.deepcopy(resources)
+            resources["claims"] = [{"name": "compute-domain-channel"}]
+            resource_claims = [{"name": "compute-domain-channel",
+                                "resourceClaimTemplateName": f"{dgd_name}-compute-domain-channel"}]
+
         return DGDService(
             env_from_secret="hf-token-secret",
             envs=envs,
@@ -183,12 +206,14 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
             replicas=replicas if replicas is not None else 1,
             resources=resources,
             shared_memory=worker_shared_memory(role),
+            multinode=multinode,
             extra_pod_spec=ExtraPodSpec(
                 volumes=volumes,
                 image_pull_secrets=image_pull_secrets,
                 node_selector=copy.deepcopy(node_selector_fact),
                 tolerations=copy.deepcopy(tolerations_fact),
                 host_ipc=host_ipc,
+                resource_claims=resource_claims,
                 main_container=MainContainer(
                     image=k8s.get("k8s_image"),
                     working_dir=runtime_working_dir,
@@ -260,7 +285,15 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
         )
 
     dgd = DGD(name=context.get("name"), namespace=k8s.get("k8s_namespace"), services=services)
-    return [dgd]
+    docs: list[Any] = [dgd]
+    if any_multinode[0]:
+        docs.append(ComputeDomainDoc(
+            name=f"{dgd_name}-compute-domain",
+            namespace=k8s.get("k8s_namespace"),
+            channel_name=f"{dgd_name}-compute-domain-channel",
+            num_nodes=0,
+        ))
+    return docs
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +325,13 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
     tr_facts = getattr(resolved_facts, "transport", None) if resolved_facts is not None else None
     node_selector_fact = hw_facts.get("node_selector") if isinstance(hw_facts, dict) else None
     tolerations_fact = (hw_facts.get("tolerations") or None) if isinstance(hw_facts, dict) else None
+
+    # Multinode (NVLink-fabric / GB200) detection: a worker is multinode when its
+    # GPU count exceeds the node's GPU count. Opt-in — single-node deployments
+    # emit nothing. Replicated per backend (no shared helper, per PR#314->#340).
+    gpn = int(context.get("NodeConfig", {}).get("num_gpus_per_node", 8) or 8)
+    dgd_name = context.get("name")
+    any_multinode = [False]
 
     def worker_main_env(role: str | None) -> list[dict[str, str]] | None:
         if not isinstance(hw_facts, dict):
@@ -385,6 +425,21 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
             if efa_pod.get("efa_resource"):
                 resources = {"limits": {"gpu": str(gpu), "custom": {efa_pod["efa_resource"]: str(gpu)}}}
 
+        # Multinode worker: emit ComputeDomain wiring (resourceClaims + channel).
+        multinode = None
+        resource_claims = None
+        try:
+            gpu_count = int(gpu)
+        except (TypeError, ValueError):
+            gpu_count = 0
+        if gpu_count > gpn:
+            any_multinode[0] = True
+            multinode = {"nodeCount": math.ceil(gpu_count / gpn)}
+            resources = copy.deepcopy(resources)
+            resources["claims"] = [{"name": "compute-domain-channel"}]
+            resource_claims = [{"name": "compute-domain-channel",
+                                "resourceClaimTemplateName": f"{dgd_name}-compute-domain-channel"}]
+
         return DGDService(
             env_from_secret="hf-token-secret",
             envs=envs,
@@ -393,12 +448,14 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
             replicas=replicas if replicas is not None else 1,
             resources=resources,
             shared_memory=worker_shared_memory(role),
+            multinode=multinode,
             extra_pod_spec=ExtraPodSpec(
                 volumes=volumes,
                 image_pull_secrets=image_pull_secrets,
                 node_selector=copy.deepcopy(node_selector_fact),
                 tolerations=copy.deepcopy(tolerations_fact),
                 host_ipc=host_ipc,
+                resource_claims=resource_claims,
                 main_container=MainContainer(
                     image=k8s.get("k8s_image"),
                     working_dir=runtime_working_dir,
@@ -461,7 +518,15 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
         )
 
     dgd = DGD(name=context.get("name"), namespace=k8s.get("k8s_namespace"), services=services)
-    return [dgd]
+    docs: list[Any] = [dgd]
+    if any_multinode[0]:
+        docs.append(ComputeDomainDoc(
+            name=f"{dgd_name}-compute-domain",
+            namespace=k8s.get("k8s_namespace"),
+            channel_name=f"{dgd_name}-compute-domain-channel",
+            num_nodes=0,
+        ))
+    return docs
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +562,13 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
     tr_facts = getattr(resolved_facts, "transport", None) if resolved_facts is not None else None
     node_selector_fact = hw_facts.get("node_selector") if isinstance(hw_facts, dict) else None
     tolerations_fact = (hw_facts.get("tolerations") or None) if isinstance(hw_facts, dict) else None
+
+    # Multinode (NVLink-fabric / GB200) detection: a worker is multinode when its
+    # GPU count exceeds the node's GPU count. Opt-in — single-node deployments
+    # emit nothing. Replicated per backend (no shared helper, per PR#314->#340).
+    gpn = int(context.get("NodeConfig", {}).get("num_gpus_per_node", 8) or 8)
+    dgd_name = context.get("name")
+    any_multinode = [False]
 
     def worker_main_env(role: str | None) -> list[dict[str, str]] | None:
         if not isinstance(hw_facts, dict):
@@ -644,6 +716,21 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
             if efa_pod.get("efa_resource"):
                 resources = {"limits": {"gpu": str(gpu), "custom": {efa_pod["efa_resource"]: str(gpu)}}}
 
+        # Multinode worker: emit ComputeDomain wiring (resourceClaims + channel).
+        multinode = None
+        resource_claims = None
+        try:
+            gpu_count = int(gpu)
+        except (TypeError, ValueError):
+            gpu_count = 0
+        if gpu_count > gpn:
+            any_multinode[0] = True
+            multinode = {"nodeCount": math.ceil(gpu_count / gpn)}
+            resources = copy.deepcopy(resources)
+            resources["claims"] = [{"name": "compute-domain-channel"}]
+            resource_claims = [{"name": "compute-domain-channel",
+                                "resourceClaimTemplateName": f"{dgd_name}-compute-domain-channel"}]
+
         return DGDService(
             env_from_secret="hf-token-secret",
             envs=envs,
@@ -652,12 +739,14 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
             replicas=replicas,
             resources=resources,
             shared_memory=worker_shared_memory(sub_component_type),
+            multinode=multinode,
             extra_pod_spec=ExtraPodSpec(
                 volumes=render_volumes(),
                 image_pull_secrets=image_pull_secrets,
                 node_selector=copy.deepcopy(node_selector_fact),
                 tolerations=copy.deepcopy(tolerations_fact),
                 host_ipc=host_ipc,
+                resource_claims=resource_claims,
                 main_container=MainContainer(
                     image=k8s.get("k8s_image"),
                     working_dir=runtime_working_dir,
@@ -765,4 +854,11 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
         )
 
     docs.append(DGD(name=context.get("name"), namespace=k8s.get("k8s_namespace"), services=services))
+    if any_multinode[0]:
+        docs.append(ComputeDomainDoc(
+            name=f"{dgd_name}-compute-domain",
+            namespace=k8s.get("k8s_namespace"),
+            channel_name=f"{dgd_name}-compute-domain-channel",
+            num_nodes=0,
+        ))
     return docs

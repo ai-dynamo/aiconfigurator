@@ -93,6 +93,7 @@ class ExtraPodSpec:
     node_selector: dict[str, Any] | None = None
     tolerations: list[Any] | None = None
     host_ipc: bool | None = None
+    resource_claims: list[Any] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     _KEYS = (
@@ -101,6 +102,7 @@ class ExtraPodSpec:
         ("nodeSelector", "node_selector"),
         ("tolerations", "tolerations"),
         ("hostIPC", "host_ipc"),
+        ("resourceClaims", "resource_claims"),
     )
 
     @classmethod
@@ -134,6 +136,7 @@ class DGDService:
     resources: dict[str, Any] | None = None
     extra_pod_spec: ExtraPodSpec | None = None
     shared_memory: dict[str, Any] | None = None
+    multinode: dict[str, Any] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     _KEYS = (
@@ -144,6 +147,7 @@ class DGDService:
         ("replicas", "replicas"),
         ("resources", "resources"),
         ("sharedMemory", "shared_memory"),
+        ("multinode", "multinode"),
     )
 
     @classmethod
@@ -266,6 +270,65 @@ class ConfigMapDoc:
         return yaml.safe_dump(self.to_dict(), sort_keys=False)
 
 
+@dataclass
+class ComputeDomainDoc:
+    """A ComputeDomain CRD document (resource.nvidia.com/v1beta1).
+
+    Emitted once per deployment when any worker is multinode (a worker whose
+    GPU count exceeds the node's GPU count). Recipes ship the ComputeDomain
+    only — NOT a ResourceClaimTemplate.
+    """
+
+    name: str | None = None
+    namespace: str | None = None
+    channel_name: str | None = None
+    num_nodes: int = 0
+    api_version: str = "resource.nvidia.com/v1beta1"
+    kind: str = "ComputeDomain"
+    metadata_extra: dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ComputeDomainDoc":
+        data = copy.deepcopy(data)
+        api_version = data.pop("apiVersion", "resource.nvidia.com/v1beta1")
+        kind = data.pop("kind", "ComputeDomain")
+        metadata = data.pop("metadata", {}) or {}
+        spec = data.pop("spec", {}) or {}
+        channel = spec.pop("channel", {}) or {}
+        rct = channel.pop("resourceClaimTemplate", {}) or {}
+        return cls(
+            api_version=api_version,
+            kind=kind,
+            name=metadata.pop("name", None),
+            namespace=metadata.pop("namespace", None),
+            channel_name=rct.pop("name", None),
+            num_nodes=spec.pop("numNodes", 0),
+            metadata_extra=metadata,
+            extra=data,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        _put(metadata, "name", self.name)
+        _put(metadata, "namespace", self.namespace)
+        metadata.update(copy.deepcopy(self.metadata_extra))
+        out: dict[str, Any] = {
+            "apiVersion": self.api_version,
+            "kind": self.kind,
+            "metadata": metadata,
+            "spec": {
+                "channel": {"resourceClaimTemplate": {"name": self.channel_name}},
+                "numNodes": self.num_nodes,
+            },
+        }
+        out.update(copy.deepcopy(self.extra))
+        return out
+
+    def to_yaml(self) -> str:
+        return yaml.safe_dump(self.to_dict(), sort_keys=False)
+
+
 def dgd_documents_to_yaml(docs: list[Any]) -> str:
-    """Serialize a list of model objects (DGD / ConfigMapDoc) as a multi-doc YAML stream."""
+    """Serialize a list of model objects (DGD / ConfigMapDoc / ComputeDomainDoc) as a multi-doc YAML stream."""
     return "---\n".join(doc.to_yaml() for doc in docs)

@@ -53,6 +53,29 @@ def test_efa_pod_fields_absent_when_unset():
     assert "securityContext" not in s["extraPodSpec"]["mainContainer"]
 
 
+def test_multinode_and_resource_claims_emit():
+    from aiconfigurator.generator.builders.dgd_model import DGD, DGDService, ExtraPodSpec, MainContainer, dgd_documents_to_yaml
+    import yaml
+    svc = DGDService(replicas=1, multinode={"nodeCount": 2},
+        resources={"limits": {"gpu": "8"}, "claims": [{"name": "compute-domain-channel"}]},
+        extra_pod_spec=ExtraPodSpec(resource_claims=[{"name": "compute-domain-channel", "resourceClaimTemplateName": "d-compute-domain-channel"}],
+            main_container=MainContainer(image="i")))
+    s = yaml.safe_load(dgd_documents_to_yaml([DGD(name="d", services={"w": svc})]))["spec"]["services"]["w"]
+    assert s["multinode"] == {"nodeCount": 2}
+    assert s["resources"]["claims"][0]["name"] == "compute-domain-channel"
+    assert s["extraPodSpec"]["resourceClaims"][0]["resourceClaimTemplateName"] == "d-compute-domain-channel"
+
+
+def test_compute_domain_doc():
+    from aiconfigurator.generator.builders.dgd_model import ComputeDomainDoc, dgd_documents_to_yaml
+    import yaml
+    doc = yaml.safe_load(dgd_documents_to_yaml([ComputeDomainDoc(name="d-compute-domain", channel_name="d-compute-domain-channel", num_nodes=0)]))
+    assert doc["apiVersion"] == "resource.nvidia.com/v1beta1"
+    assert doc["kind"] == "ComputeDomain"
+    assert doc["spec"]["channel"]["resourceClaimTemplate"]["name"] == "d-compute-domain-channel"
+    assert doc["spec"]["numNodes"] == 0
+
+
 def test_round_trip_via_from_dict():
     svc = DGDService(replicas=1, shared_memory={"size": "80Gi"},
                      extra_pod_spec=ExtraPodSpec(node_selector={"a": "b"}, main_container=MainContainer(image="i")))
