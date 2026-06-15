@@ -9,14 +9,12 @@ It directly reuses AIConfigurator:
 - ``check_is_moe``                  -> is_moe
 - ``_estimate_model_weight_bytes``  -> model weight size (-> wideEP heuristic)
 - ``_get_system_config``            -> the SKU's VRAM / GPUs-per-node
-- ``_calculate_min_tp``             -> the BF16 weight-fit floor (legacy default
-                                       validity, used when no ``max_seq_len``)
 
-The accurate validity check is KV-cache based: when :func:`parallel_configs_for`
-is given the workload's ``max_seq_len``, each enumerated shape is kept iff its KV
-capacity exceeds it (:mod:`spica.kv_estimate`). That is per-shape (TEP / DEP / TP
-differ at the same GPU count) and uses the real quantized weights, so it
-supersedes the coarse weight floor.
+Validity is **KV-cache based**: :func:`parallel_configs_for` enumerates shapes
+from 1 GPU/worker and keeps a shape iff its estimated KV capacity exceeds the
+workload's ``max_seq_len`` (:mod:`spica.kv_estimate`). That is per-shape (TEP /
+DEP / TP differ at the same GPU count) and uses the real quantized weights — it
+replaces the old BF16 min-GPU weight floor entirely.
 """
 
 from __future__ import annotations
@@ -24,7 +22,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from aiconfigurator.generator.naive import (
-    _calculate_min_tp,
     _estimate_model_weight_bytes,
     _get_system_config,
 )
@@ -49,7 +46,7 @@ _GQA_MOE_ARCHITECTURES = frozenset({"Qwen3MoeForCausalLM"})
 
 
 class NoViableParallelConfig(ValueError):
-    """The model cannot fit within the GPU budget at any parallel config."""
+    """No parallel config can hold the model+sequence within the GPU budget."""
 
 
 @dataclass(frozen=True)
@@ -65,13 +62,10 @@ class ModelHardware:
     weight_bytes: int
     vram_per_gpu: int
     gpus_per_node: int
-    min_gpus_per_worker: int  # memory-fit floor: smallest worker that holds the weights
-    fits: bool  # False -> model can't fit within gpu_budget at any config
 
 
-def resolve_model_hardware(model_name: str, hardware_sku: str, *, gpu_budget: int, backend: str) -> ModelHardware:
-    """Read the model weights + SKU spec (via AIC) to derive is_moe / mla /
-    wideep and the memory-fit floor for ``gpu_budget``."""
+def resolve_model_hardware(model_name: str, hardware_sku: str, *, backend: str) -> ModelHardware:
+    """Read the model weights + SKU spec (via AIC) to derive is_moe / mla / wideep."""
     is_moe = check_is_moe(model_name)
     architecture = get_model_config_from_model_path(model_name).get("architecture", "")
     allow_pure_tp = is_moe and architecture in _GQA_MOE_ARCHITECTURES
@@ -85,13 +79,6 @@ def resolve_model_hardware(model_name: str, hardware_sku: str, *, gpu_budget: in
     # Large MoE (a node can't hold ~2x the weights) auto-enables multi-node wideEP.
     enable_wideep = is_moe and gpus_per_node * vram_per_gpu < 2 * weight_bytes
 
-    min_gpus, fits, _required_tp = _calculate_min_tp(
-        model_weight_bytes=weight_bytes,
-        vram_per_gpu=vram_per_gpu,
-        gpus_per_node=gpus_per_node,
-        total_gpus=gpu_budget,
-        allow_multi_node=is_moe and enable_wideep,
-    )
     return ModelHardware(
         model_name=model_name,
         hardware_sku=hardware_sku,
@@ -102,8 +89,6 @@ def resolve_model_hardware(model_name: str, hardware_sku: str, *, gpu_budget: in
         weight_bytes=weight_bytes,
         vram_per_gpu=vram_per_gpu,
         gpus_per_node=gpus_per_node,
-        min_gpus_per_worker=min_gpus,
-        fits=fits,
     )
 
 
@@ -114,45 +99,34 @@ def parallel_configs_for(
     gpu_budget: int,
     deployment_mode: str,
     backend: str,
+    max_seq_len: int,
     min_gpu_budget: int | None = None,
-    max_seq_len: int | None = None,
     max_num_tokens: int = DEFAULT_MAX_NUM_TOKENS,
     max_batch_size: int = DEFAULT_MAX_BATCH_SIZE,
     memory_fraction: float = DEFAULT_MEMORY_FRACTION,
 ) -> list[ReplicaParallelConfig] | list[DisaggParallelConfig]:
     """Resolve the model/hardware, then enumerate the parallel configs that fit
-    the GPU budget and can actually hold the model.
+    the GPU budget and can hold a ``max_seq_len``-token sequence.
 
-    Validity:
-
-    - ``max_seq_len`` given -> **KV-cache** validity: enumerate from 1 GPU/worker
-      and keep only shapes whose estimated KV capacity exceeds ``max_seq_len`` (the
-      accurate, per-shape check; see :mod:`spica.kv_estimate`). ``max_num_tokens`` /
-      ``max_batch_size`` / ``memory_fraction`` are the runtime knobs the estimate
-      reserves around the KV budget.
-    - ``max_seq_len`` ``None`` -> legacy **BF16 weight-fit floor** (smallest worker
-      that holds the weights).
+    Validity is **KV-cache based**: shapes are enumerated from 1 GPU/worker and a
+    shape is kept iff its estimated KV capacity exceeds ``max_seq_len`` (the
+    accurate, per-shape check; see :mod:`spica.kv_estimate`). ``max_num_tokens`` /
+    ``max_batch_size`` / ``memory_fraction`` are the runtime knobs the estimate
+    reserves around the KV budget.
 
     ``deployment_mode`` is ``"agg"`` (-> ``list[ReplicaParallelConfig]``) or
     ``"disagg"`` (-> ``list[DisaggParallelConfig]``). Raises
-    :class:`NoViableParallelConfig` when nothing fits.
+    :class:`NoViableParallelConfig` when no shape can hold the sequence within the
+    budget.
     """
-    mh = resolve_model_hardware(model_name, hardware_sku, gpu_budget=gpu_budget, backend=backend)
+    mh = resolve_model_hardware(model_name, hardware_sku, backend=backend)
 
-    # KV validity lets the estimate decide the floor (enumerate from 1 GPU/worker);
-    # the legacy path keeps AIC's weight-fit floor and its up-front fit check.
-    if max_seq_len is None and not mh.fits:
-        raise NoViableParallelConfig(
-            f"{model_name} ({mh.weight_bytes / 1024**3:.0f} GiB weights) needs more than "
-            f"{gpu_budget} GPUs to fit on {hardware_sku}"
-        )
-
+    # Enumerate from 1 GPU/worker; the KV estimate is the sole feasibility filter.
     common = dict(
         is_moe=mh.is_moe,
         backend=backend,
         gpu_budget=gpu_budget,
         min_gpu_budget=min_gpu_budget,
-        min_gpus_per_worker=1 if max_seq_len is not None else mh.min_gpus_per_worker,
         enable_wideep=mh.enable_wideep,
     )
     if deployment_mode == "disagg":
@@ -161,9 +135,6 @@ def parallel_configs_for(
         configs = enumerate_parallel_configs(**common)
     else:
         raise ValueError(f"deployment_mode must be 'agg' or 'disagg', got {deployment_mode!r}")
-
-    if max_seq_len is None:
-        return configs
 
     # KV-cache validity: keep configs whose every role-shape holds a max_seq_len sequence.
     if deployment_mode == "agg":

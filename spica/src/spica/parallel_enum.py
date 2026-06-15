@@ -170,9 +170,9 @@ def enumerate_parallel_configs(
     ``1..(gpu_budget // g)`` so the total ``g * r`` stays within
     ``[min_gpu_budget, gpu_budget]``.
 
-    ``min_gpus_per_worker`` is the memory-fit floor (smallest worker that holds
-    the model weights), normally from AIC's ``_calculate_min_tp`` via
-    :func:`spica.model_hw.resolve_model_hardware`.
+    ``min_gpus_per_worker`` is an optional lower bound on a worker's GPU count
+    (default 1). :func:`spica.model_hw.parallel_configs_for` leaves it at 1 and
+    applies the KV-cache feasibility filter instead of a static weight floor.
 
     This is branch-agnostic: call once for an ``agg`` worker, or once per role
     (prefill / decode) for ``disagg`` — the prefill/decode pairing under the
