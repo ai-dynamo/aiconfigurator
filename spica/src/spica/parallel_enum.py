@@ -15,9 +15,9 @@ On top of that, this module iterates the replica counts ``r`` such that
 separately in its sweep layer.
 
 Kept standalone (no aiconfigurator import) so it is light and unit-testable;
-parity with AIC's rules is covered by tests. ``is_moe`` / ``mla`` are inputs here
-(resolved from the model via AIC's ``check_is_moe`` / ``get_model_family`` by the
-caller).
+parity with AIC's rules is covered by tests. ``is_moe`` is an input here
+(resolved from the model via AIC's ``check_is_moe`` by the caller); the KV-cache
+feasibility of each shape is applied separately by :mod:`spica.model_hw`.
 """
 
 from __future__ import annotations

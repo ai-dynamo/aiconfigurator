@@ -15,6 +15,11 @@ from .config import (
     SweepConfig,
     Workload,
 )
+from .kv_estimate import (
+    NoPerfDatabase,
+    estimate_kv_tokens,
+    feasible_shape_tokens,
+)
 from .load_predictor_sweep import (
     LoadPredictorResult,
     sweep_load_predictor,
@@ -56,4 +61,8 @@ __all__ = [
     "LoadPredictorResult",
     "sweep_load_predictor",
     "window_loss",
+    # KV-cache feasibility
+    "NoPerfDatabase",
+    "estimate_kv_tokens",
+    "feasible_shape_tokens",
 ]
