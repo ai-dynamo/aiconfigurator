@@ -5,10 +5,12 @@ import pytest
 
 import tools.support_matrix.support_matrix as support_matrix_module
 from tools.support_matrix.support_matrix import (
+    STATUS_FAIL,
     STATUS_FRAMEWORK_INCOMPATIBLE,
     STATUS_HW_INCOMPATIBLE,
     STATUS_PASS,
     SupportMatrix,
+    get_framework_incompatibility,
     get_hardware_incompatibility,
 )
 
@@ -72,28 +74,33 @@ def test_fp4_model_is_hardware_incompatible_without_fp4_support():
     assert "does not support FP4" in incompatibility.reason
 
 
-def test_sglang_dsa_model_is_hardware_incompatible_below_sm90():
+@pytest.mark.parametrize("model", ["openai/gpt-oss-20b", "openai/gpt-oss-120b"])
+def test_gpt_oss_mxfp4_model_is_hardware_incompatible_on_sm80(model):
     incompatibility = get_hardware_incompatibility(
-        model="zai-org/GLM-5",
-        system="l40s",
+        model=model,
+        system="a100_sxm",
         backend="sglang",
-        system_spec=_system_spec(sm_version=89, fp8=True),
+        system_spec=_system_spec(sm_version=80),
     )
 
     assert incompatibility is not None
-    assert incompatibility.missing_datatypes == ()
-    assert "SGLang DSA/NSA module collectors require SM90+" in incompatibility.reason
+    assert incompatibility.missing_datatypes == ("MXFP4",)
+    assert f"does not support MXFP4/FP4 required by {model}" in incompatibility.reason
 
 
-def test_sglang_dsa_model_is_allowed_on_sm90_plus():
-    incompatibility = get_hardware_incompatibility(
-        model="zai-org/GLM-5",
-        system="h100_sxm",
+def test_gemma4_sglang_flashattention_limit_is_framework_incompatible_on_sm80():
+    incompatibility = get_framework_incompatibility(
+        model="google/gemma-4-26B-A4B",
+        system="a100_sxm",
         backend="sglang",
-        system_spec=_system_spec(sm_version=90, fp8=True),
+        version="0.5.10",
+        system_spec=_system_spec(sm_version=80),
     )
 
-    assert incompatibility is None
+    assert incompatibility is not None
+    assert "cannot collect FlashAttention data" in incompatibility.reason
+    assert "head_dim=512" in incompatibility.reason
+    assert "FlashAttention forward only supports head dimension at most 256" in incompatibility.reason
 
 
 @pytest.mark.parametrize("model", ["openai/gpt-oss-20b", "openai/gpt-oss-120b"])
@@ -106,6 +113,68 @@ def test_mxfp4_model_is_not_native_fp4_hardware_incompatible_on_hopper(model):
     )
 
     assert incompatibility is None
+
+
+@pytest.mark.parametrize("backend", ["sglang", "vllm"])
+def test_sparse_dsa_model_is_hardware_incompatible_on_a100(backend):
+    incompatibility = get_hardware_incompatibility(
+        model="zai-org/GLM-5",
+        system="a100_sxm",
+        backend=backend,
+        system_spec=_system_spec(sm_version=80),
+    )
+
+    assert incompatibility is not None
+    assert incompatibility.missing_datatypes == ("DSA",)
+    assert incompatibility.reason == (
+        f"a100_sxm (SM80) does not support sparse DSA attention required by zai-org/GLM-5 on {backend}"
+    )
+
+
+@pytest.mark.parametrize("backend", ["sglang", "vllm"])
+def test_sparse_dsa_model_is_allowed_on_hopper(backend):
+    incompatibility = get_hardware_incompatibility(
+        model="zai-org/GLM-5",
+        system="h100_sxm",
+        backend=backend,
+        system_spec=_system_spec(sm_version=90, fp8=True),
+    )
+
+    assert incompatibility is None
+
+
+def test_gemma4_trtllm_head_dim_512_is_framework_incompatible_on_a100():
+    incompatibility = get_framework_incompatibility(
+        model="google/gemma-4-26B-A4B",
+        system="a100_sxm",
+        backend="trtllm",
+        version="1.0.0",
+    )
+
+    assert incompatibility is not None
+    assert "Head size 512 is not supported by MMHA" in incompatibility.reason
+    assert "run_attention_torch(1, 128, 2, 1, 512, 0" in incompatibility.reason
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("moonshotai/Kimi-K2.5", "moe_quant_mode=int4_wo"),
+        ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "Relu2/non-gated MoE"),
+        ("zai-org/GLM-5", "DSA module rows"),
+    ],
+)
+def test_trtllm_a100_framework_incompatible_rows_are_durable(model, expected):
+    incompatibility = get_framework_incompatibility(
+        model=model,
+        system="a100_sxm",
+        backend="trtllm",
+        version="1.0.0",
+        system_spec=_system_spec(sm_version=80),
+    )
+
+    assert incompatibility is not None
+    assert expected in incompatibility.reason
 
 
 def test_run_single_test_short_circuits_hardware_incompatible_model(monkeypatch):
@@ -127,6 +196,89 @@ def test_run_single_test_short_circuits_hardware_incompatible_model(monkeypatch)
     assert STATUS_PASS not in status_dict.values()
 
 
+def test_run_single_test_uses_system_yaml_for_hardware_preflight_without_perf_database(monkeypatch, tmp_path):
+    systems_root = tmp_path / "systems"
+    systems_root.mkdir()
+    (systems_root / "a100_sxm.yaml").write_text(
+        """
+data_dir: data/a100_sxm
+gpu:
+  sm_version: 80
+node:
+  num_gpus_per_node: 8
+""".strip()
+    )
+
+    def fail_run_mode(**_kwargs):
+        raise AssertionError("TaskRunner should not run for hardware-incompatible combinations")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
+    monkeypatch.setattr(support_matrix_module.perf_database, "get_database", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(support_matrix_module.perf_database, "get_systems_paths", lambda: [str(systems_root)])
+
+    status_dict, error_dict = SupportMatrix.run_single_test(
+        model="Qwen/Qwen3-32B-FP8",
+        system="a100_sxm",
+        backend="vllm",
+        version="0.22.0",
+    )
+
+    assert status_dict == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
+    assert error_dict["agg"] == "a100_sxm (SM80) does not support FP8 required by Qwen/Qwen3-32B-FP8"
+
+
+def test_run_single_test_reports_missing_exact_database_after_preflight(monkeypatch, tmp_path):
+    systems_root = tmp_path / "systems"
+    systems_root.mkdir()
+    (systems_root / "a100_sxm.yaml").write_text(
+        """
+data_dir: data/a100_sxm
+gpu:
+  sm_version: 80
+node:
+  num_gpus_per_node: 8
+""".strip()
+    )
+
+    def fail_run_mode(**_kwargs):
+        raise AssertionError("TaskRunner should not run when exact-version perf data is missing")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
+    monkeypatch.setattr(support_matrix_module.perf_database, "get_database", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(support_matrix_module.perf_database, "get_systems_paths", lambda: [str(systems_root)])
+
+    status_dict, error_dict = SupportMatrix.run_single_test(
+        model="Qwen/Qwen3-8B",
+        system="a100_sxm",
+        backend="sglang",
+        version="0.5.12",
+        modes_to_test=("agg",),
+    )
+
+    assert status_dict == {"agg": STATUS_FAIL}
+    assert "Exact-version SILICON perf database missing for a100_sxm/sglang/0.5.12" in error_dict["agg"]
+
+
+def test_run_mode_reports_taskrunner_none_result(monkeypatch):
+    class FakeTaskRunner:
+        def run(self, _task_config):
+            return None
+
+    monkeypatch.setattr(SupportMatrix, "_create_task_config", staticmethod(lambda **_kwargs: object()))
+    monkeypatch.setattr(support_matrix_module, "TaskRunner", FakeTaskRunner)
+
+    with pytest.raises(RuntimeError, match="TaskRunner returned no result"):
+        SupportMatrix._run_mode(
+            mode="agg",
+            model="Qwen/Qwen3-8B",
+            system="a100_sxm",
+            backend="vllm",
+            version="0.22.0",
+            constraints=_system_spec(sm_version=80),
+            engine_step_backend=None,
+        )
+
+
 def test_run_single_test_propagates_hardware_preflight_failures(monkeypatch):
     def fail_get_model_info(_model):
         raise RuntimeError("metadata unavailable")
@@ -145,6 +297,53 @@ def test_run_single_test_propagates_hardware_preflight_failures(monkeypatch):
             version="0.5.12",
             system_spec=_system_spec(sm_version=89, fp8=True),
         )
+
+
+def test_run_single_test_short_circuits_sglang_framework_incompatible_model(monkeypatch):
+    def fail_run_mode(**_kwargs):
+        raise AssertionError("TaskRunner should not run for framework-incompatible combinations")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
+
+    status_dict, error_dict = SupportMatrix.run_single_test(
+        model="google/gemma-4-26B-A4B",
+        system="a100_sxm",
+        backend="sglang",
+        version="0.5.10",
+        system_spec=_system_spec(sm_version=80),
+    )
+
+    assert status_dict == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert "cannot collect FlashAttention data" in error_dict["agg"]
+    assert STATUS_PASS not in status_dict.values()
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "google/gemma-4-26B-A4B",
+        "moonshotai/Kimi-K2.5",
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "zai-org/GLM-5",
+    ],
+)
+def test_run_single_test_short_circuits_trtllm_framework_incompatible_model(monkeypatch, model):
+    def fail_run_mode(**_kwargs):
+        raise AssertionError("TaskRunner should not run for framework-incompatible combinations")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_run_mode))
+
+    status_dict, error_dict = SupportMatrix.run_single_test(
+        model=model,
+        system="a100_sxm",
+        backend="trtllm",
+        version="1.0.0",
+        system_spec=_system_spec(sm_version=80),
+        modes_to_test=("agg",),
+    )
+
+    assert status_dict == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE}
+    assert error_dict["agg"]
 
 
 @pytest.mark.parametrize(

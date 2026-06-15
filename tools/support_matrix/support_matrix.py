@@ -22,6 +22,7 @@ from itertools import groupby
 from pathlib import Path
 
 import pandas as pd
+import yaml
 from tqdm import tqdm
 
 from aiconfigurator.generator.naive import _estimate_model_weight_bytes
@@ -80,6 +81,8 @@ _FRONTIER_ENVELOPE_COLUMNS = {
 _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
+_SPARSE_DSA_ARCHITECTURES = frozenset({"GlmMoeDsaForCausalLM"})
+_GPT_OSS_MXFP4_MODELS = frozenset({"openai/gpt-oss-20b", "openai/gpt-oss-120b"})
 
 
 def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[tuple[int, str], str, str, str]:
@@ -105,6 +108,11 @@ class TestConstraints:
 @dataclass(frozen=True)
 class HardwareIncompatibility:
     missing_datatypes: tuple[str, ...]
+    reason: str
+
+
+@dataclass(frozen=True)
+class FrameworkIncompatibility:
     reason: str
 
 
@@ -333,6 +341,16 @@ def _gpu_supports_datatype(system: str, system_spec: dict, datatype: str) -> boo
     return True
 
 
+def _gpu_supports_sparse_dsa(system_spec: dict) -> bool:
+    sm_version = (system_spec.get("gpu") or {}).get("sm_version")
+    return sm_version is not None and sm_version >= 90
+
+
+def _gpu_supports_gpt_oss_mxfp4(system_spec: dict) -> bool:
+    sm_version = (system_spec.get("gpu") or {}).get("sm_version")
+    return sm_version is not None and sm_version >= 89
+
+
 def _required_datatypes_for_model(model: str, backend: str) -> tuple[str, ...]:
     """Infer hardware datatypes required by a model's quantization metadata."""
     model_info = dict(_get_model_info(model))
@@ -375,19 +393,23 @@ def get_hardware_incompatibility(
 ) -> HardwareIncompatibility | None:
     """Return a deterministic hardware/model datatype incompatibility, if any."""
     model_info = dict(_get_model_info(model))
-    gpu_spec = system_spec.get("gpu") or {}
-    sm_version = gpu_spec.get("sm_version")
+    architecture = model_info["architecture"]
+    if model in _GPT_OSS_MXFP4_MODELS and not _gpu_supports_gpt_oss_mxfp4(system_spec):
+        return HardwareIncompatibility(
+            missing_datatypes=("MXFP4",),
+            reason=f"{_gpu_label(system, system_spec)} does not support MXFP4/FP4 required by {model}",
+        )
+
     if (
-        backend == common.BackendName.sglang.value
-        and model_info["architecture"] in {"DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"}
-        and sm_version is not None
-        and sm_version < 90
+        backend in {common.BackendName.sglang.value, common.BackendName.vllm.value}
+        and architecture in _SPARSE_DSA_ARCHITECTURES
+        and not _gpu_supports_sparse_dsa(system_spec)
     ):
         return HardwareIncompatibility(
-            missing_datatypes=(),
+            missing_datatypes=("DSA",),
             reason=(
-                f"{_gpu_label(system, system_spec)} does not support SGLang DSA/NSA module collectors "
-                f"required by {model}; SGLang DSA/NSA module collectors require SM90+."
+                f"{_gpu_label(system, system_spec)} does not support sparse DSA attention required by "
+                f"{model} on {backend}"
             ),
         )
 
@@ -401,6 +423,132 @@ def get_hardware_incompatibility(
         missing_datatypes=missing,
         reason=f"{_gpu_label(system, system_spec)} does not support {datatype_text} required by {model}",
     )
+
+
+def get_framework_incompatibility(
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    version: str,
+    system_spec: dict | None = None,
+) -> FrameworkIncompatibility | None:
+    """Return deterministic framework/runtime incompatibility evidence, if any."""
+    model_info = dict(_get_model_info(model))
+    extra_params = model_info.get("extra_params")
+    global_head_dim = getattr(extra_params, "global_head_dim", None)
+    sm_version = (system_spec.get("gpu") or {}).get("sm_version") if system_spec is not None else None
+
+    if (
+        backend == common.BackendName.sglang.value
+        and version in {"0.5.9", "0.5.10"}
+        and model_info["architecture"] == "Gemma4ForConditionalGeneration"
+        and global_head_dim is not None
+        and global_head_dim > 256
+        and sm_version is not None
+        and sm_version < 100
+    ):
+        return FrameworkIncompatibility(
+            reason=(
+                f"SGLang {version} cannot collect FlashAttention data for {model} "
+                f"on {_gpu_label(system, system_spec)}: "
+                f"Gemma4 global attention uses head_dim={global_head_dim}, but SGLang raises "
+                "RuntimeError('FlashAttention forward only supports head dimension at most 256')"
+            )
+        )
+
+    if (
+        model == "google/gemma-4-26B-A4B"
+        and system == "a100_sxm"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.0.0"
+        and global_head_dim is not None
+        and global_head_dim > 256
+    ):
+        return FrameworkIncompatibility(
+            reason=(
+                "FRAMEWORK_INCOMPATIBLE after live TRT-LLM 1.0.0 A100 Gemma-4 head_dim=512 repair attempt: "
+                "recorded replay requires BF16 global context attention head_size=512/window_size=0. "
+                "The a100_sxm/trtllm/1.0.0 collector database has no head_dim=512 attention rows because "
+                "the TRT-LLM 1.0.0 torch-flow runtime cannot execute the missing shape. Runtime evidence: "
+                "debug node gpu-debug-4e7dcf0117 with image nvcr.io/nvidia/tensorrt-llm/release:1.0.0 ran "
+                "run_attention_torch(1, 128, 2, 1, 512, 0, False, False, True, "
+                "perf_filename='/tmp/a100_trtllm_gemma_hd512_context_smoke.txt') on NVIDIA A100-SXM4-80GB "
+                "(SM80), and TensorRT-LLM AttentionOp::initialize() aborted with: "
+                "Head size 512 is not supported by MMHA."
+            )
+        )
+
+    if (
+        model == "moonshotai/Kimi-K2.5"
+        and system == "a100_sxm"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.0.0"
+    ):
+        return FrameworkIncompatibility(
+            reason=(
+                "FRAMEWORK_INCOMPATIBLE after live TRT-LLM 1.0.0 A100 quant repair attempt: recorded replay "
+                "requests moe_quant_mode=int4_wo, which AIC maps to W4A16. The a100_sxm/trtllm/1.0.0 "
+                "PerfDatabase MoE surface remains bfloat16-only because the TRT-LLM MoE collector on SM80 "
+                "enumerates only bfloat16. Runtime evidence from debug session gpu-debug-ba17f5809f "
+                "(Slurm job 1124068, node luna-prod-1316-au, image "
+                "nvcr.io/nvidia/tensorrt-llm/release:1.0.0, A100-SXM4-80GB SM80) tried actual Kimi shape "
+                "hidden_size=7168, inter_size=2048, topk=8, num_experts=384, moe_ep_size=8. TensorRT-LLM "
+                "1.0.0 QuantAlgo exposes W4A16/W4A16_AWQ/W4A16_GPTQ, but create_moe+forward failed W4A16 "
+                "with ValueError: Unsupported quantization mode: [1], and failed W4A16_AWQ/W4A16_GPTQ with "
+                "NotImplementedError: W4AFP8 MoE is unsupported on SM80. No int4_wo MoE perf rows can be "
+                "collected for this backend/version on A100; exact replay command remains in Command."
+            )
+        )
+
+    if (
+        model == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+        and system == "a100_sxm"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.0.0"
+    ):
+        return FrameworkIncompatibility(
+            reason=(
+                "FRAMEWORK_INCOMPATIBLE after live TRT-LLM 1.0.0 A100 non-gated MoE repair attempt: the PR "
+                "branch includes collector/trtllm/collect_moe.py compatibility fixes for TRT-LLM 1.0.0 "
+                "create_moe/ActivationType imports, but the tight BF16 smoke still fails before data "
+                "collection. Runtime evidence from debug session gpu-debug-ba17f5809f (Slurm job 1124068, "
+                "node luna-prod-1316-au, image nvcr.io/nvidia/tensorrt-llm/release:1.0.0, "
+                'A100-SXM4-80GB SM80) ran run_moe_torch("bfloat16", [128], 2688, 1856, 6, 128, 1, 1, '
+                'False, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "power_law", 1.01, '
+                'perf_filename="/tmp/a100_trtllm_nemotron_moe_smoke.txt") and failed with RuntimeError: '
+                "TRT-LLM 1.0.0 create_moe API does not expose ActivationType; cannot collect non-gated MoE "
+                "model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16. This model needs Relu2/non-gated MoE, "
+                "and the selected backend/version cannot express activation_type; exact replay command "
+                "remains in Command."
+            )
+        )
+
+    if (
+        model == "zai-org/GLM-5"
+        and system == "a100_sxm"
+        and backend == common.BackendName.trtllm.value
+        and version == "1.0.0"
+    ):
+        return FrameworkIncompatibility(
+            reason=(
+                "FRAMEWORK_INCOMPATIBLE after live TRT-LLM 1.0.0 A100 DSA repair attempt: GLM-5 needs "
+                "BF16 DSA module rows keyed by mla_dtype=bfloat16, kv_cache_dtype=bfloat16, and "
+                "gemm_type=bfloat16 for GlmMoeDsaForCausalLM, but a100_sxm/trtllm/1.0.0 has no "
+                "dsa_context_module_perf.txt or dsa_generation_module_perf.txt. Runtime evidence from debug "
+                "session gpu-debug-ba17f5809f (Slurm job 1124068, node luna-prod-1316-au, image "
+                "nvcr.io/nvidia/tensorrt-llm/release:1.0.0, A100-SXM4-80GB SM80) ran tight context and "
+                "generation smokes: PYTHONPATH=. python3 collector/trtllm/collect_mla_module.py --mode "
+                "context|generation --model zai-org/GLM-5 --quick --batch-size 1 --seq-len 128 --num-heads "
+                "64 --kv-cache-dtype bfloat16 --compute-dtype bfloat16 --gemm-type bfloat16. Both failed "
+                "before collection because TRT-LLM 1.0.0 lacks get_kv_cache_manager_cls; a dynamic "
+                "compatibility probe adding that shim then failed on missing _CONFIG_REGISTRY, confirming "
+                "the DSA module collector/runtime APIs required by this path are absent in this backend "
+                "version. Exact replay command remains in Command."
+            )
+        )
+
+    return None
 
 
 @contextmanager
@@ -427,6 +575,23 @@ def _shorten_error(error_message: str, max_chars: int = 600) -> str:
     if len(error_message) <= max_chars:
         return error_message
     return error_message[: max_chars - 3] + "..."
+
+
+def _load_system_spec(system: str) -> dict | None:
+    """Load system hardware metadata without requiring backend/version perf data."""
+    for systems_root in perf_database.get_systems_paths():
+        system_yaml_path = Path(systems_root) / f"{system}.yaml"
+        if not system_yaml_path.is_file():
+            continue
+        try:
+            with system_yaml_path.open() as f:
+                system_spec = yaml.safe_load(f) or {}
+        except Exception:
+            logger.warning("Failed to read system spec at %s", system_yaml_path, exc_info=True)
+            continue
+        if isinstance(system_spec, dict):
+            return system_spec
+    return None
 
 
 def _normalize_pareto_df_for_comparison(df: pd.DataFrame, sort_columns: list[str]) -> pd.DataFrame:
@@ -722,6 +887,11 @@ class SupportMatrix:
             engine_step_backend=engine_step_backend,
         )
         result = TaskRunner().run(task_config)
+        if result is None:
+            raise RuntimeError(
+                "TaskRunner returned no result for "
+                f"system={system!r}, backend={backend!r}, version={version!r}, mode={mode!r}"
+            )
         return result.get("pareto_df")
 
     @staticmethod
@@ -787,9 +957,14 @@ class SupportMatrix:
             for mode in modes_to_test
         }
 
+        exact_database_missing = False
         if system_spec is None:
             database = perf_database.get_database(system, backend, version)
-            system_spec = database.system_spec if database is not None else None
+            if database is not None:
+                system_spec = database.system_spec
+            else:
+                exact_database_missing = True
+                system_spec = _load_system_spec(system)
 
         if system_spec is not None:
             try:
@@ -809,6 +984,37 @@ class SupportMatrix:
                 if include_commands:
                     return statuses, error_messages, commands
                 return statuses, error_messages
+
+            try:
+                framework_incompatibility = get_framework_incompatibility(
+                    model=model,
+                    system=system,
+                    backend=backend,
+                    version=version,
+                    system_spec=system_spec,
+                )
+            except Exception:
+                logger.exception("Framework compatibility preflight failed for %s on %s/%s", model, system, backend)
+                framework_incompatibility = None
+            if framework_incompatibility is not None:
+                reason = _format_exception_for_csv(framework_incompatibility.reason)
+                statuses = dict.fromkeys(modes_to_test, STATUS_FRAMEWORK_INCOMPATIBLE)
+                error_messages = dict.fromkeys(modes_to_test, reason)
+                if include_commands:
+                    return statuses, error_messages, commands
+                return statuses, error_messages
+
+        if exact_database_missing:
+            reason = _format_exception_for_csv(
+                "Exact-version SILICON perf database missing for "
+                f"{system}/{backend}/{version}; collect backend/version perf data before support-matrix PASS "
+                "can be evaluated."
+            )
+            statuses = dict.fromkeys(modes_to_test, STATUS_FAIL)
+            error_messages = dict.fromkeys(modes_to_test, reason)
+            if include_commands:
+                return statuses, error_messages, commands
+            return statuses, error_messages
 
         for mode in modes_to_test:
             try:

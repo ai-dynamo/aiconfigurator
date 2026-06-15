@@ -63,6 +63,8 @@ class MockModelConfig:
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
         self.head_dim = head_dim
+        self.v_head_dim = head_dim
+        self.swa_v_head_dim = head_dim
         # Align with newer sglang ModelConfig while remaining harmless on older versions
         self.is_hybrid_swa = False
         self.swa_attention_layer_ids = []
@@ -106,8 +108,6 @@ class MockServerArgs:
         self.dllm_algorithm_config = None
         self.enable_piecewise_cuda_graph = False  # sglang <=0.5.9
         self.disable_piecewise_cuda_graph = True  # sglang >=0.5.10
-        self.is_embedding = False
-        self.disable_radix_cache = False
         self.enable_dp_attention = False
         self.model_path = None
         self.revision = None
@@ -116,6 +116,8 @@ class MockServerArgs:
         self.triton_attention_split_tile_size = None
         self.disable_cuda_graph = False
         self.chunked_prefill_size = -1
+        self.disable_radix_cache = True
+        self.is_embedding = False
 
 
 class MockModelRunner:
@@ -134,6 +136,7 @@ class MockModelRunner:
         self.attn_backend = None
         self.server_args = MockServerArgs(page_size=page_size)
         self.attn_cp_size = 1  # Context parallelism size; required by FlashAttentionBackend in sglang >=0.5.10
+        self.tp_size = 1
         self.is_draft_worker = False
         self.model_is_mrope = False
         self.sliding_window_size = 0
@@ -154,6 +157,7 @@ class MockModelRunner:
         self.gpu_id = 0
         self.hybrid_gdn_config = None
         self.kimi_linear_config = None
+        self.linear_attn_model_spec = None
 
 
 def create_req_to_token_pool(batch_size, total_len, page_size, torch_device, device_str):

@@ -17,6 +17,23 @@ description: >
   Qwen3 MoE model-centric collection plan.
 
 model_case_values:
+  gemm:
+    - model_path: Qwen/Qwen3-235B-A22B
+      token_counts: [1]
+      input_feature_sizes: [4096]
+      output_feature_sizes: [128, 2304, 4608, 9216, 18992]
+    - model_path: Qwen/Qwen3-235B-A22B
+      token_counts: [2]
+      input_feature_sizes: [4096]
+      output_feature_sizes: [18992]
+    - model_path: Qwen/Qwen3-Coder-480B-A35B-Instruct
+      token_counts: [1]
+      input_feature_sizes: [6144]
+      output_feature_sizes: [160, 1792]
+    - model_path: Qwen/Qwen3-Coder-480B-A35B-Instruct
+      token_counts: [2]
+      input_feature_sizes: [6144]
+      output_feature_sizes: [18992, 37984, 75968, 151936]
   moe:
     - model_path: Qwen/Qwen3-30B-A3B
       hidden_size: 2048

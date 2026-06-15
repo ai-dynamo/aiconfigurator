@@ -1,0 +1,65 @@
+{
+  "schema": "aiconfigurator.support_matrix_collector_continuation_checkpoint.v1",
+  "created_at": "2026-06-06T22:08:00Z",
+  "system": "a100_sxm",
+  "workflow_id": "a100_sxm__workflow_3",
+  "pr": {
+    "url": "https://github.com/ai-dynamo/aiconfigurator/pull/1169",
+    "branch": "heal/local/a100-sxm-workflow-1-13b24905eba5",
+    "checkpoint_head": "e18a96ad6a07599a814336e125380f3558e3c6a8"
+  },
+  "purpose": "Resume full target-framework collector runs from the measured data already committed in this PR.",
+  "important_note": "This is a continuation manifest, not a collector-native resume checkpoint. Do not synthesize collector/collect.py checkpoint JSON by hand; let collector/collect.py create per-module checkpoint files under each --checkpoint-dir as real tasks pass, fail, or hit expected failures.",
+  "existing_data_rows": {
+    "sglang=0.5.12": {
+      "data_dir": "src/aiconfigurator/systems/data/a100_sxm/sglang/0.5.12",
+      "context_attention_perf.parquet": 174,
+      "custom_allreduce_perf.parquet": 60,
+      "gemm_perf.parquet": 364,
+      "generation_attention_perf.parquet": 673,
+      "moe_perf.parquet": 2404
+    },
+    "trtllm=1.3.0rc15": {
+      "data_dir": "src/aiconfigurator/systems/data/a100_sxm/trtllm/1.3.0rc15",
+      "context_attention_perf.parquet": 13,
+      "custom_allreduce_perf.parquet": 8,
+      "gemm_perf.parquet": 35700,
+      "generation_attention_perf.parquet": 52,
+      "moe_perf.parquet": 1863
+    },
+    "vllm=0.22.0": {
+      "data_dir": "src/aiconfigurator/systems/data/a100_sxm/vllm/0.22.0",
+      "context_attention_perf.parquet": 92,
+      "gemm_perf.parquet": 18,
+      "generation_attention_perf.parquet": 93,
+      "moe_perf.parquet": 168
+    }
+  },
+  "collection_plan_summary": {
+    "sglang=0.5.12": {
+      "selected_rows": 58,
+      "deferred_cross_node_rows": 6,
+      "checkpointed_jobs": 29
+    },
+    "trtllm=1.3.0rc15": {
+      "selected_rows": 56,
+      "deferred_cross_node_rows": 35,
+      "checkpointed_jobs": 28
+    },
+    "vllm=0.22.0": {
+      "selected_rows": 56,
+      "deferred_cross_node_rows": 18,
+      "checkpointed_jobs": 28
+    }
+  },
+  "resume_commands": [
+    "From the aic-matrix-healer repo, regenerate the exact job list with: uv run python scripts/plan_support_matrix_collections.py --matrix-csv support_matrices/a100_sxm.csv --gpu-type a100_sxm --target <backend>=<version> --format commands",
+    "Run emitted collector commands on an A100-SXM debug node. They use --shuffle --checkpoint-dir /mnt/aic_debug/notes/support_matrix_fix/checkpoints/<job> --resume --resume-retry-failed --keep-csv.",
+    "After each successful collector run, sync generated perf outputs into src/aiconfigurator/systems/data/a100_sxm/<backend>/<version>/, commit a small signed checkpoint to this PR branch, rerun validate_database for that backend/version, then replay exact non-PASS support-matrix cells for that backend/version only."
+  ],
+  "known_state": {
+    "sglang=0.5.12": "Exact parquet data exists and validate_database passed, but full registry-derived framework collection evidence is not complete.",
+    "trtllm=1.3.0rc15": "Exact parquet data exists, validate_database passed, and eight repaired rows replayed; tp8/custom-allreduce rows still need multi-GPU/topology follow-up.",
+    "vllm=0.22.0": "Partial exact parquet data exists in this PR; validate_database still fails on generation_attention coverage and needs additional A100-SXM collection."
+  }
+}

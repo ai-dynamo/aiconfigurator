@@ -214,7 +214,7 @@ def test_l40s_sglang_dsa_missing_data_gap_is_hardware_incompatible(monkeypatch):
     )
 
     assert statuses == {"agg": STATUS_HW_INCOMPATIBLE, "disagg": STATUS_HW_INCOMPATIBLE}
-    assert "SGLang DSA/NSA module collectors require SM90+" in errors["agg"]
+    assert "does not support sparse DSA attention required by zai-org/GLM-5 on sglang" in errors["agg"]
 
 
 def test_kimi_moonshot_trtllm_b200_int4_wo_is_framework_incompatible(monkeypatch):

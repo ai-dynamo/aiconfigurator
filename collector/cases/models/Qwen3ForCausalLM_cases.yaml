@@ -14,3 +14,25 @@ model_paths:
 include_base: true
 description: >
   Qwen3 dense-family model-centric collection plan.
+model_case_values:
+  gemm:
+    - model_path: Qwen/Qwen3-32B
+      token_counts: [1]
+      input_feature_sizes: [5120]
+      output_feature_sizes: [151936, 75968, 37984, 18992]
+    - model_path: Qwen/Qwen3-32B
+      token_counts: [1]
+      input_feature_sizes: [5120]
+      output_feature_sizes: [5120, 2560, 1280, 640]
+    - model_path: Qwen/Qwen3-32B
+      token_counts: [1]
+      input_feature_sizes: [4096, 2048, 1024]
+      output_feature_sizes: [5120]
+    - model_path: Qwen/Qwen3-32B
+      token_counts: [128]
+      input_feature_sizes: [5120]
+      output_feature_sizes: [1280, 6400, 12800, 25600]
+    - model_path: Qwen/Qwen3-32B
+      token_counts: [128]
+      input_feature_sizes: [3200, 6400, 12800, 25600]
+      output_feature_sizes: [5120]

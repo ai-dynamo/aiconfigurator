@@ -19,6 +19,7 @@ import os
 import random
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import cache
 from types import SimpleNamespace
 
 import tensorrt_llm
@@ -55,6 +56,11 @@ aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
 moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_tuned_cache_path")
 _TRTLLM_VERSION = tensorrt_llm.__version__
+
+
+@cache
+def _moe_model_allows_quantization(model_name: str, moe_type: str) -> bool:
+    return moe_model_allows_quantization("trtllm", model_name, moe_type)
 
 
 def _is_trtllm_130rc5_runtime():
@@ -190,7 +196,7 @@ def get_moe_test_cases():
         moe_tp = common_moe_testcase.tp
 
         for moe_type in moe_list:
-            if not moe_model_allows_quantization("trtllm", model_name, moe_type):
+            if not _moe_model_allows_quantization(model_name, moe_type):
                 continue
 
             # w4afp8 requires k shape to be multiple of 128
