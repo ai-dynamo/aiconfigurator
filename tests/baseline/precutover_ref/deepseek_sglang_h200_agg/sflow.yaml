@@ -304,7 +304,7 @@ workflow:
       python3 -m dynamo.sglang \
         --model-path ${{ artifacts.LOCAL_MODEL_PATH.path }} \
         --served-model-name ${{ variables.SERVED_MODEL_NAME }} \
-        --tensor-parallel-size ${{ variables.AGG_TP_SIZE }} --pipeline-parallel-size ${{ variables.AGG_PP_SIZE }} --data-parallel-size ${{ variables.AGG_DP_SIZE }} --max-running-requests ${{ variables.AGG_BATCH_SIZE }} --max-prefill-tokens ${{ variables.AGG_MAX_NUM_TOKENS }} --enable-mixed-chunk --expert-parallel-size ${{ variables.AGG_EP_SIZE }} --cuda-graph-bs ${{ variables.AGG_CUDA_GRAPH_BS }} --moe-runner-backend deepep_moe --trust-remote-code --disable-flashinfer-autotune --speculative-algorithm ${{ variables.AGG_SPECULATIVE_ALGORITHM }} --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --kv-cache-dtype ${{ variables.KV_CACHE_DTYPE }} ${{ variables.AGG_ENABLE_ATTENTION_DP }} \
+        --tensor-parallel-size ${{ variables.AGG_TP_SIZE }} --pipeline-parallel-size ${{ variables.AGG_PP_SIZE }} --data-parallel-size ${{ variables.AGG_DP_SIZE }} --max-running-requests ${{ variables.AGG_BATCH_SIZE }} --max-prefill-tokens ${{ variables.AGG_MAX_NUM_TOKENS }} --enable-mixed-chunk --expert-parallel-size ${{ variables.AGG_EP_SIZE }} --cuda-graph-bs ${{ variables.AGG_CUDA_GRAPH_BS }} --trust-remote-code --disable-flashinfer-autotune --speculative-algorithm ${{ variables.AGG_SPECULATIVE_ALGORITHM }} --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --kv-cache-dtype ${{ variables.KV_CACHE_DTYPE }} ${{ variables.AGG_ENABLE_ATTENTION_DP }} \
         --host 0.0.0.0 ${EXTRA_AGG_ARGS}
     resources:
       gpus:

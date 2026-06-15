@@ -11,8 +11,8 @@
 #     on etshen/refactor-generator branch (§9 hardware-level silicon facts).
 #   - shared_memory: standard values from k8s deployment baseline tests and guard rails.
 #   - moe_backend: per design doc §9.3 (CUTLASS on Hopper sm90; WIDEEP on Blackwell sm100/GB200;
-#     sgLang uses deepep_moe for wideep mode — see webapp/events/event_fn.py and
-#     cli/exps/deepseek_wideep_trtllm.yaml).
+#     sglang deepep_moe is a Blackwell/wide-EP selection only — see webapp/events/event_fn.py
+#     moe_backend="deepep_moe" when enable_wideep+sglang, cli/exps/deepseek_wideep_trtllm.yaml).
 #
 # SCOPE: hardware-only facts. No NIC names, storage classes, or cluster secrets.
 
@@ -36,8 +36,8 @@ profiles:
       # Hopper (sm90): CUTLASS is the recommended TRT-LLM MoE kernel.
       # Source: extra_engine_args templates default to CUTLASS; no WIDEEP data collected for H100.
       trtllm: CUTLASS
-      # SGLang: deepep_moe is the default MoE runner for wideep mode on any silicon.
-      sglang: deepep_moe
+      # SGLang: deepep_moe is a Blackwell/wide-EP selection (enable_wideep+sglang path).
+      # Not set on Hopper — deepep_moe requires sm100+ wide-EP fabric.
 
   # ---------------------------------------------------------------------------
   # H200 SXM  —  Hopper  sm90
@@ -60,8 +60,9 @@ profiles:
       # for H200 is present in systems/data/h200_sxm/trtllm/ but CUTLASS is the
       # correct default selection for this silicon generation.
       trtllm: CUTLASS
-      # SGLang: deepep_moe is the default MoE runner (see webapp/events/event_fn.py)
-      sglang: deepep_moe
+      # SGLang: deepep_moe is a Blackwell/wide-EP selection (enable_wideep+sglang path,
+      # source: webapp/events/event_fn.py moe_backend="deepep_moe" when enable_wideep+sglang).
+      # Not set on Hopper — deepep_moe requires sm100+ wide-EP fabric.
 
   # ---------------------------------------------------------------------------
   # B200 SXM  —  Blackwell  sm100
