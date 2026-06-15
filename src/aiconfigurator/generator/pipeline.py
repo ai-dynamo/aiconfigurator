@@ -9,11 +9,16 @@ phases replace the render step with typed builders; the seam stays here.
 from __future__ import annotations
 
 import copy
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from .facts.request_resolution import resolve_facts_for_request
+from .facts.resolve import ResolvedFacts
 from .ir import Component, DeploymentIR
 from .rendering import render_backend_templates
+
+logger = logging.getLogger(__name__)
 
 _FRONTEND_NAME = {"vllm": "Frontend", "sglang": "Frontend", "trtllm": "Frontend"}
 _WORKER_NAME = {"vllm": "VllmWorker", "sglang": "SglangWorker", "trtllm": "TrtllmWorker"}
@@ -23,6 +28,7 @@ _WORKER_NAME = {"vllm": "VllmWorker", "sglang": "SglangWorker", "trtllm": "Trtll
 class PipelineResult:
     artifacts: dict[str, str]
     ir: DeploymentIR
+    facts: ResolvedFacts | None = None
 
 
 def _build_ir(params: dict[str, Any], backend: str, backend_version: str | None) -> DeploymentIR:
@@ -61,9 +67,19 @@ def run_pipeline(
     # protected. This makes run_pipeline safe to call repeatedly on shared
     # params (e.g. test fixtures) without divergence.
     params = copy.deepcopy(params)
+
+    # Resolve request -> facts (Phase 4a: resolved and threaded onto the result,
+    # but APPLIED NOWHERE — render output is unchanged). Resolution must never
+    # break generation, so any failure degrades to facts=None.
+    try:
+        facts = resolve_facts_for_request(params, backend, backend_version)
+    except Exception:  # noqa: BLE001 - resolution is best-effort, never fatal
+        logger.warning("Fact resolution failed; continuing without facts.", exc_info=True)
+        facts = None
+
     ir = _build_ir(params, backend, backend_version)
     artifacts = render_backend_templates(
         params, backend, templates_dir, backend_version,
         deployment_target=deployment_target or "dynamo-j2",
     )
-    return PipelineResult(artifacts=artifacts, ir=ir)
+    return PipelineResult(artifacts=artifacts, ir=ir, facts=facts)
