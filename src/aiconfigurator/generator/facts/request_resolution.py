@@ -99,6 +99,23 @@ def _system_name(params: dict[str, Any]) -> str | None:
     return None
 
 
+def _transport(params: dict[str, Any]) -> str:
+    """Extract the transport profile id from the params dict.
+
+    Mirrors :func:`_system_name`: scans the same sections for a ``transport``
+    key and returns the first non-empty value found. Falls back to
+    :data:`_DEFAULT_TRANSPORT` ("nvlink") when the request specifies none, so
+    existing nvlink behavior is unchanged.
+    """
+    for section in _SYSTEM_SECTIONS:
+        sec = params.get(section)
+        if isinstance(sec, dict):
+            value = sec.get("transport")
+            if value:
+                return value
+    return _DEFAULT_TRANSPORT
+
+
 def resolve_facts_for_request(
     params: dict[str, Any],
     backend: str,
@@ -115,6 +132,7 @@ def resolve_facts_for_request(
         return None
 
     hardware = hardware_key_for_system(system_name)
+    transport = _transport(params)
     model_path = (params.get("ServiceConfig") or {}).get("model_path")
     model_profile_id = model_profile_for_path(model_path)
     version = dynamo_version or ""
@@ -134,7 +152,7 @@ def resolve_facts_for_request(
             resolve_facts(
                 model_profile_id=model_profile_id,
                 hardware=hardware,
-                transport=_DEFAULT_TRANSPORT,
+                transport=transport,
                 dynamo_version=version,
                 backend=backend,
             ),
@@ -145,7 +163,7 @@ def resolve_facts_for_request(
     facts = resolve_facts(
         model_profile_id=model_profile_id,
         hardware=hardware,
-        transport=_DEFAULT_TRANSPORT,
+        transport=transport,
         dynamo_version=pivot or version,
         backend=backend,
     )

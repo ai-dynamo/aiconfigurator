@@ -1,0 +1,91 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen-qwen3-30b-a3b-agg
+  namespace: dynamo
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          imagePullPolicy: IfNotPresent
+    VllmWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 8
+      resources:
+        limits:
+          gpu: '1'
+      sharedMemory:
+        size: 64Gi
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          workingDir: /workspace/examples/backends/vllm
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-30B-A3B
+          - --tensor-parallel-size
+          - '1'
+          - --pipeline-parallel-size
+          - '1'
+          - --data-parallel-size
+          - '1'
+          - --max-model-len
+          - '6500'
+          - --max-num-seqs
+          - '512'
+          - --max-num-batched-tokens
+          - '6012'
+          env:
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'
+          - name: NCCL_MNNVL_ENABLE
+            value: '1'
+          - name: NCCL_NVLS_ENABLE
+            value: '1'
+          - name: NCCL_P2P_LEVEL
+            value: NVL
+          - name: UCX_CUDA_IPC_ENABLE_MNNVL
+            value: y
+          - name: VLLM_USE_NCCL_SYMM_MEM
+            value: '1'
+          - name: UCX_MEMTYPE_CACHE
+            value: n
+          - name: UCX_TLS
+            value: cuda_copy,cuda_ipc,tcp
+          - name: UCX_LOG_LEVEL
+            value: error
+          - name: NIXL_LOG_LEVEL
+            value: ERROR

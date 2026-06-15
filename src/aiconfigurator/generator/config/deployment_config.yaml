@@ -76,6 +76,9 @@ inputs:
   - key: K8sConfig.k8s_image_pull_secret
     required: false
     default: ""
+  - key: K8sConfig.transport
+    required: false
+    default: "nvlink"
   - key: K8sConfig.k8s_engine_mode
     required: false
     default: "inline"

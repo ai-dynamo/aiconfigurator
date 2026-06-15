@@ -25,14 +25,18 @@ def _make_params(
     mode: str = "agg",
     total_gpus: int = 8,
     system_name: str = "h200_sxm",
+    transport: str | None = None,
 ) -> dict[str, Any]:
+    k8s_overrides: dict[str, Any] = {"k8s_namespace": "dynamo"}
+    if transport is not None:
+        k8s_overrides["transport"] = transport
     return build_naive_generator_params(
         model_name=model_name,
         total_gpus=total_gpus,
         system_name=system_name,
         backend_name=backend_name,
         mode=mode,
-        generator_overrides={"K8sConfig": {"k8s_namespace": "dynamo"}},
+        generator_overrides={"K8sConfig": k8s_overrides},
     )
 
 
@@ -106,5 +110,12 @@ CANARY_CASES: list[CanaryCase] = [
         backend="trtllm",
         backend_version="1.3.0rc14",
         params=_make_params("deepseek-ai/DeepSeek-V4-Pro", "trtllm", mode="disagg", total_gpus=_TOTAL_GPUS, system_name="gb200"),
+    ),
+    # Transport selector: ib transport injects UCX_* env into worker pods.
+    CanaryCase(
+        name="qwen_moe_vllm_gb200_ib",
+        backend="vllm",
+        backend_version="0.20.1",
+        params=_make_params(_MOE_MODEL, "vllm", mode="agg", total_gpus=_TOTAL_GPUS, system_name="gb200", transport="ib"),
     ),
 ]
