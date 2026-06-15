@@ -23,11 +23,19 @@ from typing import Any
 from .dgd_model import DGD, ConfigMapDoc, DGDService, ExtraPodSpec, MainContainer
 
 
-def build_dgd(context: dict[str, Any], backend: str) -> list[Any]:
+def build_dgd(
+    context: dict[str, Any], backend: str, resolved_facts: Any = None
+) -> list[Any]:
     """Build the list of typed K8s documents for ``backend`` from a render context.
 
     Document order matches the template stream order (trtllm emits the engine
     ConfigMap before the DGD when ``k8s_engine_mode == 'configmap'``).
+
+    ``resolved_facts`` is the optional ``ResolvedFacts`` for the request (typed
+    ``Any`` to avoid an import cycle). It is threaded through to each per-backend
+    ``_populate_<backend>`` but NOT yet read or emitted from — wiring only, so
+    output stays byte-identical. Defaults to ``None`` to preserve every existing
+    caller.
     """
     populate = {
         "vllm": _populate_vllm,
@@ -36,7 +44,7 @@ def build_dgd(context: dict[str, Any], backend: str) -> list[Any]:
     }.get(backend)
     if populate is None:
         raise ValueError(f"No typed K8s builder for backend: {backend}")
-    return populate(context)
+    return populate(context, resolved_facts=resolved_facts)
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +52,7 @@ def build_dgd(context: dict[str, Any], backend: str) -> list[Any]:
 # ---------------------------------------------------------------------------
 
 
-def _populate_vllm(context: dict[str, Any]) -> list[Any]:
+def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[Any]:
     k8s = context.get("K8sConfig", {}) or {}
     dyn = context.get("DynConfig", {}) or {}
     svc_cfg = context.get("ServiceConfig", {}) or {}
@@ -197,7 +205,7 @@ def _populate_vllm(context: dict[str, Any]) -> list[Any]:
 # ---------------------------------------------------------------------------
 
 
-def _populate_sglang(context: dict[str, Any]) -> list[Any]:
+def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> list[Any]:
     k8s = context.get("K8sConfig", {}) or {}
     dyn = context.get("DynConfig", {}) or {}
     svc_cfg = context.get("ServiceConfig", {}) or {}
@@ -339,7 +347,7 @@ _TRTLLM_ENGINE_CM_NAME = "engine-configs"
 _TRTLLM_ENGINE_MOUNT_PATH = "/workspace/engine_configs"
 
 
-def _populate_trtllm(context: dict[str, Any]) -> list[Any]:
+def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> list[Any]:
     k8s = context.get("K8sConfig", {}) or {}
     dyn = context.get("DynConfig", {}) or {}
     svc_cfg = context.get("ServiceConfig", {}) or {}

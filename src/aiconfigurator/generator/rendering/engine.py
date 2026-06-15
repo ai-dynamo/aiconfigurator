@@ -672,7 +672,9 @@ def render_backend_templates(
                 _context_sink(k8s_context)
             from aiconfigurator.generator.builders.k8s_builder import build_dgd
             from aiconfigurator.generator.builders.dgd_model import dgd_documents_to_yaml
-            rendered_templates["k8s_deploy.yaml"] = dgd_documents_to_yaml(build_dgd(k8s_context, backend))
+            rendered_templates["k8s_deploy.yaml"] = dgd_documents_to_yaml(
+                build_dgd(k8s_context, backend, resolved_facts=resolved_facts)
+            )
         except Exception as e:
             logger.warning(f"Failed to build k8s_deploy.yaml: {e}")
 
