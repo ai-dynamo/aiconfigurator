@@ -344,14 +344,14 @@ def run_moe_torch(
     model_name,
     distributed="power_law",
     power_law_alpha=0.0,
-    *,
-    perf_filename,
-    device="cuda:0",
     shared_expert_inter_size: int = 0,
     max_model_len: int | None = None,
     max_num_seqs: int | None = None,
     max_num_batched_tokens: int | None = None,
     use_cuda_graph: bool = True,
+    *,
+    perf_filename,
+    device="cuda:0",
 ):
     """Run vLLM MoE performance benchmarking"""
     torch.cuda.set_device(device)
@@ -696,9 +696,9 @@ def run_moe_torch(
                     for _ in range(num_iter)
                 ]
             elif distributed == "sampled_zipf":
-                actual_logits = sampled_zipf_logits(num_tokens, num_experts, topk, power_law_alpha).to(
-                    logits_dtype
-                ).to(device)
+                actual_logits = (
+                    sampled_zipf_logits(num_tokens, num_experts, topk, power_law_alpha).to(logits_dtype).to(device)
+                )
             elif distributed == "balanced":
                 actual_logits = balanced_logits(num_tokens, num_experts, topk).to(logits_dtype).to(device)
             else:
