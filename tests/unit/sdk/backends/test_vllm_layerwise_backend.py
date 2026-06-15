@@ -811,6 +811,110 @@ def test_mixed_step_uses_aggregate_context_tokens(monkeypatch) -> None:
     }
 
 
+def test_mixed_step_falls_back_to_aggregate_context_when_batched_shape_is_missing(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+    calls = []
+
+    def _context_step(model, database, runtime_config, *, ctx_tokens, ctx_kv_tokens=0, ctx_requests=1):
+        del model, database, runtime_config
+        calls.append((ctx_tokens, ctx_kv_tokens, ctx_requests))
+        if ctx_requests == 2:
+            raise PerfDataNotAvailableError("missing batched context grid")
+        return (
+            {"context_layerwise": 5.0, "context_tp_allreduce": 0.75},
+            {"context_layerwise": 1.0, "context_tp_allreduce": 0.0},
+            {"context_layerwise": "silicon", "context_tp_allreduce": "silicon"},
+        )
+
+    def _decode_step(model, database, runtime_config, *, batch_size, past_kv):
+        del model, database, runtime_config
+        assert (batch_size, past_kv) == (4, 12)
+        return (
+            {"generation_layerwise": 2.25},
+            {"generation_layerwise": 0.25},
+            {"generation_layerwise": "silicon"},
+        )
+
+    monkeypatch.setattr(backend, "_get_context_step_latency", _context_step)
+    monkeypatch.setattr(backend, "_get_decode_step_latency", _decode_step)
+
+    latency_ms, energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _Model(),
+        object(),
+        RuntimeConfig(),
+        ctx_tokens=10,
+        gen_tokens=4,
+        isl=8,
+        osl=8,
+        prefix=1,
+        ctx_requests=2,
+    )
+
+    assert calls == [(10, 2, 2), (10, 1, 1)]
+    assert latency_ms == pytest.approx(5.75)
+    assert energy_wms == pytest.approx(1.25)
+    assert per_ops["mixed_layerwise_context_combined"] == pytest.approx(5.0)
+    assert per_ops["mixed_layerwise_context_tp_allreduce"] == pytest.approx(0.75)
+
+
+def test_mixed_step_moe_falls_back_to_per_request_context_when_batched_shape_is_missing(monkeypatch) -> None:
+    from aiconfigurator.sdk.backends import vllm_backend
+
+    class _MoeModel(_Model):
+        _topk = 2
+        _num_experts = 16
+
+    backend = VLLMBackend()
+    monkeypatch.setattr(vllm_backend, "_USE_LAYERWISE", True)
+    calls = []
+
+    def _context_step(model, database, runtime_config, *, ctx_tokens, ctx_kv_tokens=0, ctx_requests=1):
+        del model, database, runtime_config
+        calls.append((ctx_tokens, ctx_kv_tokens, ctx_requests))
+        if ctx_requests == 2:
+            raise PerfDataNotAvailableError("missing batched context grid")
+        if (ctx_tokens, ctx_kv_tokens, ctx_requests) != (5, 1, 1):
+            raise AssertionError("MoE mixed fallback should try per-request context before aggregate context")
+        return (
+            {"context_layerwise": 3.0, "context_tp_allreduce": 0.5},
+            {"context_layerwise": 0.5, "context_tp_allreduce": 0.0},
+            {"context_layerwise": "silicon", "context_tp_allreduce": "silicon"},
+        )
+
+    def _decode_step(model, database, runtime_config, *, batch_size, past_kv):
+        del model, database, runtime_config
+        assert (batch_size, past_kv) == (4, 12)
+        return (
+            {"generation_layerwise": 2.25},
+            {"generation_layerwise": 0.25},
+            {"generation_layerwise": "silicon"},
+        )
+
+    monkeypatch.setattr(backend, "_get_context_step_latency", _context_step)
+    monkeypatch.setattr(backend, "_get_decode_step_latency", _decode_step)
+
+    latency_ms, energy_wms, per_ops, _sources = backend._get_mix_step_latency(
+        _MoeModel(),
+        object(),
+        RuntimeConfig(),
+        ctx_tokens=10,
+        gen_tokens=4,
+        isl=8,
+        osl=8,
+        prefix=1,
+        ctx_requests=2,
+    )
+
+    assert calls == [(10, 2, 2), (5, 1, 1)]
+    assert latency_ms == pytest.approx(3.5)
+    assert energy_wms == pytest.approx(0.75)
+    assert per_ops["mixed_layerwise_context_combined"] == pytest.approx(3.0)
+    assert per_ops["mixed_layerwise_context_tp_allreduce"] == pytest.approx(0.5)
+
+
 def test_mixed_step_uses_aggregate_context_for_nonuniform_fpm_rows(monkeypatch) -> None:
     from aiconfigurator.sdk.backends import vllm_backend
 

@@ -173,15 +173,59 @@ Context new-token rows use `1,16,128,...`; context and decode share the same
 nonzero past-KV grid up to 32k tokens, with context adding `0` for no-prefix
 measurements.
 
-TODO:
+## Current AIC-vs-FPM Baseline
 
-- Extend dataset-shaped workloads into MoE layerwise routing validation.
-  FPM already defaults to OpenAssistant/oasst1-ordered, large-scaled ISL/OSL
-  shapes with deterministic random token IDs; layerwise still needs a
-  comparable model-agnostic routing strategy for MoE blocks.
-- Validate prefix-cache decode as the normal MoE decode path. `live_decode`
-  remains only a diagnostic path because it is substantially slower and makes
-  the collector harder to scale.
+As of 2026-06-15, the default summary command compares the full one-GPU
+layerwise simulation CSV against the curated FPM golden runs:
+
+```bash
+uv run python collector/layerwise/diagnostics/compare_aic_layerwise_fpm_summary.py \
+  --layerwise runs/layerwise_full_vllm0201_20260615_045248/layerwise.csv
+```
+
+Current aggregate MAPE across 865 matched rows is:
+
+```text
+all      29.69%
+ctx      22.09%
+gen      25.97%
+mixed    30.33%
+```
+
+To inspect whether error is concentrated at particular scheduler shapes, append
+`--shape-breakdown aggregate`. The breakdown groups rows by phase, token bucket,
+and batch bucket; use `--shape-breakdown-bins exact` for exact shape keys or
+`--shape-breakdown-min-rows N` to hide sparse buckets.
+
+Notable case-level outliers:
+
+- `dsv4_tp4_ep4`: decode MAPE is `192.02%`, while context is `30.79%` and
+  mixed is `26.33%`. This is the highest-priority blocker.
+- `qwen36_tp1_ep1`: all-row MAPE is `59.06%`, driven by `60.59%` mixed error.
+- Qwen3.6 MoE context is still high in several cases, especially
+  `qwen36_tp4_ep1` at `46.07%`, `qwen36_tp4_ep4` at `38.18%`, and the
+  TP/EP gap-fill cases in the `20-27%` context range.
+- Qwen3-32B dense decode is in good shape (`1.09-7.40%`), and its remaining
+  error is mostly context/mixed.
+
+## TODO
+
+- Fix the DeepSeek-V4-Flash `tp4_ep4` simulated decode path. The canonical
+  layerwise goal remains one-GPU rank-equivalent simulation, not physical-TP
+  collection. Physical TP probes are useful validation artifacts only. The
+  layerwise collector/AIC path needs to produce sane one-GPU equivalent decode
+  rows for `tp4/ep4`, then compose them with the modeled communication and MoE
+  overhead. Track this against the `dsv4_tp4_ep4` `192.02%` decode outlier.
+- Improve mixed-step modeling for real FPM workload rows. Current aggregate
+  mixed MAPE is `30.33%`, with Qwen3.6 MoE mixed rows dominating the worst
+  cases. Keep reporting workload-mode accuracy separately from clean/pathology
+  filtered diagnostics so partial scheduler ticks and continuation-tail rows do
+  not hide the real serving-workload gap.
+- Reduce Qwen3.6 MoE context error. Prioritize batched context and TP/EP
+  scheduler-envelope parity for the cases above `35%` context MAPE before
+  broadening the grid. In particular, verify that the one-GPU patched config,
+  context batch shape, prefix length, and `max_num_batched_tokens` match the
+  FPM deployment envelope.
 - Replace the current empirical MoE EP communication addend with a
   backend-aware model. The current AIC path treats context as one EP exchange
   and decode/op fallback as two EP exchanges; this matched a small validation
@@ -192,3 +236,10 @@ TODO:
   `--all2all-backend`, using NCCL `all_gather` and `reduce_scatter` payloads
   for the default backend and backend-specific perf data/fallbacks for
   DeepEP/FlashInfer/NIXL/MoRI.
+- Extend dataset-shaped workloads into MoE layerwise routing validation. FPM
+  already defaults to OpenAssistant/oasst1-ordered, large-scaled ISL/OSL shapes
+  with deterministic random token IDs; layerwise still needs a comparable
+  model-agnostic routing strategy for MoE blocks.
+- Keep prefix-cache decode as the normal MoE decode path. `live_decode`
+  remains only a diagnostic path because it is substantially slower and makes
+  the collector harder to scale.

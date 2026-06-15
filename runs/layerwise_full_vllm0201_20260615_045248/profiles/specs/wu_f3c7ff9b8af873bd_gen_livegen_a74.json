@@ -1,0 +1,531 @@
+{
+  "attempt_id": 74,
+  "cache_block_size": null,
+  "ctx_measured_runs": 6,
+  "ctx_warmup_runs": 1,
+  "datapoints": [
+    {
+      "batch_size": 1,
+      "new_tokens": 1,
+      "past_kv": 8192,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 1,
+      "new_tokens": 1,
+      "past_kv": 16384,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 1,
+      "new_tokens": 1,
+      "past_kv": 32768,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 2,
+      "new_tokens": 1,
+      "past_kv": 8192,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 2,
+      "new_tokens": 1,
+      "past_kv": 16384,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 2,
+      "new_tokens": 1,
+      "past_kv": 32768,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 4,
+      "new_tokens": 1,
+      "past_kv": 8192,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 4,
+      "new_tokens": 1,
+      "past_kv": 16384,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 4,
+      "new_tokens": 1,
+      "past_kv": 32768,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 8,
+      "new_tokens": 1,
+      "past_kv": 1,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 8,
+      "new_tokens": 1,
+      "past_kv": 16,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 8,
+      "new_tokens": 1,
+      "past_kv": 128,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 8,
+      "new_tokens": 1,
+      "past_kv": 256,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 8,
+      "new_tokens": 1,
+      "past_kv": 512,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 8,
+      "new_tokens": 1,
+      "past_kv": 1024,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 8,
+      "new_tokens": 1,
+      "past_kv": 2048,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 8,
+      "new_tokens": 1,
+      "past_kv": 4096,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 8,
+      "new_tokens": 1,
+      "past_kv": 8192,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 8,
+      "new_tokens": 1,
+      "past_kv": 16384,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 8,
+      "new_tokens": 1,
+      "past_kv": 32768,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 16,
+      "new_tokens": 1,
+      "past_kv": 1,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 16,
+      "new_tokens": 1,
+      "past_kv": 16,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 16,
+      "new_tokens": 1,
+      "past_kv": 128,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 16,
+      "new_tokens": 1,
+      "past_kv": 256,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 16,
+      "new_tokens": 1,
+      "past_kv": 512,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 16,
+      "new_tokens": 1,
+      "past_kv": 1024,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 16,
+      "new_tokens": 1,
+      "past_kv": 2048,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 16,
+      "new_tokens": 1,
+      "past_kv": 4096,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 16,
+      "new_tokens": 1,
+      "past_kv": 8192,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 16,
+      "new_tokens": 1,
+      "past_kv": 16384,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 16,
+      "new_tokens": 1,
+      "past_kv": 32768,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 32,
+      "new_tokens": 1,
+      "past_kv": 1,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 32,
+      "new_tokens": 1,
+      "past_kv": 16,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 32,
+      "new_tokens": 1,
+      "past_kv": 128,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 32,
+      "new_tokens": 1,
+      "past_kv": 256,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 32,
+      "new_tokens": 1,
+      "past_kv": 512,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 32,
+      "new_tokens": 1,
+      "past_kv": 1024,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 32,
+      "new_tokens": 1,
+      "past_kv": 2048,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 32,
+      "new_tokens": 1,
+      "past_kv": 4096,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 32,
+      "new_tokens": 1,
+      "past_kv": 8192,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 32,
+      "new_tokens": 1,
+      "past_kv": 16384,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 32,
+      "new_tokens": 1,
+      "past_kv": 32768,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 64,
+      "new_tokens": 1,
+      "past_kv": 1,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 64,
+      "new_tokens": 1,
+      "past_kv": 16,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 64,
+      "new_tokens": 1,
+      "past_kv": 128,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 64,
+      "new_tokens": 1,
+      "past_kv": 256,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 64,
+      "new_tokens": 1,
+      "past_kv": 512,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 64,
+      "new_tokens": 1,
+      "past_kv": 1024,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 64,
+      "new_tokens": 1,
+      "past_kv": 2048,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 64,
+      "new_tokens": 1,
+      "past_kv": 4096,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 64,
+      "new_tokens": 1,
+      "past_kv": 8192,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 64,
+      "new_tokens": 1,
+      "past_kv": 16384,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 64,
+      "new_tokens": 1,
+      "past_kv": 32768,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 128,
+      "new_tokens": 1,
+      "past_kv": 1,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 128,
+      "new_tokens": 1,
+      "past_kv": 16,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 128,
+      "new_tokens": 1,
+      "past_kv": 128,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 128,
+      "new_tokens": 1,
+      "past_kv": 256,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 128,
+      "new_tokens": 1,
+      "past_kv": 512,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 128,
+      "new_tokens": 1,
+      "past_kv": 1024,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 128,
+      "new_tokens": 1,
+      "past_kv": 2048,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 128,
+      "new_tokens": 1,
+      "past_kv": 4096,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 128,
+      "new_tokens": 1,
+      "past_kv": 8192,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 128,
+      "new_tokens": 1,
+      "past_kv": 16384,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 128,
+      "new_tokens": 1,
+      "past_kv": 32768,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 256,
+      "new_tokens": 1,
+      "past_kv": 1,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 256,
+      "new_tokens": 1,
+      "past_kv": 16,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 256,
+      "new_tokens": 1,
+      "past_kv": 128,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 256,
+      "new_tokens": 1,
+      "past_kv": 256,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 256,
+      "new_tokens": 1,
+      "past_kv": 512,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 256,
+      "new_tokens": 1,
+      "past_kv": 1024,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 256,
+      "new_tokens": 1,
+      "past_kv": 2048,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 256,
+      "new_tokens": 1,
+      "past_kv": 4096,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 256,
+      "new_tokens": 1,
+      "past_kv": 8192,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 256,
+      "new_tokens": 1,
+      "past_kv": 16384,
+      "phase": "gen"
+    },
+    {
+      "batch_size": 256,
+      "new_tokens": 1,
+      "past_kv": 32768,
+      "phase": "gen"
+    }
+  ],
+  "enable_layer_patch": true,
+  "enable_layerwise_nvtx_tracing": false,
+  "enable_step_marker": true,
+  "extra_vllm_args": [
+    "--skip-mm-profiling",
+    "--limit-mm-per-prompt",
+    "{\"image\":0,\"video\":0}",
+    "--generation-config",
+    "vllm",
+    "--no-enable-prefix-caching"
+  ],
+  "gen_driver": "prefix_cache",
+  "gen_measured_runs": 6,
+  "gen_warmup_runs": 1,
+  "gpu_memory_utilization": 0.9,
+  "live_step_gen_min_batch_size": 8,
+  "live_step_gen_min_past_kv": 8192,
+  "max_model_len": null,
+  "max_num_batched_tokens": 2048,
+  "max_num_seqs": 256,
+  "metadata_path": "/results/profiles/metadata/wu_f3c7ff9b8af873bd_gen_livegen_a74.json",
+  "model_dir": "/results/config_cache/Qwen_Qwen3.6-35B-A3B_454839449496845d8f71137d",
+  "model_layer_count": 40,
+  "moe_noop": true,
+  "moe_weight_mode": "noop",
+  "nsys_capture": "full",
+  "physical_gpus": 1,
+  "prompt_seed": null,
+  "router_weight_model": null,
+  "status_path": "/results/profiles/status.jsonl",
+  "target_layers": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39
+  ],
+  "work_unit_id": "wu_f3c7ff9b8af873bd_gen_livegen"
+}

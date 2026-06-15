@@ -1,0 +1,951 @@
+run_base=runs/fpm_dsv4_flash_tp1_ep4_dp4_vllm_recipe_safeascii_20260614_035826
++ bash collector/layerwise/fpm_ground_truth/collect_fpm_metrics.sh --model deepseek-ai/DeepSeek-V4-Flash --tp-size 1 --ep-size 4 --run-dir /home/shadeform/aiconfigurator/runs/fpm_dsv4_flash_tp1_ep4_dp4_vllm_recipe_safeascii_20260614_035826 --phases context,decode,mixed --contexts 128,1024,4096 --context-repeats 6 --decode-batches 1,4,16 --decode-past-kv 4096 --decode-osl 8 --decode-repeats 6 --image nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0 --request-allow-failures 0 --prompt-token-mode safe_ascii --include-sweep --real-workload --real-workload-requests 128 --real-workload-concurrency 32 --real-workload-dataset OpenAssistant/oasst1 --real-workload-shape-source scaled_dataset --real-workload-isl-min 100 --real-workload-isl-max 16384 --real-workload-isl-mean 4096.0 --real-workload-osl-min 100 --real-workload-osl-max 4096 --real-workload-osl-mean 1024.0 -- --block-size 256 --compilation-config {"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]} --attention-config {"use_fp4_indexer_cache":true} --tokenizer-mode deepseek_v4 --reasoning-parser deepseek_v4
+[03:58:26] Verifying image 'nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0' uses vLLM 0.20.1
+[03:58:42] Run directory: /home/shadeform/aiconfigurator/runs/fpm_dsv4_flash_tp1_ep4_dp4_vllm_recipe_safeascii_20260614_035826
+[03:58:42] CSV output: /home/shadeform/aiconfigurator/runs/fpm_dsv4_flash_tp1_ep4_dp4_vllm_recipe_safeascii_20260614_035826/fpm_metrics.csv
+[03:58:42] FPM detail CSV: /home/shadeform/aiconfigurator/runs/fpm_dsv4_flash_tp1_ep4_dp4_vllm_recipe_safeascii_20260614_035826/fpm_metrics_detail.csv
+[03:58:42] FPM phase CSV: /home/shadeform/aiconfigurator/runs/fpm_dsv4_flash_tp1_ep4_dp4_vllm_recipe_safeascii_20260614_035826/fpm_metrics_phase.csv
+[03:58:42] Request workload CSV: /home/shadeform/aiconfigurator/runs/fpm_dsv4_flash_tp1_ep4_dp4_vllm_recipe_safeascii_20260614_035826/request_workload.csv
+[03:58:42] vLLM metadata JSON: /home/shadeform/aiconfigurator/runs/fpm_dsv4_flash_tp1_ep4_dp4_vllm_recipe_safeascii_20260614_035826/vllm_metadata.json
+[03:58:42] vLLM effective config JSON: /home/shadeform/aiconfigurator/runs/fpm_dsv4_flash_tp1_ep4_dp4_vllm_recipe_safeascii_20260614_035826/effective_vllm_config.json
+[03:58:42] Measured phases: context,decode,mixed
+[03:58:42] Real workload: dataset=OpenAssistant/oasst1, shape_source=scaled_dataset, requests=128, concurrency=32, ISL=100..16384 mean~4096.0, OSL=100..4096 mean~1024.0
+[03:58:42] Refreshing local file-discovery mtimes every 2s (pid 1808540)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+INFO 06-14 03:58:51 [config.py:775] Detected quantization_config.scale_fmt=ue8m0; enabling UE8M0 for DeepGEMM.
+INFO 06-14 03:59:02 [nixl_utils.py:20] Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a rare memory leak in UCX when using NIXL.
+INFO 06-14 03:59:02 [nixl_utils.py:32] NIXL is available
+INFO 06-14 03:59:02 [model.py:555] Resolved architecture: DeepseekV4ForCausalLM
+INFO 06-14 03:59:02 [model.py:1680] Using max model len 1048576
+INFO 06-14 03:59:03 [cache.py:261] Using fp8 data type to store kv cache. It reduces the GPU memory footprint and boosts the performance. Meanwhile, it may cause accuracy drop without a proper scaling factor
+INFO 06-14 03:59:03 [vllm.py:840] Asynchronous scheduling is enabled.
+INFO 06-14 03:59:03 [vllm.py:850] Disabling NCCL for DP synchronization when using async scheduling.
+INFO 06-14 03:59:03 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'])
+WARNING 06-14 03:59:04 [vllm.py:1248] Auto-initialization of reasoning token IDs failed. Please check whether your reasoning parser has implemented the `reasoning_start_str` and `reasoning_end_str`.
+INFO 06-14 03:59:04 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+[03:59:07] Starting frontend container dynamo-fpm-20260614-035826-1807651-frontend
+405a52dc217b7597c55533bbc49f974382541086e84949705d840d81adbc4762
+[03:59:07] Starting vLLM worker container dynamo-fpm-20260614-035826-1807651-worker
+f0421019537f32212f7b55a505ce98d3d1060bdd59a8dcec26a913e75cbfb533
+[03:59:07] Waiting for frontend health
+[03:59:10] Waiting for model registration (deepseek-ai/DeepSeek-V4-Flash)
+[04:04:24] Starting FPM collector container dynamo-fpm-20260614-035826-1807651-collector
+5acbd34ef2082d6468508b4a732a54c09907dfbfa2c13e253f36f744e2456d9e
+[04:04:26] Sending 18 context variable ISL/OSL requests at concurrency 1 (ISL 128,1024,4096, OSL 1)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=0 status=200 target_isl=128 target_osl=1 prompt_tokens=128 elapsed_seconds=1.697
+request_ok index=1 status=200 target_isl=1024 target_osl=1 prompt_tokens=1024 elapsed_seconds=1.395
+request_ok index=2 status=200 target_isl=4096 target_osl=1 prompt_tokens=4096 elapsed_seconds=0.190
+request_ok index=3 status=200 target_isl=128 target_osl=1 prompt_tokens=128 elapsed_seconds=0.036
+request_ok index=4 status=200 target_isl=1024 target_osl=1 prompt_tokens=1024 elapsed_seconds=0.085
+request_ok index=5 status=200 target_isl=4096 target_osl=1 prompt_tokens=4096 elapsed_seconds=0.128
+request_ok index=6 status=200 target_isl=128 target_osl=1 prompt_tokens=128 elapsed_seconds=0.035
+request_ok index=7 status=200 target_isl=1024 target_osl=1 prompt_tokens=1024 elapsed_seconds=0.085
+request_ok index=8 status=200 target_isl=4096 target_osl=1 prompt_tokens=4096 elapsed_seconds=0.128
+request_ok index=9 status=200 target_isl=128 target_osl=1 prompt_tokens=128 elapsed_seconds=0.036
+request_ok index=10 status=200 target_isl=1024 target_osl=1 prompt_tokens=1024 elapsed_seconds=0.087
+request_ok index=11 status=200 target_isl=4096 target_osl=1 prompt_tokens=4096 elapsed_seconds=0.128
+request_ok index=12 status=200 target_isl=128 target_osl=1 prompt_tokens=128 elapsed_seconds=0.035
+request_ok index=13 status=200 target_isl=1024 target_osl=1 prompt_tokens=1024 elapsed_seconds=0.077
+request_ok index=14 status=200 target_isl=4096 target_osl=1 prompt_tokens=4096 elapsed_seconds=0.128
+request_ok index=15 status=200 target_isl=128 target_osl=1 prompt_tokens=128 elapsed_seconds=0.035
+request_ok index=16 status=200 target_isl=1024 target_osl=1 prompt_tokens=1024 elapsed_seconds=0.086
+request_ok index=17 status=200 target_isl=4096 target_osl=1 prompt_tokens=4096 elapsed_seconds=0.189
+completed=18/18 failed=0 elapsed_seconds=4.581
+[04:04:36] Sending 1 decode_b1 variable ISL/OSL requests at concurrency 1 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=18 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.390
+completed=1/1 failed=0 elapsed_seconds=0.391
+[04:04:43] Sending 4 decode_b4 variable ISL/OSL requests at concurrency 4 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=19 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.933
+request_ok index=20 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.943
+request_ok index=21 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.942
+request_ok index=22 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.941
+completed=4/4 failed=0 elapsed_seconds=1.946
+[04:04:51] Sending 16 decode_b16 variable ISL/OSL requests at concurrency 16 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=23 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.550
+request_ok index=24 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.562
+request_ok index=26 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.570
+request_ok index=29 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.564
+request_ok index=33 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.560
+request_ok index=32 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.561
+request_ok index=31 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.562
+request_ok index=25 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.583
+request_ok index=35 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.568
+request_ok index=36 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.567
+request_ok index=28 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.578
+request_ok index=37 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.566
+request_ok index=27 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.592
+request_ok index=30 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.588
+request_ok index=38 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.577
+request_ok index=34 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=2.593
+completed=16/16 failed=0 elapsed_seconds=2.612
+[04:04:59] Sending 1 decode_b1 variable ISL/OSL requests at concurrency 1 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=39 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.206
+completed=1/1 failed=0 elapsed_seconds=0.206
+[04:05:06] Sending 4 decode_b4 variable ISL/OSL requests at concurrency 4 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=40 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.442
+request_ok index=42 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.451
+request_ok index=43 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.451
+request_ok index=41 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.453
+completed=4/4 failed=0 elapsed_seconds=0.455
+[04:05:12] Sending 16 decode_b16 variable ISL/OSL requests at concurrency 16 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=44 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.370
+request_ok index=54 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.368
+request_ok index=50 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.375
+request_ok index=56 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.366
+request_ok index=55 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.368
+request_ok index=45 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.383
+request_ok index=51 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.374
+request_ok index=46 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.392
+request_ok index=47 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.391
+request_ok index=59 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.372
+request_ok index=52 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.393
+request_ok index=58 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.384
+request_ok index=53 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.392
+request_ok index=49 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.398
+request_ok index=48 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.399
+request_ok index=57 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.403
+completed=16/16 failed=0 elapsed_seconds=1.425
+[04:05:19] Sending 1 decode_b1 variable ISL/OSL requests at concurrency 1 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=60 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.206
+completed=1/1 failed=0 elapsed_seconds=0.206
+[04:05:25] Sending 4 decode_b4 variable ISL/OSL requests at concurrency 4 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=61 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.395
+request_ok index=62 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.405
+request_ok index=63 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.404
+request_ok index=64 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.403
+completed=4/4 failed=0 elapsed_seconds=0.408
+[04:05:32] Sending 16 decode_b16 variable ISL/OSL requests at concurrency 16 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=65 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.307
+request_ok index=66 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.316
+request_ok index=76 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.313
+request_ok index=69 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.323
+request_ok index=72 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.319
+request_ok index=68 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.326
+request_ok index=67 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.328
+request_ok index=75 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.325
+request_ok index=77 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.322
+request_ok index=74 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.327
+request_ok index=71 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.332
+request_ok index=80 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.319
+request_ok index=79 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.331
+request_ok index=78 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.333
+request_ok index=70 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.345
+request_ok index=73 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.341
+completed=16/16 failed=0 elapsed_seconds=1.356
+[04:05:39] Sending 1 decode_b1 variable ISL/OSL requests at concurrency 1 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=81 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.205
+completed=1/1 failed=0 elapsed_seconds=0.206
+[04:05:45] Sending 4 decode_b4 variable ISL/OSL requests at concurrency 4 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=82 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.389
+request_ok index=85 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.397
+request_ok index=83 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.399
+request_ok index=84 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.398
+completed=4/4 failed=0 elapsed_seconds=0.402
+[04:05:51] Sending 16 decode_b16 variable ISL/OSL requests at concurrency 16 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=86 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.402
+request_ok index=89 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.411
+request_ok index=88 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.413
+request_ok index=96 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.400
+request_ok index=87 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.415
+request_ok index=97 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.409
+request_ok index=94 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.413
+request_ok index=90 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.431
+request_ok index=99 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.419
+request_ok index=100 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.417
+request_ok index=92 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.429
+request_ok index=93 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.428
+request_ok index=91 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.431
+request_ok index=95 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.436
+request_ok index=101 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.427
+request_ok index=98 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.432
+completed=16/16 failed=0 elapsed_seconds=1.452
+[04:05:59] Sending 1 decode_b1 variable ISL/OSL requests at concurrency 1 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=102 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.206
+completed=1/1 failed=0 elapsed_seconds=0.206
+[04:06:05] Sending 4 decode_b4 variable ISL/OSL requests at concurrency 4 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=103 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.380
+request_ok index=104 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.391
+request_ok index=105 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.390
+request_ok index=106 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.388
+completed=4/4 failed=0 elapsed_seconds=0.393
+[04:06:11] Sending 16 decode_b16 variable ISL/OSL requests at concurrency 16 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=107 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.418
+request_ok index=108 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.430
+request_ok index=121 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.410
+request_ok index=112 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.434
+request_ok index=111 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.436
+request_ok index=110 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.440
+request_ok index=114 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.432
+request_ok index=119 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.425
+request_ok index=117 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.438
+request_ok index=115 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.442
+request_ok index=120 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.434
+request_ok index=116 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.441
+request_ok index=113 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.445
+request_ok index=118 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.450
+request_ok index=109 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.464
+request_ok index=122 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.444
+completed=16/16 failed=0 elapsed_seconds=1.469
+[04:06:19] Sending 1 decode_b1 variable ISL/OSL requests at concurrency 1 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=123 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.206
+completed=1/1 failed=0 elapsed_seconds=0.206
+[04:06:25] Sending 4 decode_b4 variable ISL/OSL requests at concurrency 4 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=124 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.465
+request_ok index=126 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.474
+request_ok index=127 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.473
+request_ok index=125 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=0.476
+completed=4/4 failed=0 elapsed_seconds=0.478
+[04:06:31] Sending 16 decode_b16 variable ISL/OSL requests at concurrency 16 (ISL 4096, OSL 8)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=128 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.459
+request_ok index=129 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.471
+request_ok index=133 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.475
+request_ok index=132 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.477
+request_ok index=136 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.471
+request_ok index=135 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.473
+request_ok index=140 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.466
+request_ok index=138 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.480
+request_ok index=131 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.491
+request_ok index=134 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.486
+request_ok index=139 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.478
+request_ok index=141 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.489
+request_ok index=143 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.486
+request_ok index=130 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.506
+request_ok index=137 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.494
+request_ok index=142 status=200 target_isl=4096 target_osl=8 prompt_tokens=4096 elapsed_seconds=1.498
+completed=16/16 failed=0 elapsed_seconds=1.521
+[04:06:39] Sending 64 mixed variable ISL/OSL requests at concurrency 32 (ISL 1024,2048,4096, OSL 32)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+wrote_workload=/work/request_workload.csv
+request_ok index=144 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=1.861
+request_ok index=145 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=2.229
+request_ok index=149 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=2.236
+request_ok index=146 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=2.243
+request_ok index=163 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=2.222
+request_ok index=147 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=2.241
+request_ok index=148 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=2.241
+request_ok index=173 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=2.223
+request_ok index=166 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=2.230
+request_ok index=170 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=2.227
+request_ok index=150 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=2.250
+request_ok index=168 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=2.232
+request_ok index=156 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=2.245
+request_ok index=171 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=2.231
+request_ok index=165 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=2.237
+request_ok index=152 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=2.252
+request_ok index=157 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=2.248
+request_ok index=169 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=2.236
+request_ok index=161 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=2.370
+request_ok index=172 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=2.360
+request_ok index=154 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=2.380
+request_ok index=151 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=2.385
+request_ok index=167 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=2.369
+request_ok index=158 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=2.378
+request_ok index=159 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=2.377
+request_ok index=160 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=2.378
+request_ok index=164 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=2.375
+request_ok index=155 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=2.385
+request_ok index=174 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=2.366
+request_ok index=175 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=2.366
+request_ok index=162 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=2.380
+request_ok index=153 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=2.721
+request_ok index=176 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=1.617
+request_ok index=177 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=1.556
+request_ok index=180 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=1.555
+request_ok index=182 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=1.554
+request_ok index=178 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=1.558
+request_ok index=181 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=1.555
+request_ok index=179 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=1.557
+request_ok index=191 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=1.551
+request_ok index=190 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=1.552
+request_ok index=185 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=1.558
+request_ok index=187 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=1.555
+request_ok index=188 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=1.555
+request_ok index=183 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=1.560
+request_ok index=184 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=1.559
+request_ok index=186 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=1.557
+request_ok index=189 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=1.554
+request_ok index=193 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=1.551
+request_ok index=192 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=1.551
+request_ok index=194 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=1.435
+request_ok index=204 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=1.427
+request_ok index=198 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=1.432
+request_ok index=195 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=1.435
+request_ok index=205 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=1.427
+request_ok index=201 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=1.430
+request_ok index=199 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=1.432
+request_ok index=196 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=1.435
+request_ok index=197 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=1.434
+request_ok index=202 status=200 target_isl=2048 target_osl=32 prompt_tokens=2048 elapsed_seconds=1.430
+request_ok index=203 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=1.430
+request_ok index=200 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=1.442
+request_ok index=206 status=200 target_isl=4096 target_osl=32 prompt_tokens=4096 elapsed_seconds=1.437
+request_ok index=207 status=200 target_isl=1024 target_osl=32 prompt_tokens=1024 elapsed_seconds=1.106
+completed=64/64 failed=0 elapsed_seconds=3.842
+[04:06:49] Sending 128 real-workload requests at concurrency 32 (dataset OpenAssistant/oasst1)
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 12.9.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+[transformers] You are using a model of type `deepseek_v4` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+[transformers] PreTrainedConfig got `key=rope_scaling` in kwargs but hasn't set it as attribute. For RoPE standardization you need to set `self.rope_parameters` in model's config. 
+safe_ascii_prompt_tokens_load_failed model='deepseek-ai/DeepSeek-V4-Flash' error=AttributeError("'PreTrainedConfig' object has no attribute 'max_position_embeddings'")
+safe_ascii_prompt_tokens_loaded_from=tokenizer_json after_error=AttributeError
+prompt_token_mode=safe_ascii candidate_count=71805
+prompt_token_config vocab_size=129280 excluded_token_count=2
+real_workload_shapes source='OpenAssistant/oasst1:scaled_large_shape_distribution' count=128
+wrote_workload=/work/request_workload.csv
+request_ok index=220 status=200 target_isl=155 target_osl=100 prompt_tokens=155 elapsed_seconds=3.861
+request_ok index=228 status=200 target_isl=101 target_osl=100 prompt_tokens=101 elapsed_seconds=3.863
+request_ok index=208 status=200 target_isl=12425 target_osl=103 prompt_tokens=12425 elapsed_seconds=3.915
+request_ok index=226 status=200 target_isl=118 target_osl=100 prompt_tokens=118 elapsed_seconds=3.881
+request_ok index=229 status=200 target_isl=15993 target_osl=100 prompt_tokens=15993 elapsed_seconds=4.068
+request_ok index=223 status=200 target_isl=6142 target_osl=105 prompt_tokens=6142 elapsed_seconds=4.661
+request_ok index=236 status=200 target_isl=4837 target_osl=109 prompt_tokens=4837 elapsed_seconds=4.728
+request_ok index=225 status=200 target_isl=358 target_osl=112 prompt_tokens=358 elapsed_seconds=4.754
+request_ok index=215 status=200 target_isl=16384 target_osl=116 prompt_tokens=16384 elapsed_seconds=4.993
+request_ok index=231 status=200 target_isl=1723 target_osl=120 prompt_tokens=1723 elapsed_seconds=5.157
+request_ok index=212 status=200 target_isl=3595 target_osl=133 prompt_tokens=3595 elapsed_seconds=5.388
+request_ok index=209 status=200 target_isl=2824 target_osl=137 prompt_tokens=2824 elapsed_seconds=5.423
+request_ok index=227 status=200 target_isl=5747 target_osl=172 prompt_tokens=5747 elapsed_seconds=6.153
+request_ok index=217 status=200 target_isl=532 target_osl=179 prompt_tokens=532 elapsed_seconds=6.521
+request_ok index=214 status=200 target_isl=100 target_osl=209 prompt_tokens=100 elapsed_seconds=7.135
+request_ok index=242 status=200 target_isl=293 target_osl=141 prompt_tokens=293 elapsed_seconds=3.903
+request_ok index=251 status=200 target_isl=147 target_osl=110 prompt_tokens=147 elapsed_seconds=2.554
+request_ok index=238 status=200 target_isl=2176 target_osl=280 prompt_tokens=2176 elapsed_seconds=8.531
+request_ok index=218 status=200 target_isl=12101 target_osl=292 prompt_tokens=12101 elapsed_seconds=8.735
+request_ok index=246 status=200 target_isl=313 target_osl=201 prompt_tokens=313 elapsed_seconds=4.352
+request_ok index=233 status=200 target_isl=1413 target_osl=319 prompt_tokens=1413 elapsed_seconds=9.412
+request_ok index=243 status=200 target_isl=3882 target_osl=218 prompt_tokens=3882 elapsed_seconds=5.607
+request_ok index=222 status=200 target_isl=467 target_osl=333 prompt_tokens=467 elapsed_seconds=9.909
+request_ok index=255 status=200 target_isl=1208 target_osl=102 prompt_tokens=1208 elapsed_seconds=2.388
+request_ok index=240 status=200 target_isl=9441 target_osl=268 prompt_tokens=9441 elapsed_seconds=6.682
+request_ok index=256 status=200 target_isl=239 target_osl=155 prompt_tokens=239 elapsed_seconds=3.377
+request_ok index=210 status=200 target_isl=102 target_osl=412 prompt_tokens=102 elapsed_seconds=11.723
+request_ok index=261 status=200 target_isl=8651 target_osl=100 prompt_tokens=8651 elapsed_seconds=2.451
+request_ok index=230 status=200 target_isl=115 target_osl=449 prompt_tokens=115 elapsed_seconds=12.428
+request_ok index=264 status=200 target_isl=9993 target_osl=100 prompt_tokens=9993 elapsed_seconds=2.285
+request_ok index=260 status=200 target_isl=210 target_osl=186 prompt_tokens=210 elapsed_seconds=4.057
+request_ok index=265 status=200 target_isl=11470 target_osl=103 prompt_tokens=11470 elapsed_seconds=2.554
+request_ok index=216 status=200 target_isl=105 target_osl=601 prompt_tokens=105 elapsed_seconds=15.361
+request_ok index=249 status=200 target_isl=197 target_osl=553 prompt_tokens=197 elapsed_seconds=11.436
+request_ok index=250 status=200 target_isl=1895 target_osl=626 prompt_tokens=1895 elapsed_seconds=12.519
+request_ok index=232 status=200 target_isl=4503 target_osl=794 prompt_tokens=4503 elapsed_seconds=18.394
+request_ok index=245 status=200 target_isl=274 target_osl=706 prompt_tokens=274 elapsed_seconds=14.112
+request_ok index=274 status=200 target_isl=1145 target_osl=101 prompt_tokens=1145 elapsed_seconds=1.739
+request_ok index=271 status=200 target_isl=100 target_osl=379 prompt_tokens=100 elapsed_seconds=6.279
+request_ok index=267 status=200 target_isl=6347 target_osl=468 prompt_tokens=6347 elapsed_seconds=8.441
+request_ok index=262 status=200 target_isl=1641 target_osl=577 prompt_tokens=1641 elapsed_seconds=10.834
+request_ok index=268 status=200 target_isl=112 target_osl=531 prompt_tokens=112 elapsed_seconds=9.535
+request_ok index=278 status=200 target_isl=9172 target_osl=347 prompt_tokens=9172 elapsed_seconds=5.691
+request_ok index=280 status=200 target_isl=5943 target_osl=363 prompt_tokens=5943 elapsed_seconds=5.778
+request_ok index=282 status=200 target_isl=4185 target_osl=129 prompt_tokens=4185 elapsed_seconds=2.273
+request_ok index=277 status=200 target_isl=770 target_osl=509 prompt_tokens=770 elapsed_seconds=8.692
+request_ok index=283 status=200 target_isl=4342 target_osl=114 prompt_tokens=4342 elapsed_seconds=2.233
+request_ok index=241 status=200 target_isl=1986 target_osl=1325 prompt_tokens=1986 elapsed_seconds=25.462
+request_ok index=285 status=200 target_isl=642 target_osl=101 prompt_tokens=642 elapsed_seconds=1.853
+request_ok index=287 status=200 target_isl=437 target_osl=100 prompt_tokens=437 elapsed_seconds=1.829
+request_ok index=275 status=200 target_isl=101 target_osl=734 prompt_tokens=101 elapsed_seconds=12.754
+request_ok index=213 status=200 target_isl=10863 target_osl=1622 prompt_tokens=10863 elapsed_seconds=32.815
+request_ok index=290 status=200 target_isl=603 target_osl=101 prompt_tokens=603 elapsed_seconds=2.092
+request_ok index=270 status=200 target_isl=15230 target_osl=1193 prompt_tokens=15230 elapsed_seconds=26.048
+request_ok index=291 status=200 target_isl=14132 target_osl=102 prompt_tokens=14132 elapsed_seconds=7.246
+request_ok index=276 status=200 target_isl=2485 target_osl=960 prompt_tokens=2485 elapsed_seconds=22.109
+request_ok index=293 status=200 target_isl=725 target_osl=106 prompt_tokens=725 elapsed_seconds=2.188
+request_ok index=295 status=200 target_isl=13431 target_osl=100 prompt_tokens=13431 elapsed_seconds=2.160
+request_ok index=296 status=200 target_isl=12754 target_osl=145 prompt_tokens=12754 elapsed_seconds=2.737
+request_ok index=253 status=200 target_isl=2595 target_osl=1788 prompt_tokens=2595 elapsed_seconds=38.401
+request_ok index=299 status=200 target_isl=134 target_osl=107 prompt_tokens=134 elapsed_seconds=1.625
+request_ok index=252 status=200 target_isl=11783 target_osl=1905 prompt_tokens=11783 elapsed_seconds=40.504
+request_ok index=258 status=200 target_isl=174 target_osl=1846 prompt_tokens=174 elapsed_seconds=38.882
+request_ok index=298 status=200 target_isl=13090 target_osl=227 prompt_tokens=13090 elapsed_seconds=3.942
+request_ok index=259 status=200 target_isl=8151 target_osl=1966 prompt_tokens=8151 elapsed_seconds=40.707
+request_ok index=303 status=200 target_isl=128 target_osl=100 prompt_tokens=128 elapsed_seconds=1.585
+request_ok index=221 status=200 target_isl=6987 target_osl=2291 prompt_tokens=6987 elapsed_seconds=50.021
+request_ok index=237 status=200 target_isl=100 target_osl=2360 prompt_tokens=100 elapsed_seconds=51.395
+request_ok index=304 status=200 target_isl=971 target_osl=104 prompt_tokens=971 elapsed_seconds=2.389
+request_ok index=288 status=200 target_isl=10278 target_osl=924 prompt_tokens=10278 elapsed_seconds=22.646
+request_ok index=279 status=200 target_isl=256 target_osl=1518 prompt_tokens=256 elapsed_seconds=32.736
+request_ok index=286 status=200 target_isl=3737 target_osl=1072 prompt_tokens=3737 elapsed_seconds=25.566
+request_ok index=307 status=200 target_isl=13779 target_osl=126 prompt_tokens=13779 elapsed_seconds=3.338
+request_ok index=211 status=200 target_isl=683 target_osl=2504 prompt_tokens=683 elapsed_seconds=55.123
+request_ok index=247 status=200 target_isl=817 target_osl=2431 prompt_tokens=817 elapsed_seconds=51.149
+request_ok index=239 status=200 target_isl=109 target_osl=2578 prompt_tokens=109 elapsed_seconds=56.699
+request_ok index=311 status=200 target_isl=5370 target_osl=118 prompt_tokens=5370 elapsed_seconds=2.677
+request_ok index=272 status=200 target_isl=100 target_osl=2028 prompt_tokens=100 elapsed_seconds=42.323
+request_ok index=312 status=200 target_isl=4668 target_osl=150 prompt_tokens=4668 elapsed_seconds=3.159
+request_ok index=234 status=200 target_isl=1274 target_osl=2654 prompt_tokens=1274 elapsed_seconds=58.205
+request_ok index=313 status=200 target_isl=6555 target_osl=160 prompt_tokens=6555 elapsed_seconds=3.413
+request_ok index=319 status=200 target_isl=1085 target_osl=123 prompt_tokens=1085 elapsed_seconds=2.158
+request_ok index=284 status=200 target_isl=6769 target_osl=1468 prompt_tokens=6769 elapsed_seconds=33.264
+request_ok index=320 status=200 target_isl=140 target_osl=247 prompt_tokens=140 elapsed_seconds=4.036
+request_ok index=235 status=200 target_isl=2707 target_osl=2973 prompt_tokens=2707 elapsed_seconds=63.596
+request_ok index=315 status=200 target_isl=1486 target_osl=488 prompt_tokens=1486 elapsed_seconds=8.528
+request_ok index=322 status=200 target_isl=4031 target_osl=257 prompt_tokens=4031 elapsed_seconds=4.418
+request_ok index=306 status=200 target_isl=8399 target_osl=825 prompt_tokens=8399 elapsed_seconds=16.270
+request_ok index=266 status=200 target_isl=123 target_osl=2731 prompt_tokens=123 elapsed_seconds=55.024
+request_ok index=309 status=200 target_isl=7671 target_osl=763 prompt_tokens=7671 elapsed_seconds=14.324
+request_ok index=305 status=200 target_isl=5188 target_osl=890 prompt_tokens=5188 elapsed_seconds=17.389
+request_ok index=300 status=200 target_isl=3193 target_osl=1152 prompt_tokens=3193 elapsed_seconds=21.703
+request_ok index=317 status=200 target_isl=3458 target_osl=651 prompt_tokens=3458 elapsed_seconds=11.470
+request_ok index=292 status=200 target_isl=866 target_osl=1676 prompt_tokens=866 elapsed_seconds=36.635
+request_ok index=224 status=200 target_isl=1027 target_osl=3319 prompt_tokens=1027 elapsed_seconds=70.083
+request_ok index=327 status=200 target_isl=917 target_osl=237 prompt_tokens=917 elapsed_seconds=4.743
+request_ok index=325 status=200 target_isl=2379 target_osl=305 prompt_tokens=2379 elapsed_seconds=6.124
+request_ok index=330 status=200 target_isl=1562 target_osl=193 prompt_tokens=1562 elapsed_seconds=4.012
+request_ok index=257 status=200 target_isl=100 target_osl=3142 prompt_tokens=100 elapsed_seconds=63.534
+request_ok index=334 status=200 target_isl=14858 target_osl=166 prompt_tokens=14858 elapsed_seconds=2.985
+request_ok index=310 status=200 target_isl=8909 target_osl=1111 prompt_tokens=8909 elapsed_seconds=20.500
+request_ok index=269 status=200 target_isl=5011 target_osl=3057 prompt_tokens=5011 elapsed_seconds=60.856
+request_ok index=332 status=200 target_isl=14492 target_osl=395 prompt_tokens=14492 elapsed_seconds=6.706
+request_ok index=254 status=200 target_isl=1342 target_osl=3502 prompt_tokens=1342 elapsed_seconds=69.211
+request_ok index=263 status=200 target_isl=107 target_osl=3410 prompt_tokens=107 elapsed_seconds=66.834
+request_ok index=335 status=200 target_isl=2079 target_osl=430 prompt_tokens=2079 elapsed_seconds=6.404
+request_ok index=321 status=200 target_isl=103 target_osl=1033 prompt_tokens=103 elapsed_seconds=17.406
+request_ok index=328 status=200 target_isl=498 target_osl=678 prompt_tokens=498 elapsed_seconds=11.178
+request_ok index=316 status=200 target_isl=185 target_osl=1280 prompt_tokens=185 elapsed_seconds=21.602
+request_ok index=281 status=200 target_isl=409 target_osl=2891 prompt_tokens=409 elapsed_seconds=56.686
+request_ok index=314 status=200 target_isl=11164 target_osl=1372 prompt_tokens=11164 elapsed_seconds=23.371
+request_ok index=324 status=200 target_isl=3324 target_osl=996 prompt_tokens=3324 elapsed_seconds=16.396
+request_ok index=219 status=200 target_isl=7908 target_osl=3992 prompt_tokens=7908 elapsed_seconds=80.360
+request_ok index=244 status=200 target_isl=9714 target_osl=3891 prompt_tokens=9714 elapsed_seconds=76.292
+request_ok index=329 status=200 target_isl=2276 target_osl=857 prompt_tokens=2276 elapsed_seconds=13.628
+request_ok index=248 status=200 target_isl=1808 target_osl=4096 prompt_tokens=1808 elapsed_seconds=78.091
+request_ok index=302 status=200 target_isl=2943 target_osl=2092 prompt_tokens=2943 elapsed_seconds=35.707
+request_ok index=273 status=200 target_isl=335 target_osl=3596 prompt_tokens=335 elapsed_seconds=67.218
+request_ok index=301 status=200 target_isl=164 target_osl=2223 prompt_tokens=164 elapsed_seconds=37.543
+request_ok index=318 status=200 target_isl=3067 target_osl=1731 prompt_tokens=3067 elapsed_seconds=27.144
+request_ok index=294 status=200 target_isl=5557 target_osl=2810 prompt_tokens=5557 elapsed_seconds=47.067
+request_ok index=333 status=200 target_isl=224 target_osl=1236 prompt_tokens=224 elapsed_seconds=17.306
+request_ok index=331 status=200 target_isl=7210 target_osl=1419 prompt_tokens=7210 elapsed_seconds=20.158
+request_ok index=326 status=200 target_isl=7438 target_osl=1570 prompt_tokens=7438 elapsed_seconds=22.821
+request_ok index=323 status=200 target_isl=567 target_osl=2157 prompt_tokens=567 elapsed_seconds=30.588
+request_ok index=289 status=200 target_isl=383 target_osl=3791 prompt_tokens=383 elapsed_seconds=64.533
+request_ok index=297 status=200 target_isl=10567 target_osl=3693 prompt_tokens=10567 elapsed_seconds=55.242
+request_ok index=308 status=200 target_isl=15608 target_osl=3230 prompt_tokens=15608 elapsed_seconds=46.548
+completed=128/128 failed=0 elapsed_seconds=98.774
+[04:08:39] Collecting for 3s after requests
+[04:08:42] FPM phase rows written to /home/shadeform/aiconfigurator/runs/fpm_dsv4_flash_tp1_ep4_dp4_vllm_recipe_safeascii_20260614_035826/fpm_metrics_phase.csv
+[04:08:42] Collected 5845 FPM rows at /home/shadeform/aiconfigurator/runs/fpm_dsv4_flash_tp1_ep4_dp4_vllm_recipe_safeascii_20260614_035826/fpm_metrics.csv
+[04:08:42] Phase row counts:
+  context: 34
+  mixed: 66
+  decode: 5745
+[04:08:42] First rows:
+num_context_tokens,num_decode_tokens,latency_ms
+128,0,1667.648
+4096,0,181.676
+1024,0,80.512
+4096,0,114.437
+128,0,32.575
+4096,0,121.645
+128,0,33.744
+1024,0,74.080
+4096,0,114.423
+128,0,32.723
+4096,0,121.307
+[04:08:42] Done

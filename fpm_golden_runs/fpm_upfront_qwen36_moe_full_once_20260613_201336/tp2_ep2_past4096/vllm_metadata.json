@@ -1,0 +1,81 @@
+{
+  "artifact_kind": "fpm",
+  "effective_config": {
+    "attention_config.backend": null,
+    "cache_config.block_size": 16,
+    "cache_config.cache_dtype": "auto",
+    "cache_config.enable_prefix_caching": false,
+    "cache_config.mamba_cache_mode": "none",
+    "compilation_config.backend": "inductor",
+    "compilation_config.cudagraph_mode": "FULL_AND_PIECEWISE",
+    "compilation_config.custom_ops": [
+      "none"
+    ],
+    "compilation_config.mode": "VLLM_COMPILE",
+    "compilation_config.pass_config": {
+      "eliminate_noops": true,
+      "enable_qk_norm_rope_fusion": false,
+      "enable_sp": false,
+      "fi_allreduce_fusion_max_size_mb": null,
+      "fuse_act_padding": null,
+      "fuse_act_quant": false,
+      "fuse_allreduce_rms": true,
+      "fuse_attn_quant": false,
+      "fuse_gemm_comms": false,
+      "fuse_minimax_qk_norm": null,
+      "fuse_mla_dual_rms_norm": null,
+      "fuse_norm_quant": false,
+      "fuse_rope_kvcache": null,
+      "rope_kvcache_fusion_max_token_num": 256,
+      "sp_min_token_num": null
+    },
+    "model_config.dtype": "torch.bfloat16",
+    "model_config.max_model_len": 262144,
+    "optimization_level": "O2",
+    "parallel_config.pipeline_parallel_size": 1,
+    "parallel_config.tensor_parallel_size": 2,
+    "scheduler_config.max_num_batched_tokens": 2048,
+    "scheduler_config.max_num_seqs": 128,
+    "vllm_version": "0.20.1"
+  },
+  "measurement_mode": "deployment-parity",
+  "requested": {
+    "deployment_config": {
+      "disable_prefix_caching": false,
+      "dtype": null,
+      "enforce_eager": false,
+      "extra_args": [
+        "--skip-mm-profiling",
+        "--limit-mm-per-prompt",
+        "{\"image\":0,\"video\":0}",
+        "--generation-config",
+        "vllm",
+        "--enable-expert-parallel"
+      ],
+      "gpu_memory_utilization": 0.9,
+      "kv_cache_dtype": null,
+      "max_model_len": null,
+      "max_num_batched_tokens": null,
+      "max_num_seqs": null,
+      "model": "Qwen/Qwen3.6-35B-A3B",
+      "no_async_scheduling": false,
+      "pipeline_parallel_size": null,
+      "tensor_parallel_size": 2
+    },
+    "engine_args": [
+      "--model",
+      "Qwen/Qwen3.6-35B-A3B",
+      "--gpu-memory-utilization",
+      "0.9",
+      "--tensor-parallel-size",
+      "2",
+      "--skip-mm-profiling",
+      "--limit-mm-per-prompt",
+      "{\"image\":0,\"video\":0}",
+      "--generation-config",
+      "vllm",
+      "--enable-expert-parallel"
+    ]
+  },
+  "vllm_config_hash": "18cc1a49e3031d68"
+}

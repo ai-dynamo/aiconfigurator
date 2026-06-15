@@ -10,15 +10,18 @@ shapes.
 from __future__ import annotations
 
 import argparse
+import atexit
 import csv
 import json
 import math
+import os
 import shutil
 import statistics
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.backends import vllm_backend
@@ -663,6 +666,40 @@ def _write_filtered_rows(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _merge_layerwise_csvs(
+    base_csv: Path,
+    overlay_csvs: Sequence[Path],
+    output_csv: Path,
+    *,
+    clear_overlay_max_num_seqs: bool = False,
+) -> Path:
+    """Append diagnostic layerwise overlay rows to a base layerwise CSV."""
+
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    with base_csv.open(newline="") as base_f:
+        base_reader = csv.DictReader(base_f)
+        if base_reader.fieldnames is None:
+            raise ValueError(f"Layerwise CSV has no header: {base_csv}")
+        fieldnames = list(base_reader.fieldnames)
+        with output_csv.open("w", newline="") as out_f:
+            writer = csv.DictWriter(out_f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in base_reader:
+                writer.writerow({field: row.get(field, "") for field in fieldnames})
+
+            for overlay_csv in overlay_csvs:
+                with overlay_csv.open(newline="") as overlay_f:
+                    overlay_reader = csv.DictReader(overlay_f)
+                    if overlay_reader.fieldnames is None:
+                        raise ValueError(f"Layerwise overlay CSV has no header: {overlay_csv}")
+                    for row in overlay_reader:
+                        output_row = {field: row.get(field, "") for field in fieldnames}
+                        if clear_overlay_max_num_seqs and "max_num_seqs" in output_row:
+                            output_row["max_num_seqs"] = ""
+                        writer.writerow(output_row)
+    return output_csv
+
+
 def _load_fpm_max_num_batched_tokens(
     fpm_csv: Path,
     *,
@@ -725,6 +762,72 @@ def _load_fpm_max_num_batched_tokens(
     if observed_value is None:
         return metadata_value
     return max(metadata_value, observed_value)
+
+
+def _load_layerwise_max_context_tokens(
+    layerwise_csv: Path,
+    *,
+    model_name: str,
+    tp: int,
+    moe_tp: int,
+    ep: int,
+) -> int | None:
+    """Return the largest context-token shape available in a layerwise CSV."""
+
+    model_key = model_name.lower()
+    max_tokens = 0
+    if not layerwise_csv.exists():
+        return None
+    with layerwise_csv.open(newline="") as f:
+        for row in csv.DictReader(f):
+            if str(row.get("model", "")).lower() != model_key:
+                continue
+            if str(row.get("phase", "")).lower() != "ctx":
+                continue
+            try:
+                row_tp = int(float(row.get("attn_tp") or 1))
+                row_moe_tp = int(float(row.get("moe_tp") or 1))
+                row_ep = int(float(row.get("ep") or 1))
+                new_tokens = int(float(row.get("new_tokens") or 0))
+            except (TypeError, ValueError):
+                continue
+            if row_tp != int(tp) or row_moe_tp != int(moe_tp) or row_ep != int(ep):
+                continue
+            max_tokens = max(max_tokens, new_tokens)
+    return max_tokens or None
+
+
+def _resolve_auto_max_num_batched_tokens(
+    *,
+    layerwise_csv: Path,
+    fpm_csv: Path,
+    model_name: str,
+    tp: int,
+    moe_tp: int,
+    ep: int,
+    workload_segment: str | None,
+) -> int | None:
+    """Resolve the context chunk size for layerwise-vs-FPM comparison.
+
+    FPM can report scheduler rows larger than the serialized metadata, while a
+    layerwise CSV may only contain smaller chunk shapes. For AIC prediction we
+    need a chunk size the layerwise database can actually serve; otherwise
+    large mixed rows are silently dropped after failed lookups.
+    """
+
+    fpm_value = _load_fpm_max_num_batched_tokens(fpm_csv, workload_segment=workload_segment)
+    layerwise_value = _load_layerwise_max_context_tokens(
+        layerwise_csv,
+        model_name=model_name,
+        tp=tp,
+        moe_tp=moe_tp,
+        ep=ep,
+    )
+    if fpm_value is None:
+        return layerwise_value
+    if layerwise_value is None:
+        return fpm_value
+    return min(fpm_value, layerwise_value)
 
 
 def _load_fpm_max_num_seqs(fpm_csv: Path) -> int | None:
@@ -1038,6 +1141,62 @@ def _mixed_pathology_reasons(
                     f"latency_ms={latency_ms:.3f},peer_median_ms={peer_median:.3f},"
                     f"ctx_tokens={ctx_tokens:.0f},peer_count={len(peers)}"
                 )
+    return reasons
+
+
+def _mixed_below_decode_floor_reasons(
+    rows: list[dict[str, str]],
+    *,
+    decode_rows: list[dict[str, str]],
+    peer_kv_window: float,
+    peer_batch_window: int,
+    min_peer_count: int,
+    latency_fraction: float,
+) -> dict[str, str]:
+    """Return mixed context tails that are below comparable decode-only ticks."""
+
+    parsed_decode: list[tuple[int, float, float]] = []
+    for row in decode_rows:
+        parsed_decode.append(
+            (
+                int(float(row.get("decode_requests") or 0.0)),
+                float(row.get("mean_decode_kv_tokens") or 0.0),
+                float(row.get("latency_ms") or 0.0),
+            )
+        )
+    if not parsed_decode:
+        return {}
+
+    reasons: dict[str, str] = {}
+    for row in rows:
+        counter_id = str(row.get("counter_id", ""))
+        if not counter_id:
+            continue
+        ctx_tokens = float(row.get("ctx_tokens") or 0.0)
+        ctx_kv_tokens = float(row.get("ctx_kv_tokens") or 0.0)
+        decode_requests = int(float(row.get("decode_requests") or 0.0))
+        mean_decode_kv = float(row.get("mean_decode_kv_tokens") or 0.0)
+        latency_ms = float(row.get("latency_ms") or 0.0)
+        if ctx_tokens <= 0.0 or ctx_kv_tokens <= 0.0 or decode_requests <= 0 or latency_ms <= 0.0:
+            continue
+        decode_peers = [
+            peer_latency
+            for peer_requests, peer_kv, peer_latency in parsed_decode
+            if abs(peer_requests - decode_requests) <= peer_batch_window
+            and abs(peer_kv - mean_decode_kv) <= peer_kv_window
+            and peer_latency > 0.0
+        ]
+        if len(decode_peers) < min_peer_count:
+            continue
+        decode_median = float(statistics.median(decode_peers))
+        if latency_ms < decode_median * latency_fraction:
+            reasons[counter_id] = (
+                "mixed_context_tail_below_decode_floor:"
+                f"latency_ms={latency_ms:.3f},decode_median_ms={decode_median:.3f},"
+                f"ctx_tokens={ctx_tokens:.0f},ctx_kv_tokens={ctx_kv_tokens:.0f},"
+                f"decode_requests={decode_requests},mean_kv={mean_decode_kv:.3f},"
+                f"peer_count={len(decode_peers)}"
+            )
     return reasons
 
 
@@ -1863,6 +2022,7 @@ def compare(
     pathological_decode_latency_factor: float,
     pathological_decode_min_latency_ms: float,
     filter_pathological_mixed: bool,
+    filter_mixed_below_decode_floor: bool,
     filter_nonterminal_mixed_chunks: bool,
     fpm_workload_segment: str | None,
     pathological_mixed_tiny_ctx_tokens: int,
@@ -2044,6 +2204,18 @@ def compare(
                 if filter_pathological_mixed
                 else {}
             )
+            mixed_below_decode_floor_reasons = (
+                _mixed_below_decode_floor_reasons(
+                    mixed_rows,
+                    decode_rows=support_decode_rows,
+                    peer_kv_window=pathological_decode_peer_kv_window,
+                    peer_batch_window=pathological_decode_peer_batch_window,
+                    min_peer_count=pathological_decode_min_peer_count,
+                    latency_fraction=0.95,
+                )
+                if filter_mixed_below_decode_floor
+                else {}
+            )
             pathology_reasons = (
                 _mixed_pathology_reasons(
                     mixed_rows,
@@ -2068,6 +2240,7 @@ def compare(
             }
             blocked_sequence_counter_ids = set(queue_adjacent_mixed_reasons)
             blocked_sequence_counter_ids.update(decode_spike_adjacent_mixed_reasons)
+            blocked_sequence_counter_ids.update(mixed_below_decode_floor_reasons)
             for row_index in pathology_reasons:
                 blocked_sequence_counter_ids.add(str(mixed_rows[row_index].get("counter_id", "")))
             sequence_rows_by_first_counter_id: dict[str, list[dict[str, str]]] = {}
@@ -2179,6 +2352,23 @@ def compare(
                             "phase": fpm_row.get("phase", ""),
                             "counter_id": fpm_row.get("counter_id", ""),
                             "reason": decode_spike_adjacent_reason,
+                            "latency_ms": fpm_row.get("latency_ms", ""),
+                            "ctx_tokens": fpm_row.get("ctx_tokens", ""),
+                            "ctx_requests": fpm_row.get("ctx_requests", ""),
+                            "ctx_kv_tokens": fpm_row.get("ctx_kv_tokens", ""),
+                            "decode_requests": fpm_row.get("decode_requests", ""),
+                            "mean_decode_kv_tokens": fpm_row.get("mean_decode_kv_tokens", ""),
+                        }
+                    )
+                    continue
+                mixed_below_decode_floor_reason = mixed_below_decode_floor_reasons.get(mixed_counter_id)
+                if mixed_below_decode_floor_reason is not None:
+                    filtered_rows.append(
+                        {
+                            "row_index": row_index,
+                            "phase": fpm_row.get("phase", ""),
+                            "counter_id": fpm_row.get("counter_id", ""),
+                            "reason": mixed_below_decode_floor_reason,
                             "latency_ms": fpm_row.get("latency_ms", ""),
                             "ctx_tokens": fpm_row.get("ctx_tokens", ""),
                             "ctx_requests": fpm_row.get("ctx_requests", ""),
@@ -2377,6 +2567,30 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", required=True)
     parser.add_argument("--systems-root", default="src/aiconfigurator/systems")
     parser.add_argument(
+        "--layerwise-overlay",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Append a diagnostic layerwise CSV before comparison. May be repeated. "
+            "Useful for explicit physical TP/EP probe rows without modifying canonical data."
+        ),
+    )
+    parser.add_argument(
+        "--layerwise-overlay-clear-max-num-seqs",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Clear max_num_seqs on overlay rows so default decode lookups can prefer them. "
+            "Use only for diagnostic overlays that intentionally replace the default envelope."
+        ),
+    )
+    parser.add_argument(
+        "--allow-physical-layerwise",
+        action="store_true",
+        help="Set AIC_LAYERWISE_ALLOW_PHYSICAL_GPUS=1 for diagnostic multi-GPU layerwise overlays.",
+    )
+    parser.add_argument(
         "--moe-perf-file",
         type=Path,
         help=(
@@ -2421,7 +2635,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vllm-max-num-batched-tokens",
         default="auto",
-        help="vLLM scheduler max_num_batched_tokens for runtime metadata. Defaults to FPM metadata when present.",
+        help=(
+            "vLLM scheduler max_num_batched_tokens for runtime metadata. "
+            "Defaults to FPM metadata/observed rows capped by the largest context shape in --layerwise."
+        ),
     )
     parser.add_argument(
         "--vllm-max-num-seqs",
@@ -2455,18 +2672,36 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Also compare mixed prefill+decode FPM scheduler rows with _get_mix_step_latency.",
     )
     parser.add_argument(
+        "--mixed-mode",
+        choices=("workload", "clean"),
+        default="workload",
+        help=(
+            "Mixed-row comparison policy. workload compares real FPM mixed scheduler ticks; "
+            "clean applies conservative chunk/pathology filters."
+        ),
+    )
+    parser.add_argument(
         "--filter-pathological-mixed",
         action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override mixed pathology filtering. Defaults off in workload mode and on in clean mode.",
+    )
+    parser.add_argument(
+        "--filter-mixed-below-decode-floor",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Filter mixed FPM rows whose latency is far below nearby large-context mixed rows.",
+        help=(
+            "Filter mixed rows with nonzero context whose measured latency is below comparable decode-only rows. "
+            "This targets FPM continuation-tail accounting artifacts without enabling the broader clean filters."
+        ),
     )
     parser.add_argument(
         "--filter-nonterminal-mixed-chunks",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help=(
             "Filter mixed rows that are intermediate chunked-prefill iterations. "
-            "These rows do not represent complete target iteration shapes."
+            "Defaults off in workload mode and on in clean mode."
         ),
     )
     parser.add_argument("--pathological-mixed-tiny-ctx-tokens", type=int, default=320)
@@ -2494,9 +2729,30 @@ def main() -> None:
     """Run the diagnostic comparison."""
 
     args = _build_parser().parse_args()
+    if args.allow_physical_layerwise:
+        os.environ["AIC_LAYERWISE_ALLOW_PHYSICAL_GPUS"] = "1"
+    for overlay_csv in args.layerwise_overlay:
+        if not overlay_csv.is_file():
+            raise SystemExit(f"Layerwise overlay CSV does not exist: {overlay_csv}")
+    layerwise_csv = args.layerwise
+    if args.layerwise_overlay:
+        temp_dir = Path(tempfile.mkdtemp(prefix="aic_layerwise_overlay_"))
+        atexit.register(shutil.rmtree, temp_dir, ignore_errors=True)
+        layerwise_csv = _merge_layerwise_csvs(
+            args.layerwise,
+            args.layerwise_overlay,
+            temp_dir / "layerwise_with_overlays.csv",
+            clear_overlay_max_num_seqs=args.layerwise_overlay_clear_max_num_seqs,
+        )
+
     if args.vllm_max_num_batched_tokens == "auto":
-        max_num_batched_tokens = _load_fpm_max_num_batched_tokens(
-            args.fpm,
+        max_num_batched_tokens = _resolve_auto_max_num_batched_tokens(
+            layerwise_csv=layerwise_csv,
+            fpm_csv=args.fpm,
+            model_name=args.model,
+            tp=args.tp,
+            moe_tp=args.moe_tp,
+            ep=args.ep,
             workload_segment=args.fpm_workload_segment,
         )
     elif args.vllm_max_num_batched_tokens in ("", "none", "None"):
@@ -2509,11 +2765,17 @@ def main() -> None:
         max_num_seqs = None
     else:
         max_num_seqs = int(args.vllm_max_num_seqs)
+    filter_pathological_mixed = args.filter_pathological_mixed
+    if filter_pathological_mixed is None:
+        filter_pathological_mixed = args.mixed_mode == "clean"
+    filter_nonterminal_mixed_chunks = args.filter_nonterminal_mixed_chunks
+    if filter_nonterminal_mixed_chunks is None:
+        filter_nonterminal_mixed_chunks = args.mixed_mode == "clean"
     filtered_output = args.filtered_output
     if filtered_output is None:
         filtered_output = args.output.with_name(f"{args.output.stem}_filtered_rows{args.output.suffix}")
     compare(
-        layerwise_csv=args.layerwise,
+        layerwise_csv=layerwise_csv,
         fpm_csv=args.fpm,
         model_name=args.model,
         tp=args.tp,
@@ -2542,8 +2804,9 @@ def main() -> None:
         pathological_decode_min_peer_count=args.pathological_decode_min_peer_count,
         pathological_decode_latency_factor=args.pathological_decode_latency_factor,
         pathological_decode_min_latency_ms=args.pathological_decode_min_latency_ms,
-        filter_pathological_mixed=args.filter_pathological_mixed,
-        filter_nonterminal_mixed_chunks=args.filter_nonterminal_mixed_chunks,
+        filter_pathological_mixed=filter_pathological_mixed,
+        filter_mixed_below_decode_floor=args.filter_mixed_below_decode_floor,
+        filter_nonterminal_mixed_chunks=filter_nonterminal_mixed_chunks,
         fpm_workload_segment=args.fpm_workload_segment,
         pathological_mixed_tiny_ctx_tokens=args.pathological_mixed_tiny_ctx_tokens,
         pathological_mixed_min_ctx_tokens=args.pathological_mixed_min_ctx_tokens,

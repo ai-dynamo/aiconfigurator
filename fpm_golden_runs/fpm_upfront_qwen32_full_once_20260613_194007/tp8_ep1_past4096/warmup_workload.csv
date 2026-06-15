@@ -1,0 +1,5 @@
+workload_label,request_index,endpoint,target_isl,target_osl,prompt_tokens,max_tokens,prompt_token_mode,shape_source
+warmup,0,completions,1,1,1,1,random_vocab_excluding_special,explicit_or_logspace_shape_grid
+warmup,1,completions,16,10,16,10,random_vocab_excluding_special,explicit_or_logspace_shape_grid
+warmup,2,completions,256,102,256,102,random_vocab_excluding_special,explicit_or_logspace_shape_grid
+warmup,3,completions,4096,1024,4096,1024,random_vocab_excluding_special,explicit_or_logspace_shape_grid

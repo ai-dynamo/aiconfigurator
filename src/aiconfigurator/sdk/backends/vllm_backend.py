@@ -1809,17 +1809,48 @@ class VLLMBackend(BaseBackend):
             # FPM mixed rows report aggregate scheduled context tokens. Uniform
             # aggregates have enough request-count information to query the
             # corresponding batched context scheduler envelope. Non-uniform
-            # aggregates do not, so price the aggregate token work directly.
-            context_requests = ctx_requests if ctx_tokens % ctx_requests == 0 else 1
-            context_prefix_total = ctx_prefix * context_requests
-            context_latency, context_energy, context_sources = self._get_context_step_latency(
-                model,
-                database,
-                runtime_config,
-                ctx_tokens=ctx_tokens,
-                ctx_kv_tokens=context_prefix_total,
-                ctx_requests=context_requests,
+            # aggregates do not. Some real mixed workload rows are uniform but
+            # exceed the batch-specific layerwise context grid. Dense fallback
+            # conserves total token work; MoE fallback preserves the scheduler
+            # envelope before treating concurrent expert work as serialized.
+            is_moe_model = (
+                int(getattr(model, "_topk", 0) or 0) > 0 and int(getattr(model, "_num_experts", 0) or 0) > 0
             )
+            context_shape_options: list[tuple[int, int, int]] = []
+
+            def _append_context_shape(context_tokens: int, context_prefix_total: int, context_requests: int) -> None:
+                option = (
+                    max(1, int(context_tokens)),
+                    max(0, int(context_prefix_total)),
+                    max(1, int(context_requests)),
+                )
+                if option not in context_shape_options:
+                    context_shape_options.append(option)
+
+            if ctx_tokens % ctx_requests == 0:
+                _append_context_shape(ctx_tokens, ctx_prefix * ctx_requests, ctx_requests)
+            if is_moe_model and ctx_requests > 1:
+                avg_ctx_tokens = (ctx_tokens + ctx_requests - 1) // ctx_requests
+                _append_context_shape(avg_ctx_tokens, ctx_prefix, 1)
+            _append_context_shape(ctx_tokens, ctx_prefix, 1)
+
+            context_error: Exception | None = None
+            for context_tokens, context_prefix_total, context_requests in context_shape_options:
+                try:
+                    context_latency, context_energy, context_sources = self._get_context_step_latency(
+                        model,
+                        database,
+                        runtime_config,
+                        ctx_tokens=context_tokens,
+                        ctx_kv_tokens=context_prefix_total,
+                        ctx_requests=context_requests,
+                    )
+                    break
+                except (AssertionError, KeyError, PerfDataNotAvailableError, ValueError) as exc:
+                    context_error = exc
+            else:
+                assert context_error is not None
+                raise context_error
             context_tp_allreduce_ms = float(context_latency.get("context_tp_allreduce", 0.0))
             context_total_ms = float(sum(context_latency.values()))
             context_combined_ms = max(0.0, context_total_ms - context_tp_allreduce_ms)
