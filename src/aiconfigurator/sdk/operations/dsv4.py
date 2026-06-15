@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, ClassVar, Optional
 import numpy as np
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 
 logger = logging.getLogger(__name__)
@@ -511,35 +512,70 @@ class DeepSeekV4MHCModule(Operation):
         hc_dim = hc_mult * hidden_size
         mix_hc = (2 + hc_mult) * hc_mult
 
-        def get_sol() -> tuple[float, float, float]:
+        def get_sol(nt: int = num_tokens, op_name: str = op) -> tuple[float, float, float]:
             pre_ops = sites * (
-                2 * num_tokens * hc_dim * mix_hc
-                + num_tokens * hc_dim * 3
-                + num_tokens * (hc_mult * hc_mult + 2 * hc_mult) * sinkhorn_iters
-                + 2 * num_tokens * hc_mult * hidden_size
+                2 * nt * hc_dim * mix_hc
+                + nt * hc_dim * 3
+                + nt * (hc_mult * hc_mult + 2 * hc_mult) * sinkhorn_iters
+                + 2 * nt * hc_mult * hidden_size
             )
-            post_ops = sites * (
-                2 * num_tokens * hc_mult * hc_mult * hidden_size + 2 * num_tokens * hc_mult * hidden_size
-            )
-            if op == "pre":
+            post_ops = sites * (2 * nt * hc_mult * hc_mult * hidden_size + 2 * nt * hc_mult * hidden_size)
+            if op_name == "pre":
                 ops = pre_ops
-            elif op == "post":
+            elif op_name == "post":
                 ops = post_ops
-            elif op == "both":
+            elif op_name == "both":
                 ops = pre_ops + post_ops
             else:
-                raise ValueError(f"Unsupported DeepSeek-V4 mHC op: {op}")
+                raise ValueError(f"Unsupported DeepSeek-V4 mHC op: {op_name}")
 
             param_bytes = sites * (mix_hc * hc_dim + mix_hc + 3) * quant_mode.value.memory
-            activation_bytes = sites * num_tokens * hc_dim * quant_mode.value.memory * (3 if op == "both" else 2)
-            if op in {"pre", "both"}:
-                activation_bytes += sites * num_tokens * (2 * hc_mult + hc_mult * hc_mult) * 4
+            activation_bytes = sites * nt * hc_dim * quant_mode.value.memory * (3 if op_name == "both" else 2)
+            if op_name in {"pre", "both"}:
+                activation_bytes += sites * nt * (2 * hc_mult + hc_mult * hc_mult) * 4
             sol_math = ops / GEMM._get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = (param_bytes + activation_bytes) / database.system_spec["gpu"]["mem_bw"] * 1000
             return max(sol_math, sol_mem), sol_math, sol_mem
 
         def get_empirical() -> float:
-            return get_sol()[0] / 0.55
+            # SOL / util from own num_tokens curve (per op slice); else 0.55.
+            mhc_data = getattr(database, "_mhc_module_data", None)
+
+            def _emp_for_op(op_name: str) -> float:
+                sol_q = get_sol(num_tokens, op_name)[0]
+
+                def _slice():
+                    if (
+                        not mhc_data
+                        or op_name not in mhc_data
+                        or hc_mult not in mhc_data[op_name]
+                        or hidden_size not in mhc_data[op_name][hc_mult]
+                        or not mhc_data[op_name][hc_mult][hidden_size]
+                    ):
+                        raise KeyError("no mHC data")
+                    return mhc_data[op_name][hc_mult][hidden_size]
+
+                grid = util_empirical.grid_for(
+                    (
+                        "dsv4_mhc",
+                        database.system,
+                        database.backend,
+                        database.version,
+                        op_name,
+                        hc_mult,
+                        hidden_size,
+                        quant_mode.name,
+                    ),
+                    _slice,
+                    lambda c: get_sol(c[0], op_name)[0],  # c=(num_tokens,)
+                    depth=1,
+                )
+                lat, _ = util_empirical.estimate(sol_q, (num_tokens,), grid, fallback_scale=0.55)
+                return lat
+
+            if op == "both":
+                return _emp_for_op("pre") + _emp_for_op("post")
+            return _emp_for_op(op)
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -984,13 +1020,13 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
         cls.load_data(database)
 
-        def get_sol() -> tuple[float, float, float]:
+        def get_sol(b_: int = b, s_: int = s, prefix_: int = prefix) -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(
                 database,
                 is_context=True,
-                b=b,
-                s=s,
-                prefix=prefix,
+                b=b_,
+                s=s_,
+                prefix=prefix_,
                 num_heads=num_heads,
                 hidden_size=hidden_size,
                 q_lora_rank=q_lora_rank,
@@ -1009,7 +1045,40 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             )
 
         def get_empirical() -> float:
-            return get_sol()[0] / 0.55
+            # SOL / util from own prefix-resolved (prefix, s, b) grid; else 0.55.
+            sol_q = get_sol()[0]
+
+            def _slice():
+                data = getattr(database, "_context_deepseek_v4_attention_module_data", None)
+                if not data:
+                    raise KeyError("no context dsv4 attention data")
+                quant_data = data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
+                head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
+                if head_axis is None:
+                    raise KeyError("no head axis")
+                cr_dict = quant_data[head_axis].get(compress_ratio)
+                if cr_dict is None:
+                    raise KeyError("no compress_ratio")
+                return cr_dict  # {prefix: {s: {b: leaf}}}
+
+            grid = util_empirical.grid_for(
+                (
+                    "dsv4_ctx_attn",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    fmha_quant_mode.name,
+                    kvcache_quant_mode.name,
+                    gemm_quant_mode.name,
+                    num_heads,
+                    compress_ratio,
+                ),
+                _slice,
+                lambda c: get_sol(c[2], c[1], c[0])[0],  # c=(prefix, s, b)
+                depth=3,
+            )
+            lat, _ = util_empirical.estimate(sol_q, (prefix, s, b), grid, fallback_scale=0.55)
+            return lat
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -1201,12 +1270,12 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
         cls.load_data(database)
 
-        def get_sol() -> tuple[float, float, float]:
+        def get_sol(b_: int = b, s_: int = s) -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(
                 database,
                 is_context=False,
-                b=b,
-                s=s,
+                b=b_,
+                s=s_,
                 prefix=0,
                 num_heads=num_heads,
                 hidden_size=hidden_size,
@@ -1226,7 +1295,39 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             )
 
         def get_empirical() -> float:
-            return get_sol()[0] / 0.6
+            # SOL / util from own (b, s_total) grid; else 0.6.
+            sol_q = get_sol()[0]
+
+            def _slice():
+                data = getattr(database, "_generation_deepseek_v4_attention_module_data", None)
+                if not data:
+                    raise KeyError("no generation dsv4 attention data")
+                quant_data = data[kvcache_quant_mode][gemm_quant_mode]
+                head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
+                if head_axis is None:
+                    raise KeyError("no head axis")
+                dv4_dict = quant_data[head_axis].get(compress_ratio)
+                if dv4_dict is None:
+                    raise KeyError("no compress_ratio")
+                return dv4_dict  # {b: {s_total: leaf}}
+
+            grid = util_empirical.grid_for(
+                (
+                    "dsv4_gen_attn",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    kvcache_quant_mode.name,
+                    gemm_quant_mode.name,
+                    num_heads,
+                    compress_ratio,
+                ),
+                _slice,
+                lambda c: get_sol(c[0], c[1])[0],  # c=(b, s_total)
+                depth=2,
+            )
+            lat, _ = util_empirical.estimate(sol_q, (b, s), grid, fallback_scale=0.6)
+            return lat
 
         if database_mode is None:
             database_mode = database._default_database_mode

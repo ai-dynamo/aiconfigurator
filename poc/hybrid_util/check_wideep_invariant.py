@@ -62,6 +62,20 @@ def main():
 
     _check(f"WideEPGenerationMLA @ num_heads={nh}(tp={tp}), b={b}, s={s}", db2, _mla, 0.7)
 
+    # DeepSeekV4MHCModule (b200/sglang) — mhc_module table exists (DSV4 attention
+    # modules have no collected data anywhere yet, so only MHC is checkable).
+    df = pd.read_parquet("src/aiconfigurator/systems/data/b200_sxm/sglang/0.5.10/mhc_module_perf.parquet")
+    g = df[df.op_name == "pre"]
+    nt = int(sorted(g.num_tokens.unique())[len(g.num_tokens.unique()) // 2])
+    hc, h = int(g.hc_mult.iloc[0]), int(g.hidden_size.iloc[0])
+    db3 = get_database("b200_sxm", "sglang", "0.5.10")
+
+    def _mhc(mode):
+        db3.set_default_database_mode(mode)
+        return float(db3.query_mhc_module(nt, h, hc, 1, "pre", common.GEMMQuantMode.bfloat16))
+
+    _check(f"DeepSeekV4MHCModule(pre) @ num_tokens={nt}, hc={hc}, hidden={h}", db3, _mhc, 0.55)
+
 
 if __name__ == "__main__":
     main()
