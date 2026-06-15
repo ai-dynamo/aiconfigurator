@@ -49,6 +49,7 @@ class MainContainer:
     startup_probe: dict[str, Any] | None = None
     liveness_probe: dict[str, Any] | None = None
     readiness_probe: dict[str, Any] | None = None
+    env: list[Any] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     # Emission order of the legacy k8s_deploy.yaml.j2 render_worker macros
@@ -63,6 +64,7 @@ class MainContainer:
         ("startupProbe", "startup_probe"),
         ("livenessProbe", "liveness_probe"),
         ("readinessProbe", "readiness_probe"),
+        ("env", "env"),
     )
 
     @classmethod
@@ -86,11 +88,15 @@ class ExtraPodSpec:
     volumes: list[Any] | None = None
     image_pull_secrets: list[Any] | None = None
     main_container: MainContainer | None = None
+    node_selector: dict[str, Any] | None = None
+    tolerations: list[Any] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     _KEYS = (
         ("volumes", "volumes"),
         ("imagePullSecrets", "image_pull_secrets"),
+        ("nodeSelector", "node_selector"),
+        ("tolerations", "tolerations"),
     )
 
     @classmethod
@@ -123,6 +129,7 @@ class DGDService:
     replicas: int | None = None
     resources: dict[str, Any] | None = None
     extra_pod_spec: ExtraPodSpec | None = None
+    shared_memory: dict[str, Any] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     _KEYS = (
@@ -132,6 +139,7 @@ class DGDService:
         ("subComponentType", "sub_component_type"),
         ("replicas", "replicas"),
         ("resources", "resources"),
+        ("sharedMemory", "shared_memory"),
     )
 
     @classmethod
