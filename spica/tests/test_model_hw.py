@@ -26,6 +26,7 @@ def test_resolve_deepseek_is_moe_mla_wideep():
     mh = resolve_model_hardware(DEEPSEEK, "h200_sxm", backend="trtllm")
     assert mh.is_moe and mh.mla and mh.enable_wideep
     assert mh.weight_bytes > 0
+    assert mh.max_context == 163840  # DeepSeek-V3 max context
 
 
 def test_resolve_dense_qwen():
@@ -33,6 +34,20 @@ def test_resolve_dense_qwen():
     assert not mh.is_moe
     assert not mh.mla
     assert not mh.enable_wideep  # dense models never enable wideEP
+    assert mh.max_context == 40960  # Qwen3-32B max context
+
+
+def test_max_seq_len_defaults_to_model_context(monkeypatch):
+    # Omitting max_seq_len uses the model's max context length.
+    seen = {}
+
+    def fake_feasible(shapes, *, max_seq_len, **kwargs):
+        seen["max_seq_len"] = max_seq_len
+        return {s: 10_000_000 for s in dict.fromkeys(shapes)}
+
+    monkeypatch.setattr(mh_mod, "feasible_shape_tokens", fake_feasible)
+    parallel_configs_for(DEEPSEEK, "gb200", gpu_budget=16, deployment_mode="agg", backend="trtllm")
+    assert seen["max_seq_len"] == 163840  # DeepSeek-V3 max context
 
 
 # --- KV-cache validity (the sole feasibility filter; no weight floor) ---

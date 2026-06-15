@@ -62,14 +62,18 @@ class ModelHardware:
     weight_bytes: int
     vram_per_gpu: int
     gpus_per_node: int
+    max_context: int | None  # model's max context length (the default max_seq_len)
 
 
 def resolve_model_hardware(model_name: str, hardware_sku: str, *, backend: str) -> ModelHardware:
-    """Read the model weights + SKU spec (via AIC) to derive is_moe / mla / wideep."""
+    """Read the model weights + SKU spec (via AIC) to derive is_moe / mla / wideep
+    and the model's max context length."""
+    model_config = get_model_config_from_model_path(model_name)
     is_moe = check_is_moe(model_name)
-    architecture = get_model_config_from_model_path(model_name).get("architecture", "")
+    architecture = model_config.get("architecture", "")
     allow_pure_tp = is_moe and architecture in _GQA_MOE_ARCHITECTURES
     mla = is_moe and not allow_pure_tp
+    max_context = model_config.get("context")
 
     sys_cfg = _get_system_config(hardware_sku)
     vram_per_gpu = sys_cfg["vram_per_gpu"]
@@ -89,6 +93,7 @@ def resolve_model_hardware(model_name: str, hardware_sku: str, *, backend: str) 
         weight_bytes=weight_bytes,
         vram_per_gpu=vram_per_gpu,
         gpus_per_node=gpus_per_node,
+        max_context=int(max_context) if max_context else None,
     )
 
 
@@ -99,7 +104,7 @@ def parallel_configs_for(
     gpu_budget: int,
     deployment_mode: str,
     backend: str,
-    max_seq_len: int,
+    max_seq_len: int | None = None,
     min_gpu_budget: int | None = None,
     max_num_tokens: int = DEFAULT_MAX_NUM_TOKENS,
     max_batch_size: int = DEFAULT_MAX_BATCH_SIZE,
@@ -114,12 +119,19 @@ def parallel_configs_for(
     ``max_batch_size`` / ``memory_fraction`` are the runtime knobs the estimate
     reserves around the KV budget.
 
+    ``max_seq_len`` defaults to the model's max context length (the engine's
+    ``max_model_len`` -> the longest sequence any request can occupy); pass a
+    smaller value only to tune for a workload known to be shorter.
+
     ``deployment_mode`` is ``"agg"`` (-> ``list[ReplicaParallelConfig]``) or
     ``"disagg"`` (-> ``list[DisaggParallelConfig]``). Raises
     :class:`NoViableParallelConfig` when no shape can hold the sequence within the
     budget.
     """
     mh = resolve_model_hardware(model_name, hardware_sku, backend=backend)
+    seq_len = max_seq_len if max_seq_len is not None else mh.max_context
+    if seq_len is None:
+        raise ValueError(f"max_seq_len is required: {model_name} config exposes no max context length")
 
     # Enumerate from 1 GPU/worker; the KV estimate is the sole feasibility filter.
     common = dict(
@@ -146,7 +158,7 @@ def parallel_configs_for(
         model_name=model_name,
         hardware_sku=hardware_sku,
         backend=backend,
-        max_seq_len=max_seq_len,
+        max_seq_len=seq_len,
         max_num_tokens=max_num_tokens,
         max_batch_size=max_batch_size,
         memory_fraction=memory_fraction,
@@ -157,7 +169,7 @@ def parallel_configs_for(
         kept = [c for c in configs if c.prefill.shape in feasible and c.decode.shape in feasible]
     if not kept:
         raise NoViableParallelConfig(
-            f"{model_name} on {hardware_sku}: no parallel config holds a {max_seq_len}-token "
+            f"{model_name} on {hardware_sku}: no parallel config holds a {seq_len}-token "
             f"sequence within {gpu_budget} GPUs ({backend} KV-cache estimate)"
         )
     return kept
