@@ -39,6 +39,16 @@ CONFIGS = {
         pastkv=[0],
         model_config=lambda: config.ModelConfig(tp_size=8, moe_tp_size=1, moe_ep_size=8),
     ),
+    # GLM-5 WideEP (trtllm): TrtLLMWideEPMoE + TrtLLMWideEPMoEDispatch + DSA.
+    "glm5_wideep": dict(
+        model="zai-org/GLM-5-FP8",
+        system="b200_sxm",
+        version="1.3.0rc10",
+        pastkv=[0],
+        model_config=lambda: config.ModelConfig(
+            tp_size=8, attention_dp_size=8, moe_tp_size=1, moe_ep_size=64, enable_wideep=True
+        ),
+    ),
     # DeepSeek-V3: MLA (FallbackOp primary = MLAModule ctx/gen) + MoE.
     # bf16 quant: MLA-module/context perf tables only collected mla_dtype=bfloat16.
     "deepseek_v3": dict(

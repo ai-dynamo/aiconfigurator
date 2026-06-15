@@ -1424,8 +1424,8 @@ class TrtLLMWideEPMoE(Operation):
             quant_mode: common.MoEQuantMode,
             workload_distribution: str,
         ) -> float:
-            """Get the empirical estimation: SOL / scale_factor."""
-            latency = get_sol(
+            """Empirical via SOL / util (util best-effort from own data; else 0.4)."""
+            sol_time = get_sol(
                 num_tokens,
                 hidden_size,
                 inter_size,
@@ -1437,8 +1437,54 @@ class TrtLLMWideEPMoE(Operation):
                 quant_mode,
                 workload_distribution,
             )[0]
-            scale_factor = 0.4
-            return latency / scale_factor
+            kernel_source = cls._select_kernel(database, quant_mode)
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._wideep_moe_compute_data
+                wrapper.raise_if_not_loaded()
+                kd = wrapper[kernel_source]
+                dists = list(kd[quant_mode].keys())
+                dist = workload_distribution if workload_distribution in dists else (dists[0] if dists else None)
+                if dist is None:
+                    raise KeyError("no distribution")
+                return kd[quant_mode][dist][topk][num_experts][hidden_size][inter_size][num_slots][moe_tp_size][
+                    moe_ep_size
+                ]
+
+            grid = util_empirical.grid_for(
+                (
+                    "wideep_moe",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    kernel_source,
+                    quant_mode.name,
+                    topk,
+                    num_experts,
+                    hidden_size,
+                    inter_size,
+                    num_slots,
+                    moe_tp_size,
+                    moe_ep_size,
+                ),
+                _slice,
+                lambda c: get_sol(
+                    c[0],
+                    hidden_size,
+                    inter_size,
+                    topk,
+                    num_experts,
+                    num_slots,
+                    moe_tp_size,
+                    moe_ep_size,
+                    quant_mode,
+                    workload_distribution,
+                )[0],
+                depth=1,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, fallback_scale=0.4)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -1529,11 +1575,19 @@ class TrtLLMWideEPMoE(Operation):
             return database._interp_pr(lat, energy=energy)
 
         def get_empirical() -> float:
-            # Simple empirical fallback based on SOL
-            total_tokens = num_tokens * topk
-            ops = total_tokens * hidden_size * inter_size * 3 * 2 // moe_ep_size // moe_tp_size
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
-            return sol_math / 0.4  # Empirical scale factor
+            # Data-calibrated util; delegates to get_empirical_from_sol.
+            return get_empirical_from_sol(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,
@@ -1834,8 +1888,8 @@ class TrtLLMWideEPMoEDispatch(Operation):
             quant_mode: common.MoEQuantMode,
             node_num: int,
         ) -> float:
-            """Get the empirical estimation: SOL / scale_factor."""
-            latency = get_sol(
+            """Empirical via SOL / util (util best-effort from own data; else 0.5)."""
+            sol_time = get_sol(
                 num_tokens,
                 hidden_size,
                 topk,
@@ -1844,8 +1898,40 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 quant_mode,
                 node_num,
             )[0]
-            scale_factor = 0.5
-            return latency / scale_factor
+            ks = cls._select_alltoall_kernel(database, quant_mode, moe_ep_size, topk, moe_backend=moe_backend)
+            tqm = cls._normalize_quant_mode_for_table(quant_mode)
+
+            def _slice():
+                if ks == "NotEnabled":
+                    raise KeyError("alltoall not enabled")
+                cls.load_data(database)
+                wrapper = database._trtllm_alltoall_data
+                if not wrapper:
+                    raise KeyError("no alltoall data")
+                wrapper.raise_if_not_loaded()
+                return wrapper[ks][op_name][tqm][node_num][hidden_size][topk][num_experts][moe_ep_size]
+
+            grid = util_empirical.grid_for(
+                (
+                    "alltoall",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    ks,
+                    op_name,
+                    tqm.name,
+                    node_num,
+                    hidden_size,
+                    topk,
+                    num_experts,
+                    moe_ep_size,
+                ),
+                _slice,
+                lambda c: get_sol(c[0], hidden_size, topk, num_experts, moe_ep_size, quant_mode, node_num)[0],
+                depth=1,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, fallback_scale=0.5)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode

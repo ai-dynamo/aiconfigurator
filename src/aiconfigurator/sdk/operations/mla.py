@@ -1206,9 +1206,34 @@ class WideEPGenerationMLA(Operation):
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
-            latency = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.7
-            return latency / scale_factor
+            # SOL / util from own (num_heads, b, s) grid; num_heads = 128 // tp_size
+            # (mirrors get_silicon). Falls back to 0.7 if no data.
+            sol_time = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            attn_backend = attention_backend or "flashinfer"
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._wideep_generation_mla_data
+                if wrapper is None:
+                    raise KeyError("wideep generation mla is sglang-only")
+                wrapper.raise_if_not_loaded()
+                return wrapper[attn_backend][kvcache_quant_mode]
+
+            grid = util_empirical.grid_for(
+                (
+                    "wideep_gen_mla",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    attn_backend,
+                    kvcache_quant_mode.name,
+                ),
+                _slice,
+                lambda c: get_sol(c[1], c[2], round(128 / c[0]), kvcache_quant_mode, fmha_quant_mode)[0],
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (128 // tp_size, b, s), grid, fallback_scale=0.7)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -1459,9 +1484,35 @@ class WideEPContextMLA(Operation):
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
-            latency = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.6
-            return latency / scale_factor
+            # SOL / util from own (num_heads, full_s, b) grid; num_heads = 128 // tp_size.
+            # Samples are prefix=0; SOL(query) carries prefix natively. Falls back to 0.6.
+            sol_time = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            attn_backend = attention_backend or "flashinfer"
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._wideep_context_mla_data
+                if wrapper is None:
+                    raise KeyError("wideep context mla is sglang-only")
+                wrapper.raise_if_not_loaded()
+                return wrapper[attn_backend][fmha_quant_mode][kvcache_quant_mode]
+
+            grid = util_empirical.grid_for(
+                (
+                    "wideep_ctx_mla",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    attn_backend,
+                    fmha_quant_mode.name,
+                    kvcache_quant_mode.name,
+                ),
+                _slice,
+                lambda c: get_sol(c[2], c[1], 0, round(128 / c[0]), kvcache_quant_mode, fmha_quant_mode)[0],
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (128 // tp_size, s + prefix, b), grid, fallback_scale=0.6)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
