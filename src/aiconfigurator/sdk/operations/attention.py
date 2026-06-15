@@ -25,6 +25,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -237,9 +238,39 @@ class ContextAttention(Operation):
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
-            latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.6
-            return latency / scale_factor
+            # SOL / util, util read best-effort from own collected data (the
+            # (n, full_s, b) grid for this slice); falls back to 0.6 if no data.
+            sol_time = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            n_kv_lookup = 0 if n == n_kv else n_kv
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._context_attention_data
+                wrapper.raise_if_not_loaded()
+                return wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
+
+            def _sol(c):  # c = (n, full_s, b); samples are full attention (prefix=0)
+                nkv = c[0] if n_kv_lookup == 0 else n_kv_lookup
+                return get_sol(c[2], c[1], 0, c[0], nkv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
+
+            grid = util_empirical.grid_for(
+                (
+                    "ctx_attn",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    fmha_quant_mode.name,
+                    kvcache_quant_mode.name,
+                    n_kv_lookup,
+                    head_size,
+                    window_size,
+                ),
+                _slice,
+                _sol,
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (n, s + prefix, b), grid, fallback_scale=0.6)
+            return latency
 
         assert n_kv <= n, "n_kv must be less than or equal to n"
 
@@ -539,9 +570,38 @@ class GenerationAttention(Operation):
             w: int,
             kvcache_quant_mode: common.KVCacheQuantMode,
         ) -> float:
-            latency = get_sol(b, s, n, n_kv, h, w, kvcache_quant_mode)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
+            # SOL / util, util read best-effort from own collected data (the
+            # (n, b, s) grid for this slice); falls back to 0.8 if no data.
+            sol_time = get_sol(b, s, n, n_kv, h, w, kvcache_quant_mode)[0]
+            n_kv_lookup = n_kv if n_kv != n else 0
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._generation_attention_data
+                wrapper.raise_if_not_loaded()
+                return wrapper[kvcache_quant_mode][n_kv_lookup][h][w]
+
+            def _sol(c):  # c = (n, b, s)
+                nkv = c[0] if n_kv_lookup == 0 else n_kv_lookup
+                return get_sol(c[1], c[2], c[0], nkv, h, w, kvcache_quant_mode)[0]
+
+            grid = util_empirical.grid_for(
+                (
+                    "gen_attn",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    kvcache_quant_mode.name,
+                    n_kv_lookup,
+                    h,
+                    w,
+                ),
+                _slice,
+                _sol,
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (n, b, s), grid, fallback_scale=0.8)
+            return latency
 
         assert n_kv <= n, "n_kv must be less than or equal to n"
 

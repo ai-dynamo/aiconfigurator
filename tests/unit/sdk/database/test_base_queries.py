@@ -32,19 +32,36 @@ def test_query_gemm_exact_match(stub_perf_db):
     assert sol_value.source == "sol"
 
 
-def test_query_gemm_empirical_mode(stub_perf_db):
+def test_query_gemm_empirical_data_calibrated(stub_perf_db):
+    """EMPIRICAL now derives util (= SOL / measured) from collected data instead
+    of a fixed scale_factor. At a collected shape, SOL / util recovers the
+    (SOL-corrected) silicon latency -- not the old SOL / 0.8 constant.
     """
-    EMPIRICAL mode should return the SOL latency scaled by 1 / 0.8.
+    quant_mode = common.GEMMQuantMode.bfloat16  # stub has bf16 GEMM data
+    m, n, k = 64, 128, 256
+
+    sol_value = stub_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
+    silicon_value = stub_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SILICON)
+    empirical_value = stub_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.EMPIRICAL)
+
+    # data-calibrated: at a collected shape, empirical recovers the silicon value
+    assert math.isclose(float(empirical_value), float(silicon_value), rel_tol=1e-6)
+    # and is no longer the fixed-constant fallback
+    assert not math.isclose(float(empirical_value), float(sol_value) / 0.8)
+
+
+def test_query_gemm_empirical_constant_fallback_without_data(stub_perf_db):
+    """When the op has no data for the requested slice (fp8 absent in the stub),
+    EMPIRICAL falls back to the fixed SOL / 0.8 -- preserving prior behaviour for
+    zero-data ops.
     """
-    quant_mode = common.GEMMQuantMode.bfloat16
+    quant_mode = common.GEMMQuantMode.fp8  # no fp8 GEMM data in the stub
     m, n, k = 64, 128, 256
 
     sol_value = stub_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
     empirical_value = stub_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.EMPIRICAL)
 
-    assert math.isclose(empirical_value, sol_value / 0.8), (
-        f"EMPIRICAL expected {sol_value / 0.8}, got {empirical_value}"
-    )
+    assert math.isclose(float(empirical_value), float(sol_value) / 0.8)
 
 
 def test_query_gemm_exact_match_skips_3d_interpolation(comprehensive_perf_db, monkeypatch):

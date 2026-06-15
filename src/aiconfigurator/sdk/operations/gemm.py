@@ -23,6 +23,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -390,9 +391,25 @@ class GEMM(Operation):
             return sol_time, sol_math, sol_mem
 
         def get_empirical(m_v: int, n_v: int, k_v: int, qm: common.GEMMQuantMode) -> float:
+            # SOL / util, where util is read best-effort from this op's own
+            # collected data; falls back to the fixed 0.8 only when no data.
             sol_time = get_sol(m_v, n_v, k_v, qm)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
+            tqm = cls._normalize_gemm_quant_mode_for_table(qm)
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._gemm_data
+                wrapper.raise_if_not_loaded()
+                return wrapper[tqm]  # m -> n -> k -> leaf
+
+            grid = util_empirical.grid_for(
+                ("gemm", database.system, database.backend, database.version, tqm.name),
+                _slice,
+                lambda c: get_sol(c[0], c[1], c[2], qm)[0],
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (m_v, n_v, k_v), grid, fallback_scale=0.8)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
