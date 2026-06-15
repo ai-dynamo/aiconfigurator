@@ -103,7 +103,6 @@ def _backend_allows_moe_tp(backend: str, *, enable_wideep: bool, moe_backend: st
 def enumerate_worker_shapes(
     *,
     is_moe: bool,
-    mla: bool,
     backend: str,
     gpus_per_worker: int,
     enable_wideep: bool = False,
@@ -112,7 +111,9 @@ def enumerate_worker_shapes(
     """Legal per-worker shapes at exactly ``gpus_per_worker`` GPUs (``pp`` = 1).
 
     Mirrors ``enumerate_parallel_config`` (width + backend filters) followed by
-    ``filter_real_silicon_configs`` (pure TEP / DEP / TP only for MoE).
+    ``filter_real_silicon_configs``. Every MoE model scans TP + TEP + DEP (no
+    MLA carve-out for pure expert-TP); dense models scan plain TP. Backend
+    EP-only filters (sglang wideep) still apply.
     """
     g = gpus_per_worker
     if not is_moe:
@@ -144,7 +145,7 @@ def enumerate_worker_shapes(
                     # real-silicon pure-pattern filter
                     is_tep = tp > 1 and dp == 1 and moe_tp == 1 and moe_ep > 1
                     is_dep = tp == 1 and dp > 1 and moe_tp == 1 and moe_ep > 1
-                    is_pure_tp = tp > 1 and dp == 1 and moe_tp > 1 and moe_ep == 1 and not mla
+                    is_pure_tp = tp > 1 and dp == 1 and moe_tp > 1 and moe_ep == 1
                     if not (is_tep or is_dep or is_pure_tp):
                         continue
                     shapes.append(ParallelShape(tp=tp, dp=dp, moe_tp=moe_tp, moe_ep=moe_ep))
@@ -154,7 +155,6 @@ def enumerate_worker_shapes(
 def enumerate_parallel_configs(
     *,
     is_moe: bool,
-    mla: bool,
     backend: str,
     gpu_budget: int,
     min_gpu_budget: int | None = None,
@@ -184,7 +184,6 @@ def enumerate_parallel_configs(
             continue
         shapes = enumerate_worker_shapes(
             is_moe=is_moe,
-            mla=mla,
             backend=backend,
             gpus_per_worker=g,
             enable_wideep=enable_wideep,
@@ -205,7 +204,6 @@ def enumerate_parallel_configs(
 def enumerate_disagg_configs(
     *,
     is_moe: bool,
-    mla: bool,
     backend: str,
     gpu_budget: int,
     min_gpu_budget: int | None = None,
@@ -229,7 +227,6 @@ def enumerate_disagg_configs(
     """
     per_role = enumerate_parallel_configs(
         is_moe=is_moe,
-        mla=mla,
         backend=backend,
         gpu_budget=gpu_budget,
         min_gpus_per_worker=min_gpus_per_worker,

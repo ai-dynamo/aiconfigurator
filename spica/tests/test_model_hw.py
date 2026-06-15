@@ -41,7 +41,7 @@ def test_agg_configs_respect_memory_fit_floor():
     cfgs = parallel_configs_for(DEEPSEEK, "h200_sxm", gpu_budget=32, deployment_mode="agg", backend="trtllm")
     assert cfgs
     assert all(c.shape.gpus_per_worker >= mh.min_gpus_per_worker for c in cfgs)
-    assert all(c.shape.moe_tp == 1 for c in cfgs)  # MLA -> only TEP/DEP
+    assert any(c.shape.moe_tp > 1 for c in cfgs)  # pure expert-TP scanned for all MoE
     assert all(c.total_gpus <= 32 for c in cfgs)
 
 

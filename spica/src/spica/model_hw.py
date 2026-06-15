@@ -123,7 +123,6 @@ def parallel_configs_for(
 
     common = dict(
         is_moe=mh.is_moe,
-        mla=mh.mla,
         backend=backend,
         gpu_budget=gpu_budget,
         min_gpu_budget=min_gpu_budget,
