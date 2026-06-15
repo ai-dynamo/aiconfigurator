@@ -15,8 +15,11 @@ exactly so they render identically to user/recipe/rule flags.
 Ported from ``refs/heads/etshen/refactor-generator`` (``defaults_pass`` matching
 semantics + ``legacy_adapter`` token append/skip-if-present semantics).
 
-NOTE: ``moe_backend`` is deliberately NOT handled here (it is a hardware-derived
-fact, wired in a later task). This module touches model ``defaults:`` only.
+This module also applies the hardware-derived ``moe_backend`` fact
+(:func:`apply_moe_backend`). Unlike model ``defaults:`` (which key off
+``ResolvedFacts.model``), ``moe_backend`` is a HARDWARE selection
+(``ResolvedFacts.hardware``) and is applied for ANY MoE deployment on the
+matched hardware — independent of whether the model has a profile entry.
 """
 
 from __future__ import annotations
@@ -97,6 +100,44 @@ def apply_model_default_args(
                 continue
             tokens.append(flag)
             tokens.append(_stringify(value))
+
+
+def apply_moe_backend(context: dict[str, Any], hardware: dict[str, Any] | None, *, backend: str) -> None:
+    """Apply the hardware-derived ``moe_backend`` selection (fill-if-absent, MoE-only).
+
+    ``hardware`` is the resolved hardware-profile dict (``ResolvedFacts.hardware``).
+    Its ``moe_backend`` entry maps backend -> kernel/runner choice, e.g.
+    ``{"trtllm": "WIDEEP", "sglang": "deepep_moe"}``. Selecting the wrong trtllm
+    MoE backend on Blackwell is a STARTUP CRASH, so this fills the correct value
+    when nothing has set it yet.
+
+    Precedence: facts-default (fill-if-absent) — a user/recipe/rule value already
+    in ``context`` always wins. Guarded to MoE deployments only via
+    ``context["is_moe"]``; dense models are left untouched.
+
+    Per-backend seam:
+
+    * ``trtllm``: sets ``context["moe_config"]["backend"]`` (consumed by the typed
+      engine-config builder). Only when unset — the builder defaults to CUTLASS.
+    * ``sglang``: sets ``context["moe_backend"]`` (mapped to ``--moe-runner-backend``
+      via ``backend_config_mapping.yaml``). Only when unset.
+    * ``vllm``: no-op — vLLM's MoE backend comes from MODEL ``defaults:`` (handled
+      by :func:`apply_model_default_args`), not this hardware fact.
+    """
+    choice = ((hardware or {}).get("moe_backend") or {}).get(backend)
+    if not choice:
+        return
+    # GUARD: hardware moe_backend applies to MoE deployments only.
+    if not context.get("is_moe"):
+        return
+    if backend == "trtllm":
+        moe = context.setdefault("moe_config", {})
+        if isinstance(moe, dict) and not moe.get("backend"):
+            moe["backend"] = choice
+    elif backend == "sglang":
+        if not context.get("moe_backend"):
+            context["moe_backend"] = choice
+    # vllm: intentionally no-op (model-default driven).
 
 
 def _system_key(facts: "ResolvedFacts") -> str | None:

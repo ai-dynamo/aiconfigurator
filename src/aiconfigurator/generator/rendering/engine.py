@@ -316,6 +316,45 @@ def render_backend_templates(
 
     rendered_templates = {}
 
+    # ── Resolve facts from our own params when the caller did not supply them ──
+    # ``run_pipeline`` resolves facts up front and threads them in via
+    # ``resolved_facts``; the PUBLIC api (CLI / dynamo profiler / freeze script)
+    # calls this function WITHOUT it. To make every caller apply facts from a
+    # single path, self-resolve here when ``resolved_facts is None`` — from the
+    # RAW request params (pre-rule-plugin), matching exactly what ``run_pipeline``
+    # resolves from so the two paths reconverge. Resolution is best-effort: any
+    # failure degrades to ``None`` and never breaks rendering. Resolved BEFORE the
+    # engine/cli render loops so the hardware ``moe_backend`` fact (applied just
+    # below) is present when those loops consume the context.
+    if resolved_facts is None:
+        try:
+            from aiconfigurator.generator.facts.request_resolution import (
+                resolve_facts_for_request,
+            )
+
+            resolved_facts = resolve_facts_for_request(_raw_param_values, backend, version)
+        except Exception:  # noqa: BLE001 - facts are best-effort, never fatal
+            logger.warning("Fact self-resolution failed; continuing without facts.", exc_info=True)
+            resolved_facts = None
+
+    # ── Apply the hardware-derived moe_backend fact onto the shared context ──
+    # HARDWARE selection (not a model default): trtllm needs the right MoE kernel
+    # (WIDEEP on Blackwell, CUTLASS on Hopper — the wrong choice on Blackwell is a
+    # startup crash). Applied here, BEFORE the engine render loop, which reads
+    # ``context["moe_config"]["backend"]`` via each per-worker ``wc = dict(context)``
+    # (the shallow copy aliases the ``moe_config`` dict, so the fill is visible to
+    # every role). The sglang side (``--moe-runner-backend``) is applied to the
+    # per-worker cli token lists further below, alongside the model defaults,
+    # because the sglang cli template reads the *nested* ``sglang[...]`` dict that
+    # ``make_worker_context`` would otherwise prune. Fill-if-absent and MoE-only
+    # (``is_moe`` guard) — dense models untouched. Unlike the model-default block,
+    # this runs even when ``model is None`` (the fact is keyed on hardware, not on
+    # a model profile). No-op without resolved facts.
+    if resolved_facts is not None and backend == "trtllm":
+        from aiconfigurator.generator.facts.apply import apply_moe_backend
+
+        apply_moe_backend(context, getattr(resolved_facts, "hardware", None), backend=backend)
+
     # Find template files
     template_path = Path(templates_dir)
 
@@ -518,41 +557,44 @@ def render_backend_templates(
             context["agg_cli_args_list"] = cli_list
             rendered_templates["cli_args_agg"] = cli
 
-    # ── Resolve facts from our own params when the caller did not supply them ──
-    # ``run_pipeline`` resolves facts up front and threads them in via
-    # ``resolved_facts``; the PUBLIC api (CLI / dynamo profiler / freeze script)
-    # calls this function WITHOUT it. To make every caller apply model defaults
-    # from a single path, self-resolve here when ``resolved_facts is None`` —
-    # from the RAW request params (pre-rule-plugin), matching exactly what
-    # ``run_pipeline`` resolves from so the two paths reconverge. Resolution is
-    # best-effort: any failure degrades to ``None`` and never breaks rendering.
-    # For generic models (no profile match) this yields ``model is None`` and the
-    # apply block below is a strict no-op, so the Qwen baseline stays identical.
-    if resolved_facts is None:
-        try:
-            from aiconfigurator.generator.facts.request_resolution import (
-                resolve_facts_for_request,
-            )
-
-            resolved_facts = resolve_facts_for_request(_raw_param_values, backend, version)
-        except Exception:  # noqa: BLE001 - facts are best-effort, never fatal
-            logger.warning("Fact self-resolution failed; continuing without facts.", exc_info=True)
-            resolved_facts = None
-
-    # ── Apply model-default cli flags from resolved facts (facts-default layer) ──
+    # ── Apply facts-default cli flags from resolved facts (facts-default layer) ──
     # Single seam: after the per-role token lists are built and BEFORE the cli
     # string formatting / k8s build consume them, so appended flags appear in
     # BOTH the ``cli_args_*`` string artifact and the typed k8s builder.
     # Fill-if-absent only (user/recipe/rule values already in the list win).
-    # No-op unless ``resolved_facts`` carries a matched model profile — the
-    # existing canary (model is None) is byte-identical through this block.
+    # Two facts feed this seam:
+    #   1. The hardware ``moe_backend`` fact for sglang (``--moe-runner-backend``),
+    #      applied on the token list here — the sglang cli template reads a nested
+    #      ``sglang[...]`` dict that ``make_worker_context`` prunes for a fact set
+    #      after ``prepare_template_context``, so the post-render token list is the
+    #      reliable seam. Runs even when ``model is None`` (hardware-keyed fact).
+    #   2. Model ``defaults:`` flags, only when a model profile matched.
+    # ``_facts_touched_cli`` gates the single re-sync below so the no-fact canary
+    # (no profile + non-MoE / no hardware fact) is byte-identical through here.
+    _facts_touched_cli = False
+    if resolved_facts is not None and backend == "sglang":
+        from aiconfigurator.generator.facts.apply import apply_moe_backend
+
+        apply_moe_backend(context, getattr(resolved_facts, "hardware", None), backend="sglang")
+        moe_choice = context.get("moe_backend")
+        if moe_choice:
+            for worker in worker_plan:
+                tokens = context.get(f"{worker}_cli_args_list")
+                if isinstance(tokens, list) and "--moe-runner-backend" not in tokens:
+                    tokens.append("--moe-runner-backend")
+                    tokens.append(str(moe_choice))
+                    _facts_touched_cli = True
+
     if resolved_facts is not None and getattr(resolved_facts, "model", None) is not None:
         from aiconfigurator.generator.facts.apply import apply_facts
 
         apply_facts(context, resolved_facts, backend)
-        # Re-sync the string artifacts from the (possibly extended) token lists
-        # so appended flags render identically to user-supplied ones. Only runs
-        # on the facts path, so the no-fact path's strings are never rewritten.
+        _facts_touched_cli = True
+
+    # Re-sync the string artifacts from the (possibly extended) token lists so
+    # appended flags render identically to user-supplied ones. Only runs when a
+    # fact actually touched the cli, so the no-fact path's strings are untouched.
+    if _facts_touched_cli:
         for worker in worker_plan:
             list_key = f"{worker}_cli_args_list"
             str_key = f"{worker}_cli_args"

@@ -9,7 +9,11 @@ a flat list of single tokens. A value flag is two tokens (``--block-size`` then
 is omitted. Appended defaults must match this exactly.
 """
 
-from aiconfigurator.generator.facts.apply import _entry_matches, apply_model_default_args
+from aiconfigurator.generator.facts.apply import (
+    _entry_matches,
+    apply_model_default_args,
+    apply_moe_backend,
+)
 
 
 def _model():
@@ -66,3 +70,33 @@ def test_role_filter_skips_non_matching_role():
     tokens2: list[str] = []
     apply_model_default_args(tokens2, model, backend="sglang", system="h200", role="decode", variant=None)
     assert "--speculative-num-steps" in tokens2 and "3" in tokens2
+
+
+def test_moe_backend_sets_trtllm_engine_when_absent():
+    ctx = {"is_moe": True, "moe_config": {}}
+    apply_moe_backend(ctx, {"moe_backend": {"trtllm": "WIDEEP"}}, backend="trtllm")
+    assert ctx["moe_config"]["backend"] == "WIDEEP"
+
+
+def test_moe_backend_does_not_override_existing_trtllm():
+    ctx = {"is_moe": True, "moe_config": {"backend": "CUTLASS"}}
+    apply_moe_backend(ctx, {"moe_backend": {"trtllm": "WIDEEP"}}, backend="trtllm")
+    assert ctx["moe_config"]["backend"] == "CUTLASS"
+
+
+def test_moe_backend_sglang_sets_param_when_absent_and_moe():
+    ctx = {"is_moe": True}
+    apply_moe_backend(ctx, {"moe_backend": {"sglang": "deepep_moe"}}, backend="sglang")
+    assert ctx.get("moe_backend") == "deepep_moe"
+
+
+def test_moe_backend_skipped_for_dense_sglang():
+    ctx = {"is_moe": False}
+    apply_moe_backend(ctx, {"moe_backend": {"sglang": "deepep_moe"}}, backend="sglang")
+    assert "moe_backend" not in ctx          # dense must NOT get the flag
+
+
+def test_moe_backend_noop_when_user_set_sglang():
+    ctx = {"is_moe": True, "moe_backend": "deepgemm"}
+    apply_moe_backend(ctx, {"moe_backend": {"sglang": "deepep_moe"}}, backend="sglang")
+    assert ctx["moe_backend"] == "deepgemm"
