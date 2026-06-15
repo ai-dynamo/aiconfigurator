@@ -38,3 +38,24 @@ def test_deepseek_sglang_gets_eagle_speculative_defaults():
 def test_generic_qwen_has_no_deepseek_defaults():
     blob = _blob("vllm_dense_agg")
     assert "--block-size 256" not in blob and "--trust-remote-code" not in blob
+
+
+def test_trtllm_b200_engine_uses_wideep():
+    c = next(c for c in CANARY_CASES if c.name == "deepseek_trtllm_b200_disagg")
+    arts = generate_backend_artifacts(copy.deepcopy(c.params), c.backend, backend_version=c.backend_version)
+    eng = "\n".join(v for k, v in arts.items() if k.startswith("extra_engine_args_"))
+    assert "WIDEEP" in eng
+
+
+def test_sglang_gb200_uses_deepep_moe():
+    c = next(c for c in CANARY_CASES if c.name == "deepseek_sglang_gb200_agg")
+    blob = "\n".join(generate_backend_artifacts(copy.deepcopy(c.params), c.backend, backend_version=c.backend_version).values())
+    assert "deepep_moe" in blob
+
+
+def test_trtllm_h200_engine_stays_cutlass():
+    # contrast: Hopper must NOT get WIDEEP (would crash on the wrong silicon target)
+    c = next(c for c in CANARY_CASES if c.name == "trtllm_moe_disagg")  # Qwen MoE, h200
+    arts = generate_backend_artifacts(copy.deepcopy(c.params), c.backend, backend_version=c.backend_version)
+    eng = "\n".join(v for k, v in arts.items() if k.startswith("extra_engine_args_"))
+    assert "WIDEEP" not in eng

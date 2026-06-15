@@ -84,4 +84,18 @@ CANARY_CASES: list[CanaryCase] = [
         backend_version="0.5.11",
         params=_make_params("deepseek-ai/DeepSeek-V4-Pro", "sglang", mode="agg", total_gpus=_TOTAL_GPUS, system_name=_SYSTEM),
     ),
+    # Blackwell cases: exercise the hardware moe_backend fact (Blackwell-gated).
+    # trtllm -> WIDEEP on b200/gb200 (CUTLASS on Hopper); sglang -> deepep_moe on b200/gb200.
+    CanaryCase(
+        name="deepseek_trtllm_b200_disagg",
+        backend="trtllm",
+        backend_version="1.3.0rc14",
+        params=_make_params("deepseek-ai/DeepSeek-V4-Pro", "trtllm", mode="disagg", total_gpus=_TOTAL_GPUS, system_name="b200_sxm"),
+    ),
+    CanaryCase(
+        name="deepseek_sglang_gb200_agg",
+        backend="sglang",
+        backend_version="0.5.11",
+        params=_make_params("deepseek-ai/DeepSeek-V4-Pro", "sglang", mode="agg", total_gpus=_TOTAL_GPUS, system_name="gb200"),
+    ),
 ]

@@ -1,0 +1,154 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-ai-deepseek-v4-pro-disagg
+  namespace: dynamo
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
+          imagePullPolicy: IfNotPresent
+    TRTLLMPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: '8'
+      extraPodSpec:
+        volumes:
+        - name: engine-configs
+          emptyDir: {}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
+          workingDir: /workspace/components/backends/trtllm
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+          - name: engine-configs
+            mountPath: /workspace/engine_configs
+          - name: tmp
+            mountPath: /tmp
+          command:
+          - /bin/bash
+          - -c
+          args:
+          - "set -euo pipefail\nmkdir -p /workspace/engine_configs\ncat > /workspace/engine_configs/prefill_config.yaml\
+            \ <<'YAML'\nbackend: pytorch\nmoe_expert_parallel_size: 1\nmoe_tensor_parallel_size:\
+            \ 8\nmoe_config:\n  backend: WIDEEP\ntensor_parallel_size: 8\npipeline_parallel_size:\
+            \ 1\nenable_attention_dp: false\nenable_chunked_prefill: false\nmax_batch_size:\
+            \ 128\nmax_num_tokens: 4512\nkv_cache_config:\n  free_gpu_memory_fraction:\
+            \ 0.8\n  dtype: auto\n  tokens_per_block: 32\n  enable_block_reuse: false\n\
+            cache_transceiver_config:\n  backend: DEFAULT\n  max_tokens_in_buffer:\
+            \ 5504\ncuda_graph_config:\n  enable_padding: false\n  batch_sizes:\n\
+            \  - 1\n  - 2\n  - 4\n  - 8\n  - 16\n  - 32\n  - 64\n  - 128\n  - 256\n\
+            disable_overlap_scheduler: true\nprint_iter_log: false\nYAML\nargs=(\n\
+            \  --model-path \"deepseek-ai/DeepSeek-V4-Pro\"\n  --served-model-name\
+            \ \"deepseek-ai/DeepSeek-V4-Pro\"\n  --extra-engine-args \"/workspace/engine_configs/prefill_config.yaml\"\
+            \n)\nargs+=(--disaggregation-mode prefill)\nexec python3 -m dynamo.trtllm\
+            \ \"${args[@]}\"\n"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 40
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
+    TRTLLMDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: '8'
+      extraPodSpec:
+        volumes:
+        - name: engine-configs
+          emptyDir: {}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
+          workingDir: /workspace/components/backends/trtllm
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+          - name: engine-configs
+            mountPath: /workspace/engine_configs
+          - name: tmp
+            mountPath: /tmp
+          command:
+          - /bin/bash
+          - -c
+          args:
+          - "set -euo pipefail\nmkdir -p /workspace/engine_configs\ncat > /workspace/engine_configs/decode_config.yaml\
+            \ <<'YAML'\nbackend: pytorch\nmoe_expert_parallel_size: 1\nmoe_tensor_parallel_size:\
+            \ 8\nmoe_config:\n  backend: WIDEEP\ntensor_parallel_size: 8\npipeline_parallel_size:\
+            \ 1\nenable_attention_dp: false\nenable_chunked_prefill: false\nmax_batch_size:\
+            \ 128\nmax_num_tokens: 128\nkv_cache_config:\n  free_gpu_memory_fraction:\
+            \ 0.8\n  dtype: auto\n  tokens_per_block: 32\n  enable_block_reuse: false\n\
+            cache_transceiver_config:\n  backend: DEFAULT\n  max_tokens_in_buffer:\
+            \ 5504\ncuda_graph_config:\n  enable_padding: true\n  batch_sizes:\n \
+            \ - 1\n  - 2\n  - 3\n  - 4\n  - 5\n  - 6\n  - 7\n  - 8\n  - 9\n  - 10\n\
+            \  - 11\n  - 12\n  - 13\n  - 14\n  - 15\n  - 16\n  - 16\n  - 20\n  - 24\n\
+            \  - 28\n  - 32\n  - 32\n  - 40\n  - 48\n  - 56\n  - 64\n  - 64\n  - 80\n\
+            \  - 96\n  - 112\n  - 128\n  - 128\n  - 160\n  - 192\n  - 224\n  - 256\n\
+            \  - 256\n  - 320\n  - 384\n  - 448\n  - 512\n  - 120\n  - 121\n  - 122\n\
+            \  - 123\n  - 124\n  - 125\n  - 126\n  - 127\n  - 128\n  - 129\n  - 130\n\
+            \  - 131\n  - 132\n  - 133\n  - 134\n  - 135\n  - 136\ndisable_overlap_scheduler:\
+            \ false\nprint_iter_log: false\nYAML\nargs=(\n  --model-path \"deepseek-ai/DeepSeek-V4-Pro\"\
+            \n  --served-model-name \"deepseek-ai/DeepSeek-V4-Pro\"\n  --extra-engine-args\
+            \ \"/workspace/engine_configs/decode_config.yaml\"\n)\nargs+=(--disaggregation-mode\
+            \ decode)\nexec python3 -m dynamo.trtllm \"${args[@]}\"\n"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 40
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10

@@ -1,0 +1,42 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-ai-deepseek-v4-pro-agg
+  namespace: dynamo
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0
+          imagePullPolicy: IfNotPresent
+    SGLangWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 2
+      resources:
+        limits:
+          gpu: '4'
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0
+          workingDir: /workspace/components/backends/sglang
+          imagePullPolicy: IfNotPresent
+          command:
+          - /bin/bash
+          - -c
+          args:
+          - "set -euo pipefail\nargs=(\n  --model-path \"deepseek-ai/DeepSeek-V4-Pro\"\
+            \n  --served-model-name \"deepseek-ai/DeepSeek-V4-Pro\"\n  --tensor-parallel-size\
+            \ 4 --pipeline-parallel-size 1 --data-parallel-size 1 --max-running-requests\
+            \ 512 --max-prefill-tokens 5500 --enable-mixed-chunk --expert-parallel-size\
+            \ 1 --cuda-graph-bs 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 16 20 24 28\
+            \ 32 32 40 48 56 64 64 80 96 112 128 128 160 192 224 256 256 320 384 448\
+            \ 512 120 121 122 123 124 125 126 127 128 129 130 131 132 133 134 135\
+            \ 136 --moe-runner-backend deepep_moe --trust-remote-code --disable-flashinfer-autotune\
+            \ --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk\
+            \ 1 --speculative-num-draft-tokens 4\n)\nexec python3 -m dynamo.sglang\
+            \ \"${args[@]}\"\n"
