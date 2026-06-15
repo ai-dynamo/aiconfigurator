@@ -1,0 +1,1 @@
+--tensor-parallel-size 8 --pipeline-parallel-size 1 --data-parallel-size 1 --max-model-len 6500 --max-num-seqs 512 --max-num-batched-tokens 6012 --trust-remote-code --block-size 256 --no-enable-flashinfer-autotune

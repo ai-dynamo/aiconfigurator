@@ -72,4 +72,16 @@ CANARY_CASES: list[CanaryCase] = [
         backend_version="1.3.0rc14",
         params=_make_params(_MOE_MODEL, "trtllm", mode="disagg", total_gpus=_TOTAL_GPUS, system_name=_SYSTEM),
     ),
+    CanaryCase(
+        name="deepseek_vllm_h200_agg",
+        backend="vllm",
+        backend_version="0.20.1",
+        params=_make_params("deepseek-ai/DeepSeek-V4-Pro", "vllm", mode="agg", total_gpus=_TOTAL_GPUS, system_name=_SYSTEM),
+    ),
+    CanaryCase(
+        name="deepseek_sglang_h200_agg",
+        backend="sglang",
+        backend_version="0.5.11",
+        params=_make_params("deepseek-ai/DeepSeek-V4-Pro", "sglang", mode="agg", total_gpus=_TOTAL_GPUS, system_name=_SYSTEM),
+    ),
 ]

@@ -250,7 +250,11 @@ def render_backend_templates(
             cycle). When it carries a matched model profile, model ``defaults:``
             cli flags are appended (facts-default precedence: fill-if-absent) at the
             single cli seam so they reach BOTH the ``cli_args_*`` string artifact
-            and the typed k8s builder. ``None`` (or ``model is None``) is a no-op.
+            and the typed k8s builder. When ``None`` (the public API path), facts
+            are SELF-RESOLVED from ``param_values`` so every caller applies the
+            same model defaults; ``run_pipeline`` passes its already-resolved facts
+            to avoid double resolution. A generic model (``model is None``) is a
+            strict no-op, leaving the no-fact baseline byte-identical.
 
     Returns:
         Dictionary mapping template names to rendered content
@@ -274,6 +278,11 @@ def render_backend_templates(
         env = Environment(loader=FileSystemLoader(search_paths), trim_blocks=True, lstrip_blocks=True)
         _TEMPLATE_ENV_CACHE[templates_dir] = env
 
+    # Capture the raw request params BEFORE rule plugins run so facts can be
+    # self-resolved from the same input ``run_pipeline`` resolves from (the
+    # top-level ``ServiceConfig.model_path`` / ``*.system_name`` sections). This
+    # keeps the two render paths' facts identical (see facts self-resolve below).
+    _raw_param_values = param_values
     param_values = apply_rule_plugins(dict(param_values), backend)
     context = prepare_template_context(param_values, backend)
     # Assign backend-specific working_dir (removes need for input-driven path)
@@ -508,6 +517,27 @@ def render_backend_templates(
             context["agg_cli_args"] = cli
             context["agg_cli_args_list"] = cli_list
             rendered_templates["cli_args_agg"] = cli
+
+    # ── Resolve facts from our own params when the caller did not supply them ──
+    # ``run_pipeline`` resolves facts up front and threads them in via
+    # ``resolved_facts``; the PUBLIC api (CLI / dynamo profiler / freeze script)
+    # calls this function WITHOUT it. To make every caller apply model defaults
+    # from a single path, self-resolve here when ``resolved_facts is None`` —
+    # from the RAW request params (pre-rule-plugin), matching exactly what
+    # ``run_pipeline`` resolves from so the two paths reconverge. Resolution is
+    # best-effort: any failure degrades to ``None`` and never breaks rendering.
+    # For generic models (no profile match) this yields ``model is None`` and the
+    # apply block below is a strict no-op, so the Qwen baseline stays identical.
+    if resolved_facts is None:
+        try:
+            from aiconfigurator.generator.facts.request_resolution import (
+                resolve_facts_for_request,
+            )
+
+            resolved_facts = resolve_facts_for_request(_raw_param_values, backend, version)
+        except Exception:  # noqa: BLE001 - facts are best-effort, never fatal
+            logger.warning("Fact self-resolution failed; continuing without facts.", exc_info=True)
+            resolved_facts = None
 
     # ── Apply model-default cli flags from resolved facts (facts-default layer) ──
     # Single seam: after the per-role token lists are built and BEFORE the cli
