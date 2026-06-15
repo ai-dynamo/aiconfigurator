@@ -46,6 +46,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -279,7 +280,9 @@ class MoE(Operation):
             quant_mode: common.MoEQuantMode,
             workload_distribution: str,
         ) -> float:
-            latency = get_sol(
+            # SOL / util, util read best-effort from own collected data (the
+            # num_tokens curve for this slice); falls back to 0.4 if no data.
+            sol_time = get_sol(
                 num_tokens,
                 hidden_size,
                 inter_size,
@@ -290,8 +293,47 @@ class MoE(Operation):
                 quant_mode,
                 workload_distribution,
             )[0]
-            scale_factor = 0.4
-            return latency / scale_factor
+
+            def _slice():
+                cls.load_data(database)
+                if database.backend == common.BackendName.sglang.value and moe_backend == "deepep_moe":
+                    moe_data = database._wideep_context_moe_data if is_context else database._wideep_generation_moe_data
+                else:
+                    moe_data = database._moe_data
+                moe_data.raise_if_not_loaded()
+                wl = workload_distribution if workload_distribution in moe_data[quant_mode] else "uniform"
+                return moe_data[quant_mode][wl][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+
+            grid = util_empirical.grid_for(
+                (
+                    "moe",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    quant_mode.name,
+                    topk,
+                    num_experts,
+                    hidden_size,
+                    inter_size,
+                    moe_tp_size,
+                    moe_ep_size,
+                ),
+                _slice,
+                lambda c: get_sol(
+                    c[0],
+                    hidden_size,
+                    inter_size,
+                    topk,
+                    num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    quant_mode,
+                    workload_distribution,
+                )[0],
+                depth=1,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, fallback_scale=0.4)
+            return latency
 
         def _estimate_overflow_with_last_token_util(
             query_tokens: int,

@@ -34,6 +34,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -422,9 +423,47 @@ class ContextDSAModule(Operation):
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
-            latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.5
-            return latency / scale_factor
+            # SOL / util, util read best-effort from own collected data; falls
+            # back to 0.5 if no data. GLM keeps an explicit prefix axis
+            # ([num_heads][prefix][s][b]); legacy is [num_heads][s][b].
+            sol_time = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+            has_prefix = architecture == "GlmMoeDsaForCausalLM"
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._context_dsa_module_data
+                if wrapper is None:
+                    raise KeyError("context dsa module data not loaded")
+                return wrapper[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
+
+            if has_prefix:  # c = (num_heads, prefix, s, b); s is new tokens
+                depth, query = 4, (num_heads, prefix, s, b)
+
+                def _sol(c):
+                    return get_sol(c[3], c[2], c[1], c[0], kvcache_quant_mode, fmha_quant_mode)[0]
+            else:  # legacy c = (num_heads, full_s, b); samples are prefix=0
+                depth, query = 3, (num_heads, s + prefix, b)
+
+                def _sol(c):
+                    return get_sol(c[2], c[1], 0, c[0], kvcache_quant_mode, fmha_quant_mode)[0]
+
+            grid = util_empirical.grid_for(
+                (
+                    "ctx_dsa",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    fmha_quant_mode.name,
+                    kvcache_quant_mode.name,
+                    gemm_quant_mode.name,
+                    architecture,
+                ),
+                _slice,
+                _sol,
+                depth=depth,
+            )
+            latency, _ = util_empirical.estimate(sol_time, query, grid, fallback_scale=0.5)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -829,9 +868,33 @@ class GenerationDSAModule(Operation):
             return sol_time, sol_math, sol_mem
 
         def get_empirical(b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode) -> float:
-            latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
-            scale_factor = 0.5
-            return latency / scale_factor
+            # SOL / util, util read best-effort from own collected data (the
+            # (num_heads, b, s) grid for this slice); falls back to 0.5 if no data.
+            sol_time = get_sol(b, s, num_heads, kv_cache_dtype)[0]
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._generation_dsa_module_data
+                if wrapper is None:
+                    raise KeyError("generation dsa module data not loaded")
+                return wrapper[kv_cache_dtype][gemm_quant_mode][architecture]
+
+            grid = util_empirical.grid_for(
+                (
+                    "gen_dsa",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    kv_cache_dtype.name,
+                    gemm_quant_mode.name,
+                    architecture,
+                ),
+                _slice,
+                lambda c: get_sol(c[1], c[2], c[0], kv_cache_dtype)[0],  # c = (num_heads, b, s)
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_heads, b, s), grid, fallback_scale=0.5)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
