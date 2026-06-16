@@ -311,49 +311,27 @@ merged with new clean decode.
   dense decode repair (`_repair_decode_high_kv`); mixed model
   `= context_total + decode attention` (`_get_mix_step_latency`).
 
-### Verify a re-collection
-1. Group `layerwise.csv` by (model, attn_tp, ep, past_kv): `latency_ms` must be
-   non-decreasing in `batch_size`, with a single `latency_source`.
-2. Regenerate charts (set `--vllm-max-num-seqs` to the collected value); the gen
-   AIC line should track FPM and the blue "layerwise collected" dots should rise
-   smoothly (no jump/plateau). A full (ctx+gen) run enables clean mixed charts.
-3. The summary command also reports per-case MAPE:
-   ```bash
-   uv run python collector/layerwise/diagnostics/compare_aic_layerwise_fpm_summary.py \
-     --layerwise <RUN_DIR>/layerwise.csv
-   ```
-   (append `--shape-breakdown aggregate` to see error by phase/token/batch bucket).
+## Next steps
 
-## TODO
+In priority order, working off the committed FPM-vs-AIC charts:
 
-- (DONE) DeepSeek-V4-Flash `tp4_ep4` decode is fixed by the GPU-isolated
-  `execute_model_gpu` timing — the old `192.02%` decode outlier was corrupt
-  collection, not modeling. See the status section above.
-- Improve mixed-step / context modeling. Mixed error is now dominated by
-  context/prefill and FPM measurement outliers, not decode. Add FPM-outlier
-  filtering (drop points where FPM << prefill-only SOL) and verify the one-GPU
-  patched config, context batch shape, prefix length, and `max_num_batched_tokens`
-  match the FPM deployment envelope. Keep workload-mode accuracy separate from
-  pathology-filtered diagnostics.
-- Reduce Qwen3.6 MoE context error. Prioritize batched context and TP/EP
-  scheduler-envelope parity for the cases above `35%` context MAPE before
-  broadening the grid. In particular, verify that the one-GPU patched config,
-  context batch shape, prefix length, and `max_num_batched_tokens` match the
-  FPM deployment envelope.
-- Replace the current empirical MoE EP communication addend with a
-  backend-aware model. The current AIC path treats context as one EP exchange
-  and decode/op fallback as two EP exchanges; this matched a small validation
-  set but is not what vLLM implements. vLLM's default EP backend is
-  `allgather_reducescatter`, where MoE dispatch is an all-gather/all-gatherv
-  phase and combine is a reduce-scatter/reduce-scatterv phase. A better model
-  should compute `dispatch_ms + combine_ms` from the selected vLLM
-  `--all2all-backend`, using NCCL `all_gather` and `reduce_scatter` payloads
-  for the default backend and backend-specific perf data/fallbacks for
-  DeepEP/FlashInfer/NIXL/MoRI.
-- Extend dataset-shaped workloads into MoE layerwise routing validation. FPM
-  already defaults to OpenAssistant/oasst1-ordered, large-scaled ISL/OSL shapes
-  with deterministic random token IDs; layerwise still needs a comparable
-  model-agnostic routing strategy for MoE blocks.
-- Keep prefix-cache decode as the normal MoE decode path. `live_decode`
-  remains only a diagnostic path because it is substantially slower and makes
-  the collector harder to scale.
+1. **Fix MoE mixed-step modeling (first priority).** On the charts, context and
+   decode for MoE models are OK (could be better — see item 2), but **mixed is
+   really bad for MoE**. That points at AIC's SDK code for composing the mixed
+   step latency for MoE models (`_get_mix_step_latency` and the MoE path it calls
+   in `src/aiconfigurator/sdk/backends/vllm_backend.py`) rather than at the
+   collected data. Fix the mixed-step model for MoE first.
+
+2. **Identify and fix the accuracy gaps in MoE context and decode.** They are
+   acceptable today but not great. Determine whether the residual error comes
+   from layerwise collection or from the AIC SDK model, then fix the responsible
+   side.
+
+3. **Explain or remove `_DECODE_COMPUTE_BATCH_CAL`.** Find the physical reason the
+   dense decode compute calibration (`0.0066` per batch element, in
+   `vllm_backend.py`) is needed, or change the model so it is no longer required.
+   Magic calibration constants we cannot explain are not acceptable long term.
+
+4. **Make layerwise collection faster.** It is still too slow. Scaling to 30+
+   models requires a substantially faster collector.
+
