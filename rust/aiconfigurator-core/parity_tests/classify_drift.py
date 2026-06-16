@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Classify the pareto-DRIFT entries: discreteness vs real frontier divergence.
+
+For each DRIFT entry, run cli_default under both engines and compare the
+user-facing frontier CURVES (throughput tokens/s/gpu vs latency tpot) by
+interpolating each curve onto the other's throughput points over the overlapping
+range. Small curve gap => frontiers materially equivalent (the row-count DRIFT is
+discreteness in point selection). Large gap => a real residual divergence.
+"""
+
+import logging
+
+logging.disable(logging.CRITICAL)
+import sys
+
+sys.path.insert(0, "tools/support_matrix")
+import numpy as np
+import pandas as pd
+from support_matrix import SupportMatrix, _get_test_constraints
+
+ENTRIES = [
+    ("Qwen/Qwen3-30B-A3B", "gb200", "vllm", "0.19.0"),
+    ("moonshotai/Kimi-K2.5", "h200_sxm", "vllm", "0.14.0"),
+    ("moonshotai/Kimi-K2.5", "h200_sxm", "vllm", "0.19.0"),
+    ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "gb300", "sglang", "0.5.10"),
+]
+
+
+def frontier_curve(df, x="tokens/s/gpu", y="tpot"):
+    d = (
+        pd.DataFrame({x: pd.to_numeric(df[x], errors="coerce"), y: pd.to_numeric(df[y], errors="coerce")})
+        .dropna()
+        .sort_values(x)
+    )
+    return d[x].to_numpy(dtype=float), d[y].to_numpy(dtype=float)
+
+
+def max_gap(xa, ya, xb, yb):
+    # interpolate curve B's y at curve A's x (overlapping range only), rel gap
+    lo = max(xa.min(), xb.min())
+    hi = min(xa.max(), xb.max())
+    xs = xa[(xa >= lo) & (xa <= hi)]
+    if len(xs) < 2:
+        return None
+    yb_i = np.interp(xs, xb, yb)
+    ya_i = np.interp(xs, xa, ya)
+    rel = np.abs(ya_i - yb_i) / np.maximum(np.abs(yb_i), 1e-9)
+    return float(rel.max() * 100), float(rel.mean() * 100)
+
+
+for model, system, backend, version in ENTRIES:
+    c = _get_test_constraints(model)
+    py = SupportMatrix._run_mode(
+        mode="disagg",
+        model=model,
+        system=system,
+        backend=backend,
+        version=version,
+        constraints=c,
+        engine_step_backend="python",
+    )
+    ru = SupportMatrix._run_mode(
+        mode="disagg",
+        model=model,
+        system=system,
+        backend=backend,
+        version=version,
+        constraints=c,
+        engine_step_backend="rust",
+    )
+    line = f"{model.split('/')[-1]:34s} {system:8s} {version}: py={len(py)} ru={len(ru)}"
+
+    # gate metric: envelope extremes (exactly what _compare_frontier_envelope checks)
+    def ext(df, col, agg):
+        v = pd.to_numeric(df[col], errors="coerce").dropna()
+        return (v.max() if agg == "max" else v.min()) if len(v) else float("nan")
+
+    for col, agg in [("tokens/s/user", "max"), ("tpot", "min"), ("request_latency", "min")]:
+        p = ext(py, col, agg)
+        r = ext(ru, col, agg)
+        rel = abs(p - r) / max(abs(p), abs(r), 1e-9) * 100
+        line += f" | {agg}({col}) py={p:.4g} ru={r:.4g} d={rel:.2f}%"
+    # smooth curve overlap on the user-facing SLA tradeoff
+    xa, ya = frontier_curve(py, "tokens/s/user", "request_latency")
+    xb, yb = frontier_curve(ru, "tokens/s/user", "request_latency")
+    g = max_gap(xa, ya, xb, yb)
+    line += " | reqlat-curve: " + (f"max {g[0]:.2f}% mean {g[1]:.2f}%" if g else "n/a")
+    print("CLASSIFY " + line, flush=True)
