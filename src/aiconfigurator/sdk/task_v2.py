@@ -41,7 +41,12 @@ from aiconfigurator.sdk.models import (
     check_is_moe,
     get_model_family,
 )
-from aiconfigurator.sdk.perf_database import get_latest_database_version, load_system_spec
+from aiconfigurator.sdk.perf_database import (
+    get_latest_database_version,
+    is_blackwell_system,
+    is_hopper_system,
+    load_system_spec,
+)
 from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -105,21 +110,6 @@ _DEEPSEEK_V4_NATIVE_FP4_TO_FP8_MODEL = {
     "deepseek-ai/DeepSeek-V4-Flash": "sgl-project/DeepSeek-V4-Flash-FP8",
     "deepseek-ai/DeepSeek-V4-Pro": "sgl-project/DeepSeek-V4-Pro-FP8",
 }
-
-
-def _is_blackwell_system(system_name: str | None) -> bool:
-    """True for Blackwell-class systems (SM >= 100, e.g. b200_sxm / gb200 / b300 / gb300)."""
-    if not system_name:
-        return False
-    spec = load_system_spec(system_name)
-    return int(spec.get("gpu", {}).get("sm_version", -1)) >= 100
-
-
-def _is_hopper_system(system_name: str | None) -> bool:
-    """True for Hopper-class systems (h100 / h200 / gh200)."""
-    if not system_name:
-        return False
-    return system_name.startswith(("h100", "h200", "gh200"))
 
 
 # SGLang MegaMoE (DeepSeek-V4) — only these checkpoints have packaged perf data.
@@ -580,7 +570,7 @@ class Task:
             {
                 self._role_attr(r, "system_name")
                 for r in roles
-                if not _is_blackwell_system(self._role_attr(r, "system_name"))
+                if not is_blackwell_system(self._role_attr(r, "system_name"))
             }
         )
         if non_blackwell:
@@ -594,7 +584,7 @@ class Task:
         for role in roles:
             model = self._role_attr(role, "model_path")
             replacement = _DEEPSEEK_V4_NATIVE_FP4_TO_FP8_MODEL.get(model)
-            if replacement and _is_hopper_system(self._role_attr(role, "system_name")):
+            if replacement and is_hopper_system(self._role_attr(role, "system_name")):
                 raise ValueError(
                     f"{model} uses native FP4 routed-expert weights and is not supported on "
                     f"Hopper systems. Use {replacement} instead."
@@ -698,7 +688,7 @@ class Task:
                 self._role_attr(role, "moe_quant_mode") is None
                 and self._role_attr(role, "backend_name") == "trtllm"
                 and self._role_attr(role, "model_path") in _GPTOSS_BLACKWELL_MODELS
-                and _is_blackwell_system(self._role_attr(role, "system_name"))
+                and is_blackwell_system(self._role_attr(role, "system_name"))
             ):
                 self._set_role_attr(role, "moe_quant_mode", common.MoEQuantMode.w4a8_mxfp4_mxfp8)
 
@@ -722,9 +712,9 @@ class Task:
                     and self.moe_backend != "megamoe"
                 ):
                     sysn = self._role_attr(role, "system_name")
-                    if _is_blackwell_system(sysn):
+                    if is_blackwell_system(sysn):
                         from_hf = common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
-                    elif _is_hopper_system(sysn):
+                    elif is_hopper_system(sysn):
                         from_hf = common.MoEQuantMode.w4a16_mxfp4_cutlass
                 fallback = _QUANT_FALLBACKS[key]
 
@@ -799,7 +789,7 @@ class Task:
         if self.total_gpus is None or self.total_gpus < 16:
             return False
         try:
-            return all(_is_blackwell_system(s) for s in systems)
+            return all(is_blackwell_system(s) for s in systems)
         except Exception:
             return False
 
