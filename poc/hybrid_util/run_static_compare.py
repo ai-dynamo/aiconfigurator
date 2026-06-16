@@ -69,8 +69,12 @@ CONFIGS = {
 }
 
 
-def main():
-    name = sys.argv[1] if len(sys.argv) > 1 else "llama70b"
+def collect(name):
+    """Run the bs x seq x pastkv sweep for a config; return per-point records.
+
+    apes is a list of (ape, bs, seq, pk, silicon, empirical) -- ape=|emp-sil|/sil.
+    Used both by main() (summary) and plot_gate_errors.py (distribution).
+    """
     cfg = CONFIGS[name]
     backend_name = "trtllm"
     db = get_database(cfg["system"], backend_name, cfg["version"])  # shared layer OFF for both modes
@@ -93,26 +97,44 @@ def main():
                 except Exception as e:
                     sil_fail += 1
                     fail_types[type(e).__name__] = fail_types.get(type(e).__name__, 0) + 1
-                    if sil_fail <= 3:
-                        print(f"  FAIL bs={bs} seq={seq} pk={pk}: {type(e).__name__}: {str(e)[:200]}")
                     continue
                 emp = latency(common.DatabaseMode.EMPIRICAL, rc)
                 if sil and sil > 0 and emp and emp > 0:
-                    apes.append((abs(emp - sil) / sil, bs, seq, pk, sil, emp))
+                    # SIGNED relative error (emp-sil)/sil: >0 over-predict, <0 under-predict.
+                    apes.append(((emp - sil) / sil, bs, seq, pk, sil, emp))
                     both_ok += 1
+    return {
+        "name": name,
+        "cfg": cfg,
+        "backend": backend_name,
+        "pastkv": pastkv,
+        "apes": apes,
+        "sil_fail": sil_fail,
+        "fail_types": fail_types,
+        "both_ok": both_ok,
+    }
+
+
+def main():
+    name = sys.argv[1] if len(sys.argv) > 1 else "llama70b"
+    r = collect(name)
+    cfg, backend_name, pastkv = r["cfg"], r["backend"], r["pastkv"]
+    apes, sil_fail, fail_types, both_ok = r["apes"], r["sil_fail"], r["fail_types"], r["both_ok"]
 
     print(f"\n=== {name}: {cfg['model']} on {cfg['system']}/{backend_name}/{cfg['version']}")
     print(f"grid: bs{len(BS)} x seq{len(SEQ)} x pastkv{len(pastkv)} = {len(BS) * len(SEQ) * len(pastkv)} points")
     print(f"silicon failures: {sil_fail} {fail_types}   scored points: {both_ok}")
     if apes:
-        vals = np.array([a for a, *_ in apes]) * 100
-        print("\n  empirical-vs-silicon  |emp-sil|/sil")
-        print(f"    MAPE%  {vals.mean():7.2f}    median {np.median(vals):7.2f}")
-        print(f"    p95%   {np.percentile(vals, 95):7.2f}    p99%   {np.percentile(vals, 99):7.2f}")
-        print(f"    max%   {vals.max():7.2f}")
-        print("\n  worst 5 points (bs, seq, pastkv | silicon -> empirical | ape%):")
-        for a, bs, seq, pk, sil, emp in sorted(apes, reverse=True)[:5]:
-            print(f"    bs={bs:<4} seq={seq:<6} pk={pk:<5} | {sil:8.3f} -> {emp:8.3f} | {a * 100:7.1f}")
+        signed = np.array([a for a, *_ in apes]) * 100  # signed (emp-sil)/sil
+        av = np.abs(signed)
+        print("\n  empirical-vs-silicon  (emp-sil)/sil")
+        print(f"    MAPE%  {av.mean():7.2f}    median|e| {np.median(av):7.2f}    bias(signed) {signed.mean():+7.2f}")
+        print(
+            f"    p95|e| {np.percentile(av, 95):7.2f}    p99|e| {np.percentile(av, 99):7.2f}    max|e| {av.max():7.2f}"
+        )
+        print("\n  worst 5 points (bs, seq, pastkv | silicon -> empirical | signed%):")
+        for a, bs, seq, pk, sil, emp in sorted(apes, key=lambda t: abs(t[0]), reverse=True)[:5]:
+            print(f"    bs={bs:<4} seq={seq:<6} pk={pk:<5} | {sil:8.3f} -> {emp:8.3f} | {a * 100:+7.1f}")
 
 
 if __name__ == "__main__":

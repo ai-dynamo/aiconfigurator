@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hybrid Modeling Enhancement · SOL-Utilization Empirical (util-empirical)</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#161b22; --ink:#e6edf3; --muted:#9aa7b4; --line:#2b333d;
+    --acc:#4fa3ff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --vio:#bc8cff;
+    --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:40px 24px 80px}
+  header{border-bottom:1px solid var(--line);padding-bottom:24px;margin-bottom:32px}
+  h1{font-size:30px;margin:0 0 6px;letter-spacing:.3px}
+  h2{font-size:22px;margin:46px 0 14px;padding-top:10px;border-top:1px solid var(--line)}
+  h3{font-size:17px;margin:26px 0 10px;color:var(--acc)}
+  .sub{color:var(--muted);font-size:14px}
+  p{margin:10px 0}
+  code{font-family:var(--mono);background:#0b0f14;border:1px solid var(--line);border-radius:5px;
+    padding:1px 6px;font-size:13px;color:#cdd9e5}
+  .eq{font-family:var(--mono);background:#0b0f14;border:1px solid var(--line);border-left:3px solid var(--acc);
+    border-radius:6px;padding:12px 16px;margin:14px 0;font-size:14px;color:#dbe6f0;overflow-x:auto}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+  .tag{display:inline-block;font-size:11px;font-family:var(--mono);padding:2px 8px;border-radius:20px;
+    border:1px solid var(--line);color:var(--muted);margin-right:6px}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left}
+  th{background:#1b222b;color:var(--muted);font-weight:600}
+  td.num{font-family:var(--mono);text-align:right}
+  .ok{color:var(--good)} .bad{color:var(--bad)} .wn{color:var(--warn)} .vi{color:var(--vio)}
+  .note{color:var(--muted);font-size:13px}
+  ul{margin:8px 0 8px 0;padding-left:22px} li{margin:4px 0}
+  .box{background:#1b222b;border:1px solid var(--line);border-radius:8px;padding:10px 14px;font-size:13.5px}
+  .box .k{font-family:var(--mono);font-size:12px;color:var(--acc)}
+  .col{display:flex;flex-direction:column;align-items:stretch;gap:0}
+  .arrow{align-self:center;color:var(--muted);font-size:20px;line-height:1;margin:6px 0}
+  .arrow small{display:block;font-size:11px;color:var(--muted);text-align:center}
+  .pill{border-radius:8px;padding:10px 14px;font-size:13.5px;border:1px solid}
+  .p-sil{border-color:#2d4a6b;background:#13202e}
+  .p-own{border-color:#2f5a36;background:#122017}
+  .p-tr{border-color:#5a4a2f;background:#1f1a10}
+  .p-const{border-color:#5a2f33;background:#1f1314}
+  .lead{font-size:16px;color:#cdd9e5}
+  .kbd{font-family:var(--mono);font-size:12px;color:var(--vio)}
+  svg{max-width:100%;height:auto;display:block;margin:6px auto}
+  footer{margin-top:60px;border-top:1px solid var(--line);padding-top:16px;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>Hybrid Modeling Enhancement: SOL-Utilization Empirical</h1>
+  <div class="sub">Branch <code>enhance_hybrid</code> · Module <code>sdk/operations/util_empirical.py</code> · Methodology &amp; validation summary</div>
+</header>
+
+<p class="lead">Replace every op's hard-coded empirical <code>scale_factor</code> with a <strong>SOL-utilization (util) read from real collected data</strong>.
+In one line: <em>model in the util = SOL/measured space, not in latency space</em> — util is bounded, smooth, and transferable across structural variants.</p>
+
+<!-- 1 -->
+<h2>1 · Problem &amp; Motivation</h2>
+<p>The original empirical estimate was a fixed per-op constant:</p>
+<div class="eq">empirical_latency = SOL(shape) / scale_factor &nbsp;&nbsp;# scale_factor ∈ {0.4 … 0.8}, hard-coded</div>
+<p>That constant is really an "assumed utilization" and is badly off across shapes. Five observations motivated the change:</p>
+<div class="grid2">
+  <div class="card"><span class="tag">Obs 1</span>Interpolation needs a full cartesian grid; a missing point errors out — hybrid should fill it.</div>
+  <div class="card"><span class="tag">Obs 2</span>A fixed scaling factor can't be accurate; how do we <strong>lightly reuse</strong> existing data?</div>
+  <div class="card"><span class="tag">Obs 3</span>SOL% is smoother than latency; good as an extra dimension; extrapolation should clamp to <strong>boundary SOL%</strong>.</div>
+  <div class="card"><span class="tag">Obs 4</span>New model with missing ops → afraid to use hybrid; a new op could borrow a <strong>similar op's</strong> sol%.</div>
+  <div class="card" style="grid-column:1/-1"><span class="tag">Obs 5</span>attn / moe minor variants (different head / expert counts) are structurally alike; under the same input they should reuse a similar op's sol%.</div>
+</div>
+
+<!-- 2 -->
+<h2>2 · Core Method: Model in util Space</h2>
+<div class="eq">util = SOL / measured ∈ (0, 1]&nbsp;&nbsp;(measured ≥ SOL, guaranteed by _correct_sol)<br>
+latency(query) = SOL(query) / util(query)</div>
+
+<div class="grid2">
+  <div class="card">
+    <h3 style="margin-top:4px">Why util, not latency</h3>
+    <ul>
+      <li><b>Bounded</b>: util∈(0,1]; extrapolation can't go negative or explode.</li>
+      <li><b>Smooth</b>: util is "kernel efficiency", far lower curvature than latency (which spans orders of magnitude with M·N·K).</li>
+      <li><b>Transferable</b>: analytic SOL absorbs structural differences (heads / experts / hidden); util keeps only kernel efficiency, ~invariant across structure.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:4px">SOL = analytic prior, util = residual</h3>
+    <p class="note">Use analytic SOL as a basis capturing the bulk variation; interpolate only the smooth efficiency residual. The query's SOL is computed <strong>exactly</strong>, adding a physical prior that raw latency interpolation lacks.</p>
+    <p class="note">SOL handles quant / prefix / window kinks analytically, so util is even flatter across those boundaries.</p>
+  </div>
+</div>
+
+<h3>Diagram A · latency space vs util space</h3>
+<svg viewBox="0 0 900 230" role="img" aria-label="latency vs util space">
+  <text x="150" y="24" fill="#9aa7b4" font-size="13" text-anchor="middle">latency space (high curvature, orders of magnitude)</text>
+  <line x1="40" y1="180" x2="270" y2="180" stroke="#2b333d"/>
+  <line x1="40" y1="180" x2="40" y2="40" stroke="#2b333d"/>
+  <path d="M40,178 Q120,176 180,120 T270,46" fill="none" stroke="#f85149" stroke-width="2.5"/>
+  <text x="155" y="205" fill="#9aa7b4" font-size="11" text-anchor="middle">shape / tokens →</text>
+  <text x="22" y="110" fill="#9aa7b4" font-size="11" transform="rotate(-90 22 110)" text-anchor="middle">latency</text>
+  <text x="250" y="38" fill="#f85149" font-size="11">large interp error</text>
+  <text x="450" y="100" fill="#4fa3ff" font-size="13" text-anchor="middle">÷ SOL (analytic)</text>
+  <path d="M300,110 L600,110" stroke="#4fa3ff" stroke-width="2" marker-end="url(#ah)"/>
+  <defs><marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#4fa3ff"/></marker></defs>
+  <text x="760" y="24" fill="#9aa7b4" font-size="13" text-anchor="middle">util space (bounded, smooth)</text>
+  <line x1="630" y1="180" x2="880" y2="180" stroke="#2b333d"/>
+  <line x1="630" y1="180" x2="630" y2="40" stroke="#2b333d"/>
+  <line x1="630" y1="60" x2="880" y2="60" stroke="#2b333d" stroke-dasharray="3 3"/>
+  <text x="884" y="63" fill="#9aa7b4" font-size="10">1.0</text>
+  <path d="M630,150 Q740,120 880,116" fill="none" stroke="#3fb950" stroke-width="2.5"/>
+  <text x="755" y="205" fill="#9aa7b4" font-size="11" text-anchor="middle">tokens →</text>
+  <text x="612" y="110" fill="#9aa7b4" font-size="11" transform="rotate(-90 612 110)" text-anchor="middle">util</text>
+  <text x="820" y="138" fill="#3fb950" font-size="11">easy interp / extrap</text>
+</svg>
+
+<!-- 3 -->
+<h2>3 · Estimation Priority Chain <span class="sub">(core methodology diagram)</span></h2>
+<p>How a query resolves to a latency. EMPIRICAL mode (and the HYBRID silicon-miss fallback) walks the three-level chain on the right; each level is more accurate than the next:</p>
+
+<div class="col" style="max-width:580px;margin:10px auto">
+  <div class="box"><b>query(shape)</b> &nbsp;<span class="k">DatabaseMode?</span></div>
+  <div class="arrow">▼</div>
+  <div class="pill p-sil"><b class="vi">SILICON</b> — strict interpolation on the collected grid; <span class="kbd">raise</span> on a missing bracket (→ handed to HYBRID fallback)</div>
+  <div class="arrow">▼ <small>EMPIRICAL / HYBRID-miss</small></div>
+  <div class="pill p-own"><b class="ok">① own-slice util</b> — from this op's own collected data; nearest-neighbour / boundary clamp (Obs 2, 3)<div class="note">latency = SOL(query) / util_own</div></div>
+  <div class="arrow">▼ <small>no data in own slice</small></div>
+  <div class="pill p-tr"><b class="wn">② cross-shape transfer</b> — borrow the nearest sibling slice's util, reconstruct with the query's own SOL (Obs 4, 5)<div class="note">latency = SOL(query) / util_ref(nearest sibling)</div></div>
+  <div class="arrow">▼ <small>no sibling to borrow</small></div>
+  <div class="pill p-const"><b class="bad">③ constant fallback</b> — revert to the op's original scale_factor (keeps zero-data ops unchanged)<div class="note">latency = SOL(query) / scale_factor</div></div>
+</div>
+<p class="note">Each level beats the next and keeps a <code>source</code> tag for attribution. The own-data path is identical to pre-change — transfer/constant fire only when data is missing.</p>
+
+<!-- 4 -->
+<h2>4 · Module Structure <code>util_empirical</code></h2>
+<svg viewBox="0 0 900 300" role="img" aria-label="module components">
+  <rect x="20" y="30" width="230" height="230" rx="10" fill="#13202e" stroke="#2d4a6b"/>
+  <text x="135" y="52" fill="#4fa3ff" font-size="13" text-anchor="middle" font-weight="bold">each op's get_empirical supplies</text>
+  <rect x="40" y="70" width="190" height="40" rx="6" fill="#1b222b" stroke="#2b333d"/>
+  <text x="50" y="86" fill="#e6edf3" font-size="12">slice_fn() → own data sub-grid</text>
+  <text x="50" y="102" fill="#9aa7b4" font-size="11">(sliced by categorical keys)</text>
+  <rect x="40" y="120" width="190" height="40" rx="6" fill="#1b222b" stroke="#2b333d"/>
+  <text x="50" y="136" fill="#e6edf3" font-size="12">sol_fn(coords) → SOL(ms)</text>
+  <text x="50" y="152" fill="#9aa7b4" font-size="11">analytic, per shape</text>
+  <rect x="40" y="170" width="190" height="34" rx="6" fill="#1b222b" stroke="#2b333d"/>
+  <text x="50" y="191" fill="#e6edf3" font-size="12">fallback_scale (constant)</text>
+  <rect x="40" y="212" width="190" height="34" rx="6" fill="#1b222b" stroke="#2b333d"/>
+  <text x="50" y="233" fill="#e6edf3" font-size="12">query coords + transfer feats</text>
+  <path d="M250,145 L320,145" stroke="#4fa3ff" stroke-width="2" marker-end="url(#ah)"/>
+  <rect x="330" y="30" width="550" height="230" rx="10" fill="#161b22" stroke="#2b333d"/>
+  <text x="605" y="52" fill="#e6edf3" font-size="13" text-anchor="middle" font-weight="bold">util_empirical</text>
+  <rect x="350" y="66" width="245" height="56" rx="6" fill="#122017" stroke="#2f5a36"/>
+  <text x="362" y="86" fill="#3fb950" font-size="12" font-weight="bold">build_samples + UtilGrid</text>
+  <text x="362" y="104" fill="#9aa7b4" font-size="11">nearest-neighbour in</text>
+  <text x="362" y="118" fill="#9aa7b4" font-size="11">normalised log space; clamps on extrap</text>
+  <rect x="610" y="66" width="250" height="56" rx="6" fill="#1f1a10" stroke="#5a4a2f"/>
+  <text x="622" y="86" fill="#d29922" font-size="12" font-weight="bold">grid_from_reference</text>
+  <text x="622" y="104" fill="#9aa7b4" font-size="11">+ ReferenceCandidate</text>
+  <text x="622" y="118" fill="#9aa7b4" font-size="11">pick nearest sibling slice by features</text>
+  <rect x="350" y="134" width="245" height="46" rx="6" fill="#1b222b" stroke="#2b333d"/>
+  <text x="362" y="154" fill="#e6edf3" font-size="12" font-weight="bold">grid_for</text>
+  <text x="362" y="170" fill="#9aa7b4" font-size="11">best-effort; None when data missing</text>
+  <rect x="610" y="134" width="250" height="46" rx="6" fill="#1b222b" stroke="#2b333d"/>
+  <text x="622" y="154" fill="#e6edf3" font-size="12" font-weight="bold">_GRID_CACHE</text>
+  <text x="622" y="170" fill="#9aa7b4" font-size="11">process-lifetime (keyed by slice)</text>
+  <rect x="350" y="194" width="510" height="48" rx="6" fill="#13202e" stroke="#2d4a6b"/>
+  <text x="362" y="214" fill="#4fa3ff" font-size="12" font-weight="bold">estimate(sol_query, coords, grid, fallback_scale)</text>
+  <text x="362" y="232" fill="#9aa7b4" font-size="11">→ (latency, util); util=None means the constant fallback was used</text>
+</svg>
+<p class="note">Extension seam: the <b>sample source</b> is swappable (own / sibling slice / cross-op reference); <code>UtilGrid</code> and <code>estimate</code> stay unchanged — that's what makes "transfer" pluggable.</p>
+
+<!-- 5 -->
+<h2>5 · Cross-Shape Transfer (Obs 5)</h2>
+<p>"SOL-ratio transfer": the analytic SOL carries the structural difference; util only borrows the shared kernel efficiency.</p>
+<div class="eq">latency_query(c) = SOL_query(c) / util_ref(c)<br>
+&nbsp;&nbsp;= SOL_query(c) · measured_ref(c) / SOL_ref(c)&nbsp;&nbsp;# SOL_ref MUST use the <strong>reference's own shape</strong></div>
+<svg viewBox="0 0 900 150" role="img" aria-label="cross-shape transfer">
+  <rect x="30" y="40" width="220" height="70" rx="8" fill="#1f1a10" stroke="#5a4a2f"/>
+  <text x="140" y="64" fill="#d29922" font-size="12" text-anchor="middle" font-weight="bold">nearest sibling slice</text>
+  <text x="140" y="84" fill="#9aa7b4" font-size="11" text-anchor="middle">nearest by (topk, experts,</text>
+  <text x="140" y="98" fill="#9aa7b4" font-size="11" text-anchor="middle">hidden, inter)</text>
+  <path d="M250,75 L340,75" stroke="#4fa3ff" stroke-width="2" marker-end="url(#ah)"/>
+  <text x="295" y="66" fill="#9aa7b4" font-size="11" text-anchor="middle">util_ref(c)</text>
+  <rect x="345" y="40" width="230" height="70" rx="8" fill="#122017" stroke="#2f5a36"/>
+  <text x="460" y="70" fill="#3fb950" font-size="12" text-anchor="middle" font-weight="bold">util(c) ≈ struct-invariant</text>
+  <text x="460" y="90" fill="#9aa7b4" font-size="11" text-anchor="middle">(kernel efficiency)</text>
+  <path d="M575,75 L665,75" stroke="#4fa3ff" stroke-width="2" marker-end="url(#ah)"/>
+  <text x="620" y="66" fill="#9aa7b4" font-size="11" text-anchor="middle">× SOL_query(c)</text>
+  <rect x="670" y="40" width="210" height="70" rx="8" fill="#13202e" stroke="#2d4a6b"/>
+  <text x="775" y="70" fill="#4fa3ff" font-size="12" text-anchor="middle" font-weight="bold">latency_query</text>
+  <text x="775" y="90" fill="#9aa7b4" font-size="11" text-anchor="middle">unseen shape now estimable</text>
+</svg>
+<p class="note">The similarity key was found by POC to be <b>(topk, num_experts) + GEMM size regime, not model lineage</b> (DeepSeek-V3→MiniMax 6.9% beats same-family Qwen30B→Qwen235B 27%).</p>
+
+<!-- 6 -->
+<h2>6 · Validation Methodology (two layers)</h2>
+<div class="grid2">
+  <div class="card">
+    <h3 style="margin-top:4px">① Model-level run_static gate</h3>
+    <p class="note">Run the same model over (bs, seq, pastkv) in SILICON vs EMPIRICAL; treat silicon as reference and report MAPE/p95/max. Measures empirical's model-level accuracy.</p>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:4px">② Per-op invariant</h3>
+    <p class="note">At a <strong>collected point</strong>, <code>SOL/util = SOL/(SOL/measured) = measured</code>, so <b>emp/sil must = 1.0000</b>. Used to confirm wiring when the model-level gate is blocked by data gaps.</p>
+  </div>
+</div>
+<p class="note vi" style="margin-top:10px">Recurring theme: run_static gates are often blocked by <strong>collection data gaps</strong> (GLM-5 prefix&gt;0, trtllm alltoall table, DSV4 fp8 fmha, attention prefix&gt;0) — a data problem, not a wiring problem; fall back to the per-op invariant.</p>
+
+<h3>Model-level gate results</h3>
+<table>
+  <tr><th>Model</th><th>System/Backend</th><th>Op coverage</th><th class="num">MAPE</th><th class="num">median</th><th class="num">p95</th><th class="num">max</th></tr>
+  <tr><td>Llama-3.1-70B</td><td>h100/trtllm</td><td>GEMM+attn</td><td class="num">23.6→<b class="ok">7.0</b></td><td class="num">→8.2</td><td class="num">54.9→<b class="ok">12.0</b></td><td class="num">57.9→<b class="ok">14.2</b></td></tr>
+  <tr><td>GLM-5 (MoE+DSA)</td><td>b200/trtllm</td><td>MoE+DSA+GEMM</td><td class="num"><b class="ok">5.3</b></td><td class="num"><b class="ok">1.47</b></td><td class="num">7.2</td><td class="num">—</td></tr>
+  <tr><td>DeepSeek-V3 (MLA)</td><td>h200/trtllm</td><td>MLA+MoE+GEMM</td><td class="num"><b class="ok">3.63</b></td><td class="num">3.44</td><td class="num">6.2</td><td class="num">6.42</td></tr>
+</table>
+<p class="note">Values are before(SOL/const) → after(util) of |emp−sil|/sil %. Blanks were not separately reported.</p>
+
+<h3>Per-op invariant (ops sitting on data gaps)</h3>
+<table>
+  <tr><th>Op</th><th>Check point</th><th class="num">emp/sil</th><th class="num">old const/sil</th></tr>
+  <tr><td>TrtLLMWideEPMoE</td><td>b200/trtllm collected pt</td><td class="num"><b class="ok">1.0000</b></td><td class="num">1.17×</td></tr>
+  <tr><td>WideEPGenerationMLA</td><td>h100/sglang collected pt</td><td class="num"><b class="ok">1.0000</b></td><td class="num">0.70×</td></tr>
+  <tr><td>DeepSeekV4MHCModule</td><td>b200/sglang collected pt</td><td class="num"><b class="ok">1.0000</b></td><td class="num">0.44×</td></tr>
+</table>
+
+<h3>Cross-shape transfer (leave-one-out)</h3>
+<table>
+  <tr><th>Experiment</th><th>Method</th><th class="num">transfer MAPE</th><th class="num">median</th><th class="num">const</th></tr>
+  <tr><td>MoE across configs</td><td>leave-one-out, h100/trtllm 12 configs</td><td class="num"><b class="ok">19.5</b></td><td class="num">15.1</td><td class="num bad">113</td></tr>
+  <tr><td>Attention across num_heads</td><td>nearest-neighbour (heads≥8)</td><td class="num"><b class="ok">5–13</b></td><td class="num">—</td><td class="num bad">67</td></tr>
+  <tr><td>Attention across head_dim</td><td>64↔128</td><td class="num bad">35–78</td><td class="num">—</td><td class="num">—</td></tr>
+</table>
+<p class="note">Transferability rule: <b>variant difference on a categorical key with ~invariant util → transferable</b> (MoE configs, near num_heads); <b>difference on a kernel-shape dimension → not transferable</b> (head_dim must stay a hard key). num_heads is already a dense continuous axis, so interpolation already covers it.</p>
+
+<!-- 7 -->
+<h2>7 · Op Coverage &amp; Per-op Coordinates</h2>
+<table>
+  <tr><th>Op</th><th>util coordinate (continuous axis)</th><th>categorical key / transfer feature</th><th class="num">fallback const</th><th>status</th></tr>
+  <tr><td>GEMM</td><td>(m, n, k)</td><td>quant</td><td class="num">0.8</td><td class="ok">✓</td></tr>
+  <tr><td>ContextAttention</td><td>(n, full_s, b)</td><td>head_size, window, n_kv, quant</td><td class="num">0.6</td><td class="ok">✓</td></tr>
+  <tr><td>GenerationAttention</td><td>(n, b, s)</td><td>same</td><td class="num">0.8</td><td class="ok">✓</td></tr>
+  <tr><td>MoE (regular)</td><td>(num_tokens)</td><td>topk, experts, hidden, inter</td><td class="num">0.4</td><td class="ok">✓ + transfer</td></tr>
+  <tr><td>ContextDSAModule</td><td>(nh, prefix, s, b) / legacy 3D</td><td>architecture, compress_ratio, quant</td><td class="num">0.5</td><td class="ok">✓</td></tr>
+  <tr><td>GenerationDSAModule</td><td>(nh, b, s)</td><td>same</td><td class="num">0.5</td><td class="ok">✓</td></tr>
+  <tr><td>ContextMLA / Module</td><td>(nh, full_s, b)</td><td>quant (+gemm_quant)</td><td class="num">0.6</td><td class="ok">✓</td></tr>
+  <tr><td>GenerationMLA / Module</td><td>(nh, b, s)</td><td>quant</td><td class="num">0.8 / 0.5</td><td class="ok">✓</td></tr>
+  <tr><td>MLABmm</td><td>(num_tokens)</td><td>quant, op_name, num_heads</td><td class="num">0.8</td><td class="ok">✓</td></tr>
+  <tr><td>TrtLLMWideEPMoE / Dispatch</td><td>(num_tokens)</td><td>kernel, slots, tp, ep</td><td class="num">0.4 / 0.5</td><td class="ok">✓</td></tr>
+  <tr><td>WideEP Context/Generation MLA</td><td>(nh, …, b) · nh=128//tp</td><td>attn_backend, quant</td><td class="num">0.6 / 0.7</td><td class="ok">✓</td></tr>
+  <tr><td>DSV4 MHC / ctx+gen attn</td><td>(num_tokens) / (prefix,s,b) / (b,s)</td><td>hc_mult, compress_ratio, quant</td><td class="num">0.55 / 0.6</td><td class="ok">✓ <span class="note">(MHC has data; attn dormant pending collection)</span></td></tr>
+  <tr><td>comm / elementwise / embedding</td><td colspan="2" class="note">bandwidth roofline / analytic / table lookup — not util-grid; keep own scaling</td><td class="num">—</td><td class="wn">out of scope</td></tr>
+</table>
+<p class="note"><b>1110 SDK unit tests pass.</b> Own-data path unchanged; transfer/constant fire only when data is missing.</p>
+
+<!-- 8 -->
+<h2>8 · Open Items</h2>
+<ul>
+  <li><b>Attention transfer path</b> (separate discussion / TODO): num_heads transferable when near, head_dim not; num_heads is already covered by continuous-axis interpolation, so whether an explicit transfer path is needed is TBD.</li>
+  <li><b>Cross-op transfer</b> (Obs 4, brand-new op class): op→reference registry + shape adaptation, with GEMM decomposition as the final fallback (FallbackOp already exists).</li>
+  <li><b>Data-gap re-collection</b>: prefix&gt;0 DSA/attention, trtllm alltoall, fp8-fmha MLA, DSV4 attention module — once collected, those gates upgrade from per-op invariant back to model-level validation.</li>
+  <li><b>Global polish</b>: <code>UtilGrid</code> nearest-neighbour → k-NN inverse-distance-weighted (IDW), to kill boundary outliers (GLM-5 gen-DSA bs=2 corner was 188%).</li>
+</ul>
+
+<footer>
+  Generated on the enhance_hybrid branch · POC &amp; validation scripts under <code>poc/hybrid_util/</code> (loo_gemm / transfer_moe / transfer_attention / run_static_compare / check_*_invariant).
+</footer>
+</div>
+</body>
+</html>
