@@ -509,15 +509,32 @@ class GEMM(Operation):
             sol_time = sol_mem
             return sol_time, 0, sol_mem
 
+        table_quant_mode = cls._normalize_gemm_quant_mode_for_table(quant_mode)
+
         def get_empirical(m_v: int, k_v: int) -> float:
+            # SOL / util, util read best-effort from collected compute_scale data
+            # (the (m, k) grid for this quant); falls back to SOL / 0.8 if none.
             sol_time = get_sol(m_v, k_v)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._compute_scale_data
+                wrapper.raise_if_not_loaded()
+                if table_quant_mode not in wrapper:
+                    raise KeyError("compute_scale quant not collected")
+                return wrapper[table_quant_mode]
+
+            grid = util_empirical.grid_for(
+                ("compute_scale", database.system, database.backend, database.version, table_quant_mode.name),
+                _slice,
+                lambda c: get_sol(c[0], c[1])[0],
+                depth=2,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (float(m_v), float(k_v)), grid, fallback_scale=0.8)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
-
-        table_quant_mode = cls._normalize_gemm_quant_mode_for_table(quant_mode)
 
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
@@ -587,15 +604,32 @@ class GEMM(Operation):
             sol_time = sol_mem
             return sol_time, 0, sol_mem
 
+        table_quant_mode = cls._normalize_gemm_quant_mode_for_table(quant_mode)
+
         def get_empirical(m_v: int, k_v: int) -> float:
+            # SOL / util, util read best-effort from collected scale_matrix data
+            # (the (m, k) grid for this quant); falls back to SOL / 0.8 if none.
             sol_time = get_sol(m_v, k_v)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._scale_matrix_data
+                wrapper.raise_if_not_loaded()
+                if table_quant_mode not in wrapper:
+                    raise KeyError("scale_matrix quant not collected")
+                return wrapper[table_quant_mode]
+
+            grid = util_empirical.grid_for(
+                ("scale_matrix", database.system, database.backend, database.version, table_quant_mode.name),
+                _slice,
+                lambda c: get_sol(c[0], c[1])[0],
+                depth=2,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (float(m_v), float(k_v)), grid, fallback_scale=0.8)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
-
-        table_quant_mode = cls._normalize_gemm_quant_mode_for_table(quant_mode)
 
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")

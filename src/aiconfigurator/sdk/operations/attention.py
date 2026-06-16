@@ -817,9 +817,27 @@ class EncoderAttention(Operation):
             return sol_time, sol_math, sol_mem
 
         def get_empirical(b: int, s: int, n: int, h: int, fmha_quant_mode: common.FMHAQuantMode) -> float:
-            latency = get_sol(b, s, n, h, fmha_quant_mode)[0]
-            scale_factor = 0.6
-            return latency / scale_factor
+            # SOL / util, util read best-effort from collected encoder-attention
+            # data (the (n, s, b) grid for this slice); falls back to 0.6 if none.
+            sol_time = get_sol(b, s, n, h, fmha_quant_mode)[0]
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._encoder_attention_data
+                wrapper.raise_if_not_loaded()
+                return wrapper[fmha_quant_mode][h]
+
+            def _sol(c):  # c = (n, s, b)
+                return get_sol(c[2], c[1], c[0], h, fmha_quant_mode)[0]
+
+            grid = util_empirical.grid_for(
+                ("encoder_attn", database.system, database.backend, database.version, fmha_quant_mode.name, h),
+                _slice,
+                _sol,
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (n, s, b), grid, fallback_scale=0.6)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
