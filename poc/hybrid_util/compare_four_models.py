@@ -53,30 +53,27 @@ def nvfp4_module_available(arch):
 
 
 def quant_for(model_name, dsa_arch_for_lookup):
-    """Pick (label, quant-dict). dsa_arch_for_lookup=None => non-DSA model (nvfp4 always ok)."""
-    use_nvfp4 = True
-    reason = "non-DSA: gemm/moe nvfp4 + bf16 attn, all present"
-    if dsa_arch_for_lookup is not None:
-        if nvfp4_module_available(dsa_arch_for_lookup):
-            reason = f"{dsa_arch_for_lookup}: nvfp4 module rows present -> real fp4 matmul"
-        else:
-            use_nvfp4 = False
-            reason = f"{dsa_arch_for_lookup}: NO nvfp4 module rows -> would fall back to const, use fp8_block"
-    if use_nvfp4:
-        q = dict(
-            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
-            moe_quant_mode=common.MoEQuantMode.nvfp4,
-            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
-        )
-        return "nvfp4", q, reason
+    """Uniform fp8_block for all four models.
+
+    GLM-5 and M3 (GlmMoeDsa) have NO nvfp4 sparse-attention module rows on this
+    version — under nvfp4 they collapse to the constant fallback. Mixing nvfp4
+    (DSV3.2, M2.7) with fp8_block (GLM-5, M3) is not apples-to-apples, so we put
+    every model on fp8_block: the common precision for which all four
+    architectures have real module data. nvfp4-availability is still reported.
+    """
+    if dsa_arch_for_lookup is None:
+        note = "non-DSA"
+    elif nvfp4_module_available(dsa_arch_for_lookup):
+        note = "nvfp4 available, using fp8_block for parity"
+    else:
+        note = "no nvfp4 module rows (nvfp4 would hit const)"
     q = dict(
         gemm_quant_mode=common.GEMMQuantMode.fp8_block,
         moe_quant_mode=common.MoEQuantMode.fp8_block,
         fmha_quant_mode=common.FMHAQuantMode.bfloat16,
         kvcache_quant_mode=common.KVCacheQuantMode.fp8,
     )
-    return "fp8_block", q, reason
+    return "fp8_block", q, note
 
 
 # (display, model_name, dsa_arch_for_lookup). All run HYBRID: silicon where the
@@ -150,8 +147,7 @@ def main():
         a.legend(fontsize=8)
         a.grid(alpha=0.2)
     fig.suptitle(
-        f"DeepSeek-V3.2 / GLM-5 / MiniMax-M2.7 / M3 — {SYS}, {BK} {VER}, tp8 "
-        "(nvfp4 where module data exists, else fp8_block)",
+        f"DeepSeek-V3.2 / GLM-5 / MiniMax-M2.7 / M3 — {SYS}, {BK} {VER}, tp8, fp8_block (parity)",
         fontsize=12,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.95])

@@ -42,19 +42,15 @@ def nvfp4_module_available(arch):
 
 
 def quant_for(dsa_arch):
-    nvfp4 = dsa_arch is None or nvfp4_module_available(dsa_arch)
-    g, m = (
-        (common.GEMMQuantMode.nvfp4, common.MoEQuantMode.nvfp4)
-        if nvfp4
-        else (common.GEMMQuantMode.fp8_block, common.MoEQuantMode.fp8_block)
-    )
+    # Uniform fp8_block for all four — the common precision with real module data
+    # on every architecture (GlmMoeDsa lacks nvfp4 rows). Apples-to-apples.
     q = dict(
-        gemm_quant_mode=g,
-        moe_quant_mode=m,
+        gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+        moe_quant_mode=common.MoEQuantMode.fp8_block,
         fmha_quant_mode=common.FMHAQuantMode.bfloat16,
         kvcache_quant_mode=common.KVCacheQuantMode.fp8,
     )
-    return ("nvfp4" if nvfp4 else "fp8_block"), q
+    return "fp8_block", q
 
 
 # (display, model_name, dsa_arch_for_lookup)
