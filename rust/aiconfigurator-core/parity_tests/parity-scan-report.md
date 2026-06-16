@@ -5,13 +5,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # Rust↔Python Engine-Step Parity Coverage
 
-**Status as of 2026-06-15.** **6 engine parity bugs found and fixed** (§5);
-probe 0 DRIFT / 0 REGRESSION; Pareto 0 REGRESSION, 99.8% pass. The 4 residual
-Pareto DRIFT are **frontier-extent differences in the high-throughput corner,
-not engine errors** — the user-facing frontier curves agree within ~1% (§6).
-Two small, pre-existing limitations documented for fast-follow (§8). Acceptance
-criterion: **0 REGRESSION + every DRIFT explained** (§9). A confirming rescan on
-the final build remains before Python-deletion.
+**Status as of 2026-06-16 — gate CLOSED.** **6 engine parity bugs found and
+fixed** (§5); probe 0 DRIFT / 0 REGRESSION; Pareto 0 REGRESSION, 99.8% pass. The
+4 residual Pareto DRIFT are **frontier-extent differences in the high-throughput
+corner, not engine errors** — the user-facing frontier curves agree within ~1%
+(§6). Two small, pre-existing limitations documented for fast-follow (§8).
+Acceptance criterion: **0 REGRESSION + every DRIFT explained** (§9). The
+confirming full rescan on the final build (commit `048c3a7f`) has completed and
+reproduces these results exactly — **Phase 2 Python-deletion may proceed** (§9).
 
 ## 1. Why this report
 
@@ -236,8 +237,23 @@ frontier selects, which no amount of engine accuracy removes.
 | Pareto: 0 REGRESSION | ✅ |
 | Pareto: every DRIFT explained | ✅ 4 = frontier-extent/discreteness (§6), 2 known-limits (§8) |
 
-**Confirming rescan (required before Python-deletion):** the Pareto numbers above
-predate `49751d1e`/`b195bbfd`. A confirming run on the final build —
-full probe (fast) + a Pareto rescan of the non-`STRICT_PASS` rows (the fixes can
-only tighten STRICT_PASS) — closes the gate. The drift map (37→4) and the
-per-entry classifier already provide the engine-level evidence.
+**Confirming rescan — DONE, gate closed (2026-06-16, commit `048c3a7f`).** The
+Pareto numbers above predated `49751d1e`/`b195bbfd`; the confirming run on the
+final build has now completed and reproduces them exactly. Rather than rescan
+only the non-`STRICT_PASS` rows, the **full** matrix was re-run on the final
+build for a clean single-commit certification (the cloud host has no memory
+pressure):
+
+- **Probe (2,158):** 1875 PASS / 280 BOTH_ERROR_PASS / 3 PY_ERROR_ONLY —
+  **0 DRIFT / 0 REGRESSION** (0 drift/reg in every one of the 10 systems). The
+  bs=1 prefill-ttft fix (`49751d1e`) was separately verified: the pre-fix
+  +3.6–12% bs=1 ttft gap across all backends is now 0.000%.
+- **Pareto (2,158):** 2021 STRICT_PASS / 9 ENVELOPE_PASS / 124 ERROR /
+  **4 DRIFT / 0 REGRESSION** — identical verdict counts to the pre-fix baseline.
+  Regression-checked rigorously: **0 rows where Python passed and Rust did not**,
+  in any bucket. The 4 DRIFT are exactly the frontier-extent entries in §6; the
+  124 ERROR are 120 symmetric both-engine + 4 Python-only (Rust the robust side).
+
+The drift map (37→4) and the per-entry classifier provided the engine-level
+evidence; this rescan is the end-to-end confirmation. **Phase 2 Python-deletion
+may proceed.**
