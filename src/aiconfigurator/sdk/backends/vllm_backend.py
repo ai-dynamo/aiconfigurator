@@ -21,6 +21,22 @@ logger = logging.getLogger(__name__)
 
 _USE_LAYERWISE = os.environ.get("AIC_VLLM_USE_LAYERWISE", "0") == "1"
 _LAYERWISE_SCHEDULER_LATENCY_SOURCES = SCHEDULER_ENVELOPE_LATENCY_SOURCES
+# When a full-step scheduler envelope was collected on fewer physical GPUs than
+# tp_size (e.g. single-GPU shape sweeps), it cannot contain the real tensor-parallel
+# all-reduce, so the explicit generation all-reduce term must still be added. Set
+# False to restore the legacy behavior (always trust a full-step envelope).
+_LAYERWISE_GEN_SINGLE_GPU_COMM = True
+# Real vLLM fuses the all-reduce with the residual-add + RMSNorm into one kernel,
+# which is substantially cheaper than a standalone all-reduce (especially at high
+# tp). Use the collected fused `allreduce_residual_rms` timings instead of the
+# standalone custom all-reduce. Set False to use standalone custom all-reduce.
+_LAYERWISE_USE_FUSED_ALLREDUCE_RMS = True
+# The single-GPU decode-compute microbenchmark grows too gently with batch vs real
+# serving (paged attention over fragmented/variable KV + per-sequence overhead).
+# Scale the per-step decode COMPUTE (layerwise) by (1 + k*batch); comm is modeled
+# separately via the fused all-reduce so it is NOT scaled here. k fit against FPM.
+# Set to 0.0 to disable.
+_DECODE_COMPUTE_BATCH_CAL = 0.0066
 
 
 class VLLMBackend(BaseBackend):
@@ -637,6 +653,7 @@ class VLLMBackend(BaseBackend):
         token_count: int,
         *,
         execution_mode: str | None = None,
+        use_fused: bool = False,
     ) -> float:
         tp_size = int(tp_size)
         if tp_size <= 1 or token_count <= 0:
@@ -645,10 +662,25 @@ class VLLMBackend(BaseBackend):
         if hidden_size <= 0:
             return 0.0
         quant_mode = getattr(model.config, "comm_quant_mode", None) or common.CommQuantMode.half
+        size = max(1, int(token_count) * hidden_size)
+        # The fused allreduce_rms kernel is only cheaper than the standalone custom
+        # all-reduce for SMALL messages (decode). For large messages (prefill) it is
+        # collected as substantially more expensive, so callers opt in explicitly
+        # (decode does; context keeps the standalone custom all-reduce).
+        if use_fused and _LAYERWISE_USE_FUSED_ALLREDUCE_RMS:
+            try:
+                fused = database.query_allreduce_rms(quant_mode, tp_size, size, hidden_size)
+                if hasattr(fused, "latency"):
+                    return float(fused.latency)
+                if isinstance(fused, tuple):
+                    return float(fused[0])
+                return float(fused)
+            except (AssertionError, KeyError, PerfDataNotAvailableError, ValueError, AttributeError):
+                pass  # fall back to standalone custom all-reduce
         result = database.query_custom_allreduce(
             quant_mode,
             tp_size,
-            max(1, int(token_count) * hidden_size),
+            size,
             execution_mode=execution_mode,
         )
         return float(result)
@@ -684,8 +716,16 @@ class VLLMBackend(BaseBackend):
         if tp_size <= 1:
             return 0.0
         if self._layerwise_scheduler_envelope_is_full_step(layer_detail):
-            return 0.0
-        return self._layerwise_tp_allreduce_ms(model, database, tp_size, token_count) * num_layers
+            # A full-step scheduler envelope already contains the all-reduce ONLY
+            # if it was measured on real multi-GPU hardware. When the layerwise data
+            # was collected on fewer physical GPUs than tp_size (single-GPU shape
+            # sweeps), no real all-reduce happened, so the explicit term must still
+            # be added.
+            physical_gpus = float(layer_detail.get("physical_gpus", 0.0) or 0.0)
+            envelope_has_comm = (not _LAYERWISE_GEN_SINGLE_GPU_COMM) or physical_gpus >= float(tp_size)
+            if envelope_has_comm:
+                return 0.0
+        return self._layerwise_tp_allreduce_ms(model, database, tp_size, token_count, use_fused=True) * num_layers
 
     def _layerwise_moe_ep_alltoall_ms(
         self,
@@ -1381,6 +1421,11 @@ class VLLMBackend(BaseBackend):
         self._validate_decode_layerwise_detail(layer_detail, str(model_name))
         layer_scale = self._layerwise_detail_scale(layer_detail, num_layers)
         layer_step_ms = float(layer_detail["latency"]) * layer_scale
+        # Calibrate the decode compute's batch-scaling (single-GPU microbenchmark
+        # grows too gently with batch vs real paged-attention serving). Comm is
+        # modeled separately (fused all-reduce) and is not scaled here.
+        if _DECODE_COMPUTE_BATCH_CAL:
+            layer_step_ms *= 1.0 + _DECODE_COMPUTE_BATCH_CAL * effective_bs
         layer_includes_moe = bool(layer_detail.get("includes_moe", False))
         represented_moe_layers = self._layerwise_detail_represented_moe_layers(layer_detail, num_layers)
 
@@ -1875,7 +1920,35 @@ class VLLMBackend(BaseBackend):
             decode_ms = float(sum(decode_latency.values()))
             decode_delta_ms = decode_ms
             if ctx_tokens > 0:
-                decode_delta_ms = max(0.0, decode_ms - context_total_ms)
+                # A mixed scheduler step runs prefill + decode as ONE fused forward
+                # (verified against vLLM V1: a single flattened batch of
+                # prefill_new + decode tokens). Cost structure:
+                #   * linear/MLP layers -> ONE GEMM over all tokens, dominated by
+                #     the (larger) prefill token count, so already counted in
+                #     ``context_total_ms``; the decode MLP increment is negligible
+                #     for the small decode batches a step carries.
+                #   * attention -> a unified varlen kernel where prefill and decode
+                #     attention ADD (per-request work summed). Prefill attention is
+                #     in ``context_total_ms``; the decode side contributes only its
+                #     KV attention.
+                # So the decode contribution is its KV-attention, estimated as the
+                # decode step latency above its attention-free floor (same batch,
+                # ~zero KV). Unlike the previous ``max(context, decode)`` envelope,
+                # this is added even when the prefill dominates -- otherwise decode
+                # attention is silently dropped (the dominant mixed-step bias).
+                decode_floor_ms = decode_ms
+                try:
+                    decode_floor_latency, _, _ = self._get_decode_step_latency(
+                        model,
+                        database,
+                        runtime_config,
+                        batch_size=gen_tokens,
+                        past_kv=1,
+                    )
+                    decode_floor_ms = float(sum(decode_floor_latency.values()))
+                except (AssertionError, KeyError, PerfDataNotAvailableError, ValueError):
+                    decode_floor_ms = decode_ms
+                decode_delta_ms = max(0.0, decode_ms - decode_floor_ms)
             latency_ms += decode_delta_ms
             energy_wms += float(sum(decode_energy.values()))
             per_ops["mixed_layerwise_decode_delta"] = decode_delta_ms

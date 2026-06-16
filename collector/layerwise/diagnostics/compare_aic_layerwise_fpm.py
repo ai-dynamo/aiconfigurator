@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import csv
+import hashlib
 import json
 import math
 import os
@@ -138,6 +139,9 @@ def _read_perf_frame(path: Path):
     return pd.read_csv(path)
 
 
+_MOE_OVERLAY_ROOT_CACHE: dict[tuple, str] = {}
+
+
 def _prepare_moe_overlay_systems_root(
     *,
     systems_root: str,
@@ -147,7 +151,14 @@ def _prepare_moe_overlay_systems_root(
     backend: str = "vllm",
     version: str = "0.20.1",
 ) -> str:
-    """Create a generated systems root with a run-local MoE table overlaid."""
+    """Create a generated systems root with a run-local MoE table overlaid.
+
+    The overlay is content-addressed by (base systems root, MoE perf file +
+    mtime, system/backend/version) and memoized for the process: repeated calls
+    with the same inputs reuse one overlay directory. This keeps ``systems_root``
+    stable across cases so the GEMM/layerwise perf caches (which key on
+    ``systems_root``) hit instead of re-running SOL correction once per case.
+    """
 
     import pandas as pd
 
@@ -155,7 +166,20 @@ def _prepare_moe_overlay_systems_root(
     if not moe_perf_file.is_file():
         raise FileNotFoundError(f"MoE perf file does not exist: {moe_perf_file}")
 
-    overlay_root = output.parent / f"{output.stem}_systems_overlay"
+    cache_key = (
+        str(base_root.resolve()),
+        str(moe_perf_file.resolve()),
+        str(moe_perf_file.stat().st_mtime_ns),
+        system,
+        backend,
+        version,
+    )
+    cached_root = _MOE_OVERLAY_ROOT_CACHE.get(cache_key)
+    if cached_root is not None and Path(cached_root).is_dir():
+        return cached_root
+
+    digest = hashlib.sha1("\x00".join(cache_key).encode()).hexdigest()[:12]
+    overlay_root = output.parent / f"moe_overlay_{digest}"
     _replace_path(overlay_root)
     overlay_root.mkdir(parents=True, exist_ok=True)
 
@@ -197,6 +221,7 @@ def _prepare_moe_overlay_systems_root(
     frames.append(_read_perf_frame(moe_perf_file))
     merged = pd.concat(frames, ignore_index=True, sort=False)
     merged.to_csv(overlay_version_root / "moe_perf.txt", index=False)
+    _MOE_OVERLAY_ROOT_CACHE[cache_key] = str(overlay_root)
     return str(overlay_root)
 
 
@@ -1598,10 +1623,86 @@ class _Model:
         self.extra_params = extra_params
 
 
+def _repair_decode_high_kv(
+    layerwise_csv: Path,
+    *,
+    kv_threshold: int,
+    models: tuple[str, ...],
+    anchor_kvs: tuple[int, int] = (2048, 4096),
+) -> str:
+    """Replace corrupt high-``past_kv`` decode latencies with a clean extrapolation.
+
+    The collected layerwise decode table for some models has non-physical values
+    at large ``past_kv`` (latency that jumps then *decreases* with KV length --
+    scheduler-envelope measurement noise at sparsely-sampled high KV; see the
+    Qwen3-32B batch=1 row that is flat ~13ms to 4096 then 29.6/23.5/23.7 at
+    8192/16384/32768). Decode latency must be non-decreasing in KV length, so for
+    the listed models the gen-phase rows with ``past_kv >= kv_threshold`` are
+    recomputed per (tp, batch) by linearly extrapolating latency vs ``past_kv``
+    from the two clean anchor KV points (decode attention is ~linear in KV, so
+    this is the physical trend). Writes a repaired CSV to a temp file and returns
+    its path; the original file is untouched.
+    """
+
+    import os
+    import tempfile
+
+    import pandas as pd
+
+    df = pd.read_csv(layerwise_csv)
+    wanted = {m.lower() for m in models}
+    if not wanted or "past_kv" not in df.columns:
+        return str(layerwise_csv)
+    lo, hi = sorted(anchor_kvs)
+    target_mask = (
+        (df["phase"] == "gen")
+        & df["model"].str.lower().isin(wanted)
+        & (df["past_kv"] >= kv_threshold)
+    )
+    if not target_mask.any():
+        return str(layerwise_csv)
+
+    scope = df[(df["phase"] == "gen") & df["model"].str.lower().isin(wanted)]
+    repaired = 0
+    for (_mdl, _tp, _bs), grp in scope.groupby(["model", "attn_tp", "batch_size"]):
+        a_lo = grp.loc[grp["past_kv"] == lo, "latency_ms"]
+        a_hi = grp.loc[grp["past_kv"] == hi, "latency_ms"]
+        if a_lo.empty or a_hi.empty:
+            continue
+        y_lo = float(a_lo.iloc[0])
+        y_hi = float(a_hi.iloc[0])
+        slope = (y_hi - y_lo) / float(hi - lo)
+        for idx, row in grp[grp["past_kv"] >= kv_threshold].iterrows():
+            # Clamp to non-decreasing so a noisy (slightly negative) anchor slope
+            # can never make latency fall with KV length.
+            df.at[idx, "latency_ms"] = max(y_hi, y_hi + slope * (float(row["past_kv"]) - hi))
+            repaired += 1
+
+    fd, path = tempfile.mkstemp(prefix="layerwise_decode_repaired_", suffix=".csv")
+    os.close(fd)
+    df.to_csv(path, index=False)
+    return path
+
+
 class _LayerwiseDatabase:
     """Adapter that serves supplied layerwise rows plus real comm/MoE tables."""
 
-    def __init__(self, layerwise_csv: Path, real_database: PerfDatabase):
+    def __init__(
+        self,
+        layerwise_csv: Path,
+        real_database: PerfDatabase,
+        *,
+        repair_decode_kv_above: int | None = None,
+        repair_decode_models: tuple[str, ...] = (),
+        repair_decode_anchor_kvs: tuple[int, int] = (2048, 4096),
+    ):
+        if repair_decode_kv_above is not None and repair_decode_models:
+            layerwise_csv = _repair_decode_high_kv(
+                Path(layerwise_csv),
+                kv_threshold=int(repair_decode_kv_above),
+                models=tuple(repair_decode_models),
+                anchor_kvs=repair_decode_anchor_kvs,
+            )
         self.layerwise = load_layerwise_data(str(layerwise_csv))
         self.real_database = real_database
         self._extracted_metrics_cache: dict[Any, Any] = {}

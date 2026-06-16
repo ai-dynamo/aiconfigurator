@@ -126,20 +126,26 @@ def _robust_generation_detail(model_data: dict, batch_size: int, seq_len: int) -
 
     lower = sorted((point for point in points if point[0] < batch_size), reverse=True)
     higher = sorted(point for point in points if point[0] > batch_size)
-    if lower and higher:
-        neighbors = lower[:1] + higher[:1]
-    else:
-        neighbors = (lower or higher)[:2]
-    if len(neighbors) < 2:
+    # Only suppress a genuine isolated spike: require an immediate neighbor on
+    # BOTH sides. Without this, the highest batch at a given kv (a one-sided
+    # boundary point) is compared only to smaller/faster batches and its
+    # legitimately-higher latency gets flattened down -- which violates the
+    # monotone batch->latency trend and under-predicts the throughput-critical
+    # large-batch decode step.
+    if not lower or not higher:
         return entry
-    neighbor_median = float(statistics.median(latency for _, latency in neighbors))
-    if neighbor_median <= 0.0:
+    lower_latency = float(lower[0][1])
+    higher_latency = float(higher[0][1])
+    # A spike must exceed BOTH immediate neighbors, not merely their median, so
+    # a point sitting on a rising trend is never treated as an outlier.
+    reference = max(lower_latency, higher_latency)
+    if reference <= 0.0:
         return entry
-    if latency <= neighbor_median * 1.25 or latency - neighbor_median <= 0.5:
+    if latency <= reference * 1.25 or latency - reference <= 0.5:
         return entry
 
     smoothed = dict(entry)
-    smoothed["latency"] = neighbor_median
+    smoothed["latency"] = float(statistics.median((lower_latency, higher_latency)))
     smoothed["diagnostic_smoothed_from_latency"] = latency
     return smoothed
 
