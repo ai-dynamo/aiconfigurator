@@ -1,0 +1,21 @@
+exps:
+  - moe_sil
+  - moe_hyb
+  - attn_sil
+  - attn_hyb
+  - quant_sil
+  - quant_hyb
+  - dsa_sil
+  - dsa_hyb
+
+moe_sil: {mode: patch, serving_mode: agg, model_path: "Qwen/Qwen3-Coder-480B-A35B-Instruct", total_gpus: 8, system_name: h100_sxm, backend_name: sglang, backend_version: "0.5.6.post2", database_mode: SILICON, isl: 4000, osl: 500, ttft: 2000.0, tpot: 50.0}
+moe_hyb: {mode: patch, serving_mode: agg, model_path: "Qwen/Qwen3-Coder-480B-A35B-Instruct", total_gpus: 8, system_name: h100_sxm, backend_name: sglang, backend_version: "0.5.6.post2", database_mode: HYBRID, isl: 4000, osl: 500, ttft: 2000.0, tpot: 50.0}
+
+attn_sil: {mode: patch, serving_mode: agg, model_path: "Qwen/Qwen3.5-27B", total_gpus: 8, system_name: h100_sxm, backend_name: sglang, backend_version: "0.5.10", database_mode: SILICON, isl: 4000, osl: 500, ttft: 2000.0, tpot: 50.0}
+attn_hyb: {mode: patch, serving_mode: agg, model_path: "Qwen/Qwen3.5-27B", total_gpus: 8, system_name: h100_sxm, backend_name: sglang, backend_version: "0.5.10", database_mode: HYBRID, isl: 4000, osl: 500, ttft: 2000.0, tpot: 50.0}
+
+quant_sil: {mode: patch, serving_mode: agg, model_path: "Qwen/Qwen3-32B-FP8-Static-PerTensor", total_gpus: 8, system_name: h100_sxm, backend_name: sglang, backend_version: "0.5.10", database_mode: SILICON, isl: 4000, osl: 500, ttft: 2000.0, tpot: 50.0}
+quant_hyb: {mode: patch, serving_mode: agg, model_path: "Qwen/Qwen3-32B-FP8-Static-PerTensor", total_gpus: 8, system_name: h100_sxm, backend_name: sglang, backend_version: "0.5.10", database_mode: HYBRID, isl: 4000, osl: 500, ttft: 2000.0, tpot: 50.0}
+
+dsa_sil: {mode: patch, serving_mode: agg, model_path: "deepseek-ai/DeepSeek-V3.2", total_gpus: 8, system_name: h100_sxm, backend_name: sglang, backend_version: "0.5.6.post2", database_mode: SILICON, isl: 4000, osl: 500, ttft: 2000.0, tpot: 50.0}
+dsa_hyb: {mode: patch, serving_mode: agg, model_path: "deepseek-ai/DeepSeek-V3.2", total_gpus: 8, system_name: h100_sxm, backend_name: sglang, backend_version: "0.5.6.post2", database_mode: HYBRID, isl: 4000, osl: 500, ttft: 2000.0, tpot: 50.0}

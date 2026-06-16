@@ -1,0 +1,60 @@
+# Qwen3-235B-A22B-NVFP4 on b200 — silicon vs empirical, agg + disagg
+exps:
+  - agg_silicon
+  - agg_empirical
+  - disagg_silicon
+  - disagg_empirical
+
+agg_silicon:
+  mode: "patch"
+  serving_mode: "agg"
+  model_path: "nvidia/Qwen3-235B-A22B-NVFP4"
+  total_gpus: 8
+  system_name: "b200_sxm"
+  backend_name: "trtllm"
+  database_mode: "SILICON"
+  isl: 4000
+  osl: 500
+  ttft: 600.0
+  tpot: 16.7
+
+agg_empirical:
+  mode: "patch"
+  serving_mode: "agg"
+  model_path: "nvidia/Qwen3-235B-A22B-NVFP4"
+  total_gpus: 8
+  system_name: "b200_sxm"
+  backend_name: "trtllm"
+  database_mode: "EMPIRICAL"
+  isl: 4000
+  osl: 500
+  ttft: 600.0
+  tpot: 16.7
+
+disagg_silicon:
+  mode: "patch"
+  serving_mode: "disagg"
+  model_path: "nvidia/Qwen3-235B-A22B-NVFP4"
+  total_gpus: 8
+  system_name: "b200_sxm"
+  decode_system_name: "b200_sxm"
+  backend_name: "trtllm"
+  database_mode: "SILICON"
+  isl: 4000
+  osl: 500
+  ttft: 600.0
+  tpot: 16.7
+
+disagg_empirical:
+  mode: "patch"
+  serving_mode: "disagg"
+  model_path: "nvidia/Qwen3-235B-A22B-NVFP4"
+  total_gpus: 8
+  system_name: "b200_sxm"
+  decode_system_name: "b200_sxm"
+  backend_name: "trtllm"
+  database_mode: "EMPIRICAL"
+  isl: 4000
+  osl: 500
+  ttft: 600.0
+  tpot: 16.7
