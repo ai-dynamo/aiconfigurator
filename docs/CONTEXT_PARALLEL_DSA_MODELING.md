@@ -6,7 +6,7 @@ prefill under Context Parallelism** — e.g. GLM-5-NVFP4, `attn_cp_size = 8`,
 
 A CP layer is modeled as **three serial parts**:
 
-```
+```text
 per_layer = DSA  +  MoE  +  Comm
 ```
 
@@ -36,7 +36,7 @@ For a prefill of `isl` tokens with `attn_cp_size = cp` (`attn_dp=1` ⇒
 
 **One layer, one ReduceScatter.** Per-layer timeline (one RS→RS period):
 
-```
+```text
 … MoE → RS │ AG_KV → mqa → topk → AG_LSE → fmha → AG_hidden │ MoE → RS │ …
             └──────────────── DSA ────────────────┘└ Comm-in┘└MoE┘└Comm-out┘
 ```
@@ -48,7 +48,7 @@ once**: TP-reduce the MoE partials **and** SP-scatter back to per-card tokens.
 
 ## 2. The model — three parts
 
-```
+```text
 DSA  = dsa_context_module(isl/cp, prefix=0)        # base, per-card token count
      + mqa_correction
      + topk_correction
@@ -84,7 +84,7 @@ mqa cost ∝ Σ_card causal context = `(1/cp)·full_mqa`. Because mqa ∝ `isl²
 Use the **`×cp` form** (not `full/cp`): it carries the **small-kernel
 (`isl/cp`-query) efficiency** that the per-card kernel actually has.
 
-```
+```text
 mqa_correction = mqa(isl/cp, prefix=0) · (cp − 1)
 ```
 *isl=32768,cp=8:* 45.1·7 = **+316us**; per-card mqa = 360 vs timeline 374 (−4%).
@@ -100,7 +100,7 @@ The `dsa_context_module` runs **dummy weights**, so its internal topk sees
 **flat** scores (the degenerate worst-case anchor). Real runtime is the
 **top_last** distribution. Correct flat→top_last, both at `full/cp`:
 
-```
+```text
 topk_correction = − [ topk_full(flat) − topk_full(top_last) ] / cp
 ```
 *isl=32768,cp=8:* −(3383 − 1520.6)/8 = **−233us**; per-card topk = `full(top_last)/cp` = 190.
@@ -191,7 +191,7 @@ For the TP+SP MoE config:
 | AG_hidden | attn-out hidden (bf16) | `isl·hidden·2B` | ~628us |
 | RS | hidden, TP-reduce+SP-scatter (bf16) | `isl·hidden·2B` | ~658us |
 
-```
+```text
 Comm = AG_hidden + RS                    # one AG_hidden, one RS per layer
 ```
 
@@ -204,7 +204,7 @@ Looked up in the NCCL all-gather / reduce-scatter tables at `num_gpus = cp`.
 The per-layer wall-clock is the **serial sum** of one card's critical path
 (round-robin is balanced, so all cards are equal):
 
-```
+```text
 per_layer = DSA + MoE + Comm
           = [base + mqaΔ + topkΔ + AG_KV + AG_LSE] + moe(isl,tp) + [AG_hidden + RS]
 ```
@@ -212,7 +212,7 @@ per_layer = DSA + MoE + Comm
 Measured decomposition (device 0, RS→RS, isl=32768/cp8) confirms it is serial —
 segment sum = layer period, no hidden overlap:
 
-```
+```text
 DSA(attn, no big comm)  3808us
 AG_hidden                622us
 MoE                     2430us
@@ -229,7 +229,7 @@ real comm/compute overlap at this granularity.)
 
 ## 8. End-to-end validation (isl=32768, cp=8, bf16 base)
 
-```
+```text
 DSA  = 4300(base,kv=bf16) + 316(mqa) − 233(topk) + 54(AG_KV) + 100(AG_LSE) = 4537
 MoE  = moe(32768,tp8,ep1,pl1.01)                                           = 2047
 Comm = AG_hidden 628 + RS 658                                              = 1286
