@@ -68,6 +68,57 @@ single-request context rows and adds a bounded batched-context grid whose
 aggregate scheduled tokens fit the resolved `max_num_batched_tokens` budget.
 Use an explicit `--ctx-batch-sizes` list only for diagnostic shapes.
 
+## Full Collection Run
+
+Run the full default registry (Qwen3-32B, Qwen3.6 MoE, DeepSeek-V4-Flash) on all
+GPUs:
+
+```bash
+export AIC_REPO="$PWD"
+export RUN_DIR="$AIC_REPO/runs/layerwise_full_vllm0201_$(date -u +%Y%m%d_%H%M%S)"
+export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+export VLLM_CACHE_HOST="${VLLM_CACHE_HOST:-$HOME/.cache/aic-vllm}"
+export NSYS_VERSION="${NSYS_VERSION:-2025.6.3}"
+mkdir -p "$RUN_DIR" "$HF_HOME" "$VLLM_CACHE_HOST/tilelang/tmp"
+
+docker run --rm --gpus all --ipc=host --network=host --entrypoint bash \
+  -v /opt/nvidia/nsight-systems:/opt/nvidia/nsight-systems:ro \
+  -v "$AIC_REPO:/workspace" \
+  -v "$RUN_DIR:/results" \
+  -v "$HF_HOME:/hf-cache" \
+  -v "$VLLM_CACHE_HOST:/home/dynamo/.cache/vllm" \
+  -v "$VLLM_CACHE_HOST:/root/.cache/vllm" \
+  -v "$HOME/hf.token:/run/secrets/hf.token:ro" \
+  -e HF_HOME=/hf-cache -e HF_HUB_CACHE=/hf-cache/hub \
+  -e TILELANG_CACHE_DIR=/home/dynamo/.cache/vllm/tilelang \
+  -e TILELANG_TMP_DIR=/home/dynamo/.cache/vllm/tilelang/tmp \
+  -e NSYS_VERSION="$NSYS_VERSION" \
+  -w /workspace \
+  vllm/vllm-openai:v0.20.1 \
+  -lc 'set -euo pipefail
+       export PATH="/opt/nvidia/nsight-systems/${NSYS_VERSION}/target-linux-x64:$PATH"
+       export HF_TOKEN="$(tr -d "\n" < /run/secrets/hf.token)"
+       python3 -m collector.layerwise.vllm.collect --run-dir /results --max-workers 8'
+```
+
+Progress from another shell:
+
+```bash
+wc -l "$RUN_DIR/layerwise.csv"
+tail -f "$RUN_DIR/profiles/status.jsonl"
+```
+
+Then compare against the FPM golden runs (see the status section below for the
+current numbers and the chart tool):
+
+```bash
+uv run python collector/layerwise/diagnostics/compare_aic_layerwise_fpm_summary.py \
+  --layerwise "$RUN_DIR/layerwise.csv"
+```
+
+Decode timing now uses the `execute_model_gpu` source (do not re-enable the old
+`--live-step-driver` path, which produced the corrupt MoE decode curves).
+
 ## Scheduler Sizing
 
 Do not hardcode `max_num_seqs` or `max_num_batched_tokens` in layerwise or FPM
@@ -148,8 +199,13 @@ in this AIC branch.
 Current validation data is stored under
 `src/aiconfigurator/systems/data/b300_sxm/vllm/0.20.1/layerwise_perf.csv`.
 The public vLLM collector defaults to phase-specific representative depth and
-latency source. Canonical context and decode rows use scheduler/worker timing
-envelopes so the backend can consume them as full-step data. Diagnostic
+latency source. Context rows use a scheduler/worker timing envelope so the
+backend can consume them as full-step data. **Decode rows now use the
+GPU-isolated `execute_model_gpu` source** (one uniform timing method across all
+batch sizes), which replaced the earlier scheduler-envelope sources
+(`schedule_to_update`/`live_step_wall`) that produced non-physical MoE decode
+curves — see "FPM-vs-AIC MoE modeling: status & handoff" below. Critically, the
+timing method must never switch with batch size or shape. Diagnostic
 `--latency-source span`, `gpu`, and `gpu_capped` rows are still available for
 module-level analysis, but they should not be promoted as backend-ready decode
 data without metadata that prevents representative layer scaling.
@@ -173,54 +229,85 @@ Context new-token rows use `1,16,128,...`; context and decode share the same
 nonzero past-KV grid up to 32k tokens, with context adding `0` for no-prefix
 measurements.
 
-## Current AIC-vs-FPM Baseline
+## FPM-vs-AIC MoE modeling: status & handoff
 
-As of 2026-06-15, the default summary command compares the full one-GPU
-layerwise simulation CSV against the curated FPM golden runs:
+### Decode timing: RESOLVED
+The "Fix MoE decode GPU timing collection" change added the uniform GPU-isolated
+latency source `execute_model_gpu` (one method for every batch size — no more
+`schedule_to_update`/`live_step_wall` mixing). New decode runs are clean and
+monotonic; decode MAPE is **qwen36 ~8.9%, dsv4 ~11.7%** (was catastrophic, 90%+;
+e.g. the old `dsv4_tp4_ep4` 192% decode outlier is gone). Latest MoE decode run:
+`runs/layerwise_moe_decode_execgpu_stablep25_compare_20260616_212000/`.
 
+**Most important rule for any re-collection:** never switch the timing method /
+`latency_source` by batch size or shape. The corruption came from mixing
+`schedule_to_update` (small batch) with `live_step_wall` (batch>=8) in one sweep
+(a step-change discontinuity), plus `live_step_wall` capturing per-step host/wall
+overhead (a fixed ~7-8 ms floor that even exceeded the real full step) instead of
+the GPU step. Use one GPU-isolated method for every batch, KV, model, and phase.
+
+### Open: mixed step is context/prefill-limited (not decode)
+With clean decode, mixed is still ~47% MAPE for qwen36 because (a) the golden-set
+mixed steps are context/prefill-dominated (`decode_delta ~= 0` — decode barely
+contributes) and (b) the headline number is polluted by FPM measurement outliers
+(e.g. `ctx_tokens=928` reported at ~1.6-2.8 ms, physically impossible; AIC's
+~31 ms is right). Legitimate large-prefill steps are ~+8 to +41%. Next focus is
+the context/prefill model and FPM-outlier handling — NOT decode.
+
+### Charts (FPM vs AIC)
+`tools/plot_fpm_vs_aic.py` writes ctx/gen/mixed log-log charts plus an all-reduce
+comparison. The new decode runs are decode-only (`phase=gen`, `max_num_seqs=64`,
+`past_kv in {4096,8192,16384}`), so they refresh only the gen charts:
 ```bash
-uv run python collector/layerwise/diagnostics/compare_aic_layerwise_fpm_summary.py \
-  --layerwise runs/layerwise_full_vllm0201_20260615_045248/layerwise.csv
+.venv/bin/python tools/plot_fpm_vs_aic.py \
+  --layerwise runs/layerwise_moe_decode_execgpu_stablep25_compare_20260616_212000/layerwise.csv \
+  --model "Qwen/Qwen3.6-35B-A3B" \
+  --moe-perf-file collector/layerwise/wip/moe_perf.txt \
+  --out-dir fpm_vs_aic_charts_qwen36 --phases gen --vllm-max-num-seqs 64
 ```
+For dense Qwen3-32B drop `--moe-perf-file`. A clean **mixed** chart needs a full
+(ctx+gen) run with `execute_model_gpu`; the committed mixed charts are partial
+(old-run context merged with new clean decode). The MoE overlay `moe_perf.txt`
+(real measured fused-experts kernel timings) lives in `collector/layerwise/wip/`.
 
-Current aggregate MAPE across 865 matched rows is:
+### What is NOT broken — do not change
+- **MoE op overlay is correct.** AIC decode = backbone (`generation_layerwise`,
+  `includes_moe=False`) + MoE overlay (`generation_moe` etc.) from `moe_perf` at
+  `num_tokens=batch`, scaled per layer. Overlay values are real kernel timings,
+  queried correctly; at batch=1 (clean backbone) `backbone + moe ~= FPM`.
+- **Decode compute calibration is dense-only.** `_DECODE_COMPUTE_BATCH_CAL = 0.0066`
+  in `vllm_backend.py` (gated behind `is_moe_model`), validated on dense Qwen3-32B
+  (MAPE 10.6% -> 3.4%); intentionally not applied to MoE.
+- Other in-place modeling fixes (do not redo): fused all-reduce for decode comm
+  (`_LAYERWISE_USE_FUSED_ALLREDUCE_RMS`, decode only); generation comm
+  un-suppression for single-GPU data (`_LAYERWISE_GEN_SINGLE_GPU_COMM`); high-KV
+  dense decode repair (`_repair_decode_high_kv`); mixed model
+  `= context_total + decode attention` (`_get_mix_step_latency`).
 
-```text
-all      29.69%
-ctx      22.09%
-gen      25.97%
-mixed    30.33%
-```
-
-To inspect whether error is concentrated at particular scheduler shapes, append
-`--shape-breakdown aggregate`. The breakdown groups rows by phase, token bucket,
-and batch bucket; use `--shape-breakdown-bins exact` for exact shape keys or
-`--shape-breakdown-min-rows N` to hide sparse buckets.
-
-Notable case-level outliers:
-
-- `dsv4_tp4_ep4`: decode MAPE is `192.02%`, while context is `30.79%` and
-  mixed is `26.33%`. This is the highest-priority blocker.
-- `qwen36_tp1_ep1`: all-row MAPE is `59.06%`, driven by `60.59%` mixed error.
-- Qwen3.6 MoE context is still high in several cases, especially
-  `qwen36_tp4_ep1` at `46.07%`, `qwen36_tp4_ep4` at `38.18%`, and the
-  TP/EP gap-fill cases in the `20-27%` context range.
-- Qwen3-32B dense decode is in good shape (`1.09-7.40%`), and its remaining
-  error is mostly context/mixed.
+### Verify a re-collection
+1. Group `layerwise.csv` by (model, attn_tp, ep, past_kv): `latency_ms` must be
+   non-decreasing in `batch_size`, with a single `latency_source`.
+2. Regenerate charts (set `--vllm-max-num-seqs` to the collected value); the gen
+   AIC line should track FPM and the blue "layerwise collected" dots should rise
+   smoothly (no jump/plateau). A full (ctx+gen) run enables clean mixed charts.
+3. The summary command also reports per-case MAPE:
+   ```bash
+   uv run python collector/layerwise/diagnostics/compare_aic_layerwise_fpm_summary.py \
+     --layerwise <RUN_DIR>/layerwise.csv
+   ```
+   (append `--shape-breakdown aggregate` to see error by phase/token/batch bucket).
 
 ## TODO
 
-- Fix the DeepSeek-V4-Flash `tp4_ep4` simulated decode path. The canonical
-  layerwise goal remains one-GPU rank-equivalent simulation, not physical-TP
-  collection. Physical TP probes are useful validation artifacts only. The
-  layerwise collector/AIC path needs to produce sane one-GPU equivalent decode
-  rows for `tp4/ep4`, then compose them with the modeled communication and MoE
-  overhead. Track this against the `dsv4_tp4_ep4` `192.02%` decode outlier.
-- Improve mixed-step modeling for real FPM workload rows. Current aggregate
-  mixed MAPE is `30.33%`, with Qwen3.6 MoE mixed rows dominating the worst
-  cases. Keep reporting workload-mode accuracy separately from clean/pathology
-  filtered diagnostics so partial scheduler ticks and continuation-tail rows do
-  not hide the real serving-workload gap.
+- (DONE) DeepSeek-V4-Flash `tp4_ep4` decode is fixed by the GPU-isolated
+  `execute_model_gpu` timing — the old `192.02%` decode outlier was corrupt
+  collection, not modeling. See the status section above.
+- Improve mixed-step / context modeling. Mixed error is now dominated by
+  context/prefill and FPM measurement outliers, not decode. Add FPM-outlier
+  filtering (drop points where FPM << prefill-only SOL) and verify the one-GPU
+  patched config, context batch shape, prefix length, and `max_num_batched_tokens`
+  match the FPM deployment envelope. Keep workload-mode accuracy separate from
+  pathology-filtered diagnostics.
 - Reduce Qwen3.6 MoE context error. Prioritize batched context and TP/EP
   scheduler-envelope parity for the cases above `35%` context MAPE before
   broadening the grid. In particular, verify that the one-GPU patched config,
