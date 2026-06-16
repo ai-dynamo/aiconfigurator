@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiniMax-M3 Support · MSA op + cross-op transfer (pure hybrid)</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#161b22; --ink:#e6edf3; --muted:#9aa7b4; --line:#2b333d;
+    --acc:#4fa3ff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --vio:#bc8cff;
+    --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:40px 24px 80px}
+  header{border-bottom:1px solid var(--line);padding-bottom:24px;margin-bottom:32px}
+  h1{font-size:29px;margin:0 0 6px;letter-spacing:.3px}
+  h2{font-size:22px;margin:46px 0 14px;padding-top:10px;border-top:1px solid var(--line)}
+  h3{font-size:17px;margin:24px 0 10px;color:var(--acc)}
+  .sub{color:var(--muted);font-size:14px}
+  p{margin:10px 0}
+  code{font-family:var(--mono);background:#0b0f14;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:13px;color:#cdd9e5}
+  .eq{font-family:var(--mono);background:#0b0f14;border:1px solid var(--line);border-left:3px solid var(--acc);border-radius:6px;padding:12px 16px;margin:14px 0;font-size:13.5px;color:#dbe6f0;overflow-x:auto;white-space:pre-wrap}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+  .tag{display:inline-block;font-size:11px;font-family:var(--mono);padding:2px 8px;border-radius:20px;border:1px solid var(--line);color:var(--muted);margin-right:6px}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left}
+  th{background:#1b222b;color:var(--muted);font-weight:600}
+  td.num{font-family:var(--mono);text-align:right}
+  .ok{color:var(--good)} .bad{color:var(--bad)} .wn{color:var(--warn)} .vi{color:var(--vio)}
+  .note{color:var(--muted);font-size:13px}
+  ul{margin:8px 0;padding-left:22px} li{margin:4px 0}
+  .lead{font-size:16px;color:#cdd9e5}
+  .big{font-size:30px;font-weight:700}
+  svg{max-width:100%;height:auto;display:block;margin:8px auto}
+  footer{margin-top:60px;border-top:1px solid var(--line);padding-top:16px;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>MiniMax-M3 Support — MSA op + cross-op transfer</h1>
+  <div class="sub">Pure HYBRID · new MSA operator (SOL derived) · transfers from DSA · validated vs sglang B200</div>
+</header>
+
+<p class="lead">Goal: model <strong>MiniMax-M3</strong> (text decoder) end-to-end with <em>no MSA perf data</em>.
+M3 introduces <strong>MSA</strong> (MiniMax Sparse Attention). We derive its SOL, run it in pure
+HYBRID, and let it <strong>transfer from DSA's measured utilisation</strong> via the
+<code>util_scale</code> hook. Result: TPOT within <span class="ok">2%</span> of the real sglang B200 number, with no tuning.</p>
+
+<!-- 1 -->
+<h2>1 · What MSA is (and why it transfers to DSA)</h2>
+<p>MSA (github.com/MiniMax-AI/MSA) is structurally a <strong>GQA version of DSA</strong>: a cheap
+per-block "dense proxy" indexer scores KV blocks, the top-k blocks are selected, and full attention
+runs over only the selected tokens. The only real difference from DSA is the main attention —
+<strong>GQA</strong> (M3: 64 q / 4 kv heads, head_dim 128, partial rope) instead of DSA's
+MLA-compressed attention. The sparse selection (index_topk = 16 blocks × 128 = 2048 tokens) is the same.</p>
+
+<svg viewBox="0 0 900 130" role="img" aria-label="MSA pipeline">
+  <rect x="20" y="35" width="180" height="60" rx="8" fill="#13202e" stroke="#2d4a6b"/>
+  <text x="110" y="60" fill="#4fa3ff" font-size="12" text-anchor="middle" font-weight="bold">indexer (per-block)</text>
+  <text x="110" y="80" fill="#9aa7b4" font-size="11" text-anchor="middle">4 idx heads · dim 128</text>
+  <path d="M200,65 L270,65" stroke="#4fa3ff" stroke-width="2" marker-end="url(#a)"/>
+  <defs><marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#4fa3ff"/></marker></defs>
+  <rect x="275" y="35" width="200" height="60" rx="8" fill="#1f1a10" stroke="#5a4a2f"/>
+  <text x="375" y="60" fill="#d29922" font-size="12" text-anchor="middle" font-weight="bold">top-16 block select</text>
+  <text x="375" y="80" fill="#9aa7b4" font-size="11" text-anchor="middle">block 128 → 2048 tokens</text>
+  <path d="M475,65 L545,65" stroke="#4fa3ff" stroke-width="2" marker-end="url(#a)"/>
+  <rect x="550" y="35" width="200" height="60" rx="8" fill="#122017" stroke="#2f5a36"/>
+  <text x="650" y="60" fill="#3fb950" font-size="12" text-anchor="middle" font-weight="bold">GQA attention</text>
+  <text x="650" y="80" fill="#9aa7b4" font-size="11" text-anchor="middle">over selected tokens</text>
+  <path d="M750,65 L820,65" stroke="#4fa3ff" stroke-width="2" marker-end="url(#a)"/>
+  <rect x="822" y="42" width="58" height="46" rx="8" fill="#13202e" stroke="#2d4a6b"/>
+  <text x="851" y="70" fill="#4fa3ff" font-size="12" text-anchor="middle">out</text>
+</svg>
+<p class="note">DSA = same pipeline but MLA attention + 32–64 index heads. Because both are sparse-top-k
+families with similar kernel efficiency, MSA can borrow DSA's <em>utilisation</em> almost 1:1.</p>
+
+<!-- 2 -->
+<h2>2 · MSA SOL (derived from GQA / DSA / DSV4 logic)</h2>
+<p>No MSA silicon data exists, so SOL must be analytic. It only needs to capture the
+<strong>shape trend</strong> (how latency scales with b, s, prefix); the absolute level is set by the
+transfer. Three groups, same split as DSA/DSV4:</p>
+<div class="eq">tokens = b·s    full_s = prefix + s    (context)
+
+GEMM group   = 2·tokens·hidden·(num_heads·d)        # Q
+             + 2·tokens·hidden·(2·num_kv_heads·d)   # K,V   (GQA → by num_kv_heads)
+             + 2·tokens·(num_heads·v_d)·hidden      # O
+             + 2·tokens·hidden·(idx_heads·idx_d)    # indexer Q
+indexer (fp8)= 2·tokens·idx_heads·idx_d·num_blocks  # per-BLOCK scoring (÷ block_size)
+sparse attn  = 2·num_heads·(qk_d + v_d)·pairs       # QK^T + AV
+               pairs = top-k saturated causal count (DSA's formula)
+
+KV cache mem = b·num_kv_heads·min(full_s,topk)·(qk_d+v_d)·kv_bytes   # GQA cache by kv heads
+SOL = max( Σ group_ops / tc_flops , total_mem / mem_bw )</div>
+<p class="note">Key choices: KV cache by <code>num_kv_heads</code> (GQA), compute by <code>num_heads</code>;
+indexer scores per <em>block</em> (MSA's proxy pass), ~block_size× cheaper than DSA's per-token; sparse
+pair count reuses DSA's causal-ramp-then-saturate-at-topk count.</p>
+
+<!-- 3 -->
+<h2>3 · Empirical = cross-op transfer from DSA</h2>
+<div class="eq">latency_MSA(b,s) = SOL_MSA(b,s) / ( util_DSA(b,s) · k )
+   util_DSA = DSA SOL / DSA silicon   (at the same workload)
+   k        = msa_dsa_scale_k   (util_scale hook, default 1.0, user-tunable)</div>
+<p>SOL carries the structural difference (GQA vs MLA, 4 vs 64 index heads); DSA's measured util carries
+the shared sparse-attention kernel efficiency. Falls back to a constant when DSA data is absent.
+This reuses the <code>util_scale</code> seam added for cross-op transfer — k pulls the level, SOL the shape.</p>
+
+<!-- 4 -->
+<h2>4 · Integration (text decoder only)</h2>
+<div class="grid2">
+  <div class="card">
+    <h3 style="margin-top:4px">New op</h3>
+    <p class="note"><code>operations/msa.py</code>: <code>ContextMSAModule</code> /
+    <code>GenerationMSAModule</code>. SILICON raises (no data); HYBRID/EMPIRICAL → DSA transfer.</p>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:4px">New model</h3>
+    <p class="note"><code>models/minimax_m3.py</code> <code>MiniMaxM3Model</code> (family <code>MINIMAXM3</code>),
+    mirrors <code>DeepSeekV32Model</code> with MSA. Registered <code>MiniMaxM3SparseForConditionalGeneration</code>
+    (multimodal → text_config unwrap) + <code>MiniMaxM3ForCausalLM</code>.</p>
+  </div>
+</div>
+<p class="note">M3 = hidden 6144, 60 layers, 64 q / 4 kv heads (d 128), 128 experts / topk 4 / 1 shared.
+Vision tower skipped (text decoder only); first-3-dense approximated as all-MoE (matches GLM-5/DSV3.2).</p>
+
+<!-- 5 -->
+<h2>5 · Validation vs sglang B200 cookbook</h2>
+<p>sglang cookbook (MiniMax-M3, B200, mxfp8, TP8, single node, ISL 2048 / OSL 256, concurrency 64):
+<strong>TPOT 24.1 ms</strong>, TTFT 1580 ms, 265 tok/s/GPU. Our M3 in <strong>pure HYBRID</strong>
+(MoE from real silicon, MSA transferred from DSA at k=1.0), fp8_block ≈ mxfp8, bs 64, kv ≈ 2176:</p>
+<table>
+  <tr><th>metric</th><th class="num">M3 hybrid (est)</th><th class="num">sglang B200</th><th class="num">ratio</th></tr>
+  <tr><td>TPOT (decode step)</td><td class="num"><b class="ok">23.5 ms</b></td><td class="num">24.1 ms</td><td class="num"><b class="ok">0.98</b></td></tr>
+</table>
+<p style="text-align:center" class="big ok">within 2% — no k tuning</p>
+<p class="note">Decode breakdown: MoE 12.4 ms (real silicon data) + MSA 10.6 ms (DSA transfer) + norms.
+k≈1 works because MSA↔DSA are both sparse-top-k families with near-equal utilisation (cf. MHA↔MLA which
+needed k≈1.41). TTFT not compared directly — sglang's 1580 ms is concurrency-64 batched prefill;
+single-prompt context ≈ 47 ms, which needs serving-level (continuous-batching) modeling.</p>
+
+<!-- 6 -->
+<h2>6 · Open items</h2>
+<ul>
+  <li><b>k tuning</b>: with even one M3 silicon point, calibrate <code>msa_dsa_scale_k</code> (currently 1.0, already within 2%).</li>
+  <li><b>indexer granularity</b>: per-block scoring is an approximation of MSA's proxy pass; refine if MSA kernel cost data appears.</li>
+  <li><b>first-3-dense + vision tower</b>: approximated / out of scope; add if needed for full multimodal serving.</li>
+  <li><b>TTFT</b>: needs serving-level modeling to compare against concurrency-batched cookbook TTFT.</li>
+</ul>
+
+<footer>
+  enhance_hybrid branch · op <code>sdk/operations/msa.py</code>, model <code>sdk/models/minimax_m3.py</code>,
+  validation <code>poc/hybrid_util/validate_m3_vs_sglang.py</code>. See also the methodology doc
+  <code>docs/design/hybrid_util_empirical_design.html</code>.
+</footer>
+</div>
+</body>
+</html>
