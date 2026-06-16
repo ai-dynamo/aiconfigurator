@@ -143,24 +143,31 @@ k≈1 works because MSA↔DSA are both sparse-top-k families with near-equal uti
 needed k≈1.41). TTFT not compared directly — sglang's 1580 ms is concurrency-64 batched prefill;
 single-prompt context ≈ 47 ms, which needs serving-level (continuous-batching) modeling.</p>
 
-<h3>5.1 · How trustworthy is the MoE half? (leave-one-out)</h3>
-<p>The MoE term is the <strong>weakest link</strong>, and the 2% total match should not be
-over-read. Leave-one-out over every collected MoE config (drop it, force the transfer from the
-nearest remaining neighbour, compare to its real silicon) gives a sobering picture:</p>
+<h3>5.1 · How trustworthy is the MoE half? (and what we cannot measure)</h3>
+<p><strong>We have no silicon for M3's MoE (<code>topk4/128/6144/3072</code>), so its error cannot
+be measured directly.</strong> What we <em>can</em> measure is the transfer error on the 8 configs
+that <em>do</em> have silicon — leave-one-out: drop each, force the transfer from its nearest
+remaining neighbour, compare to its own real silicon:</p>
 <table>
   <tr><th>regime</th><th class="num">mean</th><th class="num">median</th><th class="num">max</th></tr>
   <tr><td>all num_tokens</td><td class="num wn">27.8%</td><td class="num wn">28.2%</td><td class="num bad">49.2%</td></tr>
   <tr><td>decode regime (~64 tokens, M3's point)</td><td class="num wn">29.4%</td><td class="num">24.2%</td><td class="num bad">67.2%</td></tr>
 </table>
-<p class="note">Error is entirely a function of how close the nearest neighbour is: configs that differ
-only in hidden size (7168 vs 6144) transfer at ~4–6%; isolated ones (e.g. <code>topk6/384/7168/3072</code>)
-miss by 40–67%. M3's MoE (<code>topk4/128/6144/3072</code>) borrows <code>topk6/256/4096/2048</code> —
-a large gap (topk 4 vs 6, 128 vs 256 experts), with <strong>no same-topk neighbour in the pool at
-all</strong>, so its MoE term plausibly carries ~25–40% error. The decode TPOT still lands at 2%
-because MSA (the other ~half) transfers cleanly and the MoE error partly cancels at this operating
-point — not because the MoE term is individually accurate. <strong>To tighten this, collect a
-<code>topk4 / 128-expert</code> MoE point.</strong> Figure: <code>poc/hybrid_util/loo_moe_transfer.png</code>;
-contrast GEMM (~7%) and the GLM-5 own-data path (~1.5%).</p>
+<p>To say anything about <em>M3</em>, we relate that measured error to the one thing we know about
+M3's MoE: how far its nearest neighbour sits in the <code>(topk, experts, hidden, inter)</code>
+normalized-log space. Error correlates with that distance at <strong>r = 0.85</strong> — but
+<strong>M3's nearest-neighbour distance (4.1) is beyond every validated case (max 2.5)</strong>. M3
+borrows <code>topk6/256/4096/2048</code> for <code>topk4/128/6144/3072</code> — and there is
+<strong>no same-topk neighbour in the pool at all</strong>.</p>
+<p class="note">So M3's MoE term is an <strong class="bad">out-of-support extrapolation</strong>: the
+linear fit reads ~88%, but that number is itself unvalidated — the honest statement is "no validation
+support; error likely ≥50%, unquantifiable." The earlier "~25–40%" was too optimistic. Why does the
+total decode TPOT still land at 2%? Because MSA (the other ~half) transfers cleanly and the MoE error
+happens to cancel at this operating point — <strong>not</strong> because the MoE term is individually
+accurate. <strong>The one real fix is to collect a <code>topk4 / 128-expert</code> MoE point</strong>
+(brings M3's neighbour distance into the validated <0.5 / ~5%-error range). Figures:
+<code>loo_moe_transfer.png</code>, <code>loo_moe_calibration.png</code>. Contrast GEMM (~7%) and the
+GLM-5 own-data path (~1.5%).</p>
 
 <!-- 6 -->
 <h2>6 · Four-model alignment — DeepSeek-V3.2 / GLM-5 / M2.7 / M3</h2>
