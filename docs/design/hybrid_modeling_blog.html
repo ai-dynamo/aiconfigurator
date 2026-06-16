@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Modeling a GPU you've never benchmarked — util-space hybrid + MiniMax-M3</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#161b22; --ink:#e6edf3; --muted:#9aa7b4; --line:#2b333d;
+    --acc:#4fa3ff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --vio:#bc8cff;
+    --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}
+  .wrap{max-width:820px;margin:0 auto;padding:40px 24px 80px}
+  header{border-bottom:1px solid var(--line);padding-bottom:24px;margin-bottom:32px}
+  h1{font-size:30px;margin:0 0 8px;letter-spacing:.2px;line-height:1.25}
+  h2{font-size:22px;margin:46px 0 14px;padding-top:10px;border-top:1px solid var(--line)}
+  h3{font-size:17px;margin:24px 0 10px;color:var(--acc)}
+  .sub{color:var(--muted);font-size:14px}
+  p{margin:12px 0}
+  code{font-family:var(--mono);background:#0b0f14;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:13px;color:#cdd9e5}
+  .eq{font-family:var(--mono);background:#0b0f14;border:1px solid var(--line);border-left:3px solid var(--acc);border-radius:6px;padding:12px 16px;margin:16px 0;font-size:13.5px;color:#dbe6f0;overflow-x:auto;white-space:pre-wrap}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:16px 0}
+  .tag{display:inline-block;font-size:11px;font-family:var(--mono);padding:2px 8px;border-radius:20px;border:1px solid var(--line);color:var(--muted);margin-right:6px}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left}
+  th{background:#1b222b;color:var(--muted);font-weight:600}
+  td.num{font-family:var(--mono);text-align:right}
+  .ok{color:var(--good)} .bad{color:var(--bad)} .wn{color:var(--warn)} .vi{color:var(--vio)}
+  .note{color:var(--muted);font-size:13px}
+  ul{margin:8px 0;padding-left:22px} li{margin:5px 0}
+  .lead{font-size:16.5px;color:#cdd9e5;line-height:1.6}
+  blockquote{margin:16px 0;padding:8px 16px;border-left:3px solid var(--vio);color:#cdd9e5;background:#13181f}
+  svg{max-width:100%;height:auto;display:block;margin:10px auto}
+  footer{margin-top:60px;border-top:1px solid var(--line);padding-top:16px;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <span class="tag">aiconfigurator</span><span class="tag">perf modeling</span><span class="tag">hybrid</span>
+  <h1>Estimating latency for a model you have no data for</h1>
+  <div class="sub">Why we model in <em>utilisation</em> space, how perf transfers across shapes and ops, and what happened when we onboarded MiniMax-M3 with zero MSA benchmarks.</div>
+</header>
+
+<p class="lead">aiconfigurator predicts the latency of an LLM deployment — every GEMM, attention, MoE
+and communication op — from a database of microbenchmarks. The problem: the database is always
+incomplete. A new model arrives, a new quantisation, a new GPU, a brand-new attention variant —
+and there is simply no measurement to interpolate. This is the story of how we stopped guessing a
+fixed fudge factor and started <strong>transferring utilisation</strong> instead, and how that let us
+model <strong>MiniMax-M3</strong> end-to-end before a single MSA kernel was ever benchmarked.</p>
+
+<h2>1 · The hole in interpolation</h2>
+<p>The accurate path is <strong>SILICON</strong> mode: look up the measured latency for the exact
+(op, shape, quant) and interpolate between bracketing points. When the bracket exists, it's great.
+When it doesn't — a sequence length past the grid, a batch size never collected, an op that simply
+isn't in the data — interpolation has nothing to stand on.</p>
+<p>The old fallback (<strong>HYBRID</strong> mode) was a <em>fixed scaling factor</em>: take the
+roofline lower bound (SOL — "speed of light", the time if the GPU ran at peak FLOPs/bandwidth) and
+multiply by a constant like <code>1 / 0.8</code>. One number for every shape, every op. It is wrong
+almost everywhere: a tiny GEMM runs at 15% of peak, a large one at 90%, and a single constant
+splits the difference by being bad at both.</p>
+
+<h2>2 · Model in utilisation space, not latency space</h2>
+<p>The key move is a change of variable. Instead of modeling latency directly, model the
+<strong>achieved utilisation</strong>:</p>
+<div class="eq">util = SOL / measured_latency        # in (0, 1],  how close to peak the kernel ran
+latency = SOL / util                  # invert to predict</div>
+<p>Why this is the right space: <strong>util is bounded and smooth</strong>. It lives in (0,1], it
+moves gently and monotonically with problem size (small → low util → climbing → saturating), and it
+factors out the part we already know exactly (the SOL roofline, which we can compute analytically for
+any shape). Latency spans four orders of magnitude across shapes; util spans maybe 5×. Interpolating —
+or transferring — a quantity that varies 5× is far safer than one that varies 10,000×.</p>
+
+<svg viewBox="0 0 720 230" role="img" aria-label="util vs latency space">
+  <text x="180" y="20" fill="#9aa7b4" font-size="12" text-anchor="middle">latency (raw) — spans 10,000×</text>
+  <line x1="60" y1="180" x2="300" y2="180" stroke="#2b333d"/>
+  <line x1="60" y1="180" x2="60" y2="40" stroke="#2b333d"/>
+  <path d="M60,178 L110,176 L160,168 L210,120 L260,55 L300,44" fill="none" stroke="#f85149" stroke-width="2.5"/>
+  <text x="180" y="205" fill="#9aa7b4" font-size="11" text-anchor="middle">problem size</text>
+  <text x="540" y="20" fill="#9aa7b4" font-size="12" text-anchor="middle">util = SOL/latency — bounded, smooth</text>
+  <line x1="420" y1="180" x2="660" y2="180" stroke="#2b333d"/>
+  <line x1="420" y1="180" x2="420" y2="40" stroke="#2b333d"/>
+  <line x1="420" y1="55" x2="660" y2="55" stroke="#2b333d" stroke-dasharray="3 3"/>
+  <text x="414" y="58" fill="#9aa7b4" font-size="10" text-anchor="end">1.0</text>
+  <path d="M420,165 L470,150 L520,120 L570,85 L620,62 L660,57" fill="none" stroke="#bc8cff" stroke-width="2.5"/>
+  <text x="540" y="205" fill="#9aa7b4" font-size="11" text-anchor="middle">problem size</text>
+</svg>
+<p class="note">Same kernel, two coordinate systems. We fit, interpolate, and transfer the purple
+curve, then multiply the analytic SOL back in to recover latency.</p>
+
+<h2>3 · A ladder of fallbacks</h2>
+<p>Once perf is expressed as util, "I have no data" stops being binary. There is a graceful ladder,
+each rung used only when the one above has nothing:</p>
+<div class="card">
+  <ol>
+    <li><strong>Own-data util curve.</strong> The op has measurements for this quant — fit util vs
+      size and read it off. (This is just SILICON, re-expressed.)</li>
+    <li><strong>Cross-shape transfer.</strong> No data at this shape, but the op was measured at
+      <em>other</em> shapes. Find the nearest neighbour in normalised log-space and borrow its util.
+      Similarity is keyed on what actually drives the kernel — e.g. MoE on <code>(topk, num_experts)</code>
+      and the size regime — <em>not</em> on model lineage.</li>
+    <li><strong>Sibling-version fallback.</strong> No data for this op at this backend version? Pull
+      the same op from the nearest sibling version (manifest-gated, newest-first).</li>
+    <li><strong>Cross-op transfer.</strong> A brand-new op with no data at all borrows the util curve
+      of a structurally similar op. util is <em>not</em> directly comparable across op classes (each
+      op's SOL covers a different fraction of the real work), so this rung carries a manual
+      per-op-pair scale <code>k</code>: <code>latency = SOL / (util_ref · k)</code>. Default
+      <code>k = 1</code>, set deliberately when you know the two ops' efficiency offset.</li>
+    <li><strong>Constant fallback.</strong> The old fixed factor, now the last resort instead of the
+      first.</li>
+  </ol>
+</div>
+<blockquote>The constant didn't disappear — it got demoted. Every rung above it is data-grounded;
+you only hit the constant when literally nothing structurally related was ever measured.</blockquote>
+
+<h2>4 · Does it actually track silicon?</h2>
+<p>We validated rung-by-rung with <code>run_static</code>, comparing the empirical path against true
+silicon on models that <em>do</em> have full data (so we can score the error):</p>
+<table>
+  <tr><th>check</th><th>what it tests</th><th class="num">empirical vs silicon</th></tr>
+  <tr><td>Llama-3-70B, full run_static</td><td>own-data util across all ops</td><td class="num ok">~7% MAPE</td></tr>
+  <tr><td>GLM-5, full run_static</td><td>own-data util, DSA model</td><td class="num ok">1.47% median</td></tr>
+  <tr><td>DeepSeek-V3, full run_static</td><td>own-data util, MLA + MoE</td><td class="num ok">3.63% median</td></tr>
+  <tr><td>MiniMax MoE, drop the matching shapes</td><td>cross-shape transfer (rung 2)</td><td class="num ok">15% &nbsp;(vs <span class="bad">113%</span> constant)</td></tr>
+</table>
+<p>The headline is rung 2: when we deliberately deleted the MoE rows for a shape and forced a
+transfer, the util-borrowing path landed at 15% error where the old constant was off by 113%. Same
+input, an 8× improvement, purely from transferring a bounded quantity instead of inventing one.</p>
+
+<h2>5 · The real test: MiniMax-M3 with zero MSA data</h2>
+<p>Then a model showed up that exercises the whole ladder at once. <strong>MiniMax-M3</strong>
+introduces <strong>MSA</strong> (MiniMax Sparse Attention): a cheap per-block indexer scores KV
+blocks, the top-k blocks (16 × 128 = 2048 tokens) are selected, and full GQA attention runs over only
+those. We had <em>no MSA benchmarks at all</em>.</p>
+<p>But MSA is structurally a GQA cousin of <strong>DSA</strong> (DeepSeek sparse attention), which we
+<em>do</em> have data for. So we:</p>
+<ul>
+  <li><strong>Derived the MSA SOL by hand</strong> — three groups: the projection GEMMs, the per-block
+    fp8 indexer, and the sparse attention itself (pair count saturating at the top-k cap). Prefill is
+    compute-bound; decode is memory-bound and, crucially, <strong>context-independent</strong> because
+    the KV touched is capped at the top-k selection.</li>
+  <li><strong>Transferred util from DSA</strong> (rung 4, <code>k = 1</code>) — MSA borrows DSA's
+    measured efficiency curve, scaled by the analytic SOL ratio.</li>
+</ul>
+<p>Result, pure HYBRID, no tuning: M3 decode <strong>TPOT 23.5 ms</strong> vs the published sglang
+B200 number of <strong>24.1 ms</strong> — within <span class="ok">2%</span>. And the flat-in-context
+decode shape predicted by the SOL was confirmed independently by GLM-5 <em>silicon</em> (sparse decode
+really is context-independent).</p>
+
+<h2>6 · An honesty section: the data you think you have</h2>
+<p>The interesting failure came when we compared M3 against its dense sibling M2.7 under NVFP4 and the
+M3 decode line looked suspiciously, perfectly flat. It was the <em>constant fallback</em> in disguise:
+under NVFP4 the MSA transfer had nothing to grab, so it silently bottomed out at rung 5.</p>
+<p>Chasing it down was a lesson in reading your own database. The DSA module's <code>mla_dtype</code>
+column is always <code>bfloat16</code> — which made it <em>look</em> like there's no quantised DSA
+data anywhere. But the quant actually lives in a separate <code>gemm_type</code> column
+(<code>bfloat16 / fp8_block / nvfp4</code>), and it's keyed per <em>architecture</em>. The NVFP4 DSA
+data exists richly — just not for the exact (architecture, backend-version) cell M3's transfer was
+pointing at on that one SKU. fp8_block, on the other hand, had real data on the same cell, so it
+transfers honestly.</p>
+<blockquote>"No data" and "data under a column I wasn't looking at" produce identical-looking flat
+lines. A graceful fallback ladder is only trustworthy if it's loud about which rung it landed on.</blockquote>
+<p>So the faithful M2.7-vs-M3 comparison uses <strong>fp8_block</strong>, and it tells a clean story:</p>
+
+<svg viewBox="0 0 720 270" role="img" aria-label="TPOT vs context, M2.7 vs M3">
+  <text x="360" y="18" fill="#9aa7b4" font-size="12" text-anchor="middle">decode TPOT vs context length (B200, fp8_block, tp8, bs=64)</text>
+  <line x1="60" y1="230" x2="690" y2="230" stroke="#2b333d"/>
+  <line x1="60" y1="230" x2="60" y2="36" stroke="#2b333d"/>
+  <text x="30" y="135" fill="#9aa7b4" font-size="11" transform="rotate(-90 30 135)" text-anchor="middle">TPOT (ms)</text>
+  <text x="52" y="233" fill="#9aa7b4" font-size="10" text-anchor="end">0</text>
+  <text x="52" y="186" fill="#9aa7b4" font-size="10" text-anchor="end">10</text>
+  <text x="52" y="140" fill="#9aa7b4" font-size="10" text-anchor="end">20</text>
+  <text x="52" y="93" fill="#9aa7b4" font-size="10" text-anchor="end">30</text>
+  <text x="52" y="46" fill="#9aa7b4" font-size="10" text-anchor="end">40</text>
+  <text x="150" y="247" fill="#9aa7b4" font-size="10" text-anchor="middle">2048</text>
+  <text x="320" y="247" fill="#9aa7b4" font-size="10" text-anchor="middle">4096</text>
+  <text x="500" y="247" fill="#9aa7b4" font-size="10" text-anchor="middle">8192</text>
+  <text x="670" y="247" fill="#9aa7b4" font-size="10" text-anchor="middle">16384</text>
+  <!-- y = 230 - ms*4.667 ; x = 150,320,500,670 -->
+  <!-- M2.7: 14.5,18.1,25.1,42.1 -->
+  <polyline points="150,162 320,146 500,113 670,33" fill="none" stroke="#4fa3ff" stroke-width="2.5"/>
+  <circle cx="150" cy="162" r="3.2" fill="#4fa3ff"/><circle cx="320" cy="146" r="3.2" fill="#4fa3ff"/><circle cx="500" cy="113" r="3.2" fill="#4fa3ff"/><circle cx="670" cy="33" r="3.2" fill="#4fa3ff"/>
+  <!-- M3: 23.6,21.2,17.5,17.9 -->
+  <polyline points="150,120 320,131 500,148 670,146" fill="none" stroke="#bc8cff" stroke-width="2.5"/>
+  <circle cx="150" cy="120" r="3.2" fill="#bc8cff"/><circle cx="320" cy="131" r="3.2" fill="#bc8cff"/><circle cx="500" cy="148" r="3.2" fill="#bc8cff"/><circle cx="670" cy="146" r="3.2" fill="#bc8cff"/>
+  <text x="560" y="28" fill="#4fa3ff" font-size="12">M2.7 — full attn (grows)</text>
+  <text x="520" y="140" fill="#bc8cff" font-size="12">M3 — MSA (flat)</text>
+</svg>
+<p class="note">M2.7's full attention grows with context (14.5 → 42 ms); M3's MSA is capped by the
+top-k selection and stays flat (~18–24 ms). Short context favours the smaller M2.7; beyond ~6k the
+sparse attention wins — at 16k, M3 is 2.3× faster per token. The entire M3 curve comes from a derived
+SOL plus a DSA-transferred util — no MSA measurements.</p>
+
+<h2>7 · Takeaways</h2>
+<ul>
+  <li><strong>Pick a bounded coordinate.</strong> Modeling util (∈ (0,1]) instead of latency
+    (∈ 10,000×) makes interpolation and transfer behave.</li>
+  <li><strong>Make "no data" a ladder, not a cliff.</strong> Own-shape → cross-shape → sibling-version
+    → cross-op → constant. Each rung is data-grounded until the last.</li>
+  <li><strong>Transfer on what drives the kernel.</strong> MoE similarity is <code>(topk, experts)</code>,
+    not the model name. MSA borrows DSA because they share a sparse-attention structure, not a vendor.</li>
+  <li><strong>Be loud about the rung.</strong> A silent constant fallback is indistinguishable from a
+    real estimate until it bites — instrument which rung fired.</li>
+  <li><strong>Derive the SOL when the kernel is new.</strong> A hand-derived roofline plus a
+    transferred util got MiniMax-M3 within 2% of measured, before MSA was ever benchmarked.</li>
+</ul>
+
+<footer>
+  aiconfigurator · util-space hybrid modeling. Companion design docs:
+  <code>docs/design/hybrid_util_empirical_design.html</code>,
+  <code>docs/design/minimax_m3_msa_support.html</code>. Reproduction scripts under
+  <code>poc/hybrid_util/</code>.
+</footer>
+</div>
+</body>
+</html>
