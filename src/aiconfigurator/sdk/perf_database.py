@@ -1188,17 +1188,20 @@ class PerfDatabase:
         Initialize the perf database.
 
         Args:
-            database_mode: drives the shared-layer load behavior. `"HYBRID"` enables
-                sibling-row inheritance (including `kernel_source=default` fallback
-                rows); other modes keep it off so predictions stay bit-identical to
-                main. Doesn't change which rows are interpolated at query time;
-                that's controlled by `set_default_database_mode`.
+            database_mode: drives the shared-layer load behavior. `"HYBRID"` and
+                `"EMPIRICAL"` enable sibling-row inheritance (other versions of the
+                same framework newest-first, then other frameworks; including
+                `kernel_source=default` fallback rows) so a missing op/shape can be
+                filled from the nearest sibling instead of dropping straight to the
+                empirical constant. `"SILICON"` / `"SOL"` keep it off so predictions
+                stay bit-identical to main. Doesn't change which rows are
+                interpolated at query time; that's `set_default_database_mode`.
         """
         self.system = system
         self.backend = backend
         self.version = version
         self.systems_root = systems_root
-        self.enable_shared_layer = (database_mode or "").upper() == "HYBRID"
+        self.enable_shared_layer = (database_mode or "").upper() in ("HYBRID", "EMPIRICAL")
         with open(os.path.join(systems_root, system + ".yaml")) as f:
             self.system_spec = SystemSpec(yaml.load(f, Loader=yaml.SafeLoader))
         self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
