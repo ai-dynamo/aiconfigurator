@@ -126,12 +126,20 @@ def grid_for(cache_key, slice_fn: Callable[[], object], sol_fn: Callable[[Coords
         return None
 
 
-def estimate(sol_query: float, query: Coords, grid: UtilGrid | None, fallback_scale: float):
+def estimate(sol_query: float, query: Coords, grid: UtilGrid | None, fallback_scale: float, util_scale: float = 1.0):
     """Return ``(latency_ms, util)``. ``util`` is ``None`` when the constant
-    fallback was used (no samples for the slice)."""
+    fallback was used (no samples for the slice).
+
+    ``util_scale`` is the cross-op level-alignment hook (default 1.0 = no change,
+    used for own-data / same-op transfer). When a CROSS-OP transfer borrows a
+    *different* op's util grid, the caller passes a scale ``k`` (supplied by the
+    modeller) so ``latency = SOL / (util * k)`` -- this pulls the borrowed util to
+    the target op's level (e.g. MLA runs ~1.4x the SOL-utilisation of MHA). Not
+    auto-calibrated and not table-backed by design; it is a manual injection point.
+    """
     util = grid.util(query) if grid is not None else None
     if util and util > 0:
-        return sol_query / util, util
+        return sol_query / (util * util_scale), util
     return sol_query / fallback_scale, None
 
 
