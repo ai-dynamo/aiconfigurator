@@ -23,23 +23,22 @@ SYS, BK, VER = "b200_sxm", "trtllm", "1.3.0rc10"
 
 
 def build():
+    # fp8_block baseline: NVFP4 has no DSA silicon on b200, so M3's MSA transfer
+    # would fall back to a constant under NVFP4. fp8_block has DSA data -> the
+    # MSA transfer is real, and M2.7 has fp8_block silicon too. Apples-to-apples.
     db = get_database(SYS, BK, VER)
     be = TRTLLMBackend()
+    q = dict(
+        gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+        moe_quant_mode=common.MoEQuantMode.fp8_block,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+    )
     m27 = get_model(
-        "nvidia/MiniMax-M2.7-NVFP4", config.ModelConfig(tp_size=8, moe_tp_size=1, moe_ep_size=8), backend_name=BK
+        "MiniMaxAI/MiniMax-M2.7", config.ModelConfig(tp_size=8, moe_tp_size=1, moe_ep_size=8, **q), backend_name=BK
     )
     m3 = get_model(
-        "MiniMaxAI/MiniMax-M3",
-        config.ModelConfig(
-            tp_size=8,
-            moe_tp_size=1,
-            moe_ep_size=8,
-            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
-            moe_quant_mode=common.MoEQuantMode.nvfp4,
-            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
-        ),
-        backend_name=BK,
+        "MiniMaxAI/MiniMax-M3", config.ModelConfig(tp_size=8, moe_tp_size=1, moe_ep_size=8, **q), backend_name=BK
     )
     return db, be, m27, m3
 
@@ -103,7 +102,7 @@ def main():
         a.set_ylabel("ms")
         a.set_title(title)
         a.legend(fontsize=8)
-    fig.suptitle("MiniMax-M2.7 (silicon) vs M3 (hybrid) — B200, NVFP4, tp8", fontsize=13)
+    fig.suptitle("MiniMax-M2.7 (silicon) vs M3 (hybrid) — B200, fp8_block, tp8", fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "compare_m27_m3.png")
     fig.savefig(out, dpi=130)
