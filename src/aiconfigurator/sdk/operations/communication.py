@@ -31,6 +31,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -132,9 +133,34 @@ class CustomAllReduce(Operation):
             return sol_time * 1000, 0, 0
 
         def get_empirical(quant_mode: common.CommQuantMode, tp_size: int, size: int) -> float:
-            latency = get_sol(quant_mode, tp_size, size)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
+            # Data-calibrated: util = SOL/measured read from the collected
+            # custom_allreduce curve (smooth in message size), reconstructed with
+            # this query's SOL. Falls back to the legacy 1/0.8 constant when the
+            # slice has no data. SOL uses the real tp_size; the util grid is built
+            # from the effective (node-capped) tp slice, so SOL ratio carries any
+            # multi-node bandwidth scaling.
+            sol_q = get_sol(quant_mode, tp_size, size)[0]
+            if tp_size <= 1 or sol_q <= 0:
+                return sol_q
+            eff = min(tp_size, database.system_spec["node"]["num_gpus_per_node"])
+
+            def _slice():
+                cls.load_data(database)
+                dw = database._custom_allreduce_data
+                dw.raise_if_not_loaded()
+                comm_dict = dw.get(quant_mode, {}).get(eff, {}).get("AUTO", {})
+                if not comm_dict:
+                    raise KeyError("no custom_allreduce rows for this slice")
+                return comm_dict
+
+            grid = util_empirical.grid_for(
+                ("custom_allreduce", database.system, database.backend, database.version, quant_mode.value.name, eff),
+                _slice,
+                lambda c: get_sol(quant_mode, eff, int(c[0]))[0],
+                depth=1,
+            )
+            latency, _ = util_empirical.estimate(sol_q, (float(size),), grid, fallback_scale=0.8)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -350,9 +376,41 @@ class NCCL(Operation):
             return sol_time, 0, sol_time
 
         def get_empirical(dtype: common.CommQuantMode, num_gpus: int, operation: str, message_size: int) -> float:
-            latency = get_sol(dtype, num_gpus, operation, message_size)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
+            # Data-calibrated: util = SOL/measured read from the collected NCCL
+            # curve for this (dtype, operation, num_gpus) slice, reconstructed with
+            # this query's SOL. Falls back to the legacy 1/0.8 constant when no
+            # data. The grid is built from the available (capped) num_gpus slice;
+            # SOL uses the real num_gpus so the SOL ratio carries scaling beyond
+            # the largest collected num_gpus.
+            sol_q = get_sol(dtype, num_gpus, operation, message_size)[0]
+            if num_gpus <= 1 or sol_q <= 0:
+                return sol_q
+            cls.load_data(database)
+            src = database._nccl_data
+            if not src.loaded and database._oneccl_data is not None and database._oneccl_data.loaded:
+                src = database._oneccl_data
+            if not src.loaded:
+                return sol_q / 0.8
+            try:
+                by_op = src[dtype][operation]
+                eff = min(num_gpus, max(by_op.keys()))
+            except (KeyError, ValueError):
+                return sol_q / 0.8
+
+            def _slice():
+                nccl_dict = by_op[eff]
+                if not nccl_dict:
+                    raise KeyError("no nccl rows for this slice")
+                return nccl_dict
+
+            grid = util_empirical.grid_for(
+                ("nccl", database.system, database.backend, database.version, dtype.value.name, operation, eff),
+                _slice,
+                lambda c: get_sol(dtype, eff, operation, int(c[0]))[0],
+                depth=1,
+            )
+            latency, _ = util_empirical.estimate(sol_q, (float(message_size),), grid, fallback_scale=0.8)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode

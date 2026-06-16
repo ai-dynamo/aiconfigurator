@@ -334,3 +334,48 @@ def test_system_spec_was_loaded_correctly(stub_perf_db):
     assert isinstance(spec, dict)
     assert spec["gpu"]["bfloat16_tc_flops"] == 1_000.0
     assert spec["node"]["inter_node_bw"] == 100.0
+
+
+# ---------------------------------------------------------------------------
+# Communication EMPIRICAL mode is now data-calibrated (util = SOL/measured),
+# mirroring GEMM/MoE, instead of the legacy SOL / 0.8 constant. These guard the
+# per-op invariant: at a collected point empirical recovers silicon; with no
+# data it falls back to the constant.
+# ---------------------------------------------------------------------------
+
+
+def test_query_custom_allreduce_empirical_data_calibrated(comprehensive_perf_db):
+    """At a collected (quant, tp, size) point, EMPIRICAL recovers the silicon
+    latency (util read from data), not the old SOL / 0.8 constant."""
+    q, tp, size = common.CommQuantMode.half, 2, 1024  # collected in the stub
+    silicon = comprehensive_perf_db.query_custom_allreduce(q, tp, size, database_mode=common.DatabaseMode.SILICON)
+    empirical = comprehensive_perf_db.query_custom_allreduce(q, tp, size, database_mode=common.DatabaseMode.EMPIRICAL)
+    sol = comprehensive_perf_db.query_custom_allreduce(q, tp, size, database_mode=common.DatabaseMode.SOL)
+    assert math.isclose(float(empirical), float(silicon), rel_tol=1e-6)
+    assert not math.isclose(float(empirical), float(sol) / 0.8)
+
+
+def test_query_custom_allreduce_empirical_constant_fallback_without_data(comprehensive_perf_db):
+    """With no custom_allreduce data for the slice, EMPIRICAL falls back to SOL / 0.8."""
+    q, tp, size = common.CommQuantMode.int8, 2, 1024  # int8 not in the custom_allreduce stub
+    empirical = comprehensive_perf_db.query_custom_allreduce(q, tp, size, database_mode=common.DatabaseMode.EMPIRICAL)
+    sol = comprehensive_perf_db.query_custom_allreduce(q, tp, size, database_mode=common.DatabaseMode.SOL)
+    assert math.isclose(float(empirical), float(sol) / 0.8, rel_tol=1e-6)
+
+
+def test_query_nccl_empirical_data_calibrated(comprehensive_perf_db):
+    """At a collected (dtype, op, num_gpus, size) point, EMPIRICAL recovers silicon."""
+    dtype, ngpu, op, size = common.CommQuantMode.half, 2, "all_gather", 1024  # collected
+    silicon = comprehensive_perf_db.query_nccl(dtype, ngpu, op, size, database_mode=common.DatabaseMode.SILICON)
+    empirical = comprehensive_perf_db.query_nccl(dtype, ngpu, op, size, database_mode=common.DatabaseMode.EMPIRICAL)
+    sol = comprehensive_perf_db.query_nccl(dtype, ngpu, op, size, database_mode=common.DatabaseMode.SOL)
+    assert math.isclose(float(empirical), float(silicon), rel_tol=1e-6)
+    assert not math.isclose(float(empirical), float(sol) / 0.8)
+
+
+def test_query_nccl_empirical_constant_fallback_without_data(comprehensive_perf_db):
+    """With no NCCL data for the operation, EMPIRICAL falls back to SOL / 0.8."""
+    dtype, ngpu, op, size = common.CommQuantMode.half, 2, "all_reduce", 1024  # all_reduce absent in stub
+    empirical = comprehensive_perf_db.query_nccl(dtype, ngpu, op, size, database_mode=common.DatabaseMode.EMPIRICAL)
+    sol = comprehensive_perf_db.query_nccl(dtype, ngpu, op, size, database_mode=common.DatabaseMode.SOL)
+    assert math.isclose(float(empirical), float(sol) / 0.8, rel_tol=1e-6)
