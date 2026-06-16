@@ -194,9 +194,11 @@ def get_moe_test_cases():
         elif model_name == "zai-org/GLM-5-FP8":
             model_moe_list = ["fp8_block"]
         elif model_name == "nvidia/GLM-5-NVFP4":
+            # nvfp4 MoE; sweep the full EP/TP grid like DeepSeek-V4 (the EP/TP
+            # validity is already bounded by get_common_moe_test_cases via
+            # tp*ep==gpu / ep<=num_experts / num_experts%ep==0 / inter%tp==0).
+            # (Previously hard-pinned to ep==1 & tp<32 as an nvfp4-EP>1 workaround.)
             model_moe_list = ["nvfp4"]
-            if common_moe_testcase.ep != 1 or common_moe_testcase.tp >= 32:
-                continue
         elif sm_version >= 120 and model_name in _SM120_NEMOTRON_NVFP4_MODELS:
             model_moe_list = [*model_moe_list, "nvfp4"]
 

@@ -59,6 +59,9 @@ class PerfFile(str, Enum):
     # (flat vs top_last scores).  Consumed by perf_database's
     # _load_dsv4_topk_calib / _dsv4_csa_topk_latency_delta_ms.
     DSV4_CSA_TOPK_CALIB = "dsv4_csa_topk_calib_perf.txt"
+    GLM5_MQA_LOGITS_MODULE = "glm5_mqa_logits_module_perf.txt"
+    GLM5_TOPK_MODULE = "glm5_topk_module_perf.txt"
+    GLM5_DSA_ATTN_MODULE = "glm5_dsa_attn_module_perf.txt"
     DSV4_MEGAMOE_MODULE = "dsv4_megamoe_module_perf.txt"
     NCCL = "nccl_perf.txt"
     CUSTOM_ALLREDUCE = "custom_allreduce_perf.txt"

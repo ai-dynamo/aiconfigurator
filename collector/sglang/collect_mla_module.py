@@ -26,6 +26,13 @@ import argparse
 import gc
 import json
 import os
+
+# Collector only ever benches a single M per point; skip DeepGEMM's upfront
+# full-M precompile sweep (compiles every M in 1..16384 x each GEMM = ~32818
+# kernels, all but one unused). With this off, DeepGEMM JIT-compiles only the
+# actual M on demand during the per-point warmup (absorbed, not in timing).
+# setdefault so an explicit env can still override.
+os.environ.setdefault("SGLANG_JIT_DEEPGEMM_PRECOMPILE", "0")
 import shutil
 import subprocess
 import sys
@@ -34,7 +41,6 @@ import traceback
 import types
 from importlib.metadata import version as get_version
 
-import numpy as np
 import torch
 
 try:
@@ -153,6 +159,16 @@ def _filter_cases_from_env(test_cases, *, is_prefill: bool, attn_type: str):
         if prefix_set is not None and prefix_len not in prefix_set:
             continue
         filtered.append((bs, seq_len, ip, prefix_len))
+    # Inject explicit off-grid (seq, prefix) combos when both filters are set
+    if seq_set and prefix_set:
+        have = {(s, p) for (_b, s, _ip, p) in filtered}
+        bss = sorted(batch_set) if batch_set else [1]
+        ipv = test_cases[0][2] if test_cases else True
+        for s in sorted(seq_set):
+            for p in sorted(prefix_set):
+                for bs in bss:
+                    if (s, p) not in have:
+                        filtered.append((bs, s, ipv, p))
     print(f"[DSA] Env-filtered context cases: {len(filtered)}/{len(test_cases)}")
     return filtered
 
@@ -161,12 +177,30 @@ def _is_glm5_dsa_model(model_id: str) -> bool:
     return _module_model_architecture(model_id) == _GLM5_DSA_ARCHITECTURE
 
 
+def _sglang_version_ge(target: str) -> bool:
+    """True if the installed sglang version is >= target (e.g. "0.5.13")."""
+    try:
+        from packaging.version import parse as _parse
+
+        return _parse(get_version("sglang")) >= _parse(target)
+    except Exception:
+        try:
+            cur = tuple(int(x) for x in get_version("sglang").split("+")[0].split(".")[:3] if x.isdigit())
+            return cur >= tuple(int(x) for x in target.split("."))
+        except Exception:
+            return False
+
+
 def _enable_glm5_dsa_piecewise_graph(attn_type: str, model_id: str) -> bool:
-    if _env_flag("AIC_DISABLE_PIECEWISE_CUDA_GRAPH"):
+    if not (attn_type == "dsa" and _is_glm5_dsa_model(model_id)):
         return False
-    # SGLang 0.5.10 full-model piecewise capture rejects the GLM-5 DSA
-    # attention path; module-level piecewise replay remains enabled below.
-    return _env_flag("AIC_ENABLE_PIECEWISE_CUDA_GRAPH") and attn_type == "dsa" and _is_glm5_dsa_model(model_id)
+    # SGLang 0.5.10 full-model piecewise capture rejects the GLM-5 DSA path;
+    # GLM-5 NSA/DSA piecewise works on sglang >= e958f4561 / 0.5.12.x (PR #23351).
+    # BUT SGLang >= 0.5.13 crashes piecewise capture in concat_mla.cuh:309
+    # (cudaErrorInvalidValue); only eager / module CUDA graph is safe there,
+    # which is also what CP prefill serve runs. Controlled purely by the
+    # installed sglang version -- no env flag.
+    return not _sglang_version_ge("0.5.13")
 
 
 def _piecewise_cuda_graph_tokens_for_cases(test_cases, is_prefill: bool) -> list[int] | None:
@@ -270,7 +304,7 @@ def _resolve_local_model_path(model_id: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _get_precision_combos(phase: str):
+def _get_precision_combos(phase: str, model_id: str | None = None):
     """Return (compute_dtype, kv_cache_dtype, gemm_type) triples for a phase.
 
     All strings are perf-database-compatible (not SGLang-native).
@@ -296,7 +330,16 @@ def _get_precision_combos(phase: str):
         kv_dtypes.append("fp8")
     combos = [("bfloat16", kv, "bfloat16") for kv in kv_dtypes]
     if sm >= 89:
-        combos += [("bfloat16", kv, "fp8_block") for kv in kv_dtypes]
+        # GLM5-NVFP4 / DSV4 are modelopt NVFP4 models -> use nvfp4 gemm
+        # (quantization=modelopt_fp4, native hf_quant_config) to MATCH serve
+        # (--quantization modelopt_fp4). attention proj are NVFP4-excluded
+        # (bf16) so the bf16 combo above still covers the proj path.
+        combos += [("bfloat16", kv, "nvfp4") for kv in kv_dtypes]
+    # GLM5-NVFP4 weights ARE nvfp4 -> the bf16-gemm combos are meaningless and
+    # just duplicate the case. Serve runs --quantization modelopt_fp4, so for
+    # GLM5 DSA collect ONLY the nvfp4 combos. Hardcoded (no env gate).
+    if model_id is not None and _is_glm5_dsa_model(model_id):
+        combos = [c for c in combos if c[2] == "nvfp4"]
     return combos
 
 
@@ -428,15 +471,125 @@ def _get_module_precision_combos():
     return get_mla_module_sweep_spec("sglang").module_precision_combos
 
 
-def _dsa_context_prefix_shape_is_valid(batch_size: int, seq_len: int, prefix_len: int) -> bool:
+def _model_max_position_embeddings(model_id: str) -> int | None:
+    """Return the model's max context length (RoPE table size) from its config.
+
+    This is exactly the value SGLang uses to size the DSA/NSA indexer's rotary
+    cos/sin cache (``nsa_indexer`` builds it with
+    ``max_position=max_position_embeddings``) and to admit requests
+    (``ServerArgs.context_length`` defaults to it).  Read from AIC's cached
+    model config — the same file :func:`_resolve_local_model_path` loads — so
+    no HuggingFace network access is needed.  Returns ``None`` if unavailable
+    (caller then applies no context cap).
+    """
+    config_file = os.path.join(_MODEL_CONFIG_DIR, f"{model_id.replace('/', '--')}_config.json")
+    if not os.path.exists(config_file):
+        return None
+    try:
+        with open(config_file) as f:
+            value = json.load(f).get("max_position_embeddings")
+        return int(value) if value else None
+    except Exception:
+        return None
+
+
+def _model_native_gemm_quant(model_id: str) -> str | None:
+    """Return the checkpoint's native weight-quantization gemm kind, or ``None``
+    for an unquantized (bf16) checkpoint.
+
+    Different GLM-5 / DeepSeek checkpoints ship at different precisions —
+    ``nvidia/GLM-5-NVFP4`` (ModelOpt NVFP4), ``zai-org/GLM-5-FP8`` (block-fp8),
+    ``zai-org/GLM-5`` (bf16) — and they are *separate models*, not one model
+    reinterpreted at several precisions.  A module precision combo whose
+    ``gemm_type`` asks for a quantization the checkpoint does not carry (e.g.
+    ``gemm_type=fp8_block`` against the NVFP4 checkpoint) cannot load: SGLang
+    routes to the checkpoint's own quant loader, which then rejects the foreign
+    config (``Cannot find 'quant_algo'``) and the subprocess dies at model load.
+    This reads the checkpoint's quant config so the caller only enumerates
+    combos the input model actually supports.
+
+    Reads the same AIC cached config files :func:`_resolve_local_model_path`
+    loads:
+
+    * ModelOpt ``*_hf_quant_config.json`` → ``quantization.quant_algo``
+      (``NVFP4`` → ``"nvfp4"``, ``FP8`` → ``"fp8_block"``)
+    * HF ``*_config.json`` ``quantization_config`` → ``quant_method`` +
+      ``weight_block_size`` (block-fp8 → ``"fp8_block"``)
+
+    Returns one of ``"nvfp4"`` / ``"fp8_block"`` / ``None``.
+    """
+    base = os.path.join(_MODEL_CONFIG_DIR, model_id.replace("/", "--"))
+    quant_file = f"{base}_hf_quant_config.json"
+    if os.path.exists(quant_file):
+        try:
+            with open(quant_file) as f:
+                algo = (json.load(f).get("quantization") or {}).get("quant_algo")
+            if algo:
+                algo = str(algo).upper()
+                if "FP4" in algo:
+                    return "nvfp4"
+                if "FP8" in algo:
+                    return "fp8_block"
+        except Exception:
+            pass
+    config_file = f"{base}_config.json"
+    if os.path.exists(config_file):
+        try:
+            with open(config_file) as f:
+                quant_cfg = json.load(f).get("quantization_config") or {}
+            method = str(quant_cfg.get("quant_method", "")).lower()
+            if method == "fp8" and quant_cfg.get("weight_block_size"):
+                return "fp8_block"
+            if "fp4" in method:
+                return "nvfp4"
+        except Exception:
+            pass
+    return None
+
+
+def _gemm_type_supported_by_model(gemm_type: str | None, native_quant: str | None) -> bool:
+    """Whether a module precision combo's ``gemm_type`` can load on this model.
+
+    ``bfloat16`` always works (unquantized / dummy-weight path).  Any quantized
+    ``gemm_type`` is loadable only when it matches the checkpoint's native
+    quantization (see :func:`_model_native_gemm_quant`) — a mismatch is a
+    different model and fails at load.
+    """
+    if gemm_type in (None, "bfloat16", "bf16"):
+        return True
+    return gemm_type == native_quant
+
+
+def _dsa_context_prefix_shape_is_valid(
+    batch_size: int,
+    seq_len: int,
+    prefix_len: int,
+    max_position_embeddings: int | None = None,
+) -> bool:
     """Return whether a DSA prefix-context sample is structurally valid.
 
     Single-token extension is a decode/generation shape.  SGLang's DSA prefill
     indexer can illegal-access on that shape, so context collection skips it
-    before launching kernels.  Capacity is checked after ModelRunner
-    construction against the actual runtime limits.
+    before launching kernels.
+
+    **Per-request context ceiling (SGLang mechanism, not an empirical constant).**
+    The DSA/NSA indexer builds its rotary cos/sin cache for
+    ``max_position_embeddings`` positions, which is also what SGLang's scheduler
+    uses to admit a request (``ServerArgs.context_length`` defaults to it).  A
+    per-request context ``prefix_len + seq_len`` longer than that indexes past
+    the RoPE table, so the indexer illegal-accesses on Blackwell — independent
+    of batch size and of KV-pool headroom, hence uncatchable by the
+    post-ModelRunner capacity filters.  Skip it before launch.  The cap is
+    per-request: ``batch_size`` does not enter here.
+
+    The complementary **memory bound** — ``batch_size * (prefix + seq) <= KV
+    pool capacity`` — is what makes large-batch x long-context infeasible (e.g.
+    bs=1024 cannot also be long-context); it is already enforced after
+    ModelRunner construction via ``required_kv_tokens`` / ``kv_pool_capacity_tokens``.
     """
-    return prefix_len >= 0 and dsa_indexer_prefill_shape_is_supported(batch_size, seq_len)
+    if not (prefix_len >= 0 and dsa_indexer_prefill_shape_is_supported(batch_size, seq_len)):
+        return False
+    return not (max_position_embeddings is not None and prefix_len + seq_len > max_position_embeddings)
 
 
 def _build_module_test_cases(attn_type: str, mode: str):
@@ -467,7 +620,14 @@ def _build_module_test_cases(attn_type: str, mode: str):
     sweep = get_mla_module_sweep_spec("sglang")
     cases = []
     for model_spec in model_specs:
+        # Each checkpoint ships at one native precision; only enumerate the
+        # precision combos it can actually load (bf16 always + its own quant).
+        # Prevents e.g. gemm_type=fp8_block being applied to the NVFP4 checkpoint
+        # (a different model), which dies at model load with "Cannot find quant_algo".
+        native_quant = _model_native_gemm_quant(model_spec.model_path)
         for compute_dtype, kv_dtype, gemm_type in _get_module_precision_combos():
+            if not _gemm_type_supported_by_model(gemm_type, native_quant):
+                continue
             target_tps = sweep.module_tp_sizes if attn_type == "dsa" else [1]
             for target_tp_size in target_tps:
                 if model_spec.native_num_heads % target_tp_size != 0:
@@ -591,7 +751,22 @@ def cleanup_distributed():
     """Clean up SGLang distributed environment if it exists."""
     import sglang.srt.distributed.parallel_state as parallel_state
 
-    for var_name in ["_TP", "_PP", "_MOE_EP", "_MOE_TP", "_WORLD", "_PDMUX_PREFILL_TP_GROUP"]:
+    try:
+        parallel_state.destroy_model_parallel()
+    except Exception:
+        pass
+    for var_name in [
+        "_TP",
+        "_PP",
+        "_MOE_EP",
+        "_MOE_TP",
+        "_MOE_DP",
+        "_WORLD",
+        "_PDMUX_PREFILL_TP_GROUP",
+        "_ATTN_CP",
+        "_ATTN_TP",
+        "_ATTN_DP",
+    ]:
         if hasattr(parallel_state, var_name):
             setattr(parallel_state, var_name, None)
 
@@ -617,6 +792,7 @@ def _ensure_fp8_block_quant_config(hf_cfg) -> None:
         "activation_scheme": "dynamic",
         "weight_block_size": [128, 128],
         "fmt": "e4m3",
+        "quant_algo": "FP8",
     }
     qc = getattr(hf_cfg, "quantization_config", None)
     if qc is None:
@@ -844,7 +1020,14 @@ def load_model_runner(
         tp_size=1,
         trust_remote_code=True,
         disable_radix_cache=True,
-        disable_cuda_graph=not enable_piecewise_cuda_graph,
+        # Decode CUDA graphs (sglang init_device_graphs: one full-model decode
+        # capture per batch size, default bs=512..1 = 52 captures) are NEVER
+        # used by the prefill DSA-module measurement and are the multi-second
+        # 'various kernels' burst at the front of the timeline. Skip them
+        # entirely (init_device_graphs early-returns on disable_cuda_graph).
+        # The prefill PIECEWISE graph is independent (init_piecewise_cuda_graphs,
+        # gated only by disable_piecewise_cuda_graph) so it still captures.
+        disable_cuda_graph=True,
         kv_cache_dtype=sglang_kv_dtype,
         max_total_tokens=max_total_tokens,
     )
@@ -881,6 +1064,30 @@ def load_model_runner(
         server_args.enable_piecewise_cuda_graph = enable_piecewise_cuda_graph
 
     server_args.attention_backend = attention_backend
+    # Do NOT warm up gemm at sglang ModelRunner init (that is the separate
+    # front-of-timeline gemm autotune phase, done over the FULL model). The DSA
+    # module gemm tuning is instead absorbed into the dsa-module warmup below
+    # (run_mla_module, under `with autotune(True)`), so it is part of the module
+    # init we actually measure -- not a global init phase.
+    if hasattr(server_args, "disable_flashinfer_autotune"):
+        server_args.disable_flashinfer_autotune = True
+    # Match the serve config: force nsa sub-backends so the DSA FMHA uses the
+    # topk-capped flash_fwd_splitkv_mla_fp8_sparse kernel (flat in prefix),
+    # not the default full-attention paged kernel (scales with prefix).
+    # Only fp8 KV: force flashmla_kv so the DSA FMHA uses the topk-capped
+    # flash_fwd_splitkv_mla_fp8_sparse kernel (flat in prefix). bf16 KV is left
+    # at sglang default (flashmla_kv rejects bf16). Gated by env so reversible.
+    # GLM5 DSA fp8 MUST use flashmla_kv so the FMHA is the topk-capped
+    # flash_fwd_splitkv_mla_fp8_sparse kernel (flat in prefix) = serve. Hardcoded
+    # ON for nsa+fp8 (no env gate); bf16 KV left at sglang default.
+    if attention_backend == "nsa" and sglang_kv_dtype == "fp8_e4m3":
+        # sglang renamed nsa_* -> dsa_* around e958f4561; set whichever exists.
+        for _pre in ("nsa_prefill_backend", "dsa_prefill_backend"):
+            if hasattr(server_args, _pre):
+                setattr(server_args, _pre, "flashmla_kv")
+        for _dec in ("nsa_decode_backend", "dsa_decode_backend"):
+            if hasattr(server_args, _dec):
+                setattr(server_args, _dec, "flashmla_kv")
     print(
         f"Using attention backend: {attention_backend}, kv_cache_dtype: {sglang_kv_dtype}, "
         f"gpu_id: {gpu_id}, chunked_prefill_size={server_args.chunked_prefill_size}, "
@@ -1119,6 +1326,18 @@ def _run_prefill(
             )
             req.prefix_indices = prefix_indices[i]
             req.fill_ids = req.origin_input_ids
+            # sglang >= 0.5.13: ScheduleBatch.prepare_for_extend reads the per-req
+            # sequence length from req.fill_len and the token ids from
+            # req.get_fill_ids() == full_untruncated_fill_ids[:fill_len] (NOT
+            # req.fill_ids). fill_len defaults to 0, so the admission assert
+            # `seq_len - pre_len == req.extend_input_len` fails for every case.
+            # Populate the new fields (full prefix+seq) when they exist; older
+            # sglang has neither attribute and keeps using req.fill_ids.
+            if hasattr(req, "full_untruncated_fill_ids"):
+                from array import array as _array
+
+                req.full_untruncated_fill_ids = _array("q", req.origin_input_ids)
+                req.fill_len = full_length
             req.extend_input_len = seq_length if prefix_len else len(req.fill_ids)
             req.logprob_start_len = 0
             reqs.append(req)
@@ -1167,27 +1386,58 @@ def _run_prefill(
         attn_inputs = AttentionInputs(hidden_states, forward_batch, dummy_qkv_latent_func)
         get_attn_tp_context().set_attn_inputs(attn_inputs)
 
-        use_module_piecewise_replay = _env_flag("AIC_ENABLE_MODULE_PIECEWISE_REPLAY") or (
-            attn_type == "dsa" and _is_glm5_dsa_model(model_path)
+        use_module_piecewise_replay = not getattr(model_runner, "_aic_module_piecewise_fallback_eager", False) and (
+            _env_flag("AIC_ENABLE_MODULE_PIECEWISE_REPLAY") or (attn_type == "dsa" and _is_glm5_dsa_model(model_path))
         )
         use_full_model_piecewise_replay = _env_flag("AIC_ENABLE_FULL_MODEL_PIECEWISE_REPLAY")
         use_module_cuda_graph = use_module_cuda_graph or _env_flag("AIC_ENABLE_MODULE_CUDA_GRAPH")
         use_module_piecewise_context = _env_flag("AIC_ENABLE_MODULE_PIECEWISE_CONTEXT")
+        # Eager DSA timing: proper forward context but NO piecewise CUDA graph.
+        # Used when the prefill chunk exceeds the piecewise graph's captured token
+        # ceiling (see the fallback just below).
+        use_module_eager_dsa_context = False
+        # If an earlier case in this subprocess found piecewise CUDA graph
+        # capture unsupported (e.g. sglang 0.5.13), time the module EAGERLY.
+        if getattr(model_runner, "_aic_module_piecewise_fallback_eager", False):
+            use_module_eager_dsa_context = True
         token_count = batch_size * seq_length
+        # Production chunks prefill to chunked_prefill_size; a one-shot forward with
+        # more query tokens than that needs more shared memory than the GPU has
+        # (kernel falls back to a low-smem path that illegal-memory-accesses).
+        # These (bs*seq > chunk) shapes are multi-chunk in serve; the single-chunk
+        # shape (bs*seq <= chunk) is collected separately. Skip to avoid the crash.
+        _chunk_cap = _runtime_chunk_size(model_runner)
+        _smem_optin2 = torch.cuda.get_device_properties(torch.cuda.current_device()).shared_memory_per_block_optin
+        _chunk_cap = min(_chunk_cap, (_smem_optin2 // 4 - 1) // 5)
+        if token_count > _chunk_cap:
+            print(
+                f"  SKIP oversized prefill: token_count(bs*seq)={token_count} > "
+                f"chunked_prefill_size={_chunk_cap}; serve chunks this, not a one-shot shape.",
+                flush=True,
+            )
+            return 0
         max_piecewise_tokens = int(getattr(model_runner.server_args, "piecewise_cuda_graph_max_tokens", 0) or 0) or (
             max(int(x) for x in model_runner.server_args.piecewise_cuda_graph_tokens)
             if model_runner.server_args.piecewise_cuda_graph_tokens
             else 0
         )
         if use_module_piecewise_replay and max_piecewise_tokens and token_count > max_piecewise_tokens:
+            # piecewise_cuda_graph_max_tokens is an sglang serving knob (2048 by
+            # default for MLA backends, to avoid kernel-dispatch regression) — NOT
+            # a limit on valid prefill sizes. A larger chunk simply has no captured
+            # graph, so we must still collect it by timing the module EAGERLY with
+            # the correct DSA forward context. (Production likewise runs MLA prefill
+            # chunks above this ceiling without a piecewise graph.) The piecewise
+            # switch decides graph-or-not; it must never drop the data point.
             print(
-                "  Module piecewise CUDA graph replay disabled: "
-                f"num_tokens={token_count} exceeds max={max_piecewise_tokens}; "
-                "using piecewise context without graph replay"
+                "  Module piecewise CUDA graph disabled: "
+                f"num_tokens={token_count} exceeds piecewise max={max_piecewise_tokens}; "
+                "timing eager (no graph), still collected"
             )
             use_module_piecewise_replay = False
             use_module_cuda_graph = False
-            use_module_piecewise_context = True
+            use_module_piecewise_context = False
+            use_module_eager_dsa_context = True
         if use_module_piecewise_replay:
             print("  Module piecewise CUDA graph replay enabled")
             use_full_model_piecewise_replay = False
@@ -1385,6 +1635,13 @@ def _run_prefill(
                 )
                 model_runner.model = module_model
                 model_runner.model_config.num_hidden_layers = 1
+                # sglang >= 0.5.13: PiecewiseCudaGraphRunner.replay_prepare reads
+                # len(forward_batch.input_ids); the module-only attention forward
+                # leaves it None (compute is driven by hidden_states via attn_inputs).
+                # Populate a dummy id tensor of the right token count so replay_prepare
+                # does not crash (the attention-only model ignores input_ids).
+                if getattr(forward_batch, "input_ids", None) is None:
+                    forward_batch.input_ids = torch.zeros(token_count, dtype=torch.int64, device="cuda")
                 model_runner._aic_module_piecewise_forward_batch = forward_batch
                 try:
                     pcg_runner_mod.install_torch_compiled = _install_torch_compiled_with_module_dims
@@ -1394,6 +1651,25 @@ def _run_prefill(
                     )
                     with torch.no_grad():
                         model_runner.init_piecewise_cuda_graphs()
+                except Exception as _pw_exc:
+                    # Piecewise CUDA graph capture unsupported in this collector
+                    # context (e.g. sglang >= 0.5.13: concat_mla_absorb_q launches
+                    # on the device default stream, illegal under the piecewise
+                    # graph context -> cudaErrorInvalidValue). Clear the non-sticky
+                    # error and fall back to EAGER module timing for this and all
+                    # subsequent cases in this subprocess.
+                    print(
+                        f"  Module piecewise CUDA graph unsupported "
+                        f"({type(_pw_exc).__name__}: {_pw_exc}); falling back to EAGER"
+                    )
+                    try:
+                        torch.cuda.synchronize()
+                    except Exception:
+                        pass
+                    torch.cuda.empty_cache()
+                    model_runner._aic_module_piecewise_fallback_eager = True
+                    model_runner.piecewise_cuda_graph_runner = None
+                    model_runner.model = original_model
                 finally:
                     pcg_runner_mod.install_torch_compiled = original_install_torch_compiled
                     pcg_runner_mod.PiecewiseCudaGraphRunner.warmup_compile = original_warmup_compile
@@ -1403,9 +1679,15 @@ def _run_prefill(
                         delattr(model_runner, "_aic_module_piecewise_forward_batch")
                     model_runner.server_args.piecewise_cuda_graph_tokens = original_piecewise_tokens
                     model_runner.server_args.piecewise_cuda_graph_max_tokens = original_piecewise_max_tokens
-                model_runner._aic_module_piecewise_replay_initialized = True
-                model_runner._aic_module_piecewise_replay_token_count = token_count
-                print(f"  Module piecewise runner={model_runner.piecewise_cuda_graph_runner is not None}")
+                if not getattr(model_runner, "_aic_module_piecewise_fallback_eager", False):
+                    model_runner._aic_module_piecewise_replay_initialized = True
+                    model_runner._aic_module_piecewise_replay_token_count = token_count
+                    print(f"  Module piecewise runner={model_runner.piecewise_cuda_graph_runner is not None}")
+
+        # Current case: piecewise capture just fell back -> time it eagerly.
+        if getattr(model_runner, "_aic_module_piecewise_fallback_eager", False) and use_module_piecewise_replay:
+            use_module_piecewise_replay = False
+            use_module_eager_dsa_context = True
 
         def call_attention_module():
             with forward_context(forward_context_type(attn_backend=model_runner.attn_backend)):
@@ -1431,6 +1713,22 @@ def _run_prefill(
                             forward_batch=forward_batch,
                             zero_allocator=zero_allocator,
                         )
+                elif use_module_eager_dsa_context:
+                    # Prefill chunk exceeds the piecewise graph ceiling: time the
+                    # module EAGERLY in the non-piecewise "original mode" — exactly
+                    # what production runs for >max-token MLA prefill chunks (sglang
+                    # caps piecewise at 2048 for MLA precisely to avoid the piecewise
+                    # kernel-dispatch regression). No piecewise forward context, no
+                    # graph: the standard forward_context entered above plus the
+                    # attention metadata is all the NSA indexer needs (its metadata
+                    # is built in init_forward_metadata, not via the forward context).
+                    model_runner.attn_backend.init_forward_metadata(forward_batch)
+                    attention_module(
+                        positions=positions,
+                        hidden_states=hidden_states,
+                        forward_batch=forward_batch,
+                        zero_allocator=zero_allocator,
+                    )
                 else:
                     attention_module(
                         positions=positions,
@@ -1452,11 +1750,22 @@ def _run_prefill(
             else call_attention_module
         )
 
-        # Warmup
-        for _ in range(num_warmup):
-            with torch.no_grad():
-                call_target()
-            torch.cuda.synchronize()
+        # Warmup — run UNDER the flashinfer autotune context so the fp4_gemm
+        # autotuning is absorbed into this module warmup (tuned here, cached for
+        # the timed region) instead of running as a separate model-init phase.
+        import contextlib
+
+        try:
+            from flashinfer.autotuner import autotune as _fi_autotune
+
+            _tune_ctx = _fi_autotune(True)
+        except Exception:
+            _tune_ctx = contextlib.nullcontext()
+        with _tune_ctx:
+            for _ in range(num_warmup):
+                with torch.no_grad():
+                    call_target()
+                torch.cuda.synchronize()
         if use_full_model_piecewise_replay or use_module_piecewise_replay:
             print(f"  Piecewise can_run_graph={last_can_run_graph}")
 
@@ -1473,23 +1782,23 @@ def _run_prefill(
                 print("  Module CUDA graph capture failed")
                 raise
 
-        # Timed runs — skip first 2 for stability
-        cuda_times = []
-        for i in range(num_iterations):
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
-            with torch.no_grad():
+        # Timed runs — run ALL iterations back-to-back, ONE sync at the end, then
+        # divide by count. Per-iteration cuda.synchronize would insert GPU-idle
+        # bubbles + per-launch latency between modules (NOT representative); the
+        # amortized back-to-back timing matches the serve continuous pipeline.
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        torch.cuda.synchronize()
+        start_event.record()
+        with torch.no_grad():
+            for i in range(num_iterations):
                 if module_cuda_graph is not None:
                     module_cuda_graph.replay()
                 else:
                     call_target()
-            end_event.record()
-            torch.cuda.synchronize()
-            if i > 1:
-                cuda_times.append(start_event.elapsed_time(end_event))
-
-        avg_time_ms = np.mean(cuda_times)
+        end_event.record()
+        torch.cuda.synchronize()
+        avg_time_ms = start_event.elapsed_time(end_event) / num_iterations
 
         # Log perf — wideep MLA uses old filename/op_name/kernel_source conventions
         try:
@@ -1529,11 +1838,7 @@ def _run_prefill(
             print(f"  Warning: failed to log prefill metrics: {e}")
             return False
 
-        print(
-            f"  Prefill: {avg_time_ms:.3f} ms "
-            f"(min: {np.min(cuda_times):.3f}, max: {np.max(cuda_times):.3f}, "
-            f"std: {np.std(cuda_times):.3f})"
-        )
+        print(f"  Prefill: {avg_time_ms:.3f} ms (back-to-back avg over {num_iterations} iters)")
         return True
 
     except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
@@ -1619,6 +1924,18 @@ def _run_decode(
             )
             req.prefix_indices = torch.empty((0,), dtype=torch.int64)
             req.fill_ids = req.origin_input_ids
+            # sglang >= 0.5.13: ScheduleBatch.prepare_for_extend reads the per-req
+            # length from req.fill_len and the ids from req.get_fill_ids() ==
+            # full_untruncated_fill_ids[:fill_len] (NOT req.fill_ids). fill_len
+            # defaults to 0, so the admission assert
+            # `seq_len - pre_len == req.extend_input_len` fails for every decode
+            # case. Decode has no prefix (pre_len=0) -> fill_len = full kv length.
+            # Older sglang lacks both attributes and keeps using req.fill_ids.
+            if hasattr(req, "full_untruncated_fill_ids"):
+                from array import array as _array
+
+                req.full_untruncated_fill_ids = _array("q", req.origin_input_ids)
+                req.fill_len = len(req.origin_input_ids)
             req.extend_input_len = len(req.fill_ids)
             req.logprob_start_len = 0
             req.cached_tokens = 0
@@ -1846,14 +2163,25 @@ def run_mla_module(
     if batch_size_filter:
         base_cases = [(bs, seq_len, ip) for bs, seq_len, ip in base_cases if bs == batch_size_filter]
     if is_prefill and attn_type == "dsa":
-        prefix_lens = get_mla_module_sweep_spec("sglang").context_prefix_lengths
+        _sweep = get_mla_module_sweep_spec("sglang")
+        prefix_lens = _sweep.context_prefix_lengths
+        # Per-request context cap = the model's max_position_embeddings (the RoPE
+        # table size the DSA indexer uses); contexts beyond it index past the
+        # RoPE cache and illegal-access. Driven by the model config, not a
+        # hardcoded constant.
+        _max_pos = _model_max_position_embeddings(model_path)
         # Run prefix as the outer loop so a late long-prefix illegal access does
         # not discard all larger-ISL rows for the current batch-size subprocess.
         cases = [
             (bs, seq_len, ip, prefix_len)
             for prefix_len in prefix_lens
             for bs, seq_len, ip in base_cases
-            if _dsa_context_prefix_shape_is_valid(bs, seq_len, prefix_len)
+            if _dsa_context_prefix_shape_is_valid(
+                bs,
+                seq_len,
+                prefix_len,
+                max_position_embeddings=_max_pos,
+            )
         ]
     else:
         cases = [(bs, seq_len, ip, 0) for bs, seq_len, ip in base_cases]
@@ -1909,6 +2237,28 @@ def run_mla_module(
         skipped = before - len(cases)
         if skipped:
             print(f"[DSA] Dropped {skipped} context cases beyond DSA indexer total KV token limit")
+
+        # PRE-INIT cap: cuda graph capture tokens are computed from `cases` and the
+        # model is built (init_piecewise capture) BEFORE the old post-model chunk
+        # filter ran -> a bs*seq > chunked_prefill_size case got captured one-shot,
+        # exceeding GPU shared memory (low-smem fallback FlashMLA kernel illegal-
+        # accesses). Serve chunks prefill to chunked_prefill_size, so >chunk shapes
+        # are multi-chunk (the <=chunk shape is collected). Drop them BEFORE capture.
+        # Cap = min(chunked_prefill_size, device sched-meta smem limit), per DSV4
+        # collect_dsv4_attn.py: FlashMLA get_decoding_sched_meta allocates dynamic
+        # smem = 4*(b*5+1) for b=fresh_tokens(bs*seq); 16384 can exceed the device
+        # per-block optin smem (~11.6k on B200). Read from device, not hardcoded.
+        _smem_optin = torch.cuda.get_device_properties(torch.cuda.current_device()).shared_memory_per_block_optin
+        _sched_meta_max_b = (_smem_optin // 4 - 1) // 5
+        _chunk_cap = min(16384, _sched_meta_max_b)
+        _before_chunk = len(cases)
+        cases = [c for c in cases if c[0] * c[1] <= _chunk_cap]
+        _dropped_chunk = _before_chunk - len(cases)
+        if _dropped_chunk:
+            print(
+                f"[DSA] pre-init dropped {_dropped_chunk} cases with bs*seq > "
+                f"chunked_prefill_size={_chunk_cap} (oversized one-shot forward crashes FlashMLA)"
+            )
 
     max_total_tokens = None
     if cases:
@@ -2003,7 +2353,7 @@ def run_mla_module(
             test_cases=cases,
             head_num=head_num,
             test_layer=0,
-            num_warmup=3,
+            num_warmup=8,
             num_iterations=10,
             device=device,
             output_path=output_path,
@@ -2064,10 +2414,15 @@ def _run_mla_subprocess(
         cwd=os.path.dirname(os.path.abspath(__file__)),
     )
 
-    # Per-subprocess timeout: keep the historical 120 s default, but allow
-    # GLM-5 DSA piecewise CUDA graph capture runs to raise it from the launch
-    # script. First-time capture/compile can legitimately exceed 120 s.
-    subprocess_timeout = int(os.environ.get("AIC_MLA_MODULE_SUBPROCESS_TIMEOUT_SEC", "120"))
+    # Per-subprocess timeout is OFF by default. A DSA context subprocess sweeps
+    # the full isl x prefix grid for one batch_size and can legitimately run for
+    # many minutes; a wall-clock cap silently truncated the sweep (killed mid-grid,
+    # kept the partial rows, logged a WARNING not an error) and left the perf DB
+    # with short prefix coverage, forcing AIC to extrapolate. Unset =
+    # communicate(timeout=None) = block until the subprocess finishes on its own.
+    # Users can still opt into a cap by setting AIC_MLA_MODULE_SUBPROCESS_TIMEOUT_SEC.
+    _timeout_env = os.environ.get("AIC_MLA_MODULE_SUBPROCESS_TIMEOUT_SEC")
+    subprocess_timeout = int(_timeout_env) if _timeout_env else None
     try:
         stdout, _ = proc.communicate(timeout=subprocess_timeout)
         if stdout:
@@ -2209,7 +2564,7 @@ def main():
                 else [h for h in get_mla_module_sweep_spec("sglang").inner_sweep_head_counts if h <= native_heads]
             )
 
-            for compute_dtype, kv_dtype, gemm_type in _get_precision_combos(args.mode):
+            for compute_dtype, kv_dtype, gemm_type in _get_precision_combos(args.mode, model_path):
                 if args.kv_cache_dtype and kv_dtype != args.kv_cache_dtype:
                     continue
 

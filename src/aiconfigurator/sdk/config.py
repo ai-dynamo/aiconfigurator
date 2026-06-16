@@ -23,6 +23,9 @@ class ModelConfig:
     moe_tp_size: int = None
     moe_ep_size: int = None
     attention_dp_size: int = 1
+    attention_cp_size: int = (
+        1  # context parallelism (splits attention tokens, not heads); attn_tp = tp_size // attention_cp_size
+    )
     workload_distribution: str = "power_law"
     # quantization options
     nextn: int = 0  # at most mtp5
@@ -52,8 +55,13 @@ class ModelConfig:
 
         _validate_positive("tp_size", self.tp_size)
         _validate_positive("attention_dp_size", self.attention_dp_size)
+        _validate_positive("attention_cp_size", self.attention_cp_size)
+        # Context parallelism is an INDEPENDENT attention dimension: it splits
+        # tokens (sequence), orthogonal to tp_size (which splits heads). It
+        # contributes to the total width that the MoE must match:
+        # tp_size * attention_dp_size * attention_cp_size == moe_tp * moe_ep.
 
-        attn_width = self.tp_size * self.attention_dp_size
+        attn_width = self.tp_size * self.attention_dp_size * self.attention_cp_size
         moe_tp_size = self.moe_tp_size
         moe_ep_size = self.moe_ep_size
         if moe_tp_size is None and moe_ep_size is None:

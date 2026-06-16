@@ -177,6 +177,7 @@ class ContextDSAModule(Operation):
         fmha_quant_mode: common.FMHAQuantMode,
         gemm_quant_mode: common.GEMMQuantMode,
         architecture: str = "DeepseekV32ForCausalLM",
+        cp_size: int = 1,
     ) -> None:
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
@@ -184,6 +185,7 @@ class ContextDSAModule(Operation):
         self._fmha_quant_mode = fmha_quant_mode
         self._gemm_quant_mode = gemm_quant_mode
         self._architecture = architecture
+        self._cp_size = cp_size
         self._weights = 0.0
 
     # ------------------------------------------------------------------
@@ -624,6 +626,9 @@ class ContextDSAModule(Operation):
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix", 0)
 
+        if self._cp_size and self._cp_size > 1:
+            return self._query_cp(database, batch_size, isl, prefix)
+
         result = database.query_context_dsa_module(
             b=batch_size,
             s=isl,
@@ -639,6 +644,171 @@ class ContextDSAModule(Operation):
             energy=result.energy * self._scale_factor,
             source=getattr(result, "source", "silicon"),
         )
+
+    # ------------------------------------------------------------------
+    # Context-Parallel (CP) prefill model — GLM-5 DSA only.
+    # See docs/CONTEXT_PARALLEL_DSA_MODELING.md. Per-card =
+    #   base dsa_module(isl/cp, bf16-KV row)
+    #   + mqa(isl/cp)*(cp-1)                          (mqa ∝ isl², xcp identity)
+    #   - [topk_full(flat) - topk_full(top_last)]/cp  (topk ∝ full/cp; module is dummy/flat)
+    #   + AG_KV + AG_LSE                              (the two small attention all-gathers)
+    # AG_hidden + RS belong to the MoE comm (modeled by MoEDispatch), not here.
+    # ------------------------------------------------------------------
+    _glm5_sparse_cache: ClassVar[dict] = {}
+
+    def _query_cp(self, database: PerfDatabase, b: int, isl: int, prefix: int) -> PerformanceResult:
+        """CP (round-robin split) per-layer DSA, new strategy (2026-06-11):
+
+            result = dsa(isl/cp, prefix)
+                   + [mqa(isl, prefix)/cp      - mqa(isl/cp, prefix)]
+                   + [topk_last(isl, prefix)/cp - topk_flat(isl/cp, prefix)]
+                   + AG_KV + AG_LSE
+
+        The per-card monolithic dsa_module(isl/cp, prefix) is the base; its
+        internal mqa(isl/cp,prefix) and topk_flat(isl/cp,prefix) are swapped out
+        by the two deltas, leaving proj + dsa_attn (both prefix-independent: proj
+        by construction, dsa_attn topk-capped to index_topk) plus the CP-correct
+        full-chunk mqa/topk_last divided across cp ranks. All sub-kernels are
+        looked up at the REAL (q_len, prefix) shape — the parquet ``step`` column
+        IS the prefix (past_kv) length.
+        """
+        cp = self._cp_size
+        per_card = max(1, isl // cp)
+        sp = self._load_glm5_sparse(database)
+        g = sp.get("_2d", {})
+        # Base: per-card monolithic dsa_module at (per_card, prefix), follows the
+        # run's kv_cache_dtype like the non-CP path.
+        dsa_base = float(
+            database.query_context_dsa_module(
+                b=b,
+                s=per_card,
+                prefix=prefix,
+                num_heads=self._num_heads,
+                kvcache_quant_mode=self._kvcache_quant_mode,
+                fmha_quant_mode=self._fmha_quant_mode,
+                gemm_quant_mode=self._gemm_quant_mode,
+                architecture=self._architecture,
+            )
+        )
+        mqa_full = self._lookup_2d(g.get("mqa"), isl, prefix)
+        mqa_perc = self._lookup_2d(g.get("mqa"), per_card, prefix)
+        tl_full = self._lookup_2d(g.get("topk_last"), isl, prefix)
+        tf_perc = self._lookup_2d(g.get("topk_flat"), per_card, prefix)
+        latency = dsa_base
+        if None not in (mqa_full, mqa_perc, tl_full, tf_perc):
+            delta_mqa = mqa_full / cp - mqa_perc
+            delta_topk = tl_full / cp - tf_perc
+            latency += delta_mqa + delta_topk
+        # CP communication: AG of compressed KV (kv_lora+rope) + AG of LSE (kv_lora).
+        dims = DSA_MODEL_DIMS.get(self._architecture, {})
+        kv_lora = dims.get("kv_lora_rank", 512)
+        rope = dims.get("qk_rope_head_dim", 64)
+        index_head_dim = dims.get("index_head_dim", 128)
+        # CP attention all-gather, verified by instrumenting sglang cp_utils
+        # (cp_all_gather_rerange_output): per current-chunk tokens (isl, not
+        # isl+prefix; prefix KV is already replicated), bf16. Two gathers:
+        #   - compressed KV latent: kv_lora_rank + qk_rope_head_dim (= 576)
+        #   - DSA indexer key: index_head_dim (= 128)
+        # (The hidden_states 6144 AG/RS is the MoE token dispatch, modeled in
+        # context_moe_pre/post_dispatch, not here.)
+        # ag_kv = MQA-stage gather: DSA indexer key (index_head_dim), bf16.
+        # ag_lse = FMHA-stage gather: compressed KV latent (kv_lora_rank +
+        # qk_rope_head_dim), bf16. Both over the current chunk (isl), verified by
+        # instrumenting sglang (dsa_indexer index_key 128; deepseek_v2
+        # rebuild_cp_kv_cache latent 576).
+        ag_kv = float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", isl * index_head_dim))
+        ag_lse = float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", isl * (kv_lora + rope)))
+        latency += ag_kv + ag_lse
+        return PerformanceResult(latency * self._scale_factor, energy=0.0, source="cp_model")
+
+    @classmethod
+    def _load_glm5_sparse(cls, database: PerfDatabase) -> dict:
+        key = cls._cache_key(database)
+        if key in cls._glm5_sparse_cache:
+            return cls._glm5_sparse_cache[key]
+        import os
+
+        import pandas as pd
+
+        data_dir = os.path.join(
+            database.systems_root, database.system_spec["data_dir"], database.backend, database.version
+        )
+        out = {"mqa": {}, "topk_flat": {}, "topk_last": {}}
+        # 2D grids keyed by (isl, step) for the CP composition path.
+        out2d = {"mqa": {}, "topk_last": {}, "topk_flat": {}, "dsa_attn": {}}
+
+        def _read(fn):
+            p = os.path.join(data_dir, fn)
+            return pd.read_parquet(p) if os.path.exists(p) else None
+
+        mdf = _read("glm5_mqa_logits_module_perf.parquet")
+        if mdf is not None:
+            mh = mdf[mdf["num_heads"] == 64] if "num_heads" in mdf else mdf
+            for _, r in mh[mh["batch_size"] == 1].iterrows():
+                out2d["mqa"][(int(r["isl"]), int(r["step"]))] = float(r["latency"])
+                if int(r["step"]) == 0:
+                    out["mqa"][int(r["isl"])] = float(r["latency"])
+        tdf = _read("glm5_topk_module_perf.parquet")
+        if tdf is not None:
+            th = tdf[tdf["num_heads"] == 64] if "num_heads" in tdf else tdf
+            for _, r in th[th["batch_size"] == 1].iterrows():
+                mode = "topk_flat" if str(r.get("score_mode", "")) == "flat" else "topk_last"
+                out2d[mode][(int(r["isl"]), int(r["step"]))] = float(r["latency"])
+                if int(r["step"]) == 0:
+                    out[mode][int(r["isl"])] = float(r["latency"])
+        adf = _read("glm5_dsa_attn_module_perf.parquet")
+        if adf is not None:
+            ah = adf[adf["num_heads"] == 64] if "num_heads" in adf else adf
+            for _, r in ah[ah["batch_size"] == 1].iterrows():
+                out2d["dsa_attn"][(int(r["isl"]), int(r["step"]))] = float(r["latency"])
+        out["_2d"] = out2d
+        cls._glm5_sparse_cache[key] = out
+        return out
+
+    @staticmethod
+    def _lookup_2d(table, isl, step):
+        """Lookup {(isl,step): latency} at a fixed isl (exact grid value), linear
+        interp/extrap on step. Used by the CP sub-kernel composition."""
+        if not table:
+            return None
+        isls = sorted({i for (i, _s) in table})
+        use_isl = isl if isl in isls else min(isls, key=lambda x: abs(x - isl))
+        steps = sorted(st for (i, st) in table if i == use_isl)
+        if not steps:
+            return None
+        if (use_isl, step) in table:
+            return table[(use_isl, step)]
+        lo = max([st for st in steps if st <= step], default=steps[0])
+        hi = min([st for st in steps if st >= step], default=steps[-1])
+        if lo == hi:
+            return table[(use_isl, lo)]
+        a = table[(use_isl, lo)]
+        bb = table[(use_isl, hi)]
+        return a + (bb - a) * (step - lo) / (hi - lo)
+
+    @staticmethod
+    def _lookup_sparse(table: dict, isl: int):
+        """Power-law (log-log) interp/extrap of a {isl: latency} table at
+        prefix=0 — handles mqa (∝ isl²) and topk (∝ isl^~1.6) beyond the
+        collected range (e.g. topk at isl=32768 when sweep caps at 16384)."""
+        if not table:
+            return None
+        if isl in table:
+            return table[isl]
+        import math
+
+        xs = sorted(table)
+        if isl < xs[0]:
+            lo, hi = xs[0], (xs[1] if len(xs) > 1 else xs[0])
+        elif isl > xs[-1]:
+            lo, hi = (xs[-2] if len(xs) > 1 else xs[-1]), xs[-1]
+        else:
+            lo = max(x for x in xs if x <= isl)
+            hi = min(x for x in xs if x >= isl)
+        if lo == hi or table[lo] <= 0 or table[hi] <= 0:
+            return table[min(xs, key=lambda x: abs(x - isl))]
+        f = (math.log(isl) - math.log(lo)) / (math.log(hi) - math.log(lo))
+        return math.exp(math.log(table[lo]) + f * (math.log(table[hi]) - math.log(table[lo])))
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

@@ -254,19 +254,10 @@ KERNEL_TO_COMPRESS_RATIO = {
     "csa_attn": 4,
 }
 
-# Single input source: each sparse sub-kernel derives its (prefix, isl, bs[, tp])
-# shapes from the module it belongs to (paged_mqa/topk/csa_attn are CSA-module
-# sub-kernels; hca_attn is the HCA-module FMLA). The worker reads these
-# already-collected module CSVs at runtime — registry order runs the modules
-# first — instead of a separate sparse sweep grid.
-_CSA_MODULE_CSVS = ("dsv4_csa_context_module_perf.txt", "dsv4_csa_generation_module_perf.txt")
-_HCA_MODULE_CSVS = ("dsv4_hca_context_module_perf.txt", "dsv4_hca_generation_module_perf.txt")
-KERNEL_TO_MODULE_CSVS = {
-    "paged_mqa_logits": _CSA_MODULE_CSVS,
-    "topk": _CSA_MODULE_CSVS,
-    "hca_attn": _HCA_MODULE_CSVS,
-    "csa_attn": _CSA_MODULE_CSVS,
-}
+# Each sparse sub-kernel derives its (prefix, isl, bs) shapes from its owning
+# attention module's INPUT sweep (paged_mqa/topk/csa_attn <- CSA, hca_attn <-
+# HCA) via _dsv4_context_derived_shapes / _dsv4_generation_derived_shapes —
+# NOT from the already-collected module CSVs.
 # ALL four sparse kernels are TP-independent — the indexer/FMLA latency does not
 # change with tp (the module's per-tp rows differ only by the attention module's
 # comms/sharding, not the sparse sub-kernel). So each is benched ONCE per unique
@@ -798,6 +789,118 @@ def _bench_sparse_kernel_shape(kernel, prefix, isl, bs, sc, device):
     return [(None, lat)]
 
 
+def _derive_context_shapes(bs_list, seq_list, prefix_list, is_valid, env_filter=None):
+    """Build unique ``(prefix, isl, bs)`` context shapes from a STATIC sweep grid
+    (the owning attention module's INPUT grid), deduped + order-preserving.
+
+    Shared by GLM5 (dsa) and DSV4 (csa/hca): the sparse sub-kernels reconstruct
+    the module's intended input grid instead of reading back the rows the full
+    module actually survived. The full module drops large isl at runtime (smem /
+    KV-pool caps) that the cheap sparse indexer/topk kernels do not hit, so a
+    1:1 read of the module CSV under-samples them.
+
+    ``is_valid(bs, isl, prefix) -> bool`` encodes the module's context limits.
+    ``env_filter`` (optional) takes the list of ``(bs, isl, prefix)`` tuples and
+    returns a filtered list (e.g. an ``AIC_*_CONTEXT_*`` env pin); applied
+    before dedup. Iteration is prefix-outer so a late long-prefix shape does not
+    reorder the smaller-isl rows.
+    """
+    cases = [
+        (bs, isl, prefix) for prefix in prefix_list for bs in bs_list for isl in seq_list if is_valid(bs, isl, prefix)
+    ]
+    if env_filter is not None:
+        cases = env_filter(cases)
+    shapes, seen = [], set()
+    for bs, isl, prefix in cases:
+        key = (int(prefix), int(isl), int(bs))
+        if key not in seen:
+            seen.add(key)
+            shapes.append(key)
+    return shapes
+
+
+def _dsv4_context_derived_shapes(model_path):
+    """DSV4 sparse-kernel context shapes derived from the csa/hca context MODULE
+    INPUT sweep (same source as GLM5's dsa derive) — NOT read back from the
+    module CSV. paged_mqa_logits / topk / csa_attn / hca_attn therefore cover
+    the full-chunk isl the module drops at runtime; CSA and HCA share one grid
+    (the module input validity does not depend on attn_kind).
+
+    DSV4 differs from GLM5 in scale: context new-token budget is the
+    chunked-prefill size (bs*isl), per-request context is capped by the model
+    max_position_embeddings, and bs*(isl+prefix) is bounded by the KV pool.
+    isl==1 (paged decode) shapes are still read from the owning generation CSV
+    by the worker.
+    """
+    try:
+        from collector.case_generator import (
+            _DSV4_MODULE_BATCH_SIZES,
+            _DSV4_MODULE_PAST_KV_LIST,
+            _DSV4_MODULE_SEQ_LENGTHS,
+            _DSV4_SPARSE_CHUNK_PREFILL_SIZE,
+        )
+    except ModuleNotFoundError:
+        from case_generator import (
+            _DSV4_MODULE_BATCH_SIZES,
+            _DSV4_MODULE_PAST_KV_LIST,
+            _DSV4_MODULE_SEQ_LENGTHS,
+            _DSV4_SPARSE_CHUNK_PREFILL_SIZE,
+        )
+    cfg = _dsv4_model_config(model_path)
+    max_pos = cfg.get("max_position_embeddings")
+    chunk = int(_DSV4_SPARSE_CHUNK_PREFILL_SIZE)  # context new-token budget (8192)
+
+    def _valid(bs, isl, prefix):
+        if bs <= 0 or isl <= 0 or prefix < 0:
+            return False
+        if bs * isl > chunk:  # chunked-prefill new-token budget per forward
+            return False
+        if max_pos and prefix + isl > max_pos:  # per-request context <= model cap
+            return False
+        return bs * (prefix + isl) <= 1_048_576  # KV-pool memory cap (~1M tokens)
+
+    return _derive_context_shapes(
+        _DSV4_MODULE_BATCH_SIZES,
+        _DSV4_MODULE_SEQ_LENGTHS,
+        _DSV4_MODULE_PAST_KV_LIST,
+        _valid,
+    )
+
+
+def _dsv4_generation_derived_shapes(model_path):
+    """Decode ``(kv_len, isl=1, bs)`` shapes from the csa/hca generation MODULE
+    INPUT sweep (``_DSV4_MODULE_BATCH_SIZES`` x ``_DSV4_MODULE_SEQ_LENGTHS`` +
+    generation validity), NOT read from the generation CSV. Decode sweeps
+    batch x kv_cache_len with isl==1 (the perf ``step`` column is kv_len); CSA
+    and HCA share one grid (validity does not depend on attn_kind). Reuses the
+    shared _derive_context_shapes engine with seq_list=[1] and the kv-length
+    sweep as the prefix dimension.
+    """
+    try:
+        from collector.case_generator import (
+            _DSV4_MODULE_BATCH_SIZES,
+            _DSV4_MODULE_SEQ_LENGTHS,
+            _dsv4_module_is_valid_shape,
+        )
+    except ModuleNotFoundError:
+        from case_generator import (
+            _DSV4_MODULE_BATCH_SIZES,
+            _DSV4_MODULE_SEQ_LENGTHS,
+            _dsv4_module_is_valid_shape,
+        )
+    cfg = _dsv4_model_config(model_path)
+    max_pos = cfg.get("max_position_embeddings")
+
+    def _valid(bs, isl, kv):
+        if bs <= 0 or kv <= 0:
+            return False
+        if max_pos and kv >= max_pos:  # decode seq_len must be < max_position
+            return False
+        return _dsv4_module_is_valid_shape("generation", bs, kv)
+
+    return _derive_context_shapes(_DSV4_MODULE_BATCH_SIZES, [1], _DSV4_MODULE_SEQ_LENGTHS, _valid)
+
+
 def run_dsv4_sparse_kernel_worker(
     model_path: str,
     kernel: str,
@@ -820,17 +923,16 @@ def run_dsv4_sparse_kernel_worker(
     output_dir = os.path.dirname(perf_filename) or os.getcwd()
     perf_path = _make_perf_filename(kernel, output_dir)
 
-    csv_files = KERNEL_TO_MODULE_CSVS[kernel]
-    # TP-independent: dedup to unique (prefix, isl, bs) — one bench, one row per
-    # shape (tp-agnostic), no per-tp expansion. Filter to THIS model: the module
-    # CSV is consolidated across every model collected to this (system, backend,
-    # version), so unioning all rows would mirror other models' shapes.
-    shapes = _read_module_shapes(output_dir, csv_files, model_path)
+    # Both context and decode shapes are derived from the csa/hca module INPUT
+    # sweeps (no module CSV read): context from the csa/hca context sweep,
+    # decode (isl==1) from the generation sweep. TP-independent: one bench /
+    # one row per unique (prefix, isl, bs); CSA/HCA share one grid.
+    ctx_shapes = _dsv4_context_derived_shapes(model_path)
+    dec_shapes = _dsv4_generation_derived_shapes(model_path)
+    _seen = set(ctx_shapes)
+    shapes = ctx_shapes + [sh for sh in dec_shapes if sh not in _seen]
     if not shapes:
-        print(
-            f"[dsv4-sparse {kernel}] no module CSV ({'/'.join(csv_files)}) in {output_dir}; "
-            "collect the owning csa/hca module first. Skipping."
-        )
+        print(f"[dsv4-sparse {kernel}] no shapes derived for {model_path}; skipping.")
         return
 
     device_name = torch.cuda.get_device_name(device)
@@ -942,43 +1044,6 @@ def get_dsv4_topk_calib_test_cases():
     if not _dsv4_topk_kernel_supported():
         return []
     return _impl()
-
-
-def _read_module_shapes(data_dir: str, csv_files, model_path: str | None = None) -> list[tuple[int, int, int]]:
-    """Unique ``(prefix, isl, bs)`` shape keys from the already-collected module
-    CSVs (the SINGLE input source: every sparse sub-kernel derives its shapes
-    from the module it belongs to). ``step`` is the prefix/past_kv length; the
-    sparse kernels are TP-independent so ``tp_size`` is dropped (one shape per
-    unique prefix/isl/bs). Order preserved, deduped.
-
-    ``collect_dsv4_attn`` writes ONE consolidated ``*_module_perf`` file per
-    (system, backend, version) holding rows for every model collected there, so
-    rows are filtered to ``model_path`` before deduping — otherwise a sparse
-    worker would mirror another model's shapes and break the same-source 1:1
-    contract (writing those shapes under the wrong model). ``model_path=None``
-    keeps every row (no filter).
-    """
-    import csv
-
-    want_model = None if not model_path else str(model_path).rstrip("/")
-    shapes: list[tuple[int, int, int]] = []
-    seen: set[tuple[int, int, int]] = set()
-    for fname in csv_files:
-        path = os.path.join(data_dir, fname)
-        if not os.path.isfile(path):
-            continue
-        with open(path, newline="") as f:
-            for row in csv.DictReader(f):
-                if want_model is not None and str(row.get("model", "")).rstrip("/") != want_model:
-                    continue
-                try:
-                    key = (int(float(row.get("step", 0) or 0)), int(row["isl"]), int(row["batch_size"]))
-                except (KeyError, ValueError, TypeError):
-                    continue
-                if key not in seen:
-                    seen.add(key)
-                    shapes.append(key)
-    return shapes
 
 
 def _bench_topk_shape(prefix: int, isl: int, bs: int, sc, device: str) -> list:
