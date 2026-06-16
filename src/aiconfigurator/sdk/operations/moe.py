@@ -926,14 +926,12 @@ class MoEDispatch(Operation):
                         )
                     elif self._attention_tp_size > 1:
                         if self._reduce_results:
-                            if _num_gpus_per_node == 72 and self.num_gpus > 4:
-                                comm_latency = database.query_nccl(
-                                    common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
-                                )
-                            else:
-                                comm_latency = database.query_custom_allreduce(
-                                    common.CommQuantMode.half, self.num_gpus, volume
-                                )
+                            # TP MoE comm = all_gather (pre) + reduce_scatter (post),
+                            # together == ONE all_reduce. Using all_reduce for BOTH
+                            # double-counted (each all_reduce = AG+RS) -> ~2x too slow.
+                            comm_latency = database.query_nccl(
+                                common.CommQuantMode.half, self.num_gpus, "all_gather", volume
+                            )
                         else:
                             comm_latency = 0
                     else:
@@ -960,14 +958,12 @@ class MoEDispatch(Operation):
                         )
                     elif self._attention_tp_size > 1:
                         if self._reduce_results:
-                            if _num_gpus_per_node == 72 and self.num_gpus > 4:
-                                comm_latency = database.query_nccl(
-                                    common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
-                                )
-                            else:
-                                comm_latency = database.query_custom_allreduce(
-                                    common.CommQuantMode.half, self.num_gpus, volume
-                                )
+                            # TP MoE comm = reduce_scatter (post) half of TP all_reduce,
+                            # together == ONE all_reduce. Using all_reduce for BOTH
+                            # double-counted (each all_reduce = AG+RS) -> ~2x too slow.
+                            comm_latency = database.query_nccl(
+                                common.CommQuantMode.half, self.num_gpus, "reduce_scatter", volume
+                            )
                         else:
                             comm_latency = 0
                     else:
@@ -977,7 +973,9 @@ class MoEDispatch(Operation):
                 if self._pre_dispatch:
                     if self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
-                        comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half, self.num_gpus, "all_gather", volume
+                        )  # attn-CP + moe-TP: pre = all_gather (NOT all_reduce)
                     elif self._attention_dp_size > 1:
                         comm_latency = database.query_nccl(
                             common.CommQuantMode.half,
@@ -990,7 +988,9 @@ class MoEDispatch(Operation):
                 else:
                     if self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
-                        comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half, self.num_gpus, "reduce_scatter", volume
+                        )  # attn-CP + moe-TP: post = reduce_scatter (NOT all_reduce)
                     elif self._attention_dp_size > 1:
                         comm_latency = database.query_nccl(
                             common.CommQuantMode.half,
@@ -1059,7 +1059,9 @@ class MoEDispatch(Operation):
                         )
                     elif self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
-                        comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half, self.num_gpus, "all_gather", volume
+                        )  # attn-CP + moe-TP: pre = all_gather (NOT all_reduce)
                     elif self._attention_dp_size > 1:
                         comm_latency = database.query_nccl(
                             common.CommQuantMode.half,
@@ -1086,7 +1088,9 @@ class MoEDispatch(Operation):
                         )
                     elif self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
-                        comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half, self.num_gpus, "reduce_scatter", volume
+                        )  # attn-CP + moe-TP: post = reduce_scatter (NOT all_reduce)
                     elif self._attention_dp_size > 1:
                         comm_latency = database.query_nccl(
                             common.CommQuantMode.half,

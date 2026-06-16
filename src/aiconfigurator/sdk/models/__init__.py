@@ -68,6 +68,15 @@ def get_model(
     architecture = model_info["architecture"]
     model_family = _architecture_to_model_family(architecture)
 
+    # Context parallelism is currently implemented only for GLM-5 DSA prefill
+    # (see ContextDSAModule._query_cp / docs/CONTEXT_PARALLEL_DSA_MODELING.md).
+    if getattr(model_config, "attention_cp_size", 1) > 1 and architecture != "GlmMoeDsaForCausalLM":
+        raise NotImplementedError(
+            f"AIC does not support context parallelism (attention_cp_size="
+            f"{model_config.attention_cp_size}) for architecture '{architecture}'. "
+            f"CP is implemented only for GLM-5 (GlmMoeDsaForCausalLM)."
+        )
+
     _apply_model_quant_defaults(model_config, raw_config, architecture, backend_name)
     if check_is_moe(model_path, model_info=model_info):
         model_config.resolve_moe_parallelism()

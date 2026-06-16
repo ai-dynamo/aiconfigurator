@@ -55,3 +55,9 @@ framework_specific_op_cases:
       cases: all
     dsa_generation_module:
       cases: all
+    glm5_mqa_logits_module:
+      cases: all
+    glm5_topk_module:
+      cases: all
+    glm5_dsa_attn_module:
+      cases: all
