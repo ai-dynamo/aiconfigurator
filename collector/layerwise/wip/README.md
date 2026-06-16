@@ -13,7 +13,7 @@ Covers the Qwen3.6-35B-A3B and DeepSeek-V4-Flash decode/mixed MoE shapes:
 
 Usage:
 ```
-.venv/bin/python tools/plot_fpm_vs_aic.py \
+uv run python tools/plot_fpm_vs_aic.py \
   --layerwise <layerwise.csv> \
   --model "Qwen/Qwen3.6-35B-A3B" \
   --moe-perf-file collector/layerwise/wip/moe_perf.txt \

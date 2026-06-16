@@ -255,20 +255,47 @@ contributes) and (b) the headline number is polluted by FPM measurement outliers
 the context/prefill model and FPM-outlier handling — NOT decode.
 
 ### Charts (FPM vs AIC)
-`tools/plot_fpm_vs_aic.py` writes ctx/gen/mixed log-log charts plus an all-reduce
-comparison. The new decode runs are decode-only (`phase=gen`, `max_num_seqs=64`,
+`tools/plot_fpm_vs_aic.py` renders log-log FPM-vs-AIC charts for a single model.
+Each run writes up to five PNGs into `--out-dir`:
+
+| File | Phase | Contents |
+|---|---|---|
+| `fpm_vs_aic_ctx.png` | context | one subplot per (parallelism, past_kv); x = new tokens |
+| `fpm_vs_aic_gen.png` | decode | one subplot per (parallelism, past_kv); x = decode batch size |
+| `fpm_vs_aic_mixed.png` | mixed | one AIC-vs-FPM parity scatter per parallelism (no past_kv split) |
+| `fpm_vs_aic_mixed_errormap.png` | mixed | mixed AIC/FPM error heatmap |
+| `allreduce_custom_vs_fused.png` | comm | `custom_allreduce` vs fused `allreduce_rms` latency vs message bytes |
+
+Each ctx/gen subplot draws three series: AIC-exact (AIC at the measured grid
+points), AIC-interp (AIC swept densely), and FPM-real (collected FPM points).
+`--phases` selects which to emit (`ctx,gen,mixed,allreduce`). For dense Qwen3-32B
+drop `--moe-perf-file`; for MoE models pass the overlay (real measured
+fused-experts kernel timings) from `collector/layerwise/wip/moe_perf.txt`.
+
+**Committed charts** (regenerate in place with the commands below):
+
+| Out dir | Model |
+|---|---|
+| `fpm_vs_aic_charts/` | Qwen3-32B (dense) |
+| `fpm_vs_aic_charts_qwen36/` | Qwen3.6-35B-A3B (MoE) |
+| `fpm_vs_aic_charts_dsv4/` | DeepSeek-V4-Flash (MoE) |
+
+The new decode runs are decode-only (`phase=gen`, `max_num_seqs=64`,
 `past_kv in {4096,8192,16384}`), so they refresh only the gen charts:
 ```bash
-.venv/bin/python tools/plot_fpm_vs_aic.py \
+uv run python tools/plot_fpm_vs_aic.py \
   --layerwise runs/layerwise_moe_decode_execgpu_stablep25_compare_20260616_212000/layerwise.csv \
   --model "Qwen/Qwen3.6-35B-A3B" \
   --moe-perf-file collector/layerwise/wip/moe_perf.txt \
   --out-dir fpm_vs_aic_charts_qwen36 --phases gen --vllm-max-num-seqs 64
 ```
-For dense Qwen3-32B drop `--moe-perf-file`. A clean **mixed** chart needs a full
-(ctx+gen) run with `execute_model_gpu`; the committed mixed charts are partial
-(old-run context merged with new clean decode). The MoE overlay `moe_perf.txt`
-(real measured fused-experts kernel timings) lives in `collector/layerwise/wip/`.
+A clean **mixed** chart needs a full (ctx+gen) run with `execute_model_gpu`; the
+committed mixed charts (`fpm_vs_aic_mixed*.png`) are partial — old-run context
+merged with new clean decode.
+
+> The committed PNGs are the canonical handoff snapshots; `--out-dir`'s
+> `overlay.csv` and `moe_overlay_*/` subdirs are regenerable scratch and are
+> git-ignored.
 
 ### What is NOT broken — do not change
 - **MoE op overlay is correct.** AIC decode = backbone (`generation_layerwise`,
