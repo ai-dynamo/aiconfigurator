@@ -294,15 +294,39 @@ class MoE(Operation):
                 workload_distribution,
             )[0]
 
-            def _slice():
+            # Mirror get_silicon's kernel selection: nvfp4 + small tokens + gated
+            # uses the low-latency kernel table (~3x faster than the regular one).
+            # Building util from the wrong table over-estimates by that factor.
+            def _use_low_latency():
+                return (
+                    num_tokens <= 128
+                    and quant_mode == common.MoEQuantMode.nvfp4
+                    and is_gated
+                    and database._moe_low_latency_data is not None
+                    and not (database.backend == common.BackendName.sglang.value and moe_backend == "deepep_moe")
+                )
+
+            def _moe_table():
                 cls.load_data(database)
                 if database.backend == common.BackendName.sglang.value and moe_backend == "deepep_moe":
-                    moe_data = database._wideep_context_moe_data if is_context else database._wideep_generation_moe_data
-                else:
-                    moe_data = database._moe_data
-                moe_data.raise_if_not_loaded()
-                wl = workload_distribution if workload_distribution in moe_data[quant_mode] else "uniform"
-                return moe_data[quant_mode][wl][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                    return database._wideep_context_moe_data if is_context else database._wideep_generation_moe_data
+                if _use_low_latency():
+                    ll = database._moe_low_latency_data
+                    try:
+                        ll_wl = workload_distribution if workload_distribution in ll[quant_mode] else "uniform"
+                        if ll[quant_mode][ll_wl][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]:
+                            return ll
+                    except (KeyError, TypeError):
+                        pass
+                return database._moe_data
+
+            moe_table = _moe_table()
+            kernel_tag = "ll" if moe_table is database._moe_low_latency_data else "std"
+
+            def _slice():
+                moe_table.raise_if_not_loaded()
+                wl = workload_distribution if workload_distribution in moe_table[quant_mode] else "uniform"
+                return moe_table[quant_mode][wl][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
 
             grid = util_empirical.grid_for(
                 (
@@ -311,6 +335,7 @@ class MoE(Operation):
                     database.backend,
                     database.version,
                     quant_mode.name,
+                    kernel_tag,
                     topk,
                     num_experts,
                     hidden_size,
@@ -337,11 +362,13 @@ class MoE(Operation):
                 # cross-shape transfer (obs 5): borrow the nearest collected MoE
                 # config's util curve, reconstructed with this query's own SOL.
                 def _moe_candidates():
-                    cls.load_data(database)
-                    if database.backend == common.BackendName.sglang.value and moe_backend == "deepep_moe":
-                        md = database._wideep_context_moe_data if is_context else database._wideep_generation_moe_data
-                    else:
-                        md = database._moe_data
+                    # Same kernel table as the own-data path: in the nvfp4 small-token
+                    # gated regime, borrow from low-latency configs (what silicon uses).
+                    md = (
+                        database._moe_low_latency_data
+                        if (_use_low_latency() and database._moe_low_latency_data is not None)
+                        else _moe_table()
+                    )
                     md.raise_if_not_loaded()
                     wl = workload_distribution if workload_distribution in md[quant_mode] else "uniform"
                     wl_data = md[quant_mode][wl]
@@ -381,6 +408,7 @@ class MoE(Operation):
                         database.backend,
                         database.version,
                         quant_mode.name,
+                        kernel_tag,
                         topk,
                         num_experts,
                         hidden_size,
