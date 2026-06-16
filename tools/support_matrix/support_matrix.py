@@ -696,6 +696,8 @@ class SupportMatrix:
             "ttft": constraints.ttft,
             "tpot": constraints.tpot,
             "engine_step_backend": engine_step_backend,
+            # Default SILICON (matrix semantics); env override for HYBRID/EMPIRICAL coverage experiments.
+            "database_mode": os.environ.get("AIC_SM_DATABASE_MODE", "SILICON"),
         }
         if mode == "disagg":
             task_config_kwargs["decode_system_name"] = system
