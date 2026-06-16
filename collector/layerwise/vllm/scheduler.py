@@ -52,8 +52,14 @@ except ImportError:  # pragma: no cover - direct script compatibility
 
 
 TERMINAL_EVENTS = {
-    "success", "failed_oom", "failed_error", "failed_fatal_cuda", "failed_parse",
-    "skipped_oom_dominated", "skipped_same_error", "skipped_not_started",
+    "success",
+    "failed_oom",
+    "failed_error",
+    "failed_fatal_cuda",
+    "failed_parse",
+    "skipped_oom_dominated",
+    "skipped_same_error",
+    "skipped_not_started",
 }
 FATAL_STREAK_LIMIT = 3
 FPM_PORT_ENV = "DYN_FORWARDPASS_METRIC_PORT"
@@ -75,6 +81,7 @@ class Attempt:
     stdout_handle: Any
     stderr_handle: Any
     pending_ids: set[str]
+
 
 class StatusIndex:
     """Reconstructed view of the append-only status log."""
@@ -123,6 +130,7 @@ class StatusIndex:
             if dpid in pending_ids and dpid not in self.terminal:
                 return dpid
         return None
+
 
 class StatusStore:
     """Append-only manifest/status files shared by scheduler and workers."""
@@ -222,6 +230,7 @@ class StatusStore:
                 self.append_jsonl(self.manifest_path, row)
                 seen.add(row["datapoint_id"])
 
+
 def _is_oom_text(text: str) -> bool:
     lowered = text.lower()
     return (
@@ -232,9 +241,11 @@ def _is_oom_text(text: str) -> bool:
         or ("failed to prime" in lowered and "prefix" in lowered and "free_blocks=0" in lowered)
     )
 
+
 def _is_fatal_cuda_text(text: str) -> bool:
     lowered = text.lower()
     return "illegal memory access" in lowered or "device-side assert" in lowered or "cuda error" in lowered
+
 
 def _attempt_signature(returncode: int, stderr_tail: str) -> str:
     if _is_oom_text(stderr_tail):
@@ -242,7 +253,8 @@ def _attempt_signature(returncode: int, stderr_tail: str) -> str:
     if _is_fatal_cuda_text(stderr_tail):
         return "fatal_cuda"
     error_lines = [
-        line.strip() for line in stderr_tail.splitlines()
+        line.strip()
+        for line in stderr_tail.splitlines()
         if any(marker in line for marker in ("Error:", "Exception:", "RuntimeError", "ValueError"))
     ]
     detail = error_lines[-1] if error_lines else stderr_tail.strip().splitlines()[-1:]
@@ -250,6 +262,7 @@ def _attempt_signature(returncode: int, stderr_tail: str) -> str:
         detail = detail[0] if detail else ""
     fingerprint = hashlib.sha1(str(detail).encode()).hexdigest()[:12]
     return f"exit_{returncode}:{fingerprint}:{str(detail)[:160]}"
+
 
 def oom_dominates(failed: DataPoint, candidate: DataPoint) -> bool:
     """Return whether a failed OOM point should prune a candidate.
@@ -261,24 +274,13 @@ def oom_dominates(failed: DataPoint, candidate: DataPoint) -> bool:
     if failed.phase != candidate.phase:
         return False
     if failed.phase == "ctx":
-        same_or_larger = (
-            candidate.new_tokens >= failed.new_tokens
-            and candidate.past_kv >= failed.past_kv
-        )
-        strictly_larger = (
-            candidate.new_tokens > failed.new_tokens
-            or candidate.past_kv > failed.past_kv
-        )
+        same_or_larger = candidate.new_tokens >= failed.new_tokens and candidate.past_kv >= failed.past_kv
+        strictly_larger = candidate.new_tokens > failed.new_tokens or candidate.past_kv > failed.past_kv
         return same_or_larger and strictly_larger
-    same_or_larger = (
-        candidate.batch_size >= failed.batch_size
-        and candidate.past_kv >= failed.past_kv
-    )
-    strictly_larger = (
-        candidate.batch_size > failed.batch_size
-        or candidate.past_kv > failed.past_kv
-    )
+    same_or_larger = candidate.batch_size >= failed.batch_size and candidate.past_kv >= failed.past_kv
+    strictly_larger = candidate.batch_size > failed.batch_size or candidate.past_kv > failed.past_kv
     return same_or_larger and strictly_larger
+
 
 def _attempt_config_hash(attempt: Attempt, store: StatusStore, index: StatusIndex | None = None) -> str:
     status_index = index or store.index()
@@ -291,6 +293,7 @@ def _attempt_config_hash(attempt: Attempt, store: StatusStore, index: StatusInde
             continue
         return str(event.get("vllm_config_hash") or "")
     return ""
+
 
 def _attempt_max_num_batched_tokens(attempt: Attempt) -> int | None:
     """Return the context-token budget used by a launched attempt."""
@@ -306,6 +309,7 @@ def _attempt_max_num_batched_tokens(attempt: Attempt) -> int | None:
         return None
     return int(value)
 
+
 def _attempt_max_num_seqs(attempt: Attempt) -> int | None:
     """Return the sequence budget used by a launched attempt."""
 
@@ -320,6 +324,7 @@ def _attempt_max_num_seqs(attempt: Attempt) -> int | None:
         return None
     return int(value)
 
+
 def _lookup_scheduler_timing_aggs(
     events: list[dict[str, Any]],
     work_unit_id: str,
@@ -327,6 +332,7 @@ def _lookup_scheduler_timing_aggs(
     *,
     attempt_id: int | None = None,
     prefer_schedule_to_update_for_gen: bool = False,
+    prefer_live_step_wall_for_gen: bool = True,
 ) -> list[dict[str, Any]]:
     """Return scheduler wall-envelope repeats for one datapoint.
 
@@ -380,16 +386,16 @@ def _lookup_scheduler_timing_aggs(
                 continue
             model_execute_counts_by_run[run] = model_execute_counts_by_run.get(run, 0) + 1
             latency_us = float(latency_ms) * 1000.0
-            model_execute_aggs.append({
-                "gpu_us": latency_us,
-                "rms_us": 0.0,
-                "span_us": latency_us,
-                "kernel_count": 0,
-                "rms_kernel_count": 0,
-            })
-        rank_sharded_gen = datapoint.phase == "gen" and any(
-            count > 1 for count in model_execute_counts_by_run.values()
-        )
+            model_execute_aggs.append(
+                {
+                    "gpu_us": latency_us,
+                    "rms_us": 0.0,
+                    "span_us": latency_us,
+                    "kernel_count": 0,
+                    "rms_kernel_count": 0,
+                }
+            )
+        rank_sharded_gen = datapoint.phase == "gen" and any(count > 1 for count in model_execute_counts_by_run.values())
         if model_execute_aggs and not rank_sharded_gen:
             return model_execute_aggs
 
@@ -418,14 +424,17 @@ def _lookup_scheduler_timing_aggs(
         if latency_ms in (None, ""):
             continue
         latency_us = float(latency_ms) * 1000.0
-        live_step_aggs.append({
-            "gpu_us": latency_us,
-            "rms_us": 0.0,
-            "span_us": latency_us,
-            "kernel_count": 0,
-            "rms_kernel_count": 0,
-        })
-    if live_step_aggs and datapoint.phase != "gen":
+        live_step_aggs.append(
+            {
+                "gpu_us": latency_us,
+                "rms_us": 0.0,
+                "span_us": latency_us,
+                "kernel_count": 0,
+                "rms_kernel_count": 0,
+                "latency_source": "live_step_wall",
+            }
+        )
+    if live_step_aggs and (datapoint.phase != "gen" or prefer_live_step_wall_for_gen):
         return live_step_aggs
 
     def _event_int(event: dict[str, Any], key: str) -> int | None:
@@ -505,24 +514,29 @@ def _lookup_scheduler_timing_aggs(
         run_agg["span_us"] += latency_us
     if datapoint.phase == "gen":
         for _run, run_agg in sorted(gen_by_run.items()):
-            aggs.append({
+            aggs.append(
+                {
+                    "gpu_us": run_agg["gpu_us"],
+                    "rms_us": run_agg["rms_us"],
+                    "span_us": run_agg["span_us"],
+                    "kernel_count": int(run_agg["kernel_count"]),
+                    "rms_kernel_count": int(run_agg["rms_kernel_count"]),
+                }
+            )
+        return aggs or live_step_aggs
+
+    for _run, run_agg in sorted(by_run.items()):
+        aggs.append(
+            {
                 "gpu_us": run_agg["gpu_us"],
                 "rms_us": run_agg["rms_us"],
                 "span_us": run_agg["span_us"],
                 "kernel_count": int(run_agg["kernel_count"]),
                 "rms_kernel_count": int(run_agg["rms_kernel_count"]),
-            })
-        return aggs or live_step_aggs
-
-    for _run, run_agg in sorted(by_run.items()):
-        aggs.append({
-            "gpu_us": run_agg["gpu_us"],
-            "rms_us": run_agg["rms_us"],
-            "span_us": run_agg["span_us"],
-            "kernel_count": int(run_agg["kernel_count"]),
-            "rms_kernel_count": int(run_agg["rms_kernel_count"]),
-        })
+            }
+        )
     return aggs or live_step_aggs
+
 
 def _lookup_worker_wall_aggs(
     events: list[dict[str, Any]],
@@ -565,14 +579,17 @@ def _lookup_worker_wall_aggs(
         if latency_ms in (None, ""):
             continue
         latency_us = float(latency_ms) * 1000.0
-        aggs.append({
-            "gpu_us": latency_us,
-            "rms_us": 0.0,
-            "span_us": latency_us,
-            "kernel_count": 0,
-            "rms_kernel_count": 0,
-        })
+        aggs.append(
+            {
+                "gpu_us": latency_us,
+                "rms_us": 0.0,
+                "span_us": latency_us,
+                "kernel_count": 0,
+                "rms_kernel_count": 0,
+            }
+        )
     return aggs
+
 
 def _effective_latency_source(
     requested_source: str,
@@ -588,6 +605,7 @@ def _effective_latency_source(
             return "schedule_to_update"
         return "span"
     return requested_source
+
 
 def _live_step_driver_would_handle(
     datapoint: DataPoint,
@@ -656,8 +674,11 @@ def _lookup_timing_source_aggs(
             datapoint,
             attempt_id=attempt_id,
             prefer_schedule_to_update_for_gen=False,
+            prefer_live_step_wall_for_gen=includes_moe or moe_noop,
         )
         if aggs:
+            if all(str(agg.get("latency_source") or "") == "live_step_wall" for agg in aggs):
+                return "live_step_wall", aggs
             return effective_source, aggs
         if requested_source == "auto":
             worker_aggs = _lookup_worker_wall_aggs(events, work_unit_id, datapoint, attempt_id=attempt_id)
@@ -689,7 +710,7 @@ class Scheduler:
         if not self.gpus:
             raise RuntimeError("No GPU slots available")
         self.max_workers = args.max_workers
-        live_step_gen_max_workers = int(getattr(args, "live_step_gen_max_workers", 1) or 0)
+        live_step_gen_max_workers = int(getattr(args, "live_step_gen_max_workers", 0) or 0)
         self.live_step_gen_max_workers = live_step_gen_max_workers if live_step_gen_max_workers > 0 else None
         self.attempt_counter = self.store.max_attempt_id()
         self.fatal_streak: dict[tuple[str, str], int] = {}
@@ -871,7 +892,8 @@ class Scheduler:
                 dp,
                 includes_moe=_work_unit_includes_moe(unit),
                 moe_decode_gpu_batch_threshold=self.args.moe_decode_gpu_batch_threshold,
-            ) == "schedule_to_update"
+            )
+            == "schedule_to_update"
             for dp in pending
         ):
             env["LAYERWISE_SCHEDULER_TIMING"] = "1"
@@ -884,10 +906,7 @@ class Scheduler:
             paths["report"],
             capture_nsys=self._attempt_needs_nsys(unit, pending),
         )
-        print(
-            f"[scheduler] launch gpu={gpu} attempt={attempt_id} "
-            f"{unit.work_unit_id} pending={len(pending)}"
-        )
+        print(f"[scheduler] launch gpu={gpu} attempt={attempt_id} {unit.work_unit_id} pending={len(pending)}")
         process = subprocess.Popen(
             cmd,
             cwd=str(_THIS_DIR),
@@ -940,26 +959,16 @@ class Scheduler:
             for dp in gen_datapoints
         ]
         has_live_step_gen = any(live_step_gen_flags)
-        has_prefix_cache_gen = (
-            unit.gen_driver == "prefix_cache"
-            and any(not uses_live_step for uses_live_step in live_step_gen_flags)
+        has_prefix_cache_gen = unit.gen_driver == "prefix_cache" and any(
+            not uses_live_step for uses_live_step in live_step_gen_flags
         )
-        live_step_gen_deployment = (
-            has_gen
-            and (
-                unit.gen_driver == "live_decode"
-                or has_live_step_gen
-            )
-        )
+        live_step_gen_deployment = has_gen and (unit.gen_driver == "live_decode" or has_live_step_gen)
         needs_prefix_cache = has_gen and has_prefix_cache_gen
         disables_prefix_cache = (
             has_gen
             and not has_ctx
             and not has_prefix_cache_gen
-            and (
-                unit.gen_driver == "live_decode"
-                or has_live_step_gen
-            )
+            and (unit.gen_driver == "live_decode" or has_live_step_gen)
         )
         runtime_defaults = gpt_oss_runtime_defaults(
             model=unit.row_base["model"],
@@ -974,9 +983,7 @@ class Scheduler:
                 runtime_defaults.kv_cache_dtype,
                 *extra_vllm_args,
             ]
-        if runtime_defaults.disable_prefix_caching and not has_cli_flag(
-            extra_vllm_args, "--no-enable-prefix-caching"
-        ):
+        if runtime_defaults.disable_prefix_caching and not has_cli_flag(extra_vllm_args, "--no-enable-prefix-caching"):
             extra_vllm_args.append("--no-enable-prefix-caching")
         if needs_prefix_cache and not has_cli_flag(
             extra_vllm_args, "--enable-prefix-caching", "--no-enable-prefix-caching"
@@ -992,22 +999,16 @@ class Scheduler:
             for dp in pending
         ]
         enable_layerwise_nvtx = any(
-            source not in {"schedule_to_update", "worker_wall"}
-            for source in effective_latency_sources
+            source not in {"schedule_to_update", "worker_wall"} for source in effective_latency_sources
         )
-        enable_layer_patch = unit.needs_layer_patch(
-            enable_layerwise_nvtx_tracing=enable_layerwise_nvtx
-        )
-        live_step_marker = (
-            getattr(self.args, "live_step_driver", False)
-            and any(
-                _live_step_driver_would_handle(
-                    dp,
-                    gen_min_past_kv=live_step_gen_min_past_kv,
-                    gen_min_batch_size=live_step_gen_min_batch_size,
-                )
-                for dp in pending
+        enable_layer_patch = unit.needs_layer_patch(enable_layerwise_nvtx_tracing=enable_layerwise_nvtx)
+        live_step_marker = getattr(self.args, "live_step_driver", False) and any(
+            _live_step_driver_would_handle(
+                dp,
+                gen_min_past_kv=live_step_gen_min_past_kv,
+                gen_min_batch_size=live_step_gen_min_batch_size,
             )
+            for dp in pending
         )
         prefix_cache_gen_step_marker = has_prefix_cache_gen and any(
             dp.phase == "gen" and source == "schedule_to_update"
@@ -1094,10 +1095,12 @@ class Scheduler:
             "--force-overwrite=true",
         ]
         if self.args.nsys_capture == "cuda_profiler_api":
-            cmd.extend([
-                "--capture-range=cudaProfilerApi",
-                "--capture-range-end=stop",
-            ])
+            cmd.extend(
+                [
+                    "--capture-range=cudaProfilerApi",
+                    "--capture-range-end=stop",
+                ]
+            )
         elif self.args.nsys_capture != "full":
             raise ValueError(f"unsupported nsys capture mode: {self.args.nsys_capture}")
         cmd.extend(["-o", str(report_base), *worker_cmd])
@@ -1258,13 +1261,9 @@ class Scheduler:
             )
             representative = asdict(attempt.work_unit.representative)
             physical_representative = (
-                int(attempt.work_unit.physical_gpus or 1) > 1
-                and not attempt.work_unit.uses_full_layer_depth()
+                int(attempt.work_unit.physical_gpus or 1) > 1 and not attempt.work_unit.uses_full_layer_depth()
             )
-            if (
-                effective_latency_source in {"schedule_to_update", "worker_wall"}
-                and not physical_representative
-            ):
+            if effective_latency_source in {"schedule_to_update", "worker_wall"} and not physical_representative:
                 representative["layer_multiplier"] = representative["measured_layer_count"]
             row = {
                 **attempt.work_unit.row_base,
@@ -1346,8 +1345,7 @@ class Scheduler:
             )
             representative = asdict(attempt.work_unit.representative)
             physical_representative = (
-                int(attempt.work_unit.physical_gpus or 1) > 1
-                and not attempt.work_unit.uses_full_layer_depth()
+                int(attempt.work_unit.physical_gpus or 1) > 1 and not attempt.work_unit.uses_full_layer_depth()
             )
             if not physical_representative:
                 representative["layer_multiplier"] = representative["measured_layer_count"]

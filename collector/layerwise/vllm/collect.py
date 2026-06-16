@@ -259,12 +259,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     advanced.add_argument(
         "--live-step-gen-max-workers",
         type=int,
-        default=1,
+        default=0,
         help=(
-            "Maximum concurrent live-step generation workers. The default "
-            "isolates scheduler-step decode timing while allowing ctx and "
-            "prefix-cache gen workers to run concurrently. Use 0 to disable "
-            "this cap for diagnostics."
+            "Maximum concurrent live-step generation workers. The default 0 "
+            "disables this cap so live-step decode workers can use all "
+            "available GPU slots. Use a positive value to throttle live-step "
+            "decode for timing-isolation diagnostics."
         ),
     )
     advanced.add_argument("--timeout", type=int, default=1800)
@@ -308,14 +308,16 @@ def _selected_models(args: argparse.Namespace) -> list[LayerwiseModel]:
 
     models = select_models(args.models)
     overrides = {
-        key: value for key, value in {
+        key: value
+        for key, value in {
             "gemm_quant": args.gemm_quant,
             "moe_quant": args.moe_quant,
             "attn_quant": args.attn_quant,
             "kv_quant": args.kv_quant,
             "num_slots": args.num_slots,
             "gen_driver": args.gen_driver,
-        }.items() if value is not None
+        }.items()
+        if value is not None
     }
     if overrides:
         return [replace(model, **overrides) for model in models]

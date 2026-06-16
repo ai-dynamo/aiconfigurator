@@ -13,13 +13,14 @@ from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.models import BaseModel
+from aiconfigurator.sdk.operations.layerwise import SCHEDULER_ENVELOPE_LATENCY_SOURCES
 from aiconfigurator.sdk.perf_database import PerfDatabase, PerfDataNotAvailableError
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 logger = logging.getLogger(__name__)
 
 _USE_LAYERWISE = os.environ.get("AIC_VLLM_USE_LAYERWISE", "0") == "1"
-_LAYERWISE_SCHEDULER_LATENCY_SOURCES = {"schedule_to_update", "worker_wall", "fpm_wall"}
+_LAYERWISE_SCHEDULER_LATENCY_SOURCES = SCHEDULER_ENVELOPE_LATENCY_SOURCES
 
 
 class VLLMBackend(BaseBackend):
@@ -982,10 +983,7 @@ class VLLMBackend(BaseBackend):
         if int(token_count) > threshold:
             return 0.0
         routed_path_ms = (
-            max(0.0, moe_ms)
-            + max(0.0, moe_router_ms)
-            + max(0.0, moe_dispatch_ms)
-            + max(0.0, moe_ep_alltoall_ms)
+            max(0.0, moe_ms) + max(0.0, moe_router_ms) + max(0.0, moe_dispatch_ms) + max(0.0, moe_ep_alltoall_ms)
         )
         if routed_path_ms <= 0.0:
             return 0.0
@@ -1813,9 +1811,7 @@ class VLLMBackend(BaseBackend):
             # exceed the batch-specific layerwise context grid. Dense fallback
             # conserves total token work; MoE fallback preserves the scheduler
             # envelope before treating concurrent expert work as serialized.
-            is_moe_model = (
-                int(getattr(model, "_topk", 0) or 0) > 0 and int(getattr(model, "_num_experts", 0) or 0) > 0
-            )
+            is_moe_model = int(getattr(model, "_topk", 0) or 0) > 0 and int(getattr(model, "_num_experts", 0) or 0) > 0
             context_shape_options: list[tuple[int, int, int]] = []
 
             def _append_context_shape(context_tokens: int, context_prefix_total: int, context_requests: int) -> None:

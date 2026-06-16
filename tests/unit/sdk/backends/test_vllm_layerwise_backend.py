@@ -107,6 +107,9 @@ def test_vllm_layerwise_composed_context_row_is_not_scheduler_like() -> None:
     assert backend._layerwise_scheduler_like_detail(
         {"latency_source": "schedule_to_update", "max_num_batched_tokens": 2048, "seq_len_q": 2048}
     )
+    assert backend._layerwise_scheduler_like_detail(
+        {"latency_source": "live_step_wall", "max_num_batched_tokens": 2048, "seq_len_q": 2048}
+    )
     assert not backend._layerwise_scheduler_like_detail(
         {"latency_source": "schedule_to_update", "max_num_batched_tokens": 2048, "seq_len_q": 4096}
     )

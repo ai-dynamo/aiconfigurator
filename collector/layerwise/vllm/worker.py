@@ -104,10 +104,8 @@ def _dummy_prompts(
     token_config: RandomPromptTokenConfig,
 ):
     rng = random.Random()
-    return [
-        {"prompt_token_ids": sample_prompt_token_ids(rng, input_len, token_config)}
-        for _ in range(batch_size)
-    ]
+    return [{"prompt_token_ids": sample_prompt_token_ids(rng, input_len, token_config)} for _ in range(batch_size)]
+
 
 class PromptTokenFactory:
     """Sample synthetic prompt tokens, optionally reproducibly from a seed."""
@@ -134,6 +132,7 @@ class PromptTokenFactory:
         while len(tokens) < token_count:
             tokens.extend(sample_prompt_token_ids(self.rng, token_count - len(tokens), token_config))
         return list(tokens[:token_count])
+
 
 class PromptBatchCache:
     """Reuse large prompt-token batches across repeated decode measurements."""
@@ -173,6 +172,7 @@ class PromptBatchCache:
 
         self._token_prompts.clear()
 
+
 def _token_prompts(
     batch_size: int,
     input_len: int,
@@ -188,13 +188,12 @@ def _token_prompts(
             token_ids = prompt_factory.sample(input_len, token_config)
         else:
             token_ids = prompt_factory.stream((*stream_key_prefix, request_idx), input_len, token_config)
-        prompt: dict[str, Any] = {
-            "prompt_token_ids": token_ids
-        }
+        prompt: dict[str, Any] = {"prompt_token_ids": token_ids}
         if cache_salt_prefix is not None:
             prompt["cache_salt"] = f"{cache_salt_prefix}:req{request_idx}"
         prompts.append(prompt)
     return prompts
+
 
 def _variable_token_prompts(
     input_lens: list[int],
@@ -212,13 +211,12 @@ def _variable_token_prompts(
             token_ids = prompt_factory.sample(input_len, token_config)
         else:
             token_ids = prompt_factory.stream((*stream_key_prefix, request_idx), input_len, token_config)
-        prompt: dict[str, Any] = {
-            "prompt_token_ids": token_ids
-        }
+        prompt: dict[str, Any] = {"prompt_token_ids": token_ids}
         if cache_salt_prefix is not None:
             prompt["cache_salt"] = f"{cache_salt_prefix}:req{request_idx}"
         prompts.append(prompt)
     return prompts
+
 
 def _prefix_suffix_prompts(
     batch_size: int,
@@ -243,6 +241,7 @@ def _prefix_suffix_prompts(
             prompt["cache_salt"] = f"{cache_salt_prefix}:req{request_idx}"
         prompts.append(prompt)
     return prompts
+
 
 def _run_generate(
     llm,
@@ -324,6 +323,7 @@ def _run_generate(
             profile_text=profile_paths.get("text"),
         )
 
+
 def _profile_generate_call(
     func,
     *,
@@ -372,10 +372,10 @@ def _profile_generate_call(
     stats.print_stats(80)
     text_path.write_text(
         f"datapoint_id={safe_dpid}\n"
-        f"phase={phase} batch_size={batch_size} past_kv={past_kv} run={run}\n\n"
-        + stream.getvalue()
+        f"phase={phase} batch_size={batch_size} past_kv={past_kv} run={run}\n\n" + stream.getvalue()
     )
     return {"stats": str(stats_path), "text": str(text_path)}
+
 
 def _run_generate_variable_lengths(
     llm,
@@ -401,6 +401,7 @@ def _run_generate_variable_lengths(
         sampling_params=sampling_params,
         use_tqdm=False,
     )
+
 
 def _run_generate_prefix_suffix(
     llm,
@@ -429,6 +430,7 @@ def _run_generate_prefix_suffix(
         use_tqdm=False,
     )
 
+
 def _use_live_step_driver(dp: DataPoint) -> bool:
     """Return whether the opt-in live engine-step driver should handle a row."""
 
@@ -444,6 +446,7 @@ def _use_live_step_driver(dp: DataPoint) -> bool:
         return min_batch_size > 0 and int(dp.batch_size) >= min_batch_size
     return False
 
+
 def _make_final_only_sampling_params(sampling_cls, **kwargs):
     """Build sampling params matching ``LLM.generate`` output processing."""
 
@@ -456,6 +459,7 @@ def _make_final_only_sampling_params(sampling_cls, **kwargs):
         pass
     return params
 
+
 def _engine_core_scheduler(llm):
     """Return the in-process vLLM scheduler used by ``LLMEngine.step``."""
 
@@ -464,6 +468,7 @@ def _engine_core_scheduler(llm):
     if scheduler is None:
         raise RuntimeError("live LLMEngine driver requires an in-process vLLM scheduler")
     return scheduler
+
 
 @contextmanager
 def _temporary_scheduler_token_budget(llm, token_budget: int):
@@ -476,6 +481,7 @@ def _temporary_scheduler_token_budget(llm, token_budget: int):
         yield
     finally:
         scheduler.max_num_scheduled_tokens = old_budget
+
 
 def _engine_requests_by_id(llm, request_ids: list[str]) -> dict[str, Any]:
     """Return currently known scheduler request objects for the given IDs."""
@@ -497,6 +503,7 @@ def _engine_requests_by_id(llm, request_ids: list[str]) -> dict[str, Any]:
     _track_request_container(getattr(scheduler, "waiting", []))
     return {request_id: requests[request_id] for request_id in request_ids if request_id in requests}
 
+
 def _all_requests_computed_at_least(llm, request_ids: list[str], token_count: int) -> bool:
     """Return whether all live requests have computed at least ``token_count`` tokens."""
 
@@ -504,6 +511,7 @@ def _all_requests_computed_at_least(llm, request_ids: list[str], token_count: in
     if len(requests) != len(request_ids):
         return False
     return all(int(getattr(req, "num_computed_tokens", 0)) >= token_count for req in requests.values())
+
 
 def _all_requests_done_or_computed_at_least(
     llm,
@@ -526,6 +534,7 @@ def _all_requests_done_or_computed_at_least(
         for request_id in request_ids
     )
 
+
 def _add_engine_requests(llm, prompts: list[dict[str, Any]], sampling_params, *, request_prefix: str) -> list[str]:
     """Submit prompts directly to the lower-level vLLM engine."""
 
@@ -534,6 +543,7 @@ def _add_engine_requests(llm, prompts: list[dict[str, Any]], sampling_params, *,
         request_id = f"{request_prefix}:{idx}:{time.time_ns()}"
         request_ids.append(llm.llm_engine.add_request(request_id, prompt, sampling_params))
     return request_ids
+
 
 def _prime_engine_requests_for_prompt_prefix(
     llm,
@@ -574,9 +584,7 @@ def _prime_engine_requests_for_prompt_prefix(
         if request is None:
             raise RuntimeError(f"request {request_id} was not registered with the scheduler")
         if int(getattr(request, "num_prompt_tokens", 0)) < prefix_tokens:
-            raise RuntimeError(
-                f"request {request_id} prompt is shorter than synthetic {label} prefix={prefix_tokens}"
-            )
+            raise RuntimeError(f"request {request_id} prompt is shorter than synthetic {label} prefix={prefix_tokens}")
         if int(getattr(request, "num_computed_tokens", 0)) != 0:
             raise RuntimeError(f"request {request_id} was already partially computed")
         scheduled_requests.append((request_id, request))
@@ -642,6 +650,7 @@ def _prime_engine_requests_for_prompt_prefix(
                 request.append_output_token_ids(int(token_ids[-1]))
     return total_rounds
 
+
 def _prime_engine_requests_for_context(llm, request_ids: list[str], past_kv: int) -> int:
     """Move newly submitted requests to an exact-past prefill scheduler state."""
 
@@ -652,6 +661,7 @@ def _prime_engine_requests_for_context(llm, request_ids: list[str], past_kv: int
         label="context",
         append_decode_token=False,
     )
+
 
 def _prime_engine_requests_for_decode(llm, request_ids: list[str], past_kv: int) -> int:
     """Move newly submitted requests to a decode-ready scheduler state."""
@@ -664,6 +674,7 @@ def _prime_engine_requests_for_decode(llm, request_ids: list[str], past_kv: int)
         append_decode_token=True,
     )
 
+
 def _live_decode_past_tolerance(dp: DataPoint, total_decode_steps: int, decode_headroom: int) -> float:
     """Return the existing live-decode past tolerance for a datapoint."""
 
@@ -673,11 +684,13 @@ def _live_decode_past_tolerance(dp: DataPoint, total_decode_steps: int, decode_h
         float((total_decode_steps + decode_headroom) * max(1, dp.new_tokens)),
     )
 
+
 def _short_retry_past_kv(dp: DataPoint, past_tolerance: float) -> int:
     """Return a shorter prompt length that remains in the target past bucket."""
 
     retry_delta = max(1, int(past_tolerance))
     return max(1, int(dp.past_kv) - retry_delta)
+
 
 def _abort_engine_requests(llm, request_ids: list[str]) -> None:
     """Abort live engine requests, ignoring already-finished IDs."""
@@ -688,6 +701,7 @@ def _abort_engine_requests(llm, request_ids: list[str]) -> None:
         llm.llm_engine.abort_request(request_ids, internal=True)
     except Exception:
         pass
+
 
 def _step_engine_until(
     llm,
@@ -717,6 +731,7 @@ def _step_engine_until(
         )
     return steps
 
+
 def _classify_exception(exc: BaseException) -> str:
     text = f"{type(exc).__name__}: {exc}"
     if _is_oom_text(text):
@@ -725,8 +740,10 @@ def _classify_exception(exc: BaseException) -> str:
         return "fatal_cuda"
     return "error"
 
+
 def _worker_datapoint_id(work_unit_id: str, dp: DataPoint) -> str:
     return dp.datapoint_id(work_unit_id)
+
 
 def _write_marker_control(
     *,
@@ -763,6 +780,7 @@ def _write_marker_control(
         json.dump(payload, f, sort_keys=True, separators=(",", ":"))
         f.write("\n")
     os.replace(tmp, path)
+
 
 def _set_marker_state(
     marker_mod,
@@ -804,6 +822,7 @@ def _set_marker_state(
         **extras,
     )
 
+
 def _ctx_marker_iteration(
     dp: DataPoint,
     max_num_batched_tokens: int,
@@ -811,6 +830,7 @@ def _ctx_marker_iteration(
     if max_num_batched_tokens < 1:
         raise ValueError(f"max_num_batched_tokens must be >= 1, got {max_num_batched_tokens}")
     return 1
+
 
 def _live_ctx_chunk_plan(
     dp: DataPoint,
@@ -832,7 +852,7 @@ def _live_ctx_chunk_plan(
             "live ctx batch cannot fit one token per request within "
             f"max_num_batched_tokens={step_budget}, batch_size={request_count}"
         )
-    if request_count == 1:
+    if step_budget <= 0 and request_count == 1:
         return [(int(dp.new_tokens), int(dp.past_kv))]
     per_request_budget = int(dp.new_tokens) if step_budget <= 0 else max(1, step_budget // request_count)
     remaining = int(dp.new_tokens)
@@ -845,6 +865,7 @@ def _live_ctx_chunk_plan(
         past_kv += chunk_tokens
     return chunks
 
+
 def _resolve_attr_path(obj: Any, path: str) -> Any | None:
     """Return a nested attribute path if every segment exists."""
 
@@ -854,6 +875,7 @@ def _resolve_attr_path(obj: Any, path: str) -> Any | None:
         if current is None:
             return None
     return current
+
 
 def _find_torch_model(llm: Any) -> Any:
     """Find the inner torch module inside a vLLM ``LLM`` instance."""
@@ -898,6 +920,7 @@ def _find_torch_model(llm: Any) -> Any:
                 queue.append((child, depth + 1))
     raise RuntimeError("could not locate inner torch model for router weight loading")
 
+
 def _load_safetensor_weights(model_id: str, keys: set[str]) -> dict[str, Any]:
     """Load selected tensors from an HF safetensors checkpoint."""
 
@@ -937,6 +960,7 @@ def _load_safetensor_weights(model_id: str, keys: set[str]) -> dict[str, Any]:
                 tensors[key] = f.get_tensor(key)
     return tensors
 
+
 def _install_router_weights(
     llm: Any,
     *,
@@ -958,11 +982,7 @@ def _install_router_weights(
         if match is None:
             continue
         layer_position = int(match.group(1))
-        source_layer = (
-            int(target_layers[layer_position])
-            if layer_position < len(target_layers)
-            else layer_position
-        )
+        source_layer = int(target_layers[layer_position]) if layer_position < len(target_layers) else layer_position
         if any(hasattr(module, attr) for attr in key_suffixes):
             layer_modules.append((layer_position, source_layer, module_name, module))
 
@@ -1002,6 +1022,7 @@ def _install_router_weights(
             param.copy_(tensor.to(device=param.device, dtype=param.dtype))
             loaded += 1
     return loaded
+
 
 def run_worker(spec_path: Path) -> None:
     """Execute one worker spec inside an nsys-profiled subprocess."""
@@ -1052,11 +1073,7 @@ def run_worker(spec_path: Path) -> None:
         os.environ.pop("LAYERWISE_ROUTER_WEIGHT_MODEL", None)
     max_num_batched_tokens = spec.get("max_num_batched_tokens") or 1
     iterations = {1}
-    iterations.update(
-        _ctx_marker_iteration(dp, max_num_batched_tokens)
-        for dp in datapoints
-        if dp.phase == "ctx"
-    )
+    iterations.update(_ctx_marker_iteration(dp, max_num_batched_tokens) for dp in datapoints if dp.phase == "ctx")
     iterations.update(dp.past_kv + 1 for dp in datapoints if dp.phase == "gen")
     os.environ["LAYERWISE_STEP_ITERATIONS"] = ",".join(str(x) for x in sorted(iterations))
     os.environ["LAYERWISE_BENCH_MIN_NEW"] = "1"
@@ -1129,9 +1146,7 @@ def run_worker(spec_path: Path) -> None:
     _worker_append_event(status_path, "engine_create_started", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
     llm = _create_llm(
         engine_tokens,
-        enable_layerwise_nvtx_tracing=bool(
-            spec.get("enable_layerwise_nvtx_tracing", True)
-        ),
+        enable_layerwise_nvtx_tracing=bool(spec.get("enable_layerwise_nvtx_tracing", True)),
     )
     _worker_append_event(
         status_path,
@@ -1309,6 +1324,7 @@ def run_worker(spec_path: Path) -> None:
             attempt_id=spec["attempt_id"],
         )
     _worker_append_event(status_path, "work_unit_finished", work_unit_id=work_unit_id, attempt_id=spec["attempt_id"])
+
 
 def _worker_run_ctx(
     status_path: Path,
@@ -1507,16 +1523,19 @@ def _worker_run_ctx(
         for dp in datapoints:
             run_one(dp, run_idx, warmup=False)
 
+
 def _ctx_cache_salt_prefix(
     work_unit_id: str,
     dp: DataPoint,
 ) -> str:
     return f"layerwise-ctx:{work_unit_id}:bs{dp.batch_size}:past{dp.past_kv}"
 
+
 def _ctx_prefix_stream_key(work_unit_id: str, dp: DataPoint) -> tuple[Any, ...]:
     """Return the token stream key shared by context prefix-cache prompts."""
 
     return ("ctx-prefix", work_unit_id, int(dp.batch_size), int(dp.past_kv))
+
 
 def _run_prefix_cached_ctx_iteration(
     llm,
@@ -1566,6 +1585,7 @@ def _run_prefix_cached_ctx_iteration(
         prefix_stream_key_prefix=prefix_stream_key,
         cache_salt_prefix=cache_salt_prefix,
     )
+
 
 def _run_live_ctx_iteration(
     llm,
@@ -1744,6 +1764,7 @@ def _run_live_ctx_iteration(
         _set_marker_state(marker_mod, active_iterations="", phase="ctx")
         _abort_engine_requests(llm, request_ids)
 
+
 def _live_decode_past_lengths(dp: DataPoint) -> list[int]:
     """Return per-request past lengths for live-decode diagnostics."""
 
@@ -1761,13 +1782,16 @@ def _live_decode_past_lengths(dp: DataPoint) -> list[int]:
         raise ValueError(f"live decode input lengths must be positive, got {input_lens}")
     return input_lens
 
+
 def _gen_cache_salt_prefix(work_unit_id: str, dp: DataPoint) -> str:
     return f"layerwise-gen:{work_unit_id}"
+
 
 def _gen_prefix_stream_key(work_unit_id: str) -> tuple[Any, ...]:
     """Return the token stream key shared by prefix-cache decode prompts."""
 
     return ("gen-prefix", work_unit_id)
+
 
 def _run_prefix_cached_gen_iteration(
     llm,
@@ -1829,6 +1853,7 @@ def _run_prefix_cached_gen_iteration(
         timing_past_kv=dp.past_kv,
         timing_run=run_idx,
     )
+
 
 def _worker_run_gen(
     status_path: Path,
@@ -1987,6 +2012,7 @@ def _worker_run_gen(
             _set_marker_state(marker_mod, active_iterations="", phase="gen")
         _worker_append_event(status_path, "batch_finished", work_unit_id=work_unit_id, batch_size=batch_size)
 
+
 def _run_live_gen_datapoint(
     llm,
     sampling_cls,
@@ -2048,11 +2074,7 @@ def _run_live_gen_datapoint(
                 break
             except RuntimeError as exc:
                 last_error = exc
-                if (
-                    candidate_past_kv == int(dp.past_kv)
-                    and retry_past_kv < int(dp.past_kv)
-                    and _is_oom_text(str(exc))
-                ):
+                if candidate_past_kv == int(dp.past_kv) and retry_past_kv < int(dp.past_kv) and _is_oom_text(str(exc)):
                     _abort_engine_requests(llm, request_ids)
                     request_ids = []
                     if status_path is not None and work_unit_id is not None:
@@ -2133,6 +2155,7 @@ def _run_live_gen_datapoint(
     finally:
         _set_marker_state(marker_mod, active_iterations="", phase="gen")
         _abort_engine_requests(llm, request_ids)
+
 
 def _worker_run_gen_live_decode(
     status_path: Path,
@@ -2216,6 +2239,7 @@ def _worker_run_gen_live_decode(
             gen_driver="live_decode",
         )
 
+
 def _worker_empty_cache() -> None:
     try:
         import torch
@@ -2224,6 +2248,7 @@ def _worker_empty_cache() -> None:
             torch.cuda.empty_cache()
     except Exception:
         pass
+
 
 def _cuda_profiler_call(action: str) -> None:
     try:
@@ -2253,6 +2278,7 @@ def _cuda_profiler_call(action: str) -> None:
             raise ValueError(f"unsupported cuda profiler action: {action}")
     except Exception as exc:
         raise RuntimeError(f"cudaProfiler{action.title()} failed") from exc
+
 
 def _worker_set_cuda_profiler_capture(
     *,

@@ -124,6 +124,7 @@ def _args(tmp_path):
         live_step_driver=False,
         live_step_gen_min_past_kv=8192,
         live_step_gen_min_batch_size=256,
+        live_step_gen_max_workers=0,
         prompt_seed=None,
         rollup=r"layers\.(\d+)\.(self_attn|mlp)",
         rank_reduce="sum",
@@ -163,6 +164,7 @@ def _build_args(tmp_path, **overrides):
         live_step_driver=False,
         live_step_gen_min_past_kv=8192,
         live_step_gen_min_batch_size=256,
+        live_step_gen_max_workers=0,
     )
     for key, value in overrides.items():
         setattr(args, key, value)
@@ -187,18 +189,21 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertIsNone(args.gen_driver)
         self.assertEqual(args.live_step_gen_min_past_kv, 8192)
         self.assertEqual(args.live_step_gen_min_batch_size, 256)
+        self.assertEqual(args.live_step_gen_max_workers, 0)
         self.assertFalse(hasattr(args, "ctx_driver"))
         self.assertEqual(args.nsys_capture, "full")
 
     def test_public_moe_decode_defaults_large_batch_live_step_route_to_bs8(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "Qwen/Qwen3.6-35B-A3B",
-                "--phases",
-                "gen",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "Qwen/Qwen3.6-35B-A3B",
+                    "--phases",
+                    "gen",
+                ]
+            )
             args.run_dir = tmp_path
             moe = LayerwiseModel(model="moe", kind="moe", ep_sizes=(1,))
             dense = LayerwiseModel(model="dense", kind="dense")
@@ -212,14 +217,16 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_moe_decode_can_disable_large_batch_live_step_route(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "Qwen/Qwen3.6-35B-A3B",
-                "--phases",
-                "gen",
-                "--live-step-gen-min-batch-size",
-                "0",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "Qwen/Qwen3.6-35B-A3B",
+                    "--phases",
+                    "gen",
+                    "--live-step-gen-min-batch-size",
+                    "0",
+                ]
+            )
             args.run_dir = tmp_path
             moe = LayerwiseModel(model="moe", kind="moe", ep_sizes=(1,))
 
@@ -230,20 +237,22 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_both_sweep_splits_context_and_decode_target_depth(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "1",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "both",
-                "--run-preset",
-                "smoke",
-                "--max-decode-batch-size",
-                "8",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "1",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "both",
+                    "--run-preset",
+                    "smoke",
+                    "--max-decode-batch-size",
+                    "8",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -280,22 +289,24 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_gen_max_num_seqs_only_applies_to_decode_phase(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "1",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "both",
-                "--run-preset",
-                "smoke",
-                "--max-decode-batch-size",
-                "8",
-                "--gen-max-num-seqs",
-                "4",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "1",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "both",
+                    "--run-preset",
+                    "smoke",
+                    "--max-decode-batch-size",
+                    "8",
+                    "--gen-max-num-seqs",
+                    "4",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -324,22 +335,24 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_full_auto_ctx_batches_stay_inside_scheduler_budget(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "1",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "full",
-                "--ctx-new-tokens",
-                "128,256,512,1024,2048",
-                "--ctx-past-kv",
-                "0",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "1",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "full",
+                    "--ctx-new-tokens",
+                    "128,256,512,1024,2048",
+                    "--ctx-past-kv",
+                    "0",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -360,9 +373,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             self.assertEqual(len(units), 1)
             datapoint_keys = {
-                (dp.batch_size, dp.new_tokens, dp.past_kv)
-                for dp in units[0].datapoints
-                if dp.phase == "ctx"
+                (dp.batch_size, dp.new_tokens, dp.past_kv) for dp in units[0].datapoints if dp.phase == "ctx"
             }
             self.assertIn((2, 1024, 0), datapoint_keys)
             self.assertNotIn((2, 2048, 0), datapoint_keys)
@@ -374,20 +385,22 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_tp1_moe_defaults_to_noop_without_real_weights(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "1",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "both",
-                "--run-preset",
-                "smoke",
-                "--max-decode-batch-size",
-                "8",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "1",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "both",
+                    "--run-preset",
+                    "smoke",
+                    "--max-decode-batch-size",
+                    "8",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -428,12 +441,14 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             patcher.assert_called()
 
     def test_public_gen_driver_override_updates_registry_models(self):
-        args = cl._build_arg_parser().parse_args([
-            "--models",
-            "Qwen/Qwen3-32B",
-            "--gen-driver",
-            "live_decode",
-        ])
+        args = cl._build_arg_parser().parse_args(
+            [
+                "--models",
+                "Qwen/Qwen3-32B",
+                "--gen-driver",
+                "live_decode",
+            ]
+        )
 
         models = public_collect._selected_models(args)
 
@@ -443,22 +458,24 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_context_batch_sizes_are_explicit_opt_in(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "1",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-                "--ctx-new-tokens",
-                "2640",
-                "--ctx-past-kv",
-                "0",
-                "--ctx-batch-sizes",
-                "3",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "1",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                    "--ctx-new-tokens",
+                    "2640",
+                    "--ctx-past-kv",
+                    "0",
+                    "--ctx-batch-sizes",
+                    "3",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -480,10 +497,12 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertEqual(units[0].datapoints, [cl.DataPoint("ctx", 3, 2640, 0)])
 
     def test_public_deepseek_registry_defaults_to_prefix_cache(self):
-        args = cl._build_arg_parser().parse_args([
-            "--models",
-            "deepseek-ai/DeepSeek-V4-Flash",
-        ])
+        args = cl._build_arg_parser().parse_args(
+            [
+                "--models",
+                "deepseek-ai/DeepSeek-V4-Flash",
+            ]
+        )
 
         models = public_collect._selected_models(args)
 
@@ -494,20 +513,22 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_deepseek_full_preset_uses_model_specific_gen_past_grid(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "deepseek-ai/DeepSeek-V4-Flash",
-                "--tp-sizes",
-                "4",
-                "--ep-sizes",
-                "4",
-                "--phases",
-                "gen",
-                "--run-preset",
-                "full",
-                "--max-decode-batch-size",
-                "256",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "deepseek-ai/DeepSeek-V4-Flash",
+                    "--tp-sizes",
+                    "4",
+                    "--ep-sizes",
+                    "4",
+                    "--phases",
+                    "gen",
+                    "--run-preset",
+                    "full",
+                    "--max-decode-batch-size",
+                    "256",
+                ]
+            )
             args.run_dir = tmp_path
             model = public_collect._selected_models(args)[0]
 
@@ -522,18 +543,20 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_deepseek_v4_flash_stub_memory_filter_allows_small_tp(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "deepseek-ai/DeepSeek-V4-Flash",
-                "--tp-sizes",
-                "1,2,4,8",
-                "--ep-sizes",
-                "auto",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "deepseek-ai/DeepSeek-V4-Flash",
+                    "--tp-sizes",
+                    "1,2,4,8",
+                    "--ep-sizes",
+                    "auto",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -587,16 +610,18 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_parallelism_pairs_select_exact_tp_ep_pairs(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--parallelism-pairs",
-                "1:1,2:1,2:2,4:4,8:8",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--parallelism-pairs",
+                    "1:1,2:1,2:2,4:4,8:8",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -637,18 +662,20 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_moe_effective_ep_can_exceed_attention_tp(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "1",
-                "--ep-sizes",
-                "4",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "1",
+                    "--ep-sizes",
+                    "4",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -676,19 +703,21 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_patched_moe_uses_router_weight_overlay(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "2",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-                "--moe-real-router",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "2",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                    "--moe-real-router",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -717,20 +746,22 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_physical_tp_uses_depth_only_patch_and_gpu_group(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "2",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-                "--physical-tp",
-                "--allow-multi-gpu-diagnostic",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "2",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                    "--physical-tp",
+                    "--allow-multi-gpu-diagnostic",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -770,19 +801,21 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_physical_tp_requires_diagnostic_opt_in(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "2",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-                "--physical-tp",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "2",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                    "--physical-tp",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -794,20 +827,22 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_physical_tp_ep_enables_vllm_expert_parallel(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "2",
-                "--ep-sizes",
-                "2",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-                "--physical-tp",
-                "--allow-multi-gpu-diagnostic",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "2",
+                    "--ep-sizes",
+                    "2",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                    "--physical-tp",
+                    "--allow-multi-gpu-diagnostic",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -849,20 +884,22 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_physical_tp_ep_noop_keeps_data_parallel_out_of_engine(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "2",
-                "--ep-sizes",
-                "4",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-                "--physical-tp",
-                "--allow-multi-gpu-diagnostic",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "2",
+                    "--ep-sizes",
+                    "4",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                    "--physical-tp",
+                    "--allow-multi-gpu-diagnostic",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -903,21 +940,23 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_physical_tp_active_moe_adds_data_parallel_for_effective_ep(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "2",
-                "--ep-sizes",
-                "4",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-                "--physical-tp",
-                "--allow-multi-gpu-diagnostic",
-                "--moe-dummy-router",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "2",
+                    "--ep-sizes",
+                    "4",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                    "--physical-tp",
+                    "--allow-multi-gpu-diagnostic",
+                    "--moe-dummy-router",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -961,20 +1000,22 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_physical_tp1_ep_noop_keeps_data_parallel_out_of_engine(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "1",
-                "--ep-sizes",
-                "4",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-                "--physical-tp",
-                "--allow-multi-gpu-diagnostic",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "1",
+                    "--ep-sizes",
+                    "4",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                    "--physical-tp",
+                    "--allow-multi-gpu-diagnostic",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -1016,21 +1057,23 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_physical_tp_real_weights_uses_original_snapshot(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "2",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-                "--physical-tp",
-                "--allow-multi-gpu-diagnostic",
-                "--physical-tp-real-weights",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "2",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                    "--physical-tp",
+                    "--allow-multi-gpu-diagnostic",
+                    "--physical-tp-real-weights",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -1064,23 +1107,25 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_context_schedule_envelope_does_not_add_fpm_scheduler(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "2",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-                "--physical-tp",
-                "--allow-multi-gpu-diagnostic",
-                "--physical-tp-real-weights",
-                "--latency-source",
-                "schedule_to_update",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "2",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                    "--physical-tp",
+                    "--allow-multi-gpu-diagnostic",
+                    "--physical-tp-real-weights",
+                    "--latency-source",
+                    "schedule_to_update",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -1104,20 +1149,22 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_non_context_schedule_envelope_does_not_add_fpm_scheduler(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "1",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "gen",
-                "--run-preset",
-                "smoke",
-                "--latency-source",
-                "span",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "1",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "gen",
+                    "--run-preset",
+                    "smoke",
+                    "--latency-source",
+                    "span",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -1140,23 +1187,25 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_context_worker_wall_keeps_full_depth_for_typed_moe_layers(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "2",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-                "--latency-source",
-                "worker_wall",
-                "--physical-tp",
-                "--allow-multi-gpu-diagnostic",
-                "--physical-tp-real-weights",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "2",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                    "--latency-source",
+                    "worker_wall",
+                    "--physical-tp",
+                    "--allow-multi-gpu-diagnostic",
+                    "--physical-tp-real-weights",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -1186,23 +1235,25 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_public_physical_tp_real_weights_requires_full_depth(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "2",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-                "--physical-tp",
-                "--allow-multi-gpu-diagnostic",
-                "--physical-tp-real-weights",
-                "--target-layer-count",
-                "1",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "2",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                    "--physical-tp",
+                    "--allow-multi-gpu-diagnostic",
+                    "--physical-tp-real-weights",
+                    "--target-layer-count",
+                    "1",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -1302,32 +1353,34 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(index.active_started("wu", {"a", "b", "c", "d"}), "d")
 
     def test_aggregate_step_rows_uses_span_for_latency_source(self):
-        parsed = cl._aggregate_step_rows([
-            {
-                "step": 17,
-                "batch_size": 4,
-                "past_kv": 16,
-                "measure_run": 0,
-                "gpu_us": 100.0,
-                "rms_us": 5.0,
-                "start_ns": 1_000,
-                "end_ns": 101_000,
-                "kernel_count": 2,
-                "rms_kernel_count": 1,
-            },
-            {
-                "step": 17,
-                "batch_size": 4,
-                "past_kv": 16,
-                "measure_run": 0,
-                "gpu_us": 50.0,
-                "rms_us": 3.0,
-                "start_ns": 80_000,
-                "end_ns": 130_000,
-                "kernel_count": 1,
-                "rms_kernel_count": 1,
-            },
-        ])
+        parsed = cl._aggregate_step_rows(
+            [
+                {
+                    "step": 17,
+                    "batch_size": 4,
+                    "past_kv": 16,
+                    "measure_run": 0,
+                    "gpu_us": 100.0,
+                    "rms_us": 5.0,
+                    "start_ns": 1_000,
+                    "end_ns": 101_000,
+                    "kernel_count": 2,
+                    "rms_kernel_count": 1,
+                },
+                {
+                    "step": 17,
+                    "batch_size": 4,
+                    "past_kv": 16,
+                    "measure_run": 0,
+                    "gpu_us": 50.0,
+                    "rms_us": 3.0,
+                    "start_ns": 80_000,
+                    "end_ns": 130_000,
+                    "kernel_count": 1,
+                    "rms_kernel_count": 1,
+                },
+            ]
+        )
 
         agg = parsed[(17, 4, 16, 0)]
         self.assertEqual(agg["gpu_us"], 150.0)
@@ -1624,7 +1677,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
         self.assertEqual(measure_count, 1)
         self.assertEqual(kernel_count, 0)
-        self.assertEqual(latency_us, 8_500.0)
+        self.assertEqual(latency_us, 35_000.0)
+        self.assertEqual({agg.get("latency_source") for agg in aggs}, {"live_step_wall"})
 
     def test_scheduler_timing_lookup_prefers_prefix_execute_for_generation(self):
         events = [
@@ -1739,7 +1793,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(kernel_count, 0)
         self.assertEqual(latency_us, 6_000.0)
 
-    def test_scheduler_timing_lookup_prefers_scheduler_update_over_live_step_for_generation(self):
+    def test_scheduler_timing_lookup_prefers_live_step_wall_for_generation(self):
         events = [
             {
                 "event": "live_step_wall_time",
@@ -1780,7 +1834,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
         self.assertEqual(measure_count, 1)
         self.assertEqual(kernel_count, 0)
-        self.assertEqual(latency_us, 8_500.0)
+        self.assertEqual(latency_us, 35_000.0)
+        self.assertEqual({agg.get("latency_source") for agg in aggs}, {"live_step_wall"})
 
     def test_scheduler_timing_lookup_treats_generation_runs_as_repeats(self):
         events = [
@@ -2327,38 +2382,40 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(latency_us, 39_000.0)
 
     def test_repeat_aggregation_selects_median_latency(self):
-        parsed = cl._aggregate_step_rows([
-            {
-                "step": 64,
-                "batch_size": 1,
-                "past_kv": 0,
-                "measure_run": 0,
-                "gpu_us": 100.0,
-                "start_ns": 0,
-                "end_ns": 100_000,
-                "kernel_count": 1,
-            },
-            {
-                "step": 64,
-                "batch_size": 1,
-                "past_kv": 0,
-                "measure_run": 1,
-                "gpu_us": 200.0,
-                "start_ns": 0,
-                "end_ns": 200_000,
-                "kernel_count": 2,
-            },
-            {
-                "step": 64,
-                "batch_size": 1,
-                "past_kv": 0,
-                "measure_run": 2,
-                "gpu_us": 300.0,
-                "start_ns": 0,
-                "end_ns": 300_000,
-                "kernel_count": 3,
-            },
-        ])
+        parsed = cl._aggregate_step_rows(
+            [
+                {
+                    "step": 64,
+                    "batch_size": 1,
+                    "past_kv": 0,
+                    "measure_run": 0,
+                    "gpu_us": 100.0,
+                    "start_ns": 0,
+                    "end_ns": 100_000,
+                    "kernel_count": 1,
+                },
+                {
+                    "step": 64,
+                    "batch_size": 1,
+                    "past_kv": 0,
+                    "measure_run": 1,
+                    "gpu_us": 200.0,
+                    "start_ns": 0,
+                    "end_ns": 200_000,
+                    "kernel_count": 2,
+                },
+                {
+                    "step": 64,
+                    "batch_size": 1,
+                    "past_kv": 0,
+                    "measure_run": 2,
+                    "gpu_us": 300.0,
+                    "start_ns": 0,
+                    "end_ns": 300_000,
+                    "kernel_count": 3,
+                },
+            ]
+        )
 
         aggs = cl._lookup_aggs(parsed, (64, 1, 0))
         latency_us, rms_us, kernel_count, rms_kernel_count, measure_count = cl._reduce_agg_latency(
@@ -2375,8 +2432,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
     def test_repeat_aggregation_can_drop_min_and_max_then_average(self):
         aggs = [
-            {"gpu_us": value, "span_us": value, "kernel_count": 1}
-            for value in [10.0, 20.0, 30.0, 40.0, 50.0, 1000.0]
+            {"gpu_us": value, "span_us": value, "kernel_count": 1} for value in [10.0, 20.0, 30.0, 40.0, 50.0, 1000.0]
         ]
 
         latency_us, rms_us, kernel_count, rms_kernel_count, measure_count = cl._reduce_agg_latency(
@@ -2423,17 +2479,25 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_prompt_token_config_excludes_special_ids(self):
         with tempfile.TemporaryDirectory() as td:
             model_dir = Path(td)
-            (model_dir / "config.json").write_text(json.dumps({
-                "vocab_size": 16,
-                "bos_token_id": 1,
-                "eos_token_id": 2,
-            }))
-            (model_dir / "tokenizer_config.json").write_text(json.dumps({
-                "added_tokens_decoder": {
-                    "3": {"special": True},
-                    "4": {"special": False},
-                },
-            }))
+            (model_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "vocab_size": 16,
+                        "bos_token_id": 1,
+                        "eos_token_id": 2,
+                    }
+                )
+            )
+            (model_dir / "tokenizer_config.json").write_text(
+                json.dumps(
+                    {
+                        "added_tokens_decoder": {
+                            "3": {"special": True},
+                            "4": {"special": False},
+                        },
+                    }
+                )
+            )
 
             token_config = load_random_prompt_token_config(str(model_dir))
 
@@ -2472,18 +2536,26 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
     def test_prompt_token_config_falls_back_to_hf_json_when_transformers_is_unknown(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
-            (tmp_path / "config.json").write_text(json.dumps({
-                "vocab_size": 64,
-                "bos_token_id": 1,
-                "eos_token_id": [2, 3],
-            }))
-            (tmp_path / "tokenizer_config.json").write_text(json.dumps({
-                "pad_token_id": 0,
-                "added_tokens_decoder": {
-                    "4": {"special": True},
-                    "5": {"special": False},
-                },
-            }))
+            (tmp_path / "config.json").write_text(
+                json.dumps(
+                    {
+                        "vocab_size": 64,
+                        "bos_token_id": 1,
+                        "eos_token_id": [2, 3],
+                    }
+                )
+            )
+            (tmp_path / "tokenizer_config.json").write_text(
+                json.dumps(
+                    {
+                        "pad_token_id": 0,
+                        "added_tokens_decoder": {
+                            "4": {"special": True},
+                            "5": {"special": False},
+                        },
+                    }
+                )
+            )
 
             class FakeAutoConfig:
                 @staticmethod
@@ -2673,10 +2745,13 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             live_step_gen_min_batch_size=256,
         )
 
-        self.assertEqual(parts, [
-            ("_prefixgen", [prefix]),
-            ("_livegen", [large_batch, high_past]),
-        ])
+        self.assertEqual(
+            parts,
+            [
+                ("_prefixgen", [prefix]),
+                ("_livegen", [large_batch, high_past]),
+            ],
+        )
 
     def test_gen_partition_can_disable_large_batch_live_step_route(self):
         prefix = cl.DataPoint("gen", 1, 1, 4096)
@@ -2690,10 +2765,13 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             live_step_gen_min_batch_size=0,
         )
 
-        self.assertEqual(parts, [
-            ("_prefixgen", [prefix, large_batch]),
-            ("_livegen", [high_past]),
-        ])
+        self.assertEqual(
+            parts,
+            [
+                ("_prefixgen", [prefix, large_batch]),
+                ("_livegen", [high_past]),
+            ],
+        )
 
     def test_live_step_driver_handles_context_past_rows(self):
         ctx = cl.DataPoint("ctx", 1, 400, 3696)
@@ -2952,10 +3030,13 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             chunks = cl._prime_engine_requests_for_decode(mock.Mock(), ["req"], 128)
 
         self.assertEqual(chunks, 2)
-        self.assertEqual(kv_cache_manager.allocate_slots.call_args_list, [
-            mock.call(request, 64),
-            mock.call(request, 64),
-        ])
+        self.assertEqual(
+            kv_cache_manager.allocate_slots.call_args_list,
+            [
+                mock.call(request, 64),
+                mock.call(request, 64),
+            ],
+        )
         self.assertEqual(request.num_computed_tokens, 128)
         self.assertEqual(request.appended, [23])
 
@@ -2985,10 +3066,13 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             chunks = cl._prime_engine_requests_for_context(mock.Mock(), ["req"], 128)
 
         self.assertEqual(chunks, 2)
-        self.assertEqual(kv_cache_manager.allocate_slots.call_args_list, [
-            mock.call(request, 64),
-            mock.call(request, 64),
-        ])
+        self.assertEqual(
+            kv_cache_manager.allocate_slots.call_args_list,
+            [
+                mock.call(request, 64),
+                mock.call(request, 64),
+            ],
+        )
         self.assertEqual(request.num_computed_tokens, 128)
         self.assertEqual(request.num_tokens, 528)
         self.assertEqual(request.appended, [])
@@ -3142,10 +3226,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             )
             scheduler._mark_oom_dominated(unit, dps[1], failed_id)
 
-            pending_ids = {
-                dp.datapoint_id(unit.work_unit_id)
-                for dp in scheduler._pending_datapoints(unit)
-            }
+            pending_ids = {dp.datapoint_id(unit.work_unit_id) for dp in scheduler._pending_datapoints(unit)}
             self.assertIn(dps[0].datapoint_id(unit.work_unit_id), pending_ids)
             self.assertNotIn(failed_id, pending_ids)
             self.assertNotIn(dps[2].datapoint_id(unit.work_unit_id), pending_ids)
@@ -3424,7 +3505,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             args = _args(tmp_path)
             args.extra_vllm_arg = [
                 "--generation-config=auto",
-                "--limit-mm-per-prompt={\"image\":1}",
+                '--limit-mm-per-prompt={"image":1}',
                 "--no-skip-mm-profiling",
             ]
             scheduler = cl.Scheduler(args, [unit])
@@ -3437,7 +3518,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertNotIn("--generation-config", extra)
             self.assertIn("--generation-config=auto", extra)
             self.assertNotIn("--limit-mm-per-prompt", extra)
-            self.assertIn("--limit-mm-per-prompt={\"image\":1}", extra)
+            self.assertIn('--limit-mm-per-prompt={"image":1}', extra)
 
     def test_scheduler_keeps_prefix_cache_unset_for_gpt_oss_context_with_past_kv(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3808,20 +3889,22 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "num_experts": 8,
                 "num_experts_per_tok": 2,
             }
-            args = public_collect._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "1",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "gen",
-                "--run-preset",
-                "smoke",
-                "--max-decode-batch-size",
-                "8",
-            ])
+            args = public_collect._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "1",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "gen",
+                    "--run-preset",
+                    "smoke",
+                    "--max-decode-batch-size",
+                    "8",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -3853,20 +3936,22 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "num_experts_per_tok": 2,
                 "n_shared_experts": 1,
             }
-            args = public_collect._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "1",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "gen",
-                "--run-preset",
-                "smoke",
-                "--max-decode-batch-size",
-                "8",
-            ])
+            args = public_collect._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "1",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "gen",
+                    "--run-preset",
+                    "smoke",
+                    "--max-decode-batch-size",
+                    "8",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -4050,22 +4135,24 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "intermediate_size": 1024,
                 "num_hidden_layers": 4,
             }
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "1",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-                "--ctx-new-tokens",
-                "128,1024",
-                "--gen-past-kv",
-                "4096",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "1",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                    "--ctx-new-tokens",
+                    "128,1024",
+                    "--gen-past-kv",
+                    "4096",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -4089,22 +4176,24 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "intermediate_size": 1024,
                 "num_hidden_layers": 4,
             }
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "1",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "smoke",
-                "--ctx-new-tokens",
-                "128,1024",
-                "--max-model-len",
-                "4104",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "1",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "smoke",
+                    "--ctx-new-tokens",
+                    "128,1024",
+                    "--max-model-len",
+                    "4104",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -4129,18 +4218,20 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "num_hidden_layers": 4,
                 "max_position_embeddings": 40960,
             }
-            args = cl._build_arg_parser().parse_args([
-                "--models",
-                "model",
-                "--tp-sizes",
-                "1",
-                "--ep-sizes",
-                "1",
-                "--phases",
-                "ctx",
-                "--run-preset",
-                "full",
-            ])
+            args = cl._build_arg_parser().parse_args(
+                [
+                    "--models",
+                    "model",
+                    "--tp-sizes",
+                    "1",
+                    "--ep-sizes",
+                    "1",
+                    "--phases",
+                    "ctx",
+                    "--run-preset",
+                    "full",
+                ]
+            )
             args.run_dir = tmp_path
             args.work_dir = str(tmp_path / "profiles")
             args.config_cache_dir = str(tmp_path / "config_cache")
@@ -4780,7 +4871,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertEqual(row["latency_source"], "worker_wall")
             self.assertEqual(float(row["latency_ms"]), 12.0)
 
-    def test_auto_decode_success_row_uses_scheduler_update_timing(self):
+    def test_auto_dense_decode_live_step_success_row_uses_scheduler_timing(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = _args(tmp_path)
@@ -4861,6 +4952,89 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertEqual(float(row["latency_ms"]), 20.0)
             self.assertEqual(row["layer_multiplier"], "4")
 
+    def test_auto_moe_decode_live_step_success_row_uses_live_step_wall_timing(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            args = _args(tmp_path)
+            args.latency_source = "auto"
+            args.nsys_capture = "none"
+            unit = dataclasses.replace(
+                _unit(tmp_path, [cl.DataPoint("gen", 1, 1, 4096)]),
+                includes_moe=False,
+                moe_noop=True,
+                target_layers=[0, 1, 2, 3],
+                model_layer_count=4,
+                representative=cl.RepresentativeLayer(
+                    layer_index=0,
+                    layer_type="moe",
+                    measured_layer_count=4,
+                    layer_multiplier=4,
+                    target_layers=(0, 1, 2, 3),
+                ),
+            )
+            scheduler = cl.Scheduler(args, [unit])
+            results._write_csv_header_if_needed(Path(args.output))
+            dpid = unit.datapoints[0].datapoint_id(unit.work_unit_id)
+            scheduler.store.append_event(
+                "scheduler_update_wall_time",
+                work_unit_id=unit.work_unit_id,
+                attempt_id=1,
+                control_phase="gen",
+                control_step=4097,
+                control_bs=1,
+                control_past=4096,
+                control_run=0,
+                scheduled_new_reqs=0,
+                scheduled_tokens=1,
+                fpm_wall_time_ms=20.0,
+            )
+            scheduler.store.append_event(
+                "live_step_wall_time",
+                work_unit_id=unit.work_unit_id,
+                datapoint_id=dpid,
+                attempt_id=1,
+                phase="gen",
+                batch_size=1,
+                past_kv=4096,
+                run=0,
+                wall_latency_ms=16.0,
+            )
+            scheduler.store.append_event(
+                "completed_execution",
+                work_unit_id=unit.work_unit_id,
+                datapoint_id=dpid,
+                attempt_id=1,
+                phase="gen",
+                batch_size=1,
+                new_tokens=1,
+                past_kv=4096,
+                run=0,
+                live_step_driver=True,
+                execute_model_wall_time_ms=0.7,
+            )
+            attempt = cl.Attempt(
+                work_unit=unit,
+                gpu="0",
+                attempt_id=1,
+                spec_path=tmp_path / "spec.json",
+                report_base=tmp_path / "report",
+                stdout_path=tmp_path / "out",
+                stderr_path=tmp_path / "err",
+                process=None,
+                stdout_handle=None,
+                stderr_handle=None,
+                pending_ids={dpid},
+            )
+
+            successes = scheduler._parse_scheduler_timing_only(attempt)
+
+            self.assertEqual(successes, 1)
+            with Path(args.output).open() as f:
+                row = list(csv.DictReader(f))[0]
+            self.assertEqual(row["latency_source"], "live_step_wall")
+            self.assertEqual(float(row["latency_ms"]), 16.0)
+            self.assertEqual(row["layer_multiplier"], "4")
+
     def test_scheduler_resumes_after_existing_attempt_ids(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
@@ -4881,10 +5055,13 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             scheduler = cl.Scheduler(args, [unit])
             fake_process = mock.Mock()
 
-            with mock.patch.object(scheduler, "_worker_cmd", return_value=["worker"]), mock.patch(
-                "collector.layerwise.vllm.scheduler.subprocess.Popen",
-                return_value=fake_process,
-            ) as popen:
+            with (
+                mock.patch.object(scheduler, "_worker_cmd", return_value=["worker"]),
+                mock.patch(
+                    "collector.layerwise.vllm.scheduler.subprocess.Popen",
+                    return_value=fake_process,
+                ) as popen,
+            ):
                 attempt = scheduler._launch_attempt(unit, "0", unit.datapoints)
 
             attempt.stdout_handle.close()
@@ -4958,10 +5135,13 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             scheduler = cl.Scheduler(args, [unit])
             fake_process = mock.Mock()
 
-            with mock.patch.object(scheduler, "_worker_cmd", return_value=["worker"]), mock.patch(
-                "collector.layerwise.vllm.scheduler.subprocess.Popen",
-                return_value=fake_process,
-            ) as popen:
+            with (
+                mock.patch.object(scheduler, "_worker_cmd", return_value=["worker"]),
+                mock.patch(
+                    "collector.layerwise.vllm.scheduler.subprocess.Popen",
+                    return_value=fake_process,
+                ) as popen,
+            ):
                 attempt = scheduler._launch_attempt(unit, "0", unit.datapoints)
 
             attempt.stdout_handle.close()
@@ -4978,10 +5158,13 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             scheduler = cl.Scheduler(args, [unit])
             fake_process = mock.Mock()
 
-            with mock.patch.object(scheduler, "_worker_cmd", return_value=["worker"]), mock.patch(
-                "collector.layerwise.vllm.scheduler.subprocess.Popen",
-                return_value=fake_process,
-            ) as popen:
+            with (
+                mock.patch.object(scheduler, "_worker_cmd", return_value=["worker"]),
+                mock.patch(
+                    "collector.layerwise.vllm.scheduler.subprocess.Popen",
+                    return_value=fake_process,
+                ) as popen,
+            ):
                 attempt = scheduler._launch_attempt(unit, "0", unit.datapoints)
 
             attempt.stdout_handle.close()
@@ -5002,10 +5185,13 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             scheduler = cl.Scheduler(args, [unit])
             fake_process = mock.Mock()
 
-            with mock.patch.object(scheduler, "_worker_cmd", return_value=["worker"]), mock.patch(
-                "collector.layerwise.vllm.scheduler.subprocess.Popen",
-                return_value=fake_process,
-            ) as popen:
+            with (
+                mock.patch.object(scheduler, "_worker_cmd", return_value=["worker"]),
+                mock.patch(
+                    "collector.layerwise.vllm.scheduler.subprocess.Popen",
+                    return_value=fake_process,
+                ) as popen,
+            ):
                 attempt = scheduler._launch_attempt(unit, "0", unit.datapoints)
 
             attempt.stdout_handle.close()
@@ -5088,9 +5274,12 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             )
             attempt.report_base.with_suffix(".nsys-rep").write_text("rep")
 
-            with mock.patch("collector.layerwise.vllm.scheduler.subprocess.run") as run, mock.patch(
-                "collector.layerwise.vllm.scheduler.parse_step_sweep",
-                return_value=([], {}),
+            with (
+                mock.patch("collector.layerwise.vllm.scheduler.subprocess.run") as run,
+                mock.patch(
+                    "collector.layerwise.vllm.scheduler.parse_step_sweep",
+                    return_value=([], {}),
+                ),
             ):
                 run.return_value = mock.Mock(returncode=0, stderr="")
                 successes = scheduler._parse_attempt_report(attempt)

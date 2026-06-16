@@ -38,6 +38,7 @@ _MAX_NUM_SEQS_MODE_INDEX_KEY = "__max_num_seqs_mode_index__"
 _MAX_NUM_SEQS_PARALLEL_INDEX_KEY = "__max_num_seqs_parallel_index__"
 _MAX_NUM_SEQS_PARALLEL_MODE_INDEX_KEY = "__max_num_seqs_parallel_mode_index__"
 _ALLOW_PHYSICAL_GPUS_ENV = "AIC_LAYERWISE_ALLOW_PHYSICAL_GPUS"
+SCHEDULER_ENVELOPE_LATENCY_SOURCES = frozenset({"schedule_to_update", "worker_wall", "fpm_wall", "live_step_wall"})
 
 
 def _parse_bool(value) -> bool:
@@ -92,7 +93,7 @@ def _robust_generation_detail(model_data: dict, batch_size: int, seq_len: int) -
     if not isinstance(entry, dict):
         return entry
     latency_source = str(entry.get("latency_source") or "")
-    if latency_source not in {"schedule_to_update", "worker_wall", "fpm_wall"}:
+    if latency_source not in SCHEDULER_ENVELOPE_LATENCY_SOURCES:
         return entry
     try:
         latency = float(entry["latency"])
@@ -185,7 +186,7 @@ def _is_scheduler_envelope_entry(entry: dict | None) -> bool:
 
     if not isinstance(entry, dict):
         return False
-    return str(entry.get("latency_source") or "") in {"schedule_to_update", "worker_wall", "fpm_wall"}
+    return str(entry.get("latency_source") or "") in SCHEDULER_ENVELOPE_LATENCY_SOURCES
 
 
 def _entry_mode(entry: dict | None) -> str:
