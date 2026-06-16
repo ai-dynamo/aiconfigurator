@@ -119,6 +119,73 @@ uv run python collector/layerwise/diagnostics/compare_aic_layerwise_fpm_summary.
 Decode timing now uses the `execute_model_gpu` source (do not re-enable the old
 `--live-step-driver` path, which produced the corrupt MoE decode curves).
 
+## FPM Ground Truth
+
+**FPM = ForwardPassMetrics**, the per-iteration metrics that vLLM's scheduler
+emits for every forward pass (one scheduler step). FPM is the *ground truth* the
+layerwise model is validated against: it is the real end-to-end step wall-time on
+a fully deployed engine — real weights, real KV cache, CUDA graphs, the actual
+scheduler and batching — not a synthetic isolated-kernel measurement. When AIC's
+layerwise composition disagrees with FPM, FPM is assumed right (after filtering
+obvious measurement outliers).
+
+### What is measured
+Each FPM row is one forward pass, reduced to three numbers
+(`fpm_metrics.csv`):
+
+```text
+num_context_tokens, num_decode_tokens, latency_ms
+```
+
+- `num_context_tokens` is the scheduler's `sum_prefill_tokens` — the prefill
+  tokens *freshly scheduled in that one iteration*, not the full prompt length.
+- `num_decode_tokens` is `num_decode_requests` — active sequences each emitting
+  one token that step.
+- `latency_ms` is `wall_time` for that forward pass, in ms.
+
+A line-aligned `fpm_metrics_detail.csv` adds the full scheduled/queued FPM fields
+(prefill/decode request counts, KV-token sums, variances, queue depth), and
+`fpm_metrics_phase.csv` classifies every step as `context`, `decode`, `mixed`, or
+`idle` (from `sum_prefill_tokens` and `num_decode_requests`) so steps can be
+bucketed for per-phase validation.
+
+### How it works
+`collector/layerwise/fpm_ground_truth/collect_fpm_metrics.sh` brings up a real
+local Dynamo vLLM stack in Docker (frontend + worker + collector containers,
+wired together with file-based discovery):
+
+1. The worker runs `dynamo.vllm.instrumented_scheduler`, which publishes a
+   `ForwardPassMetrics` message over a ZMQ PUB socket
+   (`tcp://127.0.0.1:$DYN_FORWARDPASS_METRIC_PORT`, default `20380`) once per
+   forward pass.
+2. `fpm_collect.py` subscribes (ZMQ SUB), decodes each message with
+   `dynamo.common.forward_pass_metrics.decode`, classifies its phase, and appends
+   the compact/detail/phase CSV rows.
+3. `send_requests.py` drives traffic against the frontend's OpenAI-compatible
+   `completions` API while the collector records. By default it sends a
+   **real-workload** mixed stream (dataset-shaped: OpenAssistant/oasst1 ordering,
+   ISL/OSL scaled to a serving regime); `--no-real-workload` switches to a static
+   `context`/`decode`/`mixed` sweep instead. Prompts use random token IDs
+   (`--prompt-token-seed` for reproducibility).
+
+Because the metrics come straight off the live scheduler, FPM captures whatever
+the deployment actually does for a given `(model, TP/EP/DP, max_num_seqs,
+max_num_batched_tokens, prefix caching, dtype)` shape — which is exactly why the
+Scheduler Sizing constraints below matter when comparing against layerwise.
+
+### Outputs and the public wrapper
+A run writes `fpm_metrics.csv`, `fpm_metrics_detail.csv`,
+`fpm_metrics_phase.csv`, `request_workload.csv` (per-request target ISL/OSL +
+prompt tokens), `warmup_workload.csv`, `vllm_metadata.json`, and
+`effective_vllm_config.json`. The Python wrapper
+`python -m collector.layerwise.fpm.collect --model <HF id>` expands TP/EP cases
+and invokes the shell collector (see the command under Scheduler Sizing).
+
+The committed reference runs live under `fpm_golden_runs/` and are the canonical
+ground truth used for the FPM-vs-AIC numbers in this README. The golden steps are
+highly repeatable (~0.3% CV), so persistent AIC error against them is a modeling
+gap, not measurement noise.
+
 ## Scheduler Sizing
 
 Do not hardcode `max_num_seqs` or `max_num_batched_tokens` in layerwise or FPM
@@ -229,32 +296,7 @@ Context new-token rows use `1,16,128,...`; context and decode share the same
 nonzero past-KV grid up to 32k tokens, with context adding `0` for no-prefix
 measurements.
 
-## FPM-vs-AIC MoE modeling: status & handoff
-
-### Decode timing: RESOLVED
-The "Fix MoE decode GPU timing collection" change added the uniform GPU-isolated
-latency source `execute_model_gpu` (one method for every batch size — no more
-`schedule_to_update`/`live_step_wall` mixing). New decode runs are clean and
-monotonic; decode MAPE is **qwen36 ~8.9%, dsv4 ~11.7%** (was catastrophic, 90%+;
-e.g. the old `dsv4_tp4_ep4` 192% decode outlier is gone). Latest MoE decode run:
-`runs/layerwise_moe_decode_execgpu_stablep25_compare_20260616_212000/`.
-
-**Most important rule for any re-collection:** never switch the timing method /
-`latency_source` by batch size or shape. The corruption came from mixing
-`schedule_to_update` (small batch) with `live_step_wall` (batch>=8) in one sweep
-(a step-change discontinuity), plus `live_step_wall` capturing per-step host/wall
-overhead (a fixed ~7-8 ms floor that even exceeded the real full step) instead of
-the GPU step. Use one GPU-isolated method for every batch, KV, model, and phase.
-
-### Open: mixed step is context/prefill-limited (not decode)
-With clean decode, mixed is still ~47% MAPE for qwen36 because (a) the golden-set
-mixed steps are context/prefill-dominated (`decode_delta ~= 0` — decode barely
-contributes) and (b) the headline number is polluted by FPM measurement outliers
-(e.g. `ctx_tokens=928` reported at ~1.6-2.8 ms, physically impossible; AIC's
-~31 ms is right). Legitimate large-prefill steps are ~+8 to +41%. Next focus is
-the context/prefill model and FPM-outlier handling — NOT decode.
-
-### Charts (FPM vs AIC)
+## Charts (FPM vs AIC)
 `tools/plot_fpm_vs_aic.py` renders log-log FPM-vs-AIC charts for a single model.
 Each run writes up to five PNGs into `--out-dir`:
 
@@ -310,6 +352,12 @@ merged with new clean decode.
   un-suppression for single-GPU data (`_LAYERWISE_GEN_SINGLE_GPU_COMM`); high-KV
   dense decode repair (`_repair_decode_high_kv`); mixed model
   `= context_total + decode attention` (`_get_mix_step_latency`).
+- ** Important rule for any re-collection:** never switch the timing method /
+  `latency_source` by batch size or shape. The corruption came from mixing
+  `schedule_to_update` (small batch) with `live_step_wall` (batch>=8) in one sweep
+  (a step-change discontinuity), plus `live_step_wall` capturing per-step host/wall
+  overhead (a fixed ~7-8 ms floor that even exceeded the real full step) instead of
+  the GPU step. Use one GPU-isolated method for every batch, KV, model, and phase.
 
 ## Next steps
 
