@@ -564,6 +564,7 @@ ModelFamily = {
     "QWEN3VL",
     "QWEN3VL_MOE",
     "GEMMA4MIX",
+    "MINIMAXM3",
 }
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
@@ -586,6 +587,8 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Qwen2MoeForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
     "MiniMaxM2ForCausalLM": "MOE",
+    "MiniMaxM3ForCausalLM": "MINIMAXM3",
+    "MiniMaxM3SparseForConditionalGeneration": "MINIMAXM3",
     "MiMoV2FlashForCausalLM": "HYBRIDMOE",
     "Llama4ForConditionalGeneration": "HYBRIDMOE",
     "Qwen3_5ForConditionalGeneration": "QWEN35",
@@ -603,6 +606,7 @@ MULTIMODAL_TEXT_CONFIG_KEY = {
     "Gemma4ForConditionalGeneration": "text_config",
     "Qwen3VLForConditionalGeneration": "text_config",
     "Qwen3VLMoeForConditionalGeneration": "text_config",
+    "MiniMaxM3SparseForConditionalGeneration": "text_config",
 }
 
 """
