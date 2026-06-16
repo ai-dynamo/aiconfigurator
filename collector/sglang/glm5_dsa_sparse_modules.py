@@ -145,19 +145,28 @@ def _write_row(
 # ═══════════════════════════════════════════════════════════════════════
 # Kernel benches (standalone, synthetic inputs)
 # ═══════════════════════════════════════════════════════════════════════
-def _bench_glm5_mqa(M, past_kv, *, index_n_heads, index_head_dim, device):  # noqa: N803
-    """deep_gemm.fp8_mqa_logits — NON-paged ragged kv, FULL-length causal scan.
-    Shared kv of length full_s keeps memory bounded; M query tokens reference it
-    with causal [0, ke) (ke=past_kv+j+1)."""
+def _bench_glm5_mqa(M, past_kv, isl, *, index_n_heads, index_head_dim, device):  # noqa: N803
+    """deep_gemm.fp8_mqa_logits — ragged batch of bs = M // isl requests.
+    M = bs*isl query tokens over a CONCATENATED per-request KV cache (bs
+    segments of past_kv + isl); ks/ke are absolute [start, end) into that
+    cache, matching sglang's dsa_indexer (per-token k_start / k_end). Each
+    request r local pos p scans causal [r*seg, r*seg + past_kv + p + 1)."""
     from deep_gemm import fp8_mqa_logits
 
-    full_s = max(1, past_kv + M)
+    bs = max(1, M // isl)
+    seg = past_kv + isl  # per-request KV length
+    full_s = max(1, bs * seg)  # CONCATENATED kv: bs segments of (past_kv + isl)
     q = torch.randn(M, index_n_heads, index_head_dim, dtype=torch.bfloat16, device=device).to(torch.float8_e4m3fn)
     k_fp8 = torch.randn(full_s, index_head_dim, dtype=torch.bfloat16, device=device).to(torch.float8_e4m3fn)
     k_scale = torch.ones(full_s, dtype=torch.float32, device=device)
     weights = torch.randn(M, index_n_heads, dtype=torch.float32, device=device)
-    ke = torch.arange(past_kv + 1, past_kv + M + 1, dtype=torch.int32, device=device).clamp(max=full_s)
-    ks = torch.zeros(M, dtype=torch.int32, device=device)
+    # Absolute [ks, ke) into the concatenated kv (sglang dsa_indexer k_start/k_end):
+    # token (request r, local pos p) attends its own segment
+    # [r*seg, r*seg + past_kv + p + 1).
+    seg_start = torch.repeat_interleave(torch.arange(bs, dtype=torch.int32, device=device) * seg, isl)
+    causal = torch.arange(1, isl + 1, dtype=torch.int32, device=device).repeat(bs)
+    ks = seg_start
+    ke = (seg_start + past_kv + causal).clamp(max=full_s)
 
     def kernel_fn():
         return fp8_mqa_logits(q, (k_fp8, k_scale), weights, ks, ke, clean_logits=False)
@@ -290,18 +299,23 @@ def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
     return results, kernel_src
 
 
-def _bench_glm5_dsa_attn(M, past_kv, *, native_heads, d_qk, d_v, topk, device):  # noqa: N803
-    """flash_mla_sparse_fwd — sparse FMLA over topk-selected positions.
-    q (s_q, heads->pad128, d_qk), kv (kv_len, 1, d_qk), indices (s_q, 1, K)."""
+def _bench_glm5_dsa_attn(M, past_kv, isl, *, native_heads, d_qk, d_v, topk, device):  # noqa: N803
+    """flash_mla_sparse_fwd — sparse FMLA, ragged batch of bs = M // isl reqs.
+    q (M=bs*isl, heads->pad128, d_qk), kv = CONCATENATED bs segments of
+    (past_kv + isl); indices (M, 1, K) are absolute into each token's own
+    segment. K = min(topk, per-request context)."""
     from sgl_kernel.flash_mla import flash_mla_sparse_fwd
 
-    full_s = max(1, past_kv + M)
-    k = min(topk, full_s)
+    bs = max(1, M // isl)
+    seg = past_kv + isl
+    full_s = max(1, bs * seg)  # concatenated bs segments of (past_kv + isl)
+    k = min(topk, seg)  # topk capped by PER-REQUEST context
     pad_heads = 128 if (native_heads % 128) else native_heads
     q = torch.randn(M, pad_heads, d_qk, dtype=torch.bfloat16, device=device)
     kv = torch.randn(full_s, 1, d_qk, dtype=torch.bfloat16, device=device)
-    base = torch.arange(k, dtype=torch.int32, device=device)
-    indices = base.view(1, 1, k).repeat(M, 1, 1)
+    # each token selects k positions inside its own segment [r*seg, r*seg+seg)
+    seg_start = torch.repeat_interleave(torch.arange(bs, dtype=torch.int32, device=device) * seg, isl)
+    indices = seg_start.view(M, 1, 1) + torch.arange(k, dtype=torch.int32, device=device).view(1, 1, k)
     if k % 64:
         pad = 64 - k % 64
         indices = torch.cat(
@@ -323,11 +337,14 @@ def _bench_glm5_sparse_kernel_shape(kernel, prefix, isl, bs, sc, device):
         results, kernel_source = _bench_glm5_topk(M, prefix, isl, bs, topk=sc.index_topk, device=device)
         return kernel_source, results
     if kernel == "mqa":
-        r = _bench_glm5_mqa(M, prefix, index_n_heads=sc.index_n_heads, index_head_dim=sc.index_head_dim, device=device)
+        r = _bench_glm5_mqa(
+            M, prefix, isl, index_n_heads=sc.index_n_heads, index_head_dim=sc.index_head_dim, device=device
+        )
     elif kernel == "dsa_attn":
         r = _bench_glm5_dsa_attn(
             M,
             prefix,
+            isl,
             native_heads=sc.num_attention_heads,
             d_qk=sc.d_qk,
             d_v=sc.kv_lora_rank,

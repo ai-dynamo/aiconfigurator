@@ -673,9 +673,19 @@ class ContextDSAModule(Operation):
         IS the prefix (past_kv) length.
         """
         cp = self._cp_size
-        per_card = max(1, isl // cp)
+        per_card = max(1, -(-isl // cp))  # ceil: critical path = busiest CP rank
         sp = self._load_glm5_sparse(database)
         g = sp.get("_2d", {})
+        # Fail fast: CP DSA modeling REQUIRES the sparse mqa/topk tables for
+        # the mqa/topk_last deltas. _lookup_2d clamps isl + interp/extrapolates
+        # step, so a None below means the table is absent entirely (parquet not
+        # collected) -- degrading silently to dsa_base would hide that.
+        missing = [k for k in ("mqa", "topk_last", "topk_flat") if not g.get(k)]
+        if missing:
+            raise ValueError(
+                f"GLM5 CP DSA modeling needs sparse tables {missing} for "
+                f"{self._architecture}; collect glm5_mqa_logits/glm5_topk first."
+            )
         # Base: per-card monolithic dsa_module at (per_card, prefix), follows the
         # run's kv_cache_dtype like the non-CP path.
         dsa_base = float(
