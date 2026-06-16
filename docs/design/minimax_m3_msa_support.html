@@ -148,6 +148,9 @@ GQA attention, has data) vs <strong>M3 in pure HYBRID</strong> (MoE + MSA; MSA t
 M3 is the larger model (hidden 6144 vs 3072, 64 vs 48 heads) so prefill is heavier; but its MSA
 sparse attention caps the decode KV at the top-2048 selection, so <strong>TPOT stays flat as context
 grows</strong> while M2.7's full attention grows linearly.</p>
+<p class="note wn"><b>Caveat:</b> b200 has no NVFP4 DSA data, so under NVFP4 the M3 MSA transfer falls
+back to the constant (SOL/0.5), not DSA's util — that is why the NVFP4 M3 decode below is a suspiciously
+exact flat line. The faithful (DSA-transfer) M3 decode uses fp8_block; see the sanity check in 6.1.</p>
 
 <table>
   <tr><th>workload</th><th class="num">M2.7 (silicon)</th><th class="num">M3 (hybrid)</th><th class="num">M3 / M2.7</th></tr>
@@ -189,6 +192,24 @@ grows</strong> while M2.7's full attention grows linearly.</p>
 faster per token than M2.7's full attention. The hybrid M3 reproduces this purely from the MSA SOL
 (pairs capped at index_topk) + DSA-transferred util; no MSA measurements. Figure:
 <code>poc/hybrid_util/compare_m27_m3.png</code>.</p>
+
+<h3>6.1 · Decode sanity check vs real DSA (GLM-5, SILICON)</h3>
+<p>Is M3's flat decode real, or an artifact? Cross-check against a model that <em>has</em>
+sparse-attention silicon data. GLM-5 (real DSA) in SILICON also shows non-growing decode — sparse
+attention is genuinely context-independent (top-k cap). The faithful M3 decode (fp8_block, where DSA
+data exists so the transfer is real) sits below GLM-5's (lighter MSA: 4 vs 32 index heads, GQA vs
+MLA). The NVFP4 M3 column is the constant fallback (no DSA NVFP4) and should not be read as a transfer.</p>
+<table>
+  <tr><th>decode TPOT, bs=64</th><th class="num">GLM-5 silicon (real DSA)</th><th class="num">M3 fp8_block (real DSA transfer)</th><th class="num">M3 NVFP4 (constant fallback)</th></tr>
+  <tr><td>kv 2048</td><td class="num">56.4 ms</td><td class="num">23.6 ms</td><td class="num wn">10.3 ms</td></tr>
+  <tr><td>kv 4096</td><td class="num">51.2 ms</td><td class="num">21.2 ms</td><td class="num wn">10.3 ms</td></tr>
+  <tr><td>kv 8192</td><td class="num">40.7 ms</td><td class="num">17.5 ms</td><td class="num wn">10.3 ms</td></tr>
+  <tr><td>kv 16384</td><td class="num">49.9 ms</td><td class="num">17.9 ms</td><td class="num wn">10.3 ms</td></tr>
+</table>
+<p class="note">All three are flat in kv &rarr; the sparse-decode behaviour is <strong class="ok">physically
+real</strong>, confirmed by real DSA silicon. Take-away: cross-op transfer needs the reference op (DSA)
+to have data <em>at the query's quant</em> — otherwise it degrades to the constant. So either collect
+NVFP4 DSA data, or set <code>msa_dsa_scale_k</code> against the fp8_block transfer.</p>
 
 <!-- 7 -->
 <h2>7 · Open items</h2>
