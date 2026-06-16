@@ -73,8 +73,7 @@ def values_for_preset(preset: str, *, max_decode_batch_size: int | None = None) 
     """Return CSV shape defaults for the named public run preset."""
     if preset == "full":
         gen_batch_sizes = (
-            _batch_sizes_up_to(max_decode_batch_size)
-            if max_decode_batch_size is not None else GEN_BATCH_SIZES
+            _batch_sizes_up_to(max_decode_batch_size) if max_decode_batch_size is not None else GEN_BATCH_SIZES
         )
         return {
             "ctx_new_tokens": ",".join(map(str, CTX_NEW_TOKENS)),
@@ -225,10 +224,7 @@ def make_work_unit_args(
     moe_dummy_router = bool(getattr(public_args, "moe_dummy_router", False))
     physical_tp_real_weights = bool(getattr(public_args, "physical_tp_real_weights", False))
     use_moe_noop = public_args.moe_noop or (
-        model.is_moe
-        and not public_args.moe_real_router
-        and not moe_dummy_router
-        and not physical_tp_real_weights
+        model.is_moe and not public_args.moe_real_router and not moe_dummy_router and not physical_tp_real_weights
     )
     return argparse.Namespace(
         model=model.model,
@@ -270,9 +266,7 @@ def make_work_unit_args(
         allow_multi_gpu_diagnostic=bool(getattr(public_args, "allow_multi_gpu_diagnostic", False)),
         physical_tp_real_weights=physical_tp_real_weights,
         default_gen_target_layer_count=(
-            public_args.target_layer_count is None
-            and phases == "gen"
-            and public_args.gen_target_layer_count == 1
+            public_args.target_layer_count is None and phases == "gen" and public_args.gen_target_layer_count == 1
         ),
     )
 
@@ -323,10 +317,7 @@ def _detect_layer_schedule(
         if any(i < 0 for i in target_layers):
             raise ValueError(f"target_layers must be non-negative, got {target_layers}")
         if max_config_layers and max(target_layers) >= max_config_layers:
-            raise ValueError(
-                f"target_layers {target_layers} exceed config num_hidden_layers="
-                f"{max_config_layers}"
-            )
+            raise ValueError(f"target_layers {target_layers} exceed config num_hidden_layers={max_config_layers}")
         is_moe = _is_moe_config(config)
         if is_moe and not _is_all_moe_config(config):
             raise ValueError(
@@ -345,17 +336,21 @@ def _detect_layer_schedule(
                 raise ValueError(
                     f"target_layer_config_depth={target_layer_config_depth} exceeds "
                     f"config num_hidden_layers={max_config_layers}"
-            )
+                )
             num_hidden_layers = target_layer_config_depth
-        return [
-            RepresentativeLayer(
-                layer_index=sorted_layers[0],
-                layer_type="moe" if is_moe else "dense",
-                measured_layer_count=len(sorted_layers),
-                layer_multiplier=len(sorted_layers),
-                target_layers=tuple(sorted_layers),
-            )
-        ], num_hidden_layers, _layer_types_override(config, num_hidden_layers)
+        return (
+            [
+                RepresentativeLayer(
+                    layer_index=sorted_layers[0],
+                    layer_type="moe" if is_moe else "dense",
+                    measured_layer_count=len(sorted_layers),
+                    layer_multiplier=len(sorted_layers),
+                    target_layers=tuple(sorted_layers),
+                )
+            ],
+            num_hidden_layers,
+            _layer_types_override(config, num_hidden_layers),
+        )
 
     if target_layer_count < 1:
         raise ValueError(f"target_layer_count must be >= 1, got {target_layer_count}")
@@ -382,15 +377,19 @@ def _detect_layer_schedule(
                     f"config num_hidden_layers={max_config_layers}"
                 )
             num_hidden_layers = target_layer_config_depth
-        return [
-            RepresentativeLayer(
-                layer_index=0,
-                layer_type="dense",
-                measured_layer_count=target_layer_count,
-                layer_multiplier=max_config_layers or target_layer_count,
-                target_layers=tuple(range(target_layer_count)),
-            )
-        ], num_hidden_layers, _layer_types_override(config, num_hidden_layers)
+        return (
+            [
+                RepresentativeLayer(
+                    layer_index=0,
+                    layer_type="dense",
+                    measured_layer_count=target_layer_count,
+                    layer_multiplier=max_config_layers or target_layer_count,
+                    target_layers=tuple(range(target_layer_count)),
+                )
+            ],
+            num_hidden_layers,
+            _layer_types_override(config, num_hidden_layers),
+        )
 
     if _is_all_moe_config(config):
         typed_representatives = (
@@ -413,21 +412,26 @@ def _detect_layer_schedule(
                     f"config num_hidden_layers={max_config_layers}"
                 )
             num_hidden_layers = target_layer_config_depth
-        return [
-            RepresentativeLayer(
-                layer_index=0,
-                layer_type="moe",
-                measured_layer_count=target_layer_count,
-                layer_multiplier=max_config_layers or target_layer_count,
-                target_layers=tuple(range(target_layer_count)),
-            )
-        ], num_hidden_layers, _layer_types_override(config, num_hidden_layers)
+        return (
+            [
+                RepresentativeLayer(
+                    layer_index=0,
+                    layer_type="moe",
+                    measured_layer_count=target_layer_count,
+                    layer_multiplier=max_config_layers or target_layer_count,
+                    target_layers=tuple(range(target_layer_count)),
+                )
+            ],
+            num_hidden_layers,
+            _layer_types_override(config, num_hidden_layers),
+        )
 
     raise ValueError(
         "hybrid dense+MoE layerwise collection is not implemented yet; "
         "the collector schema supports representative layer metadata, but "
         "hybrid scheduling needs separate dense and MoE work units"
     )
+
 
 def _layer_types_override(
     config: dict[str, Any],
@@ -437,11 +441,9 @@ def _layer_types_override(
     if not isinstance(layer_types, list):
         return None
     if len(layer_types) < num_hidden_layers:
-        raise ValueError(
-            f"layer_types has length {len(layer_types)} but num_hidden_layers="
-            f"{num_hidden_layers}"
-        )
+        raise ValueError(f"layer_types has length {len(layer_types)} but num_hidden_layers={num_hidden_layers}")
     return {"layer_types": list(layer_types[:num_hidden_layers])}
+
 
 def _representatives_from_layer_types(
     config: dict[str, Any],
@@ -472,15 +474,18 @@ def _representatives_from_layer_types(
     num_hidden_layers = max(rep.layer_index for rep in representatives) + 1
     return representatives, num_hidden_layers, _layer_types_override(config, num_hidden_layers)
 
+
 def _decoder_config_view(config: dict[str, Any]) -> dict[str, Any]:
     text_config = config.get("text_config")
     if isinstance(text_config, dict) and "num_attention_heads" in text_config:
         return text_config
     return config
 
+
 def _is_moe_config(config: dict[str, Any]) -> bool:
     config = _decoder_config_view(config)
     return any((config.get(k, 0) or 0) > 0 for k in EXPERT_COUNT_KEYS)
+
 
 def _is_all_moe_config(config: dict[str, Any]) -> bool:
     config = _decoder_config_view(config)
@@ -492,9 +497,9 @@ def _is_all_moe_config(config: dict[str, Any]) -> bool:
     # config exposes experts but none of those controls, assume every decoder
     # block owns a routed MLP.
     return _is_moe_config(config) and not any(
-        key in config
-        for key in ("first_k_dense_replace", "decoder_sparse_step", "mlp_only_layers")
+        key in config for key in ("first_k_dense_replace", "decoder_sparse_step", "mlp_only_layers")
     )
+
 
 def _work_unit_id(
     row_base: dict[str, Any],
@@ -528,7 +533,8 @@ def _partition_gen_datapoints_for_live_step(
         return [("", datapoints)]
 
     prefix_datapoints = [
-        dp for dp in datapoints
+        dp
+        for dp in datapoints
         if not _live_step_gen_would_handle(
             dp,
             min_past_kv=live_step_gen_min_past_kv,
@@ -536,7 +542,8 @@ def _partition_gen_datapoints_for_live_step(
         )
     ]
     live_step_datapoints = [
-        dp for dp in datapoints
+        dp
+        for dp in datapoints
         if _live_step_gen_would_handle(
             dp,
             min_past_kv=live_step_gen_min_past_kv,
@@ -578,6 +585,7 @@ def _patch_for_layerwise_depth(
         cache_dir=cache_dir,
     )
 
+
 def _build_datapoints(
     *,
     phases: str,
@@ -598,6 +606,7 @@ def _build_datapoints(
             for past_kv in gen_past_kv:
                 datapoints.append(DataPoint("gen", batch_size, 1, past_kv))
     return datapoints
+
 
 def _filter_auto_ctx_batch_datapoints(
     datapoints: list[DataPoint],
@@ -621,6 +630,7 @@ def _filter_auto_ctx_batch_datapoints(
         skipped += 1
     return filtered, skipped
 
+
 def _resolve_decode_max_num_seqs(
     datapoints: list[DataPoint],
     max_num_seqs: int | None,
@@ -642,18 +652,12 @@ def _resolve_decode_max_num_seqs(
     if max_gen_batch_size <= resolved_max_num_seqs:
         return datapoints, resolved_max_num_seqs
 
-    filtered = [
-        dp
-        for dp in datapoints
-        if dp.phase != "gen" or int(dp.batch_size) <= resolved_max_num_seqs
-    ]
+    filtered = [dp for dp in datapoints if dp.phase != "gen" or int(dp.batch_size) <= resolved_max_num_seqs]
     skipped = len(datapoints) - len(filtered)
     if skipped:
-        print(
-            f"[filter] skipped {skipped} decode datapoints with batch_size > "
-            f"max_num_seqs={resolved_max_num_seqs}"
-        )
+        print(f"[filter] skipped {skipped} decode datapoints with batch_size > max_num_seqs={resolved_max_num_seqs}")
     return filtered, resolved_max_num_seqs
+
 
 def _live_step_gen_would_handle(
     datapoint: DataPoint,
@@ -669,6 +673,7 @@ def _live_step_gen_would_handle(
         return True
     return int(min_batch_size) > 0 and int(datapoint.batch_size) >= int(min_batch_size)
 
+
 def _model_max_position_embeddings(config: dict[str, Any]) -> int | None:
     config = _decoder_config_view(config)
     for key in ("max_position_embeddings", "model_max_length", "seq_length", "n_positions"):
@@ -683,6 +688,7 @@ def _model_max_position_embeddings(config: dict[str, Any]) -> int | None:
         if 0 < value < 1_000_000_000:
             return value
     return None
+
 
 def _filter_datapoints_for_model_max_len(
     datapoints: list[DataPoint],
@@ -706,6 +712,7 @@ def _filter_datapoints_for_model_max_len(
             continue
         filtered.append(dp)
     return filtered, skipped
+
 
 def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
     """Build legacy work units for one model and one requested TP/EP sweep."""
@@ -735,16 +742,15 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
     orig_layer_count = int(orig_decoder_config.get("num_hidden_layers") or 0)
     target_layer_count = args.target_layer_count
     is_moe = _is_moe_config(orig_config)
-    explicit_target_layers = (
-        _parse_ints(args.target_layers) if getattr(args, "target_layers", None) else None
-    )
+    explicit_target_layers = _parse_ints(args.target_layers) if getattr(args, "target_layers", None) else None
     moe_noop = bool(getattr(args, "moe_noop", False) and is_moe)
     requested_latency_source = str(getattr(args, "latency_source", "span"))
+    gen_full_step_sources = {"auto", "schedule_to_update", "worker_wall", "execute_model_gpu"}
     moe_gen_schedule_envelope = (
         args.phases == "gen"
         and is_moe
         and moe_noop
-        and requested_latency_source in {"auto", "schedule_to_update", "worker_wall"}
+        and requested_latency_source in gen_full_step_sources
         and bool(getattr(args, "default_gen_target_layer_count", False))
         and explicit_target_layers is None
         and getattr(args, "target_layer_config_depth", None) is None
@@ -752,7 +758,7 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
     dense_gen_schedule_envelope = (
         args.phases == "gen"
         and not is_moe
-        and requested_latency_source in {"auto", "schedule_to_update", "worker_wall"}
+        and requested_latency_source in gen_full_step_sources
         and bool(getattr(args, "default_gen_target_layer_count", False))
         and explicit_target_layers is None
         and getattr(args, "target_layer_config_depth", None) is None
@@ -761,13 +767,16 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
         if orig_layer_count < 1:
             raise ValueError("target_layer_count=0 requires config num_hidden_layers")
         target_layer_count = orig_layer_count
-    context_schedule_envelope = (
-        args.phases == "ctx"
-        and requested_latency_source in {"auto", "schedule_to_update", "worker_wall"}
-    )
+    context_schedule_envelope = args.phases == "ctx" and requested_latency_source in {
+        "auto",
+        "schedule_to_update",
+        "worker_wall",
+    }
     layer_schedule, num_hidden_layers, extra_overrides = _detect_layer_schedule(
-        orig_config, target_layer_count,
-        explicit_target_layers, args.target_layer_config_depth,
+        orig_config,
+        target_layer_count,
+        explicit_target_layers,
+        args.target_layer_config_depth,
         expand_layer_types=not (context_schedule_envelope or moe_gen_schedule_envelope),
     )
 
@@ -785,19 +794,12 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
         gen_past_kv=gen_past_kv,
     )
     base_datapoints, resolved_max_num_seqs = _resolve_decode_max_num_seqs(base_datapoints, max_num_seqs)
-    gen_driver = str(
-        getattr(args, "gen_driver", "")
-        or os.environ.get("LAYERWISE_GEN_DRIVER")
-        or "prefix_cache"
-    )
+    gen_driver = str(getattr(args, "gen_driver", "") or os.environ.get("LAYERWISE_GEN_DRIVER") or "prefix_cache")
     if not getattr(args, "no_filter_model_max_len", False):
         model_max_len = _model_max_position_embeddings(orig_config)
         base_datapoints, skipped = _filter_datapoints_for_model_max_len(base_datapoints, model_max_len)
         if skipped:
-            print(
-                f"[skip] {skipped} datapoints require more than "
-                f"model_max_len={model_max_len} tokens"
-            )
+            print(f"[skip] {skipped} datapoints require more than model_max_len={model_max_len} tokens")
         if not base_datapoints:
             raise ValueError("all datapoints exceed the model's configured max length")
     work_units: list[WorkUnit] = []
@@ -809,10 +811,7 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
                 ep = requested_effective_ep
                 moe_tp = tp if ep == 1 else 1
                 if ep != 1 and (ep < tp or ep % tp != 0):
-                    print(
-                        f"[skip] effective_ep_size={ep} is not representable "
-                        f"for tp={tp}; vLLM EP is TP * DP"
-                    )
+                    print(f"[skip] effective_ep_size={ep} is not representable for tp={tp}; vLLM EP is TP * DP")
                     continue
             else:
                 if tp % args.moe_tp != 0:
@@ -847,10 +846,7 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
                 for dp in gen_datapoints
             )
         )
-        live_step_gen_deployment = (
-            gen_driver == "live_decode"
-            or has_live_step_gen
-        )
+        live_step_gen_deployment = gen_driver == "live_decode" or has_live_step_gen
         runtime_defaults = gpt_oss_runtime_defaults(
             model=args.model,
             system=system,
@@ -975,10 +971,7 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
         }
         for representative in layer_schedule:
             target_layers = representative.kept_layers()
-            includes_moe = (
-                not moe_noop
-                and "moe" in representative.layer_type.lower()
-            )
+            includes_moe = not moe_noop and "moe" in representative.layer_type.lower()
             final_extra_vllm_args = work_unit_extra_vllm_args
             base_work_unit_id = _work_unit_id(
                 row_base,
@@ -995,26 +988,28 @@ def build_work_units(args: argparse.Namespace) -> list[WorkUnit]:
                 live_step_gen_min_past_kv=live_step_gen_min_past_kv,
                 live_step_gen_min_batch_size=live_step_gen_min_batch_size,
             ):
-                work_units.append(WorkUnit(
-                    work_unit_id=f"{phase_work_unit_id}{id_suffix}",
-                    model_dir=model_dir,
-                    row_base=row_base,
-                    representative=representative,
-                    target_layers=target_layers,
-                    datapoints=partitioned_datapoints,
-                    model_layer_count=num_hidden_layers,
-                    max_num_seqs=resolved_max_num_seqs,
-                    max_num_batched_tokens=resolved_max_num_batched_tokens,
-                    cache_block_size=resolved_cache_block_size,
-                    max_model_len=max_model_len,
-                    gpu_memory_utilization=gpu_memory_utilization,
-                    gen_driver=gen_driver,
-                    extra_vllm_args=final_extra_vllm_args,
-                    moe_noop=moe_noop,
-                    includes_moe=includes_moe,
-                    router_weight_model=router_weight_model,
-                    physical_gpus=tp * physical_dp_size if physical_tp else 1,
-                    live_step_gen_min_past_kv=live_step_gen_min_past_kv,
-                    live_step_gen_min_batch_size=live_step_gen_min_batch_size,
-                ))
+                work_units.append(
+                    WorkUnit(
+                        work_unit_id=f"{phase_work_unit_id}{id_suffix}",
+                        model_dir=model_dir,
+                        row_base=row_base,
+                        representative=representative,
+                        target_layers=target_layers,
+                        datapoints=partitioned_datapoints,
+                        model_layer_count=num_hidden_layers,
+                        max_num_seqs=resolved_max_num_seqs,
+                        max_num_batched_tokens=resolved_max_num_batched_tokens,
+                        cache_block_size=resolved_cache_block_size,
+                        max_model_len=max_model_len,
+                        gpu_memory_utilization=gpu_memory_utilization,
+                        gen_driver=gen_driver,
+                        extra_vllm_args=final_extra_vllm_args,
+                        moe_noop=moe_noop,
+                        includes_moe=includes_moe,
+                        router_weight_model=router_weight_model,
+                        physical_gpus=tp * physical_dp_size if physical_tp else 1,
+                        live_step_gen_min_past_kv=live_step_gen_min_past_kv,
+                        live_step_gen_min_batch_size=live_step_gen_min_batch_size,
+                    )
+                )
     return work_units

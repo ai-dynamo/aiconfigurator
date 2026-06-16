@@ -64,6 +64,8 @@ TERMINAL_EVENTS = {
 FATAL_STREAK_LIMIT = 3
 FPM_PORT_ENV = "DYN_FORWARDPASS_METRIC_PORT"
 FPM_PORT_BASE = 20380
+WORKER_TIMING_LATENCY_SOURCES = {"schedule_to_update", "worker_wall", "execute_model_gpu"}
+FULL_STEP_LATENCY_SOURCES = {"schedule_to_update", "worker_wall", "live_step_wall", "execute_model_gpu"}
 
 
 @dataclass
@@ -358,7 +360,7 @@ def _lookup_scheduler_timing_aggs(
             if datapoint.phase == "ctx":
                 if not event.get("live_step_driver"):
                     continue
-            elif event.get("live_step_driver"):
+            elif "execute_model_gpu_time_ms" not in event:
                 continue
             if datapoint.phase == "ctx" and not event.get("sync_execute_model_wall_time"):
                 continue
@@ -379,22 +381,23 @@ def _lookup_scheduler_timing_aggs(
             run = int(event["run"])
             latency_ms = (
                 event.get("execute_model_gpu_time_ms")
-                if datapoint.phase == "gen" and not event.get("live_step_driver")
+                if datapoint.phase == "gen"
                 else event.get("execute_model_wall_time_ms")
             )
             if latency_ms in (None, ""):
                 continue
             model_execute_counts_by_run[run] = model_execute_counts_by_run.get(run, 0) + 1
             latency_us = float(latency_ms) * 1000.0
-            model_execute_aggs.append(
-                {
-                    "gpu_us": latency_us,
-                    "rms_us": 0.0,
-                    "span_us": latency_us,
-                    "kernel_count": 0,
-                    "rms_kernel_count": 0,
-                }
-            )
+            agg = {
+                "gpu_us": latency_us,
+                "rms_us": 0.0,
+                "span_us": latency_us,
+                "kernel_count": 0,
+                "rms_kernel_count": 0,
+            }
+            if datapoint.phase == "gen":
+                agg["latency_source"] = "execute_model_gpu"
+            model_execute_aggs.append(agg)
         rank_sharded_gen = datapoint.phase == "gen" and any(count > 1 for count in model_execute_counts_by_run.values())
         if model_execute_aggs and not rank_sharded_gen:
             return model_execute_aggs
@@ -602,7 +605,7 @@ def _effective_latency_source(
 
     if requested_source == "auto":
         if datapoint.phase in {"ctx", "gen"}:
-            return "schedule_to_update"
+            return "execute_model_gpu" if datapoint.phase == "gen" else "schedule_to_update"
         return "span"
     return requested_source
 
@@ -667,7 +670,7 @@ def _lookup_timing_source_aggs(
 ) -> tuple[str, list[dict[str, Any]]] | None:
     """Return scheduler/worker timing repeats, falling back only for auto mode."""
 
-    if effective_source == "schedule_to_update":
+    if effective_source in {"schedule_to_update", "execute_model_gpu"}:
         aggs = _lookup_scheduler_timing_aggs(
             events,
             work_unit_id,
@@ -677,8 +680,16 @@ def _lookup_timing_source_aggs(
             prefer_live_step_wall_for_gen=includes_moe or moe_noop,
         )
         if aggs:
+            if all(str(agg.get("latency_source") or "") == "execute_model_gpu" for agg in aggs):
+                return "execute_model_gpu", aggs
             if all(str(agg.get("latency_source") or "") == "live_step_wall" for agg in aggs):
+                if effective_source == "execute_model_gpu" and requested_source != "auto":
+                    return None
                 return "live_step_wall", aggs
+            if effective_source == "execute_model_gpu":
+                if requested_source != "auto":
+                    return None
+                return "schedule_to_update", aggs
             return effective_source, aggs
         if requested_source == "auto":
             worker_aggs = _lookup_worker_wall_aggs(events, work_unit_id, datapoint, attempt_id=attempt_id)
@@ -728,7 +739,7 @@ class Scheduler:
                     includes_moe=_work_unit_includes_moe(unit),
                     moe_decode_gpu_batch_threshold=self.args.moe_decode_gpu_batch_threshold,
                 )
-                if source not in {"schedule_to_update", "worker_wall"}:
+                if source not in WORKER_TIMING_LATENCY_SOURCES:
                     raise ValueError(
                         "--nsys-capture cuda_profiler_api cannot be used for "
                         "per-layer latency sources because CUDA graph module "
@@ -998,9 +1009,7 @@ class Scheduler:
             )
             for dp in pending
         ]
-        enable_layerwise_nvtx = any(
-            source not in {"schedule_to_update", "worker_wall"} for source in effective_latency_sources
-        )
+        enable_layerwise_nvtx = any(source not in WORKER_TIMING_LATENCY_SOURCES for source in effective_latency_sources)
         enable_layer_patch = unit.needs_layer_patch(enable_layerwise_nvtx_tracing=enable_layerwise_nvtx)
         live_step_marker = getattr(self.args, "live_step_driver", False) and any(
             _live_step_driver_would_handle(
@@ -1011,7 +1020,7 @@ class Scheduler:
             for dp in pending
         )
         prefix_cache_gen_step_marker = has_prefix_cache_gen and any(
-            dp.phase == "gen" and source == "schedule_to_update"
+            dp.phase == "gen" and source in {"schedule_to_update", "execute_model_gpu"}
             for dp, source in zip(pending, effective_latency_sources, strict=False)
         )
         enable_step_marker = (
@@ -1077,7 +1086,7 @@ class Scheduler:
                 includes_moe=_work_unit_includes_moe(unit),
                 moe_decode_gpu_batch_threshold=self.args.moe_decode_gpu_batch_threshold,
             )
-            not in {"schedule_to_update", "worker_wall"}
+            not in WORKER_TIMING_LATENCY_SOURCES
             for dp in pending
         )
 
@@ -1234,7 +1243,7 @@ class Scheduler:
                 includes_moe=_work_unit_includes_moe(attempt.work_unit),
                 moe_decode_gpu_batch_threshold=self.args.moe_decode_gpu_batch_threshold,
             )
-            if effective_latency_source in {"schedule_to_update", "worker_wall"}:
+            if effective_latency_source in WORKER_TIMING_LATENCY_SOURCES:
                 timing = _lookup_timing_source_aggs(
                     requested_source=self.args.latency_source,
                     effective_source=effective_latency_source,
@@ -1263,7 +1272,7 @@ class Scheduler:
             physical_representative = (
                 int(attempt.work_unit.physical_gpus or 1) > 1 and not attempt.work_unit.uses_full_layer_depth()
             )
-            if effective_latency_source in {"schedule_to_update", "worker_wall"} and not physical_representative:
+            if effective_latency_source in FULL_STEP_LATENCY_SOURCES and not physical_representative:
                 representative["layer_multiplier"] = representative["measured_layer_count"]
             row = {
                 **attempt.work_unit.row_base,
@@ -1321,7 +1330,7 @@ class Scheduler:
                 includes_moe=_work_unit_includes_moe(attempt.work_unit),
                 moe_decode_gpu_batch_threshold=self.args.moe_decode_gpu_batch_threshold,
             )
-            if effective_latency_source not in {"schedule_to_update", "worker_wall"}:
+            if effective_latency_source not in WORKER_TIMING_LATENCY_SOURCES:
                 if dp.phase != "gen":
                     continue
                 effective_latency_source = "worker_wall"
@@ -1347,7 +1356,7 @@ class Scheduler:
             physical_representative = (
                 int(attempt.work_unit.physical_gpus or 1) > 1 and not attempt.work_unit.uses_full_layer_depth()
             )
-            if not physical_representative:
+            if effective_latency_source in FULL_STEP_LATENCY_SOURCES and not physical_representative:
                 representative["layer_multiplier"] = representative["measured_layer_count"]
             row = {
                 **attempt.work_unit.row_base,

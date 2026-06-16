@@ -194,12 +194,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     advanced.add_argument("--rank-reduce", choices=("sum", "max"), default="max")
     advanced.add_argument(
         "--latency-source",
-        choices=("auto", "span", "gpu", "gpu_capped", "schedule_to_update", "worker_wall"),
+        choices=("auto", "span", "gpu", "gpu_capped", "schedule_to_update", "worker_wall", "execute_model_gpu"),
         default="auto",
         help=(
             "Latency source for output rows. auto uses scheduler timing for "
-            "context and decode. Use span/gpu/gpu_capped only for diagnostic "
-            "module-level rows that will not be promoted as full-step backend data."
+            "context and CUDA-event execute_model timing for decode. Use "
+            "span/gpu/gpu_capped only for diagnostic module-level rows that "
+            "will not be promoted as full-step backend data."
         ),
     )
     advanced.add_argument("--moe-decode-gpu-batch-threshold", type=int, default=8)
@@ -207,15 +208,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     advanced.add_argument("--ctx-measured-runs", type=int, default=6)
     advanced.add_argument(
         "--ctx-repeat-aggregation",
-        choices=("median", "mean", "trimmed_mean", "min"),
+        choices=("median", "mean", "trimmed_mean", "min", "stable_median", "stable_p25"),
         default="trimmed_mean",
     )
     advanced.add_argument("--gen-warmup-runs", type=int, default=1)
     advanced.add_argument("--gen-measured-runs", type=int, default=6)
     advanced.add_argument(
         "--gen-repeat-aggregation",
-        choices=("median", "mean", "trimmed_mean", "min"),
-        default="trimmed_mean",
+        choices=("median", "mean", "trimmed_mean", "min", "stable_median", "stable_p25"),
+        default="stable_p25",
     )
     advanced.add_argument(
         "--gen-driver",

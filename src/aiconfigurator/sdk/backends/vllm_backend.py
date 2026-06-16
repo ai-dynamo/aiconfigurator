@@ -609,7 +609,7 @@ class VLLMBackend(BaseBackend):
         raise PerfDataNotAvailableError(
             "vLLM GEN layerwise data for "
             f"{model_name!r} is representative module timing, not a full scheduler step. "
-            "Recollect decode rows with latency_source=auto/schedule_to_update/worker_wall."
+            "Recollect decode rows with latency_source=auto/execute_model_gpu/schedule_to_update/worker_wall."
         )
 
     def _layerwise_structural_moe_context_ms(self, detail: dict, num_layers: int) -> float | None:

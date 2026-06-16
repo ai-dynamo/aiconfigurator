@@ -9,8 +9,32 @@ import argparse
 import statistics
 from typing import Any
 
-
 DEFAULT_ROLLUP = r"^(CUDAGraphWrapper)$"
+
+
+def _stable_median_values(values: list[float]) -> list[float]:
+    """Return the stable low-latency repeat cluster after trimming high plateaus."""
+
+    cluster = sorted(float(value) for value in values)
+    while len(cluster) >= 6:
+        gaps = [cluster[idx + 1] - cluster[idx] for idx in range(len(cluster) - 1)]
+        gap_idx = max(range(len(gaps)), key=gaps.__getitem__)
+        lower = cluster[: gap_idx + 1]
+        upper = cluster[gap_idx + 1 :]
+        if len(lower) < 3 or len(upper) < 2:
+            break
+        lower_median = float(statistics.median(lower))
+        upper_median = float(statistics.median(upper))
+        min_gap = max(1_000.0, lower_median * 0.25)
+        if gaps[gap_idx] < min_gap or upper_median < lower_median * 1.5:
+            break
+        cluster = lower
+    return cluster
+
+
+def _lower_quartile(values: list[float]) -> float:
+    ordered = sorted(float(value) for value in values)
+    return ordered[int((len(ordered) - 1) * 0.25)]
 
 
 def _aggregate_step_rows(rows: list[dict[str, Any]]) -> dict[tuple[int, int, int, int], dict[str, Any]]:
@@ -22,15 +46,18 @@ def _aggregate_step_rows(rows: list[dict[str, Any]]) -> dict[tuple[int, int, int
             row["past_kv"],
             int(row.get("measure_run", 0)),
         )
-        agg = out.setdefault(key, {
-            "gpu_us": 0.0,
-            "rms_us": 0.0,
-            "span_us": 0.0,
-            "start_ns": None,
-            "end_ns": None,
-            "kernel_count": 0,
-            "rms_kernel_count": 0,
-        })
+        agg = out.setdefault(
+            key,
+            {
+                "gpu_us": 0.0,
+                "rms_us": 0.0,
+                "span_us": 0.0,
+                "start_ns": None,
+                "end_ns": None,
+                "kernel_count": 0,
+                "rms_kernel_count": 0,
+            },
+        )
         agg["gpu_us"] += row["gpu_us"]
         agg["rms_us"] += row.get("rms_us", 0.0)
         if "start_ns" in row and "end_ns" in row:
@@ -48,6 +75,7 @@ def _aggregate_step_rows(rows: list[dict[str, Any]]) -> dict[tuple[int, int, int
         agg["rms_kernel_count"] += row.get("rms_kernel_count", 0)
     return out
 
+
 def _latency_us_from_agg(agg: dict[str, Any], latency_source: str) -> float:
     if latency_source == "span":
         return float(agg["span_us"])
@@ -57,26 +85,22 @@ def _latency_us_from_agg(agg: dict[str, Any], latency_source: str) -> float:
         return min(float(agg["gpu_us"]), float(agg["span_us"]))
     raise ValueError(f"unsupported latency source: {latency_source}")
 
+
 def _lookup_aggs(
     parsed: dict[tuple[int, int, int, int], dict[str, Any]],
     expected_key: tuple[int, int, int],
 ) -> list[dict[str, Any]]:
-    exact = [
-        value for key, value in sorted(parsed.items())
-        if key[:3] == expected_key
-    ]
+    exact = [value for key, value in sorted(parsed.items()) if key[:3] == expected_key]
     if exact:
         return exact
 
     step, _batch_size, past_kv = expected_key
-    candidate_items = [
-        (key, value) for key, value in sorted(parsed.items())
-        if key[0] == step and key[2] == past_kv
-    ]
+    candidate_items = [(key, value) for key, value in sorted(parsed.items()) if key[0] == step and key[2] == past_kv]
     candidate_batches = {key[1] for key, _ in candidate_items}
     if len(candidate_batches) == 1:
         return [value for _, value in candidate_items]
     return []
+
 
 def _reduce_agg_latency(
     aggs: list[dict[str, Any]],
@@ -104,11 +128,18 @@ def _reduce_agg_latency(
     elif aggregation == "min":
         latency_us = float(min(values))
         rms_us = float(min(rms_values))
+    elif aggregation == "stable_median":
+        latency_us = float(statistics.median(_stable_median_values(values)))
+        rms_us = float(statistics.median(_stable_median_values(rms_values)))
+    elif aggregation == "stable_p25":
+        latency_us = float(_lower_quartile(_stable_median_values(values)))
+        rms_us = float(_lower_quartile(_stable_median_values(rms_values)))
     else:
         raise ValueError(f"unsupported repeat aggregation: {aggregation}")
     kernel_count = int(statistics.median([int(agg["kernel_count"]) for agg in aggs]))
     rms_kernel_count = int(statistics.median([int(agg.get("rms_kernel_count", 0)) for agg in aggs]))
     return latency_us, rms_us, kernel_count, rms_kernel_count, len(aggs)
+
 
 def _effective_rollup(args: argparse.Namespace) -> str:
     if args.rollup:

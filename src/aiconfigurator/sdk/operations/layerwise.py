@@ -38,7 +38,9 @@ _MAX_NUM_SEQS_MODE_INDEX_KEY = "__max_num_seqs_mode_index__"
 _MAX_NUM_SEQS_PARALLEL_INDEX_KEY = "__max_num_seqs_parallel_index__"
 _MAX_NUM_SEQS_PARALLEL_MODE_INDEX_KEY = "__max_num_seqs_parallel_mode_index__"
 _ALLOW_PHYSICAL_GPUS_ENV = "AIC_LAYERWISE_ALLOW_PHYSICAL_GPUS"
-SCHEDULER_ENVELOPE_LATENCY_SOURCES = frozenset({"schedule_to_update", "worker_wall", "fpm_wall", "live_step_wall"})
+SCHEDULER_ENVELOPE_LATENCY_SOURCES = frozenset(
+    {"schedule_to_update", "worker_wall", "fpm_wall", "live_step_wall", "execute_model_gpu"}
+)
 
 
 def _parse_bool(value) -> bool:

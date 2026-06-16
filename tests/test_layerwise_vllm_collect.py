@@ -172,7 +172,7 @@ def _build_args(tmp_path, **overrides):
 
 
 class VllmCollectLayerwiseTests(unittest.TestCase):
-    def test_repeat_defaults_use_six_run_trimmed_mean(self):
+    def test_repeat_defaults_use_stable_generation_reducer(self):
         args = cl._build_arg_parser().parse_args(["--model", "model"])
 
         self.assertEqual(args.ctx_measured_runs, 6)
@@ -180,7 +180,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(args.ctx_repeat_aggregation, "trimmed_mean")
         self.assertEqual(args.gen_measured_runs, 6)
         self.assertEqual(args.gen_warmup_runs, 1)
-        self.assertEqual(args.gen_repeat_aggregation, "trimmed_mean")
+        self.assertEqual(args.gen_repeat_aggregation, "stable_p25")
         self.assertEqual(args.latency_source, "auto")
         self.assertEqual(args.max_decode_batch_size, "256")
         self.assertEqual(args.gpu_memory_utilization, 0.9)
@@ -1400,12 +1400,14 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             100.0,
         )
 
-    def test_parser_accepts_scheduler_timing_latency_source(self):
+    def test_parser_accepts_worker_timing_latency_sources(self):
         parser = cl._build_arg_parser()
 
         args = parser.parse_args(["--latency-source", "schedule_to_update"])
+        execute_args = parser.parse_args(["--latency-source", "execute_model_gpu"])
 
         self.assertEqual(args.latency_source, "schedule_to_update")
+        self.assertEqual(execute_args.latency_source, "execute_model_gpu")
 
     def test_scheduler_timing_latency_source_supports_context_and_decode(self):
         self.assertEqual(
@@ -1417,7 +1419,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             "schedule_to_update",
         )
 
-    def test_auto_latency_source_selects_scheduler_timing_for_context_and_decode(self):
+    def test_auto_latency_source_selects_context_scheduler_and_decode_gpu_timing(self):
         self.assertEqual(
             cl._effective_latency_source("auto", cl.DataPoint("ctx", 1, 128, 0)),
             "schedule_to_update",
@@ -1428,15 +1430,15 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         )
         self.assertEqual(
             cl._effective_latency_source("auto", cl.DataPoint("gen", 4, 1, 4096), includes_moe=True),
-            "schedule_to_update",
+            "execute_model_gpu",
         )
         self.assertEqual(
             cl._effective_latency_source("auto", cl.DataPoint("gen", 8, 1, 4096), includes_moe=True),
-            "schedule_to_update",
+            "execute_model_gpu",
         )
         self.assertEqual(
             cl._effective_latency_source("auto", cl.DataPoint("gen", 8, 1, 4096), includes_moe=False),
-            "schedule_to_update",
+            "execute_model_gpu",
         )
 
     def test_scheduler_timing_lookup_matches_datapoint_shape(self):
@@ -1623,7 +1625,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(kernel_count, 0)
         self.assertEqual(latency_us, 17_000.0)
 
-    def test_scheduler_timing_lookup_ignores_live_execute_model_for_generation(self):
+    def test_scheduler_timing_lookup_prefers_live_execute_model_gpu_for_generation(self):
         events = [
             {
                 "event": "completed_execution",
@@ -1636,6 +1638,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 "run": 0,
                 "live_step_driver": True,
                 "execute_model_wall_time_ms": 40.0,
+                "execute_model_gpu_time_ms": 4.5,
             },
             {
                 "event": "live_step_wall_time",
@@ -1677,8 +1680,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
         self.assertEqual(measure_count, 1)
         self.assertEqual(kernel_count, 0)
-        self.assertEqual(latency_us, 35_000.0)
-        self.assertEqual({agg.get("latency_source") for agg in aggs}, {"live_step_wall"})
+        self.assertEqual(latency_us, 4_500.0)
+        self.assertEqual({agg.get("latency_source") for agg in aggs}, {"execute_model_gpu"})
 
     def test_scheduler_timing_lookup_prefers_prefix_execute_for_generation(self):
         events = [
@@ -1793,8 +1796,20 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(kernel_count, 0)
         self.assertEqual(latency_us, 6_000.0)
 
-    def test_scheduler_timing_lookup_prefers_live_step_wall_for_generation(self):
+    def test_scheduler_timing_lookup_prefers_execute_model_gpu_over_live_step_wall_for_generation(self):
         events = [
+            {
+                "event": "completed_execution",
+                "work_unit_id": "wu",
+                "attempt_id": 2,
+                "phase": "gen",
+                "batch_size": 2,
+                "new_tokens": 1,
+                "past_kv": 4096,
+                "run": 0,
+                "live_step_driver": True,
+                "execute_model_gpu_time_ms": 4.5,
+            },
             {
                 "event": "live_step_wall_time",
                 "work_unit_id": "wu",
@@ -1834,8 +1849,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
         self.assertEqual(measure_count, 1)
         self.assertEqual(kernel_count, 0)
-        self.assertEqual(latency_us, 35_000.0)
-        self.assertEqual({agg.get("latency_source") for agg in aggs}, {"live_step_wall"})
+        self.assertEqual(latency_us, 4_500.0)
+        self.assertEqual({agg.get("latency_source") for agg in aggs}, {"execute_model_gpu"})
 
     def test_scheduler_timing_lookup_treats_generation_runs_as_repeats(self):
         events = [
@@ -2462,6 +2477,38 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
         self.assertEqual(latency_us, 20.0)
         self.assertEqual(rms_us, 2.0)
         self.assertEqual(measure_count, 2)
+
+    def test_stable_median_drops_slow_repeat_plateau(self):
+        aggs = [
+            {"gpu_us": value, "span_us": value, "rms_us": 0.0, "kernel_count": 1}
+            for value in [7547.0, 7409.0, 7381.0, 33814.0, 33847.0, 33708.0, 33780.0, 33967.0, 37036.0]
+        ]
+
+        latency_us, rms_us, _kernel_count, _rms_kernel_count, measure_count = cl._reduce_agg_latency(
+            aggs,
+            latency_source="span",
+            aggregation="stable_median",
+        )
+
+        self.assertEqual(latency_us, 7409.0)
+        self.assertEqual(rms_us, 0.0)
+        self.assertEqual(measure_count, 9)
+
+    def test_stable_p25_uses_lower_quartile_of_stable_cluster(self):
+        aggs = [
+            {"gpu_us": value, "span_us": value, "rms_us": 0.0, "kernel_count": 1}
+            for value in [7547.0, 7409.0, 7381.0, 7600.0, 7700.0, 33814.0, 33847.0, 33708.0, 33780.0]
+        ]
+
+        latency_us, rms_us, _kernel_count, _rms_kernel_count, measure_count = cl._reduce_agg_latency(
+            aggs,
+            latency_source="span",
+            aggregation="stable_p25",
+        )
+
+        self.assertEqual(latency_us, 7409.0)
+        self.assertEqual(rms_us, 0.0)
+        self.assertEqual(measure_count, 9)
 
     def test_dummy_prompts_are_random_token_ids(self):
         token_config = cl.RandomPromptTokenConfig(
@@ -4871,7 +4918,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertEqual(row["latency_source"], "worker_wall")
             self.assertEqual(float(row["latency_ms"]), 12.0)
 
-    def test_auto_dense_decode_live_step_success_row_uses_scheduler_timing(self):
+    def test_auto_dense_decode_live_step_success_row_uses_execute_model_gpu_timing(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = _args(tmp_path)
@@ -4928,6 +4975,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 run=0,
                 live_step_driver=True,
                 execute_model_wall_time_ms=0.7,
+                execute_model_gpu_time_ms=0.4,
             )
             attempt = cl.Attempt(
                 work_unit=unit,
@@ -4948,11 +4996,11 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertEqual(successes, 1)
             with Path(args.output).open() as f:
                 row = list(csv.DictReader(f))[0]
-            self.assertEqual(row["latency_source"], "schedule_to_update")
-            self.assertEqual(float(row["latency_ms"]), 20.0)
+            self.assertEqual(row["latency_source"], "execute_model_gpu")
+            self.assertEqual(float(row["latency_ms"]), 0.4)
             self.assertEqual(row["layer_multiplier"], "4")
 
-    def test_auto_moe_decode_live_step_success_row_uses_live_step_wall_timing(self):
+    def test_auto_moe_decode_live_step_success_row_uses_execute_model_gpu_timing(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = _args(tmp_path)
@@ -5011,6 +5059,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
                 run=0,
                 live_step_driver=True,
                 execute_model_wall_time_ms=0.7,
+                execute_model_gpu_time_ms=0.4,
             )
             attempt = cl.Attempt(
                 work_unit=unit,
@@ -5031,8 +5080,8 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
             self.assertEqual(successes, 1)
             with Path(args.output).open() as f:
                 row = list(csv.DictReader(f))[0]
-            self.assertEqual(row["latency_source"], "live_step_wall")
-            self.assertEqual(float(row["latency_ms"]), 16.0)
+            self.assertEqual(row["latency_source"], "execute_model_gpu")
+            self.assertEqual(float(row["latency_ms"]), 0.4)
             self.assertEqual(row["layer_multiplier"], "4")
 
     def test_scheduler_resumes_after_existing_attempt_ids(self):
@@ -5126,7 +5175,7 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             self.assertNotEqual(cmd[:2], ["nsys", "profile"])
 
-    def test_auto_decode_launch_enables_scheduler_timing(self):
+    def test_auto_decode_launch_uses_execute_model_gpu_without_scheduler_timing(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_path = Path(td)
             args = _args(tmp_path)
@@ -5146,8 +5195,9 @@ class VllmCollectLayerwiseTests(unittest.TestCase):
 
             attempt.stdout_handle.close()
             attempt.stderr_handle.close()
-            self.assertEqual(popen.call_args.kwargs["env"]["LAYERWISE_SCHEDULER_TIMING"], "1")
+            self.assertNotIn("LAYERWISE_SCHEDULER_TIMING", popen.call_args.kwargs["env"])
             self.assertEqual(popen.call_args.kwargs["env"]["DYN_FORWARDPASS_METRIC_PORT"], "20381")
+            self.assertTrue(json.loads(attempt.spec_path.read_text())["enable_step_marker"])
 
     def test_live_step_driver_launch_sets_worker_env(self):
         with tempfile.TemporaryDirectory() as td:

@@ -31,6 +31,7 @@ Env:
 Non-target iterations run as-is (no outer marker). Keeps nsys overhead low
 outside the sweep points.
 """
+
 import fcntl
 import json
 import logging
@@ -100,9 +101,7 @@ def _write_progress(event, *, step, batch_size, past_kv, phase=None, **extra):
     row = {
         "event": event,
         "work_unit_id": work_unit_id,
-        "datapoint_id": _progress_datapoint_id(
-            work_unit_id, phase, batch_size, step, past_kv
-        ),
+        "datapoint_id": _progress_datapoint_id(work_unit_id, phase, batch_size, step, past_kv),
         "phase": phase,
         "batch_size": int(batch_size),
         "new_tokens": int(step if phase == "ctx" else 1),
@@ -316,9 +315,7 @@ def _ctx_chunk_match(runner, scheduler_output, control: dict) -> tuple[bool, int
         if req_id is None:
             continue
         request_by_req[req_id] = new_req
-        computed_by_req.setdefault(
-            req_id, int(getattr(new_req, "num_computed_tokens", 0))
-        )
+        computed_by_req.setdefault(req_id, int(getattr(new_req, "num_computed_tokens", 0)))
 
     allow_variable_past = bool(control.get("allow_variable_past"))
     past_tolerance = float(control.get("past_tolerance", 0.0) or 0.0)
@@ -426,12 +423,17 @@ def _run_marked_step(
         measure_gpu_time = bool(control.get("measure_execute_model_gpu_time"))
         start_event = end_event = None
         if measure_gpu_time:
+            # DSV4 attention uses auxiliary CUDA streams. Fence before and after
+            # the forward so the event pair measures only this execute_model call
+            # and includes work that joins from side streams.
+            torch.cuda.synchronize()
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
             start_event.record()
         execute_start = time.perf_counter()
         ret = orig(runner, scheduler_output, intermediate_tensors)
         if end_event is not None:
+            torch.cuda.synchronize()
             end_event.record()
             end_event.synchronize()
         if control.get("sync_execute_model_wall_time"):
@@ -477,9 +479,7 @@ def _install():
 
         control = _read_control()
         if control.get("trigger") == "decode_only":
-            matched, step, batch_size, past_kv = _decode_only_match(
-                self, scheduler_output, control
-            )
+            matched, step, batch_size, past_kv = _decode_only_match(self, scheduler_output, control)
             if not matched:
                 return orig(self, scheduler_output, intermediate_tensors)
             if control.get("match_once"):
@@ -503,9 +503,7 @@ def _install():
                 control=control,
             )
         if control.get("trigger") == "ctx_chunk":
-            matched, step, batch_size, past_kv = _ctx_chunk_match(
-                self, scheduler_output, control
-            )
+            matched, step, batch_size, past_kv = _ctx_chunk_match(self, scheduler_output, control)
             if not matched:
                 return orig(self, scheduler_output, intermediate_tensors)
             if control.get("match_once"):
@@ -550,10 +548,7 @@ def _install():
         if n not in _parse_active_iterations(iterations, control):
             return orig(self, scheduler_output, intermediate_tensors)
 
-        num_reqs = (
-            len(scheduler_output.scheduled_new_reqs)
-            + len(scheduler_output.scheduled_cached_reqs.req_ids)
-        )
+        num_reqs = len(scheduler_output.scheduled_new_reqs) + len(scheduler_output.scheduled_cached_reqs.req_ids)
         # past_kv at this step = n - 1 under isl=1 driver
         # (step 1 = prefill, past_kv=0; step k = decode, past_kv=k-1).
         past_kv = n - 1
@@ -569,10 +564,7 @@ def _install():
         )
 
     _gmr.GPUModelRunner.execute_model = patched
-    logger.warning(
-        f"[step-marker] installed GPUModelRunner.execute_model wrapper, "
-        f"iterations={sorted(iterations)}"
-    )
+    logger.warning(f"[step-marker] installed GPUModelRunner.execute_model wrapper, iterations={sorted(iterations)}")
 
 
 _install()

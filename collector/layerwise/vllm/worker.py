@@ -2128,6 +2128,7 @@ def _run_live_gen_datapoint(
                 past=dp.past_kv,
                 run=run_idx,
                 live_step_driver=True,
+                measure_execute_model_gpu_time=True,
             )
             live_start = time.perf_counter()
             marker_mod._LAST_DECODE_MATCH_META = {}
@@ -2221,6 +2222,7 @@ def _worker_run_gen_live_decode(
                     bs=dp.batch_size,
                     past=dp.past_kv,
                     run=run_idx,
+                    measure_execute_model_gpu_time=True,
                 )
                 _run_generate_variable_lengths(
                     llm,
