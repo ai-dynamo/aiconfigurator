@@ -352,7 +352,7 @@ merged with new clean decode.
   un-suppression for single-GPU data (`_LAYERWISE_GEN_SINGLE_GPU_COMM`); high-KV
   dense decode repair (`_repair_decode_high_kv`); mixed model
   `= context_total + decode attention` (`_get_mix_step_latency`).
-- ** Important rule for any re-collection:** never switch the timing method /
+- **Important rule for any re-collection:** never switch the timing method /
   `latency_source` by batch size or shape. The corruption came from mixing
   `schedule_to_update` (small batch) with `live_step_wall` (batch>=8) in one sweep
   (a step-change discontinuity), plus `live_step_wall` capturing per-step host/wall
