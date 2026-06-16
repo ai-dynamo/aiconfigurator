@@ -130,13 +130,15 @@ Vision tower skipped (text decoder only); first-3-dense approximated as all-MoE 
 <h2>5 · Validation vs sglang B200 cookbook</h2>
 <p>sglang cookbook (MiniMax-M3, B200, mxfp8, TP8, single node, ISL 2048 / OSL 256, concurrency 64):
 <strong>TPOT 24.1 ms</strong>, TTFT 1580 ms, 265 tok/s/GPU. Our M3 in <strong>pure HYBRID</strong>
-(MoE from real silicon, MSA transferred from DSA at k=1.0), fp8_block ≈ mxfp8, bs 64, kv ≈ 2176:</p>
+(MoE via cross-shape transfer, MSA transferred from DSA at k=1.0), fp8_block ≈ mxfp8, bs 64, kv ≈ 2176:</p>
 <table>
   <tr><th>metric</th><th class="num">M3 hybrid (est)</th><th class="num">sglang B200</th><th class="num">ratio</th></tr>
   <tr><td>TPOT (decode step)</td><td class="num"><b class="ok">23.5 ms</b></td><td class="num">24.1 ms</td><td class="num"><b class="ok">0.98</b></td></tr>
 </table>
 <p style="text-align:center" class="big ok">within 2% — no k tuning</p>
-<p class="note">Decode breakdown: MoE 12.4 ms (real silicon data) + MSA 10.6 ms (DSA transfer) + norms.
+<p class="note">Decode breakdown: MoE 12.4 ms (cross-shape transfer — M3's MoE structure
+[topk4, 128 exp, 6144/3072] is not in silicon; borrows the util of the nearest collected config
+[topk6, 256 exp, 4096/2048] re-scaled by M3's own SOL) + MSA 10.6 ms (DSA transfer) + norms.
 k≈1 works because MSA↔DSA are both sparse-top-k families with near-equal utilisation (cf. MHA↔MLA which
 needed k≈1.41). TTFT not compared directly — sglang's 1580 ms is concurrency-64 batched prefill;
 single-prompt context ≈ 47 ms, which needs serving-level (continuous-batching) modeling.</p>
