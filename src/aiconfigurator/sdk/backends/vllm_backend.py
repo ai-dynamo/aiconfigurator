@@ -1423,8 +1423,12 @@ class VLLMBackend(BaseBackend):
         layer_step_ms = float(layer_detail["latency"]) * layer_scale
         # Calibrate the decode compute's batch-scaling (single-GPU microbenchmark
         # grows too gently with batch vs real paged-attention serving). Comm is
-        # modeled separately (fused all-reduce) and is not scaled here.
-        if _DECODE_COMPUTE_BATCH_CAL:
+        # modeled separately (fused all-reduce) and is not scaled here. The factor
+        # was fit on DENSE decode; it does not transfer to MoE (different decode
+        # scaling, and here it would scale only the expert-free backbone), so it is
+        # applied to dense models only.
+        is_moe_model = int(getattr(model, "_topk", 0) or 0) > 0 and int(getattr(model, "_num_experts", 0) or 0) > 0
+        if _DECODE_COMPUTE_BATCH_CAL and not is_moe_model:
             layer_step_ms *= 1.0 + _DECODE_COMPUTE_BATCH_CAL * effective_bs
         layer_includes_moe = bool(layer_detail.get("includes_moe", False))
         represented_moe_layers = self._layerwise_detail_represented_moe_layers(layer_detail, num_layers)
