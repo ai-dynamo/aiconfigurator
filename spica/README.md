@@ -45,6 +45,25 @@ the build) and a Rust toolchain (`ai-dynamo-runtime` builds from source until
 GIT_LFS_SKIP_SMUDGE=1 uv pip install --python .venv/bin/python -e ".[dev,dynamo]"
 ```
 
+### Real replay (`aic-forward-pass`)
+
+The `[dynamo]` extra above is enough for the load-predictor sweep, but the
+replay-backed evaluator (`spica.evaluator.ReplayEvaluator`, what the real sweep
+uses) drives the dynamo mocker's **AIC perf model**. Those bindings are gated on
+the optional `aic-forward-pass` Cargo feature, which the prebuilt/default install
+does **not** enable — without it the planner bridge raises *"AIC perf model
+requires the `aic-forward-pass` feature"*. Rebuild the bindings from a dynamo
+source checkout (matching the pinned commit) into this venv:
+
+```bash
+cd <dynamo>/lib/bindings/python
+VIRTUAL_ENV=<spica>/.venv <spica>/.venv/bin/maturin develop --uv --release --features aic-forward-pass
+```
+
+Probe whether the running install has it: `RustEnginePerfModel` is importable
+from `dynamo._core` only when the feature is compiled in. The real-replay
+integration tests skip when it is absent.
+
 Validate an example config:
 
 ```bash

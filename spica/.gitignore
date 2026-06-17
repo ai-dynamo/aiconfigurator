@@ -1,0 +1,3 @@
+# Planner diagnostics HTML/log artifacts (dynamo replay writes these to ./planner_reports
+# when run from here; Spica's evaluator disables them, but the CLI may not).
+planner_reports/

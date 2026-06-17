@@ -18,7 +18,7 @@ def test_example_yaml_loads():
     assert cfg.search_space.deployment_mode == ["disagg", "agg"]
     assert "disabled" in cfg.search_space.planner_scaling_policy
     assert cfg.workload.is_trace_based
-    assert cfg.goal.target is OptimizationTarget.GOODPUT_PER_GPU
+    assert cfg.goal.target is OptimizationTarget.GOODPUT_PER_GPU_HOUR
     assert cfg.sweep.max_rounds == 40
 
 
@@ -56,7 +56,7 @@ def test_goodput_requires_sla():
 
 def test_target_direction():
     assert OptimizationTarget.THROUGHPUT.maximize
-    assert OptimizationTarget.GOODPUT_PER_GPU.maximize
+    assert OptimizationTarget.GOODPUT_PER_GPU_HOUR.maximize
     assert not OptimizationTarget.E2E_LATENCY.maximize
 
 

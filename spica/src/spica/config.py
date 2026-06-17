@@ -34,11 +34,11 @@ class OptimizationTarget(str, Enum):
     THROUGHPUT = "throughput"  # maximize replay throughput
     E2E_LATENCY = "e2e_latency"  # minimize mean end-to-end latency
     GOODPUT = "goodput"  # maximize SLA-satisfying throughput
-    GOODPUT_PER_GPU = "goodput_per_gpu"  # maximize goodput / used_gpus
+    GOODPUT_PER_GPU_HOUR = "goodput_per_gpu_hour"  # maximize goodput / GPU-hour
 
     @property
     def maximize(self) -> bool:
-        """True when larger is better (throughput/goodput/goodput_per_gpu)."""
+        """True when larger is better (throughput/goodput/goodput_per_gpu_hour)."""
         return self is not OptimizationTarget.E2E_LATENCY
 
 
@@ -58,13 +58,13 @@ class OptimizationGoal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     target: OptimizationTarget = OptimizationTarget.THROUGHPUT
-    sla: SLATarget | None = None  # required for goodput / goodput_per_gpu
+    sla: SLATarget | None = None  # required for goodput / goodput_per_gpu_hour
 
     @model_validator(mode="after")
     def _require_sla_for_goodput(self) -> "OptimizationGoal":
         needs_sla = self.target in (
             OptimizationTarget.GOODPUT,
-            OptimizationTarget.GOODPUT_PER_GPU,
+            OptimizationTarget.GOODPUT_PER_GPU_HOUR,
         )
         has_sla = self.sla is not None and (
             self.sla.e2e_ms is not None or (self.sla.ttft_ms is not None and self.sla.itl_ms is not None)

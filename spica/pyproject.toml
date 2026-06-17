@@ -56,14 +56,35 @@ dynamo = [
     "scikit-learn==1.7.2",
     "scipy>=1.14.0,<2.0",
 ]
-# Wired in later milestones:
-#   search = ["google-vizier"]    # black-box optimizer for the smart sweep
+# Black-box optimizer for the main smart sweep (Vizier ask/tell).
+#
+# google-vizier's [jax] extra is under-constrained: it hard-pins an old
+# equinox==0.11.7 (which needs jax with jax.core.Primitive) but leaves jax/flax
+# uncapped, so a fresh resolve grabs a too-new jax and the stack self-conflicts
+# (equinox wants old jax, flax wants new jax). See google/vizier#519, #1238.
+# Pin a mutually-consistent late-2024 jax snapshot so equinox/flax/optax/chex/tfp
+# all agree on jax 0.4.x; this coexists with the dynamo/prophet stack. Revisit
+# when google-vizier ships properly-bounded jax deps.
+search = [
+    "google-vizier[jax]==0.1.21",
+    "jax==0.4.38",
+    "jaxlib==0.4.38",
+    "flax==0.10.0",
+    "optax==0.2.4",
+    "chex==0.1.87",
+    "tensorflow-probability[jax]==0.25.0",
+]
 
 [project.scripts]
 spica = "spica.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/spica"]
+
+# The [dynamo] extra pins ai-dynamo / ai-dynamo-runtime to a git commit (direct
+# references); hatchling requires this opt-in to allow them in the metadata.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -15,11 +15,14 @@ from .config import (
     SweepConfig,
     Workload,
 )
+from .deploy import DeploymentPlan, build_deployment
+from .evaluator import ReplayEvaluator
 from .kv_estimate import (
     NoPerfDatabase,
     estimate_kv_tokens,
     feasible_shape_tokens,
 )
+from .model_hw import ModelHardware, NoViableParallelConfig, parallel_configs_for, resolve_model_hardware
 from .load_predictor_sweep import (
     LoadPredictorResult,
     predictor_fields,
@@ -36,7 +39,10 @@ from .parallel_enum import (
 )
 from .planner import FPM_SAMPLING, LOAD_SENSITIVITY, SCALING_POLICIES, ScalingPolicy, throughput_intervals
 from .sample import unroll_sample
+from .sampler import BranchSampler, Suggestion, make_branch_sampler
+from .score import is_feasible, make_candidate, objective_value, rank, score_report, sla_violation
 from .search import run_smart_search
+from .search_space import BranchSpace, enumerate_branches
 
 __all__ = [
     "Candidate",
@@ -72,4 +78,26 @@ __all__ = [
     "feasible_shape_tokens",
     # sample unroll
     "unroll_sample",
+    # model/hardware resolution + parallel-config enumeration
+    "ModelHardware",
+    "NoViableParallelConfig",
+    "resolve_model_hardware",
+    "parallel_configs_for",
+    # candidate space + sampler
+    "BranchSpace",
+    "enumerate_branches",
+    "BranchSampler",
+    "Suggestion",
+    "make_branch_sampler",
+    # deployment translation + evaluation
+    "DeploymentPlan",
+    "build_deployment",
+    "ReplayEvaluator",
+    # scoring
+    "objective_value",
+    "score_report",
+    "sla_violation",
+    "is_feasible",
+    "make_candidate",
+    "rank",
 ]
