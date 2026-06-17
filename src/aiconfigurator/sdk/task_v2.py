@@ -1028,10 +1028,11 @@ class Task:
         """Check that the resolved task is internally consistent and supported.
 
         Two layers:
-        - Static checks: required fields, fp8_static→trtllm constraint,
-          DeepSeek+vLLM exclusion.  Always run, no I/O.
+        - Static checks: required fields, DeepSeek+vLLM exclusion.  Always
+          run, no I/O.
         - Database-dependent checks: each user-selected quant mode is in
           the perf database's ``supported_quant_mode`` list for its op
+          (this is where fp8_static is gated by overhead-table availability)
           (gemm, moe / wideep_*_moe, context_attention / context_mla /
           dsa_context_module / deepseek_v4_context_module / wideep_context_mla,
           and the corresponding generation_* op).  Skipped silently if
