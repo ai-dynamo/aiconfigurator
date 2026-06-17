@@ -1145,14 +1145,28 @@ class Task:
         except (PerfDataNotAvailableError, FileNotFoundError) as exc:
             # DB unavailable; let sweep surface the real error later.
             logger.debug("validate: skipping DB-side quant check (DB unavailable): %s", exc)
-            return
+            database = None
         except Exception as exc:
             # Match the legacy "DB error" envelope (e.g. wrapped FileNotFoundError
             # inside RuntimeError) without swallowing programmer typos.
-            if has_perf_data_not_available_cause(exc):
-                logger.debug("validate: skipping DB-side quant check (DB unavailable): %s", exc)
-                return
-            raise
+            if not has_perf_data_not_available_cause(exc):
+                raise
+            logger.debug("validate: skipping DB-side quant check (DB unavailable): %s", exc)
+            database = None
+
+        if database is None:
+            # In SILICON mode the DB must exist; fp8_static is derived from
+            # compute_scale/scale_matrix overhead tables we can't confirm without it,
+            # so fail fast rather than defer to a late run() failure.  Other modes
+            # (and other quant modes) keep deferring to the sweep.
+            if self.database_mode in (None, common.DatabaseMode.SILICON.name) and (
+                self._role_attr(role, "gemm_quant_mode") == common.GEMMQuantMode.fp8_static
+            ):
+                raise ValueError(
+                    f"fp8_static GEMM mode requires perf data that is unavailable for "
+                    f"system={system!r}, backend={backend!r}, version={version!r}."
+                )
+            return
 
         supported: dict = getattr(database, "supported_quant_mode", {}) or {}
         enable_wideep = bool(self._role_attr(role, "enable_wideep"))

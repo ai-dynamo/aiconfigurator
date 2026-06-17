@@ -1383,6 +1383,21 @@ def test_validate_skips_db_check_when_database_unavailable():
     t.validate()  # static checks pass, DB silently skipped
 
 
+def test_validate_fp8_static_fails_fast_when_db_unavailable_in_silicon():
+    """SILICON mode can't confirm fp8_static overhead data without the DB, so an
+    unloadable (system, backend, version) must fail fast instead of deferring."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        gemm_quant_mode=common.GEMMQuantMode.fp8_static,
+    )
+    t.backend_version = "9.99.99-nonexistent"  # DB load fails -> can't confirm support
+    with pytest.raises(ValueError, match="fp8_static GEMM mode requires perf data"):
+        t.validate()
+
+
 def test_validate_skips_db_check_for_deepseekv4_synthetic_mode():
     """DeepSeek-V4 in synthetic database modes skips DB validation entirely."""
     t = Task(
