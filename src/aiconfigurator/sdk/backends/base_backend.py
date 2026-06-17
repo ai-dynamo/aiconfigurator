@@ -1076,7 +1076,7 @@ class BaseBackend:
         moe_tp = model.config.moe_tp_size
         moe_ep = model.config.moe_ep_size
         tokens_s_gpu = output_throughput / pp / tp / dp
-        tokens_s_user = 1000 / tpot
+        tokens_s_user = 0.0 if tpot == 0.0 else 1000.0 / tpot
         seq_s = request_rate
         seq_s_gpu = seq_s / pp / tp / dp
         tokens_s = output_throughput
