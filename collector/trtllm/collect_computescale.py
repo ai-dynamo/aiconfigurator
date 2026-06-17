@@ -1,9 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Measure TensorRT-LLM FP8 compute-scale overhead.
+
+The compute-scale collector compares dynamic FP8 quantization against static
+quantization for each YAML-backed shape. The reported latency isolates the
+scale-computation portion so support matrix data can track the cost separately
+from the static quantize kernel.
+"""
+
 import tensorrt_llm
 import torch
-from common_test_cases import get_gemm_common_test_cases
+from case_generator import get_compute_scale_case_specs
 
 from helper import benchmark_with_power, get_sm_version, log_perf
 
@@ -14,14 +22,8 @@ def get_computescale_test_cases():
         return []
 
     test_cases = []
-    seen_mk = set()
-    for gemm_common_testcase in get_gemm_common_test_cases():
-        m = gemm_common_testcase.x
-        k = gemm_common_testcase.k
-        if (m, k) in seen_mk:
-            continue
-        seen_mk.add((m, k))
-        test_cases.append([m, k])
+    for compute_scale_common_testcase in get_compute_scale_case_specs():
+        test_cases.append([compute_scale_common_testcase.m, compute_scale_common_testcase.k])
 
     return test_cases
 

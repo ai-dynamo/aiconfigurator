@@ -36,42 +36,10 @@ tailwind.config = {
   /* Body/backgrounds are full-bleed. Each bar (header / controls / tabs)
      and the main panel wrap their children in `max-w-[1600px] mx-auto` so
      content is centered at 1600px while the colored bar extends edge-to-edge. */
-  /* Instant (no-delay) tooltip for table cells. Uses `data-tip` so the
-     browser's native `title` delay does not kick in. */
-  td[data-tip] { position: relative; }
-  /* Orange/red cells use `hover:brightness-95` which creates a CSS filter
-     stacking context. Without lifting the hovered cell itself, the
-     tooltip's z-index is trapped inside that context and gets painted
-     under the next sibling <td>. Promoting the cell on hover escapes that. */
-  td[data-tip]:hover { z-index: 20; }
-  td[data-tip]:hover::after {
-    content: attr(data-tip);
-    position: absolute;
-    left: 50%;
-    top: 100%;
-    transform: translate(-50%, 6px);
-    z-index: 1000;
-    padding: 0.4rem 0.6rem;
-    background: rgb(15 23 42);
-    color: rgb(241 245 249);
-    font-size: 0.72rem;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    line-height: 1.4;
+  .matrix-tooltip {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     word-break: break-word;
-    border-radius: 4px;
-    box-shadow: 0 2px 8px rgba(0,0,0,.25);
-    pointer-events: none;
-    width: max-content;
-    max-width: min(480px, calc(100vw - 2rem));
-    box-sizing: border-box;
-    text-align: left;
-  }
-  html.dark td[data-tip]:hover::after {
-    background: rgb(30 41 59);
-    color: rgb(241 245 249);
-    box-shadow: 0 2px 8px rgba(0,0,0,.5);
   }
 </style>
 </head>
@@ -87,8 +55,50 @@ const SUPPORT_MATRIX_PATH = 'src/aiconfigurator/systems/support_matrix';
 const SUPPORT_MATRIX_INDEX_PATH = `${SUPPORT_MATRIX_PATH}/index.json`;
 const LEGACY_CSV_PATH = 'src/aiconfigurator/systems/support_matrix.csv';
 const STATUS_HW_INCOMPATIBLE = 'HW_INCOMPATIBLE';
+const STATUS_FRAMEWORK_INCOMPATIBLE = 'FRAMEWORK_INCOMPATIBLE';
 const PREFERRED_DEFAULT_SYSTEM = 'b200_sxm';
-const SYSTEM_ORDER = ['b200', 'gb200', 'gb300', 'h100', 'h200', '__other__', 'a100', 'l40s'];
+const SYSTEM_ORDER = [
+  'b200',
+  'gb200',
+  'b300',
+  'gb300',
+  'rtx_pro_6000',
+  'h200',
+  'h100',
+  'l40s',
+  'a100',
+  'b60',
+  '__other__',
+];
+
+function isFrameworkUnsupported(error) {
+  if (!error) return false;
+  return /\bUnsupported\s+[A-Za-z0-9_ -]*quant mode\b/i.test(String(error));
+}
+
+function isHardwareUnsupported(error) {
+  if (!error) return true;
+  const text = String(error).toLowerCase();
+  if (
+    text.includes('gpu does not support') ||
+    text.includes('hardware is incompatible') ||
+    text.includes('hardware-incompatible')
+  ) return true;
+  if (/\bdoes not support\b.*\brequired by\b/.test(text)) return true;
+  return text.includes('does not support model datatype') || text.includes('does not support model dtype');
+}
+
+function unsupportedStatusFromError(error) {
+  if (isHardwareUnsupported(error)) return 'hw_incompatible';
+  if (isFrameworkUnsupported(error)) return 'framework_unsupported';
+  return 'fail';
+}
+
+function statusDisplayLabel(status) {
+  if (status === 'hw_incompatible') return STATUS_HW_INCOMPATIBLE;
+  if (status === 'framework_unsupported') return STATUS_FRAMEWORK_INCOMPATIBLE;
+  return 'FAIL';
+}
 
 function sortSystems(systems) {
   return [...systems].sort((a, b) => {
@@ -166,6 +176,100 @@ function extractErrorSignature(errMsg) {
   return text.substring(0, 500);
 }
 
+function shellQuote(value) {
+  const text = String(value ?? '');
+  if (/^[A-Za-z0-9_./:=@+-]+$/.test(text)) return text;
+  return `'${text.replace(/'/g, `'\\''`)}'`;
+}
+
+function supportMatrixCliConstraints(model) {
+  const lowerModel = String(model || '').toLowerCase();
+  const largeModelMarkers = [
+    'deepseek',
+    'glm-5',
+    'kimi',
+    'llama-4-maverick',
+    'llama-4-scout',
+    'minimax',
+    'mimo-v2',
+    'nemotron-ultra',
+  ];
+  const sizes = Array.from(lowerModel.matchAll(/(\d+(?:\.\d+)?)b/g), match => Number(match[1]))
+    .filter(Number.isFinite);
+  const maxSize = sizes.length ? Math.max(...sizes) : null;
+  if (maxSize !== null && maxSize < 10) {
+    return { totalGpus: '4', ttft: '1500.0', tpot: '50.0' };
+  }
+  if (maxSize !== null && maxSize < 100 && !largeModelMarkers.some(marker => lowerModel.includes(marker))) {
+    return { totalGpus: '32', ttft: '2000.0', tpot: '50.0' };
+  }
+  return { totalGpus: '128', ttft: '2000000.0', tpot: '50000.0' };
+}
+
+function supportMatrixCommand(model, system, backend, version, mode) {
+  const constraints = supportMatrixCliConstraints(model);
+  return [
+    'uv',
+    'run',
+    'aiconfigurator',
+    'cli',
+    'default',
+    '--model-path', model,
+    '--total-gpus', constraints.totalGpus,
+    '--system', system,
+    '--backend', backend,
+    '--backend-version', version,
+    '--database-mode', 'SILICON',
+    '--isl', '256',
+    '--osl', '256',
+    '--prefix', '128',
+    '--ttft', constraints.ttft,
+    '--tpot', constraints.tpot,
+    '--top-n', '1',
+    '--no-color',
+  ].map(shellQuote).join(' ');
+}
+
+function rowCommand(row) {
+  const command = (row.Command || '').trim();
+  if (
+    command &&
+    !command.startsWith('aiconfigurator cli default') &&
+    !command.includes('tools/support_matrix/generate_support_matrix.py')
+  ) return command;
+  return supportMatrixCommand(row.HuggingFaceID, row.System, row.Backend, row.Version, row.Mode);
+}
+
+function rowDetails(row) {
+  const errorMsg = (row.ErrMsg || '').trim();
+  const lines = [
+    `Mode: ${row.Mode}`,
+    `Status: ${row.Status}`,
+    `Version: ${row.Version}`,
+    '',
+    'Command:',
+    rowCommand(row),
+  ];
+  if (errorMsg) lines.push('', 'Details:', errorMsg);
+  return lines.join('\n');
+}
+
+function missingRowDetails(model, system, backend, versions, modeFilter) {
+  const latestVersion = versions && versions.length ? versions[versions.length - 1] : 'unknown';
+  const mode = modeFilter === 'all' ? 'all' : modeFilter;
+  return [
+    `Mode: ${mode}`,
+    'Status: FAIL',
+    `Version: ${latestVersion}`,
+    '',
+    'Command:',
+    supportMatrixCommand(model, system, backend, latestVersion, mode),
+    '',
+    'Details:',
+    'No support-matrix row exists for this model/system/backend cell. Run the command above to check the latest backend version.',
+  ].join('\n');
+}
+
 // ── Matrix Building Logic ───────────────────────────────────────────
 function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
   const subset = rows.filter(r =>
@@ -176,12 +280,23 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
   const versionHasFail = {};
   const versionHasPass = {};
   const versionHasHwIncompatible = {};
+  const versionHasFrameworkIncompatible = {};
   const versionErrorMsgs = {};
+  const versionDetails = {};
 
   for (const row of subset) {
     const version = row.Version;
     const status = row.Status;
     const errorMsg = (row.ErrMsg || '').trim() || null;
+    const detailMsg = rowDetails(row);
+
+    if (version in versionDetails) {
+      if (detailMsg && !versionDetails[version].includes(detailMsg)) {
+        versionDetails[version] = `${versionDetails[version]}\n\n---\n\n${detailMsg}`;
+      }
+    } else {
+      versionDetails[version] = detailMsg;
+    }
 
     if (status === 'FAIL') {
       versionHasFail[version] = true;
@@ -209,10 +324,22 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
           versionErrorMsgs[version] = errorMsg;
         }
       }
+    } else if (status === STATUS_FRAMEWORK_INCOMPATIBLE) {
+      versionHasFrameworkIncompatible[version] = true;
+      if (errorMsg) {
+        if (version in versionErrorMsgs) {
+          const existing = versionErrorMsgs[version];
+          if (existing && existing !== errorMsg) {
+            versionErrorMsgs[version] = `${existing} | ${errorMsg}`;
+          }
+        } else {
+          versionErrorMsgs[version] = errorMsg;
+        }
+      }
     }
   }
 
-  if (!Object.keys(versionHasFail).length && !Object.keys(versionHasPass).length && !Object.keys(versionHasHwIncompatible).length) {
+  if (!Object.keys(versionHasFail).length && !Object.keys(versionHasPass).length && !Object.keys(versionHasHwIncompatible).length && !Object.keys(versionHasFrameworkIncompatible).length) {
     return { version: null, isLatest: false, error: null };
   }
 
@@ -222,59 +349,116 @@ function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
     .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
   const latestVersion = testedVersions[0] || null;
   if (latestVersion && versionHasPass[latestVersion]) {
-    return { version: latestVersion, isLatest: true, error: null };
+    return { version: latestVersion, isLatest: true, error: null, detail: versionDetails[latestVersion] || null };
   }
   if (latestVersion && versionHasHwIncompatible[latestVersion] && !versionHasFail[latestVersion]) {
-    return { version: STATUS_HW_INCOMPATIBLE, isLatest: false, error: versionErrorMsgs[latestVersion] || 'Hardware is incompatible with model datatype' };
+    return {
+      version: STATUS_HW_INCOMPATIBLE,
+      isLatest: false,
+      error: versionErrorMsgs[latestVersion] || 'Hardware is incompatible with model datatype',
+      detail: versionDetails[latestVersion] || null,
+    };
+  }
+  if (latestVersion && versionHasFrameworkIncompatible[latestVersion] && !versionHasFail[latestVersion]) {
+    return {
+      version: STATUS_FRAMEWORK_INCOMPATIBLE,
+      isLatest: false,
+      error: versionErrorMsgs[latestVersion] || 'Framework version does not support required model feature',
+      detail: versionDetails[latestVersion] || null,
+    };
   }
   if (latestVersion && versionHasFail[latestVersion]) {
-    return { version: 'FAIL', isLatest: false, error: versionErrorMsgs[latestVersion] || 'No error message available' };
+    return {
+      version: 'FAIL',
+      isLatest: false,
+      error: versionErrorMsgs[latestVersion] || 'No error message available',
+      detail: versionDetails[latestVersion] || null,
+    };
   }
 
   const passing = Object.keys(versionHasPass)
     .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
   if (passing.length) {
-    return { version: passing[0], isLatest: false, error: null };
+    return { version: passing[0], isLatest: false, error: null, detail: versionDetails[passing[0]] || null };
   }
 
   const allMsgs = [];
+  const allDetails = [];
   const failVersions = Object.keys(versionHasFail)
     .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
   for (const ver of failVersions) {
     if (versionErrorMsgs[ver]) allMsgs.push(`${ver}: ${versionErrorMsgs[ver]}`);
+    if (versionDetails[ver]) allDetails.push(versionDetails[ver]);
   }
   if (allMsgs.length || failVersions.length) {
-    return { version: 'FAIL', isLatest: false, error: allMsgs.length ? allMsgs.join(' | ') : 'No error message available' };
+    return {
+      version: 'FAIL',
+      isLatest: false,
+      error: allMsgs.length ? allMsgs.join(' | ') : 'No error message available',
+      detail: allDetails.length ? allDetails.join('\n\n---\n\n') : null,
+    };
   }
 
   const hwVersions = Object.keys(versionHasHwIncompatible)
     .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
+  const frameworkVersions = Object.keys(versionHasFrameworkIncompatible)
+    .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
+  const frameworkMsgs = [];
+  const frameworkDetails = [];
+  for (const ver of frameworkVersions) {
+    if (versionErrorMsgs[ver]) frameworkMsgs.push(`${ver}: ${versionErrorMsgs[ver]}`);
+    if (versionDetails[ver]) frameworkDetails.push(versionDetails[ver]);
+  }
+  if (frameworkMsgs.length || frameworkVersions.length) {
+    return {
+      version: STATUS_FRAMEWORK_INCOMPATIBLE,
+      isLatest: false,
+      error: frameworkMsgs.length ? frameworkMsgs.join(' | ') : 'Framework version does not support required model feature',
+      detail: frameworkDetails.length ? frameworkDetails.join('\n\n---\n\n') : null,
+    };
+  }
+
   const hwMsgs = [];
+  const hwDetails = [];
   for (const ver of hwVersions) {
     if (versionErrorMsgs[ver]) hwMsgs.push(`${ver}: ${versionErrorMsgs[ver]}`);
+    if (versionDetails[ver]) hwDetails.push(versionDetails[ver]);
   }
-  return { version: STATUS_HW_INCOMPATIBLE, isLatest: false, error: hwMsgs.length ? hwMsgs.join(' | ') : 'Hardware is incompatible with model datatype' };
+  return {
+    version: STATUS_HW_INCOMPATIBLE,
+    isLatest: false,
+    error: hwMsgs.length ? hwMsgs.join(' | ') : 'Hardware is incompatible with model datatype',
+    detail: hwDetails.length ? hwDetails.join('\n\n---\n\n') : null,
+  };
 }
 
 // Aggregate per-version statuses into a single (model, backend) cell. Each
 // cell records which versions pass, partially pass, or fail so the UI can
 // show "pass on v1.0, fail on v1.1" instead of a single PASS/FAIL flag.
 // Overall status:
-//   pass:    every tested version fully passes
+//   pass:    every tested framework version fully passes
+//   latest_pass_with_older_issues: latest framework version passes, older versions have issues
+//   older_pass_only: latest framework version does not pass, but an older version does
 //   fail:    every tested version fully fails
 //   partial: any mix (includes per-version agg/disagg splits)
 //   hw_incompatible: latest tested version is impossible on this GPU
+//   framework_unsupported: framework/version does not support required model feature
 //   missing: no rows tested for this (model, backend)
 function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilter) {
   const passVersions = [];
   const partialVersions = [];
   const failVersions = [];
   const hwVersions = [];
-  const errors = [];
+  const frameworkUnsupportedVersions = [];
+  const errorEntries = [];
+  const detailEntries = [];
 
   const statusFromResult = (result) => {
     if (result.version === null) return 'missing';
-    if (result.version === 'FAIL') return 'fail';
+    if (result.version === 'FAIL') {
+      return isFrameworkUnsupported(result.error) ? 'framework_unsupported' : 'fail';
+    }
+    if (result.version === STATUS_FRAMEWORK_INCOMPATIBLE) return 'framework_unsupported';
     if (result.version === STATUS_HW_INCOMPATIBLE) return 'hw_incompatible';
     return 'pass';
   };
@@ -283,11 +467,12 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
   // `getLatestSupportedVersion`, restricted to one version at a time.
   for (const version of versions) {
     const verRows = rows.filter(r => r.Version === version);
-    const { version: v, error } = getLatestSupportedVersion(verRows, modelId, system, backend);
+    const { version: v, error, detail } = getLatestSupportedVersion(verRows, modelId, system, backend);
     if (v === null) continue; // missing for this version
 
-    let verStatus = statusFromResult({ version: v });
+    let verStatus = statusFromResult({ version: v, error });
     let verError = verStatus === 'pass' ? null : error;
+    let verDetail = detail;
 
     // Within-version agg/disagg split (only meaningful when viewing "all").
     if (modeFilter === 'all') {
@@ -305,58 +490,95 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
       const hasPass = modeStatuses.includes('pass');
       const hasFail = modeStatuses.includes('fail');
       const hasHw = modeStatuses.includes('hw_incompatible');
+      const hasFrameworkUnsupported = modeStatuses.includes('framework_unsupported');
 
-      if (hasPass && (hasFail || hasHw || modeStatuses.length < 2)) {
+      if (hasPass && (hasFail || hasHw || hasFrameworkUnsupported || modeStatuses.length < 2)) {
         verStatus = 'partial';
         if (aggStatus !== 'pass') {
-          verError = `[agg ${aggStatus === 'hw_incompatible' ? STATUS_HW_INCOMPATIBLE : 'FAIL'}] ${aggResult.error || 'No error message available'}`;
+          verError = `[agg ${statusDisplayLabel(aggStatus)}] ${aggResult.error || 'No error message available'}`;
         } else {
-          verError = `[disagg ${disaggStatus === 'hw_incompatible' ? STATUS_HW_INCOMPATIBLE : 'FAIL'}] ${disaggResult.error || 'No error message available'}`;
+          verError = `[disagg ${statusDisplayLabel(disaggStatus)}] ${disaggResult.error || 'No error message available'}`;
         }
+        verDetail = [aggResult.detail, disaggResult.detail].filter(Boolean).join('\n\n---\n\n') || verDetail;
       } else if (!hasPass && hasFail) {
         verStatus = 'fail';
         verError = aggStatus === 'fail'
           ? (aggResult.error || 'No error message available')
           : (disaggResult.error || 'No error message available');
+        verDetail = [aggResult.detail, disaggResult.detail].filter(Boolean).join('\n\n---\n\n') || verDetail;
+      } else if (!hasPass && hasFrameworkUnsupported) {
+        verStatus = 'framework_unsupported';
+        verError = aggStatus === 'framework_unsupported'
+          ? (aggResult.error || 'Framework version does not support required model feature')
+          : (disaggResult.error || 'Framework version does not support required model feature');
+        verDetail = [aggResult.detail, disaggResult.detail].filter(Boolean).join('\n\n---\n\n') || verDetail;
       } else if (!hasPass && hasHw) {
         verStatus = 'hw_incompatible';
         verError = aggStatus === 'hw_incompatible'
           ? (aggResult.error || 'Hardware is incompatible with model datatype')
           : (disaggResult.error || 'Hardware is incompatible with model datatype');
+        verDetail = [aggResult.detail, disaggResult.detail].filter(Boolean).join('\n\n---\n\n') || verDetail;
       }
     }
 
     if (verStatus === 'pass') passVersions.push(version);
     else if (verStatus === 'partial') partialVersions.push(version);
+    else if (verStatus === 'framework_unsupported') frameworkUnsupportedVersions.push(version);
     else if (verStatus === 'hw_incompatible') hwVersions.push(version);
     else failVersions.push(version);
 
     if (verError) {
-      if (verStatus === 'hw_incompatible') {
-        if (!errors.includes(verError)) errors.push(verError);
-      } else {
-        errors.push(`[${version}] ${verError}`);
-      }
+      errorEntries.push({ version, message: `[${version}] ${verError}` });
+    }
+    if (verDetail) {
+      detailEntries.push({ version, message: `[${version}]\n${verDetail}` });
     }
   }
 
-  if (!passVersions.length && !partialVersions.length && !failVersions.length && !hwVersions.length) {
-    return { status: 'missing', passVersions: [], partialVersions: [], failVersions: [], hwVersions: [], error: null };
+  if (!passVersions.length && !partialVersions.length && !failVersions.length && !hwVersions.length && !frameworkUnsupportedVersions.length) {
+    const detail = missingRowDetails(modelId, system, backend, versions, modeFilter);
+    return {
+      status: 'missing',
+      passVersions: [],
+      partialVersions: [],
+      failVersions: [],
+      frameworkUnsupportedVersions: [],
+      hwVersions: [],
+      error: null,
+      detail,
+    };
   }
 
   // Color is driven by the **latest tested version** for this (model, backend):
-  //   - latest is strictly pass               -> green
-  //   - latest is fail/partial but any older  -> orange (regression)
+  //   - every tested version fully passes     -> dark green
+  //   - latest passes but older versions have issues -> light green
+  //   - only an older version passes          -> blue
+  //   - latest has partial support only       -> orange
   //   - everything failed                     -> red
+  //   - latest is framework-unsupported       -> violet
   //   - latest is hardware-incompatible       -> gray
   const sortDesc = (a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a));
-  const allTested = [...passVersions, ...partialVersions, ...failVersions, ...hwVersions].sort(sortDesc);
+  const allTested = [
+    ...passVersions,
+    ...partialVersions,
+    ...failVersions,
+    ...frameworkUnsupportedVersions,
+    ...hwVersions,
+  ].sort(sortDesc);
   const newest = allTested[0];
   let status;
-  if (passVersions.includes(newest)) status = 'pass';
+  if (passVersions.includes(newest)) {
+    status = passVersions.length === allTested.length
+      ? 'pass'
+      : 'latest_pass_with_older_issues';
+  }
+  else if (passVersions.length) {
+    status = 'older_pass_only';
+  }
+  else if (frameworkUnsupportedVersions.includes(newest)) status = 'framework_unsupported';
   else if (hwVersions.includes(newest)) status = 'hw_incompatible';
   else if (partialVersions.includes(newest)) status = 'partial';
-  else if (passVersions.length || partialVersions.length) status = 'partial';
+  else if (partialVersions.length) status = 'partial';
   else status = 'fail';
 
   return {
@@ -364,8 +586,22 @@ function aggregateBackendCell(rows, modelId, system, backend, versions, modeFilt
     passVersions: passVersions.slice().sort(sortDesc),
     partialVersions: partialVersions.slice().sort(sortDesc),
     failVersions: failVersions.slice().sort(sortDesc),
+    frameworkUnsupportedVersions: frameworkUnsupportedVersions.slice().sort(sortDesc),
     hwVersions: hwVersions.slice().sort(sortDesc),
-    error: errors.length ? errors.join(' | ') : null,
+    error: errorEntries.length
+      ? errorEntries
+        .slice()
+        .sort((a, b) => compareVersionTuples(versionSortKey(b.version), versionSortKey(a.version)))
+        .map(e => e.message)
+        .join('\n')
+      : null,
+    detail: detailEntries.length
+      ? detailEntries
+        .slice()
+        .sort((a, b) => compareVersionTuples(versionSortKey(b.version), versionSortKey(a.version)))
+        .map(e => e.message)
+        .join('\n\n---\n\n')
+      : null,
   };
 }
 
@@ -425,7 +661,7 @@ function isLocalPreview() {
 }
 
 function rawUrl(branch, path) {
-  if (isLocalPreview()) return `/${path}`;
+  if (isLocalPreview()) return `/${path}?localPreviewTs=${Date.now()}`;
   return `https://raw.githubusercontent.com/${REPO}/refs/heads/${branch}/${path}`;
 }
 
@@ -502,7 +738,7 @@ async function fetchBranchList() {
 }
 
 async function fetchOneCsv(branch, path) {
-  const res = await fetch(rawUrl(branch, path));
+  const res = await fetch(rawUrl(branch, path), { cache: isLocalPreview() ? 'no-store' : 'default' });
   if (!res.ok) throw new Error(`Failed to fetch CSV (HTTP ${res.status}) from branch "${branch}"`);
   const text = await res.text();
   // Support generated updates that mix historical CRLF rows with LF rows.
@@ -512,7 +748,7 @@ async function fetchOneCsv(branch, path) {
 }
 
 async function fetchCsv(branch) {
-  const indexRes = await fetch(rawUrl(branch, SUPPORT_MATRIX_INDEX_PATH));
+  const indexRes = await fetch(rawUrl(branch, SUPPORT_MATRIX_INDEX_PATH), { cache: isLocalPreview() ? 'no-store' : 'default' });
   if (!indexRes.ok) {
     return fetchOneCsv(branch, LEGACY_CSV_PATH);
   }
@@ -757,19 +993,31 @@ function Legend() {
     <div className="flex flex-wrap gap-4 items-center mb-4 text-sm text-slate-500 dark:text-slate-400">
       <span className="font-semibold">Legend:</span>
       <div className="flex items-center gap-1.5">
-        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-green-100 dark:bg-green-950"></span>
-        Latest version passes
+        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-green-300 dark:bg-green-900"></span>
+        All framework versions supported (click for command)
       </div>
       <div className="flex items-center gap-1.5">
-        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-amber-100 dark:bg-amber-950"></span>
-        Regression (latest fails, older passes) or partial coverage in latest version (agg or disagg only) (<span className="line-through opacity-75 font-mono">struck</span>&nbsp;= fails)
+        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-green-200 dark:bg-green-950"></span>
+        Latest framework version supported, older version has issues (<span className="font-mono">F</span>&nbsp;= framework unsupported, <span className="font-mono">!</span>&nbsp;= hardware-incompatible)
       </div>
       <div className="flex items-center gap-1.5">
-        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-red-100 dark:bg-red-950"></span>
-        All versions fail (click for details)
+        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-sky-200 dark:bg-sky-950"></span>
+        Only older framework version supported; latest does not pass
       </div>
       <div className="flex items-center gap-1.5">
-        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-slate-200 dark:bg-slate-700"></span>
+        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-amber-200 dark:bg-amber-950"></span>
+        Partial coverage in latest version (agg or disagg only) (<span className="line-through opacity-75 font-mono">struck</span>&nbsp;= fails)
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-red-200 dark:bg-red-950"></span>
+        All versions fail (click for command and details)
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-violet-200 dark:bg-violet-950"></span>
+        Framework version does not support required model feature
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-slate-300 dark:bg-slate-700"></span>
         GPU does not support model datatype
       </div>
       <a href={buildFileIssueUrl()} target="_blank" rel="noopener"
@@ -786,20 +1034,91 @@ function SortArrow({ col, sortCol, sortAsc }) {
   return <span className="ml-1 text-[0.65rem]">{sortAsc ? '\u25B2' : '\u25BC'}</span>;
 }
 
+function FloatingTooltip({ tip }) {
+  if (!tip) return null;
+  return (
+    <div
+      className="matrix-tooltip fixed z-[2000] pointer-events-none rounded bg-slate-900 dark:bg-slate-800
+                 px-2.5 py-2 text-[0.72rem] leading-snug font-mono text-slate-100 shadow-lg overflow-auto"
+      style={tip.style}
+    >
+      {tip.text}
+    </div>
+  );
+}
+
 function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showAllVersions, onSort, onCellClick }) {
+  const [hoverTip, setHoverTip] = useState(null);
+  const rowNumberColumnWidth = 56;
+  const modelColumnWidth = 360;
+  const backendColumnWidth = 184;
+  const tableMinWidth = rowNumberColumnWidth + modelColumnWidth + columns.length * backendColumnWidth;
+
+  const showTooltip = useCallback((event, text, placement = 'bottom') => {
+    if (!text) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const margin = 12;
+    const gap = 8;
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+    const width = Math.min(520, Math.max(0, viewportWidth - margin * 2));
+    const maxLeft = Math.max(margin, viewportWidth - width - margin);
+    const left = Math.min(
+      Math.max(rect.left + rect.width / 2 - width / 2, margin),
+      maxLeft,
+    );
+    const availableAbove = rect.top - margin - gap;
+    const availableBelow = viewportHeight - rect.bottom - margin - gap;
+    const useAbove = placement === 'top'
+      ? availableAbove >= 96 || availableAbove >= availableBelow
+      : availableBelow < 120 && availableAbove > availableBelow;
+    const maxHeight = Math.max(96, Math.min(420, useAbove ? availableAbove : availableBelow));
+    const style = {
+      left: `${left}px`,
+      width: `${width}px`,
+      maxHeight: `${maxHeight}px`,
+    };
+    if (useAbove) style.bottom = `${Math.max(margin, viewportHeight - rect.top + gap)}px`;
+    else style.top = `${Math.max(margin, Math.min(rect.bottom + gap, viewportHeight - margin - maxHeight))}px`;
+    setHoverTip({ text, style });
+  }, []);
+
+  const hideTooltip = useCallback(() => setHoverTip(null), []);
+  const tooltipHandlers = (text, placement) => ({
+    onMouseEnter: (event) => showTooltip(event, text, placement),
+    onMouseLeave: hideTooltip,
+    onFocus: (event) => showTooltip(event, text, placement),
+    onBlur: hideTooltip,
+  });
+
   let filtered = matrixRows;
   if (searchQuery) {
     const q = searchQuery.toLowerCase();
     filtered = matrixRows.filter(r => r.model.toLowerCase().includes(q));
   }
 
-  // Sort by status rank first (pass < partial < fail < missing), then by
+  // Sort by status rank first (all-pass < latest-pass < older-pass-only <
+  // partial < fail < framework-unsupported < hardware-incompatible < missing), then by
   // the concatenated version lists so rows with the same status cluster by
   // their supported-version set.
-  const STATUS_RANK = { pass: 0, partial: 1, fail: 2, hw_incompatible: 3, missing: 4 };
+  const STATUS_RANK = {
+    pass: 0,
+    latest_pass_with_older_issues: 1,
+    older_pass_only: 2,
+    partial: 3,
+    fail: 4,
+    framework_unsupported: 5,
+    hw_incompatible: 6,
+    missing: 7,
+  };
   const cellSortKey = (c) => {
     if (!c) return '99|';
-    const versions = (c.passVersions || []).concat(c.partialVersions || [], c.failVersions || [], c.hwVersions || []).join(',');
+    const versions = (c.passVersions || []).concat(
+      c.partialVersions || [],
+      c.failVersions || [],
+      c.frameworkUnsupportedVersions || [],
+      c.hwVersions || [],
+    ).join(',');
     return String(STATUS_RANK[c.status] ?? 99) + '|' + versions;
   };
 
@@ -822,10 +1141,13 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
 
   const cellClass = (status) => {
     switch (status) {
-      case 'pass': return 'bg-green-100 dark:bg-green-950 text-green-800 dark:text-green-300 font-medium';
-      case 'partial': return 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 font-medium cursor-pointer hover:brightness-95 dark:hover:brightness-125';
-      case 'fail': return 'bg-red-100 dark:bg-red-950 text-red-700 dark:text-red-300 font-semibold cursor-pointer hover:brightness-95 dark:hover:brightness-125';
-      case 'hw_incompatible': return 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-medium';
+      case 'pass': return 'bg-green-300 dark:bg-green-900 text-green-950 dark:text-white font-semibold cursor-pointer hover:brightness-95 dark:hover:brightness-125';
+      case 'latest_pass_with_older_issues': return 'bg-green-200 dark:bg-green-950 text-green-900 dark:text-green-300 font-medium cursor-pointer hover:brightness-95 dark:hover:brightness-125';
+      case 'older_pass_only': return 'bg-sky-200 dark:bg-sky-950 text-sky-900 dark:text-sky-300 font-medium cursor-pointer hover:brightness-95 dark:hover:brightness-125';
+      case 'partial': return 'bg-amber-200 dark:bg-amber-950 text-amber-900 dark:text-amber-300 font-medium cursor-pointer hover:brightness-95 dark:hover:brightness-125';
+      case 'fail': return 'bg-red-200 dark:bg-red-950 text-red-800 dark:text-red-300 font-semibold cursor-pointer hover:brightness-95 dark:hover:brightness-125';
+      case 'framework_unsupported': return 'bg-violet-200 dark:bg-violet-950 text-violet-900 dark:text-violet-300 font-medium cursor-pointer hover:brightness-95 dark:hover:brightness-125';
+      case 'hw_incompatible': return 'bg-slate-300 dark:bg-slate-700 text-slate-700 dark:text-slate-300 font-medium cursor-pointer hover:brightness-95 dark:hover:brightness-125';
       default: return '';
     }
   };
@@ -841,25 +1163,31 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
     const pushPass = (v) => chips.push(<span key={`p-${v}`}>{v}</span>);
     const pushPartial = (v) => chips.push(<span key={`m-${v}`} title="Partial (agg or disagg only)">~{v}</span>);
     const pushFail = (v) => chips.push(<span key={`f-${v}`} className="line-through opacity-75">{v}</span>);
-    const pushHw = (v) => chips.push(<span key={`h-${v}`}>{v}</span>);
+    const pushFrameworkUnsupported = (v) => chips.push(<span key={`u-${v}`} title="Framework unsupported" className="opacity-80">F{v}</span>);
+    const pushHw = (v) => chips.push(<span key={`h-${v}`} title="Hardware incompatible" className="opacity-80">!{v}</span>);
 
     if (showAllVersions) {
       const all = [
         ...(cell.passVersions || []).map(v => ({ version: v, status: 'pass' })),
         ...(cell.partialVersions || []).map(v => ({ version: v, status: 'partial' })),
         ...(cell.failVersions || []).map(v => ({ version: v, status: 'fail' })),
+        ...(cell.frameworkUnsupportedVersions || []).map(v => ({ version: v, status: 'framework_unsupported' })),
         ...(cell.hwVersions || []).map(v => ({ version: v, status: 'hw_incompatible' })),
       ].sort((a, b) => compareVersionTuples(versionSortKey(a.version), versionSortKey(b.version)));
       all.forEach(({ version, status }) => {
         if (status === 'pass') pushPass(version);
         else if (status === 'partial') pushPartial(version);
+        else if (status === 'framework_unsupported') pushFrameworkUnsupported(version);
         else if (status === 'hw_incompatible') pushHw(version);
         else pushFail(version);
       });
     } else {
       // Each per-status list is already newest-first (sorted in aggregateBackendCell).
       // Pick whichever bucket the overall status points at.
-      if (cell.status === 'pass' && cell.passVersions && cell.passVersions.length) {
+      if (
+        (cell.status === 'pass' || cell.status === 'latest_pass_with_older_issues' || cell.status === 'older_pass_only')
+        && cell.passVersions && cell.passVersions.length
+      ) {
         pushPass(cell.passVersions[0]);
       } else if (cell.status === 'partial') {
         const brokenVersions = [
@@ -873,6 +1201,10 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
       } else if (cell.status === 'fail') {
         if (cell.failVersions && cell.failVersions.length) pushFail(cell.failVersions[0]);
         else if (cell.partialVersions && cell.partialVersions.length) pushPartial(cell.partialVersions[0]);
+      } else if (cell.status === 'framework_unsupported') {
+        if (cell.frameworkUnsupportedVersions && cell.frameworkUnsupportedVersions.length) {
+          pushFrameworkUnsupported(cell.frameworkUnsupportedVersions[0]);
+        }
       } else if (cell.status === 'hw_incompatible') {
         if (cell.hwVersions && cell.hwVersions.length) pushHw(cell.hwVersions[0]);
       }
@@ -881,12 +1213,20 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
   };
 
   return (
-    <div className="overflow-x-auto mb-6 rounded-lg border border-slate-200 dark:border-slate-700 scrollbar-thin">
-      <table className="w-full text-sm border-collapse">
+    <React.Fragment>
+    <div className="overflow-x-auto mb-6 rounded-lg border border-slate-200 dark:border-slate-700 scrollbar-thin" onScroll={hideTooltip}>
+      <table className="w-full text-sm border-collapse table-fixed" style={{ minWidth: `${tableMinWidth}px` }}>
+        <colgroup>
+          <col style={{ width: `${rowNumberColumnWidth}px` }} />
+          <col style={{ width: `${modelColumnWidth}px` }} />
+          {columns.map(c => (
+            <col key={c.key} style={{ width: `${backendColumnWidth}px` }} />
+          ))}
+        </colgroup>
         <thead>
           <tr>
             <th className="bg-slate-50 dark:bg-slate-800 sticky top-0 z-10 px-3 py-2 text-right font-bold
-                  border-b-2 border-slate-200 dark:border-slate-600 whitespace-nowrap w-14 text-slate-500 dark:text-slate-400">
+                  border-b-2 border-slate-200 dark:border-slate-600 whitespace-nowrap text-slate-500 dark:text-slate-400">
               No.
             </th>
             <th onClick={() => onSort('model')}
@@ -899,22 +1239,26 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
             {columns.map(c => (
               <th key={c.key} onClick={() => onSort(c.key)}
                   className={`bg-slate-50 dark:bg-slate-800 sticky top-0 z-10 px-3 py-2 text-left font-bold
-                    border-b-2 border-slate-200 dark:border-slate-600 cursor-pointer select-none whitespace-nowrap
+                    border-b-2 border-slate-200 dark:border-slate-600 cursor-pointer select-none
                     hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors
                     ${sortCol === c.key ? 'text-indigo-600 dark:text-indigo-400' : ''}`}>
-                {c.backend}
-                {c.versions.length > 1 && (
-                  <small className="font-normal text-slate-400 ml-1">({c.versions.join(', ')})</small>
-                )}
-                <SortArrow col={c.key} sortCol={sortCol} sortAsc={sortAsc} />
+                <div className="flex items-start gap-1 min-w-0">
+                  <span className="shrink-0">{c.backend}</span>
+                  {c.versions.length > 1 && (
+                    <small className="font-normal text-slate-400 truncate min-w-0">({c.versions.join(', ')})</small>
+                  )}
+                  <span className="shrink-0"><SortArrow col={c.key} sortCol={sortCol} sortAsc={sortAsc} /></span>
+                </div>
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {filtered.map((row, index) => (
+          {filtered.map((row, index) => {
+            const tipPlacement = index >= Math.max(filtered.length - 6, 0) ? 'top' : 'bottom';
+            return (
             <tr key={row.model} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/50 transition-colors">
-              <td className="px-3 py-2 border-b border-slate-200 dark:border-slate-700 text-right text-slate-500 dark:text-slate-400 tabular-nums w-14">
+              <td className="px-3 py-2 border-b border-slate-200 dark:border-slate-700 text-right text-slate-500 dark:text-slate-400 tabular-nums">
                 {index + 1}
               </td>
               <td className="px-3 py-2 border-b border-slate-200 dark:border-slate-700 font-medium max-w-xs overflow-hidden text-ellipsis whitespace-nowrap"
@@ -924,9 +1268,32 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
               {columns.map(c => {
                 const cell = row.cells[c.key];
                 if (!cell || cell.status === 'missing') {
-                  return <td key={c.key} data-tip={`${c.backend}: not tested`} className="px-3 py-2 border-b border-slate-200 dark:border-slate-700 text-slate-400">&mdash;</td>;
+                  const detail = cell?.detail || `${c.backend}: not tested`;
+                  const displayTooltip = `${c.backend}: not tested\n\nClick to keep this open and copy it.`;
+                  return (
+                    <td key={c.key}
+                        {...tooltipHandlers(displayTooltip, tipPlacement)}
+                        onClick={() => {
+                          hideTooltip();
+                          onCellClick(row.model, c.backend, detail);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            hideTooltip();
+                            onCellClick(row.model, c.backend, detail);
+                          }
+                        }}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={displayTooltip}
+                        className="px-3 py-2 border-b border-slate-200 dark:border-slate-700 text-slate-400 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800">
+                      &mdash;
+                    </td>
+                  );
                 }
-                const clickable = cell.status === 'fail' || cell.status === 'partial';
+                const detail = cell.detail || cell.error;
+                const clickable = Boolean(detail);
                 // Native browser tooltip with the full version breakdown so the
                 // user can always inspect all versions regardless of the
                 // "Show all versions" toggle.
@@ -934,24 +1301,44 @@ function MatrixTable({ matrixRows, columns, searchQuery, sortCol, sortAsc, showA
                 if (cell.passVersions && cell.passVersions.length) tooltipParts.push(`Pass: ${cell.passVersions.join(', ')}`);
                 if (cell.partialVersions && cell.partialVersions.length) tooltipParts.push(`Partial: ${cell.partialVersions.join(', ')}`);
                 if (cell.failVersions && cell.failVersions.length) tooltipParts.push(`Fail: ${cell.failVersions.join(', ')}`);
+                if (cell.frameworkUnsupportedVersions && cell.frameworkUnsupportedVersions.length) tooltipParts.push(`Framework unsupported: ${cell.frameworkUnsupportedVersions.join(', ')}`);
                 if (cell.hwVersions && cell.hwVersions.length) tooltipParts.push(`Hardware incompatible: ${cell.hwVersions.join(', ')}`);
-                const tooltip = cell.status === 'hw_incompatible'
-                  ? (cell.error || 'Hardware is incompatible with model datatype')
-                  : `${c.backend}\n${tooltipParts.join('\n')}`;
+                const tooltip = cell.status === 'framework_unsupported'
+                  ? (cell.error || 'Framework version does not support required model feature')
+                  : cell.status === 'hw_incompatible'
+                    ? (cell.error || 'Hardware is incompatible with model datatype')
+                    : `${c.backend}\n${tooltipParts.join('\n')}`;
+                const displayTooltip = clickable ? `${tooltip}\n\nClick to keep this open and copy the command.` : tooltip;
                 return (
                   <td key={c.key}
-                      data-tip={tooltip}
-                      onClick={clickable ? () => onCellClick(row.model, c.backend, cell.error) : undefined}
+                      {...tooltipHandlers(displayTooltip, tipPlacement)}
+                      onClick={clickable ? () => {
+                        hideTooltip();
+                        onCellClick(row.model, c.backend, detail);
+                      } : undefined}
+                      onKeyDown={clickable ? (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          hideTooltip();
+                          onCellClick(row.model, c.backend, detail);
+                        }
+                      } : undefined}
+                      role={clickable ? 'button' : undefined}
+                      tabIndex={clickable ? 0 : undefined}
+                      aria-label={clickable ? `Open support details for ${row.model} on ${c.backend}` : undefined}
                       className={`px-3 py-2 border-b border-slate-200 dark:border-slate-700 ${cellClass(cell.status)}`}>
                     {renderChips(cell)}
                   </td>
                 );
               })}
             </tr>
-          ))}
+          );
+          })}
         </tbody>
       </table>
     </div>
+    <FloatingTooltip tip={hoverTip} />
+    </React.Fragment>
   );
 }
 
@@ -993,30 +1380,224 @@ function TopErrors({ errors }) {
   );
 }
 
+function parseSupportDetailSections(text) {
+  return text
+    .split(/\n\s*---\s*\n/)
+    .map(chunk => chunk.trim())
+    .filter(Boolean)
+    .map((raw, index) => {
+      const lines = raw.split('\n');
+      let headingVersion = null;
+      const firstLine = (lines[0] || '').trim();
+      if (/^\[[^\]]+\]$/.test(firstLine)) {
+        headingVersion = firstLine.slice(1, -1);
+        lines.shift();
+      }
+
+      const section = {
+        raw,
+        index,
+        headingVersion,
+        mode: null,
+        status: null,
+        version: null,
+        command: null,
+        details: null,
+      };
+      let block = null;
+      const commandLines = [];
+      const detailLines = [];
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed === 'Command:') {
+          block = 'command';
+          continue;
+        }
+        if (trimmed === 'Details:') {
+          block = 'details';
+          continue;
+        }
+
+        if (block === 'command') {
+          commandLines.push(line);
+          continue;
+        }
+        if (block === 'details') {
+          detailLines.push(line);
+          continue;
+        }
+
+        const fieldMatch = line.match(/^(Mode|Status|Version):\s*(.*)$/);
+        if (fieldMatch) {
+          section[fieldMatch[1].toLowerCase()] = fieldMatch[2].trim();
+        }
+      }
+
+      section.command = commandLines.join('\n').trim() || null;
+      section.details = detailLines.join('\n').trim() || null;
+      section.version = section.version || headingVersion;
+      return section;
+    });
+}
+
+function copyText(text, done) {
+  const copyWithTextarea = () => {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(done)
+      .catch(() => {
+        copyWithTextarea();
+        done();
+      });
+    return;
+  }
+  copyWithTextarea();
+  done();
+}
+
+function StatusBadge({ status }) {
+  const normalized = (status || 'UNKNOWN').toUpperCase();
+  const badgeClass = normalized === 'PASS'
+    ? 'bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300'
+    : normalized === 'HW_INCOMPATIBLE'
+      ? 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'
+      : normalized === 'FAIL'
+        ? 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300'
+        : 'bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300';
+  return (
+    <span className={`px-2 py-0.5 rounded text-[0.68rem] font-bold tracking-wide ${badgeClass}`}>
+      {normalized}
+    </span>
+  );
+}
+
+function CopyCommandButton({ command }) {
+  const [copied, setCopied] = useState(false);
+  if (!command) return null;
+  return (
+    <button
+      onClick={() => copyText(command, () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      })}
+      className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600
+                 text-slate-700 dark:text-slate-200 text-[0.68rem] font-semibold rounded transition-colors whitespace-nowrap"
+    >
+      {copied ? 'Copied' : 'Copy command'}
+    </button>
+  );
+}
+
+function SupportDetailCards({ formatted }) {
+  const sections = parseSupportDetailSections(formatted);
+  if (!sections.length) {
+    return (
+      <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-50 dark:bg-slate-900 p-4 rounded border border-slate-200 dark:border-slate-700">
+        {formatted}
+      </pre>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {sections.map(section => (
+        <section
+          key={section.index}
+          className="rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden"
+        >
+          <div className="px-4 py-3 bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 flex items-center gap-2 flex-wrap">
+            <StatusBadge status={section.status} />
+            <span className="font-semibold text-sm">{section.mode || 'mode unknown'}</span>
+            <span className="text-xs text-slate-500 dark:text-slate-400">version {section.version || 'unknown'}</span>
+            {section.headingVersion && section.headingVersion !== section.version && (
+              <span className="text-xs text-slate-400">group {section.headingVersion}</span>
+            )}
+            <span className="ml-auto"></span>
+            <CopyCommandButton command={section.command} />
+          </div>
+          <div className="px-4 py-3 space-y-3">
+            {section.command && (
+              <div>
+                <div className="text-[0.68rem] uppercase font-bold text-slate-500 dark:text-slate-400 mb-1">
+                  Reproduce Command
+                </div>
+                <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-950 text-slate-100 p-3 rounded">
+                  {section.command}
+                </pre>
+              </div>
+            )}
+            {section.details && (
+              <details open={section.status !== 'PASS'} className="group">
+                <summary className="cursor-pointer text-xs font-semibold text-slate-600 dark:text-slate-300 select-none">
+                  Details
+                </summary>
+                <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-50 dark:bg-slate-950 p-3 rounded border border-slate-200 dark:border-slate-700">
+                  {section.details}
+                </pre>
+              </details>
+            )}
+          </div>
+        </section>
+      ))}
+      <details className="text-xs text-slate-500 dark:text-slate-400">
+        <summary className="cursor-pointer font-semibold select-none">Raw text</summary>
+        <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-50 dark:bg-slate-900 p-3 rounded border border-slate-200 dark:border-slate-700">
+          {formatted}
+        </pre>
+      </details>
+    </div>
+  );
+}
+
 function ErrorModal({ model, system, backend, error, onClose }) {
+  const [copied, setCopied] = useState(false);
   if (!error) return null;
   const formatted = error.replace(/\\\\n/g, '\n').replace(/\\n/g, '\n');
+  const showFixLink = /Status: (FAIL|HW_INCOMPATIBLE|FRAMEWORK_INCOMPATIBLE)/.test(formatted) || formatted.includes('No support-matrix row exists');
   const issueUrl = buildCallForFixUrl(model, system, backend, formatted);
+  const copyError = () => {
+    const done = () => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    };
+    copyText(formatted, done);
+  };
   return (
     <div className="fixed inset-0 bg-black/50 z-[1000] flex items-center justify-center p-6" onClick={onClose}>
       <div className="bg-white dark:bg-slate-800 rounded-lg max-w-3xl w-full max-h-[85vh] flex flex-col shadow-2xl"
            onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-200 dark:border-slate-700 shrink-0">
-          <h3 className="flex-1 text-base font-bold">Error Details &mdash; {model} / {backend}</h3>
-          <a href={issueUrl} target="_blank" rel="noopener"
-            className="px-3 py-1.5 bg-indigo-500 hover:bg-indigo-600 dark:bg-indigo-400 dark:hover:bg-indigo-500
-                       text-white text-xs font-semibold rounded transition-colors no-underline whitespace-nowrap">
-            Call for Fix
-          </a>
+          <h3 className="flex-1 text-base font-bold">Support Details &mdash; {model} / {backend}</h3>
+          <button onClick={copyError}
+            className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600
+                       text-slate-700 dark:text-slate-200 text-xs font-semibold rounded transition-colors whitespace-nowrap">
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+          {showFixLink && (
+            <a href={issueUrl} target="_blank" rel="noopener"
+              className="px-3 py-1.5 bg-indigo-500 hover:bg-indigo-600 dark:bg-indigo-400 dark:hover:bg-indigo-500
+                         text-white text-xs font-semibold rounded transition-colors no-underline whitespace-nowrap">
+              Call for Fix
+            </a>
+          )}
           <button onClick={onClose}
             className="bg-transparent border-none text-xl cursor-pointer text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 px-1 rounded transition-colors">
             &times;
           </button>
         </div>
         <div className="px-5 py-4 overflow-y-auto flex-1">
-          <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-50 dark:bg-slate-900 p-4 rounded border border-slate-200 dark:border-slate-700">
-            {formatted}
-          </pre>
+          <SupportDetailCards formatted={formatted} />
         </div>
       </div>
     </div>

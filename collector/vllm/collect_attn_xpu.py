@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""vLLM dense attention collector for XPU devices.
+
+This mirrors the CUDA vLLM attention collector but routes tensor allocation,
+backend setup, and perf logging through XPU-capable helper paths. It benchmarks
+isolated context/generation attention kernels with synthetic KV-cache state.
+"""
+
 __compat__ = "vllm>=0.11.0"
 
 import os
@@ -36,6 +43,7 @@ except ImportError:
 
 from vllm.config import set_current_vllm_config
 
+from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
 from collector.helper import benchmark_with_power, get_device_module, log_perf
 from collector.vllm.utils import (
     BatchSpec,
@@ -242,9 +250,13 @@ def run_attention_torch(
     # Fix backend-specific kv cache layout.
     backend_name_str = backend_name if isinstance(backend_name, str) else backend_name.name
 
-    if backend_name_str == "FLASHINFER":
-        kv_cache = kv_cache.transpose(0, 1)
+    if backend_name_str in {"FLASHINFER", "TRITON_ATTN"}:
+        # The collector helper populates cache as [2, num_blocks, ...] because
+        # that layout makes K/V insertion simple. vLLM V1 backends consume it as
+        # [num_blocks, 2, ...].
+        kv_cache = kv_cache.transpose(0, 1).contiguous()
 
+    if backend_name_str == "FLASHINFER":
         # For FlashInfer default to HND layout
         kv_cache = kv_cache.transpose(2, 3).contiguous().transpose(2, 3)
         set_kv_cache_layout("HND")
@@ -398,171 +410,158 @@ def run_attention_torch(
 def get_context_attention_test_cases(if_unit_test=False):
     test_cases = []
 
-    if not if_unit_test:
-        # narrow down the search space for xpu currently
-        b_list = [1, 2, 4, 8, 16, 32]
-        s_list = [
-            1,
-            16,
-            32,
-            64,
-            128,
-            256,
-            512,
-            1024,
-            1536,
-            2048,
-            3072,
-            4096,
-            6144,
-            8192,
-            10240,
-            12288,
-            16384,
+    if if_unit_test:
+        shape_sweeps = [
+            {
+                "batch_sizes": [1],
+                "sequence_lengths": [64],
+                "query_head_counts": [4],
+                "kv_head_options": [0],
+                "head_dims": [128, 64],
+                "window_sizes": [0, 128],
+                "max_tokens_self_attention": 65536,
+                "max_tokens_grouped_query_attention": 131072,
+                "max_kv_elements": 2147483647,
+            }
         ]
-        n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
-        n_kv_list = [1, 2, 4, 8]  # no zero here, influence logics below
-
     else:
-        b_list = [1]
-        s_list = [64]
-        n_list = [4]
-        n_kv_list = [0]
+        shape_sweeps = get_attention_context_shape_sweeps("vllm_xpu")
 
     # kv cache dtype fp8 to be supported
     kv_cache_dtype_list = [False, True]
 
-    head_dim_list = [128, 64]
-    # window_size=0 means full attention; window_size=128 for GPT-OSS SWA layers
-    window_size_list = [0, 128]
     # XPU paged flash attention kernel supports GQA ratio up to 16
     max_gqa_ratio = 16
 
-    # DEBUG
-    # print(f"b_list: {b_list}, s_list: {s_list}, n_list: {n_list}, n_kv_list: {n_kv_list}")
-    for n in sorted(n_list, reverse=True):
-        for s in sorted(s_list, reverse=True):
-            for b in sorted(b_list, reverse=True):
-                for n_kv in n_kv_list:
-                    if n_kv != 0 and (n_kv > n or n % n_kv != 0):
-                        continue
-                    num_kv_heads = n_kv if n_kv != 0 else n
-                    # XPU paged flash attention only supports GQA ratio <= 16
-                    if n // num_kv_heads > max_gqa_ratio:
-                        continue
-                    if num_kv_heads == n:
-                        if b * s > 65536 or b > 128:
-                            continue
-                    else:
-                        if b * s > 131072:
-                            continue
-                    for head_dim in head_dim_list:
-                        if b * s * num_kv_heads * head_dim * 2 >= 2147483647:
-                            continue
+    for shape_sweep in shape_sweeps:
+        batch_sizes = [int(value) for value in shape_sweep["batch_sizes"]]
+        sequence_lengths = [int(value) for value in shape_sweep["sequence_lengths"]]
+        query_head_counts = [int(value) for value in shape_sweep["query_head_counts"]]
+        kv_head_options = shape_sweep["kv_head_options"]
+        head_dims = [int(value) for value in shape_sweep["head_dims"]]
+        window_sizes = [int(value) for value in shape_sweep["window_sizes"]]
+        max_tokens_self_attention = int(shape_sweep["max_tokens_self_attention"])
+        max_tokens_grouped_query_attention = int(shape_sweep["max_tokens_grouped_query_attention"])
+        max_kv_elements = int(shape_sweep["max_kv_elements"])
 
-                        for window_size in window_size_list:
-                            # Skip SWA for head_dim=128 (no models use it)
-                            if window_size > 0 and head_dim == 128:
+        for n in sorted(query_head_counts, reverse=True):
+            for s in sorted(sequence_lengths, reverse=True):
+                for b in sorted(batch_sizes, reverse=True):
+                    for kv_head_option in kv_head_options:
+                        is_self_kv = kv_head_option in ("self", 0, "0", None)
+                        num_kv_heads = n if is_self_kv else int(kv_head_option)
+                        if num_kv_heads <= 0:
+                            continue
+                        if num_kv_heads != n and (num_kv_heads > n or n % num_kv_heads != 0):
+                            continue
+                        # XPU paged flash attention only supports GQA ratio <= 16
+                        if n // num_kv_heads > max_gqa_ratio:
+                            continue
+                        if num_kv_heads == n:
+                            if b * s > max_tokens_self_attention or b > 128:
                                 continue
-                            for is_fp8_kv_cache in kv_cache_dtype_list:
-                                test_cases.append(
-                                    [
-                                        b,
-                                        s,
-                                        n,
-                                        num_kv_heads,
-                                        head_dim,
-                                        is_fp8_kv_cache,
-                                        True,
-                                        window_size,
-                                    ]
-                                )
+                        else:
+                            if b * s > max_tokens_grouped_query_attention:
+                                continue
+                        for head_dim in head_dims:
+                            if b * s * num_kv_heads * head_dim * 2 >= max_kv_elements:
+                                continue
+
+                            for window_size in window_sizes:
+                                # Skip SWA for head_dim=128 (no models use it)
+                                if window_size > 0 and head_dim == 128:
+                                    continue
+                                for is_fp8_kv_cache in kv_cache_dtype_list:
+                                    test_cases.append(
+                                        [
+                                            b,
+                                            s,
+                                            n,
+                                            num_kv_heads,
+                                            head_dim,
+                                            is_fp8_kv_cache,
+                                            True,
+                                            window_size,
+                                        ]
+                                    )
 
     return test_cases
+
+
+def _generation_target_sequence_lengths(batch_sizes, sequence_lengths, num_heads, max_tokens, shape_sweep):
+    b_s_dict = {}
+    s_b_dict = {}
+    for s in sequence_lengths:
+        max_b = max_tokens // s // num_heads
+        for b in batch_sizes:
+            if b > max_b:
+                break
+            if s not in s_b_dict:
+                s_b_dict[s] = {b}
+            else:
+                s_b_dict[s].add(b)
+    for s, b_set in s_b_dict.items():
+        if len(b_set) < int(shape_sweep["min_batch_options_per_sequence"]):
+            continue
+        for b in b_set:
+            if b not in b_s_dict:
+                b_s_dict[b] = {s - 1}
+            b_s_dict[b].add(s - 1)
+    return b_s_dict
 
 
 def get_generation_attention_test_cases():
     test_cases = []
 
-    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
-    # b_list_xqa = [1,2,4,8,16,32,64,128,256,512,1024,2048]
-    n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
-    # n_list_xqa = [4,8,16,32,64,128]
-    s_list = [
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-        2048,
-        4096,
-        8192,
-        16384,
-        32768,
-        65536,
-        131072,
-    ]
-    n_kv_list = [1, 2, 4, 8]
-
     # kv cache dtype fp8 to be supported
     kv_cache_dtype_list = [False, True]
     # XPU paged flash attention kernel supports GQA ratio up to 16
     max_gqa_ratio = 16
 
-    max_bsn = 8192 * 1024
-    for n in sorted(n_list, reverse=True):
-        b_s_dict = {}
-        s_b_dict = {}
-        for s in s_list:
-            max_b = max_bsn // s // n
-            for b in b_list:
-                if b > max_b:
-                    break
-                if s not in s_b_dict:
-                    s_b_dict[s] = {b}
-                else:
-                    s_b_dict[s].add(b)
-        for s, b_set in s_b_dict.items():
-            if len(b_set) < 4:
-                continue
-            for b in b_set:
-                if b not in b_s_dict:
-                    b_s_dict[b] = {s - 1}
-                b_s_dict[b].add(s - 1)
-        for b, s_list_limited in b_s_dict.items():
-            target_s_list = sorted(s_list_limited)
-            if b >= 256:
-                target_s_list = target_s_list[:-1]
-            for n_kv in n_kv_list:
-                if n_kv > n or n % n_kv != 0:
-                    continue
-                # XPU paged flash attention only supports GQA ratio <= 16
-                if n // n_kv > max_gqa_ratio:
-                    continue
-                for s in target_s_list:
-                    for head_dim in [128, 64]:
-                        for window_size in [0, 128]:
-                            # Skip SWA for head_dim=128 (no models use it)
-                            if window_size > 0 and head_dim == 128:
-                                continue
-                            for is_fp8_kv_cache in kv_cache_dtype_list:
-                                test_cases.append(
-                                    [
-                                        b,
-                                        s,
-                                        n,
-                                        n_kv,
-                                        head_dim,
-                                        is_fp8_kv_cache,
-                                        False,
-                                        window_size,
-                                    ]
-                                )
+    for shape_sweep in get_attention_generation_shape_sweeps("vllm_xpu"):
+        batch_sizes = [int(value) for value in shape_sweep["batch_sizes"]]
+        sequence_lengths = [int(value) for value in shape_sweep["sequence_lengths"]]
+        head_dims = [int(value) for value in shape_sweep["head_dims"]]
+        window_sizes = [int(value) for value in shape_sweep["window_sizes"]]
+        min_drop_batch = int(shape_sweep["drop_largest_sequence_for_batch_at_least"])
+
+        for n in sorted([int(value) for value in shape_sweep["xqa_query_head_counts"]], reverse=True):
+            b_s_dict = _generation_target_sequence_lengths(
+                batch_sizes,
+                sequence_lengths,
+                n,
+                int(shape_sweep["max_mha_tokens_per_step"]),
+                shape_sweep,
+            )
+            for b, s_list_limited in b_s_dict.items():
+                target_s_list = sorted(s_list_limited)
+                if b >= min_drop_batch:
+                    target_s_list = target_s_list[:-1]
+                for n_kv in [int(value) for value in shape_sweep["kv_head_counts"]]:
+                    if n_kv > n or n % n_kv != 0:
+                        continue
+                    # XPU paged flash attention only supports GQA ratio <= 16
+                    if n // n_kv > max_gqa_ratio:
+                        continue
+                    for s in target_s_list:
+                        for head_dim in head_dims:
+                            for window_size in window_sizes:
+                                # Skip SWA for head_dim=128 (no models use it)
+                                if window_size > 0 and head_dim == 128:
+                                    continue
+                                for is_fp8_kv_cache in kv_cache_dtype_list:
+                                    test_cases.append(
+                                        [
+                                            b,
+                                            s,
+                                            n,
+                                            n_kv,
+                                            head_dim,
+                                            is_fp8_kv_cache,
+                                            False,
+                                            window_size,
+                                        ]
+                                    )
     return test_cases
 
 

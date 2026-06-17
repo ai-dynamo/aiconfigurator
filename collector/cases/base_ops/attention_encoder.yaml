@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+op: attention_encoder
+description: Base collector v2 cases for attention_encoder (non-causal / encoder attention).
+model_ops:
+- attention_encoder
+all_frameworks_op_cases:
+  attention_encoder:
+    cases:
+    - id: base_attention_encoder_shape_sweep
+      description: 'Encoder (non-causal) attention shapes for multimodal ViT / audio encoders. MHA only, bf16 only.
+
+        '
+      batch_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      sequence_lengths:
+      - 1
+      - 16
+      - 32
+      - 64
+      - 128
+      - 192
+      - 256
+      - 400
+      - 512
+      - 576
+      - 1024
+      - 1296
+      - 1500
+      - 1536
+      - 2048
+      - 2304
+      - 3072
+      - 3136
+      - 4096
+      - 5184
+      - 6144
+      - 6400
+      - 7744
+      - 8192
+      - 9216
+      - 10240
+      - 10816
+      - 12288
+      - 12544
+      - 14400
+      - 16384
+      - 24576
+      - 32768
+      - 49152
+      - 65536
+      head_counts:
+      - 2
+      - 4
+      - 5
+      - 8
+      - 10
+      - 12
+      - 14
+      - 16
+      - 20
+      - 24
+      - 32
+      head_dims:
+      - 64
+      - 72
+      - 80

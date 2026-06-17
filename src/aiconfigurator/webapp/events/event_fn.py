@@ -16,6 +16,7 @@ from aiconfigurator.sdk import common, config, models, pareto_analysis
 from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.inference_session import InferenceSession
 from aiconfigurator.sdk.models import check_is_moe, get_model, get_model_family
+from aiconfigurator.sdk.models.helpers import _get_model_info, _infer_quant_modes_from_raw_config
 from aiconfigurator.sdk.perf_database import get_database, get_supported_databases
 from aiconfigurator.sdk.utils import enumerate_parallel_config
 
@@ -181,6 +182,9 @@ class EventFn:
         enable_eplb,
         mode,
         record_df,
+        image_height=0,
+        image_width=0,
+        num_images=1,
     ):
         is_error = False
         stdout_buffer = StringIO()
@@ -214,7 +218,15 @@ class EventFn:
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
-                runtime_config = config.RuntimeConfig(batch_size=batch_size, isl=isl, osl=osl, prefix=prefix)
+                runtime_config = config.RuntimeConfig(
+                    batch_size=batch_size,
+                    isl=isl,
+                    osl=osl,
+                    prefix=prefix,
+                    image_height=int(image_height or 0),
+                    image_width=int(image_width or 0),
+                    num_images_per_request=int(num_images if num_images is not None else 1),
+                )
 
                 model = get_model(model_path, model_config, backend_name)
                 stride = (osl + 8 - 1) // 8  # run at most 8 steps
@@ -228,15 +240,17 @@ class EventFn:
         stderr_text = stderr_buffer.getvalue()
         if is_error:
             return (
-                gr.update(value=""),
                 gr.update(value="ERROR!!!"),
+                gr.update(value=""),
+                gr.update(value=""),
                 gr.update(value=""),
                 gr.update(value=record_df),
                 gr.update(value=stdout_text + stderr_text + traceback_log),
             )
         else:
-            perf_info, mem_info, context_info, generation_info = summary.get_static_info()
+            perf_info, mem_info, encoder_info, context_info, generation_info = summary.get_static_info()
             summary_string = f"```\n{perf_info + mem_info}\n```"
+            encoder_breakdown_string = f"```\n{encoder_info}\n```"
             context_breakdown_string = f"```\n{context_info}\n```"
             generation_breakdown_string = f"```\n{generation_info}\n```"
             new_record_df = summary.get_summary_df()
@@ -248,6 +262,7 @@ class EventFn:
             # need to update the textbox (breakdown) as well the table to be downloaded
             return (
                 gr.update(value=summary_string),
+                gr.update(value=encoder_breakdown_string),
                 gr.update(value=context_breakdown_string),
                 gr.update(value=generation_breakdown_string),
                 gr.update(value=updated_record_df),
@@ -1186,18 +1201,21 @@ class EventFn:
         supported_quant_mode = database.supported_quant_mode
 
         model_family = get_model_family(model_path)
-        if model_family not in ("DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4"):
+        is_deepseek_fam = model_family in ("DEEPSEEK", "KIMIK25")
+        is_deepseek_v32 = model_family == "DEEPSEEKV32"
+        is_deepseek_v4 = model_family == "DEEPSEEKV4"
+        if not (is_deepseek_fam or is_deepseek_v32 or is_deepseek_v4):
             gemm_quant_mode_choices = sorted(supported_quant_mode["gemm"])
             kvcache_quant_mode_choices = sorted(supported_quant_mode["generation_attention"])
             fmha_quant_mode_choices = sorted(supported_quant_mode["context_attention"])
             moe_quant_mode_choices = sorted(supported_quant_mode["moe"])
         else:
-            if model_family == "DEEPSEEKV4":
+            if is_deepseek_v4:
                 gemm_quant_mode_choices = sorted(supported_quant_mode["gemm"])
                 kvcache_quant_mode_choices = sorted(supported_quant_mode["deepseek_v4_generation_module"])
                 fmha_quant_mode_choices = sorted(supported_quant_mode["deepseek_v4_context_module"])
                 moe_quant_mode_choices = sorted(supported_quant_mode["moe"])
-            elif model_family == "DEEPSEEKV32":
+            elif is_deepseek_v32:
                 gemm_quant_mode_choices = sorted(supported_quant_mode["gemm"])
                 kvcache_quant_mode_choices = sorted(supported_quant_mode["dsa_generation_module"])
                 fmha_quant_mode_choices = sorted(supported_quant_mode["dsa_context_module"])
@@ -1234,26 +1252,42 @@ class EventFn:
             moe_quant_mode_choices if len(moe_quant_mode_choices) > 0 else [common.MoEQuantMode.bfloat16.name]
         )
 
-        default_gemm_quant_mode = gemm_quant_mode_choices[0]
+        # Infer model-native quant modes from config.json so the UI defaults
+        # match what the CLI would use (e.g. FP8 for NVFP4 checkpoints).
+        try:
+            model_info = _get_model_info(model_path)
+            raw_config = model_info.get("raw_config", {})
+            architecture = model_info.get("architecture")
+            inferred = _infer_quant_modes_from_raw_config(raw_config, architecture)
+        except Exception:
+            inferred = {}
+
+        def _pick_default(choices, inferred_value):
+            if inferred_value is not None:
+                name = inferred_value.name if hasattr(inferred_value, "name") else str(inferred_value)
+                if name in choices:
+                    return name
+            return choices[0]
+
         return (
             gr.update(
                 choices=gemm_quant_mode_choices,
-                value=default_gemm_quant_mode,
+                value=_pick_default(gemm_quant_mode_choices, inferred.get("gemm_quant_mode")),
                 interactive=True,
             ),
             gr.update(
                 choices=kvcache_quant_mode_choices,
-                value=kvcache_quant_mode_choices[0],
+                value=_pick_default(kvcache_quant_mode_choices, inferred.get("kvcache_quant_mode")),
                 interactive=True,
             ),
             gr.update(
                 choices=fmha_quant_mode_choices,
-                value=fmha_quant_mode_choices[0],
+                value=_pick_default(fmha_quant_mode_choices, inferred.get("fmha_quant_mode")),
                 interactive=True,
             ),
             gr.update(
                 choices=moe_quant_mode_choices,
-                value=moe_quant_mode_choices[0],
+                value=_pick_default(moe_quant_mode_choices, inferred.get("moe_quant_mode")),
                 interactive=True,
             ),
         )
@@ -1304,7 +1338,7 @@ class EventFn:
     def update_model_related_components(model_path):
         # nextn, accept_rate, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size, wideep
         model_family = models.get_model_family(model_path)
-        if model_family in ("DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "MOE", "QWEN35"):
+        if check_is_moe(model_path):
             return (
                 gr.update(value=0, visible=True),
                 gr.update(visible=True),

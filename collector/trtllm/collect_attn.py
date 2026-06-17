@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""TensorRT-LLM dense attention collector.
+
+Constructs a single TRT-LLM torch-flow attention layer and synthetic metadata to
+benchmark context and generation attention. This file owns TRT-LLM cache manager
+setup, quantization flags, SM/version-specific skips, and perf-row formatting.
+"""
+
 import os
 
 import tensorrt_llm
@@ -19,6 +26,7 @@ from tensorrt_llm.llmapi import KvCacheConfig
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
+from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.registry_types import PerfFile
 
@@ -53,6 +61,70 @@ def _skip_trtllm_sm120_fp8_context_fmha(
         or (num_heads == 48 and num_key_value_heads == 8 and num_tokens >= 131072)
         or (num_heads == num_key_value_heads == 96 and batch_size >= 2 and input_len >= 16384)
     )
+
+
+def _skip_trtllm_sm89_rc15_long_context_gqa(
+    batch_size: int,
+    input_len: int,
+    num_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+) -> bool:
+    if not (tensorrt_llm.__version__.startswith("1.3.0rc15") and get_sm_version() == 89):
+        return False
+
+    if num_key_value_heads not in {1, 2, 4, 8}:
+        return False
+
+    num_tokens = batch_size * input_len
+    if num_heads == 96:
+        if head_dim == 128:
+            return num_tokens >= 98304
+        if head_dim >= 256:
+            return num_tokens >= 49152
+        return head_dim >= 192 and num_tokens >= 65536
+    if num_heads == 64:
+        if head_dim >= 256:
+            return num_tokens >= 81920
+        return head_dim >= 192 and num_tokens >= 98304
+    if num_heads == 48:
+        if head_dim >= 256:
+            return num_tokens >= 98304
+        return head_dim >= 192 and num_tokens >= 131072
+    if num_heads == 40:
+        return head_dim >= 256 and num_tokens >= 131072
+    return False
+
+
+def _skip_trtllm_sm89_rc15_fp8_context_mha(
+    batch_size: int,
+    input_len: int,
+    num_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+    use_fp8_kv_cache: bool,
+    use_fp8_context_fmha: bool,
+) -> bool:
+    if not (tensorrt_llm.__version__.startswith("1.3.0rc15") and get_sm_version() == 89):
+        return False
+
+    if not (use_fp8_kv_cache and use_fp8_context_fmha and num_heads == num_key_value_heads):
+        return False
+
+    num_tokens = batch_size * input_len
+    if num_heads == 96:
+        if head_dim == 128:
+            return num_tokens >= 65536
+        if head_dim >= 256:
+            return num_tokens >= 32768
+        return head_dim >= 192 and num_tokens >= 40960
+    if num_heads == 64:
+        if head_dim >= 256:
+            return num_tokens >= 49152
+        return head_dim >= 192 and num_tokens >= 65536
+    if num_heads == 48:
+        return head_dim >= 256 and num_tokens >= 65536
+    return False
 
 
 def run_attention_torch(
@@ -136,8 +208,12 @@ def run_attention_torch(
 
     num_hidden_layers = 1
 
+    synthetic_max_seq_len = input_len + output_len + 1
+    if attention_window_size > 0:
+        synthetic_max_seq_len = max(synthetic_max_seq_len, attention_window_size + output_len + 1)
+
     kv_cache_config = KvCacheConfig(
-        max_tokens=int((input_len + output_len - 1) / tokens_per_block + 1)
+        max_tokens=int((synthetic_max_seq_len - 1) / tokens_per_block + 1)
         * tokens_per_block
         * batch_size
         * 2,  # num_bloacks * block_size
@@ -151,7 +227,7 @@ def run_attention_torch(
         num_kv_heads=num_key_value_heads,
         head_dim=head_dim,
         tokens_per_block=tokens_per_block,
-        max_seq_len=input_len + output_len + 1,  # +1 for the magic fixme mentioned in trtllm xqa JIT path impl.
+        max_seq_len=synthetic_max_seq_len,  # +1 for the magic fixme mentioned in trtllm xqa JIT path impl.
         max_batch_size=batch_size,
         mapping=mapping,
         dtype=kv_cache_dtype,
@@ -303,120 +379,95 @@ def run_attention_torch(
     kv_cache_manager.shutdown()
 
 
+def _int_list(values):
+    return [int(value) for value in values]
+
+
+def _kv_head_options(values, num_heads):
+    return [num_heads if value == "self" else int(value) for value in values]
+
+
+def _default_attention_window_options(head_dim: int) -> list[int]:
+    return [128, 0] if head_dim == 64 else [0]
+
+
+def _attention_window_options(shape_sweep: dict, head_dim: int) -> list[int]:
+    windows = _default_attention_window_options(head_dim)
+    if "window_sizes" in shape_sweep:
+        windows = [*windows, *_int_list(shape_sweep["window_sizes"])]
+    return sorted(set(windows), reverse=True)
+
+
 def get_context_attention_test_cases():
     has_fp8 = get_sm_version() > 86
     test_cases = []
-    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    s_list = [
-        1,
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-        10240,
-        12288,
-        16384,
-        262144,
-    ]
-    n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64, 96]
-    n_kv_list = [0, 1, 2, 4, 8]
-    head_dim = [64, 128, 256]
 
-    for h in head_dim:
-        for n in sorted(n_list, reverse=True):
-            for s in sorted(s_list, reverse=True):
-                for b in sorted(b_list, reverse=True):
-                    for n_kv in n_kv_list:
-                        if n_kv != 0 and (n_kv >= n or n % n_kv != 0):
-                            continue
-                        num_kv_heads = n_kv if n_kv != 0 else n
+    for shape_sweep in get_attention_context_shape_sweeps("trtllm"):
+        batch_sizes = _int_list(shape_sweep["batch_sizes"])
+        sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
+        query_head_counts = _int_list(shape_sweep["query_head_counts"])
+        kv_head_options = shape_sweep["kv_head_options"]
+        head_dims = _int_list(shape_sweep["head_dims"])
+        max_tokens_self_attention = int(shape_sweep["max_tokens_self_attention"])
+        max_tokens_grouped_query_attention = int(shape_sweep["max_tokens_grouped_query_attention"])
+        max_batch_size_self_attention = int(shape_sweep["max_batch_size_self_attention"])
+        max_kv_elements = int(shape_sweep["max_kv_elements"])
 
-                        if num_kv_heads == n:
-                            if b * s > 65536 or b > 128:
-                                continue
-                        else:
-                            if b * s > 131072:
-                                continue
-                        if b * s * num_kv_heads * h * 2 >= 2147483647:
-                            continue
-                        if get_sm_version() >= 100:
-                            # though it's a precheck of gen kernels during the attention op init,
-                            # this cannot be skipped for now
-                            # TLLM_CHECK_WITH_INFO((params.m_num_heads_q_per_kv < max_num_heads_q_per_kv_in_cta || params.m_num_heads_q_per_kv % max_num_heads_q_per_kv_in_cta == 0), # noqa: E501
-                            m_num_heads_q_per_kv = 1 if n_kv == 0 else n // n_kv
-                            max_num_heads_q_per_kv_in_cta = 32
-                            if (
-                                m_num_heads_q_per_kv >= max_num_heads_q_per_kv_in_cta
-                                and m_num_heads_q_per_kv % max_num_heads_q_per_kv_in_cta != 0
-                            ):
+        for h in head_dims:
+            for n in sorted(query_head_counts, reverse=True):
+                for s in sorted(sequence_lengths, reverse=True):
+                    for b in sorted(batch_sizes, reverse=True):
+                        for num_kv_heads in _kv_head_options(kv_head_options, n):
+                            if num_kv_heads != n and (num_kv_heads >= n or n % num_kv_heads != 0):
                                 continue
 
-                        # print(
-                        #     f"collecting heads: {n} kv_heads: {num_kv_heads} seq: {s} "
-                        #     f"batchsize: {b}"
-                        # )
-                        # use fp8 kv cache, fp8 context fmha, is_context_phase. in torch flow,
-                        # int8 kvcache is not supported yet.
-                        #
-                        # bfloat16 kv cache, bfloat16 context fmha, is_context_phase
-                        skip_fp8_context_fmha = _skip_trtllm_sm120_fp8_context_fmha(
-                            b,
-                            s,
-                            n,
-                            num_kv_heads,
-                            h,
-                        )
-                        if h == 64:
-                            test_cases.append(
-                                [
-                                    b,
-                                    s,
-                                    n,
-                                    num_kv_heads,
-                                    h,
-                                    128,
-                                    False,
-                                    False,
-                                    True,
-                                ]
+                            if num_kv_heads == n:
+                                if b * s > max_tokens_self_attention or b > max_batch_size_self_attention:
+                                    continue
+                            else:
+                                if b * s > max_tokens_grouped_query_attention:
+                                    continue
+                            if b * s * num_kv_heads * h * 2 >= max_kv_elements:
+                                continue
+                            if get_sm_version() >= 100:
+                                # though it's a precheck of gen kernels during the attention op init,
+                                # this cannot be skipped for now
+                                # TLLM_CHECK_WITH_INFO((params.m_num_heads_q_per_kv < max_num_heads_q_per_kv_in_cta || params.m_num_heads_q_per_kv % max_num_heads_q_per_kv_in_cta == 0), # noqa: E501
+                                m_num_heads_q_per_kv = n // num_kv_heads
+                                max_num_heads_q_per_kv_in_cta = 32
+                                if (
+                                    m_num_heads_q_per_kv >= max_num_heads_q_per_kv_in_cta
+                                    and m_num_heads_q_per_kv % max_num_heads_q_per_kv_in_cta != 0
+                                ):
+                                    continue
+
+                            skip_fp8_context_fmha = _skip_trtllm_sm120_fp8_context_fmha(
+                                b,
+                                s,
+                                n,
+                                num_kv_heads,
+                                h,
                             )
-                            test_cases.append(
-                                [
-                                    b,
-                                    s,
-                                    n,
-                                    num_kv_heads,
-                                    h,
-                                    0,
-                                    False,
-                                    False,
-                                    True,
-                                ]
-                            )
-                            if has_fp8:
-                                test_cases.append(
-                                    [
+                            if _skip_trtllm_sm89_rc15_long_context_gqa(b, s, n, num_kv_heads, h):
+                                continue
+                            for attention_window_size in _attention_window_options(shape_sweep, h):
+                                for precision_case in shape_sweep["precision_cases"]:
+                                    use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                                    use_fp8_context_fmha = bool(precision_case["fp8_context_fmha"])
+                                    if not has_fp8 and use_fp8_kv_cache:
+                                        continue
+                                    if skip_fp8_context_fmha and use_fp8_context_fmha:
+                                        continue
+                                    if _skip_trtllm_sm89_rc15_fp8_context_mha(
                                         b,
                                         s,
                                         n,
                                         num_kv_heads,
                                         h,
-                                        128,
-                                        True,
-                                        False,
-                                        True,
-                                    ]
-                                )
-                                if not skip_fp8_context_fmha:
+                                        use_fp8_kv_cache,
+                                        use_fp8_context_fmha,
+                                    ):
+                                        continue
                                     test_cases.append(
                                         [
                                             b,
@@ -424,78 +475,9 @@ def get_context_attention_test_cases():
                                             n,
                                             num_kv_heads,
                                             h,
-                                            128,
-                                            True,
-                                            True,
-                                            True,
-                                        ]
-                                    )
-                                test_cases.append(
-                                    [
-                                        b,
-                                        s,
-                                        n,
-                                        num_kv_heads,
-                                        h,
-                                        0,
-                                        True,
-                                        False,
-                                        True,
-                                    ]
-                                )
-                                if not skip_fp8_context_fmha:
-                                    test_cases.append(
-                                        [
-                                            b,
-                                            s,
-                                            n,
-                                            num_kv_heads,
-                                            h,
-                                            0,
-                                            True,
-                                            True,
-                                            True,
-                                        ]
-                                    )
-                        else:
-                            test_cases.append(
-                                [
-                                    b,
-                                    s,
-                                    n,
-                                    num_kv_heads,
-                                    h,
-                                    0,
-                                    False,
-                                    False,
-                                    True,
-                                ]
-                            )
-                            if has_fp8:
-                                test_cases.append(
-                                    [
-                                        b,
-                                        s,
-                                        n,
-                                        num_kv_heads,
-                                        h,
-                                        0,
-                                        True,
-                                        False,
-                                        True,
-                                    ]
-                                )
-                                if not skip_fp8_context_fmha:
-                                    test_cases.append(
-                                        [
-                                            b,
-                                            s,
-                                            n,
-                                            num_kv_heads,
-                                            h,
-                                            0,
-                                            True,
-                                            True,
+                                            attention_window_size,
+                                            use_fp8_kv_cache,
+                                            use_fp8_context_fmha,
                                             True,
                                         ]
                                     )
@@ -503,225 +485,97 @@ def get_context_attention_test_cases():
     return test_cases
 
 
+def _generation_target_sequence_lengths(batch_sizes, sequence_lengths, num_heads, max_tokens, shape_sweep):
+    b_s_dict = {}
+    s_b_dict = {}
+    for s in sequence_lengths:
+        max_b = max_tokens // s // num_heads
+        for b in batch_sizes:
+            if b > max_b:
+                break
+            if s not in s_b_dict:
+                s_b_dict[s] = {b}
+            else:
+                s_b_dict[s].add(b)
+    for s, b_set in s_b_dict.items():
+        if len(b_set) < int(shape_sweep["min_batch_options_per_sequence"]):
+            continue
+        for b in b_set:
+            if b not in b_s_dict:
+                b_s_dict[b] = {s - 1}
+            b_s_dict[b].add(s - 1)
+    return b_s_dict
+
+
 def get_generation_attention_test_cases():
     has_fp8 = get_sm_version() > 86
     test_cases = []
 
-    # generation
-    b_list = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-        2048,
-    ]
-    # the i-th token to record. 1 for context phase. mapping to osl definition
-    s_list = [
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-        2048,
-        4096,
-        8192,
-        16384,
-        32768,
-        65536,
-        131072,
-    ]
-    n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
-    n_list_xqa = [1, 2, 4, 8, 16, 32, 64, 96, 128]
-    n_kv_list = [1, 2, 4, 8]
-    head_dim = [64, 128, 256]
+    for shape_sweep in get_attention_generation_shape_sweeps("trtllm"):
+        batch_sizes = _int_list(shape_sweep["batch_sizes"])
+        sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
+        head_dims = _int_list(shape_sweep["head_dims"])
+        min_drop_batch = int(shape_sweep["drop_largest_sequence_for_batch_at_least"])
 
-    # MHA
-    max_bsn = 8192 * 1024  # 2*1024*1024*1024/128/2 INT32MAX/128/2
-    for n in sorted(n_list, reverse=True):
-        b_s_dict = {}
-        s_b_dict = {}
-        for s in s_list:
-            max_b = max_bsn // s // n  # b*s*n*byte <= max_bsn
-            for b in b_list:
-                if b > max_b:
-                    break
-                if s not in s_b_dict:
-                    s_b_dict[s] = {b}
-                else:
-                    s_b_dict[s].add(b)
-        for s, b_set in s_b_dict.items():
-            if len(b_set) < 4:
-                continue
-            for b in b_set:
-                if b not in b_s_dict:
-                    b_s_dict[b] = {s - 1}
-                b_s_dict[b].add(s - 1)
-        for h in head_dim:
-            for b, s_list_limited in b_s_dict.items():
-                target_s_list = sorted(s_list_limited)
-                if b >= 256:
-                    target_s_list = target_s_list[:-1]
-                # print(f'collecting MHA heads: {n} batchsize: {b}  steps: {s_list_limited}')
-                # fp8 kv cache, fp8 context fmha, is_context_phase
-                for s in target_s_list:
-                    test_cases.append([b, s, n, n, h, 0, False, False, False])
-
-                    if has_fp8:
-                        test_cases.append([b, s, n, n, h, 0, True, False, False])
-                        # currently, fp8 is not for generation compute
-                        # test_cases.append(
-                        #     [b, s, n, n, 128, True, True, False, "generation_attention_perf.txt"]
-                        # )
-
-    # XQA
-    max_bsn = 8192 * 1024 * 2  # 2*1024*1024*1024/128/2
-    for n in sorted(n_list_xqa, reverse=True):
-        b_s_dict = {}
-        s_b_dict = {}
-        for s in s_list:
-            max_b = max_bsn // s // n
-            for b in b_list:
-                if b > max_b:
-                    break
-                if s not in s_b_dict:
-                    s_b_dict[s] = {b}
-                else:
-                    s_b_dict[s].add(b)
-        for s, b_set in s_b_dict.items():
-            if len(b_set) < 4:
-                continue
-            for b in b_set:
-                if b not in b_s_dict:
-                    b_s_dict[b] = {s - 1}
-                b_s_dict[b].add(s - 1)
-        for h in head_dim:
-            for b, s_list_limited in b_s_dict.items():
-                target_s_list = sorted(s_list_limited)
-                if b >= 256:
-                    target_s_list = target_s_list[:-1]
-                for n_kv in n_kv_list:
-                    if n_kv >= n:
-                        continue
-
-                    # fp8 kv cache, fp8 context fmha, is_context_phase
+        # MHA
+        for n in sorted(_int_list(shape_sweep["mha_query_head_counts"]), reverse=True):
+            b_s_dict = _generation_target_sequence_lengths(
+                batch_sizes,
+                sequence_lengths,
+                n,
+                int(shape_sweep["max_mha_tokens_per_step"]),
+                shape_sweep,
+            )
+            for h in head_dims:
+                for b, s_list_limited in b_s_dict.items():
+                    target_s_list = sorted(s_list_limited)
+                    if b >= min_drop_batch:
+                        target_s_list = target_s_list[:-1]
                     for s in target_s_list:
+                        for attention_window_size in _attention_window_options(shape_sweep, h):
+                            for precision_case in shape_sweep["precision_cases"]:
+                                use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                                if not has_fp8 and use_fp8_kv_cache:
+                                    continue
+                                test_cases.append(
+                                    [b, s, n, n, h, attention_window_size, use_fp8_kv_cache, False, False]
+                                )
+
+        # XQA
+        for n in sorted(_int_list(shape_sweep["xqa_query_head_counts"]), reverse=True):
+            b_s_dict = _generation_target_sequence_lengths(
+                batch_sizes,
+                sequence_lengths,
+                n,
+                int(shape_sweep["max_xqa_tokens_per_step"]),
+                shape_sweep,
+            )
+            for h in head_dims:
+                for b, s_list_limited in b_s_dict.items():
+                    target_s_list = sorted(s_list_limited)
+                    if b >= min_drop_batch:
+                        target_s_list = target_s_list[:-1]
+                    for n_kv in _int_list(shape_sweep["kv_head_counts"]):
+                        if n_kv >= n:
+                            continue
                         if get_sm_version() >= 100:
                             # TLLM_CHECK_WITH_INFO((params.m_num_heads_q_per_kv < max_num_heads_q_per_kv_in_cta || params.m_num_heads_q_per_kv % max_num_heads_q_per_kv_in_cta == 0), # noqa: E501
-                            m_num_heads_q_per_kv = 1 if n_kv == 0 else n // n_kv
+                            m_num_heads_q_per_kv = n // n_kv
                             max_num_heads_q_per_kv_in_cta = 32
                             if (
                                 m_num_heads_q_per_kv >= max_num_heads_q_per_kv_in_cta
                                 and m_num_heads_q_per_kv % max_num_heads_q_per_kv_in_cta != 0
                             ):
                                 continue
-                        if h == 64:
-                            test_cases.append(
-                                [
-                                    b,
-                                    s,
-                                    n,
-                                    n_kv,
-                                    h,
-                                    128,
-                                    False,
-                                    False,
-                                    False,
-                                ]
-                            )
-                            test_cases.append(
-                                [
-                                    b,
-                                    s,
-                                    n,
-                                    n_kv,
-                                    h,
-                                    0,
-                                    False,
-                                    False,
-                                    False,
-                                ]
-                            )
-                            if has_fp8:
-                                test_cases.append(
-                                    [
-                                        b,
-                                        s,
-                                        n,
-                                        n_kv,
-                                        h,
-                                        128,
-                                        True,
-                                        False,
-                                        False,
-                                    ]
-                                )
-                                test_cases.append(
-                                    [
-                                        b,
-                                        s,
-                                        n,
-                                        n_kv,
-                                        h,
-                                        0,
-                                        True,
-                                        False,
-                                        False,
-                                    ]
-                                )
-                                # currently, fp8 is not for generation compute
-                                # test_cases.append(
-                                #     [
-                                #         b,
-                                #         s,
-                                #         n,
-                                #         n_kv,
-                                #         128,
-                                #         True,
-                                #         True,
-                                #         False,
-                                #         "generation_attention_perf.txt",
-                                #     ]
-                                # )
-                        else:
-                            test_cases.append(
-                                [
-                                    b,
-                                    s,
-                                    n,
-                                    n_kv,
-                                    h,
-                                    0,
-                                    False,
-                                    False,
-                                    False,
-                                ]
-                            )
-                            if has_fp8:
-                                test_cases.append(
-                                    [
-                                        b,
-                                        s,
-                                        n,
-                                        n_kv,
-                                        h,
-                                        0,
-                                        True,
-                                        False,
-                                        False,
-                                    ]
-                                )
+                        for s in target_s_list:
+                            for attention_window_size in _attention_window_options(shape_sweep, h):
+                                for precision_case in shape_sweep["precision_cases"]:
+                                    use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                                    if not has_fp8 and use_fp8_kv_cache:
+                                        continue
+                                    test_cases.append(
+                                        [b, s, n, n_kv, h, attention_window_size, use_fp8_kv_cache, False, False]
+                                    )
     return test_cases
 
 

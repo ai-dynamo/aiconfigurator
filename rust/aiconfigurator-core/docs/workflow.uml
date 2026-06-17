@@ -1,0 +1,24 @@
+@startuml
+Mocker -> "AIC Rust Crate" : build_aic_engine(...)
+"AIC Rust Crate" -> "AIC Python Core": PyO3: make_engine(...)
+"AIC Python Core" -> "AIC Python Core": decompose model \n& serialize
+"AIC Python Core" -> "AIC Rust Crate": serialized engine in bytes
+"AIC Rust Crate" -> Mocker: AicEngine::from_bytes(&bytes)
+Mocker -> "AIC Rust Crate": predict_prefill_latency(bs, isl, prefix)
+"AIC Rust Crate" -> "AIC Rust Crate": query op latencies \n& compute step latency
+Mocker -> "AIC Rust Crate": predict_decode_latency(bs, isl, osl)
+"AIC Rust Crate" -> "AIC Rust Crate": query op latencies \n& compute step latency
+Mocker -> "AIC Rust Crate": estimate_num_gpu_blocks(...)
+Mocker --> "AIC Rust Crate": more predict_*_latency() requests
+Mocker --> "AIC Rust Crate":
+Mocker --> "AIC Rust Crate":
+
+"AIC Python Sweeper" -> "AIC Python Core": run_static / run_agg
+"AIC Python Core" -> "AIC Python Core": decompose model \n& serialize
+"AIC Python Core" -> "AIC Rust Crate": PyO3:\nrun_static(engine_bytes,...) \n / run_agg(engine_bytes,...)
+"AIC Rust Crate" -> "AIC Python Core": analytical latency (no queue)
+"AIC Rust Crate" -> "AIC Rust Crate": Rayon data parallelism \n(no GIL)
+"AIC Rust Crate" -> "AIC Python Core": analytical latency for different configs
+"AIC Rust Crate" --> "AIC Python Core":
+"AIC Rust Crate" --> "AIC Python Core":
+@enduml

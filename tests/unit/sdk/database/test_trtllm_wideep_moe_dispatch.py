@@ -243,7 +243,7 @@ class TestTrtLLMWideEPMoEDispatch:
         for call in mock_database.query_trtllm_alltoall.call_args_list:
             assert call[1]["node_num"] == 4
 
-    @patch("aiconfigurator.sdk.operations.logger")
+    @patch("aiconfigurator.sdk.operations.moe.logger")
     def test_query_debug_logging_pre_dispatch(self, mock_logger, mock_database):
         """Test debug logging for pre-dispatch."""
         dispatch = TrtLLMWideEPMoEDispatch(
@@ -263,7 +263,7 @@ class TestTrtLLMWideEPMoEDispatch:
 
         mock_logger.debug.assert_called_with("TrtLLMWideEPMoEDispatch: Pre-dispatch with standard precision")
 
-    @patch("aiconfigurator.sdk.operations.logger")
+    @patch("aiconfigurator.sdk.operations.moe.logger")
     def test_query_debug_logging_post_dispatch_low_precision(self, mock_logger, mock_database):
         """Test debug logging for post-dispatch with low precision."""
         dispatch = TrtLLMWideEPMoEDispatch(

@@ -1,14 +1,14 @@
 {
   "files": [
-    "a100_sxm.csv",
     "b200_sxm.csv",
-    "b300_sxm.csv",
-    "b60.csv",
     "gb200.csv",
+    "b300_sxm.csv",
     "gb300.csv",
-    "h100_sxm.csv",
+    "rtx_pro_6000_server.csv",
     "h200_sxm.csv",
+    "h100_sxm.csv",
     "l40s.csv",
-    "rtx_pro_6000_server.csv"
+    "a100_sxm.csv",
+    "b60.csv"
   ]
 }

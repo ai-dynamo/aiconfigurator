@@ -56,7 +56,13 @@ jobs:
             INPUT_DIR="comment-inputs/accuracy-regression-comment-inputs"
           fi
 
-          : "${PR_NUMBER:?workflow_run payload did not include a PR number}"
+          # workflow_run.pull_requests is empty for PRs from forks; fall back to
+          # the pr-number.txt saved in the artifact by the triggering workflow.
+          if [ -z "${PR_NUMBER}" ] && [ -f "${INPUT_DIR}/pr-number.txt" ]; then
+            PR_NUMBER="$(tr -d '[:space:]' < "${INPUT_DIR}/pr-number.txt")"
+          fi
+
+          : "${PR_NUMBER:?could not determine PR number from workflow_run payload or artifact}"
 
           echo "input_dir=${INPUT_DIR}" >> "$GITHUB_OUTPUT"
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"

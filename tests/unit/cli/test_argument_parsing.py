@@ -117,8 +117,19 @@ class TestCLIArgumentParsing:
         assert args.ttft == 2000.0
         assert args.tpot == 30.0
         assert args.request_latency is None
+        assert args.inclusive_tpot is False
         assert args.prefix == 0
         assert args.engine_step_backend is None
+
+    def test_inclusive_tpot_default_false_in_exp_mode(self, cli_parser, mock_exp_yaml_path):
+        """--inclusive-tpot defaults to False in exp mode."""
+        args = cli_parser.parse_args(["exp", "--yaml-path", str(mock_exp_yaml_path)])
+        assert args.inclusive_tpot is False
+
+    def test_inclusive_tpot_enabled_in_exp_mode(self, cli_parser, mock_exp_yaml_path):
+        """--inclusive-tpot can be set in exp mode."""
+        args = cli_parser.parse_args(["exp", "--yaml-path", str(mock_exp_yaml_path), "--inclusive-tpot"])
+        assert args.inclusive_tpot is True
 
     def test_debug_mode_flag(self, cli_parser):
         """Test that debug mode can be enabled."""

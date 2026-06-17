@@ -1,0 +1,528 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+sm_version: 120
+gpu_types:
+  - rtx_pro_6000_server
+description: >
+  SM120 workstation Blackwell exceptions extracted from collector version/SM
+  guards. Rules distinguish hardware/kernel shape limits from current
+  framework-version gaps in SGLang 0.5.10, TRT-LLM 1.3.0rc5/rc10, and vLLM
+  0.19.0.
+
+framework_specific_op_exceptions:
+  sglang:
+    gemm:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.10"]
+          reason: SGLang 0.5.10 has no DeepGEMM block-FP8 GEMM recipe for SM120.
+          fields: [gemm_type, token_count, output_features, input_features]
+          match:
+            gemm_type: fp8_block
+    moe:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.10"]
+          reason: SGLang 0.5.10 routes most NVFP4 MoE through FlashInfer paths that have not been validated on SM120; B200 live smokes allow the scoped Nemotron NVFP4 cases below.
+          fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
+          match:
+            moe_type: nvfp4
+            model_path:
+              not_in:
+                - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+                - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.10"]
+          reason: SGLang 0.5.10 MoE collector does not support GPT-OSS MoE cases.
+          fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
+          match:
+            model_path:
+              in: [openai/gpt-oss-20b, openai/gpt-oss-120b]
+    attention_context:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.10"]
+          reason: SGLang SM120 Triton context attention uses 32-bit indexing and crashes at this large Q/O element boundary.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length, num_heads, head_dim]
+                gte: 2147483647
+    wideep_mla_context:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.10"]
+          reason: SGLang 0.5.10 DeepGEMM-backed MLA module path reports unsupported SM120 architecture.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type, attention_backend]
+          match:
+            attn_type: mla
+    wideep_mla_generation:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.10"]
+          reason: SGLang 0.5.10 DeepGEMM-backed MLA module path reports unsupported SM120 architecture.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type, attention_backend]
+          match:
+            attn_type: mla
+    dsa_context_module:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.10"]
+          reason: SGLang 0.5.10 DeepGEMM-backed DSA module path reports unsupported SM120 architecture.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type, attention_backend]
+          match:
+            attn_type: dsa
+    dsa_generation_module:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.5.10"]
+          reason: SGLang 0.5.10 DeepGEMM-backed DSA module path reports unsupported SM120 architecture.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type, attention_backend]
+          match:
+            attn_type: dsa
+  trtllm:
+    gemm:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc5", "1.3.0rc10"]
+          reason: TRT-LLM 1.3.0rc5/rc10 SM120 FP8 GEMM crashes for tiny M with very large N/K.
+          fields: [gemm_type, token_count, output_features, input_features]
+          match:
+            gemm_type: fp8
+            token_count:
+              lte: 8
+            output_features:
+              gte: 51200
+            input_features:
+              gte: 51200
+    mla_bmm_gen_pre:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: TRT-LLM MLA BMM FP8 variants are only emitted for 86 < SM < 100.
+          fields: [num_tokens, num_heads, dtype, num_warmups, num_runs]
+          match:
+            dtype: fp8
+    mla_bmm_gen_post:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: TRT-LLM MLA BMM FP8 variants are only emitted for 86 < SM < 100.
+          fields: [num_tokens, num_heads, dtype, num_warmups, num_runs]
+          match:
+            dtype: fp8
+    attention_context:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc5"]
+          reason: TRT-LLM 1.3.0rc5 SM120 FP8 context FMHA MHA h=128 max-token cases crash with illegal memory access.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, tokens_per_block, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 96
+            num_key_value_heads: 96
+            head_dim: 128
+            use_fp8_context_fmha: true
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                eq: 65536
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc5"]
+          reason: TRT-LLM 1.3.0rc5 SM120 qkv_256 FP8 context FMHA path fails.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, tokens_per_block, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            head_dim: 256
+            use_fp8_context_fmha: true
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc10"]
+          reason: TRT-LLM 1.3.0rc10 SM120 qkv_256 FP8 context FMHA crashes for high-token GQA 96/8 cases.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, tokens_per_block, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 96
+            num_key_value_heads: 8
+            head_dim: 256
+            use_fp8_context_fmha: true
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 81920
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc10"]
+          reason: TRT-LLM 1.3.0rc10 SM120 qkv_256 FP8 context FMHA crashes for high-token GQA 48/8 cases.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, tokens_per_block, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 48
+            num_key_value_heads: 8
+            head_dim: 256
+            use_fp8_context_fmha: true
+          conditions:
+            - product:
+                fields: [batch_size, sequence_length]
+                gte: 131072
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc10"]
+          reason: TRT-LLM 1.3.0rc10 SM120 qkv_256 FP8 context FMHA crashes for MHA 96/96 at large batch and sequence.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, tokens_per_block, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          match:
+            num_heads: 96
+            num_key_value_heads: 96
+            head_dim: 256
+            batch_size:
+              gte: 2
+            sequence_length:
+              gte: 16384
+            use_fp8_context_fmha: true
+        - reason_type: hardware_unsupported
+          reason: TRT-LLM Blackwell attention kernels reject GQA ratios >= 32 unless the ratio is a multiple of 32.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, tokens_per_block, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          conditions:
+            - ratio:
+                numerator: num_heads
+                denominator: num_key_value_heads
+                gte: 32
+                mod_ne: [32, 0]
+    attention_generation:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: TRT-LLM Blackwell attention kernels reject GQA ratios >= 32 unless the ratio is a multiple of 32.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, tokens_per_block, use_fp8_kv_cache, use_fp8_context_fmha, is_context_phase]
+          conditions:
+            - ratio:
+                numerator: num_heads
+                denominator: num_key_value_heads
+                gte: 32
+                mod_ne: [32, 0]
+    moe:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc5", "1.3.0rc10"]
+          reason: TRT-LLM 1.3.0rc5/rc10 TRTLLMGenFusedMoE rejects GPT-OSS MXFP4 paths on SM120.
+          fields: [moe_type, num_tokens_list, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, min_latency_mode, model_path, token_expert_distribution, power_law_alpha]
+          match:
+            model_path:
+              in: [openai/gpt-oss-20b, openai/gpt-oss-120b]
+            moe_type:
+              in: [w4a16_mxfp4, w4a8_mxfp4_mxfp8]
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc5", "1.3.0rc10"]
+          reason: TRT-LLM 1.3.0rc5/rc10 DeepGEMM has no SM120 block-FP8 MoE recipe.
+          fields: [moe_type, num_tokens_list, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, min_latency_mode, model_path, token_expert_distribution, power_law_alpha]
+          match:
+            moe_type: fp8_block
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc5"]
+          reason: TRT-LLM 1.3.0rc5 SM120 NVFP4 standalone EP shapes crash when local experts are fewer than top-k.
+          fields: [moe_type, num_tokens_list, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, min_latency_mode, model_path, token_expert_distribution, power_law_alpha]
+          match:
+            moe_type: nvfp4
+          conditions:
+            - floor_div:
+                numerator: num_experts
+                denominator: expert_parallel_size
+                lt_field: topk
+    mla_context_module:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: TRT-LLM MLA module FP8 KV-cache variants are Hopper-only; Blackwell FP8 KV applies to DSA.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            attn_type: mla
+            kv_cache_dtype: fp8
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc5.post1", "1.3.0rc10"]
+          reason: TRT-LLM SM120 MLA module fp8_block dummy weights assert during post_load_weights for these versions.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            attn_type: mla
+            gemm_type: fp8_block
+    mla_generation_module:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: TRT-LLM MLA module FP8 KV-cache variants are Hopper-only; Blackwell FP8 KV applies to DSA.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            attn_type: mla
+            kv_cache_dtype: fp8
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc5.post1", "1.3.0rc10"]
+          reason: TRT-LLM SM120 MLA module fp8_block dummy weights assert during post_load_weights for these versions.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            attn_type: mla
+            gemm_type: fp8_block
+    dsa_context_module:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc5", "1.3.0rc10"]
+          reason: TRT-LLM 1.3.0rc5/rc10 SM120 DSA module paths reject sparse MLA setup.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            attn_type: dsa
+    dsa_generation_module:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["1.3.0rc5", "1.3.0rc10"]
+          reason: TRT-LLM 1.3.0rc5/rc10 SM120 DSA module paths reject sparse MLA setup.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            attn_type: dsa
+  vllm:
+    gemm:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: vLLM Blackwell block-FP8 GEMM requires token_count to be divisible by 4.
+          fields: [gemm_type, token_count, output_features, input_features]
+          match:
+            gemm_type: fp8_block
+            token_count:
+              mod_ne: [4, 0]
+    attention_generation:
+      rules:
+        - reason_type: hardware_unsupported
+          reason: vLLM Blackwell FlashInfer/TRT-LLM batch decode supports GQA ratio <= 16.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, is_context_phase, window_size]
+          conditions:
+            - ratio:
+                numerator: num_heads
+                denominator: num_key_value_heads
+                gt: 16
+    moe:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.19.0"]
+          reason: vLLM 0.19.0 FlashInfer TRT-LLM FP4 MoE path is not compiled for RTX PRO 6000 Blackwell Server (SM120).
+          fields: [moe_type, num_tokens_list, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha]
+          match:
+            moe_type: nvfp4
+    mla_context_module:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.19.0"]
+          reason: vLLM 0.19.0 block-FP8 MLA module path rejects SM120 CUTLASS scaled-mm.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            attn_type: mla
+            gemm_type: fp8_block
+    mla_generation_module:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.19.0"]
+          reason: vLLM 0.19.0 block-FP8 MLA module path rejects SM120 CUTLASS scaled-mm.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            attn_type: mla
+            gemm_type: fp8_block
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.19.0"]
+          reason: vLLM 0.19.0 NVFP4 plus FP8 KV MLA generation hits SM120 illegal memory access.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            attn_type: mla
+            gemm_type: nvfp4
+            kv_cache_dtype: fp8
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.19.0"]
+          reason: vLLM 0.19.0 NVFP4 MLA generation hits SM120 illegal memory access at large cache sizes.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            attn_type: mla
+            gemm_type: nvfp4
+          conditions:
+            - product:
+                fields: [seq_len, batch_size]
+                gte: 16777216
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.19.0"]
+          reason: vLLM 0.19.0 FP8 KV MLA generation hits SM120 illegal memory access at large cache sizes.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            attn_type: mla
+            kv_cache_dtype: fp8
+          conditions:
+            - product:
+                fields: [seq_len, batch_size]
+                gte: 16777216
+    dsa_context_module:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.19.0"]
+          reason: vLLM 0.19.0 sparse DSA module backend selector has no valid SM120 path.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            attn_type: dsa
+    dsa_generation_module:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.19.0"]
+          reason: vLLM 0.19.0 sparse DSA module backend selector has no valid SM120 path.
+          fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type]
+          match:
+            attn_type: dsa
+
+known_exceptions:
+  - framework: sglang
+    op: moe
+    reason_type: framework_version_unsupported
+    source: collector/sglang/collect_moe.py
+    case_fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
+    reason: >
+      SGLang 0.5.10 uses the default Triton block-FP8 MoE config for several
+      SM120 model/tp/ep regions. Those regions require 144 KiB shared memory,
+      above the 99 KiB runtime limit. The collector has explicit token
+      thresholds per model shape; they stay documented here because removing
+      only the inner token points is more precise than dropping every top-level
+      MoE shape with the same model dimensions.
+    threshold_groups:
+      - label: Mixtral
+        match: {hidden_size: 4096, inter_size: 14336, topk: 2, num_experts: 8, tensor_parallel_size: 32}
+        thresholds:
+          - {num_tokens_gte: 16}
+          - {expert_parallel_size: 2, num_tokens_gte: 8}
+          - {expert_parallel_size: 4, num_tokens_gte: 4}
+          - {expert_parallel_size: 8, num_tokens_gte: 2}
+      - label: Nemotron-3-Super
+        match: {hidden_size: 4096, inter_size: 2688, topk: 22, num_experts: 512}
+        thresholds:
+          - {tensor_parallel_size: 2, num_tokens_gte: 768}
+          - {tensor_parallel_size: 2, expert_parallel_size: 2, num_tokens_gte: 320}
+          - {tensor_parallel_size: 2, expert_parallel_size: 4, num_tokens_gte: 160}
+          - {tensor_parallel_size: 2, expert_parallel_size: 8, num_tokens_gte: 80}
+          - {tensor_parallel_size: 2, expert_parallel_size: 16, num_tokens_gte: 48}
+          - {tensor_parallel_size: 2, expert_parallel_size: 32, num_tokens_gte: 32}
+          - {tensor_parallel_size: 2, expert_parallel_size: 64}
+          - {tensor_parallel_size: 2, expert_parallel_size: 128}
+          - {tensor_parallel_size: 4, num_tokens_gte: 768}
+          - {tensor_parallel_size: 4, expert_parallel_size: 2, num_tokens_gte: 320}
+          - {tensor_parallel_size: 4, expert_parallel_size: 4, num_tokens_gte: 160}
+          - {tensor_parallel_size: 4, expert_parallel_size: 8, num_tokens_gte: 80}
+          - {tensor_parallel_size: 4, expert_parallel_size: 16, num_tokens_gte: 48}
+          - {tensor_parallel_size: 4, expert_parallel_size: 32, num_tokens_gte: 32}
+          - {tensor_parallel_size: 4, expert_parallel_size: 64, num_tokens_gte: 16}
+          - {tensor_parallel_size: 8, num_tokens_gte: 768}
+          - {tensor_parallel_size: 8, expert_parallel_size: 2, num_tokens_gte: 320}
+          - {tensor_parallel_size: 8, expert_parallel_size: 4, num_tokens_gte: 160}
+          - {tensor_parallel_size: 8, expert_parallel_size: 8, num_tokens_gte: 80}
+          - {tensor_parallel_size: 8, expert_parallel_size: 16, num_tokens_gte: 48}
+          - {tensor_parallel_size: 8, expert_parallel_size: 32, num_tokens_gte: 32}
+          - {tensor_parallel_size: 16, num_tokens_gte: 768}
+          - {tensor_parallel_size: 16, expert_parallel_size: 2, num_tokens_gte: 320}
+          - {tensor_parallel_size: 16, expert_parallel_size: 4, num_tokens_gte: 160}
+          - {tensor_parallel_size: 16, expert_parallel_size: 8, num_tokens_gte: 80}
+          - {tensor_parallel_size: 16, expert_parallel_size: 16, num_tokens_gte: 48}
+          - {tensor_parallel_size: 32, num_tokens_gte: 768}
+          - {tensor_parallel_size: 32, expert_parallel_size: 2, num_tokens_gte: 320}
+          - {tensor_parallel_size: 32, expert_parallel_size: 4, num_tokens_gte: 160}
+          - {tensor_parallel_size: 32, expert_parallel_size: 8, num_tokens_gte: 80}
+      - label: Qwen3-30B-A3B
+        match: {hidden_size: 2048, inter_size: 768, topk: 8, num_experts: 128, tensor_parallel_size: 4}
+        thresholds:
+          - {num_tokens_gte: 160}
+          - {expert_parallel_size: 2, num_tokens_gte: 80}
+          - {expert_parallel_size: 4, num_tokens_gte: 48}
+          - {expert_parallel_size: 8, num_tokens_gte: 32}
+          - {expert_parallel_size: 16, num_tokens_gte: 16}
+          - {expert_parallel_size: 32, num_tokens_gte: 8}
+          - {expert_parallel_size: 64, num_tokens_gte: 8}
+      - label: Qwen3-235B-A22B
+        match: {hidden_size: 4096, inter_size: 1536, topk: 8, num_experts: 128}
+        thresholds:
+          - {tensor_parallel_size: 8, num_tokens_gte: 160}
+          - {tensor_parallel_size: 8, expert_parallel_size: 2, num_tokens_gte: 80}
+          - {tensor_parallel_size: 8, expert_parallel_size: 4, num_tokens_gte: 48}
+          - {tensor_parallel_size: 8, expert_parallel_size: 8, num_tokens_gte: 32}
+          - {tensor_parallel_size: 8, expert_parallel_size: 16, num_tokens_gte: 16}
+          - {tensor_parallel_size: 8, expert_parallel_size: 32, num_tokens_gte: 8}
+          - {tensor_parallel_size: 16, num_tokens_gte: 160}
+          - {tensor_parallel_size: 16, expert_parallel_size: 2, num_tokens_gte: 80}
+          - {tensor_parallel_size: 16, expert_parallel_size: 4, num_tokens_gte: 48}
+          - {tensor_parallel_size: 16, expert_parallel_size: 8, num_tokens_gte: 32}
+          - {tensor_parallel_size: 16, expert_parallel_size: 16, num_tokens_gte: 16}
+          - {tensor_parallel_size: 32, num_tokens_gte: 160}
+          - {tensor_parallel_size: 32, expert_parallel_size: 2, num_tokens_gte: 80}
+          - {tensor_parallel_size: 32, expert_parallel_size: 4, num_tokens_gte: 48}
+          - {tensor_parallel_size: 32, expert_parallel_size: 8, num_tokens_gte: 32}
+      - label: Qwen3-Coder-480B-A35B
+        match: {hidden_size: 6144, inter_size: 2560, topk: 8, num_experts: 160}
+        thresholds:
+          - {tensor_parallel_size: 8, num_tokens_gte: 192}
+          - {tensor_parallel_size: 8, expert_parallel_size: 2, num_tokens_gte: 96}
+          - {tensor_parallel_size: 8, expert_parallel_size: 4, num_tokens_gte: 48}
+          - {tensor_parallel_size: 8, expert_parallel_size: 8, num_tokens_gte: 32}
+          - {tensor_parallel_size: 8, expert_parallel_size: 16, num_tokens_gte: 16}
+          - {tensor_parallel_size: 8, expert_parallel_size: 32, num_tokens_gte: 8}
+          - {tensor_parallel_size: 16, num_tokens_gte: 192}
+          - {tensor_parallel_size: 16, expert_parallel_size: 2, num_tokens_gte: 96}
+          - {tensor_parallel_size: 16, expert_parallel_size: 4, num_tokens_gte: 48}
+          - {tensor_parallel_size: 16, expert_parallel_size: 8, num_tokens_gte: 32}
+          - {tensor_parallel_size: 16, expert_parallel_size: 16, num_tokens_gte: 16}
+          - {tensor_parallel_size: 32, num_tokens_gte: 192}
+          - {tensor_parallel_size: 32, expert_parallel_size: 2, num_tokens_gte: 96}
+          - {tensor_parallel_size: 32, expert_parallel_size: 4, num_tokens_gte: 48}
+          - {tensor_parallel_size: 32, expert_parallel_size: 8, num_tokens_gte: 32}
+      - label: Qwen3.5-397B-A17B
+        match: {hidden_size: 4096, inter_size: 1024, topk: 10, num_experts: 512}
+        thresholds:
+          - {tensor_parallel_size: 16, num_tokens_gte: 768}
+          - {tensor_parallel_size: 16, expert_parallel_size: 2, num_tokens_gte: 320}
+          - {tensor_parallel_size: 16, expert_parallel_size: 4, num_tokens_gte: 160}
+          - {tensor_parallel_size: 16, expert_parallel_size: 8, num_tokens_gte: 80}
+          - {tensor_parallel_size: 16, expert_parallel_size: 16, num_tokens_gte: 48}
+          - {tensor_parallel_size: 32, num_tokens_gte: 768}
+          - {tensor_parallel_size: 32, expert_parallel_size: 2, num_tokens_gte: 320}
+          - {tensor_parallel_size: 32, expert_parallel_size: 4, num_tokens_gte: 160}
+          - {tensor_parallel_size: 32, expert_parallel_size: 8, num_tokens_gte: 80}
+      - label: GLM-5
+        match: {hidden_size: 6144, inter_size: 2048, topk: 8, num_experts: 256, tensor_parallel_size: 32}
+        thresholds:
+          - {num_tokens_gte: 320}
+          - {expert_parallel_size: 2, num_tokens_gte: 160}
+          - {expert_parallel_size: 4, num_tokens_gte: 80}
+          - {expert_parallel_size: 8, num_tokens_gte: 48}
+      - label: DeepSeek-V3
+        match: {hidden_size: 7168, inter_size: 2048, topk: 8, num_experts: 256, tensor_parallel_size: 32}
+        thresholds:
+          - {num_tokens_gte: 320}
+          - {expert_parallel_size: 2, num_tokens_gte: 160}
+          - {expert_parallel_size: 4, num_tokens_gte: 80}
+          - {expert_parallel_size: 8, num_tokens_gte: 48}
+      - label: DeepSeek-V4-Flash
+        match: {hidden_size: 4096, inter_size: 2048, topk: 6, num_experts: 256, tensor_parallel_size: 32}
+        thresholds:
+          - {num_tokens_gte: 320}
+          - {expert_parallel_size: 2, num_tokens_gte: 160}
+          - {expert_parallel_size: 4, num_tokens_gte: 80}
+          - {expert_parallel_size: 8, num_tokens_gte: 48}
+      - label: DeepSeek-V4-Pro
+        match: {hidden_size: 7168, inter_size: 3072, topk: 6, num_experts: 384}
+        thresholds:
+          - {tensor_parallel_size: 16, num_tokens_gte: 512}
+          - {tensor_parallel_size: 16, expert_parallel_size: 2, num_tokens_gte: 256}
+          - {tensor_parallel_size: 16, expert_parallel_size: 4, num_tokens_gte: 128}
+          - {tensor_parallel_size: 16, expert_parallel_size: 8, num_tokens_gte: 64}
+          - {tensor_parallel_size: 16, expert_parallel_size_gte: 16, num_tokens_gte: 48}
+          - {tensor_parallel_size: 32, num_tokens_gte: 512}
+          - {tensor_parallel_size: 32, expert_parallel_size: 2, num_tokens_gte: 256}
+          - {tensor_parallel_size: 32, expert_parallel_size: 4, num_tokens_gte: 128}
+          - {tensor_parallel_size: 32, expert_parallel_size: 8, num_tokens_gte: 64}
+          - {tensor_parallel_size: 32, expert_parallel_size_gte: 16, num_tokens_gte: 48}
+      - label: Kimi-K2
+        match: {hidden_size: 7168, inter_size: 2048, topk: 8, num_experts: 384, tensor_parallel_size: 32}
+        thresholds:
+          - {num_tokens_gte: 512}
+          - {expert_parallel_size: 2, num_tokens_gte: 256}
+          - {expert_parallel_size: 4, num_tokens_gte: 128}
+          - {expert_parallel_size: 8, num_tokens_gte: 64}
+      - label: MiniMax-M2.5
+        match: {hidden_size: 3072, inter_size: 1536, topk: 8, num_experts: 256}
+        thresholds:
+          - {tensor_parallel_size: 16}
+          - {tensor_parallel_size: 8, expert_parallel_size: 2, num_tokens_gte: 160}
+          - {tensor_parallel_size: 8, expert_parallel_size: 4, num_tokens_gte: 80}
+          - {tensor_parallel_size: 8, expert_parallel_size: 8, num_tokens_gte: 48}
+          - {tensor_parallel_size: 8, expert_parallel_size: 16, num_tokens_gte: 32}
+          - {tensor_parallel_size: 8, expert_parallel_size: 32, num_tokens_gte: 16}
+          - {tensor_parallel_size: 8, num_tokens_gte: 320}
+          - {tensor_parallel_size: 32, expert_parallel_size: 2, num_tokens_gte: 160}
+          - {tensor_parallel_size: 32, expert_parallel_size: 4, num_tokens_gte: 80}
+          - {tensor_parallel_size: 32, expert_parallel_size: 8, num_tokens_gte: 48}
+          - {tensor_parallel_size: 32, num_tokens_gte: 320}

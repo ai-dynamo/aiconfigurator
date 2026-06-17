@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: Qwen1_5MoeForCausalLM
+model_path: Qwen/Qwen1.5-MoE-A2.7B
+model_paths:
+  - Qwen/Qwen1.5-MoE-A2.7B
+include_base: true
+description: >
+  Qwen1.5 MoE model-centric collection plan.
+
+framework_specific_model_case_values:
+  vllm_xpu:
+    moe:
+      - model_path: Qwen/Qwen1.5-MoE-A2.7B
+        hidden_size: 2048
+        inter_size: 1408
+        topk: 4
+        num_experts: 60
+        sweep: small
+        activation: silu
+
+framework_specific_op_cases:
+  vllm_xpu:
+    moe:
+      cases: all

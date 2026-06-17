@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""vLLM GEMM collector for XPU devices.
+
+This is the XPU counterpart to the CUDA vLLM GEMM collector. It builds
+RowParallelLinear layers, prepares supported FP8 paths, expands YAML-backed
+matrix shapes, and logs perf rows using XPU-aware device helpers.
+"""
+
 __compat__ = "vllm>=0.11.0"
 
 import os
@@ -19,79 +26,21 @@ except Exception:
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.version import __version__ as vllm_version
 
-from collector.common_test_cases import GemmCommonTestCase
+from collector.case_generator import get_gemm_case_specs, get_gemm_type_specs
 from collector.helper import benchmark_with_power, get_device_module, log_perf
 from collector.vllm.utils import create_vllm_config, setup_distributed, with_exit_stack
 
 FP8_BLOCK_SHAPE = (128, 128)
 
 
-def get_gemm_xpu_test_cases() -> list[GemmCommonTestCase]:
-    x_list = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        384,
-        512,
-        768,
-        1024,
-        2048,
-        4096,
-        8192,
-    ]
-    nk_list = [
-        32,
-        64,
-        128,
-        256,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        2560,
-        3072,
-        3584,
-        4096,
-        5120,
-        6144,
-        7168,
-        8192,
-        10240,
-        12288,
-    ]
-    # narrow down the search space for xpu currently
-    nk_list_ext = []
-
-    test_cases = []
-    # x_list_orig+add+ext  <==> nk_list+ext
-    for x in sorted(x_list, reverse=True):
-        for n in sorted(nk_list + nk_list_ext, reverse=True):
-            for k in sorted(nk_list + nk_list_ext, reverse=True):
-                if n * k == 65536 * 65536:
-                    continue
-                test_cases.append(GemmCommonTestCase(x=x, n=n, k=k))
-
-    return test_cases
-
-
 def get_gemm_test_cases():
-    gemm_list = ["bfloat16", "fp8"]
+    gemm_list = get_gemm_type_specs("vllm_xpu")
+    if not gemm_list:
+        raise RuntimeError("collector/cases/base_ops/gemm.yaml must define vllm_xpu gemm_types")
 
     test_cases = []
 
-    for gemm_common_testcase in get_gemm_xpu_test_cases():
+    for gemm_common_testcase in get_gemm_case_specs("vllm_xpu"):
         x = gemm_common_testcase.x
         n = gemm_common_testcase.n
         k = gemm_common_testcase.k

@@ -1,17 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Thin facade over the compiled Rust engine (``aiconfigurator_core``).
+
+The only supported path is "Python builds, Rust executes":
+``sdk.engine.compile_engine``
+walks the model once and emits a bincoded ``EngineSpec``; an ``EngineHandle``
+wraps the bytes plus a PyO3 ``AicEngine`` and runs the static / per-step
+composition pure-Rust. The helpers here map ``RuntimeConfig`` / raw step args
+onto that handle and cache one handle per engine identity.
+"""
+
 from __future__ import annotations
 
-import copy
-import ctypes
 import json
-import math
 import os
-import platform
-import shutil
-import subprocess
-from functools import cache
 from importlib import resources as pkg_resources
 from pathlib import Path
 from typing import Any
@@ -19,52 +22,201 @@ from typing import Any
 from aiconfigurator.sdk.config import RuntimeConfig
 
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
-RUST_CORE_LIB_ENV = "AICONFIGURATOR_RUST_CORE_LIB"
-RUST_CORE_AUTOBUILD_ENV = "AICONFIGURATOR_RUST_CORE_AUTOBUILD"
 
 
-class RustCoreUnavailableError(RuntimeError):
-    """Raised when the Rust core shared library is not available."""
+class RustForwardPassPerfModel:
+    """Facade over the compiled Rust forward-pass perf model (PR #1152).
 
+    Built on the PyO3 ``aiconfigurator_core`` extension (the compiled
+    ``Engine``). The public class name and method signatures match PR #1152 so
+    callers (the Dynamo planner / mocker) are unaffected; FPM inputs are passed
+    as Python dictionaries and marshalled to JSON for the Rust boundary.
 
-class RustCoreError(RuntimeError):
-    """Raised when the Rust core returns an estimator error."""
+    This wrapper is forward-pass-level only. It does not model TTFT, ITL, SLA,
+    queueing, or engine limits. ``estimate_forward_pass_time_ms()`` takes one
+    iteration as a list of FPM dictionaries, one per attention-DP rank. Single
+    rank callers may pass either one FPM dictionary or a one-element list.
 
+    The Rust model infers the workload kind from each iteration's scheduled FPM
+    fields:
 
-class RustEngineStepEstimator:
-    """ctypes wrapper over the Rust `aiconfigurator-core` FPM estimator."""
+    * prefill: scheduled prefill tokens and no scheduled decode work, using
+      ``[sum_prefill_tokens]``
+    * decode: scheduled decode work and no scheduled prefill tokens, using
+      ``[num_decode_requests, sum_decode_kv_tokens]``
+    * mixed/agg: both scheduled prefill and decode work, using
+      ``[sum_prefill_tokens, sum_decode_kv_tokens]``
+    * empty: no scheduled prefill or decode work, estimates ``0.0`` and is not
+      used for tuning
 
-    def __init__(self, config: dict[str, Any], *, autobuild: bool | None = None) -> None:
+    Queued request fields are accepted for schema compatibility but ignored by
+    this AIC forward-pass model. ``estimate_forward_pass_time_ms()`` treats FPM
+    as a workload descriptor: scheduled request fields are used, while
+    ``wall_time`` is ignored. ``tune_with_fpms()`` treats FPM as observed
+    telemetry: scheduled request fields are used as features and positive
+    ``wall_time`` is the latency target. For tuning, ``tune_with_fpms()`` accepts
+    multiple iterations as ``[[iter0_rank0, iter0_rank1], [iter1_rank0,
+    iter1_rank1]]``. Each iteration is merged using max-rank load features and
+    max positive ``wall_time`` across ranks.
+
+    Correction grids use fixed constructor-time ranges from ``options``:
+    ``max_num_tokens`` bounds ``sum_prefill_tokens`` and defaults to ``8192``,
+    ``max_batch_size`` bounds ``num_decode_requests`` and defaults to ``512``,
+    and ``max_kv_tokens`` bounds ``sum_decode_kv_tokens`` and defaults to
+    ``2000000``.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    @classmethod
+    def from_native(
+        cls,
+        config: dict[str, Any],
+        options: dict[str, Any] | None = None,
+    ) -> RustForwardPassPerfModel:
+        """API: ``RustForwardPassPerfModel.from_native(config, options=None)``.
+
+        Description: create a strict native AIC forward-pass model.
+
+        Crosses into the Rust core, which compiles ``config`` via
+        ``aiconfigurator.sdk.engine.compile_engine``. Raises if the config is
+        unsupported by the native estimator. Use ``best_available()`` when
+        unsupported configs should fall back to the learned regression model.
+        """
         _configure_default_data_roots()
-        self._lib = _load_library(bool(autobuild) or _truthy(os.environ.get(RUST_CORE_AUTOBUILD_ENV)))
-        self._handle = ctypes.c_void_p()
-        config_json = _json_bytes(config)
-        err = self._lib.aic_engine_step_estimator_new(config_json, ctypes.byref(self._handle))
-        _raise_for_error(self._lib, err)
+        import aiconfigurator_core
 
-    def forward_pass_time_ms(self, metrics: dict[str, Any] | list[dict[str, Any]]) -> float:
-        out_ms = ctypes.c_double()
-        metrics_json = _json_bytes(metrics)
-        err = self._lib.aic_engine_step_forward_pass_time_ms(
-            self._handle,
-            metrics_json,
-            ctypes.byref(out_ms),
+        inner = aiconfigurator_core.RustForwardPassPerfModel.from_native(
+            _json_dumps(config),
+            _optional_json_dumps(options),
         )
-        _raise_for_error(self._lib, err)
-        return float(out_ms.value)
+        return cls(inner)
+
+    @classmethod
+    def best_available(
+        cls,
+        config: dict[str, Any],
+        options: dict[str, Any] | None = None,
+    ) -> RustForwardPassPerfModel:
+        """API: ``RustForwardPassPerfModel.best_available(config, options=None)``.
+
+        Description: create a native model when possible, otherwise fall back to
+        regression. Fallback reason is available from
+        ``diagnostics()["last_warning"]``.
+        """
+        _configure_default_data_roots()
+        import aiconfigurator_core
+
+        inner = aiconfigurator_core.RustForwardPassPerfModel.best_available(
+            _json_dumps(config),
+            _optional_json_dumps(options),
+        )
+        return cls(inner)
+
+    @classmethod
+    def from_regression(
+        cls,
+        options: dict[str, Any] | None = None,
+    ) -> RustForwardPassPerfModel:
+        """API: ``RustForwardPassPerfModel.from_regression(options=None)``.
+
+        Description: create a regression-only forward-pass model. Regression
+        models return ``None`` for non-empty estimates until enough samples have
+        been provided for the inferred workload kind through
+        ``tune_with_fpms()``. Correction factor getters return ``None`` in this
+        mode.
+        """
+        _configure_default_data_roots()
+        import aiconfigurator_core
+
+        inner = aiconfigurator_core.RustForwardPassPerfModel.from_regression(
+            _optional_json_dumps(options),
+        )
+        return cls(inner)
+
+    def estimate_forward_pass_time_ms(self, metrics: dict[str, Any] | list[dict[str, Any]]) -> float | None:
+        """API: ``model.estimate_forward_pass_time_ms(metrics) -> float | None``.
+
+        Description: estimate one forward-pass iteration in milliseconds.
+
+        ``metrics`` represents one iteration. Pass a list of FPM dictionaries
+        for attention-DP ranks, or a single FPM dictionary for a single-rank
+        convenience form. The inferred workload kind uses only
+        ``scheduled_requests``; queued fields and ``wall_time`` are ignored for
+        estimation. Regression models return ``None`` until the matching
+        inferred workload kind has enough tuned observations. Empty scheduled
+        work returns ``0.0``.
+        """
+        return self._inner.estimate_forward_pass_time_ms(_json_dumps(metrics))
+
+    def tune_with_fpms(self, iterations: dict[str, Any] | list[Any]) -> None:
+        """API: ``model.tune_with_fpms(iterations) -> None``.
+
+        Description: tune the model with one or more observed FPM iterations.
+
+        The canonical input is a nested list ``[[iter0_rank0, iter0_rank1],
+        [iter1_rank0, iter1_rank1]]``. Each inner list is one iteration's
+        per-attention-DP-rank FPMs. For convenience, a single FPM dictionary is
+        normalized to ``[[fpm]]``, and a list of FPM dictionaries is normalized
+        to one iteration.
+        """
+        self._inner.tune_with_fpms(_json_dumps(_normalize_tuning_iterations(iterations)))
+
+    def diagnostics(self) -> dict[str, Any]:
+        """API: ``model.diagnostics() -> dict[str, Any]``.
+
+        Description: return source, readiness, retained sample count, and
+        fallback warning.
+        """
+        return json.loads(self._inner.diagnostics())
+
+    def get_min_correction_factor(self) -> float | None:
+        """API: ``model.get_min_correction_factor() -> float | None``.
+
+        Description: return the smallest ready native correction factor.
+        Regression-only models return ``None``; native models return ``None``
+        until at least one correction bucket has enough observations.
+        """
+        return self._inner.min_correction_factor()
+
+    def get_max_correction_factor(self) -> float | None:
+        """API: ``model.get_max_correction_factor() -> float | None``.
+
+        Description: return the largest ready native correction factor.
+        """
+        return self._inner.max_correction_factor()
+
+    def get_avg_correction_factor(self) -> float | None:
+        """API: ``model.get_avg_correction_factor() -> float | None``.
+
+        Description: return the average ready native correction factor.
+        """
+        return self._inner.avg_correction_factor()
 
     def close(self) -> None:
-        handle = getattr(self, "_handle", None)
-        if handle is None or not handle.value:
-            return
-        self._lib.aic_engine_step_estimator_free(handle)
-        self._handle = ctypes.c_void_p()
+        # PyO3 objects are reference-counted; dropping the handle is enough.
+        self._inner = None
 
-    def __del__(self) -> None:
-        try:
-            self.close()
-        except Exception:
-            pass
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def _optional_json_dumps(value: dict[str, Any] | None) -> str | None:
+    if value is None:
+        return None
+    return _json_dumps(value)
+
+
+def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list[Any]:
+    if isinstance(iterations, dict):
+        return [[iterations]]
+    if not iterations:
+        return []
+    if all(isinstance(item, dict) for item in iterations):
+        return [iterations]
+    return iterations
 
 
 def should_use_rust_engine_step(runtime_config: RuntimeConfig) -> bool:
@@ -80,37 +232,29 @@ def estimate_static_latency_breakdown_with_rust(
     stride: int,
     latency_correction_scale: float,
 ) -> tuple[dict[str, float], dict[str, float], dict[str, str], dict[str, str]]:
-    estimator = _cached_estimator(_engine_config_json(model, database))
-    context_latency_ms = 0.0
-    generation_latency_ms = 0.0
+    """Static (context / generation) latency breakdown via the compiled engine.
 
-    if mode in {"static", "static_ctx"}:
-        context_latency_ms = estimator.forward_pass_time_ms(
-            _metrics_by_attention_dp_rank(
-                model,
-                _prefill_metrics(
-                    batch_size=int(runtime_config.batch_size),
-                    isl=int(runtime_config.isl),
-                    prefix=int(runtime_config.prefix or 0),
-                ),
-            )
-        )
-
-    if mode in {"static", "static_gen"}:
-        decode_batch_size = int(runtime_config.batch_size) * (int(getattr(model, "_nextn", 0)) + 1)
-        beam_width = int(runtime_config.beam_width or 1)
-        for i in range(0, max(int(runtime_config.osl) - 1, 0), stride):
-            step_latency_ms = estimator.forward_pass_time_ms(
-                _metrics_by_attention_dp_rank(
-                    model,
-                    _decode_metrics(
-                        batch_size=decode_batch_size * beam_width,
-                        context_length=int(runtime_config.isl) + i,
-                    ),
-                )
-            )
-            repeat_count = min(stride, int(runtime_config.osl) - 1 - i)
-            generation_latency_ms += step_latency_ms * repeat_count
+    Routes through ``EngineHandle.run_static`` (the "Python builds, Rust
+    executes" path). ``run_static`` performs the decode stride quadrature and
+    the ``(nextn + 1)`` decode-batch scaling internally (mirroring
+    ``base_backend._run_generation_phase``), so the Python side here only maps
+    ``mode`` -> the engine ``mode`` string, applies ``latency_correction_scale``
+    after the call, and collapses the scalar phase totals into the synthetic
+    single-key breakdown dicts the caller sums.
+    """
+    handle = _cached_engine_handle(model, database)
+    engine_mode = mode if mode in {"static", "static_ctx", "static_gen"} else "static"
+    context_latency_ms, generation_latency_ms, _ = handle.run_static(
+        batch_size=int(runtime_config.batch_size),
+        isl=int(runtime_config.isl),
+        osl=int(runtime_config.osl),
+        prefix=int(runtime_config.prefix or 0),
+        beam_width=int(runtime_config.beam_width or 1),
+        seq_imbalance_correction_scale=float(runtime_config.seq_imbalance_correction_scale or 1.0),
+        gen_seq_imbalance_correction_scale=float(runtime_config.gen_seq_imbalance_correction_scale or 1.0),
+        mode=engine_mode,
+        stride=int(stride),
+    )
 
     if latency_correction_scale != 1.0:
         context_latency_ms *= latency_correction_scale
@@ -133,36 +277,23 @@ def estimate_mixed_step_latency_with_rust(
     osl: int,
     prefix: int,
 ) -> float:
-    """Estimate one mixed prefill/decode engine step through the Rust FPM API."""
-    estimator = _cached_estimator(_engine_config_json(model, database))
-    ctx_tokens = max(int(ctx_tokens), 0)
-    gen_tokens = max(int(gen_tokens), 0)
-    isl = max(int(isl), 1)
-    osl = max(int(osl), 1)
-    prefix = max(int(prefix or 0), 0)
+    """Estimate one mixed prefill/decode engine step through the compiled engine.
 
-    scheduled_requests: dict[str, Any] = {}
-    if ctx_tokens > 0:
-        num_prefill_requests = max(math.ceil(ctx_tokens / isl), 1)
-        scheduled_requests.update(
-            {
-                "num_prefill_requests": num_prefill_requests,
-                "sum_prefill_tokens": ctx_tokens,
-                "sum_prefill_kv_tokens": prefix * num_prefill_requests,
-            }
-        )
-    if gen_tokens > 0:
-        scheduled_requests.update(
-            {
-                "num_decode_requests": gen_tokens,
-                "sum_decode_kv_tokens": gen_tokens * (isl + osl // 2),
-            }
-        )
-
-    if not scheduled_requests:
-        return 0.0
-    return estimator.forward_pass_time_ms(
-        _metrics_by_attention_dp_rank(model, {"version": 1, "scheduled_requests": scheduled_requests})
+    Delegates to ``EngineHandle.mixed_step_latency``. The Rust
+    ``Engine::mixed_step_latency`` (``engine/runtime.rs:280``) reproduces the
+    full FPM packing the old ctypes bridge did inline — the
+    ``ceil(ctx_tokens / isl)`` prefill-request count, the cached-prefix
+    subtraction, the ``(nextn + 1)`` decode multiplier, and the kv-token
+    packing — so the raw step args pass straight through with no Python-side
+    pre-math.
+    """
+    handle = _cached_engine_handle(model, database)
+    return handle.mixed_step_latency(
+        int(ctx_tokens),
+        int(gen_tokens),
+        int(isl),
+        int(osl),
+        int(prefix or 0),
     )
 
 
@@ -174,37 +305,85 @@ def estimate_decode_step_latency_with_rust(
     isl: int,
     osl: int,
 ) -> float:
-    """Estimate one decode-only engine step through the Rust FPM API."""
-    estimator = _cached_estimator(_engine_config_json(model, database))
-    gen_tokens = max(int(gen_tokens), 0)
-    if gen_tokens == 0:
-        return 0.0
-    context_length = max(int(isl), 1) + max(int(osl), 1) // 2
-    return estimator.forward_pass_time_ms(
-        _metrics_by_attention_dp_rank(model, _decode_metrics(batch_size=gen_tokens, context_length=context_length))
+    """Estimate one decode-only engine step through the compiled engine.
+
+    Delegates to ``EngineHandle.decode_step_latency``. The Rust
+    ``Engine::decode_step_latency`` (``engine/runtime.rs:342``) applies the
+    ``(nextn + 1)`` decode-batch scaling and the ``s = isl + osl/2`` sequence
+    length internally, so the raw args pass straight through.
+    """
+    handle = _cached_engine_handle(model, database)
+    return handle.decode_step_latency(int(gen_tokens), int(isl), int(osl))
+
+
+# Memo of compiled ``EngineHandle`` objects, keyed by the engine identity
+# (model_path + system + backend + version + parallelism + quant + nextn +
+# kv_block_size). ``compile_engine`` rebuilds the model and loads the perf DB,
+# which is expensive; the engine-step helpers are called many times per sweep,
+# so each unique config must compile + load its DB exactly once. The key is
+# ``_engine_config_json``, so two runtime points that differ only in
+# batch/isl/osl share one handle.
+_ENGINE_HANDLE_CACHE: dict[str, Any] = {}
+
+
+def _engine_handle_cache_clear() -> None:
+    """Reset the compiled-engine handle memo (used by parity harnesses)."""
+    _ENGINE_HANDLE_CACHE.clear()
+
+
+def _cached_engine_handle(model: Any, database: Any) -> Any:
+    """Return a cached ``EngineHandle`` for ``(model, database)``.
+
+    Builds the compiled ``EngineSpec`` from the ALREADY-BUILT ``model`` via
+    ``engine.build_engine_spec_json`` (NOT ``compile_engine``, which would
+    rebuild the model from flat args and risk quant/parallel-inference drift),
+    then wraps the bincode bytes in an ``EngineHandle``. The handle's Rust
+    ``AicEngine`` loads its own perf DB; ``_configure_default_data_roots`` sets
+    ``AICONFIGURATOR_SYSTEMS_PATH`` so it resolves to the same systems tree the
+    Python ``database`` came from.
+    """
+    key = _engine_config_json(model, database)
+    handle = _ENGINE_HANDLE_CACHE.get(key)
+    if handle is not None:
+        return handle
+
+    _configure_default_data_roots()
+    # Lazy import: ``sdk.engine`` imports from this module at top level
+    # (``_quant_to_dtype`` / ``_moe_quant_to_dtype``), so a top-level import
+    # here would be a circular import.
+    import aiconfigurator_core
+    from aiconfigurator.sdk.engine import EngineHandle, build_engine_spec_json
+
+    systems_path = os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
+    nextn = getattr(model, "_nextn", None)
+    spec_json = build_engine_spec_json(
+        model,
+        model_path=getattr(model, "model_path", getattr(model, "model_name", "")),
+        system=database.system,
+        backend=_backend_name(database.backend),
+        backend_version=getattr(database, "version", None),
+        kv_block_size=None,
+        systems_path=systems_path,
+        nextn=int(nextn) if nextn is not None else 0,
+        nextn_accept_rates=getattr(model, "_nextn_accept_rates", None),
+        database=database,
     )
-
-
-def is_rust_core_available(*, autobuild: bool = False) -> bool:
-    try:
-        _load_library(autobuild)
-    except RustCoreUnavailableError:
-        return False
-    return True
-
-
-@cache
-def _cached_estimator(config_json: str) -> RustEngineStepEstimator:
-    return RustEngineStepEstimator(json.loads(config_json))
-
-
-def _metrics_by_attention_dp_rank(model: Any, metrics: dict[str, Any]) -> list[dict[str, Any]]:
-    rank_count = max(int(getattr(model.config, "attention_dp_size", 1) or 1), 1)
-    return [copy.deepcopy(metrics) for _ in range(rank_count)]
+    spec_bytes = bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json))
+    handle = EngineHandle(spec_bytes, systems_path=systems_path)
+    _ENGINE_HANDLE_CACHE[key] = handle
+    return handle
 
 
 def _engine_config_json(model: Any, database: Any) -> str:
     model_config = model.config
+    # Forward MTP speculative-decoding params so the Rust DeepSeek-family +
+    # Qwen3.5 model builders can compute the same `_mtp_scale_factor` Python
+    # applies (`sdk/models/base.py:105-110`). Python sets `nextn=1` for
+    # DeepSeek/DSv32/DSv4/Kimi-K2.5/Qwen3.5 by default (`sdk/task.py:448-449`)
+    # and stores it on the model object via `BaseModel._nextn`. Rust treats
+    # `nextn=None` or `nextn=0` as MTP-disabled (scale=1.0).
+    nextn = getattr(model, "_nextn", None)
+    nextn_accept_rates = getattr(model, "_nextn_accept_rates", None)
     config = {
         "schema_version": 1,
         "model_name": getattr(model, "model_path", getattr(model, "model_name", "")),
@@ -222,131 +401,11 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "activation_dtype": _quant_to_dtype(getattr(model_config, "fmha_quant_mode", None)),
         "kv_cache_dtype": _quant_to_dtype(getattr(model_config, "kvcache_quant_mode", None)),
         "kv_block_size": None,
+        "nextn": int(nextn) if nextn is not None else None,
+        "nextn_accept_rates": ([float(r) for r in nextn_accept_rates] if nextn_accept_rates is not None else None),
         "extra": {},
     }
     return json.dumps(config, sort_keys=True, separators=(",", ":"))
-
-
-def _prefill_metrics(*, batch_size: int, isl: int, prefix: int) -> dict[str, Any]:
-    effective_isl = max(isl - prefix, 0)
-    return {
-        "version": 1,
-        "scheduled_requests": {
-            "num_prefill_requests": batch_size,
-            "sum_prefill_tokens": batch_size * effective_isl,
-            "sum_prefill_kv_tokens": batch_size * prefix,
-        },
-    }
-
-
-def _decode_metrics(*, batch_size: int, context_length: int) -> dict[str, Any]:
-    return {
-        "version": 1,
-        "scheduled_requests": {
-            "num_decode_requests": batch_size,
-            "sum_decode_kv_tokens": batch_size * context_length,
-        },
-    }
-
-
-@cache
-def _load_library(autobuild: bool) -> ctypes.CDLL:
-    library_path = _find_library(include_debug=not autobuild)
-    if library_path is None and autobuild:
-        library_path = _build_rust_core()
-    if library_path is None:
-        raise RustCoreUnavailableError(
-            "Rust core shared library not found. Build it with "
-            "`cargo build --release --manifest-path rust/aiconfigurator-core/Cargo.toml`, "
-            f"set {RUST_CORE_LIB_ENV}, or set {RUST_CORE_AUTOBUILD_ENV}=1."
-        )
-
-    lib = ctypes.CDLL(str(library_path))
-    lib.aic_engine_step_estimator_new.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
-    lib.aic_engine_step_estimator_new.restype = ctypes.c_void_p
-    lib.aic_engine_step_forward_pass_time_ms.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_char_p,
-        ctypes.POINTER(ctypes.c_double),
-    ]
-    lib.aic_engine_step_forward_pass_time_ms.restype = ctypes.c_void_p
-    lib.aic_engine_step_estimator_free.argtypes = [ctypes.c_void_p]
-    lib.aic_engine_step_estimator_free.restype = None
-    lib.aic_engine_step_string_free.argtypes = [ctypes.c_void_p]
-    lib.aic_engine_step_string_free.restype = None
-    return lib
-
-
-def _find_library(*, include_debug: bool = True) -> Path | None:
-    explicit = os.environ.get(RUST_CORE_LIB_ENV)
-    if explicit:
-        path = Path(explicit)
-        if path.is_file():
-            return path
-        raise RustCoreUnavailableError(f"{RUST_CORE_LIB_ENV} points to a missing file: {path}")
-
-    crate_root = _crate_root()
-    if crate_root is None:
-        return None
-    lib_name = _library_name()
-    candidates = [crate_root / "target" / "release" / lib_name]
-    if include_debug:
-        candidates.append(crate_root / "target" / "debug" / lib_name)
-    return next((path for path in candidates if path.is_file()), None)
-
-
-def _build_rust_core() -> Path:
-    crate_root = _crate_root()
-    if crate_root is None:
-        raise RustCoreUnavailableError("could not locate rust/aiconfigurator-core/Cargo.toml")
-    if shutil.which("cargo") is None:
-        raise RustCoreUnavailableError("cargo is not available on PATH")
-
-    subprocess.run(
-        ["cargo", "build", "--release", "--manifest-path", str(crate_root / "Cargo.toml")],
-        check=True,
-    )
-    library_path = crate_root / "target" / "release" / _library_name()
-    if not library_path.is_file():
-        raise RustCoreUnavailableError(f"cargo build completed but did not produce {library_path}")
-    return library_path
-
-
-def _crate_root() -> Path | None:
-    search_starts = [Path(__file__).resolve().parent, Path.cwd().resolve()]
-    searched: set[Path] = set()
-    for start in search_starts:
-        for parent in (start, *start.parents):
-            if parent in searched:
-                continue
-            searched.add(parent)
-            candidate = parent / "rust" / "aiconfigurator-core"
-            if (candidate / "Cargo.toml").is_file():
-                return candidate
-    return None
-
-
-def _library_name() -> str:
-    system = platform.system()
-    if system == "Darwin":
-        return "libaiconfigurator_core.dylib"
-    if system == "Windows":
-        return "aiconfigurator_core.dll"
-    return "libaiconfigurator_core.so"
-
-
-def _raise_for_error(lib: ctypes.CDLL, error_ptr: int | None) -> None:
-    if not error_ptr:
-        return
-    try:
-        message = ctypes.cast(error_ptr, ctypes.c_char_p).value
-        raise RustCoreError((message or b"unknown Rust core error").decode("utf-8", errors="replace"))
-    finally:
-        lib.aic_engine_step_string_free(error_ptr)
-
-
-def _json_bytes(value: dict[str, Any]) -> bytes:
-    return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
 def _backend_name(value: Any) -> str:
@@ -418,7 +477,3 @@ def _python_sdk_systems_root() -> Path | None:
         if path.exists():
             return path
     return None
-
-
-def _truthy(value: str | None) -> bool:
-    return str(value or "").lower() in {"1", "true", "yes", "on"}

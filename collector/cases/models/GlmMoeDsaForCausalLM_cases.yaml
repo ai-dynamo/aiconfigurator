@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: GlmMoeDsaForCausalLM
+model_path: zai-org/GLM-5
+model_paths:
+  - zai-org/GLM-5
+  - zai-org/GLM-5-FP8
+  - nvidia/GLM-5-NVFP4
+include_base: false
+description: >
+  GLM-5 DSA/MoE model-centric collection plan.
+
+model_case_values:
+  moe:
+    - model_paths:
+        - zai-org/GLM-5
+        - zai-org/GLM-5-FP8
+        - nvidia/GLM-5-NVFP4
+      hidden_size: 6144
+      inter_size: 2048
+      topk: 8
+      num_experts: 256
+      wideep: true
+  mla_module:
+    - model_paths:
+        - zai-org/GLM-5
+        - zai-org/GLM-5-FP8
+        - nvidia/GLM-5-NVFP4
+      attention_type: dsa
+      native_num_heads: 64
+
+all_frameworks_op_cases:
+  gemm:
+    cases: all
+  moe:
+    cases: all
+
+framework_specific_op_cases:
+  trtllm:
+    dsa_context_module:
+      cases: all
+    dsa_generation_module:
+      cases: all
+    trtllm_moe_wideep:
+      cases: all
+  vllm:
+    dsa_context_module:
+      cases: all
+    dsa_generation_module:
+      cases: all
+  sglang:
+    dsa_context_module:
+      cases: all
+    dsa_generation_module:
+      cases: all

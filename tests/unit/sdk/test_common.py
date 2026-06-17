@@ -8,12 +8,13 @@ Tests supported systems, model families, and other common configurations.
 """
 
 import csv
+import json
 from collections import Counter
 from pathlib import Path
 
 import pytest
 
-from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk import common
 
 pytestmark = pytest.mark.unit
 
@@ -70,6 +71,34 @@ class TestSupportedSystems:
         """Cloud/colo PCIe systems should be available for naive and SOL-style estimates."""
         assert {"h100_pcie", "a100_pcie", "l4", "a30"}.issubset(common.SupportedSystems)
 
+    def test_support_matrix_systems_sort_by_display_priority(self):
+        """Support matrix systems should sort by product priority before name."""
+        systems = [
+            "b60",
+            "a100_sxm",
+            "gb300",
+            "h100_sxm",
+            "l40s",
+            "b200_sxm",
+            "rtx_pro_6000_server",
+            "gb200",
+            "h200_sxm",
+            "b300_sxm",
+        ]
+
+        assert common.sort_support_matrix_systems(systems) == [
+            "b200_sxm",
+            "gb200",
+            "b300_sxm",
+            "gb300",
+            "rtx_pro_6000_server",
+            "h200_sxm",
+            "h100_sxm",
+            "l40s",
+            "a100_sxm",
+            "b60",
+        ]
+
 
 class TestSupportMatrix:
     """Test support matrix functionality."""
@@ -102,6 +131,29 @@ class TestSupportMatrix:
                 systems = {row["System"] for row in csv.DictReader(f)}
             assert systems == {csv_path.stem}
 
+    def test_support_matrix_index_uses_display_order(self):
+        """The static support-matrix manifest should keep the preferred system order."""
+        repo_root = _find_repo_root(Path(__file__))
+        index_path = repo_root / "src" / "aiconfigurator" / "systems" / "support_matrix" / "index.json"
+
+        with index_path.open() as f:
+            files = json.load(f)["files"]
+
+        systems = [Path(file_name).stem for file_name in files]
+        assert systems == [
+            "b200_sxm",
+            "gb200",
+            "b300_sxm",
+            "gb300",
+            "rtx_pro_6000_server",
+            "h200_sxm",
+            "h100_sxm",
+            "l40s",
+            "a100_sxm",
+            "b60",
+        ]
+        assert systems == common.sort_support_matrix_systems(systems)
+
     @pytest.mark.parametrize(
         "model,system,backend,version,architecture,expected_agg,expected_disagg",
         [
@@ -127,6 +179,7 @@ class TestSupportMatrix:
         "model,backend,version,expected_agg,expected_disagg",
         [
             ("zai-org/GLM-5-FP8", "sglang", "0.5.10", True, True),
+            ("zai-org/GLM-5-FP8", "sglang", "0.5.9", False, False),
             ("zai-org/GLM-5-FP8", "trtllm", "1.3.0rc10", False, False),
             ("nvidia/GLM-5-NVFP4", "sglang", "0.5.10", True, True),
             ("nvidia/GLM-5-NVFP4", "vllm", "0.19.0", True, True),
@@ -135,7 +188,7 @@ class TestSupportMatrix:
     def test_check_support_uses_exact_glm5_b200_variant_rows(
         self, model, backend, version, expected_agg, expected_disagg
     ):
-        """GLM-5 quantized variants should not inherit BF16 support results."""
+        """GLM-5 quantized variants should use their exact support rows."""
         result = common.check_support(model, "b200_sxm", backend, version, "GlmMoeDsaForCausalLM")
 
         assert result.agg_supported is expected_agg
@@ -144,17 +197,10 @@ class TestSupportMatrix:
 
     def test_glm5_quantized_variants_cover_all_database_combinations(self):
         """GLM-5 quantized variants should have exact rows for every support-matrix target."""
-        supported_databases = perf_database.get_supported_databases()
-        expected_keys = {
-            (system, backend, version, mode)
-            for system, backend_versions in supported_databases.items()
-            for backend, versions in backend_versions.items()
-            for version in versions
-            for mode in ("agg", "disagg")
-        }
-
         matrix = common.get_support_matrix()
-        for model in ("zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"):
+        target_models = {"zai-org/GLM-5-FP8", "nvidia/GLM-5-NVFP4"}
+        expected_keys = {(row["System"], row["Backend"], row["Version"], row["Mode"]) for row in matrix}
+        for model in target_models:
             model_rows = [row for row in matrix if row["HuggingFaceID"] == model]
             model_key_counts = Counter(
                 (row["System"], row["Backend"], row["Version"], row["Mode"]) for row in model_rows
@@ -262,3 +308,18 @@ class TestSupportMatrix:
         assert result.disagg_supported is True
         assert result.agg_pass_count == 1
         assert result.agg_total_count == 1
+
+
+class TestEncoderLatencyColumn:
+    """Test encoder_latency column is in ColumnsStatic in the correct position."""
+
+    def test_encoder_latency_in_columns_static(self):
+        assert "encoder_latency" in common.ColumnsStatic
+
+    def test_encoder_latency_before_context_latency(self):
+        cols = common.ColumnsStatic
+        assert cols.index("encoder_latency") < cols.index("context_latency")
+
+    def test_encoder_latency_before_generation_latency(self):
+        cols = common.ColumnsStatic
+        assert cols.index("encoder_latency") < cols.index("generation_latency")

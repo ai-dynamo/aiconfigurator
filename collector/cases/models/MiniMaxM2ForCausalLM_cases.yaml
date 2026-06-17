@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: MiniMaxM2ForCausalLM
+model_path: MiniMaxAI/MiniMax-M2.5
+model_paths:
+  - MiniMaxAI/MiniMax-M2.5
+  - MiniMaxAI/MiniMax-M2.7
+  - nvidia/MiniMax-M2.5-NVFP4
+  - nvidia/MiniMax-M2.7-NVFP4
+include_base: true
+description: >
+  MiniMax-M2 MoE model-centric collection plan.
+
+model_case_values:
+  moe:
+    - model_paths:
+        - MiniMaxAI/MiniMax-M2.5
+        - MiniMaxAI/MiniMax-M2.7
+        - nvidia/MiniMax-M2.5-NVFP4
+        - nvidia/MiniMax-M2.7-NVFP4
+      hidden_size: 3072
+      inter_size: 1536
+      topk: 8
+      num_experts: 256
+      wideep: true
+
+all_frameworks_op_cases:
+  moe:
+    cases: all
+
+framework_specific_op_cases:
+  trtllm:
+    trtllm_moe_wideep:
+      cases: all

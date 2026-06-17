@@ -32,13 +32,16 @@ sys.path.insert(0, _REPO_ROOT)
 
 from tools.support_matrix.support_matrix import (
     STATUS_FAIL,
+    STATUS_FRAMEWORK_INCOMPATIBLE,
     STATUS_HW_INCOMPATIBLE,
     STATUS_PASS,
+    SUPPORT_MATRIX_BASE_HEADER,
+    SUPPORT_MATRIX_HEADER,
     VALID_STATUSES,
     SupportMatrix,
 )
 
-EXPECTED_HEADER = ["HuggingFaceID", "Architecture", "System", "Backend", "Version", "Mode", "Status", "ErrMsg"]
+SUPPORTED_HEADERS = (SUPPORT_MATRIX_HEADER, SUPPORT_MATRIX_BASE_HEADER)
 
 
 def _read_single_csv(csv_path: Path) -> tuple[list[str], list[list[str]]]:
@@ -116,8 +119,8 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
         List of error messages (empty if all checks pass)
     """
     errors = []
-    if header != EXPECTED_HEADER:
-        errors.append(f"Invalid header: expected {EXPECTED_HEADER}, got {header}")
+    if header not in SUPPORTED_HEADERS:
+        errors.append(f"Invalid header: expected {SUPPORT_MATRIX_HEADER}, got {header}")
         return errors  # Can't continue without valid header
 
     if len(data_rows) == 0:
@@ -125,8 +128,8 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
         return errors
 
     for i, row in enumerate(data_rows, start=2):
-        if len(row) != len(EXPECTED_HEADER):
-            errors.append(f"Row {i} has {len(row)} columns, expected {len(EXPECTED_HEADER)}")
+        if len(row) != len(header):
+            errors.append(f"Row {i} has {len(row)} columns, expected {len(header)}")
             continue
 
         mode = row[5]
@@ -140,6 +143,12 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
         err_msg = row[7].strip() if len(row) > 7 else ""
         if status == STATUS_HW_INCOMPATIBLE and not err_msg:
             errors.append(f"Row {i}: {STATUS_HW_INCOMPATIBLE} rows must include a hardware incompatibility reason")
+        if status == STATUS_FRAMEWORK_INCOMPATIBLE and not err_msg:
+            errors.append(
+                f"Row {i}: {STATUS_FRAMEWORK_INCOMPATIBLE} rows must include a framework incompatibility reason"
+            )
+        if header == SUPPORT_MATRIX_HEADER and not row[8].strip():
+            errors.append(f"Row {i}: Command column must include the support-matrix rerun command")
 
     return errors
 
@@ -245,21 +254,21 @@ def find_blocking_status_transitions(changed_rows: list[tuple]) -> list[str]:
     """
     Return status transitions that should block an automated support-matrix PR.
 
-    Hardware-incompatible rows are produced by deterministic preflight. A previous
-    PASS becoming hardware-incompatible, or a hardware-incompatible row becoming a
-    normal FAIL, indicates either bad metadata or a broken preflight and should be
-    investigated explicitly instead of treated as a routine support change.
+    Hardware-incompatible rows are produced by deterministic preflight, and
+    framework-incompatible rows are produced by deterministic runtime/data gap
+    classification. A previous PASS becoming either terminal incompatibility, or
+    an incompatibility becoming a normal FAIL, should be investigated explicitly.
     """
     errors = []
     for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in changed_rows:
-        if old_status == STATUS_PASS and new_status == STATUS_HW_INCOMPATIBLE:
+        if old_status == STATUS_PASS and new_status in {STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}:
             errors.append(
-                "Unexpected PASS -> HW_INCOMPATIBLE transition: "
+                f"Unexpected PASS -> {new_status} transition: "
                 f"{huggingface_id} ({architecture}) {system}/{backend} v{version} {mode}"
             )
-        elif old_status == STATUS_HW_INCOMPATIBLE and new_status == STATUS_FAIL:
+        elif old_status in {STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE} and new_status == STATUS_FAIL:
             errors.append(
-                "Unexpected HW_INCOMPATIBLE -> FAIL transition: "
+                f"Unexpected {old_status} -> FAIL transition: "
                 f"{huggingface_id} ({architecture}) {system}/{backend} v{version} {mode}"
             )
     return errors
@@ -281,8 +290,13 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
         Markdown formatted PR description
     """
     regressions = [r for r in changed_rows if r[6] == STATUS_PASS and r[7] == STATUS_FAIL]
-    fixed = [r for r in changed_rows if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE}]
+    fixed = [
+        r
+        for r in changed_rows
+        if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+    ]
     reclassified_hw = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_HW_INCOMPATIBLE]
+    reclassified_framework = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_FRAMEWORK_INCOMPATIBLE]
 
     lines = [
         "This PR updates the split support matrix CSV files with the following changes:",
@@ -292,9 +306,11 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
         "| Category | Count |",
         "|----------|-------|",
         f"| Regressions (PASS -> FAIL) | {len(regressions)} |",
-        f"| Fixed ({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE} -> PASS) | {len(fixed)} |",
+        f"| Fixed ({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE}/{STATUS_FRAMEWORK_INCOMPATIBLE} -> PASS) | {len(fixed)} |",
         f"| Reclassified as hardware-incompatible ({STATUS_FAIL} -> {STATUS_HW_INCOMPATIBLE}) "
         f"| {len(reclassified_hw)} |",
+        f"| Reclassified as framework-incompatible ({STATUS_FAIL} -> {STATUS_FRAMEWORK_INCOMPATIBLE}) "
+        f"| {len(reclassified_framework)} |",
         f"| Removed rows | {len(removed_rows)} |",
         f"| Added rows | {len(added_rows)} |",
         "",
@@ -325,7 +341,10 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     lines.append("")
 
     # Fixed (FAIL -> PASS)
-    lines.append(f"### {section}. Fixed ({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE} -> PASS): {len(fixed)} rows")
+    lines.append(
+        f"### {section}. Fixed "
+        f"({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE}/{STATUS_FRAMEWORK_INCOMPATIBLE} -> PASS): {len(fixed)} rows"
+    )
     section += 1
     if fixed:
         lines.append("")
@@ -369,6 +388,39 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     else:
         lines.append("")
         lines.append("*No hardware-incompatible reclassifications*")
+    lines.append("")
+
+    lines.append(
+        f"### {section}. Reclassified as framework-incompatible "
+        f"({STATUS_FAIL} -> {STATUS_FRAMEWORK_INCOMPATIBLE}): {len(reclassified_framework)} rows"
+    )
+    section += 1
+    if reclassified_framework:
+        lines.append("")
+        lines.append(
+            "| HuggingFaceID | Architecture | System | Backend | Version | Mode | Previous Status | New Status |"
+        )
+        lines.append(
+            "|---------------|--------------|--------|---------|---------|------|-----------------|------------|"
+        )
+        for (
+            huggingface_id,
+            architecture,
+            system,
+            backend,
+            version,
+            mode,
+            old_status,
+            new_status,
+        ) in reclassified_framework:
+            row = (
+                f"| {huggingface_id} | {architecture} | {system} | {backend} "
+                f"| {version} | {mode} | {old_status} | {new_status} |"
+            )
+            lines.append(row)
+    else:
+        lines.append("")
+        lines.append("*No framework-incompatible reclassifications*")
     lines.append("")
 
     # Removed rows
@@ -484,20 +536,31 @@ def main():
     transition_errors = find_blocking_status_transitions(changed_rows)
     validation_errors.extend(transition_errors)
 
+    regression_count = len([r for r in changed_rows if r[6] == STATUS_PASS and r[7] == STATUS_FAIL])
+    fixed_count = len(
+        [
+            r
+            for r in changed_rows
+            if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+        ]
+    )
+    reclassified_hw_count = len([r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_HW_INCOMPATIBLE])
+    reclassified_framework_count = len(
+        [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_FRAMEWORK_INCOMPATIBLE]
+    )
+
     print(f"Added rows: {len(added_rows)}")
     print(f"Removed rows: {len(removed_rows)}")
     print(f"Changed rows: {len(changed_rows)}")
-    print(
-        f"  - Regressions (PASS -> FAIL): "
-        f"{len([r for r in changed_rows if r[6] == STATUS_PASS and r[7] == STATUS_FAIL])}"
-    )
-    print(
-        f"  - Fixed ({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE} -> PASS): "
-        f"{len([r for r in changed_rows if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE}])}"
-    )
+    print(f"  - Regressions (PASS -> FAIL): {regression_count}")
+    print(f"  - Fixed ({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE}/{STATUS_FRAMEWORK_INCOMPATIBLE} -> PASS): {fixed_count}")
     print(
         f"  - Reclassified as hardware-incompatible ({STATUS_FAIL} -> {STATUS_HW_INCOMPATIBLE}): "
-        f"{len([r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_HW_INCOMPATIBLE])}"
+        f"{reclassified_hw_count}"
+    )
+    print(
+        f"  - Reclassified as framework-incompatible ({STATUS_FAIL} -> {STATUS_FRAMEWORK_INCOMPATIBLE}): "
+        f"{reclassified_framework_count}"
     )
     if transition_errors:
         print("Blocking status transitions:")
@@ -507,8 +570,13 @@ def main():
     has_changes = len(added_rows) > 0 or len(removed_rows) > 0 or len(changed_rows) > 0
 
     regressions = [r for r in changed_rows if r[6] == STATUS_PASS and r[7] == STATUS_FAIL]
-    fixed = [r for r in changed_rows if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE}]
+    fixed = [
+        r
+        for r in changed_rows
+        if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+    ]
     reclassified_hw = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_HW_INCOMPATIBLE]
+    reclassified_framework = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_FRAMEWORK_INCOMPATIBLE]
 
     # Generate output
     if args.output_diff:
@@ -521,6 +589,7 @@ def main():
             "regression_count": len(regressions),
             "fixed_count": len(fixed),
             "reclassified_hw_incompatible_count": len(reclassified_hw),
+            "reclassified_framework_incompatible_count": len(reclassified_framework),
             "added_rows": added_rows,
             "removed_rows": removed_rows,
             "changed_rows": changed_rows,

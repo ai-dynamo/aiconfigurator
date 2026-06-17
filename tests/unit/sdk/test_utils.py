@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk.models import HybridMoEModel
+from aiconfigurator.sdk.models import Gemma4MixModel, HybridMoEModel
 from aiconfigurator.sdk.utils import (
     _parse_hf_config_json,
     enumerate_parallel_config,
@@ -507,6 +507,363 @@ class TestParseHFConfig:
         with pytest.raises(ValueError, match="positive integer"):
             _parse_hf_config_json(hf_config)
 
+    @staticmethod
+    def _gemma4_text_config(layer_types):
+        """Minimal valid Gemma 4 HF config wrapping the text_config branch."""
+        return {
+            "architectures": ["Gemma4ForConditionalGeneration"],
+            "text_config": {
+                "num_hidden_layers": len(layer_types),
+                "hidden_size": 2816,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 8,
+                "num_global_key_value_heads": 2,
+                "head_dim": 256,
+                "global_head_dim": 512,
+                "intermediate_size": 2112,
+                "moe_intermediate_size": 704,
+                "vocab_size": 262144,
+                "max_position_embeddings": 262144,
+                "top_k_experts": 8,
+                "num_experts": 128,
+                "layer_types": layer_types,
+                "sliding_window": 1024,
+                "attention_k_eq_v": True,
+            },
+        }
+
+    def test_parse_gemma4_config(self):
+        """Real google/gemma-4-26B-A4B shape: 5:1 SWA:global, k_eq_v on global, top_k_experts."""
+        # Exact pattern from config.json: [SWA, SWA, SWA, SWA, SWA, global] x 5 = 30 layers.
+        layer_types = ["sliding_attention"] * 5 + ["full_attention"]
+        layer_types = layer_types * 5
+        hf_config = self._gemma4_text_config(layer_types)
+
+        result = _parse_hf_config_json(hf_config)
+
+        assert result["architecture"] == "Gemma4ForConditionalGeneration"
+        assert result["layers"] == 30
+        assert result["n"] == 16
+        assert result["n_kv"] == 8  # SWA default at top level
+        assert result["d"] == 256  # SWA default at top level
+        assert result["hidden_size"] == 2816
+        assert result["inter_size"] == 2112  # shared dense MLP intermediate
+        assert result["moe_inter_size"] == 704  # per routed expert
+        assert result["topk"] == 8  # picked up from top_k_experts fallback
+        assert result["num_experts"] == 128
+        assert result["vocab"] == 262144
+
+        cfg = result["extra_params"]
+        assert isinstance(cfg, common.Gemma4MixConfig)
+        assert cfg.layer_types == tuple(layer_types)
+        assert cfg.layer_types.count("sliding_attention") == 25
+        assert cfg.layer_types.count("full_attention") == 5
+        assert cfg.layer_types[-1] == "full_attention"
+        assert cfg.swa_num_kv_heads == 8
+        assert cfg.swa_head_dim == 256
+        assert cfg.global_num_kv_heads == 2
+        assert cfg.global_head_dim == 512
+        assert cfg.sliding_window_size == 1024
+        assert cfg.attention_k_eq_v is True
+
+    def test_gemma4_layer_types_length_mismatch_raises(self):
+        """layer_types length must equal num_hidden_layers."""
+        hf_config = self._gemma4_text_config(["sliding_attention"] * 5)
+        hf_config["text_config"]["num_hidden_layers"] = 30  # model claims 30, config has 5
+        with pytest.raises(ValueError, match="layer_types length"):
+            _parse_hf_config_json(hf_config)
+
+    def test_gemma4_invalid_layer_type_raises(self):
+        """layer_types must contain only sliding_attention / full_attention."""
+        hf_config = self._gemma4_text_config(["sliding_attention", "linear_attention", "full_attention"])
+        with pytest.raises(ValueError, match="must contain only"):
+            _parse_hf_config_json(hf_config)
+
+
+class TestGemma4MixModelBuilder:
+    """Builder-level tests that verify Gemma4MixModel wiring through set_gemma4_config."""
+
+    @staticmethod
+    def _make_model_config(tp_size=1, moe_tp_size=1, moe_ep_size=1):
+        return config.ModelConfig(
+            tp_size=tp_size,
+            pp_size=1,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+            attention_dp_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.bfloat16,
+        )
+
+    @staticmethod
+    def _make_model(model_config, layer_types=None, attention_k_eq_v=True):
+        """Build a Gemma4MixModel at the gemma-4-26B-A4B shape (or a custom layer pattern)."""
+        if layer_types is None:
+            layer_types = (["sliding_attention"] * 5 + ["full_attention"]) * 5
+        cfg = common.Gemma4MixConfig(
+            layer_types=tuple(layer_types),
+            swa_num_kv_heads=8,
+            swa_head_dim=256,
+            global_num_kv_heads=2,
+            global_head_dim=512,
+            sliding_window_size=1024,
+            attention_k_eq_v=attention_k_eq_v,
+        )
+        model = Gemma4MixModel(
+            8,  # topk
+            128,  # num_experts
+            704,  # moe_inter_size
+            "google/gemma-4-26B-A4B",  # model_path
+            "GEMMA4MIX",  # model_family
+            "Gemma4ForConditionalGeneration",  # architecture
+            len(layer_types),  # num_layers
+            16,  # num_heads
+            8,  # num_kv_heads (SWA default)
+            256,  # head_size (SWA default)
+            2816,  # hidden_size
+            2112,  # inter_size (shared MLP)
+            262144,  # vocab_size
+            262144,  # context_length
+            model_config,
+            None,  # extra_params (we use set_gemma4_config instead)
+        )
+        model.set_gemma4_config(cfg)
+        return model
+
+    def test_builds_both_layer_recipes(self):
+        """30-layer 5:1 SWA:global pattern emits both recipes with shared-MLP + MoE ops."""
+        model = self._make_model(self._make_model_config())
+        op_names = {op._name for op in model.context_ops}
+        # SWA recipe
+        assert "context_swa_qkv_gemm" in op_names
+        assert "context_swa_shared_mlp_gate_up_gemm" in op_names
+        assert "context_swa_shared_mlp_down_gemm" in op_names
+        assert "context_swa_router_gemm" in op_names
+        # Global recipe
+        assert "context_global_qkv_gemm" in op_names
+        assert "context_global_shared_mlp_gate_up_gemm" in op_names
+        assert "context_global_router_gemm" in op_names
+
+    def test_global_qkv_omits_v_when_k_eq_v(self):
+        """attention_k_eq_v=True drops V from the global-layer QKV-GEMM output width."""
+        model = self._make_model(self._make_model_config(), attention_k_eq_v=True)
+        global_qkv = next(op for op in model.context_ops if op._name == "context_global_qkv_gemm")
+        swa_qkv = next(op for op in model.context_ops if op._name == "context_swa_qkv_gemm")
+        # Global: Q (16*512) + K (2*512) = 9216, no V buffer.
+        assert global_qkv._n == 16 * 512 + 2 * 512
+        # SWA always has separate K and V: Q (16*256) + K (8*256) + V (8*256) = 8192.
+        assert swa_qkv._n == 16 * 256 + 8 * 256 * 2
+
+    def test_global_qkv_includes_v_when_k_eq_v_false(self):
+        """attention_k_eq_v=False (defensive default) keeps V in the global QKV-out width."""
+        model = self._make_model(self._make_model_config(), layer_types=["full_attention"], attention_k_eq_v=False)
+        qkv = next(op for op in model.context_ops if op._name == "context_global_qkv_gemm")
+        # With V re-enabled: Q + K + V = 16*512 + 2*512*2 = 10240.
+        assert qkv._n == 16 * 512 + 2 * 512 * 2
+
+    def test_kvcache_bytes_window_caps_swa(self):
+        """SWA contribution caps at sliding_window_size; global grows linearly with seq_len."""
+        model = self._make_model(self._make_model_config())
+
+        # bf16, TP=1 hand derivation:
+        #   per-token SWA layer = 8 KV * 256 dim * 2 (K+V) * 2 bytes = 8192
+        #   per-token global layer = 2 KV * 512 dim * 2 (K+V) * 2 bytes = 4096
+        def expected(seq_len):
+            swa_seq = min(seq_len, 1024)
+            return 25 * 8192 * swa_seq + 5 * 4096 * seq_len
+
+        for seq_len in (512, 1024, 4096, 65536, 262144):
+            assert model.get_kvcache_bytes_per_sequence(seq_len) == expected(seq_len)
+
+    def test_kvcache_bytes_at_256k_in_expected_range(self):
+        """Architectural payoff: full 256K context KV fits in ~5 GiB on a single GPU at bf16."""
+        model = self._make_model(self._make_model_config())
+        gib = model.get_kvcache_bytes_per_sequence(262144) / (1024**3)
+        assert 4.5 <= gib <= 5.5, f"expected ~5.2 GiB, got {gib:.3f}"
+
+    def test_kvcache_bytes_tp_sharding(self):
+        """KV heads round up per GPU; TP=8 with KV-heads (8,2) → (1,1) per GPU."""
+        model = self._make_model(self._make_model_config(tp_size=8, moe_ep_size=8))
+        seq_len = 262144
+        # SWA: 8/8 = 1 KV per GPU.  Global: ceil(2/8) = 1 KV per GPU.
+        # SWA per-token per-layer per-GPU = 1*256*2*2 = 1024.  Global = 1*512*2*2 = 2048.
+        expected = 25 * 1024 * 1024 + 5 * 2048 * seq_len
+        assert model.get_kvcache_bytes_per_sequence(seq_len) == expected
+
+    def test_get_kvcache_max_tokens_follows_window_capped_curve(self):
+        """The capacity inverse caps SWA layers at the window instead of using the
+        (larger) seq_len=1 slope, so it fits far more tokens past the window."""
+        model = self._make_model(self._make_model_config())
+        budget = model.get_kvcache_bytes_per_sequence(65536)  # >> 1024 window
+        tokens = model.get_kvcache_max_tokens(budget)
+        # Exact monotonic inverse: `tokens` fits, one more token does not.
+        assert tokens == 65536
+        assert model.get_kvcache_bytes_per_sequence(tokens) <= budget
+        assert model.get_kvcache_bytes_per_sequence(tokens + 1) > budget
+        # The seq_len=1 extrapolation under-counts: SWA layers are charged forever.
+        per_token = model.get_kvcache_bytes_per_sequence(1)
+        assert tokens > int(budget // per_token)
+
+    def test_get_kvcache_max_tokens_linear_below_window(self):
+        """Below the window every layer still grows, so the inverse is plain
+        floor-division by the per-token size."""
+        model = self._make_model(self._make_model_config())
+        per_token = model.get_kvcache_bytes_per_sequence(1)
+        budget = model.get_kvcache_bytes_per_sequence(512)  # < 1024 window
+        assert model.get_kvcache_max_tokens(budget) == int(budget // per_token) == 512
+
+    def test_get_kvcache_max_tokens_saturated_caps_at_context_length(self):
+        """A fully window-capped cache (all SWA, no global layers) saturates: KV
+        stops growing past the window, so memory never binds and capacity is
+        bounded by the model context length -- not an arbitrary doubling step."""
+        # No full_attention layer -> every layer caps at the 1024 window.
+        model = self._make_model(self._make_model_config(), layer_types=["sliding_attention"] * 6)
+        # KV is flat past the window: confirm we are actually in the saturated regime.
+        assert model.get_kvcache_bytes_per_sequence(2048) == model.get_kvcache_bytes_per_sequence(1024)
+        saturated = model.get_kvcache_bytes_per_sequence(model._context_length)
+        # Any budget at/above the saturated size returns the context length, and is
+        # stable across wildly different (large) budgets rather than tracking 2^k.
+        assert model.get_kvcache_max_tokens(saturated) == model._context_length == 262144
+        assert model.get_kvcache_max_tokens(saturated * 1000) == model._context_length
+
+    def test_set_gemma4_config_rejects_wrong_type(self):
+        """Passing a HybridMoEConfig (or any non-Gemma4MixConfig) raises."""
+        model = Gemma4MixModel(
+            8,
+            128,
+            704,
+            "test",
+            "GEMMA4MIX",
+            "Gemma4ForConditionalGeneration",
+            2,
+            16,
+            8,
+            256,
+            2816,
+            2112,
+            262144,
+            262144,
+            self._make_model_config(),
+            None,
+        )
+        with pytest.raises(ValueError, match="requires a Gemma4MixConfig"):
+            model.set_gemma4_config(common.HybridMoEConfig(attn_layer_pattern=(0, 1), moe_layer_freq=(1, 1)))
+
+    def test_set_gemma4_config_rejects_wrong_layer_count(self):
+        """layer_types length must match num_layers passed at construction."""
+        model = Gemma4MixModel(
+            8,
+            128,
+            704,
+            "test",
+            "GEMMA4MIX",
+            "Gemma4ForConditionalGeneration",
+            30,
+            16,
+            8,
+            256,
+            2816,
+            2112,
+            262144,
+            262144,
+            self._make_model_config(),
+            None,
+        )
+        bad_cfg = common.Gemma4MixConfig(
+            layer_types=("sliding_attention",) * 5,  # only 5, but num_layers=30
+            swa_num_kv_heads=8,
+            swa_head_dim=256,
+            global_num_kv_heads=2,
+            global_head_dim=512,
+            sliding_window_size=1024,
+        )
+        with pytest.raises(ValueError, match="layer_types length"):
+            model.set_gemma4_config(bad_cfg)
+
+    def test_dense_variant_builds_without_moe_ops(self):
+        """Dense Gemma 4 variants (e.g. gemma-4-31B-it: topk=0, num_experts=None) have
+        no routed-MoE block: every layer is just shared dense MLP + attention.
+
+        Regression test for the assertion crash when num_experts is None.
+        """
+        layer_types = (["sliding_attention"] * 5 + ["full_attention"]) * 2  # 12 layers
+        cfg = common.Gemma4MixConfig(
+            layer_types=tuple(layer_types),
+            swa_num_kv_heads=16,
+            swa_head_dim=256,
+            global_num_kv_heads=4,
+            global_head_dim=512,
+            sliding_window_size=1024,
+            attention_k_eq_v=True,
+        )
+        model = Gemma4MixModel(
+            0,  # topk = 0 (dense)
+            None,  # num_experts = None (dense)
+            21504,  # moe_inter_size (unused for dense, but kept aligned with HF config)
+            "google/gemma-4-31B-it",
+            "GEMMA4MIX",
+            "Gemma4ForConditionalGeneration",
+            len(layer_types),
+            32,
+            16,
+            256,
+            5376,
+            21504,
+            262144,
+            262144,
+            self._make_model_config(),  # tp=1, moe_tp=1, moe_ep=1
+            None,
+        )
+        model.set_gemma4_config(cfg)
+
+        op_names = {op._name for op in model.context_ops}
+        # Shared dense MLP ops MUST be present.
+        assert "context_swa_shared_mlp_gate_up_gemm" in op_names
+        assert "context_global_shared_mlp_gate_up_gemm" in op_names
+        # Routed-MoE ops MUST NOT be present.
+        assert not any("moe" in n.lower() or "router" in n.lower() for n in op_names), (
+            f"dense variant should not emit MoE/router ops, found: "
+            f"{[n for n in op_names if 'moe' in n.lower() or 'router' in n.lower()]}"
+        )
+        gen_names = {op._name for op in model.generation_ops}
+        assert not any("moe" in n.lower() or "router" in n.lower() for n in gen_names)
+
+    def test_dense_variant_rejects_moe_ep_gt_1(self):
+        """Dense Gemma 4 has no experts, so any moe_ep_size > 1 must be rejected
+        (otherwise pareto search would enumerate equivalent dense configurations)."""
+        bad_config = config.ModelConfig(
+            tp_size=2,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=2,
+            attention_dp_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.bfloat16,
+        )
+        with pytest.raises(AssertionError, match="moe_ep_size=1"):
+            Gemma4MixModel(
+                0,
+                None,
+                21504,
+                "google/gemma-4-31B-it",
+                "GEMMA4MIX",
+                "Gemma4ForConditionalGeneration",
+                2,
+                32,
+                16,
+                256,
+                5376,
+                21504,
+                262144,
+                262144,
+                bad_config,
+                None,
+            )
+
 
 class TestHybridMoEModelBuilder:
     """Builder-level tests that verify HybridMoEModel wiring through set_hybrid_config."""
@@ -998,3 +1355,153 @@ class TestEnumerateParallelConfigVLLMMoE:
         )
         has_pure_ep = any(c[3] == 1 and c[4] > 1 for c in configs)
         assert has_pure_ep, "Should include pure MoE EP configs (moe_tp=1, moe_ep>1)"
+
+
+# ── Qwen3VL config parsing constants ──────────────────────────────────────────
+
+_QWEN3VL_ARCH = "Qwen3VLForConditionalGeneration"
+
+# Minimal Qwen3VL config matching the actual downloaded structure
+_QWEN3VL_HF_CONFIG = {
+    "architectures": [_QWEN3VL_ARCH],
+    "image_token_id": 151655,
+    "model_type": "qwen3_vl",
+    "text_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 151643,
+        "dtype": "bfloat16",
+        "eos_token_id": 151645,
+        "head_dim": 128,
+        "hidden_act": "silu",
+        "hidden_size": 5120,
+        "initializer_range": 0.02,
+        "intermediate_size": 25600,
+        "max_position_embeddings": 262144,
+        "model_type": "qwen3_vl_text",
+        "num_attention_heads": 64,
+        "num_hidden_layers": 64,
+        "num_key_value_heads": 8,
+        "rms_norm_eps": 1e-06,
+        "rope_theta": 5000000,
+        "use_cache": True,
+        "vocab_size": 151936,
+    },
+    "tie_word_embeddings": False,
+    "vision_config": {
+        "depth": 27,
+        "hidden_size": 1152,
+        "num_heads": 16,
+        "intermediate_size": 4304,
+        "patch_size": 16,
+        "spatial_merge_size": 2,
+        "temporal_patch_size": 2,
+        "out_hidden_size": 5120,
+    },
+}
+
+
+class TestQwen3VLConfigParsing:
+    """Test that _parse_hf_config_json correctly unwraps text_config for Qwen3VL."""
+
+    def test_architecture_preserved(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["architecture"] == _QWEN3VL_ARCH
+
+    def test_llm_layers_from_text_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["layers"] == 64
+
+    def test_llm_hidden_size_from_text_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["hidden_size"] == 5120
+
+    def test_llm_attention_heads_from_text_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["n"] == 64
+
+    def test_llm_kv_heads_from_text_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["n_kv"] == 8
+
+    def test_llm_head_dim_from_text_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["d"] == 128
+
+    def test_llm_inter_size_from_text_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["inter_size"] == 25600
+
+    def test_llm_vocab_from_text_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["vocab"] == 151936
+
+    def test_not_moe(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["topk"] == 0
+        assert result["num_experts"] == 0
+
+
+class TestQwen3VLVisionEncoderParsing:
+    """Test that vision_config is captured before text_config unwrap and parsed correctly."""
+
+    def test_extra_params_is_vision_encoder_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert isinstance(result["extra_params"], common.VisionEncoderConfig)
+
+    def test_vision_encoder_depth(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].depth == 27
+
+    def test_vision_encoder_hidden_size(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].hidden_size == 1152
+
+    def test_vision_encoder_num_heads(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].num_heads == 16
+
+    def test_vision_encoder_intermediate_size(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].intermediate_size == 4304
+
+    def test_vision_encoder_patch_size(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].patch_size == 16
+
+    def test_vision_encoder_temporal_patch_size(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].temporal_patch_size == 2
+
+    def test_vision_encoder_spatial_merge_size(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].spatial_merge_size == 2
+
+    def test_vision_encoder_out_hidden_size_matches_llm(self):
+        """out_hidden_size must equal LLM hidden_size for the projection to be valid."""
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].out_hidden_size == result["hidden_size"]
+
+    def test_vision_config_not_lost_after_text_config_unwrap(self):
+        """Regression: vision_config must be captured before the text_config overwrite."""
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"] is not None
+
+    def test_missing_vision_config_does_not_raise(self):
+        """If vision_config is absent, extra_params should be None, not an error."""
+        cfg = {**_QWEN3VL_HF_CONFIG}
+        cfg.pop("vision_config")
+        result = _parse_hf_config_json(cfg)
+        assert result["extra_params"] is None
+
+    def test_vision_encoder_deepstack_visual_indexes_default(self):
+        """deepstack_visual_indexes defaults to empty tuple when absent from vision_config."""
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].deepstack_visual_indexes == ()
+
+    def test_vision_encoder_deepstack_visual_indexes_populated(self):
+        """deepstack_visual_indexes is parsed as a tuple when present in vision_config."""
+        vision_cfg = {**_QWEN3VL_HF_CONFIG["vision_config"], "deepstack_visual_indexes": [8, 17, 26]}
+        cfg = {**_QWEN3VL_HF_CONFIG, "vision_config": vision_cfg}
+        result = _parse_hf_config_json(cfg)
+        assert result["extra_params"].deepstack_visual_indexes == (8, 17, 26)

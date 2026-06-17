@@ -23,7 +23,16 @@ from aiconfigurator.sdk.utils import (
 
 logger = logging.getLogger(__name__)
 
-_MOE_MODEL_FAMILIES = {"MOE", "DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25", "HYBRIDMOE"}
+_MOE_MODEL_FAMILIES = {
+    "MOE",
+    "DEEPSEEK",
+    "DEEPSEEKV32",
+    "DEEPSEEKV4",
+    "KIMIK25",
+    "HYBRIDMOE",
+    "QWEN3VL_MOE",
+    "GEMMA4MIX",
+}
 
 
 @cache
@@ -150,13 +159,6 @@ def _apply_model_quant_defaults(
 
     if applied:
         logger.debug("Using model-provided quantization defaults: %s", ", ".join(applied))
-
-    # FIXME: temporary workaround for Deepseek V3 fp8 fmha quant mode, only bfloat16+fp8kvcache is supported
-    if (
-        architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
-        and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
-    ):
-        model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
 
     # DSA module (DeepSeek-V3.2 / GLM-5): DSA perf tables only have bfloat16 FMHA currently.
     if (

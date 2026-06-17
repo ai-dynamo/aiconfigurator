@@ -1,21 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""vLLM GEMM collector for CUDA backends.
+
+Builds vLLM RowParallelLinear layers with synthetic weights to benchmark BF16,
+FP8, FP8 block, and FP4-style paths where available. Shared GEMM shapes come
+from `case_generator.py`; this file handles vLLM config contexts, distributed setup,
+quantized-weight preparation, and backend-specific skips.
+"""
+
 __compat__ = "vllm>=0.14.0"
 
 import os
+from types import SimpleNamespace
 
 import torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    maybe_post_process_fp8_weight_block,
-)
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.version import __version__ as vllm_version
 
-from collector.common_test_cases import get_gemm_common_test_cases
+from collector.case_generator import get_gemm_case_specs
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.vllm.utils import setup_distributed, with_exit_stack
 
@@ -44,6 +50,10 @@ _NVFP4_QUANT_ARGS = {
 }
 
 
+def _skip_vllm_sm89_022_fp8_gemm(gemm_type: str) -> bool:
+    return vllm_version.startswith("0.22.0") and get_sm_version() == 89 and gemm_type in {"fp8", "fp8_static"}
+
+
 def get_gemm_test_cases():
     sm = get_sm_version()
 
@@ -57,13 +67,20 @@ def get_gemm_test_cases():
     if sm >= 100 and _nvfp4_gemm_available:
         gemm_list += ["nvfp4"]
 
+    requested_gemm_types = os.environ.get("AIC_COLLECT_GEMM_TYPES")
+    if requested_gemm_types:
+        requested = {item.strip() for item in requested_gemm_types.split(",") if item.strip()}
+        gemm_list = [gemm_type for gemm_type in gemm_list if gemm_type in requested]
+
     test_cases = []
 
-    for gemm_common_testcase in get_gemm_common_test_cases():
+    for gemm_common_testcase in get_gemm_case_specs():
         x = gemm_common_testcase.x
         n = gemm_common_testcase.n
         k = gemm_common_testcase.k
         for gemm_type in gemm_list:
+            if _skip_vllm_sm89_022_fp8_gemm(gemm_type):
+                continue
             if gemm_type in ("nvfp4", "fp8_block") and (n < 128 or k < 128):
                 continue
             if gemm_type == "nvfp4" and ((n % 16) != 0 or (k % 16) != 0):
@@ -99,7 +116,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
     if gemm_type == "fp8":
         qc = Fp8Config(
             is_checkpoint_fp8_serialized=True,
-            activation_scheme="static",
+            activation_scheme="dynamic",
             ignored_layers=None,
             weight_block_size=None,
         )
@@ -164,12 +181,10 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
                     if not hasattr(gemm, "weight_scale"):
                         gemm.weight_scale = gemm.weight_scale_inv
 
-                # Support both old (layer-only) and new (layer, cutlass_supported)
-                # signatures for maybe_post_process_fp8_weight_block.
-                try:
-                    maybe_post_process_fp8_weight_block(gemm)
-                except TypeError:
-                    maybe_post_process_fp8_weight_block(gemm, cutlass_block_fp8_supported=True)
+                quant_method = getattr(gemm, "quant_method", None)
+                if quant_method is None or not hasattr(quant_method, "process_weights_after_loading"):
+                    raise RuntimeError("Unable to post-process vLLM fp8_block linear weights")
+                quant_method.process_weights_after_loading(gemm)
 
                 # Dynamic activation scheme does not create input_scale;
                 # the forward path still reads it, so set it explicitly.
@@ -196,7 +211,14 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
 
         return gemm
 
-    exit_stack.enter_context(set_current_vllm_config(VllmConfig()))
+    vllm_config = VllmConfig()
+    if vllm_config.model_config is None:
+        vllm_config.model_config = SimpleNamespace(
+            dtype=dtype,
+            hf_text_config=SimpleNamespace(model_type=""),
+            model="collector_dummy",
+        )
+    exit_stack.enter_context(set_current_vllm_config(vllm_config))
 
     outside_loop_count = 1 if gemm_type in ("fp8_block", "nvfp4") else 6
     op_list = []

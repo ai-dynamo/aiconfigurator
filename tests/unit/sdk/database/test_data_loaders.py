@@ -4,6 +4,8 @@
 from collections import defaultdict
 from itertools import product
 
+import pyarrow.csv as pc
+import pyarrow.parquet as pq
 import pytest
 import yaml
 
@@ -16,9 +18,12 @@ from aiconfigurator.sdk.common import (
     MoEQuantMode,
     PerfDataFilename,
 )
+from aiconfigurator.sdk.operations.base import _read_perf_rows
 from aiconfigurator.sdk.perf_database import (
     LoadedOpData,
     PerfDatabase,
+    PerfDataNotAvailableError,
+    _resolve_perf_data_path,
     databases_cache,
     get_all_databases,
     get_database,
@@ -27,6 +32,7 @@ from aiconfigurator.sdk.perf_database import (
     load_context_mla_data,
     load_context_mla_module_data,
     load_custom_allreduce_data,
+    load_dsv4_megamoe_module_data,
     load_gemm_data,
     load_generation_attention_data,
     load_generation_mla_data,
@@ -48,6 +54,13 @@ class DummyPerfDatabase:
         self.version = version
         self.systems_root = systems_root_arg
         self.database_mode = database_mode
+
+
+def test_read_perf_rows_normalizes_missing_csv_fields(tmp_path):
+    data_path = tmp_path / "ragged_perf.txt"
+    data_path.write_text("a,b,c\n1,2\n")
+
+    assert _read_perf_rows(str(data_path)) == [{"a": "1", "b": "2", "c": ""}]
 
 
 def test_perf_database_finalize_loaded_data_converts_defaultdicts():
@@ -384,6 +397,26 @@ def test_load_gemm_data_basic(tmp_path):
     assert data[key_mode][128][256][512]["latency"] == pytest.approx(0.789)
 
 
+def test_load_gemm_data_parquet(tmp_path):
+    csv_file = tmp_path / "gemm.csv"
+    parquet_file = tmp_path / "gemm.parquet"
+    csv_file.write_text(
+        "framework,version,device,op_name,gemm_dtype,m,n,k,latency\ntrt,1.0,hwX,opX,bfloat16,128,256,512,0.789\n"
+    )
+    pq.write_table(pc.read_csv(csv_file), parquet_file, compression="zstd")
+
+    data = load_gemm_data(str(parquet_file))
+
+    assert data[GEMMQuantMode.bfloat16][128][256][512]["latency"] == pytest.approx(0.789)
+
+
+def test_resolve_perf_data_path_falls_back_to_legacy_txt(tmp_path):
+    legacy_file = tmp_path / "gemm_perf.txt"
+    legacy_file.write_text("framework,version,device,op_name,gemm_dtype,m,n,k,latency\n")
+
+    assert _resolve_perf_data_path(str(tmp_path / "gemm_perf.parquet")) == str(legacy_file)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4) load_moe_data
 # ─────────────────────────────────────────────────────────────────────────────
@@ -454,6 +487,153 @@ def test_load_moe_data_basic(tmp_path):
     assert 2 in data[qm]["uniform"][2][4][16][32][2]  # moe_ep_size
     assert 1 in data[qm]["uniform"][2][4][16][32][2][2]  # num_tokens
     assert data[qm]["uniform"][2][4][16][32][2][2][1]["latency"] == pytest.approx(1.23)
+
+
+def _dsv4_megamoe_row(
+    *,
+    phase: str = "context",
+    num_tokens: int = 1024,
+    latency: float = 1.25,
+    power: float | None = None,
+    distribution: str = "balanced",
+) -> dict[str, str]:
+    row = {
+        "framework": "SGLang",
+        "version": "unknown",
+        "device": "NVIDIA GB200",
+        "op_name": "dsv4_megamoe_module",
+        "kernel_source": "deepgemm_megamoe",
+        "phase": phase,
+        "moe_dtype": "w4a8_mxfp4_mxfp8",
+        "kernel_dtype": "fp8_fp4",
+        "num_tokens": str(num_tokens),
+        "global_num_tokens": "8192",
+        "hidden_size": "7168",
+        "inter_size": "3072",
+        "topk": "6",
+        "num_experts": "384",
+        "num_fused_shared_experts": "0",
+        "moe_tp_size": "1",
+        "moe_ep_size": "8",
+        "distribution": distribution,
+        "source_policy": "random",
+        "pre_dispatch": "sglang_jit",
+        "num_max_tokens_per_rank": "16384",
+        "effective_num_max_tokens_per_rank": "16448",
+        "routed_scaling_factor": "2.5",
+        "includes_routed_scale": "true",
+        "includes_gate_topk": "false",
+        "buffer_policy": "cached_sglang",
+        "includes_buffer_init": "false",
+        "used_cuda_graph": "true",
+        "latency": str(latency),
+    }
+    if power is not None:
+        row["power"] = str(power)
+    return row
+
+
+def _write_dsv4_megamoe_perf(csv_file, *rows: dict[str, str], include_phase: bool = True) -> None:
+    fields = list(_dsv4_megamoe_row().keys())
+    for row in rows:
+        fields.extend(field for field in row if field not in fields)
+    if not include_phase:
+        fields = [field for field in fields if field != "phase"]
+    csv_file.write_text(
+        ",".join(fields) + "\n" + "".join(",".join(row.get(field, "") for field in fields) + "\n" for row in rows)
+    )
+
+
+def test_load_dsv4_megamoe_module_data_slim_schema(tmp_path):
+    csv_file = tmp_path / "dsv4_megamoe_module_perf.txt"
+    _write_dsv4_megamoe_perf(csv_file, _dsv4_megamoe_row())
+
+    data = load_dsv4_megamoe_module_data(str(csv_file))
+
+    leaf = data["context"]["deepgemm_megamoe"]["fp8_fp4"][MoEQuantMode.w4a8_mxfp4_mxfp8]["sglang_jit"]["random"][
+        "balanced"
+    ][6][384][0][7168][3072][1][8][1024]
+    assert leaf["latency"] == pytest.approx(1.25)
+    assert leaf["global_num_tokens"] == 8192
+    assert leaf["effective_num_max_tokens_per_rank"] == 16448
+    assert leaf["phase"] == "context"
+
+
+def test_load_dsv4_megamoe_module_data_rejects_duplicate_loader_keys(tmp_path):
+    csv_file = tmp_path / "dsv4_megamoe_module_perf.txt"
+    _write_dsv4_megamoe_perf(
+        csv_file,
+        _dsv4_megamoe_row(latency=1.25, distribution="power_law_sampled_1.9"),
+        _dsv4_megamoe_row(latency=1.50, distribution="power_law_sampled_1.9"),
+    )
+
+    with pytest.raises(ValueError, match="duplicate DSv4 MegaMoE data row"):
+        load_dsv4_megamoe_module_data(str(csv_file))
+
+
+def test_load_dsv4_megamoe_module_data_requires_phase_for_unified_file(tmp_path):
+    csv_file = tmp_path / "dsv4_megamoe_module_perf.txt"
+    _write_dsv4_megamoe_perf(csv_file, _dsv4_megamoe_row(), include_phase=False)
+
+    with pytest.raises(ValueError, match="unified perf file requires a phase column"):
+        load_dsv4_megamoe_module_data(str(csv_file))
+
+
+def test_query_dsv4_megamoe_module_missing_data_raises(tmp_path):
+    systems_root = tmp_path / "systems"
+    data_dir = systems_root / "data" / "sglang" / "0.5.10"
+    data_dir.mkdir(parents=True)
+    (systems_root / "gb200.yaml").write_text(
+        yaml.safe_dump({"data_dir": "data", "gpu": {"sm_version": 100}, "misc": {"nccl_version": "test"}})
+    )
+
+    db = PerfDatabase("gb200", "sglang", "0.5.10", str(systems_root))
+
+    assert db.supported_quant_mode["dsv4_megamoe_module"] == []
+    with pytest.raises(PerfDataNotAvailableError, match="dsv4_megamoe_module"):
+        db.query_dsv4_megamoe_module(
+            num_tokens=1024,
+            hidden_size=7168,
+            inter_size=3072,
+            topk=6,
+            num_experts=384,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            quant_mode=MoEQuantMode.w4a8_mxfp4_mxfp8,
+            workload_distribution="balanced",
+            is_context=True,
+        )
+
+
+def test_query_dsv4_megamoe_module_interpolates_energy_from_rows(tmp_path):
+    systems_root = tmp_path / "systems"
+    data_dir = systems_root / "data" / "sglang" / "0.5.10"
+    data_dir.mkdir(parents=True)
+    (systems_root / "gb200.yaml").write_text(yaml.safe_dump({"data_dir": "data", "misc": {"nccl_version": "test"}}))
+
+    _write_dsv4_megamoe_perf(
+        data_dir / "dsv4_megamoe_module_perf.txt",
+        _dsv4_megamoe_row(num_tokens=1024, latency=1.0, power=100.0),
+        _dsv4_megamoe_row(num_tokens=2048, latency=3.0, power=200.0),
+    )
+
+    db = PerfDatabase("gb200", "sglang", "0.5.10", str(systems_root))
+    result = db.query_dsv4_megamoe_module(
+        num_tokens=1536,
+        hidden_size=7168,
+        inter_size=3072,
+        topk=6,
+        num_experts=384,
+        moe_tp_size=1,
+        moe_ep_size=8,
+        quant_mode=MoEQuantMode.w4a8_mxfp4_mxfp8,
+        workload_distribution="balanced",
+        is_context=True,
+    )
+
+    assert float(result) == pytest.approx(2.0)
+    assert result.power == pytest.approx(175.0)
+    assert result.energy == pytest.approx(350.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,218 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+op: attention_context
+description: Base collector v2 cases for attention_context.
+model_ops:
+- attention_context
+all_frameworks_op_cases:
+  attention_context:
+    cases:
+    - id: base_attention_context_shape_sweep
+      description: 'Context attention shapes. `kv_head_options: self` means num_key_value_heads equals the query head count.
+
+        '
+      batch_sizes:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      sequence_lengths:
+      - 1
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      - 1536
+      - 2048
+      - 3072
+      - 4096
+      - 6144
+      - 8192
+      - 10240
+      - 12288
+      - 16384
+      - 262144
+      query_head_counts:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 12
+      - 16
+      - 24
+      - 32
+      - 40
+      - 48
+      - 64
+      - 96
+      kv_head_options:
+      - self
+      - 1
+      - 2
+      - 4
+      - 8
+      head_dims:
+      - 128
+      - 256
+      max_tokens_self_attention: 65536
+      max_tokens_grouped_query_attention: 131072
+      max_batch_size_self_attention: 128
+      max_kv_elements: 2147483647
+      precision_cases:
+      - id: bf16
+        fp8_kv_cache: false
+        fp8_context_fmha: false
+      - id: fp8_kv_cache
+        fp8_kv_cache: true
+        fp8_context_fmha: false
+      - id: fp8_kv_cache_and_context_fmha
+        fp8_kv_cache: true
+        fp8_context_fmha: true
+framework_specific_op_cases:
+  sglang:
+    attention_context:
+      cases:
+      - id: base_attention_context_shape_sweep
+        query_head_counts:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 8
+        - 12
+        - 16
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        - 96
+        head_dims:
+        - 64
+        - 128
+        - 192
+        - 256
+        window_sizes:
+        - 0
+        - 128
+        - 1024
+  trtllm:
+    attention_context:
+      cases:
+      - id: base_attention_context_shape_sweep
+        query_head_counts:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 8
+        - 10
+        - 12
+        - 16
+        - 20
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        - 96
+        head_dims:
+        - 64
+        - 128
+        - 192
+        - 256
+        window_sizes:
+        - 0
+        - 1024
+  vllm:
+    attention_context:
+      cases:
+      - id: base_attention_context_shape_sweep
+        query_head_counts:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 8
+        - 12
+        - 16
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        head_dims:
+        - 64
+        - 128
+        - 192
+        - 256
+        - 512
+        window_sizes:
+        - 0
+        - 128
+        - 1024
+        - 8192
+  vllm_xpu:
+    attention_context:
+      cases:
+      - id: base_attention_context_shape_sweep
+        batch_sizes:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 16
+        - 32
+        sequence_lengths:
+        - 1
+        - 16
+        - 32
+        - 64
+        - 128
+        - 256
+        - 512
+        - 1024
+        - 1536
+        - 2048
+        - 3072
+        - 4096
+        - 6144
+        - 8192
+        - 10240
+        - 12288
+        - 16384
+        query_head_counts:
+        - 1
+        - 2
+        - 4
+        - 8
+        - 12
+        - 16
+        - 24
+        - 32
+        - 40
+        - 48
+        - 64
+        kv_head_options:
+        - 1
+        - 2
+        - 4
+        - 8
+        head_dims:
+        - 128
+        - 64
+        window_sizes:
+        - 0
+        - 128

@@ -46,6 +46,8 @@ if "torch" not in sys.modules:
 import collect as _collect_mod
 from collect import parallel_run
 
+from collector.model_cases import CaseSelector, OpCasePlan
+
 _collect_mod.logger = logging.getLogger("test_parallel_run")
 _collect_mod.logger.setLevel(logging.DEBUG)
 _collect_mod.logger.addHandler(logging.StreamHandler(sys.stderr))
@@ -66,6 +68,8 @@ def _task_fn(label, behavior, device):
         os.kill(os.getpid(), signal.SIGABRT)
     elif behavior == "error":
         raise ValueError(f"simulated: {label}")
+    elif behavior == "expected_error":
+        raise RuntimeError(f"expected simulated: {label}")
     # "normal": return silently
 
 
@@ -103,13 +107,14 @@ def _log_dir(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _run(tasks, num_processes, tmp_path, module_name="test"):
+def _run(tasks, num_processes, tmp_path, module_name="test", expected_failure_context=None):
     return parallel_run(
         tasks,
         _task_fn,
         num_processes=num_processes,
         module_name=module_name,
         resume_options={"checkpoint_dir": str(tmp_path / ".checkpoint")},
+        expected_failure_context=expected_failure_context,
     )
 
 
@@ -135,11 +140,17 @@ def _load_failed_ids(tmp_path, module_name, backend="unknown"):
     return set(data.get("failed", []))
 
 
+def _load_expected_failed_ids(tmp_path, module_name, backend="unknown"):
+    data = _load_checkpoint_data(tmp_path, module_name, backend=backend)
+    return set(data.get("expected_failed", []))
+
+
 def _assert_all_tasks_attempted(tasks, tmp_path, module_name):
     expected = {task["id"] for task in tasks}
     done = _load_done_ids(tmp_path, module_name)
     failed = _load_failed_ids(tmp_path, module_name)
-    attempted = done | failed
+    expected_failed = _load_expected_failed_ids(tmp_path, module_name)
+    attempted = done | failed | expected_failed
     missing = expected - attempted
     extra = attempted - expected
     assert attempted == expected, f"attempted mismatch: missing={missing}, extra={extra}"
@@ -164,6 +175,57 @@ def _tasks(specs):
 
 def _crash_errors(errors):
     return [e for e in errors if e.get("error_type") in ("WorkerSignalCrash", "WorkerAbnormalExit")]
+
+
+def _expected_failure_context():
+    return {
+        "plan": OpCasePlan(
+            expected_failures=CaseSelector(
+                contains={"expected_error"},
+            )
+        ),
+        "full_module_name": "test",
+        "run_func_name": "_task_fn",
+        "runtime_version": None,
+    }
+
+
+class TestCudaFatalExceptionDetection:
+    def test_torch_accelerator_error_is_fatal(self):
+        torch_mod = MagicMock()
+        torch_mod.AcceleratorError = type("AcceleratorError", (Exception,), {})
+
+        assert _collect_mod._is_cuda_fatal_exception(torch_mod.AcceleratorError("boom"), torch_mod)
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "CUDA error: an illegal memory access was encountered",
+            "cuda error: unspecified launch failure",
+            "CUDA_ERROR_LAUNCH_FAILED",
+            "CUBLAS_STATUS_EXECUTION_FAILED",
+            "CUBLAS_STATUS_INTERNAL_ERROR",
+            "CUBLAS_STATUS_ALLOC_FAILED",
+        ],
+    )
+    def test_cuda_fatal_markers_are_fatal(self, message):
+        torch_mod = MagicMock()
+        torch_mod.AcceleratorError = type("AcceleratorError", (Exception,), {})
+
+        assert _collect_mod._is_cuda_fatal_exception(RuntimeError(message), torch_mod)
+
+    def test_dsl_cuda_runtime_error_is_fatal(self):
+        torch_mod = MagicMock()
+        torch_mod.AcceleratorError = type("AcceleratorError", (Exception,), {})
+        exc_cls = type("DSLCudaRuntimeError", (RuntimeError,), {})
+
+        assert _collect_mod._is_cuda_fatal_exception(exc_cls("context corrupted"), torch_mod)
+
+    def test_non_cuda_exception_is_not_fatal(self):
+        torch_mod = MagicMock()
+        torch_mod.AcceleratorError = type("AcceleratorError", (Exception,), {})
+
+        assert not _collect_mod._is_cuda_fatal_exception(ValueError("plain failure"), torch_mod)
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +296,29 @@ class TestTaskExceptions:
         assert len([e for e in errors if e.get("error_type") == "ValueError"]) == 2
         assert _load_done_ids(tmp_path, "mixed_success_fail") == {"a", "c", "e"}
         assert _load_failed_ids(tmp_path, "mixed_success_fail") == {"b", "d"}
+
+    def test_expected_failures_are_logged_but_not_reported_as_errors(self, tmp_path):
+        tasks = _tasks(
+            [
+                ("a", "normal"),
+                ("b", "expected_error"),
+                ("c", "error"),
+                ("d", "expected_error"),
+            ]
+        )
+        errors = _run(
+            tasks,
+            2,
+            tmp_path,
+            module_name="expected_failures",
+            expected_failure_context=_expected_failure_context(),
+        )
+
+        _assert_all_tasks_attempted(tasks, tmp_path, "expected_failures")
+        assert len([e for e in errors if e.get("error_type") == "ValueError"]) == 1
+        assert _load_done_ids(tmp_path, "expected_failures") == {"a"}
+        assert _load_failed_ids(tmp_path, "expected_failures") == {"c"}
+        assert _load_expected_failed_ids(tmp_path, "expected_failures") == {"b", "d"}
 
 
 class TestMixedFailureModes:

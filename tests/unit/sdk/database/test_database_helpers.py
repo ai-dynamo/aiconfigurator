@@ -93,6 +93,17 @@ def test_get_supported_databases_basic(temp_systems_dir: Path, perf_database):
     assert result["h200"]["trtllm"] == ["1.2.0", "1.3.0rc2"]
 
 
+def test_get_supported_databases_skips_incomplete_versions(temp_systems_dir: Path, perf_database):
+    setup_mock_filesystem(temp_systems_dir, {"h100": {"vllm": ["0.14.0", "0.22.0"]}})
+    incomplete_path = temp_systems_dir / "data_h100" / "vllm" / "0.22.0" / "INCOMPLETE.txt"
+    incomplete_path.write_text("not enough profiling coverage\n", encoding="utf-8")
+
+    result = perf_database.get_supported_databases(str(temp_systems_dir))
+
+    assert result["h100"]["vllm"] == ["0.14.0"]
+    assert perf_database.get_latest_database_version("h100", "vllm", systems_paths=str(temp_systems_dir)) == "0.14.0"
+
+
 def test_get_supported_databases_empty_dir(temp_systems_dir: Path, perf_database):
     result = perf_database.get_supported_databases(str(temp_systems_dir))
     # defaultdict, but empty

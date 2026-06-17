@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""SGLang MLA collector.
+
+Builds standalone RadixAttention/ForwardBatch mocks for MLA context and
+generation kernels without starting a server. Shared MLA cases come from YAML;
+this file owns SGLang MLA backend choice, paged KV-cache setup, DP-attention
+mocking, SM-specific skips, and perf logging.
+"""
+
 __compat__ = "sglang>=0.5.10rc0"
 
 import math
@@ -100,6 +108,7 @@ class MockModelConfig:
         self.is_hybrid_swa = None
         self.swa_attention_layer_ids = None
         self.full_attention_layer_ids = None
+        self.swa_v_head_dim = v_head_dim
         self.num_attention_heads = num_attention_heads
         self.kv_lora_rank = kv_lora_rank
         self.qk_nope_head_dim = qk_nope_head_dim
@@ -158,6 +167,7 @@ class MockModelRunner:
         self.is_hybrid = False
         self.hybrid_gdn_config = None
         self.kimi_linear_config = None
+        self.linear_attn_model_spec = None
         self.model_config = MockModelConfig(num_attention_heads=num_attention_heads, scaling=scaling)
         # Keep attributes for compatibility across sglang versions (older code ignores them)
         self.is_hybrid_swa = self.model_config.is_hybrid_swa
@@ -388,6 +398,7 @@ def run_mla(
     # Must update config BEFORE creating attn_backend so it picks up the right v_head_dim
     model_runner.model_config.kv_lora_rank = kv_lora_rank
     model_runner.model_config.v_head_dim = v_head_dim
+    model_runner.model_config.swa_v_head_dim = v_head_dim
     model_runner.model_config.qk_nope_head_dim = qk_nope_head_dim
     model_runner.model_config.qk_rope_head_dim = qk_rope_head_dim
     model_runner.model_config.scaling = MLA_SCALING

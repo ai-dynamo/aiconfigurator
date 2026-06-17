@@ -4,19 +4,11 @@
 """
 Declarative registry mapping ops to collector modules.
 
-For versioned entries, ``versions`` is a tuple of :class:`VersionRoute` in
-DESCENDING order. The resolver picks the first entry where
-``min_version <= runtime``.  Each module file declares its own precise
-``__compat__`` constraint (e.g. ``__compat__ = "trtllm>=0.21.0,<1.1.0"``),
-which is validated at runtime.
-
-To add support for a new framework version:
-- API unchanged: nothing to do (the latest matching entry covers it).
-- API changed: create collect_{op}_v{N+1}.py with the right __compat__,
-  add a new VersionRoute at the top of the versions tuple.
+TRT-LLM collectors target the current manifest runtime. Each module file still
+declares its precise ``__compat__`` constraint, which is validated at runtime.
 """
 
-from collector.registry_types import OpEntry, PerfFile, VersionRoute
+from collector.registry_types import OpEntry, PerfFile
 
 REGISTRY: list[OpEntry] = [
     OpEntry(
@@ -35,23 +27,17 @@ REGISTRY: list[OpEntry] = [
     ),
     OpEntry(
         op="mla_context",
+        module="collector.trtllm.collect_mla",
         get_func="get_context_mla_test_cases",
         run_func="run_mla",
         perf_filename=PerfFile.CONTEXT_MLA,
-        versions=(
-            VersionRoute("1.1.0", "collector.trtllm.collect_mla_v2"),
-            VersionRoute("0.0.0", "collector.trtllm.collect_mla_v1"),
-        ),
     ),
     OpEntry(
         op="mla_generation",
+        module="collector.trtllm.collect_mla",
         get_func="get_generation_mla_test_cases",
         run_func="run_mla",
         perf_filename=PerfFile.GENERATION_MLA,
-        versions=(
-            VersionRoute("1.1.0", "collector.trtllm.collect_mla_v2"),
-            VersionRoute("0.0.0", "collector.trtllm.collect_mla_v1"),
-        ),
     ),
     OpEntry(
         op="attention_context",
@@ -66,6 +52,13 @@ REGISTRY: list[OpEntry] = [
         get_func="get_generation_attention_test_cases",
         run_func="run_attention_torch",
         perf_filename=PerfFile.GENERATION_ATTENTION,
+    ),
+    OpEntry(
+        op="encoder_attention",
+        module="collector.trtllm.collect_attn_encoder",
+        get_func="get_encoder_attention_test_cases",
+        run_func="run_encoder_attention_torch",
+        perf_filename=PerfFile.ENCODER_ATTENTION,
     ),
     OpEntry(
         op="mla_bmm_gen_pre",
@@ -83,21 +76,10 @@ REGISTRY: list[OpEntry] = [
     ),
     OpEntry(
         op="moe",
+        module="collector.trtllm.collect_moe",
         get_func="get_moe_test_cases",
         run_func="run_moe_torch",
         perf_filename=PerfFile.MOE,
-        versions=(
-            VersionRoute("1.1.0", "collector.trtllm.collect_moe_v3"),
-            VersionRoute("0.21.0", "collector.trtllm.collect_moe_v2"),
-            VersionRoute("0.20.0", "collector.trtllm.collect_moe_v1"),
-        ),
-    ),
-    OpEntry(
-        op="trtllm_moe_wideep",
-        module="collector.trtllm.collect_wideep_moe_compute",
-        get_func="get_wideep_moe_compute_all_test_cases",
-        run_func="run_wideep_moe_compute",
-        perf_filename=PerfFile.WIDEEP_MOE,
     ),
     OpEntry(
         op="mamba2",

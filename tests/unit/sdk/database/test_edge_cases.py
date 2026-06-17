@@ -135,7 +135,12 @@ class TestInitializationEdgeCases:
     """Test edge cases during PerfDatabase initialization."""
 
     def test_extrapolation_during_init(self, tmp_path, monkeypatch, caplog):
-        """Test that extrapolation runs during initialization."""
+        """Test that extrapolation runs when ContextAttention's data is loaded.
+
+        Previously ``PerfDatabase.__init__`` warmed every op eagerly, so
+        extrapolation ran during construction. Now the load is lazy: we
+        explicitly trigger ``ContextAttention.load_data`` below (with
+        the loader patches still active) and assert on the result."""
         # Set up minimal system spec
         import yaml
 
@@ -179,23 +184,23 @@ class TestInitializationEdgeCases:
         dummy_context_data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][0][128][0][8][32][1] = 0.25
 
         monkeypatch.setattr(
-            "aiconfigurator.sdk.perf_database.load_context_attention_data",
+            "aiconfigurator.sdk.operations.attention.load_context_attention_data",
             lambda path: dummy_context_data,
         )
 
-        # Patch other loaders to return empty defaultdicts
-        for loader, depth in [
-            ("load_gemm_data", 4),  # quant_mode -> m -> n -> k -> value
-            ("load_generation_attention_data", 5),  # kv_cache -> num_kv -> n -> b -> s -> value
-            ("load_custom_allreduce_data", 4),  # quant -> tp -> strategy -> size -> value
-            ("load_nccl_data", 4),  # quant -> op -> num_gpus -> size -> value
-            (
-                "load_moe_data",
-                9,
-            ),  # quant -> workload -> topk -> experts -> hidden -> inter -> tp -> ep -> tokens -> value
-            ("load_context_mla_data", 5),  # quant -> kv_cache -> tp -> s -> b -> value
-            ("load_generation_mla_data", 4),  # kv_cache -> tp -> b -> s -> value
-            ("load_mla_bmm_data", 4),  # quant -> pre/post -> heads -> tokens -> value
+        # Patch other loaders to return empty defaultdicts. Each loader
+        # lives in the op module that owns the data, so the patch target
+        # is ``aiconfigurator.sdk.operations.<module>.<loader>``.
+        for loader, module, depth in [
+            ("load_gemm_data", "gemm", 4),  # quant_mode -> m -> n -> k -> value
+            ("load_generation_attention_data", "attention", 5),  # kv_cache -> num_kv -> n -> b -> s -> value
+            ("load_custom_allreduce_data", "communication", 4),  # quant -> tp -> strategy -> size -> value
+            ("load_nccl_data", "communication", 4),  # quant -> op -> num_gpus -> size -> value
+            # quant -> workload -> topk -> experts -> hidden -> inter -> tp -> ep -> tokens -> value
+            ("load_moe_data", "moe", 9),
+            ("load_context_mla_data", "mla", 5),  # quant -> kv_cache -> tp -> s -> b -> value
+            ("load_generation_mla_data", "mla", 4),  # kv_cache -> tp -> b -> s -> value
+            ("load_mla_bmm_data", "mla", 4),  # quant -> pre/post -> heads -> tokens -> value
         ]:
             # Create nested defaultdict with appropriate depth
             def create_nested_defaultdict(depth):
@@ -210,10 +215,14 @@ class TestInitializationEdgeCases:
                 )
             else:
                 loader_func = lambda path, d=depth: create_nested_defaultdict(d)
-            monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{loader}", loader_func)
+            monkeypatch.setattr(f"aiconfigurator.sdk.operations.{module}.{loader}", loader_func)
 
-        # Initialize database - should trigger extrapolation
+        # Initialize database, then trigger the lazy load explicitly so
+        # extrapolation runs while loader patches are still active.
+        from aiconfigurator.sdk.operations.attention import ContextAttention
+
         db = PerfDatabase("test", "backend", "v1", str(tmp_path))
+        ContextAttention.load_data(db)
 
         # Check that extrapolation created new data points
         # Should have more than the 4 original points

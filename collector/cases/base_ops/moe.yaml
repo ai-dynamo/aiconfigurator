@@ -1,0 +1,213 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+op: moe
+description: Base collector v2 cases for moe.
+common_case_values:
+  moe:
+    token_counts:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 48
+    - 64
+    - 80
+    - 96
+    - 128
+    - 160
+    - 192
+    - 256
+    - 320
+    - 384
+    - 512
+    - 768
+    - 1024
+    - 1536
+    - 2048
+    - 3072
+    - 4096
+    - 6144
+    - 8192
+    - 12288
+    - 16384
+    tensor_parallel_sizes:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    expert_parallel_sizes:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+    - 128
+    - 256
+    gpu_counts:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+    - 128
+    - 256
+    token_expert_distributions:
+    - name: balanced
+      power_law_alpha: 0.0
+    - name: power_law
+      power_law_alpha: 1.01
+    - name: power_law
+      power_law_alpha: 1.2
+    constraints:
+    - tensor_parallel_size * expert_parallel_size == gpu_count
+    - expert_parallel_size <= num_experts
+    - num_experts % expert_parallel_size == 0
+    - inter_size % tensor_parallel_size == 0
+    - tensor_parallel_size < max_tp_exclusive when max_tp_exclusive is set
+  moe_sglang:
+    quantization_modes:
+    - name: bfloat16
+    - name: int4_wo
+    - name: fp8_block
+      min_sm: 90
+    - name: nvfp4
+      min_sm: 100
+    - name: w4a16_mxfp4
+      min_sm: 100
+      allowed_model_paths:
+      - openai/gpt-oss-20b
+      - openai/gpt-oss-120b
+    - name: w4a8_mxfp4_mxfp8
+      min_sm: 100
+      allowed_model_paths:
+      - deepseek-ai/DeepSeek-V4-Flash
+      - deepseek-ai/DeepSeek-V4-Pro
+      - sgl-project/DeepSeek-V4-Flash-FP8
+      - sgl-project/DeepSeek-V4-Pro-FP8
+    model_quantization_policies:
+    - model_paths:
+      - openai/gpt-oss-20b
+      - openai/gpt-oss-120b
+      allowed_modes:
+      - w4a16_mxfp4
+  moe_trtllm:
+    quantization_modes:
+    - name: bfloat16
+    - name: fp8
+      min_sm_exclusive: 86
+    - name: fp8_block
+      min_sm: 90
+    - name: int4_wo
+      min_sm: 100
+    - name: nvfp4
+      min_sm: 100
+    - name: w4a16_mxfp4
+      min_sm_exclusive: 86
+      allowed_model_paths:
+      - moonshotai/Kimi-K2-Instruct
+      - moonshotai/Kimi-K2.5
+      - nvidia/Kimi-K2.5-NVFP4
+      - openai/gpt-oss-20b
+      - openai/gpt-oss-120b
+    - name: w4a8_mxfp4_mxfp8
+      min_sm: 100
+      allowed_model_paths:
+      - moonshotai/Kimi-K2-Instruct
+      - moonshotai/Kimi-K2.5
+      - nvidia/Kimi-K2.5-NVFP4
+      - openai/gpt-oss-20b
+      - openai/gpt-oss-120b
+    model_quantization_policies:
+    - model_paths:
+      - openai/gpt-oss-20b
+      - openai/gpt-oss-120b
+      allowed_modes:
+      - w4a16_mxfp4
+      - w4a8_mxfp4_mxfp8
+  moe_vllm:
+    quantization_modes:
+    - name: bfloat16
+    - name: int4_wo
+    - name: fp8
+      min_sm_exclusive: 86
+    - name: fp8_block
+      min_sm: 90
+      requires_runtime_feature: per_block_fp8
+    - name: nvfp4
+      min_sm: 100
+      requires_runtime_feature: nvfp4
+    - name: w4a16_mxfp4
+      requires_runtime_feature: mxfp4
+      requires_model_quantization_config: true
+    shape_constraints:
+    - mode: fp8_block
+      divisible_by:
+        hidden_size: 128
+        local_inter_size: 128
+    - mode: nvfp4
+      divisible_by:
+        hidden_size: 512
+        local_inter_size: 64
+      max_topk: 10
+    - mode: w4a16_mxfp4
+      divisible_by:
+        hidden_size: 32
+        local_inter_size: 32
+    - mode: int4_wo
+      divisible_by:
+        hidden_size: 128
+        local_inter_size: 128
+  moe_vllm_xpu:
+    token_counts:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 48
+    - 64
+    - 80
+    - 96
+    - 128
+    - 160
+    - 192
+    - 256
+    - 320
+    - 384
+    - 512
+    - 768
+    - 1024
+    - 1536
+    - 2048
+    - 3072
+    - 4096
+    - 6144
+    - 8192
+    - 12288
+    - 16384
+    sweeps:
+      small:
+        tensor_parallel_sizes: [1, 2, 4, 8]
+        expert_parallel_sizes: [1, 2, 4, 8]
+        gpu_counts: [1, 2, 4, 8]
+      full:
+        tensor_parallel_sizes: [1, 2, 4, 8, 16, 32]
+        expert_parallel_sizes: [1, 2, 4, 8, 16, 32, 64, 128, 256]
+        gpu_counts: [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    quantization_modes:
+    - name: bfloat16
+    - name: fp8
+      requires_runtime_feature: torch_fp8_e4m3fn
+    - name: w4a16_mxfp4
+      requires_model_quantization_config: true

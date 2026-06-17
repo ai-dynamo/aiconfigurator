@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: DeepseekV32ForCausalLM
+model_path: deepseek-ai/DeepSeek-V3.2
+model_paths:
+  - deepseek-ai/DeepSeek-V3.2
+include_base: true
+description: >
+  DeepSeek-V3.2 DSA model-centric collection plan. DSA module data is
+  framework-specific while MoE and base attention/GEMM cases stay shared.
+
+model_case_values:
+  moe:
+    - model_path: deepseek-ai/DeepSeek-V3.2
+      hidden_size: 7168
+      inter_size: 2048
+      topk: 8
+      num_experts: 256
+      wideep: true
+  mla_module:
+    - model_path: deepseek-ai/DeepSeek-V3.2
+      attention_type: dsa
+      native_num_heads: 128
+
+all_frameworks_op_cases:
+  moe:
+    cases: all
+
+framework_specific_op_cases:
+  trtllm:
+    dsa_context_module:
+      cases: all
+    dsa_generation_module:
+      cases: all
+    trtllm_moe_wideep:
+      cases: all
+  vllm:
+    dsa_context_module:
+      cases: all
+    dsa_generation_module:
+      cases: all
+  sglang:
+    dsa_context_module:
+      cases: all
+    dsa_generation_module:
+      cases: all
+    wideep_moe:
+      cases: all
