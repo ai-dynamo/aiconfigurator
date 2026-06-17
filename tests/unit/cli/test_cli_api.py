@@ -111,8 +111,8 @@ class TestCLIEstimateUnit:
 class TestCLIExpUnit:
     """Unit tests for cli_exp API (mocked)."""
 
-    @patch("aiconfigurator.cli.api._execute_task_configs_internal")
-    @patch("aiconfigurator.cli.api.build_experiment_task_configs")
+    @patch("aiconfigurator.cli.api._execute_tasks_internal")
+    @patch("aiconfigurator.cli.api.build_experiment_tasks")
     def test_cli_exp_dict_config_equivalent_to_example_yaml(self, mock_build, mock_execute):
         """cli_exp with dict config should work correctly (mocked).
 
@@ -148,14 +148,14 @@ class TestCLIExpUnit:
 
         result = cli_exp(config=config)
 
-        # Verify build_experiment_task_configs was called with correct params
+        # Verify build_experiment_tasks was called with correct params
         mock_build.assert_called_once_with(
             yaml_path=None,
             config=config,
         )
 
         assert isinstance(result, CLIResult)
-        assert "exp_agg_simplified" in result.task_configs
+        assert "exp_agg_simplified" in result.tasks
         assert "exp_agg_simplified" in result.best_throughputs
 
 

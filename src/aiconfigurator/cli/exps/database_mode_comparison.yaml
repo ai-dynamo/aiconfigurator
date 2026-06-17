@@ -1,56 +1,43 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# This experiment file compares different database modes for performance estimation.
-# Database modes:
-#   - SILICON: Uses actual silicon data (default, most accurate when data is available)
-#   - HYBRID: Uses silicon data when available, otherwise falls back to SOL+empirical factor
-#   - EMPIRICAL: Uses SOL (Speed of Light) + empirical factor for all estimations
+# Flat V2 task schema: one key per Task field, no mode/config/worker_config nesting.
+# `exps` lists which experiments to run (in order); each other top-level key is an experiment.
 
 exps:
-  - exp_silicon
-  - exp_hybrid
-  - exp_empirical
-
-# Experiment using SILICON mode (default) - uses actual measured silicon data
+- exp_silicon
+- exp_hybrid
+- exp_empirical
 exp_silicon:
-  mode: "patch"
-  serving_mode: "agg"
-  model_path: "Qwen/Qwen3-32B-FP8"
-  total_gpus: 8
-  system_name: "h200_sxm"
-  backend_name: "trtllm"
-  database_mode: "SILICON"
   isl: 4000
-  osl: 1000
-  ttft: 1000.0
+  serving_mode: agg
+  total_gpus: 8
   tpot: 30.0
-
-# Experiment using HYBRID mode - uses silicon data when available, otherwise empirical
+  ttft: 1000.0
+  osl: 1000
+  database_mode: SILICON
+  model_path: Qwen/Qwen3-32B-FP8
+  system_name: h200_sxm
+  backend_name: trtllm
 exp_hybrid:
-  mode: "patch"
-  serving_mode: "agg"
-  model_path: "Qwen/Qwen3-32B-FP8"
-  total_gpus: 8
-  system_name: "h200_sxm"
-  backend_name: "trtllm"
-  database_mode: "HYBRID"
   isl: 4000
-  osl: 1000
-  ttft: 1000.0
+  serving_mode: agg
+  total_gpus: 8
   tpot: 30.0
-
-# Experiment using EMPIRICAL mode - uses SOL + empirical factor for all estimations
+  ttft: 1000.0
+  osl: 1000
+  database_mode: HYBRID
+  model_path: Qwen/Qwen3-32B-FP8
+  system_name: h200_sxm
+  backend_name: trtllm
 exp_empirical:
-  mode: "patch"
-  serving_mode: "agg"
-  model_path: "Qwen/Qwen3-32B-FP8"
-  total_gpus: 8
-  system_name: "h200_sxm"
-  backend_name: "trtllm"
-  database_mode: "EMPIRICAL"
   isl: 4000
-  osl: 1000
-  ttft: 1000.0
+  serving_mode: agg
+  total_gpus: 8
   tpot: 30.0
-
+  ttft: 1000.0
+  osl: 1000
+  database_mode: EMPIRICAL
+  model_path: Qwen/Qwen3-32B-FP8
+  system_name: h200_sxm
+  backend_name: trtllm

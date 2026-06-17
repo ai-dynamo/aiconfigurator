@@ -26,8 +26,8 @@ class TestProcessExperimentResult:
         """Test processing result with TPOT constraint."""
         # Create mock task config
         mock_task_config = MagicMock()
-        mock_task_config.config.runtime_config.tpot = 30.0
-        mock_task_config.config.runtime_config.request_latency = None
+        mock_task_config.tpot = 30.0
+        mock_task_config.request_latency = None
         mock_task_config.serving_mode = "agg"
         mock_task_config.total_gpus = 32
 
@@ -59,8 +59,8 @@ class TestProcessExperimentResult:
         """Test processing result with request_latency constraint."""
         # Create mock task config
         mock_task_config = MagicMock()
-        mock_task_config.config.runtime_config.tpot = None
-        mock_task_config.config.runtime_config.request_latency = 1200.0
+        mock_task_config.tpot = None
+        mock_task_config.request_latency = 1200.0
         mock_task_config.serving_mode = "disagg"
         mock_task_config.total_gpus = 32
 
@@ -90,8 +90,8 @@ class TestProcessExperimentResult:
     def test_process_result_with_empty_pareto_df(self):
         """Test processing result with empty pareto_df."""
         mock_task_config = MagicMock()
-        mock_task_config.config.runtime_config.tpot = 30.0
-        mock_task_config.config.runtime_config.request_latency = None
+        mock_task_config.tpot = 30.0
+        mock_task_config.request_latency = None
         mock_task_config.serving_mode = "agg"
         mock_task_config.total_gpus = 32
 
@@ -110,8 +110,8 @@ class TestProcessExperimentResult:
     def test_process_result_with_none_pareto_df(self):
         """Test processing result with None pareto_df."""
         mock_task_config = MagicMock()
-        mock_task_config.config.runtime_config.tpot = 30.0
-        mock_task_config.config.runtime_config.request_latency = None
+        mock_task_config.tpot = 30.0
+        mock_task_config.request_latency = None
         mock_task_config.serving_mode = "agg"
         mock_task_config.total_gpus = 32
 
@@ -129,8 +129,8 @@ class TestProcessExperimentResult:
     def test_process_result_disagg_mode_uses_correct_group_by(self):
         """Test that disagg mode uses (d)parallel as group_by key."""
         mock_task_config = MagicMock()
-        mock_task_config.config.runtime_config.tpot = 30.0
-        mock_task_config.config.runtime_config.request_latency = None
+        mock_task_config.tpot = 30.0
+        mock_task_config.request_latency = None
         mock_task_config.serving_mode = "disagg"
         mock_task_config.total_gpus = 32
 
@@ -154,8 +154,8 @@ class TestProcessExperimentResult:
     def test_process_result_top_n_limiting(self):
         """Test that top_n correctly limits the number of returned configs."""
         mock_task_config = MagicMock()
-        mock_task_config.config.runtime_config.tpot = 30.0
-        mock_task_config.config.runtime_config.request_latency = None
+        mock_task_config.tpot = 30.0
+        mock_task_config.request_latency = None
         mock_task_config.serving_mode = "agg"
         mock_task_config.total_gpus = 32
 
@@ -180,8 +180,8 @@ class TestProcessExperimentResult:
     def test_process_result_computes_tokens_per_gpu_cluster(self):
         """Test that tokens/s/gpu_cluster is correctly computed."""
         mock_task_config = MagicMock()
-        mock_task_config.config.runtime_config.tpot = 30.0
-        mock_task_config.config.runtime_config.request_latency = None
+        mock_task_config.tpot = 30.0
+        mock_task_config.request_latency = None
         mock_task_config.serving_mode = "agg"
         mock_task_config.total_gpus = 32
 
@@ -211,11 +211,12 @@ class TestMergeIntoTopN:
     def test_merge_multiple_backends(self):
         """Test merging configs from multiple backends."""
         # Create mock task configs
-        task_configs = {}
+        tasks = {}
         for backend in ["trtllm", "vllm", "sglang"]:
             mock_config = MagicMock()
             mock_config.backend_name = backend
-            task_configs[f"agg_{backend}"] = mock_config
+            mock_config.primary_backend_name = backend
+            tasks[f"agg_{backend}"] = mock_config
 
         # Create mock best configs
         best_configs = {
@@ -235,7 +236,7 @@ class TestMergeIntoTopN:
         exps = ["agg_trtllm", "agg_vllm", "agg_sglang"]
 
         merged_best, merged_throughput, merged_pareto, x_col = _merge_into_top_n(
-            exps, task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n=5
+            exps, tasks, best_configs, pareto_fronts, pareto_x_axis, top_n=5
         )
 
         # Verify results
@@ -248,7 +249,7 @@ class TestMergeIntoTopN:
 
     def test_merge_with_top_n_limiting(self):
         """Test that merging respects top_n limit."""
-        task_configs = {}
+        tasks = {}
         best_configs = {}
         pareto_fronts = {}
         pareto_x_axis = {}
@@ -256,8 +257,9 @@ class TestMergeIntoTopN:
         for i, backend in enumerate(["trtllm", "vllm", "sglang"]):
             mock_config = MagicMock()
             mock_config.backend_name = backend
+            mock_config.primary_backend_name = backend
             exp_name = f"agg_{backend}"
-            task_configs[exp_name] = mock_config
+            tasks[exp_name] = mock_config
 
             # Create configs with different throughputs
             best_configs[exp_name] = pd.DataFrame(
@@ -269,11 +271,9 @@ class TestMergeIntoTopN:
             pareto_fronts[exp_name] = best_configs[exp_name].copy()
             pareto_x_axis[exp_name] = "tokens/s/user"
 
-        exps = list(task_configs.keys())
+        exps = list(tasks.keys())
 
-        merged_best, _, _, _ = _merge_into_top_n(
-            exps, task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n=3
-        )
+        merged_best, _, _, _ = _merge_into_top_n(exps, tasks, best_configs, pareto_fronts, pareto_x_axis, top_n=3)
 
         # Should return at most 3 configs
         assert len(merged_best) <= 3
@@ -282,9 +282,9 @@ class TestMergeIntoTopN:
 
     def test_merge_with_empty_dataframes(self):
         """Test merging when some configs are empty."""
-        task_configs = {
-            "agg_trtllm": MagicMock(backend_name="trtllm"),
-            "agg_vllm": MagicMock(backend_name="vllm"),
+        tasks = {
+            "agg_trtllm": MagicMock(backend_name="trtllm", primary_backend_name="trtllm"),
+            "agg_vllm": MagicMock(backend_name="vllm", primary_backend_name="vllm"),
         }
 
         best_configs = {
@@ -302,7 +302,7 @@ class TestMergeIntoTopN:
         exps = ["agg_trtllm", "agg_vllm"]
 
         merged_best, merged_throughput, merged_pareto, x_col = _merge_into_top_n(
-            exps, task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n=5
+            exps, tasks, best_configs, pareto_fronts, pareto_x_axis, top_n=5
         )
 
         # Should only contain vllm results
@@ -313,7 +313,7 @@ class TestMergeIntoTopN:
 
     def test_merge_with_missing_pareto_fronts(self):
         """Test merging when pareto fronts are missing."""
-        task_configs = {"agg_trtllm": MagicMock(backend_name="trtllm")}
+        tasks = {"agg_trtllm": MagicMock(backend_name="trtllm", primary_backend_name="trtllm")}
 
         best_configs = {"agg_trtllm": pd.DataFrame({"tokens/s/gpu_cluster": [100.0], "tokens/s/user": [10.0]})}
 
@@ -324,7 +324,7 @@ class TestMergeIntoTopN:
         exps = ["agg_trtllm"]
 
         merged_best, merged_throughput, merged_pareto, x_col = _merge_into_top_n(
-            exps, task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n=5
+            exps, tasks, best_configs, pareto_fronts, pareto_x_axis, top_n=5
         )
 
         # Should still merge best configs
@@ -335,7 +335,7 @@ class TestMergeIntoTopN:
 
     def test_merge_recomputes_pareto_frontier(self):
         """Test that merge recomputes Pareto frontier from combined data."""
-        task_configs = {}
+        tasks = {}
         best_configs = {}
         pareto_fronts = {}
         pareto_x_axis = {}
@@ -343,8 +343,9 @@ class TestMergeIntoTopN:
         for backend in ["trtllm", "vllm"]:
             mock_config = MagicMock()
             mock_config.backend_name = backend
+            mock_config.primary_backend_name = backend
             exp_name = f"agg_{backend}"
-            task_configs[exp_name] = mock_config
+            tasks[exp_name] = mock_config
 
             # Create different pareto fronts
             if backend == "trtllm":
@@ -367,9 +368,7 @@ class TestMergeIntoTopN:
 
         exps = ["agg_trtllm", "agg_vllm"]
 
-        _, _, merged_pareto, _ = _merge_into_top_n(
-            exps, task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n=5
-        )
+        _, _, merged_pareto, _ = _merge_into_top_n(exps, tasks, best_configs, pareto_fronts, pareto_x_axis, top_n=5)
 
         # Should combine and recompute pareto frontier
         assert not merged_pareto.empty
@@ -382,13 +381,14 @@ class TestMergeExperimentResultsByMode:
     def test_merge_six_backends_into_two_modes(self):
         """Test merging 6 backend experiments into agg and disagg."""
         # Create mock task configs for all 6 experiments
-        task_configs = {}
+        tasks = {}
         for backend in ["trtllm", "vllm", "sglang"]:
             for mode in ["agg", "disagg"]:
                 mock_config = MagicMock()
                 mock_config.backend_name = backend
+                mock_config.primary_backend_name = backend
                 mock_config.serving_mode = mode
-                task_configs[f"{mode}_{backend}"] = mock_config
+                tasks[f"{mode}_{backend}"] = mock_config
 
         # Create mock best configs with different throughputs
         best_configs = {
@@ -405,7 +405,7 @@ class TestMergeExperimentResultsByMode:
 
         # Merge results
         merged_configs, merged_throughputs, merged_fronts, merged_axis = merge_experiment_results_by_mode(
-            task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n=5
+            tasks, best_configs, pareto_fronts, pareto_x_axis, top_n=5
         )
 
         # Should have only 2 merged results: agg and disagg
@@ -431,7 +431,7 @@ class TestMergeExperimentResultsByMode:
 
     def test_merge_with_top_n_limiting(self):
         """Test that merge respects top_n limit across backends."""
-        task_configs = {}
+        tasks = {}
         best_configs = {}
         pareto_fronts = {}
         pareto_x_axis = {}
@@ -439,9 +439,10 @@ class TestMergeExperimentResultsByMode:
         for i, backend in enumerate(["trtllm", "vllm", "sglang"]):
             mock_config = MagicMock()
             mock_config.backend_name = backend
+            mock_config.primary_backend_name = backend
             mock_config.serving_mode = "agg"
             exp_name = f"agg_{backend}"
-            task_configs[exp_name] = mock_config
+            tasks[exp_name] = mock_config
 
             # Each backend has 3 configs
             best_configs[exp_name] = pd.DataFrame(
@@ -455,7 +456,7 @@ class TestMergeExperimentResultsByMode:
 
         # Merge with top_n=5
         merged_configs, _, _, _ = merge_experiment_results_by_mode(
-            task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n=5
+            tasks, best_configs, pareto_fronts, pareto_x_axis, top_n=5
         )
 
         # Should return at most 5 configs for agg
@@ -463,10 +464,10 @@ class TestMergeExperimentResultsByMode:
 
     def test_merge_with_mixed_agg_disagg(self):
         """Test merging with mix of agg and disagg experiments."""
-        task_configs = {
-            "agg_trtllm": MagicMock(backend_name="trtllm", serving_mode="agg"),
-            "agg_vllm": MagicMock(backend_name="vllm", serving_mode="agg"),
-            "disagg_trtllm": MagicMock(backend_name="trtllm", serving_mode="disagg"),
+        tasks = {
+            "agg_trtllm": MagicMock(backend_name="trtllm", primary_backend_name="trtllm", serving_mode="agg"),
+            "agg_vllm": MagicMock(backend_name="vllm", primary_backend_name="vllm", serving_mode="agg"),
+            "disagg_trtllm": MagicMock(backend_name="trtllm", primary_backend_name="trtllm", serving_mode="disagg"),
         }
 
         best_configs = {
@@ -479,7 +480,7 @@ class TestMergeExperimentResultsByMode:
         pareto_x_axis = dict.fromkeys(best_configs.keys(), "tokens/s/user")
 
         merged_configs, merged_throughputs, _, _ = merge_experiment_results_by_mode(
-            task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n=5
+            tasks, best_configs, pareto_fronts, pareto_x_axis, top_n=5
         )
 
         # Should have 2 results: agg (from 2 backends) and disagg (from 1 backend)
@@ -493,7 +494,7 @@ class TestMergeExperimentResultsByMode:
 
     def test_merge_preserves_backend_information(self):
         """Test that backend information is preserved in merged results."""
-        task_configs = {}
+        tasks = {}
         best_configs = {}
         pareto_fronts = {}
         pareto_x_axis = {}
@@ -501,16 +502,17 @@ class TestMergeExperimentResultsByMode:
         for backend in ["trtllm", "vllm"]:
             mock_config = MagicMock()
             mock_config.backend_name = backend
+            mock_config.primary_backend_name = backend
             mock_config.serving_mode = "agg"
             exp_name = f"agg_{backend}"
-            task_configs[exp_name] = mock_config
+            tasks[exp_name] = mock_config
 
             best_configs[exp_name] = pd.DataFrame({"tokens/s/gpu_cluster": [100.0], "tokens/s/user": [10.0]})
             pareto_fronts[exp_name] = best_configs[exp_name].copy()
             pareto_x_axis[exp_name] = "tokens/s/user"
 
         merged_configs, _, _, _ = merge_experiment_results_by_mode(
-            task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n=5
+            tasks, best_configs, pareto_fronts, pareto_x_axis, top_n=5
         )
 
         # Backend column should exist and contain correct values
@@ -520,10 +522,10 @@ class TestMergeExperimentResultsByMode:
 
     def test_merge_with_empty_experiments(self):
         """Test merging when some experiments have no results."""
-        task_configs = {
-            "agg_trtllm": MagicMock(backend_name="trtllm", serving_mode="agg"),
-            "agg_vllm": MagicMock(backend_name="vllm", serving_mode="agg"),
-            "disagg_trtllm": MagicMock(backend_name="trtllm", serving_mode="disagg"),
+        tasks = {
+            "agg_trtllm": MagicMock(backend_name="trtllm", primary_backend_name="trtllm", serving_mode="agg"),
+            "agg_vllm": MagicMock(backend_name="vllm", primary_backend_name="vllm", serving_mode="agg"),
+            "disagg_trtllm": MagicMock(backend_name="trtllm", primary_backend_name="trtllm", serving_mode="disagg"),
         }
 
         best_configs = {
@@ -536,7 +538,7 @@ class TestMergeExperimentResultsByMode:
         pareto_x_axis = dict.fromkeys(best_configs.keys(), "tokens/s/user")
 
         merged_configs, merged_throughputs, _, _ = merge_experiment_results_by_mode(
-            task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n=5
+            tasks, best_configs, pareto_fronts, pareto_x_axis, top_n=5
         )
 
         # Should still produce results for both modes

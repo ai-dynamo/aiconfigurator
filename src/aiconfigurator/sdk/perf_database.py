@@ -95,6 +95,22 @@ def load_system_spec(
     return _load_system_spec_from_paths(tuple(resolved_paths), system_name)
 
 
+def is_blackwell_system(system_name: str | None) -> bool:
+    """True for Blackwell-class systems (SM >= 100, e.g. b200_sxm / gb200 / b300 / gb300)."""
+    if not system_name:
+        return False
+    spec = load_system_spec(system_name)
+    return int(spec.get("gpu", {}).get("sm_version", -1)) >= 100
+
+
+def is_hopper_system(system_name: str | None) -> bool:
+    """True for Hopper-class systems (SM 90, e.g. h100 / h200 / gh200)."""
+    if not system_name:
+        return False
+    spec = load_system_spec(system_name)
+    return int(spec.get("gpu", {}).get("sm_version", -1)) == 90
+
+
 def build_no_databases_message() -> str:
     """Build a concise error message for systems path/db validation failures."""
     resolved_paths = get_systems_paths()

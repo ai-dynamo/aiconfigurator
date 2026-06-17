@@ -7,7 +7,7 @@ Unit tests for --backend auto functionality.
 
 import pytest
 
-from aiconfigurator.cli.main import build_default_task_configs
+from aiconfigurator.cli.main import build_default_tasks
 from aiconfigurator.sdk.common import BackendName
 
 pytestmark = pytest.mark.unit
@@ -16,24 +16,24 @@ pytestmark = pytest.mark.unit
 class TestBackendAny:
     """Tests for --backend auto functionality."""
 
-    def test_build_default_task_configs_single_backend(self):
+    def test_build_default_tasks_single_backend(self):
         """Single backend should create 2 task configs (agg, disagg)."""
-        task_configs = build_default_task_configs(
+        tasks = build_default_tasks(
             model_path="Qwen/Qwen3-32B",
             total_gpus=8,
             system="h200_sxm",
             backend="trtllm",
         )
 
-        assert len(task_configs) == 2
-        assert "agg" in task_configs
-        assert "disagg" in task_configs
-        assert task_configs["agg"].backend_name == "trtllm"
-        assert task_configs["disagg"].backend_name == "trtllm"
+        assert len(tasks) == 2
+        assert "agg" in tasks
+        assert "disagg" in tasks
+        assert tasks["agg"].primary_backend_name == "trtllm"
+        assert tasks["disagg"].primary_backend_name == "trtllm"
 
-    def test_build_default_task_configs_any_backend(self):
+    def test_build_default_tasks_any_backend(self):
         """Backend 'auto' should create 6 internal task configs but they will be merged later."""
-        task_configs = build_default_task_configs(
+        tasks = build_default_tasks(
             model_path="Qwen/Qwen3-32B",
             total_gpus=8,
             system="h200_sxm",
@@ -41,8 +41,8 @@ class TestBackendAny:
         )
 
         # Should have 6 internal configs: agg_trtllm, agg_vllm, agg_sglang, disagg_trtllm, disagg_vllm, disagg_sglang
-        # These will be merged in _execute_task_configs to produce 2 results (agg, disagg)
-        assert len(task_configs) == 6
+        # These will be merged in _execute_tasks to produce 2 results (agg, disagg)
+        assert len(tasks) == 6
 
         # Check all expected experiment names exist
         expected_names = {
@@ -53,19 +53,19 @@ class TestBackendAny:
             "disagg_vllm",
             "disagg_sglang",
         }
-        assert set(task_configs.keys()) == expected_names
+        assert set(tasks.keys()) == expected_names
 
         # Verify each config has the correct backend
         for backend in BackendName:
             backend_name = backend.value
-            assert task_configs[f"agg_{backend_name}"].backend_name == backend_name
-            assert task_configs[f"disagg_{backend_name}"].backend_name == backend_name
-            assert task_configs[f"agg_{backend_name}"].serving_mode == "agg"
-            assert task_configs[f"disagg_{backend_name}"].serving_mode == "disagg"
+            assert tasks[f"agg_{backend_name}"].primary_backend_name == backend_name
+            assert tasks[f"disagg_{backend_name}"].primary_backend_name == backend_name
+            assert tasks[f"agg_{backend_name}"].serving_mode == "agg"
+            assert tasks[f"disagg_{backend_name}"].serving_mode == "disagg"
 
-    def test_build_default_task_configs_any_backend_parameters(self):
+    def test_build_default_tasks_any_backend_parameters(self):
         """Backend 'auto' should preserve all parameters for each backend config."""
-        task_configs = build_default_task_configs(
+        tasks = build_default_tasks(
             model_path="Qwen/Qwen3-32B",
             total_gpus=32,
             system="h200_sxm",
@@ -78,23 +78,23 @@ class TestBackendAny:
         )
 
         # Check that all configs have the same parameters (except backend_name)
-        for exp_name, task_config in task_configs.items():
-            assert task_config.config.model_path == "Qwen/Qwen3-32B"
+        for exp_name, task_config in tasks.items():
+            assert task_config.primary_model_path == "Qwen/Qwen3-32B"
             assert task_config.total_gpus == 32
-            assert task_config.system_name == "h200_sxm"
-            assert task_config.config.runtime_config.isl == 4000
-            assert task_config.config.runtime_config.osl == 1000
-            assert task_config.config.runtime_config.ttft == 2000.0
-            assert task_config.config.runtime_config.tpot == 30.0
-            assert task_config.config.runtime_config.prefix == 500
+            assert task_config.primary_system_name == "h200_sxm"
+            assert task_config.isl == 4000
+            assert task_config.osl == 1000
+            assert task_config.ttft == 2000.0
+            assert task_config.tpot == 30.0
+            assert task_config.prefix == 500
 
             # Disagg configs should have decode_system set (defaults to system)
             if exp_name.startswith("disagg"):
                 assert task_config.decode_system_name == "h200_sxm"
 
-    def test_build_default_task_configs_with_nextn(self):
+    def test_build_default_tasks_with_nextn(self):
         """Test that nextn and nextn_accept_rates are passed to TaskConfig when specified."""
-        task_configs = build_default_task_configs(
+        tasks = build_default_tasks(
             model_path="Qwen/Qwen3-32B",
             total_gpus=8,
             system="h200_sxm",
@@ -103,26 +103,26 @@ class TestBackendAny:
             nextn_accept_rates=[0.9, 0.5, 0.2, 0.1, 0.0],
         )
 
-        assert len(task_configs) == 2
+        assert len(tasks) == 2
 
         # Verify nextn is set in config
-        for task_config in task_configs.values():
-            assert task_config.config.nextn == 3
-            assert task_config.config.nextn_accept_rates == [0.9, 0.5, 0.2, 0.1, 0.0]
+        for task_config in tasks.values():
+            assert task_config.nextn == 3
+            assert task_config.nextn_accept_rates == [0.9, 0.5, 0.2, 0.1, 0.0]
 
-    def test_build_default_task_configs_nextn_default_zero(self):
+    def test_build_default_tasks_nextn_default_zero(self):
         """Test that nextn defaults to 0 (MTP disabled) when not specified."""
-        task_configs = build_default_task_configs(
+        tasks = build_default_tasks(
             model_path="Qwen/Qwen3-32B",
             total_gpus=8,
             system="h200_sxm",
             backend="trtllm",
         )
 
-        assert len(task_configs) == 2
+        assert len(tasks) == 2
 
         # Verify nextn defaults to 0
-        for task_config in task_configs.values():
-            assert task_config.config.nextn == 0
+        for task_config in tasks.values():
+            assert task_config.nextn == 0
             # Default accept rates should still be present
-            assert task_config.config.nextn_accept_rates is not None
+            assert task_config.nextn_accept_rates is not None
