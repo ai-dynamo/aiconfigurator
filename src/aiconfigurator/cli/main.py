@@ -88,6 +88,13 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
     common_parser.add_argument(
+        "--log-level",
+        type=str.upper,
+        default=None,
+        choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
+        help=("Set the minimum log level (overrides --debug and the AICONFIGURATOR_LOG_LEVEL env var). Default: INFO."),
+    )
+    common_parser.add_argument(
         "--no-color",
         dest="no_color",
         action="store_true",
@@ -2164,9 +2171,19 @@ def _run_estimate_mode(args):
     print()
 
 
+def _resolve_cli_log_level(args) -> int:
+    """Pick the log level with priority: --log-level > --debug > INFO."""
+    cli_level = getattr(args, "log_level", None)
+    if cli_level:
+        return getattr(logging, cli_level)
+    if getattr(args, "debug", False):
+        return logging.DEBUG
+    return logging.INFO
+
+
 def main(args):
     setup_logging(
-        level=logging.DEBUG if args.debug else logging.INFO,
+        level=_resolve_cli_log_level(args),
         no_color=getattr(args, "no_color", False),
     )
 

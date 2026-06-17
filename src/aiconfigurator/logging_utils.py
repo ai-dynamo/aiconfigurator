@@ -7,6 +7,41 @@ import logging
 import os
 import sys
 
+LOG_LEVEL_ENV = "AICONFIGURATOR_LOG_LEVEL"
+
+_LOG_LEVEL_NAMES = {
+    "CRITICAL": logging.CRITICAL,
+    "ERROR": logging.ERROR,
+    "WARNING": logging.WARNING,
+    "INFO": logging.INFO,
+    "DEBUG": logging.DEBUG,
+    "NOTSET": logging.NOTSET,
+}
+
+
+def _parse_log_level(value):
+    """Resolve a log level from a name (case-insensitive) or numeric value.
+
+    Returns the resolved ``logging`` level, or ``None`` if ``value`` is unset
+    or unrecognised.
+    """
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    name = str(value).strip().upper()
+    if name in _LOG_LEVEL_NAMES:
+        return _LOG_LEVEL_NAMES[name]
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_log_level(default):
+    """Pick a level using the ``AICONFIGURATOR_LOG_LEVEL`` env var if set."""
+    return _parse_log_level(os.environ.get(LOG_LEVEL_ENV)) or default
+
 
 def _stdout_env_suggests_plain() -> bool:
     """True when NO_COLOR or non-TTY stdout indicates avoiding ANSI."""
@@ -128,13 +163,15 @@ def setup_logging(level=logging.INFO, *, no_color: bool = False):
     """Configure root logging to stdout.
 
     Args:
-        level: Minimum log level for the root logger.
+        level: Minimum log level for the root logger. Overridden by the
+            ``AICONFIGURATOR_LOG_LEVEL`` environment variable when set (e.g.
+            ``AICONFIGURATOR_LOG_LEVEL=WARNING``).
         no_color: If True (CLI --no-color), disable ANSI in log lines and treat all
             CLI summaries as plain; see use_plain_cli_output. TTY and NO_COLOR
             are combined inside ColoredFormatter and use_plain_cli_output.
     """
     root_logger = logging.getLogger()
-    root_logger.setLevel(level)
+    root_logger.setLevel(_resolve_log_level(level))
 
     # Remove existing handlers
     root_logger.handlers.clear()
