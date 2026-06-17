@@ -189,6 +189,7 @@ class DeepSeekV32Model(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
+                    attn_cp_size=self.config.attention_cp_size,
                 ),
                 ops.MoE(
                     "context_moe",
@@ -214,6 +215,7 @@ class DeepSeekV32Model(BaseModel):
                     attention_dp_size,
                     False,
                     quant_mode=moe_quant_mode,
+                    attn_cp_size=self.config.attention_cp_size,
                 ),
                 ops.GEMM(
                     "context_logits_gemm",
@@ -296,6 +298,7 @@ class DeepSeekV32Model(BaseModel):
                 attention_dp_size,
                 True,
                 quant_mode=moe_quant_mode,
+                attn_cp_size=self.config.attention_cp_size,
             ),
             ops.MoE(
                 "generation_moe",
@@ -321,6 +324,7 @@ class DeepSeekV32Model(BaseModel):
                 attention_dp_size,
                 False,
                 quant_mode=moe_quant_mode,
+                attn_cp_size=self.config.attention_cp_size,
             ),
         ]
         self.generation_ops.append(
@@ -738,6 +742,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
+                    attn_cp_size=self.config.attention_cp_size,
                     sms=sms,
                     moe_backend=moe_backend,
                     is_context=True,
@@ -805,6 +810,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
+                    attn_cp_size=self.config.attention_cp_size,
                     sms=sms,
                     moe_backend=moe_backend,
                     is_context=False,

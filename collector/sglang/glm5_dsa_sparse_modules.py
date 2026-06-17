@@ -378,6 +378,7 @@ def _dsa_context_derived_shapes(model_path):
             _dsa_context_prefix_shape_is_valid,
             _filter_cases_from_env,
             _model_max_position_embeddings,
+            dsa_indexer_total_kv_tokens_supported,
         )
     except ModuleNotFoundError:
         from case_generator import get_mla_module_sweep_spec
@@ -385,16 +386,24 @@ def _dsa_context_derived_shapes(model_path):
             _dsa_context_prefix_shape_is_valid,
             _filter_cases_from_env,
             _model_max_position_embeddings,
+            dsa_indexer_total_kv_tokens_supported,
         )
     sweep = get_mla_module_sweep_spec("sglang")
     max_pos = _model_max_position_embeddings(model_path)
 
     def _valid(bs, isl, prefix):
+        # Reuse the dsa_context MODULE's skip verbatim: max_token
+        # (context_max_tokens) + large-seq cap + per-request max_pos/indexer-shape
+        # + KV-pool total-token limit (dsa_indexer_total_kv_tokens_supported).
+        # Only the FlashMLA smem cap is omitted -- the cheap fp8_mqa_logits /
+        # fast_topk / sparse_fwd kernels don't hit it.
         if bs * isl > sweep.context_max_tokens:
             return False
         if isl >= sweep.context_large_sequence_min and bs > sweep.context_large_sequence_max_batch_size:
             return False
-        return _dsa_context_prefix_shape_is_valid(bs, isl, prefix, max_position_embeddings=max_pos)
+        return _dsa_context_prefix_shape_is_valid(
+            bs, isl, prefix, max_position_embeddings=max_pos
+        ) and dsa_indexer_total_kv_tokens_supported(bs, isl, prefix, is_prefill=True)
 
     # AIC_DSA_CONTEXT_* env pin: _filter_cases_from_env wants (bs, seq, ip, prefix).
     def _env(cases):
@@ -440,7 +449,7 @@ def _dsa_generation_derived_shapes(model_path):
     return _derive_context_shapes(sweep.generation_batch_sizes, [1], sweep.generation_sequence_lengths, _valid)
 
 
-def run_glm5_dsa_sparse_kernel_worker(model_path, kernel, *, perf_filename, device="cuda:0"):
+def run_glm5_dsa_sparse_kernel_worker(model_path, kernel, bs_only, *, perf_filename, device="cuda:0"):
     if kernel not in KERNEL_TO_OP_NAME:
         raise ValueError(f"unknown kernel={kernel}; expected one of {list(KERNEL_TO_OP_NAME)}")
     sc = _glm5_sparse_config(model_path)
@@ -454,11 +463,13 @@ def run_glm5_dsa_sparse_kernel_worker(model_path, kernel, *, perf_filename, devi
     dec_shapes = _dsa_generation_derived_shapes(model_path)
     _seen = set(ctx_shapes)
     shapes = ctx_shapes + [sh for sh in dec_shapes if sh not in _seen]
+    # this task owns one bs (collect.py distributes bs across GPU workers)
+    shapes = [(prefix, isl, bs) for (prefix, isl, bs) in shapes if bs == bs_only]
     if not shapes:
-        print(f"[glm5-sparse {kernel}] no shapes derived for {model_path}; skipping.")
+        print(f"[glm5-sparse {kernel} bs={bs_only}] no shapes; skipping.")
         return
     device_name = torch.cuda.get_device_name(device)
-    print(f"[glm5-sparse {kernel}] {len(shapes)} module shapes -> {perf_path}")
+    print(f"[glm5-sparse {kernel} bs={bs_only}] {len(shapes)} shapes -> {perf_path}")
     n_ok = 0
     for prefix, isl, bs in shapes:
         out = _guarded_bench(
@@ -487,13 +498,29 @@ def run_glm5_dsa_sparse_kernel_worker(model_path, kernel, *, perf_filename, devi
     print(f"  {kernel}: benched {n_ok}/{len(shapes)} unique shapes")
 
 
+def _glm5_sparse_kernel_cases(kernel):
+    # One task per (model, bs) so collect.py spreads bs across the GPU workers
+    # (no single-worker cuda-graph private-pool buildup -> no 1-worker-sweep
+    # deadlock). All sparse kernels run a single fixed head config: the FMLA
+    # pads to its required head count OUTSIDE the kernel (model TP zero-pad),
+    # so the kernel is TP-independent -> one config per bs, no tp sweep. Each
+    # task sweeps (isl, prefix) for its bs.
+    cases = []
+    for m in _selected_glm5_models():
+        ctx = _dsa_context_derived_shapes(m)
+        dec = _dsa_generation_derived_shapes(m)
+        bss = sorted({b for (_p, _i, b) in ctx} | {b for (_p, _i, b) in dec})
+        cases.extend([m, kernel, b] for b in bss)
+    return cases
+
+
 def get_glm5_mqa_test_cases():
-    return [[m, "mqa"] for m in _selected_glm5_models()]
+    return _glm5_sparse_kernel_cases("mqa")
 
 
 def get_glm5_topk_test_cases():
-    return [[m, "topk"] for m in _selected_glm5_models()]
+    return _glm5_sparse_kernel_cases("topk")
 
 
 def get_glm5_dsa_attn_test_cases():
-    return [[m, "dsa_attn"] for m in _selected_glm5_models()]
+    return _glm5_sparse_kernel_cases("dsa_attn")

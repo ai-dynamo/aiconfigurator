@@ -230,6 +230,7 @@ class ContextDSAModule(Operation):
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
         cls._raw_data_cache.clear()
+        cls._glm5_sparse_cache.clear()
 
     @classmethod
     def _extrapolate(cls, data_wrapper) -> None:
@@ -743,8 +744,8 @@ class ContextDSAModule(Operation):
         data_dir = os.path.join(
             database.systems_root, database.system_spec["data_dir"], database.backend, database.version
         )
-        out = {"mqa": {}, "topk_flat": {}, "topk_last": {}}
         # 2D grids keyed by (isl, step) for the CP composition path.
+        out = {}
         out2d = {"mqa": {}, "topk_last": {}, "topk_flat": {}, "dsa_attn": {}}
 
         def _read(fn):
@@ -756,16 +757,12 @@ class ContextDSAModule(Operation):
             mh = mdf[mdf["num_heads"] == 64] if "num_heads" in mdf else mdf
             for _, r in mh[mh["batch_size"] == 1].iterrows():
                 out2d["mqa"][(int(r["isl"]), int(r["step"]))] = float(r["latency"])
-                if int(r["step"]) == 0:
-                    out["mqa"][int(r["isl"])] = float(r["latency"])
         tdf = _read("glm5_topk_module_perf.parquet")
         if tdf is not None:
             th = tdf[tdf["num_heads"] == 64] if "num_heads" in tdf else tdf
             for _, r in th[th["batch_size"] == 1].iterrows():
                 mode = "topk_flat" if str(r.get("score_mode", "")) == "flat" else "topk_last"
                 out2d[mode][(int(r["isl"]), int(r["step"]))] = float(r["latency"])
-                if int(r["step"]) == 0:
-                    out[mode][int(r["isl"])] = float(r["latency"])
         adf = _read("glm5_dsa_attn_module_perf.parquet")
         if adf is not None:
             ah = adf[adf["num_heads"] == 64] if "num_heads" in adf else adf
@@ -782,6 +779,14 @@ class ContextDSAModule(Operation):
         if not table:
             return None
         isls = sorted({i for (i, _s) in table})
+        if isl > isls[-1]:
+            raise ValueError(
+                f"GLM5 CP DSA: isl={isl} exceeds the collected sparse-kernel grid "
+                f"(max isl={isls[-1]}); mqa/topk scale super-linearly with isl, so "
+                f"clamping the isl axis would silently under-estimate. Re-collect with "
+                f"AIC_CHUNKED_PREFILL_SIZE >= {isl} "
+                f"(docs/CONTEXT_PARALLEL_DSA_MODELING.md §9.1)."
+            )
         use_isl = isl if isl in isls else min(isls, key=lambda x: abs(x - isl))
         steps = sorted(st for (i, st) in table if i == use_isl)
         if not steps:
@@ -795,30 +800,6 @@ class ContextDSAModule(Operation):
         a = table[(use_isl, lo)]
         bb = table[(use_isl, hi)]
         return a + (bb - a) * (step - lo) / (hi - lo)
-
-    @staticmethod
-    def _lookup_sparse(table: dict, isl: int):
-        """Power-law (log-log) interp/extrap of a {isl: latency} table at
-        prefix=0 — handles mqa (∝ isl²) and topk (∝ isl^~1.6) beyond the
-        collected range (e.g. topk at isl=32768 when sweep caps at 16384)."""
-        if not table:
-            return None
-        if isl in table:
-            return table[isl]
-        import math
-
-        xs = sorted(table)
-        if isl < xs[0]:
-            lo, hi = xs[0], (xs[1] if len(xs) > 1 else xs[0])
-        elif isl > xs[-1]:
-            lo, hi = (xs[-2] if len(xs) > 1 else xs[-1]), xs[-1]
-        else:
-            lo = max(x for x in xs if x <= isl)
-            hi = min(x for x in xs if x >= isl)
-        if lo == hi or table[lo] <= 0 or table[hi] <= 0:
-            return table[min(xs, key=lambda x: abs(x - isl))]
-        f = (math.log(isl) - math.log(lo)) / (math.log(hi) - math.log(lo))
-        return math.exp(math.log(table[lo]) + f * (math.log(table[hi]) - math.log(table[lo])))
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

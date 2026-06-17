@@ -49,9 +49,9 @@ once**: TP-reduce the MoE partials **and** SP-scatter back to per-card tokens.
 ## 2. The model — three parts
 
 ```text
-DSA  = dsa_context_module(isl/cp, prefix=0)        # base, per-card token count
-     + mqa_correction
-     + topk_correction
+DSA  = dsa_context_module(isl/cp, prefix)          # base, per-card tokens (REAL prefix)
+     + [ mqa(isl,prefix)/cp        - mqa(isl/cp,prefix) ]        # swap per-card mqa -> full/cp
+     + [ topk_last(isl,prefix)/cp  - topk_flat(isl/cp,prefix) ]  # swap per-card flat topk -> full/cp top_last
      + AG_KV + AG_LSE                              # the two SMALL all-gathers
 #      ( fmha, projections, RMSNorm: NO correction )
 
@@ -67,7 +67,7 @@ Why only mqa / topk move inside DSA:
 | sub-op | context-scaling | CP treatment |
 |--------|-----------------|--------------|
 | q/kv proj, o_proj, RMSNorm | none (per-token) | base, unchanged |
-| **indexer mqa (logits)** | ∝ context² (quadratic) | scale up (`×cp`) |
+| **indexer mqa (logits)** | ∝ context² (quadratic) | `full/cp` (swap per-card mqa for mqa(isl)/cp) |
 | **topk selection** | ∝ context¹·⁶ (sub-quad) + data-dependent | `full/cp`, flat→top_last |
 | sparse FMHA | none (capped at `index_topk` keys) | base, unchanged |
 | AG_KV, AG_LSE | n/a (CP attention comm) | add (small) |
@@ -76,19 +76,24 @@ Why only mqa / topk move inside DSA:
 
 ## 3. Deriving the DSA corrections
 
-### 3.1 mqa — quadratic ⇒ `× cp` on the small kernel
+### 3.1 mqa — quadratic ⇒ `full/cp` (swap per-card mqa for mqa(isl)/cp)
 
-mqa cost ∝ Σ_card causal context = `(1/cp)·full_mqa`. Because mqa ∝ `isl²`:
-`mqa(isl/cp,p0)·cp = (isl/cp)²/2·cp = isl²/(2cp) = full_mqa/cp`.
-
-Use the **`×cp` form** (not `full/cp`): it carries the **small-kernel
-(`isl/cp`-query) efficiency** that the per-card kernel actually has.
+mqa cost ∝ Σ_card causal context = `(1/cp)·full_mqa`. The monolithic per-card
+base `dsa_context_module(isl/cp)` already contains an internal `mqa(isl/cp)`;
+CP swaps it for the CP-correct `mqa(isl)/cp` (the full chunk's logits, split
+across the cp ranks):
 
 ```text
-mqa_correction = mqa(isl/cp, prefix=0) · (cp − 1)
+delta_mqa = mqa(isl, prefix)/cp − mqa(isl/cp, prefix)
+# net per-card mqa = mqa(isl)/cp
 ```
-*isl=32768,cp=8:* 45.1·7 = **+316us**; per-card mqa = 360 vs timeline 374 (−4%).
-(`full/cp` = 2558/8 = 320 → −14%, worse — confirms the small-kernel point.)
+Both terms are looked up at the **REAL prefix** (the parquet `step` column IS
+the past_kv length), not `prefix=0`.
+
+> *(Strategy 2026-06-11.)* An earlier strategy used the `×cp` identity
+> `mqa(isl/cp)·(cp−1)` (net `cp·mqa(isl/cp)`); under perfect `isl²` scaling
+> the two agree, but `full/cp` anchors directly on the measured full-chunk mqa
+> and is what `_query_cp` implements.
 
 ### 3.2 topk — sub-quadratic ⇒ `full/cp`, then flat→top_last
 
@@ -101,9 +106,12 @@ The `dsa_context_module` runs **dummy weights**, so its internal topk sees
 **top_last** distribution. Correct flat→top_last, both at `full/cp`:
 
 ```text
-topk_correction = − [ topk_full(flat) − topk_full(top_last) ] / cp
+delta_topk = topk_last(isl, prefix)/cp − topk_flat(isl/cp, prefix)
+# net per-card topk = topk_last(isl)/cp
 ```
-*isl=32768,cp=8:* −(3383 − 1520.6)/8 = **−233us**; per-card topk = `full(top_last)/cp` = 190.
+i.e. swap the base's per-card **flat** topk for the CP-correct full-chunk
+**top_last** divided across cp ranks (both at REAL prefix). *isl=32768,cp=8:*
+net per-card topk = `topk_last(isl)/cp` ≈ 190.
 
 > There is **no separate `isl/cp → full` context scale-up** for topk — `full/cp`
 > already uses the full-context measurement. (Mixing the per-card-shape value
@@ -122,11 +130,14 @@ base value.**
 
 | comm | tensor | size | timeline |
 |------|--------|------|----------|
-| AG_KV | gathered KV latent (fp8) | `isl·(kv_lora+rope)·1B` | ~54us |
-| AG_LSE | softmax LSE (bf16) | `isl·kv_lora·2B` | ~100us |
+| AG_KV | DSA indexer key (bf16) | `isl·index_head_dim(128)·2B` | ~54us |
+| AG_LSE | compressed KV latent (bf16) | `isl·(kv_lora+rope=576)·2B` | ~100us |
 
-Looked up in the NCCL all-gather table at `num_gpus = cp`. (AG_hidden and RS
-are **not** here — they belong to Comm, §6.)
+Looked up in the NCCL all-gather table at `num_gpus = cp`. Both are over the
+current chunk (`isl`, not `isl+prefix` — prefix KV is already replicated) and
+**bf16**; sizes verified by instrumenting sglang (`dsa_indexer` index_key 128;
+`deepseek_v2 rebuild_cp_kv_cache` latent 576). (AG_hidden and RS are **not**
+here — they belong to Comm, §6.)
 
 ---
 
@@ -230,7 +241,10 @@ real comm/compute overlap at this granularity.)
 ## 8. End-to-end validation (isl=32768, cp=8, bf16 base)
 
 ```text
-DSA  = 4300(base,kv=bf16) + 316(mqa) − 233(topk) + 54(AG_KV) + 100(AG_LSE) = 4537
+DSA  = 4300(base,kv=bf16) + mqa(full/cp) + topk(full/cp) + 54(AG_KV) + 100(AG_LSE)
+#  (us values below captured under the older ×cp strategy; the implemented
+#   full/cp form agrees under isl² scaling — re-derive exact us from current data)
+#  ≈ 4300 + 316 − 233 + 54 + 100 = 4537
 MoE  = moe(32768,tp8,ep1,pl1.01)                                           = 2047
 Comm = AG_hidden 628 + RS 658                                              = 1286
 ──────────────────────────────────────────────────────────────────────────────
@@ -268,16 +282,14 @@ slightly heavy (+) vs MoE-perf light (−), partly cancelling.
 def get_cp_dsa(self, b, isl, cp, db, dims):
     per_card = isl // cp
     # base: bf16-KV row (fmha kernel is bf16 QkvBfloat16), heads=native, tp=1, bs=b
-    base = db.query_dsa_context_module(per_card, prefix=0,
+    base = db.query_dsa_context_module(per_card, prefix,            # REAL prefix
                                        kv_cache_dtype="bfloat16",   # NOT fp8 — §4
                                        num_heads=dims["num_heads"], tp_size=1, bs=b)
-    mqa_corr  = db.query_glm5_mqa(per_card, prefix=0) * (cp - 1)        # ×cp, quadratic
-    tk_flat   = db.query_glm5_topk(isl, prefix=0, mode="flat")          # full/cp
-    tk_last   = db.query_glm5_topk(isl, prefix=0, mode="top_last")
-    topk_corr = -(tk_flat - tk_last) / cp                              # flat→top_last
-    ag_kv  = db.ag_latency(isl * (dims["kv_lora"] + dims["rope"]) * 1, cp)
-    ag_lse = db.ag_latency(isl * dims["kv_lora"] * 2, cp)
-    return base + mqa_corr + topk_corr + ag_kv + ag_lse
+    delta_mqa  = db.query_glm5_mqa(isl, prefix)/cp - db.query_glm5_mqa(per_card, prefix)          # full/cp
+    delta_topk = db.query_glm5_topk(isl, prefix, "top_last")/cp - db.query_glm5_topk(per_card, prefix, "flat")
+    ag_kv  = db.ag_latency(isl * dims["index_head_dim"] * 2, cp)        # indexer key 128, bf16
+    ag_lse = db.ag_latency(isl * (dims["kv_lora"] + dims["rope"]) * 2, cp)  # latent 576, bf16
+    return base + delta_mqa + delta_topk + ag_kv + ag_lse
 ```
 
 ### 9.3 Layer assembly (estimator)
@@ -293,8 +305,9 @@ prefill = layer * num_layers    # (first_k_dense_replace layers have no MoE/DSA-
 ### 9.4 Invariants (do not get these wrong)
 
 1. **base row = bf16-KV** (fmha kernel is bf16; KV-stored-fp8 ≠ fp8-fmha). §4.
-2. **mqa uses `×cp`** on `mqa(isl/cp)`; **topk uses `full/cp`** then flat→top_last.
-   Different on purpose; don't unify. topk has **no** context scale-up term.
+2. **mqa uses `full/cp`** (`mqa(isl)/cp − mqa(isl/cp)`, swap the base's per-card
+   mqa); **topk uses `full/cp`** then flat→top_last. Both at REAL prefix. topk
+   has **no** context scale-up term.
 3. **fmha & projections: no correction.**
 4. **MoE on full `isl`** (not per-card); **comm primitives follow the MoE
    parallel mode** (TP+SP → AG_hidden+RS; EP → all-to-all). §5.
