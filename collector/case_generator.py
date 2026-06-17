@@ -95,17 +95,118 @@ def get_merged_base_op_case_specs(backend: str, op_name: str) -> list[dict[str, 
 
 def get_attention_context_shape_sweeps(backend: str) -> list[dict[str, object]]:
     """Return YAML-backed context attention shape sweeps for one backend."""
-    return get_merged_base_op_case_specs(backend, "attention_context")
+    return [
+        *get_merged_base_op_case_specs(backend, "attention_context"),
+        *get_attention_context_model_sweeps(backend),
+    ]
 
 
 def get_attention_generation_shape_sweeps(backend: str) -> list[dict[str, object]]:
     """Return YAML-backed generation attention shape sweeps for one backend."""
-    return get_merged_base_op_case_specs(backend, "attention_generation")
+    return [
+        *get_merged_base_op_case_specs(backend, "attention_generation"),
+        *get_attention_generation_model_sweeps(backend),
+    ]
 
 
 def get_attention_encoder_shape_sweeps(backend: str) -> list[dict[str, object]]:
     """Return YAML-backed encoder (non-causal) attention shape sweeps for one backend."""
-    return get_merged_base_op_case_specs(backend, "attention_encoder")
+    return [
+        *get_merged_base_op_case_specs(backend, "attention_encoder"),
+        *get_attention_encoder_model_sweeps(backend),
+    ]
+
+
+# Per-model entry metadata that must not leak into generated shape-sweep dicts:
+# ``model_path`` drives COLLECTOR_MODEL_PATH filtering and ``architecture`` is
+# auto-injected by ``_model_case_values``. Neither is a shape dimension.
+_MODEL_METADATA_FIELDS = frozenset({"model_path", "architecture"})
+
+
+def _sanitize_sweep_id(value: str) -> str:
+    return "".join(char if char.isalnum() else "_" for char in str(value))
+
+
+def _normalize_attention_model_entry(entry: dict, *, op_name: str) -> dict[str, object]:
+    """Map a per-model attention entry onto phase-specific sweep keys.
+
+    A generic ``query_head_counts`` fans out to the field each phase's collector
+    actually reads: generation needs both ``mha_query_head_counts`` and
+    ``xqa_query_head_counts``; encoder reads ``head_counts``; context reads
+    ``query_head_counts`` directly. This keeps a uniform ``query_head_counts``
+    field across all three attention phases in model YAML. Explicit phase-specific
+    keys win over the generic one. Every other key (batch/sequence sweeps, kv
+    heads, head dims, window sizes, precision cases, and token-budget cap
+    overrides) passes through unchanged so it overlays the inherited base template.
+    """
+    overrides = {key: value for key, value in entry.items() if key not in _MODEL_METADATA_FIELDS}
+    generic_query_heads = overrides.pop("query_head_counts", None)
+    if generic_query_heads is None:
+        return overrides
+
+    if op_name == "attention_context":
+        overrides["query_head_counts"] = generic_query_heads
+    elif op_name == "attention_generation":
+        overrides.setdefault("mha_query_head_counts", generic_query_heads)
+        overrides.setdefault("xqa_query_head_counts", generic_query_heads)
+    elif op_name == "attention_encoder":
+        overrides.setdefault("head_counts", generic_query_heads)
+    else:
+        raise ValueError(f"unsupported attention op_name: {op_name!r}")
+    return overrides
+
+
+def _attention_model_shape_sweeps(backend: str, op_name: str) -> list[dict[str, object]]:
+    """Build per-model attention sweeps by overlaying model dims on the base template.
+
+    Each sweep starts as a deep copy of the per-backend merged base template, so
+    backend-correct caps, ``precision_cases`` (trtllm/sglang) and ``window_sizes``
+    (vllm) are inherited; a model entry may override any of them. Entries honor
+    ``COLLECTOR_MODEL_PATH`` via ``_model_case_values``.
+    """
+    entries = _model_case_values(op_name)
+    if not entries:
+        return []
+    base_specs = get_merged_base_op_case_specs(backend, op_name)
+    if len(base_specs) != 1:
+        raise RuntimeError(
+            f"{op_name}: per-model attention sweeps assume exactly one base sweep template, "
+            f"found {len(base_specs)} for backend={backend}. Add explicit handling if a second "
+            "base sweep is introduced."
+        )
+    template = base_specs[0]
+
+    sweeps: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        overrides = _normalize_attention_model_entry(entry, op_name=op_name)
+        sweep = copy.deepcopy(template)
+        sweep.update(overrides)
+        label = entry.get("model_path") or entry.get("architecture") or "model"
+        sweep["id"] = f"model_{_sanitize_sweep_id(label)}_{op_name}"
+        # Drop exact-duplicate sweeps (same content ignoring id) from multiple
+        # model files declaring identical dimensions.
+        dedupe_key = repr(sorted((key, repr(value)) for key, value in sweep.items() if key != "id"))
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        sweeps.append(sweep)
+    return sweeps
+
+
+def get_attention_context_model_sweeps(backend: str) -> list[dict[str, object]]:
+    """Return per-model context attention shape sweeps for one backend."""
+    return _attention_model_shape_sweeps(backend, "attention_context")
+
+
+def get_attention_generation_model_sweeps(backend: str) -> list[dict[str, object]]:
+    """Return per-model generation attention shape sweeps for one backend."""
+    return _attention_model_shape_sweeps(backend, "attention_generation")
+
+
+def get_attention_encoder_model_sweeps(backend: str) -> list[dict[str, object]]:
+    """Return per-model encoder attention shape sweeps for one backend."""
+    return _attention_model_shape_sweeps(backend, "attention_encoder")
 
 
 def get_base_common_case_values(name: str) -> dict[str, object]:
@@ -999,9 +1100,42 @@ def _get_base_gemm_shape_sweeps(backend: str | None = None) -> list[dict[str, ob
     return shape_sweeps
 
 
+def _gemm_model_shape_sweeps(backend: str | None = None) -> list[dict[str, object]]:
+    """Return per-model GEMM shape sweeps from ``model_case_values.gemm``.
+
+    Each model entry is a GEMM shape-sweep dict (``feature_sizes`` shorthand or
+    explicit ``input_feature_sizes``/``output_feature_sizes``, optional
+    ``token_counts``/``skip_shapes``). ``token_counts`` is inherited from the
+    base GEMM sweep when the entry omits it, so a model only needs to declare its
+    projection feature shapes. Entries honor ``COLLECTOR_MODEL_PATH`` via
+    ``_model_case_values``; ``model_path``/``architecture`` metadata is stripped.
+    """
+    entries = _model_case_values("gemm")
+    if not entries:
+        return []
+
+    base_sweeps = _get_base_gemm_shape_sweeps(backend)
+    if len(base_sweeps) != 1:
+        raise RuntimeError(
+            f"gemm: per-model GEMM sweeps assume exactly one base GEMM sweep template, "
+            f"found {len(base_sweeps)} for backend={backend}."
+        )
+
+    default_token_counts = base_sweeps[0].get("token_counts")
+
+    sweeps: list[dict[str, object]] = []
+    for entry in entries:
+        sweep = {key: value for key, value in entry.items() if key not in _MODEL_METADATA_FIELDS}
+        if "token_counts" not in sweep and default_token_counts is not None:
+            sweep["token_counts"] = list(default_token_counts)
+        sweeps.append(sweep)
+    return sweeps
+
+
 def get_gemm_case_specs(backend: str | None = None) -> list[GemmCommonTestCase]:
     test_cases = []
-    for shape_sweep in _get_base_gemm_shape_sweeps(backend):
+    seen: set[tuple[int, int, int]] = set()
+    for shape_sweep in [*_get_base_gemm_shape_sweeps(backend), *_gemm_model_shape_sweeps(backend)]:
         token_counts = _as_int_list(shape_sweep.get("token_counts"), field_name="gemm.token_counts")
         feature_sizes = shape_sweep.get("feature_sizes")
         input_feature_sizes = _as_int_list(
@@ -1023,6 +1157,12 @@ def get_gemm_case_specs(backend: str | None = None) -> list[GemmCommonTestCase]:
                         continue
                     if output_features * input_features == 65536 * 65536:
                         continue
+
+                    # Do not duplicate cases covered in the base grid.
+                    key = (token_count, output_features, input_features)
+                    if key in seen:
+                        continue
+                    seen.add(key)
                     test_cases.append(GemmCommonTestCase(x=token_count, n=output_features, k=input_features))
 
     return test_cases
