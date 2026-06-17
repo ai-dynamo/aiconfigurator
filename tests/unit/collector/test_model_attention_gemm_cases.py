@@ -143,9 +143,12 @@ def test_gemm_model_paths_plural_expansion(monkeypatch):
             gemm=[{"model_paths": ["org/a", "org/b"], "output_feature_sizes": [99], "input_feature_sizes": [77]}],
         ),
     )
-    # No filter -> the shape is present once (deduped across both aliases).
+    # No filter -> both aliases expand to the same sweep; dedupe means each
+    # (x, n, k) for (99, 77) appears exactly once (no per-alias duplication).
     cases = case_generator.get_gemm_case_specs("vllm")
-    assert any(case.n == 99 and case.k == 77 for case in cases)
+    matching = [(case.x, case.n, case.k) for case in cases if case.n == 99 and case.k == 77]
+    assert matching, "expected the model (99, 77) shape to be present"
+    assert len(matching) == len(set(matching)), "model shape duplicated across aliases (dedupe failed)"
 
     # Filter to one alias -> still present.
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "org/b")
@@ -305,6 +308,33 @@ def test_attention_model_sweeps_dedupe_identical_entries(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     sweeps = case_generator.get_attention_context_model_sweeps("vllm")
     assert len(sweeps) == 1
+
+
+def test_attention_context_model_sweeps_filtered_by_collector_model_path(monkeypatch):
+    monkeypatch.setattr(
+        case_generator,
+        "_load_model_cases_data",
+        lambda: (
+            _model_file(
+                "org/A", attention_context=[{"model_path": "org/A", "query_head_counts": [64], "head_dims": [192]}]
+            ),
+            _model_file(
+                "org/B", attention_context=[{"model_path": "org/B", "query_head_counts": [40], "head_dims": [128]}]
+            ),
+        ),
+    )
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "org/A")
+
+    sweeps = case_generator.get_attention_context_model_sweeps("vllm")
+    assert len(sweeps) == 1
+    assert sweeps[0]["query_head_counts"] == [64]
+
+
+def test_attention_overlay_identical_to_base_is_dropped(monkeypatch):
+    # An overlay with no shape fields equals the base sweep, which already covers
+    # those shapes, so it must not be emitted as a redundant duplicate.
+    _set_model_cases(monkeypatch, _model_file("org/M", attention_context=[{"model_path": "org/M"}]))
+    assert case_generator.get_attention_context_model_sweeps("vllm") == []
 
 
 # ---------------------------------------------------------------------------

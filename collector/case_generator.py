@@ -176,17 +176,22 @@ def _attention_model_shape_sweeps(backend: str, op_name: str) -> list[dict[str, 
         )
     template = base_specs[0]
 
+    def _dedupe_key(sweep_dict: dict[str, object]) -> str:
+        return repr(sorted((key, repr(value)) for key, value in sweep_dict.items() if key != "id"))
+
     sweeps: list[dict[str, object]] = []
-    seen: set[str] = set()
+    # Seed with the base template so an overlay that changes nothing (already
+    # covered by the base sweep) is not emitted as a redundant duplicate.
+    seen: set[str] = {_dedupe_key(template)}
     for entry in entries:
         overrides = _normalize_attention_model_entry(entry, op_name=op_name)
         sweep = copy.deepcopy(template)
         sweep.update(overrides)
         label = entry.get("model_path") or entry.get("architecture") or "model"
         sweep["id"] = f"model_{_sanitize_sweep_id(label)}_{op_name}"
-        # Drop exact-duplicate sweeps (same content ignoring id) from multiple
-        # model files declaring identical dimensions.
-        dedupe_key = repr(sorted((key, repr(value)) for key, value in sweep.items() if key != "id"))
+        # Drop exact-duplicate sweeps (same content ignoring id): both overlays
+        # identical to the base template and identical entries across model files.
+        dedupe_key = _dedupe_key(sweep)
         if dedupe_key in seen:
             continue
         seen.add(dedupe_key)
