@@ -63,28 +63,41 @@ except ModuleNotFoundError:
     from case_generator import _DSV4_DEFAULT_MODELS
 
 
-def get_dsv4_paged_mqa_logits_test_cases():
-    from collector.case_generator import get_dsv4_paged_mqa_logits_test_cases as _impl
+def _dsv4_sparse_kernel_cases(kernel):
+    # One task per (model, bs); collect.py spreads bs across GPU workers (no
+    # single-worker cuda-graph buildup). All sparse kernels run a single fixed
+    # head config: the FMLA pads to its required head count OUTSIDE the kernel
+    # (model TP zero-pad), so the kernel is TP-independent -> one config per bs,
+    # no tp sweep. Each task sweeps (isl, prefix) for its bs.
+    try:
+        from collector.case_generator import _selected_dsv4_models
+    except ModuleNotFoundError:
+        from case_generator import _selected_dsv4_models
+    cases = []
+    for m in _selected_dsv4_models():
+        ctx = _dsv4_context_derived_shapes(m)
+        dec = _dsv4_generation_derived_shapes(m)
+        bss = sorted({b for (_p, _i, b) in ctx} | {b for (_p, _i, b) in dec})
+        cases.extend([m, kernel, b] for b in bss)
+    return cases
 
+
+def get_dsv4_paged_mqa_logits_test_cases():
     if not _dsv4_sparse_kernel_supported("paged_mqa_logits"):
         return []
-    return _impl()
+    return _dsv4_sparse_kernel_cases("paged_mqa_logits")
 
 
 def get_dsv4_hca_attn_test_cases():
-    from collector.case_generator import get_dsv4_hca_attn_test_cases as _impl
-
     if not _dsv4_sparse_kernel_supported("hca_attn"):
         return []
-    return _impl()
+    return _dsv4_sparse_kernel_cases("hca_attn")
 
 
 def get_dsv4_csa_attn_test_cases():
-    from collector.case_generator import get_dsv4_csa_attn_test_cases as _impl
-
     if not _dsv4_sparse_kernel_supported("csa_attn"):
         return []
-    return _impl()
+    return _dsv4_sparse_kernel_cases("csa_attn")
 
 
 get_dsv4_flash_paged_mqa_logits_test_cases = get_dsv4_paged_mqa_logits_test_cases
@@ -819,6 +832,36 @@ def _derive_context_shapes(bs_list, seq_list, prefix_list, is_valid, env_filter=
     return shapes
 
 
+_CHUNKED_PREFILL = None
+
+
+def _sglang_chunked_prefill_size():
+    # The csa/hca MODULE (collect_dsv4_attn) launches sglang with
+    # chunked_prefill_size=None -> sglang DERIVES it from GPU memory. Mirror
+    # that here (sglang's own GPU-mem tiering: get_device_memory_capacity +
+    # ServerArgs._handle_gpu_memory_settings; 2k/4k/8k/16k by device mem),
+    # model-free and weight-free. NOT a hardcoded 8192 and NOT a guessed
+    # ServerArgs. chunked_prefill_size depends only on device memory.
+    global _CHUNKED_PREFILL
+    if _CHUNKED_PREFILL is None:
+        try:
+            from sglang.srt.server_args import ServerArgs, get_device_memory_capacity
+        except ModuleNotFoundError:
+            from srt.server_args import ServerArgs, get_device_memory_capacity
+        sa = ServerArgs.__new__(ServerArgs)
+        sa.chunked_prefill_size = None
+        sa.cuda_graph_max_bs = None
+        sa.cuda_graph_bs = None
+        sa.tp_size = 1
+        sa.device = "cuda"
+        try:
+            sa._handle_gpu_memory_settings(get_device_memory_capacity("cuda"))
+        except Exception:
+            pass  # chunked_prefill_size is set first, before any model-dependent step
+        _CHUNKED_PREFILL = int(sa.chunked_prefill_size)
+    return _CHUNKED_PREFILL
+
+
 def _dsv4_context_derived_shapes(model_path):
     """DSV4 sparse-kernel context shapes derived from the csa/hca context MODULE
     INPUT sweep (same source as GLM5's dsa derive) — NOT read back from the
@@ -837,27 +880,38 @@ def _dsv4_context_derived_shapes(model_path):
             _DSV4_MODULE_BATCH_SIZES,
             _DSV4_MODULE_PAST_KV_LIST,
             _DSV4_MODULE_SEQ_LENGTHS,
-            _DSV4_SPARSE_CHUNK_PREFILL_SIZE,
+            _dsv4_module_is_valid_shape,
         )
     except ModuleNotFoundError:
         from case_generator import (
             _DSV4_MODULE_BATCH_SIZES,
             _DSV4_MODULE_PAST_KV_LIST,
             _DSV4_MODULE_SEQ_LENGTHS,
-            _DSV4_SPARSE_CHUNK_PREFILL_SIZE,
+            _dsv4_module_is_valid_shape,
         )
     cfg = _dsv4_model_config(model_path)
     max_pos = cfg.get("max_position_embeddings")
-    chunk = int(_DSV4_SPARSE_CHUNK_PREFILL_SIZE)  # context new-token budget (8192)
+    try:
+        from collector.sglang.runtime_limits import required_kv_tokens
+    except ModuleNotFoundError:
+        from runtime_limits import required_kv_tokens
+    chunk = _sglang_chunked_prefill_size()  # sglang-derived (like the module), NOT hardcoded 8192
 
     def _valid(bs, isl, prefix):
+        # Reuse the csa/hca MODULE's skip: chunk = sglang chunked_prefill_size
+        # (GPU-derived, like the module), per-request max_pos, and the module's
+        # _dsv4_module_is_valid_shape + required_kv_tokens (the shared KV-token fn
+        # GLM5 uses via dsa_indexer_total_kv_tokens_supported). The 1M KV-pool cap
+        # is the module's proxy -- DSV4 has no sglang-readable pool size offline.
         if bs <= 0 or isl <= 0 or prefix < 0:
             return False
-        if bs * isl > chunk:  # chunked-prefill new-token budget per forward
+        if bs * isl > chunk:
             return False
-        if max_pos and prefix + isl > max_pos:  # per-request context <= model cap
+        if max_pos and prefix + isl > max_pos:
             return False
-        return bs * (prefix + isl) <= 1_048_576  # KV-pool memory cap (~1M tokens)
+        return _dsv4_module_is_valid_shape("context", bs, isl) and (
+            required_kv_tokens(bs, isl, prefix, is_prefill=True) <= 1_048_576
+        )
 
     return _derive_context_shapes(
         _DSV4_MODULE_BATCH_SIZES,
@@ -904,6 +958,7 @@ def _dsv4_generation_derived_shapes(model_path):
 def run_dsv4_sparse_kernel_worker(
     model_path: str,
     kernel: str,
+    bs_only: int,
     *,
     perf_filename: str,
     device: str = "cuda:0",
@@ -931,12 +986,14 @@ def run_dsv4_sparse_kernel_worker(
     dec_shapes = _dsv4_generation_derived_shapes(model_path)
     _seen = set(ctx_shapes)
     shapes = ctx_shapes + [sh for sh in dec_shapes if sh not in _seen]
+    # this task owns one bs (collect.py distributes bs across GPU workers)
+    shapes = [(prefix, isl, bs) for (prefix, isl, bs) in shapes if bs == bs_only]
     if not shapes:
-        print(f"[dsv4-sparse {kernel}] no shapes derived for {model_path}; skipping.")
+        print(f"[dsv4-sparse {kernel} bs={bs_only}] no shapes; skipping.")
         return
 
     device_name = torch.cuda.get_device_name(device)
-    print(f"[dsv4-sparse {kernel}] {len(shapes)} module shapes -> {perf_path}")
+    print(f"[dsv4-sparse {kernel} bs={bs_only}] {len(shapes)} shapes -> {perf_path}")
     n_ok = 0
     for prefix, isl, bs in shapes:
         # Every module shape is benched (strict 1:1); tiny shapes run fine
@@ -1037,13 +1094,9 @@ def _bench_topk_512(rows: int, c4_len: int, mode: str, device: str, topk_k: int)
 
 def get_dsv4_topk_calib_test_cases():
     """topk_512 DELTA calibration cases (gated on kernel availability)."""
-    try:
-        from collector.case_generator import get_dsv4_topk_calib_test_cases as _impl
-    except ModuleNotFoundError:
-        from case_generator import get_dsv4_topk_calib_test_cases as _impl
     if not _dsv4_topk_kernel_supported():
         return []
-    return _impl()
+    return _dsv4_sparse_kernel_cases("topk")
 
 
 def _bench_topk_shape(prefix: int, isl: int, bs: int, sc, device: str) -> list:
