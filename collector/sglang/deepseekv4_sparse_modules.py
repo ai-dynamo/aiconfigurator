@@ -858,6 +858,15 @@ def _sglang_chunked_prefill_size():
             sa._handle_gpu_memory_settings(get_device_memory_capacity("cuda"))
         except Exception:
             pass  # chunked_prefill_size is set first, before any model-dependent step
+        if sa.chunked_prefill_size is None:
+            # The derivation set it first, so None means it failed before even that
+            # (e.g. get_device_memory_capacity threw). Fail loud rather than int(None)
+            # or guessing a value -- this module derives, never defaults.
+            raise RuntimeError(
+                "Could not derive sglang chunked_prefill_size from GPU memory "
+                "(get_device_memory_capacity/_handle_gpu_memory_settings failed before "
+                "assigning it). Cannot derive DSV4 sparse-kernel context shapes."
+            )
         _CHUNKED_PREFILL = int(sa.chunked_prefill_size)
     return _CHUNKED_PREFILL
 
