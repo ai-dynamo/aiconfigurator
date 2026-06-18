@@ -140,6 +140,7 @@ include = [
 
 [tool.setuptools.package-data]
 "aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
+"aiconfigurator.agent" = ["skills/**/*.md"]
 "aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule"]
 "aiconfigurator" = [
     "systems/*.yaml",
