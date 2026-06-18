@@ -272,6 +272,19 @@ def _add_default_mode_arguments(parser):
         help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
     )
     parser.add_argument(
+        "--ttft-queue-model",
+        type=str,
+        choices=["default", "md1", "dd1"],
+        default="default",
+        help="TTFT queue model: default empirical correction, md1 random-arrival queueing, or dd1 deterministic-arrival queueing.",
+    )
+    parser.add_argument(
+        "--ttft-request-interval-ms",
+        type=float,
+        default=0.0,
+        help="Arrival interval in ms used by --ttft-queue-model md1/dd1 (0 means internal 1000ms / 1 req/s fallback).",
+    )
+    parser.add_argument(
         "--inclusive-tpot",
         action="store_true",
         default=False,
@@ -804,6 +817,19 @@ def _add_estimate_mode_arguments(parser):
         "exceeds KV cache capacity.",
     )
     parser.add_argument(
+        "--ttft-queue-model",
+        type=str,
+        choices=["default", "md1", "dd1"],
+        default="default",
+        help="(agg-only) TTFT queue model: default empirical correction, md1 random-arrival queueing, or dd1 deterministic-arrival queueing.",
+    )
+    parser.add_argument(
+        "--ttft-request-interval-ms",
+        type=float,
+        default=0.0,
+        help="(agg-only) Arrival interval in ms used by --ttft-queue-model md1/dd1 (0 means internal 1000ms / 1 req/s fallback).",
+    )
+    parser.add_argument(
         "--max-seq-len",
         type=int,
         default=None,
@@ -1083,6 +1109,8 @@ def build_default_tasks(
     enable_chunked_prefill: bool = False,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
+    ttft_queue_model: str = "default",
+    ttft_request_interval_ms: float = 0.0,
     enable_wideep: bool = False,
     moe_backend: str | None = None,
     engine_step_backend: str | None = None,
@@ -1227,6 +1255,8 @@ def build_default_tasks(
         "free_gpu_memory_fraction": free_gpu_memory_fraction,
         "max_seq_len": max_seq_len,
         "engine_step_backend": engine_step_backend,
+        "ttft_queue_model": ttft_queue_model,
+        "ttft_request_interval_ms": ttft_request_interval_ms,
     }
     if nextn and nextn > 0:
         global_kwargs["nextn"] = nextn
@@ -1944,6 +1974,8 @@ def _run_estimate_mode(args):
         moe_quant_mode=args.moe_quant_mode,
         comm_quant_mode=args.comm_quant_mode,
         free_gpu_memory_fraction=args.free_gpu_memory_fraction,
+        ttft_queue_model=args.ttft_queue_model,
+        ttft_request_interval_ms=args.ttft_request_interval_ms,
         max_seq_len=args.max_seq_len,
         engine_step_backend=args.engine_step_backend,
         prefix=args.prefix,
@@ -2238,6 +2270,8 @@ def main(args):
             enable_chunked_prefill=args.enable_chunked_prefill,
             free_gpu_memory_fraction=args.free_gpu_memory_fraction,
             max_seq_len=args.max_seq_len,
+            ttft_queue_model=args.ttft_queue_model,
+            ttft_request_interval_ms=args.ttft_request_interval_ms,
             engine_step_backend=args.engine_step_backend,
             enable_wideep=getattr(args, "enable_wideep", False),
             moe_backend=getattr(args, "moe_backend", None),

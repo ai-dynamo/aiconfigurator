@@ -149,6 +149,8 @@ def cli_default(
     strict_sla: bool = False,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
+    ttft_queue_model: str = "default",
+    ttft_request_interval_ms: float = 0.0,
     top_n: int = 5,
     save_dir: str | None = None,
     generator_set: list[str] | None = None,
@@ -189,6 +191,10 @@ def cli_default(
             Used to filter batch sizes that would exceed KV cache capacity.
         max_seq_len: TRT-LLM ``--max_seq_len`` setting. Controls how many KV blocks are
             pre-allocated per sequence. Defaults to ``isl + osl`` when ``None``.
+        ttft_queue_model: TTFT queue model for agg prediction ("default", "md1", or "dd1").
+        ttft_request_interval_ms: Arrival interval in ms for ``ttft_queue_model="md1"`` or ``"dd1"``.
+            Defaults to 0.0. For md1/dd1, non-positive values are normalized
+            to the internal 1000ms (1 req/s) fallback.
         top_n: Number of top configurations to return for each mode (agg/disagg). Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
         generator_set: List of inline generator overrides in KEY=VALUE format (e.g.,
@@ -253,6 +259,8 @@ def cli_default(
         prefix=prefix,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         max_seq_len=max_seq_len,
+        ttft_queue_model=ttft_queue_model,
+        ttft_request_interval_ms=ttft_request_interval_ms,
         engine_step_backend=engine_step_backend,
     )
 
@@ -670,6 +678,8 @@ def cli_estimate(
     decode_num_workers: int | None = None,
     systems_paths: str | None = None,
     free_gpu_memory_fraction: float | None = None,
+    ttft_queue_model: str = "default",
+    ttft_request_interval_ms: float = 0.0,
     max_seq_len: int | None = None,
     engine_step_backend: str | None = None,
     # Static-mode (and shared) extras
@@ -936,6 +946,8 @@ def cli_estimate(
             get_backend=get_backend,
             get_model=get_model,
             free_gpu_memory_fraction=free_gpu_memory_fraction,
+            ttft_queue_model=ttft_queue_model,
+            ttft_request_interval_ms=ttft_request_interval_ms,
             max_seq_len=max_seq_len,
             engine_step_backend=engine_step_backend,
             prefix=prefix,
@@ -1166,6 +1178,8 @@ def _run_agg_estimate(
     get_backend,
     get_model,
     free_gpu_memory_fraction=None,
+    ttft_queue_model: str = "default",
+    ttft_request_interval_ms: float = 0.0,
     max_seq_len=None,
     engine_step_backend=None,
     # Common (also accepted by disagg / static)
@@ -1214,6 +1228,8 @@ def _run_agg_estimate(
         ctx_tokens=ctx_tokens,
         max_seq_len=max_seq_len,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
+        ttft_queue_model=ttft_queue_model,
+        ttft_request_interval_ms=ttft_request_interval_ms,
     )
 
     if summary.check_oom():

@@ -34,7 +34,7 @@ class _StaticOp:
 
 class _TestBackend(BaseBackend):
     def run_agg(self, model, database, runtime_config, **kwargs):
-        raise NotImplementedError
+        return super().run_agg(model, database, runtime_config, **kwargs)
 
     def find_best_agg_result_under_constraints(self, model, database, runtime_config, **kwargs):
         raise NotImplementedError
@@ -182,3 +182,238 @@ def test_run_static_can_route_to_rust_engine_step_backend(
     assert summary.get_generation_energy_wms_dict() == {"rust_engine_step_generation": 0.0}
     assert summary.get_context_source_dict() == {"rust_engine_step_context": "rust"}
     assert summary.get_generation_source_dict() == {"rust_engine_step_generation": "rust"}
+
+
+def test_run_agg_ttft_legacy_correction_is_default(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, prefix=2)
+
+    monkeypatch.setattr(
+        backend,
+        "_run_encoder_phase",
+        lambda *_args, **_kwargs: ({}, {}, {}, 0),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_encoder_component_memory_for_runtime",
+        lambda *_args, **_kwargs: {"total": 0.0},
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_mix_step_latency",
+        lambda *_args, **_kwargs: (10.0, 0.0, {}, {}),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *_args, **_kwargs: (5.0, 0.0, {}, {}),
+    )
+
+    summary = backend.run_agg(model, database, runtime_config, ctx_tokens=4)
+    result = summary.get_result_dict()
+
+    # Expected:
+    # llm_ttft = ceil(isl/ctx_tokens) * mix_step = ceil(8/4)*10 = 20ms
+    # correction_factor = min(2 + (steps_to_finish_ctx - 3)/2/10, 4)
+    # steps_to_finish_ctx = ceil(isl*b/ctx_tokens) = ceil(8*2/4) = 4
+    # correction_factor = 2.05
+    # ttft = 20 * 2.05 = 41ms
+    assert result["ttft"] == pytest.approx(41.0)
+
+
+def test_run_agg_ttft_md1_fixed_interval_model(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, prefix=2)
+
+    monkeypatch.setattr(
+        backend,
+        "_run_encoder_phase",
+        lambda *_args, **_kwargs: ({}, {}, {}, 0),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_encoder_component_memory_for_runtime",
+        lambda *_args, **_kwargs: {"total": 0.0},
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_mix_step_latency",
+        lambda *_args, **_kwargs: (10.0, 0.0, {}, {}),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *_args, **_kwargs: (5.0, 0.0, {}, {}),
+    )
+
+    summary = backend.run_agg(
+        model,
+        database,
+        runtime_config,
+        ctx_tokens=4,
+        ttft_queue_model="md1",
+        ttft_wait_base_steps=0.0,
+        ttft_request_interval_ms=25.0,
+        ttft_wait_queue_scale=1.0,
+        ttft_wait_max_queue_steps=10.0,
+    )
+    result = summary.get_result_dict()
+
+    # Under same scheduling as above:
+    # prefill_service_time = mix_step / (ctx_tokens/isl) = 10 / (4/8) = 20ms
+    # request interval = 25ms -> lambda=40/s, mu=50/s, rho=0.8
+    # M/D/1: Wq = rho/(2*(1-rho))*service = 40ms -> 4 queue steps
+    # ttft = llm_ttft(20) + 4*10 = 60ms
+    assert result["ttft"] == pytest.approx(60.0)
+
+
+@pytest.mark.parametrize("request_interval_ms", [None, 0.0, 1000.0])
+def test_run_agg_ttft_md1_defaults_to_one_request_per_second(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+    request_interval_ms,
+) -> None:
+    runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, prefix=2)
+
+    monkeypatch.setattr(
+        backend,
+        "_run_encoder_phase",
+        lambda *_args, **_kwargs: ({}, {}, {}, 0),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_encoder_component_memory_for_runtime",
+        lambda *_args, **_kwargs: {"total": 0.0},
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_mix_step_latency",
+        lambda *_args, **_kwargs: (10.0, 0.0, {}, {}),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *_args, **_kwargs: (5.0, 0.0, {}, {}),
+    )
+
+    kwargs = {
+        "ctx_tokens": 4,
+        "ttft_queue_model": "md1",
+        "ttft_wait_base_steps": 0.0,
+        "ttft_wait_queue_scale": 1.0,
+        "ttft_wait_max_queue_steps": 10.0,
+    }
+    if request_interval_ms is not None:
+        kwargs["ttft_request_interval_ms"] = request_interval_ms
+
+    summary = backend.run_agg(model, database, runtime_config, **kwargs)
+    result = summary.get_result_dict()
+
+    # Public default is 0.0; md1 normalizes omitted or zero interval to the
+    # internal 1000ms / 1 req/s fallback, not to this candidate's predicted
+    # steady-state throughput.
+    # prefill_service_time = 20ms, lambda=1/s, mu=50/s, rho=0.02
+    # M/D/1: Wq = 0.02/(2*(1-0.02))*20ms = 0.2040816327ms
+    assert result["ttft"] == pytest.approx(20.2040816327)
+
+
+def test_run_agg_ttft_dd1_has_no_queue_wait_below_capacity(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, prefix=2)
+
+    monkeypatch.setattr(
+        backend,
+        "_run_encoder_phase",
+        lambda *_args, **_kwargs: ({}, {}, {}, 0),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_encoder_component_memory_for_runtime",
+        lambda *_args, **_kwargs: {"total": 0.0},
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_mix_step_latency",
+        lambda *_args, **_kwargs: (10.0, 0.0, {}, {}),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *_args, **_kwargs: (5.0, 0.0, {}, {}),
+    )
+
+    summary = backend.run_agg(
+        model,
+        database,
+        runtime_config,
+        ctx_tokens=4,
+        ttft_queue_model="dd1",
+        ttft_wait_base_steps=0.0,
+        ttft_request_interval_ms=25.0,
+        ttft_wait_max_queue_steps=10.0,
+    )
+    result = summary.get_result_dict()
+
+    # D/D/1 deterministic arrivals: service_time=20ms < interval=25ms,
+    # so a no-backlog stream does not accumulate queue waiting.
+    assert result["ttft"] == pytest.approx(20.0)
+
+
+def test_run_agg_ttft_dd1_caps_queue_wait_at_capacity(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, prefix=2)
+
+    monkeypatch.setattr(
+        backend,
+        "_run_encoder_phase",
+        lambda *_args, **_kwargs: ({}, {}, {}, 0),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_encoder_component_memory_for_runtime",
+        lambda *_args, **_kwargs: {"total": 0.0},
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_mix_step_latency",
+        lambda *_args, **_kwargs: (10.0, 0.0, {}, {}),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *_args, **_kwargs: (5.0, 0.0, {}, {}),
+    )
+
+    summary = backend.run_agg(
+        model,
+        database,
+        runtime_config,
+        ctx_tokens=4,
+        ttft_queue_model="dd1",
+        ttft_wait_base_steps=0.0,
+        ttft_request_interval_ms=20.0,
+        ttft_wait_max_queue_steps=10.0,
+    )
+    result = summary.get_result_dict()
+
+    # D/D/1 at capacity has no finite steady-state slack in this coarse model;
+    # cap the queue wait instead of reporting an optimistic zero.
+    assert result["ttft"] == pytest.approx(120.0)

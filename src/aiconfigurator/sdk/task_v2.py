@@ -328,6 +328,8 @@ class Task:
     database_mode: str | None = None
     free_gpu_memory_fraction: float | None = None
     max_seq_len: int | None = None
+    ttft_queue_model: str = "default"
+    ttft_request_interval_ms: float = 0.0
     engine_step_backend: str | None = None
 
     # ====== 2. Agg worker spec (serving_mode='agg') ======
@@ -1294,6 +1296,8 @@ class Task:
             "enable_chunked_prefill": self.enable_chunked_prefill,
             "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
             "max_seq_len": self.max_seq_len,
+            "ttft_queue_model": self.ttft_queue_model,
+            "ttft_request_interval_ms": self.ttft_request_interval_ms,
         }
 
     def sweep_disagg_kwargs(self, *, prefill_database, decode_database) -> dict[str, Any]:
@@ -1485,6 +1489,9 @@ class Task:
             backend_kwargs["max_seq_len"] = self.max_seq_len
         if self.free_gpu_memory_fraction is not None:
             backend_kwargs["free_gpu_memory_fraction"] = self.free_gpu_memory_fraction
+        if self.ttft_queue_model:
+            backend_kwargs["ttft_queue_model"] = self.ttft_queue_model
+        backend_kwargs["ttft_request_interval_ms"] = self.ttft_request_interval_ms
 
         summary = predict_agg_worker(
             model=model,

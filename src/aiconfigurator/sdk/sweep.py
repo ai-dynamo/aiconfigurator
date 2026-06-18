@@ -259,6 +259,8 @@ def _sweep_one_parallel_agg(
     enable_chunked_prefill: bool,
     free_gpu_memory_fraction: float | None,
     max_seq_len: int | None,
+    ttft_queue_model: str,
+    ttft_request_interval_ms: float,
     predictor: Any = None,
 ) -> tuple[pd.DataFrame, bool]:
     """Sweep batch_size x ctx_tokens for one fixed parallel choice.
@@ -317,6 +319,9 @@ def _sweep_one_parallel_agg(
                 backend_kwargs["max_seq_len"] = max_seq_len
             if free_gpu_memory_fraction is not None:
                 backend_kwargs["free_gpu_memory_fraction"] = free_gpu_memory_fraction
+            if ttft_queue_model:
+                backend_kwargs["ttft_queue_model"] = ttft_queue_model
+            backend_kwargs["ttft_request_interval_ms"] = ttft_request_interval_ms
 
             summary = predict_agg_worker(
                 model=model,
@@ -361,6 +366,8 @@ def sweep_agg(
     enable_chunked_prefill: bool = False,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
+    ttft_queue_model: str = "default",
+    ttft_request_interval_ms: float = 0.0,
     predictor: Any = None,
 ) -> pd.DataFrame:
     """Sweep parallel x batch x ctx_tokens for agg; return feasible-candidate DataFrame.
@@ -473,6 +480,8 @@ def sweep_agg(
                     enable_chunked_prefill=enable_chunked_prefill,
                     free_gpu_memory_fraction=free_gpu_memory_fraction,
                     max_seq_len=max_seq_len,
+                    ttft_queue_model=ttft_queue_model,
+                    ttft_request_interval_ms=ttft_request_interval_ms,
                     predictor=predictor,
                 )
                 if not all_oom:

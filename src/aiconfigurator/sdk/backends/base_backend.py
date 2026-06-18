@@ -1100,9 +1100,21 @@ class BaseBackend:
             runtime_config.image_width,
             runtime_config.num_images_per_request,
         )
+        ttft_queue_model_key = str(kwargs.get("ttft_queue_model", "default")).strip().lower()
+        ttft_request_interval_ms_key = float(kwargs.get("ttft_request_interval_ms", 0.0))
+        if ttft_request_interval_ms_key <= 0:
+            ttft_request_interval_ms_key = 1000.0
+        ttft_cache_key = (
+            ttft_queue_model_key,
+            float(kwargs.get("ttft_wait_base_steps", 0.5)),
+            float(kwargs.get("ttft_wait_max_queue_steps", 3.0)),
+            float(kwargs.get("ttft_wait_queue_scale", 1.0)),
+            ttft_request_interval_ms_key,
+        )
         cache_key = (
             self._make_agg_cache_key(isl, osl, b, ctx_tokens, engine_step_backend_key, agg_extra),
             visual_cache_key,
+            ttft_cache_key,
         )
         cached = self._agg_cache.get(cache_key)
         if cached is not None:
@@ -1168,13 +1180,86 @@ class BaseBackend:
             per_ops_data["genonly_step"] = genonly_per_ops
             per_ops_source["genonly_step"] = genonly_per_ops_src
 
-        # TTFT: assume a 10x request queue, capped correction factor at 4.
+        # TTFT queue model:
+        # - default: original empirical correction_factor.
+        # - md1: M/D/1 queueing estimate. The configured interval is converted
+        #   to an average arrival rate, but arrivals are still modeled as random.
+        # - dd1: deterministic-arrival estimate for a fixed-interval request
+        #   stream. With no initial backlog, there is no queue wait while one
+        #   request's prefill service time is below the arrival interval.
+        # Public APIs default ttft_request_interval_ms to 0.0. Inside md1/dd1,
+        # any non-positive interval is normalized to the internal fallback
+        # 1000ms / 1 req/s. Do not infer arrival rate from this candidate's
+        # predicted throughput; that makes the queue model depend on the
+        # configuration being ranked.
         llm_ttft = mix_step_latency_ms * np.ceil(isl / ctx_tokens)
-        correction_factor = min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)
-        ttft = encoder_latency_ms + llm_ttft * correction_factor
+        ttft_queue_model = str(kwargs.get("ttft_queue_model", "default")).strip().lower()
+        if ttft_queue_model not in {"default", "md1", "dd1"}:
+            logger.warning("Unknown ttft_queue_model=%s, fallback to default", ttft_queue_model)
+            ttft_queue_model = "default"
+        ttft_wait_base_steps = max(0.0, float(kwargs.get("ttft_wait_base_steps", 0.5)))
+        ttft_wait_max_queue_steps = max(0.0, float(kwargs.get("ttft_wait_max_queue_steps", 3.0)))
+        ttft_wait_queue_scale = max(0.0, float(kwargs.get("ttft_wait_queue_scale", 1.0)))
+        ttft_request_interval_ms = float(kwargs.get("ttft_request_interval_ms", 0.0))
+        if ttft_request_interval_ms <= 0:
+            ttft_request_interval_ms = 1000.0
+
+        correction_factor = 1.0
+        queue_wait_steps = 0.0
+        prefill_util = 0.0
+        request_rate_est = 0.0
+        prefill_service_rate = 0.0
+        prefill_service_time_ms = 0.0
+        prefill_units_per_mix_step = (ctx_tokens / isl) if isl > 0 else 0.0
+
+        if ttft_queue_model == "default":
+            correction_factor = min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)
+            ttft = encoder_latency_ms + llm_ttft * correction_factor
+        else:
+            if mix_step_latency_ms > 0 and prefill_units_per_mix_step > 0:
+                # Effective prefill service time for one full request context.
+                prefill_service_time_ms = mix_step_latency_ms / prefill_units_per_mix_step
+                if prefill_service_time_ms > 0:
+                    prefill_service_rate = 1000.0 / prefill_service_time_ms
+                    if prefill_service_rate > 0:
+                        # rho is utilization of the prefill service station under the
+                        # configured arrival interval. It is intentionally independent
+                        # of output throughput, which is a result of this candidate.
+                        request_rate_est = 1000.0 / ttft_request_interval_ms
+                        prefill_util = request_rate_est / prefill_service_rate
+                        if ttft_queue_model == "dd1":
+                            # D/D/1 with deterministic arrivals has zero steady-state
+                            # queueing delay below capacity. At or above capacity there
+                            # is no finite steady-state slack, so use the configured cap.
+                            queue_wait_steps = 0.0 if prefill_util < 1.0 else ttft_wait_max_queue_steps
+                        elif prefill_util < 1.0:
+                            # M/D/1 waiting time: Wq = rho/(2*(1-rho)) * service_time.
+                            md1_wait_ms = (
+                                prefill_util / (2.0 * (1.0 - prefill_util))
+                            ) * prefill_service_time_ms
+                            queue_wait_steps = ttft_wait_queue_scale * (md1_wait_ms / mix_step_latency_ms)
+                        else:
+                            # Saturation guard: rho >= 1 leads to unbounded queueing delay.
+                            queue_wait_steps = ttft_wait_max_queue_steps
+            queue_wait_steps = min(max(queue_wait_steps, 0.0), ttft_wait_max_queue_steps)
+            ttft_wait_steps = ttft_wait_base_steps + queue_wait_steps
+            ttft = encoder_latency_ms + llm_ttft + mix_step_latency_ms * ttft_wait_steps
+
         logger.debug(
-            f"ttft correction factor: {2 + (steps_to_finish_ctx - 3) / 2 / 10} capped to "
-            f"{correction_factor} when b: {b}, ctx_tokens: {ctx_tokens} isl {isl}"
+            "TTFT queue model: "
+            f"queue_model={ttft_queue_model}, "
+            f"correction_factor={correction_factor}, "
+            f"wait_base_steps={ttft_wait_base_steps}, "
+            f"wait_queue_steps={queue_wait_steps}, "
+            f"wait_total_steps={ttft_wait_base_steps + queue_wait_steps}, "
+            f"request_rate_est={request_rate_est}, "
+            f"prefill_service_rate={prefill_service_rate}, "
+            f"prefill_service_time_ms={prefill_service_time_ms}, "
+            f"prefill_util={prefill_util}, "
+            f"request_interval_ms={ttft_request_interval_ms}, "
+            f"queue_scale={ttft_wait_queue_scale}, "
+            f"queue_cap_steps={ttft_wait_max_queue_steps}, "
+            f"b={b}, ctx_tokens={ctx_tokens}, isl={isl}"
         )
 
         # Guard against osl == 1 (no-decode), which makes both denominators zero.
