@@ -1110,26 +1110,25 @@ def run_dsv4_mla_module(
                             prefix_len=cur_prefix,
                         )
 
+                        # 0.5.13+ ships sglang's forward_context module (DeepSeek-V4
+                        # reads the attn backend off the global ForwardContext via
+                        # get_attn_backend()); v0.5.12/e958 ships no such module and
+                        # reads it off forward_batch instead. Detect by import
+                        # capability rather than a version-string prefix, so 0.5.14+
+                        # keeps the real context instead of falling to the no-op.
+                        # Reuses collect_mla_module's proven helper.
+                        try:
+                            from collector.sglang.collect_mla_module import _import_sglang_forward_context
+                        except ModuleNotFoundError:
+                            from collect_mla_module import _import_sglang_forward_context
+
+                        forward_context_type, forward_context = _import_sglang_forward_context()
+
                         def kernel_func(model_runner=model_runner):
-                            # e958 sglang DeepSeek-V4 forward reads the attn backend
-                            # from the global forward context (get_attn_backend), so
                             # enter sglang's default forward_context around the call.
                             # (model_runner bound as a default arg to make the closure
                             # explicit for static analysis.)
-                            # 0.5.13+ reads the attn backend from the global ForwardContext
-                            # (deepseek_v4: get_attn_backend()); v0.5.12/e958 reads it off
-                            # forward_batch and ships no such module, so use a no-op there.
-                            import sglang as _sgl
-
-                            if _sgl.__version__.startswith("0.5.13"):
-                                from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
-
-                                ctx = forward_context(ForwardContext(attn_backend=model_runner.attn_backend))
-                            else:
-                                from contextlib import nullcontext
-
-                                ctx = nullcontext()
-                            with ctx:
+                            with forward_context(forward_context_type(attn_backend=model_runner.attn_backend)):
                                 return attention_module(
                                     x=hidden_states,
                                     positions=positions,
