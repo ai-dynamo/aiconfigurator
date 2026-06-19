@@ -79,12 +79,13 @@ Tolerances are baked-in constants in the runner, not CLI flags.
 | **DRIFT** | **0** | — |
 | **REGRESSION** | **0** | — |
 
-Among the 1,875 PASS entries the agreement is far tighter than the 1% gate:
+Among the 1,875 PASS entries the agreement is far tighter than the 1% gate
+(final build `048c3a7f`):
 
-- Max absolute drift: **0.41% ttft / 0.45% tpot**.
-- Mean absolute drift: **0.002% ttft / 0.008% tpot**.
-- Only 33 entries exceed 0.1% drift (all still < 0.5%); the rest are
-  bit-identical to the Python engine.
+- Max absolute drift: **0.41% ttft / 0.18% tpot**.
+- Mean absolute drift: **0.003% ttft / 0.005% tpot**.
+- Only 4 entries exceed 0.1% drift (all < 0.5%); the rest are bit-identical to
+  the Python engine.
 
 ## 5. Parity bugs found and fixed
 
