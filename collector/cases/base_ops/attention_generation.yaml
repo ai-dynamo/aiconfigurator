@@ -145,6 +145,7 @@ framework_specific_op_cases:
         - 256
         window_sizes:
         - 0
+        - 128
         - 1024
   vllm:
     attention_generation:
@@ -179,7 +180,6 @@ framework_specific_op_cases:
         - 128
         - 192
         - 256
-        - 512
         window_sizes:
         - 0
         - 128
