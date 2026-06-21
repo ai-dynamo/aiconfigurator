@@ -303,6 +303,7 @@ def render_backend_templates(
     has_prefill = bool(params_obj.get("prefill"))
     has_decode = bool(params_obj.get("decode"))
     has_agg = bool(params_obj.get("agg"))
+    has_encode = bool(params_obj.get("encode"))
     generate_disagg = has_prefill and has_decode
     generate_agg = has_agg and not generate_disagg
     # Prefer disagg when both are present
@@ -313,6 +314,10 @@ def render_backend_templates(
     else:
         # Fallback: prefer disagg if any prefill/decode provided, else agg
         worker_plan = ["prefill", "decode"] if (has_prefill or has_decode) else ["agg"]
+    # Multimodal EPD: the encode worker is an optional extra role rendered
+    # alongside prefill/decode/agg. Presence-guarded: no encode role -> unchanged.
+    if has_encode:
+        worker_plan = worker_plan + ["encode"]
 
     rendered_templates = {}
 
@@ -518,6 +523,8 @@ def render_backend_templates(
                     out_name = "extra_engine_args_agg.yaml"
                 elif worker == "prefill":
                     out_name = "extra_engine_args_prefill.yaml"
+                elif worker == "encode":
+                    out_name = "extra_engine_args_encode.yaml"
                 else:
                     out_name = "extra_engine_args_decode.yaml"
                 rendered_templates[out_name] = rendered
@@ -529,6 +536,7 @@ def render_backend_templates(
     context["prefill_engine_args_inline"] = rendered_templates.get("extra_engine_args_prefill.yaml", "")
     context["decode_engine_args_inline"] = rendered_templates.get("extra_engine_args_decode.yaml", "")
     context["agg_engine_args_inline"] = rendered_templates.get("extra_engine_args_agg.yaml", "")
+    context["encode_engine_args_inline"] = rendered_templates.get("extra_engine_args_encode.yaml", "")
 
     # Resolve CLI args template (version-specific preferred)
     cli_template_candidates = list(template_path.glob("cli_args*.j2"))
@@ -555,6 +563,10 @@ def render_backend_templates(
             context["decode_cli_args"] = cli
             context["decode_cli_args_list"] = cli_list
             rendered_templates["cli_args_decode"] = cli
+        elif worker == "encode":
+            context["encode_cli_args"] = cli
+            context["encode_cli_args_list"] = cli_list
+            rendered_templates["cli_args_encode"] = cli
         else:
             context["agg_cli_args"] = cli
             context["agg_cli_args_list"] = cli_list
@@ -643,10 +655,12 @@ def render_backend_templates(
     prefill_gpu = int(pv_params.get("prefill", {}).get("gpus_per_worker") or 1)
     decode_gpu = int(pv_params.get("decode", {}).get("gpus_per_worker") or 1)
     agg_gpu = int(pv_params.get("agg", {}).get("gpus_per_worker") or 1)
+    encode_gpu = int(pv_params.get("encode", {}).get("gpus_per_worker") or 1)
 
     context["prefill_gpu"] = prefill_gpu
     context["decode_gpu"] = decode_gpu
     context["agg_gpu"] = agg_gpu
+    context["encode_gpu"] = encode_gpu
 
     # Render auxiliary templates based on deployment target
     if deployment_target == "llm-d":
@@ -998,6 +1012,13 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context["prefill_gpu"] = context["prefill_gpus_per_worker"]
     context["decode_gpu"] = context["decode_gpus_per_worker"]
     context["agg_gpu"] = context["agg_gpus_per_worker"]
+    # Multimodal EPD encode worker (set only when present so non-EPD context is
+    # unchanged; the k8s builder reads these only when building the encode worker).
+    if worker_params.get("encode"):
+        context["encode_params"] = worker_params.get("encode", {})
+        context["encode_workers"] = workers.get("encode_workers", 1)
+        context["encode_gpus_per_worker"] = workers.get("encode_gpus_per_worker")
+        context["encode_gpu"] = context["encode_gpus_per_worker"]
 
     fr = 1 if (context.get("include_frontend") is True) else 0
     context["frontend_replicas"] = fr
@@ -1059,7 +1080,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
                 param_to_template_var[param_key] = template_var_mapping[param_key]
 
     # Apply parameter mapping for each worker type
-    for worker_type in ["prefill", "decode", "agg"]:
+    for worker_type in ["prefill", "decode", "agg", "encode"]:
         worker_config = worker_params.get(worker_type, {})
 
         for param_key, value in worker_config.items():
@@ -1101,7 +1122,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
 
     # Add individual parameter shortcuts for easy template access
     # Expose worker-scoped parameters with role prefixes only
-    for worker_type in ["prefill", "decode", "agg"]:
+    for worker_type in ["prefill", "decode", "agg", "encode"]:
         worker_config = worker_params.get(worker_type, {})
         for key, value in worker_config.items():
             context[f"{worker_type}_{key}"] = value
@@ -1112,6 +1133,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context["prefill_engine_args"] = "/workspace/engine_configs/prefill_config.yaml"
     context["decode_engine_args"] = "/workspace/engine_configs/decode_config.yaml"
     context["agg_engine_args"] = "/workspace/engine_configs/agg_config.yaml"
+    context["encode_engine_args"] = "/workspace/engine_configs/encode_config.yaml"
 
     # Initialize nested backend config dicts for template access
     for nested in [
