@@ -128,6 +128,9 @@ inputs:
   - key: WorkerConfig.agg_workers
     required: false
     default: 1
+  # Multimodal EPD encode worker count (optional; absent -> no encode worker).
+  - key: WorkerConfig.encode_workers
+    required: false
 
   # Runtime additions
   - key: ModelConfig.is_moe

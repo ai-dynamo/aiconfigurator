@@ -176,6 +176,8 @@ def to_legacy_params(req: GeneratorRequest) -> dict[str, Any]:
         dyn_config=dyn,
         backend=req.backend.name or None,
         generator_dynamo_version=req.backend.dynamo_version or raw.get("generator_dynamo_version"),
+        encode_params=role_params.get("encode"),
+        encode_workers=req.topology.workers.get("encode"),
     )
 
     if model_cfg:

@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 SCHEMA_VERSION = "v1beta1"
 
-_ROLES = ("agg", "prefill", "decode")
+_ROLES = ("agg", "prefill", "decode", "encode")
 
 
 @dataclass(frozen=True)
@@ -181,10 +181,12 @@ class GeneratorRequest:
             errors.append(f"unknown topology.roles: {sorted(bad_roles)}")
         roles = set(self.topology.roles) & set(_ROLES)
         if roles:
-            if self.topology.mode == "agg" and roles != {"agg"}:
-                errors.append("agg mode must use only the 'agg' role")
-            if self.topology.mode == "disagg" and not roles <= {"prefill", "decode"}:
-                errors.append("disagg mode roles must be a subset of {prefill, decode}")
+            # `encode` is an optional extra role (multimodal EPD) allowed in both
+            # modes: encode+agg = 2-stage E/PD, encode+disagg = 3-stage EPD.
+            if self.topology.mode == "agg" and not roles <= {"agg", "encode"}:
+                errors.append("agg mode roles must be a subset of {agg, encode}")
+            if self.topology.mode == "disagg" and not roles <= {"prefill", "decode", "encode"}:
+                errors.append("disagg mode roles must be a subset of {prefill, decode, encode}")
         # A sizing source is required (naive total_gpus OR explicit roles).
         if not roles and not self.topology.total_gpus:
             errors.append("topology requires either total_gpus or explicit roles")

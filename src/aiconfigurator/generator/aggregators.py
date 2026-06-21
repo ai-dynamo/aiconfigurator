@@ -40,6 +40,8 @@ def collect_generator_params(
     sflow: Optional[dict[str, Any]] = None,
     backend: Optional[str] = None,
     generator_dynamo_version: Optional[str] = None,
+    encode_params: Optional[dict[str, Any]] = None,
+    encode_workers: Optional[int] = None,
 ) -> dict[str, Any]:
     prefill_params = prefill_params or {}
     decode_params = decode_params or {}
@@ -143,6 +145,18 @@ def collect_generator_params(
             "agg_engine_args": "/workspace/engine_configs/agg_config.yaml",
         }
     )
+    # Optional multimodal encode worker (EPD). Added only when provided so a
+    # request without it produces a byte-identical params dict.
+    role_params = {
+        "prefill": prefill_params,
+        "decode": decode_params,
+        "agg": agg_params,
+    }
+    if encode_params:
+        role_params["encode"] = encode_params
+        workers_dict["encode_workers"] = int(encode_workers if encode_workers is not None else 1)
+        workers_dict["encode_gpus_per_worker"] = coerce_int(encode_params.get("gpus_per_worker"))
+
     return {
         "ServiceConfig": service_payload,
         "K8sConfig": k8s_payload,
@@ -152,11 +166,7 @@ def collect_generator_params(
         "BenchConfig": bench_cfg,
         "SflowConfig": dict(sflow_cfg),
         "NodeConfig": {"num_gpus_per_node": int(num_gpus_per_node)},
-        "params": {
-            "prefill": prefill_params,
-            "decode": decode_params,
-            "agg": agg_params,
-        },
+        "params": role_params,
     }
 
 
@@ -270,7 +280,7 @@ def generate_config_from_input_dict(
     except Exception:
         allowed_keys = set()
     workers_in = input_params.get("Workers", {}) or {}
-    for role in ("prefill", "decode", "agg"):
+    for role in ("prefill", "decode", "agg", "encode"):
         role_in = workers_in.get(role, {}) or {}
         if isinstance(role_in, dict):
             # `extra_engine_args` is a user passthrough, not a mapped param, so
@@ -299,6 +309,8 @@ def generate_config_from_input_dict(
         dyn_config=target.get("DynConfig", {}),
         backend=backend_key,
         generator_dynamo_version=target.get("generator_dynamo_version"),
+        encode_params=target.get("params", {}).get("encode"),
+        encode_workers=target.get("WorkerConfig", {}).get("encode_workers"),
     )
     if target.get("ModelConfig"):
         params["ModelConfig"] = target.get("ModelConfig", {})
