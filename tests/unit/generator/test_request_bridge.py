@@ -35,6 +35,33 @@ def _row(prefix=""):
                       {"workers": 1, "tp": 1, "pp": 1, "dp": 1, "moe_tp": 1, "moe_ep": 1, "bs": 128}.items()})
 
 
+def test_bridge_injects_encode_role_from_overrides():
+    """EPD via `cli default`: an encode role is injected from Workers.encode.* +
+    WorkerConfig.encode_workers (the sweep does not produce it)."""
+    tc = _fake_task_config("disagg")
+    row = pd.Series(
+        {f"(p){k}": v for k, v in {"workers": 1, "tp": 2, "pp": 1, "dp": 1, "moe_tp": 1, "moe_ep": 1, "bs": 64}.items()}
+        | {f"(d){k}": v for k, v in {"workers": 1, "tp": 2, "pp": 1, "dp": 1, "moe_tp": 1, "moe_ep": 1, "bs": 128}.items()}
+    )
+    # without the override -> no encode role
+    base = task_config_to_generator_config(tc, row, num_gpus_per_node=8)
+    assert "encode" not in base["params"]
+    # with the override -> encode role injected
+    ov = {
+        "Workers": {"encode": {"tensor_parallel_size": 1, "modality": "multimodal", "max_file_size_mb": 50}},
+        "WorkerConfig": {"encode_workers": 1},
+    }
+    cfg = task_config_to_generator_config(tc, row, generator_overrides=ov, num_gpus_per_node=8)
+    enc = cfg["params"]["encode"]
+    assert enc["tensor_parallel_size"] == 1 and enc["gpus_per_worker"] == 1
+    assert enc["modality"] == "multimodal" and enc["max_file_size_mb"] == 50
+    assert cfg["WorkerConfig"]["encode_workers"] == 1
+
+
+def _disagg_task_config():
+    return _fake_task_config("disagg")
+
+
 def test_request_bridge_matches_dict_bridge_agg():
     tc = _fake_task_config("agg")
     row = _row("")

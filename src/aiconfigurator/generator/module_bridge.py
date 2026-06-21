@@ -232,6 +232,21 @@ def task_config_to_generator_config(
     if decode_params:
         decode_workers = _safe_int(worker_count_overrides.get("decode_workers"), decode_workers)
 
+    # Multimodal EPD: the encode worker is not produced by the SDK sweep (the
+    # encoder is modeled colocated with prefill). Inject it from explicit
+    # overrides -- --generator-set Workers.encode.* + WorkerConfig.encode_workers.
+    # Absent -> no encode worker, output unchanged.
+    encode_override = worker_overrides.get("encode")
+    encode_params = None
+    encode_workers = 0
+    if isinstance(encode_override, dict) and encode_override:
+        encode_params = dict(encode_override)
+        e_tp = _safe_int(encode_params.get("tensor_parallel_size"), 1)
+        e_pp = _safe_int(encode_params.get("pipeline_parallel_size"), 1)
+        e_dp = _safe_int(encode_params.get("data_parallel_size"), 1)
+        encode_params.setdefault("gpus_per_worker", e_tp * e_pp * e_dp)
+        encode_workers = _safe_int(worker_count_overrides.get("encode_workers"), 1)
+
     sla_cfg = {
         "isl": runtime_cfg.isl,
         "osl": runtime_cfg.osl,
@@ -257,6 +272,8 @@ def task_config_to_generator_config(
         dyn_config=dyn_cfg,
         backend=backend_name,
         generator_dynamo_version=generator_dynamo_version,
+        encode_params=encode_params,
+        encode_workers=encode_workers if encode_params else None,
     )
 
     params = _deep_merge(params, overrides.get("Params"))
