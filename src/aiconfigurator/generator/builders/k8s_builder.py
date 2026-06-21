@@ -182,7 +182,10 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
         return {"size": sz}
 
     # macro render_worker(component_name, role, replicas, gpu, cli_args_list)
-    def render_worker(role: str | None, replicas: Any, gpu: Any, cli_args_list: Any) -> DGDService:
+    def render_worker(
+        role: str | None, replicas: Any, gpu: Any, cli_args_list: Any,
+        extra_args: list[str] | None = None,
+    ) -> DGDService:
         envs = None
         if hf_home or etcd_endpoints:
             envs = []
@@ -227,6 +230,14 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
             args.extend(
                 ["--is-decode-worker", "--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both"}']
             )
+        elif role == "encode":
+            # Multimodal EPD encode worker (vision encoder only).
+            args.extend(["--multimodal-encode-worker", "--enable-multimodal"])
+            gmu = (context.get("encode_params") or {}).get("gpu_memory_utilization")
+            if gmu is not None:
+                args.extend(["--gpu-memory-utilization", str(gmu)])
+            args.extend(["--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'])
+        args.extend(extra_args or [])
 
         # Phase 4c-T2 EFA pod requirements (worker-only, opt-in). Only the efa
         # transport profile carries a `pod` block; non-efa transports emit
@@ -326,9 +337,17 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
 
     services: dict[str, DGDService] = {"Frontend": frontend}
     mode = dyn.get("mode", "disagg") or "disagg"
+    # Multimodal EPD: optional encode worker + mm flags on the PD workers
+    # (the prefill/entry worker also routes to the encoder). Presence-guarded.
+    is_epd = bool(context.get("encode_workers"))
+    pd_mm_flags = ["--enable-multimodal", "--enable-mm-embeds"] if is_epd else None
+    entry_mm_flags = (
+        ["--route-to-encoder", "--enable-multimodal", "--enable-mm-embeds"] if is_epd else None
+    )
     if mode == "agg":
         services["VllmWorker"] = render_worker(
-            None, context.get("agg_workers"), context.get("agg_gpu"), context.get("agg_cli_args_list") or []
+            None, context.get("agg_workers"), context.get("agg_gpu"), context.get("agg_cli_args_list") or [],
+            extra_args=entry_mm_flags,
         )
     else:
         services["VllmPrefillWorker"] = render_worker(
@@ -336,12 +355,18 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
             context.get("prefill_workers"),
             context.get("prefill_gpu"),
             context.get("prefill_cli_args_list") or [],
+            extra_args=entry_mm_flags,
         )
         services["VllmDecodeWorker"] = render_worker(
             "decode",
             context.get("decode_workers"),
             context.get("decode_gpu"),
             context.get("decode_cli_args_list") or [],
+            extra_args=pd_mm_flags,
+        )
+    if is_epd:
+        services["VllmEncodeWorker"] = render_worker(
+            "encode", context.get("encode_workers"), context.get("encode_gpu"), [],
         )
 
     dgd = DGD(name=context.get("name"), namespace=k8s.get("k8s_namespace"), services=services)
@@ -426,7 +451,10 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
         return {"size": sz}
 
     # macro render_worker(component_name, role, replicas, gpu, cli_args)
-    def render_worker(role: str | None, replicas: Any, gpu: Any, cli_args: Any) -> DGDService:
+    def render_worker(
+        role: str | None, replicas: Any, gpu: Any, cli_args: Any,
+        extra_flags: list[str] | None = None,
+    ) -> DGDService:
         envs = None
         if hf_home or etcd_endpoints:
             envs = []
@@ -461,6 +489,15 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
             lines.append("args+=(--disaggregation-mode prefill)")
         elif role == "decode":
             lines.append("args+=(--disaggregation-mode decode)")
+        elif role == "encode":
+            # Multimodal EPD encode worker (vision encoder only).
+            lines.append("args+=(--multimodal-encode-worker)")
+            _ct = (context.get("encode_params") or {}).get("chat_template")
+            if _ct:
+                lines.append(f'args+=(--chat-template "{_ct}")')
+            lines.append("args+=(--skip-tokenizer-init)")
+        for _flag in (extra_flags or []):
+            lines.append(f"args+=({_flag})")
         if enable_router:
             port = svc_cfg.get("sglang_kv_event_port") or 5557
             lines.append(
@@ -567,16 +604,27 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
         frontend.extra["envs"] = fe_envs
 
     services: dict[str, DGDService] = {"Frontend": frontend}
+    # Multimodal EPD: optional encode worker + --multimodal-worker on the PD
+    # worker(s) (sglang E/PD is typically 2-stage: encode + aggregated PD).
+    is_epd = bool(context.get("encode_workers"))
+    pd_mm_flags = ["--multimodal-worker", "--disaggregation-transfer-backend nixl"] if is_epd else None
     if mode == "agg":
         services["SGLangWorker"] = render_worker(
-            None, context.get("agg_workers"), context.get("agg_gpu"), context.get("agg_cli_args")
+            None, context.get("agg_workers"), context.get("agg_gpu"), context.get("agg_cli_args"),
+            extra_flags=pd_mm_flags,
         )
     else:
         services["SGLangPrefillWorker"] = render_worker(
-            "prefill", context.get("prefill_workers"), context.get("prefill_gpu"), context.get("prefill_cli_args")
+            "prefill", context.get("prefill_workers"), context.get("prefill_gpu"), context.get("prefill_cli_args"),
+            extra_flags=pd_mm_flags,
         )
         services["SGLangDecodeWorker"] = render_worker(
-            "decode", context.get("decode_workers"), context.get("decode_gpu"), context.get("decode_cli_args")
+            "decode", context.get("decode_workers"), context.get("decode_gpu"), context.get("decode_cli_args"),
+            extra_flags=pd_mm_flags,
+        )
+    if is_epd:
+        services["SGLangEncodeWorker"] = render_worker(
+            "encode", context.get("encode_workers"), context.get("encode_gpu"), context.get("encode_cli_args"),
         )
 
     dgd = DGD(name=context.get("name"), namespace=k8s.get("k8s_namespace"), services=services)
