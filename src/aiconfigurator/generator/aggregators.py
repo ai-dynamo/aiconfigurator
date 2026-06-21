@@ -273,8 +273,8 @@ def generate_config_from_input_dict(
     for role in ("prefill", "decode", "agg"):
         role_in = workers_in.get(role, {}) or {}
         if isinstance(role_in, dict):
-            # `extra_engine_args` is a user passthrough (W4), not a mapped param,
-            # so it must survive the allowed-keys filter to reach the renderer.
+            # `extra_engine_args` is a user passthrough, not a mapped param, so
+            # it must survive the allowed-keys filter to reach the renderer.
             filtered = {
                 k: v
                 for k, v in role_in.items()

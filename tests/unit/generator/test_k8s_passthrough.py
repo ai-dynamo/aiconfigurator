@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""W2: optional user K8s passthrough (extra_env / *_extra_pod_spec).
+"""Optional user K8s passthrough (extra_env / *_extra_pod_spec).
 
 These are additive and presence-guarded: absent -> output byte-identical to the
 baseline; present -> the values land on the worker/frontend services.

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""W4: optional per-role trtllm engine-config passthrough.
+"""Optional per-role trtllm engine-config passthrough.
 
 Lets a user inject arbitrary ``extra_engine_args`` keys the template doesn't
 model. Additive and presence-guarded: absent -> output byte-identical.
