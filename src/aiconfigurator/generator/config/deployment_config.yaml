@@ -221,6 +221,27 @@ inputs:
   - key: BenchConfig.ui
     required: false
     default: "'simple'"
+  # Multimodal-image / EPD benchmark options (vision-language deployments).
+  # image_batch_size default 0 = disabled; absent value -> image args omitted.
+  - key: BenchConfig.image_batch_size
+    required: false
+    default: 0
+  - key: BenchConfig.image_width_mean
+    required: false
+  - key: BenchConfig.image_width_stddev
+    required: false
+  - key: BenchConfig.image_height_mean
+    required: false
+  - key: BenchConfig.image_height_stddev
+    required: false
+  - key: BenchConfig.image_format
+    required: false
+  - key: BenchConfig.image_source
+    required: false
+  - key: BenchConfig.input_file
+    required: false
+  - key: BenchConfig.custom_dataset_type
+    required: false
 
   # LlmdConfig - llm-d specific configuration
   - key: LlmdConfig.hf_token_secret

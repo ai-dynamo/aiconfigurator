@@ -35,12 +35,44 @@ BENCH_PREFIX="${AICONFIGURATOR_BENCH_PREFIX:-{{ BenchConfig.prefix | default(0) 
 BENCH_PREFIX_PROMPTS="${AICONFIGURATOR_BENCH_PREFIX_PROMPTS:-{{ BenchConfig.prefix_prompt_pool_size | default(1) }}}"
 BENCH_UI="simple"
 BENCH_MULTI_ROUND="${AICONFIGURATOR_BENCH_MULTI_ROUND:-20}"
+{% if (BenchConfig.image_batch_size | default(0)) | int > 0 %}
+BENCH_IMAGE_BATCH_SIZE="${AICONFIGURATOR_BENCH_IMAGE_BATCH_SIZE:-{{ BenchConfig.image_batch_size | default(0) }}}"
+BENCH_IMAGE_WIDTH_MEAN="${AICONFIGURATOR_BENCH_IMAGE_WIDTH_MEAN:-{{ BenchConfig.image_width_mean | default('') }}}"
+BENCH_IMAGE_WIDTH_STDDEV="${AICONFIGURATOR_BENCH_IMAGE_WIDTH_STDDEV:-{{ BenchConfig.image_width_stddev | default('') }}}"
+BENCH_IMAGE_HEIGHT_MEAN="${AICONFIGURATOR_BENCH_IMAGE_HEIGHT_MEAN:-{{ BenchConfig.image_height_mean | default('') }}}"
+BENCH_IMAGE_HEIGHT_STDDEV="${AICONFIGURATOR_BENCH_IMAGE_HEIGHT_STDDEV:-{{ BenchConfig.image_height_stddev | default('') }}}"
+BENCH_IMAGE_FORMAT="${AICONFIGURATOR_BENCH_IMAGE_FORMAT:-{{ BenchConfig.image_format | default('') }}}"
+BENCH_IMAGE_SOURCE="${AICONFIGURATOR_BENCH_IMAGE_SOURCE:-{{ BenchConfig.image_source | default('') }}}"
+{% endif %}
+{% if BenchConfig.input_file | default('') %}
+BENCH_INPUT_FILE="${AICONFIGURATOR_BENCH_INPUT_FILE:-{{ BenchConfig.input_file | default('') }}}"
+BENCH_CUSTOM_DATASET_TYPE="${AICONFIGURATOR_BENCH_CUSTOM_DATASET_TYPE:-{{ BenchConfig.custom_dataset_type | default('') }}}"
+{% endif %}
 
 prefix_args=()
 if [[ "${BENCH_PREFIX}" =~ ^[0-9]+$ && "${BENCH_PREFIX}" -gt 0 \
     && "${BENCH_PREFIX_PROMPTS}" =~ ^[0-9]+$ && "${BENCH_PREFIX_PROMPTS}" -gt 0 ]]; then
   prefix_args+=(--prefix-prompt-length "${BENCH_PREFIX}" --num-prefix-prompts "${BENCH_PREFIX_PROMPTS}")
 fi
+{% if (BenchConfig.image_batch_size | default(0)) | int > 0 %}
+image_args=()
+if [[ "${BENCH_IMAGE_BATCH_SIZE}" =~ ^[0-9]+$ && "${BENCH_IMAGE_BATCH_SIZE}" -gt 0 ]]; then
+  image_args+=(--image-batch-size "${BENCH_IMAGE_BATCH_SIZE}")
+  [[ -n "${BENCH_IMAGE_WIDTH_MEAN}" ]] && image_args+=(--image-width-mean "${BENCH_IMAGE_WIDTH_MEAN}")
+  [[ -n "${BENCH_IMAGE_WIDTH_STDDEV}" ]] && image_args+=(--image-width-stddev "${BENCH_IMAGE_WIDTH_STDDEV}")
+  [[ -n "${BENCH_IMAGE_HEIGHT_MEAN}" ]] && image_args+=(--image-height-mean "${BENCH_IMAGE_HEIGHT_MEAN}")
+  [[ -n "${BENCH_IMAGE_HEIGHT_STDDEV}" ]] && image_args+=(--image-height-stddev "${BENCH_IMAGE_HEIGHT_STDDEV}")
+  [[ -n "${BENCH_IMAGE_FORMAT}" ]] && image_args+=(--image-format "${BENCH_IMAGE_FORMAT}")
+  [[ -n "${BENCH_IMAGE_SOURCE}" ]] && image_args+=(--image-source "${BENCH_IMAGE_SOURCE}")
+fi
+{% endif %}
+{% if BenchConfig.input_file | default('') %}
+input_file_args=()
+if [[ -n "${BENCH_INPUT_FILE}" && -f "${BENCH_INPUT_FILE}" ]]; then
+  input_file_args+=(--input-file "${BENCH_INPUT_FILE}")
+  [[ -n "${BENCH_CUSTOM_DATASET_TYPE}" ]] && input_file_args+=(--custom-dataset-type "${BENCH_CUSTOM_DATASET_TYPE}")
+fi
+{% endif %}
 
 for concurrency in "${concurrency_array[@]}"; do
   echo "Run concurrency: $concurrency"
@@ -53,6 +85,12 @@ for concurrency in "${concurrency_array[@]}"; do
     --isl "${BENCH_ISL}" --isl-stddev "${BENCH_ISL_STDDEV}" \
     --osl "${BENCH_OSL}" --osl-stddev "${BENCH_OSL_STDDEV}" \
     "${prefix_args[@]}" \
+{% if (BenchConfig.image_batch_size | default(0)) | int > 0 %}
+    "${image_args[@]}" \
+{% endif %}
+{% if BenchConfig.input_file | default('') %}
+    "${input_file_args[@]}" \
+{% endif %}
     --extra-inputs ignore_eos:true \
     --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
     --concurrency ${concurrency} \
