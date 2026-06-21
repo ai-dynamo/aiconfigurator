@@ -385,17 +385,23 @@ def add_generator_override_arguments(parser: argparse.ArgumentParser) -> None:
         help="Print generator schema help (deploy, backend, or all) and exit.",
     )
     grp.add_argument(
+        "--config-template-version",
         "--generated-config-version",
+        dest="generated_config_version",
         type=str,
         default=None,
-        help="Backend template version for generated artifacts (e.g. 1.1.0rc5).",
+        help="[expert] Override the backend template version for generated "
+        "artifacts (e.g. 1.1.0rc5). Takes precedence over the version derived "
+        "from --dynamo-version. Alias: --generated-config-version.",
     )
     grp.add_argument(
+        "--dynamo-version",
         "--generator-dynamo-version",
         dest="generator_dynamo_version",
         type=str,
         default=None,
-        help="Dynamo version used for backend template selection.",
+        help="Target Dynamo release to deploy on; selects both the container "
+        "image tag and the config-template version. Alias: --generator-dynamo-version.",
     )
 
 
