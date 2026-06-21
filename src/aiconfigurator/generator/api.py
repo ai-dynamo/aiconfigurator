@@ -404,6 +404,39 @@ def add_generator_override_arguments(parser: argparse.ArgumentParser) -> None:
         "image tag and the config-template version. Alias: --generator-dynamo-version.",
     )
 
+    dep = parser.add_argument_group(
+        "Cluster & Deployment",
+        "Common deployment overrides. Each is a convenience shortcut for a "
+        "--generator-set K8sConfig.* key and takes precedence over it.",
+    )
+    dep.add_argument(
+        "--namespace",
+        type=str,
+        default=None,
+        help="Kubernetes namespace for generated resources (K8sConfig.k8s_namespace).",
+    )
+    dep.add_argument(
+        "--model-cache",
+        type=str,
+        default=None,
+        metavar="NAME[:MOUNT[:SUBPATH]]",
+        help="Model-cache PVC. NAME maps to K8sConfig.k8s_pvc_name; optional "
+        ":MOUNT to k8s_pvc_mount_path; optional :SUBPATH to k8s_model_path_in_pvc.",
+    )
+    dep.add_argument(
+        "--transport",
+        choices=["nvlink", "ib", "efa"],
+        default=None,
+        help="Worker network transport (K8sConfig.transport).",
+    )
+    dep.add_argument(
+        "--image-pull-secret",
+        dest="image_pull_secret",
+        type=str,
+        default=None,
+        help="Image pull secret for a private registry (K8sConfig.k8s_image_pull_secret).",
+    )
+
 
 def load_generator_overrides(
     config_path: Optional[str],
@@ -442,6 +475,27 @@ def load_generator_overrides_from_args(args: argparse.Namespace) -> dict[str, An
     dynamo_version = getattr(args, "generator_dynamo_version", None)
     if dynamo_version:
         overrides = _deep_merge_dicts(overrides, {"generator_dynamo_version": dynamo_version})
+
+    # Promoted first-class deployment flags -> K8sConfig overrides. Applied last
+    # so an explicit flag wins over the same key set via --generator-set.
+    k8s: dict[str, Any] = {}
+    if getattr(args, "namespace", None):
+        k8s["k8s_namespace"] = args.namespace
+    if getattr(args, "transport", None):
+        k8s["transport"] = args.transport
+    if getattr(args, "image_pull_secret", None):
+        k8s["k8s_image_pull_secret"] = args.image_pull_secret
+    model_cache = getattr(args, "model_cache", None)
+    if model_cache:
+        parts = model_cache.split(":")
+        if parts[0]:
+            k8s["k8s_pvc_name"] = parts[0]
+        if len(parts) > 1 and parts[1]:
+            k8s["k8s_pvc_mount_path"] = parts[1]
+        if len(parts) > 2 and parts[2]:
+            k8s["k8s_model_path_in_pvc"] = parts[2]
+    if k8s:
+        overrides = _deep_merge_dicts(overrides, {"K8sConfig": k8s})
     return overrides
 
 
