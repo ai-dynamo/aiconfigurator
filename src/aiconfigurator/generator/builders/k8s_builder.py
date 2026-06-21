@@ -618,6 +618,31 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
     image_pull_secret = k8s.get("k8s_image_pull_secret")
     mode = dyn.get("mode", "disagg") or "disagg"
 
+    # Multimodal EPD: an optional encode worker rendered alongside the PD
+    # worker(s). Presence-guarded by encode_workers (set only when an encode
+    # role is present), so non-EPD output is unchanged.
+    is_epd = bool(context.get("encode_workers"))
+    encode_params = context.get("encode_params") or {}
+    _encode_endpoint = "dyn://dynamo.encode.generate"
+
+    def encode_flags() -> list[str]:
+        flags = ["--modality multimodal"]
+        almp = encode_params.get("allowed_local_media_path")
+        if almp:
+            flags.append(f'--allowed-local-media-path "{almp}"')
+        mfs = encode_params.get("max_file_size_mb")
+        if mfs is not None:
+            flags.append(f"--max-file-size-mb {mfs}")
+        return flags
+
+    # PD workers that consume the encode worker carry --modality; the entry
+    # worker (prefill in disagg, the agg/PD worker in 2-stage) also points at
+    # the encode endpoint.
+    pd_modality = ["--modality multimodal"] if is_epd else None
+    pd_entry_flags = (
+        ["--modality multimodal", f'--encode-endpoint "{_encode_endpoint}"'] if is_epd else None
+    )
+
     # Phase 4b-1 pod facts (hardware/transport). Guard on resolved_facts and
     # key presence so a None facts / missing key emits nothing (keeps the
     # crosscheck / no-fact callers byte-identical). Replicated per backend (no
@@ -725,6 +750,7 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
         cli_args_list: Any,
         disagg_mode: str | None,
         publish_metrics: bool,
+        extra_flags: list[str] | None = None,
     ) -> DGDService:
         envs = None
         if hf_home or etcd_endpoints:
@@ -761,6 +787,8 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
             lines.append(f"args+=(--disaggregation-mode {disagg_mode})")
         if publish_metrics:
             lines.append("args+=(--publish-events-and-metrics)")
+        for _flag in (extra_flags or []):
+            lines.append(f"args+=({_flag})")
         lines.append('exec python3 -m dynamo.trtllm "${args[@]}"')
         script = "\n".join(lines) + "\n"
 
@@ -844,6 +872,9 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
             decode_key = str(context.get("decode_engine_args", "")).split("/")[-1]
             data[prefill_key] = cm_value(context.get("prefill_engine_args_inline"))
             data[decode_key] = cm_value(context.get("decode_engine_args_inline"))
+        if is_epd:
+            encode_key = str(context.get("encode_engine_args", "")).split("/")[-1]
+            data[encode_key] = cm_value(context.get("encode_engine_args_inline"))
         # Gate B fix: stamp the same namespace the DGD carries so that a bare
         # `kubectl apply -f` (no -n) lands the ConfigMap next to the workers;
         # otherwise kai-scheduler leaves pods Pending on a missing ConfigMap.
@@ -894,6 +925,7 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
             context.get("agg_cli_args_list"),
             None,
             enable_router,
+            extra_flags=pd_entry_flags,  # 2-stage E/PD: agg worker is the PD entry point
         )
     else:
         services["TRTLLMPrefillWorker"] = render_worker(
@@ -905,6 +937,7 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
             context.get("prefill_cli_args_list"),
             "prefill",
             enable_router,
+            extra_flags=pd_entry_flags,  # 3-stage EPD: prefill is the encode entry point
         )
         services["TRTLLMDecodeWorker"] = render_worker(
             "decode",
@@ -915,6 +948,19 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
             context.get("decode_cli_args_list"),
             "decode",
             enable_router,
+            extra_flags=pd_modality,
+        )
+    if is_epd:
+        services["TRTLLMEncodeWorker"] = render_worker(
+            "encode",
+            context.get("encode_workers"),
+            context.get("encode_gpu"),
+            context.get("encode_engine_args"),
+            context.get("encode_engine_args_inline"),
+            context.get("encode_cli_args_list"),
+            "encode",
+            False,
+            extra_flags=encode_flags(),
         )
 
     docs.append(DGD(name=context.get("name"), namespace=k8s.get("k8s_namespace"), services=services))
