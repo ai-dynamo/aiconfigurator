@@ -44,7 +44,9 @@ def test_trtllm_b200_engine_uses_wideep():
     c = next(c for c in CANARY_CASES if c.name == "deepseek_trtllm_b200_disagg")
     arts = generate_backend_artifacts(copy.deepcopy(c.params), c.backend, backend_version=c.backend_version)
     eng = "\n".join(v for k, v in arts.items() if k.startswith("extra_engine_args_"))
-    assert "WIDEEP" in eng
+    # Check the emitted value line, not a bare substring: the template's
+    # explanatory comment enumerates WIDEEP as a valid option.
+    assert "backend: WIDEEP" in eng
 
 
 def test_sglang_gb200_uses_deepep_moe():
@@ -58,4 +60,6 @@ def test_trtllm_h200_engine_stays_cutlass():
     c = next(c for c in CANARY_CASES if c.name == "trtllm_moe_disagg")  # Qwen MoE, h200
     arts = generate_backend_artifacts(copy.deepcopy(c.params), c.backend, backend_version=c.backend_version)
     eng = "\n".join(v for k, v in arts.items() if k.startswith("extra_engine_args_"))
-    assert "WIDEEP" not in eng
+    # Check the emitted value line, not a bare substring: the template's
+    # explanatory comment enumerates WIDEEP as a valid option.
+    assert "backend: WIDEEP" not in eng

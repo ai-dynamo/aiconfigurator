@@ -505,12 +505,7 @@ def render_backend_templates(
             eng_tmpl = env.get_template(engine_template_file.name)
             for worker in worker_plan:
                 wc = build_engine_worker_context(worker)
-                if backend == "trtllm" and engine_builder_covers(version):
-                    import yaml as _yaml
-                    from aiconfigurator.generator.builders.trtllm_engine_config import build_engine_config
-                    rendered = _yaml.safe_dump(build_engine_config(wc, role=worker, version=version), sort_keys=False)
-                else:
-                    rendered = eng_tmpl.render(**wc)
+                rendered = eng_tmpl.render(**wc)
                 if worker == "agg":
                     out_name = "extra_engine_args_agg.yaml"
                 elif worker == "prefill":
@@ -906,17 +901,6 @@ def build_engine_worker_contexts_for_test(param_values, backend, templates_dir=N
         _engine_context_sink=_sink,
     )
     return captured
-
-
-def engine_builder_covers(version: str | None) -> bool:
-    """True when a trtllm version manifest with builder_facts exists at/<= version
-    (floor match). Below the floor, the Jinja extra_engine_args template is used."""
-    from aiconfigurator.generator.contract.loader import MANIFESTS_DIR, _select_version_manifest
-    versions_dir = MANIFESTS_DIR / "backends" / "trtllm" / "versions"
-    try:
-        return _select_version_manifest(versions_dir, version) is not None
-    except Exception:
-        return False
 
 
 def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict[str, Any]:

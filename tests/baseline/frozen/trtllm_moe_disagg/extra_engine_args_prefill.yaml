@@ -1,33 +1,35 @@
 backend: pytorch
+
+  # is_moe from sdk
 moe_expert_parallel_size: 1
 moe_tensor_parallel_size: 1
+
 moe_config:
-  backend: CUTLASS
+    backend: CUTLASS # MOE backend to use (CUTLASS, CUTEDSL, WIDEEP, TRTLLM, VANILLA)
+
 tensor_parallel_size: 1
 pipeline_parallel_size: 1
-enable_attention_dp: false
-enable_chunked_prefill: false
+enable_attention_dp: False
+enable_chunked_prefill: False
+
+
 max_batch_size: 128
 max_num_tokens: 4512
+
 kv_cache_config:
-  free_gpu_memory_fraction: 0.8
+  free_gpu_memory_fraction: 0.8  # Fraction of GPU memory usable for KV-cache
   dtype: auto
   tokens_per_block: 32
-  enable_block_reuse: false
+  enable_block_reuse: False
+
 cache_transceiver_config:
-  backend: DEFAULT
+  backend: DEFAULT # The communication backend type to use for the cache transceiver ("DEFAULT","UCX","NIXL","MPI")
   max_tokens_in_buffer: 5504
+
 cuda_graph_config:
-  enable_padding: false
-  batch_sizes:
-  - 1
-  - 2
-  - 4
-  - 8
-  - 16
-  - 32
-  - 64
-  - 128
-  - 256
-disable_overlap_scheduler: true
-print_iter_log: false
+  enable_padding: False # Pad CUDA graph
+  batch_sizes: [1,2,4,8,16,32,64,128,256]
+
+disable_overlap_scheduler: True
+print_iter_log: False
+
