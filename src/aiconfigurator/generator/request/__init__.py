@@ -3,6 +3,7 @@
 """Public input contract for the generator. See generator_request_design.md."""
 from __future__ import annotations
 
+from .cli import from_cli
 from .legacy import from_legacy_params, to_legacy_params
 from .schema import (
     SCHEMA_VERSION,
@@ -32,6 +33,7 @@ __all__ = [
     "RoleSizing",
     "SlaSpec",
     "Topology",
+    "from_cli",
     "from_legacy_params",
     "to_legacy_params",
 ]

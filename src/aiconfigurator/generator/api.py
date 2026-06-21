@@ -798,11 +798,44 @@ def generate_naive_config(
     }
 
 
+def generate_from_request(
+    req: Any,
+    output_dir: Optional[str] = None,
+    templates_dir: Optional[str] = None,
+) -> dict[str, str]:
+    """Generate artifacts from a typed GeneratorRequest (the new public entry).
+
+    Lowers the request to the legacy params dict and renders via the unchanged
+    ``generate_backend_artifacts``. Version intent comes from the request:
+    ``backend.generated_config_version`` overrides; otherwise it is derived from
+    ``backend.dynamo_version``; otherwise the renderer uses its default templates.
+    """
+    from .request import to_legacy_params
+
+    params = to_legacy_params(req)
+    backend = req.backend.name
+
+    backend_version = req.backend.generated_config_version
+    if backend_version is None and req.backend.dynamo_version:
+        backend_version = resolve_backend_version_for_dynamo(req.backend.dynamo_version, backend)
+
+    out = output_dir if output_dir is not None else req.emit.output_dir
+    return generate_backend_artifacts(
+        params,
+        backend,
+        templates_dir=templates_dir,
+        output_dir=out,
+        backend_version=backend_version,
+        deployment_target=req.emit.deployment_target,
+    )
+
+
 __all__ = [
     "add_generator_override_arguments",
     "collect_generator_params",
     "generate_backend_artifacts",
     "generate_backend_config",
+    "generate_from_request",
     "generate_config_from_input_dict",
     "generate_config_from_yaml",
     "generate_naive_config",
