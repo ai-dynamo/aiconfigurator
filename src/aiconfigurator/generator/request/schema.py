@@ -132,6 +132,36 @@ class EmitTargets:
 
 
 @dataclass(frozen=True)
+class EncodeSpec:
+    """First-class config for the multimodal EPD encode worker.
+
+    Lowers into the `encode` role's params (where the typed k8s builders read it),
+    so callers don't have to stuff these into RoleSizing.extra. All optional;
+    `modality` defaults to "multimodal" at render time.
+    """
+
+    modality: Optional[str] = None  # trtllm --modality
+    allowed_local_media_path: Optional[str] = None  # trtllm --allowed-local-media-path
+    max_file_size_mb: Optional[int] = None  # trtllm --max-file-size-mb
+    chat_template: Optional[str] = None  # sglang --chat-template
+    gpu_memory_utilization: Optional[float] = None  # vllm --gpu-memory-utilization
+
+    def to_params(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for k in (
+            "modality",
+            "allowed_local_media_path",
+            "max_file_size_mb",
+            "chat_template",
+            "gpu_memory_utilization",
+        ):
+            v = getattr(self, k)
+            if v is not None:
+                out[k] = v
+        return out
+
+
+@dataclass(frozen=True)
 class ModelFacts:
     """SDK-owned facts (not a hand-authored field); lowers to ModelConfig.*."""
 
@@ -162,6 +192,7 @@ class GeneratorRequest:
     cache: CacheSpec = field(default_factory=CacheSpec)
     emit: EmitTargets = field(default_factory=EmitTargets)
     model_facts: Optional[ModelFacts] = None
+    encode: Optional[EncodeSpec] = None  # multimodal EPD encode-worker config
     overrides: Overrides = field(default_factory=Overrides)
     schema_version: str = SCHEMA_VERSION
 

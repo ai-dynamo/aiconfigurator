@@ -672,9 +672,10 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
     is_epd = bool(context.get("encode_workers"))
     encode_params = context.get("encode_params") or {}
     _encode_endpoint = "dyn://dynamo.encode.generate"
+    _modality = encode_params.get("modality") or "multimodal"
 
     def encode_flags() -> list[str]:
-        flags = ["--modality multimodal"]
+        flags = [f"--modality {_modality}"]
         almp = encode_params.get("allowed_local_media_path")
         if almp:
             flags.append(f'--allowed-local-media-path "{almp}"')
@@ -686,9 +687,9 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
     # PD workers that consume the encode worker carry --modality; the entry
     # worker (prefill in disagg, the agg/PD worker in 2-stage) also points at
     # the encode endpoint.
-    pd_modality = ["--modality multimodal"] if is_epd else None
+    pd_modality = [f"--modality {_modality}"] if is_epd else None
     pd_entry_flags = (
-        ["--modality multimodal", f'--encode-endpoint "{_encode_endpoint}"'] if is_epd else None
+        [f"--modality {_modality}", f'--encode-endpoint "{_encode_endpoint}"'] if is_epd else None
     )
 
     # Phase 4b-1 pod facts (hardware/transport). Guard on resolved_facts and

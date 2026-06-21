@@ -154,6 +154,12 @@ def to_legacy_params(req: GeneratorRequest) -> dict[str, Any]:
     llmd = _section_from_raw(raw, "LlmdConfig", {})
 
     role_params = {r: rs.to_params() for r, rs in req.topology.roles.items()}
+    # First-class EncodeSpec config lowers into the encode role params (the
+    # per-role RoleSizing.extra still wins for any overlapping key).
+    if req.encode is not None and "encode" in role_params:
+        merged = dict(req.encode.to_params())
+        merged.update(role_params["encode"])
+        role_params["encode"] = merged
 
     def _workers(role: str) -> int:
         if role in req.topology.workers:
