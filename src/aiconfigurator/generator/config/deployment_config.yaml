@@ -24,6 +24,11 @@ inputs:
   - key: ServiceConfig.model_name
     required: false
     default: "ServiceConfig.served_model_name"
+  # Referenced by served_model_name / BenchConfig default expressions and set by
+  # the SDK bridge; declared here so every key used in the schema is declared.
+  # No default: when absent the `... or model_path` fallbacks apply (unchanged).
+  - key: ServiceConfig.served_model_path
+    required: false
   - key: ServiceConfig.head_node_ip
     required: false
     default: "0.0.0.0"
@@ -102,6 +107,16 @@ inputs:
   - key: K8sConfig.k8s_hf_home
     required: false
     default: ""
+  # User passthrough (optional; absent -> no effect, output unchanged).
+  # extra_env: env entries appended to each worker's main container.
+  # *_extra_pod_spec: dicts deep-merged into the worker/frontend extraPodSpec
+  # (user values win) -- e.g. nodeSelector, tolerations, affinity.
+  - key: K8sConfig.extra_env
+    required: false
+  - key: K8sConfig.worker_extra_pod_spec
+    required: false
+  - key: K8sConfig.frontend_extra_pod_spec
+    required: false
 
   # Worker config
   - key: WorkerConfig.prefill_workers

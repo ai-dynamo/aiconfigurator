@@ -46,7 +46,67 @@ def build_dgd(
     }.get(backend)
     if populate is None:
         raise ValueError(f"No typed K8s builder for backend: {backend}")
-    return populate(context, resolved_facts=resolved_facts)
+    docs = populate(context, resolved_facts=resolved_facts)
+    _apply_k8s_passthrough(docs, context)
+    return docs
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``override`` into ``base``; ``override`` wins.
+
+    Nested dicts merge; every non-dict value (incl. lists) is replaced wholesale.
+    """
+    out = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+def _apply_k8s_passthrough(docs: list[Any], context: dict[str, Any]) -> None:
+    """Apply optional user-supplied K8s passthrough to the built DGD documents.
+
+    A single central post-process (covers all three backends without touching
+    the per-backend population logic, which deliberately mirrors the templates).
+    Reads three optional ``K8sConfig`` keys; when none are set this is a no-op
+    so output stays byte-identical:
+
+    - ``extra_env``: list of env entries appended to each WORKER's main
+      container env (after the hardware/transport fact env). Network-style
+      customization is a worker concern; the frontend is left untouched.
+    - ``worker_extra_pod_spec`` / ``frontend_extra_pod_spec``: dicts deep-merged
+      into the worker / frontend ``extraPodSpec`` respectively (user values win;
+      e.g. nodeSelector, tolerations, affinity, runtimeClassName).
+    """
+    k8s = context.get("K8sConfig", {}) or {}
+    extra_env = k8s.get("extra_env") or None
+    worker_eps = k8s.get("worker_extra_pod_spec") or None
+    frontend_eps = k8s.get("frontend_extra_pod_spec") or None
+    if not (extra_env or worker_eps or frontend_eps):
+        return
+
+    for doc in docs:
+        services = getattr(doc, "services", None)
+        if not isinstance(services, dict):  # only DGD docs carry services
+            continue
+        for svc in services.values():
+            if svc.component_type == "worker":
+                _apply_passthrough_to_service(svc, worker_eps, extra_env)
+            elif svc.component_type == "frontend":
+                _apply_passthrough_to_service(svc, frontend_eps, None)
+
+
+def _apply_passthrough_to_service(svc: DGDService, eps_overlay: Any, extra_env: Any) -> None:
+    eps = svc.extra_pod_spec or ExtraPodSpec()
+    if isinstance(eps_overlay, dict) and eps_overlay:
+        eps = ExtraPodSpec.from_dict(_deep_merge(eps.to_dict(), eps_overlay))
+    if extra_env:
+        mc = eps.main_container or MainContainer()
+        mc.env = (mc.env or []) + copy.deepcopy(list(extra_env))
+        eps.main_container = mc
+    svc.extra_pod_spec = eps
 
 
 # ---------------------------------------------------------------------------

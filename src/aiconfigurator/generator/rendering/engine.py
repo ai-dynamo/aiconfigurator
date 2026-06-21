@@ -506,6 +506,14 @@ def render_backend_templates(
             for worker in worker_plan:
                 wc = build_engine_worker_context(worker)
                 rendered = eng_tmpl.render(**wc)
+                # W4: optional per-role passthrough of arbitrary engine-config
+                # keys the template doesn't model. Presence-guarded (absent ->
+                # output unchanged). Appended as YAML so a duplicate key lets the
+                # user override a template-emitted value (engine parser: last wins).
+                extra_engine = (param_values.get("params", {}).get(worker) or {}).get("extra_engine_args")
+                if isinstance(extra_engine, dict) and extra_engine:
+                    import yaml as _yaml
+                    rendered = rendered.rstrip("\n") + "\n" + _yaml.safe_dump(extra_engine, sort_keys=False)
                 if worker == "agg":
                     out_name = "extra_engine_args_agg.yaml"
                 elif worker == "prefill":
