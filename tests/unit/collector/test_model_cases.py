@@ -5,7 +5,7 @@ import csv
 from itertools import pairwise
 from pathlib import Path
 
-from collector.case_generator import moe_model_allows_quantization
+from collector.case_generator import moe_model_allows_quantization, windows_for_head_dim
 from collector.helper import create_test_case_id
 from collector.model_cases import (
     CaseSelector,
@@ -35,6 +35,21 @@ def test_model_case_plan_merges_base_op_and_framework_specific_ops():
     assert "wideep_mla_context" in plan.op_cases
     assert "wideep_moe" in plan.op_cases
     assert "trtllm_moe_wideep" not in plan.op_cases
+
+
+def test_windows_for_head_dim_gates_sliding_window_by_head_dim():
+    # head_dim -> the only sliding-window value any surveyed model uses at that head_dim:
+    #   64=gpt-oss(128), 128=Llama-4(8192), 192=MiMo-V2-Flash(128), 256=gemma-4(1024).
+    # window=0 (dense) is always kept; unrelated window values for that head_dim are pruned.
+    sweep = [0, 128, 1024, 8192]
+    assert windows_for_head_dim(sweep, 64) == [0, 128]
+    assert windows_for_head_dim(sweep, 128) == [0, 8192]
+    assert windows_for_head_dim(sweep, 192) == [0, 128]
+    assert windows_for_head_dim(sweep, 256) == [0, 1024]
+    # unknown head_dim keeps only the dense (window=0) case
+    assert windows_for_head_dim(sweep, 96) == [0]
+    # order is preserved and no spurious values are added
+    assert windows_for_head_dim([128, 0], 64) == [128, 0]
 
 
 def test_base_gemm_cases_are_readable_shape_specs():
