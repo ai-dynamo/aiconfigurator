@@ -267,3 +267,25 @@ def task_config_to_generator_config(
         params["rule"] = rule_name
     params["ModelConfig"] = model_cfg
     return params
+
+
+def task_config_to_request(
+    task_config: TaskConfig,
+    result_df: pd.Series,
+    generator_overrides: dict | None = None,
+    num_gpus_per_node: int | None = None,
+):
+    """Convert a task config/result row into a typed ``GeneratorRequest``.
+
+    Built on top of :func:`task_config_to_generator_config` so it stays
+    byte-equivalent with the legacy dict path (proven by the request round-trip
+    gate). The dict-returning function above is kept unchanged for the dynamo
+    profiler and existing callers; this is the typed alternative used when a
+    caller wants to go through ``api.generate_from_request``.
+    """
+    from .request import from_legacy_params
+
+    params = task_config_to_generator_config(
+        task_config, result_df, generator_overrides, num_gpus_per_node
+    )
+    return from_legacy_params(params, backend=getattr(task_config, "backend_name", None))
