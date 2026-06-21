@@ -30,6 +30,33 @@ def test_generate_from_request_matches_direct(name):
     assert arts == expected
 
 
+@pytest.mark.parametrize(
+    "name", ["trtllm_dense_agg", "deepseek_trtllm_b200_disagg", "deepseek_sglang_gb200_agg"]
+)
+def test_save_results_render_path_is_equivalent(name):
+    """P5a: the rewired `default`-mode render step (from_legacy_params(cfg) ->
+    generate_from_request) produces artifacts byte-identical to the old direct
+    generate_backend_artifacts(cfg, ...) call."""
+    case = next(c for c in CANARY_CASES if c.name == name)
+    cfg = copy.deepcopy(case.params)  # stands in for the dict-bridge output
+
+    # NEW path (exactly what save_results now does)
+    req = from_legacy_params(cfg, backend=case.backend)
+    req = dataclasses.replace(
+        req,
+        backend=dataclasses.replace(req.backend, generated_config_version=case.backend_version),
+        emit=dataclasses.replace(req.emit, deployment_target="dynamo-j2", output_dir=None),
+    )
+    arts_new = generate_from_request(req)
+
+    # OLD path
+    arts_old = generate_backend_artifacts(
+        copy.deepcopy(case.params), case.backend, backend_version=case.backend_version,
+        output_dir=None, deployment_target="dynamo-j2",
+    )
+    assert arts_new == arts_old
+
+
 def _cli_args(**kw):
     base = dict(
         model_path="Qwen/Qwen3-32B", backend="trtllm", system="h200_sxm", total_gpus=16,
