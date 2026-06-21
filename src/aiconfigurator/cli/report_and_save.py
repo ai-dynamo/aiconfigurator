@@ -671,6 +671,21 @@ def save_results(
                 # generated backend versions for each backend, empty unless --generator-dynamo-version is provided
                 generated_backend_versions = {}
 
+            # Search / perf-DB version echo: the performance data the sweep ran
+            # against (search fidelity). This is distinct from the generated /
+            # deployed config version shown in the box below -- the two axes are
+            # decoupled (set via --perf-db-version; default: latest).
+            logger.warning(
+                "\n" + "=" * 80 + "\n"
+                "  🔍  Search / perf-DB version (simulation fidelity)\n" + "=" * 80 + "\n"
+                "  Experiment: %s\n"
+                "  Perf-DB version: %s   (--perf-db-version; default: latest)\n"
+                "  This is what the search simulated against; it may differ from the\n"
+                "  generated/deployed config version shown next.\n" + "=" * 80,
+                exp_name,
+                backend_version_str or "latest",
+            )
+
             # case #1: --generated-config-version is provided
             if generated_backend_version:
                 effective_generated_version = generated_backend_version
