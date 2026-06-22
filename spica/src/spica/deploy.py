@@ -49,16 +49,6 @@ _PLANNER_PASSTHROUGH = (
     "kalman_min_points",
 )
 
-# Load-scaling trigger thresholds the planner validator requires whenever
-# optimization_target="load" (its own defaults are None). Fixed sensible v1
-# values; the scale-down conservativeness knob is the separate
-# load_scaling_down_sensitivity preset. Decode is keyed on KV-cache utilization
-# (% 0-100, up > down); prefill (disagg only) on queued prefill tokens.
-_LOAD_DECODE_SCALE_UP_KV_RATE = 80.0
-_LOAD_DECODE_SCALE_DOWN_KV_RATE = 40.0
-_LOAD_PREFILL_SCALE_UP_QUEUE_TOKENS = 1024
-_LOAD_PREFILL_SCALE_DOWN_QUEUE_TOKENS = 0
-
 
 @dataclass(frozen=True)
 class DeploymentPlan:
@@ -115,18 +105,24 @@ def _engine_args_payload(sample: dict, role: str, *, backend_version: str) -> di
     return payload
 
 
-def _planner_config_payload(sample: dict, *, planner_sla: SLATarget | None) -> dict[str, Any] | None:
+def _planner_config_payload(
+    sample: dict, *, optimization_target: str, planner_sla: SLATarget | None
+) -> dict[str, Any] | None:
     """PlannerConfig JSON for a scaling candidate, or None when the planner is
-    disabled (static -> plain replay)."""
+    disabled (static -> plain replay).
+
+    ``optimization_target`` is the planner's scaling objective, derived from the
+    sweep's goal (``goal.target.planner_optimization_target``) — NOT from the scaling
+    policy. The ``planner_scaling_policy`` only decides which scaling mechanisms run
+    (enable_throughput / enable_load + intervals); the policy filter upstream already
+    ensures throughput scaling (which needs ``"sla"``) is only present for goodput
+    sweeps. ttft/itl are seeded only under ``"sla"`` (other targets ignore them)."""
     enable_throughput = bool(sample.get("enable_throughput_scaling", False))
     enable_load = bool(sample.get("enable_load_scaling", False))
     if not (enable_throughput or enable_load):
         return None  # "disabled" -> static plain replay
 
-    payload: dict[str, Any] = {"mode": sample["deployment_mode"]}
-    # The only target that drives predictive throughput scaling is "sla"; a non-sla
-    # target forces load-only scaling (planner validator). hybrid (both) -> "sla".
-    payload["optimization_target"] = "sla" if enable_throughput else "load"
+    payload: dict[str, Any] = {"mode": sample["deployment_mode"], "optimization_target": optimization_target}
     # Spica consumes the trace_report directly and sweeps many candidates, so turn
     # off the planner's per-run diagnostics (a ~5 MB HTML in ./planner_reports/ per
     # candidate) and the live dashboard, both of which default on.
@@ -142,16 +138,9 @@ def _planner_config_payload(sample: dict, *, planner_sla: SLATarget | None) -> d
         payload["decode_engine_num_gpu"] = int(sample["decode_tp"]) * int(sample["decode_attention_dp"])
     else:
         payload["decode_engine_num_gpu"] = int(sample["tp"]) * int(sample["attention_dp"])
-    # Load scaling needs explicit trigger thresholds (planner defaults are None).
-    if payload["optimization_target"] == "load":
-        payload["decode_scale_up_kv_rate"] = _LOAD_DECODE_SCALE_UP_KV_RATE
-        payload["decode_scale_down_kv_rate"] = _LOAD_DECODE_SCALE_DOWN_KV_RATE
-        if sample["deployment_mode"] == "disagg":
-            payload["prefill_scale_up_queue_tokens"] = _LOAD_PREFILL_SCALE_UP_QUEUE_TOKENS
-            payload["prefill_scale_down_queue_tokens"] = _LOAD_PREFILL_SCALE_DOWN_QUEUE_TOKENS
-    # Planner's own scaling SLA (independent of the goodput SLA): seed from the
-    # goal's SLA when it carries ttft+itl, else the planner defaults stand.
-    if payload["optimization_target"] == "sla" and planner_sla is not None:
+    # SLA-based scaling uses ttft/itl; seed them from the goal's SLA. Other targets
+    # ignore ttft/itl (planner warns), so only set them under "sla".
+    if optimization_target == "sla" and planner_sla is not None:
         if planner_sla.ttft_ms is not None:
             payload["ttft_ms"] = planner_sla.ttft_ms
         if planner_sla.itl_ms is not None:
@@ -173,10 +162,20 @@ def _router_config_payload(sample: dict) -> dict[str, Any] | None:
     return {k: sample[k] for k in keys if k in sample}
 
 
-def build_deployment(sample: dict, *, backend_version: str, planner_sla: SLATarget | None = None) -> DeploymentPlan:
-    """Translate one unrolled sample into a :class:`DeploymentPlan`."""
+def build_deployment(
+    sample: dict,
+    *,
+    backend_version: str,
+    optimization_target: str = "sla",
+    planner_sla: SLATarget | None = None,
+) -> DeploymentPlan:
+    """Translate one unrolled sample into a :class:`DeploymentPlan`.
+
+    ``optimization_target`` is the planner's scaling objective (from the sweep goal,
+    via ``OptimizationTarget.planner_optimization_target``); it is only used when the
+    candidate has a planner (a non-disabled scaling policy)."""
     mode = sample["deployment_mode"]
-    planner_config = _planner_config_payload(sample, planner_sla=planner_sla)
+    planner_config = _planner_config_payload(sample, optimization_target=optimization_target, planner_sla=planner_sla)
     router_mode = sample.get("router_mode", "round_robin")
     common = dict(
         deployment_mode=mode,

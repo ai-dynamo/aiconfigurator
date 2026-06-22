@@ -62,16 +62,19 @@ def test_agg_scaling_builds_planner_config():
         parallel_config=AGG_MOE,
         load_predictor=lp,
     )
-    plan = build_deployment(sample, backend_version=BV, planner_sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
+    # a goodput sweep -> planner optimization_target="sla" (passed in by the caller)
+    plan = build_deployment(
+        sample, backend_version=BV, optimization_target="sla", planner_sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0)
+    )
     assert not plan.is_static
     pc = plan.planner_config
     assert pc["mode"] == "agg"
-    assert pc["optimization_target"] == "sla"  # throughput scaling -> sla target
+    assert pc["optimization_target"] == "sla"  # from the goal, not the policy
     assert pc["enable_throughput_scaling"] is True
     assert pc["throughput_adjustment_interval_seconds"] == 180
     assert pc["decode_engine_num_gpu"] == 4  # tp(4) * attention_dp(1)
     assert pc["load_predictor"] == "prophet"  # resolved from the sweep winner
-    assert pc["ttft_ms"] == 2000.0 and pc["itl_ms"] == 30.0  # planner SLA seeded from goal
+    assert pc["ttft_ms"] == 2000.0 and pc["itl_ms"] == 30.0  # ttft/itl seeded only under "sla"
 
 
 def test_disagg_builds_both_roles():
@@ -88,14 +91,21 @@ def test_disagg_builds_both_roles():
         decode_max_num_seqs=1024,
     )
     sample = unroll_sample(search_space=_space(), selection=sel, parallel_config=cfg)
-    plan = build_deployment(sample, backend_version=BV)
+    # a throughput sweep -> planner optimization_target="throughput" (from the goal, not
+    # the load_* policy); pass an SLA too to confirm it is NOT seeded for a non-sla target.
+    plan = build_deployment(
+        sample, backend_version=BV, optimization_target="throughput", planner_sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0)
+    )
     assert plan.deployment_mode == "disagg"
     assert plan.num_prefill_workers == 1 and plan.num_decode_workers == 2
     assert plan.prefill_engine_args["aic_tp_size"] == 8 and plan.prefill_engine_args["worker_type"] == "prefill"
     assert plan.decode_engine_args["aic_attention_dp_size"] == 8 and plan.decode_engine_args["worker_type"] == "decode"
-    # load policy -> load target; engine GPU counts per role
-    assert plan.planner_config["optimization_target"] == "load"
-    assert plan.planner_config["prefill_engine_num_gpu"] == 8 and plan.planner_config["decode_engine_num_gpu"] == 8
+    pc = plan.planner_config
+    assert pc["optimization_target"] == "throughput"  # from the goal, not the policy
+    assert pc["enable_load_scaling"] is True and pc["enable_throughput_scaling"] is False
+    assert pc["prefill_engine_num_gpu"] == 8 and pc["decode_engine_num_gpu"] == 8
+    assert "ttft_ms" not in pc and "itl_ms" not in pc  # non-sla target ignores the SLA
+    assert "decode_scale_up_kv_rate" not in pc  # no load-target kv_rate plumbing anymore
 
 
 def test_kv_router_emits_router_config():

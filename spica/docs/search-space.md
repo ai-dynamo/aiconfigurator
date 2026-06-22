@@ -81,6 +81,18 @@ Dict keys: `enable_throughput_scaling`, `enable_load_scaling`,
 **Both flags `false` ⇒ planner off** (static replica count — same as `disabled`); no
 intervals / fpm / sensitivity / predictor are emitted.
 
+**The planner's `optimization_target` is derived from the sweep goal, not from this
+policy** — `throughput`→`"throughput"`, `e2e_latency`→`"latency"`,
+`goodput`/`goodput_per_gpu_hour`→`"sla"` (see `OptimizationTarget.planner_optimization_target`).
+The policy only decides *which* scaling loops run + their intervals.
+
+**Predictive throughput scaling needs an SLA**, so it only works under a goodput sweep
+(`optimization_target="sla"`). For a `throughput`/`e2e_latency` sweep, the
+throughput-scaling presets (`throughput_*`, `hybrid_*`, or any dict with
+`enable_throughput_scaling: true`) are **automatically dropped** from the search (with a
+log); only `disabled` / `load_*` survive. If you list *only* throughput-scaling policies
+for a non-goodput sweep, the run errors (nothing left to search).
+
 ### `planner_fpm_sampling`
 
 | preset | `max_num_fpm_samples` | `fpm_sample_bucket_size` |

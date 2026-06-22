@@ -55,6 +55,23 @@ def test_static_agg_uses_plain_path(monkeypatch):
     report = ev.evaluate(_agg_plan(static=True))
     assert report["output_throughput_tok_s"] == 42.0
     assert rec["num_workers"] == 2 and rec["trace_file"] == "/tmp/t.jsonl" and rec["router_mode"] == "round_robin"
+    assert "sla_ttft_ms" not in rec  # no SLA on a throughput goal -> none threaded
+
+
+def test_static_path_threads_goodput_sla(monkeypatch):
+    # the mocker is SLA-aware on the plain path too, so a static/disabled candidate
+    # still receives the goodput SLA and can emit goodput.
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    rec = {}
+    monkeypatch.setattr(
+        dynamo.replay.api,
+        "run_trace_replay",
+        lambda **kw: rec.update(kw) or {"goodput_output_throughput_tok_s": 100.0, "gpu_hours": 1.0},
+    )
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
+    report = ReplayEvaluator(_wl(), goal).evaluate(_agg_plan(static=True))
+    assert report["goodput_output_throughput_tok_s"] == 100.0
+    assert rec["sla_ttft_ms"] == 2000.0 and rec["sla_itl_ms"] == 30.0  # SLA threaded to the plain path
 
 
 def test_scaling_agg_uses_bridge_with_goodput_sla(monkeypatch):

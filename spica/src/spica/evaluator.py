@@ -6,10 +6,14 @@
 Routes by the plan's policy (see the disabled==static investigation):
 
 - ``plan.is_static`` -> ``dynamo.replay.api.run_trace_replay`` (plain, fixed worker
-  counts; emits gpu_hours, not goodput).
-- otherwise -> ``dynamo.replay.main._run_planner_replay`` (planner bridge; emits
-  goodput + gpu_hours). The **goodput SLA** (``goal.sla``) is passed as
-  ``sla_*_ms`` — independent of the planner's own scaling SLA.
+  counts; emits gpu_hours + goodput).
+- otherwise -> ``dynamo.replay.main._run_planner_replay`` (planner bridge; scaling;
+  emits goodput + gpu_hours).
+
+The **goodput SLA** (``goal.sla``) is passed as ``sla_*_ms`` on BOTH paths (the
+mocker classifies SLA-satisfying requests per-request to compute goodput), so a
+static/disabled candidate still produces goodput. It is independent of the planner's
+own scaling SLA.
 
 Returns the flat ``trace_report`` dict that :mod:`spica.score` consumes. dynamo
 is imported lazily so ``import spica`` stays light and unit tests can stub the
@@ -72,7 +76,12 @@ class ReplayEvaluator:
             if plan.is_static:
                 from dynamo.replay.api import run_trace_replay
 
-                return run_trace_replay(extra_engine_args=extra, num_workers=plan.num_workers, **common)
+                return run_trace_replay(
+                    extra_engine_args=extra,
+                    num_workers=plan.num_workers,
+                    **self._goodput_sla_kwargs(),
+                    **common,
+                )
             from dynamo.replay.main import _run_planner_replay
 
             report = _run_planner_replay(
@@ -99,6 +108,7 @@ class ReplayEvaluator:
                 decode_engine_args=decode,
                 num_prefill_workers=plan.num_prefill_workers,
                 num_decode_workers=plan.num_decode_workers,
+                **self._goodput_sla_kwargs(),
                 **common,
             )
         from dynamo.replay.main import _run_planner_replay

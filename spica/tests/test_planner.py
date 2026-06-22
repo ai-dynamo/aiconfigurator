@@ -3,6 +3,7 @@
 
 from spica.planner import (
     SCALING_POLICIES,
+    filter_scaling_policies,
     fpm_fields,
     load_sensitivity_fields,
     scaling_fields,
@@ -71,3 +72,26 @@ def test_throughput_intervals_mixes_presets_and_dicts():
         {"enable_load_scaling": True, "load_adjustment_interval_seconds": 5},  # load-only -> ignored
     ]
     assert throughput_intervals(policies) == [180, 240]
+
+
+def test_filter_scaling_policies():
+    policies = [
+        "disabled",
+        "load_180_5",
+        "throughput_180_5",
+        "hybrid_600_5",
+        {"enable_throughput_scaling": True, "throughput_adjustment_interval_seconds": 240},  # dict, throughput
+        {"enable_load_scaling": True, "load_adjustment_interval_seconds": 5},  # dict, load-only
+    ]
+    # allow_throughput=True (goodput sweep / "sla") -> keep everything
+    kept, dropped = filter_scaling_policies(policies, allow_throughput=True)
+    assert kept == policies and dropped == []
+    # allow_throughput=False (throughput/latency sweep) -> drop everything that enables
+    # throughput scaling (presets AND dicts)
+    kept, dropped = filter_scaling_policies(policies, allow_throughput=False)
+    assert kept == ["disabled", "load_180_5", {"enable_load_scaling": True, "load_adjustment_interval_seconds": 5}]
+    assert dropped == [
+        "throughput_180_5",
+        "hybrid_600_5",
+        {"enable_throughput_scaling": True, "throughput_adjustment_interval_seconds": 240},
+    ]

@@ -100,6 +100,25 @@ def load_sensitivity_fields(entry: str | dict[str, Any]) -> dict[str, Any]:
     return dict(entry) if isinstance(entry, dict) else dict(LOAD_SENSITIVITY[entry])
 
 
+def filter_scaling_policies(
+    policies: list[str | dict[str, Any]], *, allow_throughput: bool
+) -> tuple[list[str | dict[str, Any]], list[str | dict[str, Any]]]:
+    """Split ``planner_scaling_policy`` entries into ``(kept, dropped)``.
+
+    Predictive throughput scaling only works under the planner's
+    ``optimization_target="sla"`` (i.e. a goodput sweep). When the planner can't use
+    SLA (``allow_throughput=False`` — a throughput/latency sweep), entries that enable
+    throughput scaling are dropped. Handles preset ids and raw dicts uniformly.
+    """
+    if allow_throughput:
+        return list(policies), []
+    kept: list[str | dict[str, Any]] = []
+    dropped: list[str | dict[str, Any]] = []
+    for p in policies:
+        (dropped if scaling_fields(p)["enable_throughput_scaling"] else kept).append(p)
+    return kept, dropped
+
+
 def throughput_intervals(policies: list[str | dict[str, Any]]) -> list[int]:
     """Distinct throughput-adjustment intervals (seconds), sorted, across the given
     ``planner_scaling_policy`` candidates (preset ids or dicts) that enable

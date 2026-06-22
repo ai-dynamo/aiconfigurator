@@ -29,6 +29,7 @@ from .deploy import build_deployment
 from .evaluator import ReplayEvaluator
 from .kv_estimate import resolve_backend_version
 from .load_predictor_sweep import LoadPredictorResult, sweep_load_predictor
+from .planner import filter_scaling_policies
 from .sample import unroll_sample
 from .sampler import BranchSampler, Suggestion, make_branch_sampler
 from .score import is_feasible, make_candidate, rank, score_report
@@ -60,7 +61,12 @@ def _evaluate_suggestion(
         parallel_config=suggestion.parallel_config,
         load_predictor=load_predictor,
     )
-    plan = build_deployment(sample, backend_version=backend_version, planner_sla=goal.sla)
+    plan = build_deployment(
+        sample,
+        backend_version=backend_version,
+        optimization_target=goal.target.planner_optimization_target,
+        planner_sla=goal.sla,
+    )
     try:
         report = evaluator.evaluate(plan)
     except Exception as exc:  # a single candidate failing must not abort the sweep
@@ -88,6 +94,31 @@ def run_smart_search(
     one-line summary at the end; set False for quiet/non-interactive runs.
     """
     goal = config.goal
+    # Predictive throughput scaling only works under the planner's "sla" target
+    # (a goodput sweep). For throughput/latency sweeps, drop the throughput-scaling
+    # policies up front so neither the sampler nor the load-predictor sub-sweep sees
+    # them. (Disabled / load_* still run; static-path goodput is fine once the mocker
+    # is SLA-aware.)
+    kept, dropped = filter_scaling_policies(
+        config.search_space.planner_scaling_policy,
+        allow_throughput=(goal.target.planner_optimization_target == "sla"),
+    )
+    if dropped:
+        if not kept:
+            raise ValueError(
+                f"every planner_scaling_policy enables throughput scaling, which a "
+                f"'{goal.target.value}' sweep can't use (it has no SLA — use a goodput target, "
+                f"or include 'disabled' / a load_* policy)"
+            )
+        if show_progress:
+            tqdm.write(
+                f"smart-sweep: dropped {len(dropped)} throughput-scaling policy option(s) "
+                f"for target={goal.target.value} (needs SLA): {dropped}"
+            )
+        config = config.model_copy(
+            update={"search_space": config.search_space.model_copy(update={"planner_scaling_policy": kept})}
+        )
+
     branches: list[BranchSpace] = enumerate_branches(config)
     load_predictor = sweep_load_predictor(config)
     if evaluator is None:

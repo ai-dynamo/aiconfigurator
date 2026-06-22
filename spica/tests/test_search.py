@@ -6,6 +6,8 @@ are stubbed and a fake sampler + evaluator are injected, so this exercises the
 suggest->unroll->deploy->evaluate->score->observe->rank loop without Vizier or
 real replay."""
 
+import pytest
+
 import spica.search as search_mod
 from spica.config import SmartSearchConfig
 from spica.load_predictor_sweep import LoadPredictorResult
@@ -139,3 +141,38 @@ def test_study_id_unique_per_run(monkeypatch):
     run_smart_search(_config(), evaluator=_FakeEvaluator(), sampler_factory=factory, show_progress=False)
     assert len(seen) == 2 and seen[0] != seen[1]  # fresh study per run, no stale reuse
     assert all(s.startswith("spica_agg_trtllm_") for s in seen)
+
+
+def _config_with_policies(policies, target="throughput"):
+    return SmartSearchConfig(
+        search_space={
+            "model_name": "deepseek-ai/DeepSeek-V3",
+            "hardware_sku": "gb200",
+            "backend": ["trtllm"],
+            "deployment_mode": ["agg"],
+            "gpu_budget": 32,
+            "planner_scaling_policy": policies,
+        },
+        workload={"trace_path": "/tmp/t.jsonl"},
+        sweep={"max_rounds": 1, "candidates_per_round": 2},
+        goal={"target": target},
+    )
+
+
+def test_non_goodput_sweep_rejects_all_throughput_scaling_policies(monkeypatch):
+    # a throughput sweep can't use predictive throughput scaling (no SLA); if EVERY
+    # policy enables it, there's nothing to search -> a clear error.
+    branch = _branch(ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2))
+    _stub(monkeypatch, branch)
+    cfg = _config_with_policies(["throughput_180_5", "hybrid_600_5"], target="throughput")
+    with pytest.raises(ValueError, match="throughput scaling"):
+        run_smart_search(cfg, evaluator=_FakeEvaluator(), sampler_factory=_FakeSampler, show_progress=False)
+
+
+def test_non_goodput_sweep_drops_throughput_scaling_and_proceeds(monkeypatch):
+    # mixed list -> the throughput-scaling entry is dropped, the rest still run.
+    branch = _branch(ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2))
+    _stub(monkeypatch, branch)
+    cfg = _config_with_policies(["disabled", "throughput_180_5", "load_180_5"], target="throughput")
+    cands = run_smart_search(cfg, evaluator=_FakeEvaluator(), sampler_factory=_FakeSampler, show_progress=False)
+    assert [c.score for c in cands] == [512.0, 256.0]  # ran fine (throughput == max_num_seqs)

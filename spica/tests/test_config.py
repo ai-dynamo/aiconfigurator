@@ -60,6 +60,14 @@ def test_target_direction():
     assert not OptimizationTarget.E2E_LATENCY.maximize
 
 
+def test_planner_optimization_target_mapping():
+    # the planner's scaling objective is derived from the sweep goal
+    assert OptimizationTarget.THROUGHPUT.planner_optimization_target == "throughput"
+    assert OptimizationTarget.E2E_LATENCY.planner_optimization_target == "latency"
+    assert OptimizationTarget.GOODPUT.planner_optimization_target == "sla"
+    assert OptimizationTarget.GOODPUT_PER_GPU_HOUR.planner_optimization_target == "sla"
+
+
 def _search_space(**overrides):
     return {"model_name": "m", "hardware_sku": "h200_sxm", **overrides}
 

@@ -41,6 +41,23 @@ class OptimizationTarget(str, Enum):
         """True when larger is better (throughput/goodput/goodput_per_gpu_hour)."""
         return self is not OptimizationTarget.E2E_LATENCY
 
+    @property
+    def planner_optimization_target(self) -> str:
+        """The dynamo planner ``optimization_target`` this sweep goal maps to.
+
+        The planner's scaling objective should match what the sweep optimizes:
+        ``goodput``/``goodput_per_gpu_hour`` -> ``"sla"`` (SLA-based scaling, the only
+        mode that uses ttft/itl and enables predictive throughput scaling);
+        ``throughput`` -> ``"throughput"``; ``e2e_latency`` -> ``"latency"`` (both
+        reactive, no SLA).
+        """
+        return {
+            OptimizationTarget.THROUGHPUT: "throughput",
+            OptimizationTarget.E2E_LATENCY: "latency",
+            OptimizationTarget.GOODPUT: "sla",
+            OptimizationTarget.GOODPUT_PER_GPU_HOUR: "sla",
+        }[self]
+
 
 class SLATarget(BaseModel):
     """Per-request latency bounds in ms. Set ttft_ms+itl_ms, or e2e_ms."""
