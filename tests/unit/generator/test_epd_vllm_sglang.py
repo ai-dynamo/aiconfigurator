@@ -67,3 +67,21 @@ def test_sglang_epd_2stage():
     assert '--chat-template "qwen2-vl"' in enc
     pd = _args(svcs["SGLangWorker"])
     assert "--multimodal-worker" in pd and "--disaggregation-transfer-backend nixl" in pd
+
+
+def test_sglang_epd_chat_template_defaults_when_unset():
+    """The sglang encode worker requires --chat-template (crashes KeyError: None
+    without it). It must be emitted even when the user does not set one — default
+    to dynamo's Qwen-VL E/PD default 'qwen2-vl'."""
+    roles = {
+        "encode": RoleSizing(tensor_parallel_size=1, extra={"gpus_per_worker": 1}),  # no chat_template
+        "agg": RoleSizing(tensor_parallel_size=1, extra={"gpus_per_worker": 1}),
+    }
+    req = GeneratorRequest(
+        model=ModelSpec(model_path="Qwen/Qwen3-VL-2B-Instruct"),
+        backend=BackendSpec(name="sglang"),
+        topology=Topology(mode="agg", roles=roles, workers={"encode": 1, "agg": 1}),
+    )
+    arts = generate_backend_artifacts(to_legacy_params(req), "sglang")
+    enc = _args(_dgd(arts)["spec"]["services"]["SGLangEncodeWorker"])
+    assert '--chat-template "qwen2-vl"' in enc

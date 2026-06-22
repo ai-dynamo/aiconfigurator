@@ -492,9 +492,12 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
         elif role == "encode":
             # Multimodal EPD encode worker (vision encoder only).
             lines.append("args+=(--multimodal-encode-worker)")
-            _ct = (context.get("encode_params") or {}).get("chat_template")
-            if _ct:
-                lines.append(f'args+=(--chat-template "{_ct}")')
+            # --chat-template is REQUIRED: the sglang encode worker looks the
+            # template up in its registry and crashes (KeyError: None) without
+            # it. Default to dynamo's Qwen-VL E/PD default ("qwen2-vl", which the
+            # Qwen3-VL family aiconfigurator models also uses); user-overridable.
+            _ct = (context.get("encode_params") or {}).get("chat_template") or "qwen2-vl"
+            lines.append(f'args+=(--chat-template "{_ct}")')
             lines.append("args+=(--skip-tokenizer-init)")
         for _flag in (extra_flags or []):
             lines.append(f"args+=({_flag})")
@@ -671,11 +674,20 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
     # role is present), so non-EPD output is unchanged.
     is_epd = bool(context.get("encode_workers"))
     encode_params = context.get("encode_params") or {}
-    _encode_endpoint = "dyn://dynamo.encode.generate"
+    # The prefill/PD worker reaches the encode worker via an explicit dyn://
+    # endpoint, so both sides must agree on it. dynamo's per-mode default encode
+    # component name is image-version-specific (e.g. `tensorrt_llm_encode`), so
+    # we PIN the encode worker's --endpoint to a stable `encode` component inside
+    # the operator-injected DYN_NAMESPACE (`{k8s_namespace}-{DGD name}`) and point
+    # the prefill --encode-endpoint at the same value. Without the explicit
+    # --endpoint, prefill cannot find the encode worker ("no instances found for
+    # endpoint dynamo/encode/generate").
+    _dyn_namespace = f"{k8s.get('k8s_namespace')}-{context.get('name')}"
+    _encode_endpoint = f"dyn://{_dyn_namespace}.encode.generate"
     _modality = encode_params.get("modality") or "multimodal"
 
     def encode_flags() -> list[str]:
-        flags = [f"--modality {_modality}"]
+        flags = [f'--endpoint "{_encode_endpoint}"', f"--modality {_modality}"]
         almp = encode_params.get("allowed_local_media_path")
         if almp:
             flags.append(f'--allowed-local-media-path "{almp}"')
@@ -823,8 +835,16 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
         if cli_args_list:
             # The template's `{%- for %}` whitespace control collapses the arg
             # list onto a single line joined by the 16-space template indent.
+            # --model-path/--served-model-name must lead: every dynamo.trtllm
+            # worker needs them, the trtllm cli_args template never emits them,
+            # and without them dynamo.trtllm falls back to its default model
+            # (the EPD encode worker otherwise loads TinyLlama, not the VL model).
             joined = "".join(f"{' ' * 16}{json.dumps(arg)}" for arg in cli_args_list)
-            lines.append(f"args=({joined}{' ' * 16}--extra-engine-args \"{engine_path}\"")
+            model_lead = (
+                f"{' ' * 16}--model-path \"{svc_cfg.get('model_path')}\""
+                f"{' ' * 16}--served-model-name \"{svc_cfg.get('served_model_name')}\""
+            )
+            lines.append(f"args=({model_lead}{joined}{' ' * 16}--extra-engine-args \"{engine_path}\"")
             lines.append(")")
         else:
             lines.append("args=(")

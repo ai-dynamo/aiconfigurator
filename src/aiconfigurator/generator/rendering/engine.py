@@ -856,6 +856,37 @@ def render_backend_templates(
         except Exception as e:
             logger.warning(f"Failed to render template run.sh.j2: {e}")
 
+    # Multimodal EPD single-pod (colocated) artifacts. trtllm's image-URL E-PD
+    # flow transfers vision embeddings via CUDA IPC, which needs the encode and
+    # prefill/PD workers to share GPU memory; k8s per-pod GPU isolation breaks
+    # that. So when an encode role is present we additionally emit a launch
+    # script (encode colocated on GPU 0 with prefill/PD) and a single Pod that
+    # runs all workers together with pod-local etcd/nats. Presence-guarded
+    # (trtllm + encode role only) -> no effect on non-EPD output.
+    if has_encode and backend == "trtllm":
+        epd_run_tmpl = template_path / "epd_run.sh.j2"
+        epd_pod_tmpl = template_path / "epd_pod.yaml.j2"
+        if epd_run_tmpl.exists() and epd_pod_tmpl.exists():
+            try:
+                _enc = (param_values.get("params", {}).get("encode") or {})
+                if context.get("DynConfig", {}).get("mode") == "agg":
+                    _total = int(context.get("agg_workers", 1)) * int(context.get("agg_gpu", 1))
+                else:
+                    _total = (int(context.get("prefill_workers", 1)) * int(context.get("prefill_gpu", 1))
+                              + int(context.get("decode_workers", 1)) * int(context.get("decode_gpu", 1)))
+                epd_ctx = dict(context)
+                epd_ctx["epd_total_gpus"] = max(_total, 1)
+                epd_ctx["epd_name"] = f"{context.get('name') or 'dynamo'}-epd"
+                epd_ctx["encode_modality"] = _enc.get("modality") or "multimodal"
+                epd_ctx["encode_allowed_local_media_path"] = _enc.get("allowed_local_media_path") or "/tmp"
+                epd_ctx["encode_max_file_size_mb"] = _enc.get("max_file_size_mb") or 50
+                run_sh = env.get_template("epd_run.sh.j2").render(**epd_ctx)
+                rendered_templates["epd_run.sh"] = run_sh
+                epd_ctx["epd_run_sh"] = run_sh
+                rendered_templates["epd_pod.yaml"] = env.get_template("epd_pod.yaml.j2").render(**epd_ctx)
+            except Exception as e:
+                logger.warning(f"Failed to render EPD single-pod artifacts: {e}")
+
     # sflow deploy: shared template from sflow/ folder
     sflow_tmpl_name = "sflow_deploy.yaml.j2"
     try:
