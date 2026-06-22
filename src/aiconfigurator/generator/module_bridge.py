@@ -230,6 +230,21 @@ def task_config_to_generator_config(
     if decode_params:
         decode_workers = _safe_int(worker_count_overrides.get("decode_workers"), decode_workers)
 
+    # Multimodal EPD: the encode worker is not produced by the SDK sweep (the
+    # encoder is modeled colocated with prefill). Inject it from explicit
+    # overrides -- --generator-set Workers.encode.* + WorkerConfig.encode_workers.
+    # Absent -> no encode worker, output unchanged.
+    encode_override = worker_overrides.get("encode")
+    encode_params = None
+    encode_workers = 0
+    if isinstance(encode_override, dict) and encode_override:
+        encode_params = dict(encode_override)
+        e_tp = _safe_int(encode_params.get("tensor_parallel_size"), 1)
+        e_pp = _safe_int(encode_params.get("pipeline_parallel_size"), 1)
+        e_dp = _safe_int(encode_params.get("data_parallel_size"), 1)
+        encode_params.setdefault("gpus_per_worker", e_tp * e_pp * e_dp)
+        encode_workers = _safe_int(worker_count_overrides.get("encode_workers"), 1)
+
     sla_cfg = {
         "isl": task_config.isl,
         "osl": task_config.osl,
@@ -255,6 +270,8 @@ def task_config_to_generator_config(
         dyn_config=dyn_cfg,
         backend=backend_name,
         generator_dynamo_version=generator_dynamo_version,
+        encode_params=encode_params,
+        encode_workers=encode_workers if encode_params else None,
     )
 
     params = _deep_merge(params, overrides.get("Params"))
@@ -265,3 +282,23 @@ def task_config_to_generator_config(
         params["rule"] = rule_name
     params["ModelConfig"] = model_cfg
     return params
+
+
+def task_config_to_request(
+    task_config: Task,
+    result_df: pd.Series,
+    generator_overrides: dict | None = None,
+    num_gpus_per_node: int | None = None,
+):
+    """Convert a task config/result row into a typed ``GeneratorRequest``.
+
+    Built on top of :func:`task_config_to_generator_config` so it stays
+    byte-equivalent with the legacy dict path (proven by the request round-trip
+    gate). The dict-returning function above is kept unchanged for the dynamo
+    profiler and existing callers; this is the typed alternative used when a
+    caller wants to go through ``api.generate_from_request``.
+    """
+    from .request import from_legacy_params
+
+    params = task_config_to_generator_config(task_config, result_df, generator_overrides, num_gpus_per_node)
+    return from_legacy_params(params, backend=getattr(task_config, "backend_name", None))
