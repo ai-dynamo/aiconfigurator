@@ -68,6 +68,7 @@ from aiconfigurator.sdk.operations import (
     WideEPContextMLA,
     WideEPGenerationMLA,
 )
+from aiconfigurator.sdk.operations.dsa import DEFAULT_DSA_ARCHITECTURE, DSA_MODEL_DIMS
 
 # Reuse the exact quant-mode -> Rust ``DataType`` serde-string mappers the live
 # ctypes bridge uses, so the compiled ``EngineConfig`` decodes the same way.
@@ -321,6 +322,12 @@ def _dsa_module(op: ContextDSAModule | GenerationDSAModule, *, architecture: str
     # (generation has no separate fmha mode in Python).
     kv = getattr(op, "_kvcache_quant_mode", None) or getattr(op, "_kv_cache_dtype", None)
     fmha = getattr(op, "_fmha_quant_mode", None)
+    arch = op._architecture or architecture
+    # `index_topk` is the top-k boundary used by the context piecewise / robust
+    # 3-D dispatch. Python sources it from `DSA_MODEL_DIMS[arch]` (defaulting to
+    # the default DSA architecture); mirror that so the Rust op-spec carries the
+    # same boundary. Field name MUST match the Rust `DsaModuleOp.index_topk`.
+    dims = DSA_MODEL_DIMS.get(arch, DSA_MODEL_DIMS[DEFAULT_DSA_ARCHITECTURE])
     return {
         "name": op._name,
         "scale_factor": op._scale_factor,
@@ -328,7 +335,8 @@ def _dsa_module(op: ContextDSAModule | GenerationDSAModule, *, architecture: str
         "kv_cache_dtype": _quant_name(kv),
         "fmha_quant_mode": _quant_name(fmha) if fmha is not None else "bfloat16",
         "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
-        "architecture": op._architecture or architecture,
+        "architecture": arch,
+        "index_topk": int(dims["index_topk"]),
     }
 
 
