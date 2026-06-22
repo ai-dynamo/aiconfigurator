@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Resolve the (out-of-repo) baseline data root.
 
 The frozen + pre-cutover baselines are developer-only migration fixtures for the

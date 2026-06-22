@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Compare generated artifacts to the immutable pre-cutover reference.
 
 Structured artifacts (YAML) -> compared by PARSED structure (semantic equality):

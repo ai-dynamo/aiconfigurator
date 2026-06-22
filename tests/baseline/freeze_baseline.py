@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Freeze current main-generator output for the canary matrix.
 
 Run from the repo root: python -m tests.baseline.freeze_baseline

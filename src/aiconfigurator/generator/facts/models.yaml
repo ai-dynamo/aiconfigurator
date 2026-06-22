@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Model serving profiles — flat facts layer (spec §6).
 # Only models with special serving behaviour get a profile here.
 # Models without an entry flow through the generic path on SDK facts.

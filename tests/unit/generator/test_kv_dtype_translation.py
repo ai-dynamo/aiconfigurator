@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Characterization test pinning kv_cache_dtype value translation.
 
 These value translations are CRASH/SILENT-severity guard rails (see
