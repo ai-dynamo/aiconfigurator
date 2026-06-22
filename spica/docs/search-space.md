@@ -100,7 +100,7 @@ Dict keys: `max_num_fpm_samples`, `fpm_sample_bucket_size` (must be a perfect sq
 
 Dict keys: `load_scaling_down_sensitivity` (0–100), `load_min_observations`.
 
-### `load_predictor_presets`
+### `load_predictor_candidates`
 
 The forecaster for predictive throughput scaling. It is **not** part of the main study:
 a separate forecast-loss sub-sweep scores every entry against the trace and pins the

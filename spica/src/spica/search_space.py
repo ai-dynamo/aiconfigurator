@@ -11,7 +11,7 @@ atomic knobs (each a configured choice list straight off the SearchSpace). The
 sampler turns one :class:`BranchSpace` into one Vizier study (one study per
 branch, per the design proposal).
 
-``backend`` is fixed per branch (not a searched knob); ``load_predictor_presets``
+``backend`` is fixed per branch (not a searched knob); ``load_predictor_candidates``
 is resolved separately by the load-predictor sub-sweep and is not a sampler
 dimension.
 """

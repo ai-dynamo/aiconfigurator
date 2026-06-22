@@ -45,7 +45,7 @@ def test_sweep_static_workload_uses_constant_per_interval():
     assert r.best_by_interval == {180: "constant_last", 600: "constant_last"}
 
 
-# --- load_predictor_presets as raw dicts (unrolled names) ---
+# --- load_predictor_candidates as raw dicts (unrolled names) ---
 
 
 def test_internal_preset_from_id_or_dict():

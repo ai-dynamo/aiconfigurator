@@ -30,7 +30,7 @@ def test_defaults_fill_in():
     # search-space defaults
     assert cfg.search_space.gpu_budget == 32
     assert cfg.search_space.prefill_block_size == 64
-    assert len(cfg.search_space.load_predictor_presets) == 11
+    assert len(cfg.search_space.load_predictor_candidates) == 11
     # goal/sweep default factories
     assert cfg.goal.target is OptimizationTarget.THROUGHPUT
     assert cfg.sweep.parallel_evals == 16
@@ -112,7 +112,7 @@ def test_composite_dict_entries_accepted():
                 {"enable_throughput_scaling": True, "throughput_adjustment_interval_seconds": 240},
             ],
             planner_fpm_sampling=[{"max_num_fpm_samples": 96, "fpm_sample_bucket_size": 16}],
-            load_predictor_presets=[{"load_predictor": "prophet", "prophet_window_size": 30}],
+            load_predictor_candidates=[{"load_predictor": "prophet", "prophet_window_size": 30}],
         ),
         workload={"isl": 1, "osl": 1, "concurrency": 1},
     )

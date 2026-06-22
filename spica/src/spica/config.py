@@ -135,7 +135,7 @@ SEARCH_CHOICES: dict[str, tuple] = {
     ),
     "planner_fpm_sampling": ("small", "default", "large", "fine"),
     "planner_load_sensitivity": ("aggressive", "default", "conservative"),
-    "load_predictor_presets": (
+    "load_predictor_candidates": (
         "constant_last",
         "arima_raw",
         "arima_log1p",
@@ -167,7 +167,7 @@ COMPOSITE_DICT_KEYS: dict[str, frozenset[str]] = {
     ),
     "planner_fpm_sampling": frozenset({"max_num_fpm_samples", "fpm_sample_bucket_size"}),
     "planner_load_sensitivity": frozenset({"load_scaling_down_sensitivity", "load_min_observations"}),
-    "load_predictor_presets": frozenset(
+    "load_predictor_candidates": frozenset(
         {
             "load_predictor",
             "load_predictor_log1p",
@@ -188,7 +188,7 @@ class SearchSpace(BaseModel):
     single-element list pins that knob) followed by the pinned knobs that group
     needs (scalars). When ``deployment_mode`` lists both branches the optimizer
     runs one flat study per branch and ranks across both. Most fields drive the
-    main Vizier sweep; ``load_predictor_presets`` is swept by a separate
+    main Vizier sweep; ``load_predictor_candidates`` is swept by a separate
     forecast-loss grid, with its winner pinned into the main sweep.
     """
 
@@ -269,7 +269,7 @@ class SearchSpace(BaseModel):
     # planner load predictor — independent grid sweep (ranked by one-step-ahead
     # forecast loss, NOT the main Vizier loop); the winning preset is pinned
     # into the main sweep. Only relevant under predictive throughput scaling.
-    load_predictor_presets: list[str | dict[str, Any]] = [
+    load_predictor_candidates: list[str | dict[str, Any]] = [
         "constant_last",
         "arima_raw",
         "arima_log1p",

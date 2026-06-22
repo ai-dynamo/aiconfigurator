@@ -276,7 +276,7 @@ def sweep_load_predictor(config: SmartSearchConfig, *, show_progress: bool = Tru
         )
 
     result = LoadPredictorResult(reason="swept")
-    presets = space.load_predictor_presets
+    presets = space.load_predictor_candidates
     labels = [_entry_label(e, i) for i, e in enumerate(presets)]
     for iv in intervals:
         windows = build_windows(config.workload.trace_path, iv)

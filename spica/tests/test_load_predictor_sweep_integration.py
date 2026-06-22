@@ -47,7 +47,7 @@ def test_sweep_constant_traffic_constant_predictor_is_optimal(tmp_path):
             "planner_scaling_policy": ["throughput_180_5"],
             # keep the grid fast (skip prophet/arima model fits) while still
             # exercising multi-preset selection per interval
-            "load_predictor_presets": ["constant_last", "kalman_default_raw"],
+            "load_predictor_candidates": ["constant_last", "kalman_default_raw"],
         },
         workload={"trace_path": _trace(tmp_path, rows), "trace_format": "mooncake"},
     )
