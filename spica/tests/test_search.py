@@ -122,3 +122,20 @@ def test_eval_failure_marked_infeasible(monkeypatch):
     cands = run_smart_search(_config(), evaluator=_Boom(), sampler_factory=factory)
     assert cands == []
     assert all(isinstance(x, tuple) and x[0] == "infeasible" for x in sampler_seen["s"].scored)
+
+
+def test_study_id_unique_per_run(monkeypatch):
+    # Vizier persists studies by id; a fixed id makes a later run inherit a stale
+    # study (and its old param space). run_smart_search must use a fresh id per run.
+    branch = _branch(ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2))
+    _stub(monkeypatch, branch)
+    seen: list[str] = []
+
+    def factory(b, study_id):
+        seen.append(study_id)
+        return _FakeSampler(b, study_id)
+
+    run_smart_search(_config(), evaluator=_FakeEvaluator(), sampler_factory=factory, show_progress=False)
+    run_smart_search(_config(), evaluator=_FakeEvaluator(), sampler_factory=factory, show_progress=False)
+    assert len(seen) == 2 and seen[0] != seen[1]  # fresh study per run, no stale reuse
+    assert all(s.startswith("spica_agg_trtllm_") for s in seen)

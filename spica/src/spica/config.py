@@ -180,6 +180,18 @@ COMPOSITE_DICT_KEYS: dict[str, frozenset[str]] = {
     ),
 }
 
+# Keys a composite dict MUST provide (any others default downstream). The three
+# planner composites are small coupled sets, so a dict must give all of them (the
+# doc's "self-contained" contract); a load-predictor dict needs at least the family
+# (``load_predictor``) — there is no sensible default for it, and omitting it would
+# crash the sub-sweep; the remaining family params default per family.
+COMPOSITE_REQUIRED_KEYS: dict[str, frozenset[str]] = {
+    "planner_scaling_policy": COMPOSITE_DICT_KEYS["planner_scaling_policy"],
+    "planner_fpm_sampling": COMPOSITE_DICT_KEYS["planner_fpm_sampling"],
+    "planner_load_sensitivity": COMPOSITE_DICT_KEYS["planner_load_sensitivity"],
+    "load_predictor_candidates": frozenset({"load_predictor"}),
+}
+
 
 class SearchSpace(BaseModel):
     """Inputs to one search run, grouped by component.
@@ -305,6 +317,12 @@ class SearchSpace(BaseModel):
                         raise ValueError(
                             f"{field_name} dict has unknown keys {sorted(unknown)}; allowed: {sorted(dict_keys)}"
                         )
+                    missing = COMPOSITE_REQUIRED_KEYS.get(field_name, frozenset()) - set(v)
+                    if missing:
+                        raise ValueError(
+                            f"{field_name} dict is missing required keys {sorted(missing)}; "
+                            f"a dict entry must be self-contained (see docs/search-space.md)"
+                        )
                 elif v not in allowed:
                     raise ValueError(f"{field_name} has invalid choice {v!r}; allowed: {list(allowed)}")
         return self
@@ -341,8 +359,8 @@ class SweepConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_rounds: int = 20  # total Vizier suggestion/evaluation rounds
-    parallel_evals: int = 16  # concurrent CPU replay evaluations
-    candidates_per_round: int | None = None  # defaults to parallel_evals
+    parallel_evals: int = 16  # default candidates-per-round fan-out (v1 evaluates sequentially)
+    candidates_per_round: int | None = None  # suggestions per round; defaults to parallel_evals
     random_seed: int = 1
 
 

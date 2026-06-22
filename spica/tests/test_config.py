@@ -107,11 +107,18 @@ def test_empty_choice_list_rejected():
 def test_composite_dict_entries_accepted():
     cfg = SmartSearchConfig(
         search_space=_search_space(
+            # a planner dict must be self-contained (all 4 scaling fields)
             planner_scaling_policy=[
                 "disabled",
-                {"enable_throughput_scaling": True, "throughput_adjustment_interval_seconds": 240},
+                {
+                    "enable_throughput_scaling": True,
+                    "enable_load_scaling": False,
+                    "throughput_adjustment_interval_seconds": 240,
+                    "load_adjustment_interval_seconds": 5,
+                },
             ],
             planner_fpm_sampling=[{"max_num_fpm_samples": 96, "fpm_sample_bucket_size": 16}],
+            # load_predictor needs only the family; params default per family
             load_predictor_candidates=[{"load_predictor": "prophet", "prophet_window_size": 30}],
         ),
         workload={"isl": 1, "osl": 1, "concurrency": 1},
@@ -124,6 +131,25 @@ def test_composite_dict_unknown_key_rejected():
     with pytest.raises(ValidationError, match="unknown keys"):
         SmartSearchConfig(
             search_space=_search_space(planner_fpm_sampling=[{"max_num_fpm_samples": 64, "bogus": 1}]),
+            workload={"isl": 1, "osl": 1, "concurrency": 1},
+        )
+
+
+def test_composite_dict_missing_required_key_rejected():
+    # load_predictor dict without the family would KeyError mid-sweep -> reject upfront
+    with pytest.raises(ValidationError, match="missing required keys"):
+        SmartSearchConfig(
+            search_space=_search_space(load_predictor_candidates=[{"load_predictor_log1p": True}]),
+            workload={"isl": 1, "osl": 1, "concurrency": 1},
+        )
+    # a planner dict must be self-contained (all of its fields)
+    with pytest.raises(ValidationError, match="missing required keys"):
+        SmartSearchConfig(
+            search_space=_search_space(
+                planner_scaling_policy=[
+                    {"enable_throughput_scaling": True, "throughput_adjustment_interval_seconds": 240}
+                ]
+            ),
             workload={"isl": 1, "osl": 1, "concurrency": 1},
         )
 

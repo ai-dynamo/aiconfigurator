@@ -56,11 +56,13 @@ Each list entry is **either** a preset id (string) **or** a `dict` that pins tho
 unrolled fields directly — the escape hatch for a value no preset offers. The list is a
 candidate set: one entry = pin, several = search; presets and dicts can be mixed.
 
-A dict entry is **self-contained**: its keys are exactly that composite's unrolled field
-names — it *replaces* the preset expansion (no partial / merge). To tweak one field off a
-preset, copy that composite's 2–4 fields into a dict and change the one. The *legality* of
-the values (perfect-square fpm bucket, interval > 0, scale-up > scale-down, …) is validated
-downstream by dynamo's `PlannerConfig`; the schema only checks the key set here.
+A dict entry is **self-contained**: it *replaces* the preset expansion (no partial / merge).
+Required keys are enforced at config load — the three **planner** composites must provide
+*all* of their unrolled fields; a **`load_predictor_candidates`** dict needs at least
+`load_predictor` (the family), and its family params default per family. Unknown keys are
+rejected. To tweak one field off a preset, copy that composite's fields into a dict and
+change the one. The *legality* of the values (perfect-square fpm bucket, interval > 0,
+scale-up > scale-down, …) is validated downstream by dynamo's `PlannerConfig`.
 
 ### `planner_scaling_policy`
 
@@ -184,7 +186,8 @@ Pin a disagg parallel config (prefill TEP, decode DEP):
 ## Validation summary
 
 - **List knob** — non-empty; string entries must be a listed choice.
-- **Composite dict** — keys ⊆ that composite's unrolled field names (value legality is
-  checked downstream by dynamo's `PlannerConfig`).
+- **Composite dict** — no unknown keys, and the required keys are present (all fields for
+  the planner composites; at least `load_predictor` for `load_predictor_candidates`). Value
+  legality is checked downstream by dynamo's `PlannerConfig`.
 - **`parallel_configs`** — structural + single-mode at config load; full legality /
   KV-feasibility when branches are enumerated.
