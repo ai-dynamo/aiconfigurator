@@ -1255,15 +1255,20 @@ def test_validate_agg_rejects_deepseek_on_vllm():
         t.validate()
 
 
-def test_validate_agg_rejects_fp8_static_on_non_trtllm():
+def test_validate_agg_fp8_static_on_sglang_is_data_driven():
+    """fp8_static is no longer hard-gated to trtllm; support is decided by the
+    perf DB.  h200_sxm/sglang has fp8 GEMM data but no compute_scale/scale_matrix
+    overhead tables, so fp8_static is rejected by the DB-side check rather than a
+    backend allowlist."""
     t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
         backend_name="sglang",
+        backend_version="0.5.10",
         gemm_quant_mode=common.GEMMQuantMode.fp8_static,
     )
-    with pytest.raises(ValueError, match="fp8_static GEMM mode is only supported on the trtllm backend"):
+    with pytest.raises(ValueError, match="Unsupported gemm quant mode 'fp8_static'"):
         t.validate()
 
 
@@ -1303,17 +1308,21 @@ def test_validate_disagg_rejects_mismatched_prefill_decode_model_paths():
         t.validate()
 
 
-def test_validate_disagg_rejects_fp8_static_on_non_trtllm_per_role():
+def test_validate_disagg_fp8_static_is_data_driven_per_role():
+    """Per-role fp8_static support is decided by the perf DB, not a trtllm
+    allowlist.  h200_sxm/sglang lacks the overhead tables, so the prefill role's
+    fp8_static is rejected by the DB-side check."""
     t = Task(
         serving_mode="disagg",
         prefill_model_path="deepseek-ai/DeepSeek-V3",
         prefill_system_name="h200_sxm",
         prefill_backend_name="sglang",
+        prefill_backend_version="0.5.10",
         prefill_gemm_quant_mode=common.GEMMQuantMode.fp8_static,
         decode_model_path="deepseek-ai/DeepSeek-V3",
         decode_system_name="h200_sxm",
     )
-    with pytest.raises(ValueError, match="prefill_backend_name='sglang'"):
+    with pytest.raises(ValueError, match="Unsupported gemm quant mode 'fp8_static'"):
         t.validate()
 
 
@@ -1372,6 +1381,21 @@ def test_validate_skips_db_check_when_database_unavailable():
     # Force a non-existent backend_version → DB load fails → DB check skipped
     t.backend_version = "9.99.99-nonexistent"
     t.validate()  # static checks pass, DB silently skipped
+
+
+def test_validate_fp8_static_fails_fast_when_db_unavailable_in_silicon():
+    """SILICON mode can't confirm fp8_static overhead data without the DB, so an
+    unloadable (system, backend, version) must fail fast instead of deferring."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        gemm_quant_mode=common.GEMMQuantMode.fp8_static,
+    )
+    t.backend_version = "9.99.99-nonexistent"  # DB load fails -> can't confirm support
+    with pytest.raises(ValueError, match="fp8_static GEMM mode requires perf data"):
+        t.validate()
 
 
 def test_validate_skips_db_check_for_deepseekv4_synthetic_mode():

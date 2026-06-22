@@ -1028,10 +1028,11 @@ class Task:
         """Check that the resolved task is internally consistent and supported.
 
         Two layers:
-        - Static checks: required fields, fp8_static→trtllm constraint,
-          DeepSeek+vLLM exclusion.  Always run, no I/O.
+        - Static checks: required fields, DeepSeek+vLLM exclusion.  Always
+          run, no I/O.
         - Database-dependent checks: each user-selected quant mode is in
           the perf database's ``supported_quant_mode`` list for its op
+          (this is where fp8_static is gated by overhead-table availability)
           (gemm, moe / wideep_*_moe, context_attention / context_mla /
           dsa_context_module / deepseek_v4_context_module / wideep_context_mla,
           and the corresponding generation_* op).  Skipped silently if
@@ -1066,10 +1067,10 @@ class Task:
             raise ValueError("agg mode requires system_name")
         if self.backend_name == "vllm" and self._model_family == "DEEPSEEK":
             raise NotImplementedError("AIConfigurator does not yet support the DeepSeek family on the vLLM backend.")
-        if self.gemm_quant_mode == common.GEMMQuantMode.fp8_static and self.backend_name != "trtllm":
-            raise ValueError(
-                f"fp8_static GEMM mode is only supported on the trtllm backend, got backend={self.backend_name!r}."
-            )
+        # fp8_static is not hard-gated to trtllm: it is derived from the dynamic
+        # fp8 GEMM minus compute_scale/scale_matrix overhead and works on any
+        # backend whose perf DB carries those tables.  _validate_database_quant_modes
+        # rejects it on backends/systems that lack the data.
 
     def _validate_disagg(self) -> None:
         if not self.prefill_model_path or not self.decode_model_path:
@@ -1089,12 +1090,8 @@ class Task:
             raise ValueError("disagg mode requires both prefill_system_name and decode_system_name.")
         for role in ("prefill", "decode"):
             backend = self._role_attr(role, "backend_name")
-            gemm = self._role_attr(role, "gemm_quant_mode")
-            if gemm == common.GEMMQuantMode.fp8_static and backend != "trtllm":
-                raise ValueError(
-                    f"fp8_static GEMM mode is only supported on the trtllm backend, "
-                    f"got {role}_backend_name={backend!r}."
-                )
+            # fp8_static is not hard-gated to trtllm (see _validate_agg); the
+            # per-role DB check in _validate_database_quant_modes governs support.
             if backend == "vllm" and self._model_family == "DEEPSEEK":
                 raise NotImplementedError(
                     f"AIConfigurator does not yet support the DeepSeek family on the vLLM backend ({role} side)."
@@ -1148,14 +1145,28 @@ class Task:
         except (PerfDataNotAvailableError, FileNotFoundError) as exc:
             # DB unavailable; let sweep surface the real error later.
             logger.debug("validate: skipping DB-side quant check (DB unavailable): %s", exc)
-            return
+            database = None
         except Exception as exc:
             # Match the legacy "DB error" envelope (e.g. wrapped FileNotFoundError
             # inside RuntimeError) without swallowing programmer typos.
-            if has_perf_data_not_available_cause(exc):
-                logger.debug("validate: skipping DB-side quant check (DB unavailable): %s", exc)
-                return
-            raise
+            if not has_perf_data_not_available_cause(exc):
+                raise
+            logger.debug("validate: skipping DB-side quant check (DB unavailable): %s", exc)
+            database = None
+
+        if database is None:
+            # In SILICON mode the DB must exist; fp8_static is derived from
+            # compute_scale/scale_matrix overhead tables we can't confirm without it,
+            # so fail fast rather than defer to a late run() failure.  Other modes
+            # (and other quant modes) keep deferring to the sweep.
+            if self.database_mode in (None, common.DatabaseMode.SILICON.name) and (
+                self._role_attr(role, "gemm_quant_mode") == common.GEMMQuantMode.fp8_static
+            ):
+                raise ValueError(
+                    f"fp8_static GEMM mode requires perf data that is unavailable for "
+                    f"system={system!r}, backend={backend!r}, version={version!r}."
+                )
+            return
 
         supported: dict = getattr(database, "supported_quant_mode", {}) or {}
         enable_wideep = bool(self._role_attr(role, "enable_wideep"))
