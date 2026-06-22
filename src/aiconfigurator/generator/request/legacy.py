@@ -8,7 +8,7 @@ existing derivation), then overlays `overrides.raw`. `from_legacy_params` is the
 inverse and captures every section into `overrides.raw` so a
 params -> request -> params round-trip is lossless on legacy shapes.
 
-The load-bearing invariant (tests/baseline): for the canary matrix,
+The load-bearing invariant: for the canary matrix,
 `to_legacy_params(from_legacy_params(p))` renders byte-identically to `p`.
 """
 
