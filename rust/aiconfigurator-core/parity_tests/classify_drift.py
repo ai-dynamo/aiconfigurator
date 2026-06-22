@@ -37,14 +37,18 @@ def frontier_curve(df, x="tokens/s/gpu", y="tpot"):
 
 
 def max_gap(xa, ya, xb, yb):
-    # interpolate curve B's y at curve A's x (overlapping range only), rel gap
+    # Compare the two curves on the UNION of both frontiers' x-points within the
+    # overlap, not just one curve's x. Sampling only A's x-points is one-sided: a
+    # sparser curve can hide divergence that only shows up at the other frontier's
+    # x-points. Interpolate BOTH onto the union grid and take the relative gap.
     lo = max(xa.min(), xb.min())
     hi = min(xa.max(), xb.max())
-    xs = xa[(xa >= lo) & (xa <= hi)]
+    xs = np.unique(np.concatenate([xa, xb]))
+    xs = xs[(xs >= lo) & (xs <= hi)]
     if len(xs) < 2:
         return None
-    yb_i = np.interp(xs, xb, yb)
     ya_i = np.interp(xs, xa, ya)
+    yb_i = np.interp(xs, xb, yb)
     rel = np.abs(ya_i - yb_i) / np.maximum(np.abs(yb_i), 1e-9)
     return float(rel.max() * 100), float(rel.mean() * 100)
 

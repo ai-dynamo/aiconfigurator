@@ -32,6 +32,13 @@ default = []
 # Enable when building as a standalone Rust binary that embeds Python
 # (cargo build / cargo test). Do NOT enable when used as a dep of a
 # PyO3 extension-module crate — maturin sets extension-module instead.
+#
+# NOTE: the integration tests that embed Python (tests/pyo3_smoke.rs,
+# tests/embedded_round_trip.rs, tests/memory_round_trip.rs — they call
+# `Python::with_gil`) need `auto-initialize`, so run them with
+# `cargo test --features embed-python`. Plain `cargo test` leaves those
+# specific tests failing with "Python interpreter is not initialized"
+# (expected — not a regression).
 embed-python = ["pyo3/auto-initialize"]
 
 [dev-dependencies]

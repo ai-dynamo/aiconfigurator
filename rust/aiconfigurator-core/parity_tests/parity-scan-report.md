@@ -26,8 +26,8 @@ model × system × backend × version matrix.
 This report is that gate's evidence: the coverage swept, the methodology, the
 results, and every parity bug found and fixed along the way.
 
-- Plan: [`rust/aiconfigurator-core/docs/phase-2-python-dedup-plan.md`](../rust/aiconfigurator-core/docs/phase-2-python-dedup-plan.md)
-- Scan runbook: [`rust/aiconfigurator-core/docs/phase-2-parity-scan-runbook.md`](../rust/aiconfigurator-core/docs/phase-2-parity-scan-runbook.md)
+- Plan: [`rust/aiconfigurator-core/docs/phase-2-python-dedup-plan.md`](../docs/phase-2-python-dedup-plan.md)
+- Scan runbook: [`rust/aiconfigurator-core/docs/phase-2-parity-scan-runbook.md`](../docs/phase-2-parity-scan-runbook.md)
 - Harness: `tools/support_matrix/scan_rust_parity.py`
 
 ## 2. Coverage
@@ -160,7 +160,7 @@ the final build is the confirming gate (§8).
 | `Qwen/Qwen3-30B-A3B` · gb200 · vllm 0.19.0 | 0.0% | mean **0.09%** / max 0.36% | 19% (peak-throughput endpoint) |
 | `moonshotai/Kimi-K2.5` · h200_sxm · vllm 0.14.0 | 0.0% | mean **0.96%** / max 6.47% | 6% (min-latency endpoint; tpot & peak-tput identical) |
 | `moonshotai/Kimi-K2.5` · h200_sxm · vllm 0.19.0 | 0.0% | mean **1.23%** / max 6.88% | 6% (min-latency endpoint; tpot & peak-tput identical) |
-| `nvidia/Nemotron-3-Nano-30B-A3B-BF16` · gb300 · sglang 0.5.10 | 0.0% | mean **0.15%** / max 0.97% | 7% (extreme endpoints; curve <1%) |
+| `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` · gb300 · sglang 0.5.10 | 0.0% | mean **0.15%** / max 0.97% | 7% (extreme endpoints; curve <1%) |
 
 A classifier (`parity_tests/classify_drift.py`) compared the two engines'
 user-facing frontier **curves** (request_latency vs tokens/s/user) and the

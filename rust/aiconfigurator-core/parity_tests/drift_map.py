@@ -94,14 +94,20 @@ def main():
     print("\n==== SUMMARY by (mode, phase, batch-bucket) ====")
     from collections import defaultdict
 
+    def _bucket(b):
+        return "bs=1" if b == 1 else ("bs<=16" if b <= 16 else ("bs<=64" if b <= 64 else "bs>=256"))
+
     buckets = defaultdict(int)
     for fam, model, mode, desc, dt, dp in hits:
-        bs = int([t for t in desc.split() if t.startswith("bs=") or t.startswith("dbs=")][-1].split("=")[1])
-        bucket = "bs=1" if bs == 1 else ("bs<=16" if bs <= 16 else ("bs<=64" if bs <= 64 else "bs>=256"))
+        # Bucket each phase on ITS OWN batch: ttft is prefill (bs / pbs), tpot is
+        # decode (bs / dbs). desc is "...bs=N" (agg) or "...pbs=P dbs=D" (disagg).
+        toks = dict(t.split("=") for t in desc.split() if "=" in t)
+        prefill_b = int(toks.get("pbs", toks.get("bs", 0)))
+        decode_b = int(toks.get("dbs", toks.get("bs", 0)))
         if abs(dt) > 1.0:
-            buckets[(mode, "ttft", bucket)] += 1
+            buckets[(mode, "ttft", _bucket(prefill_b))] += 1
         if abs(dp) > 1.0:
-            buckets[(mode, "tpot", bucket)] += 1
+            buckets[(mode, "tpot", _bucket(decode_b))] += 1
     for k in sorted(buckets):
         print(f"  {k[0]:6s} {k[1]:4s} {k[2]:8s}: {buckets[k]} configs")
     print(f"\nTOTAL HITS: {len(hits)}")

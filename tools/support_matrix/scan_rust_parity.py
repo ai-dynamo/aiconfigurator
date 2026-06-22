@@ -1206,8 +1206,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Recycle each worker process after this many entries to bound memory "
             "(the per-process perf-DB cache grows otherwise). 0 = never recycle "
-            "(workers live for the whole run). Recommended ~25 for memory-constrained "
-            "hosts. Requires the 'spawn' start method (default on macOS/Windows)."
+            "(workers live for the whole run). STRONGLY PREFER 0: a finite value "
+            "deterministically deadlocks this homogeneous workload (all workers hit "
+            "the W*N recycle boundary at once -> ProcessPoolExecutor recycle hang; "
+            "see runbook phase-2-parity-scan-runbook.md §4.0). To bound memory, "
+            "recycle at the process boundary with --limit shards instead, keeping "
+            "--max-tasks-per-child 0. Requires the 'spawn' start method."
         ),
     )
     scan.add_argument(
