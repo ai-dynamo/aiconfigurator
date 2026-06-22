@@ -65,6 +65,13 @@ def _decoder_for(choices: list[Any]) -> Callable[[Any], Any]:
     return float  # discrete float
 
 
+def _index_decoder(choices: list[Any]) -> Callable[[Any], Any]:
+    """Decode a categorical *index* back to the chosen entry. Used when a knob's
+    choices include dicts (a composite knob with pinned-dict entries) — dicts can't
+    be Vizier categorical values, so we categorize over the index instead."""
+    return lambda v: choices[int(round(float(v)))]
+
+
 class VizierBranchSampler:
     """A Vizier GP-bandit study over one :class:`BranchSpace`."""
 
@@ -84,11 +91,16 @@ class VizierBranchSampler:
                 if choices:
                     self._constants[knob] = choices[0]  # fixed -> inject, not a param
                 continue
-            if all(isinstance(c, str) for c in choices):
+            if any(isinstance(c, dict) for c in choices):
+                # composite knob with pinned-dict entries -> categorical over index
+                root.add_categorical_param(knob, [str(i) for i in range(len(choices))])
+                self._decoders[knob] = _index_decoder(choices)
+            elif all(isinstance(c, str) for c in choices):
                 root.add_categorical_param(knob, list(choices))
+                self._decoders[knob] = _decoder_for(choices)
             else:
                 root.add_discrete_param(knob, sorted(float(c) for c in choices))
-            self._decoders[knob] = _decoder_for(choices)
+                self._decoders[knob] = _decoder_for(choices)
 
         problem.metric_information.append(vz.MetricInformation(name=_METRIC, goal=vz.ObjectiveMetricGoal.MAXIMIZE))
         study_config = vz.StudyConfig.from_problem(problem)

@@ -10,6 +10,7 @@ pytest.importorskip("aiconfigurator")
 
 from spica.config import SmartSearchConfig  # noqa: E402
 from spica.kv_estimate import NoPerfDatabase  # noqa: E402
+from spica.model_hw import NoViableParallelConfig  # noqa: E402
 from spica.search_space import branch_knob_choices, enumerate_branches  # noqa: E402
 
 
@@ -54,3 +55,35 @@ def test_enumerate_branches_deepseek_gb200():
         assert "planner_scaling_policy" in b.knob_choices
         key = "agg_max_num_seqs" if b.deployment_mode == "agg" else "decode_max_num_seqs"
         assert key in b.knob_choices
+
+
+def test_pinned_parallel_configs_replace_the_menu():
+    # a dense, KV-trivial model so the pinned shapes are guaranteed feasible
+    cfg = _config(
+        model_name="meta-llama/Meta-Llama-3.1-8B",
+        deployment_mode=["agg"],
+        gpu_budget=32,
+        parallel_configs=[{"tp": 4, "replicas": 2}, {"tp": 8, "replicas": 1}],
+    )
+    try:
+        branches = enumerate_branches(cfg)
+    except NoPerfDatabase:
+        pytest.skip("no gb200/trtllm perf DB")
+    (branch,) = branches
+    menu = {(c.shape.tp, c.replicas) for c in branch.parallel_configs}
+    assert menu == {(4, 2), (8, 1)}  # exactly the pinned set, not the full enumeration
+    assert all(c.total_gpus == 8 for c in branch.parallel_configs)
+
+
+def test_pinned_parallel_config_illegal_is_rejected():
+    cfg = _config(
+        model_name="meta-llama/Meta-Llama-3.1-8B",
+        deployment_mode=["agg"],
+        gpu_budget=32,
+        parallel_configs=[{"tp": 3, "replicas": 1}],  # tp=3 not on the GPU ladder
+    )
+    try:
+        with pytest.raises(NoViableParallelConfig):
+            enumerate_branches(cfg)
+    except NoPerfDatabase:
+        pytest.skip("no gb200/trtllm perf DB")

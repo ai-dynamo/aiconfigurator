@@ -1,7 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from spica.planner import SCALING_POLICIES, throughput_intervals
+from spica.planner import (
+    SCALING_POLICIES,
+    fpm_fields,
+    load_sensitivity_fields,
+    scaling_fields,
+    throughput_intervals,
+)
 
 
 def test_scaling_policy_decode():
@@ -22,3 +28,46 @@ def test_throughput_intervals_distinct_enabled_only():
 
 def test_throughput_intervals_empty_when_none_enabled():
     assert throughput_intervals(["disabled", "load_180_5", "load_180_10"]) == []
+
+
+# --- composite knobs as raw dicts (the pin-the-unrolled-fields escape hatch) ---
+
+
+def test_scaling_fields_from_preset_or_dict():
+    assert scaling_fields("throughput_180_5") == {
+        "enable_throughput_scaling": True,
+        "enable_load_scaling": False,
+        "throughput_adjustment_interval_seconds": 180,
+        "load_adjustment_interval_seconds": 5,
+    }
+    # a raw dict is returned as the four normalized fields (custom interval=240)
+    raw = {
+        "enable_throughput_scaling": True,
+        "enable_load_scaling": False,
+        "throughput_adjustment_interval_seconds": 240,
+        "load_adjustment_interval_seconds": 5,
+    }
+    assert scaling_fields(raw) == raw
+
+
+def test_fpm_and_sensitivity_fields_from_preset_or_dict():
+    assert fpm_fields("default") == {"max_num_fpm_samples": 64, "fpm_sample_bucket_size": 16}
+    assert fpm_fields({"max_num_fpm_samples": 96, "fpm_sample_bucket_size": 16}) == {
+        "max_num_fpm_samples": 96,
+        "fpm_sample_bucket_size": 16,
+    }
+    assert load_sensitivity_fields("aggressive") == {"load_scaling_down_sensitivity": 70, "load_min_observations": 3}
+    assert load_sensitivity_fields({"load_scaling_down_sensitivity": 75, "load_min_observations": 4}) == {
+        "load_scaling_down_sensitivity": 75,
+        "load_min_observations": 4,
+    }
+
+
+def test_throughput_intervals_mixes_presets_and_dicts():
+    policies = [
+        "disabled",
+        "throughput_180_5",  # 180
+        {"enable_throughput_scaling": True, "throughput_adjustment_interval_seconds": 240},  # 240
+        {"enable_load_scaling": True, "load_adjustment_interval_seconds": 5},  # load-only -> ignored
+    ]
+    assert throughput_intervals(policies) == [180, 240]

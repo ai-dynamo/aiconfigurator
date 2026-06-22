@@ -20,11 +20,14 @@ Spica — Spica is the upper layer.
 
 ## Status
 
-- Input schema (`SmartSearchConfig`) — done.
+- Input schema (`SmartSearchConfig`) — done. See [docs/search-space.md](docs/search-space.md)
+  for the full knob reference (what you can pin/search, composite-knob presets vs.
+  raw-dict pins, and `parallel_configs`).
 - Planner load-predictor independent grid sweep (`sweep_load_predictor`) —
   done; reuses the real dynamo planner predictors + the planner's densify-fixed
   trace→window tool.
-- `run_smart_search` (the main Vizier + Replay sweep) — still a stub; lands next.
+- `run_smart_search` (the main Vizier + Replay sweep) — done: enumerate → sample →
+  deploy → replay → score → rank. Real replay needs the `aic-forward-pass` build below.
 
 ## Develop
 

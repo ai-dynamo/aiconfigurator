@@ -22,8 +22,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from .config import SmartSearchConfig
-from .model_hw import parallel_configs_for
-from .parallel_enum import DisaggParallelConfig, ReplicaParallelConfig
+from .model_hw import NoViableParallelConfig, parallel_configs_for
+from .parallel_enum import DisaggParallelConfig, ParallelShape, ReplicaParallelConfig
 
 # Searchable atomic knobs, by group. Names are SearchSpace list-typed fields.
 _ROUTER_KNOBS = (
@@ -60,6 +60,51 @@ def _engine_knobs(deployment_mode: str) -> tuple[str, ...]:
     return _AGG_ENGINE if deployment_mode == "agg" else _DISAGG_ENGINE
 
 
+def _shape_from_dict(d: dict[str, Any]) -> ParallelShape:
+    """A per-worker :class:`ParallelShape` from a pinned shape dict. Omitted dims
+    default to 1 (so dense models can write just ``{tp: N}``); ``pp`` defaults to 1."""
+    if "tp" not in d:
+        raise ValueError(f"a parallel_configs shape needs a 'tp' field, got {d}")
+    return ParallelShape(
+        tp=int(d["tp"]),
+        dp=int(d.get("attention_dp", 1)),
+        moe_tp=int(d.get("moe_tp", 1)),
+        moe_ep=int(d.get("moe_ep", 1)),
+        pp=int(d.get("pp", 1)),
+    )
+
+
+def _replica_from_dict(d: dict[str, Any]) -> ReplicaParallelConfig:
+    return ReplicaParallelConfig(shape=_shape_from_dict(d), replicas=int(d.get("replicas", 1)))
+
+
+def _parse_parallel_entry(entry: dict[str, Any], deployment_mode: str):
+    """Parse one pinned ``parallel_configs`` entry into the config object: a flat
+    shape dict for agg, or a ``{prefill, decode}`` pair for disagg."""
+    if deployment_mode == "agg":
+        return _replica_from_dict(entry)
+    return DisaggParallelConfig(
+        prefill=_replica_from_dict(entry["prefill"]),
+        decode=_replica_from_dict(entry["decode"]),
+    )
+
+
+def _pinned_parallel_configs(parallel_configs, deployment_mode, legal):
+    """Parse the user's pinned ``parallel_configs`` and keep only those that appear
+    in the enumerated ``legal`` set (KV-feasible + shape/backend-legal within budget).
+    Raises if any pinned config is not legal/feasible for this branch."""
+    legal_set = set(legal)
+    pinned = [_parse_parallel_entry(entry, deployment_mode) for entry in parallel_configs]
+    illegal = [p for p in pinned if p not in legal_set]
+    if illegal:
+        raise NoViableParallelConfig(
+            f"pinned parallel_configs are not legal/KV-feasible for this branch: {illegal}. "
+            "Each pinned shape must satisfy the MoE-width / backend / GPU-ladder rules and "
+            "hold a max_seq_len sequence within gpu_budget (same constraints the enumerator applies)."
+        )
+    return pinned
+
+
 def branch_knob_choices(search_space, deployment_mode: str) -> dict[str, list[Any]]:
     """The searchable atomic knobs for a branch (router + planner + the active
     mode's engine batching), each mapped to its configured choice list."""
@@ -78,7 +123,7 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
     branches: list[BranchSpace] = []
     for deployment_mode in ss.deployment_mode:
         for backend in ss.backend:
-            parallel_configs = parallel_configs_for(
+            legal = parallel_configs_for(
                 ss.model_name,
                 ss.hardware_sku,
                 gpu_budget=ss.gpu_budget,
@@ -87,6 +132,13 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
                 min_gpu_budget=ss.min_gpu_budget,
                 max_seq_len=max_seq_len,
             )
+            # A pinned parallel_configs replaces the enumerated menu (validated against
+            # it); empty -> use the full enumerated menu. (deployment_mode is pinned to
+            # one mode when parallel_configs is set, enforced in SearchSpace.)
+            if ss.parallel_configs:
+                parallel_configs = _pinned_parallel_configs(ss.parallel_configs, deployment_mode, legal)
+            else:
+                parallel_configs = list(legal)
             branches.append(
                 BranchSpace(
                     deployment_mode=deployment_mode,

@@ -22,6 +22,7 @@ The two other named planner presets decode to numeric fields here too:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -66,17 +67,51 @@ LOAD_SENSITIVITY: dict[str, dict[str, int]] = {
 }
 
 
-def throughput_intervals(policy_ids: list[str]) -> list[int]:
-    """Distinct throughput-adjustment intervals (seconds), sorted, across the
-    given policy candidates that enable throughput scaling.
+# A composite knob entry is either a preset id (str) or a dict pinning the
+# unrolled fields directly. These decoders accept both and always return the flat
+# field dict, so callers never branch on the entry type.
+
+
+def scaling_fields(entry: str | dict[str, Any]) -> dict[str, Any]:
+    """The four ``planner_scaling_policy`` fields for an entry (preset id or dict)."""
+    if isinstance(entry, dict):
+        return {
+            "enable_throughput_scaling": bool(entry.get("enable_throughput_scaling", False)),
+            "enable_load_scaling": bool(entry.get("enable_load_scaling", False)),
+            "throughput_adjustment_interval_seconds": entry.get("throughput_adjustment_interval_seconds"),
+            "load_adjustment_interval_seconds": entry.get("load_adjustment_interval_seconds"),
+        }
+    p = SCALING_POLICIES[entry]
+    return {
+        "enable_throughput_scaling": p.enable_throughput,
+        "enable_load_scaling": p.enable_load,
+        "throughput_adjustment_interval_seconds": p.throughput_interval_s,
+        "load_adjustment_interval_seconds": p.load_interval_s,
+    }
+
+
+def fpm_fields(entry: str | dict[str, Any]) -> dict[str, Any]:
+    """The ``planner_fpm_sampling`` fields for an entry (preset id or dict)."""
+    return dict(entry) if isinstance(entry, dict) else dict(FPM_SAMPLING[entry])
+
+
+def load_sensitivity_fields(entry: str | dict[str, Any]) -> dict[str, Any]:
+    """The ``planner_load_sensitivity`` fields for an entry (preset id or dict)."""
+    return dict(entry) if isinstance(entry, dict) else dict(LOAD_SENSITIVITY[entry])
+
+
+def throughput_intervals(policies: list[str | dict[str, Any]]) -> list[int]:
+    """Distinct throughput-adjustment intervals (seconds), sorted, across the given
+    ``planner_scaling_policy`` candidates (preset ids or dicts) that enable
+    throughput scaling.
 
     Returns an empty list when no candidate enables throughput scaling — the
     load-predictor sweep is then unnecessary (it only matters for predictive
     throughput scaling).
     """
-    intervals = {
-        SCALING_POLICIES[p].throughput_interval_s
-        for p in policy_ids
-        if p in SCALING_POLICIES and SCALING_POLICIES[p].enable_throughput
-    }
+    intervals = set()
+    for entry in policies:
+        f = scaling_fields(entry)
+        if f["enable_throughput_scaling"]:
+            intervals.add(f["throughput_adjustment_interval_seconds"])
     return sorted(iv for iv in intervals if iv is not None)

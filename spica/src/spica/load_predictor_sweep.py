@@ -79,6 +79,37 @@ LOAD_PREDICTOR_PRESETS: dict[str, dict[str, Any]] = {
 # Planner defaults for knobs a preset does not pin (mirror SLAPlannerDefaults).
 _DEFAULTS = {"prophet_window_size": 50, "q_level": 1.0, "q_trend": 0.1, "r": 10.0, "min_points": 5}
 
+# Predictor families AIC offers (also the legal values for a custom dict's
+# ``load_predictor``). Derived from the presets so it stays in sync.
+_VALID_FAMILIES = frozenset(p["family"] for p in LOAD_PREDICTOR_PRESETS.values())
+
+
+def _internal_preset(entry: str | dict[str, Any]) -> dict[str, Any]:
+    """Internal preset dict (``family`` / ``log1p`` / ``q_*`` / ``r`` / ``min_points``)
+    the predictor classes consume, from either a preset id or a user dict in the
+    *unrolled* field names (``load_predictor`` / ``load_predictor_log1p`` / ``kalman_*``).
+    """
+    if not isinstance(entry, dict):
+        return LOAD_PREDICTOR_PRESETS[entry]
+    family = entry["load_predictor"]
+    if family not in _VALID_FAMILIES:
+        raise ValueError(f"load_predictor must be one of {sorted(_VALID_FAMILIES)}, got {family!r}")
+    return {
+        "family": family,
+        "log1p": bool(entry.get("load_predictor_log1p", False)),
+        "prophet_window_size": entry.get("prophet_window_size", _DEFAULTS["prophet_window_size"]),
+        "q_level": entry.get("kalman_q_level", _DEFAULTS["q_level"]),
+        "q_trend": entry.get("kalman_q_trend", _DEFAULTS["q_trend"]),
+        "r": entry.get("kalman_r", _DEFAULTS["r"]),
+        "min_points": entry.get("kalman_min_points", _DEFAULTS["min_points"]),
+    }
+
+
+def _entry_label(entry: str | dict[str, Any], index: int) -> str:
+    """Stable diagnostics id for a load-predictor entry: the preset id, or
+    ``custom_<index>`` for a pinned dict (used as the ``losses`` map key / tqdm tag)."""
+    return entry if isinstance(entry, str) else f"custom_{index}"
+
 
 @dataclass
 class Window:
@@ -106,9 +137,9 @@ class _PredictorConfig:
 
 @dataclass
 class LoadPredictorResult:
-    # best preset id per throughput interval (seconds)
-    best_by_interval: dict[int, str] = field(default_factory=dict)
-    # interval -> {preset id -> mean one-step-ahead loss}
+    # best entry (preset id, or a custom dict) per throughput interval (seconds)
+    best_by_interval: dict[int, str | dict[str, Any]] = field(default_factory=dict)
+    # interval -> {entry label -> mean one-step-ahead loss}
     losses: dict[int, dict[str, float]] = field(default_factory=dict)
     # why the sweep produced this (diagnostics)
     reason: str = ""
@@ -156,14 +187,14 @@ def build_windows(trace_path: str, interval_s: int) -> list[Window]:
     ]
 
 
-def predictor_fields(preset_id: str) -> dict[str, Any]:
-    """Flat planner load-predictor fields a preset id expands to: the
-    ``load_predictor`` family + ``load_predictor_log1p`` + only the family knobs
-    that family reads (``prophet_window_size`` for prophet; the ``kalman_*``
-    params for kalman; nothing extra for constant/arima). Defaults fill knobs the
-    preset does not pin. Used to unroll the sweep's winning preset into a sample.
+def predictor_fields(entry: str | dict[str, Any]) -> dict[str, Any]:
+    """Flat planner load-predictor fields an entry expands to: the ``load_predictor``
+    family + ``load_predictor_log1p`` + only the family knobs that family reads
+    (``prophet_window_size`` for prophet; the ``kalman_*`` params for kalman; nothing
+    extra for constant/arima). Accepts a preset id or a custom dict; defaults fill
+    knobs neither pins. Used to unroll the sweep's winning entry into a sample.
     """
-    preset = LOAD_PREDICTOR_PRESETS[preset_id]
+    preset = _internal_preset(entry)
     family = preset["family"]
     fields: dict[str, Any] = {"load_predictor": family, "load_predictor_log1p": preset["log1p"]}
     if family == "prophet":
@@ -219,12 +250,12 @@ def evaluate_preset(windows: list[Window], preset: dict[str, Any], interval_s: i
     return mean(losses) if losses else math.inf
 
 
-def _common_warmup(preset_ids: list[str], interval_s: int) -> int:
-    """Max ``minimum_data_points`` across the selected presets, so every preset
+def _common_warmup(entries: list[str | dict[str, Any]], interval_s: int) -> int:
+    """Max ``minimum_data_points`` across the selected entries, so every entry
     is scored on the same windows."""
     mins = []
-    for pid in preset_ids:
-        pn, _, _ = _new_predictors(LOAD_PREDICTOR_PRESETS[pid], interval_s)
+    for entry in entries:
+        pn, _, _ = _new_predictors(_internal_preset(entry), interval_s)
         mins.append(pn.minimum_data_points)
     return max(mins) if mins else 0
 
@@ -245,19 +276,27 @@ def sweep_load_predictor(config: SmartSearchConfig, *, show_progress: bool = Tru
         )
 
     result = LoadPredictorResult(reason="swept")
+    presets = space.load_predictor_presets
+    labels = [_entry_label(e, i) for i, e in enumerate(presets)]
     for iv in intervals:
         windows = build_windows(config.workload.trace_path, iv)
-        warmup = _common_warmup(space.load_predictor_presets, iv)
+        warmup = _common_warmup(presets, iv)
         per_preset: dict[str, float] = {}
+        best_entry: str | dict[str, Any] | None = None
+        best_loss = math.inf
         bar = tqdm(
-            space.load_predictor_presets,
+            zip(labels, presets),
+            total=len(presets),
             desc=f"load-predictor @ {iv}s ({len(windows)} windows, warmup {warmup})",
             unit="preset",
             disable=not show_progress,
         )
-        for pid in bar:
-            per_preset[pid] = evaluate_preset(windows, LOAD_PREDICTOR_PRESETS[pid], iv, warmup)
-            bar.set_postfix_str(f"{pid}={per_preset[pid]:.3f}")
+        for label, entry in bar:
+            loss = evaluate_preset(windows, _internal_preset(entry), iv, warmup)
+            per_preset[label] = loss
+            bar.set_postfix_str(f"{label}={loss:.3f}")
+            if loss < best_loss:
+                best_loss, best_entry = loss, entry
         result.losses[iv] = per_preset
-        result.best_by_interval[iv] = min(per_preset, key=per_preset.__getitem__)
+        result.best_by_interval[iv] = best_entry
     return result

@@ -50,6 +50,34 @@ def test_suggest_produces_valid_selections():
         assert s.parallel_config in branch.parallel_configs
 
 
+def test_dict_form_composite_decodes_via_index():
+    # planner_scaling_policy mixes a preset id and a pinned dict; the sampler
+    # categorizes over the index and decodes back to the exact entry (str or dict).
+    raw = {
+        "enable_throughput_scaling": True,
+        "enable_load_scaling": False,
+        "throughput_adjustment_interval_seconds": 240,
+        "load_adjustment_interval_seconds": 5,
+    }
+    branch = BranchSpace(
+        deployment_mode="agg",
+        backend="trtllm",
+        parallel_configs=(ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=1),),
+        knob_choices={
+            "planner_scaling_policy": ["disabled", raw],  # str | dict -> index categorical
+            "planner_fpm_sampling": ["default"],
+            "planner_load_sensitivity": ["default"],
+        },
+    )
+    sampler = make_branch_sampler(branch, study_id="test_dict_index")
+    seen = [s.selection["planner_scaling_policy"] for s in sampler.suggest(count=5)]
+    assert seen, "expected suggestions"
+    # every decoded entry is exactly one of the two originals (native type preserved)
+    for entry in seen:
+        assert entry == "disabled" or entry == raw
+        assert isinstance(entry, (str, dict))
+
+
 def test_suggest_observe_round_trips():
     # Verify the ask/tell round-trip feeds back without error and the study
     # tracks the best observed score. (Convergence quality isn't asserted —

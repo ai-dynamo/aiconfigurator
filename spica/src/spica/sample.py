@@ -33,7 +33,7 @@ from typing import Any
 from .config import SearchSpace
 from .load_predictor_sweep import LoadPredictorResult, predictor_fields
 from .parallel_enum import DisaggParallelConfig, ParallelShape, ReplicaParallelConfig
-from .planner import FPM_SAMPLING, LOAD_SENSITIVITY, SCALING_POLICIES
+from .planner import fpm_fields, load_sensitivity_fields, scaling_fields
 
 # pinned deployment scalars folded in so the sample stands alone (search-only
 # constraints like gpu_budget / min_gpu_budget / min_endpoint are intentionally
@@ -98,27 +98,31 @@ def _unroll_parallel(
 
 
 def _unroll_planner(selection: dict[str, Any], load_predictor: LoadPredictorResult | None) -> dict[str, Any]:
-    policy_id = selection["planner_scaling_policy"]
-    policy = SCALING_POLICIES[policy_id]
+    # Each planner composite entry is a preset id (str) or a dict pinning the
+    # unrolled fields; the planner decoders accept both.
+    scaling_entry = selection["planner_scaling_policy"]
+    scaling = scaling_fields(scaling_entry)
+    enable_throughput = scaling["enable_throughput_scaling"]
+    enable_load = scaling["enable_load_scaling"]
     out: dict[str, Any] = {
-        "planner_scaling_policy": policy_id,
-        "enable_throughput_scaling": policy.enable_throughput,
-        "enable_load_scaling": policy.enable_load,
+        "planner_scaling_policy": scaling_entry,  # raw entry (str or dict) kept for traceability
+        "enable_throughput_scaling": enable_throughput,
+        "enable_load_scaling": enable_load,
     }
-    if policy_id == "disabled":
-        return out  # planner off: no intervals / fpm / sensitivity / predictor
+    if not (enable_throughput or enable_load):
+        return out  # planner off (disabled): no intervals / fpm / sensitivity / predictor
 
-    out["throughput_adjustment_interval_seconds"] = policy.throughput_interval_s
-    out["load_adjustment_interval_seconds"] = policy.load_interval_s
-    out.update(FPM_SAMPLING[selection["planner_fpm_sampling"]])
-    out.update(LOAD_SENSITIVITY[selection["planner_load_sensitivity"]])
+    out["throughput_adjustment_interval_seconds"] = scaling["throughput_adjustment_interval_seconds"]
+    out["load_adjustment_interval_seconds"] = scaling["load_adjustment_interval_seconds"]
+    out.update(fpm_fields(selection["planner_fpm_sampling"]))
+    out.update(load_sensitivity_fields(selection["planner_load_sensitivity"]))
 
     # The load predictor is the forecaster for predictive throughput scaling; it
     # comes from the independent sweep's winner for this policy's interval.
-    if policy.enable_throughput and load_predictor is not None:
-        preset_id = load_predictor.best_by_interval.get(policy.throughput_interval_s)
-        if preset_id is not None:
-            out.update(predictor_fields(preset_id))
+    if enable_throughput and load_predictor is not None:
+        entry = load_predictor.best_by_interval.get(scaling["throughput_adjustment_interval_seconds"])
+        if entry is not None:
+            out.update(predictor_fields(entry))
     return out
 
 

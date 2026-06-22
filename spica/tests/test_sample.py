@@ -132,6 +132,52 @@ def test_router_knobs_gated_by_router_mode():
     assert "no_admission_control" in s2  # admission scalars folded in for kv_router
 
 
+def test_planner_composites_accept_raw_dicts():
+    # scaling + fpm + sensitivity all pinned as raw dicts (custom interval=240)
+    sel = _agg_selection(
+        planner_scaling_policy={
+            "enable_throughput_scaling": True,
+            "enable_load_scaling": False,
+            "throughput_adjustment_interval_seconds": 240,
+            "load_adjustment_interval_seconds": 5,
+        },
+        planner_fpm_sampling={"max_num_fpm_samples": 96, "fpm_sample_bucket_size": 16},
+        planner_load_sensitivity={"load_scaling_down_sensitivity": 75, "load_min_observations": 4},
+    )
+    s = unroll_sample(search_space=_space(), selection=sel, parallel_config=AGG_CFG)
+    assert s["enable_throughput_scaling"] is True and s["enable_load_scaling"] is False
+    assert s["throughput_adjustment_interval_seconds"] == 240  # not a preset value
+    assert s["max_num_fpm_samples"] == 96 and s["fpm_sample_bucket_size"] == 16
+    assert s["load_scaling_down_sensitivity"] == 75 and s["load_min_observations"] == 4
+
+
+def test_scaling_dict_both_flags_off_is_disabled():
+    sel = _agg_selection(planner_scaling_policy={"enable_throughput_scaling": False, "enable_load_scaling": False})
+    s = unroll_sample(search_space=_space(), selection=sel, parallel_config=AGG_CFG)
+    assert s["enable_throughput_scaling"] is False and s["enable_load_scaling"] is False
+    assert "throughput_adjustment_interval_seconds" not in s  # disabled -> nothing else emitted
+    assert "max_num_fpm_samples" not in s
+
+
+def test_load_predictor_winner_can_be_a_custom_dict():
+    # the sweep winner for the interval is a raw predictor dict, not a preset id
+    lp = LoadPredictorResult(
+        best_by_interval={240: {"load_predictor": "kalman", "load_predictor_log1p": True, "kalman_q_level": 3.0}},
+        reason="swept",
+    )
+    sel = _agg_selection(
+        planner_scaling_policy={
+            "enable_throughput_scaling": True,
+            "enable_load_scaling": False,
+            "throughput_adjustment_interval_seconds": 240,
+            "load_adjustment_interval_seconds": 5,
+        }
+    )
+    s = unroll_sample(search_space=_space(), selection=sel, parallel_config=AGG_CFG, load_predictor=lp)
+    assert s["load_predictor"] == "kalman" and s["load_predictor_log1p"] is True
+    assert s["kalman_q_level"] == 3.0 and s["kalman_min_points"] == 5  # custom value + default
+
+
 def test_pinned_scalars_folded_in():
     s = unroll_sample(
         search_space=_space(context_length=4096, aic_nextn=2), selection=_agg_selection(), parallel_config=AGG_CFG

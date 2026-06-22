@@ -150,6 +150,36 @@ SEARCH_CHOICES: dict[str, tuple] = {
     ),
 }
 
+# Composite knobs accept either a preset id (a string from SEARCH_CHOICES) or a
+# dict that pins the unrolled fields directly (the escape hatch — search a custom
+# value a preset doesn't offer). A dict entry must be self-contained: its keys are
+# exactly that composite's unrolled field names (no partial/merge). The legality of
+# the values (perfect-square fpm bucket, interval > 0, etc.) is validated downstream
+# by dynamo's PlannerConfig; here we only gate the key set. See docs/search-space.md.
+COMPOSITE_DICT_KEYS: dict[str, frozenset[str]] = {
+    "planner_scaling_policy": frozenset(
+        {
+            "enable_throughput_scaling",
+            "enable_load_scaling",
+            "throughput_adjustment_interval_seconds",
+            "load_adjustment_interval_seconds",
+        }
+    ),
+    "planner_fpm_sampling": frozenset({"max_num_fpm_samples", "fpm_sample_bucket_size"}),
+    "planner_load_sensitivity": frozenset({"load_scaling_down_sensitivity", "load_min_observations"}),
+    "load_predictor_presets": frozenset(
+        {
+            "load_predictor",
+            "load_predictor_log1p",
+            "prophet_window_size",
+            "kalman_q_level",
+            "kalman_q_trend",
+            "kalman_r",
+            "kalman_min_points",
+        }
+    ),
+}
+
 
 class SearchSpace(BaseModel):
     """Inputs to one search run, grouped by component.
@@ -221,9 +251,10 @@ class SearchSpace(BaseModel):
     active_prefill_tokens_threshold_frac: float | None = None
     no_admission_control: bool = False
 
-    # planner: preset ids expanded by the candidate generator
-    # "disabled" = planner not enabled (no autoscaling, static replica count)
-    planner_scaling_policy: list[str] = [
+    # planner: composite knobs — each entry is a preset id (str) OR a dict pinning
+    # the unrolled fields directly (see COMPOSITE_DICT_KEYS / docs/search-space.md).
+    # "disabled" = planner not enabled (no autoscaling, static replica count).
+    planner_scaling_policy: list[str | dict[str, Any]] = [
         "disabled",
         "throughput_180_5",
         "throughput_600_5",
@@ -232,13 +263,13 @@ class SearchSpace(BaseModel):
         "hybrid_180_5",
         "hybrid_600_5",
     ]
-    planner_fpm_sampling: list[str] = ["small", "default", "large", "fine"]
-    planner_load_sensitivity: list[str] = ["aggressive", "default", "conservative"]
+    planner_fpm_sampling: list[str | dict[str, Any]] = ["small", "default", "large", "fine"]
+    planner_load_sensitivity: list[str | dict[str, Any]] = ["aggressive", "default", "conservative"]
 
     # planner load predictor — independent grid sweep (ranked by one-step-ahead
     # forecast loss, NOT the main Vizier loop); the winning preset is pinned
     # into the main sweep. Only relevant under predictive throughput scaling.
-    load_predictor_presets: list[str] = [
+    load_predictor_presets: list[str | dict[str, Any]] = [
         "constant_last",
         "arima_raw",
         "arima_log1p",
@@ -254,14 +285,53 @@ class SearchSpace(BaseModel):
 
     @model_validator(mode="after")
     def _validate_search_choices(self) -> "SearchSpace":
-        """Each swept dimension must be a non-empty subset of its listed choices."""
+        """Each swept dimension is a non-empty list whose entries are valid: a string
+        must be one of the listed choices; a dict (only on a composite knob) must have
+        exactly that composite's unrolled field names (value legality is checked
+        downstream by dynamo's PlannerConfig)."""
         for field_name, allowed in SEARCH_CHOICES.items():
             values = getattr(self, field_name)
             if not values:
                 raise ValueError(f"{field_name} must list at least one choice; allowed: {list(allowed)}")
-            invalid = [v for v in values if v not in allowed]
-            if invalid:
-                raise ValueError(f"{field_name} has invalid choices {invalid}; allowed: {list(allowed)}")
+            dict_keys = COMPOSITE_DICT_KEYS.get(field_name)
+            for v in values:
+                if isinstance(v, dict):
+                    if dict_keys is None:
+                        raise ValueError(f"{field_name} does not accept a dict entry; choices: {list(allowed)}")
+                    if not v:
+                        raise ValueError(f"{field_name} dict entry must not be empty")
+                    unknown = set(v) - dict_keys
+                    if unknown:
+                        raise ValueError(
+                            f"{field_name} dict has unknown keys {sorted(unknown)}; allowed: {sorted(dict_keys)}"
+                        )
+                elif v not in allowed:
+                    raise ValueError(f"{field_name} has invalid choice {v!r}; allowed: {list(allowed)}")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_parallel_configs(self) -> "SearchSpace":
+        """A pinned ``parallel_configs`` (non-empty) must match a single deployment
+        mode and have the right shape: an agg entry is a flat shape dict (needs
+        ``tp``); a disagg entry nests ``prefill`` + ``decode`` shape dicts. Full
+        legality (MoE width, KV feasibility, GPU budget) is checked in
+        ``enumerate_branches`` against the model+hardware."""
+        if not self.parallel_configs:
+            return self
+        if len(self.deployment_mode) != 1:
+            raise ValueError(
+                "pinning parallel_configs requires deployment_mode to list exactly one mode "
+                f"(got {self.deployment_mode}); pin the mode too"
+            )
+        mode = self.deployment_mode[0]
+        for entry in self.parallel_configs:
+            if not isinstance(entry, dict):
+                raise ValueError("each parallel_configs entry must be a dict")
+            if mode == "agg":
+                if "tp" not in entry:
+                    raise ValueError("an agg parallel_configs entry needs a 'tp' field")
+            elif "prefill" not in entry or "decode" not in entry:
+                raise ValueError("a disagg parallel_configs entry needs 'prefill' and 'decode' sub-dicts")
         return self
 
 
