@@ -44,7 +44,11 @@ except ImportError:
 
 from vllm.config import set_current_vllm_config
 
-from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
+from collector.case_generator import (
+    get_attention_context_shape_sweeps,
+    get_attention_generation_shape_sweeps,
+    windows_for_head_dim,
+)
 from collector.helper import EXIT_CODE_RESTART, benchmark_with_power, get_sm_version, log_perf
 from collector.vllm.utils import (
     BatchSpec,
@@ -484,7 +488,7 @@ def get_context_attention_test_cases(if_unit_test=False):
                             if b * s * num_kv_heads * head_dim * 2 >= max_kv_elements:
                                 continue
 
-                            for window_size in window_sizes:
+                            for window_size in windows_for_head_dim(window_sizes, head_dim):
                                 if _skip_vllm_sm89_022_flashinfer_head_dim(head_dim):
                                     continue
                                 for is_fp8_kv_cache in kv_cache_dtype_list:
@@ -567,7 +571,7 @@ def get_generation_attention_test_cases():
                         if get_sm_version() >= 100 and n // n_kv > 16:
                             continue
                         for s in target_s_list:
-                            for window_size in window_sizes:
+                            for window_size in windows_for_head_dim(window_sizes, head_dim):
                                 for is_fp8_kv_cache in kv_cache_dtype_list:
                                     if _skip_vllm_sm89_022_fp8_kv_cache(is_fp8_kv_cache):
                                         continue

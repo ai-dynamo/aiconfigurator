@@ -219,6 +219,19 @@ def _is_known_framework_incompatible_gap(
         return False
 
     normalized = error_message.lower()
+
+    # MiMo-V2-Flash uses head_dim=192 attention, which the TRT-LLM kernel cannot run
+    # on Hopper/Blackwell (SM90/SM100): illegal-memory-access / cublas / OOM, so the
+    # attention data can't be collected on those GPUs. It collects fine on Ada (l40s,
+    # SM89) and on sglang/vllm. Treat MiMo+trtllm failures on the SM90+ datacenter GPUs
+    # as a framework gap; leave l40s (works) and a100 (Ampere, hardware-limited) alone.
+    if (
+        model == "XiaomiMiMo/MiMo-V2-Flash"
+        and backend == common.BackendName.trtllm.value
+        and system not in {"l40s", "a100_sxm"}
+    ):
+        return True
+
     if (
         backend == common.BackendName.vllm.value
         and version == "0.19.0"

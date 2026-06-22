@@ -26,7 +26,11 @@ from tensorrt_llm.llmapi import KvCacheConfig
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
-from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
+from collector.case_generator import (
+    get_attention_context_shape_sweeps,
+    get_attention_generation_shape_sweeps,
+    windows_for_head_dim,
+)
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.registry_types import PerfFile
 
@@ -394,7 +398,7 @@ def _default_attention_window_options(head_dim: int) -> list[int]:
 def _attention_window_options(shape_sweep: dict, head_dim: int) -> list[int]:
     windows = _default_attention_window_options(head_dim)
     if "window_sizes" in shape_sweep:
-        windows = [*windows, *_int_list(shape_sweep["window_sizes"])]
+        windows = [*windows, *windows_for_head_dim(_int_list(shape_sweep["window_sizes"]), head_dim)]
     return sorted(set(windows), reverse=True)
 
 

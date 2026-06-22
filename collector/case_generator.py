@@ -108,6 +108,29 @@ def get_attention_encoder_shape_sweeps(backend: str) -> list[dict[str, object]]:
     return get_merged_base_op_case_specs(backend, "attention_encoder")
 
 
+# GQA/MQA sliding-window: each head_dim is used by models with a SPECIFIC window,
+# so collecting the full head_dim x window_sizes cross is wasteful. Keep window=0
+# (full attention) for every head_dim, and a non-zero window only for the
+# (head_dim, window) pairs a real GQA/MQA model actually uses:
+#   head_dim 64  -> gpt-oss (sliding_window=128)
+#   head_dim 128 -> Llama-4 Scout/Maverick (attention_chunk_size=8192)
+#   head_dim 192 -> MiMo-V2-Flash (sliding_window=128)
+#   head_dim 256 -> gemma-4 (sliding_window=1024)
+# Update this map when a windowed model with a new (head_dim, window) is added.
+_HEAD_DIM_WINDOW_SIZES: dict[int, set[int]] = {64: {128}, 128: {8192}, 192: {128}, 256: {1024}}
+
+
+def windows_for_head_dim(window_sizes: list[int], head_dim: int) -> list[int]:
+    """Filter a window_sizes sweep to the values valid for ``head_dim``.
+
+    window=0 (full attention) is always kept; a non-zero window is kept only if a
+    real GQA/MQA model uses that (head_dim, window) pair (see ``_HEAD_DIM_WINDOW_SIZES``).
+    Order is preserved.
+    """
+    allowed = _HEAD_DIM_WINDOW_SIZES.get(head_dim, set())
+    return [w for w in window_sizes if w == 0 or w in allowed]
+
+
 def get_base_common_case_values(name: str) -> dict[str, object]:
     """Return shared scalar/list values from base op case YAML files."""
     try:
