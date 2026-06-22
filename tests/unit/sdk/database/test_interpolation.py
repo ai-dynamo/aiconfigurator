@@ -262,8 +262,12 @@ class TestInterpolationMethods:
             2: {256: {1: 21.0, 2: 22.0}},
         }
 
-        with pytest.raises(ValueError, match="only value"):
+        with pytest.raises(interpolation.InterpolationDataNotAvailableError, match="only value"):
             interpolation.interp_2d_1d(1.5, 257, 1.5, data, method="bilinear")
+
+    def test_data_unavailable_errors_subclass_value_error(self):
+        """Existing ``except ValueError`` callers must keep working."""
+        assert issubclass(interpolation.InterpolationDataNotAvailableError, ValueError)
 
     def test_interp_3d(self, comprehensive_perf_db):
         """Test general 3D interpolation dispatcher."""

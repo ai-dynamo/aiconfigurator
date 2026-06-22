@@ -17,6 +17,7 @@ import yaml
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.common import PerfDataFilename, parse_support_matrix_version
+from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
 from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.system_spec import SystemSpec
 
@@ -24,7 +25,7 @@ databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
-_MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError, ValueError)
+_MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError, InterpolationDataNotAvailableError)
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
