@@ -301,4 +301,7 @@ def task_config_to_request(
     from .request import from_legacy_params
 
     params = task_config_to_generator_config(task_config, result_df, generator_overrides, num_gpus_per_node)
-    return from_legacy_params(params, backend=getattr(task_config, "backend_name", None))
+    # Task exposes the backend via primary_backend_name (matching the dict bridge);
+    # fall back to backend_name for duck-typed/legacy callers.
+    backend = getattr(task_config, "primary_backend_name", None) or getattr(task_config, "backend_name", None)
+    return from_legacy_params(params, backend=backend)

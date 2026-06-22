@@ -225,6 +225,7 @@ def _assemble_k8s_context(context: dict[str, Any], has_engine_templates: bool) -
     k8s_context["agg_cli_args_list"] = None
     k8s_context["prefill_cli_args_list"] = None
     k8s_context["decode_cli_args_list"] = None
+    k8s_context["encode_cli_args_list"] = None
     return k8s_context
 
 
@@ -878,9 +879,11 @@ def render_backend_templates(
                     _total = int(context.get("prefill_workers", 1)) * int(context.get("prefill_gpu", 1)) + int(
                         context.get("decode_workers", 1)
                     ) * int(context.get("decode_gpu", 1))
+                from aiconfigurator.generator.naive import _sanitize_rfc1123
+
                 epd_ctx = dict(context)
                 epd_ctx["epd_total_gpus"] = max(_total, 1)
-                epd_ctx["epd_name"] = f"{context.get('name') or 'dynamo'}-epd"
+                epd_ctx["epd_name"] = _sanitize_rfc1123(f"{context.get('name') or 'dynamo'}-epd")
                 epd_ctx["encode_modality"] = _enc.get("modality") or "multimodal"
                 epd_ctx["encode_allowed_local_media_path"] = _enc.get("allowed_local_media_path") or "/tmp"
                 epd_ctx["encode_max_file_size_mb"] = _enc.get("max_file_size_mb") or 50

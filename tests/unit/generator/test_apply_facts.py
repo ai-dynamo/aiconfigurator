@@ -37,6 +37,9 @@ def test_entry_matches():
     assert _entry_matches({"backend": "vllm"}, backend="vllm", system="h200", variant=None)
     assert not _entry_matches({"backend": "vllm", "system": "gb200"}, backend="vllm", system="h200", variant=None)
     assert _entry_matches({}, backend="vllm", system="h200", variant=None)
+    # model_variant predicate: matches when equal, rejects when different
+    assert _entry_matches({"model_variant": "fp8"}, backend="vllm", system="h200", variant="fp8")
+    assert not _entry_matches({"model_variant": "fp8"}, backend="vllm", system="h200", variant="nvfp4")
 
 
 def test_defaults_appended_when_absent():

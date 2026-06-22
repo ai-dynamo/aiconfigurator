@@ -60,7 +60,7 @@ def from_legacy_params(params: dict[str, Any], backend: Optional[str] = None) ->
     mode = dyn.get("mode") or ("disagg" if (pdict.get("prefill") and pdict.get("decode")) else "agg")
     roles = {r: RoleSizing.from_params(v) for r, v in pdict.items() if v}
     workers: dict[str, int] = {}
-    for r in ("prefill", "decode", "agg"):
+    for r in ("prefill", "decode", "agg", "encode"):
         wc = worker.get(f"{r}_workers")
         if wc is not None:
             workers[r] = int(wc)

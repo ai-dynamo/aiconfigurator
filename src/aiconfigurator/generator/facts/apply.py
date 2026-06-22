@@ -157,7 +157,7 @@ def apply_facts(context: dict[str, Any], facts: ResolvedFacts | None, backend: s
     system = _system_key(facts)
     # model_variant is not yet resolved per request.
     variant: str | None = None
-    for role in ("prefill", "decode", "agg"):
+    for role in ("prefill", "decode", "agg", "encode"):
         list_key = f"{role}_cli_args_list"
         tokens = context.get(list_key)
         if not isinstance(tokens, list):

@@ -59,6 +59,8 @@ class ArtifactWriter:
             return "prefill_config.yaml"
         if artifact_name == "extra_engine_args_decode.yaml":
             return "decode_config.yaml"
+        if artifact_name == "extra_engine_args_encode.yaml":
+            return "encode_config.yaml"
         return artifact_name
 
     def _emit_file(self, path: str, content: str, artifact_name: str | None = None) -> None:

@@ -53,9 +53,9 @@ spec:
         - name: ALLOW_NONE_AUTHENTICATION
           value: "yes"
         - name: ETCD_LISTEN_CLIENT_URLS
-          value: "http://0.0.0.0:2379"
+          value: "http://127.0.0.1:2379"
         - name: ETCD_ADVERTISE_CLIENT_URLS
-          value: "http://0.0.0.0:2379"
+          value: "http://127.0.0.1:2379"
       ports:
         - containerPort: 2379
     # All EPD workers (frontend + encode + prefill + decode) run here, sharing
