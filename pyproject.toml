@@ -127,6 +127,8 @@ include = [
     "src/aiconfigurator/generator/config/**/*.yaml",
     "src/aiconfigurator/generator/config/backend_templates/**/*.j2",
     "src/aiconfigurator/generator/rule_plugin/**/*.rule",
+    "src/aiconfigurator/generator/facts/**/*.yaml",
+    "src/aiconfigurator/generator/environment/*.yaml",
     "src/aiconfigurator/systems/*.yaml",
     "src/aiconfigurator/systems/*.csv",
     "src/aiconfigurator/systems/**/*.csv",
@@ -140,7 +142,7 @@ include = [
 
 [tool.setuptools.package-data]
 "aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
-"aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule"]
+"aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule", "facts/**/*.yaml", "environment/*.yaml"]
 "aiconfigurator" = [
     "systems/*.yaml",
     "systems/*.csv",
