@@ -1,0 +1,107 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ epd_name }}-cfg
+  namespace: {{ K8sConfig.k8s_namespace | default('default') }}
+data:
+  encode_config.yaml: |
+{{ encode_engine_args_inline | indent(4, true) }}
+{% if DynConfig.mode | default('disagg') == "agg" %}
+  agg_config.yaml: |
+{{ agg_engine_args_inline | indent(4, true) }}
+{% else %}
+  prefill_config.yaml: |
+{{ prefill_engine_args_inline | indent(4, true) }}
+  decode_config.yaml: |
+{{ decode_engine_args_inline | indent(4, true) }}
+{% endif %}
+  epd_run.sh: |
+{{ epd_run_sh | indent(4, true) }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ epd_name }}
+  namespace: {{ K8sConfig.k8s_namespace | default('default') }}
+  labels:
+    app: {{ epd_name }}
+    nvidia.com/dynamo-deployment: epd-single-pod
+spec:
+  restartPolicy: Never
+  volumes:
+    - name: cfg
+      configMap:
+        name: {{ epd_name }}-cfg
+        defaultMode: 365
+    - name: model-cache
+      persistentVolumeClaim:
+        claimName: {{ K8sConfig.k8s_pvc_name | default('model-cache') }}
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Gi
+  containers:
+    # Pod-local discovery (etcd) + messaging (nats), shared via localhost.
+    - name: nats
+      image: nats:2.11.4
+      args: ["-js"]
+      ports:
+        - containerPort: 4222
+    - name: etcd
+      image: bitnamilegacy/etcd:3.6.1
+      env:
+        - name: ALLOW_NONE_AUTHENTICATION
+          value: "yes"
+        - name: ETCD_LISTEN_CLIENT_URLS
+          value: "http://0.0.0.0:2379"
+        - name: ETCD_ADVERTISE_CLIENT_URLS
+          value: "http://0.0.0.0:2379"
+      ports:
+        - containerPort: 2379
+    # All EPD workers (frontend + encode + prefill + decode) run here, sharing
+    # the GPUs so encode can colocate with prefill for CUDA IPC.
+    - name: main
+      image: {{ K8sConfig.k8s_image }}
+      command: ["/bin/bash", "/cfg/epd_run.sh"]
+      env:
+        - name: ETCD_ENDPOINTS
+          value: "localhost:2379"
+        - name: NATS_SERVER
+          value: "nats://localhost:4222"
+        - name: DYN_NAMESPACE
+          value: "dynamo"
+        - name: HF_HOME
+          value: "{{ K8sConfig.k8s_hf_home | default('/workspace/model_cache') }}"
+      envFrom:
+        - secretRef:
+            name: hf-token-secret
+      resources:
+        limits:
+          nvidia.com/gpu: "{{ epd_total_gpus }}"
+      volumeMounts:
+        - name: cfg
+          mountPath: /cfg
+        - name: model-cache
+          mountPath: {{ K8sConfig.k8s_pvc_mount_path | default('/workspace/model_cache') }}
+        - name: dshm
+          mountPath: /dev/shm
+{% if K8sConfig.k8s_image_pull_secret %}
+  imagePullSecrets:
+    - name: {{ K8sConfig.k8s_image_pull_secret }}
+{% endif %}
+---
+# Frontend Service: exposes the in-pod dynamo.frontend so the generated benchmark
+# (and any client) can reach it. Named to match the benchmark endpoint_url
+# (dynamo-<mode>-frontend), i.e. "<K8sConfig.name>-frontend".
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ K8sConfig.name | default('dynamo') }}-frontend
+  namespace: {{ K8sConfig.k8s_namespace | default('default') }}
+spec:
+  selector:
+    app: {{ epd_name }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
