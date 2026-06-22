@@ -67,7 +67,7 @@ def _evaluate_suggestion(
         sampler.observe_infeasible(suggestion, f"replay failed: {type(exc).__name__}: {exc}")
         return None, "failed"
     sampler.observe(suggestion, score_report(report, goal.target))
-    if is_feasible(report, int(sample["used_gpus"]), goal, config.search_space.gpu_budget):
+    if is_feasible(int(sample["used_gpus"]), config.search_space.gpu_budget):
         return make_candidate(sample, report, goal.target), "feasible"
     return None, "infeasible"
 

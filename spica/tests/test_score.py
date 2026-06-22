@@ -3,16 +3,13 @@
 
 """Scoring / feasibility / ranking over a replay trace_report (pure)."""
 
-import math
-
-from spica.config import OptimizationGoal, OptimizationTarget, SLATarget
+from spica.config import OptimizationTarget
 from spica.score import (
     is_feasible,
     make_candidate,
     objective_value,
     rank,
     score_report,
-    sla_violation,
 )
 
 # A representative trace_report (the keys the merged replay emits).
@@ -49,23 +46,12 @@ def test_score_sign():
     assert score_report(REPORT, OptimizationTarget.E2E_LATENCY) == -1200.0
 
 
-def test_sla_violation():
-    # ttft+itl both met -> 0
-    assert sla_violation(REPORT, SLATarget(ttft_ms=2000.0, itl_ms=30.0)) == 0.0
-    # itl breached: 20/10 - 1 = 1.0
-    assert sla_violation(REPORT, SLATarget(ttft_ms=2000.0, itl_ms=10.0)) == 1.0
-    # no SLA -> 0
-    assert sla_violation(REPORT, None) == 0.0
-    # missing report key -> inf (fails the gate)
-    assert sla_violation({}, SLATarget(e2e_ms=1000.0)) == math.inf
-
-
-def test_is_feasible():
-    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
-    assert is_feasible(REPORT, used_gpus=16, goal=goal, gpu_budget=32)
-    assert not is_feasible(REPORT, used_gpus=64, goal=goal, gpu_budget=32)  # over budget
-    tight = OptimizationGoal(target=OptimizationTarget.GOODPUT, sla=SLATarget(ttft_ms=2000.0, itl_ms=10.0))
-    assert not is_feasible(REPORT, used_gpus=16, goal=tight, gpu_budget=32)  # itl SLA breached
+def test_is_feasible_budget_only():
+    # SLA is no longer a feasibility gate (the goodput targets bake it into the
+    # metric); feasibility is purely the GPU budget.
+    assert is_feasible(used_gpus=16, gpu_budget=32)
+    assert is_feasible(used_gpus=32, gpu_budget=32)  # at the budget
+    assert not is_feasible(used_gpus=64, gpu_budget=32)  # over budget
 
 
 def test_make_candidate_and_rank():

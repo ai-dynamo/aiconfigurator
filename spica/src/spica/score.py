@@ -9,8 +9,10 @@ Three steps, mirroring the existing profiler replay optimizer
 
 1. **objective** — map the goal target to a number from the report (the
    ``goodput_per_gpu_hour`` target is ``goodput / gpu_hour``, both from the report).
-2. **feasibility** — SLA satisfied (mean latency within bounds) AND within the
-   GPU budget. Infeasible candidates are dropped, not scored (per the design).
+2. **feasibility** — within the GPU budget. SLA is intentionally *not* gated here:
+   when the user cares about latency they pick a ``goodput`` / ``goodput_per_gpu_hour``
+   target, whose metric already counts only SLA-satisfying requests (the bridge's
+   per-request goodput SLA). Over-budget candidates are dropped.
 3. **rank** — feasible candidates best-first by score, ties broken toward fewer GPUs.
 """
 
@@ -18,7 +20,7 @@ from __future__ import annotations
 
 import math
 
-from .config import Candidate, OptimizationGoal, OptimizationTarget, SLATarget
+from .config import Candidate, OptimizationTarget
 
 # trace_report keys the report always carries (goodput_* only when an SLA was
 # supplied to the replay). Surfaced into Candidate.metrics for inspection.
@@ -30,14 +32,6 @@ _METRIC_KEYS = (
     "goodput_output_throughput_tok_s",
     "gpu_hours",
 )
-
-# SLA field -> the report key its mean is checked against (matches the profiler:
-# itl is checked against mean TPOT, the per-request average inter-token latency).
-_SLA_REPORT_KEYS = {
-    "ttft_ms": "mean_ttft_ms",
-    "itl_ms": "mean_tpot_ms",
-    "e2e_ms": "mean_e2e_latency_ms",
-}
 
 
 def objective_value(report: dict[str, float], target: OptimizationTarget) -> float:
@@ -61,29 +55,15 @@ def score_report(report: dict[str, float], target: OptimizationTarget) -> float:
     return value if target.maximize else -value
 
 
-def sla_violation(report: dict[str, float], sla: SLATarget | None) -> float:
-    """Total SLA overage: ``sum(max(actual/bound - 1, 0))`` over the set bounds.
+def is_feasible(used_gpus: int, gpu_budget: int) -> bool:
+    """A candidate is feasible iff it fits the GPU budget.
 
-    0.0 means every configured bound is met. A bound whose report key is missing
-    contributes ``inf`` (fails the gate rather than silently passing).
+    SLA is deliberately not a gate: the goodput targets already bake the SLA into
+    their metric (the bridge counts only SLA-satisfying requests per-request), so an
+    aggregate mean-latency gate here would double-count it and could drop a genuinely
+    high-goodput config whose mean is dragged over by the tail.
     """
-    if sla is None:
-        return 0.0
-    penalty = 0.0
-    for field, report_key in _SLA_REPORT_KEYS.items():
-        bound = getattr(sla, field)
-        if bound is None:
-            continue
-        actual = report.get(report_key)
-        if actual is None:
-            return math.inf
-        penalty += max(float(actual) / float(bound) - 1.0, 0.0)
-    return penalty
-
-
-def is_feasible(report: dict[str, float], used_gpus: int, goal: OptimizationGoal, gpu_budget: int) -> bool:
-    """A candidate is feasible iff it meets the SLA and fits the GPU budget."""
-    return sla_violation(report, goal.sla) == 0.0 and used_gpus <= gpu_budget
+    return used_gpus <= gpu_budget
 
 
 def make_candidate(config: dict, report: dict[str, float], target: OptimizationTarget) -> Candidate:

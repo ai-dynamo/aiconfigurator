@@ -40,7 +40,7 @@ from .parallel_enum import (
 from .planner import FPM_SAMPLING, LOAD_SENSITIVITY, SCALING_POLICIES, ScalingPolicy, throughput_intervals
 from .sample import unroll_sample
 from .sampler import BranchSampler, Suggestion, make_branch_sampler
-from .score import is_feasible, make_candidate, objective_value, rank, score_report, sla_violation
+from .score import is_feasible, make_candidate, objective_value, rank, score_report
 from .search import run_smart_search
 from .search_space import BranchSpace, enumerate_branches
 
@@ -96,7 +96,6 @@ __all__ = [
     # scoring
     "objective_value",
     "score_report",
-    "sla_violation",
     "is_feasible",
     "make_candidate",
     "rank",
