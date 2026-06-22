@@ -74,7 +74,12 @@ class _FakeEvaluator:
 
 
 def _branch(parallel_config):
-    return BranchSpace(deployment_mode="agg", backend="trtllm", parallel_configs=(parallel_config,), knob_choices={})
+    return BranchSpace(
+        deployment_mode="agg",
+        parallel_configs=(parallel_config,),
+        supported_backends={parallel_config: frozenset({"trtllm"})},
+        knob_choices={"backend": ["trtllm"]},
+    )
 
 
 def _stub(monkeypatch, branch):
@@ -140,7 +145,7 @@ def test_study_id_unique_per_run(monkeypatch):
     run_smart_search(_config(), evaluator=_FakeEvaluator(), sampler_factory=factory, show_progress=False)
     run_smart_search(_config(), evaluator=_FakeEvaluator(), sampler_factory=factory, show_progress=False)
     assert len(seen) == 2 and seen[0] != seen[1]  # fresh study per run, no stale reuse
-    assert all(s.startswith("spica_agg_trtllm_") for s in seen)
+    assert all(s.startswith("spica_agg_") for s in seen)  # study id is per-mode (backend is a knob)
 
 
 def _config_with_policies(policies, target="throughput"):

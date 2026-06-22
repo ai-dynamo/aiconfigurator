@@ -16,9 +16,10 @@ def _branch() -> BranchSpace:
     configs = tuple(ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=r) for r in (1, 2, 4))
     return BranchSpace(
         deployment_mode="agg",
-        backend="trtllm",
         parallel_configs=configs,
+        supported_backends={c: frozenset({"trtllm"}) for c in configs},
         knob_choices={
+            "backend": ["trtllm"],  # single choice -> constant
             "router_mode": ["round_robin"],  # single choice -> constant, not a param
             "planner_scaling_policy": ["disabled", "throughput_180_5"],  # categorical
             "planner_fpm_sampling": ["default", "large"],
@@ -59,11 +60,13 @@ def test_dict_form_composite_decodes_via_index():
         "throughput_adjustment_interval_seconds": 240,
         "load_adjustment_interval_seconds": 5,
     }
+    pc = ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=1)
     branch = BranchSpace(
         deployment_mode="agg",
-        backend="trtllm",
-        parallel_configs=(ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=1),),
+        parallel_configs=(pc,),
+        supported_backends={pc: frozenset({"trtllm"})},
         knob_choices={
+            "backend": ["trtllm"],
             "planner_scaling_policy": ["disabled", raw],  # str | dict -> index categorical
             "planner_fpm_sampling": ["default"],
             "planner_load_sensitivity": ["default"],

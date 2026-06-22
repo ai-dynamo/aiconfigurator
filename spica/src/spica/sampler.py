@@ -111,9 +111,10 @@ class VizierBranchSampler:
         suggestions: list[Suggestion] = []
         for trial in self._study.suggest(count=count):
             params = dict(trial.parameters)
+            # backend is a searched knob now (in knob_choices) -> comes via _constants
+            # (single backend) or _decoders (multiple), not a per-branch constant.
             selection: dict[str, Any] = {
                 "deployment_mode": self.branch.deployment_mode,
-                "backend": self.branch.backend,
                 **self._constants,
             }
             for knob, decode in self._decoders.items():

@@ -3,17 +3,17 @@
 
 """Build the per-branch candidate space the sampler searches over.
 
-A *branch* is one ``(deployment_mode, backend)`` combination from the SearchSpace
-lists. For each branch we enumerate the **KV-feasible** parallel configs
-(:func:`spica.model_hw.parallel_configs_for`) — that legal set is the categorical
-domain the sampler picks an index into — and collect the branch's searchable
-atomic knobs (each a configured choice list straight off the SearchSpace). The
-sampler turns one :class:`BranchSpace` into one Vizier study (one study per
-branch, per the design proposal).
+A *branch* is one **deployment_mode** (agg / disagg) — one Vizier study each, since
+agg and disagg have structurally different parallel configs. ``backend`` is NOT a
+branch: it is a searched categorical knob within the study. For each mode we take the
+**union** of every configured backend's KV-feasible parallel configs
+(:func:`spica.model_hw.parallel_configs_for`) as the categorical domain, recording per
+config which backends support it; a sampled ``(backend, parallel_config)`` pair outside
+that set is marked infeasible (no replay) so the optimizer learns to avoid it. Backends
+with no perf DB / no viable config for a mode are dropped from the backend knob.
 
-``backend`` is fixed per branch (not a searched knob); ``load_predictor_candidates``
-is resolved separately by the load-predictor sub-sweep and is not a sampler
-dimension.
+``load_predictor_candidates`` is resolved separately by the load-predictor sub-sweep
+and is not a sampler dimension.
 """
 
 from __future__ import annotations
@@ -22,8 +22,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from .config import SmartSearchConfig
+from .kv_estimate import NoPerfDatabase
 from .model_hw import NoViableParallelConfig, parallel_configs_for
 from .parallel_enum import DisaggParallelConfig, ParallelShape, ReplicaParallelConfig
+
+_ParallelConfig = ReplicaParallelConfig | DisaggParallelConfig
 
 # Searchable atomic knobs, by group. Names are SearchSpace list-typed fields.
 _ROUTER_KNOBS = (
@@ -46,13 +49,16 @@ _DISAGG_ENGINE = (
 
 @dataclass(frozen=True)
 class BranchSpace:
-    """One ``(deployment_mode, backend)`` branch of the search."""
+    """One ``deployment_mode`` branch of the search (backend is a searched knob)."""
 
     deployment_mode: str
-    backend: str
-    # KV-feasible parallel configs — the categorical domain (pick an index).
-    parallel_configs: tuple[ReplicaParallelConfig | DisaggParallelConfig, ...]
-    # Searchable atomic knob -> its configured choice list (from the SearchSpace).
+    # Union of every searched backend's KV-feasible parallel configs — the categorical
+    # domain (pick an index).
+    parallel_configs: tuple[_ParallelConfig, ...]
+    # parallel config -> the backends for which it is legal+KV-feasible. A sampled
+    # (backend, config) pair whose backend isn't here is marked infeasible (no replay).
+    supported_backends: dict[_ParallelConfig, frozenset[str]]
+    # Searchable atomic knob -> its configured choice list (incl. "backend").
     knob_choices: dict[str, list[Any]]
 
 
@@ -89,62 +95,71 @@ def _parse_parallel_entry(entry: dict[str, Any], deployment_mode: str):
     )
 
 
-def _pinned_parallel_configs(parallel_configs, deployment_mode, legal):
-    """Parse the user's pinned ``parallel_configs`` and keep only those that appear
-    in the enumerated ``legal`` set (KV-feasible + shape/backend-legal within budget).
-    Raises if any pinned config is not legal/feasible for this branch."""
-    legal_set = set(legal)
-    pinned = [_parse_parallel_entry(entry, deployment_mode) for entry in parallel_configs]
-    illegal = [p for p in pinned if p not in legal_set]
-    if illegal:
-        raise NoViableParallelConfig(
-            f"pinned parallel_configs are not legal/KV-feasible for this branch: {illegal}. "
-            "Each pinned shape must satisfy the MoE-width / backend / GPU-ladder rules and "
-            "hold a max_seq_len sequence within gpu_budget (same constraints the enumerator applies)."
-        )
-    return pinned
-
-
 def branch_knob_choices(search_space, deployment_mode: str) -> dict[str, list[Any]]:
-    """The searchable atomic knobs for a branch (router + planner + the active
-    mode's engine batching), each mapped to its configured choice list."""
+    """The searchable atomic knobs for a branch (router + planner + the active mode's
+    engine batching), each mapped to its configured choice list. ``backend`` is added
+    by :func:`enumerate_branches` (only the backends viable for the mode)."""
     names = (*_ROUTER_KNOBS, *_PLANNER_KNOBS, *_engine_knobs(deployment_mode))
     return {name: list(getattr(search_space, name)) for name in names}
 
 
 def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = None) -> list[BranchSpace]:
-    """One :class:`BranchSpace` per ``(deployment_mode, backend)``.
+    """One :class:`BranchSpace` per ``deployment_mode``. Within each, ``backend`` is a
+    searched knob: the parallel-config domain is the **union** of every configured
+    backend's KV-feasible configs, tagged with which backends support each.
 
-    ``max_seq_len`` is forwarded to :func:`parallel_configs_for` for the KV
-    feasibility filter; ``None`` uses the model's max context length (the
-    conservative default).
+    A backend with no perf DB / no viable config for a mode is dropped (skipped). If no
+    backend is viable for a mode, or a *pinned* config is legal for no backend, raises
+    :class:`NoViableParallelConfig`. ``max_seq_len`` is forwarded to
+    :func:`parallel_configs_for` (``None`` -> the model's max context length).
     """
     ss = config.search_space
     branches: list[BranchSpace] = []
     for deployment_mode in ss.deployment_mode:
+        # Pinned configs (if any) are parsed once, then validated per backend; otherwise
+        # each backend contributes its full enumerated menu.
+        pinned = (
+            [_parse_parallel_entry(e, deployment_mode) for e in ss.parallel_configs] if ss.parallel_configs else None
+        )
+        support: dict[_ParallelConfig, set[str]] = {}
         for backend in ss.backend:
-            legal = parallel_configs_for(
-                ss.model_name,
-                ss.hardware_sku,
-                gpu_budget=ss.gpu_budget,
-                deployment_mode=deployment_mode,
-                backend=backend,
-                min_gpu_budget=ss.min_gpu_budget,
-                max_seq_len=max_seq_len,
-            )
-            # A pinned parallel_configs replaces the enumerated menu (validated against
-            # it); empty -> use the full enumerated menu. (deployment_mode is pinned to
-            # one mode when parallel_configs is set, enforced in SearchSpace.)
-            if ss.parallel_configs:
-                parallel_configs = _pinned_parallel_configs(ss.parallel_configs, deployment_mode, legal)
-            else:
-                parallel_configs = list(legal)
-            branches.append(
-                BranchSpace(
+            try:
+                legal = parallel_configs_for(
+                    ss.model_name,
+                    ss.hardware_sku,
+                    gpu_budget=ss.gpu_budget,
                     deployment_mode=deployment_mode,
                     backend=backend,
-                    parallel_configs=tuple(parallel_configs),
-                    knob_choices=branch_knob_choices(ss, deployment_mode),
+                    min_gpu_budget=ss.min_gpu_budget,
+                    max_seq_len=max_seq_len,
                 )
+            except (NoPerfDatabase, NoViableParallelConfig):
+                continue  # backend unusable for this mode -> drop it from the search
+            legal_set = set(legal)
+            for cfg in pinned if pinned is not None else legal:
+                if cfg in legal_set:
+                    support.setdefault(cfg, set()).add(backend)
+
+        if not support:
+            raise NoViableParallelConfig(
+                f"deployment_mode={deployment_mode!r}: no configured backend has a viable parallel "
+                f"config within gpu_budget={ss.gpu_budget} (check backends / model / hardware)"
             )
+        if pinned is not None:
+            illegal = [c for c in pinned if c not in support]
+            if illegal:
+                raise NoViableParallelConfig(
+                    f"pinned parallel_configs are legal/KV-feasible for no configured backend: {illegal}"
+                )
+
+        knob_choices = branch_knob_choices(ss, deployment_mode)
+        knob_choices["backend"] = sorted(set().union(*support.values()))  # only viable backends
+        branches.append(
+            BranchSpace(
+                deployment_mode=deployment_mode,
+                parallel_configs=tuple(support),
+                supported_backends={cfg: frozenset(bs) for cfg, bs in support.items()},
+                knob_choices=knob_choices,
+            )
+        )
     return branches

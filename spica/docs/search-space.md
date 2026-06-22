@@ -135,12 +135,24 @@ Dict keys: `load_predictor` (`constant` / `arima` / `prophet` / `kalman`),
 `kalman_q_level` / `kalman_q_trend` / `kalman_r` / `kalman_min_points` (kalman). Omitted
 family fields take the planner defaults.
 
+## Branches & backend
+
+The sweep runs **one Vizier study per `deployment_mode`** (agg / disagg — they have
+structurally different parallel configs). **`backend` is a searched knob, not a branch**:
+listing multiple backends searches them *together* within each mode's study (the optimizer
+can shift budget toward the better backend), and `rank()` picks the global best across all.
+The parallel-config menu is the **union** of every backend's KV-feasible configs; a sampled
+`(backend, parallel_config)` pair the backend can't run is marked infeasible (no replay), so
+the optimizer learns to avoid it. A backend with no perf DB / no viable config for a mode is
+dropped from the search.
+
 ## `parallel_configs` (the derived dimension you can also pin)
 
-Left empty, the parallel shape + replica count are **enumerated**: for the branch's
-`(model, hardware, backend, gpu_budget)`, every KV-feasible per-worker shape × replica
-count that fits the budget. Provide a list of dicts to **pin** (one entry) or to search a
-**custom menu** (several entries) instead of the full enumeration.
+Left empty, the parallel shape + replica count are **enumerated**: for `(model, hardware,
+gpu_budget)` and each backend, every KV-feasible per-worker shape × replica count that fits
+the budget (unioned across backends). Provide a list of dicts to **pin** (one entry) or to
+search a **custom menu** (several entries) instead of the full enumeration; a pinned config is
+kept for whichever backends it's legal+feasible on (errors if none).
 
 - **agg** entry — a flat shape dict: `tp` (required), `attention_dp`, `moe_tp`, `moe_ep`,
   `pp`, `replicas`. Omitted dims default to `1`; `replicas` defaults to `1`. Dense models

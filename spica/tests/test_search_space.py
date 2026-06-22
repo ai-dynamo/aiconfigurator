@@ -40,17 +40,20 @@ def test_enumerate_branches_deepseek_gb200():
     cfg = _config(deployment_mode=["agg", "disagg"], backend=["trtllm"], gpu_budget=16)
     try:
         branches = enumerate_branches(cfg)
-    except NoPerfDatabase:
+    except (NoPerfDatabase, NoViableParallelConfig):
         pytest.skip("no gb200/trtllm perf DB")
     except ValueError as exc:
         if "unsupported model/backend/GPU" in str(exc):
             pytest.skip(f"native KV build unavailable: {exc}")
         raise
+    # one branch per deployment_mode (backend is a searched knob, not a branch)
     assert {b.deployment_mode for b in branches} == {"agg", "disagg"}
     for b in branches:
-        assert b.backend == "trtllm"
+        assert b.knob_choices["backend"] == ["trtllm"]  # only the viable backend(s)
         assert len(b.parallel_configs) > 0  # KV-feasible configs exist
         assert all(c.total_gpus <= 16 for c in b.parallel_configs)
+        # every config is tagged with the backends that support it
+        assert all(b.supported_backends[c] == frozenset({"trtllm"}) for c in b.parallel_configs)
         # planner + router knobs always present; engine knobs match the mode
         assert "planner_scaling_policy" in b.knob_choices
         key = "agg_max_num_seqs" if b.deployment_mode == "agg" else "decode_max_num_seqs"

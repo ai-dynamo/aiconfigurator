@@ -43,24 +43,30 @@ class _Evaluator(Protocol):
 def _evaluate_suggestion(
     suggestion: Suggestion,
     *,
+    branch: BranchSpace,
     config: SmartSearchConfig,
     goal: OptimizationGoal,
-    backend_version: str,
     evaluator: _Evaluator,
     sampler: BranchSampler,
     load_predictor: LoadPredictorResult,
 ) -> tuple[Candidate | None, str]:
     """Unroll -> deploy -> replay -> score one suggestion; tell the sampler. Returns
     ``(candidate, outcome)`` where outcome is ``"feasible"`` (with the Candidate),
-    ``"infeasible"`` (scored but gated out), or ``"failed"`` (replay raised). Replay
-    failures are reported to the sampler as infeasible so the study keeps moving; the
-    outcome lets the caller tally them instead of silently dropping both as None."""
+    ``"unsupported"`` (the sampled backend can't run the chosen parallel config — no
+    replay), ``"infeasible"`` (ran + scored but gated out, e.g. over budget), or
+    ``"failed"`` (replay raised). All non-feasible outcomes are reported to the sampler
+    as infeasible so the study keeps moving; the outcome lets the caller tally them."""
+    backend = suggestion.selection["backend"]
+    if backend not in branch.supported_backends.get(suggestion.parallel_config, frozenset()):
+        sampler.observe_infeasible(suggestion, f"backend {backend!r} does not support this parallel config")
+        return None, "unsupported"
     sample = unroll_sample(
         search_space=config.search_space,
         selection=suggestion.selection,
         parallel_config=suggestion.parallel_config,
         load_predictor=load_predictor,
     )
+    backend_version = resolve_backend_version(config.search_space.hardware_sku, backend)
     plan = build_deployment(
         sample,
         backend_version=backend_version,
@@ -129,7 +135,7 @@ def run_smart_search(
     # Upper bound on evaluations (a Vizier round may return fewer than per_round).
     total = len(branches) * sweep.max_rounds * per_round
     candidates: list[Candidate] = []
-    tally = {"feasible": 0, "infeasible": 0, "failed": 0}
+    tally = {"feasible": 0, "infeasible": 0, "failed": 0, "unsupported": 0}
     # Unique per run: Vizier's datastore persists studies by id, so a fixed id would
     # make a later run inherit a stale study (and its old param space) -> decode crash.
     run_nonce = uuid.uuid4().hex[:8]
@@ -139,17 +145,16 @@ def run_smart_search(
 
     with tqdm(total=total, desc="smart-sweep", unit="eval", disable=not show_progress) as bar:
         for branch in branches:
-            backend_version = resolve_backend_version(config.search_space.hardware_sku, branch.backend)
-            study_id = f"spica_{branch.deployment_mode}_{branch.backend}_{run_nonce}"
+            study_id = f"spica_{branch.deployment_mode}_{run_nonce}"
             sampler = sampler_factory(branch, study_id=study_id)
-            bar.set_description(f"smart-sweep {branch.deployment_mode}/{branch.backend}")
+            bar.set_description(f"smart-sweep {branch.deployment_mode}")
             for _ in range(sweep.max_rounds):
                 for suggestion in sampler.suggest(per_round):
                     candidate, outcome = _evaluate_suggestion(
                         suggestion,
+                        branch=branch,
                         config=config,
                         goal=goal,
-                        backend_version=backend_version,
                         evaluator=evaluator,
                         sampler=sampler,
                         load_predictor=load_predictor,
@@ -170,11 +175,12 @@ def run_smart_search(
         evaluated = sum(tally.values())
         summary = (
             f"smart-sweep done: {tally['feasible']}/{evaluated} feasible, "
-            f"{tally['infeasible']} gated, {tally['failed']} replay-failed"
+            f"{tally['infeasible']} gated, {tally['unsupported']} backend-unsupported, "
+            f"{tally['failed']} replay-failed"
         )
         if candidates:
             summary += f"; best {goal.target.value}={best:.4g}"
         else:
-            summary += " — NO feasible candidate (check SLA / gpu_budget / replay errors)"
+            summary += " — NO feasible candidate (check backends / SLA / gpu_budget / replay errors)"
         tqdm.write(summary)
     return rank(candidates)
