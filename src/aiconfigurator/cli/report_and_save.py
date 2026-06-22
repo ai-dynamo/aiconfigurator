@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import dataclasses
 import json
 import logging
 import os
@@ -13,12 +14,13 @@ import yaml
 from prettytable import PrettyTable
 
 from aiconfigurator.generator.api import (
-    generate_backend_artifacts,
+    generate_from_request,
     get_default_dynamo_version_mapping,
     load_generator_overrides_from_args,
     resolve_backend_version_for_dynamo,
 )
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
+from aiconfigurator.generator.request import from_legacy_params
 from aiconfigurator.logging_utils import _cli_bold, _cli_underline
 from aiconfigurator.sdk import pareto_analysis
 from aiconfigurator.sdk.pareto_analysis import draw_pareto_to_string
@@ -665,6 +667,21 @@ def save_results(
                 # generated backend versions for each backend, empty unless --generator-dynamo-version is provided
                 generated_backend_versions = {}
 
+            # Search / perf-DB version echo: the performance data the sweep ran
+            # against (search fidelity). This is distinct from the generated /
+            # deployed config version shown in the box below -- the two axes are
+            # decoupled (set via --perf-db-version; default: latest).
+            logger.warning(
+                "\n" + "=" * 80 + "\n"
+                "  🔍  Search / perf-DB version (simulation fidelity)\n" + "=" * 80 + "\n"
+                "  Experiment: %s\n"
+                "  Perf-DB version: %s   (--perf-db-version; default: latest)\n"
+                "  This is what the search simulated against; it may differ from the\n"
+                "  generated/deployed config version shown next.\n" + "=" * 80,
+                exp_name,
+                backend_version_str or "latest",
+            )
+
             # case #1: --generated-config-version is provided
             if generated_backend_version:
                 effective_generated_version = generated_backend_version
@@ -801,13 +818,21 @@ def save_results(
 
                     try:
                         deployment_target = getattr(args, "deployment_target", "dynamo-j2")
-                        generate_backend_artifacts(
-                            params=cfg,
-                            backend=row_task.primary_backend_name,
-                            backend_version=row_backend_version,
-                            output_dir=top_config_dir,
-                            deployment_target=deployment_target,
+                        # Render through the typed request path. `cfg` (dumped to
+                        # generator_config.yaml above) is the dict bridge output;
+                        # lowering its request reproduces byte-identical artifacts
+                        # (the request round-trip gate), so this is output-neutral.
+                        req = from_legacy_params(cfg, backend=row_task.primary_backend_name)
+                        req = dataclasses.replace(
+                            req,
+                            backend=dataclasses.replace(req.backend, generated_config_version=row_backend_version),
+                            emit=dataclasses.replace(
+                                req.emit,
+                                deployment_target=deployment_target,
+                                output_dir=top_config_dir,
+                            ),
                         )
+                        generate_from_request(req)
                     except Exception as exc:
                         logger.warning(
                             "Failed to generate backend config from aic generator: %s, %s",
