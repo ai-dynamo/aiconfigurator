@@ -11,6 +11,7 @@ to backend-specific configurations using YAML mapping files and Jinja2 templates
 import logging
 import os
 import shlex
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Optional
 
@@ -210,12 +211,32 @@ def _generate_k8s_via_dynamo(
     return yaml.dump(config_dict, sort_keys=False)
 
 
+def _assemble_k8s_context(context: dict[str, Any], has_engine_templates: bool) -> dict[str, Any]:
+    """Assemble the exact context the dynamo-j2 ``k8s_deploy.yaml`` render consumes.
+
+    For backends with extra_engine_args templates (trtllm), suppress cli_args_list
+    so the k8s template uses the ``--extra-engine-args`` file approach instead of
+    inlining all parameters as redundant CLI flags. Pure helper: no behavior change
+    versus the prior inline assembly.
+    """
+    if not has_engine_templates:
+        return context
+    k8s_context = dict(context)
+    k8s_context["agg_cli_args_list"] = None
+    k8s_context["prefill_cli_args_list"] = None
+    k8s_context["decode_cli_args_list"] = None
+    return k8s_context
+
+
 def render_backend_templates(
     param_values: dict[str, Any],
     backend: str,
     templates_dir: Optional[str] = None,
     version: Optional[str] = None,
     deployment_target: str = "dynamo-j2",
+    _context_sink: Optional[Callable[[dict[str, Any]], None]] = None,
+    _engine_context_sink: Optional[Callable[[dict[str, dict[str, Any]]], None]] = None,
+    resolved_facts: Any = None,
 ) -> dict[str, str]:
     """
     Render templates for a specific backend with version-specific template selection.
@@ -226,6 +247,15 @@ def render_backend_templates(
         templates_dir: Directory containing backend-specific template directories
         version: Version string (e.g., '1.1.0rc5'). If None, uses default templates
         deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', or 'llm-d')
+        resolved_facts: Optional ``ResolvedFacts`` (typed ``Any`` to avoid an import
+            cycle). When it carries a matched model profile, model ``defaults:``
+            cli flags are appended (facts-default precedence: fill-if-absent) at the
+            single cli seam so they reach BOTH the ``cli_args_*`` string artifact
+            and the typed k8s builder. When ``None`` (the public API path), facts
+            are SELF-RESOLVED from ``param_values`` so every caller applies the
+            same model defaults; ``run_pipeline`` passes its already-resolved facts
+            to avoid double resolution. A generic model (``model is None``) is a
+            strict no-op, leaving the no-fact baseline byte-identical.
 
     Returns:
         Dictionary mapping template names to rendered content
@@ -249,6 +279,11 @@ def render_backend_templates(
         env = Environment(loader=FileSystemLoader(search_paths), trim_blocks=True, lstrip_blocks=True)
         _TEMPLATE_ENV_CACHE[templates_dir] = env
 
+    # Capture the raw request params BEFORE rule plugins run so facts can be
+    # self-resolved from the same input ``run_pipeline`` resolves from (the
+    # top-level ``ServiceConfig.model_path`` / ``*.system_name`` sections). This
+    # keeps the two render paths' facts identical (see facts self-resolve below).
+    _raw_param_values = param_values
     param_values = apply_rule_plugins(dict(param_values), backend)
     context = prepare_template_context(param_values, backend)
     # Assign backend-specific working_dir (removes need for input-driven path)
@@ -269,6 +304,7 @@ def render_backend_templates(
     has_prefill = bool(params_obj.get("prefill"))
     has_decode = bool(params_obj.get("decode"))
     has_agg = bool(params_obj.get("agg"))
+    has_encode = bool(params_obj.get("encode"))
     generate_disagg = has_prefill and has_decode
     generate_agg = has_agg and not generate_disagg
     # Prefer disagg when both are present
@@ -279,8 +315,51 @@ def render_backend_templates(
     else:
         # Fallback: prefer disagg if any prefill/decode provided, else agg
         worker_plan = ["prefill", "decode"] if (has_prefill or has_decode) else ["agg"]
+    # Multimodal EPD: the encode worker is an optional extra role rendered
+    # alongside prefill/decode/agg. Presence-guarded: no encode role -> unchanged.
+    if has_encode:
+        worker_plan = worker_plan + ["encode"]
 
     rendered_templates = {}
+
+    # ── Resolve facts from our own params when the caller did not supply them ──
+    # ``run_pipeline`` resolves facts up front and threads them in via
+    # ``resolved_facts``; the PUBLIC api (CLI / dynamo profiler / freeze script)
+    # calls this function WITHOUT it. To make every caller apply facts from a
+    # single path, self-resolve here when ``resolved_facts is None`` — from the
+    # RAW request params (pre-rule-plugin), matching exactly what ``run_pipeline``
+    # resolves from so the two paths reconverge. Resolution is best-effort: any
+    # failure degrades to ``None`` and never breaks rendering. Resolved BEFORE the
+    # engine/cli render loops so the hardware ``moe_backend`` fact (applied just
+    # below) is present when those loops consume the context.
+    if resolved_facts is None:
+        try:
+            from aiconfigurator.generator.facts.request_resolution import (
+                resolve_facts_for_request,
+            )
+
+            resolved_facts = resolve_facts_for_request(_raw_param_values, backend, version)
+        except Exception:
+            logger.warning("Fact self-resolution failed; continuing without facts.", exc_info=True)
+            resolved_facts = None
+
+    # ── Apply the hardware-derived moe_backend fact onto the shared context ──
+    # HARDWARE selection (not a model default): trtllm needs the right MoE kernel
+    # (WIDEEP on Blackwell, CUTLASS on Hopper — the wrong choice on Blackwell is a
+    # startup crash). Applied here, BEFORE the engine render loop, which reads
+    # ``context["moe_config"]["backend"]`` via each per-worker ``wc = dict(context)``
+    # (the shallow copy aliases the ``moe_config`` dict, so the fill is visible to
+    # every role). The sglang side (``--moe-runner-backend``) is applied to the
+    # per-worker cli token lists further below, alongside the model defaults,
+    # because the sglang cli template reads the *nested* ``sglang[...]`` dict that
+    # ``make_worker_context`` would otherwise prune. Fill-if-absent and MoE-only
+    # (``is_moe`` guard) — dense models untouched. Unlike the model-default block,
+    # this runs even when ``model is None`` (the fact is keyed on hardware, not on
+    # a model profile). No-op without resolved facts.
+    if resolved_facts is not None and backend == "trtllm":
+        from aiconfigurator.generator.facts.apply import apply_moe_backend
+
+        apply_moe_backend(context, getattr(resolved_facts, "hardware", None), backend=backend)
 
     # Find template files
     template_path = Path(templates_dir)
@@ -412,18 +491,42 @@ def render_backend_templates(
                 speculative_config.setdefault("num_nextn_predict_layers", num_nextn_predict_layers)
             wc["speculative_config"] = speculative_config
 
+    def build_engine_worker_context(worker: str) -> dict[str, Any]:
+        """Assemble the exact per-worker engine render context for one worker role.
+
+        Pure extraction of the inline engine-context assembly used by the engine
+        render loop below: ``make_worker_context(...)`` plus, for trtllm, the
+        nested-engine-config population. No behavior change.
+        """
+        wc = make_worker_context(context, worker, param_keys, mapping_data)
+        if backend == "trtllm":
+            _populate_trtllm_nested_engine_config(wc)
+        return wc
+
+    if _engine_context_sink is not None:
+        _engine_context_sink({worker: build_engine_worker_context(worker) for worker in worker_plan})
+
     if engine_template_file is not None:
         try:
             eng_tmpl = env.get_template(engine_template_file.name)
             for worker in worker_plan:
-                wc = make_worker_context(context, worker, param_keys, mapping_data)
-                if backend == "trtllm":
-                    _populate_trtllm_nested_engine_config(wc)
+                wc = build_engine_worker_context(worker)
                 rendered = eng_tmpl.render(**wc)
+                # Optional per-role passthrough of arbitrary engine-config keys
+                # the template doesn't model. Presence-guarded (absent ->
+                # output unchanged). Appended as YAML so a duplicate key lets the
+                # user override a template-emitted value (engine parser: last wins).
+                extra_engine = (param_values.get("params", {}).get(worker) or {}).get("extra_engine_args")
+                if isinstance(extra_engine, dict) and extra_engine:
+                    import yaml as _yaml
+
+                    rendered = rendered.rstrip("\n") + "\n" + _yaml.safe_dump(extra_engine, sort_keys=False)
                 if worker == "agg":
                     out_name = "extra_engine_args_agg.yaml"
                 elif worker == "prefill":
                     out_name = "extra_engine_args_prefill.yaml"
+                elif worker == "encode":
+                    out_name = "extra_engine_args_encode.yaml"
                 else:
                     out_name = "extra_engine_args_decode.yaml"
                 rendered_templates[out_name] = rendered
@@ -435,6 +538,7 @@ def render_backend_templates(
     context["prefill_engine_args_inline"] = rendered_templates.get("extra_engine_args_prefill.yaml", "")
     context["decode_engine_args_inline"] = rendered_templates.get("extra_engine_args_decode.yaml", "")
     context["agg_engine_args_inline"] = rendered_templates.get("extra_engine_args_agg.yaml", "")
+    context["encode_engine_args_inline"] = rendered_templates.get("extra_engine_args_encode.yaml", "")
 
     # Resolve CLI args template (version-specific preferred)
     cli_template_candidates = list(template_path.glob("cli_args*.j2"))
@@ -461,10 +565,63 @@ def render_backend_templates(
             context["decode_cli_args"] = cli
             context["decode_cli_args_list"] = cli_list
             rendered_templates["cli_args_decode"] = cli
+        elif worker == "encode":
+            context["encode_cli_args"] = cli
+            context["encode_cli_args_list"] = cli_list
+            rendered_templates["cli_args_encode"] = cli
         else:
             context["agg_cli_args"] = cli
             context["agg_cli_args_list"] = cli_list
             rendered_templates["cli_args_agg"] = cli
+
+    # ── Apply facts-default cli flags from resolved facts (facts-default layer) ──
+    # Single seam: after the per-role token lists are built and BEFORE the cli
+    # string formatting / k8s build consume them, so appended flags appear in
+    # BOTH the ``cli_args_*`` string artifact and the typed k8s builder.
+    # Fill-if-absent only (user/recipe/rule values already in the list win).
+    # Two facts feed this seam:
+    #   1. The hardware ``moe_backend`` fact for sglang (``--moe-runner-backend``),
+    #      applied on the token list here — the sglang cli template reads a nested
+    #      ``sglang[...]`` dict that ``make_worker_context`` prunes for a fact set
+    #      after ``prepare_template_context``, so the post-render token list is the
+    #      reliable seam. Runs even when ``model is None`` (hardware-keyed fact).
+    #   2. Model ``defaults:`` flags, only when a model profile matched.
+    # ``_facts_touched_cli`` gates the single re-sync below so the no-fact canary
+    # (no profile + non-MoE / no hardware fact) is byte-identical through here.
+    _facts_touched_cli = False
+    if resolved_facts is not None and backend == "sglang":
+        from aiconfigurator.generator.facts.apply import apply_moe_backend
+
+        apply_moe_backend(context, getattr(resolved_facts, "hardware", None), backend="sglang")
+        moe_choice = context.get("moe_backend")
+        if moe_choice:
+            for worker in worker_plan:
+                tokens = context.get(f"{worker}_cli_args_list")
+                if isinstance(tokens, list) and "--moe-runner-backend" not in tokens:
+                    tokens.append("--moe-runner-backend")
+                    tokens.append(str(moe_choice))
+                    _facts_touched_cli = True
+
+    if resolved_facts is not None and getattr(resolved_facts, "model", None) is not None:
+        from aiconfigurator.generator.facts.apply import apply_facts
+
+        apply_facts(context, resolved_facts, backend)
+        _facts_touched_cli = True
+
+    # Re-sync the string artifacts from the (possibly extended) token lists so
+    # appended flags render identically to user-supplied ones. Only runs when a
+    # fact actually touched the cli, so the no-fact path's strings are untouched.
+    if _facts_touched_cli:
+        for worker in worker_plan:
+            list_key = f"{worker}_cli_args_list"
+            str_key = f"{worker}_cli_args"
+            tmpl_key = f"cli_args_{worker}"
+            token_list = context.get(list_key)
+            if not isinstance(token_list, list):
+                continue
+            cli_str = " ".join(shlex.quote(tok) for tok in token_list)
+            context[str_key] = cli_str
+            rendered_templates[tmpl_key] = cli_str
 
     # ── Translate: append --trtllm.* dynamic flags from extra_engine_args ──
     # When the dynamo-python path is active and the backend is trtllm, convert
@@ -500,10 +657,12 @@ def render_backend_templates(
     prefill_gpu = int(pv_params.get("prefill", {}).get("gpus_per_worker") or 1)
     decode_gpu = int(pv_params.get("decode", {}).get("gpus_per_worker") or 1)
     agg_gpu = int(pv_params.get("agg", {}).get("gpus_per_worker") or 1)
+    encode_gpu = int(pv_params.get("encode", {}).get("gpus_per_worker") or 1)
 
     context["prefill_gpu"] = prefill_gpu
     context["decode_gpu"] = decode_gpu
     context["agg_gpu"] = agg_gpu
+    context["encode_gpu"] = encode_gpu
 
     # Render auxiliary templates based on deployment target
     if deployment_target == "llm-d":
@@ -523,25 +682,21 @@ def render_backend_templates(
         except Exception as e:
             logger.warning(f"Failed to generate k8s config via Dynamo: {e}")
     else:
-        # Dynamo deployment using Jinja2 templates (default: dynamo-j2)
-        k8s_aux = template_path / "k8s_deploy.yaml.j2"
-        if k8s_aux.exists():
-            try:
-                k8s_context = context
-                # For backends with extra_engine_args templates (trtllm),
-                # suppress cli_args_list so the k8s template uses the
-                # --extra-engine-args file approach instead of inlining
-                # all parameters as redundant CLI flags.
-                if has_engine_templates:
-                    k8s_context = dict(context)
-                    k8s_context["agg_cli_args_list"] = None
-                    k8s_context["prefill_cli_args_list"] = None
-                    k8s_context["decode_cli_args_list"] = None
-                tmpl = env.get_template("k8s_deploy.yaml.j2")
-                rendered = tmpl.render(**k8s_context)
-                rendered_templates["k8s_deploy.yaml"] = rendered
-            except Exception as e:
-                logger.warning(f"Failed to render template k8s_deploy.yaml.j2: {e}")
+        # Dynamo deployment (default: dynamo-j2). The k8s_deploy.yaml for all
+        # backends (vllm/sglang/trtllm) is now produced by the typed k8s builder
+        # (build_dgd); the legacy k8s_deploy.yaml.j2 templates have been retired.
+        try:
+            k8s_context = _assemble_k8s_context(context, has_engine_templates)
+            if _context_sink is not None:
+                _context_sink(k8s_context)
+            from aiconfigurator.generator.builders.dgd_model import dgd_documents_to_yaml
+            from aiconfigurator.generator.builders.k8s_builder import build_dgd
+
+            rendered_templates["k8s_deploy.yaml"] = dgd_documents_to_yaml(
+                build_dgd(k8s_context, backend, resolved_facts=resolved_facts)
+            )
+        except Exception as e:
+            logger.warning(f"Failed to build k8s_deploy.yaml: {e}")
 
     # Benchmark templates (Dynamo-specific)
     if deployment_target in ("dynamo-j2", "dynamo-python"):
@@ -704,6 +859,38 @@ def render_backend_templates(
         except Exception as e:
             logger.warning(f"Failed to render template run.sh.j2: {e}")
 
+    # Multimodal EPD single-pod (colocated) artifacts. trtllm's image-URL E-PD
+    # flow transfers vision embeddings via CUDA IPC, which needs the encode and
+    # prefill/PD workers to share GPU memory; k8s per-pod GPU isolation breaks
+    # that. So when an encode role is present we additionally emit a launch
+    # script (encode colocated on GPU 0 with prefill/PD) and a single Pod that
+    # runs all workers together with pod-local etcd/nats. Presence-guarded
+    # (trtllm + encode role only) -> no effect on non-EPD output.
+    if has_encode and backend == "trtllm":
+        epd_run_tmpl = template_path / "epd_run.sh.j2"
+        epd_pod_tmpl = template_path / "epd_pod.yaml.j2"
+        if epd_run_tmpl.exists() and epd_pod_tmpl.exists():
+            try:
+                _enc = param_values.get("params", {}).get("encode") or {}
+                if context.get("DynConfig", {}).get("mode") == "agg":
+                    _total = int(context.get("agg_workers", 1)) * int(context.get("agg_gpu", 1))
+                else:
+                    _total = int(context.get("prefill_workers", 1)) * int(context.get("prefill_gpu", 1)) + int(
+                        context.get("decode_workers", 1)
+                    ) * int(context.get("decode_gpu", 1))
+                epd_ctx = dict(context)
+                epd_ctx["epd_total_gpus"] = max(_total, 1)
+                epd_ctx["epd_name"] = f"{context.get('name') or 'dynamo'}-epd"
+                epd_ctx["encode_modality"] = _enc.get("modality") or "multimodal"
+                epd_ctx["encode_allowed_local_media_path"] = _enc.get("allowed_local_media_path") or "/tmp"
+                epd_ctx["encode_max_file_size_mb"] = _enc.get("max_file_size_mb") or 50
+                run_sh = env.get_template("epd_run.sh.j2").render(**epd_ctx)
+                rendered_templates["epd_run.sh"] = run_sh
+                epd_ctx["epd_run_sh"] = run_sh
+                rendered_templates["epd_pod.yaml"] = env.get_template("epd_pod.yaml.j2").render(**epd_ctx)
+            except Exception as e:
+                logger.warning(f"Failed to render EPD single-pod artifacts: {e}")
+
     # sflow deploy: shared template from sflow/ folder
     sflow_tmpl_name = "sflow_deploy.yaml.j2"
     try:
@@ -722,6 +909,55 @@ def render_backend_templates(
             logger.warning(f"Failed to render sflow template: {e}")
 
     return rendered_templates
+
+
+def build_k8s_context_for_test(param_values, backend, templates_dir=None, backend_version=None):
+    """Return the exact context dict the dynamo-j2 k8s_deploy render uses.
+
+    Pure extraction of existing logic so the typed builder and tests can consume
+    the identical context. Runs the same ``render_backend_templates`` pipeline the
+    Jinja k8s render uses and captures the assembled k8s context via a sink, so the
+    returned dict is byte-for-byte what ``k8s_deploy.yaml.j2`` is rendered with.
+    Must not change ``render_backend_templates`` output.
+    """
+    captured: dict[str, Any] = {}
+
+    def _sink(ctx: dict[str, Any]) -> None:
+        captured["ctx"] = ctx
+
+    render_backend_templates(
+        param_values,
+        backend,
+        templates_dir,
+        backend_version,
+        deployment_target="dynamo-j2",
+        _context_sink=_sink,
+    )
+    return captured["ctx"]
+
+
+def build_engine_worker_contexts_for_test(param_values, backend, templates_dir=None, backend_version=None) -> dict:
+    """Return {worker: wc} — the exact per-worker engine contexts the engine render uses.
+
+    Pure extraction of existing logic; must not change render_backend_templates output.
+    Runs the same ``render_backend_templates`` pipeline the Jinja engine render uses and
+    captures the assembled per-worker engine contexts via a sink, so each returned context
+    is byte-for-byte what ``extra_engine_args*.yaml.j2`` is rendered with.
+    """
+    captured: dict[str, dict[str, Any]] = {}
+
+    def _sink(contexts: dict[str, dict[str, Any]]) -> None:
+        captured.update(contexts)
+
+    render_backend_templates(
+        param_values,
+        backend,
+        templates_dir,
+        backend_version,
+        deployment_target="dynamo-j2",
+        _engine_context_sink=_sink,
+    )
+    return captured
 
 
 def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict[str, Any]:
@@ -811,6 +1047,13 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context["prefill_gpu"] = context["prefill_gpus_per_worker"]
     context["decode_gpu"] = context["decode_gpus_per_worker"]
     context["agg_gpu"] = context["agg_gpus_per_worker"]
+    # Multimodal EPD encode worker (set only when present so non-EPD context is
+    # unchanged; the k8s builder reads these only when building the encode worker).
+    if worker_params.get("encode"):
+        context["encode_params"] = worker_params.get("encode", {})
+        context["encode_workers"] = workers.get("encode_workers", 1)
+        context["encode_gpus_per_worker"] = workers.get("encode_gpus_per_worker")
+        context["encode_gpu"] = context["encode_gpus_per_worker"]
 
     fr = 1 if (context.get("include_frontend") is True) else 0
     context["frontend_replicas"] = fr
@@ -872,7 +1115,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
                 param_to_template_var[param_key] = template_var_mapping[param_key]
 
     # Apply parameter mapping for each worker type
-    for worker_type in ["prefill", "decode", "agg"]:
+    for worker_type in ["prefill", "decode", "agg", "encode"]:
         worker_config = worker_params.get(worker_type, {})
 
         for param_key, value in worker_config.items():
@@ -914,7 +1157,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
 
     # Add individual parameter shortcuts for easy template access
     # Expose worker-scoped parameters with role prefixes only
-    for worker_type in ["prefill", "decode", "agg"]:
+    for worker_type in ["prefill", "decode", "agg", "encode"]:
         worker_config = worker_params.get(worker_type, {})
         for key, value in worker_config.items():
             context[f"{worker_type}_{key}"] = value
@@ -925,6 +1168,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context["prefill_engine_args"] = "/workspace/engine_configs/prefill_config.yaml"
     context["decode_engine_args"] = "/workspace/engine_configs/decode_config.yaml"
     context["agg_engine_args"] = "/workspace/engine_configs/agg_config.yaml"
+    context["encode_engine_args"] = "/workspace/engine_configs/encode_config.yaml"
 
     # Initialize nested backend config dicts for template access
     for nested in [
