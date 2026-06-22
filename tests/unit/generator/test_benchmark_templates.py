@@ -170,7 +170,6 @@ class TestBenchmarkTemplates:
         assert 'input_file_args+=(--input-file "${BENCH_INPUT_FILE}")' in rendered
         assert (
             '[[ -n "${BENCH_CUSTOM_DATASET_TYPE}" ]] && '
-            'input_file_args+=(--custom-dataset-type "${BENCH_CUSTOM_DATASET_TYPE}")'
-            in rendered
+            'input_file_args+=(--custom-dataset-type "${BENCH_CUSTOM_DATASET_TYPE}")' in rendered
         )
         assert '"${input_file_args[@]}"' in rendered
