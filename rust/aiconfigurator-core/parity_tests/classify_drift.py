@@ -41,6 +41,8 @@ def max_gap(xa, ya, xb, yb):
     # overlap, not just one curve's x. Sampling only A's x-points is one-sided: a
     # sparser curve can hide divergence that only shows up at the other frontier's
     # x-points. Interpolate BOTH onto the union grid and take the relative gap.
+    if len(xa) == 0 or len(xb) == 0:
+        return None
     lo = max(xa.min(), xb.min())
     hi = min(xa.max(), xb.max())
     xs = np.unique(np.concatenate([xa, xb]))
@@ -53,32 +55,41 @@ def max_gap(xa, ya, xb, yb):
     return float(rel.max() * 100), float(rel.mean() * 100)
 
 
-for model, system, backend, version in ENTRIES:
-    c = _get_test_constraints(model)
-    py = SupportMatrix._run_mode(
-        mode="disagg",
-        model=model,
-        system=system,
-        backend=backend,
-        version=version,
-        constraints=c,
-        engine_step_backend="python",
-    )
-    ru = SupportMatrix._run_mode(
-        mode="disagg",
-        model=model,
-        system=system,
-        backend=backend,
-        version=version,
-        constraints=c,
-        engine_step_backend="rust",
-    )
-    line = f"{model.split('/')[-1]:34s} {system:8s} {version}: py={len(py)} ru={len(ru)}"
+# gate metric: envelope extremes (exactly what _compare_frontier_envelope checks)
+def ext(df, col, agg):
+    v = pd.to_numeric(df[col], errors="coerce").dropna()
+    return (v.max() if agg == "max" else v.min()) if len(v) else float("nan")
 
-    # gate metric: envelope extremes (exactly what _compare_frontier_envelope checks)
-    def ext(df, col, agg):
-        v = pd.to_numeric(df[col], errors="coerce").dropna()
-        return (v.max() if agg == "max" else v.min()) if len(v) else float("nan")
+
+def _run(model, system, backend, version, be):
+    return SupportMatrix._run_mode(
+        mode="disagg",
+        model=model,
+        system=system,
+        backend=backend,
+        version=version,
+        constraints=_get_test_constraints(model),
+        engine_step_backend=be,
+    )
+
+
+for model, system, backend, version in ENTRIES:
+    tag = f"{model.split('/')[-1]:34s} {system:8s} {version}"
+    # Fail fast and keep going: an unsupported/missing combo (or an empty
+    # frontier) shouldn't abort the whole sweep. _run_mode may return None or an
+    # empty DataFrame; guard before len()/metrics.
+    try:
+        py = _run(model, system, backend, version, "python")
+        ru = _run(model, system, backend, version, "rust")
+    except Exception as exc:
+        print(f"CLASSIFY {tag}: SKIP ({type(exc).__name__}: {exc})", flush=True)
+        continue
+    py_n = None if py is None else len(py)
+    ru_n = None if ru is None else len(ru)
+    if not py_n or not ru_n:
+        print(f"CLASSIFY {tag}: SKIP (no frontier — py={py_n} ru={ru_n})", flush=True)
+        continue
+    line = f"{tag}: py={py_n} ru={ru_n}"
 
     for col, agg in [("tokens/s/user", "max"), ("tpot", "min"), ("request_latency", "min")]:
         p = ext(py, col, agg)
