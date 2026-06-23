@@ -508,6 +508,7 @@ DefaultHFModels = {
     "Qwen/Qwen3.5-27B",
     "Qwen/Qwen3.5-35B-A3B",
     "Qwen/Qwen3.5-397B-A17B",
+    "Qwen/Qwen3.6-35B-A3B",
     # MiMo Models
     "XiaomiMiMo/MiMo-V2-Flash",
     "XiaomiMiMo/MiMo-7B-Base",
@@ -798,6 +799,7 @@ class PerfDataFilename(Enum):
     mla_bmm = "mla_bmm_perf.parquet"
     moe = "moe_perf.parquet"
     custom_allreduce = "custom_allreduce_perf.parquet"
+    allreduce_rms = "allreduce_rms_perf.parquet"
     wideep_context_mla = "wideep_context_mla_perf.parquet"
     wideep_generation_mla = "wideep_generation_mla_perf.parquet"
     wideep_context_moe = "wideep_context_moe_perf.parquet"
@@ -833,6 +835,7 @@ class PerfDataFilename(Enum):
     dsv4_paged_mqa_logits_module = "dsv4_paged_mqa_logits_module_perf.parquet"
     dsv4_hca_attn_module = "dsv4_hca_attn_module_perf.parquet"
     dsv4_megamoe_module = "dsv4_megamoe_module_perf.parquet"
+    layerwise = "layerwise_perf.csv"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])
