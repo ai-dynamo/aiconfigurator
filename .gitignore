@@ -37,3 +37,6 @@ scan-pareto.log.*
 # maturin-built Rust extension (compiled locally / shipped in wheel)
 src/aiconfigurator_core/*.so
 src/aiconfigurator_core/*.pyd
+
+# Local hybrid-util POC scripts/figures (not for version control)
+poc/hybrid_util/
