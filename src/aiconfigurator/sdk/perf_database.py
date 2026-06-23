@@ -133,7 +133,14 @@ def build_no_databases_message() -> str:
 
 
 class PerfDataNotAvailableError(RuntimeError):
-    """Raised when required performance data is missing or unsupported for a requested mode."""
+    """Raised when required performance data is missing or unsupported for a requested mode.
+
+    This is a *per-op* data-miss raised deep inside a single config's evaluation
+    (and in non-sweep paths like validate / single-point estimate), so it is
+    deliberately NOT a :class:`~aiconfigurator.sdk.errors.NoResultsError`: a miss
+    on one config can be skipped while other configs still produce results.
+    Recognize it via :func:`has_perf_data_not_available_cause`.
+    """
 
 
 def has_perf_data_not_available_cause(error: BaseException) -> bool:

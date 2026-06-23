@@ -41,7 +41,11 @@ import pandas as pd
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.backends.factory import get_backend
-from aiconfigurator.sdk.errors import NoFeasibleConfigError
+from aiconfigurator.sdk.errors import (
+    InsufficientMemoryError,
+    KVCacheCapacityError,
+    NoFeasibleConfigError,
+)
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
 from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
@@ -510,12 +514,12 @@ def sweep_agg(
             f"sweep_agg: no results for any parallel configuration. Last exception: {exceptions[-1]}"
         ) from exceptions[-1]
     if all_configs_oom:
-        raise RuntimeError(
+        raise InsufficientMemoryError(
             "sweep_agg: no results — model does not fit in GPU memory for any parallel config. "
             "Try increasing --total-gpus, using a quantized model, or a system with more VRAM per GPU."
         )
     if all_kv_cache_oom:
-        raise RuntimeError(
+        raise KVCacheCapacityError(
             "sweep_agg: no results — requested batch_size exceeds KV cache capacity for all configs. "
             "Try reducing batch_size, increasing free_gpu_memory_fraction, or a system with more VRAM."
         )
@@ -616,7 +620,7 @@ def _get_disagg_worker_candidates(
                 f"sweep_disagg/{role}: no results for any parallel config. Last exception: {exceptions[-1]}"
             ) from exceptions[-1]
         if all_configs_oom:
-            raise RuntimeError(
+            raise InsufficientMemoryError(
                 f"sweep_disagg/{role}: no results — model does not fit in GPU memory for any parallel config. "
                 "Try increasing GPU budget, using a quantized model, or a system with more VRAM per GPU."
             )
