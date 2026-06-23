@@ -138,7 +138,14 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     moe_cases = get_common_moe_test_cases()
-    assert len(moe_cases) == 4548
+    assert len(moe_cases) == 4665
+    assert any(
+        case.model_name == "Qwen/Qwen3.6-35B-A3B"
+        and case.hidden_size == 2048
+        and case.inter_size == 512
+        and case.shared_expert_inter_size == 512
+        for case in moe_cases
+    )
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -184,13 +191,13 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
         "vllm",
         sm_version=100,
         runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
-    ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "nvfp4", "w4a16_mxfp4"]
+    ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"]
     assert get_moe_quantization_modes(
         "vllm",
         sm_version=120,
         runtime_version="0.19.0",
         runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
-    ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "nvfp4", "w4a16_mxfp4"]
+    ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"]
 
     assert moe_model_allows_quantization("vllm", "openai/gpt-oss-20b", "w4a16_mxfp4")
     assert not moe_model_allows_quantization("vllm", "openai/gpt-oss-20b", "bfloat16")

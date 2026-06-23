@@ -225,6 +225,50 @@ def test_query_custom_allreduce_non_database_mode_uses_custom_latency(stub_perf_
     assert math.isclose(custom_latency, 5.0), f"Expected custom-allreduce latency 5.0, got {custom_latency}"
 
 
+def test_query_allreduce_rms_uses_nearest_hidden_size(stub_perf_db, monkeypatch):
+    from aiconfigurator.sdk.operations.communication import AllReduceRMS
+
+    monkeypatch.setattr(AllReduceRMS, "load_data", classmethod(lambda cls, database: None))
+    stub_perf_db._allreduce_rms_data = LoadedOpData(
+        {
+            common.CommQuantMode.half: {
+                8: {
+                    "allreduce_residual_rms": {
+                        4096: {
+                            327680: {"latency": 0.0125, "power": 0.0, "energy": 0.0},
+                            655360: {"latency": 0.0200, "power": 0.0, "energy": 0.0},
+                        },
+                        8192: {
+                            327680: {"latency": 0.0140, "power": 0.0, "energy": 0.0},
+                            655360: {"latency": 0.0230, "power": 0.0, "energy": 0.0},
+                        },
+                    }
+                }
+            }
+        },
+        common.PerfDataFilename.allreduce_rms,
+        "dummy_allreduce_rms_perf.txt",
+    )
+
+    qwen_like = stub_perf_db.query_allreduce_rms(
+        common.CommQuantMode.half,
+        tp_size=8,
+        size=327680,
+        hidden_size=5120,
+        database_mode=common.DatabaseMode.SILICON,
+    )
+    bigger_hidden = stub_perf_db.query_allreduce_rms(
+        common.CommQuantMode.half,
+        tp_size=8,
+        size=327680,
+        hidden_size=7000,
+        database_mode=common.DatabaseMode.SILICON,
+    )
+
+    assert float(qwen_like) == pytest.approx(0.0125)
+    assert float(bigger_hidden) == pytest.approx(0.0140)
+
+
 def test_query_nccl_database_mode_all_gather(stub_perf_db):
     """
     For query_nccl(..., database_mode=SOL) and operation='all_gather':
