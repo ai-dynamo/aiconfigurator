@@ -874,6 +874,67 @@ class DatabaseMode(Enum):
     SOL_FULL = 4  # Provide SOL time and details
 
 
+class TransferKind(Enum):
+    """A way the empirical path may borrow utilisation when an op's own slice has no
+    data. Each kind is independently enabled/disabled by a transfer policy, so HYBRID/
+    EMPIRICAL coverage can be tuned (and the kind that fired is the result's provenance).
+    Roughly ordered by decreasing confidence."""
+
+    XSHAPE = "xshape"  # cross-shape within the SAME quant (nearest collected config)
+    XQUANT = "xquant"  # cross-quant within the SAME (memory, compute) profile
+    XPROFILE = "xprofile"  # cross-quant across profiles (rescaled by a util-level ratio)
+    XOP = "xop"  # cross-op (borrow a related op's util, e.g. MSA<-DSA, via util_scale)
+    XVERSION = "xversion"  # sibling-version shared-layer inheritance (enable_shared_layer)
+
+
+# All transfer kinds enabled — the default HYBRID/EMPIRICAL behaviour (backward compatible).
+ALL_TRANSFERS: frozenset[TransferKind] = frozenset(TransferKind)
+
+# Named presets along the confidence ladder, for a simple external surface.
+TRANSFER_PRESETS: dict[str, frozenset[TransferKind]] = {
+    "off": frozenset(),
+    "conservative": frozenset({TransferKind.XSHAPE, TransferKind.XVERSION}),
+    "balanced": frozenset({TransferKind.XSHAPE, TransferKind.XQUANT, TransferKind.XVERSION}),
+    "aggressive": ALL_TRANSFERS,
+}
+
+
+def resolve_transfer_policy(spec) -> frozenset[TransferKind]:
+    """Normalise an external transfer-policy spec into a frozenset of TransferKind.
+
+    Accepts: None (-> ALL_TRANSFERS), a preset name, a TransferKind, or any iterable of
+    those (names or TransferKind). Unknown names raise ValueError so a typo surfaces."""
+    if spec is None:
+        return ALL_TRANSFERS
+    if isinstance(spec, TransferKind):
+        return frozenset({spec})
+    if isinstance(spec, str):
+        key = spec.strip().lower()
+        if key in TRANSFER_PRESETS:
+            return TRANSFER_PRESETS[key]
+        return frozenset({_transfer_kind_from_token(key)})
+    out: set[TransferKind] = set()
+    for item in spec:
+        if isinstance(item, TransferKind):
+            out.add(item)
+        else:
+            token = str(item).strip().lower()
+            if token in TRANSFER_PRESETS:
+                out |= TRANSFER_PRESETS[token]
+            else:
+                out.add(_transfer_kind_from_token(token))
+    return frozenset(out)
+
+
+def _transfer_kind_from_token(token: str) -> TransferKind:
+    for kind in TransferKind:
+        if kind.value == token:
+            return kind
+    valid = ", ".join(sorted(k.value for k in TransferKind))
+    presets = ", ".join(sorted(TRANSFER_PRESETS))
+    raise ValueError(f"unknown transfer kind/preset {token!r}; valid kinds: {valid}; presets: {presets}")
+
+
 class BackendName(Enum):
     """
     Backend name for inference.

@@ -6,6 +6,7 @@ import math
 import pytest
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -582,3 +583,36 @@ class TestMoECrossProfileTransfer:
         empirical = float(comprehensive_perf_db.query_moe(**kwargs, database_mode=common.DatabaseMode.EMPIRICAL))
         assert empirical > 0
         assert empirical > sol  # util < 1 always degrades SOL; transfer did fire
+
+    def test_resolve_transfer_policy(self):
+        tk = common.TransferKind
+        assert common.resolve_transfer_policy(None) == common.ALL_TRANSFERS
+        assert common.resolve_transfer_policy("conservative") == common.TRANSFER_PRESETS["conservative"]
+        assert common.resolve_transfer_policy(["xshape", "xquant"]) == frozenset({tk.XSHAPE, tk.XQUANT})
+        assert common.resolve_transfer_policy(tk.XPROFILE) == frozenset({tk.XPROFILE})
+        with pytest.raises(ValueError):
+            common.resolve_transfer_policy("not_a_kind")
+
+    def test_transfer_policy_gates_cross_profile(self, comprehensive_perf_db):
+        """With XPROFILE disabled, the absent-profile quant raises again instead of
+        falling through to cross-profile transfer. The policy is read at query time."""
+        kwargs = dict(
+            num_tokens=16,
+            hidden_size=2048,
+            inter_size=8192,
+            topk=2,
+            num_experts=8,
+            moe_tp_size=2,
+            moe_ep_size=2,
+            quant_mode=common.MoEQuantMode.nvfp4,
+            workload_distribution="uniform",
+            database_mode=common.DatabaseMode.EMPIRICAL,
+        )
+        try:
+            comprehensive_perf_db.set_transfer_policy("balanced")  # xshape+xquant+xversion, no xprofile
+            with pytest.raises(EmpiricalNotImplementedError):
+                comprehensive_perf_db.query_moe(**kwargs)
+            comprehensive_perf_db.set_transfer_policy(None)  # all on -> fills again
+            assert float(comprehensive_perf_db.query_moe(**kwargs)) > 0
+        finally:
+            comprehensive_perf_db.set_transfer_policy(None)

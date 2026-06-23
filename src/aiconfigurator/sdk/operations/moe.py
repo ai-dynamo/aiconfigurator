@@ -445,20 +445,27 @@ class MoE(Operation):
                                     )
                     return out
 
+                policy = database.transfer_policy
+
                 def _moe_candidates():
-                    # Tier 1: cross-shape within the query quant (closest measurement).
-                    cands = _collect(quant_mode, quant_mode) if quant_mode in moe_table else []
+                    # Tier 1 (XSHAPE): cross-shape within the query quant (closest measurement).
+                    cands = (
+                        _collect(quant_mode, quant_mode)
+                        if (common.TransferKind.XSHAPE in policy and quant_mode in moe_table)
+                        else []
+                    )
                     if cands:
                         return cands
-                    # Tier 2: cross-quant within the same (memory, compute) profile. Same
-                    # profile => same SOL coefficients and binding regime, so util transfers
-                    # (measured ~13% MAPE for fp8_block <- fp8; the query quant's SOL is used
-                    # unchanged). Only when the query quant has no data of any shape.
-                    qp = (quant_mode.value.memory, quant_mode.value.compute)
-                    for q in moe_table:
-                        if q is quant_mode or (q.value.memory, q.value.compute) != qp:
-                            continue
-                        cands.extend(_collect(q, quant_mode))
+                    # Tier 2 (XQUANT): cross-quant within the same (memory, compute) profile.
+                    # Same profile => same SOL coefficients and binding regime, so util
+                    # transfers (measured ~13% MAPE for fp8_block <- fp8; the query quant's
+                    # SOL is used unchanged). Only when the query quant has no data of any shape.
+                    if common.TransferKind.XQUANT in policy:
+                        qp = (quant_mode.value.memory, quant_mode.value.compute)
+                        for q in moe_table:
+                            if q is quant_mode or (q.value.memory, q.value.compute) != qp:
+                                continue
+                            cands.extend(_collect(q, quant_mode))
                     return cands
 
                 grid = util_empirical.grid_from_reference(
@@ -486,7 +493,7 @@ class MoE(Operation):
                 # SOL, and rescale by the per-quant util-LEVEL ratio e(query)/e(ref). The
                 # cross-profile error is ~pure systematic kernel-efficiency bias, which this
                 # ratio removes (raw ~58% -> ~24% MAPE LOO). Last resort, lowest confidence.
-                if grid is None or not grid.samples:
+                if (grid is None or not grid.samples) and common.TransferKind.XPROFILE in policy:
                     for ref_q in _xprofile_moe_quants(quant_mode, moe_table):
                         g = util_empirical.grid_from_reference(
                             (

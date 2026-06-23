@@ -1202,6 +1202,11 @@ class PerfDatabase:
         self.version = version
         self.systems_root = systems_root
         self.enable_shared_layer = (database_mode or "").upper() in ("HYBRID", "EMPIRICAL")
+        # Which empirical transfer kinds are permitted (HYBRID/EMPIRICAL only). All on by
+        # default = current behaviour; set_transfer_policy() narrows it for fine-grained
+        # HYBRID control. Read at query time by op get_empirical, so it can be retuned on
+        # the (cached, shared) instance like the default database mode.
+        self._transfer_policy: frozenset[common.TransferKind] = common.ALL_TRANSFERS
         with open(os.path.join(systems_root, system + ".yaml")) as f:
             self.system_spec = SystemSpec(yaml.load(f, Loader=yaml.SafeLoader))
         self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
@@ -1501,6 +1506,26 @@ class PerfDatabase:
         Get the default database mode
         """
         return self._default_database_mode
+
+    def set_transfer_policy(self, spec) -> None:
+        """Set which empirical transfer kinds are permitted (fine-grained HYBRID control).
+
+        ``spec`` is anything :func:`common.resolve_transfer_policy` accepts: ``None``
+        (all), a preset name, a :class:`common.TransferKind`, or an iterable of those.
+        Clears runtime caches so already-cached query results don't mask the new policy.
+        """
+        policy = common.resolve_transfer_policy(spec)
+        if policy != self._transfer_policy:
+            self.clear_runtime_caches()
+            self._transfer_policy = policy
+
+    @property
+    def transfer_policy(self) -> frozenset[common.TransferKind]:
+        """Empirical transfer kinds currently permitted (see :class:`common.TransferKind`).
+
+        Defaults to all kinds when unset (e.g. a bare instance), so attribute
+        introspection (``dir``/``clear_runtime_caches``) never trips on it."""
+        return getattr(self, "_transfer_policy", common.ALL_TRANSFERS)
 
     def clear_runtime_caches(self) -> None:
         """Clear cached query/interpolation state while preserving loaded op data."""
