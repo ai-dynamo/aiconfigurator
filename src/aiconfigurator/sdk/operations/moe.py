@@ -68,6 +68,53 @@ def _cache_key(database: PerfDatabase) -> tuple:
     )
 
 
+# Per-quant achieved-util LEVEL e(q) for MoE, keyed by the (memory, compute) profile
+# (which encodes (weight, activation) precision: memory∈{2,1,0.5}↔w{16,8,4},
+# compute∈{1,2,4}↔a{16,8,4}). Used ONLY by the cross-PROFILE transfer tier: when the
+# query quant has no data of any profile, borrow the nearest collected quant's util
+# curve and rescale it by e(query)/e(ref). util is the achieved kernel efficiency
+# (SOL already absorbs the coefficients); its LEVEL differs systematically by quant —
+# 4-bit-weight kernels run far below their (higher) roofline, and efficiency rises mildly
+# as activation precision drops. The RATIO e(query)/e(ref) is what matters and is
+# ~stack-stable (≈10%; e.g. w4a16/fp8 = 0.17 on b200 vs 0.18 on h100). Levels are
+# data-derived on b200/trtllm where collected, inferred from the structure otherwise.
+# A SINGLE scalar per quant by design: the analytic SOL's compute/mem split is not
+# trustworthy enough to calibrate per-component (validated — splitting blows up because
+# the SOL attribution doesn't match the kernel's real bottleneck). Levels are relative
+# and tunable; only ratios are consumed.
+_MOE_QUANT_UTIL_LEVEL: dict[tuple[float, float], float] = {
+    (2, 1): 0.53,  # w16a16 / bfloat16              [data]
+    (1, 1): 0.45,  # w8a16                          [inferred]
+    (0.5, 1): 0.07,  # w4a16 (int4_wo, mxfp4)       [data]
+    (1, 2): 0.40,  # w8a8 / fp8(_block)             [data]
+    (0.5, 2): 0.15,  # w4a8 (w4afp8, mxfp4_mxfp8)   [data]
+    (1, 4): 0.30,  # w8a4                           [inferred]
+    (0.5, 4): 0.23,  # w4a4                         [data ≈ nvfp4]
+    (0.5625, 4): 0.23,  # w4a4 / nvfp4              [data]
+}
+_MOE_QUANT_UTIL_DEFAULT = 0.30  # unlisted profile: mid-range relative level
+
+
+def _moe_quant_util_level(quant_mode) -> float:
+    """Achieved-util level e(q) for a MoE quant, by (memory, compute) profile."""
+    return _MOE_QUANT_UTIL_LEVEL.get((quant_mode.value.memory, quant_mode.value.compute), _MOE_QUANT_UTIL_DEFAULT)
+
+
+def _xprofile_moe_quants(query_quant, table) -> list:
+    """Collected quants with a DIFFERENT (memory, compute) profile than the query,
+    nearest-profile first. Same-profile quants are handled by the same-profile tier;
+    these are the cross-profile transfer references, rescaled by the util-level ratio."""
+    qp = (query_quant.value.memory, query_quant.value.compute)
+
+    def dist(q):
+        return abs(q.value.memory - qp[0]) + abs(q.value.compute - qp[1])
+
+    return sorted(
+        (q for q in table if q is not query_quant and (q.value.memory, q.value.compute) != qp),
+        key=dist,
+    )
+
+
 # ───────────────────────────────────────────────────────────────────────
 # MoE
 # ───────────────────────────────────────────────────────────────────────
@@ -358,53 +405,49 @@ class MoE(Operation):
                 depth=1,
             )
 
+            util_scale = 1.0
             if grid is None or not grid.samples:
-                # cross-shape transfer (obs 5): borrow the nearest collected MoE
-                # config's util curve, reconstructed with this query's own SOL.
-                def _moe_candidates():
-                    # Same kernel table as the own-data path: in the nvfp4 small-token
-                    # gated regime, borrow from low-latency configs (what silicon uses).
-                    md = (
-                        database._moe_low_latency_data
-                        if (_use_low_latency() and database._moe_low_latency_data is not None)
-                        else _moe_table()
-                    )
-                    md.raise_if_not_loaded()
-
-                    def _collect(q):
-                        wl = workload_distribution if workload_distribution in md[q] else "uniform"
-                        wl_data = md[q].get(wl, {})
-                        out = []
-                        for tk in wl_data:
-                            for ne in wl_data[tk]:
-                                for hs in wl_data[tk][ne]:
-                                    for isz in wl_data[tk][ne][hs]:
-                                        node = wl_data[tk][ne][hs][isz].get(moe_tp_size, {}).get(moe_ep_size)
-                                        if not node:
-                                            continue
-                                        out.append(
-                                            util_empirical.ReferenceCandidate(
-                                                features=(tk, ne, hs, isz),
-                                                node=node,
-                                                sol_fn=(
-                                                    lambda c, _hs=hs, _isz=isz, _tk=tk, _ne=ne: get_sol(
-                                                        c[0],
-                                                        _hs,
-                                                        _isz,
-                                                        _tk,
-                                                        _ne,
-                                                        moe_tp_size,
-                                                        moe_ep_size,
-                                                        quant_mode,
-                                                        workload_distribution,
-                                                    )[0]
-                                                ),
-                                            )
+                # Transfer tiers (all borrow a collected MoE config's util curve and
+                # reconstruct with SOL). `sol_quant` is the quant whose SOL builds the
+                # borrowed util: the QUERY quant for same-profile tiers (coefficients
+                # match), the REFERENCE quant for cross-profile (so util = its own
+                # SOL/measured = that kernel's true efficiency, then rescaled below).
+                def _collect(q, sol_quant):
+                    moe_table.raise_if_not_loaded()
+                    wl = workload_distribution if workload_distribution in moe_table[q] else "uniform"
+                    wl_data = moe_table[q].get(wl, {})
+                    out = []
+                    for tk in wl_data:
+                        for ne in wl_data[tk]:
+                            for hs in wl_data[tk][ne]:
+                                for isz in wl_data[tk][ne][hs]:
+                                    node = wl_data[tk][ne][hs][isz].get(moe_tp_size, {}).get(moe_ep_size)
+                                    if not node:
+                                        continue
+                                    out.append(
+                                        util_empirical.ReferenceCandidate(
+                                            features=(tk, ne, hs, isz),
+                                            node=node,
+                                            sol_fn=(
+                                                lambda c, _hs=hs, _isz=isz, _tk=tk, _ne=ne, _sq=sol_quant: get_sol(
+                                                    c[0],
+                                                    _hs,
+                                                    _isz,
+                                                    _tk,
+                                                    _ne,
+                                                    moe_tp_size,
+                                                    moe_ep_size,
+                                                    _sq,
+                                                    workload_distribution,
+                                                )[0]
+                                            ),
                                         )
-                        return out
+                                    )
+                    return out
 
+                def _moe_candidates():
                     # Tier 1: cross-shape within the query quant (closest measurement).
-                    cands = _collect(quant_mode) if quant_mode in md else []
+                    cands = _collect(quant_mode, quant_mode) if quant_mode in moe_table else []
                     if cands:
                         return cands
                     # Tier 2: cross-quant within the same (memory, compute) profile. Same
@@ -412,10 +455,10 @@ class MoE(Operation):
                     # (measured ~13% MAPE for fp8_block <- fp8; the query quant's SOL is used
                     # unchanged). Only when the query quant has no data of any shape.
                     qp = (quant_mode.value.memory, quant_mode.value.compute)
-                    for q in md:
+                    for q in moe_table:
                         if q is quant_mode or (q.value.memory, q.value.compute) != qp:
                             continue
-                        cands.extend(_collect(q))
+                        cands.extend(_collect(q, quant_mode))
                     return cands
 
                 grid = util_empirical.grid_from_reference(
@@ -437,7 +480,39 @@ class MoE(Operation):
                     _moe_candidates,
                     depth=1,
                 )
-            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid)
+
+                # Tier 3: cross-PROFILE. No own- or same-profile data at all -> borrow the
+                # nearest collected quant's util curve, built with the REFERENCE quant's own
+                # SOL, and rescale by the per-quant util-LEVEL ratio e(query)/e(ref). The
+                # cross-profile error is ~pure systematic kernel-efficiency bias, which this
+                # ratio removes (raw ~58% -> ~24% MAPE LOO). Last resort, lowest confidence.
+                if grid is None or not grid.samples:
+                    for ref_q in _xprofile_moe_quants(quant_mode, moe_table):
+                        g = util_empirical.grid_from_reference(
+                            (
+                                "moe_xprofile",
+                                database.system,
+                                database.backend,
+                                database.version,
+                                quant_mode.name,
+                                ref_q.name,
+                                kernel_tag,
+                                topk,
+                                num_experts,
+                                hidden_size,
+                                inter_size,
+                                moe_tp_size,
+                                moe_ep_size,
+                            ),
+                            (topk, num_experts, hidden_size, inter_size),
+                            (lambda _rq=ref_q: _collect(_rq, _rq)),
+                            depth=1,
+                        )
+                        if g is not None and g.samples:
+                            grid = g
+                            util_scale = _moe_quant_util_level(quant_mode) / _moe_quant_util_level(ref_q)
+                            break
+            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, util_scale=util_scale)
             return latency
 
         def _estimate_overflow_with_last_token_util(

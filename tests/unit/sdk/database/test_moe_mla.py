@@ -531,3 +531,54 @@ class TestP2P:
         # Small message
         result = comprehensive_perf_db.query_p2p(64, database_mode=common.DatabaseMode.SILICON)
         assert result > 0
+
+
+class TestMoECrossProfileTransfer:
+    """Cross-PROFILE cross-quant transfer (MoE Tier 3): when the query quant has no
+    data of any profile, borrow the nearest collected quant's util curve and rescale
+    by the per-quant util-LEVEL ratio e(query)/e(ref). The stub db collects only
+    bfloat16 (2,1) and fp8 (1,2)."""
+
+    def test_quant_util_level_keyed_by_profile_and_structured(self):
+        from aiconfigurator.sdk.operations.moe import _moe_quant_util_level
+
+        mq = common.MoEQuantMode
+        # keyed by (memory, compute) profile, NOT by enum name: quants sharing a profile
+        # share a level (int4_wo & w4a16_mxfp4 both (0.5,1); fp8 & fp8_block both (1,2))
+        assert _moe_quant_util_level(mq.int4_wo) == _moe_quant_util_level(mq.w4a16_mxfp4)
+        assert _moe_quant_util_level(mq.fp8) == _moe_quant_util_level(mq.fp8_block)
+        # structural fact the transfer ratios rely on: more aggressive weight quant runs
+        # further below its (higher) roofline -> lower achieved-util level
+        assert (
+            _moe_quant_util_level(mq.w4a16_mxfp4) < _moe_quant_util_level(mq.fp8) < _moe_quant_util_level(mq.bfloat16)
+        )
+
+    def test_xprofile_quants_nearest_first(self):
+        from aiconfigurator.sdk.operations.moe import _xprofile_moe_quants
+
+        table = {common.MoEQuantMode.fp8: 1, common.MoEQuantMode.bfloat16: 1}
+        # query nvfp4 (0.5625, 4): fp8 (1,2) is nearer than bf16 (2,1) in profile space
+        ordered = _xprofile_moe_quants(common.MoEQuantMode.nvfp4, table)
+        assert ordered[0] is common.MoEQuantMode.fp8
+        # same-profile quants are excluded (fp8_block shares fp8's (1,2) profile)
+        assert common.MoEQuantMode.fp8 not in _xprofile_moe_quants(common.MoEQuantMode.fp8_block, table)
+
+    def test_absent_profile_fills_via_tier3(self, comprehensive_perf_db):
+        """nvfp4 (profile (0.5625,4)) has no data and no same-profile sibling -> Tier 3
+        borrows fp8 and returns a finite estimate instead of raising. The util-level
+        correction (util<1, e(nvfp4)<e(fp8)) makes it strictly slower than SOL."""
+        kwargs = dict(
+            num_tokens=16,
+            hidden_size=2048,
+            inter_size=8192,
+            topk=2,
+            num_experts=8,
+            moe_tp_size=2,
+            moe_ep_size=2,
+            quant_mode=common.MoEQuantMode.nvfp4,
+            workload_distribution="uniform",
+        )
+        sol = float(comprehensive_perf_db.query_moe(**kwargs, database_mode=common.DatabaseMode.SOL))
+        empirical = float(comprehensive_perf_db.query_moe(**kwargs, database_mode=common.DatabaseMode.EMPIRICAL))
+        assert empirical > 0
+        assert empirical > sol  # util < 1 always degrades SOL; transfer did fire
