@@ -93,6 +93,32 @@ def test_real_bridge_emits_goodput_and_gpu_hours():
     assert objective_value(report, OptimizationTarget.GOODPUT_PER_GPU_HOUR) == pytest.approx(expected)
 
 
+def test_static_path_emits_goodput():
+    """A disabled/static candidate -> the plain run_trace_replay path, which (since
+    dynamo#10849) also takes the goodput SLA -> still emits goodput + gpu_hours."""
+    cfg = _config()
+    pc = enumerate_branches(cfg)[0].parallel_configs[0]
+    selection = {
+        "deployment_mode": "agg",
+        "backend": "trtllm",
+        "agg_max_num_batched_tokens": 16384,
+        "agg_max_num_seqs": 512,
+        "router_mode": "round_robin",
+        "planner_scaling_policy": "disabled",  # static -> plain replay (no planner)
+        "planner_fpm_sampling": "default",
+        "planner_load_sensitivity": "default",
+    }
+    sample = unroll_sample(search_space=cfg.search_space, selection=selection, parallel_config=pc)
+    plan = build_deployment(
+        sample, backend_version=resolve_backend_version("gb200", "trtllm"), planner_sla=cfg.goal.sla
+    )
+    assert plan.is_static and plan.planner_config is None  # plain path
+
+    report = ReplayEvaluator(cfg.workload, cfg.goal).evaluate(plan)
+    assert report["goodput_output_throughput_tok_s"] > 0.0  # goodput on the static path
+    assert report["gpu_hours"] > 0.0
+
+
 def test_smart_search_returns_ranked_candidate():
     """The full loop (Vizier sampler + real replay) returns ranked candidates."""
     candidates = run_smart_search(_config())
