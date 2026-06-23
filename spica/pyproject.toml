@@ -29,9 +29,11 @@ dev = [
 ]
 # Planner load-predictor sweep + (later) Replay evaluator.
 #
-# Pinned to the #10849 merge commit (goodput SLA on the plain trace-replay binding —
-# so static/disabled candidates emit goodput too; includes #10739 replay goodput +
-# provisioned GPU-hours, and the #10670 warmup empty-window densify fix).
+# Pinned to the #10888 merge commit (planner-replay load modes: closed-loop
+# concurrency + synthetic workloads in the planner bridge — so all three load shapes
+# run with or without the planner; includes #10849 goodput SLA on the plain
+# trace-replay binding, #10739 replay goodput + provisioned GPU-hours, and the
+# #10670 warmup empty-window densify fix).
 # ai-dynamo is pure-Python (hatchling), but at this commit main is the
 # unreleased 1.3.0 and ai-dynamo-runtime==1.3.0 is NOT on PyPI, so the Rust
 # bindings must be built from source at the same commit (needs a Rust
@@ -49,8 +51,8 @@ dev = [
 # Pinned here to the same versions (same commit) so spica's predictors behave
 # identically to the planner's. Keep in sync with that file on dynamo bumps.
 dynamo = [
-    "ai-dynamo @ git+https://github.com/ai-dynamo/dynamo@3e4f66f6c4bb9ed95f10ed159c8f8f576d2aa3b6",
-    "ai-dynamo-runtime @ git+https://github.com/ai-dynamo/dynamo@3e4f66f6c4bb9ed95f10ed159c8f8f576d2aa3b6#subdirectory=lib/bindings/python",
+    "ai-dynamo @ git+https://github.com/ai-dynamo/dynamo@5fa34ad08f193c792dfe0ac29c888f4d4dc9bc09",
+    "ai-dynamo-runtime @ git+https://github.com/ai-dynamo/dynamo@5fa34ad08f193c792dfe0ac29c888f4d4dc9bc09#subdirectory=lib/bindings/python",
     "filterpy==1.4.5",
     "pmdarima==2.1.1",
     "prophet==1.2.1",
