@@ -190,7 +190,7 @@ def test_llmd_kustomize_vllm_agg_b60_mode():
         "SlaConfig": {"isl": 4500, "osl": 1000},
         "NodeConfig": {"system_name": "b60"},
         "LlmdConfig": {
-            "vllm_image": "intel/vllm:0.17.0-xpu",
+            "vllm_image": "vllm/vllm-openai:v0.20.0",
         },
         "WorkerConfig": {
             "agg_workers": 1,
@@ -218,7 +218,7 @@ def test_llmd_kustomize_vllm_agg_b60_mode():
     decode = yaml.safe_load(artifacts["patch-vllm.yaml"])
     decode_container = decode["spec"]["template"]["spec"]["containers"][0]
     assert decode["spec"]["replicas"] == 1
-    assert decode_container["image"] == "intel/vllm:0.17.0-xpu"
+    assert decode_container["image"] == "vllm/vllm-openai:v0.20.0"
     assert "resources" not in decode_container
     assert any('"kv_buffer_device":"cpu"' in arg for arg in decode_container["args"])
 
