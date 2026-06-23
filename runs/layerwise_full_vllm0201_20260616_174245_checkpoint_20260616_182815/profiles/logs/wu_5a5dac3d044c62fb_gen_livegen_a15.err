@@ -1,0 +1,53 @@
+[vllm-layer-skip] installed GPUModelRunner.load_model patch, targets=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
+[scheduler-timing] installed Scheduler schedule/update patch
+[step-marker] installed GPUModelRunner.execute_model wrapper, iterations=[1, 2, 17, 129, 257, 513, 1025, 2049, 4097, 8193, 16385, 32769]
+[transformers] `Qwen2VLImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Qwen2VLImageProcessor` instead.
+[vllm-layer-skip] found layers at language_model.model.layers
+[vllm-layer-skip] kept=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39], skipped=0 layers (identity forward); total layers=40
+[vllm-layer-skip] LAYERWISE_MOE_NOOP patched=['0.mlp:Qwen3NextSparseMoeBlock', '1.mlp:Qwen3NextSparseMoeBlock', '2.mlp:Qwen3NextSparseMoeBlock', '3.mlp:Qwen3NextSparseMoeBlock', '4.mlp:Qwen3NextSparseMoeBlock', '5.mlp:Qwen3NextSparseMoeBlock', '6.mlp:Qwen3NextSparseMoeBlock', '7.mlp:Qwen3NextSparseMoeBlock', '8.mlp:Qwen3NextSparseMoeBlock', '9.mlp:Qwen3NextSparseMoeBlock', '10.mlp:Qwen3NextSparseMoeBlock', '11.mlp:Qwen3NextSparseMoeBlock', '12.mlp:Qwen3NextSparseMoeBlock', '13.mlp:Qwen3NextSparseMoeBlock', '14.mlp:Qwen3NextSparseMoeBlock', '15.mlp:Qwen3NextSparseMoeBlock', '16.mlp:Qwen3NextSparseMoeBlock', '17.mlp:Qwen3NextSparseMoeBlock', '18.mlp:Qwen3NextSparseMoeBlock', '19.mlp:Qwen3NextSparseMoeBlock', '20.mlp:Qwen3NextSparseMoeBlock', '21.mlp:Qwen3NextSparseMoeBlock', '22.mlp:Qwen3NextSparseMoeBlock', '23.mlp:Qwen3NextSparseMoeBlock', '24.mlp:Qwen3NextSparseMoeBlock', '25.mlp:Qwen3NextSparseMoeBlock', '26.mlp:Qwen3NextSparseMoeBlock', '27.mlp:Qwen3NextSparseMoeBlock', '28.mlp:Qwen3NextSparseMoeBlock', '29.mlp:Qwen3NextSparseMoeBlock', '30.mlp:Qwen3NextSparseMoeBlock', '31.mlp:Qwen3NextSparseMoeBlock', '32.mlp:Qwen3NextSparseMoeBlock', '33.mlp:Qwen3NextSparseMoeBlock', '34.mlp:Qwen3NextSparseMoeBlock', '35.mlp:Qwen3NextSparseMoeBlock', '36.mlp:Qwen3NextSparseMoeBlock', '37.mlp:Qwen3NextSparseMoeBlock', '38.mlp:Qwen3NextSparseMoeBlock', '39.mlp:Qwen3NextSparseMoeBlock']
+Exception in thread Thread-1 (_report_usage_worker):
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/threading.py", line 1075, in _bootstrap_inner
+    self.run()
+  File "/usr/local/lib/python3.12/threading.py", line 1012, in run
+    self._target(*self._args, **self._kwargs)
+  File "/usr/local/lib/python3.12/site-packages/vllm/usage/usage_lib.py", line 173, in _report_usage_worker
+    self._report_usage_once(model_architecture, usage_context, extra_kvs)
+  File "/usr/local/lib/python3.12/site-packages/vllm/usage/usage_lib.py", line 217, in _report_usage_once
+    info = cpuinfo.get_cpu_info()
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/cpuinfo/cpuinfo.py", line 2762, in get_cpu_info
+    output = json.loads(output, object_hook = _utf_to_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/json/__init__.py", line 359, in loads
+    return cls(**kw).decode(s)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/json/decoder.py", line 338, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/json/decoder.py", line 356, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+2026-06-16 17:54:45,475 - INFO - autotuner.py:457 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+2026-06-16 17:54:45,482 - INFO - autotuner.py:466 - flashinfer.jit: [Autotuner]: Autotuning process ends
+Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/51 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  12%|█▏        | 6/51 [00:00<00:00, 56.12it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  24%|██▎       | 12/51 [00:00<00:00, 55.26it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  37%|███▋      | 19/51 [00:00<00:00, 57.85it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  51%|█████     | 26/51 [00:00<00:00, 59.17it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  63%|██████▎   | 32/51 [00:00<00:00, 59.38it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  75%|███████▍  | 38/51 [00:00<00:00, 58.17it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  86%|████████▋ | 44/51 [00:00<00:00, 58.15it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 51/51 [00:00<00:00, 59.41it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 51/51 [00:00<00:00, 58.58it/s]
+Capturing CUDA graphs (decode, FULL):   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL):   3%|▎         | 1/35 [00:00<00:04,  8.04it/s]Capturing CUDA graphs (decode, FULL):   6%|▌         | 2/35 [00:00<00:04,  8.04it/s]Capturing CUDA graphs (decode, FULL):  26%|██▌       | 9/35 [00:00<00:00, 32.11it/s]Capturing CUDA graphs (decode, FULL):  49%|████▊     | 17/35 [00:00<00:00, 47.24it/s]Capturing CUDA graphs (decode, FULL):  71%|███████▏  | 25/35 [00:00<00:00, 55.88it/s]Capturing CUDA graphs (decode, FULL):  94%|█████████▍| 33/35 [00:00<00:00, 61.39it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 35/35 [00:00<00:00, 42.84it/s]
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/workspace/collector/layerwise/vllm/collect.py", line 352, in <module>
+[rank0]:     main()
+[rank0]:   File "/workspace/collector/layerwise/vllm/collect.py", line 334, in main
+[rank0]:     run_worker(Path(worker_args.spec))
+[rank0]:   File "/workspace/collector/layerwise/vllm/worker.py", line 1274, in run_worker
+[rank0]:     _worker_run_gen(
+[rank0]:   File "/workspace/collector/layerwise/vllm/worker.py", line 1953, in _worker_run_gen
+[rank0]:     _run_live_gen_datapoint(
+[rank0]:   File "/workspace/collector/layerwise/vllm/worker.py", line 2071, in _run_live_gen_datapoint
+[rank0]:     prime_chunks = _prime_engine_requests_for_decode(llm, request_ids, candidate_past_kv)
+[rank0]:                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/workspace/collector/layerwise/vllm/worker.py", line 669, in _prime_engine_requests_for_decode
+[rank0]:     return _prime_engine_requests_for_prompt_prefix(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/workspace/collector/layerwise/vllm/worker.py", line 631, in _prime_engine_requests_for_prompt_prefix
+[rank0]:     raise RuntimeError(
+[rank0]: RuntimeError: insufficient KV blocks to prime decode prefix for request gen-live:wu_5a5dac3d044c62fb_gen_livegen:bs256:past32441:179:1781632517540537140-8362d948: prefix=32441 computed=31680 round_tokens=1432 chunk_tokens=8 active_requests=256 free_blocks=0
+[rank0]:[W616 17:55:25.860351982 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())

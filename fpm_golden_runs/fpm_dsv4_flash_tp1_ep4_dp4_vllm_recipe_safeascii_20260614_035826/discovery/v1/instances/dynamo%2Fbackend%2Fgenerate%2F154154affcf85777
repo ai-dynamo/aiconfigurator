@@ -1,0 +1,1 @@
+{"type":"Endpoint","component":"backend","endpoint":"generate","namespace":"dynamo","instance_id":1531598463122823031,"transport":{"tcp":"95.133.253.63:42505/154154affcf85777/generate"},"device_type":"cpu"}

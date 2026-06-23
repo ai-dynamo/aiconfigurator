@@ -1,0 +1,5 @@
+{
+  "qwen": "runs/layerwise_qwen_moe_execgpu_stablep25_subset_20260616_211757/layerwise.csv",
+  "dsv4": "runs/layerwise_dsv4_execgpu_subset_deepgemm_serial_warm12_20260616_210700_stablep25/layerwise.csv",
+  "notes": "Qwen rows are freshly collected execute_model_gpu rows using stable_p25 aggregation. DSV4 rows are regenerated from saved execute_model_gpu repeat samples using stable_p25 aggregation."
+}

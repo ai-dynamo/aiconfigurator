@@ -1,0 +1,41 @@
+{
+  "attention_config.backend": null,
+  "cache_config.block_size": 256,
+  "cache_config.cache_dtype": "fp8",
+  "cache_config.enable_prefix_caching": true,
+  "cache_config.mamba_cache_mode": "none",
+  "compilation_config.backend": "inductor",
+  "compilation_config.cudagraph_mode": "FULL_AND_PIECEWISE",
+  "compilation_config.custom_ops": [
+    "all",
+    "+quant_fp8",
+    "+quant_fp8"
+  ],
+  "compilation_config.mode": "VLLM_COMPILE",
+  "compilation_config.pass_config": {
+    "eliminate_noops": true,
+    "enable_qk_norm_rope_fusion": false,
+    "enable_sp": false,
+    "fi_allreduce_fusion_max_size_mb": null,
+    "fuse_act_padding": null,
+    "fuse_act_quant": true,
+    "fuse_allreduce_rms": true,
+    "fuse_attn_quant": false,
+    "fuse_gemm_comms": false,
+    "fuse_minimax_qk_norm": null,
+    "fuse_mla_dual_rms_norm": null,
+    "fuse_norm_quant": true,
+    "fuse_rope_kvcache": null,
+    "rope_kvcache_fusion_max_token_num": 256,
+    "sp_min_token_num": null
+  },
+  "model_config.dtype": "torch.bfloat16",
+  "model_config.max_model_len": 1048576,
+  "optimization_level": "O2",
+  "parallel_config.data_parallel_size": 1,
+  "parallel_config.pipeline_parallel_size": 1,
+  "parallel_config.tensor_parallel_size": 4,
+  "scheduler_config.max_num_batched_tokens": 2048,
+  "scheduler_config.max_num_seqs": 128,
+  "vllm_version": "0.20.1"
+}

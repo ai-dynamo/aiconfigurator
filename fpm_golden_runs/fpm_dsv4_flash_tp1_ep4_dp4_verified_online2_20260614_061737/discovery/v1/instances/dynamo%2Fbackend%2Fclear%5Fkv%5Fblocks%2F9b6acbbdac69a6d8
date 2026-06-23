@@ -1,0 +1,1 @@
+{"type":"Endpoint","component":"backend","endpoint":"clear_kv_blocks","namespace":"dynamo","instance_id":11198987438912022232,"transport":{"tcp":"95.133.253.63:39421/9b6acbbdac69a6d8/clear_kv_blocks"},"device_type":"cpu"}

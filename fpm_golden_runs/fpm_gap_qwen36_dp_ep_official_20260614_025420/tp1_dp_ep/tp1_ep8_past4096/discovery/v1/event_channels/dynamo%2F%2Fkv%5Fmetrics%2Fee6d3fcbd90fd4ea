@@ -1,0 +1,1 @@
+{"type":"EventChannel","namespace":"dynamo","component":"","topic":"kv_metrics","instance_id":17180458298240914666,"transport":{"kind":"Zmq","config":{"endpoint":"tcp://95.133.253.63:46011"}}}
