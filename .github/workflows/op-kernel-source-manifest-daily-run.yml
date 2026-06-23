@@ -33,7 +33,7 @@ jobs:
       TARGET_BRANCH: ${{ inputs.branch != '' && inputs.branch || github.event.repository.default_branch }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ env.TARGET_BRANCH }}
           lfs: true
@@ -42,7 +42,7 @@ jobs:
         run: git lfs pull
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -79,7 +79,7 @@ jobs:
 
       - name: Create or Update Pull Request
         if: steps.drift.outputs.has_changes == 'true'
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           signoff: true
