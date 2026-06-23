@@ -1116,12 +1116,20 @@ def run_dsv4_mla_module(
                             # enter sglang's default forward_context around the call.
                             # (model_runner bound as a default arg to make the closure
                             # explicit for static analysis.)
-                            from sglang.srt.model_executor.forward_context import (
-                                ForwardContext,
-                                forward_context,
-                            )
+                            # 0.5.13+ reads the attn backend from the global ForwardContext
+                            # (deepseek_v4: get_attn_backend()); v0.5.12/e958 reads it off
+                            # forward_batch and ships no such module, so use a no-op there.
+                            import sglang as _sgl
 
-                            with forward_context(ForwardContext(attn_backend=model_runner.attn_backend)):
+                            if _sgl.__version__.startswith("0.5.13"):
+                                from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+
+                                ctx = forward_context(ForwardContext(attn_backend=model_runner.attn_backend))
+                            else:
+                                from contextlib import nullcontext
+
+                                ctx = nullcontext()
+                            with ctx:
                                 return attention_module(
                                     x=hidden_states,
                                     positions=positions,

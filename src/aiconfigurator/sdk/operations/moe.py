@@ -705,6 +705,7 @@ class MoEDispatch(Operation):
         self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
         self._quant_mode = kwargs.get("quant_mode")
         self._reduce_results = kwargs.get("reduce_results", True)
+        self._attn_cp_size = kwargs.get("attn_cp_size", 1)
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -1057,6 +1058,11 @@ class MoEDispatch(Operation):
                             "all_gather",
                             volume * self._attention_dp_size,
                         )
+                    elif self._attn_cp_size > 1:
+                        # attn-CP + moe-TP: pre = all_gather (NOT all_reduce)
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half, self.num_gpus, "all_gather", volume
+                        )
                     elif self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
                         comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
@@ -1083,6 +1089,11 @@ class MoEDispatch(Operation):
                             self._attention_tp_size,
                             "all_gather",
                             volume,
+                        )
+                    elif self._attn_cp_size > 1:
+                        # attn-CP + moe-TP: post = reduce_scatter (NOT all_reduce)
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half, self.num_gpus, "reduce_scatter", volume
                         )
                     elif self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
