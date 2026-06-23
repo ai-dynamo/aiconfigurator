@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.perf_surrogate import TableQuery
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -445,20 +446,19 @@ class GEMM(Operation):
 
             gemm_data = gemm_data_wrapper[table_quant_mode]
 
-            if m in gemm_data and n in gemm_data[m] and k in gemm_data[m][n]:
-                result = gemm_data[m][n][k]
-                return _to_performance_result(result)
-
-            m_values = sorted(m_key for m_key in gemm_data if n in gemm_data[m_key] and k in gemm_data[m_key][n])
-            if len(m_values) >= 2:
-                m_left, m_right = interpolation.nearest_1d_point_helper(m, m_values, inner_only=False)
-                result = interpolation.interp_1d(
-                    [m_left, m_right], [gemm_data[m_left][n][k], gemm_data[m_right][n][k]], m
-                )
-                return _to_performance_result(result)
-
+            # Delegate all interp/extrap to the reusable surrogate. Source
+            # precedence (exact -> 1-D along m at exact (n,k) -> 3-D cubic) is
+            # preserved; the only behaviour change is that m-axis EXTRAPOLATION
+            # now uses util-hold (latency = SOL(m,n,k)/util_boundary) instead of
+            # raw linear, via the injected sol_fn.
+            surrogate = TableQuery(
+                gemm_data,
+                sol_fn=lambda x, y, z: get_sol(x, y, z, quant_mode)[0],
+                method="cubic",
+                extracted_metrics_cache=database._extracted_metrics_cache,
+            )
             try:
-                result = interpolation.interp_3d(m, n, k, gemm_data, "cubic", database._extracted_metrics_cache)
+                result = surrogate.query(m, n, k)
             except ValueError as exc:
                 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
