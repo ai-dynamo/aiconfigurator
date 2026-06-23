@@ -42,24 +42,10 @@ from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
 Coords = tuple[float, ...]
 
 
-def _as_components(sol) -> tuple[float, ...]:
-    """Normalise a SOL value to a component tuple.
-
-    A scalar -> one component (the legacy single-SOL behaviour). A ``(sol_compute,
-    sol_mem)`` tuple -> two components, so utilisation can be tracked per roofline
-    bound (MFU and achieved-BW) instead of only for whichever bound dominates.
-    Splitting matters for transfer ACROSS the binding regime (a source point that
-    is compute-bound predicting a target that is memory-bound, or vice versa).
-    """
-    if isinstance(sol, tuple | list):
-        return tuple(float(x) for x in sol)
-    return (float(sol),)
-
-
 @dataclass(frozen=True)
 class UtilSample:
     coords: Coords  # continuous-axis coordinates of a collected point
-    utils: tuple[float, ...]  # per-component SOL_i / measured (compute, mem), in (0, 1]
+    util: float  # SOL / measured at that point, in (0, 1]
 
 
 def leaf_latency(leaf) -> float | None:
@@ -78,27 +64,15 @@ def iter_grid(node, depth: int, prefix: Coords = ()):
         yield from iter_grid(child, depth - 1, prefix + (key,))
 
 
-def build_samples(node, depth: int, sol_fn: Callable[[Coords], object]) -> list[UtilSample]:
-    """Flatten a nested grid into util samples. ``sol_fn(coords)`` returns either a
-    scalar SOL (one component) or a ``(sol_compute, sol_mem)`` tuple.
-
-    For a 2-component SOL, only the BINDING bound's utilisation is recorded per
-    sample (the other component is ``NaN``). ``measured`` reflects only the binding
-    roofline, so ``SOL_i / measured`` for a *non*-binding ``i`` is an artifact (a
-    lower bound on that bound's true efficiency, not the achieved one). Recording it
-    would make cross-regime transfer over-predict (a compute-bound reference's tiny
-    artifact ``util_mem`` blows up a memory-bound query). A scalar SOL is always
-    "binding" by construction, so 1-component behaviour is unchanged.
-    """
+def build_samples(node, depth: int, sol_fn: Callable[[Coords], float]) -> list[UtilSample]:
+    """Flatten a nested grid into util samples. ``sol_fn(coords) -> sol_ms``."""
     samples = []
     for coords, leaf in iter_grid(node, depth):
         lat = leaf_latency(leaf)
         if lat and lat > 0:
-            sols = _as_components(sol_fn(coords))
-            binding = max(sols)
-            if binding > 0:
-                utils = tuple((s / lat if s >= binding else float("nan")) for s in sols)
-                samples.append(UtilSample(tuple(float(c) for c in coords), utils))
+            sol = sol_fn(coords)
+            if sol and sol > 0:
+                samples.append(UtilSample(tuple(float(c) for c in coords), sol / lat))
     return samples
 
 
@@ -107,8 +81,7 @@ class UtilGrid:
 
     Nearest-neighbour clamps naturally on extrapolation (a query past the grid
     edge resolves to the boundary sample's util), which is the conservative
-    behaviour we want -- collected boundary utilization is already flat. Each
-    sample carries a per-component utilisation vector (compute / mem).
+    behaviour we want -- collected boundary utilization is already flat.
     """
 
     def __init__(self, samples: list[UtilSample]):
@@ -121,26 +94,14 @@ class UtilGrid:
         spans = logc.max(axis=0) - self._mins
         self._spans = np.where(spans > 0, spans, 1.0)
         self._norm = (logc - self._mins) / self._spans
-        self._utils = np.asarray([s.utils for s in samples], dtype=float)  # (n_samples, n_components)
-        # Per component, the rows where its util is a real (binding) measurement.
-        # NN runs over only those rows so a query's bound borrows util from a sample
-        # where THAT bound was binding (its true efficiency), not a cross-regime
-        # artifact. Both regimes appear along the collected curve (small tokens are
-        # memory-bound, large tokens compute-bound), so each component is populated.
-        self._active = [np.flatnonzero(np.isfinite(self._utils[:, c])) for c in range(self._utils.shape[1])]
+        self._utils = np.asarray([s.util for s in samples], dtype=float)
 
-    def util(self, query: Coords) -> tuple[float, ...] | None:
+    def util(self, query: Coords) -> float | None:
         if not self.samples:
             return None
         q = (np.log(np.maximum(np.asarray(query, dtype=float), 1e-9)) - self._mins) / self._spans
-        out = []
-        for c, rows in enumerate(self._active):
-            if rows.size == 0:
-                out.append(float("nan"))  # this bound never bound in collected data
-                continue
-            dist2 = ((self._norm[rows] - q) ** 2).sum(axis=1)
-            out.append(float(self._utils[rows[int(dist2.argmin())], c]))
-        return tuple(out)
+        dist2 = ((self._norm - q) ** 2).sum(axis=1)
+        return float(self._utils[int(dist2.argmin())])
 
 
 # Process-lifetime cache of built grids. Collected data is itself cached for the
@@ -170,45 +131,24 @@ def grid_for(cache_key, slice_fn: Callable[[], object], sol_fn: Callable[[Coords
         return None
 
 
-def estimate(sol_query, query: Coords, grid: UtilGrid | None, util_scale: float = 1.0):
+def estimate(sol_query: float, query: Coords, grid: UtilGrid | None, util_scale: float = 1.0):
     """Return ``(latency_ms, util)`` from the util grid, or raise.
-
-    ``sol_query`` is the query's SOL: a scalar (single roofline bound -- legacy
-    behaviour) or a ``(sol_compute, sol_mem)`` tuple. With components, the latency
-    is reconstructed per bound and the binding one wins::
-
-        latency = max_i( sol_query_i / (util_i * util_scale) )
-
-    For a scalar this reduces exactly to ``sol_query / (util * util_scale)``. The
-    per-bound form is what makes transfer correct ACROSS the binding regime: a
-    compute-bound source point predicting a memory-bound target (or vice versa)
-    uses each bound's own measured utilisation rather than the single dominant one.
 
     Raises :class:`EmpiricalNotImplementedError` when no util sample is available
     for the slice (``grid`` is ``None`` / empty) -- there is no own-shape,
     cross-shape, or sibling data to calibrate from, so we surface the gap instead
     of inventing a ``SOL / constant`` placeholder.
 
-    ``util_scale`` is the cross-op level-alignment hook (default 1.0 = no change).
-    A CROSS-OP transfer borrowing a *different* op's util grid passes a scale ``k``
-    (supplied by the modeller) so the borrowed util is pulled to the target op's
-    level (e.g. MLA runs ~1.4x the SOL-utilisation of MHA). Manual injection point.
+    ``util_scale`` is the cross-op level-alignment hook (default 1.0 = no change,
+    used for own-data / same-op transfer). When a CROSS-OP transfer borrows a
+    *different* op's util grid, the caller passes a scale ``k`` (supplied by the
+    modeller) so ``latency = SOL / (util * k)`` -- this pulls the borrowed util to
+    the target op's level (e.g. MLA runs ~1.4x the SOL-utilisation of MHA). Not
+    auto-calibrated and not table-backed by design; it is a manual injection point.
     """
     util = grid.util(query) if grid is not None else None
-    if util is not None:
-        sols = _as_components(sol_query)
-        binding = max(sols)
-        # Reconstruct latency from the QUERY's binding bound, using that bound's
-        # utilisation measured where it was itself binding (per-component grid). A
-        # compute-bound query thus borrows MFU only, never a memory-bound sample's
-        # artifact BW (which would blow up the estimate), and vice versa. Only if the
-        # binding bound has no calibration in the borrowed data do we fall back to any
-        # available bound. For a scalar SOL this is exactly ``sol / (util*scale)``.
-        cands = [s / (u * util_scale) for s, u in zip(sols, util, strict=False) if s >= binding and u > 0]
-        if not cands:
-            cands = [s / (u * util_scale) for s, u in zip(sols, util, strict=False) if s > 0 and u > 0]
-        if cands:
-            return max(cands), util
+    if util and util > 0:
+        return sol_query / (util * util_scale), util
     raise EmpiricalNotImplementedError(
         f"No empirical utilisation data to estimate this op at query={query}: "
         "no own-shape, cross-shape, or sibling transfer reference available."
