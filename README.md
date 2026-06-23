@@ -241,7 +241,7 @@ For the full guide, refer to [CLI User Guide](docs/cli_user_guide.md).
 
 ### Deploying to llm-d Platform
 
-AIConfigurator supports deploying to the llm-d platform using Helm values. Use `--deployment-target llm-d` with vLLM or SGLang backends:
+AIConfigurator supports deploying to the llm-d platform using Helm values. Use `--deployment-target llm-d-helm` with vLLM or SGLang backends:
 
 ```bash
 # vLLM on llm-d
@@ -250,7 +250,7 @@ aiconfigurator cli default \
   --total-gpus 32 \
   --system h200_sxm \
   --backend vllm \
-  --deployment-target llm-d \
+  --deployment-target llm-d-helm \
   --save-dir ./output
 
 # SGLang on llm-d
@@ -259,7 +259,7 @@ aiconfigurator cli default \
   --total-gpus 32 \
   --system h200_sxm \
   --backend sglang \
-  --deployment-target llm-d \
+  --deployment-target llm-d-helm \
   --save-dir ./output
 ```
 
@@ -313,7 +313,7 @@ results/QWEN3_32B_FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 └── pareto_frontier.png
 ```
 
-**For llm-d deployments** (`--deployment-target llm-d`):
+**For llm-d Helm deployments** (`--deployment-target llm-d-helm`):
 
 ```text
 results/QWEN3_32B_h200_sxm_vllm_isl4000_osl1000_ttft1000_tpot20_904495

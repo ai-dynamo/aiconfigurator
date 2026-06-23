@@ -286,9 +286,9 @@ inputs:
   - key: LlmdConfig.xpu_kv_buffer_device
     required: false
     default: "cpu"
-  - key: LlmdConfig.kcustomize_base_path
+  - key: LlmdConfig.kustomize_base_path
     required: false
     default: ""
-  - key: LlmdConfig.kcustomize_name_prefix
+  - key: LlmdConfig.kustomize_name_prefix
     required: false
     default: ""

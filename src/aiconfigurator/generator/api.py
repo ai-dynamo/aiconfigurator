@@ -274,9 +274,9 @@ def generate_backend_artifacts(
         templates_dir: Optional directory containing templates
         output_dir: Optional directory to save generated files
         backend_version: Optional version string for version-specific template selection
-        deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', 'llm-d', or 'llm-d-kcustomize').
+        deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', 'llm-d-helm', or 'llm-d-kustomize').
             'dynamo-j2' uses Jinja2 templates, 'dynamo-python' uses Dynamo's Python config modifiers,
-            'llm-d' generates Helm values for llm-d-modelservice chart, and 'llm-d-kcustomize'
+            'llm-d-helm' generates Helm values for llm-d-modelservice chart, and 'llm-d-kustomize'
             generates Kustomize overlays for llm-d modelserver guides.
         use_dynamo_generator: If True, use Dynamo's Python config modifiers
             (equivalent to deployment_target='dynamo-python'). Cannot be combined

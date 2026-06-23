@@ -121,11 +121,11 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
     common_parser.add_argument(
         "--deployment-target",
         type=str,
-        choices=["dynamo-j2", "dynamo-python", "llm-d", "llm-d-kcustomize"],
+        choices=["dynamo-j2", "dynamo-python", "llm-d-helm", "llm-d-kustomize"],
         default="dynamo-j2",
         help="Deployment target platform. Options: dynamo-j2 (default, Jinja2 templates), "
-        "dynamo-python (Dynamo Python config modifiers), llm-d (llm-d Helm values), "
-        "llm-d-kcustomize (llm-d Kustomize overlays).",
+        "dynamo-python (Dynamo Python config modifiers), llm-d-helm (llm-d Helm values), "
+        "llm-d-kustomize (llm-d Kustomize overlays).",
     )
     common_parser.add_argument(
         "--engine-step-backend",

@@ -47,7 +47,7 @@ def test_llmd_values_template_renders():
         "decode_cli_args_list": ["--tensor-parallel-size", "4", "--max-num-seqs", "128"],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend="vllm", deployment_target="llm-d")
+    artifacts = render_backend_templates(param_values=params, backend="vllm", deployment_target="llm-d-helm")
 
     assert "llm-d-values.yaml" in artifacts
     assert "k8s_deploy.yaml" not in artifacts  # Should not render Dynamo manifest
@@ -100,7 +100,7 @@ def test_llmd_values_template_aggregated_mode():
         "agg_cli_args_list": ["--tensor-parallel-size", "2"],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend="vllm", deployment_target="llm-d")
+    artifacts = render_backend_templates(param_values=params, backend="vllm", deployment_target="llm-d-helm")
 
     values_content = artifacts["llm-d-values.yaml"]
 
@@ -115,7 +115,7 @@ def test_llmd_values_template_aggregated_mode():
 
 
 @pytest.mark.unit
-def test_llmd_kcustomize_vllm_disagg_mode():
+def test_llmd_kustomize_vllm_disagg_mode():
     """Test that vLLM can render llm-d Kustomize overlay patches."""
     params = {
         "ServiceConfig": {
@@ -127,7 +127,7 @@ def test_llmd_kcustomize_vllm_disagg_mode():
         "SlaConfig": {"isl": 4000, "osl": 1000},
         "LlmdConfig": {
             "vllm_image": "vllm/vllm-openai:v0.19.0",
-            "kcustomize_base_path": "/repo/llm-d/guides/pd-disaggregation/modelserver/gpu/vllm/base",
+            "kustomize_base_path": "/repo/llm-d/guides/pd-disaggregation/modelserver/gpu/vllm/base",
         },
         "WorkerConfig": {
             "prefill_workers": 14,
@@ -149,7 +149,7 @@ def test_llmd_kcustomize_vllm_disagg_mode():
         "decode_cli_args_list": ["--tensor-parallel-size", "2", "--max-num-seqs", "512"],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend="vllm", deployment_target="llm-d-kcustomize")
+    artifacts = render_backend_templates(param_values=params, backend="vllm", deployment_target="llm-d-kustomize")
 
     assert set(artifacts) >= {"kustomization.yaml", "patch-decode.yaml", "patch-prefill.yaml"}
     assert "llm-d-values.yaml" not in artifacts
@@ -178,7 +178,7 @@ def test_llmd_kcustomize_vllm_disagg_mode():
 
 
 @pytest.mark.unit
-def test_llmd_kcustomize_vllm_agg_b60_mode():
+def test_llmd_kustomize_vllm_agg_b60_mode():
     """Test that agg mode renders a single llm-d Kustomize modelserver patch."""
     params = {
         "ServiceConfig": {
@@ -205,7 +205,7 @@ def test_llmd_kcustomize_vllm_agg_b60_mode():
         "agg_cli_args_list": ["--tensor-parallel-size", "4", "--max-model-len", "7000"],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend="vllm", deployment_target="llm-d-kcustomize")
+    artifacts = render_backend_templates(param_values=params, backend="vllm", deployment_target="llm-d-kustomize")
 
     assert set(artifacts) >= {"kustomization.yaml", "patch-vllm.yaml"}
     assert "patch-decode.yaml" not in artifacts
@@ -257,7 +257,7 @@ def test_llmd_sglang_disagg_mode():
         "decode_cli_args_list": ["--tp-size", "8", "--mem-fraction-static", "0.9"],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend="sglang", deployment_target="llm-d")
+    artifacts = render_backend_templates(param_values=params, backend="sglang", deployment_target="llm-d-helm")
 
     assert "llm-d-values.yaml" in artifacts
     assert "k8s_deploy.yaml" not in artifacts  # Should not render Dynamo manifest
@@ -313,7 +313,7 @@ def test_llmd_sglang_agg_mode():
         "agg_cli_args_list": ["--tp-size", "8", "--context-length", "8192"],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend="sglang", deployment_target="llm-d")
+    artifacts = render_backend_templates(param_values=params, backend="sglang", deployment_target="llm-d-helm")
 
     assert "llm-d-values.yaml" in artifacts
     values_content = artifacts["llm-d-values.yaml"]
@@ -358,7 +358,7 @@ def test_llmd_sglang_default_image():
         "agg_cli_args_list": [],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend="sglang", deployment_target="llm-d")
+    artifacts = render_backend_templates(param_values=params, backend="sglang", deployment_target="llm-d-helm")
 
     values_content = artifacts["llm-d-values.yaml"]
     # Should use default sglang image
@@ -384,7 +384,7 @@ def test_llmd_hf_token_secret(backend):
         "agg_cli_args_list": [],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend=backend, deployment_target="llm-d")
+    artifacts = render_backend_templates(param_values=params, backend=backend, deployment_target="llm-d-helm")
     values_content = artifacts["llm-d-values.yaml"]
     assert "authSecretName: my-hf-secret" in values_content
 
@@ -407,7 +407,7 @@ def test_llmd_hf_token_secret_default_empty(backend):
         "agg_cli_args_list": [],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend=backend, deployment_target="llm-d")
+    artifacts = render_backend_templates(param_values=params, backend=backend, deployment_target="llm-d-helm")
     values_content = artifacts["llm-d-values.yaml"]
     assert "authSecretName:" in values_content
     assert "authSecretName: my-hf-secret" not in values_content
