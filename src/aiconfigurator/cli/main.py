@@ -207,10 +207,13 @@ def _add_default_mode_arguments(parser):
         "globally optimal configuration is selected. Default: trtllm.",
     )
     parser.add_argument(
+        "--perf-db-version",
         "--backend-version",
+        dest="backend_version",
         type=str,
         default=None,
-        help="Backend database version. Default is latest",
+        help="[expert] Performance-database version used for the simulation/search "
+        "(search fidelity). Default: latest. Alias: --backend-version.",
     )
     parser.add_argument(
         "--database-mode",
@@ -434,10 +437,13 @@ def _add_estimate_mode_arguments(parser):
         help="Backend name (default: trtllm).",
     )
     parser.add_argument(
+        "--perf-db-version",
         "--backend-version",
+        dest="backend_version",
         type=str,
         default=None,
-        help="Backend database version. Default is latest.",
+        help="[expert] Performance-database version used for the simulation/search "
+        "(search fidelity). Default: latest. Alias: --backend-version.",
     )
     parser.add_argument("--isl", type=int, default=1024, help="Input sequence length. Default: 1024.")
     parser.add_argument("--osl", type=int, default=1024, help="Output sequence length. Default: 1024.")
@@ -840,10 +846,12 @@ def _add_support_mode_arguments(parser):
         "Defaults to 'all' when --system is 'all', otherwise 'trtllm'.",
     )
     parser.add_argument(
+        "--perf-db-version",
         "--backend-version",
+        dest="backend_version",
         type=str,
         default=None,
-        help="Optional backend version to filter by.",
+        help="Optional backend / perf-db version to filter by. Alias: --backend-version.",
     )
 
 
@@ -855,17 +863,17 @@ aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --top-n 3 \\
     --total-gpus 8 --system h200_sxm \\
     --ttft 600 --tpot 50 --isl 4000 --osl 500 \\
-    --generator-dynamo-version 0.7.1 \\
+    --dynamo-version 0.7.1 \\
     --generator-set K8sConfig.k8s_pvc_name=$YOUR_PVC_NAME \\
     --generator-set K8sConfig.k8s_namespace=$YOUR_NAMESPACE \\
     --save-dir results
 
-# Sweep for trtllm 1.2.0rc5 but generate config matching trtllm 1.2.0rc6
+# Sweep against trtllm 1.2.0rc5 perf data but generate config matching trtllm 1.2.0rc6
 aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --backend trtllm \\
     --total-gpus 8 --system h200_sxm \\
-    --backend-version 1.2.0rc5 \\
-    --generated-config-version 1.2.0rc6 \\
+    --perf-db-version 1.2.0rc5 \\
+    --config-template-version 1.2.0rc6 \\
     --save-dir results
 """
 
