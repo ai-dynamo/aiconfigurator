@@ -44,6 +44,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _dsa_module_has_prefix_axis(module_dict) -> bool:
+    """Detect whether a context-DSA module slice carries an explicit prefix axis.
+
+    Mirrors the silicon-path detection: a slice is ``[num_heads][prefix][s][b]``
+    (prefix present) vs the legacy ``[num_heads][s][b]`` (prefix folded into the
+    sequence length). We look one level under num_heads: if its values are still
+    nested dicts (not latency leaves), there is an extra axis -> prefix present.
+    Collected for BOTH DeepseekV32 and GlmMoeDsa across trtllm/sglang/vllm, so the
+    empirical path must detect it from data rather than hardcode it per-arch.
+    """
+    for head_data in module_dict.values():
+        if not isinstance(head_data, dict):
+            continue
+        for first_slice in head_data.values():
+            if not isinstance(first_slice, dict):
+                continue
+            # Legacy [num_heads][s][b]: first_slice's values are latency-leaf dicts.
+            return not any(isinstance(v, dict) and "latency" in v for v in first_slice.values())
+    return False
+
+
 DSA_MODEL_DIMS: dict[str, dict] = {
     "DeepseekV32ForCausalLM": {
         "hidden_size": 7168,
@@ -423,11 +444,11 @@ class ContextDSAModule(Operation):
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
-            # SOL / util, util read best-effort from own collected data; falls
-            # back to 0.5 if no data. GLM keeps an explicit prefix axis
-            # ([num_heads][prefix][s][b]); legacy is [num_heads][s][b].
+            # SOL / util, util read best-effort from own collected data. The prefix
+            # axis ([num_heads][prefix][s][b] vs legacy [num_heads][s][b]) is
+            # DETECTED from the data -- matching the silicon path -- not hardcoded
+            # per-arch: both DeepseekV32 and GlmMoeDsa carry it on every framework.
             sol_time = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            has_prefix = architecture == "GlmMoeDsaForCausalLM"
 
             def _slice():
                 cls.load_data(database)
@@ -435,6 +456,11 @@ class ContextDSAModule(Operation):
                 if wrapper is None:
                     raise KeyError("context dsa module data not loaded")
                 return wrapper[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
+
+            try:
+                has_prefix = _dsa_module_has_prefix_axis(_slice())
+            except Exception:
+                has_prefix = architecture == "GlmMoeDsaForCausalLM"  # data unavailable: prior heuristic
 
             if has_prefix:  # c = (num_heads, prefix, s, b); s is new tokens
                 depth, query = 4, (num_heads, prefix, s, b)
@@ -457,6 +483,7 @@ class ContextDSAModule(Operation):
                     kvcache_quant_mode.name,
                     gemm_quant_mode.name,
                     architecture,
+                    has_prefix,
                 ),
                 _slice,
                 _sol,
