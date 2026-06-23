@@ -370,35 +370,52 @@ class MoE(Operation):
                         else _moe_table()
                     )
                     md.raise_if_not_loaded()
-                    wl = workload_distribution if workload_distribution in md[quant_mode] else "uniform"
-                    wl_data = md[quant_mode][wl]
-                    cands = []
-                    for tk in wl_data:
-                        for ne in wl_data[tk]:
-                            for hs in wl_data[tk][ne]:
-                                for isz in wl_data[tk][ne][hs]:
-                                    node = wl_data[tk][ne][hs][isz].get(moe_tp_size, {}).get(moe_ep_size)
-                                    if not node:
-                                        continue
-                                    cands.append(
-                                        util_empirical.ReferenceCandidate(
-                                            features=(tk, ne, hs, isz),
-                                            node=node,
-                                            sol_fn=(
-                                                lambda c, _hs=hs, _isz=isz, _tk=tk, _ne=ne: get_sol(
-                                                    c[0],
-                                                    _hs,
-                                                    _isz,
-                                                    _tk,
-                                                    _ne,
-                                                    moe_tp_size,
-                                                    moe_ep_size,
-                                                    quant_mode,
-                                                    workload_distribution,
-                                                )[0]
-                                            ),
+
+                    def _collect(q):
+                        wl = workload_distribution if workload_distribution in md[q] else "uniform"
+                        wl_data = md[q].get(wl, {})
+                        out = []
+                        for tk in wl_data:
+                            for ne in wl_data[tk]:
+                                for hs in wl_data[tk][ne]:
+                                    for isz in wl_data[tk][ne][hs]:
+                                        node = wl_data[tk][ne][hs][isz].get(moe_tp_size, {}).get(moe_ep_size)
+                                        if not node:
+                                            continue
+                                        out.append(
+                                            util_empirical.ReferenceCandidate(
+                                                features=(tk, ne, hs, isz),
+                                                node=node,
+                                                sol_fn=(
+                                                    lambda c, _hs=hs, _isz=isz, _tk=tk, _ne=ne: get_sol(
+                                                        c[0],
+                                                        _hs,
+                                                        _isz,
+                                                        _tk,
+                                                        _ne,
+                                                        moe_tp_size,
+                                                        moe_ep_size,
+                                                        quant_mode,
+                                                        workload_distribution,
+                                                    )[0]
+                                                ),
+                                            )
                                         )
-                                    )
+                        return out
+
+                    # Tier 1: cross-shape within the query quant (closest measurement).
+                    cands = _collect(quant_mode) if quant_mode in md else []
+                    if cands:
+                        return cands
+                    # Tier 2: cross-quant within the same (memory, compute) profile. Same
+                    # profile => same SOL coefficients and binding regime, so util transfers
+                    # (measured ~13% MAPE for fp8_block <- fp8; the query quant's SOL is used
+                    # unchanged). Only when the query quant has no data of any shape.
+                    qp = (quant_mode.value.memory, quant_mode.value.compute)
+                    for q in md:
+                        if q is quant_mode or (q.value.memory, q.value.compute) != qp:
+                            continue
+                        cands.extend(_collect(q))
                     return cands
 
                 grid = util_empirical.grid_from_reference(
