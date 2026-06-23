@@ -420,7 +420,7 @@ class MoE(Operation):
                     _moe_candidates,
                     depth=1,
                 )
-            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, fallback_scale=0.4)
+            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid)
             return latency
 
         def _estimate_overflow_with_last_token_util(
@@ -1571,7 +1571,7 @@ class TrtLLMWideEPMoE(Operation):
                 )[0],
                 depth=1,
             )
-            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, fallback_scale=0.4)
+            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid)
             return latency
 
         if database_mode is None:
@@ -2018,7 +2018,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 lambda c: get_sol(c[0], hidden_size, topk, num_experts, moe_ep_size, quant_mode, node_num)[0],
                 depth=1,
             )
-            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, fallback_scale=0.5)
+            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid)
             return latency
 
         if database_mode is None:

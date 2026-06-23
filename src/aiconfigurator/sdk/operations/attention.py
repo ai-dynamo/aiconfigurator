@@ -269,7 +269,7 @@ class ContextAttention(Operation):
                 _sol,
                 depth=3,
             )
-            latency, _ = util_empirical.estimate(sol_time, (n, s + prefix, b), grid, fallback_scale=0.6)
+            latency, _ = util_empirical.estimate(sol_time, (n, s + prefix, b), grid)
             return latency
 
         assert n_kv <= n, "n_kv must be less than or equal to n"
@@ -600,7 +600,7 @@ class GenerationAttention(Operation):
                 _sol,
                 depth=3,
             )
-            latency, _ = util_empirical.estimate(sol_time, (n, b, s), grid, fallback_scale=0.8)
+            latency, _ = util_empirical.estimate(sol_time, (n, b, s), grid)
             return latency
 
         assert n_kv <= n, "n_kv must be less than or equal to n"
@@ -836,7 +836,7 @@ class EncoderAttention(Operation):
                 _sol,
                 depth=3,
             )
-            latency, _ = util_empirical.estimate(sol_time, (n, s, b), grid, fallback_scale=0.6)
+            latency, _ = util_empirical.estimate(sol_time, (n, s, b), grid)
             return latency
 
         if database_mode is None:

@@ -209,19 +209,22 @@ class TestNcclOnecclFallback:
                 database_mode=common.DatabaseMode.SILICON,
             )
 
-    def test_hybrid_falls_back_to_empirical_when_neither_loaded(self, _db_factory):
-        """In HYBRID mode, when neither backend has data, fall back to empirical."""
+    def test_hybrid_raises_when_neither_loaded(self, _db_factory):
+        """With neither NCCL nor oneCCL data, the empirical path has nothing to
+        calibrate from, so HYBRID raises EmpiricalNotImplementedError (the legacy
+        SOL/constant placeholder was removed)."""
+        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+
         db = _db_factory(nccl_data=None, oneccl_data=None)
 
-        # HYBRID mode should not raise — it falls back to empirical
-        result = db.query_nccl(
-            common.CommQuantMode.half,
-            4,
-            "all_gather",
-            1024,
-            database_mode=common.DatabaseMode.HYBRID,
-        )
-        assert float(result) > 0, "HYBRID empirical fallback should return positive latency"
+        with pytest.raises(EmpiricalNotImplementedError):
+            db.query_nccl(
+                common.CommQuantMode.half,
+                4,
+                "all_gather",
+                1024,
+                database_mode=common.DatabaseMode.HYBRID,
+            )
 
     def test_single_gpu_returns_zero(self, _db_factory):
         """num_gpus=1 is a fast-path returning zero latency regardless of data."""

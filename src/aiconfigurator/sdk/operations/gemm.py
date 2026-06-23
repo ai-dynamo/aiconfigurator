@@ -408,7 +408,7 @@ class GEMM(Operation):
                 lambda c: get_sol(c[0], c[1], c[2], qm)[0],
                 depth=3,
             )
-            latency, _ = util_empirical.estimate(sol_time, (m_v, n_v, k_v), grid, fallback_scale=0.8)
+            latency, _ = util_empirical.estimate(sol_time, (m_v, n_v, k_v), grid)
             return latency
 
         if database_mode is None:
@@ -530,7 +530,7 @@ class GEMM(Operation):
                 lambda c: get_sol(c[0], c[1])[0],
                 depth=2,
             )
-            latency, _ = util_empirical.estimate(sol_time, (float(m_v), float(k_v)), grid, fallback_scale=0.8)
+            latency, _ = util_empirical.estimate(sol_time, (float(m_v), float(k_v)), grid)
             return latency
 
         if database_mode is None:
@@ -625,7 +625,7 @@ class GEMM(Operation):
                 lambda c: get_sol(c[0], c[1])[0],
                 depth=2,
             )
-            latency, _ = util_empirical.estimate(sol_time, (float(m_v), float(k_v)), grid, fallback_scale=0.8)
+            latency, _ = util_empirical.estimate(sol_time, (float(m_v), float(k_v)), grid)
             return latency
 
         if database_mode is None:

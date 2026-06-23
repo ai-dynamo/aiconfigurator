@@ -434,32 +434,36 @@ class TestContextDSAModule:
         )
         assert with_prefix > no_prefix
 
-    def test_empirical_returns_positive(self, comprehensive_perf_db):
-        result = comprehensive_perf_db.query_context_dsa_module(
-            b=2,
-            s=256,
-            prefix=0,
-            num_heads=32,
-            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
-            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.EMPIRICAL,
-        )
-        assert float(result) > 0
+    def test_empirical_raises_without_data(self, comprehensive_perf_db):
+        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
 
-    def test_hybrid_falls_back_to_empirical_when_no_data(self, comprehensive_perf_db):
-        """HYBRID mode should fallback to empirical when no silicon data loaded."""
-        result = comprehensive_perf_db.query_context_dsa_module(
-            b=2,
-            s=256,
-            prefix=0,
-            num_heads=32,
-            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
-            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.HYBRID,
-        )
-        assert float(result) > 0
+        with pytest.raises(EmpiricalNotImplementedError):
+            comprehensive_perf_db.query_context_dsa_module(
+                b=2,
+                s=256,
+                prefix=0,
+                num_heads=32,
+                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+                fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.EMPIRICAL,
+            )
+
+    def test_hybrid_raises_when_no_data(self, comprehensive_perf_db):
+        """With no DSA-module util to calibrate from, HYBRID raises (no SOL/constant)."""
+        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+
+        with pytest.raises(EmpiricalNotImplementedError):
+            comprehensive_perf_db.query_context_dsa_module(
+                b=2,
+                s=256,
+                prefix=0,
+                num_heads=32,
+                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+                fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.HYBRID,
+            )
 
     def test_different_index_params_change_sol(self, comprehensive_perf_db):
         """Different index_topk should yield different SOL estimates."""
@@ -623,24 +627,28 @@ class TestGenerationDSAModule:
         )
         assert r2 < r1
 
-    def test_empirical_returns_positive(self, comprehensive_perf_db):
-        result = comprehensive_perf_db.query_generation_dsa_module(
-            b=4,
-            s=1024,
-            num_heads=32,
-            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
-            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.EMPIRICAL,
-        )
-        assert float(result) > 0
+    def test_empirical_raises_without_data(self, comprehensive_perf_db):
+        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
 
-    def test_hybrid_falls_back_when_no_data(self, comprehensive_perf_db):
-        result = comprehensive_perf_db.query_generation_dsa_module(
-            b=4,
-            s=1024,
-            num_heads=32,
-            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
-            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.HYBRID,
-        )
-        assert float(result) > 0
+        with pytest.raises(EmpiricalNotImplementedError):
+            comprehensive_perf_db.query_generation_dsa_module(
+                b=4,
+                s=1024,
+                num_heads=32,
+                kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.EMPIRICAL,
+            )
+
+    def test_hybrid_raises_when_no_data(self, comprehensive_perf_db):
+        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+
+        with pytest.raises(EmpiricalNotImplementedError):
+            comprehensive_perf_db.query_generation_dsa_module(
+                b=4,
+                s=1024,
+                num_heads=32,
+                kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.HYBRID,
+            )

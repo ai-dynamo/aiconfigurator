@@ -9,11 +9,14 @@ where ``util = SOL / measured`` (in ``(0, 1]`` after SOL clamping) is taken
 best-effort from collected samples by nearest-neighbour lookup in per-axis
 normalised log space.
 
-This is the *non-failing sibling* of util-space silicon interpolation: silicon
-requires a full interpolation bracket and raises when it is missing; this
-clamps to the nearest known util and always returns a value. When no samples
-exist for the requested slice it falls back to the op's constant
-``fallback_scale`` (today's behaviour), so an op with zero data is unchanged.
+Like util-space silicon interpolation, this clamps to the nearest known util on
+extrapolation. But when *no* samples exist for the requested slice (no own-shape,
+no cross-shape/sibling transfer reference), it raises
+:class:`~aiconfigurator.sdk.errors.EmpiricalNotImplementedError` rather than
+returning a fabricated ``SOL / constant``. Missing coverage thus surfaces
+honestly. (The legacy ``fallback_scale`` constant was a placeholder and has been
+removed; genuinely table-less ops -- mem / p2p / element-wise -- keep their own
+analytic formulas and never call :func:`estimate`.)
 
 Extension seams (designed in, not yet wired):
 
@@ -33,6 +36,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
+
+from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
 
 Coords = tuple[float, ...]
 
@@ -117,8 +122,8 @@ def grid_for(cache_key, slice_fn: Callable[[], object], sol_fn: Callable[[Coords
 
     ``slice_fn()`` returns the nested data sub-grid for the requested slice
     (and may load data lazily). Any failure -- missing data files, an absent
-    slice (``KeyError``) -- returns ``None`` so the caller falls back to its
-    constant ``fallback_scale``. This is what keeps zero-data ops unchanged.
+    slice (``KeyError``) -- returns ``None``; :func:`estimate` then raises
+    :class:`EmpiricalNotImplementedError` (no fabricated constant).
     """
     try:
         return get_grid(cache_key, lambda: UtilGrid(build_samples(slice_fn(), depth, sol_fn)))
@@ -126,9 +131,13 @@ def grid_for(cache_key, slice_fn: Callable[[], object], sol_fn: Callable[[Coords
         return None
 
 
-def estimate(sol_query: float, query: Coords, grid: UtilGrid | None, fallback_scale: float, util_scale: float = 1.0):
-    """Return ``(latency_ms, util)``. ``util`` is ``None`` when the constant
-    fallback was used (no samples for the slice).
+def estimate(sol_query: float, query: Coords, grid: UtilGrid | None, util_scale: float = 1.0):
+    """Return ``(latency_ms, util)`` from the util grid, or raise.
+
+    Raises :class:`EmpiricalNotImplementedError` when no util sample is available
+    for the slice (``grid`` is ``None`` / empty) -- there is no own-shape,
+    cross-shape, or sibling data to calibrate from, so we surface the gap instead
+    of inventing a ``SOL / constant`` placeholder.
 
     ``util_scale`` is the cross-op level-alignment hook (default 1.0 = no change,
     used for own-data / same-op transfer). When a CROSS-OP transfer borrows a
@@ -140,7 +149,10 @@ def estimate(sol_query: float, query: Coords, grid: UtilGrid | None, fallback_sc
     util = grid.util(query) if grid is not None else None
     if util and util > 0:
         return sol_query / (util * util_scale), util
-    return sol_query / fallback_scale, None
+    raise EmpiricalNotImplementedError(
+        f"No empirical utilisation data to estimate this op at query={query}: "
+        "no own-shape, cross-shape, or sibling transfer reference available."
+    )
 
 
 # ---------------------------------------------------------------------------

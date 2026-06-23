@@ -50,18 +50,18 @@ def test_query_gemm_empirical_data_calibrated(stub_perf_db):
     assert not math.isclose(float(empirical_value), float(sol_value) / 0.8)
 
 
-def test_query_gemm_empirical_constant_fallback_without_data(stub_perf_db):
+def test_query_gemm_empirical_raises_without_data(stub_perf_db):
     """When the op has no data for the requested slice (fp8 absent in the stub),
-    EMPIRICAL falls back to the fixed SOL / 0.8 -- preserving prior behaviour for
-    zero-data ops.
+    EMPIRICAL raises EmpiricalNotImplementedError instead of fabricating a
+    SOL / constant -- the legacy placeholder fallback was removed.
     """
+    from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+
     quant_mode = common.GEMMQuantMode.fp8  # no fp8 GEMM data in the stub
     m, n, k = 64, 128, 256
 
-    sol_value = stub_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
-    empirical_value = stub_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.EMPIRICAL)
-
-    assert math.isclose(float(empirical_value), float(sol_value) / 0.8)
+    with pytest.raises(EmpiricalNotImplementedError):
+        stub_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.EMPIRICAL)
 
 
 def test_query_gemm_exact_match_skips_3d_interpolation(comprehensive_perf_db, monkeypatch):
@@ -294,8 +294,12 @@ def test_query_nccl_database_mode_alltoall_and_reduce_scatter(stub_perf_db, oper
 
 def test_query_context_attention_hybrid_fallback(stub_perf_db):
     """
-    HYBRID mode should fall back to the empirical calculation when silicon data is missing.
+    HYBRID falls back to the empirical path when silicon is missing. With no util
+    data for the slice (and no transfer reference), both EMPIRICAL and HYBRID now
+    raise EmpiricalNotImplementedError consistently -- no fabricated SOL/constant.
     """
+    from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+
     kwargs = dict(
         b=2,
         s=32,
@@ -308,10 +312,10 @@ def test_query_context_attention_hybrid_fallback(stub_perf_db):
         window_size=0,
     )
 
-    empirical = stub_perf_db.query_context_attention(database_mode=common.DatabaseMode.EMPIRICAL, **kwargs)
-    hybrid = stub_perf_db.query_context_attention(database_mode=common.DatabaseMode.HYBRID, **kwargs)
-
-    assert math.isclose(hybrid, empirical), f"HYBRID fallback mismatch: expected {empirical}, got {hybrid}"
+    with pytest.raises(EmpiricalNotImplementedError):
+        stub_perf_db.query_context_attention(database_mode=common.DatabaseMode.EMPIRICAL, **kwargs)
+    with pytest.raises(EmpiricalNotImplementedError):
+        stub_perf_db.query_context_attention(database_mode=common.DatabaseMode.HYBRID, **kwargs)
 
 
 def test_query_p2p_database_mode(stub_perf_db):
@@ -355,12 +359,13 @@ def test_query_custom_allreduce_empirical_data_calibrated(comprehensive_perf_db)
     assert not math.isclose(float(empirical), float(sol) / 0.8)
 
 
-def test_query_custom_allreduce_empirical_constant_fallback_without_data(comprehensive_perf_db):
-    """With no custom_allreduce data for the slice, EMPIRICAL falls back to SOL / 0.8."""
+def test_query_custom_allreduce_empirical_raises_without_data(comprehensive_perf_db):
+    """With no custom_allreduce data for the slice, EMPIRICAL raises (no SOL/const)."""
+    from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+
     q, tp, size = common.CommQuantMode.int8, 2, 1024  # int8 not in the custom_allreduce stub
-    empirical = comprehensive_perf_db.query_custom_allreduce(q, tp, size, database_mode=common.DatabaseMode.EMPIRICAL)
-    sol = comprehensive_perf_db.query_custom_allreduce(q, tp, size, database_mode=common.DatabaseMode.SOL)
-    assert math.isclose(float(empirical), float(sol) / 0.8, rel_tol=1e-6)
+    with pytest.raises(EmpiricalNotImplementedError):
+        comprehensive_perf_db.query_custom_allreduce(q, tp, size, database_mode=common.DatabaseMode.EMPIRICAL)
 
 
 def test_query_nccl_empirical_data_calibrated(comprehensive_perf_db):
@@ -373,9 +378,10 @@ def test_query_nccl_empirical_data_calibrated(comprehensive_perf_db):
     assert not math.isclose(float(empirical), float(sol) / 0.8)
 
 
-def test_query_nccl_empirical_constant_fallback_without_data(comprehensive_perf_db):
-    """With no NCCL data for the operation, EMPIRICAL falls back to SOL / 0.8."""
+def test_query_nccl_empirical_raises_without_data(comprehensive_perf_db):
+    """With no NCCL data for the operation, EMPIRICAL raises (no SOL/const)."""
+    from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+
     dtype, ngpu, op, size = common.CommQuantMode.half, 2, "all_reduce", 1024  # all_reduce absent in stub
-    empirical = comprehensive_perf_db.query_nccl(dtype, ngpu, op, size, database_mode=common.DatabaseMode.EMPIRICAL)
-    sol = comprehensive_perf_db.query_nccl(dtype, ngpu, op, size, database_mode=common.DatabaseMode.SOL)
-    assert math.isclose(float(empirical), float(sol) / 0.8, rel_tol=1e-6)
+    with pytest.raises(EmpiricalNotImplementedError):
+        comprehensive_perf_db.query_nccl(dtype, ngpu, op, size, database_mode=common.DatabaseMode.EMPIRICAL)

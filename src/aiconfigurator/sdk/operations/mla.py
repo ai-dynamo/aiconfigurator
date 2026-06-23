@@ -252,7 +252,7 @@ class ContextMLA(Operation):
                 ],  # c=(num_heads, full_s, b)
                 depth=3,
             )
-            latency, _ = util_empirical.estimate(sol_time, (num_heads, s + prefix, b), grid, fallback_scale=0.6)
+            latency, _ = util_empirical.estimate(sol_time, (num_heads, s + prefix, b), grid)
             return latency
 
         if database_mode is None:
@@ -437,7 +437,7 @@ class GenerationMLA(Operation):
                 lambda c: get_sol(c[1], c[2], c[0], kvcache_quant_mode)[0],  # c=(num_heads, b, s)
                 depth=3,
             )
-            latency, _ = util_empirical.estimate(sol_time, (num_heads, b, s), grid, fallback_scale=0.8)
+            latency, _ = util_empirical.estimate(sol_time, (num_heads, b, s), grid)
             return latency
 
         if database_mode is None:
@@ -596,7 +596,7 @@ class MLABmm(Operation):
                 lambda c: get_sol(c[0], num_heads, quant_mode, if_pre)[0],  # c=(num_tokens,)
                 depth=1,
             )
-            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, fallback_scale=0.8)
+            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid)
             return latency
 
         if database_mode is None:
@@ -854,7 +854,7 @@ class MLAModule(Operation):
                 ],  # c=(num_heads, full_s, b)
                 depth=3,
             )
-            latency, _ = util_empirical.estimate(sol_time, (num_heads, s + prefix, b), grid, fallback_scale=0.6)
+            latency, _ = util_empirical.estimate(sol_time, (num_heads, s + prefix, b), grid)
             return latency
 
         if database_mode is None:
@@ -957,7 +957,7 @@ class MLAModule(Operation):
                 lambda c: get_sol(c[1], c[2], c[0], kv_cache_dtype)[0],  # c=(num_heads, b, s)
                 depth=3,
             )
-            latency, _ = util_empirical.estimate(sol_time, (num_heads, b, s), grid, fallback_scale=0.5)
+            latency, _ = util_empirical.estimate(sol_time, (num_heads, b, s), grid)
             return latency
 
         if database_mode is None:
@@ -1232,7 +1232,7 @@ class WideEPGenerationMLA(Operation):
                 lambda c: get_sol(c[1], c[2], round(128 / c[0]), kvcache_quant_mode, fmha_quant_mode)[0],
                 depth=3,
             )
-            latency, _ = util_empirical.estimate(sol_time, (128 // tp_size, b, s), grid, fallback_scale=0.7)
+            latency, _ = util_empirical.estimate(sol_time, (128 // tp_size, b, s), grid)
             return latency
 
         if database_mode is None:
@@ -1511,7 +1511,7 @@ class WideEPContextMLA(Operation):
                 lambda c: get_sol(c[2], c[1], 0, round(128 / c[0]), kvcache_quant_mode, fmha_quant_mode)[0],
                 depth=3,
             )
-            latency, _ = util_empirical.estimate(sol_time, (128 // tp_size, s + prefix, b), grid, fallback_scale=0.6)
+            latency, _ = util_empirical.estimate(sol_time, (128 // tp_size, s + prefix, b), grid)
             return latency
 
         if database_mode is None:

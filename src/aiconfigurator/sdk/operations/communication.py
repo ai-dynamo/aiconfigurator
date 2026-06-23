@@ -31,6 +31,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -159,7 +160,7 @@ class CustomAllReduce(Operation):
                 lambda c: get_sol(quant_mode, eff, int(c[0]))[0],
                 depth=1,
             )
-            latency, _ = util_empirical.estimate(sol_q, (float(size),), grid, fallback_scale=0.8)
+            latency, _ = util_empirical.estimate(sol_q, (float(size),), grid)
             return latency
 
         if database_mode is None:
@@ -384,18 +385,22 @@ class NCCL(Operation):
             # the largest collected num_gpus.
             sol_q = get_sol(dtype, num_gpus, operation, message_size)[0]
             if num_gpus <= 1 or sol_q <= 0:
-                return sol_q
+                return sol_q  # no communication for a single rank -> 0, not a data gap
             cls.load_data(database)
             src = database._nccl_data
             if not src.loaded and database._oneccl_data is not None and database._oneccl_data.loaded:
                 src = database._oneccl_data
             if not src.loaded:
-                return sol_q / 0.8
+                raise EmpiricalNotImplementedError(
+                    f"No NCCL data to estimate {operation} ({dtype.value.name}, num_gpus={num_gpus})."
+                )
             try:
                 by_op = src[dtype][operation]
                 eff = min(num_gpus, max(by_op.keys()))
-            except (KeyError, ValueError):
-                return sol_q / 0.8
+            except (KeyError, ValueError) as exc:
+                raise EmpiricalNotImplementedError(
+                    f"No NCCL data for operation {operation!r} ({dtype.value.name}, num_gpus={num_gpus})."
+                ) from exc
 
             def _slice():
                 nccl_dict = by_op[eff]
@@ -409,7 +414,7 @@ class NCCL(Operation):
                 lambda c: get_sol(dtype, eff, operation, int(c[0]))[0],
                 depth=1,
             )
-            latency, _ = util_empirical.estimate(sol_q, (float(message_size),), grid, fallback_scale=0.8)
+            latency, _ = util_empirical.estimate(sol_q, (float(message_size),), grid)
             return latency
 
         if database_mode is None:

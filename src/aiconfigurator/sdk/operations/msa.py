@@ -24,6 +24,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
 from aiconfigurator.sdk.operations.base import Operation
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -223,7 +224,6 @@ class _BaseMSAModule(Operation):
         self._dsa_architecture = dsa_architecture
         self._dsa_scale_k = dsa_scale_k
         self._weights = 0.0
-        self._fallback_scale = 0.5  # DSA's empirical constant; used when no DSA data
 
     @classmethod
     def load_data(cls, database):  # no MSA silicon table
@@ -281,7 +281,12 @@ class ContextMSAModule(_BaseMSAModule):
             gemm_quant_mode=self._gemm_quant_mode,
             architecture=self._dsa_architecture,
         )
-        lat = sol / (util * self._dsa_scale_k) if util and util > 0 else sol / self._fallback_scale
+        if not (util and util > 0):
+            raise EmpiricalNotImplementedError(
+                f"MSA context: no DSA util to transfer from (arch={self._dsa_architecture}, "
+                f"b={b}, s={s}); collect DSA data or set msa_dsa_scale_k against an available quant."
+            )
+        lat = sol / (util * self._dsa_scale_k)
         return PerformanceResult(lat * self._scale_factor, energy=0.0, source="empirical")
 
 
@@ -308,5 +313,10 @@ class GenerationMSAModule(_BaseMSAModule):
             gemm_quant_mode=self._gemm_quant_mode,
             architecture=self._dsa_architecture,
         )
-        lat = sol / (util * self._dsa_scale_k) if util and util > 0 else sol / self._fallback_scale
+        if not (util and util > 0):
+            raise EmpiricalNotImplementedError(
+                f"MSA generation: no DSA util to transfer from (arch={self._dsa_architecture}, "
+                f"b={b}, s={s}); collect DSA data or set msa_dsa_scale_k against an available quant."
+            )
+        lat = sol / (util * self._dsa_scale_k)
         return PerformanceResult(lat * self._scale_factor, energy=0.0, source="empirical")

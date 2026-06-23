@@ -570,7 +570,7 @@ class DeepSeekV4MHCModule(Operation):
                     lambda c: get_sol(c[0], op_name)[0],  # c=(num_tokens,)
                     depth=1,
                 )
-                lat, _ = util_empirical.estimate(sol_q, (num_tokens,), grid, fallback_scale=0.55)
+                lat, _ = util_empirical.estimate(sol_q, (num_tokens,), grid)
                 return lat
 
             if op == "both":
@@ -1077,7 +1077,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 lambda c: get_sol(c[2], c[1], c[0])[0],  # c=(prefix, s, b)
                 depth=3,
             )
-            lat, _ = util_empirical.estimate(sol_q, (prefix, s, b), grid, fallback_scale=0.55)
+            lat, _ = util_empirical.estimate(sol_q, (prefix, s, b), grid)
             return lat
 
         if database_mode is None:
@@ -1326,7 +1326,7 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 lambda c: get_sol(c[0], c[1])[0],  # c=(b, s_total)
                 depth=2,
             )
-            lat, _ = util_empirical.estimate(sol_q, (b, s), grid, fallback_scale=0.6)
+            lat, _ = util_empirical.estimate(sol_q, (b, s), grid)
             return lat
 
         if database_mode is None:

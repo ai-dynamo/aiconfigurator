@@ -293,28 +293,28 @@ class TestMoE:
         assert "KeyError" not in message
         assert "IndexError" not in message
 
-    def test_query_moe_vllm_missing_bucket_hybrid_falls_back(self, mutable_comprehensive_perf_db):
-        """HYBRID mode keeps the existing empirical fallback for missing MoE silicon data."""
+    def test_query_moe_vllm_missing_bucket_hybrid_raises(self, mutable_comprehensive_perf_db):
+        """With the bucket empty and no cross-shape transfer reference, HYBRID raises
+        EmpiricalNotImplementedError instead of fabricating a SOL/constant."""
+        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+
         db = mutable_comprehensive_perf_db
         db.backend = common.BackendName.vllm.value
         db._moe_data[common.MoEQuantMode.bfloat16]["uniform"][2][8][2048][8192][1][3] = {}
 
-        result = db.query_moe(
-            22,
-            2048,
-            8192,
-            2,
-            8,
-            1,
-            3,
-            common.MoEQuantMode.bfloat16,
-            "uniform",
-            database_mode=common.DatabaseMode.HYBRID,
-        )
-
-        assert isinstance(result, PerformanceResult)
-        assert result.source == "empirical"
-        assert float(result) > 0
+        with pytest.raises(EmpiricalNotImplementedError):
+            db.query_moe(
+                22,
+                2048,
+                8192,
+                2,
+                8,
+                1,
+                3,
+                common.MoEQuantMode.bfloat16,
+                "uniform",
+                database_mode=common.DatabaseMode.HYBRID,
+            )
 
 
 class TestMLABMM:

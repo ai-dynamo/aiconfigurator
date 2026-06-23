@@ -462,7 +462,7 @@ class ContextDSAModule(Operation):
                 _sol,
                 depth=depth,
             )
-            latency, _ = util_empirical.estimate(sol_time, query, grid, fallback_scale=0.5)
+            latency, _ = util_empirical.estimate(sol_time, query, grid)
             return latency
 
         if database_mode is None:
@@ -893,7 +893,7 @@ class GenerationDSAModule(Operation):
                 lambda c: get_sol(c[1], c[2], c[0], kv_cache_dtype)[0],  # c = (num_heads, b, s)
                 depth=3,
             )
-            latency, _ = util_empirical.estimate(sol_time, (num_heads, b, s), grid, fallback_scale=0.5)
+            latency, _ = util_empirical.estimate(sol_time, (num_heads, b, s), grid)
             return latency
 
         if database_mode is None:
