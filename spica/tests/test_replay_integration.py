@@ -25,10 +25,18 @@ import pytest
 pytest.importorskip("dynamo.mocker")
 
 import dynamo._core as _core  # noqa: E402
+import dynamo.replay.main as _replay_main  # noqa: E402
 
 if not hasattr(_core, "RustEnginePerfModel"):
     pytest.skip(
         "dynamo bindings built without the aic-forward-pass feature (no AIC perf model)",
+        allow_module_level=True,
+    )
+
+if not hasattr(_replay_main, "SyntheticWorkload"):
+    pytest.skip(
+        "installed dynamo predates the planner load-modes API (ai-dynamo/dynamo#10888); "
+        "repin the [dynamo] dependency + rebuild to run these integration tests",
         allow_module_level=True,
     )
 

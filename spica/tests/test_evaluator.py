@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""ReplayEvaluator dispatch: static->plain, scaling->bridge (dynamo stubbed)."""
+"""ReplayEvaluator dispatch across 3 load shapes x {static, planner} (dynamo stubbed)."""
 
 import dataclasses
 import json
@@ -121,9 +121,9 @@ def test_kv_router_config_is_built_and_passed(monkeypatch):
     assert isinstance(rec["router_config"], KvRouterConfig)
 
 
-def test_static_path_threads_replay_concurrency(monkeypatch):
-    # a closed-loop concurrency cap reaches the static run_trace_replay path as
-    # replay_concurrency + replay_mode='offline' (the blog's Pareto sweep).
+def test_static_trace_threads_replay_concurrency(monkeypatch):
+    # a closed-loop concurrency cap on a trace reaches run_trace_replay as
+    # replay_concurrency (run_trace_replay defaults replay_mode='offline').
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
     rec = {}
     monkeypatch.setattr(
@@ -131,26 +131,86 @@ def test_static_path_threads_replay_concurrency(monkeypatch):
     )
     wl = Workload(trace_path="/tmp/t.jsonl", replay_concurrency=32)
     ReplayEvaluator(wl, OptimizationGoal(target=OptimizationTarget.THROUGHPUT)).evaluate(_agg_plan(static=True))
-    assert rec["replay_concurrency"] == 32 and rec["replay_mode"] == "offline"
+    assert rec["replay_concurrency"] == 32
 
 
-def test_bridge_path_rejects_replay_concurrency(monkeypatch):
-    # the planner bridge replays at arrival timestamps; a concurrency cap can't apply,
-    # so a scaling candidate with replay_concurrency set fails loudly (not silently ignored).
+def test_scaling_trace_threads_replay_concurrency(monkeypatch):
+    # closed-loop concurrency over a trace + planner now works (the bridge takes a cap):
+    # the evaluator threads replay_concurrency into _run_planner_replay.
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    rec = {}
+    monkeypatch.setattr(
+        dynamo.replay.main,
+        "_run_planner_replay",
+        lambda **kw: rec.update(kw) or SimpleNamespace(trace_report={"gpu_hours": 1.0}),
+    )
     wl = Workload(trace_path="/tmp/t.jsonl", replay_concurrency=32)
     goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
-    with pytest.raises(ValueError, match="no concurrency cap"):
-        ReplayEvaluator(wl, goal).evaluate(_agg_plan(static=False))
+    ReplayEvaluator(wl, goal).evaluate(_agg_plan(static=False))
+    assert rec["replay_concurrency"] == 32 and rec["trace_file"] == "/tmp/t.jsonl"
 
 
-def test_replay_concurrency_validation():
-    with pytest.raises(ValueError, match="positive integer"):
+def _syn_wl(**kw):
+    base = dict(isl=128, osl=64, request_count=100)
+    base.update(kw)
+    return Workload(**base)
+
+
+def test_synthetic_static_uses_from_synthetic_bridge(monkeypatch):
+    # synthetic + static -> PlannerReplayBridge.from_synthetic, driven to completion with
+    # no scaling; goodput SLA threaded; closed-loop in-flight cap = concurrency.
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    rec = {}
+
+    class _Bridge:
+        def advance_to(self, until_ms):
+            return {"is_done": True}
+
+        def finalize(self):
+            return {"goodput_output_throughput_tok_s": 50.0, "gpu_hours": 0.5}
+
+    class _BridgeFactory:
+        @staticmethod
+        def from_synthetic(**kw):
+            rec.update(kw)
+            return _Bridge()
+
+    monkeypatch.setattr(dynamo.mocker, "PlannerReplayBridge", _BridgeFactory)
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
+    report = ReplayEvaluator(_syn_wl(concurrency=4.0), goal).evaluate(_agg_plan(static=True))
+    assert report["goodput_output_throughput_tok_s"] == 50.0
+    assert rec["input_tokens"] == 128 and rec["output_tokens"] == 64 and rec["request_count"] == 100
+    assert rec["replay_concurrency"] == 4  # closed-loop cap from concurrency
+    assert rec["sla_ttft_ms"] == 2000.0
+
+
+def test_synthetic_planner_uses_run_planner_replay(monkeypatch):
+    # synthetic + planner -> _run_planner_replay(synthetic=SyntheticWorkload(...), trace_file=None).
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    monkeypatch.setattr(dynamo.replay.main, "SyntheticWorkload", lambda **kw: ("SYN", kw), raising=False)
+    rec = {}
+    monkeypatch.setattr(
+        dynamo.replay.main,
+        "_run_planner_replay",
+        lambda **kw: rec.update(kw) or SimpleNamespace(trace_report={"gpu_hours": 2.0}),
+    )
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=1500.0, itl_ms=50.0))
+    # request-rate workload -> open-loop (no cap); arrival_interval derived from the rate
+    ReplayEvaluator(_syn_wl(request_rate=20.0), goal).evaluate(_agg_plan(static=False))
+    assert rec["trace_file"] is None and rec["replay_concurrency"] is None
+    assert rec["synthetic"][0] == "SYN"
+    assert rec["synthetic"][1]["arrival_interval_ms"] == 50.0  # 1000 / 20
+    assert rec["sla_ttft_ms"] == 1500.0
+
+
+def test_workload_validation():
+    with pytest.raises(ValueError, match="positive integer"):  # trace + bad cap
         Workload(trace_path="/tmp/t.jsonl", replay_concurrency=0)
-    with pytest.raises(ValueError, match="trace-based"):
-        Workload(isl=128, osl=128, concurrency=1.0, request_count=10, replay_concurrency=8)
-
-
-def test_requires_trace_workload():
-    with pytest.raises(ValueError, match="trace-based"):
-        ReplayEvaluator(Workload(isl=128, osl=128, concurrency=1.0, request_count=10), OptimizationGoal())
+    with pytest.raises(ValueError, match="for trace workloads"):  # synthetic can't use replay_concurrency
+        _syn_wl(concurrency=1.0, replay_concurrency=8)
+    with pytest.raises(ValueError, match="exactly one of request_rate or concurrency"):
+        _syn_wl()  # synthetic needs a load shape
+    with pytest.raises(ValueError, match="exactly one of request_rate or concurrency"):
+        _syn_wl(request_rate=10.0, concurrency=4.0)  # not both
+    with pytest.raises(ValueError, match="must not set synthetic fields"):
+        Workload(trace_path="/tmp/t.jsonl", isl=128)

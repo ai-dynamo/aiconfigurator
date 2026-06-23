@@ -94,14 +94,23 @@ class OptimizationGoal(BaseModel):
 class Workload(BaseModel):
     """Traffic every candidate is evaluated against (pinned, never searched).
 
-    A synthetic static workload, or a replay-ready trace — ``trace_path``
-    discriminates. The trace is the dynamic-traffic path; the synthetic fields
-    cover the static, backward-compatible case.
+    Exactly one of **three load shapes** (all replayable with or without the planner):
+
+    1. **mooncake trace** — set ``trace_path``. Open-loop at the trace's arrival
+       timestamps (scale with ``arrival_speedup_ratio``); set ``replay_concurrency``
+       to drive it **closed-loop** (cap N in flight, ignore timestamps).
+    2. **synthetic request-rate** — set ``request_rate`` (+ ``isl``/``osl``/``request_count``):
+       open-loop at a fixed QPS.
+    3. **synthetic concurrency** — set ``concurrency`` (+ ``isl``/``osl``/``request_count``):
+       closed-loop, cap N in flight.
+
+    The mode is inferred from which field is set; see the validator.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    # synthetic static workload (used when trace_path is unset)
+    # synthetic workload (used when trace_path is unset): exactly one of
+    # request_rate (open-loop QPS) or concurrency (closed-loop in-flight cap).
     isl: int | None = None
     osl: int | None = None
     concurrency: float | None = None  # set concurrency OR request_rate
@@ -110,28 +119,69 @@ class Workload(BaseModel):
     shared_prefix_ratio: float = 0.0  # cache-locality / prefix sharing
     num_prefix_groups: int = 0
     turns_per_session: int = 1  # multi-turn sessions
+    inter_turn_delay_ms: float = 0.0  # think-time between turns (multi-turn synthetic)
 
     # dynamic trace source (mutually exclusive with the synthetic fields)
     trace_path: str | None = None
     trace_format: str = "mooncake"  # replay-ready trace schema
     arrival_speedup_ratio: float = 1.0  # scale trace inter-arrival times
-    # Closed-loop replay: cap in-flight requests at this many (the trace's timestamps
-    # are ignored; a new request starts as one finishes), instead of the default
-    # arrival-timestamp replay. This is how the DynoSim blog sweeps the throughput/
-    # latency Pareto. Static path only — the planner bridge replays at arrival time.
+    # Closed-loop replay over a *trace*: cap in-flight requests at this many (the
+    # trace's timestamps are ignored; a new request starts as one finishes). For a
+    # *synthetic* closed-loop workload use ``concurrency`` instead.
     replay_concurrency: int | None = None
 
     @property
     def is_trace_based(self) -> bool:
         return self.trace_path is not None
 
+    @property
+    def is_synthetic(self) -> bool:
+        return self.trace_path is None
+
+    @property
+    def in_flight_cap(self) -> int | None:
+        """Closed-loop in-flight cap (``None`` = open-loop): ``replay_concurrency``
+        for a trace, ``concurrency`` for a synthetic workload."""
+        if self.trace_path is not None:
+            return self.replay_concurrency
+        if self.concurrency is not None:
+            return int(self.concurrency)
+        return None
+
+    @property
+    def synthetic_arrival_interval_ms(self) -> float:
+        """Mean inter-arrival for a synthetic request-rate workload (1.0 default;
+        ignored in closed-loop / concurrency mode)."""
+        if self.request_rate:
+            return 1000.0 / self.request_rate
+        return 1.0
+
     @model_validator(mode="after")
-    def _validate_replay_concurrency(self) -> "Workload":
-        if self.replay_concurrency is not None:
-            if not self.is_trace_based:
-                raise ValueError("replay_concurrency requires a trace-based workload (set trace_path)")
-            if self.replay_concurrency <= 0:
+    def _validate_workload(self) -> "Workload":
+        synthetic_only = ("isl", "osl", "request_rate", "concurrency", "request_count")
+        if self.trace_path is not None:
+            set_syn = [n for n in synthetic_only if getattr(self, n) is not None]
+            if set_syn:
+                raise ValueError(f"trace workload (trace_path set) must not set synthetic fields {set_syn}")
+            if self.replay_concurrency is not None and self.replay_concurrency <= 0:
                 raise ValueError(f"replay_concurrency must be a positive integer, got {self.replay_concurrency}")
+            return self
+        # synthetic: exactly one of request_rate / concurrency, plus isl/osl/request_count
+        loads = [n for n in ("request_rate", "concurrency") if getattr(self, n) is not None]
+        if len(loads) != 1:
+            raise ValueError(
+                "a synthetic workload needs exactly one of request_rate or concurrency "
+                "(or set trace_path for a trace workload)"
+            )
+        missing = [n for n in ("isl", "osl", "request_count") if getattr(self, n) is None]
+        if missing:
+            raise ValueError(f"a synthetic workload requires {missing}")
+        if self.replay_concurrency is not None:
+            raise ValueError("replay_concurrency is for trace workloads; use 'concurrency' for synthetic closed-loop")
+        for name in ("request_rate", "concurrency", "isl", "osl", "request_count"):
+            v = getattr(self, name)
+            if v is not None and v <= 0:
+                raise ValueError(f"{name} must be positive, got {v}")
         return self
 
 

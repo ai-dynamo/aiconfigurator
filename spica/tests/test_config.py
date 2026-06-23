@@ -25,7 +25,7 @@ def test_example_yaml_loads():
 def test_defaults_fill_in():
     cfg = SmartSearchConfig(
         search_space={"model_name": "m", "hardware_sku": "h200_sxm"},
-        workload={"isl": 4000, "osl": 1000, "request_rate": 25},
+        workload={"isl": 4000, "osl": 1000, "request_rate": 25, "request_count": 1000},
     )
     # search-space defaults
     assert cfg.search_space.gpu_budget == 32
@@ -40,7 +40,7 @@ def test_extra_field_forbidden():
     with pytest.raises(ValidationError):
         SmartSearchConfig(
             search_space={"model_name": "m", "hardware_sku": "h", "bogus": 1},
-            workload={"isl": 1, "osl": 1, "concurrency": 1},
+            workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
         )
 
 
@@ -75,7 +75,7 @@ def _search_space(**overrides):
 def test_subset_of_choices_is_accepted():
     cfg = SmartSearchConfig(
         search_space=_search_space(router_mode=["kv_router"], backend=["vllm", "sglang"]),
-        workload={"isl": 1, "osl": 1, "concurrency": 1},
+        workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
     )
     assert cfg.search_space.router_mode == ["kv_router"]
     assert cfg.search_space.backend == ["vllm", "sglang"]
@@ -85,19 +85,19 @@ def test_value_outside_choices_rejected():
     with pytest.raises(ValidationError):
         SmartSearchConfig(
             search_space=_search_space(router_mode=["bogus"]),
-            workload={"isl": 1, "osl": 1, "concurrency": 1},
+            workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
         )
     # numeric dimension: 999 is not a listed prefill_max_num_seqs choice
     with pytest.raises(ValidationError):
         SmartSearchConfig(
             search_space=_search_space(prefill_max_num_seqs=[1, 999]),
-            workload={"isl": 1, "osl": 1, "concurrency": 1},
+            workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
         )
     # planner: only listed presets allowed
     with pytest.raises(ValidationError):
         SmartSearchConfig(
             search_space=_search_space(planner_scaling_policy=["disabled", "made_up"]),
-            workload={"isl": 1, "osl": 1, "concurrency": 1},
+            workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
         )
 
 
@@ -105,7 +105,7 @@ def test_empty_choice_list_rejected():
     with pytest.raises(ValidationError):
         SmartSearchConfig(
             search_space=_search_space(router_mode=[]),
-            workload={"isl": 1, "osl": 1, "concurrency": 1},
+            workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
         )
 
 
@@ -129,7 +129,7 @@ def test_composite_dict_entries_accepted():
             # load_predictor needs only the family; params default per family
             load_predictor_candidates=[{"load_predictor": "prophet", "prophet_window_size": 30}],
         ),
-        workload={"isl": 1, "osl": 1, "concurrency": 1},
+        workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
     )
     assert isinstance(cfg.search_space.planner_scaling_policy[1], dict)
     assert cfg.search_space.planner_fpm_sampling[0]["max_num_fpm_samples"] == 96
@@ -139,7 +139,7 @@ def test_composite_dict_unknown_key_rejected():
     with pytest.raises(ValidationError, match="unknown keys"):
         SmartSearchConfig(
             search_space=_search_space(planner_fpm_sampling=[{"max_num_fpm_samples": 64, "bogus": 1}]),
-            workload={"isl": 1, "osl": 1, "concurrency": 1},
+            workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
         )
 
 
@@ -148,7 +148,7 @@ def test_composite_dict_missing_required_key_rejected():
     with pytest.raises(ValidationError, match="missing required keys"):
         SmartSearchConfig(
             search_space=_search_space(load_predictor_candidates=[{"load_predictor_log1p": True}]),
-            workload={"isl": 1, "osl": 1, "concurrency": 1},
+            workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
         )
     # a planner dict must be self-contained (all of its fields)
     with pytest.raises(ValidationError, match="missing required keys"):
@@ -158,7 +158,7 @@ def test_composite_dict_missing_required_key_rejected():
                     {"enable_throughput_scaling": True, "throughput_adjustment_interval_seconds": 240}
                 ]
             ),
-            workload={"isl": 1, "osl": 1, "concurrency": 1},
+            workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
         )
 
 
@@ -167,7 +167,7 @@ def test_dict_rejected_on_non_composite_knob():
     with pytest.raises(ValidationError):
         SmartSearchConfig(
             search_space=_search_space(router_mode=[{"foo": 1}]),
-            workload={"isl": 1, "osl": 1, "concurrency": 1},
+            workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
         )
 
 
@@ -178,7 +178,7 @@ def test_parallel_configs_pin_requires_single_mode():
     with pytest.raises(ValidationError, match="exactly one mode"):
         SmartSearchConfig(
             search_space=_search_space(deployment_mode=["agg", "disagg"], parallel_configs=[{"tp": 4}]),
-            workload={"isl": 1, "osl": 1, "concurrency": 1},
+            workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
         )
 
 
@@ -187,23 +187,23 @@ def test_parallel_configs_shape_matches_mode():
     with pytest.raises(ValidationError, match="'tp' field"):
         SmartSearchConfig(
             search_space=_search_space(deployment_mode=["agg"], parallel_configs=[{"replicas": 2}]),
-            workload={"isl": 1, "osl": 1, "concurrency": 1},
+            workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
         )
     # disagg entry needs prefill + decode
     with pytest.raises(ValidationError, match="prefill"):
         SmartSearchConfig(
             search_space=_search_space(deployment_mode=["disagg"], parallel_configs=[{"tp": 4}]),
-            workload={"isl": 1, "osl": 1, "concurrency": 1},
+            workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
         )
     # well-formed agg + disagg entries pass structural validation
     SmartSearchConfig(
         search_space=_search_space(deployment_mode=["agg"], parallel_configs=[{"tp": 4, "moe_ep": 4, "replicas": 2}]),
-        workload={"isl": 1, "osl": 1, "concurrency": 1},
+        workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
     )
     SmartSearchConfig(
         search_space=_search_space(
             deployment_mode=["disagg"],
             parallel_configs=[{"prefill": {"tp": 8, "moe_ep": 8}, "decode": {"tp": 1, "attention_dp": 8, "moe_ep": 8}}],
         ),
-        workload={"isl": 1, "osl": 1, "concurrency": 1},
+        workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
     )

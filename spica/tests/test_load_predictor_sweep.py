@@ -14,7 +14,7 @@ def _cfg(**search_space):
     ss = {"model_name": "m", "hardware_sku": "h200_sxm", **search_space}
     return SmartSearchConfig(
         search_space=ss,
-        workload={"isl": 4000, "osl": 1000, "request_rate": 25},  # static
+        workload={"isl": 4000, "osl": 1000, "request_rate": 25, "request_count": 1000},  # static
     )
 
 
