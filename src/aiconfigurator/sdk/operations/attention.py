@@ -21,6 +21,7 @@ enable_shared_layer)``, same as GEMM (and every other migrated op).
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
@@ -33,6 +34,141 @@ if TYPE_CHECKING:
     from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+
+# Attention utilisation vs head_size, relative to head_size=128. Used to transfer
+# util across head_size when the exact head_size has no collected data: borrow the
+# nearest collected head_size's util curve and rescale by ratio[target]/ratio[ref].
+#
+# Measured on Blackwell (b200) GQA where 64/128/256 are collected; the cross-GPU
+# spread within a backend is small, so a per-backend table is enough. PREFILL util
+# rises with head_size (compute-bound: larger heads pack the tensor cores better);
+# 192 is log2-interpolated and 512 EXTRAPOLATED under the observed diminishing-
+# returns trend (util saturates) -- both are estimates, not measured. DECODE util
+# is ~head_size-independent (memory-bound KV read), so its ratio is 1.0 (no table).
+_ATTN_PREFILL_HS_RATIO: dict[str, dict[int, float]] = {
+    "trtllm": {64: 0.58, 128: 1.00, 192: 1.10, 256: 1.17, 512: 1.25},
+    "sglang": {64: 0.60, 128: 1.00, 192: 1.18, 256: 1.32, 512: 1.45},
+    "vllm": {64: 0.60, 128: 1.00, 192: 1.27, 256: 1.51, 512: 1.75},
+}
+
+
+def _attn_prefill_hs_ratio(backend: str, head_size: int) -> float:
+    """Prefill-attention util ratio vs head_size=128, log2-interpolated between
+    table points and clamped at the ends. Unknown backend -> 1.0 (no correction)."""
+    table = _ATTN_PREFILL_HS_RATIO.get(backend)
+    if not table:
+        return 1.0
+    if head_size in table:
+        return table[head_size]
+    keys = sorted(table)
+    if head_size <= keys[0]:
+        return table[keys[0]]
+    if head_size >= keys[-1]:
+        return table[keys[-1]]
+    lo = max(k for k in keys if k < head_size)
+    hi = min(k for k in keys if k > head_size)
+    t = (math.log2(head_size) - math.log2(lo)) / (math.log2(hi) - math.log2(lo))
+    return table[lo] + t * (table[hi] - table[lo])
+
+
+def _ref_head_size(available, target: int):
+    """Pick the reference head_size to transfer util from. Prefer 128 -- the canonical,
+    most densely collected head_size and the head_size-util table's reference point --
+    so the borrowed util grid is reliable; otherwise the nearest collected head_size in
+    log2 space. Returns None if nothing is collected."""
+    avail = [h for h in available if h]
+    if not avail:
+        return None
+    if 128 in avail:
+        return 128
+    return min(avail, key=lambda h: abs(math.log2(h) - math.log2(target)))
+
+
+def _ctx_headsize_ref_grid(database, fmha_quant_mode, kvcache_quant_mode, n_kv_lookup, target_hs, window_size, get_sol):
+    """Reference util grid for context attention borrowed from the nearest collected
+    head_size (same fmha/kv/n_kv/window). Returns ``(grid, ref_hs)`` or ``(None, None)``."""
+    try:
+        from aiconfigurator.sdk.operations.attention import ContextAttention
+
+        ContextAttention.load_data(database)
+        wrapper = database._context_attention_data
+        wrapper.raise_if_not_loaded()
+        by_hs = wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup]
+        ref_hs = _ref_head_size(list(by_hs.keys()), target_hs)
+    except Exception:
+        return None, None
+    if ref_hs is None:
+        return None, None
+
+    def _ref_slice():
+        return database._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][ref_hs][window_size]
+
+    def _ref_sol(c):  # c = (n, full_s, b)
+        nkv = c[0] if n_kv_lookup == 0 else n_kv_lookup
+        return get_sol(c[2], c[1], 0, c[0], nkv, ref_hs, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
+
+    grid = util_empirical.grid_for(
+        (
+            "ctx_attn_xhs",
+            database.system,
+            database.backend,
+            database.version,
+            fmha_quant_mode.name,
+            kvcache_quant_mode.name,
+            n_kv_lookup,
+            ref_hs,
+            window_size,
+        ),
+        _ref_slice,
+        _ref_sol,
+        depth=3,
+    )
+    if grid is None or not grid.samples:
+        return None, None
+    return grid, ref_hs
+
+
+def _gen_headsize_ref_grid(database, kvcache_quant_mode, n_kv_lookup, target_hs, window_size, get_sol):
+    """Reference util grid for generation attention borrowed from the nearest collected
+    head_size (same kv/n_kv/window). Returns ``(grid, ref_hs)`` or ``(None, None)``."""
+    try:
+        from aiconfigurator.sdk.operations.attention import GenerationAttention
+
+        GenerationAttention.load_data(database)
+        wrapper = database._generation_attention_data
+        wrapper.raise_if_not_loaded()
+        by_hs = wrapper[kvcache_quant_mode][n_kv_lookup]
+        ref_hs = _ref_head_size(list(by_hs.keys()), target_hs)
+    except Exception:
+        return None, None
+    if ref_hs is None:
+        return None, None
+
+    def _ref_slice():
+        return database._generation_attention_data[kvcache_quant_mode][n_kv_lookup][ref_hs][window_size]
+
+    def _ref_sol(c):  # c = (n, b, s)
+        nkv = c[0] if n_kv_lookup == 0 else n_kv_lookup
+        return get_sol(c[1], c[2], c[0], nkv, ref_hs, window_size, kvcache_quant_mode)[0]
+
+    grid = util_empirical.grid_for(
+        (
+            "gen_attn_xhs",
+            database.system,
+            database.backend,
+            database.version,
+            kvcache_quant_mode.name,
+            n_kv_lookup,
+            ref_hs,
+            window_size,
+        ),
+        _ref_slice,
+        _ref_sol,
+        depth=3,
+    )
+    if grid is None or not grid.samples:
+        return None, None
+    return grid, ref_hs
 
 
 # Extrapolation target grids — lifted verbatim from the legacy blocks in
@@ -269,6 +405,22 @@ class ContextAttention(Operation):
                 _sol,
                 depth=3,
             )
+
+            if grid is None or not grid.samples:
+                # Cross-head_size transfer: this head_size has no data, but num_heads
+                # is already an in-grid axis, so only head_size differs. Borrow the
+                # nearest collected head_size's util and rescale by the prefill
+                # head_size-util ratio (SOL still uses the query's own head_size).
+                ref_grid, ref_hs = _ctx_headsize_ref_grid(
+                    database, fmha_quant_mode, kvcache_quant_mode, n_kv_lookup, head_size, window_size, get_sol
+                )
+                if ref_grid is not None:
+                    scale = _attn_prefill_hs_ratio(database.backend, head_size) / _attn_prefill_hs_ratio(
+                        database.backend, ref_hs
+                    )
+                    latency, _ = util_empirical.estimate(sol_time, (n, s + prefix, b), ref_grid, util_scale=scale)
+                    return latency
+
             latency, _ = util_empirical.estimate(sol_time, (n, s + prefix, b), grid)
             return latency
 
@@ -600,6 +752,16 @@ class GenerationAttention(Operation):
                 _sol,
                 depth=3,
             )
+
+            if grid is None or not grid.samples:
+                # Cross-head_size transfer (decode): borrow the nearest collected
+                # head_size's util. Decode util is ~head_size-independent (memory-bound
+                # KV read), so util_scale stays 1.0 -- no prefill-style correction.
+                ref_grid, _ref_hs = _gen_headsize_ref_grid(database, kvcache_quant_mode, n_kv_lookup, h, w, get_sol)
+                if ref_grid is not None:
+                    latency, _ = util_empirical.estimate(sol_time, (n, b, s), ref_grid)
+                    return latency
+
             latency, _ = util_empirical.estimate(sol_time, (n, b, s), grid)
             return latency
 
