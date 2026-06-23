@@ -26,3 +26,6 @@ env/
 *.pyc
 *.pyo
 *.pyd
+
+# FPM routing-capture run artifacts (regenerable; large npz/logs)
+routing_runs/
