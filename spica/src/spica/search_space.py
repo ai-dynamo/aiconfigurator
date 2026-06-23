@@ -18,6 +18,7 @@ and is not a sampler dimension.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -108,13 +109,16 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
     searched knob: the parallel-config domain is the **union** of every configured
     backend's KV-feasible configs, tagged with which backends support each.
 
-    A backend with no perf DB / no viable config for a mode is dropped (skipped). If no
-    backend is viable for a mode, or a *pinned* config is legal for no backend, raises
-    :class:`NoViableParallelConfig`. ``max_seq_len`` is forwarded to
-    :func:`parallel_configs_for` (``None`` -> the model's max context length).
+    A backend with no perf DB / no viable config for a mode is dropped (skipped). A mode
+    for which *no* backend is viable is skipped with a warning (so a viable mode still
+    runs); only if **no** mode is viable does it raise :class:`NoViableParallelConfig`. A
+    *pinned* config that is legal for no backend is a hard error (fail fast — the pin is
+    wrong). ``max_seq_len`` is forwarded to :func:`parallel_configs_for` (``None`` -> the
+    model's max context length).
     """
     ss = config.search_space
     branches: list[BranchSpace] = []
+    skipped: list[str] = []  # modes dropped because no backend was viable
     for deployment_mode in ss.deployment_mode:
         # Pinned configs (if any) are parsed once, then validated per backend; otherwise
         # each backend contributes its full enumerated menu.
@@ -141,10 +145,20 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
                     support.setdefault(cfg, set()).add(backend)
 
         if not support:
-            raise NoViableParallelConfig(
-                f"deployment_mode={deployment_mode!r}: no configured backend has a viable parallel "
-                f"config within gpu_budget={ss.gpu_budget} (check backends / model / hardware)"
+            if pinned is not None:
+                # an explicit pin that no backend can run is a user error -> fail fast
+                raise NoViableParallelConfig(
+                    f"deployment_mode={deployment_mode!r}: no configured backend can run the pinned "
+                    f"parallel_configs (illegal shape, or backend has no perf DB)"
+                )
+            # natural infeasibility for this mode -> skip it, keep any viable modes
+            warnings.warn(
+                f"smart-sweep: deployment_mode={deployment_mode!r} skipped — no configured backend "
+                f"has a viable parallel config within gpu_budget={ss.gpu_budget}",
+                stacklevel=2,
             )
+            skipped.append(deployment_mode)
+            continue
         if pinned is not None:
             illegal = [c for c in pinned if c not in support]
             if illegal:
@@ -161,5 +175,11 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
                 supported_backends={cfg: frozenset(bs) for cfg, bs in support.items()},
                 knob_choices=knob_choices,
             )
+        )
+
+    if not branches:
+        raise NoViableParallelConfig(
+            f"no deployment_mode has a viable parallel config (skipped {skipped}); check "
+            f"backends / model / hardware / gpu_budget={ss.gpu_budget}"
         )
     return branches

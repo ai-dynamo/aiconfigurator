@@ -144,7 +144,9 @@ can shift budget toward the better backend), and `rank()` picks the global best 
 The parallel-config menu is the **union** of every backend's KV-feasible configs; a sampled
 `(backend, parallel_config)` pair the backend can't run is marked infeasible (no replay), so
 the optimizer learns to avoid it. A backend with no perf DB / no viable config for a mode is
-dropped from the search.
+dropped from the search; a **mode** for which no backend is viable is **skipped with a
+warning** (a viable mode still runs), and only if *no* mode is viable does the run error.
+(A *pinned* config legal for no backend is a hard error — fail fast.)
 
 ## `parallel_configs` (the derived dimension you can also pin)
 

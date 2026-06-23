@@ -11,6 +11,7 @@ pytest.importorskip("aiconfigurator")
 from spica.config import SmartSearchConfig  # noqa: E402
 from spica.kv_estimate import NoPerfDatabase  # noqa: E402
 from spica.model_hw import NoViableParallelConfig  # noqa: E402
+from spica.parallel_enum import ParallelShape, ReplicaParallelConfig  # noqa: E402
 from spica.search_space import branch_knob_choices, enumerate_branches  # noqa: E402
 
 
@@ -90,3 +91,34 @@ def test_pinned_parallel_config_illegal_is_rejected():
             enumerate_branches(cfg)
     except NoPerfDatabase:
         pytest.skip("no gb200/trtllm perf DB")
+
+
+# --- per-mode failure policy: skip an infeasible mode, keep the viable ones --------
+# (stub parallel_configs_for so feasibility is controlled, not perf-DB-dependent)
+
+_AGG_CFG = ReplicaParallelConfig(ParallelShape(tp=1, dp=1, moe_tp=1, moe_ep=1), replicas=1)
+
+
+def test_infeasible_mode_is_skipped_with_warning(monkeypatch):
+    # disagg infeasible (raises), agg viable -> only the agg branch survives, with a warning.
+    def fake_pcf(model, hw, *, gpu_budget, deployment_mode, backend, min_gpu_budget=None, max_seq_len=None):
+        if deployment_mode == "disagg":
+            raise NoViableParallelConfig("disagg doesn't fit the budget")
+        return [_AGG_CFG]
+
+    monkeypatch.setattr("spica.search_space.parallel_configs_for", fake_pcf)
+    cfg = _config(deployment_mode=["agg", "disagg"], backend=["trtllm"], gpu_budget=8)
+    with pytest.warns(UserWarning, match="disagg.* skipped"):
+        branches = enumerate_branches(cfg)
+    assert [b.deployment_mode for b in branches] == ["agg"]  # disagg dropped, agg kept
+    assert branches[0].supported_backends[_AGG_CFG] == frozenset({"trtllm"})
+
+
+def test_all_modes_infeasible_raises(monkeypatch):
+    def _always_raise(*args, **kwargs):
+        raise NoViableParallelConfig("nothing fits")
+
+    monkeypatch.setattr("spica.search_space.parallel_configs_for", _always_raise)
+    cfg = _config(deployment_mode=["agg", "disagg"], backend=["trtllm"], gpu_budget=1)
+    with pytest.raises(NoViableParallelConfig, match="no deployment_mode"):
+        enumerate_branches(cfg)
