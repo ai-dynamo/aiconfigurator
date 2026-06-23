@@ -3,6 +3,7 @@
 
 """ReplayEvaluator dispatch: static->plain, scaling->bridge (dynamo stubbed)."""
 
+import dataclasses
 import json
 from types import SimpleNamespace
 
@@ -91,6 +92,33 @@ def test_scaling_agg_uses_bridge_with_goodput_sla(monkeypatch):
     assert rec["sla_ttft_ms"] == 2000.0 and rec["sla_itl_ms"] == 30.0
     assert json.loads(rec["planner_config_arg"])["optimization_target"] == "sla"
     assert rec["num_workers"] == 2
+
+
+def test_kv_router_config_is_built_and_passed(monkeypatch):
+    # the searched kv-router weights must reach the replay as a real KvRouterConfig
+    # (round_robin -> None). Regression for the "router_config=None" stub.
+    from dynamo._core import KvRouterConfig
+
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    rec = {}
+    monkeypatch.setattr(
+        dynamo.replay.api, "run_trace_replay", lambda **kw: rec.update(kw) or {"output_throughput_tok_s": 1.0}
+    )
+    ev = ReplayEvaluator(_wl(), OptimizationGoal(target=OptimizationTarget.THROUGHPUT))
+
+    # round_robin -> no router config
+    ev.evaluate(_agg_plan(static=True))
+    assert rec["router_mode"] == "round_robin" and rec["router_config"] is None
+
+    # kv_router with weights -> a KvRouterConfig carrying them
+    plan = dataclasses.replace(
+        _agg_plan(static=True),
+        router_mode="kv_router",
+        router_config={"overlap_score_credit": 0.5, "router_temperature": 0.2},
+    )
+    ev.evaluate(plan)
+    assert rec["router_mode"] == "kv_router"
+    assert isinstance(rec["router_config"], KvRouterConfig)
 
 
 def test_requires_trace_workload():

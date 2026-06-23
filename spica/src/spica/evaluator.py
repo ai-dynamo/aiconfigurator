@@ -19,10 +19,9 @@ Returns the flat ``trace_report`` dict that :mod:`spica.score` consumes. dynamo
 is imported lazily so ``import spica`` stays light and unit tests can stub the
 replay entrypoints.
 
-NOTE (v1 limitation): the kv-router weight knobs are searched and recorded in the
-candidate config but not yet applied to the replay router (``router_config`` is
-left at the replay default); wiring a ``KvRouterConfig`` from those knobs is a
-follow-up.
+Under ``kv_router`` the searched router-weight knobs are built into a real
+``KvRouterConfig`` and passed to the replay so they actually shape routing;
+``round_robin`` passes ``router_config=None``.
 """
 
 from __future__ import annotations
@@ -31,6 +30,16 @@ import json
 
 from .config import OptimizationGoal, Workload
 from .deploy import DeploymentPlan
+
+
+def _build_kv_router_config(payload: dict | None):
+    """A dynamo ``KvRouterConfig`` from spica's router-knob dict (its keys map 1:1 to
+    KvRouterConfig kwargs), or ``None`` under round_robin (empty/None payload)."""
+    if not payload:
+        return None
+    from dynamo.llm import KvRouterConfig
+
+    return KvRouterConfig(**payload)
 
 
 class ReplayEvaluator:
@@ -61,7 +70,7 @@ class ReplayEvaluator:
         return dict(
             trace_file=self.workload.trace_path,
             router_mode=plan.router_mode,
-            router_config=None,  # v1: kv-router weight knobs not yet applied (see module note)
+            router_config=_build_kv_router_config(plan.router_config),  # kv-router weights applied
             arrival_speedup_ratio=self.workload.arrival_speedup_ratio,
             trace_block_size=self.trace_block_size,
         )
