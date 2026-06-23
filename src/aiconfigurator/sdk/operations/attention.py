@@ -43,12 +43,15 @@ logger = logging.getLogger(__name__)
 # spread within a backend is small, so a per-backend table is enough. PREFILL util
 # rises with head_size (compute-bound: larger heads pack the tensor cores better);
 # 192 is log2-interpolated and 512 EXTRAPOLATED under the observed diminishing-
-# returns trend (util saturates) -- both are estimates, not measured. DECODE util
-# is ~head_size-independent (memory-bound KV read), so its ratio is 1.0 (no table).
+# returns trend (util saturates) -- both are estimates, not measured. 512 is held
+# conservatively close to 256 (only a small bump) since there is no data and util
+# is near-saturated there; under-crediting its efficiency errs toward over- rather
+# than under-estimating latency. DECODE util is ~head_size-independent (memory-bound
+# KV read), so its ratio is 1.0 (no table).
 _ATTN_PREFILL_HS_RATIO: dict[str, dict[int, float]] = {
-    "trtllm": {64: 0.58, 128: 1.00, 192: 1.10, 256: 1.17, 512: 1.25},
-    "sglang": {64: 0.60, 128: 1.00, 192: 1.18, 256: 1.32, 512: 1.45},
-    "vllm": {64: 0.60, 128: 1.00, 192: 1.27, 256: 1.51, 512: 1.75},
+    "trtllm": {64: 0.58, 128: 1.00, 192: 1.10, 256: 1.17, 512: 1.20},
+    "sglang": {64: 0.60, 128: 1.00, 192: 1.18, 256: 1.32, 512: 1.38},
+    "vllm": {64: 0.60, 128: 1.00, 192: 1.27, 256: 1.51, 512: 1.60},
 }
 
 
