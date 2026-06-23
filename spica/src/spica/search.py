@@ -26,6 +26,7 @@ import multiprocessing as mp
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from typing import Any, Protocol
 
 from tqdm import tqdm
@@ -115,8 +116,11 @@ def run_smart_search(
     ``evaluator`` defaults to a :class:`ReplayEvaluator` over the workload+goal;
     inject a fake to test the loop without replay. ``sampler_factory`` defaults to
     the Vizier-backed sampler. Within a round, suggestions are evaluated across
-    ``SweepConfig.parallel_evals`` worker processes (``<= 1`` -> sequential, no pool;
-    use that in tests to avoid spawning). ``show_progress`` draws a tqdm bar over the
+    ``SweepConfig.parallel_evals`` **spawned** worker processes (``<= 1`` -> sequential,
+    no pool). With ``parallel_evals > 1`` the caller must guard its entrypoint with
+    ``if __name__ == "__main__":`` (spawn re-imports the module) — the ``python -m spica``
+    CLI already does; ad-hoc scripts must too, or set ``parallel_evals=1``.
+    ``show_progress`` draws a tqdm bar over the
     candidate evaluations (live feasible/failed tally + best score) and prints a
     one-line summary at the end; set False for quiet/non-interactive runs.
     """
@@ -197,8 +201,16 @@ def run_smart_search(
                 )
         else:
             futures = {pool.submit(_worker_eval, s.selection, s.parallel_config): s for s in todo}
-            for fut in as_completed(futures):
-                yield futures[fut], fut.result()
+            try:
+                for fut in as_completed(futures):
+                    yield futures[fut], fut.result()
+            except BrokenProcessPool as exc:
+                raise RuntimeError(
+                    "smart-sweep worker pool died (parallel_evals>1 uses spawned processes). The "
+                    "usual cause is calling run_smart_search at a script's top level without guarding "
+                    "the entrypoint: spawn re-imports the module, so wrap it in `if __name__ == "
+                    '"__main__":`. Or set sweep.parallel_evals=1 to evaluate sequentially (no pool)."'
+                ) from exc
 
     with pool_cm as pool, tqdm(total=total, desc="smart-sweep", unit="eval", disable=not show_progress) as bar:
 
