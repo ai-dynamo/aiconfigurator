@@ -46,7 +46,9 @@ TRACE = str(Path(__file__).parent / "data" / "mooncake_tiny.jsonl")
 
 
 def _config(**sweep_ov) -> SmartSearchConfig:
-    sweep = {"max_rounds": 1, "candidates_per_round": 2}
+    # parallel_evals=2 exercises the real ProcessPool path (spawn + the real evaluator
+    # in worker processes) end-to-end, not just the sequential fallback.
+    sweep = {"max_rounds": 1, "candidates_per_round": 2, "parallel_evals": 2}
     sweep.update(sweep_ov)
     return SmartSearchConfig(
         search_space={

@@ -27,7 +27,7 @@ def _config(gpu_budget=32):
             "gpu_budget": gpu_budget,
         },
         workload={"trace_path": "/tmp/t.jsonl"},
-        sweep={"max_rounds": 1, "candidates_per_round": 3},
+        sweep={"max_rounds": 1, "candidates_per_round": 3, "parallel_evals": 1},  # sequential (fakes)
         goal={"target": "throughput"},
     )
 
@@ -159,7 +159,7 @@ def _config_with_policies(policies, target="throughput"):
             "planner_scaling_policy": policies,
         },
         workload={"trace_path": "/tmp/t.jsonl"},
-        sweep={"max_rounds": 1, "candidates_per_round": 2},
+        sweep={"max_rounds": 1, "candidates_per_round": 2, "parallel_evals": 1},  # sequential (fakes)
         goal={"target": target},
     )
 

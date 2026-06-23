@@ -3,23 +3,29 @@
 
 """The smart sweep: SearchSpace -> ranked candidates (best-first).
 
-Per ``(deployment_mode, backend)`` branch, a Vizier study searches the parallel
-config + knob space; each suggestion is unrolled, translated to a deployment, and
-evaluated by replay; the score is fed back to the optimizer; feasible candidates
-are ranked across branches.
+One Vizier study per ``deployment_mode`` branch searches the parallel-config + knob
+space (backend is one of the knobs); each suggestion is unrolled, translated to a
+deployment, evaluated by replay, scored, and fed back to the optimizer; feasible
+candidates are ranked across branches.
 
-The load-predictor winner is resolved once (the independent sub-sweep) and
-injected into every candidate's unroll. Evaluation is sequential in v1
-(``SweepConfig.parallel_evals`` is not yet parallelized).
+Each round is a **barrier**: the study suggests ``per_round`` trials (ask), they are
+evaluated **in parallel across worker processes** (``SweepConfig.parallel_evals``;
+``<= 1`` runs sequentially), then their scores are fed back (tell). Vizier ask/tell
+stay on the main process — workers run only the pure unroll->deploy->replay->score and
+never touch the study (the Vizier trial handle never crosses the process boundary). The
+load-predictor winner is resolved once and injected into every unroll.
 
 ``evaluator`` and ``sampler_factory`` are injectable so the loop is unit-testable
-without real replay / Vizier.
+without real replay / Vizier (use ``parallel_evals=1`` to avoid spawning processes).
 """
 
 from __future__ import annotations
 
+import contextlib
+import multiprocessing as mp
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Protocol
 
 from tqdm import tqdm
@@ -40,33 +46,31 @@ class _Evaluator(Protocol):
     def evaluate(self, plan: Any) -> dict[str, float]: ...
 
 
-def _evaluate_suggestion(
-    suggestion: Suggestion,
+# Result of evaluating one suggestion (no Vizier here): (candidate|None, score|None,
+# outcome, reason). outcome in {"feasible","infeasible","failed"}; reason carries the
+# replay error for "failed" (-> observe_infeasible). "unsupported" is decided on the
+# main process before evaluation and never reaches the worker.
+_EvalResult = tuple[Candidate | None, float | None, str, str]
+
+
+def _evaluate_one(
+    selection: dict[str, Any],
+    parallel_config: Any,
     *,
-    branch: BranchSpace,
     config: SmartSearchConfig,
     goal: OptimizationGoal,
-    evaluator: _Evaluator,
-    sampler: BranchSampler,
     load_predictor: LoadPredictorResult,
-) -> tuple[Candidate | None, str]:
-    """Unroll -> deploy -> replay -> score one suggestion; tell the sampler. Returns
-    ``(candidate, outcome)`` where outcome is ``"feasible"`` (with the Candidate),
-    ``"unsupported"`` (the sampled backend can't run the chosen parallel config — no
-    replay), ``"infeasible"`` (ran + scored but gated out, e.g. over budget), or
-    ``"failed"`` (replay raised). All non-feasible outcomes are reported to the sampler
-    as infeasible so the study keeps moving; the outcome lets the caller tally them."""
-    backend = suggestion.selection["backend"]
-    if backend not in branch.supported_backends.get(suggestion.parallel_config, frozenset()):
-        sampler.observe_infeasible(suggestion, f"backend {backend!r} does not support this parallel config")
-        return None, "unsupported"
+    evaluator: _Evaluator,
+) -> _EvalResult:
+    """Pure unroll -> deploy -> replay -> score for one (already backend-supported)
+    suggestion. No Vizier, no shared mutable state -> safe to run in a worker process."""
     sample = unroll_sample(
         search_space=config.search_space,
-        selection=suggestion.selection,
-        parallel_config=suggestion.parallel_config,
+        selection=selection,
+        parallel_config=parallel_config,
         load_predictor=load_predictor,
     )
-    backend_version = resolve_backend_version(config.search_space.hardware_sku, backend)
+    backend_version = resolve_backend_version(config.search_space.hardware_sku, selection["backend"])
     plan = build_deployment(
         sample,
         backend_version=backend_version,
@@ -75,13 +79,28 @@ def _evaluate_suggestion(
     )
     try:
         report = evaluator.evaluate(plan)
-    except Exception as exc:  # a single candidate failing must not abort the sweep
-        sampler.observe_infeasible(suggestion, f"replay failed: {type(exc).__name__}: {exc}")
-        return None, "failed"
-    sampler.observe(suggestion, score_report(report, goal.target))
+    except Exception as exc:  # one candidate failing must not abort the sweep
+        return None, None, "failed", f"replay failed: {type(exc).__name__}: {exc}"
+    score = score_report(report, goal.target)
     if is_feasible(int(sample["used_gpus"]), config.search_space.gpu_budget):
-        return make_candidate(sample, report, goal.target), "feasible"
-    return None, "infeasible"
+        return make_candidate(sample, report, goal.target), score, "feasible", ""
+    return None, score, "infeasible", ""
+
+
+# Worker-process plumbing: the shared read-only state (config/goal/load_predictor/
+# evaluator) is sent once via the pool initializer and stashed as a module global, so
+# each task only ships the per-suggestion (selection, parallel_config).
+_WORKER_CTX: dict[str, Any] = {}
+
+
+def _init_worker(
+    config: SmartSearchConfig, goal: OptimizationGoal, load_predictor: LoadPredictorResult, evaluator: _Evaluator
+) -> None:
+    _WORKER_CTX.update(config=config, goal=goal, load_predictor=load_predictor, evaluator=evaluator)
+
+
+def _worker_eval(selection: dict[str, Any], parallel_config: Any) -> _EvalResult:
+    return _evaluate_one(selection, parallel_config, **_WORKER_CTX)
 
 
 def run_smart_search(
@@ -95,7 +114,9 @@ def run_smart_search(
 
     ``evaluator`` defaults to a :class:`ReplayEvaluator` over the workload+goal;
     inject a fake to test the loop without replay. ``sampler_factory`` defaults to
-    the Vizier-backed sampler. ``show_progress`` draws a tqdm bar over the
+    the Vizier-backed sampler. Within a round, suggestions are evaluated across
+    ``SweepConfig.parallel_evals`` worker processes (``<= 1`` -> sequential, no pool;
+    use that in tests to avoid spawning). ``show_progress`` draws a tqdm bar over the
     candidate evaluations (live feasible/failed tally + best score) and prints a
     one-line summary at the end; set False for quiet/non-interactive runs.
     """
@@ -143,32 +164,76 @@ def run_smart_search(
     def _best() -> float | None:
         return max((c.score for c in candidates), default=None)
 
-    with tqdm(total=total, desc="smart-sweep", unit="eval", disable=not show_progress) as bar:
-        for branch in branches:
-            study_id = f"spica_{branch.deployment_mode}_{run_nonce}"
-            sampler = sampler_factory(branch, study_id=study_id)
-            bar.set_description(f"smart-sweep {branch.deployment_mode}")
-            for _ in range(sweep.max_rounds):
-                for suggestion in sampler.suggest(per_round):
-                    candidate, outcome = _evaluate_suggestion(
-                        suggestion,
-                        branch=branch,
+    # Parallel across worker processes when parallel_evals > 1: spawn (not fork —
+    # dynamo's tokio runtime isn't fork-safe); shared read-only state goes once via the
+    # initializer; one pool for the whole run amortizes the per-worker dynamo import.
+    use_pool = sweep.parallel_evals > 1 and per_round > 1
+    pool_cm: Any = (
+        ProcessPoolExecutor(
+            max_workers=min(sweep.parallel_evals, per_round),
+            mp_context=mp.get_context("spawn"),
+            initializer=_init_worker,
+            initargs=(config, goal, load_predictor, evaluator),
+        )
+        if use_pool
+        else contextlib.nullcontext()
+    )
+
+    def _eval_batch(pool, todo: list[Suggestion]):
+        """Yield ``(suggestion, _EvalResult)`` for each supported suggestion — across
+        worker processes when ``pool`` is set, else sequentially in-process."""
+        if pool is None:
+            for s in todo:
+                yield (
+                    s,
+                    _evaluate_one(
+                        s.selection,
+                        s.parallel_config,
                         config=config,
                         goal=goal,
-                        evaluator=evaluator,
-                        sampler=sampler,
                         load_predictor=load_predictor,
-                    )
-                    tally[outcome] += 1
-                    if candidate is not None:
-                        candidates.append(candidate)
-                    best = _best()
-                    bar.set_postfix(
-                        feasible=tally["feasible"],
-                        failed=tally["failed"],
-                        best=("-" if best is None else f"{best:.4g}"),
-                    )
-                    bar.update(1)
+                        evaluator=evaluator,
+                    ),
+                )
+        else:
+            futures = {pool.submit(_worker_eval, s.selection, s.parallel_config): s for s in todo}
+            for fut in as_completed(futures):
+                yield futures[fut], fut.result()
+
+    with pool_cm as pool, tqdm(total=total, desc="smart-sweep", unit="eval", disable=not show_progress) as bar:
+
+        def _record(outcome: str, candidate: Candidate | None) -> None:
+            tally[outcome] += 1
+            if candidate is not None:
+                candidates.append(candidate)
+            best = _best()
+            bar.set_postfix(
+                feasible=tally["feasible"], failed=tally["failed"], best=("-" if best is None else f"{best:.4g}")
+            )
+            bar.update(1)
+
+        for branch in branches:
+            sampler = sampler_factory(branch, study_id=f"spica_{branch.deployment_mode}_{run_nonce}")
+            bar.set_description(f"smart-sweep {branch.deployment_mode}")
+            for _ in range(sweep.max_rounds):
+                suggestions = sampler.suggest(per_round)  # ask (main, serial)
+                # Split off (backend, config) pairs the backend can't run: told here,
+                # never evaluated. The rest fan out.
+                todo: list[Suggestion] = []
+                for s in suggestions:
+                    if s.selection["backend"] in branch.supported_backends.get(s.parallel_config, frozenset()):
+                        todo.append(s)
+                    else:
+                        sampler.observe_infeasible(
+                            s, f"backend {s.selection['backend']!r} does not support this parallel config"
+                        )
+                        _record("unsupported", None)
+                for s, (candidate, score, outcome, reason) in _eval_batch(pool, todo):
+                    if outcome == "failed":  # tell (main, serial)
+                        sampler.observe_infeasible(s, reason)
+                    else:
+                        sampler.observe(s, score)
+                    _record(outcome, candidate)
 
     if show_progress:
         best = _best()
