@@ -80,14 +80,25 @@ def iter_grid(node, depth: int, prefix: Coords = ()):
 
 def build_samples(node, depth: int, sol_fn: Callable[[Coords], object]) -> list[UtilSample]:
     """Flatten a nested grid into util samples. ``sol_fn(coords)`` returns either a
-    scalar SOL (one component) or a ``(sol_compute, sol_mem)`` tuple."""
+    scalar SOL (one component) or a ``(sol_compute, sol_mem)`` tuple.
+
+    For a 2-component SOL, only the BINDING bound's utilisation is recorded per
+    sample (the other component is ``NaN``). ``measured`` reflects only the binding
+    roofline, so ``SOL_i / measured`` for a *non*-binding ``i`` is an artifact (a
+    lower bound on that bound's true efficiency, not the achieved one). Recording it
+    would make cross-regime transfer over-predict (a compute-bound reference's tiny
+    artifact ``util_mem`` blows up a memory-bound query). A scalar SOL is always
+    "binding" by construction, so 1-component behaviour is unchanged.
+    """
     samples = []
     for coords, leaf in iter_grid(node, depth):
         lat = leaf_latency(leaf)
         if lat and lat > 0:
             sols = _as_components(sol_fn(coords))
-            if any(s > 0 for s in sols):
-                samples.append(UtilSample(tuple(float(c) for c in coords), tuple(s / lat for s in sols)))
+            binding = max(sols)
+            if binding > 0:
+                utils = tuple((s / lat if s >= binding else float("nan")) for s in sols)
+                samples.append(UtilSample(tuple(float(c) for c in coords), utils))
     return samples
 
 
@@ -111,13 +122,25 @@ class UtilGrid:
         self._spans = np.where(spans > 0, spans, 1.0)
         self._norm = (logc - self._mins) / self._spans
         self._utils = np.asarray([s.utils for s in samples], dtype=float)  # (n_samples, n_components)
+        # Per component, the rows where its util is a real (binding) measurement.
+        # NN runs over only those rows so a query's bound borrows util from a sample
+        # where THAT bound was binding (its true efficiency), not a cross-regime
+        # artifact. Both regimes appear along the collected curve (small tokens are
+        # memory-bound, large tokens compute-bound), so each component is populated.
+        self._active = [np.flatnonzero(np.isfinite(self._utils[:, c])) for c in range(self._utils.shape[1])]
 
     def util(self, query: Coords) -> tuple[float, ...] | None:
         if not self.samples:
             return None
         q = (np.log(np.maximum(np.asarray(query, dtype=float), 1e-9)) - self._mins) / self._spans
-        dist2 = ((self._norm - q) ** 2).sum(axis=1)
-        return tuple(float(u) for u in self._utils[int(dist2.argmin())])
+        out = []
+        for c, rows in enumerate(self._active):
+            if rows.size == 0:
+                out.append(float("nan"))  # this bound never bound in collected data
+                continue
+            dist2 = ((self._norm[rows] - q) ** 2).sum(axis=1)
+            out.append(float(self._utils[rows[int(dist2.argmin())], c]))
+        return tuple(out)
 
 
 # Process-lifetime cache of built grids. Collected data is itself cached for the
@@ -174,7 +197,16 @@ def estimate(sol_query, query: Coords, grid: UtilGrid | None, util_scale: float 
     util = grid.util(query) if grid is not None else None
     if util is not None:
         sols = _as_components(sol_query)
-        cands = [s / (u * util_scale) for s, u in zip(sols, util, strict=False) if u > 0 and s > 0]
+        binding = max(sols)
+        # Reconstruct latency from the QUERY's binding bound, using that bound's
+        # utilisation measured where it was itself binding (per-component grid). A
+        # compute-bound query thus borrows MFU only, never a memory-bound sample's
+        # artifact BW (which would blow up the estimate), and vice versa. Only if the
+        # binding bound has no calibration in the borrowed data do we fall back to any
+        # available bound. For a scalar SOL this is exactly ``sol / (util*scale)``.
+        cands = [s / (u * util_scale) for s, u in zip(sols, util, strict=False) if s >= binding and u > 0]
+        if not cands:
+            cands = [s / (u * util_scale) for s, u in zip(sols, util, strict=False) if s > 0 and u > 0]
         if cands:
             return max(cands), util
     raise EmpiricalNotImplementedError(

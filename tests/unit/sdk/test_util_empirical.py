@@ -65,6 +65,38 @@ def test_estimate_raises_without_grid():
         ue.estimate(2.0, (16.0,), ue.UtilGrid([]))
 
 
+def test_build_samples_records_only_binding_component():
+    # token 1 is memory-bound (sol_mem > sol_compute); token 1000 is compute-bound.
+    # Each sample must record util ONLY for the bound that was binding (measured
+    # reflects only that bound); the other component is NaN.
+    node = {1: {"latency": 10.0}, 1000: {"latency": 125.0}}
+
+    def sol_fn(c):
+        return (0.1, 1.0) if c[0] == 1 else (100.0, 10.0)
+
+    by_coord = {s.coords[0]: s.utils for s in ue.build_samples(node, 1, sol_fn)}
+    assert math.isnan(by_coord[1.0][0]) and math.isclose(by_coord[1.0][1], 1.0 / 10.0)  # mem binds
+    assert math.isclose(by_coord[1000.0][0], 100.0 / 125.0) and math.isnan(by_coord[1000.0][1])  # compute binds
+
+
+def test_estimate_no_cross_regime_blowup():
+    # Regression for the roofline artifact: at a compute-bound sample, util_mem =
+    # sol_mem/measured is an artifact (a lower bound on true BW efficiency, not the
+    # achieved one). A naive max-over-components estimate borrows that tiny artifact
+    # for a memory-heavier query and over-predicts. The query-binding-bound rule must
+    # use only the compute bound here -> no blowup.
+    node = {1: {"latency": 100.0}, 1000: {"latency": 125.0}}  # token1000: util_mem artifact = 10/125 = 0.08
+
+    def sol_fn(c):
+        return (0.1, 1.0) if c[0] == 1 else (100.0, 10.0)
+
+    grid = ue.UtilGrid(ue.build_samples(node, 1, sol_fn))
+    # query near token 1000, mem-heavier shape but still compute-bound (200 > 80).
+    # naive would give cand_mem = 80/0.08 = 1000 (4x); binding-aware: 200/0.8 = 250.
+    lat, _ = ue.estimate((200.0, 80.0), (1000.0,), grid)
+    assert math.isclose(lat, 250.0)
+
+
 def test_build_samples_round_trip_recovers_measured():
     # node: coords (n)->{lat}; sol_fn returns (sol_compute, sol_mem). At a collected
     # point, estimate must recover the measured latency exactly (both components).
