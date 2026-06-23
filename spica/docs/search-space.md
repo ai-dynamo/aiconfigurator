@@ -36,8 +36,11 @@ A list whose entries must be a non-empty subset of the allowed choices. One elem
   `prefill_max_num_batched_tokens` / `prefill_max_num_seqs`,
   `decode_max_num_batched_tokens` / `decode_max_num_seqs`
 - router: `router_mode` (`kv_router` / `round_robin`) + the kv-router weights
-  `overlap_score_credit`, `prefill_load_scale`, `host_cache_hit_weight`,
-  `disk_cache_hit_weight`, `router_temperature`
+  `overlap_score_credit`, `prefill_load_scale`, `router_temperature`.
+  `host_cache_hit_weight` and `disk_cache_hit_weight` are **only swept when multi-tier
+  KV offload is enabled** (`num_g2_blocks > 0`): in the router's scoring they weight the
+  host/disk *extension* blocks, which are 0 with offload off (the default), so they can't
+  affect a replay and are dropped from the search to avoid dead dimensions.
 
 ### Pinned scalars (one value, never searched)
 

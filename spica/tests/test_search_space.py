@@ -37,6 +37,18 @@ def test_branch_knob_choices_by_mode():
     assert "agg_max_num_seqs" not in disagg
 
 
+def test_host_disk_cache_weights_gated_on_offload():
+    # host/disk cache-hit weights are dead in the replay unless multi-tier KV offload is
+    # on (they multiply host/disk extension blocks, which are 0 when num_g2_blocks==0),
+    # so they are only swept when offload is enabled.
+    off = branch_knob_choices(_config().search_space, "agg")  # num_g2_blocks defaults to 0
+    assert "host_cache_hit_weight" not in off and "disk_cache_hit_weight" not in off
+    assert "overlap_score_credit" in off and "prefill_load_scale" in off  # live knobs kept
+
+    on = branch_knob_choices(_config(num_g2_blocks=4096).search_space, "agg")
+    assert "host_cache_hit_weight" in on and "disk_cache_hit_weight" in on
+
+
 def test_enumerate_branches_deepseek_gb200():
     cfg = _config(deployment_mode=["agg", "disagg"], backend=["trtllm"], gpu_budget=16)
     try:

@@ -38,6 +38,12 @@ _ROUTER_KNOBS = (
     "disk_cache_hit_weight",
     "router_temperature",
 )
+# Router knobs that only bite when multi-tier KV offload is enabled: in the kv-router's
+# scoring they multiply the *host/disk extension blocks*, which are 0 whenever host
+# offload is off (num_g2_blocks == 0). The mocker honours offload, but with it disabled
+# (the default) these weights can't move any replay metric — so sweeping them just
+# inflates the search space (3x3) with dead dimensions. Gated out unless offload is on.
+_OFFLOAD_ONLY_ROUTER_KNOBS = ("host_cache_hit_weight", "disk_cache_hit_weight")
 _PLANNER_KNOBS = ("planner_scaling_policy", "planner_fpm_sampling", "planner_load_sensitivity")
 _AGG_ENGINE = ("agg_max_num_batched_tokens", "agg_max_num_seqs")
 _DISAGG_ENGINE = (
@@ -99,8 +105,14 @@ def _parse_parallel_entry(entry: dict[str, Any], deployment_mode: str):
 def branch_knob_choices(search_space, deployment_mode: str) -> dict[str, list[Any]]:
     """The searchable atomic knobs for a branch (router + planner + the active mode's
     engine batching), each mapped to its configured choice list. ``backend`` is added
-    by :func:`enumerate_branches` (only the backends viable for the mode)."""
-    names = (*_ROUTER_KNOBS, *_PLANNER_KNOBS, *_engine_knobs(deployment_mode))
+    by :func:`enumerate_branches` (only the backends viable for the mode).
+
+    The host/disk cache-hit weights are dropped unless multi-tier KV offload is enabled
+    (``num_g2_blocks > 0``) — see :data:`_OFFLOAD_ONLY_ROUTER_KNOBS`."""
+    router = _ROUTER_KNOBS
+    if search_space.num_g2_blocks == 0:
+        router = tuple(k for k in router if k not in _OFFLOAD_ONLY_ROUTER_KNOBS)
+    names = (*router, *_PLANNER_KNOBS, *_engine_knobs(deployment_mode))
     return {name: list(getattr(search_space, name)) for name in names}
 
 

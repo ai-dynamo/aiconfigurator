@@ -165,7 +165,8 @@ def unroll_sample(
     sample["router_mode"] = router_mode
     if router_mode == "kv_router":
         for key in _KV_ROUTER_KNOBS:
-            sample[key] = selection[key]
+            if key in selection:  # host/disk cache weights are gated out when offload is off
+                sample[key] = selection[key]
         for key in _ROUTER_ADMISSION:
             sample[key] = getattr(search_space, key)
 
