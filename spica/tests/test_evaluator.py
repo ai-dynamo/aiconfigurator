@@ -121,6 +121,36 @@ def test_kv_router_config_is_built_and_passed(monkeypatch):
     assert isinstance(rec["router_config"], KvRouterConfig)
 
 
+def test_static_path_threads_replay_concurrency(monkeypatch):
+    # a closed-loop concurrency cap reaches the static run_trace_replay path as
+    # replay_concurrency + replay_mode='offline' (the blog's Pareto sweep).
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    rec = {}
+    monkeypatch.setattr(
+        dynamo.replay.api, "run_trace_replay", lambda **kw: rec.update(kw) or {"output_throughput_tok_s": 1.0}
+    )
+    wl = Workload(trace_path="/tmp/t.jsonl", replay_concurrency=32)
+    ReplayEvaluator(wl, OptimizationGoal(target=OptimizationTarget.THROUGHPUT)).evaluate(_agg_plan(static=True))
+    assert rec["replay_concurrency"] == 32 and rec["replay_mode"] == "offline"
+
+
+def test_bridge_path_rejects_replay_concurrency(monkeypatch):
+    # the planner bridge replays at arrival timestamps; a concurrency cap can't apply,
+    # so a scaling candidate with replay_concurrency set fails loudly (not silently ignored).
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    wl = Workload(trace_path="/tmp/t.jsonl", replay_concurrency=32)
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
+    with pytest.raises(ValueError, match="no concurrency cap"):
+        ReplayEvaluator(wl, goal).evaluate(_agg_plan(static=False))
+
+
+def test_replay_concurrency_validation():
+    with pytest.raises(ValueError, match="positive integer"):
+        Workload(trace_path="/tmp/t.jsonl", replay_concurrency=0)
+    with pytest.raises(ValueError, match="trace-based"):
+        Workload(isl=128, osl=128, concurrency=1.0, request_count=10, replay_concurrency=8)
+
+
 def test_requires_trace_workload():
     with pytest.raises(ValueError, match="trace-based"):
         ReplayEvaluator(Workload(isl=128, osl=128, concurrency=1.0, request_count=10), OptimizationGoal())

@@ -115,10 +115,24 @@ class Workload(BaseModel):
     trace_path: str | None = None
     trace_format: str = "mooncake"  # replay-ready trace schema
     arrival_speedup_ratio: float = 1.0  # scale trace inter-arrival times
+    # Closed-loop replay: cap in-flight requests at this many (the trace's timestamps
+    # are ignored; a new request starts as one finishes), instead of the default
+    # arrival-timestamp replay. This is how the DynoSim blog sweeps the throughput/
+    # latency Pareto. Static path only — the planner bridge replays at arrival time.
+    replay_concurrency: int | None = None
 
     @property
     def is_trace_based(self) -> bool:
         return self.trace_path is not None
+
+    @model_validator(mode="after")
+    def _validate_replay_concurrency(self) -> "Workload":
+        if self.replay_concurrency is not None:
+            if not self.is_trace_based:
+                raise ValueError("replay_concurrency requires a trace-based workload (set trace_path)")
+            if self.replay_concurrency <= 0:
+                raise ValueError(f"replay_concurrency must be a positive integer, got {self.replay_concurrency}")
+        return self
 
 
 # Allowed choices for each swept search-space dimension. A configured value must
