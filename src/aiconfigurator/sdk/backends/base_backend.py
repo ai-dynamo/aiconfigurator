@@ -100,6 +100,61 @@ class BaseBackend:
             return max(1, int(b // (steps_to_finish_ctx / osl)))
         return max(1, b - int(np.ceil(ctx_tokens / isl)))
 
+    def _mix_step_efficiency(self, ctx_tokens: int, gen_tokens: int) -> float:
+        """GPU batching efficiency factor for a mixed prefill/decode forward pass.
+
+        Per-op silicon data measures each operation in isolation, overstating the
+        marginal cost of prefill tokens when they share a forward pass with decode
+        tokens. Weight matrices are loaded once from HBM for the combined batch.
+        Default: 1.0 (no correction — preserves existing behaviour for backends
+        without empirical efficiency data).
+        """
+        return 1.0
+
+    def _tpot_mix_steps(self, num_mix_steps: int) -> int:
+        """Return the effective mix-step count for TPOT calculation.
+
+        Engines with pipeline-drain latency at the context/decode boundary
+        (requests cannot be immediately enqueued after prefill finishes) may
+        reduce the effective step count to account for that bubble. Default:
+        use the full mix step count. Subclasses should override with an
+        empirically calibrated correction.
+        """
+        return num_mix_steps
+
+    def _ttft_queuing_factor(self, b: int, steps_to_finish_ctx: float) -> float:
+        """Return the queuing factor applied to the per-request prefill time to get TTFT.
+
+        In a batch of b requests that all arrive simultaneously, each request waits
+        for the preceding ones to complete their context phase before its own first
+        token is produced. Default: the legacy heuristic formula (preserves existing
+        behaviour for non-vLLM backends). Subclasses should override with a model
+        appropriate to their engine's scheduling policy.
+        """
+        return min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)
+
+    def _prefill_dispatch_overhead_ms(self, model: "BaseModel") -> float:
+        """Return a constant per-request overhead added to T_prefill (ms).
+
+        Silicon benchmarks measure isolated kernel time. Production inference
+        engines carry a fixed per-request cost from CPU-side Python dispatch
+        across all layers (tensor creation, CUDA kernel launches) that does not
+        appear in per-kernel measurements and does not scale with batch size.
+        The model is provided so subclasses can factor in architecture properties
+        beyond layer count. Default: 0.0 (no correction).
+        """
+        return 0.0
+
+    def _throughput_cap(self, step_throughput: float, ttft: float, tpot: float, b: int, osl: int) -> float:
+        """Return the effective output throughput after any engine-specific cap.
+
+        Default: returns step_throughput unchanged. Subclasses may override to
+        apply a tighter constraint — e.g. a Little's Law cap that prevents the
+        model from recommending operating points that cannot be sustained in
+        steady state given the predicted request latency.
+        """
+        return step_throughput
+
     def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int) -> dict:
         """Resolve backend-specific run_agg kwargs to defaults.
 
@@ -1133,12 +1188,10 @@ class BaseBackend:
                 num_genonly_tokens = 0
                 num_mix_steps_for_tpot_calc = num_mix_steps
             else:
-                # 3-step is an empirical correction for pipelining requests where new requests
-                # cannot be enqueued immediately after last request's exit
                 num_mix_steps = steps_to_finish_ctx
                 num_genonly_steps = osl - num_mix_steps
                 num_genonly_tokens = b
-                num_mix_steps_for_tpot_calc = max(1, num_mix_steps - 3)
+                num_mix_steps_for_tpot_calc = self._tpot_mix_steps(num_mix_steps)
         elif b == 1:
             # special case for b=1
             num_mix_steps = 1
@@ -1155,6 +1208,11 @@ class BaseBackend:
         mix_step_latency_ms, mix_step_energy_wms, mix_per_ops, mix_per_ops_src = self._get_mix_step_latency(
             model, database, runtime_config, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl, prefix
         )
+        mix_efficiency = self._mix_step_efficiency(num_mix_ctx_tokens, num_mix_gen_tokens)
+        mix_step_latency_ms *= mix_efficiency
+        mix_step_energy_wms *= mix_efficiency
+        if mix_efficiency != 1.0:
+            mix_per_ops = {op: v * mix_efficiency for op, v in mix_per_ops.items()}
         per_ops_data["mix_step"] = mix_per_ops
         per_ops_source["mix_step"] = mix_per_ops_src
 
@@ -1168,13 +1226,15 @@ class BaseBackend:
             per_ops_data["genonly_step"] = genonly_per_ops
             per_ops_source["genonly_step"] = genonly_per_ops_src
 
-        # TTFT: assume a 10x request queue, capped correction factor at 4.
-        llm_ttft = mix_step_latency_ms * np.ceil(isl / ctx_tokens)
-        correction_factor = min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)
-        ttft = encoder_latency_ms + llm_ttft * correction_factor
+        # TTFT: per-request prefill time * queuing factor, plus encoder latency.
+        # _mix_step_efficiency reduces mix_step_latency_ms based on the fraction of
+        # decode tokens in the step. For TTFT we need the pure prefill cost (no decode
+        # tokens alongside), so we undo that efficiency reduction first.
+        _prefill_step_ms = mix_step_latency_ms / mix_efficiency if mix_efficiency > 0 else mix_step_latency_ms
+        _ttft_per_request = _prefill_step_ms * np.ceil(isl / ctx_tokens) + self._prefill_dispatch_overhead_ms(model)
+        ttft = encoder_latency_ms + _ttft_per_request * self._ttft_queuing_factor(b, steps_to_finish_ctx)
         logger.debug(
-            f"ttft correction factor: {2 + (steps_to_finish_ctx - 3) / 2 / 10} capped to "
-            f"{correction_factor} when b: {b}, ctx_tokens: {ctx_tokens} isl {isl}"
+            f"ttft: prefill_step={_prefill_step_ms:.2f}ms qf={self._ttft_queuing_factor(b, steps_to_finish_ctx):.2f}"
         )
 
         # Guard against osl == 1 (no-decode), which makes both denominators zero.
@@ -1188,9 +1248,10 @@ class BaseBackend:
         _total_step_latency_ms = (
             encoder_latency_ms + num_mix_steps * mix_step_latency_ms + num_genonly_steps * genonly_step_latency_ms
         )
-        output_throughput = (
+        _step_throughput = (
             (1000 / _total_step_latency_ms * b * (osl - 1)) if (osl > 1 and _total_step_latency_ms > 0) else 0.0
         )
+        output_throughput = self._throughput_cap(_step_throughput, ttft, tpot, b, osl)
         logger.debug(
             f"ctx_tokens: {ctx_tokens}, b: {b}, osl: {osl}, isl: {isl}, "
             f"num_mix_steps: {num_mix_steps}, num_genonly_steps: {num_genonly_steps}, "

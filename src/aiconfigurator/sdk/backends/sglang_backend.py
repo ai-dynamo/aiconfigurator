@@ -37,3 +37,8 @@ class SGLANGBackend(BaseBackend):
     def __init__(self):
         super().__init__()
         self.name = common.BackendName.sglang
+
+    def _tpot_mix_steps(self, num_mix_steps: int) -> int:
+        # Same pipeline-drain correction as TRT-LLM: ~3 steps elapse before
+        # new requests can be enqueued after the last prefill finishes.
+        return max(1, num_mix_steps - 3)
