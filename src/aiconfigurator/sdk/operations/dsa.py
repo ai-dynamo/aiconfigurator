@@ -96,6 +96,25 @@ _GENERATION_DSA_TARGET_Z: list[int] = [
 # fmt: on
 
 
+def _select_dsa_backend(arch_dict, dsa_backend):
+    """Pick the per-backend sub-dict from a context-DSA architecture node.
+
+    Context data is keyed ...[architecture][backend][num_heads]...; backend is
+    "trtllm" (faster kernel, non-CP default) or "flashmla_kv" (used under CP).
+    Falls back to whichever backend is present so single-backend parquets still
+    resolve. Legacy nodes without a backend axis (int head keys) pass through."""
+    if not isinstance(arch_dict, dict) or not arch_dict:
+        return arch_dict
+    if not any(isinstance(k, str) for k in arch_dict):
+        return arch_dict
+    return (
+        arch_dict.get(dsa_backend)
+        or arch_dict.get("flashmla_kv")
+        or arch_dict.get("trtllm")
+        or next(iter(arch_dict.values()))
+    )
+
+
 def _cache_key(database: PerfDatabase) -> tuple:
     """Shared cache key — same shape as GEMM, Attention, and Communication.
 
@@ -311,6 +330,7 @@ class ContextDSAModule(Operation):
         index_n_heads: int | None = None,
         index_head_dim: int | None = None,
         index_topk: int | None = None,
+        dsa_backend: str = "trtllm",
     ):
         """Query context DSA module table. Verbatim port of the legacy body."""
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
@@ -460,6 +480,7 @@ class ContextDSAModule(Operation):
                 )
             try:
                 dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
+                dsa_dict = _select_dsa_backend(dsa_dict, dsa_backend)
             except (KeyError, TypeError) as exc:
                 raise missing_context_dsa_error() from exc
             raw_dsa_dict = None
@@ -469,6 +490,7 @@ class ContextDSAModule(Operation):
                     raw_dsa_dict = raw_dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][
                         architecture
                     ]
+                    raw_dsa_dict = _select_dsa_backend(raw_dsa_dict, dsa_backend)
                 except (KeyError, TypeError):
                     raw_dsa_dict = None
 
@@ -699,6 +721,7 @@ class ContextDSAModule(Operation):
                 fmha_quant_mode=self._fmha_quant_mode,
                 gemm_quant_mode=self._gemm_quant_mode,
                 architecture=self._architecture,
+                dsa_backend="flashmla_kv",
             )
         )
         mqa_full = self._lookup_2d(g.get("mqa"), isl, prefix)
@@ -910,6 +933,7 @@ class GenerationDSAModule(Operation):
         index_n_heads: int | None = None,
         index_head_dim: int | None = None,
         index_topk: int | None = None,
+        dsa_backend: str = "trtllm",
     ):
         """Query generation DSA module table. Verbatim port of the legacy body."""
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
@@ -1025,6 +1049,7 @@ class GenerationDSAModule(Operation):
                 )
             try:
                 dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
+                dsa_dict = _select_dsa_backend(dsa_dict, dsa_backend)
 
                 def sequence_value(seq_dict):
                     if s in seq_dict:
@@ -1179,7 +1204,9 @@ def load_context_dsa_module_data(dsa_file: str):
         lambda: defaultdict(
             lambda: defaultdict(
                 lambda: defaultdict(
-                    lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                    )
                 )
             )
         )
@@ -1205,7 +1232,9 @@ def load_context_dsa_module_data(dsa_file: str):
         fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
         kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
-        dsa_data[fmha_mode][kv_dtype][gemm_mode][arch][num_heads][prefix][s][b] = {
+        ks = row.get("kernel_source") or ""
+        dsa_backend = "trtllm" if "trtllm" in ks else "flashmla_kv"
+        dsa_data[fmha_mode][kv_dtype][gemm_mode][arch][dsa_backend][num_heads][prefix][s][b] = {
             "latency": latency,
             "power": power,
             "energy": energy,
@@ -1234,7 +1263,9 @@ def load_generation_dsa_module_data(dsa_file: str):
         return None
 
     dsa_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+        lambda: defaultdict(
+            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+        )
     )
 
     has_power = len(rows) > 0 and "power" in rows[0]
@@ -1251,7 +1282,9 @@ def load_generation_dsa_module_data(dsa_file: str):
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
-        dsa_data[kv_dtype][gemm_mode][arch][num_heads][b][s] = {
+        ks = row.get("kernel_source") or ""
+        dsa_backend = "trtllm" if "trtllm" in ks else "flashmla_kv"
+        dsa_data[kv_dtype][gemm_mode][arch][dsa_backend][num_heads][b][s] = {
             "latency": latency,
             "power": power,
             "energy": energy,

@@ -177,57 +177,33 @@ def _is_glm5_dsa_model(model_id: str) -> bool:
     return _module_model_architecture(model_id) == _GLM5_DSA_ARCHITECTURE
 
 
-def _sglang_version_ge(target: str) -> bool:
-    """True if the installed sglang version is >= target (e.g. "0.5.13")."""
-    try:
-        from packaging.version import parse as _parse
-
-        return _parse(get_version("sglang")) >= _parse(target)
-    except Exception:
-        try:
-            cur = tuple(int(x) for x in get_version("sglang").split("+")[0].split(".")[:3] if x.isdigit())
-            return cur >= tuple(int(x) for x in target.split("."))
-        except Exception:
-            return False
-
-
-def _enable_glm5_dsa_piecewise_graph(attn_type: str, model_id: str) -> bool:
+def _enable_glm5_dsa_piecewise_graph(attn_type: str, model_id: str, dsa_prefill_backend: str = "flashmla_kv") -> bool:
     if not (attn_type == "dsa" and _is_glm5_dsa_model(model_id)):
         return False
-    # SGLang 0.5.10 full-model piecewise capture rejects the GLM-5 DSA path;
-    # GLM-5 NSA/DSA piecewise works on sglang >= e958f4561 / 0.5.12.x (PR #23351).
-    # BUT SGLang >= 0.5.13 crashes piecewise capture in concat_mla.cuh:309
-    # (cudaErrorInvalidValue); only eager / module CUDA graph is safe there,
-    # which is also what CP prefill serve runs. Controlled purely by the
-    # installed sglang version -- no env flag.
-    return not _sglang_version_ge("0.5.13")
+    # Incremental trtllm variant collects WITH piecewise CUDA graph (trtllm
+    # prefill avoids the flashmla concat_mla.cuh:309 capture crash). flashmla_kv
+    # is instead timed EAGERLY: piecewise capture of the flashmla path crashes
+    # in concat_mla.cuh:309 (cudaErrorInvalidValue) on sglang >= 0.5.13, and
+    # eager is also what CP prefill serve runs.
+    return dsa_prefill_backend == "trtllm"
 
 
-def _piecewise_cuda_graph_tokens_for_cases(test_cases, is_prefill: bool) -> list[int] | None:
-    env_tokens = _parse_int_list(os.environ.get("AIC_PIECEWISE_CUDA_GRAPH_TOKENS"))
-    if env_tokens is not None:
-        return env_tokens
+def _generation_cuda_graph_enabled_for_tokens(model_runner, num_tokens: int) -> bool:
+    """Match SGLang decode CUDA graph coverage for the decode microbench.
 
-    tokens = set()
-    for batch_size, seq_len, *_rest in test_cases:
-        token_count = int(batch_size) * int(seq_len) if is_prefill else int(batch_size)
-        if is_prefill:
-            token_count = ((token_count + 7) // 8) * 8
-        tokens.add(token_count)
-    return sorted(tokens)
-
-
-def _generation_cuda_graph_enabled_for_tokens(num_tokens: int) -> bool:
-    """Match SGLang decode CUDA graph coverage for module microbenchmarks."""
-    if _env_flag("AIC_DISABLE_CUDA_GRAPH"):
+    SGLang captures decode CUDA graphs for batch sizes up to
+    server_args.cuda_graph_max_bs (or the resolved cuda_graph_bs list); mirror
+    that coverage using sglang's own settings -- no AIC env override -- so the
+    decode benchmark uses graph timing exactly where serve would.
+    """
+    sa = model_runner.server_args
+    if getattr(sa, "disable_cuda_graph", False):
         return False
-
-    cuda_graph_bs = _parse_int_list(os.environ.get("AIC_CUDA_GRAPH_BS"))
-    if cuda_graph_bs is not None:
-        return int(num_tokens) in set(cuda_graph_bs)
-
-    max_bs = int(os.environ.get("AIC_CUDA_GRAPH_MAX_BS", "256"))
-    return 0 < int(num_tokens) <= max_bs
+    capture_bs = getattr(sa, "cuda_graph_bs", None)
+    if capture_bs:
+        return int(num_tokens) in set(capture_bs)
+    max_bs = getattr(sa, "cuda_graph_max_bs", None) or 256
+    return 0 < int(num_tokens) <= int(max_bs)
 
 
 def _resolve_local_model_path(model_id: str) -> str:
@@ -637,20 +613,33 @@ def _build_module_test_cases(attn_type: str, mode: str):
                     continue
                 batch_sizes = sweep.context_batch_sizes if attn_type == "dsa" and mode == "context" else [0]
                 for batch_size in batch_sizes:
-                    cases.append(
-                        [
-                            0,
-                            batch_size,
-                            num_heads,
-                            kv_dtype,
-                            compute_dtype,
-                            gemm_type,
-                            model_spec.model_path,
-                            attn_type,
-                            None,
-                            target_tp_size,
-                        ]
+                    # Split each DSA fp8 context shape into TWO tasks (one per nsa
+                    # prefill backend) so flashmla_kv and trtllm each get a fresh,
+                    # short-lived subprocess -- avoids the cross-case memory
+                    # accumulation that crashed the long combined sweep
+                    # ("Offset increment outside graph capture"). Other cases keep
+                    # a single flashmla_kv task.
+                    _dsa_backends = (
+                        ["flashmla_kv", "trtllm"]
+                        if (attn_type == "dsa" and kv_dtype == "fp8" and mode == "context")
+                        else ["flashmla_kv"]
                     )
+                    for _dsa_backend in _dsa_backends:
+                        cases.append(
+                            [
+                                0,
+                                batch_size,
+                                num_heads,
+                                kv_dtype,
+                                compute_dtype,
+                                gemm_type,
+                                model_spec.model_path,
+                                attn_type,
+                                None,
+                                target_tp_size,
+                                _dsa_backend,
+                            ]
+                        )
     return cases
 
 
@@ -957,12 +946,12 @@ def load_model_runner(
     head_num: int,
     kv_cache_dtype: str,
     attention_backend: str,
+    dsa_prefill_backend: str = "flashmla_kv",
     device: str = "cuda:0",
     tp_rank: int = 0,
     gemm_type: str = "bfloat16",
     target_tp_size: int = 1,
     enable_piecewise_cuda_graph: bool = False,
-    piecewise_cuda_graph_tokens: list[int] | None = None,
     max_total_tokens: int | None = None,
 ):
     """Load SGLang ModelRunner with dummy weights.
@@ -1044,17 +1033,15 @@ def load_model_runner(
 
     if enable_piecewise_cuda_graph:
         server_args.disable_cuda_graph_padding = True
-        server_args.cuda_graph_max_bs = int(os.environ.get("AIC_CUDA_GRAPH_MAX_BS", "256"))
-        cuda_graph_bs = _parse_int_list(os.environ.get("AIC_CUDA_GRAPH_BS"))
-        if cuda_graph_bs:
-            server_args.cuda_graph_bs = cuda_graph_bs
-        if piecewise_cuda_graph_tokens:
-            server_args.piecewise_cuda_graph_tokens = piecewise_cuda_graph_tokens
-        max_piecewise_tokens = os.environ.get("AIC_PIECEWISE_CUDA_GRAPH_MAX_TOKENS")
-        if max_piecewise_tokens:
-            server_args.piecewise_cuda_graph_max_tokens = int(max_piecewise_tokens)
-        elif piecewise_cuda_graph_tokens:
-            server_args.piecewise_cuda_graph_max_tokens = max(piecewise_cuda_graph_tokens)
+        # cuda_graph_max_bs / cuda_graph_bs are left at sglang's own defaults
+        # (ServerArgs.__post_init__ tiers cuda_graph_max_bs by GPU memory; cuda_graph_bs
+        # is auto-generated). They only govern decode cuda graphs, which are disabled
+        # here (disable_cuda_graph=True), so the collector never overrides them.
+        # piecewise_cuda_graph_max_tokens / piecewise_cuda_graph_tokens are left
+        # entirely at sglang's own defaults (ServerArgs.__post_init__ sets 2048 for
+        # MLA backends). The per-case gate below times any token_count above that
+        # default EAGERLY (sglang runs those prefill chunks without a piecewise
+        # graph), so the collector never overrides the ceiling.
         if hasattr(server_args, "enforce_piecewise_cuda_graph"):
             server_args.enforce_piecewise_cuda_graph = True
 
@@ -1081,13 +1068,15 @@ def load_model_runner(
     # flash_fwd_splitkv_mla_fp8_sparse kernel (flat in prefix) = serve. Hardcoded
     # ON for nsa+fp8 (no env gate); bf16 KV left at sglang default.
     if attention_backend == "nsa" and sglang_kv_dtype == "fp8_e4m3":
+        # Sub-backend hardcoded by the collection sweep: flashmla_kv (serve
+        # default, topk-capped) or trtllm (incremental variant, piecewise graph).
         # sglang renamed nsa_* -> dsa_* around e958f4561; set whichever exists.
         for _pre in ("nsa_prefill_backend", "dsa_prefill_backend"):
             if hasattr(server_args, _pre):
-                setattr(server_args, _pre, "flashmla_kv")
+                setattr(server_args, _pre, dsa_prefill_backend)
         for _dec in ("nsa_decode_backend", "dsa_decode_backend"):
             if hasattr(server_args, _dec):
-                setattr(server_args, _dec, "flashmla_kv")
+                setattr(server_args, _dec, dsa_prefill_backend)
     print(
         f"Using attention backend: {attention_backend}, kv_cache_dtype: {sglang_kv_dtype}, "
         f"gpu_id: {gpu_id}, chunked_prefill_size={server_args.chunked_prefill_size}, "
@@ -1162,6 +1151,7 @@ def run_attention_torch(
     gemm_type: str,
     target_tp_size: int = 1,
     use_module_cuda_graph: bool = False,
+    dsa_prefill_backend: str = "flashmla_kv",
 ):
     """Run attention benchmark for both prefill and decode phases.
 
@@ -1239,6 +1229,7 @@ def run_attention_torch(
                     target_tp_size=target_tp_size,
                     prefix_len=prefix_len,
                     use_module_cuda_graph=use_module_cuda_graph,
+                    dsa_prefill_backend=dsa_prefill_backend,
                 )
             )
         else:
@@ -1265,6 +1256,7 @@ def run_attention_torch(
                     log_gemm_type=log_gemm_type,
                     target_tp_size=target_tp_size,
                     use_module_cuda_graph=use_module_cuda_graph,
+                    dsa_prefill_backend=dsa_prefill_backend,
                 )
             )
     return logged_count
@@ -1293,6 +1285,7 @@ def _run_prefill(
     target_tp_size: int,
     prefix_len: int = 0,
     use_module_cuda_graph: bool = False,
+    dsa_prefill_backend: str = "flashmla_kv",
 ):
     """Run prefill (context) benchmark for a single (batch_size, seq_length) point."""
     is_wideep_mla = attn_type == "mla"
@@ -1406,9 +1399,10 @@ def _run_prefill(
         # (kernel falls back to a low-smem path that illegal-memory-accesses).
         # These (bs*seq > chunk) shapes are multi-chunk in serve; the single-chunk
         # shape (bs*seq <= chunk) is collected separately. Skip to avoid the crash.
+        # Follow sglang: prefill is bounded only by chunked_prefill_size (sglang
+        # chunks longer prefills). FlashMLA metadata is sized by num_sm_parts
+        # (flashmla_backend.py), NOT a bs*seq shared-memory cap -- no smem limit.
         _chunk_cap = _runtime_chunk_size(model_runner)
-        _smem_optin2 = torch.cuda.get_device_properties(torch.cuda.current_device()).shared_memory_per_block_optin
-        _chunk_cap = min(_chunk_cap, (_smem_optin2 // 4 - 1) // 5)
         if token_count > _chunk_cap:
             print(
                 f"  SKIP oversized prefill: token_count(bs*seq)={token_count} > "
@@ -1416,6 +1410,18 @@ def _run_prefill(
                 flush=True,
             )
             return 0
+        # BUG (TODO: fix cuda-graph capture at large context): at large isl (e.g.
+        # 16384) + prefix > 65536, the module CUDA-graph / piecewise capture
+        # crashes -- "Module CUDA graph capture failed" / "RopeQuantize ... invalid
+        # argument" / "Offset increment outside graph capture". Root cause is a
+        # cuda-graph-capture incompatibility at large context (sglang/flashinfer),
+        # not yet fixed. Force EAGER for prefix > 65536 (covers use_module_cuda_graph
+        # too, which the token gate below does NOT) so these shapes still collect.
+        if prefix_len > 65536:
+            use_module_piecewise_replay = False
+            use_module_cuda_graph = False
+            use_module_piecewise_context = False
+            use_module_eager_dsa_context = True
         max_piecewise_tokens = int(getattr(model_runner.server_args, "piecewise_cuda_graph_max_tokens", 0) or 0) or (
             max(int(x) for x in model_runner.server_args.piecewise_cuda_graph_tokens)
             if model_runner.server_args.piecewise_cuda_graph_tokens
@@ -1810,6 +1816,8 @@ def _run_prefill(
                 perf_fname = f"{attn_type}_context_module_perf.txt"
                 op_name = f"{attn_type}_context_module"
                 kernel_source = f"{attn_type}_{backend_name}"
+                if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
+                    kernel_source = f"{kernel_source}_trtllm"
             perf_filename = _resolve_perf_path(output_path, perf_fname)
             log_perf(
                 item_list=[
@@ -1894,6 +1902,7 @@ def _run_decode(
     log_gemm_type: str,
     target_tp_size: int,
     use_module_cuda_graph: bool = False,
+    dsa_prefill_backend: str = "flashmla_kv",
 ):
     """Run decode (generation) benchmark for a single (batch_size, kv_cache_length) point."""
     is_wideep_mla = attn_type == "mla"
@@ -2010,7 +2019,7 @@ def _run_decode(
                 torch.cuda.synchronize()
 
         use_benchmark_cuda_graph = not (
-            attn_type == "dsa" and not _generation_cuda_graph_enabled_for_tokens(batch_size)
+            attn_type == "dsa" and not _generation_cuda_graph_enabled_for_tokens(model_runner, batch_size)
         )
         print(f"  Decode module CUDA graph: {use_benchmark_cuda_graph} (tokens={batch_size})")
 
@@ -2042,6 +2051,8 @@ def _run_decode(
                 perf_fname = f"{attn_type}_generation_module_perf.txt"
                 op_name = f"{attn_type}_generation_module"
                 kernel_source = f"{attn_type}_{backend_name}"
+                if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
+                    kernel_source = f"{kernel_source}_trtllm"
                 log_isl = 1
                 log_step = seq_length
             perf_filename = _resolve_perf_path(output_path, perf_fname)
@@ -2133,6 +2144,7 @@ def run_mla_module(
     attention_backend: str | None = None,
     batch_size_filter: int | None = None,
     target_tp_size: int = 1,
+    dsa_prefill_backend: str = "flashmla_kv",
 ):
     """Run MLA/DSA module benchmark — called inside a subprocess.
 
@@ -2183,6 +2195,20 @@ def run_mla_module(
                 max_position_embeddings=_max_pos,
             )
         ]
+        # Collect the per-seq_len CEILING prefix (max_position - seq_len) so the
+        # top of the valid prefix range is a real data point, never extrapolated.
+        # The shape filter admits prefix + seq_len == max_position (last position
+        # = max_pos - 1, still in the RoPE table), so max_position - seq_len is
+        # the largest valid prefix. Appended last; skipped if already a grid point.
+        if _max_pos is not None:
+            for bs, seq_len, ip in base_cases:
+                _ceil = _max_pos - seq_len
+                if (
+                    _ceil >= 0
+                    and _ceil not in prefix_lens
+                    and _dsa_context_prefix_shape_is_valid(bs, seq_len, _ceil, max_position_embeddings=_max_pos)
+                ):
+                    cases.append((bs, seq_len, ip, _ceil))
     else:
         cases = [(bs, seq_len, ip, 0) for bs, seq_len, ip in base_cases]
     cases = _filter_cases_from_env(cases, is_prefill=is_prefill, attn_type=attn_type)
@@ -2224,8 +2250,8 @@ def run_mla_module(
     print(f"Test cases: {len(cases)}")
     print(f"{'=' * 60}")
 
-    use_module_cuda_graph = _enable_glm5_dsa_piecewise_graph(attn_type, model_path)
-    enable_runner_piecewise_cuda_graph = _enable_glm5_dsa_piecewise_graph(attn_type, model_path)
+    use_module_cuda_graph = _enable_glm5_dsa_piecewise_graph(attn_type, model_path, dsa_prefill_backend)
+    enable_runner_piecewise_cuda_graph = _enable_glm5_dsa_piecewise_graph(attn_type, model_path, dsa_prefill_backend)
 
     if is_prefill and attn_type == "dsa":
         before = len(cases)
@@ -2244,13 +2270,16 @@ def run_mla_module(
         # exceeding GPU shared memory (low-smem fallback FlashMLA kernel illegal-
         # accesses). Serve chunks prefill to chunked_prefill_size, so >chunk shapes
         # are multi-chunk (the <=chunk shape is collected). Drop them BEFORE capture.
-        # Cap = min(chunked_prefill_size, device sched-meta smem limit), per DSV4
-        # collect_dsv4_attn.py: FlashMLA get_decoding_sched_meta allocates dynamic
-        # smem = 4*(b*5+1) for b=fresh_tokens(bs*seq); 16384 can exceed the device
-        # per-block optin smem (~11.6k on B200). Read from device, not hardcoded.
-        _smem_optin = torch.cuda.get_device_properties(torch.cuda.current_device()).shared_memory_per_block_optin
-        _sched_meta_max_b = (_smem_optin // 4 - 1) // 5
-        _chunk_cap = min(16384, _sched_meta_max_b)
+        # Follow sglang: prefill is bounded by chunked_prefill_size (sglang chunks
+        # anything longer; >chunk shapes are multi-chunk in serve). FlashMLA
+        # metadata is sized by num_sm_parts (flashmla_backend.py), NOT a bs*seq
+        # shared-memory cap. Read chunked_prefill_size model-free (same GPU-mem
+        # tiering sglang's _handle_gpu_memory_settings uses).
+        try:
+            from collector.sglang.deepseekv4_sparse_modules import _sglang_chunked_prefill_size
+        except ModuleNotFoundError:
+            from deepseekv4_sparse_modules import _sglang_chunked_prefill_size
+        _chunk_cap = _sglang_chunked_prefill_size()
         _before_chunk = len(cases)
         cases = [c for c in cases if c[0] * c[1] <= _chunk_cap]
         _dropped_chunk = _before_chunk - len(cases)
@@ -2268,14 +2297,10 @@ def run_mla_module(
         if max_total_tokens > 0:
             max_total_tokens += max(1024, max_total_tokens // 20)
 
-    piecewise_cuda_graph_tokens = (
-        _piecewise_cuda_graph_tokens_for_cases(cases, is_prefill) if enable_runner_piecewise_cuda_graph else None
-    )
     if use_module_cuda_graph:
         print("[DSA] Module CUDA graph capture enabled for GLM-5 DSA piecewise parity")
     if enable_runner_piecewise_cuda_graph:
-        token_msg = piecewise_cuda_graph_tokens if piecewise_cuda_graph_tokens is not None else "SGLang default"
-        print(f"[DSA] SGLang piecewise CUDA graph enabled with tokens={token_msg}")
+        print("[DSA] SGLang piecewise CUDA graph enabled (tokens=SGLang default)")
     if max_total_tokens is not None:
         print(f"[DSA] SGLang max_total_tokens capped for collector at {max_total_tokens}")
 
@@ -2288,11 +2313,11 @@ def run_mla_module(
             head_num=head_num,
             kv_cache_dtype=kv_cache_dtype,
             attention_backend=attention_backend,
+            dsa_prefill_backend=dsa_prefill_backend,
             device=device,
             gemm_type=gemm_type,
             target_tp_size=target_tp_size,
             enable_piecewise_cuda_graph=enable_runner_piecewise_cuda_graph,
-            piecewise_cuda_graph_tokens=piecewise_cuda_graph_tokens,
             max_total_tokens=max_total_tokens,
         )
 
@@ -2364,6 +2389,7 @@ def run_mla_module(
             gemm_type=gemm_type,
             target_tp_size=target_tp_size,
             use_module_cuda_graph=use_module_cuda_graph,
+            dsa_prefill_backend=dsa_prefill_backend,
         )
         if cases and logged_count == 0:
             raise RuntimeError(
@@ -2389,6 +2415,7 @@ def _run_mla_subprocess(
     attention_backend: str | None = None,
     batch_size_filter: int | None = None,
     target_tp_size: int = 1,
+    dsa_prefill_backend: str = "flashmla_kv",
 ):
     """Run MLA/DSA benchmark in a subprocess with CUDA_VISIBLE_DEVICES isolation."""
     env = os.environ.copy()
@@ -2403,7 +2430,8 @@ def _run_mla_subprocess(
         f"from collect_mla_module import run_mla_module\n"
         f'run_mla_module("{attn_type}", {head_num}, "{model_path}", '
         f'"{kv_cache_dtype}", "{compute_dtype}", "{gemm_type}", {is_prefill}, '
-        f"0, {output_repr}, {backend_repr}, {batch_filter_repr}, {target_tp_size})\n"
+        f"0, {output_repr}, {backend_repr}, {batch_filter_repr}, {target_tp_size}, "
+        f'"{dsa_prefill_backend}")\n'
     )
 
     proc = subprocess.Popen(
@@ -2462,6 +2490,7 @@ def run_mla_module_worker(
     attn_type: str,
     attention_backend: str | None = None,
     target_tp_size: int = 1,
+    dsa_prefill_backend: str = "flashmla_kv",
     *,
     perf_filename: str,
     device: str = "cuda:0",
@@ -2499,6 +2528,9 @@ def run_mla_module_worker(
     # the perf files land next to vllm's output — matching artifact collection.
     output_path = os.path.dirname(perf_filename) or os.getcwd()
 
+    # DSA fp8: collect BOTH sub-backends into the SAME perf file, distinguished
+    # by kernel_source ("dsa_nsa" = flashmla_kv, "dsa_nsa_trtllm" = trtllm). The
+    # query side picks flashmla_kv for CP and trtllm (faster) otherwise.
     _run_mla_subprocess(
         attn_type=attn_type,
         head_num=num_heads,
@@ -2512,6 +2544,7 @@ def run_mla_module_worker(
         attention_backend=attention_backend,
         batch_size_filter=batch_size_filter,
         target_tp_size=target_tp_size,
+        dsa_prefill_backend=dsa_prefill_backend,
     )
 
 
