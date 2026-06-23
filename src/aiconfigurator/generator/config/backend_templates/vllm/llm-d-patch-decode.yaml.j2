@@ -1,0 +1,53 @@
+{%- set service_config = ServiceConfig | default({}) -%}
+{%- set dyn_config = DynConfig | default({}) -%}
+{%- set llmd_config = LlmdConfig | default({}) -%}
+{%- set worker_config = WorkerConfig | default({}) -%}
+{%- set node_config = NodeConfig | default({}) -%}
+{%- set model_name = service_config.model_path | default('meta-llama/Llama-3.1-8B') -%}
+{%- set served_name = service_config.served_model_name | default(model_name.split('/')[-1], true) -%}
+{%- set is_agg = dyn_config.mode | default('disagg') == 'agg' -%}
+{%- set role_prefix = 'agg' if is_agg else 'decode' -%}
+{%- set role_workers = agg_workers | default(1) if is_agg else decode_workers | default(1) -%}
+{%- set role_tp = agg_tensor_parallel_size | default(1) if is_agg else decode_tensor_parallel_size | default(1) -%}
+{%- set role_pp = agg_pipeline_parallel_size | default(1) if is_agg else decode_pipeline_parallel_size | default(1) -%}
+{%- set role_gpu = (role_tp | int) * (role_pp | int) -%}
+{%- set role_cli_args = agg_cli_args_list | default([]) if is_agg else decode_cli_args_list | default([]) -%}
+{%- set default_accelerator_type = 'xpu' if node_config.system_name | default('') == 'b60' else 'nvidia' -%}
+{%- set accelerator_type = llmd_config.accelerator_type | default(default_accelerator_type, true) -%}
+{%- set is_xpu = accelerator_type in ['xpu', 'intel'] -%}
+{%- set xpu_rdma_enabled = llmd_config.xpu_rdma_enabled | default(false) -%}
+{%- set xpu_kv_buffer_device = llmd_config.xpu_kv_buffer_device | default('xpu' if xpu_rdma_enabled else 'cpu', true) -%}
+{%- set kv_transfer_config = '{"kv_connector":"NixlConnector", "kv_role":"kv_both", "kv_buffer_device":"' ~ xpu_kv_buffer_device ~ '"}' if is_xpu else '{"kv_connector":"NixlConnector", "kv_role":"kv_both"}' -%}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: decode
+spec:
+  replicas: {{ role_workers }}
+  template:
+    spec:
+      containers:
+        - name: modelserver
+          image: {{ llmd_config.vllm_image | default('vllm/vllm-openai:latest') }}
+          command: ["vllm", "serve"]
+          args:
+            - {{ model_name | tojson }}
+            - --served-model-name
+            - {{ served_name | tojson }}
+            {% for arg in role_cli_args %}
+            - {{ arg | tojson }}
+            {% endfor %}
+            {% if '--kv-transfer-config' not in role_cli_args %}
+            - --kv-transfer-config
+            - {{ kv_transfer_config | tojson }}
+            {% endif %}
+            {% if '--port' not in role_cli_args and '--port=8200' not in role_cli_args %}
+            - --port=8200
+            {% endif %}
+          {% if not is_xpu %}
+          resources:
+            limits:
+              nvidia.com/gpu: {{ role_gpu | string | tojson }}
+            requests:
+              nvidia.com/gpu: {{ role_gpu | string | tojson }}
+          {% endif %}

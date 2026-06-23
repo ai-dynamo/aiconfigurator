@@ -247,7 +247,7 @@ def render_backend_templates(
         backend: Backend name (e.g., 'trtllm', 'vllm', 'sglang')
         templates_dir: Directory containing backend-specific template directories
         version: Version string (e.g., '1.1.0rc5'). If None, uses default templates
-        deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', or 'llm-d')
+        deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', 'llm-d', or 'llm-d-kcustomize')
         resolved_facts: Optional ``ResolvedFacts`` (typed ``Any`` to avoid an import
             cycle). When it carries a matched model profile, model ``defaults:``
             cli flags are appended (facts-default precedence: fill-if-absent) at the
@@ -653,12 +653,19 @@ def render_backend_templates(
             context[cli_key] = cli_str
             rendered_templates[tmpl_key] = cli_str
 
-    # Compute GPU counts per worker using rule outputs (minimal fallback)
-    pv_params = param_values.get("params", {})
-    prefill_gpu = int(pv_params.get("prefill", {}).get("gpus_per_worker") or 1)
-    decode_gpu = int(pv_params.get("decode", {}).get("gpus_per_worker") or 1)
-    agg_gpu = int(pv_params.get("agg", {}).get("gpus_per_worker") or 1)
-    encode_gpu = int(pv_params.get("encode", {}).get("gpus_per_worker") or 1)
+    # Compute GPU counts per worker using rule outputs, falling back to WorkerConfig.
+    pv_params = param_values.get("params", {}) or {}
+    worker_config = param_values.get("WorkerConfig", {}) or {}
+    prefill_gpu = int(
+        pv_params.get("prefill", {}).get("gpus_per_worker") or worker_config.get("prefill_gpus_per_worker") or 1
+    )
+    decode_gpu = int(
+        pv_params.get("decode", {}).get("gpus_per_worker") or worker_config.get("decode_gpus_per_worker") or 1
+    )
+    agg_gpu = int(pv_params.get("agg", {}).get("gpus_per_worker") or worker_config.get("agg_gpus_per_worker") or 1)
+    encode_gpu = int(
+        pv_params.get("encode", {}).get("gpus_per_worker") or worker_config.get("encode_gpus_per_worker") or 1
+    )
 
     context["prefill_gpu"] = prefill_gpu
     context["decode_gpu"] = decode_gpu
@@ -666,7 +673,24 @@ def render_backend_templates(
     context["encode_gpu"] = encode_gpu
 
     # Render auxiliary templates based on deployment target
-    if deployment_target == "llm-d":
+    if deployment_target == "llm-d-kcustomize":
+        # llm-d v0.7+ modelserver deployment: render Kustomize overlay patches.
+        is_agg_mode = (context.get("DynConfig") or {}).get("mode", "disagg") == "agg"
+        kcustomize_templates = [
+            ("llm-d-kcustomization.yaml.j2", "kustomization.yaml"),
+            ("llm-d-patch-decode.yaml.j2", "patch-vllm.yaml" if is_agg_mode else "patch-decode.yaml"),
+        ]
+        if not is_agg_mode:
+            kcustomize_templates.append(("llm-d-patch-prefill.yaml.j2", "patch-prefill.yaml"))
+        for template_name, artifact_name in kcustomize_templates:
+            if not (template_path / template_name).exists():
+                continue
+            try:
+                tmpl = env.get_template(template_name)
+                rendered_templates[artifact_name] = tmpl.render(**context)
+            except Exception as e:
+                logger.warning(f"Failed to render template {template_name}: {e}")
+    elif deployment_target == "llm-d":
         # llm-d deployment: render Helm values for llm-d-modelservice chart
         llmd_values_aux = template_path / "llm-d-values.yaml.j2"
         if llmd_values_aux.exists():
