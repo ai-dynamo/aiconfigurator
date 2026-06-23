@@ -526,6 +526,11 @@ class MoeCommonTestCase:
     model_name: str
     token_expert_distribution: str
     power_law_alpha: Optional[float]
+    shared_expert_inter_size: int = 0
+    max_model_len: Optional[int] = None
+    max_num_seqs: Optional[int] = None
+    max_num_batched_tokens: Optional[int] = None
+    use_cuda_graph: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
@@ -893,6 +898,19 @@ def get_moe_backend_test_cases(backend: str) -> list[MoeCommonTestCase]:
                     model_name=model_name,
                     token_expert_distribution=token_distribution,
                     power_law_alpha=power_law_alpha,
+                    shared_expert_inter_size=int(model_config.get("shared_expert_inter_size", 0) or 0),
+                    max_model_len=(
+                        int(model_config["max_model_len"]) if model_config.get("max_model_len") is not None else None
+                    ),
+                    max_num_seqs=(
+                        int(model_config["max_num_seqs"]) if model_config.get("max_num_seqs") is not None else None
+                    ),
+                    max_num_batched_tokens=(
+                        int(model_config["max_num_batched_tokens"])
+                        if model_config.get("max_num_batched_tokens") is not None
+                        else None
+                    ),
+                    use_cuda_graph=bool(model_config.get("use_cuda_graph", True)),
                 )
             )
     return test_cases
@@ -952,11 +970,24 @@ def get_common_moe_test_cases():
                 num_experts=num_experts,
                 tp=tp,
                 ep=ep,
-                model_name=model_name,
-                token_expert_distribution=token_distribution,
-                power_law_alpha=power_law_alpha,
+                    model_name=model_name,
+                    token_expert_distribution=token_distribution,
+                    power_law_alpha=power_law_alpha,
+                    shared_expert_inter_size=int(model_config.get("shared_expert_inter_size", 0) or 0),
+                    max_model_len=(
+                        int(model_config["max_model_len"]) if model_config.get("max_model_len") is not None else None
+                    ),
+                    max_num_seqs=(
+                        int(model_config["max_num_seqs"]) if model_config.get("max_num_seqs") is not None else None
+                    ),
+                    max_num_batched_tokens=(
+                        int(model_config["max_num_batched_tokens"])
+                        if model_config.get("max_num_batched_tokens") is not None
+                        else None
+                    ),
+                    use_cuda_graph=bool(model_config.get("use_cuda_graph", True)),
+                )
             )
-        )
 
     return test_cases
 

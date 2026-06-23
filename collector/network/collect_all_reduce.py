@@ -75,6 +75,25 @@ def get_input_shape_and_comm_size(size, token_dim=4096):
         return [num_token, token_dim]
 
 
+def get_torch_dtype(dtype: str) -> torch.dtype:
+    dtype_map = {
+        "float32": torch.float32,
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "half": torch.float16,
+    }
+    return dtype_map.get(dtype, torch.bfloat16)
+
+
+def get_vllm_version() -> str:
+    try:
+        import vllm
+
+        return vllm.__version__ if hasattr(vllm, "__version__") else "unknown"
+    except Exception:
+        return "unknown"
+
+
 def import_trtllm():
     """Import TensorRT-LLM modules"""
     try:
@@ -485,15 +504,13 @@ def benchmark_vllm_allreduce(
     measure_power: bool = False,
     power_min_duration: float = 1.0,
 ):
-    """Benchmark vLLM custom AllReduce backend"""
+    """Benchmark vLLM custom AllReduce backend."""
     vllm_mods, local_rank = setup_vllm_distributed(world_size, rank, use_slurm)
 
     # Parse test range
     min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
 
-    # Map dtype string to torch dtype
-    dtype_map = {"float32": torch.float32, "bfloat16": torch.bfloat16}
-    torch_dtype = dtype_map.get(dtype, torch.bfloat16)
+    torch_dtype = get_torch_dtype(dtype)
 
     # Benchmark parameters
     repeat_n = 5
@@ -663,14 +680,6 @@ def benchmark_vllm_allreduce(
                 if power_stats:
                     print(f"  Power: {power_stats['power']:.2f}W (limit: {power_stats['power_limit']:.2f}W)")
 
-                # Get vLLM version
-                try:
-                    import vllm
-
-                    vllm_version = vllm.__version__ if hasattr(vllm, "__version__") else "unknown"
-                except:
-                    vllm_version = "unknown"
-
                 log_perf(
                     item_list=[
                         {
@@ -682,7 +691,7 @@ def benchmark_vllm_allreduce(
                         }
                     ],
                     framework="vLLM",
-                    version=vllm_version,
+                    version=get_vllm_version(),
                     device_name=get_device_module().get_device_name(),
                     op_name="all_reduce",
                     kernel_source=f"vLLM_custom_{mode_str}",
@@ -696,6 +705,203 @@ def benchmark_vllm_allreduce(
     # vLLM's internal NCCL communicators (pynccl / custom_all_reduce)
     # have pending async ops that ncclCommDestroy blocks on.
     # torchrun manages process lifecycle; let it handle cleanup.
+    get_device_module().synchronize()
+    os._exit(0)
+
+
+def _benchmark_vllm_allreduce_rms_shape(
+    *,
+    dtype: str,
+    torch_dtype: torch.dtype,
+    world_size: int,
+    rank: int,
+    num_tokens: int,
+    hidden_size: int,
+    max_token_num: int,
+    repeat_n: int,
+    num_warmups: int,
+    num_runs: int,
+) -> float:
+    import flashinfer.comm as flashinfer_comm
+    from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
+        call_trtllm_fused_allreduce_norm,
+    )
+
+    del dtype
+    input_tensors = [
+        torch.ones((num_tokens, hidden_size), dtype=torch_dtype, device=get_device_str())
+        for _ in range(repeat_n)
+    ]
+    residual_tensors = [
+        torch.ones((num_tokens, hidden_size), dtype=torch_dtype, device=get_device_str())
+        for _ in range(repeat_n)
+    ]
+    gamma_tensors = [torch.ones((hidden_size,), dtype=torch_dtype, device=get_device_str()) for _ in range(repeat_n)]
+
+    pattern_code = flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm
+
+    def run_once() -> None:
+        for inp, residual, gamma in zip(input_tensors, residual_tensors, gamma_tensors, strict=True):
+            call_trtllm_fused_allreduce_norm(
+                inp,
+                residual,
+                gamma,
+                1e-6,
+                world_size=world_size,
+                launch_with_pdl=True,
+                fp32_acc=True,
+                max_token_num=max_token_num,
+                pattern_code=pattern_code,
+            )
+
+    get_device_module().synchronize()
+    for _ in range(num_warmups):
+        run_once()
+    get_device_module().synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run_once()
+
+    get_device_module().synchronize()
+    for _ in range(num_warmups):
+        graph.replay()
+    get_device_module().synchronize()
+
+    start_event = get_device_module().Event(enable_timing=True)
+    end_event = get_device_module().Event(enable_timing=True)
+    start_event.record()
+    for _ in range(num_runs):
+        graph.replay()
+    end_event.record()
+    get_device_module().synchronize()
+
+    latency = start_event.elapsed_time(end_event) / num_runs / repeat_n
+    if rank == 0:
+        print(
+            "[vLLM-allreduce-rms-graph] "
+            f"Tokens: {num_tokens}, Hidden: {hidden_size}, "
+            f"Size: {num_tokens * hidden_size}, Latency: {latency:.4f} ms"
+        )
+    return latency
+
+
+def benchmark_vllm_allreduce_rms(
+    dtype: str,
+    test_range: str,
+    world_size: int,
+    rank: int,
+    use_slurm: bool,
+    perf_filename: str,
+    hidden_size: int = 4096,
+    measure_power: bool = False,
+    power_min_duration: float = 1.0,
+):
+    """Benchmark vLLM FlashInfer fused allreduce + RMSNorm.
+
+    The collector intentionally fixes hidden_size=4096 by default. The emitted
+    table still includes a hidden_size column so query logic can select the
+    nearest available hidden size if future collections add more shapes.
+    """
+    setup_vllm_distributed(world_size, rank, use_slurm)
+
+    from vllm.config.compilation import PassConfig
+
+    min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
+    torch_dtype = get_torch_dtype(dtype)
+    element_size = torch.tensor([], dtype=torch_dtype).element_size()
+    max_tensor_size = PassConfig().flashinfer_max_size(world_size)
+    if max_tensor_size is None:
+        raise RuntimeError(f"vLLM allreduce_rms is not supported for world_size={world_size}")
+    max_token_num = max_tensor_size // (hidden_size * element_size)
+    if max_token_num <= 0:
+        raise RuntimeError(
+            f"hidden_size={hidden_size} is too large for allreduce_rms max tensor size {max_tensor_size} bytes"
+        )
+
+    repeat_n = 20
+    num_warmups = 10
+    num_runs = 100
+    seen_message_sizes: set[int] = set()
+
+    size = min_size
+    while size < max_size:
+        num_tokens = max(1, (size + hidden_size - 1) // hidden_size)
+        if num_tokens > max_token_num:
+            if rank == 0:
+                print(
+                    "[vLLM-allreduce-rms-graph] "
+                    f"Stopping at requested size {size}: num_tokens={num_tokens} exceeds "
+                    f"max_token_num={max_token_num} for hidden_size={hidden_size}"
+                )
+            break
+
+        message_size = num_tokens * hidden_size
+        if message_size in seen_message_sizes:
+            size *= ratio
+            continue
+        seen_message_sizes.add(message_size)
+
+        actual_num_runs = num_runs
+        if measure_power and rank == 0:
+            # Keep power windows roughly comparable to the other allreduce path.
+            actual_num_runs = max(num_runs, int(power_min_duration / 0.001) + 1)
+            actual_num_runs = min(actual_num_runs, 1000)
+        if measure_power:
+            actual_num_runs_tensor = torch.tensor([actual_num_runs], device=get_device_str())
+            torch.distributed.broadcast(actual_num_runs_tensor, src=0)
+            actual_num_runs = int(actual_num_runs_tensor.item())
+
+        power_monitor = None
+        power_stats = None
+        if measure_power:
+            power_monitor = PowerMonitor(int(os.environ.get("LOCAL_RANK", str(rank))))
+            if not power_monitor.start_sampling():
+                power_monitor = None
+
+        latency = _benchmark_vllm_allreduce_rms_shape(
+            dtype=dtype,
+            torch_dtype=torch_dtype,
+            world_size=world_size,
+            rank=rank,
+            num_tokens=num_tokens,
+            hidden_size=hidden_size,
+            max_token_num=max_token_num,
+            repeat_n=repeat_n,
+            num_warmups=num_warmups,
+            num_runs=actual_num_runs,
+        )
+
+        if power_monitor:
+            power_stats = power_monitor.stop_sampling()
+
+        if rank == 0:
+            log_perf(
+                item_list=[
+                    {
+                        "allreduce_dtype": dtype,
+                        "num_gpus": world_size,
+                        "hidden_size": hidden_size,
+                        "message_size": message_size,
+                        "num_tokens": num_tokens,
+                        "latency": latency,
+                        "fusion_pattern": "allreduce_residual_rms",
+                        "shape_policy": f"hidden_size_{hidden_size}_approx",
+                        "max_token_num": max_token_num,
+                        "backend": "vllm_graph",
+                    }
+                ],
+                framework="vLLM",
+                version=get_vllm_version(),
+                device_name=get_device_module().get_device_name(),
+                op_name="allreduce_rms",
+                kernel_source="vLLM_allreduce_rms_graph",
+                perf_filename=perf_filename,
+                power_stats=power_stats,
+            )
+
+        size *= ratio
+
     get_device_module().synchronize()
     os._exit(0)
 
@@ -935,11 +1141,13 @@ def allreduce_benchmark(
     dtype: str,
     test_range: str = "128,1073741824,2",
     use_slurm: bool = False,
-    perf_filename: str = "custom_allreduce_perf.txt",
+    perf_filename: str | None = None,
     world_size: Optional[int] = None,
     rank: Optional[int] = None,
     measure_power: bool = False,
     power_min_duration: float = 1.0,
+    op: str = "allreduce",
+    rms_hidden_size: int = 4096,
 ):
     """
     CUDA Graph based AllReduce benchmark method supporting multiple backends
@@ -955,8 +1163,13 @@ def allreduce_benchmark(
         measure_power: Enable GPU power monitoring
         power_min_duration: Minimum duration for power measurement
     """
+    if perf_filename is None:
+        perf_filename = "allreduce_rms_perf.txt" if op == "allreduce_rms" else "custom_allreduce_perf.txt"
+
     # Setup distributed environment based on backend
     if backend == "trtllm":
+        if op != "allreduce":
+            raise ValueError(f"{op} collection is only supported for backend=vllm")
         # TensorRT-LLM uses MPI by default
         tllm_mods = import_trtllm()
         tllm = tllm_mods["tllm"]
@@ -995,11 +1208,28 @@ def allreduce_benchmark(
         if world_size == 1:
             raise RuntimeError("Benchmark must run with world_size > 1")
 
-        benchmark_vllm_allreduce(
-            dtype, test_range, world_size, rank, use_slurm, perf_filename, measure_power, power_min_duration
-        )
+        if op == "allreduce":
+            benchmark_vllm_allreduce(
+                dtype, test_range, world_size, rank, use_slurm, perf_filename, measure_power, power_min_duration
+            )
+        elif op == "allreduce_rms":
+            benchmark_vllm_allreduce_rms(
+                dtype,
+                test_range,
+                world_size,
+                rank,
+                use_slurm,
+                perf_filename,
+                rms_hidden_size,
+                measure_power,
+                power_min_duration,
+            )
+        else:
+            raise ValueError(f"Unknown op for vLLM backend: {op}")
 
     elif backend == "sglang":
+        if op != "allreduce":
+            raise ValueError(f"{op} collection is only supported for backend=vllm")
         if use_slurm:
             world_size = int(os.environ["SLURM_NTASKS"])
             rank = int(os.environ.get("SLURM_PROCID", os.environ.get("RANK", "0")))
@@ -1042,8 +1272,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--perf-filename",
         "-f",
-        default="custom_allreduce_perf.txt",
-        help="Output performance file name",
+        default=None,
+        help="Output performance file name. Defaults to custom_allreduce_perf.txt or allreduce_rms_perf.txt.",
+    )
+    parser.add_argument(
+        "--op",
+        choices=["allreduce", "allreduce_rms"],
+        default="allreduce",
+        help="Operation to collect. allreduce_rms is currently vLLM-only.",
+    )
+    parser.add_argument(
+        "--rms-hidden-size",
+        type=int,
+        default=4096,
+        help="Hidden size used for vLLM allreduce_rms collection. Kept fixed at 4096 by default.",
     )
     # Additional arguments for vLLM/SGLang when not using MPI/SLURM
     parser.add_argument("--world-size", default=8, type=int, help="World size for distributed setup (vLLM/SGLang)")
@@ -1073,4 +1315,6 @@ if __name__ == "__main__":
         args.rank,
         args.measure_power,
         args.power_test_duration_sec,
+        args.op,
+        args.rms_hidden_size,
     )
