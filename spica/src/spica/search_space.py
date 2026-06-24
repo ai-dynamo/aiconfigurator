@@ -131,7 +131,9 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
     ss = config.search_space
     branches: list[BranchSpace] = []
     skipped: list[str] = []  # modes dropped because no backend was viable
-    for deployment_mode in ss.deployment_mode:
+    # Dedupe modes (preserving order): a repeated deployment_mode would yield duplicate
+    # branches and hence colliding Vizier study_ids (one study per mode).
+    for deployment_mode in dict.fromkeys(ss.deployment_mode):
         # Pinned configs (if any) are parsed once, then validated per backend; otherwise
         # each backend contributes its full enumerated menu.
         pinned = (

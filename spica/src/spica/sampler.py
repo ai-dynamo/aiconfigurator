@@ -87,6 +87,12 @@ class VizierBranchSampler:
         root = problem.search_space.root
         root.add_categorical_param(_PARALLEL_PARAM, [str(i) for i in range(len(branch.parallel_configs))])
         for knob, choices in branch.knob_choices.items():
+            if not any(isinstance(c, dict) for c in choices):
+                # defensively dedupe hashable choices (order-preserving); duplicates
+                # would otherwise crash Vizier study construction with an opaque error.
+                # Composite (dict-bearing) knobs are left alone — dicts are unhashable
+                # and their categorical decode is index-based, not value-based.
+                choices = list(dict.fromkeys(choices))
             if len(choices) <= 1:
                 if choices:
                     self._constants[knob] = choices[0]  # fixed -> inject, not a param

@@ -48,9 +48,11 @@ class _Evaluator(Protocol):
 
 
 # Result of evaluating one suggestion (no Vizier here): (candidate|None, score|None,
-# outcome, reason). outcome in {"feasible","infeasible","failed"}; reason carries the
-# replay error for "failed" (-> observe_infeasible). "unsupported" is decided on the
-# main process before evaluation and never reaches the worker.
+# outcome, reason). outcome in {"feasible","infeasible","failed"}. Both "failed" (replay
+# error) and "infeasible" (over gpu_budget) carry a reason and no score -> the loop tells
+# the sampler observe_infeasible for them (a gated trial is never fed back as a high
+# score). "unsupported" is decided on the main process before evaluation and never
+# reaches the worker.
 _EvalResult = tuple[Candidate | None, float | None, str, str]
 
 
@@ -85,7 +87,15 @@ def _evaluate_one(
     score = score_report(report, goal.target)
     if is_feasible(int(sample["used_gpus"]), config.search_space.gpu_budget):
         return make_candidate(sample, report, goal.target), score, "feasible", ""
-    return None, score, "infeasible", ""
+    # Over gpu_budget: report as infeasible to the optimizer (observe_infeasible, not
+    # observe(score)) so a high score doesn't steer the sampler into the infeasible
+    # region. The score is dropped — the trial is gated, not ranked.
+    return (
+        None,
+        None,
+        "infeasible",
+        f"over gpu_budget: used_gpus={int(sample['used_gpus'])} > gpu_budget={config.search_space.gpu_budget}",
+    )
 
 
 # Worker-process plumbing: the shared read-only state (config/goal/load_predictor/
@@ -150,7 +160,9 @@ def run_smart_search(
             update={"search_space": config.search_space.model_copy(update={"planner_scaling_policy": kept})}
         )
 
-    branches: list[BranchSpace] = enumerate_branches(config)
+    # Thread the configured context_length into KV feasibility so parallel configs that
+    # can't fit the requested sequence length are dropped up front (None -> model max).
+    branches: list[BranchSpace] = enumerate_branches(config, max_seq_len=config.search_space.context_length)
     load_predictor = sweep_load_predictor(config)
     if evaluator is None:
         evaluator = ReplayEvaluator(config.workload, goal)
@@ -200,8 +212,10 @@ def run_smart_search(
                     ),
                 )
         else:
-            futures = {pool.submit(_worker_eval, s.selection, s.parallel_config): s for s in todo}
             try:
+                # submit() can also raise BrokenProcessPool (a worker died before/while
+                # tasks were queued), so it must be inside the friendly-error wrapper too.
+                futures = {pool.submit(_worker_eval, s.selection, s.parallel_config): s for s in todo}
                 for fut in as_completed(futures):
                     yield futures[fut], fut.result()
             except BrokenProcessPool as exc:
@@ -241,7 +255,10 @@ def run_smart_search(
                         )
                         _record("unsupported", None)
                 for s, (candidate, score, outcome, reason) in _eval_batch(pool, todo):
-                    if outcome == "failed":  # tell (main, serial)
+                    # "failed" (replay error) and "infeasible" (over gpu_budget) are both
+                    # gated: tell the sampler observe_infeasible so it learns to avoid that
+                    # region instead of being steered toward it by a high objective score.
+                    if outcome in ("failed", "infeasible"):  # tell (main, serial)
                         sampler.observe_infeasible(s, reason)
                     else:
                         sampler.observe(s, score)

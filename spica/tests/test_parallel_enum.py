@@ -32,10 +32,47 @@ def test_moe_scans_tp_tep_dep():
         assert s.gpus_per_worker == 4
 
 
+def test_mla_excludes_pure_tp_dense_keeps_tp():
+    # MLA+MoE (allow_moe_pure_tp=False): pure expert-TP (4,1,4,1) is dropped,
+    # leaving only TEP / DEP.
+    mla = enumerate_worker_shapes(is_moe=True, backend="vllm", gpus_per_worker=4, allow_moe_pure_tp=False)
+    assert _tuples(mla) == {(4, 1, 1, 4), (1, 4, 1, 4)}
+    assert {s.strategy for s in mla} == {"tep", "dep"}
+    # GQA+MoE (default allow_moe_pure_tp=True): pure expert-TP is kept.
+    gqa = enumerate_worker_shapes(is_moe=True, backend="vllm", gpus_per_worker=4, allow_moe_pure_tp=True)
+    assert (4, 1, 4, 1) in _tuples(gqa)
+    # Dense models do not go through the MoE pure-pattern gate: plain TP regardless.
+    dense = enumerate_worker_shapes(is_moe=False, backend="vllm", gpus_per_worker=4, allow_moe_pure_tp=False)
+    assert _tuples(dense) == {(4, 1, 1, 1)}
+
+
+def test_allow_moe_pure_tp_threads_through_configs():
+    # The carve-out propagates through enumerate_parallel_configs / enumerate_disagg_configs.
+    agg = enumerate_parallel_configs(is_moe=True, backend="vllm", gpu_budget=8, allow_moe_pure_tp=False)
+    assert agg
+    assert all(c.shape.moe_tp == 1 for c in agg)  # no pure expert-TP
+    disagg = enumerate_disagg_configs(is_moe=True, backend="vllm", gpu_budget=8, allow_moe_pure_tp=False)
+    assert disagg
+    assert all(c.prefill.shape.moe_tp == 1 and c.decode.shape.moe_tp == 1 for c in disagg)
+    # default keeps pure expert-TP available
+    agg_default = enumerate_parallel_configs(is_moe=True, backend="trtllm", gpu_budget=8)
+    assert any(c.shape.moe_tp > 1 for c in agg_default)
+
+
 def test_sglang_wideep_forbids_pure_tp():
     # The EP-only backend filter still drops pure expert-TP (moe_tp>1), leaving TEP/DEP.
     shapes = enumerate_worker_shapes(is_moe=True, backend="sglang", gpus_per_worker=4, enable_wideep=True)
     assert _tuples(shapes) == {(4, 1, 1, 4), (1, 4, 1, 4)}
+
+
+def test_sglang_moe_backend_filters():
+    # moe_backend in {deepep_moe, megamoe} is EP-only -> pure expert-TP dropped (same as wideep).
+    for moe_backend in ("deepep_moe", "megamoe"):
+        shapes = enumerate_worker_shapes(is_moe=True, backend="sglang", gpus_per_worker=4, moe_backend=moe_backend)
+        assert _tuples(shapes) == {(4, 1, 1, 4), (1, 4, 1, 4)}, moe_backend
+    # A non-EP-only moe_backend leaves pure expert-TP available.
+    shapes = enumerate_worker_shapes(is_moe=True, backend="sglang", gpus_per_worker=4, moe_backend="cutlass_moe")
+    assert (4, 1, 4, 1) in _tuples(shapes)
 
 
 def test_moe_has_no_shape_below_two_gpus():

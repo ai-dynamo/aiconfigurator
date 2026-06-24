@@ -37,6 +37,12 @@ def test_resolve_dense_qwen():
     assert mh.max_context == 40960  # Qwen3-32B max context
 
 
+def test_unknown_hardware_sku_raises():
+    # A typo/unknown SKU must fail loudly rather than silently using default VRAM/GPUs.
+    with pytest.raises(ValueError, match="unknown hardware_sku"):
+        resolve_model_hardware(QWEN, "h200_typo", backend="trtllm")
+
+
 def test_max_seq_len_defaults_to_model_context(monkeypatch):
     # Omitting max_seq_len uses the model's max context length.
     seen = {}

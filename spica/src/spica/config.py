@@ -64,9 +64,9 @@ class SLATarget(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    ttft_ms: float | None = None
-    itl_ms: float | None = None
-    e2e_ms: float | None = None
+    ttft_ms: float | None = Field(default=None, gt=0)
+    itl_ms: float | None = Field(default=None, gt=0)
+    e2e_ms: float | None = Field(default=None, gt=0)
 
 
 class OptimizationGoal(BaseModel):
@@ -113,7 +113,7 @@ class Workload(BaseModel):
     # request_rate (open-loop QPS) or concurrency (closed-loop in-flight cap).
     isl: int | None = None
     osl: int | None = None
-    concurrency: float | None = None  # set concurrency OR request_rate
+    concurrency: int | None = None  # set concurrency OR request_rate
     request_rate: float | None = None
     request_count: int | None = None
     shared_prefix_ratio: float = 0.0  # cache-locality / prefix sharing
@@ -145,7 +145,7 @@ class Workload(BaseModel):
         if self.trace_path is not None:
             return self.replay_concurrency
         if self.concurrency is not None:
-            return int(self.concurrency)
+            return self.concurrency
         return None
 
     @property
@@ -409,6 +409,17 @@ class SearchSpace(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _validate_gpu_budget(self) -> "SearchSpace":
+        """When ``min_gpu_budget`` is set it must be a positive value not exceeding
+        ``gpu_budget`` (``min_endpoint`` is a declared-but-unused field; left as-is)."""
+        if self.min_gpu_budget is not None and not (0 < self.min_gpu_budget <= self.gpu_budget):
+            raise ValueError(
+                f"min_gpu_budget must satisfy 0 < min_gpu_budget <= gpu_budget "
+                f"(got min_gpu_budget={self.min_gpu_budget}, gpu_budget={self.gpu_budget})"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_parallel_configs(self) -> "SearchSpace":
         """A pinned ``parallel_configs`` (non-empty) must match a single deployment
         mode and have the right shape: an agg entry is a flat shape dict (needs
@@ -439,9 +450,9 @@ class SweepConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_rounds: int = 20  # total Vizier suggestion/evaluation rounds
-    parallel_evals: int = 16  # default candidates-per-round fan-out (v1 evaluates sequentially)
-    candidates_per_round: int | None = None  # suggestions per round; defaults to parallel_evals
+    max_rounds: int = Field(default=20, ge=1)  # total Vizier suggestion/evaluation rounds
+    parallel_evals: int = Field(default=16, ge=1)  # default candidates-per-round fan-out (v1 evaluates sequentially)
+    candidates_per_round: int | None = Field(default=None, ge=1)  # suggestions per round; defaults to parallel_evals
     random_seed: int = 1
 
 

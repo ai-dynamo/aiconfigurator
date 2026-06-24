@@ -7,7 +7,9 @@ The per-worker shape enumeration mirrors
 ``aiconfigurator.sdk.utils.enumerate_parallel_config`` + ``filter_real_silicon_configs``
 (real-silicon profile): ``pp`` is pinned to 1; the MoE width constraint
 ``dp*tp == moe_tp*moe_ep`` holds; for MoE only the pure TEP / DEP / TP patterns are
-kept; dense models use plain TP. The backend-specific MoE filters are mirrored too.
+kept (pure expert-TP gated by ``allow_moe_pure_tp`` — excluded for MLA+MoE, matching
+``filter_real_silicon_configs(allow_moe_pure_tp=False)``); dense models use plain TP.
+The backend-specific MoE filters are mirrored too.
 
 ``enumerate_parallel_config`` stops at *one worker's* shape (GPUs/worker = tp*pp*dp).
 On top of that, this module iterates the replica counts ``r`` such that
@@ -107,13 +109,17 @@ def enumerate_worker_shapes(
     gpus_per_worker: int,
     enable_wideep: bool = False,
     moe_backend: str | None = None,
+    allow_moe_pure_tp: bool = True,
 ) -> list[ParallelShape]:
     """Legal per-worker shapes at exactly ``gpus_per_worker`` GPUs (``pp`` = 1).
 
     Mirrors ``enumerate_parallel_config`` (width + backend filters) followed by
-    ``filter_real_silicon_configs``. Every MoE model scans TP + TEP + DEP (no
-    MLA carve-out for pure expert-TP); dense models scan plain TP. Backend
-    EP-only filters (sglang wideep) still apply.
+    ``filter_real_silicon_configs``. For MoE, TEP / DEP are always scanned; pure
+    expert-TP is kept only when ``allow_moe_pure_tp`` (GQA+MoE models). MLA+MoE
+    models pass ``allow_moe_pure_tp=False`` to exclude pure expert-TP, matching
+    AIC's ``filter_real_silicon_configs(allow_moe_pure_tp=False)``. Dense models
+    scan plain TP and are unaffected. Backend EP-only filters (sglang wideep)
+    still apply.
     """
     g = gpus_per_worker
     if not is_moe:
@@ -145,7 +151,8 @@ def enumerate_worker_shapes(
                     # real-silicon pure-pattern filter
                     is_tep = tp > 1 and dp == 1 and moe_tp == 1 and moe_ep > 1
                     is_dep = tp == 1 and dp > 1 and moe_tp == 1 and moe_ep > 1
-                    is_pure_tp = tp > 1 and dp == 1 and moe_tp > 1 and moe_ep == 1
+                    # pure expert-TP only for GQA+MoE; MLA+MoE excludes it.
+                    is_pure_tp = allow_moe_pure_tp and tp > 1 and dp == 1 and moe_tp > 1 and moe_ep == 1
                     if not (is_tep or is_dep or is_pure_tp):
                         continue
                     shapes.append(ParallelShape(tp=tp, dp=dp, moe_tp=moe_tp, moe_ep=moe_ep))
@@ -162,6 +169,7 @@ def enumerate_parallel_configs(
     gpus_per_worker_candidates: tuple[int, ...] = _DEFAULT_GPUS_PER_WORKER,
     enable_wideep: bool = False,
     moe_backend: str | None = None,
+    allow_moe_pure_tp: bool = True,
 ) -> list[ReplicaParallelConfig]:
     """Enumerate ``(worker shape, replica count)`` configs that fit ``gpu_budget``.
 
@@ -188,6 +196,7 @@ def enumerate_parallel_configs(
             gpus_per_worker=g,
             enable_wideep=enable_wideep,
             moe_backend=moe_backend,
+            allow_moe_pure_tp=allow_moe_pure_tp,
         )
         if not shapes:
             continue
@@ -211,6 +220,7 @@ def enumerate_disagg_configs(
     gpus_per_worker_candidates: tuple[int, ...] = _DEFAULT_GPUS_PER_WORKER,
     enable_wideep: bool = False,
     moe_backend: str | None = None,
+    allow_moe_pure_tp: bool = True,
 ) -> list[DisaggParallelConfig]:
     """Enumerate disagg ``(prefill, decode)`` configs that share the GPU budget.
 
@@ -233,6 +243,7 @@ def enumerate_disagg_configs(
         gpus_per_worker_candidates=gpus_per_worker_candidates,
         enable_wideep=enable_wideep,
         moe_backend=moe_backend,
+        allow_moe_pure_tp=allow_moe_pure_tp,
     )
     if not per_role:
         return []

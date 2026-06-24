@@ -134,3 +134,36 @@ def test_all_modes_infeasible_raises(monkeypatch):
     cfg = _config(deployment_mode=["agg", "disagg"], backend=["trtllm"], gpu_budget=1)
     with pytest.raises(NoViableParallelConfig, match="no deployment_mode"):
         enumerate_branches(cfg)
+
+
+def test_backend_without_perf_db_is_dropped_from_knob(monkeypatch):
+    # Multi-backend search: vllm has no perf DB for this mode (raises NoPerfDatabase),
+    # trtllm is viable. vllm must be dropped from the backend knob and the parallel
+    # config tagged only with trtllm.
+    def fake_pcf(model, hw, *, gpu_budget, deployment_mode, backend, min_gpu_budget=None, max_seq_len=None):
+        if backend == "vllm":
+            raise NoPerfDatabase("no vllm perf DB for this mode")
+        return [_AGG_CFG]
+
+    monkeypatch.setattr("spica.search_space.parallel_configs_for", fake_pcf)
+    cfg = _config(deployment_mode=["agg"], backend=["vllm", "trtllm"], gpu_budget=8)
+    (branch,) = enumerate_branches(cfg)
+    assert branch.knob_choices["backend"] == ["trtllm"]  # vllm dropped (no perf DB)
+    assert branch.supported_backends[_AGG_CFG] == frozenset({"trtllm"})  # only trtllm supports it
+
+
+def test_partial_illegal_pinned_config_raises(monkeypatch):
+    # Two pinned configs, only one of which any backend can run -> the pin is wrong, so
+    # enumerate_branches fails fast (NoViableParallelConfig). _AGG_CFG is the tp=1 shape.
+    def fake_pcf(model, hw, *, gpu_budget, deployment_mode, backend, min_gpu_budget=None, max_seq_len=None):
+        return [_AGG_CFG]  # only the tp=1 config is ever legal; the pinned tp=2 is not
+
+    monkeypatch.setattr("spica.search_space.parallel_configs_for", fake_pcf)
+    cfg = _config(
+        deployment_mode=["agg"],
+        backend=["trtllm"],
+        gpu_budget=8,
+        parallel_configs=[{"tp": 1, "replicas": 1}, {"tp": 2, "replicas": 1}],
+    )
+    with pytest.raises(NoViableParallelConfig, match="legal/KV-feasible for no configured backend"):
+        enumerate_branches(cfg)

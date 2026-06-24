@@ -83,7 +83,7 @@ def _branch(parallel_config):
 
 
 def _stub(monkeypatch, branch):
-    monkeypatch.setattr(search_mod, "enumerate_branches", lambda config: [branch])
+    monkeypatch.setattr(search_mod, "enumerate_branches", lambda config, *, max_seq_len=None: [branch])
     monkeypatch.setattr(search_mod, "sweep_load_predictor", lambda config: LoadPredictorResult(reason="static"))
     monkeypatch.setattr(search_mod, "resolve_backend_version", lambda hw, be: "1.3.0rc10")
 
@@ -109,7 +109,13 @@ def test_over_budget_candidates_dropped(monkeypatch):
 
     cands = run_smart_search(_config(gpu_budget=32), evaluator=_FakeEvaluator(), sampler_factory=factory)
     assert cands == []  # 64 GPUs > 32 budget -> all infeasible, dropped
-    assert len(sampler_seen["s"].scored) == 3  # still scored/observed so the optimizer learns
+    # Over-budget trials are told to the optimizer as INFEASIBLE (observe_infeasible),
+    # never fed back as a high objective score (which would steer it into the infeasible
+    # region). _FakeSampler records observe_infeasible as ("infeasible", reason) tuples.
+    scored = sampler_seen["s"].scored
+    assert len(scored) == 3  # still reported so the optimizer learns to avoid the region
+    assert all(isinstance(x, tuple) and x[0] == "infeasible" for x in scored)
+    assert all("over gpu_budget" in x[1] for x in scored)  # reason carries the budget breach
 
 
 def test_eval_failure_marked_infeasible(monkeypatch):
@@ -129,6 +135,36 @@ def test_eval_failure_marked_infeasible(monkeypatch):
     cands = run_smart_search(_config(), evaluator=_Boom(), sampler_factory=factory)
     assert cands == []
     assert all(isinstance(x, tuple) and x[0] == "infeasible" for x in sampler_seen["s"].scored)
+
+
+def test_unsupported_backend_config_pair_marked_unsupported(monkeypatch):
+    # A (backend, parallel_config) pair the backend can't run is split off on the main
+    # process: it's told observe_infeasible ("does not support") and never evaluated.
+    pc = ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2)
+    branch = BranchSpace(
+        deployment_mode="agg",
+        parallel_configs=(pc,),
+        supported_backends={pc: frozenset({"vllm"})},  # NOT trtllm (what _FakeSampler suggests)
+        knob_choices={"backend": ["vllm", "trtllm"]},
+    )
+    _stub(monkeypatch, branch)
+    sampler_seen = {}
+
+    class _NeverCalled:
+        def evaluate(self, plan):
+            raise AssertionError("evaluator must not run for an unsupported (backend, config) pair")
+
+    def factory(b, study_id):
+        s = _FakeSampler(b, study_id)
+        sampler_seen["s"] = s
+        return s
+
+    cands = run_smart_search(_config(), evaluator=_NeverCalled(), sampler_factory=factory)
+    assert cands == []  # nothing evaluated -> no feasible candidate
+    scored = sampler_seen["s"].scored
+    assert len(scored) == 3  # all three suggestions told infeasible (none evaluated)
+    assert all(isinstance(x, tuple) and x[0] == "infeasible" for x in scored)
+    assert all("does not support" in x[1] for x in scored)
 
 
 def test_study_id_unique_per_run(monkeypatch):

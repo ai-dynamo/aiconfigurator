@@ -180,11 +180,16 @@ def test_load_predictor_winner_can_be_a_custom_dict():
 
 def test_pinned_scalars_folded_in():
     s = unroll_sample(
-        search_space=_space(context_length=4096, aic_nextn=2), selection=_agg_selection(), parallel_config=AGG_CFG
+        search_space=_space(context_length=4096, startup_time=300.0, aic_nextn=2),
+        selection=_agg_selection(),
+        parallel_config=AGG_CFG,
     )
     assert s["model_name"] == "deepseek-ai/DeepSeek-V3" and s["hardware_sku"] == "gb200"
-    assert s["context_length"] == 4096 and s["aic_nextn"] == 2
+    assert s["aic_nextn"] == 2
     assert s["num_g2_blocks"] == 0  # kv-manager pinned
     assert s["agg_block_size"] == 64 and s["agg_gpu_memory_utilization"] == 0.9
     # search-only constraints are not deployment knobs
     assert "gpu_budget" not in s and "min_gpu_budget" not in s
+    # context_length / startup_time bound the search but are not folded into the
+    # deployment sample (no downstream stage reads them off the unrolled dict)
+    assert "context_length" not in s and "startup_time" not in s

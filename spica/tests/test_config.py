@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from spica import OptimizationTarget, SmartSearchConfig
-from spica.config import OptimizationGoal, SLATarget
+from spica.config import OptimizationGoal, SearchSpace, SLATarget, SweepConfig, Workload
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "smart_sweep.yaml"
 
@@ -207,3 +207,74 @@ def test_parallel_configs_shape_matches_mode():
         ),
         workload={"isl": 1, "osl": 1, "concurrency": 1, "request_count": 1},
     )
+
+
+# --- synthetic concurrency is an integer in-flight cap ---
+
+
+def test_fractional_concurrency_rejected():
+    # a float concurrency would degenerate the closed-loop cap (e.g. 0.5 -> 0)
+    with pytest.raises(ValidationError):
+        Workload(isl=1, osl=1, concurrency=1.9, request_count=1)
+
+
+def test_concurrency_is_integer_in_flight_cap():
+    wl = Workload(isl=4000, osl=1000, concurrency=2, request_count=1000)
+    assert wl.in_flight_cap == 2
+    assert isinstance(wl.in_flight_cap, int)
+
+
+def test_non_positive_concurrency_rejected():
+    with pytest.raises(ValidationError):
+        Workload(isl=1, osl=1, concurrency=0, request_count=1)
+
+
+# --- SLA targets must be strictly positive ---
+
+
+@pytest.mark.parametrize("kwargs", [{"ttft_ms": 0}, {"itl_ms": -1}, {"e2e_ms": -5}])
+def test_non_positive_sla_rejected(kwargs):
+    with pytest.raises(ValidationError):
+        SLATarget(**kwargs)
+
+
+def test_positive_sla_accepted():
+    SLATarget(ttft_ms=2000, itl_ms=30)
+    SLATarget(e2e_ms=5000)
+
+
+# --- sweep run-control must be positive ---
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_rounds": 0},
+        {"max_rounds": -1},
+        {"parallel_evals": 0},
+        {"parallel_evals": -3},
+        {"candidates_per_round": 0},
+        {"candidates_per_round": -2},
+    ],
+)
+def test_sweep_non_positive_rejected(kwargs):
+    with pytest.raises(ValidationError):
+        SweepConfig(**kwargs)
+
+
+# --- min_gpu_budget bounds ---
+
+
+def test_min_gpu_budget_exceeding_budget_rejected():
+    with pytest.raises(ValidationError, match="min_gpu_budget"):
+        SearchSpace(model_name="m", hardware_sku="h200_sxm", gpu_budget=16, min_gpu_budget=32)
+
+
+def test_non_positive_min_gpu_budget_rejected():
+    with pytest.raises(ValidationError, match="min_gpu_budget"):
+        SearchSpace(model_name="m", hardware_sku="h200_sxm", gpu_budget=16, min_gpu_budget=0)
+
+
+def test_min_gpu_budget_within_budget_accepted():
+    ss = SearchSpace(model_name="m", hardware_sku="h200_sxm", gpu_budget=32, min_gpu_budget=8)
+    assert ss.min_gpu_budget == 8

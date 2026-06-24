@@ -42,10 +42,11 @@ The load-predictor sweep reuses the dynamo planner predictors (Rust runtime +
 prophet/pmdarima/filterpy), pinned to a dynamo commit. Installing that extra
 needs `GIT_LFS_SKIP_SMUDGE=1` (the dynamo repo carries LFS media irrelevant to
 the build) and a Rust toolchain (`ai-dynamo-runtime` builds from source until
-1.3.0 ships a wheel):
+1.3.0 ships a wheel). The `[search]` extra adds the Vizier optimizer that drives
+the main `run_smart_search` sweep:
 
 ```bash
-GIT_LFS_SKIP_SMUDGE=1 uv pip install --python .venv/bin/python -e ".[dev,dynamo]"
+GIT_LFS_SKIP_SMUDGE=1 uv pip install --python .venv/bin/python -e ".[dev,dynamo,search]"
 ```
 
 ### Real replay (`aic-forward-pass`)

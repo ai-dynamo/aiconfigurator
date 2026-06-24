@@ -6,6 +6,8 @@
 Feeds real ``unroll_sample`` output into ``build_deployment`` so the field names
 the two modules agree on are exercised."""
 
+import pytest
+
 from spica.config import SearchSpace, SLATarget
 from spica.deploy import build_deployment
 from spica.load_predictor_sweep import LoadPredictorResult
@@ -136,3 +138,66 @@ def test_dense_shape_omits_moe_sizes():
     ea = build_deployment(sample, backend_version=BV).agg_engine_args
     assert ea["aic_tp_size"] == 2
     assert "aic_moe_tp_size" not in ea and "aic_moe_ep_size" not in ea  # dense
+
+
+def test_engine_type_tracks_swept_backend():
+    # engine_type must mirror the swept backend so the mocker scheduler isn't always vLLM.
+    for backend in ("vllm", "sglang", "trtllm"):
+        sample = unroll_sample(search_space=_space(), selection=_agg_sel(backend=backend), parallel_config=AGG_MOE)
+        ea = build_deployment(sample, backend_version=BV).agg_engine_args
+        assert ea["engine_type"] == backend and ea["aic_backend"] == backend
+
+    # disagg: both roles carry the swept backend
+    cfg = DisaggParallelConfig(
+        prefill=ReplicaParallelConfig(ParallelShape(tp=8, dp=1, moe_tp=1, moe_ep=8), 1),
+        decode=ReplicaParallelConfig(ParallelShape(tp=1, dp=8, moe_tp=1, moe_ep=8), 2),
+    )
+    sel = _agg_sel(
+        deployment_mode="disagg",
+        backend="sglang",
+        prefill_max_num_batched_tokens=32768,
+        prefill_max_num_seqs=4,
+        decode_max_num_batched_tokens=8192,
+        decode_max_num_seqs=1024,
+    )
+    sample = unroll_sample(search_space=_space(), selection=sel, parallel_config=cfg)
+    plan = build_deployment(sample, backend_version=BV)
+    assert plan.prefill_engine_args["engine_type"] == "sglang"
+    assert plan.decode_engine_args["engine_type"] == "sglang"
+
+
+def test_offload_knobs_thread_into_payload():
+    # KV-manager offload knobs present in the sample must reach the engine-args payload.
+    space = _space(
+        num_g2_blocks=1024,
+        offload_batch_size=64,
+        bandwidth_g1_to_g2_gbps=200.0,
+        bandwidth_g2_to_g1_gbps=180.0,
+    )
+    sample = unroll_sample(search_space=space, selection=_agg_sel(), parallel_config=AGG_MOE)
+    ea = build_deployment(sample, backend_version=BV).agg_engine_args
+    assert ea["num_g2_blocks"] == 1024
+    assert ea["offload_batch_size"] == 64
+    assert ea["bandwidth_g1_to_g2_gbps"] == 200.0
+    assert ea["bandwidth_g2_to_g1_gbps"] == 180.0
+    # None-valued offload knobs are dropped (host offload disabled by default).
+    default = build_deployment(
+        unroll_sample(search_space=_space(), selection=_agg_sel(), parallel_config=AGG_MOE), backend_version=BV
+    ).agg_engine_args
+    assert "offload_batch_size" not in default  # unset -> not emitted
+
+
+def test_e2e_only_sla_with_sla_target_raises():
+    # An e2e-only SLA cannot seed the planner's ttft/itl scaling target; reject up front.
+    sample = unroll_sample(
+        search_space=_space(),
+        selection=_agg_sel(planner_scaling_policy="throughput_180_5"),
+        parallel_config=AGG_MOE,
+    )
+    with pytest.raises(ValueError, match="ttft_ms"):
+        build_deployment(sample, backend_version=BV, optimization_target="sla", planner_sla=SLATarget(e2e_ms=5000.0))
+    # ttft+itl SLA is accepted for the same sla target.
+    plan = build_deployment(
+        sample, backend_version=BV, optimization_target="sla", planner_sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0)
+    )
+    assert plan.planner_config["ttft_ms"] == 2000.0 and plan.planner_config["itl_ms"] == 30.0

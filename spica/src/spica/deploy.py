@@ -13,8 +13,10 @@ config == static/"disabled"):
 - ``enable_*_scaling`` both off  -> ``planner_config = None`` -> the plain
   ``run_trace_replay`` (static worker counts; emits gpu_hours, not goodput).
 - otherwise -> a ``PlannerConfig`` -> the planner-bridge replay (scaling; goodput
-  + gpu_hours). ``optimization_target`` is ``"sla"`` when throughput scaling is on
-  (the only target that drives predictive throughput scaling), else ``"load"``.
+  + gpu_hours). ``optimization_target`` is the planner's scaling objective derived
+  from the sweep goal (see ``OptimizationTarget.planner_optimization_target``):
+  ``goodput``/``goodput_per_gpu_hour`` -> ``"sla"``, ``throughput`` ->
+  ``"throughput"``, ``e2e_latency`` -> ``"latency"``.
 
 Pure dict-building (no dynamo import), so it is unit-testable on its own.
 """
@@ -82,6 +84,9 @@ def _engine_args_payload(sample: dict, role: str, *, backend_version: str) -> di
     moe_ep = int(sample[f"{p}moe_ep"])
     payload: dict[str, Any] = {
         "worker_type": "aggregated" if role == "agg" else role,
+        # the simulated scheduler backend; mirrors the swept aic_backend so the
+        # mocker picks the right engine (vllm/sglang/trtllm), not its vLLM default.
+        "engine_type": sample["backend"],
         "aic_backend": sample["backend"],
         "aic_backend_version": backend_version,
         "aic_system": sample["hardware_sku"],
@@ -100,8 +105,19 @@ def _engine_args_payload(sample: dict, role: str, *, backend_version: str) -> di
     if moe_tp * moe_ep > 1:
         payload["aic_moe_tp_size"] = moe_tp
         payload["aic_moe_ep_size"] = moe_ep
+    # TODO(spica): fuller speculative-decoding (nextn / MTP) support is future work — expose
+    #   nextn + accept-rates as searchable knobs and validate them; the related low-priority
+    #   test/polish items from the PR review are deferred until then.
     if sample.get("aic_nextn") is not None:
         payload["aic_nextn"] = int(sample["aic_nextn"])
+    # KV-manager multi-tier offload knobs (host/disk G2..G4). The sample carries the
+    # pinned subset that is set; copy every num_g*/bandwidth_* plus offload_batch_size
+    # through to the mocker so the simulated offload matches the swept policy.
+    for key, value in sample.items():
+        if value is None:
+            continue
+        if key == "offload_batch_size" or key.startswith("num_g") or key.startswith("bandwidth_g"):
+            payload[key] = value
     return payload
 
 
@@ -121,6 +137,16 @@ def _planner_config_payload(
     enable_load = bool(sample.get("enable_load_scaling", False))
     if not (enable_throughput or enable_load):
         return None  # "disabled" -> static plain replay
+
+    # SLA-based scaling drives the planner off ttft+itl; an e2e-only SLA can't seed
+    # them (the planner has no e2e scaling target), so reject it up front rather than
+    # silently scaling with no SLA. (The goodput SLA the evaluator uses is separate.)
+    if optimization_target == "sla" and planner_sla is not None:
+        if planner_sla.ttft_ms is None or planner_sla.itl_ms is None:
+            raise ValueError(
+                "SLA-based planner scaling (optimization_target='sla') requires both ttft_ms "
+                "and itl_ms; an e2e-only SLA cannot drive the planner's scaling target"
+            )
 
     payload: dict[str, Any] = {"mode": sample["deployment_mode"], "optimization_target": optimization_target}
     # Spica consumes the trace_report directly and sweeps many candidates, so turn

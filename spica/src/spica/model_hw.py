@@ -19,12 +19,14 @@ replaces the old BF16 min-GPU weight floor entirely.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from aiconfigurator.generator.naive import (
     _estimate_model_weight_bytes,
     _get_system_config,
 )
+from aiconfigurator.sdk import perf_database
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
@@ -47,6 +49,25 @@ _GQA_MOE_ARCHITECTURES = frozenset({"Qwen3MoeForCausalLM"})
 
 class NoViableParallelConfig(ValueError):
     """No parallel config can hold the model+sequence within the GPU budget."""
+
+
+def _validate_hardware_sku(hardware_sku: str) -> None:
+    """Raise if ``hardware_sku`` has no system YAML on AIC's systems path.
+
+    ``_get_system_config`` silently falls back to default VRAM / GPUs-per-node
+    when the SKU file is missing, so an unknown/typo SKU would otherwise resolve
+    to a wrong-but-plausible spec. Fail loudly instead.
+    """
+    available = []
+    for systems_root in perf_database.get_systems_paths():
+        if os.path.isfile(os.path.join(systems_root, f"{hardware_sku}.yaml")):
+            return
+        if os.path.isdir(systems_root):
+            available.extend(sorted(f[:-5] for f in os.listdir(systems_root) if f.endswith(".yaml")))
+    raise ValueError(
+        f"unknown hardware_sku {hardware_sku!r}: no system config found on the AIConfigurator "
+        f"systems path. Available SKUs: {', '.join(sorted(set(available)))}"
+    )
 
 
 @dataclass(frozen=True)
@@ -75,6 +96,7 @@ def resolve_model_hardware(model_name: str, hardware_sku: str, *, backend: str) 
     mla = is_moe and not allow_pure_tp
     max_context = model_config.get("context")
 
+    _validate_hardware_sku(hardware_sku)
     sys_cfg = _get_system_config(hardware_sku)
     vram_per_gpu = sys_cfg["vram_per_gpu"]
     gpus_per_node = sys_cfg["gpus_per_node"]
@@ -134,12 +156,15 @@ def parallel_configs_for(
         raise ValueError(f"max_seq_len is required: {model_name} config exposes no max context length")
 
     # Enumerate from 1 GPU/worker; the KV estimate is the sole feasibility filter.
+    # MLA+MoE excludes pure expert-TP (AIC's allow_moe_pure_tp=False); dense
+    # models are unaffected (their plain-TP shapes do not go through that gate).
     common = dict(
         is_moe=mh.is_moe,
         backend=backend,
         gpu_budget=gpu_budget,
         min_gpu_budget=min_gpu_budget,
         enable_wideep=mh.enable_wideep,
+        allow_moe_pure_tp=not mh.mla,
     )
     if deployment_mode == "disagg":
         configs = enumerate_disagg_configs(**common)

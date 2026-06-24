@@ -3,6 +3,10 @@
 
 """Scoring / feasibility / ranking over a replay trace_report (pure)."""
 
+import math
+
+import pytest
+
 from spica.config import OptimizationTarget
 from spica.score import (
     is_feasible,
@@ -38,6 +42,33 @@ def test_goodput_per_gpu_hour_zero_when_no_gpu_hours():
         )
         == 0.0
     )
+
+
+def test_goodput_per_gpu_hour_zero_when_gpu_hours_missing():
+    # gpu_hours absent -> defaults to 0.0, the guard avoids dividing by zero.
+    assert objective_value({"goodput_output_throughput_tok_s": 4000.0}, OptimizationTarget.GOODPUT_PER_GPU_HOUR) == 0.0
+
+
+def test_objective_defaults_on_missing_report_keys():
+    # An empty report falls back to each target's neutral default.
+    assert objective_value({}, OptimizationTarget.THROUGHPUT) == 0.0
+    assert objective_value({}, OptimizationTarget.GOODPUT) == 0.0
+    assert objective_value({}, OptimizationTarget.GOODPUT_PER_GPU_HOUR) == 0.0
+    # latency minimizes, so a missing report is the worst-possible +inf
+    assert objective_value({}, OptimizationTarget.E2E_LATENCY) == math.inf
+
+
+def test_score_defaults_on_missing_report_keys():
+    # The latency default propagates through the sign flip to -inf (worst score).
+    assert score_report({}, OptimizationTarget.E2E_LATENCY) == -math.inf
+    assert score_report({}, OptimizationTarget.THROUGHPUT) == 0.0
+
+
+def test_objective_value_unknown_target_raises():
+    # A target that is none of the handled enum members hits the final guard.
+    sentinel = object()
+    with pytest.raises(ValueError, match="unknown optimization target"):
+        objective_value(REPORT, sentinel)  # type: ignore[arg-type]
 
 
 def test_score_sign():

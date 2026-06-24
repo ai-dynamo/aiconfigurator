@@ -1,14 +1,50 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Vizier-backed sampler. Needs the (pinned) vizier+jax stack; skips otherwise."""
+"""Vizier-backed sampler. Needs the (pinned) vizier+jax stack; skips otherwise.
+
+The ``_decoder_for`` / ``_index_decoder`` helpers are pure (no vizier import), so
+those tests run unconditionally; everything that builds a study is gated behind the
+``importorskip`` below."""
 
 import pytest
+
+# Pure decode helpers — import eagerly so their tests run without the vizier stack.
+from spica.sampler import _decoder_for, _index_decoder
+
+
+def test_decoder_for_categorical_strings_returns_str():
+    decode = _decoder_for(["round_robin", "kv_router"])
+    assert decode("kv_router") == "kv_router"
+    assert isinstance(decode("kv_router"), str)
+
+
+def test_decoder_for_discrete_int_rounds_to_native_int():
+    decode = _decoder_for([256, 512, 1024])
+    # Vizier stores discrete params as floats; decode must round back to int.
+    assert decode("512.0") == 512
+    assert decode(512.0) == 512
+    assert isinstance(decode("512.0"), int)
+
+
+def test_decoder_for_discrete_float_returns_native_float():
+    decode = _decoder_for([0.0, 0.5, 1.0])
+    result = decode("0.5")
+    assert result == 0.5
+    assert isinstance(result, float)
+
+
+def test_index_decoder_maps_index_back_to_entry():
+    raw = {"enable_throughput_scaling": True}
+    decode = _index_decoder(["disabled", raw])
+    assert decode("0.0") == "disabled"
+    assert decode("1") == raw  # exact entry, including the dict
+
 
 pytest.importorskip("vizier")
 
 from spica.parallel_enum import ParallelShape, ReplicaParallelConfig  # noqa: E402
-from spica.sampler import Suggestion, make_branch_sampler  # noqa: E402
+from spica.sampler import _PARALLEL_PARAM, Suggestion, make_branch_sampler  # noqa: E402
 from spica.search_space import BranchSpace  # noqa: E402
 
 
@@ -79,6 +115,27 @@ def test_dict_form_composite_decodes_via_index():
     for entry in seen:
         assert entry == "disabled" or entry == raw
         assert isinstance(entry, (str, dict))
+
+
+def test_parallel_config_index_decodes_to_matching_config():
+    # N distinguishable parallel configs: the categorical index Vizier picks must
+    # decode back to exactly that element of branch.parallel_configs.
+    configs = tuple(
+        ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=r) for r in (1, 2, 4, 8)
+    )
+    assert len(set(configs)) == len(configs)  # all distinct
+    branch = BranchSpace(
+        deployment_mode="agg",
+        parallel_configs=configs,
+        supported_backends={c: frozenset({"trtllm"}) for c in configs},
+        knob_choices={"backend": ["trtllm"]},
+    )
+    sampler = make_branch_sampler(branch, study_id="test_pc_index")
+    suggestions = sampler.suggest(count=6)
+    assert suggestions
+    for s in suggestions:
+        decoded_index = int(s.handle.parameters[_PARALLEL_PARAM])
+        assert branch.parallel_configs[decoded_index] == s.parallel_config
 
 
 def test_suggest_observe_round_trips():

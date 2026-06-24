@@ -79,6 +79,11 @@ LOAD_PREDICTOR_PRESETS: dict[str, dict[str, Any]] = {
 # Planner defaults for knobs a preset does not pin (mirror SLAPlannerDefaults).
 _DEFAULTS = {"prophet_window_size": 50, "q_level": 1.0, "q_trend": 0.1, "r": 10.0, "min_points": 5}
 
+# Preset used when an interval has no informative winner (short/empty trace ->
+# every preset ties at inf loss). The next window equals this one, so the
+# planner still gets a defined forecaster instead of None.
+_DEFAULT_PRESET = "constant_last"
+
 # Predictor families AIC offers (also the legal values for a custom dict's
 # ``load_predictor``). Derived from the presets so it stays in sync.
 _VALID_FAMILIES = frozenset(p["family"] for p in LOAD_PREDICTOR_PRESETS.values())
@@ -278,6 +283,7 @@ def sweep_load_predictor(config: SmartSearchConfig, *, show_progress: bool = Tru
     result = LoadPredictorResult(reason="swept")
     presets = space.load_predictor_candidates
     labels = [_entry_label(e, i) for i, e in enumerate(presets)]
+    fallback_intervals: list[int] = []
     for iv in intervals:
         windows = build_windows(config.workload.trace_path, iv)
         warmup = _common_warmup(presets, iv)
@@ -298,5 +304,13 @@ def sweep_load_predictor(config: SmartSearchConfig, *, show_progress: bool = Tru
             if loss < best_loss:
                 best_loss, best_entry = loss, entry
         result.losses[iv] = per_preset
+        # No informative winner (short/empty trace -> every preset ties at inf
+        # loss). Fall back to a defined default so the planner still gets a
+        # forecaster under throughput scaling instead of None.
+        if best_entry is None:
+            best_entry = _DEFAULT_PRESET
+            fallback_intervals.append(iv)
         result.best_by_interval[iv] = best_entry
+    if fallback_intervals:
+        result.reason = f"swept; no_winner_fallback_{_DEFAULT_PRESET}@{fallback_intervals}"
     return result

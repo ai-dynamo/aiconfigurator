@@ -38,7 +38,7 @@ from .planner import fpm_fields, load_sensitivity_fields, scaling_fields
 # pinned deployment scalars folded in so the sample stands alone (search-only
 # constraints like gpu_budget / min_gpu_budget / min_endpoint are intentionally
 # excluded — they bound the search, not a single deployment).
-_DEPLOYMENT_PINNED = ("model_name", "hardware_sku", "context_length", "startup_time", "aic_nextn")
+_DEPLOYMENT_PINNED = ("model_name", "hardware_sku", "aic_nextn")
 _KV_MANAGER = ("num_g2_blocks", "bandwidth_g1_to_g2_gbps", "bandwidth_g2_to_g1_gbps", "offload_batch_size")
 
 # engine knobs per branch: searched batching + pinned scalars.
