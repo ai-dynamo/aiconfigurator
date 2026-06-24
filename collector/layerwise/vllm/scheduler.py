@@ -335,6 +335,7 @@ def _lookup_scheduler_timing_aggs(
     attempt_id: int | None = None,
     prefer_schedule_to_update_for_gen: bool = False,
     prefer_live_step_wall_for_gen: bool = True,
+    prefer_execute_model_gpu_for_ctx: bool = False,
 ) -> list[dict[str, Any]]:
     """Return scheduler wall-envelope repeats for one datapoint.
 
@@ -351,6 +352,11 @@ def _lookup_scheduler_timing_aggs(
 
     model_execute_aggs = []
     model_execute_counts_by_run: dict[int, int] = {}
+    # For chunked context prefills (new_tokens > max_num_batched_tokens), one
+    # measured row produces several execute_model calls per run. The full-prefill
+    # latency for that (new_tokens, past) is their sum, so accumulate per run and
+    # emit one repeat per run instead of treating each chunk as a repeat.
+    ctx_gpu_us_by_run: dict[int, float] = {}
     if datapoint.phase in {"ctx", "gen"}:
         for event in events:
             if event.get("event") != "completed_execution":
@@ -358,11 +364,17 @@ def _lookup_scheduler_timing_aggs(
             if event.get("work_unit_id") != work_unit_id:
                 continue
             if datapoint.phase == "ctx":
-                if not event.get("live_step_driver"):
-                    continue
+                if prefer_execute_model_gpu_for_ctx:
+                    # GPU-isolated CUDA-event timing for context, the same source
+                    # gen uses. Requires the marker to have measured the forward.
+                    if "execute_model_gpu_time_ms" not in event:
+                        continue
+                else:
+                    if not event.get("live_step_driver"):
+                        continue
+                    if not event.get("sync_execute_model_wall_time"):
+                        continue
             elif "execute_model_gpu_time_ms" not in event:
-                continue
-            if datapoint.phase == "ctx" and not event.get("sync_execute_model_wall_time"):
                 continue
             event_attempt_id = event.get("attempt_id")
             if attempt_id is not None and event_attempt_id not in (None, "") and event_attempt_id != attempt_id:
@@ -379,15 +391,22 @@ def _lookup_scheduler_timing_aggs(
             if event.get("run") in (None, ""):
                 continue
             run = int(event["run"])
+            use_gpu_time = datapoint.phase == "gen" or (
+                datapoint.phase == "ctx" and prefer_execute_model_gpu_for_ctx
+            )
             latency_ms = (
                 event.get("execute_model_gpu_time_ms")
-                if datapoint.phase == "gen"
+                if use_gpu_time
                 else event.get("execute_model_wall_time_ms")
             )
             if latency_ms in (None, ""):
                 continue
             model_execute_counts_by_run[run] = model_execute_counts_by_run.get(run, 0) + 1
             latency_us = float(latency_ms) * 1000.0
+            if datapoint.phase == "ctx" and prefer_execute_model_gpu_for_ctx:
+                # Sum chunks within a run; emit per-run repeats after the loop.
+                ctx_gpu_us_by_run[run] = ctx_gpu_us_by_run.get(run, 0.0) + latency_us
+                continue
             agg = {
                 "gpu_us": latency_us,
                 "rms_us": 0.0,
@@ -395,9 +414,21 @@ def _lookup_scheduler_timing_aggs(
                 "kernel_count": 0,
                 "rms_kernel_count": 0,
             }
-            if datapoint.phase == "gen":
+            if use_gpu_time:
                 agg["latency_source"] = "execute_model_gpu"
             model_execute_aggs.append(agg)
+        for _run in sorted(ctx_gpu_us_by_run):
+            run_latency_us = ctx_gpu_us_by_run[_run]
+            model_execute_aggs.append(
+                {
+                    "gpu_us": run_latency_us,
+                    "rms_us": 0.0,
+                    "span_us": run_latency_us,
+                    "kernel_count": 0,
+                    "rms_kernel_count": 0,
+                    "latency_source": "execute_model_gpu",
+                }
+            )
         rank_sharded_gen = datapoint.phase == "gen" and any(count > 1 for count in model_execute_counts_by_run.values())
         if model_execute_aggs and not rank_sharded_gen:
             return model_execute_aggs
@@ -678,6 +709,9 @@ def _lookup_timing_source_aggs(
             attempt_id=attempt_id,
             prefer_schedule_to_update_for_gen=False,
             prefer_live_step_wall_for_gen=includes_moe or moe_noop,
+            prefer_execute_model_gpu_for_ctx=(
+                datapoint.phase == "ctx" and effective_source == "execute_model_gpu"
+            ),
         )
         if aggs:
             if all(str(agg.get("latency_source") or "") == "execute_model_gpu" for agg in aggs):
@@ -1068,6 +1102,9 @@ class Scheduler:
             "enable_step_marker": enable_step_marker,
             "ctx_warmup_runs": self.args.ctx_warmup_runs,
             "ctx_measured_runs": self.args.ctx_measured_runs,
+            "ctx_measure_execute_model_gpu_time": (
+                str(getattr(self.args, "latency_source", "auto")) == "execute_model_gpu"
+            ),
             "gen_warmup_runs": self.args.gen_warmup_runs,
             "gen_measured_runs": self.args.gen_measured_runs,
             "prompt_seed": self.args.prompt_seed,

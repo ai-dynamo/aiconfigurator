@@ -1264,6 +1264,9 @@ def run_worker(spec_path: Path) -> None:
                     warmup_runs=int(spec.get("ctx_warmup_runs", 0)),
                     measured_runs=int(spec.get("ctx_measured_runs", 1)),
                     max_num_batched_tokens=max_num_batched_tokens,
+                    measure_execute_model_gpu_time=bool(
+                        spec.get("ctx_measure_execute_model_gpu_time", False)
+                    ),
                 )
 
             gen_points = [dp for dp in datapoints if dp.phase == "gen"]
@@ -1339,6 +1342,7 @@ def _worker_run_ctx(
     warmup_runs: int = 0,
     measured_runs: int = 1,
     max_num_batched_tokens: int = 1,
+    measure_execute_model_gpu_time: bool = False,
 ) -> None:
     if warmup_runs < 0:
         raise ValueError(f"warmup_runs must be >= 0, got {warmup_runs}")
@@ -1443,6 +1447,7 @@ def _worker_run_ctx(
                     bs=dp.batch_size,
                     past=dp.past_kv,
                     run=run_idx,
+                    measure_execute_model_gpu_time=measure_execute_model_gpu_time,
                 )
                 wall_start = time.perf_counter()
                 _run_prefix_cached_ctx_iteration(
@@ -1457,6 +1462,7 @@ def _worker_run_ctx(
                     prompt_factory=prompt_factory,
                     active_iteration=str(marker_iteration),
                     marker_mod=marker_mod,
+                    measure_execute_model_gpu_time=measure_execute_model_gpu_time,
                 )
                 _worker_append_event(
                     status_path,
@@ -1550,6 +1556,7 @@ def _run_prefix_cached_ctx_iteration(
     prompt_factory: PromptTokenFactory,
     active_iteration: str,
     marker_mod,
+    measure_execute_model_gpu_time: bool = False,
 ) -> None:
     cache_salt_prefix = _ctx_cache_salt_prefix(work_unit_id, dp) if dp.past_kv > 0 else None
     prefix_stream_key = _ctx_prefix_stream_key(work_unit_id, dp)
@@ -1573,6 +1580,7 @@ def _run_prefix_cached_ctx_iteration(
         bs=dp.batch_size,
         past=dp.past_kv,
         run=run_idx if not warmup else None,
+        measure_execute_model_gpu_time=measure_execute_model_gpu_time,
     )
     _run_generate_prefix_suffix(
         llm,
