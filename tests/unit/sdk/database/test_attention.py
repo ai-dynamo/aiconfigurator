@@ -51,6 +51,23 @@ class TestContextAttention:
         assert windowed > 0
         assert windowed <= full * 1.0001  # s(256) > window(128): windowed work <= full
 
+    def test_cross_head_transfer_gated_by_xshape_policy(self, comprehensive_perf_db):
+        """Cross-head_size transfer is an XSHAPE transfer. A head_size with no own data
+        (stub collects 64/128) borrows from the nearest collected head_size when XSHAPE
+        is permitted, and raises when the transfer policy excludes XSHAPE."""
+        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+
+        args = (8, 256, 0, 16, 8, common.KVCacheQuantMode.bfloat16, common.FMHAQuantMode.bfloat16)
+        kw = dict(database_mode=common.DatabaseMode.EMPIRICAL, head_size=256, window_size=0)
+        try:
+            comprehensive_perf_db.set_transfer_policy("aggressive")  # XSHAPE on
+            assert float(comprehensive_perf_db.query_context_attention(*args, **kw)) > 0
+            comprehensive_perf_db.set_transfer_policy(["xquant"])  # no XSHAPE
+            with pytest.raises(EmpiricalNotImplementedError):
+                comprehensive_perf_db.query_context_attention(*args, **kw)
+        finally:
+            comprehensive_perf_db.set_transfer_policy(None)
+
     def test_query_context_attention_sol_full_mode(self, comprehensive_perf_db):
         """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
         b, full_s, prefix, n, n_kv = 1, 32, 0, 8, 4

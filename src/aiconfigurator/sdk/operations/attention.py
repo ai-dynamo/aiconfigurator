@@ -424,12 +424,16 @@ class ContextAttention(Operation):
                 if grid is not None and grid.samples:
                     latency, _ = util_empirical.estimate(sol_time, (n, s + prefix, b), grid)
                     return latency
-                # Cross-head_size transfer: this head_size has no data, but num_heads
-                # is already an in-grid axis, so only head_size differs. Borrow the
-                # nearest collected head_size's util and rescale by the prefill
+                # Cross-head_size transfer (XSHAPE): this head_size has no data, but
+                # num_heads is already an in-grid axis, so only head_size differs. Borrow
+                # the nearest collected head_size's util and rescale by the prefill
                 # head_size-util ratio (SOL still uses the query's own head_size).
-                ref_grid, ref_hs = _ctx_headsize_ref_grid(
-                    database, fmha_quant_mode, kvcache_quant_mode, n_kv_lookup, head_size, slice_window, get_sol
+                ref_grid, ref_hs = (
+                    _ctx_headsize_ref_grid(
+                        database, fmha_quant_mode, kvcache_quant_mode, n_kv_lookup, head_size, slice_window, get_sol
+                    )
+                    if common.TransferKind.XSHAPE in database.transfer_policy
+                    else (None, None)
                 )
                 if ref_grid is not None:
                     scale = _attn_prefill_hs_ratio(database.backend, head_size) / _attn_prefill_hs_ratio(
@@ -793,11 +797,13 @@ class GenerationAttention(Operation):
                 if grid is not None and grid.samples:
                     latency, _ = util_empirical.estimate(sol_time, (n, b, s), grid)
                     return latency
-                # Cross-head_size transfer (decode): borrow the nearest collected
+                # Cross-head_size transfer (XSHAPE, decode): borrow the nearest collected
                 # head_size's util. Decode util is ~head_size-independent (memory-bound
                 # KV read), so util_scale stays 1.0 -- no prefill-style correction.
-                ref_grid, _ref_hs = _gen_headsize_ref_grid(
-                    database, kvcache_quant_mode, n_kv_lookup, h, slice_window, get_sol
+                ref_grid, _ref_hs = (
+                    _gen_headsize_ref_grid(database, kvcache_quant_mode, n_kv_lookup, h, slice_window, get_sol)
+                    if common.TransferKind.XSHAPE in database.transfer_policy
+                    else (None, None)
                 )
                 if ref_grid is not None:
                     latency, _ = util_empirical.estimate(sol_time, (n, b, s), ref_grid)

@@ -269,7 +269,14 @@ class ContextMSAModule(_BaseMSAModule):
             from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
             raise PerfDataNotAvailableError("MSA has no silicon data; use HYBRID or EMPIRICAL.")
-        # EMPIRICAL / HYBRID: cross-op transfer from DSA util * k, else constant.
+        # EMPIRICAL / HYBRID: cross-op (XOP) transfer from DSA util * k. MSA has no
+        # silicon data, so when XOP is disabled by the transfer policy there is nothing
+        # to fall back on -> raise honestly.
+        if common.TransferKind.XOP not in database.transfer_policy:
+            raise EmpiricalNotImplementedError(
+                "MSA context: cross-op transfer (xop) is disabled by the transfer policy "
+                "and MSA has no own silicon data."
+            )
         util = _dsa_context_util(
             database,
             b=b,
@@ -304,6 +311,11 @@ class GenerationMSAModule(_BaseMSAModule):
             from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
             raise PerfDataNotAvailableError("MSA has no silicon data; use HYBRID or EMPIRICAL.")
+        if common.TransferKind.XOP not in database.transfer_policy:
+            raise EmpiricalNotImplementedError(
+                "MSA generation: cross-op transfer (xop) is disabled by the transfer policy "
+                "and MSA has no own silicon data."
+            )
         util = _dsa_generation_util(
             database,
             b=b,
