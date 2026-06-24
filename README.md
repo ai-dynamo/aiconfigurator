@@ -14,7 +14,7 @@ workers to run, and the parallelism for each worker. Combined with SLA targets f
 TPOT (Time per Output Token), optimizing throughput at a given latency becomes even more complex.
 
 `aiconfigurator` helps you find a strong starting configuration for disaggregated serving. Given your model, GPU
-count, and GPU type, it searches the configuration space and generates configuration files you can use for deployment with Dynamo.
+count, and GPU type, it searches the configuration space and generates configuration files you can use for deployment with Dynamo or llm-d.
 
 For a technical deep dive into the design and methodology of AIConfigurator, please refer to our paper:  
 [**AIConfigurator: Lightning-Fast Configuration Optimization for Multi-Framework LLM Serving**](https://arxiv.org/abs/2601.06288).
@@ -370,7 +370,7 @@ To estimate performance, we take the following steps:
 2. Collect operation execution times on the target hardware.
 3. Estimate end-to-end execution time for a configuration by composing operation times using interpolation and extrapolation.
 4. Model in-flight batching (aggregated) and disaggregated serving on top of that.
-5. Search thousands of combinations to find strong configurations and generate Dynamo configuration files based on the results.
+5. Search thousands of combinations to find strong configurations and generate Dynamo or llm-d configuration files based on the results.
 
 ### Supported Features
 
