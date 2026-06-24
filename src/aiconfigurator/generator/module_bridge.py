@@ -8,7 +8,7 @@ from typing import Any
 import pandas as pd
 
 from aiconfigurator.sdk.perf_database import get_database
-from aiconfigurator.sdk.task import TaskConfig
+from aiconfigurator.sdk.task_v2 import Task
 
 from .aggregators import collect_generator_params
 from .rendering import apply_defaults
@@ -76,7 +76,7 @@ def _safe_float(val, default: float = 0.0) -> float:
 
 
 def task_config_to_generator_config(
-    task_config: TaskConfig,
+    task_config: Task,
     result_df: pd.Series,
     generator_overrides: dict | None = None,
     num_gpus_per_node: int | None = None,
@@ -84,7 +84,7 @@ def task_config_to_generator_config(
     """Convert a task config/result row into unified generator parameters.
 
     Args:
-        task_config: The TaskConfig that produced the result.
+        task_config: The Task that produced the result.
         result_df: A single row (pd.Series) from the best_configs DataFrame.
         generator_overrides: Optional overrides dict from CLI flags.
         num_gpus_per_node: If set, overrides the NodeConfig.num_gpus_per_node
@@ -130,19 +130,17 @@ def task_config_to_generator_config(
         worker_payload = _deep_merge(worker_payload, extra_overrides)
         return worker_payload, max(workers, 1)
 
-    backend_name = getattr(task_config, "backend_name", None)
-    runtime_cfg = task_config.config.runtime_config
-    prefix_tokens = _safe_int(_series_val(result_df, "prefix", runtime_cfg.prefix), runtime_cfg.prefix)
-    config_obj = task_config.config
+    backend_name = task_config.primary_backend_name
+    prefix_tokens = _safe_int(_series_val(result_df, "prefix", task_config.prefix), task_config.prefix)
 
     # Fetch num_gpus_per_node from system config (unless caller provided an override)
     if num_gpus_per_node is None:
         num_gpus_per_node = 8
         try:
             db = get_database(
-                system=task_config.system_name,
-                backend=task_config.backend_name,
-                version=task_config.backend_version,
+                system=task_config.primary_system_name,
+                backend=task_config.primary_backend_name,
+                version=task_config.primary_backend_version,
             )
             if db and "node" in db.system_spec:
                 num_gpus_per_node = db.system_spec["node"].get("num_gpus_per_node", 8)
@@ -150,8 +148,8 @@ def task_config_to_generator_config(
             pass
 
     service_cfg = {
-        "model_path": task_config.model_path,
-        "served_model_path": task_config.model_path,
+        "model_path": task_config.primary_model_path,
+        "served_model_path": task_config.primary_model_path,
         "include_frontend": True,
         "prefix": prefix_tokens,
     }
@@ -160,9 +158,9 @@ def task_config_to_generator_config(
 
     model_cfg = {
         "prefix": prefix_tokens,
-        "is_moe": getattr(config_obj, "is_moe", None),
-        "nextn": getattr(config_obj, "nextn", None),
-        "nextn_accept_rates": getattr(config_obj, "nextn_accept_rates", None),
+        "is_moe": task_config.is_moe,
+        "nextn": task_config.nextn,
+        "nextn_accept_rates": task_config.nextn_accept_rates if task_config.nextn else None,
     }
     model_cfg = {k: v for k, v in model_cfg.items() if v is not None}
     model_cfg = _deep_merge(model_cfg, overrides.get("ModelConfig"))
@@ -232,11 +230,26 @@ def task_config_to_generator_config(
     if decode_params:
         decode_workers = _safe_int(worker_count_overrides.get("decode_workers"), decode_workers)
 
+    # Multimodal EPD: the encode worker is not produced by the SDK sweep (the
+    # encoder is modeled colocated with prefill). Inject it from explicit
+    # overrides -- --generator-set Workers.encode.* + WorkerConfig.encode_workers.
+    # Absent -> no encode worker, output unchanged.
+    encode_override = worker_overrides.get("encode")
+    encode_params = None
+    encode_workers = 0
+    if isinstance(encode_override, dict) and encode_override:
+        encode_params = dict(encode_override)
+        e_tp = _safe_int(encode_params.get("tensor_parallel_size"), 1)
+        e_pp = _safe_int(encode_params.get("pipeline_parallel_size"), 1)
+        e_dp = _safe_int(encode_params.get("data_parallel_size"), 1)
+        encode_params.setdefault("gpus_per_worker", e_tp * e_pp * e_dp)
+        encode_workers = _safe_int(worker_count_overrides.get("encode_workers"), 1)
+
     sla_cfg = {
-        "isl": runtime_cfg.isl,
-        "osl": runtime_cfg.osl,
-        "ttft": _safe_float(_series_val(result_df, "ttft", runtime_cfg.ttft), runtime_cfg.ttft),
-        "tpot": _safe_float(_series_val(result_df, "tpot", runtime_cfg.tpot), runtime_cfg.tpot),
+        "isl": task_config.isl,
+        "osl": task_config.osl,
+        "ttft": _safe_float(_series_val(result_df, "ttft", task_config.ttft), task_config.ttft),
+        "tpot": _safe_float(_series_val(result_df, "tpot", task_config.tpot), task_config.tpot),
     }
     sla_cfg = _deep_merge(sla_cfg, overrides.get("SlaConfig"))
     bench_cfg = overrides.get("BenchConfig")
@@ -257,6 +270,8 @@ def task_config_to_generator_config(
         dyn_config=dyn_cfg,
         backend=backend_name,
         generator_dynamo_version=generator_dynamo_version,
+        encode_params=encode_params,
+        encode_workers=encode_workers if encode_params else None,
     )
 
     params = _deep_merge(params, overrides.get("Params"))
@@ -267,3 +282,26 @@ def task_config_to_generator_config(
         params["rule"] = rule_name
     params["ModelConfig"] = model_cfg
     return params
+
+
+def task_config_to_request(
+    task_config: Task,
+    result_df: pd.Series,
+    generator_overrides: dict | None = None,
+    num_gpus_per_node: int | None = None,
+):
+    """Convert a task config/result row into a typed ``GeneratorRequest``.
+
+    Built on top of :func:`task_config_to_generator_config` so it stays
+    byte-equivalent with the legacy dict path (proven by the request round-trip
+    gate). The dict-returning function above is kept unchanged for the dynamo
+    profiler and existing callers; this is the typed alternative used when a
+    caller wants to go through ``api.generate_from_request``.
+    """
+    from .request import from_legacy_params
+
+    params = task_config_to_generator_config(task_config, result_df, generator_overrides, num_gpus_per_node)
+    # Task exposes the backend via primary_backend_name (matching the dict bridge);
+    # fall back to backend_name for duck-typed/legacy callers.
+    backend = getattr(task_config, "primary_backend_name", None) or getattr(task_config, "backend_name", None)
+    return from_legacy_params(params, backend=backend)

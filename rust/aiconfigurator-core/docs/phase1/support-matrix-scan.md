@@ -166,8 +166,21 @@ uv run python tools/support_matrix/scan_rust_parity.py \
     --probe-atol  0.001 \
     --pareto-strict-rtol 0.01 \
     --pareto-envelope-rtol 0.05 \
-    --per-entry-timeout-sec 900
+    --per-entry-timeout-sec 900 \
+    --max-tasks-per-child 0
 ```
+
+**Memory note.** Worker RSS climbs over a long run (pareto `cli_default`
+intermediates + glibc malloc-arena bloat from BLAS/rayon threads), so memory
+must be bounded — but **NOT via a finite `--max-tasks-per-child`**. This
+workload is homogeneous, so all `W` workers hit the `W × N` recycle boundary at
+once and trigger a CPython `ProcessPoolExecutor` recycle **deadlock** (frozen,
+low RSS, no swap — deterministic, memory-independent). Always pass
+`--max-tasks-per-child 0` and recycle at the **process boundary** instead: run
+the heavy pareto phase in a `--limit N` shard loop (each process exits and
+frees all memory between shards, then resumes), and cap library threads with
+`OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 RAYON_NUM_THREADS=1`.
+Full procedure: `../phase-2-parity-scan-runbook.md` §4.0–§4.2.
 
 `--scan-mode {probe_only,pareto_only,both}` so a fast probe-only scan
 can run first (filters obvious regressions; ~17 min on a 16-worker

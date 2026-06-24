@@ -401,6 +401,58 @@ class TestDeepSeekV4AttentionModule:
         assert float(result) == pytest.approx(21.0)
         assert result.energy == pytest.approx(21.0 * 10.0)
 
+    def test_generation_kv_bytes_independent_of_num_heads(self, comprehensive_perf_db):
+        """DeepSeek-V4 KV cache stores one ``head_dim``-sized vector per token,
+        shared across all attention heads (MLA / MQA-equivalent layout).
+
+        Therefore the KV-traffic component of the attention SOL ``sol_mem`` term
+        must NOT scale with ``num_heads``: scaling ``num_heads`` only changes the
+        compute (sol_math) and the projection-related weight/activation bytes.
+
+        Regression test for the bug where ``kv_cache_bytes`` was multiplied by
+        ``num_heads``, which produced unrealistically large ``sol_mem`` values
+        (often >100 ms per decode step at moderate batch sizes). The inflated
+        SOL caused HYBRID/silicon latency to fall *below* SOL latency in the
+        ``aiconfigurator cli estimate ... --detail all`` "Latency Summary"
+        report -- a physical impossibility, since SOL is the per-op roofline
+        lower bound and cannot exceed any silicon-measured execution time.
+        """
+        base = _deepseek_v4_attn_kwargs(4)
+        # Decode-mode shape: large batch, kv_len = s - 1, KV traffic dominates sol_mem.
+        kwargs = {
+            **base,
+            "b": 256,
+            "s": 8192,
+            "num_heads": 16,
+            "index_topk": 1024,
+        }
+        kwargs.pop("prefix")
+
+        # SOL_FULL returns a tuple-like (max(sol_math, sol_mem), sol_math, sol_mem).
+        small = comprehensive_perf_db.query_generation_deepseek_v4_attention_module(
+            **kwargs,
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+        large = comprehensive_perf_db.query_generation_deepseek_v4_attention_module(
+            **{**kwargs, "num_heads": 128},
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+
+        # sol_math (index 1) must scale with num_heads: more compute per token.
+        assert large[1] > small[1]
+        # KV-cache traffic (a major component of sol_mem at this batch) must NOT
+        # scale with num_heads -- sol_mem should be much closer to the small case
+        # than the 128/16 = 8x ratio that the buggy formula would produce. We
+        # leave headroom for projection/activation/weight scaling that DOES
+        # legitimately depend on num_heads (Q projection output is num_heads x
+        # head_dim per token).
+        ratio = float(large[2]) / float(small[2])
+        assert ratio < 4.0, (
+            f"sol_mem scaled by {ratio:.2f}x when num_heads went 16→128. KV "
+            f"cache bytes should be MQA-style (head_dim only), independent of "
+            f"num_heads."
+        )
+
     def test_context_silicon_resolves_rank_local_head_bucket(self, mutable_comprehensive_perf_db):
         # SCHEME A: the head axis is the rank-local head count (native // tp), in
         # line with the universal attention convention (per-rank heads, no tp

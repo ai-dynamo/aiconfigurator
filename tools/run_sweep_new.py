@@ -31,7 +31,7 @@ from pathlib import Path
 
 import yaml
 
-from aiconfigurator.sdk.task import Task
+from aiconfigurator.sdk.task_v2 import Task
 
 logger = logging.getLogger("sweep_new")
 

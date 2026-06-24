@@ -51,7 +51,7 @@ _weight_cache: dict = {}
 
 
 def _skip_trtllm_large_fp8_projection_gemm(gemm_type: str, m: int, n: int, k: int) -> bool:
-    if gemm_type not in {"fp8", "fp8_static"} or not (1 <= m <= 8 and n >= 51200 and k >= 51200):
+    if gemm_type != "fp8" or not (1 <= m <= 8 and n >= 51200 and k >= 51200):
         return False
 
     sm_version = get_sm_version()
@@ -78,7 +78,7 @@ def _get_l2_cache_bytes(device_id: int = 0) -> int:
 
 def _build_weights(gemm_type: str, n: int, k: int, device, dtype, group_size, x) -> dict:
     """Allocate and return the weight tensors for one GEMM copy."""
-    if gemm_type in ("fp8", "fp8_static"):
+    if gemm_type == "fp8":
         return {
             "weight": torch.randn((n, k), dtype=torch.bfloat16, device=device).to(dtype=torch.float8_e4m3fn),
             "weight_scale": torch.randn(1, dtype=torch.float32, device=device),
@@ -114,7 +114,7 @@ def get_gemm_test_cases():
     gemm_list = ["bfloat16"]
     sm_version = get_sm_version()
     if sm_version > 86:
-        gemm_list += ["fp8", "fp8_static"]
+        gemm_list += ["fp8"]
         # SM90 (Hopper) and SM100 (Blackwell) both support fp8_block.
         # SM90 uses CUTLASS backend with FP32 scale.
         # SM100 uses TRTLLM/DeepGEMM backend with UE8M0 scale (MXFP8 style).
@@ -167,7 +167,7 @@ def run_gemm(gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
     dtype = torch.bfloat16
     x = torch.randn((m, k), dtype=dtype).to(torch.device(device))
 
-    if gemm_type in ("fp8", "fp8_static"):
+    if gemm_type == "fp8":
         group_size = None
         qc = QuantConfig(quant_algo=QuantAlgo.FP8)
     elif gemm_type == "fp8_block":
@@ -181,7 +181,7 @@ def run_gemm(gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
         group_size = None
 
     _l2_cache_bytes = _get_l2_cache_bytes(device.index or 0)
-    _bytes_per_elem = {"bfloat16": 2, "fp8": 1, "fp8_static": 1, "fp8_block": 1, "nvfp4": 0.5}
+    _bytes_per_elem = {"bfloat16": 2, "fp8": 1, "fp8_block": 1, "nvfp4": 0.5}
     _weight_bytes = int(n * k * _bytes_per_elem[gemm_type])
     outside_loop_count = max(1, min(5, math.ceil(_l2_cache_bytes / _weight_bytes)))
     op_list = []
@@ -202,17 +202,17 @@ def run_gemm(gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
             x_sf_global = (448 * 6) / x.abs().max().float()
             weights = {**weights, "input_scale": 1.0 / x_sf_global.cpu()}
 
-        # TRT-LLM's FP8QDQ method uses its dynamic path when
-        # force_dynamic_quantization=True. AIC subtracts the measured
-        # compute-scale overhead for fp8_static queries, so the collected table
-        # must include that runtime work.
+        # The fp8 weights carry no input_scale, so TRT-LLM's FP8QDQ method runs
+        # its dynamic-quantization path and the collected fp8 GEMM includes the
+        # compute-scale overhead.  AIC derives fp8_static at query time by
+        # subtracting that overhead, so no separate fp8_static GEMM is collected.
         gemm = Linear(
             k,
             n,
             bias=False,
             dtype=dtype,
             quant_config=qc,
-            force_dynamic_quantization=(gemm_type == "fp8_static"),
+            force_dynamic_quantization=False,
         )
         gemm.load_weights([weights])
         if gemm_type == "fp8_block" and callable(getattr(gemm, "post_load_weights", None)):
@@ -231,7 +231,7 @@ def run_gemm(gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
                 bias=False,
                 dtype=dtype,
                 quant_config=qc,
-                force_dynamic_quantization=(gemm_type == "fp8_static"),
+                force_dynamic_quantization=False,
             )
             gemm.load_weights([weights])
             if gemm_type == "fp8_block" and callable(getattr(gemm, "post_load_weights", None)):

@@ -183,21 +183,29 @@ pub(crate) fn get_mix_step_ops(
     }
 
     // ---- Pass 3: generation attention with decode batch ----
-    for op in generation_ops {
-        if !op.is_generation_attention() {
-            continue;
+    // Mirror Python `_get_mix_step_latency`, which only adds the overlapped
+    // decode-attention term `if gen_tokens > 0`. When this mixed step carries no
+    // decode requests (e.g. the prefill-only first step that drives `ttft` at low
+    // batch), Python contributes zero — so we must skip the pass entirely rather
+    // than query at the `decode_batch.max(1)` floor, which would add a spurious
+    // batch-1 generation_attention and inflate the step latency.
+    if decode_batch > 0 {
+        for op in generation_ops {
+            if !op.is_generation_attention() {
+                continue;
+            }
+            let ctx = RuntimeContext {
+                batch_size: decode_batch,
+                beam_width: 1,
+                s: kv_per_decode_req.max(1),
+                prefix: 0,
+                num_tokens: decode_batch,
+                seq_imbalance_correction_scale: 1.0,
+                gen_seq_imbalance_correction_scale: 1.0,
+                num_image_tokens: 0,
+            };
+            total += op.query(db, &ctx)?.latency_ms;
         }
-        let ctx = RuntimeContext {
-            batch_size: decode_batch.max(1),
-            beam_width: 1,
-            s: kv_per_decode_req.max(1),
-            prefix: 0,
-            num_tokens: decode_batch.max(1),
-            seq_imbalance_correction_scale: 1.0,
-            gen_seq_imbalance_correction_scale: 1.0,
-            num_image_tokens: 0,
-        };
-        total += op.query(db, &ctx)?.latency_ms;
     }
 
     Ok(total)

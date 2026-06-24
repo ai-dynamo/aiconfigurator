@@ -17,6 +17,7 @@ import yaml
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.common import PerfDataFilename, parse_support_matrix_version
+from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
 from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.system_spec import SystemSpec
 
@@ -24,7 +25,7 @@ databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
-_MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError)
+_MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError, InterpolationDataNotAvailableError)
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
@@ -93,6 +94,22 @@ def load_system_spec(
         return {}
     resolved_paths = _normalize_systems_paths(systems_paths if systems_paths is not None else get_systems_paths())
     return _load_system_spec_from_paths(tuple(resolved_paths), system_name)
+
+
+def is_blackwell_system(system_name: str | None) -> bool:
+    """True for Blackwell-class systems (SM >= 100, e.g. b200_sxm / gb200 / b300 / gb300)."""
+    if not system_name:
+        return False
+    spec = load_system_spec(system_name)
+    return int(spec.get("gpu", {}).get("sm_version", -1)) >= 100
+
+
+def is_hopper_system(system_name: str | None) -> bool:
+    """True for Hopper-class systems (SM 90, e.g. h100 / h200 / gh200)."""
+    if not system_name:
+        return False
+    spec = load_system_spec(system_name)
+    return int(spec.get("gpu", {}).get("sm_version", -1)) == 90
 
 
 def build_no_databases_message() -> str:
@@ -2224,6 +2241,7 @@ class PerfDatabase:
         index_n_heads: int | None = None,
         index_head_dim: int | None = None,
         index_topk: int | None = None,
+        dsa_backend: str = "trtllm",
     ) -> PerformanceResult | tuple[float, float, float]:
         """Query context DSA module latency. Delegates to
         ``ContextDSAModule._query_context_dsa_module_table``."""
@@ -2243,6 +2261,7 @@ class PerfDatabase:
             index_n_heads=index_n_heads,
             index_head_dim=index_head_dim,
             index_topk=index_topk,
+            dsa_backend=dsa_backend,
         )
 
     @functools.lru_cache(maxsize=32768)
@@ -2259,6 +2278,7 @@ class PerfDatabase:
         index_n_heads: int | None = None,
         index_head_dim: int | None = None,
         index_topk: int | None = None,
+        dsa_backend: str = "trtllm",
     ) -> PerformanceResult | tuple[float, float, float]:
         """Query generation DSA module latency. Delegates to
         GenerationDSAModule._query_generation_dsa_module_table."""
@@ -2276,6 +2296,7 @@ class PerfDatabase:
             index_n_heads=index_n_heads,
             index_head_dim=index_head_dim,
             index_topk=index_topk,
+            dsa_backend=dsa_backend,
         )
 
     @staticmethod

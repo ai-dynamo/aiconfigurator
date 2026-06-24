@@ -301,13 +301,16 @@ mod tests {
     fn generation_attention_smoke() {
         let db = b200_vllm_db();
         let op = GenerationAttentionOp::new("gen", 64, 4, 128, KvCacheQuantMode::Fp8);
-        // Recorded: b=32 isl+step=2 n=64 n_kv=4 -> 0.00866ms.
+        // b=32 isl+step=2 n=64 n_kv=4. The query averages 5 interp samples
+        // over s ∈ [1, 2] (s_samples = [1,1,1,1,2]) on the densified grid,
+        // matching Python's `_query_generation_attention_table`. Verified
+        // against `PerfDatabase.query_generation_attention` (= 0.0086442669).
         let result = op
             .query(&db, 32, 2, 1.0)
             .expect("gen attention query must succeed");
         assert!(
-            (result.latency_ms - 0.008661333471536636).abs() < 1e-9,
-            "expected recorded gen latency, got {}",
+            (result.latency_ms - 0.008644266923268636).abs() < 1e-9,
+            "expected 5-sample-averaged gen latency, got {}",
             result.latency_ms
         );
     }

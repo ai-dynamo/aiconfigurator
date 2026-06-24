@@ -79,7 +79,13 @@ def _infer_quant_modes_from_raw_config(raw_config: dict, architecture: str | Non
 
     # GEMM quant mode, MoE quant mode
     if quant_algo == "fp8":
-        if quant_dynamic is False:
+        # Non-block per-tensor FP8 is static unless the checkpoint explicitly
+        # marks dynamic activations.  Dynamic FP8 always tags itself
+        # (activation_scheme="dynamic" or config_groups[*].dynamic=true -> quant_dynamic=True),
+        # and block-scaled FP8 is classified as fp8_block above, so treating the
+        # unknown case (quant_dynamic is None) as static correctly covers
+        # ModelOpt/NVIDIA per-tensor FP8 checkpoints that ship no activation scheme.
+        if quant_dynamic is not True:
             overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_static
         else:
             overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8

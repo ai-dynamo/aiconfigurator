@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import copy
 import logging
 import os
 import sys
@@ -24,9 +23,9 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
-from aiconfigurator.sdk.errors import NoFeasibleConfigError
+from aiconfigurator.sdk.errors import NoFeasibleConfigError, UnsupportedWideepConfigError
 from aiconfigurator.sdk.models import check_is_moe
-from aiconfigurator.sdk.task import TaskConfig, TaskRunner, UnsupportedWideepConfigError
+from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -208,10 +207,13 @@ def _add_default_mode_arguments(parser):
         "globally optimal configuration is selected. Default: trtllm.",
     )
     parser.add_argument(
+        "--perf-db-version",
         "--backend-version",
+        dest="backend_version",
         type=str,
         default=None,
-        help="Backend database version. Default is latest",
+        help="[expert] Performance-database version used for the simulation/search "
+        "(search fidelity). Default: latest. Alias: --backend-version.",
     )
     parser.add_argument(
         "--database-mode",
@@ -444,10 +446,13 @@ def _add_estimate_mode_arguments(parser):
         help="Backend name (default: trtllm).",
     )
     parser.add_argument(
+        "--perf-db-version",
         "--backend-version",
+        dest="backend_version",
         type=str,
         default=None,
-        help="Backend database version. Default is latest.",
+        help="[expert] Performance-database version used for the simulation/search "
+        "(search fidelity). Default: latest. Alias: --backend-version.",
     )
     parser.add_argument("--isl", type=int, default=1024, help="Input sequence length. Default: 1024.")
     parser.add_argument("--osl", type=int, default=1024, help="Output sequence length. Default: 1024.")
@@ -859,10 +864,12 @@ def _add_support_mode_arguments(parser):
         "Defaults to 'all' when --system is 'all', otherwise 'trtllm'.",
     )
     parser.add_argument(
+        "--perf-db-version",
         "--backend-version",
+        dest="backend_version",
         type=str,
         default=None,
-        help="Optional backend version to filter by.",
+        help="Optional backend / perf-db version to filter by. Alias: --backend-version.",
     )
 
 
@@ -874,17 +881,17 @@ aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --top-n 3 \\
     --total-gpus 8 --system h200_sxm \\
     --ttft 600 --tpot 50 --isl 4000 --osl 500 \\
-    --generator-dynamo-version 0.7.1 \\
+    --dynamo-version 0.7.1 \\
     --generator-set K8sConfig.k8s_pvc_name=$YOUR_PVC_NAME \\
     --generator-set K8sConfig.k8s_namespace=$YOUR_NAMESPACE \\
     --save-dir results
 
-# Sweep for trtllm 1.2.0rc5 but generate config matching trtllm 1.2.0rc6
+# Sweep against trtllm 1.2.0rc5 perf data but generate config matching trtllm 1.2.0rc6
 aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --backend trtllm \\
     --total-gpus 8 --system h200_sxm \\
-    --backend-version 1.2.0rc5 \\
-    --generated-config-version 1.2.0rc6 \\
+    --perf-db-version 1.2.0rc5 \\
+    --config-template-version 1.2.0rc6 \\
     --save-dir results
 """
 
@@ -1080,7 +1087,7 @@ def _ensure_backend_version_available(system_name: str, backend_name: str, backe
     raise SystemExit(1)
 
 
-def build_default_task_configs(
+def build_default_tasks(
     model_path: str,
     total_gpus: int,
     system: str,
@@ -1106,7 +1113,7 @@ def build_default_task_configs(
     enable_wideep: bool = False,
     moe_backend: str | None = None,
     engine_step_backend: str | None = None,
-) -> dict[str, TaskConfig]:
+) -> dict[str, Task]:
     """Build agg and disagg task configs for default mode comparison.
 
     Args:
@@ -1132,7 +1139,7 @@ def build_default_task_configs(
         engine_step_backend: Experimental static latency backend ("python" or "rust").
 
     Returns:
-        Dict with TaskConfig objects. When backend='auto', returns 6 configs
+        Dict with Task objects. When backend='auto', returns 6 configs
         (agg_trtllm, agg_vllm, agg_sglang, disagg_trtllm, disagg_vllm, disagg_sglang).
         Otherwise returns 2 configs ('agg' and 'disagg').
     """
@@ -1232,28 +1239,31 @@ def build_default_task_configs(
                     database_mode,
                 )
 
-    common_kwargs: dict[str, Any] = {
-        "model_path": model_path,
-        "system_name": system,
-        "backend_version": backend_version,
-        "total_gpus": total_gpus,
+    # v2 Task uses a flat schema. Global (both-mode) fields stay top-level;
+    # worker-spec fields are top-level for agg but must be fanned out to
+    # prefill_* / decode_* for disagg (v2 forbids shared top-level worker fields).
+    global_kwargs: dict[str, Any] = {
         "isl": isl,
         "osl": osl,
-        "image_height": image_height,
-        "image_width": image_width,
-        "num_images_per_request": num_images,
+        "prefix": prefix,
         "ttft": ttft,
         "tpot": tpot,
         "request_latency": request_latency,
-        "prefix": prefix,
+        "total_gpus": total_gpus,
         "database_mode": database_mode,
         "transfer_policy": transfer_policy,
-        "enable_chunked_prefill": enable_chunked_prefill,
         "free_gpu_memory_fraction": free_gpu_memory_fraction,
         "max_seq_len": max_seq_len,
-        "enable_wideep": enable_wideep,
         "engine_step_backend": engine_step_backend,
     }
+    if nextn and nextn > 0:
+        global_kwargs["nextn"] = nextn
+        global_kwargs["nextn_accept_rates"] = nextn_accept_rates
+
+    if image_height or image_width or (num_images and num_images != 1):
+        global_kwargs["image_height"] = image_height
+        global_kwargs["image_width"] = image_width
+        global_kwargs["num_images_per_request"] = num_images
 
     def _sglang_moe_backend_override(backend_name: str) -> str | None:
         if backend_name != common.BackendName.sglang.value:
@@ -1262,30 +1272,45 @@ def build_default_task_configs(
         # (webapp/events/event_fn.py sets moe_backend="deepep_moe" when enable_wideep + sglang)
         return moe_backend or ("deepep_moe" if enable_wideep else None)
 
-    # Create yaml_config to pass nextn and nextn_accept_rates if specified
-    yaml_config = None
-    if nextn > 0:
-        yaml_config = {
-            "config": {
-                "nextn": nextn,
-                "nextn_accept_rates": nextn_accept_rates,
-            }
-        }
+    def _make_agg(backend_name: str, moe_backend_value: str | None) -> Task:
+        return Task(
+            serving_mode="agg",
+            model_path=model_path,
+            system_name=system,
+            backend_name=backend_name,
+            backend_version=backend_version,
+            enable_wideep=enable_wideep,
+            enable_chunked_prefill=enable_chunked_prefill,
+            moe_backend=moe_backend_value,
+            **global_kwargs,
+        )
 
-    task_configs: dict[str, TaskConfig] = {}
+    def _make_disagg(backend_name: str, moe_backend_value: str | None) -> Task:
+        # Fan out the shared worker spec to both roles (v2 disagg forbids top-level worker fields).
+        return Task(
+            serving_mode="disagg",
+            prefill_model_path=model_path,
+            decode_model_path=model_path,
+            prefill_system_name=system,
+            decode_system_name=decode_system,
+            prefill_backend_name=backend_name,
+            decode_backend_name=backend_name,
+            prefill_backend_version=backend_version,
+            decode_backend_version=backend_version,
+            prefill_enable_wideep=enable_wideep,
+            decode_enable_wideep=enable_wideep,
+            prefill_enable_chunked_prefill=enable_chunked_prefill,
+            moe_backend=moe_backend_value,
+            **global_kwargs,
+        )
+
+    tasks: dict[str, Task] = {}
     is_moe_model = check_is_moe(model_path)
 
     for backend_name in backends_to_sweep:
-        # Create agg task for this backend
-        agg_kwargs = dict(common_kwargs)
-        agg_kwargs["backend_name"] = backend_name
-        if backend_moe := _sglang_moe_backend_override(backend_name):
-            agg_kwargs["moe_backend"] = backend_moe
-        if yaml_config:
-            agg_kwargs["yaml_config"] = yaml_config
-        agg_task = TaskConfig(serving_mode="agg", **agg_kwargs)
+        backend_moe = _sglang_moe_backend_override(backend_name)
         exp_name = f"agg_{backend_name}" if backend == "auto" else "agg"
-        task_configs[exp_name] = agg_task
+        tasks[exp_name] = _make_agg(backend_name, backend_moe)
 
         # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
         if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
@@ -1293,31 +1318,20 @@ def build_default_task_configs(
             if skip_reason:
                 logger.info("Skipping SGLang DeepEP agg sweep: %s", skip_reason)
             else:
-                deepep_kwargs = dict(agg_kwargs)
-                deepep_kwargs["moe_backend"] = "deepep_moe"
                 try:
-                    deepep_task = TaskConfig(serving_mode="agg", **deepep_kwargs)
+                    deepep_task = _make_agg(backend_name, "deepep_moe")
                 except UnsupportedWideepConfigError as exc:
                     logger.info("Skipping SGLang DeepEP agg sweep: %s", exc)
                 else:
                     deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
-                    task_configs[deepep_name] = deepep_task
+                    tasks[deepep_name] = deepep_task
 
         if total_gpus < 2:
             logger.warning("Skipping disagg since it requires at least 2 GPUs.")
             continue
 
-        # Create disagg task for this backend
-        disagg_kwargs = dict(common_kwargs)
-        disagg_kwargs["backend_name"] = backend_name
-        disagg_kwargs["decode_system_name"] = decode_system
-        if backend_moe := _sglang_moe_backend_override(backend_name):
-            disagg_kwargs["moe_backend"] = backend_moe
-        if yaml_config:
-            disagg_kwargs["yaml_config"] = yaml_config
-        disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
         exp_name = f"disagg_{backend_name}" if backend == "auto" else "disagg"
-        task_configs[exp_name] = disagg_task
+        tasks[exp_name] = _make_disagg(backend_name, backend_moe)
 
         # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
         if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
@@ -1325,64 +1339,21 @@ def build_default_task_configs(
             if skip_reason:
                 logger.info("Skipping SGLang DeepEP disagg sweep: %s", skip_reason)
             else:
-                deepep_disagg_kwargs = dict(disagg_kwargs)
-                deepep_disagg_kwargs["moe_backend"] = "deepep_moe"
                 try:
-                    deepep_disagg_task = TaskConfig(serving_mode="disagg", **deepep_disagg_kwargs)
+                    deepep_disagg_task = _make_disagg(backend_name, "deepep_moe")
                 except UnsupportedWideepConfigError as exc:
                     logger.info("Skipping SGLang DeepEP disagg sweep: %s", exc)
                 else:
                     deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
-                    task_configs[deepep_name] = deepep_disagg_task
-    return task_configs
+                    tasks[deepep_name] = deepep_disagg_task
+    return tasks
 
 
-_EXPERIMENT_RESERVED_KEYS = {
-    "mode",
-    "serving_mode",
-    "model_path",
-    "system_name",
-    "decode_system_name",
-    "backend_name",
-    "backend_version",
-    "profiles",
-    "isl",
-    "osl",
-    "prefix",
-    "ttft",
-    "tpot",
-    "request_latency",
-    "enable_wideep",
-    "moe_backend",
-    "enable_eplb",
-    "total_gpus",
-    "database_mode",
-    "transfer_policy",
-    "engine_step_backend",
-}
-
-
-def _build_yaml_config(exp_config: dict, config_section: dict) -> dict | None:
-    if not config_section:
-        config_section = {
-            key: copy.deepcopy(value) for key, value in exp_config.items() if key not in _EXPERIMENT_RESERVED_KEYS
-        }
-    if not config_section:
-        return None
-
-    yaml_config = {
-        "mode": exp_config.get("mode", "patch"),
-        "config": config_section,
-    }
-
-    return yaml_config
-
-
-def build_experiment_task_configs(
+def build_experiment_tasks(
     yaml_path: str | None = None,
     config: dict[str, Any] | None = None,
     engine_step_backend: str | None = None,
-) -> dict[str, TaskConfig]:
+) -> dict[str, Task]:
     """Build task configs from YAML file or config dict.
 
     Args:
@@ -1393,7 +1364,7 @@ def build_experiment_task_configs(
             Per-experiment ``engine_step_backend`` entries take precedence.
 
     Returns:
-        Dict mapping experiment names to TaskConfig objects.
+        Dict mapping experiment names to Task objects.
 
     Raises:
         ValueError: If both or neither of yaml_path/config provided, or YAML load fails.
@@ -1423,7 +1394,7 @@ def build_experiment_task_configs(
     else:
         experiment_names = [name for name in experiment_data if name != "exps"]
 
-    task_configs: dict[str, TaskConfig] = {}
+    tasks: dict[str, Task] = {}
 
     for exp_name in experiment_names:
         exp_config = experiment_data[exp_name]
@@ -1431,96 +1402,73 @@ def build_experiment_task_configs(
             logger.warning("Skipping experiment '%s': configuration is not a mapping.", exp_name)
             continue
 
-        config_section = exp_config.get("config")
-        if not isinstance(config_section, dict):
-            config_section = {}
-        else:
-            config_section = copy.deepcopy(config_section)
-
         serving_mode = exp_config.get("serving_mode")
-        model_path = exp_config.get("model_path")
+        # model_path / system_name are top-level for agg and legacy-V1 disagg, but
+        # flat-V2 disagg carries them only under prefill_* / decode_*.  Accept either.
+        model_path = (
+            exp_config.get("model_path") or exp_config.get("prefill_model_path") or exp_config.get("decode_model_path")
+        )
         if serving_mode not in {"agg", "disagg"} or not model_path:
             logger.warning("Skipping experiment '%s': missing serving_mode or model_path.", exp_name)
             continue
 
-        # system
-        if serving_mode == "agg":
-            inferred_system = exp_config.get("system_name")
-            inferred_decode_system = None
-        else:
-            inferred_system = exp_config.get("system_name")
-            inferred_decode_system = exp_config.get("decode_system_name") or inferred_system
-        system_name = inferred_system
+        system_name = (
+            exp_config.get("system_name")
+            or exp_config.get("prefill_system_name")
+            or exp_config.get("decode_system_name")
+        )
         if not system_name:
-            logger.warning(
-                "Skipping experiment '%s': no system name provided "
-                "(provide system_name at the top level or inside worker config).",
-                exp_name,
-            )
+            logger.warning("Skipping experiment '%s': no system_name provided.", exp_name)
             continue
 
-        # backend, default to trtllm
-        backend_name = exp_config.get("backend_name") or common.BackendName.trtllm.value
-        backend_version = exp_config.get("backend_version")
-
-        total_gpus = exp_config.get("total_gpus")
-        if total_gpus is None:
+        if exp_config.get("total_gpus") is None:
             logger.warning("Skipping experiment '%s': total_gpus not provided.", exp_name)
             continue
 
-        task_kwargs: dict[str, Any] = {
-            "serving_mode": serving_mode,
-            "model_path": model_path,
-            "system_name": system_name,
-            "backend_name": backend_name,
-            "total_gpus": total_gpus,
-            "profiles": exp_config.get("profiles", []),
-        }
-
-        if backend_version is not None:
-            _ensure_backend_version_available(system_name, backend_name, backend_version)
-            if serving_mode == "disagg" and inferred_decode_system and inferred_decode_system != system_name:
-                _ensure_backend_version_available(inferred_decode_system, backend_name, backend_version)
-            task_kwargs["backend_version"] = backend_version
-
+        # Early-fail on an unavailable backend version (clearer than failing deep in the sweep).
+        # Role-aware: agg and legacy-v1 disagg carry backend/version/system at the top level;
+        # flat-v2 disagg carries them per role (prefill_*/decode_*), falling back to top-level so
+        # v1 configs still validate.
         if serving_mode == "disagg":
-            task_kwargs["decode_system_name"] = inferred_decode_system or system_name
+            role_checks = [
+                (
+                    exp_config.get("prefill_system_name") or system_name,
+                    exp_config.get("prefill_backend_name") or exp_config.get("backend_name"),
+                    exp_config.get("prefill_backend_version") or exp_config.get("backend_version"),
+                ),
+                (
+                    exp_config.get("decode_system_name") or system_name,
+                    exp_config.get("decode_backend_name") or exp_config.get("backend_name"),
+                    exp_config.get("decode_backend_version") or exp_config.get("backend_version"),
+                ),
+            ]
+        else:
+            role_checks = [(system_name, exp_config.get("backend_name"), exp_config.get("backend_version"))]
+        seen_combos: set[tuple[str, str, str]] = set()
+        for sys_name, bname, bver in role_checks:
+            bname = bname or common.BackendName.trtllm.value
+            if bver is not None and sys_name and (sys_name, bname, bver) not in seen_combos:
+                seen_combos.add((sys_name, bname, bver))
+                _ensure_backend_version_available(sys_name, bname, bver)
 
-        # Per-experiment overrides for runtime numeric parameters if provided at top level
-        for numeric_key in ("isl", "osl", "prefix", "ttft", "tpot", "request_latency"):
-            if numeric_key in exp_config:
-                task_kwargs[numeric_key] = exp_config[numeric_key]
+        # Per-experiment engine_step_backend wins over the global default.
+        overrides: dict[str, Any] = {}
+        if engine_step_backend is not None and "engine_step_backend" not in exp_config:
+            overrides["engine_step_backend"] = engine_step_backend
 
-        if "enable_wideep" in exp_config:
-            task_kwargs["enable_wideep"] = exp_config["enable_wideep"]
-        if "moe_backend" in exp_config:
-            task_kwargs["moe_backend"] = exp_config["moe_backend"]
-        if "enable_eplb" in exp_config:
-            task_kwargs["enable_eplb"] = exp_config["enable_eplb"]
-        if "enable_chunked_prefill" in exp_config:
-            task_kwargs["enable_chunked_prefill"] = exp_config["enable_chunked_prefill"]
-        if "database_mode" in exp_config:
-            task_kwargs["database_mode"] = exp_config["database_mode"]
-        if "transfer_policy" in exp_config:
-            task_kwargs["transfer_policy"] = exp_config["transfer_policy"]
-        effective_engine_step_backend = exp_config.get("engine_step_backend", engine_step_backend)
-        if effective_engine_step_backend is not None:
-            task_kwargs["engine_step_backend"] = effective_engine_step_backend
-
-        yaml_config = _build_yaml_config(exp_config, config_section)
-        if yaml_config:
-            task_kwargs["yaml_config"] = yaml_config
-
+        # exp_config is a legacy V1 experiment dict (top-level fields + nested config /
+        # mode / profiles).  Task.from_yaml auto-detects and converts it to the flat V2
+        # schema (emitting a DeprecationWarning); a native V2 flat dict also works.
         try:
-            task_configs[exp_name] = TaskConfig(**task_kwargs)
+            tasks[exp_name] = Task.from_yaml(exp_config, **overrides)
         except Exception:
-            logger.exception("Failed to build TaskConfig for experiment '%s'", exp_name)
+            logger.exception("Failed to build Task for experiment '%s'", exp_name)
 
-    return task_configs
+    return tasks
 
 
-def _execute_task_configs(
-    task_configs: dict[str, TaskConfig],
+def _execute_tasks(
+    tasks: dict[str, Task],
     mode: str,
     top_n: int = 5,
     target_request_rate: float | None = None,
@@ -1534,7 +1482,7 @@ def _execute_task_configs(
     throughputs, and estimated latencies.
 
     Args:
-        task_configs: Dictionary mapping experiment names to TaskConfig objects to execute.
+        tasks: Dictionary mapping experiment names to Task objects to execute.
         mode: Execution mode ('default' or 'exp').
         top_n: Number of top configurations to return for each experiment.
         target_request_rate: If set, activates load-match picking (minimize
@@ -1560,22 +1508,18 @@ def _execute_task_configs(
     results: dict[str, dict[str, pd.DataFrame]] = {}
     failure_messages: list[str] = []
     start_time = time.time()
-    runner = TaskRunner()
-
     # TODO, can run in parallel
-    for exp_name, task_config in task_configs.items():
+    for exp_name, task in tasks.items():
         try:
             logger.info("Starting experiment: %s", exp_name)
-            logger.debug("Task config: \n%s", task_config.to_yaml())
-            task_result = runner.run(task_config)
-            if task_result is None:
-                raise RuntimeError(f"Task runner returned no result for {exp_name}")
-            pareto_df = task_result["pareto_df"]
+            logger.debug("Task config: \n%s", task.to_yaml())
+            pareto_df = task.run()
+            task_result = {"pareto_df": pareto_df}
             if pareto_df is not None and not pareto_df.empty:
                 results[exp_name] = task_result
                 logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_df))
             else:
-                db_mode = getattr(task_config, "database_mode", None)
+                db_mode = getattr(task, "database_mode", None)
                 hybrid_hint = (
                     " For frontier/new models without silicon data, try --database-mode HYBRID."
                     if db_mode == common.DatabaseMode.SILICON.name
@@ -1601,7 +1545,7 @@ def _execute_task_configs(
             failure_messages.append(f"Experiment {exp_name} failed: {exc}")
 
     if len(results) < 1:
-        first_config = next(iter(task_configs.values()), None)
+        first_config = next(iter(tasks.values()), None)
         db_mode = getattr(first_config, "database_mode", None) if first_config else None
         if db_mode == common.DatabaseMode.SILICON.name:
             logger.error(
@@ -1621,9 +1565,9 @@ def _execute_task_configs(
     pareto_fronts: dict[str, pd.DataFrame | None] = {}
     pareto_x_axis: dict[str, str] = {}
     for name, task_result in results.items():
-        task_config = task_configs[name]
+        task = tasks[name]
         best_config_df, best_throughput, pareto_frontier_df, x_axis_col, latencies = process_experiment_result(
-            task_config,
+            task,
             task_result,
             top_n,
             target_request_rate=target_request_rate,
@@ -1637,9 +1581,9 @@ def _execute_task_configs(
         pareto_fronts[name] = pareto_frontier_df
         pareto_x_axis[name] = x_axis_col
 
-    if mode == "default" and len(task_configs) > 2:
+    if mode == "default" and len(tasks) > 2:
         best_configs, best_throughputs, pareto_fronts, pareto_x_axis = merge_experiment_results_by_mode(
-            task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n
+            tasks, best_configs, pareto_fronts, pareto_x_axis, top_n
         )
 
     chosen_exp = max(best_throughputs, key=best_throughputs.get) if best_throughputs else "none"
@@ -1649,7 +1593,7 @@ def _execute_task_configs(
         best_throughputs=best_throughputs,  # for summary
         best_configs=best_configs,  # for table
         pareto_fronts=pareto_fronts,  # for plotting
-        task_configs=task_configs,  # for info in summary
+        tasks=tasks,  # for info in summary
         mode=mode,
         pareto_x_axis=pareto_x_axis,
         top_n=top_n,
@@ -2301,7 +2245,7 @@ def main(args):
             args.tpot,
             args.backend,
         )
-        task_configs = build_default_task_configs(
+        tasks = build_default_tasks(
             model_path=args.model_path,
             total_gpus=args.total_gpus,
             system=args.system,
@@ -2333,11 +2277,11 @@ def main(args):
             build_kwargs: dict[str, Any] = {"yaml_path": args.yaml_path}
             if args.engine_step_backend is not None:
                 build_kwargs["engine_step_backend"] = args.engine_step_backend
-            task_configs = build_experiment_task_configs(**build_kwargs)
+            tasks = build_experiment_tasks(**build_kwargs)
         except (ValueError, TypeError) as exc:
             logger.exception("Failed to build experiment task configs")
             raise SystemExit(1) from exc
-        if not task_configs:
+        if not tasks:
             logger.error("No valid experiments found in '%s'.", args.yaml_path)
             raise SystemExit(1)
     else:
@@ -2348,8 +2292,8 @@ def main(args):
         execute_kwargs["strict_sla"] = True
     if getattr(args, "inclusive_tpot", False):
         execute_kwargs["inclusive_tpot"] = True
-    _, best_configs, pareto_fronts, _, _ = _execute_task_configs(
-        task_configs,
+    _, best_configs, pareto_fronts, _, _ = _execute_tasks(
+        tasks,
         args.mode,
         top_n=args.top_n,
         **execute_kwargs,
@@ -2360,7 +2304,7 @@ def main(args):
             args=args,
             best_configs=best_configs,
             pareto_fronts=pareto_fronts,
-            task_configs=task_configs,
+            tasks=tasks,
             save_dir=args.save_dir,
             generated_backend_version=args.generated_config_version,
             backend=args.backend if args.mode == "default" else None,

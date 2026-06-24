@@ -254,3 +254,63 @@ def test_kimi_moonshot_trtllm_int4_wo_other_system_remains_fail(monkeypatch):
     )
 
     assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
+
+
+@pytest.mark.parametrize("system,version", [("b200_sxm", "1.3.0rc10"), ("h200_sxm", "1.2.0rc5")])
+def test_mimo_v2_flash_trtllm_headdim192_is_framework_incompatible(monkeypatch, system, version):
+    # head_dim=192 attention is unsupported by the TRT-LLM kernel (SM90 and SM100).
+    def fake_run_mode(**_kwargs):
+        raise RuntimeError("Failed to query context attention data for b=1")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, _errors = SupportMatrix.run_single_test(
+        model="XiaomiMiMo/MiMo-V2-Flash",
+        system=system,
+        backend="trtllm",
+        version=version,
+        system_spec=_b200_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+
+
+def test_mimo_v2_flash_sglang_failure_remains_fail(monkeypatch):
+    # The MiMo exception is TRT-LLM-only; a genuine sglang failure must stay FAIL.
+    def fake_run_mode(**_kwargs):
+        raise RuntimeError("Failed to query context attention data for b=1")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, _errors = SupportMatrix.run_single_test(
+        model="XiaomiMiMo/MiMo-V2-Flash",
+        system="b200_sxm",
+        backend="sglang",
+        version="0.5.10",
+        system_spec=_b200_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
+
+
+@pytest.mark.parametrize("system", ["l40s", "a100_sxm"])
+def test_mimo_v2_flash_trtllm_excluded_systems_stay_fail(monkeypatch, system):
+    # l40s (Ada/SM89) collects head_dim=192 fine; a100 is Ampere/hardware-limited.
+    # Neither should be relabeled framework-incompatible by the MiMo+trtllm rule.
+    def fake_run_mode(**_kwargs):
+        raise RuntimeError("Failed to query context attention data for b=1")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, _errors = SupportMatrix.run_single_test(
+        model="XiaomiMiMo/MiMo-V2-Flash",
+        system=system,
+        backend="trtllm",
+        version="1.3.0rc10",
+        system_spec=_b200_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}

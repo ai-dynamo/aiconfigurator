@@ -1,29 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# define your experiments here, the order will determine the execution order.
+# Flat V2 task schema: one key per Task field, no mode/config/worker_config nesting.
+# `exps` lists which experiments to run (in order); each other top-level key is an experiment.
+
 exps:
-  - exp_agg
-  - exp_disagg
-
+- exp_agg
+- exp_disagg
 exp_agg:
-  mode: "patch"
-  serving_mode: "agg" # required
-  model_path: "Qwen/Qwen3-32B-FP8" # required, HuggingFace model ID
-  total_gpus: 32 # required
-  system_name: "h200_sxm" # required, for prefill
-  backend_name: "trtllm"
-  isl: 4000 # input sequence length
-  osl: 500 # output sequence length
+  isl: 4000
+  serving_mode: agg
+  total_gpus: 32
   request_latency: 12000
-
+  osl: 500
+  model_path: Qwen/Qwen3-32B-FP8
+  system_name: h200_sxm
+  backend_name: trtllm
 exp_disagg:
-  mode: "patch"
-  serving_mode: "disagg" # required
-  model_path: "Qwen/Qwen3-32B-FP8" # required, HuggingFace model ID
-  total_gpus: 32 # required
-  system_name: "h200_sxm" # required, for prefill
-  backend_name: "trtllm"
-  isl: 4000 # input sequence length
-  osl: 500 # output sequence length
+  isl: 4000
+  serving_mode: disagg
+  total_gpus: 32
   request_latency: 12000
+  osl: 500
+  prefill_model_path: Qwen/Qwen3-32B-FP8
+  prefill_backend_name: trtllm
+  decode_model_path: Qwen/Qwen3-32B-FP8
+  decode_backend_name: trtllm
+  prefill_system_name: h200_sxm
+  decode_system_name: h200_sxm

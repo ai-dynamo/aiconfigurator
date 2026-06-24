@@ -105,7 +105,7 @@ class TestContextDSAModule:
 
         value = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][
             GLM5_ARCHITECTURE
-        ][32][0][256][1]
+        ]["flashmla_kv"][32][0][256][1]
         assert value["latency"] == pytest.approx(10.0)
 
     def test_default_context_loader_treats_whitespace_step_as_missing(self, tmp_path):
@@ -119,7 +119,7 @@ class TestContextDSAModule:
 
         value = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][
             DEFAULT_DSA_ARCHITECTURE
-        ][32][0][256][1]
+        ]["flashmla_kv"][32][0][256][1]
         assert value["latency"] == pytest.approx(10.0)
 
     def test_glm5_context_rejects_legacy_shape_without_prefix_axis(self, stub_perf_db):
@@ -559,9 +559,9 @@ class TestGenerationDSAModule:
 
         data = load_generation_dsa_module_data(str(data_path))
 
-        assert data[common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][DEFAULT_DSA_ARCHITECTURE][32][1][
-            150
-        ] == _dsa_value(20.0)
+        assert data[common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][DEFAULT_DSA_ARCHITECTURE][
+            "flashmla_kv"
+        ][32][1][150] == _dsa_value(20.0)
 
     def test_sol_returns_positive(self, comprehensive_perf_db):
         result = comprehensive_perf_db.query_generation_dsa_module(

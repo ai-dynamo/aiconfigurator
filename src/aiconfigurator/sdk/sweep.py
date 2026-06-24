@@ -641,42 +641,19 @@ def _find_best_disagg_under_constraint(
     require_same_tp: bool,
     prefill_degradation: float,
     decode_degradation: float,
+    match_workers: Any,
     autoscale_ttft_correction_factor: float = _AUTOSCALE_TTFT_CORRECTION_FACTOR,
 ) -> pd.DataFrame | None:
     """For one (ttft, tpot) pair, filter + rate-match + pick best per decode parallel.
 
     Mirrors ``_find_best_result_under_constraints`` in
     DisaggInferenceSession.find_best_disagg_result_under_constraints.
-    """
 
-    @functools.lru_cache(maxsize=8192)
-    def _match_workers(
-        prefill_throughput: float,
-        prefill_gpus: int,
-        decode_throughput: float,
-        decode_gpus: int,
-        prefill_deg: float,
-        decode_deg: float,
-    ) -> tuple[int, int]:
-        prefill_opt, decode_opt = -1, -1
-        throughput_per_gpu_max = 0.0
-        for d_num in decode_num_worker_list:
-            for p_num in prefill_num_worker_list:
-                num_gpu = prefill_gpus * p_num + decode_gpus * d_num
-                if num_gpu_set and num_gpu not in num_gpu_set:
-                    continue
-                if max_prefill_gpus is not None and max_decode_gpus is not None:
-                    if prefill_gpus * p_num > max_prefill_gpus:
-                        continue
-                    if decode_gpus * d_num > max_decode_gpus:
-                        continue
-                p_corrected = prefill_throughput * p_num * prefill_deg
-                d_corrected = decode_throughput * d_num * decode_deg
-                tpg = min(p_corrected, d_corrected) / num_gpu
-                if tpg > throughput_per_gpu_max:
-                    throughput_per_gpu_max = tpg
-                    prefill_opt, decode_opt = p_num, d_num
-        return prefill_opt, decode_opt
+    ``match_workers`` is supplied by the caller (``sweep_disagg``) so its
+    ``lru_cache`` is shared across all (ttft, tpot) pairs -- its result is
+    independent of the target, so a per-pair cache would recompute identical
+    matches.
+    """
 
     p_corrected = prefill_summary_df.assign(ttft=prefill_summary_df["ttft"] * autoscale_ttft_correction_factor)
     p_candidates = p_corrected[p_corrected["ttft"] < ttft_target]
@@ -716,7 +693,7 @@ def _find_best_disagg_under_constraint(
                     continue
                 p_throughput = float(p_worker["seq/s"])
                 p_gpus = p_worker["num_total_gpus"]
-                p_num, d_num = _match_workers(
+                p_num, d_num = match_workers(
                     prefill_throughput=p_throughput,
                     prefill_gpus=p_gpus,
                     decode_throughput=d_throughput,
@@ -908,6 +885,40 @@ def sweep_disagg(
         tpot_values = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
         constraint_pairs = [(runtime_config.ttft, tpot) for tpot in tpot_values]
 
+    # Worker-count rate matching depends only on per-worker throughput/GPUs and the
+    # (constant) worker-count lists + GPU budget -- NOT on the (ttft, tpot) target.
+    # Define it once here so the lru_cache is shared across every constraint pair.
+    # Nesting it inside _find_best_disagg_under_constraint rebuilt the cache per pair
+    # and recomputed identical matches (the dominant cost of the disagg sweep).
+    @functools.lru_cache(maxsize=8192)
+    def _match_workers(
+        prefill_throughput: float,
+        prefill_gpus: int,
+        decode_throughput: float,
+        decode_gpus: int,
+        prefill_deg: float,
+        decode_deg: float,
+    ) -> tuple[int, int]:
+        prefill_opt, decode_opt = -1, -1
+        throughput_per_gpu_max = 0.0
+        for d_num in d_num_workers:
+            for p_num in p_num_workers:
+                num_gpu = prefill_gpus * p_num + decode_gpus * d_num
+                if num_gpu_set and num_gpu not in num_gpu_set:
+                    continue
+                if max_prefill_gpus is not None and max_decode_gpus is not None:
+                    if prefill_gpus * p_num > max_prefill_gpus:
+                        continue
+                    if decode_gpus * d_num > max_decode_gpus:
+                        continue
+                p_corrected = prefill_throughput * p_num * prefill_deg
+                d_corrected = decode_throughput * d_num * decode_deg
+                tpg = min(p_corrected, d_corrected) / num_gpu
+                if tpg > throughput_per_gpu_max:
+                    throughput_per_gpu_max = tpg
+                    prefill_opt, decode_opt = p_num, d_num
+        return prefill_opt, decode_opt
+
     disagg_df = pd.DataFrame(columns=common.ColumnsDisagg)
     for ttft_c, tpot_c in constraint_pairs:
         logger.debug("sweep_disagg: finding best for ttft=%sms tpot=%sms", ttft_c, tpot_c)
@@ -925,6 +936,7 @@ def sweep_disagg(
             require_same_tp=require_same_tp,
             prefill_degradation=p_deg,
             decode_degradation=d_deg,
+            match_workers=_match_workers,
             autoscale_ttft_correction_factor=ttft_corr,
         )
         if partial is not None:

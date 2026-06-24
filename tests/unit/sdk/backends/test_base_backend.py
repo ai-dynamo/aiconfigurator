@@ -182,3 +182,9 @@ def test_run_static_can_route_to_rust_engine_step_backend(
     assert summary.get_generation_energy_wms_dict() == {"rust_engine_step_generation": 0.0}
     assert summary.get_context_source_dict() == {"rust_engine_step_context": "rust"}
     assert summary.get_generation_source_dict() == {"rust_engine_step_generation": "rust"}
+
+
+def test_mix_step_efficiency_base_default_is_one(backend: BaseBackend) -> None:
+    assert backend._mix_step_efficiency(ctx_tokens=4096, gen_tokens=16) == 1.0
+    assert backend._mix_step_efficiency(ctx_tokens=4096, gen_tokens=0) == 1.0
+    assert backend._mix_step_efficiency(ctx_tokens=0, gen_tokens=0) == 1.0

@@ -103,8 +103,8 @@ manifest-path = "rust/aiconfigurator-core/Cargo.toml"
 module-name = "aiconfigurator_core._aiconfigurator_core"
 # Pure-Python sources live under src/ (src-layout).
 python-source = "src"
-# Build an abi3 wheel (single wheel valid across Py 3.9+, matching the
-# pyo3 `abi3-py39` feature).
+# Build an abi3 wheel (single wheel valid across Py 3.10+, matching the
+# requires-python = ">=3.10" and the pyo3 `abi3-py310` feature).
 abi3 = true
 # Enable the extension-module feature ONLY for the maturin/wheel build.
 # `cargo build`/`cargo test` keep linking libpython (auto-initialize) for the
@@ -127,6 +127,8 @@ include = [
     "src/aiconfigurator/generator/config/**/*.yaml",
     "src/aiconfigurator/generator/config/backend_templates/**/*.j2",
     "src/aiconfigurator/generator/rule_plugin/**/*.rule",
+    "src/aiconfigurator/generator/facts/**/*.yaml",
+    "src/aiconfigurator/generator/environment/*.yaml",
     "src/aiconfigurator/systems/*.yaml",
     "src/aiconfigurator/systems/*.csv",
     "src/aiconfigurator/systems/**/*.csv",
@@ -140,7 +142,7 @@ include = [
 
 [tool.setuptools.package-data]
 "aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
-"aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule"]
+"aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule", "facts/**/*.yaml", "environment/*.yaml"]
 "aiconfigurator" = [
     "systems/*.yaml",
     "systems/*.csv",

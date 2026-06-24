@@ -13,7 +13,7 @@ from tools.support_matrix.support_matrix import STATUS_PASS, SupportMatrix, Test
 pytestmark = pytest.mark.unit
 
 
-def test_run_single_test_uses_plain_default_task_config_for_large_moe(monkeypatch):
+def test_run_single_test_uses_plain_default_task_for_large_moe(monkeypatch):
     calls: list[dict] = []
 
     def fake_run_mode(**kwargs):

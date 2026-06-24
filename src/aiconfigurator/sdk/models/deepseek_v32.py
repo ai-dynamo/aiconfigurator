@@ -94,10 +94,12 @@ class DeepSeekV32Model(BaseModel):
         super().__init__(*args)
 
         assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
+            self.config.tp_size * self.config.attention_dp_size * self.config.attention_cp_size
+            == self.config.moe_tp_size * self.config.moe_ep_size
         ), (
             f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
+            f"({self.config.attention_dp_size}) * attention_cp_size "
+            f"({self.config.attention_cp_size}) should be equal to moe_tp_size "
             f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
@@ -118,6 +120,7 @@ class DeepSeekV32Model(BaseModel):
         moe_tp_size = self.config.moe_tp_size
         moe_ep_size = self.config.moe_ep_size
         attention_dp_size = self.config.attention_dp_size
+        cp_size = self.config.attention_cp_size  # context parallelism (token split, orthogonal to tp)
         pp_size = self.config.pp_size
 
         gemm_quant_mode = self.config.gemm_quant_mode
@@ -135,7 +138,7 @@ class DeepSeekV32Model(BaseModel):
         self.context_ops.extend(
             [
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
-                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, scale_num_tokens=cp_size),
                 ops.ContextDSAModule(
                     "context_attention",
                     self._num_layers,
@@ -144,27 +147,28 @@ class DeepSeekV32Model(BaseModel):
                     fmha_quant_mode,
                     dsa_gemm_quant_mode,
                     architecture=self.architecture,
+                    cp_size=self.config.attention_cp_size,
                 ),
-                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8, scale_num_tokens=cp_size),
                 ops.GEMM(
                     "context_shared_gate_up_gemm",
                     self._num_layers,
-                    2 * self._moe_inter_size // tp_size,
+                    2 * self._moe_inter_size // moe_tp_size,
                     h,
                     gemm_quant_mode,
                 ),
                 ops.ElementWise(
                     "context_shared_act_gate",
                     self._num_layers,
-                    2 * self._moe_inter_size // tp_size,
-                    self._moe_inter_size // tp_size,
+                    2 * self._moe_inter_size // moe_tp_size,
+                    self._moe_inter_size // moe_tp_size,
                     0.8,
                 ),
                 ops.GEMM(
                     "context_shared_ffn2_gemm",
                     self._num_layers,
                     h,
-                    self._moe_inter_size // tp_size,
+                    self._moe_inter_size // moe_tp_size,
                     gemm_quant_mode,
                 ),
                 ops.GEMM(
@@ -185,6 +189,7 @@ class DeepSeekV32Model(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
+                    attn_cp_size=self.config.attention_cp_size,
                 ),
                 ops.MoE(
                     "context_moe",
@@ -210,6 +215,7 @@ class DeepSeekV32Model(BaseModel):
                     attention_dp_size,
                     False,
                     quant_mode=moe_quant_mode,
+                    attn_cp_size=self.config.attention_cp_size,
                 ),
                 ops.GEMM(
                     "context_logits_gemm",
@@ -253,22 +259,22 @@ class DeepSeekV32Model(BaseModel):
             ops.GEMM(
                 "generation_shared_gate_up_gemm",
                 self._num_layers * self._mtp_scale_factor,
-                2 * self._moe_inter_size // tp_size,
+                2 * self._moe_inter_size // moe_tp_size,
                 h,
                 gemm_quant_mode,
             ),
             ops.ElementWise(
                 "generation_shared_act_gate",
                 self._num_layers * self._mtp_scale_factor,
-                2 * self._moe_inter_size // tp_size,
-                self._moe_inter_size // tp_size,
+                2 * self._moe_inter_size // moe_tp_size,
+                self._moe_inter_size // moe_tp_size,
                 0.8,
             ),
             ops.GEMM(
                 "generation_shared_ffn2_gemm",
                 self._num_layers * self._mtp_scale_factor,
                 h,
-                self._moe_inter_size // tp_size,
+                self._moe_inter_size // moe_tp_size,
                 gemm_quant_mode,
             ),
         ]
@@ -292,6 +298,7 @@ class DeepSeekV32Model(BaseModel):
                 attention_dp_size,
                 True,
                 quant_mode=moe_quant_mode,
+                attn_cp_size=self.config.attention_cp_size,
             ),
             ops.MoE(
                 "generation_moe",
@@ -317,6 +324,7 @@ class DeepSeekV32Model(BaseModel):
                 attention_dp_size,
                 False,
                 quant_mode=moe_quant_mode,
+                attn_cp_size=self.config.attention_cp_size,
             ),
         ]
         self.generation_ops.append(
@@ -360,10 +368,12 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
         super().__init__(*args)
 
         assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
+            self.config.tp_size * self.config.attention_dp_size * self.config.attention_cp_size
+            == self.config.moe_tp_size * self.config.moe_ep_size
         ), (
             f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
+            f"({self.config.attention_dp_size}) * attention_cp_size "
+            f"({self.config.attention_cp_size}) should be equal to moe_tp_size "
             f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
@@ -444,6 +454,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                     fmha_quant_mode,
                     dsa_gemm_quant_mode,
                     architecture=self.architecture,
+                    cp_size=self.config.attention_cp_size,
                 ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
                 ops.GEMM(
@@ -680,6 +691,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     fmha_quant_mode,
                     dsa_gemm_quant_mode,
                     architecture=self.architecture,
+                    cp_size=self.config.attention_cp_size,
                 ),
                 *(
                     [
@@ -730,6 +742,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
+                    attn_cp_size=self.config.attention_cp_size,
                     sms=sms,
                     moe_backend=moe_backend,
                     is_context=True,
@@ -797,6 +810,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
+                    attn_cp_size=self.config.attention_cp_size,
                     sms=sms,
                     moe_backend=moe_backend,
                     is_context=False,

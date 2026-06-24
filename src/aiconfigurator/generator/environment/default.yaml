@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Default environment profile.
+# Copy and customise for each target cluster.
+# All fields are optional; omitted fields fall back to the generator defaults.
+
+namespace: default
+storage_class_name: standard
+mount_root: /opt/models
+image_pull_secrets: []
+hf_token_secret: null
+nccl_socket_ifname: null
+gloo_socket_ifname: null
+registry_prefix: null

@@ -31,7 +31,6 @@ from .utils import (
 GENERATOR_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
 DEFAULT_DEPLOYMENT_SCHEMA_PATH = os.path.join(GENERATOR_CONFIG_DIR, "deployment_config.yaml")
 DEFAULT_BACKEND_MAPPING_PATH = os.path.join(GENERATOR_CONFIG_DIR, "backend_config_mapping.yaml")
-DEFAULT_BACKEND_VERSION_MATRIX_PATH = os.path.join(GENERATOR_CONFIG_DIR, "backend_version_matrix.yaml")
 _VALID_GENERATOR_HELP_SECTIONS = {"all", "deploy", "backend"}
 
 
@@ -385,17 +384,56 @@ def add_generator_override_arguments(parser: argparse.ArgumentParser) -> None:
         help="Print generator schema help (deploy, backend, or all) and exit.",
     )
     grp.add_argument(
+        "--config-template-version",
         "--generated-config-version",
+        dest="generated_config_version",
         type=str,
         default=None,
-        help="Backend template version for generated artifacts (e.g. 1.1.0rc5).",
+        help="[expert] Override the backend template version for generated "
+        "artifacts (e.g. 1.1.0rc5). Takes precedence over the version derived "
+        "from --dynamo-version. Alias: --generated-config-version.",
     )
     grp.add_argument(
+        "--dynamo-version",
         "--generator-dynamo-version",
         dest="generator_dynamo_version",
         type=str,
         default=None,
-        help="Dynamo version used for backend template selection.",
+        help="Target Dynamo release to deploy on; selects both the container "
+        "image tag and the config-template version. Alias: --generator-dynamo-version.",
+    )
+
+    dep = parser.add_argument_group(
+        "Cluster & Deployment",
+        "Common deployment overrides. Each is a convenience shortcut for a "
+        "--generator-set K8sConfig.* key and takes precedence over it.",
+    )
+    dep.add_argument(
+        "--namespace",
+        type=str,
+        default=None,
+        help="Kubernetes namespace for generated resources (K8sConfig.k8s_namespace).",
+    )
+    dep.add_argument(
+        "--model-cache",
+        type=str,
+        default=None,
+        metavar="NAME[:MOUNT[:SUBPATH]]",
+        help="Model-cache PVC. NAME maps to K8sConfig.k8s_pvc_name; optional "
+        ":MOUNT to k8s_pvc_mount_path; optional :SUBPATH to k8s_model_path_in_pvc.",
+    )
+    dep.add_argument(
+        "--transport",
+        choices=["nvlink", "ib", "efa"],
+        default=None,
+        help="Worker network transport (K8sConfig.transport).",
+    )
+    dep.add_argument(
+        "--image-pull-secret",
+        dest="image_pull_secret",
+        type=str,
+        default=None,
+        help="Image pull secret for a private registry (K8sConfig.k8s_image_pull_secret).",
     )
 
 
@@ -436,6 +474,27 @@ def load_generator_overrides_from_args(args: argparse.Namespace) -> dict[str, An
     dynamo_version = getattr(args, "generator_dynamo_version", None)
     if dynamo_version:
         overrides = _deep_merge_dicts(overrides, {"generator_dynamo_version": dynamo_version})
+
+    # Promoted first-class deployment flags -> K8sConfig overrides. Applied last
+    # so an explicit flag wins over the same key set via --generator-set.
+    k8s: dict[str, Any] = {}
+    if getattr(args, "namespace", None):
+        k8s["k8s_namespace"] = args.namespace
+    if getattr(args, "transport", None):
+        k8s["transport"] = args.transport
+    if getattr(args, "image_pull_secret", None):
+        k8s["k8s_image_pull_secret"] = args.image_pull_secret
+    model_cache = getattr(args, "model_cache", None)
+    if model_cache:
+        parts = model_cache.split(":")
+        if parts[0]:
+            k8s["k8s_pvc_name"] = parts[0]
+        if len(parts) > 1 and parts[1]:
+            k8s["k8s_pvc_mount_path"] = parts[1]
+        if len(parts) > 2 and parts[2]:
+            k8s["k8s_model_path_in_pvc"] = parts[2]
+    if k8s:
+        overrides = _deep_merge_dicts(overrides, {"K8sConfig": k8s})
     return overrides
 
 
@@ -738,6 +797,38 @@ def generate_naive_config(
     }
 
 
+def generate_from_request(
+    req: Any,
+    output_dir: Optional[str] = None,
+    templates_dir: Optional[str] = None,
+) -> dict[str, str]:
+    """Generate artifacts from a typed GeneratorRequest (the new public entry).
+
+    Lowers the request to the legacy params dict and renders via the unchanged
+    ``generate_backend_artifacts``. Version intent comes from the request:
+    ``backend.generated_config_version`` overrides; otherwise it is derived from
+    ``backend.dynamo_version``; otherwise the renderer uses its default templates.
+    """
+    from .request import to_legacy_params
+
+    params = to_legacy_params(req)
+    backend = req.backend.name
+
+    backend_version = req.backend.generated_config_version
+    if backend_version is None and req.backend.dynamo_version:
+        backend_version = resolve_backend_version_for_dynamo(req.backend.dynamo_version, backend)
+
+    out = output_dir if output_dir is not None else req.emit.output_dir
+    return generate_backend_artifacts(
+        params,
+        backend,
+        templates_dir=templates_dir,
+        output_dir=out,
+        backend_version=backend_version,
+        deployment_target=req.emit.deployment_target,
+    )
+
+
 __all__ = [
     "add_generator_override_arguments",
     "collect_generator_params",
@@ -745,6 +836,7 @@ __all__ = [
     "generate_backend_config",
     "generate_config_from_input_dict",
     "generate_config_from_yaml",
+    "generate_from_request",
     "generate_naive_config",
     "generator_cli_helper",
     "get_default_dynamo_version_mapping",

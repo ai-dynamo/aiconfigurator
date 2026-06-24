@@ -3,26 +3,20 @@
 
 //! DSA (Dynamic Sparse Attention) module operator.
 //!
-//! Mirrors `aiconfigurator.sdk.operations.dsa.DSAModule`. Wraps the
-//! `db.dsa.query_context/generation` raw lookups with prefix correction
-//! and clamping. The topk-piecewise interpolation algorithm is handled by
-//! the perf-DB layer in a follow-up; this operator currently uses the
-//! 3-D interpolated path for the matching prefix slice.
+//! Mirrors `aiconfigurator.sdk.operations.dsa.ContextDSAModule` /
+//! `GenerationDSAModule`. The context lookup keys the per-`prefix` slice and
+//! evaluates at `isl` (the new-token count), running the top-k regime-aware
+//! piecewise interpolation first and the DSv4 robust 3-D / batch-scaling
+//! lookup as the fallback (see `perf_database::dsa::query_context`).
+//!
+//! `index_topk` is the top-k boundary (per-architecture; 2048 for both
+//! DeepSeek-V3.2 and GLM-5). It is plumbed from the Python op-spec emitter.
 
 use serde::{Deserialize, Serialize};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::perf_database::PerfDatabase;
-
-fn prefix_correction(full_s: u32, prefix: u32) -> f64 {
-    if full_s == 0 {
-        return 0.0;
-    }
-    let f = full_s as f64;
-    let p = prefix as f64;
-    (f * f - p * p) / (f * f)
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DsaModuleOp {
@@ -33,9 +27,13 @@ pub struct DsaModuleOp {
     pub fmha_quant_mode: FmhaQuantMode,
     pub gemm_quant_mode: GemmQuantMode,
     pub architecture: String,
+    /// Top-k boundary for the sparse-attention regime split. Sourced from
+    /// `DSA_MODEL_DIMS[architecture]["index_topk"]` on the Python side.
+    pub index_topk: u32,
 }
 
 impl DsaModuleOp {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: impl Into<String>,
         num_heads: u32,
@@ -43,6 +41,7 @@ impl DsaModuleOp {
         fmha_quant_mode: FmhaQuantMode,
         gemm_quant_mode: GemmQuantMode,
         architecture: impl Into<String>,
+        index_topk: u32,
     ) -> Self {
         Self {
             name: name.into(),
@@ -52,6 +51,7 @@ impl DsaModuleOp {
             fmha_quant_mode,
             gemm_quant_mode,
             architecture: architecture.into(),
+            index_topk,
         }
     }
 
@@ -62,18 +62,21 @@ impl DsaModuleOp {
         isl: u32,
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
-        let full_s = isl + prefix;
-        let raw = db.dsa.query_context(
+        // Query at `isl` (new-token count) for the exact `prefix` slice — NOT
+        // `isl + prefix`. The perf-DB layer runs the piecewise + robust 3-D
+        // dispatch; there is no multiplicative prefix correction (it had no
+        // Python counterpart and under-counted context latency ~75%).
+        let latency = db.dsa.query_context(
             batch_size,
-            full_s,
+            isl,
             self.num_heads,
             self.kv_cache_dtype,
             self.fmha_quant_mode,
             self.gemm_quant_mode,
             &self.architecture,
             prefix,
+            self.index_topk,
         )?;
-        let latency = raw * prefix_correction(full_s, prefix);
         Ok(PerformanceResult::new(latency, Source::Silicon)
             .clamp_non_negative()
             .scaled(self.scale_factor))

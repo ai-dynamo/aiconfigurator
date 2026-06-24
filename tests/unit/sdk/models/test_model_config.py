@@ -24,7 +24,6 @@ from aiconfigurator.sdk.models import (
     get_model_family,
 )
 from aiconfigurator.sdk.performance_result import PerformanceResult
-from aiconfigurator.sdk.task import TaskConfig
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
 pytestmark = pytest.mark.unit
@@ -305,7 +304,7 @@ class TestHFModelSupport:
             ),
             (
                 "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
-                common.GEMMQuantMode.fp8,
+                common.GEMMQuantMode.fp8_static,
                 common.MoEQuantMode.fp8,
                 common.KVCacheQuantMode.fp8,
                 common.FMHAQuantMode.fp8,
@@ -653,23 +652,6 @@ class TestHFModelSupport:
         assert model_config.moe_quant_mode == common.MoEQuantMode.nvfp4
         assert context_dsa._gemm_quant_mode == common.GEMMQuantMode.bfloat16
         assert generation_dsa._gemm_quant_mode == common.GEMMQuantMode.bfloat16
-
-    @pytest.mark.parametrize(
-        "model_path,replacement",
-        [
-            ("deepseek-ai/DeepSeek-V4-Flash", "sgl-project/DeepSeek-V4-Flash-FP8"),
-            ("deepseek-ai/DeepSeek-V4-Pro", "sgl-project/DeepSeek-V4-Pro-FP8"),
-        ],
-    )
-    def test_native_deepseek_v4_fp4_checkpoint_rejected_on_hopper(self, model_path, replacement):
-        with pytest.raises(ValueError, match=f"Use {replacement} instead"):
-            TaskConfig(
-                serving_mode="agg",
-                model_path=model_path,
-                system_name="h200_sxm",
-                backend_name="trtllm",
-                database_mode="SOL",
-            )
 
 
 class TestKVCacheElementsPerToken:

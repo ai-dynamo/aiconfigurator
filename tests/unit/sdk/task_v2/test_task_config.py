@@ -52,28 +52,16 @@ def test_agg_resolves_quant_from_hf():
     assert t.gemm_quant_mode == common.GEMMQuantMode.fp8_block
 
 
-def test_agg_quant_preset_overrides_hf():
+def test_agg_explicit_quant_overrides_hf():
     t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
-        quant_preset="bfloat16",
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
     )
-    assert t.gemm_quant_mode == common.GEMMQuantMode.bfloat16
-    assert t.kvcache_quant_mode == common.KVCacheQuantMode.bfloat16
-
-
-def test_agg_explicit_quant_overrides_preset():
-    t = Task(
-        serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-V3",
-        system_name="h200_sxm",
-        quant_preset="bfloat16",
-        gemm_quant_mode=common.GEMMQuantMode.fp8,
-    )
-    assert t.gemm_quant_mode == common.GEMMQuantMode.fp8
-    # other modes follow preset
-    assert t.kvcache_quant_mode == common.KVCacheQuantMode.bfloat16
+    assert t.gemm_quant_mode == common.GEMMQuantMode.bfloat16  # explicit wins
+    # unset modes fall back to HF inference (DeepSeek-V3)
+    assert t.kvcache_quant_mode == common.KVCacheQuantMode.fp8
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +82,7 @@ def test_disagg_with_separate_role_specs():
     assert t.prefill_tp_candidates is not None
     assert t.decode_tp_candidates is not None
     assert t.num_gpu_per_replica is not None
-    assert t.max_gpu_per_replica == 128
+    assert t.max_gpu_per_replica == 32  # clamped to total_gpus=32, matches v1 _finalize_disagg
     assert t.max_prefill_workers == 32
 
 
@@ -123,7 +111,6 @@ def test_disagg_wideep_sets_larger_replica_budget():
         ("enable_wideep", True),
         ("enable_chunked_prefill", True),
         ("enable_eplb", True),
-        ("quant_preset", "fp8"),
         ("gemm_quant_mode", common.GEMMQuantMode.fp8),
     ],
 )
@@ -224,7 +211,7 @@ def test_from_yaml_flat_disagg():
     assert t.decode_model_path == "deepseek-ai/DeepSeek-V3"
     assert t.prefill_gemm_quant_mode == common.GEMMQuantMode.fp8_block
     assert t.decode_gemm_quant_mode == common.GEMMQuantMode.fp8_block
-    assert t.max_gpu_per_replica == 128
+    assert t.max_gpu_per_replica == 32  # clamped to total_gpus=32 (min(32, 128)), matches v1
     assert t.prefill_latency_correction == 1.1
 
 
@@ -244,11 +231,9 @@ def test_from_yaml_with_cli_overrides():
     assert t.ttft == 500.0
 
 
-def test_from_yaml_warns_on_unknown_keys(caplog):
-    """Unknown keys are warned about but not silently swallowed."""
-    import logging
-
-    with caplog.at_level(logging.WARNING):
+def test_from_yaml_rejects_unknown_keys():
+    """Unknown keys hard-fail -- no silent-ignore path. Both bad keys are named."""
+    with pytest.raises(ValueError) as exc:
         Task.from_yaml(
             {
                 "serving_mode": "agg",
@@ -258,8 +243,45 @@ def test_from_yaml_warns_on_unknown_keys(caplog):
                 "another_typo": "value",
             }
         )
-    assert "totally_made_up_field" in caplog.text
-    assert "another_typo" in caplog.text
+    assert "totally_made_up_field" in str(exc.value)
+    assert "another_typo" in str(exc.value)
+
+
+def test_from_yaml_rejects_non_yaml_expressible_strategy_field(monkeypatch):
+    """A valid-but-not-YAML-expressible field (predictor) written in YAML hard-fails."""
+    monkeypatch.setattr(Task, "__post_init__", lambda self: None)
+    with pytest.raises(ValueError) as exc:
+        Task.from_yaml({"serving_mode": "agg", "model_path": "x", "system_name": "h200_sxm", "predictor": "nope"})
+    assert "predictor" in str(exc.value)
+
+
+def test_attention_backend_and_wideep_num_slots_reach_model_config():
+    """attention_backend / wideep_num_slots flow into every role's ModelConfig
+    (fa3 vs flashinfer selects different MLA perf tables; slots feeds EPLB)."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        attention_backend="fa3",
+        wideep_num_slots=288,
+    )
+    mc = t.build_model_config(role="agg")
+    assert mc.attention_backend == "fa3"
+    assert mc.wideep_num_slots == 288
+
+
+def test_invalid_attention_backend_rejected():
+    t = Task(
+        serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", attention_backend="torch"
+    )
+    with pytest.raises(ValueError, match="attention_backend"):
+        t.validate()
+
+
+def test_invalid_wideep_num_slots_rejected():
+    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", wideep_num_slots=0)
+    with pytest.raises(ValueError, match="wideep_num_slots"):
+        t.validate()
 
 
 def test_from_yaml_disagg_rejects_legacy_shared_model_path():
@@ -295,7 +317,7 @@ def test_build_model_config_agg_uses_resolved_quant():
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
-        quant_preset="bfloat16",
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
     )
     mc = t.build_model_config(role="agg")
     assert mc.gemm_quant_mode == common.GEMMQuantMode.bfloat16
@@ -339,6 +361,462 @@ def test_sweep_disagg_kwargs_shape():
     assert kwargs["autoscale_ttft_correction_factor"] == 1.8
 
 
+def test_sweep_disagg_require_same_tp_sglang_non_wideep():
+    """SGLang non-wideep disagg must enforce prefill/decode TP equality (dynamo#5870).
+
+    WideEP relaxes it; other backends never get the SGLang-specific constraint.
+    """
+
+    def mk(backend, **extra):
+        return Task(
+            serving_mode="disagg",
+            prefill_model_path="deepseek-ai/DeepSeek-V3",
+            prefill_system_name="h200_sxm",
+            prefill_backend_name=backend,
+            decode_model_path="deepseek-ai/DeepSeek-V3",
+            decode_system_name="h200_sxm",
+            decode_backend_name=backend,
+            **extra,
+        ).sweep_disagg_kwargs(prefill_database=None, decode_database=None)
+
+    assert mk("sglang")["require_same_tp"] is True
+    assert mk("sglang", prefill_enable_wideep=True, decode_enable_wideep=True)["require_same_tp"] is False
+    assert mk("trtllm")["require_same_tp"] is False
+
+
+def test_deepseek_decode_keeps_fp8_fmha_prefill_downgrades():
+    """DeepSeek context attention (prefill) downgrades fp8 FMHA to bf16; decode
+    (generation attention) keeps fp8. Matches v1, which gates this on validate_context.
+    """
+    from aiconfigurator.sdk import common
+
+    t = Task(
+        serving_mode="disagg",
+        prefill_model_path="deepseek-ai/DeepSeek-V3",
+        prefill_system_name="h200_sxm",
+        prefill_backend_name="sglang",
+        decode_model_path="deepseek-ai/DeepSeek-V3",
+        decode_system_name="h200_sxm",
+        decode_backend_name="sglang",
+    )
+    assert t.prefill_fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert t.decode_fmha_quant_mode == common.FMHAQuantMode.fp8
+
+
+def test_deepseek_v32_v4_downgrade_fmha_all_roles():
+    """DeepSeek-V3.2 / V4 use bf16 FMHA on EVERY role incl. decode (DSA / compressed
+    attention perf tables only carry bf16). Mirrors v1 _apply_model_quant_defaults,
+    which is unconditional (unlike the context-only V3/Kimi rule).
+    """
+    from aiconfigurator.sdk import common
+
+    for mp in ("deepseek-ai/DeepSeek-V3.2", "deepseek-ai/DeepSeek-V4-Pro"):
+        t = Task(
+            serving_mode="disagg",
+            prefill_model_path=mp,
+            prefill_system_name="b200_sxm",
+            prefill_backend_name="sglang",
+            decode_model_path=mp,
+            decode_system_name="b200_sxm",
+            decode_backend_name="sglang",
+        )
+        assert t.prefill_fmha_quant_mode == common.FMHAQuantMode.bfloat16
+        assert t.decode_fmha_quant_mode == common.FMHAQuantMode.bfloat16
+
+
+def test_nextn_default_respects_hf_then_family_fallback():
+    """nextn: HF num_nextn_predict_layers wins (incl. explicit 0, e.g. Kimi-K2.5);
+    field absent -> family-based fallback (Qwen3.5 -> 1, DeepSeek -> 1).
+    """
+
+    def mk(mp):
+        return Task(serving_mode="agg", model_path=mp, system_name="h200_sxm", backend_name="trtllm").nextn
+
+    assert mk("deepseek-ai/DeepSeek-V3") == 1  # HF declares 1
+    assert mk("moonshotai/Kimi-K2.5") == 0  # HF declares 0 -- respected, not forced to 1
+    assert mk("Qwen/Qwen3.5-27B") == 1  # HF field absent -> family fallback
+
+
+def test_nextn_explicit_override_warns(caplog):
+    """An explicit nextn diverging from the checkpoint warns (MTP layer stacking)."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.task_v2"):
+        t = Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=3,
+        )
+    assert t.nextn == 3
+    assert any("overrides" in r.message for r in caplog.records)
+
+
+def test_moe_backend_flows_into_model_config():
+    """Task.moe_backend must reach the per-role ModelConfig so get_model selects the
+    right MoE kernel (v1 set it; v2 build_model_config used to drop it -> None)."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        moe_backend="deepep_moe",
+    )
+    assert t.build_model_config(role="agg").moe_backend == "deepep_moe"
+
+
+def test_dsv4_pro_sglang_moe_remap():
+    """DeepSeek-V4-Pro on sglang remaps MoE to the arch-specific kernel (v1 dsv4pro-moe-arch):
+    Blackwell -> w4a8_mxfp4_mxfp8_trtllm. megamoe and non-sglang backends are exempt.
+    """
+    from aiconfigurator.sdk import common
+
+    def moe(be, **kw):
+        return Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V4-Pro",
+            system_name="b200_sxm",
+            backend_name=be,
+            **kw,
+        ).moe_quant_mode
+
+    assert moe("sglang") == common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+    assert moe("sglang", moe_backend="megamoe") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+    assert moe("trtllm") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+
+
+def test_pareto_sweep_controls_tpot_grid():
+    """pareto_sweep=True (default) sweeps the legacy TPOT grid (matches v1); False
+    evaluates only the single tpot target (Planner path)."""
+    t = Task(serving_mode="agg", model_path="Qwen/Qwen3-32B", system_name="h200_sxm", backend_name="trtllm")
+    assert t.pareto_sweep is True
+    assert isinstance(t.sweep_agg_kwargs(database=None)["runtime_config"].tpot, list)
+    t2 = Task(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        tpot=42.0,
+        pareto_sweep=False,
+    )
+    assert t2.sweep_agg_kwargs(database=None)["runtime_config"].tpot == 42.0
+
+
+def test_total_gpus_budget_filters_and_validates():
+    """total_gpus clamps the num_gpu search space and validates it (v1 _finalize_*)."""
+    # agg: filters num_gpu candidates above the budget
+    t = Task(serving_mode="agg", model_path="Qwen/Qwen3-32B", system_name="gb200", backend_name="trtllm", total_gpus=4)
+    assert all(n <= 4 for n in t.agg_num_gpu_candidates)
+    assert t.agg_num_gpu_candidates  # not emptied
+    # agg: negative total_gpus rejected
+    with pytest.raises(ValueError, match="no smaller than 0"):
+        Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            total_gpus=-1,
+        )
+    # disagg: total_gpus < 2 rejected
+    with pytest.raises(ValueError, match="greater than 2"):
+        Task(
+            serving_mode="disagg",
+            prefill_model_path="Qwen/Qwen3-32B",
+            prefill_system_name="h200_sxm",
+            prefill_backend_name="trtllm",
+            decode_model_path="Qwen/Qwen3-32B",
+            decode_system_name="h200_sxm",
+            decode_backend_name="trtllm",
+            total_gpus=1,
+        )
+    # disagg: max_gpu_per_replica clamped to total_gpus, candidates filtered
+    td = Task(
+        serving_mode="disagg",
+        prefill_model_path="Qwen/Qwen3-32B",
+        prefill_system_name="h200_sxm",
+        prefill_backend_name="trtllm",
+        decode_model_path="Qwen/Qwen3-32B",
+        decode_system_name="h200_sxm",
+        decode_backend_name="trtllm",
+        total_gpus=8,
+    )
+    assert td.max_gpu_per_replica == 8  # min(8, 128)
+    assert all(n <= 8 for n in td.prefill_num_gpu_candidates)
+    assert all(n <= 8 for n in td.decode_num_gpu_candidates)
+    # num_gpu_per_replica keeps v1's full list at construct time; the cap is applied at sweep
+    # time via get_working_list (matches v1 construct state, not a construct-time filter).
+    assert 128 in td.num_gpu_per_replica
+    assert all(n <= 8 for n in td.sweep_disagg_kwargs(prefill_database=None, decode_database=None)["num_gpu_list"])
+
+
+def test_large_pipeline_parallel_augments_dsv32_blackwell_defaults():
+    """DeepSeek-V3.2 MoE on Blackwell, non-wideep, total_gpus>=16 gets PP=2/TP=8/16-GPU
+    added to the DEFAULT search space (v1 _include_large_pipeline_parallel_worker)."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3.2",
+        system_name="b200_sxm",
+        backend_name="trtllm",
+        total_gpus=64,
+    )
+    assert 16 in t.agg_num_gpu_candidates
+    assert 8 in t.agg_tp_candidates
+    assert 2 in t.agg_pp_candidates
+    # Not applied below 16 GPUs
+    t2 = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3.2",
+        system_name="b200_sxm",
+        backend_name="trtllm",
+        total_gpus=8,
+    )
+    assert 2 not in t2.agg_pp_candidates
+    # Not applied on non-Blackwell
+    t3 = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3.2",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        total_gpus=64,
+    )
+    assert 2 not in t3.agg_pp_candidates
+    # User-supplied candidates are NOT augmented (v1 yaml-over-defaults)
+    t4 = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3.2",
+        system_name="b200_sxm",
+        backend_name="trtllm",
+        total_gpus=64,
+        agg_pp_candidates=[1],
+    )
+    assert t4.agg_pp_candidates == [1]
+
+
+def test_megamoe_sglang_parallel_lists_and_validation():
+    """SGLang MegaMoE (initial support): DeepSeek-V4-Pro on Blackwell gets EP-only parallel
+    lists; non-sglang / non-DeepSeek-V4 are rejected (v1 _validate_megamoe_backend_support)."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V4-Pro",
+        system_name="b200_sxm",
+        backend_name="sglang",
+        moe_backend="megamoe",
+    )
+    assert t.agg_moe_tp_candidates == [1]  # EP-only
+    assert t.agg_moe_ep_candidates  # populated from the megamoe lists
+    with pytest.raises(ValueError, match="SGLang backend"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V4-Pro",
+            system_name="b200_sxm",
+            backend_name="trtllm",
+            moe_backend="megamoe",
+        )
+    with pytest.raises(ValueError, match="DeepSeek-V4"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="b200_sxm",
+            backend_name="sglang",
+            moe_backend="megamoe",
+        )
+
+
+def test_sglang_agg_default_moe_ep_search():
+    """SGLang non-wideep MoE agg DEFAULT search must include moe_ep>1 (standard comm) /
+    EP-only for deepep_moe (v1 standard vs deepep_moe branches). Was moe_ep=[1] — a bug
+    masked by always passing explicit candidates, caught by default-path parity."""
+    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", backend_name="sglang")
+    assert t.agg_moe_tp_candidates == [1, 2, 4, 8]
+    assert t.agg_moe_ep_candidates == [1, 2, 4, 8]
+    t2 = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        moe_backend="deepep_moe",
+    )
+    assert t2.agg_moe_tp_candidates == [1]
+    assert t2.agg_moe_ep_candidates == [1, 2, 4, 8]
+
+
+def test_run_validates_by_default():
+    """run() validates first (v1 fail-fast); validate=False skips it. SGLang WideEP DeepSeek
+    has no wideep_context_mla data for fp8/bf16 -> validate raises."""
+    from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
+
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        enable_wideep=True,
+        total_gpus=64,
+    )
+    with pytest.raises(UnsupportedWideepConfigError):
+        t.run()  # default validate=True
+
+
+def test_enable_wideep_normalizes_moe_backend():
+    """enable_wideep implies the deepep_moe MoE backend (mirrors v1 __init__), so DB
+    validation selects the wideep_*_moe ops."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        enable_wideep=True,
+    )
+    assert t.moe_backend == "deepep_moe"
+
+
+def test_wideep_replica_size_is_bounded():
+    """WideEP num_gpu_list (replica sizes) must be range(1, max_gpu_per_replica+1), not
+    unbounded -- v2 sweep gates replica size by this list, mirroring v1 get_working_list."""
+    t = Task(
+        serving_mode="disagg",
+        prefill_model_path="Qwen/Qwen3-235B-A22B",
+        prefill_system_name="b200_sxm",
+        prefill_backend_name="trtllm",
+        prefill_enable_wideep=True,
+        decode_model_path="Qwen/Qwen3-235B-A22B",
+        decode_system_name="b200_sxm",
+        decode_backend_name="trtllm",
+        decode_enable_wideep=True,
+        total_gpus=64,
+    )
+    kw = t.sweep_disagg_kwargs(prefill_database=None, decode_database=None)
+    assert kw["num_gpu_list"] == list(range(1, t.max_gpu_per_replica + 1))
+    assert max(kw["num_gpu_list"]) <= t.total_gpus
+
+
+def test_explicit_fmha_fp8_not_downgraded():
+    """V3/Kimi context fmha fp8->bf16 downgrade fires only on HF-inferred fp8 (matches v1's
+    `not explicit_fmha_mode` guard). An explicit fp8 is kept, so validate can fail fast
+    (instead of silently modelling bf16)."""
+    from aiconfigurator.sdk import common
+
+    base = dict(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", backend_name="trtllm")
+    assert Task(**base).fmha_quant_mode == common.FMHAQuantMode.bfloat16  # HF-inferred -> downgraded
+    assert (
+        Task(**base, fmha_quant_mode=common.FMHAQuantMode.fp8).fmha_quant_mode == common.FMHAQuantMode.fp8
+    )  # explicit -> kept
+
+
+def test_database_mode_switches_db_default_mode(monkeypatch):
+    """database_mode != SILICON must switch the db's DEFAULT mode (so predictions use
+    SOL/empirical), not merely pass the loader flag -- mirrors v1 set_default_database_mode.
+    Without this, SILICON/HYBRID/EMPIRICAL all produced identical results."""
+    from aiconfigurator.sdk import common
+
+    captured = {}
+
+    class _FakeDB:
+        def get_default_database_mode(self):
+            return common.DatabaseMode.SILICON
+
+        def set_default_database_mode(self, mode):
+            captured["mode"] = mode
+
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", lambda *a, **k: _FakeDB())
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        database_mode="EMPIRICAL",
+    )
+    t._load_database("h200_sxm", "trtllm", "1.3.0rc10")
+    assert captured.get("mode") == common.DatabaseMode.EMPIRICAL
+    # SILICON (the default) must NOT call set_default_database_mode (no-op / no copy churn)
+    captured.clear()
+    t2 = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        database_mode="SILICON",
+    )
+    t2._load_database("h200_sxm", "trtllm", "1.3.0rc10")
+    assert "mode" not in captured
+
+
+def test_no_orphan_fields():
+    """Every tunable Task field must be consumed in task_v2/sweep -- guards against the
+    'accepted-but-ignored field' class of bug (e.g. database_mode, which was defined +
+    converted from YAML but never read at runtime). Candidate lists are read dynamically via
+    getattr(f"{role}_{dim}_candidates") so they're whitelisted; everything else must appear
+    as self.<field> or _role_attr(role, "<bare>")."""
+    import dataclasses
+    import pathlib
+    import re
+
+    import aiconfigurator.sdk.sweep as sweep_mod
+    import aiconfigurator.sdk.task_v2 as tv2_mod
+
+    srcs = pathlib.Path(tv2_mod.__file__).read_text() + pathlib.Path(sweep_mod.__file__).read_text()
+    orphans = []
+    for f in [x.name for x in dataclasses.fields(Task) if x.init and not x.name.startswith("_")]:
+        if f.endswith("_candidates"):
+            continue  # read dynamically via getattr(f"{role}_{dim}_candidates")
+        bare = re.sub(r"^(prefill_|decode_)", "", f)
+        read = (
+            re.search(rf"self\.{f}\b", srcs)
+            or re.search(rf'_role_attr\([^,]+,\s*"{bare}"', srcs)
+            or re.search(rf'"{f}"', srcs)
+            or re.search(rf'"{bare}"', srcs)
+        )
+        if not read:
+            orphans.append(f)
+    assert not orphans, f"orphan Task fields (defined but never consumed): {orphans}"
+
+
+def test_scalar_config_fields_reach_sweep_consumers():
+    """Scalar config knobs must actually reach sweep consumers (regression guard for the
+    accepted-but-ignored class of bug, e.g. database_mode). Values must flow into the
+    sweep kwargs / runtime_config rather than being silently dropped."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        isl=1234,
+        osl=567,
+        ttft=111.0,
+        tpot=22.0,
+        prefix=333,
+        request_latency=8888.0,
+        free_gpu_memory_fraction=0.55,
+        max_seq_len=4321,
+    )
+    kw = t.sweep_agg_kwargs(database=None)
+    rt = kw["runtime_config"]
+    assert (rt.isl, rt.osl, rt.prefix, rt.request_latency) == (1234, 567, 333, 8888.0)
+    assert kw["free_gpu_memory_fraction"] == 0.55
+    assert kw["max_seq_len"] == 4321
+    assert isinstance(rt.tpot, list)  # pareto_sweep=True default -> legacy grid reaches the sweep
+
+    td = Task(
+        serving_mode="disagg",
+        prefill_model_path="deepseek-ai/DeepSeek-V3",
+        prefill_system_name="h200_sxm",
+        prefill_backend_name="trtllm",
+        decode_model_path="deepseek-ai/DeepSeek-V3",
+        decode_system_name="h200_sxm",
+        decode_backend_name="trtllm",
+        total_gpus=16,
+        isl=1234,
+        osl=567,
+        ttft=111.0,
+        tpot=22.0,
+        prefix=333,
+        request_latency=8888.0,
+    )
+    drt = td.sweep_disagg_kwargs(prefill_database=None, decode_database=None)["runtime_config"]
+    assert (drt.isl, drt.osl, drt.prefix, drt.request_latency) == (1234, 567, 333, 8888.0)
+
+
 def test_disagg_calibration_overrides_flow_into_sweep_kwargs():
     """Overriding the new Task fields propagates to sweep_disagg_kwargs."""
     t = Task(
@@ -378,7 +856,7 @@ def test_run_dispatches_to_sweep_agg(monkeypatch):
 
     captured: dict = {}
 
-    def fake_get_database(system, backend, version):
+    def fake_get_database(system, backend, version, **kwargs):
         captured.setdefault("dbs", []).append((system, backend, version))
         return f"db-{system}-{backend}-{version}"
 
@@ -394,7 +872,7 @@ def test_run_dispatches_to_sweep_agg(monkeypatch):
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
     )
-    result = t.run()
+    result = t.run(validate=False)  # this test isolates dispatch; validate() is covered separately
     assert result == "agg-result"
     # DB loaded for the (system, backend, version) triple
     assert captured["dbs"] == [("h200_sxm", t.backend_name, t.backend_version)]
@@ -408,7 +886,7 @@ def test_run_dispatches_to_sweep_disagg_with_two_dbs(monkeypatch):
 
     captured: dict = {}
 
-    def fake_get_database(system, backend, version):
+    def fake_get_database(system, backend, version, **kwargs):
         captured.setdefault("dbs", []).append((system, backend, version))
         return f"db-{system}"
 
@@ -539,23 +1017,6 @@ def test_to_dict_skips_predictor_strategy_field():
     )
     d = t.to_dict()
     assert "predictor" not in d
-
-
-def test_from_yaml_warns_and_skips_predictor_key(caplog):
-    """YAML can't construct a Predictor; from_yaml warns and ignores the key."""
-    import logging
-
-    with caplog.at_level(logging.WARNING):
-        t = Task.from_yaml(
-            {
-                "serving_mode": "agg",
-                "model_path": "deepseek-ai/DeepSeek-V3",
-                "system_name": "h200_sxm",
-                "predictor": "MockerPredictor",  # not a real object
-            }
-        )
-    assert "predictor" in caplog.text
-    assert t.predictor is None  # default kept; YAML value ignored
 
 
 # ---------------------------------------------------------------------------
@@ -794,15 +1255,20 @@ def test_validate_agg_rejects_deepseek_on_vllm():
         t.validate()
 
 
-def test_validate_agg_rejects_fp8_static_on_non_trtllm():
+def test_validate_agg_fp8_static_on_sglang_is_data_driven():
+    """fp8_static is no longer hard-gated to trtllm; support is decided by the
+    perf DB.  h200_sxm/sglang has fp8 GEMM data but no compute_scale/scale_matrix
+    overhead tables, so fp8_static is rejected by the DB-side check rather than a
+    backend allowlist."""
     t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
         backend_name="sglang",
+        backend_version="0.5.10",
         gemm_quant_mode=common.GEMMQuantMode.fp8_static,
     )
-    with pytest.raises(ValueError, match="fp8_static GEMM mode is only supported on the trtllm backend"):
+    with pytest.raises(ValueError, match="Unsupported gemm quant mode 'fp8_static'"):
         t.validate()
 
 
@@ -842,17 +1308,21 @@ def test_validate_disagg_rejects_mismatched_prefill_decode_model_paths():
         t.validate()
 
 
-def test_validate_disagg_rejects_fp8_static_on_non_trtllm_per_role():
+def test_validate_disagg_fp8_static_is_data_driven_per_role():
+    """Per-role fp8_static support is decided by the perf DB, not a trtllm
+    allowlist.  h200_sxm/sglang lacks the overhead tables, so the prefill role's
+    fp8_static is rejected by the DB-side check."""
     t = Task(
         serving_mode="disagg",
         prefill_model_path="deepseek-ai/DeepSeek-V3",
         prefill_system_name="h200_sxm",
         prefill_backend_name="sglang",
+        prefill_backend_version="0.5.10",
         prefill_gemm_quant_mode=common.GEMMQuantMode.fp8_static,
         decode_model_path="deepseek-ai/DeepSeek-V3",
         decode_system_name="h200_sxm",
     )
-    with pytest.raises(ValueError, match="prefill_backend_name='sglang'"):
+    with pytest.raises(ValueError, match="Unsupported gemm quant mode 'fp8_static'"):
         t.validate()
 
 
@@ -913,6 +1383,21 @@ def test_validate_skips_db_check_when_database_unavailable():
     t.validate()  # static checks pass, DB silently skipped
 
 
+def test_validate_fp8_static_fails_fast_when_db_unavailable_in_silicon():
+    """SILICON mode can't confirm fp8_static overhead data without the DB, so an
+    unloadable (system, backend, version) must fail fast instead of deferring."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        gemm_quant_mode=common.GEMMQuantMode.fp8_static,
+    )
+    t.backend_version = "9.99.99-nonexistent"  # DB load fails -> can't confirm support
+    with pytest.raises(ValueError, match="fp8_static GEMM mode requires perf data"):
+        t.validate()
+
+
 def test_validate_skips_db_check_for_deepseekv4_synthetic_mode():
     """DeepSeek-V4 in synthetic database modes skips DB validation entirely."""
     t = Task(
@@ -939,7 +1424,8 @@ def test_to_dict_emits_resolved_state_with_enum_names():
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
-        quant_preset="fp8",
+        gemm_quant_mode=common.GEMMQuantMode.fp8,
+        kvcache_quant_mode=common.KVCacheQuantMode.fp8,
     )
     d = t.to_dict()
     assert d["serving_mode"] == "agg"
@@ -968,7 +1454,7 @@ def test_to_yaml_round_trips_through_from_yaml():
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
-        quant_preset="bfloat16",
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
     )
     yaml_text = t1.to_yaml()
     yaml_data = yaml.safe_load(yaml_text)

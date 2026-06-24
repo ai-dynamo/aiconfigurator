@@ -43,8 +43,16 @@ parameters:
 
 # KV Cache
 - param_key: kv_cache_dtype
-  vllm: kv-cache-dtype
-  sglang: kv-cache-dtype
+  # Guard: vLLM doesn't accept "bfloat16" as a literal kv-cache-dtype -> map to "auto".
+  vllm:
+    key: kv-cache-dtype
+    value: '"auto" if kv_cache_dtype == "bfloat16" else kv_cache_dtype'
+  # Guard: SGLang interprets "bfloat16" literally -> "auto"; and accepts "fp8_e4m3" not "fp8".
+  sglang:
+    key: kv-cache-dtype
+    value: '"auto" if kv_cache_dtype == "bfloat16" else ("fp8_e4m3" if kv_cache_dtype == "fp8" else kv_cache_dtype)'
+  # Guard: TRT-LLM emits kv-dtype only in extra_engine_args.yaml (not cli_args), so the
+  # mapping transform can't reach it. Translation stays in trtllm.rule (float16/bfloat16 -> auto).
   trtllm: kv_cache_dtype
 
 - param_key: kv_cache_free_gpu_memory_fraction
@@ -144,12 +152,11 @@ parameters:
   sglang: disaggregation-transfer-backend
   trtllm: null
 
+# No mapping-level default: the port is emitted only when explicitly set; the
+# dynamo sglang runtime treats bootstrap_port as optional (defaults internally).
 - param_key: disaggregation_bootstrap_port
   vllm: null
-  sglang:
-    key: disaggregation-bootstrap-port
-    value: disaggregation_bootstrap_port
-    default: 12345
+  sglang: disaggregation-bootstrap-port
   trtllm: null
 
 - param_key: attention_backend
@@ -192,10 +199,9 @@ parameters:
     default: "true"
   trtllm: skip_tokenizer_init
 
+# No mapping-level default: emitted only when set explicitly or injected by the
+# model-default facts layer (per-model), not universally forced to "true".
 - param_key: trust_remote_code
   vllm: trust-remote-code
-  sglang:
-    key: trust-remote-code
-    value: "trust_remote_code"
-    default: "true"
+  sglang: trust-remote-code
   trtllm: trust_remote_code

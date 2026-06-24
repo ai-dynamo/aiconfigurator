@@ -27,7 +27,7 @@ jobs:
           rm -rf ${{ github.workspace }}/.[!.]*
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ env.TARGET_BRANCH }}
           lfs: true
@@ -113,7 +113,7 @@ jobs:
 
       - name: Create or Update Pull Request
         if: steps.compare.outputs.needs_pr == 'true'
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           signoff: true
