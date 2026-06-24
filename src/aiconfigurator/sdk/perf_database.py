@@ -451,7 +451,7 @@ LoadedDatabaseResult = tuple[DatabaseRef, object | None, str | None]
 def _as_systems_path_list(systems_paths: str | os.PathLike | Iterable[str] | None) -> list[str]:
     if systems_paths is None:
         return get_systems_paths()
-    if isinstance(systems_paths, (str, os.PathLike)):
+    if isinstance(systems_paths, str | os.PathLike):
         return [os.fspath(systems_paths)]
     return [os.fspath(path) for path in systems_paths]
 
@@ -1218,7 +1218,7 @@ class PerfDatabase:
         self.backend = backend
         self.version = version
         self.systems_root = systems_root
-        self.enable_shared_layer = (database_mode or "").upper() in ("HYBRID", "EMPIRICAL")
+        self._shared_layer_mode = (database_mode or "").upper() in ("HYBRID", "EMPIRICAL")
         # Which empirical transfer kinds are permitted (HYBRID/EMPIRICAL only). All on by
         # default = current behaviour; set_transfer_policy() narrows it for fine-grained
         # HYBRID control. Read at query time by op get_empirical, so it can be retuned on
@@ -1543,6 +1543,19 @@ class PerfDatabase:
         Defaults to all kinds when unset (e.g. a bare instance), so attribute
         introspection (``dir``/``clear_runtime_caches``) never trips on it."""
         return getattr(self, "_transfer_policy", common.ALL_TRANSFERS)
+
+    @property
+    def enable_shared_layer(self) -> bool:
+        """Whether sibling-version shared-layer sourcing is active (read at op load time
+        and in op cache keys). It is the HYBRID/EMPIRICAL mode AND the XVERSION transfer
+        kind being permitted -- so the transfer policy can switch the shared layer off
+        like any other transfer.
+
+        PLUGGABLE: the shared layer is a load-time data-sourcing mode (it reuses a sibling
+        version's measured kernel data, not a SOL-reconstruction transfer), so it is
+        expected to migrate into util-based SILICON interpolation later. To retire this
+        gate then, revert this property to ``return self._shared_layer_mode``."""
+        return getattr(self, "_shared_layer_mode", False) and (common.TransferKind.XVERSION in self.transfer_policy)
 
     def clear_runtime_caches(self) -> None:
         """Clear cached query/interpolation state while preserving loaded op data."""

@@ -360,6 +360,24 @@ def test_perf_database_clear_runtime_caches_clears_interpolation_and_lru_state(p
     assert cache_clear_calls == ["cleared"]
 
 
+def test_enable_shared_layer_gated_by_xversion_policy(perf_database):
+    """The sibling-version shared layer is the HYBRID/EMPIRICAL mode AND XVERSION being
+    permitted -- so the transfer policy switches it off like any other transfer kind. A
+    bare instance (no mode set) is False so dir()-introspection never trips."""
+    from aiconfigurator.sdk import common
+
+    db = object.__new__(perf_database.PerfDatabase)
+    db._shared_layer_mode = True
+    db._transfer_policy = common.ALL_TRANSFERS
+    assert db.enable_shared_layer is True
+    db._transfer_policy = frozenset({common.TransferKind.XSHAPE, common.TransferKind.XQUANT})  # no XVERSION
+    assert db.enable_shared_layer is False
+    db._shared_layer_mode = False  # SILICON mode: off regardless of policy
+    db._transfer_policy = common.ALL_TRANSFERS
+    assert db.enable_shared_layer is False
+    assert object.__new__(perf_database.PerfDatabase).enable_shared_layer is False  # bare, no crash
+
+
 def test_clear_database_runtime_caches_clears_matching_cached_database_once(perf_database):
     class FakeDatabase:
         def __init__(self):
