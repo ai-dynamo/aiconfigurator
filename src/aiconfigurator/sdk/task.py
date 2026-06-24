@@ -254,6 +254,10 @@ class TaskContext:
     moe_backend: str | None
     total_gpus: int | None
     database_mode: str | None = None
+    # Fine-grained HYBRID/EMPIRICAL transfer control: which empirical transfer kinds are
+    # permitted (see common.TransferKind). None = all (default). Accepts a preset name
+    # ("conservative"/"balanced"/"aggressive"/"off"), a kind ("xshape"), or a list thereof.
+    transfer_policy: str | list | None = None
     free_gpu_memory_fraction: float | None = None
     max_seq_len: int | None = None
     engine_step_backend: str | None = None
@@ -1099,6 +1103,7 @@ class TaskConfig:
         profiles: list[str] | None = None,
         yaml_config: dict | None = None,
         database_mode: str | None = None,
+        transfer_policy: str | list | None = None,
         free_gpu_memory_fraction: float | None = None,
         max_seq_len: int | None = None,
         engine_step_backend: str | None = None,
@@ -1200,6 +1205,7 @@ class TaskConfig:
             moe_backend=moe_backend,
             total_gpus=total_gpus,
             database_mode=database_mode,
+            transfer_policy=transfer_policy,
             profiles=effective_profiles,
             yaml_patch=yaml_patch,
             yaml_mode=yaml_mode,
@@ -1211,6 +1217,7 @@ class TaskConfig:
         self.config, applied_layers = TaskConfigFactory.create(ctx)
         self.config.applied_layers = applied_layers
         self.config.database_mode = database_mode  # Store in config for TaskRunner access
+        self.config.transfer_policy = transfer_policy  # Store in config for TaskRunner access
 
         self.serving_mode = serving_mode
         self.model_path = model_path
@@ -1595,18 +1602,19 @@ class TaskConfig:
 
 class TaskRunner:
     @staticmethod
-    def _get_database(system: str, backend: str, version: str, database_mode: str | None = None):
+    def _get_database(system: str, backend: str, version: str, database_mode: str | None = None, transfer_policy=None):
         """Fetch a database from the global cache.
 
-        When *database_mode* would change the cached database's default mode,
-        return a deep copy first because `set_default_database_mode` mutates
-        query-cache state. If the requested mode already matches, reuse the
-        cached instance directly.
+        When *database_mode* or *transfer_policy* would change the cached database's
+        default mode / transfer policy, return a deep copy first because the setters
+        mutate query-cache state on the shared instance. If both already match, reuse
+        the cached instance directly.
 
         `database_mode` is also passed through to `get_database` so the loader
         can resolve shared-layer defaults — HYBRID mode auto-enables sibling-row
         inheritance, which means HYBRID and SILICON queries cache as separate
-        PerfDatabase instances.
+        PerfDatabase instances. `transfer_policy` narrows which empirical transfer
+        kinds the HYBRID/EMPIRICAL path may use (None = all).
         """
         allow_missing_data = database_mode is not None and database_mode != common.DatabaseMode.SILICON.name
         db = _get_database_with_optional_missing_data(
@@ -1618,11 +1626,17 @@ class TaskRunner:
         )
         if db is None:
             raise RuntimeError(f"Failed to load database for {system=}, {backend=}, {version=}")
-        if database_mode is not None:
-            mode = common.DatabaseMode[database_mode]
-            if mode != db.get_default_database_mode():
-                db = copy.deepcopy(db)
-                db.set_default_database_mode(mode)
+        mode_changes = (
+            database_mode is not None and common.DatabaseMode[database_mode] != db.get_default_database_mode()
+        )
+        want_policy = common.resolve_transfer_policy(transfer_policy) if transfer_policy is not None else None
+        policy_changes = want_policy is not None and want_policy != db.transfer_policy
+        if mode_changes or policy_changes:
+            db = copy.deepcopy(db)
+            if mode_changes:
+                db.set_default_database_mode(common.DatabaseMode[database_mode])
+            if policy_changes:
+                db.set_transfer_policy(want_policy)
         return db
 
     def run_agg(self, task_config: DefaultMunch) -> dict[str, pd.DataFrame | None]:
@@ -1647,6 +1661,7 @@ class TaskRunner:
                 backend=task_config.worker_config.backend_name,
                 version=task_config.worker_config.backend_version,
                 database_mode=database_mode,
+                transfer_policy=getattr(task_config, "transfer_policy", None),
             )
             if database_mode is not None:
                 logger.info("Task %s: Using database mode: %s", task_config.task_name, database_mode)
@@ -1761,6 +1776,7 @@ class TaskRunner:
                 backend=task_config.prefill_worker_config.backend_name,
                 version=task_config.prefill_worker_config.backend_version,
                 database_mode=database_mode,
+                transfer_policy=getattr(task_config, "transfer_policy", None),
             )
             if database_mode is not None:
                 logger.info("Task %s: Using prefill database mode: %s", task_config.task_name, database_mode)
@@ -1824,6 +1840,7 @@ class TaskRunner:
                 backend=task_config.decode_worker_config.backend_name,
                 version=task_config.decode_worker_config.backend_version,
                 database_mode=database_mode,
+                transfer_policy=getattr(task_config, "transfer_policy", None),
             )
             if database_mode is not None:
                 logger.info("Task %s: Using decode database mode: %s", task_config.task_name, database_mode)
@@ -1956,6 +1973,7 @@ class TaskRunner:
                 backend=worker_cfg.backend_name,
                 version=worker_cfg.backend_version,
                 database_mode=database_mode,
+                transfer_policy=getattr(task_config, "transfer_policy", None),
             )
         except Exception:
             logger.exception("Error getting database for AFD task")

@@ -912,6 +912,8 @@ def resolve_transfer_policy(spec) -> frozenset[TransferKind]:
         key = spec.strip().lower()
         if key in TRANSFER_PRESETS:
             return TRANSFER_PRESETS[key]
+        if "," in key:  # comma-separated kinds/presets from CLI/YAML, e.g. "xshape,xquant"
+            return resolve_transfer_policy([t for t in (p.strip() for p in key.split(",")) if t])
         return frozenset({_transfer_kind_from_token(key)})
     out: set[TransferKind] = set()
     for item in spec:

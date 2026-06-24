@@ -18,6 +18,7 @@ exp_agg_full:
   backend_name: "trtllm" # optional, default to trtllm
   backend_version: "1.2.0rc5" # optional, default to the latest version in the database
   database_mode: "SILICON" # optional, default to SILICON. Options: SILICON (uses silicon data), HYBRID (uses silicon data when available, otherwise SOL+empirical factor), EMPIRICAL (SOL+empirical factor), SOL (SOL time only), SOL_FULL (SOL time and details)
+  transfer_policy: "aggressive" # optional, default to all-on. Fine-grained HYBRID/EMPIRICAL control of which empirical transfer kinds may fill missing data. Preset (off|conservative|balanced|aggressive) or comma-separated kinds (xshape,xquant,xprofile,xop,xversion). Ignored in SILICON mode.
   isl: 4000 # input sequence length, optional, default to 4000
   osl: 1000 # output sequence length, optional, default to 1000
   prefix: 0 # prefix len of isl, optional, default to 0

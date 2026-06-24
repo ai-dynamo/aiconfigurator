@@ -136,6 +136,7 @@ def cli_default(
     backend: str = "trtllm",
     backend_version: str | None = None,
     database_mode: str = "SILICON",
+    transfer_policy: str | list | None = None,
     isl: int = 4000,
     osl: int = 1000,
     image_height: int = 0,
@@ -241,6 +242,7 @@ def cli_default(
         backend=backend,
         backend_version=backend_version,
         database_mode=database_mode,
+        transfer_policy=transfer_policy,
         isl=isl,
         osl=osl,
         image_height=image_height,
@@ -634,6 +636,7 @@ def cli_estimate(
     backend_name: str = "trtllm",
     backend_version: str | None = None,
     database_mode: str = "SILICON",
+    transfer_policy: str | list | None = None,
     isl: int = 1024,
     osl: int = 1024,
     image_height: int = 0,
@@ -871,6 +874,8 @@ def cli_estimate(
             from aiconfigurator.sdk.common import DatabaseMode
 
             db.set_default_database_mode(DatabaseMode[database_mode])
+        if transfer_policy is not None:
+            db.set_transfer_policy(transfer_policy)
         return db
 
     if mode in ("static", "static_ctx", "static_gen"):
