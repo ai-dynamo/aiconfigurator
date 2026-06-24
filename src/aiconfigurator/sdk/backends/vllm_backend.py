@@ -385,7 +385,9 @@ class VLLMBackend(BaseBackend):
         if chunk_size is None or int(token_count) <= chunk_size:
             return None
 
-        query_token_count = min(int(token_count), chunk_size) * int(getattr(model.config, "attention_dp_size", 1) or 1)
+        # Per-rank chunk size only: the attention_dp_size scale-up to the global token pool is
+        # applied inside ``_layerwise_moe_compute_result``. Pre-multiplying here would double it.
+        query_token_count = min(int(token_count), chunk_size)
         distribution = "sampled_zipf_1.2"
         if self._layerwise_moe_distribution_available(
             model,
@@ -803,8 +805,13 @@ class VLLMBackend(BaseBackend):
         if hidden_size <= 0 or inter_size <= 0 or num_experts <= 0:
             return PerformanceResult(0.0, energy=0.0, source="silicon")
         quant_mode = getattr(model.config, "moe_quant_mode", None) or common.MoEQuantMode.bfloat16
+        # Attention DP scales up the global token pool the experts process: each of the
+        # ``attention_dp_size`` attention-DP ranks contributes its own ``token_count`` tokens,
+        # and the experts (sharded by TP/EP, not DP) see their union. Mirror the op-wise
+        # ``MoE.query()`` path, which does ``x *= attention_dp_size`` before this same call.
+        attention_dp_size = int(getattr(model.config, "attention_dp_size", 1) or 1)
         result = database.query_moe(
-            num_tokens=token_count,
+            num_tokens=token_count * attention_dp_size,
             hidden_size=hidden_size,
             inter_size=inter_size,
             topk=int(getattr(model, "_topk", 1) or 1),

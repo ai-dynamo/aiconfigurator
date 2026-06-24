@@ -679,6 +679,76 @@ def test_moe_compute_accepts_repo_moe_inter_size_metadata() -> None:
     assert latency == pytest.approx(3.0)
 
 
+def test_moe_compute_scales_routed_expert_tokens_by_attention_dp() -> None:
+    """Routed-expert GEMM must size query_moe by GLOBAL tokens (per-rank * attention_dp_size).
+
+    With attention DP, the experts (sharded by TP/EP, not DP) process the union of every DP
+    rank's tokens, so the expert-GEMM token count scales linearly with attention_dp_size. This
+    mirrors the op-wise ``MoE.query()`` path, which does ``x *= attention_dp_size`` before the
+    same ``database.query_moe`` call.
+    """
+
+    class _ConfigDp(_Config):
+        attention_dp_size = 4
+        moe_ep_size = 4
+
+    class _MoeModel(_Model):
+        config = _ConfigDp()
+        _topk = 2
+
+    seen: list[int] = []
+
+    class _Database:
+        def query_moe(self, **kwargs):
+            seen.append(kwargs["num_tokens"])
+            return PerformanceResult(1.0, energy=0.0, source="silicon")
+
+    VLLMBackend()._layerwise_moe_compute_result(
+        _MoeModel(),
+        _Database(),
+        token_count=1024,
+        num_layers=1,
+        is_context=True,
+        workload_distribution_override="uniform",
+    )
+
+    assert seen == [1024 * 4]
+
+
+def test_context_distribution_probe_does_not_double_scale_attention_dp() -> None:
+    """The no-op context MoE distribution probe must size query_moe by the GLOBAL token pool
+    exactly once (chunk_size * attention_dp_size), not chunk_size * dp * dp.
+
+    Scaling now lives in ``_layerwise_moe_compute_result``; the probe must therefore feed it the
+    per-rank chunk size and must not pre-multiply by attention_dp_size.
+    """
+
+    class _ConfigDp(_Config):
+        attention_dp_size = 4
+        moe_ep_size = 4
+
+    class _MoeModel(_Model):
+        config = _ConfigDp()
+        _topk = 2
+
+    seen: list[int] = []
+
+    class _Database:
+        def query_moe(self, **kwargs):
+            seen.append(kwargs["num_tokens"])
+            return PerformanceResult(1.0, energy=0.0, source="silicon")
+
+    override = VLLMBackend()._layerwise_context_noop_moe_distribution_override(
+        _MoeModel(),
+        _Database(),
+        token_count=2048,
+        runtime_config=RuntimeConfig(vllm_max_num_batched_tokens=512),
+    )
+
+    assert override == "sampled_zipf_1.2"
+    assert seen == [512 * 4]  # chunk_size(512) * attention_dp_size(4), scaled exactly once
+
+
 def test_noop_moe_addback_uses_model_distribution_without_model_special_case() -> None:
     class _MoeModel(_Model):
         model_path = "Qwen/Qwen3.6-35B-A3B"
