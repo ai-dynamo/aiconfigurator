@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.perf_surrogate import TableQuery
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -154,7 +155,7 @@ class ContextMLA(Operation):
             cls._data_cache[key] = LoadedOpData(
                 load_context_mla_data(sources), PerfDataFilename.context_mla, primary_path
             )
-            cls._extrapolate(cls._data_cache[key])
+            # No grid pre-expansion: TableQuery does sqrt interp + util-hold extrap.
             cls._record_load()
 
         if "_context_mla_data" not in database.__dict__:
@@ -250,9 +251,20 @@ class ContextMLA(Operation):
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             mla_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode]
-            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            # context MLA ~ s² in full_s -> sqrt interp; util-hold extrapolation.
+            surrogate = TableQuery(
+                mla_dict,
+                method="linear",
+                value_transform="sqrt",
+                sol_fn=lambda q_n, q_full_s, q_b: get_sol(q_b, q_full_s, 0, q_n, kvcache_quant_mode, fmha_quant_mode)[
+                    0
+                ],
+                extrap_axes=(0, 1, 2),  # num_heads, full_s, b
+                extracted_metrics_cache=database._extracted_metrics_cache,
+            )
+            result = surrogate.query(num_heads, full_s, b)
+            latency = interpolation.get_value(result, "latency") * prefix_correction
+            energy = interpolation.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -337,7 +349,7 @@ class GenerationMLA(Operation):
             cls._data_cache[key] = LoadedOpData(
                 load_generation_mla_data(sources), PerfDataFilename.generation_mla, primary_path
             )
-            cls._extrapolate(cls._data_cache[key])
+            # No grid pre-expansion: TableQuery does raw interp + util-hold extrap.
             cls._record_load()
 
         if "_generation_mla_data" not in database.__dict__:
@@ -419,9 +431,18 @@ class GenerationMLA(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             mla_dict = data_wrapper[kvcache_quant_mode]
-            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
+            # generation MLA ~ linear in s -> raw interp; util-hold extrapolation.
+            surrogate = TableQuery(
+                mla_dict,
+                method="bilinear",
+                value_transform="raw",
+                sol_fn=lambda q_n, q_b, q_s: get_sol(q_b, q_s, q_n, kvcache_quant_mode)[0],
+                extrap_axes=(0, 1, 2),  # num_heads, b, s
+                extracted_metrics_cache=database._extracted_metrics_cache,
+            )
+            result = surrogate.query(num_heads, b, s)
+            latency = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
