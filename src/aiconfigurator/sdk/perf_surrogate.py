@@ -23,6 +23,22 @@ policy/orchestration layer.
 from __future__ import annotations
 
 import math
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class PerfSurrogate(Protocol):
+    """The query seam ops depend on: approximate one op's metric at a shape.
+
+    ``TableQuery`` is today's interpolation-backed implementation. The point of
+    routing every op through this single interface (rather than scattered
+    ``interp_3d`` calls) is that a different engine — a better numerical method
+    or a learned model — can drop in behind the same ``query`` without touching
+    the ops. A leaf is a float or a ``{"latency", "power", "energy"}`` dict.
+    """
+
+    def query(self, x, y, z): ...
+
 
 # id-keyed cache (identity-checked) for the sqrt view, so per-query TableQuery
 # construction stays cheap.
