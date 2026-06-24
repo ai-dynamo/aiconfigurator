@@ -17,6 +17,7 @@ import pytest
 
 from aiconfigurator.cli.main import (
     _execute_tasks,
+    _format_spica_trace_summary,
     _resolve_cli_log_level,
     build_default_tasks,
     build_experiment_tasks,
@@ -178,6 +179,97 @@ class TestCLIIntegration:
         mock_run_spica.assert_called_once_with(args)
         mock_build_default.assert_not_called()
         mock_execute.assert_not_called()
+
+    def test_spica_trace_summary_uses_default_result_shape(self):
+        """Spica trace output should resemble the existing default-mode final summary."""
+        candidates = [
+            {
+                "config": {
+                    "deployment_mode": "disagg",
+                    "backend": "trtllm",
+                    "model_name": "Qwen/Qwen3-32B-FP8",
+                    "prefill_replicas": 2,
+                    "prefill_tp": 2,
+                    "prefill_pp": 1,
+                    "prefill_attention_dp": 1,
+                    "prefill_moe_tp": 1,
+                    "prefill_moe_ep": 1,
+                    "prefill_max_num_batched_tokens": 8192,
+                    "prefill_max_num_seqs": 64,
+                    "decode_replicas": 4,
+                    "decode_tp": 1,
+                    "decode_pp": 1,
+                    "decode_attention_dp": 1,
+                    "decode_moe_tp": 1,
+                    "decode_moe_ep": 1,
+                    "decode_max_num_batched_tokens": 4096,
+                    "decode_max_num_seqs": 128,
+                    "router_mode": "kv_router",
+                    "planner_scaling_policy": "predictive",
+                    "enable_throughput_scaling": True,
+                    "enable_load_scaling": False,
+                },
+                "used_gpus": 8,
+                "score": 321.5,
+                "metrics": {
+                    "goodput_output_throughput_tok_s": 2572.0,
+                    "output_throughput_tok_s": 3000.0,
+                    "mean_ttft_ms": 120.0,
+                    "mean_tpot_ms": 8.0,
+                    "mean_e2e_latency_ms": 900.0,
+                },
+            },
+            {
+                "config": {
+                    "deployment_mode": "agg",
+                    "backend": "vllm",
+                    "model_name": "Qwen/Qwen3-32B-FP8",
+                    "replicas": 4,
+                    "tp": 2,
+                    "pp": 1,
+                    "attention_dp": 1,
+                    "moe_tp": 1,
+                    "moe_ep": 1,
+                    "agg_max_num_batched_tokens": 4096,
+                    "agg_max_num_seqs": 128,
+                    "router_mode": "round_robin",
+                    "enable_throughput_scaling": False,
+                    "enable_load_scaling": False,
+                },
+                "used_gpus": 8,
+                "score": 280.0,
+                "metrics": {
+                    "goodput_output_throughput_tok_s": 2240.0,
+                    "output_throughput_tok_s": 2500.0,
+                    "mean_ttft_ms": 150.0,
+                    "mean_tpot_ms": 9.0,
+                    "mean_e2e_latency_ms": 950.0,
+                },
+            },
+        ]
+
+        summary = _format_spica_trace_summary(
+            candidates,
+            top_n=5,
+            model_path="Qwen/Qwen3-32B-FP8",
+            total_gpus=16,
+            trace_path="/data/replay/traffic.jsonl",
+            ttft=2000.0,
+            tpot=30.0,
+        )
+
+        assert "AIConfigurator Final Results" in summary
+        assert "Input Configuration & SLA Target" in summary
+        assert "Overall Best Configuration" in summary
+        assert "Deployment Details" in summary
+        assert "Trace: /data/replay/traffic.jsonl (Mooncake JSONL)" in summary
+        assert "Best Experiment Chosen:" in summary
+        assert "disagg at 321.50 goodput/s/gpu" in summary
+        assert "agg Top Configurations: (Sorted by goodput/s/gpu)" in summary
+        assert "disagg Top Configurations: (Sorted by goodput/s/gpu)" in summary
+        assert "goodput/s/gpu" in summary
+        assert "(p)parallel" in summary
+        assert "kv_router" in summary
 
     @pytest.mark.parametrize(
         "builder_patch",

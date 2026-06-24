@@ -10,6 +10,7 @@ from typing import Any
 
 import pandas as pd
 import yaml
+from prettytable import PrettyTable
 
 from aiconfigurator import __version__
 from aiconfigurator.cli.estimate_detail_report import detail_requests_time, format_estimate_detail_report
@@ -21,7 +22,7 @@ from aiconfigurator.generator.api import (
     generator_cli_helper,
     load_generator_overrides_from_args,
 )
-from aiconfigurator.logging_utils import setup_logging
+from aiconfigurator.logging_utils import _cli_bold, _cli_underline, setup_logging
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.errors import NoFeasibleConfigError, UnsupportedWideepConfigError
 from aiconfigurator.sdk.models import check_is_moe
@@ -1669,24 +1670,289 @@ def _metric_value(metrics: dict[str, Any], *names: str) -> Any:
     return None
 
 
-def _print_spica_trace_results(candidates: list[Any], *, top_n: int) -> None:
-    print("\n" + "=" * 60)
-    print("  Spica Trace Sweep Results")
-    print("=" * 60)
-    for rank, candidate in enumerate(candidates[:top_n], start=1):
-        payload = _spica_candidate_to_dict(candidate)
-        metrics = payload.get("metrics") or {}
-        print(f"  #{rank}: score={payload.get('score')} used_gpus={payload.get('used_gpus')}")
-        throughput = _metric_value(metrics, "goodput_output_throughput_tok_s", "output_throughput_tok_s")
-        ttft = _metric_value(metrics, "mean_ttft_ms", "ttft_ms")
-        e2e = _metric_value(metrics, "mean_e2e_latency_ms", "e2e_latency_ms")
-        if throughput is not None:
-            print(f"      throughput={throughput}")
-        if ttft is not None:
-            print(f"      ttft_ms={ttft}")
-        if e2e is not None:
-            print(f"      e2e_ms={e2e}")
-    print("=" * 60 + "\n")
+def _spica_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _spica_fmt(value: Any, decimals: int = 2, *, suffix: str = "") -> str:
+    number = _spica_float(value)
+    if number is None:
+        return "n/a"
+    return f"{number:.{decimals}f}{suffix}"
+
+
+def _spica_int(value: Any) -> int | None:
+    number = _spica_float(value)
+    if number is None:
+        return None
+    return int(number)
+
+
+def _spica_deployment_mode(payload: dict[str, Any]) -> str:
+    config = payload.get("config") or {}
+    mode = config.get("deployment_mode")
+    return str(mode) if mode else "unknown"
+
+
+def _spica_parallel(config: dict[str, Any], prefix: str | None = None) -> str:
+    key_prefix = f"{prefix}_" if prefix else ""
+    tp = _spica_int(config.get(f"{key_prefix}tp"))
+    pp = _spica_int(config.get(f"{key_prefix}pp"))
+    dp = _spica_int(config.get(f"{key_prefix}attention_dp"))
+    moe_tp = _spica_int(config.get(f"{key_prefix}moe_tp"))
+    moe_ep = _spica_int(config.get(f"{key_prefix}moe_ep"))
+    if tp is None or pp is None:
+        return "n/a"
+    parts = [f"tp{_cli_underline(str(tp))}", f"pp{_cli_underline(str(pp))}"]
+    if dp is not None:
+        parts.append(f"dp{_cli_underline(str(dp))}")
+    if moe_tp is not None and moe_ep is not None and (moe_tp != 1 or moe_ep != 1):
+        parts.append(f"etp{moe_tp}ep{moe_ep}")
+    return "".join(parts)
+
+
+def _spica_gpus_per_worker(config: dict[str, Any], prefix: str | None = None) -> str:
+    key_prefix = f"{prefix}_" if prefix else ""
+    tp = _spica_int(config.get(f"{key_prefix}tp"))
+    pp = _spica_int(config.get(f"{key_prefix}pp"))
+    dp = _spica_int(config.get(f"{key_prefix}attention_dp")) or 1
+    if tp is None or pp is None:
+        return "n/a"
+    gpus = tp * pp * dp
+    return f"{gpus} (={_cli_underline(str(tp))}x{_cli_underline(str(pp))}x{_cli_underline(str(dp))})"
+
+
+def _spica_batch(config: dict[str, Any], prefix: str) -> str:
+    tokens = config.get(f"{prefix}_max_num_batched_tokens")
+    seqs = config.get(f"{prefix}_max_num_seqs")
+    if tokens is None and seqs is None:
+        return "n/a"
+    return f"{tokens or 'n/a'}/{seqs or 'n/a'}"
+
+
+def _spica_planner(config: dict[str, Any]) -> str:
+    if config.get("enable_throughput_scaling") or config.get("enable_load_scaling"):
+        return str(config.get("planner_scaling_policy", "enabled"))
+    return "static"
+
+
+def _spica_router(config: dict[str, Any]) -> str:
+    return str(config.get("router_mode") or "n/a")
+
+
+def _spica_metric_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    metrics = payload.get("metrics") or {}
+    return {
+        "score": payload.get("score"),
+        "goodput": _metric_value(metrics, "goodput_output_throughput_tok_s"),
+        "throughput": _metric_value(metrics, "output_throughput_tok_s"),
+        "ttft": _metric_value(metrics, "mean_ttft_ms", "ttft_ms"),
+        "tpot": _metric_value(metrics, "mean_tpot_ms", "tpot_ms", "itl_ms"),
+        "request_latency": _metric_value(metrics, "mean_e2e_latency_ms", "e2e_latency_ms", "request_latency_ms"),
+    }
+
+
+def _spica_rank_key(payload: dict[str, Any]) -> tuple[float, int]:
+    return -(_spica_float(payload.get("score")) or 0.0), _spica_int(payload.get("used_gpus")) or 0
+
+
+def _format_spica_mode_table(mode: str, payloads: list[dict[str, Any]], *, top_n: int) -> str:
+    if not payloads:
+        return ""
+
+    table = PrettyTable()
+    ranked_payloads = sorted(payloads, key=_spica_rank_key)[:top_n]
+
+    if mode == "disagg":
+        table.field_names = [
+            "Rank",
+            "backend",
+            _cli_bold("goodput/s/gpu"),
+            "goodput",
+            "throughput",
+            "TTFT",
+            "TPOT",
+            "request_latency",
+            "total_gpus",
+            "(p)replicas",
+            "(p)gpus/worker",
+            "(p)parallel",
+            "(p)bs",
+            "(d)replicas",
+            "(d)gpus/worker",
+            "(d)parallel",
+            "(d)bs",
+            "router",
+            "planner",
+        ]
+        for rank, payload in enumerate(ranked_payloads, start=1):
+            config = payload.get("config") or {}
+            metrics = _spica_metric_summary(payload)
+            table.add_row(
+                [
+                    rank,
+                    config.get("backend", "n/a"),
+                    _cli_bold(_spica_fmt(metrics["score"])),
+                    _spica_fmt(metrics["goodput"]),
+                    _spica_fmt(metrics["throughput"]),
+                    _spica_fmt(metrics["ttft"]),
+                    _spica_fmt(metrics["tpot"]),
+                    _spica_fmt(metrics["request_latency"]),
+                    payload.get("used_gpus", "n/a"),
+                    config.get("prefill_replicas", "n/a"),
+                    _spica_gpus_per_worker(config, "prefill"),
+                    _spica_parallel(config, "prefill"),
+                    _spica_batch(config, "prefill"),
+                    config.get("decode_replicas", "n/a"),
+                    _spica_gpus_per_worker(config, "decode"),
+                    _spica_parallel(config, "decode"),
+                    _spica_batch(config, "decode"),
+                    _spica_router(config),
+                    _spica_planner(config),
+                ]
+            )
+    else:
+        table.field_names = [
+            "Rank",
+            "backend",
+            _cli_bold("goodput/s/gpu"),
+            "goodput",
+            "throughput",
+            "TTFT",
+            "TPOT",
+            "request_latency",
+            "total_gpus",
+            "replicas",
+            "gpus/worker",
+            "parallel",
+            "bs",
+            "router",
+            "planner",
+        ]
+        for rank, payload in enumerate(ranked_payloads, start=1):
+            config = payload.get("config") or {}
+            metrics = _spica_metric_summary(payload)
+            table.add_row(
+                [
+                    rank,
+                    config.get("backend", "n/a"),
+                    _cli_bold(_spica_fmt(metrics["score"])),
+                    _spica_fmt(metrics["goodput"]),
+                    _spica_fmt(metrics["throughput"]),
+                    _spica_fmt(metrics["ttft"]),
+                    _spica_fmt(metrics["tpot"]),
+                    _spica_fmt(metrics["request_latency"]),
+                    payload.get("used_gpus", "n/a"),
+                    config.get("replicas", "n/a"),
+                    _spica_gpus_per_worker(config),
+                    _spica_parallel(config),
+                    _spica_batch(config, "agg"),
+                    _spica_router(config),
+                    _spica_planner(config),
+                ]
+            )
+
+    return f"\n{mode} Top Configurations: (Sorted by goodput/s/gpu)\n{table.get_string()}"
+
+
+def _format_spica_trace_summary(
+    candidates: list[Any],
+    *,
+    top_n: int,
+    model_path: str,
+    total_gpus: int,
+    trace_path: str,
+    ttft: float,
+    tpot: float,
+) -> str:
+    payloads = [_spica_candidate_to_dict(candidate) for candidate in candidates]
+    if not payloads:
+        return "No Spica trace candidates to display."
+    payloads = sorted(payloads, key=_spica_rank_key)
+
+    chosen = payloads[0]
+    chosen_config = chosen.get("config") or {}
+    chosen_metrics = _spica_metric_summary(chosen)
+    chosen_mode = _spica_deployment_mode(chosen)
+    chosen_score = _spica_float(chosen_metrics["score"]) or 0.0
+    chosen_goodput = _spica_float(chosen_metrics["goodput"])
+    chosen_throughput = _spica_float(chosen_metrics["throughput"])
+
+    summary_box = []
+    summary_box.append("*" * 80)
+    summary_box.append("*{:^78}*".format(" AIConfigurator Final Results "))
+    summary_box.append("*" * 80)
+    summary_box.append("  " + "-" * 76)
+    summary_box.append("  Input Configuration & SLA Target:")
+    summary_box.append(f"    Model: {chosen_config.get('model_name', model_path)}")
+    summary_box.append(f"    Total GPUs: {total_gpus}")
+    summary_box.append(f"    Trace: {trace_path} (Mooncake JSONL)")
+    summary_box.append(f"    TTFT Target: {ttft:.2f}ms")
+    summary_box.append(f"    TPOT Target: {tpot:.2f}ms")
+    summary_box.append(
+        f"    Best Experiment Chosen: {_cli_bold(f'{chosen_mode} at {chosen_score:.2f} goodput/s/gpu')}"
+    )
+    summary_box.append("  " + "-" * 76)
+    summary_box.append("  Overall Best Configuration:")
+    if chosen_goodput is not None:
+        summary_box.append(f"    - Best Goodput: {chosen_goodput:,.2f} tokens/s")
+    if chosen_throughput is not None:
+        summary_box.append(f"    - Output Throughput: {chosen_throughput:,.2f} tokens/s")
+    summary_box.append(f"    - Per-GPU Goodput: {chosen_score:.2f} tokens/s/gpu")
+    summary_box.append(f"    - TTFT: {_spica_fmt(chosen_metrics['ttft'], suffix='ms')}")
+    summary_box.append(f"    - TPOT: {_spica_fmt(chosen_metrics['tpot'], suffix='ms')}")
+    summary_box.append(f"    - Request Latency: {_spica_fmt(chosen_metrics['request_latency'], suffix='ms')}")
+    summary_box.append(f"    - Backend: {chosen_config.get('backend', 'n/a')}")
+    summary_box.append(f"    - GPUs Used: {chosen.get('used_gpus', 'n/a')}")
+    summary_box.append("  " + "-" * 76)
+    summary_box.append("  Deployment Details:")
+    summary_box.append(
+        "    (p) stands for prefill, (d) stands for decode, bs is max_num_batched_tokens/max_num_seqs."
+    )
+    summary_box.append("    Spica trace mode ranks candidates by replay goodput per time-averaged GPU.")
+
+    grouped_modes: dict[str, list[dict[str, Any]]] = {}
+    for payload in payloads:
+        grouped_modes.setdefault(_spica_deployment_mode(payload), []).append(payload)
+
+    preferred_modes = [mode for mode in ("agg", "disagg") if mode in grouped_modes]
+    other_modes = sorted(mode for mode in grouped_modes if mode not in {"agg", "disagg"})
+    for mode in [*preferred_modes, *other_modes]:
+        table = _format_spica_mode_table(mode, grouped_modes[mode], top_n=top_n)
+        if table:
+            summary_box.append(table)
+
+    summary_box.append("*" * 80)
+    return "\n".join(summary_box)
+
+
+def _print_spica_trace_results(
+    candidates: list[Any],
+    *,
+    top_n: int,
+    model_path: str,
+    total_gpus: int,
+    trace_path: str,
+    ttft: float,
+    tpot: float,
+) -> None:
+    logger.info(
+        "\n%s",
+        _format_spica_trace_summary(
+            candidates,
+            top_n=top_n,
+            model_path=model_path,
+            total_gpus=total_gpus,
+            trace_path=trace_path,
+            ttft=ttft,
+            tpot=tpot,
+        ),
+    )
 
 
 def _run_spica_trace_default(args) -> list[Any]:
@@ -1750,7 +2016,15 @@ def _run_spica_trace_default(args) -> list[Any]:
         logger.error("Spica trace sweep returned no feasible candidates.")
         raise SystemExit(1)
 
-    _print_spica_trace_results(candidates, top_n=args.top_n)
+    _print_spica_trace_results(
+        candidates,
+        top_n=args.top_n,
+        model_path=args.model_path,
+        total_gpus=args.total_gpus,
+        trace_path=args.trace_path,
+        ttft=args.ttft,
+        tpot=args.tpot,
+    )
 
     if args.save_dir:
         os.makedirs(args.save_dir, exist_ok=True)
