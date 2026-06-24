@@ -7,11 +7,13 @@ import math
 
 import pytest
 
-from spica.config import OptimizationTarget
+from spica.config import Candidate, OptimizationTarget
 from spica.score import (
     is_feasible,
     make_candidate,
     objective_value,
+    objective_vector,
+    pareto_front,
     rank,
     score_report,
 )
@@ -24,6 +26,7 @@ REPORT = {
     "mean_ttft_ms": 800.0,
     "mean_tpot_ms": 20.0,
     "mean_e2e_latency_ms": 1200.0,
+    "mean_output_token_throughput_per_user": 50.0,
     "goodput_output_throughput_tok_s": 4000.0,
     "gpu_hours": 2.0,
     "duration_ms": 1_800_000.0,  # 0.5 h
@@ -107,6 +110,65 @@ def test_is_feasible_budget_only():
     assert is_feasible(used_gpus=16, gpu_budget=32)
     assert is_feasible(used_gpus=32, gpu_budget=32)  # at the budget
     assert not is_feasible(used_gpus=64, gpu_budget=32)  # over budget
+
+
+def test_throughput_per_user_objective():
+    # the InferenceX x-axis: mean per-user output throughput (tok/s/user), a raw rate
+    assert objective_value(REPORT, OptimizationTarget.THROUGHPUT_PER_USER) == 50.0
+    assert objective_value({}, OptimizationTarget.THROUGHPUT_PER_USER) == 0.0
+
+
+def test_pareto_target_is_not_a_scalar_objective():
+    with pytest.raises(ValueError, match="multi-objective"):
+        objective_value(REPORT, OptimizationTarget.PARETO)
+
+
+def test_objective_vector_reads_each_objective_raw():
+    objs = [OptimizationTarget.THROUGHPUT_PER_GPU, OptimizationTarget.THROUGHPUT_PER_USER]
+    vec = objective_vector(REPORT, objs)
+    # throughput_per_gpu = 5000 / avg_gpu(4) = 1250; throughput_per_user = 50 (raw)
+    assert vec == {"throughput_per_gpu": 1250.0, "throughput_per_user": 50.0}
+
+
+def _pareto_cand(tput_per_gpu: float, tput_per_user: float, used_gpus: int = 8) -> Candidate:
+    return Candidate(
+        config={"used_gpus": used_gpus},
+        used_gpus=used_gpus,
+        score=tput_per_gpu,
+        metrics={},
+        objectives={"throughput_per_gpu": tput_per_gpu, "throughput_per_user": tput_per_user},
+    )
+
+
+def test_pareto_front_drops_dominated_and_sorts_by_x_axis():
+    objs = [OptimizationTarget.THROUGHPUT_PER_GPU, OptimizationTarget.THROUGHPUT_PER_USER]
+    a = _pareto_cand(100.0, 10.0)  # high gpu, low user
+    b = _pareto_cand(50.0, 20.0)  # low gpu, high user  -> a,b mutually non-dominated
+    c = _pareto_cand(40.0, 8.0)  # dominated by a (worse on both)
+    front = pareto_front([a, b, c], objs)
+    assert c not in front and a in front and b in front
+    # sorted by the last objective (x-axis = throughput_per_user) ascending
+    assert front == [a, b]
+
+
+def test_pareto_front_ignores_candidates_without_objectives():
+    objs = [OptimizationTarget.THROUGHPUT_PER_GPU, OptimizationTarget.THROUGHPUT_PER_USER]
+    a = _pareto_cand(100.0, 10.0)
+    scalar = Candidate(config={}, used_gpus=8, score=1.0, metrics={})  # objectives=None
+    assert pareto_front([a, scalar], objs) == [a]
+
+
+def test_make_candidate_pareto_sets_objectives():
+    objs = [OptimizationTarget.THROUGHPUT_PER_GPU, OptimizationTarget.THROUGHPUT_PER_USER]
+    c = make_candidate({"used_gpus": 8}, REPORT, OptimizationTarget.PARETO, pareto_objectives=objs)
+    assert c.objectives == {"throughput_per_gpu": 1250.0, "throughput_per_user": 50.0}
+    assert c.score == 1250.0  # headline = first objective
+    assert c.metrics["mean_output_token_throughput_per_user"] == 50.0
+
+
+def test_make_candidate_pareto_requires_objectives():
+    with pytest.raises(ValueError, match="pareto_objectives"):
+        make_candidate({"used_gpus": 8}, REPORT, OptimizationTarget.PARETO)
 
 
 def test_make_candidate_and_rank():

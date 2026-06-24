@@ -85,9 +85,14 @@ Dict keys: `enable_throughput_scaling`, `enable_load_scaling`,
 intervals / fpm / sensitivity / predictor are emitted.
 
 **The planner's `optimization_target` is derived from the sweep goal, not from this
-policy** — `throughput`/`throughput_per_gpu`→`"throughput"`, `e2e_latency`→`"latency"`,
-`goodput`/`goodput_per_gpu`→`"sla"` (see `OptimizationTarget.planner_optimization_target`).
-The policy only decides *which* scaling loops run + their intervals.
+policy** — `throughput`/`throughput_per_gpu`/`throughput_per_user`→`"throughput"`,
+`e2e_latency`→`"latency"`, `goodput`/`goodput_per_gpu`→`"sla"`, `pareto`→`"throughput"`
+(see `OptimizationTarget.planner_optimization_target`). The policy only decides *which*
+scaling loops run + their intervals. A `pareto` goal is multi-objective (default objectives
+`throughput_per_gpu` × `throughput_per_user` — the InferenceX tok/s/gpu vs tok/s/user
+frontier) and returns the non-dominated front instead of a ranked list; under it
+`workload.concurrency` may be a **list** (the swept Pareto dimension), whereas every other
+goal needs a single concurrency value.
 
 **Predictive throughput scaling needs an SLA**, so it only works under a goodput sweep
 (`optimization_target="sla"`). For a `throughput`/`e2e_latency` sweep, the

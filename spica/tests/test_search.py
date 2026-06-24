@@ -35,8 +35,9 @@ def _config(gpu_budget=32):
 class _FakeSampler:
     """Suggests `count` agg candidates with increasing agg_max_num_seqs."""
 
-    def __init__(self, branch, study_id):
+    def __init__(self, branch, study_id, objectives=None):
         self.branch = branch
+        self.objectives = objectives
         self.scored: list = []
 
     def suggest(self, count):
@@ -55,8 +56,8 @@ class _FakeSampler:
             out.append(Suggestion(selection=sel, parallel_config=self.branch.parallel_configs[0], handle=sel))
         return out
 
-    def observe(self, suggestion, score):
-        self.scored.append(score)
+    def observe(self, suggestion, metrics):
+        self.scored.append(metrics)
 
     def observe_infeasible(self, suggestion, reason):
         self.scored.append(("infeasible", reason))
@@ -68,7 +69,7 @@ class _FakeEvaluator:
     def __init__(self):
         self.calls = 0
 
-    def evaluate(self, plan):
+    def evaluate(self, plan, *, concurrency_override=None):
         self.calls += 1
         return {"output_throughput_tok_s": float(plan.agg_engine_args["max_num_seqs"]), "gpu_hours": 1.0}
 
@@ -102,7 +103,7 @@ def test_over_budget_candidates_dropped(monkeypatch):
     _stub(monkeypatch, branch)
     sampler_seen = {}
 
-    def factory(b, study_id):
+    def factory(b, study_id, objectives=None):
         s = _FakeSampler(b, study_id)
         sampler_seen["s"] = s
         return s
@@ -124,10 +125,10 @@ def test_eval_failure_marked_infeasible(monkeypatch):
     sampler_seen = {}
 
     class _Boom:
-        def evaluate(self, plan):
+        def evaluate(self, plan, *, concurrency_override=None):
             raise RuntimeError("replay blew up")
 
-    def factory(b, study_id):
+    def factory(b, study_id, objectives=None):
         s = _FakeSampler(b, study_id)
         sampler_seen["s"] = s
         return s
@@ -151,10 +152,10 @@ def test_unsupported_backend_config_pair_marked_unsupported(monkeypatch):
     sampler_seen = {}
 
     class _NeverCalled:
-        def evaluate(self, plan):
+        def evaluate(self, plan, *, concurrency_override=None):
             raise AssertionError("evaluator must not run for an unsupported (backend, config) pair")
 
-    def factory(b, study_id):
+    def factory(b, study_id, objectives=None):
         s = _FakeSampler(b, study_id)
         sampler_seen["s"] = s
         return s
@@ -174,7 +175,7 @@ def test_study_id_unique_per_run(monkeypatch):
     _stub(monkeypatch, branch)
     seen: list[str] = []
 
-    def factory(b, study_id):
+    def factory(b, study_id, objectives=None):
         seen.append(study_id)
         return _FakeSampler(b, study_id)
 
@@ -217,3 +218,94 @@ def test_non_goodput_sweep_drops_throughput_scaling_and_proceeds(monkeypatch):
     cfg = _config_with_policies(["disabled", "throughput_180_5", "load_180_5"], target="throughput")
     cands = run_smart_search(cfg, evaluator=_FakeEvaluator(), sampler_factory=_FakeSampler, show_progress=False)
     assert [c.score for c in cands] == [512.0, 256.0]  # ran fine (throughput == max_num_seqs)
+
+
+# --- pareto (multi-objective) sweep over a swept concurrency ---
+
+
+def _pareto_config():
+    # synthetic concurrency sweep (list) under a pareto goal -> the InferenceX-style front
+    return SmartSearchConfig(
+        search_space={
+            "model_name": "deepseek-ai/DeepSeek-V3",
+            "hardware_sku": "gb200",
+            "backend": ["trtllm"],
+            "deployment_mode": ["agg"],
+            "gpu_budget": 32,
+        },
+        workload={"isl": 1024, "osl": 1024, "concurrency": [4, 8, 16], "num_request_ratio": 10},
+        sweep={"max_rounds": 1, "candidates_per_round": 3, "parallel_evals": 1},
+        goal={"target": "pareto"},
+    )
+
+
+# per-concurrency (aggregate throughput, per-user throughput): higher concurrency trades
+# more aggregate throughput for less per-user interactivity -> all three are non-dominated.
+_PARETO_POINTS = {4: (100.0, 40.0), 8: (150.0, 25.0), 16: (180.0, 12.0)}
+
+
+class _ParetoSampler:
+    """Suggests one candidate per swept concurrency (4/8/16), records observed metrics."""
+
+    def __init__(self, branch, study_id, objectives=None):
+        self.branch = branch
+        self.objectives = objectives
+        self.observed: list = []
+
+    def suggest(self, count):
+        out = []
+        for c in (4, 8, 16):
+            sel = {
+                "deployment_mode": "agg",
+                "backend": "trtllm",
+                "router_mode": "round_robin",
+                "planner_scaling_policy": "disabled",
+                "planner_fpm_sampling": "default",
+                "planner_load_sensitivity": "default",
+                "agg_max_num_batched_tokens": 8192,
+                "agg_max_num_seqs": 256,
+                "concurrency": c,  # the swept Pareto dimension
+            }
+            out.append(Suggestion(selection=sel, parallel_config=self.branch.parallel_configs[0], handle=sel))
+        return out
+
+    def observe(self, suggestion, metrics):
+        self.observed.append(metrics)
+
+    def observe_infeasible(self, suggestion, reason):
+        self.observed.append(("infeasible", reason))
+
+
+class _ParetoEvaluator:
+    def evaluate(self, plan, *, concurrency_override=None):
+        tput, user = _PARETO_POINTS[concurrency_override]
+        # avg_gpu = gpu_hours / (duration_ms / 3.6e6) = 1.0 / 1.0 = 1.0 -> throughput_per_gpu == tput
+        return {
+            "output_throughput_tok_s": tput,
+            "mean_output_token_throughput_per_user": user,
+            "gpu_hours": 1.0,
+            "duration_ms": 3_600_000.0,
+        }
+
+
+def test_pareto_sweep_returns_non_dominated_front(monkeypatch):
+    branch = _branch(ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2))  # 8 GPUs
+    _stub(monkeypatch, branch)
+    seen = {}
+
+    def factory(b, study_id, objectives=None):
+        s = _ParetoSampler(b, study_id, objectives)
+        seen["s"] = s
+        return s
+
+    front = run_smart_search(
+        _pareto_config(), evaluator=_ParetoEvaluator(), sampler_factory=factory, show_progress=False
+    )
+    # all three concurrency points are mutually non-dominated -> full front, sorted by the
+    # x-axis (per-user throughput) ascending.
+    assert [c.objectives["throughput_per_user"] for c in front] == [12.0, 25.0, 40.0]
+    assert [c.objectives["throughput_per_gpu"] for c in front] == [180.0, 150.0, 100.0]
+    assert {c.config["concurrency"] for c in front} == {4, 8, 16}  # each point recorded its concurrency
+    # the sampler was built multi-objective (one (name, maximize) per objective) and fed raw vectors
+    assert seen["s"].objectives == [("throughput_per_gpu", True), ("throughput_per_user", True)]
+    assert all(set(m) == {"throughput_per_gpu", "throughput_per_user"} for m in seen["s"].observed)

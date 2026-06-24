@@ -167,7 +167,9 @@ def test_scaling_trace_threads_replay_concurrency(monkeypatch):
 
 
 def _syn_wl(**kw):
-    base = dict(isl=128, osl=64, request_count=100)
+    # num_request_ratio=25 -> resolved request_count = 25 * load (so concurrency=4 -> 100,
+    # exercising the ratio math through the evaluator).
+    base = dict(isl=128, osl=64, num_request_ratio=25)
     base.update(kw)
     return Workload(**base)
 
@@ -198,6 +200,33 @@ def test_synthetic_static_uses_from_synthetic_bridge(monkeypatch):
     assert rec["input_tokens"] == 128 and rec["output_tokens"] == 64 and rec["request_count"] == 100
     assert rec["replay_concurrency"] == 4  # closed-loop cap from concurrency
     assert rec["sla_ttft_ms"] == 2000.0
+
+
+def test_concurrency_override_drives_cap_and_request_count(monkeypatch):
+    # Pareto sweep: workload.concurrency is a LIST; the per-trial concurrency_override sets
+    # BOTH the closed-loop in-flight cap and the num_request_ratio-scaled request count.
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    rec = {}
+
+    class _Bridge:
+        def advance_to(self, until_ms):
+            return {"is_done": True}
+
+        def finalize(self):
+            return {"goodput_output_throughput_tok_s": 50.0, "gpu_hours": 0.5}
+
+    class _BridgeFactory:
+        @staticmethod
+        def from_synthetic(**kw):
+            rec.update(kw)
+            return _Bridge()
+
+    monkeypatch.setattr(dynamo.mocker, "PlannerReplayBridge", _BridgeFactory)
+    wl = Workload(isl=128, osl=64, concurrency=[4, 8, 16], num_request_ratio=25)  # swept dimension
+    goal = OptimizationGoal(target=OptimizationTarget.PARETO)  # no SLA needed
+    ReplayEvaluator(wl, goal).evaluate(_agg_plan(static=True), concurrency_override=8)
+    assert rec["replay_concurrency"] == 8  # cap = the per-trial swept concurrency
+    assert rec["request_count"] == 200  # num_request_ratio(25) * 8
 
 
 def test_synthetic_planner_uses_run_planner_replay(monkeypatch):

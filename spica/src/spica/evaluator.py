@@ -15,7 +15,8 @@ A synthetic *static* run reuses the planner bridge (``from_synthetic``) without 
 calling ``apply_scaling`` — i.e. a fixed-fleet replay — because that constructor threads
 the goodput SLA (and emits gpu_hours), whereas the plain ``run_synthetic_trace_replay``
 does not yet take an SLA. The closed-loop in-flight cap is ``replay_concurrency`` for a
-trace and ``concurrency`` for a synthetic workload (``Workload.in_flight_cap``).
+trace and ``concurrency`` for a synthetic workload (``Workload.effective_in_flight_cap``;
+a pareto sweep overrides it per-trial via ``concurrency_override``).
 
 The **goodput SLA** (``goal.sla``) is passed as ``sla_*_ms`` on every path (the mocker
 classifies SLA-satisfying requests per-request to compute goodput); it is independent of
@@ -72,14 +73,18 @@ class ReplayEvaluator:
     def _router_config(self, plan: DeploymentPlan):
         return _build_kv_router_config(plan.router_config)
 
-    def _synthetic_kwargs(self) -> dict:
+    def _synthetic_kwargs(self, concurrency_override: int | None = None) -> dict:
         """Common synthetic-workload params shared by ``from_synthetic[_disagg]`` and
-        ``SyntheticWorkload`` (arrival_interval_ms is ignored in closed-loop mode)."""
+        ``SyntheticWorkload`` (arrival_interval_ms is ignored in closed-loop mode).
+
+        ``request_count`` is derived from ``num_request_ratio`` and the effective load
+        (the per-trial ``concurrency_override`` under a pareto sweep, else the workload's
+        concurrency / request_rate)."""
         wl = self.workload
         return dict(
             input_tokens=wl.isl,
             output_tokens=wl.osl,
-            request_count=wl.request_count,
+            request_count=wl.resolved_request_count(concurrency_override),
             arrival_interval_ms=wl.synthetic_arrival_interval_ms,
             turns_per_session=wl.turns_per_session,
             shared_prefix_ratio=wl.shared_prefix_ratio,
@@ -95,11 +100,16 @@ class ReplayEvaluator:
             pass
         return bridge.finalize()
 
-    def evaluate(self, plan: DeploymentPlan) -> dict[str, float]:
-        """Run one replay and return its trace_report dict."""
+    def evaluate(self, plan: DeploymentPlan, *, concurrency_override: int | None = None) -> dict[str, float]:
+        """Run one replay and return its trace_report dict.
+
+        ``concurrency_override`` is the per-trial swept in-flight cap under a pareto
+        concurrency sweep; it overrides the workload's ``concurrency`` for both the
+        closed-loop cap and the ``num_request_ratio``-derived request count. Trace
+        workloads ignore it (they cap via ``replay_concurrency``)."""
         if self.workload.is_trace_based:
             return self._evaluate_trace(plan)
-        return self._evaluate_synthetic(plan)
+        return self._evaluate_synthetic(plan, concurrency_override=concurrency_override)
 
     # -- trace workloads -------------------------------------------------------
 
@@ -107,7 +117,7 @@ class ReplayEvaluator:
         from dynamo.mocker import MockEngineArgs
 
         wl = self.workload
-        cap = wl.in_flight_cap  # replay_concurrency (None -> arrival timestamps)
+        cap = wl.effective_in_flight_cap()  # replay_concurrency (None -> arrival timestamps)
         sla = self._goodput_sla_kwargs()
         common = dict(
             trace_file=wl.trace_path,
@@ -178,12 +188,13 @@ class ReplayEvaluator:
 
     # -- synthetic workloads ---------------------------------------------------
 
-    def _evaluate_synthetic(self, plan: DeploymentPlan) -> dict[str, float]:
+    def _evaluate_synthetic(self, plan: DeploymentPlan, *, concurrency_override: int | None = None) -> dict[str, float]:
         from dynamo.mocker import MockEngineArgs
 
-        cap = self.workload.in_flight_cap  # int(concurrency), or None for request-rate
+        # int(concurrency) or the per-trial swept value, or None for request-rate (open-loop)
+        cap = self.workload.effective_in_flight_cap(concurrency_override)
         sla = self._goodput_sla_kwargs()
-        syn = self._synthetic_kwargs()
+        syn = self._synthetic_kwargs(concurrency_override)
         router_config = self._router_config(plan)
 
         if plan.deployment_mode == "agg":

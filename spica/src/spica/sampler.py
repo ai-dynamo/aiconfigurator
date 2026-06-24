@@ -51,7 +51,7 @@ class BranchSampler(Protocol):
 
     def suggest(self, count: int) -> list[Suggestion]: ...
 
-    def observe(self, suggestion: Suggestion, score: float) -> None: ...
+    def observe(self, suggestion: Suggestion, metrics: dict[str, float]) -> None: ...
 
     def observe_infeasible(self, suggestion: Suggestion, reason: str) -> None: ...
 
@@ -73,13 +73,27 @@ def _index_decoder(choices: list[Any]) -> Callable[[Any], Any]:
 
 
 class VizierBranchSampler:
-    """A Vizier GP-bandit study over one :class:`BranchSpace`."""
+    """A Vizier study over one :class:`BranchSpace`.
 
-    def __init__(self, branch: BranchSpace, *, study_id: str):
+    ``objectives`` is the list of ``(metric_name, maximize)`` the study optimizes; the
+    default is a single ``("objective", maximize=True)`` (the caller pre-signs the score).
+    Pass >=2 objectives for a **multi-objective / Pareto** study: the ``DEFAULT`` algorithm
+    (GP-UCB-PE) optimizes the Pareto tradeoff via hypervolume scalarization, and ``observe``
+    reports every objective's raw value in one measurement.
+    """
+
+    def __init__(
+        self,
+        branch: BranchSpace,
+        *,
+        study_id: str,
+        objectives: list[tuple[str, bool]] | None = None,
+    ):
         from vizier.service import clients
         from vizier.service import pyvizier as vz
 
         self.branch = branch
+        self._objectives = objectives or [(_METRIC, True)]
         self._decoders: dict[str, Callable[[Any], Any]] = {}
         self._constants: dict[str, Any] = {}
 
@@ -108,7 +122,9 @@ class VizierBranchSampler:
                 root.add_discrete_param(knob, sorted(float(c) for c in choices))
                 self._decoders[knob] = _decoder_for(choices)
 
-        problem.metric_information.append(vz.MetricInformation(name=_METRIC, goal=vz.ObjectiveMetricGoal.MAXIMIZE))
+        for name, maximize in self._objectives:
+            goal = vz.ObjectiveMetricGoal.MAXIMIZE if maximize else vz.ObjectiveMetricGoal.MINIMIZE
+            problem.metric_information.append(vz.MetricInformation(name=name, goal=goal))
         study_config = vz.StudyConfig.from_problem(problem)
         study_config.algorithm = "DEFAULT"
         self._study = clients.Study.from_study_config(study_config, owner="spica", study_id=study_id)
@@ -129,10 +145,10 @@ class VizierBranchSampler:
             suggestions.append(Suggestion(selection=selection, parallel_config=parallel_config, handle=trial))
         return suggestions
 
-    def observe(self, suggestion: Suggestion, score: float) -> None:
+    def observe(self, suggestion: Suggestion, metrics: dict[str, float]) -> None:
         from vizier.service import pyvizier as vz
 
-        suggestion.handle.complete(vz.Measurement(metrics={_METRIC: float(score)}))
+        suggestion.handle.complete(vz.Measurement(metrics={k: float(v) for k, v in metrics.items()}))
 
     def observe_infeasible(self, suggestion: Suggestion, reason: str) -> None:
         """Mark a candidate that could not be evaluated (e.g. replay error) so the
@@ -142,6 +158,9 @@ class VizierBranchSampler:
         suggestion.handle.complete(vz.Measurement(), infeasible_reason=reason)
 
 
-def make_branch_sampler(branch: BranchSpace, *, study_id: str) -> BranchSampler:
-    """Construct the default (Vizier) sampler for a branch."""
-    return VizierBranchSampler(branch, study_id=study_id)
+def make_branch_sampler(
+    branch: BranchSpace, *, study_id: str, objectives: list[tuple[str, bool]] | None = None
+) -> BranchSampler:
+    """Construct the default (Vizier) sampler for a branch. ``objectives`` (name, maximize)
+    pairs default to a single maximized ``"objective"``; pass >=2 for a Pareto study."""
+    return VizierBranchSampler(branch, study_id=study_id, objectives=objectives)

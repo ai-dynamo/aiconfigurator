@@ -149,7 +149,39 @@ def test_suggest_observe_round_trips():
         for s in sampler.suggest(count=2):
             score = float(s.selection["agg_max_num_seqs"])
             scores.append(score)
-            sampler.observe(s, score)
+            sampler.observe(s, {"objective": score})
     assert len(scores) == 4
     best = list(sampler._study.optimal_trials())[0].materialize()
     assert best.final_measurement.metrics["objective"].value == max(scores)
+
+
+def _branch_with_concurrency() -> BranchSpace:
+    b = _branch()
+    return BranchSpace(
+        deployment_mode=b.deployment_mode,
+        parallel_configs=b.parallel_configs,
+        supported_backends=b.supported_backends,
+        knob_choices={**b.knob_choices, "concurrency": [4, 8, 16]},  # swept pareto dimension
+    )
+
+
+def test_pareto_study_sweeps_concurrency_and_returns_front():
+    # A multi-objective study: a swept concurrency (discrete param) + two maximized metrics.
+    # Verifies the >=2-metric study builds, observe carries both, and optimal_trials() returns
+    # a non-empty Pareto set whose trials carry both objectives.
+    branch = _branch_with_concurrency()
+    sampler = make_branch_sampler(
+        branch,
+        study_id="test_pareto",
+        objectives=[("throughput_per_gpu", True), ("throughput_per_user", True)],
+    )
+    for s in sampler.suggest(count=3):
+        c = s.selection["concurrency"]
+        assert c in (4, 8, 16)  # concurrency arrives as a decoded discrete int
+        # a tradeoff: throughput-per-gpu rises with concurrency, per-user falls
+        sampler.observe(s, {"throughput_per_gpu": float(c) * 10.0, "throughput_per_user": 100.0 / c})
+    optimal = list(sampler._study.optimal_trials())
+    assert optimal  # multi-objective study -> non-empty Pareto frontier
+    for t in optimal:
+        metrics = t.materialize().final_measurement.metrics
+        assert "throughput_per_gpu" in metrics and "throughput_per_user" in metrics

@@ -182,6 +182,11 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
 
         knob_choices = branch_knob_choices(ss, deployment_mode)
         knob_choices["backend"] = sorted(set().union(*support.values()))  # only viable backends
+        # A list-valued workload.concurrency (pareto sweep) becomes a per-trial discrete
+        # dimension; the evaluator reads selection["concurrency"] as the in-flight cap.
+        concurrency_choices = config.workload.concurrency_choices
+        if concurrency_choices is not None:
+            knob_choices["concurrency"] = list(concurrency_choices)
         branches.append(
             BranchSpace(
                 deployment_mode=deployment_mode,

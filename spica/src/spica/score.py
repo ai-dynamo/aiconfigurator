@@ -20,6 +20,12 @@ Three steps, mirroring the existing profiler replay optimizer
    target, whose metric already counts only SLA-satisfying requests (the bridge's
    per-request goodput SLA). Over-budget candidates are dropped.
 3. **rank** — feasible candidates best-first by score, ties broken toward fewer GPUs.
+
+For a ``pareto`` goal the score is a *vector* instead: :func:`objective_vector` reads one
+value per objective, :func:`make_candidate` stores them on the candidate, and
+:func:`pareto_front` returns the non-dominated set (step 3 becomes Pareto dominance, not a
+scalar rank). The default objectives are throughput-per-GPU vs per-user throughput — the
+InferenceX tok/s/gpu vs tok/s/user frontier.
 """
 
 from __future__ import annotations
@@ -35,6 +41,7 @@ _METRIC_KEYS = (
     "mean_ttft_ms",
     "mean_tpot_ms",
     "mean_e2e_latency_ms",
+    "mean_output_token_throughput_per_user",
     "goodput_output_throughput_tok_s",
     "gpu_hours",
     "duration_ms",
@@ -69,6 +76,12 @@ def objective_value(report: dict[str, float], target: OptimizationTarget) -> flo
         avg_gpu = _avg_gpu(report)
         throughput = float(report.get("output_throughput_tok_s", 0.0))
         return throughput / avg_gpu if avg_gpu > 0.0 else 0.0
+    if target is OptimizationTarget.THROUGHPUT_PER_USER:
+        # per-user interactivity (tok/s/user): mean of per-token-gap 1000/itl. Already a
+        # rate, so no GPU/time normalization — this is the InferenceX x-axis.
+        return float(report.get("mean_output_token_throughput_per_user", 0.0))
+    if target is OptimizationTarget.PARETO:
+        raise ValueError("'pareto' is multi-objective; use objective_vector / pareto_front, not objective_value")
     raise ValueError(f"unknown optimization target: {target!r}")
 
 
@@ -89,9 +102,62 @@ def is_feasible(used_gpus: int, gpu_budget: int) -> bool:
     return used_gpus <= gpu_budget
 
 
-def make_candidate(config: dict, report: dict[str, float], target: OptimizationTarget) -> Candidate:
-    """Build a scored :class:`Candidate` from its config + replay report."""
+def objective_vector(report: dict[str, float], objectives: list[OptimizationTarget]) -> dict[str, float]:
+    """Raw value (natural units, NOT signed) for each Pareto objective, keyed by target
+    value. Dominance uses each objective's own direction (``target.maximize``)."""
+    return {t.value: objective_value(report, t) for t in objectives}
+
+
+def _dominates(a: dict[str, float], b: dict[str, float], objectives: list[OptimizationTarget]) -> bool:
+    """True iff ``a`` Pareto-dominates ``b``: at least as good on every objective (in that
+    objective's own direction) and strictly better on at least one."""
+    strictly_better = False
+    for t in objectives:
+        av, bv = a[t.value], b[t.value]
+        better = av > bv if t.maximize else av < bv
+        worse = av < bv if t.maximize else av > bv
+        if worse:
+            return False
+        if better:
+            strictly_better = True
+    return strictly_better
+
+
+def pareto_front(candidates: list[Candidate], objectives: list[OptimizationTarget]) -> list[Candidate]:
+    """The non-dominated subset of ``candidates`` over ``objectives`` (each carrying an
+    ``objectives`` vector), sorted by the **last** objective ascending — the x-axis — so the
+    returned list traces the frontier left-to-right (e.g. low->high per-user throughput)."""
+    pool = [c for c in candidates if c.objectives is not None]
+    front = [c for c in pool if not any(_dominates(o.objectives, c.objectives, objectives) for o in pool if o is not c)]
+    x_axis = objectives[-1].value
+    return sorted(front, key=lambda c: c.objectives.get(x_axis, 0.0))
+
+
+def make_candidate(
+    config: dict,
+    report: dict[str, float],
+    target: OptimizationTarget,
+    *,
+    pareto_objectives: list[OptimizationTarget] | None = None,
+) -> Candidate:
+    """Build a scored :class:`Candidate` from its config + replay report.
+
+    Single-objective: ``score`` is the signed objective (higher=better). Under a
+    ``pareto`` target, ``pareto_objectives`` must be given; the per-objective raw values are
+    stored in ``Candidate.objectives`` (Pareto dominance reads these) and ``score`` carries
+    the first objective's value as a headline number (it is not used for ranking)."""
     metrics = {key: float(report[key]) for key in _METRIC_KEYS if key in report}
+    if target is OptimizationTarget.PARETO:
+        if not pareto_objectives:
+            raise ValueError("a pareto candidate needs pareto_objectives")
+        objectives = objective_vector(report, pareto_objectives)
+        return Candidate(
+            config=config,
+            used_gpus=int(config.get("used_gpus", 0)),
+            score=objectives[pareto_objectives[0].value],
+            metrics=metrics,
+            objectives=objectives,
+        )
     return Candidate(
         config=config,
         used_gpus=int(config.get("used_gpus", 0)),

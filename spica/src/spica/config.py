@@ -29,17 +29,31 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class OptimizationTarget(str, Enum):
-    """What the search optimizes for."""
+    """What the search optimizes for.
+
+    All members except ``pareto`` are scalar (single-objective) targets. ``pareto`` is a
+    multi-objective mode: the search optimizes the Pareto tradeoff between the scalar
+    targets listed in :attr:`OptimizationGoal.pareto_objectives` (default: throughput per
+    GPU vs per-user throughput — the InferenceX tok/s/gpu vs tok/s/user frontier).
+    """
 
     THROUGHPUT = "throughput"  # maximize replay throughput
     THROUGHPUT_PER_GPU = "throughput_per_gpu"  # maximize throughput / avg GPU (tok/s/gpu)
+    THROUGHPUT_PER_USER = "throughput_per_user"  # maximize mean per-user output throughput (tok/s/user)
     E2E_LATENCY = "e2e_latency"  # minimize mean end-to-end latency
     GOODPUT = "goodput"  # maximize SLA-satisfying throughput
     GOODPUT_PER_GPU = "goodput_per_gpu"  # maximize goodput / avg GPU (tok/s/gpu)
+    PARETO = "pareto"  # multi-objective: Pareto front over pareto_objectives
 
     @property
     def maximize(self) -> bool:
-        """True when larger is better (everything except e2e_latency)."""
+        """True when larger is better (everything except e2e_latency).
+
+        Raises for ``pareto`` — it has no single direction; use the per-objective
+        directions in :attr:`OptimizationGoal.pareto_objectives` instead.
+        """
+        if self is OptimizationTarget.PARETO:
+            raise ValueError("'pareto' is multi-objective and has no scalar direction")
         return self is not OptimizationTarget.E2E_LATENCY
 
     @property
@@ -49,15 +63,18 @@ class OptimizationTarget(str, Enum):
         The planner's scaling objective should match what the sweep optimizes:
         ``goodput``/``goodput_per_gpu`` -> ``"sla"`` (SLA-based scaling, the only
         mode that uses ttft/itl and enables predictive throughput scaling);
-        ``throughput``/``throughput_per_gpu`` -> ``"throughput"``; ``e2e_latency``
-        -> ``"latency"`` (both reactive, no SLA).
+        ``throughput``/``throughput_per_gpu``/``throughput_per_user`` -> ``"throughput"``;
+        ``e2e_latency`` -> ``"latency"`` (both reactive, no SLA). ``pareto`` ->
+        ``"throughput"`` (its default objectives are throughput-based; no SLA).
         """
         return {
             OptimizationTarget.THROUGHPUT: "throughput",
             OptimizationTarget.THROUGHPUT_PER_GPU: "throughput",
+            OptimizationTarget.THROUGHPUT_PER_USER: "throughput",
             OptimizationTarget.E2E_LATENCY: "latency",
             OptimizationTarget.GOODPUT: "sla",
             OptimizationTarget.GOODPUT_PER_GPU: "sla",
+            OptimizationTarget.PARETO: "throughput",
         }[self]
 
 
@@ -71,25 +88,62 @@ class SLATarget(BaseModel):
     e2e_ms: float | None = Field(default=None, gt=0)
 
 
+# Goodput-based scalar targets — the only ones that need an SLA (their metric counts
+# only SLA-satisfying requests). Used to gate the SLA requirement on both the scalar
+# target and the per-objective list under a pareto goal.
+_SLA_TARGETS = frozenset({OptimizationTarget.GOODPUT, OptimizationTarget.GOODPUT_PER_GPU})
+
+# Default Pareto objectives: throughput per GPU (y) vs mean per-user throughput (x) —
+# the InferenceX tok/s/gpu vs tok/s/user frontier.
+_DEFAULT_PARETO_OBJECTIVES = (OptimizationTarget.THROUGHPUT_PER_GPU, OptimizationTarget.THROUGHPUT_PER_USER)
+
+
 class OptimizationGoal(BaseModel):
     """User-owned objective and SLA. Pinned; never searched."""
 
     model_config = ConfigDict(extra="forbid")
 
     target: OptimizationTarget = OptimizationTarget.THROUGHPUT
-    sla: SLATarget | None = None  # required for goodput / goodput_per_gpu
+    sla: SLATarget | None = None  # required for goodput / goodput_per_gpu (scalar or pareto objective)
+    # Only meaningful when target == pareto: the >=2 scalar objectives whose Pareto
+    # front is sought. None -> the default pair (throughput_per_gpu, throughput_per_user).
+    pareto_objectives: list[OptimizationTarget] | None = None
+
+    @property
+    def resolved_pareto_objectives(self) -> list[OptimizationTarget]:
+        """The effective Pareto objective list: the configured one, or the default pair only
+        when unset (``None``). An explicitly-supplied empty/short list is kept as-is so the
+        validator's ``len < 2`` guard rejects it (rather than silently using the default)."""
+        return list(_DEFAULT_PARETO_OBJECTIVES) if self.pareto_objectives is None else list(self.pareto_objectives)
+
+    @property
+    def is_pareto(self) -> bool:
+        return self.target is OptimizationTarget.PARETO
 
     @model_validator(mode="after")
-    def _require_sla_for_goodput(self) -> "OptimizationGoal":
-        needs_sla = self.target in (
-            OptimizationTarget.GOODPUT,
-            OptimizationTarget.GOODPUT_PER_GPU,
-        )
+    def _validate_goal(self) -> "OptimizationGoal":
+        # pareto_objectives only applies to a pareto target.
+        if not self.is_pareto and self.pareto_objectives is not None:
+            raise ValueError("pareto_objectives is only valid when target is 'pareto'")
+        if self.is_pareto:
+            objs = self.resolved_pareto_objectives
+            if len(objs) < 2:
+                raise ValueError("a pareto goal needs at least 2 objectives")
+            if OptimizationTarget.PARETO in objs:
+                raise ValueError("pareto_objectives cannot contain 'pareto' itself (objectives must be scalar)")
+            if len(set(objs)) != len(objs):
+                raise ValueError(f"pareto_objectives must be distinct, got {[o.value for o in objs]}")
+            effective = set(objs)
+        else:
+            effective = {self.target}
+        # Any goodput-based objective (scalar target or pareto objective) needs an SLA.
+        needs_sla = bool(effective & _SLA_TARGETS)
         has_sla = self.sla is not None and (
             self.sla.e2e_ms is not None or (self.sla.ttft_ms is not None and self.sla.itl_ms is not None)
         )
         if needs_sla and not has_sla:
-            raise ValueError(f"{self.target.value} requires an SLA target (ttft_ms+itl_ms or e2e_ms)")
+            culprits = sorted(t.value for t in (effective & _SLA_TARGETS))
+            raise ValueError(f"{culprits} require an SLA target (ttft_ms+itl_ms or e2e_ms)")
         return self
 
 
@@ -101,12 +155,21 @@ class Workload(BaseModel):
     1. **mooncake trace** — set ``trace_path``. Open-loop at the trace's arrival
        timestamps (scale with ``arrival_speedup_ratio``); set ``replay_concurrency``
        to drive it **closed-loop** (cap N in flight, ignore timestamps).
-    2. **synthetic request-rate** — set ``request_rate`` (+ ``isl``/``osl``/``request_count``):
+    2. **synthetic request-rate** — set ``request_rate`` (+ ``isl``/``osl``/``num_request_ratio``):
        open-loop at a fixed QPS.
-    3. **synthetic concurrency** — set ``concurrency`` (+ ``isl``/``osl``/``request_count``):
+    3. **synthetic concurrency** — set ``concurrency`` (+ ``isl``/``osl``/``num_request_ratio``):
        closed-loop, cap N in flight.
 
     The mode is inferred from which field is set; see the validator.
+
+    ``concurrency`` may be a **list** of ints, but only under a ``pareto`` goal — then it
+    is the swept dimension that traces the Pareto front (each value is one in-flight cap;
+    enforced in :class:`SmartSearchConfig`). Every other goal needs a single value.
+
+    ``num_request_ratio`` (synthetic only) sets the request count **relative to the load**:
+    ``num_requests = round(num_request_ratio * load)`` where ``load`` is ``concurrency``
+    (closed-loop) or ``request_rate`` (open-loop). So the synthetic trace length scales with
+    the swept concurrency automatically — e.g. ratio 10 at concurrency 256 -> 2560 requests.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -115,9 +178,9 @@ class Workload(BaseModel):
     # request_rate (open-loop QPS) or concurrency (closed-loop in-flight cap).
     isl: int | None = None
     osl: int | None = None
-    concurrency: int | None = None  # set concurrency OR request_rate
+    concurrency: int | list[int] | None = None  # set concurrency OR request_rate (list only under a pareto goal)
     request_rate: float | None = None
-    request_count: int | None = None
+    num_request_ratio: float | None = None  # num_requests = round(ratio * load); load = concurrency or request_rate
     shared_prefix_ratio: float = 0.0  # cache-locality / prefix sharing
     num_prefix_groups: int = 0
     turns_per_session: int = 1  # multi-turn sessions
@@ -141,14 +204,39 @@ class Workload(BaseModel):
         return self.trace_path is None
 
     @property
-    def in_flight_cap(self) -> int | None:
-        """Closed-loop in-flight cap (``None`` = open-loop): ``replay_concurrency``
-        for a trace, ``concurrency`` for a synthetic workload."""
+    def concurrency_choices(self) -> list[int] | None:
+        """The swept concurrency values when ``concurrency`` is a list (pareto sweep),
+        else ``None``. The sampler turns this into a per-trial discrete dimension."""
+        return list(self.concurrency) if isinstance(self.concurrency, list) else None
+
+    def effective_in_flight_cap(self, concurrency_override: int | None = None) -> int | None:
+        """Closed-loop in-flight cap (``None`` = open-loop). ``concurrency_override`` (the
+        per-trial swept value under a pareto sweep) wins; then ``replay_concurrency`` for a
+        trace, then a scalar ``concurrency`` for a synthetic workload. A list ``concurrency``
+        with no override yields ``None`` (the per-trial override is expected to supply it)."""
         if self.trace_path is not None:
             return self.replay_concurrency
-        if self.concurrency is not None:
+        if concurrency_override is not None:
+            return concurrency_override
+        if isinstance(self.concurrency, int):
             return self.concurrency
         return None
+
+    def resolved_request_count(self, concurrency_override: int | None = None) -> int:
+        """Synthetic request count = ``round(num_request_ratio * load)`` (>= 1), where
+        ``load`` is the in-flight concurrency (closed-loop) or the request rate (open-loop).
+        ``concurrency_override`` is the per-trial swept concurrency (pareto sweep)."""
+        if concurrency_override is not None:
+            load: float = concurrency_override
+        elif isinstance(self.concurrency, int):
+            load = self.concurrency
+        elif self.request_rate is not None:
+            load = self.request_rate
+        else:
+            raise ValueError(
+                "resolved_request_count needs a concurrency_override when concurrency is a list (pareto sweep)"
+            )
+        return max(1, round((self.num_request_ratio or 0.0) * load))
 
     @property
     def synthetic_arrival_interval_ms(self) -> float:
@@ -160,7 +248,7 @@ class Workload(BaseModel):
 
     @model_validator(mode="after")
     def _validate_workload(self) -> "Workload":
-        synthetic_only = ("isl", "osl", "request_rate", "concurrency", "request_count")
+        synthetic_only = ("isl", "osl", "request_rate", "concurrency", "num_request_ratio")
         if self.trace_path is not None:
             set_syn = [n for n in synthetic_only if getattr(self, n) is not None]
             if set_syn:
@@ -168,19 +256,28 @@ class Workload(BaseModel):
             if self.replay_concurrency is not None and self.replay_concurrency <= 0:
                 raise ValueError(f"replay_concurrency must be a positive integer, got {self.replay_concurrency}")
             return self
-        # synthetic: exactly one of request_rate / concurrency, plus isl/osl/request_count
+        # synthetic: exactly one of request_rate / concurrency, plus isl/osl/num_request_ratio
         loads = [n for n in ("request_rate", "concurrency") if getattr(self, n) is not None]
         if len(loads) != 1:
             raise ValueError(
                 "a synthetic workload needs exactly one of request_rate or concurrency "
                 "(or set trace_path for a trace workload)"
             )
-        missing = [n for n in ("isl", "osl", "request_count") if getattr(self, n) is None]
+        missing = [n for n in ("isl", "osl", "num_request_ratio") if getattr(self, n) is None]
         if missing:
             raise ValueError(f"a synthetic workload requires {missing}")
         if self.replay_concurrency is not None:
             raise ValueError("replay_concurrency is for trace workloads; use 'concurrency' for synthetic closed-loop")
-        for name in ("request_rate", "concurrency", "isl", "osl", "request_count"):
+        # concurrency: a single positive int, or a non-empty list of positive ints (pareto sweep).
+        if self.concurrency is not None:
+            conc_list = self.concurrency if isinstance(self.concurrency, list) else [self.concurrency]
+            if isinstance(self.concurrency, list) and not conc_list:
+                raise ValueError("concurrency list must be non-empty")
+            if any((not isinstance(c, int)) or isinstance(c, bool) or c <= 0 for c in conc_list):
+                raise ValueError(
+                    f"concurrency must be a positive integer or list of positive integers, got {self.concurrency!r}"
+                )
+        for name in ("request_rate", "isl", "osl", "num_request_ratio"):
             v = getattr(self, name)
             if v is not None and v <= 0:
                 raise ValueError(f"{name} must be positive, got {v}")
@@ -465,8 +562,12 @@ class Candidate(BaseModel):
 
     config: dict[str, Any]  # the decoded knob assignment (engine/router/planner)
     used_gpus: int
-    score: float  # objective score, normalized so higher is better
+    score: float  # objective score, normalized so higher is better (pareto: the first objective's value)
     metrics: dict[str, float]  # replay performance: throughput, ttft, itl, e2e, goodput
+    # Per-objective raw values (natural units/direction) under a pareto goal, keyed by
+    # OptimizationTarget value (e.g. {"throughput_per_gpu": .., "throughput_per_user": ..});
+    # None for a single-objective sweep. Drives Pareto dominance in score.pareto_front.
+    objectives: dict[str, float] | None = None
 
 
 class SmartSearchConfig(BaseModel):
@@ -478,6 +579,17 @@ class SmartSearchConfig(BaseModel):
     workload: Workload
     goal: OptimizationGoal = Field(default_factory=OptimizationGoal)
     sweep: SweepConfig = Field(default_factory=SweepConfig)
+
+    @model_validator(mode="after")
+    def _validate_concurrency_sweep(self) -> "SmartSearchConfig":
+        """A list-valued ``workload.concurrency`` is the swept Pareto dimension, so it is
+        only allowed under a ``pareto`` goal; every other goal needs a single concurrency."""
+        if self.workload.concurrency_choices is not None and not self.goal.is_pareto:
+            raise ValueError(
+                "a list-valued workload.concurrency is only allowed when goal.target is 'pareto' "
+                f"(got target={self.goal.target.value}); use a single concurrency value"
+            )
+        return self
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "SmartSearchConfig":

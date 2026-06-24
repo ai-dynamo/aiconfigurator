@@ -39,21 +39,22 @@ from .load_predictor_sweep import LoadPredictorResult, sweep_load_predictor
 from .planner import filter_scaling_policies
 from .sample import unroll_sample
 from .sampler import BranchSampler, Suggestion, make_branch_sampler
-from .score import is_feasible, make_candidate, rank, score_report
+from .score import is_feasible, make_candidate, pareto_front, rank
 from .search_space import BranchSpace, enumerate_branches
 
 
 class _Evaluator(Protocol):
-    def evaluate(self, plan: Any) -> dict[str, float]: ...
+    def evaluate(self, plan: Any, *, concurrency_override: int | None = None) -> dict[str, float]: ...
 
 
-# Result of evaluating one suggestion (no Vizier here): (candidate|None, score|None,
-# outcome, reason). outcome in {"feasible","infeasible","failed"}. Both "failed" (replay
-# error) and "infeasible" (over gpu_budget) carry a reason and no score -> the loop tells
-# the sampler observe_infeasible for them (a gated trial is never fed back as a high
-# score). "unsupported" is decided on the main process before evaluation and never
-# reaches the worker.
-_EvalResult = tuple[Candidate | None, float | None, str, str]
+# Result of evaluating one suggestion (no Vizier here): (candidate|None, observe_metrics|None,
+# outcome, reason). observe_metrics is the dict fed to sampler.observe — {"objective": score}
+# for a single-objective sweep, or {obj_name: raw_value, ...} under a pareto goal. outcome in
+# {"feasible","infeasible","failed"}. Both "failed" (replay error) and "infeasible" (over
+# gpu_budget) carry a reason and no metrics -> the loop tells the sampler observe_infeasible
+# for them (a gated trial is never fed back as a high score). "unsupported" is decided on the
+# main process before evaluation and never reaches the worker.
+_EvalResult = tuple[Candidate | None, dict[str, float] | None, str, str]
 
 
 def _evaluate_one(
@@ -73,6 +74,11 @@ def _evaluate_one(
         parallel_config=parallel_config,
         load_predictor=load_predictor,
     )
+    # A pareto concurrency sweep carries the per-trial in-flight cap on the selection;
+    # record it on the sample (so each Pareto point knows its concurrency) and drive replay with it.
+    concurrency = selection.get("concurrency")
+    if concurrency is not None:
+        sample["concurrency"] = concurrency
     backend_version = resolve_backend_version(config.search_space.hardware_sku, selection["backend"])
     plan = build_deployment(
         sample,
@@ -81,21 +87,27 @@ def _evaluate_one(
         planner_sla=goal.sla,
     )
     try:
-        report = evaluator.evaluate(plan)
+        report = evaluator.evaluate(plan, concurrency_override=concurrency)
     except Exception as exc:  # one candidate failing must not abort the sweep
         return None, None, "failed", f"replay failed: {type(exc).__name__}: {exc}"
-    score = score_report(report, goal.target)
-    if is_feasible(int(sample["used_gpus"]), config.search_space.gpu_budget):
-        return make_candidate(sample, report, goal.target), score, "feasible", ""
-    # Over gpu_budget: report as infeasible to the optimizer (observe_infeasible, not
-    # observe(score)) so a high score doesn't steer the sampler into the infeasible
-    # region. The score is dropped — the trial is gated, not ranked.
-    return (
-        None,
-        None,
-        "infeasible",
-        f"over gpu_budget: used_gpus={int(sample['used_gpus'])} > gpu_budget={config.search_space.gpu_budget}",
-    )
+    if not is_feasible(int(sample["used_gpus"]), config.search_space.gpu_budget):
+        # Over gpu_budget: report as infeasible to the optimizer (observe_infeasible, not
+        # observe(metrics)) so a high score doesn't steer the sampler into the infeasible
+        # region. The trial is gated, not ranked.
+        return (
+            None,
+            None,
+            "infeasible",
+            f"over gpu_budget: used_gpus={int(sample['used_gpus'])} > gpu_budget={config.search_space.gpu_budget}",
+        )
+    if goal.is_pareto:
+        candidate = make_candidate(sample, report, goal.target, pareto_objectives=goal.resolved_pareto_objectives)
+        # Pareto objectives are reported raw (each metric carries its own MAXIMIZE/MINIMIZE goal).
+        observe_metrics: dict[str, float] = dict(candidate.objectives or {})
+    else:
+        candidate = make_candidate(sample, report, goal.target)
+        observe_metrics = {"objective": candidate.score}  # single metric, pre-signed higher-is-better
+    return candidate, observe_metrics, "feasible", ""
 
 
 # Worker-process plumbing: the shared read-only state (config/goal/load_predictor/
@@ -176,6 +188,9 @@ def run_smart_search(
     # Unique per run: Vizier's datastore persists studies by id, so a fixed id would
     # make a later run inherit a stale study (and its old param space) -> decode crash.
     run_nonce = uuid.uuid4().hex[:8]
+    # Multi-objective (pareto) -> one Vizier metric per objective (each with its own
+    # direction); single-objective -> the sampler's default single maximized "objective".
+    sampler_objectives = [(t.value, t.maximize) for t in goal.resolved_pareto_objectives] if goal.is_pareto else None
 
     def _best() -> float | None:
         return max((c.score for c in candidates), default=None)
@@ -239,7 +254,9 @@ def run_smart_search(
             bar.update(1)
 
         for branch in branches:
-            sampler = sampler_factory(branch, study_id=f"spica_{branch.deployment_mode}_{run_nonce}")
+            sampler = sampler_factory(
+                branch, study_id=f"spica_{branch.deployment_mode}_{run_nonce}", objectives=sampler_objectives
+            )
             bar.set_description(f"smart-sweep {branch.deployment_mode}")
             for _ in range(sweep.max_rounds):
                 suggestions = sampler.suggest(per_round)  # ask (main, serial)
@@ -254,27 +271,30 @@ def run_smart_search(
                             s, f"backend {s.selection['backend']!r} does not support this parallel config"
                         )
                         _record("unsupported", None)
-                for s, (candidate, score, outcome, reason) in _eval_batch(pool, todo):
+                for s, (candidate, observe_metrics, outcome, reason) in _eval_batch(pool, todo):
                     # "failed" (replay error) and "infeasible" (over gpu_budget) are both
                     # gated: tell the sampler observe_infeasible so it learns to avoid that
                     # region instead of being steered toward it by a high objective score.
                     if outcome in ("failed", "infeasible"):  # tell (main, serial)
                         sampler.observe_infeasible(s, reason)
                     else:
-                        sampler.observe(s, score)
+                        sampler.observe(s, observe_metrics)
                     _record(outcome, candidate)
 
+    # Single-objective -> rank best-first by score; pareto -> the non-dominated front.
+    result = pareto_front(candidates, goal.resolved_pareto_objectives) if goal.is_pareto else rank(candidates)
     if show_progress:
-        best = _best()
         evaluated = sum(tally.values())
         summary = (
             f"smart-sweep done: {tally['feasible']}/{evaluated} feasible, "
             f"{tally['infeasible']} gated, {tally['unsupported']} backend-unsupported, "
             f"{tally['failed']} replay-failed"
         )
-        if candidates:
-            summary += f"; best {goal.target.value}={best:.4g}"
-        else:
+        if not candidates:
             summary += " — NO feasible candidate (check backends / SLA / gpu_budget / replay errors)"
+        elif goal.is_pareto:
+            summary += f"; pareto front: {len(result)} non-dominated candidate(s)"
+        else:
+            summary += f"; best {goal.target.value}={_best():.4g}"
         tqdm.write(summary)
-    return rank(candidates)
+    return result
