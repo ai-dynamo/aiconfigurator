@@ -73,7 +73,7 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 ```
 - We have four modes: `default`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
-- Use `default --trace-path` to run the Spica replay-backed smart sweeper from a trace; `--isl` and `--osl` are ignored in this mode.
+- Use `default --trace-path` to run the Spica replay-backed smart sweeper from a Mooncake JSONL trace; `--isl` and `--osl` are ignored in this mode. Example trace: [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl).
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.

@@ -296,7 +296,7 @@ def _add_default_mode_arguments(parser):
         type=str,
         default=None,
         help=(
-            "Path to a replay trace. When set, default mode runs the Spica replay-backed smart sweeper "
+            "Path to a Mooncake JSONL replay trace. When set, default mode runs the Spica replay-backed smart sweeper "
             "instead of the legacy AIC Pareto sweep, and --isl/--osl are ignored."
         ),
     )
@@ -1733,7 +1733,7 @@ def _run_spica_trace_default(args) -> list[Any]:
 
     config = SmartSearchConfig(
         search_space=search_space,
-        workload={"trace_path": args.trace_path},
+        workload={"trace_path": args.trace_path, "trace_format": "mooncake"},
         goal={"target": "goodput_per_gpu", "sla": {"ttft_ms": args.ttft, "itl_ms": args.tpot}},
     )
 
