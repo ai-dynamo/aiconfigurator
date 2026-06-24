@@ -66,6 +66,125 @@ def _architecture_to_model_family(architecture: str) -> str:
     )
 
 
+def _normalize_mixed_precision_layer_algo(value: object) -> str | None:
+    """Normalize ModelOpt per-layer/group quantization algorithms."""
+    if value is None:
+        return None
+    algo = str(value).strip().lower()
+    if not algo:
+        return None
+    aliases = {
+        "fp8": "fp8",
+        "e4m3": "fp8",
+        "e5m2": "fp8",
+        "nvfp4": "nvfp4",
+        "fp4": "nvfp4",
+    }
+    return aliases.get(algo, algo)
+
+
+def _infer_mixed_precision_group_algo(group: dict) -> str | None:
+    """Infer the layer algorithm from a ModelOpt config_groups entry."""
+    weights = group.get("weights")
+    if not isinstance(weights, dict):
+        return None
+
+    quant_algo = _normalize_mixed_precision_layer_algo(
+        weights.get("quant_algo") or weights.get("quantization_algo") or weights.get("quant_method")
+    )
+    if quant_algo:
+        return quant_algo
+
+    num_bits = weights.get("num_bits")
+    weight_type = str(weights.get("type", "")).lower()
+    if not isinstance(num_bits, int):
+        return None
+    if num_bits == 8 and "float" in weight_type:
+        return "fp8"
+    if num_bits == 4 and "float" in weight_type:
+        return "nvfp4"
+    return None
+
+
+def _is_routing_expert_target(target: object) -> bool:
+    """Return whether a ModelOpt target path points at routed MoE experts."""
+    target_name = str(target).lower()
+    if "shared_expert" in target_name:
+        return False
+    return ".experts." in target_name or "routing_expert" in target_name
+
+
+def _collect_mixed_precision_layer_algos(raw_config: dict) -> tuple[set[str], set[str]]:
+    """Collect ModelOpt mixed precision algorithms by SDK GEMM/MoE category."""
+    gemm_algos: set[str] = set()
+    moe_algos: set[str] = set()
+
+    def add_target(target: object, algo_value: object) -> None:
+        algo = _normalize_mixed_precision_layer_algo(algo_value)
+        if algo is None:
+            return
+        if _is_routing_expert_target(target):
+            moe_algos.add(algo)
+        else:
+            gemm_algos.add(algo)
+
+    def add_quantized_layers(quantized_layers: object) -> None:
+        if not isinstance(quantized_layers, dict):
+            return
+        for target, metadata in quantized_layers.items():
+            if isinstance(metadata, dict):
+                algo = metadata.get("quant_algo") or metadata.get("quantization_algo") or metadata.get("quant_method")
+            else:
+                algo = metadata
+            add_target(target, algo)
+
+    hf_quant_config = raw_config.get("hf_quant_config")
+    if isinstance(hf_quant_config, dict):
+        hf_quant_section = hf_quant_config.get("quantization")
+        if isinstance(hf_quant_section, dict):
+            add_quantized_layers(hf_quant_section.get("quantized_layers"))
+
+    quant_cfg = raw_config.get("quantization_config")
+    if isinstance(quant_cfg, dict):
+        add_quantized_layers(quant_cfg.get("quantized_layers"))
+        config_groups = quant_cfg.get("config_groups")
+        if isinstance(config_groups, dict):
+            for group in config_groups.values():
+                if not isinstance(group, dict):
+                    continue
+                algo = _infer_mixed_precision_group_algo(group)
+                if algo is None:
+                    continue
+                for target in group.get("targets") or []:
+                    add_target(target, algo)
+
+    return gemm_algos, moe_algos
+
+
+def _infer_mixed_precision_quant_modes(raw_config: dict, quant_dynamic: bool | None) -> dict[str, object]:
+    """Map ModelOpt MIXED_PRECISION metadata onto coarse SDK quant modes."""
+    gemm_algos, moe_algos = _collect_mixed_precision_layer_algos(raw_config)
+    overrides: dict[str, object] = {}
+
+    if "fp8" in gemm_algos:
+        if quant_dynamic is not True:
+            overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_static
+        else:
+            overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8
+    elif "nvfp4" in gemm_algos:
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.nvfp4
+
+    if "nvfp4" in moe_algos:
+        overrides["moe_quant_mode"] = common.MoEQuantMode.nvfp4
+    elif "fp8" in moe_algos:
+        overrides["moe_quant_mode"] = common.MoEQuantMode.fp8
+
+    if not overrides:
+        logger.warning("Unable to infer SDK quant modes from mixed_precision metadata")
+
+    return overrides
+
+
 def _infer_quant_modes_from_raw_config(raw_config: dict, architecture: str | None = None) -> dict[str, object]:
     quant_algo = raw_config.get("quant_algo")
     quant_dynamic = raw_config.get("quant_dynamic")
@@ -95,6 +214,8 @@ def _infer_quant_modes_from_raw_config(raw_config: dict, architecture: str | Non
     elif quant_algo == "nvfp4":
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.nvfp4
         overrides["moe_quant_mode"] = common.MoEQuantMode.nvfp4
+    elif quant_algo == "mixed_precision":
+        overrides.update(_infer_mixed_precision_quant_modes(raw_config, quant_dynamic))
     elif quant_algo == "mxfp4":
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.bfloat16
         overrides["moe_quant_mode"] = common.MoEQuantMode.w4a16_mxfp4
