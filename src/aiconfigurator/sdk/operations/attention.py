@@ -377,45 +377,59 @@ class ContextAttention(Operation):
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
-            # SOL / util, util read best-effort from own collected data (the
-            # (n, full_s, b) grid for this slice); falls back to 0.6 if no data.
+            # latency = SOL / util, util read best-effort from collected data. The query
+            # SOL always uses the real window_size (get_sol's windowed branch already
+            # captures the reduced O(seq*window) work). The UTIL is borrowed by slice:
+            # exact window first, then window=0 (full attention) -- the window axis is
+            # collected per-model (scattered: hs64/win128 gpt-oss, hs256/win1024 gemma3,
+            # ...), so an uncollected window has no own basis; full-attention util is the
+            # right carrier since the kernel efficiency is ~window-independent and SOL
+            # absorbs the work difference.
             sol_time = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
             n_kv_lookup = 0 if n == n_kv else n_kv
 
-            def _slice():
-                cls.load_data(database)
-                wrapper = database._context_attention_data
-                wrapper.raise_if_not_loaded()
-                return wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
+            def _own_grid(slice_window):
+                def _slice():
+                    cls.load_data(database)
+                    wrapper = database._context_attention_data
+                    wrapper.raise_if_not_loaded()
+                    return wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][slice_window]
 
-            def _sol(c):  # c = (n, full_s, b); samples are full attention (prefix=0)
-                nkv = c[0] if n_kv_lookup == 0 else n_kv_lookup
-                return get_sol(c[2], c[1], 0, c[0], nkv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
+                def _sol(c):  # c = (n, full_s, b); samples are full attention (prefix=0)
+                    nkv = c[0] if n_kv_lookup == 0 else n_kv_lookup
+                    return get_sol(
+                        c[2], c[1], 0, c[0], nkv, head_size, slice_window, kvcache_quant_mode, fmha_quant_mode
+                    )[0]
 
-            grid = util_empirical.grid_for(
-                (
-                    "ctx_attn",
-                    database.system,
-                    database.backend,
-                    database.version,
-                    fmha_quant_mode.name,
-                    kvcache_quant_mode.name,
-                    n_kv_lookup,
-                    head_size,
-                    window_size,
-                ),
-                _slice,
-                _sol,
-                depth=3,
-            )
+                return util_empirical.grid_for(
+                    (
+                        "ctx_attn",
+                        database.system,
+                        database.backend,
+                        database.version,
+                        fmha_quant_mode.name,
+                        kvcache_quant_mode.name,
+                        n_kv_lookup,
+                        head_size,
+                        slice_window,
+                    ),
+                    _slice,
+                    _sol,
+                    depth=3,
+                )
 
-            if grid is None or not grid.samples:
+            # Try exact window, then full-attention (window=0) as the util carrier.
+            for slice_window in [window_size, 0] if window_size > 0 else [window_size]:
+                grid = _own_grid(slice_window)
+                if grid is not None and grid.samples:
+                    latency, _ = util_empirical.estimate(sol_time, (n, s + prefix, b), grid)
+                    return latency
                 # Cross-head_size transfer: this head_size has no data, but num_heads
                 # is already an in-grid axis, so only head_size differs. Borrow the
                 # nearest collected head_size's util and rescale by the prefill
                 # head_size-util ratio (SOL still uses the query's own head_size).
                 ref_grid, ref_hs = _ctx_headsize_ref_grid(
-                    database, fmha_quant_mode, kvcache_quant_mode, n_kv_lookup, head_size, window_size, get_sol
+                    database, fmha_quant_mode, kvcache_quant_mode, n_kv_lookup, head_size, slice_window, get_sol
                 )
                 if ref_grid is not None:
                     scale = _attn_prefill_hs_ratio(database.backend, head_size) / _attn_prefill_hs_ratio(
@@ -424,7 +438,8 @@ class ContextAttention(Operation):
                     latency, _ = util_empirical.estimate(sol_time, (n, s + prefix, b), ref_grid, util_scale=scale)
                     return latency
 
-            latency, _ = util_empirical.estimate(sol_time, (n, s + prefix, b), grid)
+            # No own-window, full-attention, or cross-head basis -> raise honestly.
+            latency, _ = util_empirical.estimate(sol_time, (n, s + prefix, b), None)
             return latency
 
         assert n_kv <= n, "n_kv must be less than or equal to n"
@@ -450,7 +465,20 @@ class ContextAttention(Operation):
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             n_kv_lookup = 0 if n == n_kv else n_kv
-            attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
+            # Windowed attention: the per-model windowed slices are scattered and partly
+            # corrupt (e.g. hs192/win128 fp8 records ~83000x the full-attention latency).
+            # Always interpolate the window=0 (full-attention) measurement and scale by the
+            # SOL ratio, which captures the windowed O(seq*window) work analytically. SOL is
+            # already window-aware (get_sol caps the score region at the window).
+            lookup_window = window_size
+            sol_scale = 1.0
+            if window_size > 0:
+                lookup_window = 0
+                sol_full = get_sol(b, s, prefix, n, n_kv, head_size, 0, kvcache_quant_mode, fmha_quant_mode)[0]
+                sol_win = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
+                if sol_full > 0:
+                    sol_scale = sol_win / sol_full
+            attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][lookup_window]
             result = interpolation.interp_3d(
                 n,
                 full_s,
@@ -460,8 +488,8 @@ class ContextAttention(Operation):
                 database._extracted_metrics_cache,
                 allow_singleton_axes=True,
             )
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            latency = result["latency"] * prefix_correction * sol_scale
+            energy = result.get("energy", 0.0) * prefix_correction * sol_scale
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -725,47 +753,58 @@ class GenerationAttention(Operation):
             w: int,
             kvcache_quant_mode: common.KVCacheQuantMode,
         ) -> float:
-            # SOL / util, util read best-effort from own collected data (the
-            # (n, b, s) grid for this slice); falls back to 0.8 if no data.
+            # latency = SOL / util. The query SOL uses the real window w (get_sol caps
+            # kv_len at the window); the UTIL is borrowed by slice -- exact window first,
+            # then window=0 (full attention). The window axis is collected per-model
+            # (scattered), so an uncollected window borrows full-attention util: decode
+            # is memory-bound KV read, ~window-independent in efficiency, and SOL absorbs
+            # the smaller windowed KV span.
             sol_time = get_sol(b, s, n, n_kv, h, w, kvcache_quant_mode)[0]
             n_kv_lookup = n_kv if n_kv != n else 0
 
-            def _slice():
-                cls.load_data(database)
-                wrapper = database._generation_attention_data
-                wrapper.raise_if_not_loaded()
-                return wrapper[kvcache_quant_mode][n_kv_lookup][h][w]
+            def _own_grid(slice_window):
+                def _slice():
+                    cls.load_data(database)
+                    wrapper = database._generation_attention_data
+                    wrapper.raise_if_not_loaded()
+                    return wrapper[kvcache_quant_mode][n_kv_lookup][h][slice_window]
 
-            def _sol(c):  # c = (n, b, s)
-                nkv = c[0] if n_kv_lookup == 0 else n_kv_lookup
-                return get_sol(c[1], c[2], c[0], nkv, h, w, kvcache_quant_mode)[0]
+                def _sol(c):  # c = (n, b, s)
+                    nkv = c[0] if n_kv_lookup == 0 else n_kv_lookup
+                    return get_sol(c[1], c[2], c[0], nkv, h, slice_window, kvcache_quant_mode)[0]
 
-            grid = util_empirical.grid_for(
-                (
-                    "gen_attn",
-                    database.system,
-                    database.backend,
-                    database.version,
-                    kvcache_quant_mode.name,
-                    n_kv_lookup,
-                    h,
-                    w,
-                ),
-                _slice,
-                _sol,
-                depth=3,
-            )
+                return util_empirical.grid_for(
+                    (
+                        "gen_attn",
+                        database.system,
+                        database.backend,
+                        database.version,
+                        kvcache_quant_mode.name,
+                        n_kv_lookup,
+                        h,
+                        slice_window,
+                    ),
+                    _slice,
+                    _sol,
+                    depth=3,
+                )
 
-            if grid is None or not grid.samples:
+            for slice_window in [w, 0] if w > 0 else [w]:
+                grid = _own_grid(slice_window)
+                if grid is not None and grid.samples:
+                    latency, _ = util_empirical.estimate(sol_time, (n, b, s), grid)
+                    return latency
                 # Cross-head_size transfer (decode): borrow the nearest collected
                 # head_size's util. Decode util is ~head_size-independent (memory-bound
                 # KV read), so util_scale stays 1.0 -- no prefill-style correction.
-                ref_grid, _ref_hs = _gen_headsize_ref_grid(database, kvcache_quant_mode, n_kv_lookup, h, w, get_sol)
+                ref_grid, _ref_hs = _gen_headsize_ref_grid(
+                    database, kvcache_quant_mode, n_kv_lookup, h, slice_window, get_sol
+                )
                 if ref_grid is not None:
                     latency, _ = util_empirical.estimate(sol_time, (n, b, s), ref_grid)
                     return latency
 
-            latency, _ = util_empirical.estimate(sol_time, (n, b, s), grid)
+            latency, _ = util_empirical.estimate(sol_time, (n, b, s), None)
             return latency
 
         assert n_kv <= n, "n_kv must be less than or equal to n"
@@ -788,7 +827,18 @@ class GenerationAttention(Operation):
             data_wrapper.raise_if_not_loaded()
             n_kv_lookup = n_kv if n_kv != n else 0
 
-            attention_dict = data_wrapper[kvcache_quant_mode][n_kv_lookup][head_size][window_size]
+            # Windowed decode: derive from the window=0 measurement scaled by the SOL ratio
+            # (get_sol caps decode kv_len at the window). The per-model windowed slices are
+            # scattered/partly corrupt, so we don't read them directly.
+            lookup_window = window_size
+            sol_scale = 1.0
+            if window_size > 0:
+                lookup_window = 0
+                sol_full = get_sol(b, s, n, n_kv, head_size, 0, kvcache_quant_mode)[0]
+                sol_win = get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
+                if sol_full > 0:
+                    sol_scale = sol_win / sol_full
+            attention_dict = data_wrapper[kvcache_quant_mode][n_kv_lookup][head_size][lookup_window]
             s_min = max(1, int(s * 0.9))
             s_max = max(s_min, int(s * 1.1))
             sample_cnt = 5
@@ -801,8 +851,8 @@ class GenerationAttention(Operation):
                 latency_sum += float(r["latency"])
                 energy_sum += float(r.get("energy", 0.0))
 
-            latency = latency_sum / sample_cnt
-            energy = energy_sum / sample_cnt
+            latency = latency_sum / sample_cnt * sol_scale
+            energy = energy_sum / sample_cnt * sol_scale
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(

@@ -38,6 +38,19 @@ class TestContextAttention:
 
         assert math.isclose(result, expected, rel_tol=1e-6)
 
+    def test_windowed_context_attention_not_above_full(self, comprehensive_perf_db):
+        """SWA (windowed) context attention must never exceed full attention -- it does
+        strictly less work. Regression for corrupt per-model windowed silicon data
+        (hs192/win128 fp8 recorded ~83000x the full-attention latency, blowing up TTFT
+        for hybrid models). Windowed latency is now derived from the window=0 measurement
+        scaled by the window-aware SOL ratio, so the invariant holds by construction."""
+        args = (2, 256, 0, 16, 8, common.KVCacheQuantMode.bfloat16, common.FMHAQuantMode.bfloat16)
+        kw = dict(database_mode=common.DatabaseMode.HYBRID, head_size=128)
+        full = float(comprehensive_perf_db.query_context_attention(*args, window_size=0, **kw))
+        windowed = float(comprehensive_perf_db.query_context_attention(*args, window_size=128, **kw))
+        assert windowed > 0
+        assert windowed <= full * 1.0001  # s(256) > window(128): windowed work <= full
+
     def test_query_context_attention_sol_full_mode(self, comprehensive_perf_db):
         """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
         b, full_s, prefix, n, n_kv = 1, 32, 0, 8, 4
