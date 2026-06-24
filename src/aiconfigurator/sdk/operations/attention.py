@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.perf_surrogate import TableQuery
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -147,7 +148,8 @@ class ContextAttention(Operation):
                 load_context_attention_data(sources), PerfDataFilename.context_attention, primary_path
             )
 
-            cls._extrapolate(cls._data_cache[key])
+            # No load-time grid pre-expansion: TableQuery interpolates the raw grid
+            # in sqrt space (seq_len ~ s²) and extrapolates seq_len via util-hold.
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -157,29 +159,6 @@ class ContextAttention(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the legacy 4-level (quant_mode → kv_cache_dtype → num_kv_heads
-        → head_size → window_size → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-
-        for quant_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[quant_mode]:
-                for num_kv_heads in data_wrapper[quant_mode][kv_cache_dtype]:
-                    for head_size in data_wrapper[quant_mode][kv_cache_dtype][num_kv_heads]:
-                        for window_size in data_wrapper[quant_mode][kv_cache_dtype][num_kv_heads][head_size]:
-                            data_dict = data_wrapper[quant_mode][kv_cache_dtype][num_kv_heads][head_size][window_size]
-                            min_x = min(data_dict.keys())
-                            filtered_x = [i for i in _CONTEXT_ATTENTION_TARGET_X if i >= min_x]
-                            interpolation.extrapolate_data_grid(
-                                data_dict=data_dict,
-                                target_x_list=filtered_x,
-                                target_y_list=_CONTEXT_ATTENTION_TARGET_Y,
-                                target_z_list=_CONTEXT_ATTENTION_TARGET_Z,
-                                sqrt_y_value=True,
-                            )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_context_attention)
@@ -265,17 +244,22 @@ class ContextAttention(Operation):
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             n_kv_lookup = 0 if n == n_kv else n_kv
             attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
-            result = interpolation.interp_3d(
-                n,
-                full_s,
-                b,
+            # seq_len (full_s) ~ s² -> interpolate in sqrt space (regime-agnostic,
+            # handles collection gaps); extrapolate seq_len via util-hold on SOL.
+            surrogate = TableQuery(
                 attention_dict,
-                "cubic",
-                database._extracted_metrics_cache,
+                method="linear",
+                value_transform="sqrt",
+                sol_fn=lambda q_n, q_full_s, q_b: get_sol(
+                    q_b, q_full_s, 0, q_n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode
+                )[0],
+                extrap_axes=(0, 1, 2),  # util-hold extrapolation on heads, full_s, batch (as the old pre-expansion did)
                 allow_singleton_axes=True,
+                extracted_metrics_cache=database._extracted_metrics_cache,
             )
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            result = surrogate.query(n, full_s, b)
+            latency = interpolation.get_value(result, "latency") * prefix_correction
+            energy = interpolation.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
