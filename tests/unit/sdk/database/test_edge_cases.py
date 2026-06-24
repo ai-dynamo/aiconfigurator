@@ -134,13 +134,14 @@ class TestAllreduceEdgeCases:
 class TestInitializationEdgeCases:
     """Test edge cases during PerfDatabase initialization."""
 
-    def test_extrapolation_during_init(self, tmp_path, monkeypatch, caplog):
-        """Test that extrapolation runs when ContextAttention's data is loaded.
+    def test_load_binds_raw_grid_without_pre_expansion(self, tmp_path, monkeypatch, caplog):
+        """ContextAttention.load_data binds the RAW grid, without densifying it.
 
-        Previously ``PerfDatabase.__init__`` warmed every op eagerly, so
-        extrapolation ran during construction. Now the load is lazy: we
-        explicitly trigger ``ContextAttention.load_data`` below (with
-        the loader patches still active) and assert on the result."""
+        Earlier the op pre-expanded the grid at load time (eager extrapolation
+        during ``PerfDatabase.__init__``). The TableQuery rollout removed that:
+        interp/extrap is deferred to query time, so loading must leave the four
+        collected points untouched. This guards against accidentally
+        re-introducing load-time pre-expansion."""
         # Set up minimal system spec
         import yaml
 
@@ -224,8 +225,8 @@ class TestInitializationEdgeCases:
         db = PerfDatabase("test", "backend", "v1", str(tmp_path))
         ContextAttention.load_data(db)
 
-        # Check that extrapolation created new data points
-        # Should have more than the 4 original points
+        # No load-time pre-expansion: the four collected points are preserved
+        # verbatim (TableQuery interpolates/extrapolates lazily at query time).
         total_points = 0
         for quant_mode in db._context_attention_data:
             for kv_cache in db._context_attention_data[quant_mode]:
@@ -242,7 +243,7 @@ class TestInitializationEdgeCases:
                                         ][s]
                                     )
 
-        assert total_points > 4, "Extrapolation should have created additional data points"
+        assert total_points == 4, "Load must preserve the raw grid; pre-expansion was removed"
 
 
 class TestGemmInterpolation:

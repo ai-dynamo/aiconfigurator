@@ -67,43 +67,43 @@ def test_query_gemm_exact_match_skips_3d_interpolation(comprehensive_perf_db, mo
     assert math.isclose(float(observed), expected)
 
 
-def test_query_gemm_interpolates_only_on_m_when_nk_match(comprehensive_perf_db, monkeypatch):
-    """GEMM lookup should use 1D interpolation on m when n and k match."""
+def test_query_gemm_interp_on_m_when_nk_match_is_faithful(comprehensive_perf_db):
+    """GEMM lookup with n/k on exact grid points and m between them returns the
+    faithful (linear) interpolated latency.
+
+    The internal dispatch is no longer special-cased: all interp/extrap is
+    delegated to the TableQuery surrogate (cubic over the full grid). On the
+    linear test grid, cubic still reproduces the linear value exactly, so the
+    guarantee we assert is the value itself, not which interp helper runs.
+    """
     quant_mode = common.GEMMQuantMode.bfloat16
     m, n, k = 12, 128, 128
-    calls = {}
-
-    def _fail_interp_3d(*args, **kwargs):
-        raise AssertionError("_interp_3d should not be used when n/k match and only m needs interpolation")
-
-    def _spy_interp_1d(x, y, value):
-        calls["x"] = x
-        calls["y"] = y
-        calls["value"] = value
-        return {"latency": 0.1 + value * 0.001 + n * 0.0001 + k * 0.00001, "power": 0.0, "energy": 0.0}
-
-    monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", _fail_interp_3d)
-    monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_1d", _spy_interp_1d)
 
     observed = comprehensive_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SILICON)
     expected = 0.1 + m * 0.001 + n * 0.0001 + k * 0.00001
 
     assert math.isclose(float(observed), expected)
-    assert calls["x"] == [8, 16]
-    assert calls["value"] == m
     assert observed.source == "silicon"
 
 
-def test_query_gemm_fast_paths_support_legacy_scalar_leaves(mutable_comprehensive_perf_db):
-    """Fast GEMM paths should support legacy scalar-leaf tables."""
+def test_query_gemm_supports_legacy_scalar_leaves(mutable_comprehensive_perf_db):
+    """GEMM queries support legacy scalar-leaf tables (float leaves, not
+    ``{"latency": ...}`` dicts), for both exact hits and interpolation.
+
+    Uses a table with >=2 points on every axis so the scalar-leaf path is
+    exercised through normal interpolation (an exact (n,k) lookup with an
+    interior m collapses to a 1-D linear interp along m), rather than the
+    degenerate single-n/single-k shape — which a singleton axis legitimately
+    treats as a miss (see test_query_gemm_fp8_static_sparse_shape_miss_is_structured)."""
     db = mutable_comprehensive_perf_db
     quant_mode = common.GEMMQuantMode.bfloat16
     db._gemm_data[quant_mode] = {
-        8: {128: {128: 0.5}},
-        16: {128: {128: 0.9}},
+        8: {128: {128: 0.5, 256: 0.6}, 256: {128: 0.7, 256: 0.8}},
+        16: {128: {128: 0.9, 256: 1.0}, 256: {128: 1.1, 256: 1.2}},
     }
 
     exact = db.query_gemm(8, 128, 128, quant_mode, database_mode=common.DatabaseMode.SILICON)
+    # n, k on exact grid points; m interior -> 1-D linear along m: (0.5, 0.9) @ 12 -> 0.7.
     interp = db.query_gemm(12, 128, 128, quant_mode, database_mode=common.DatabaseMode.SILICON)
 
     assert math.isclose(float(exact), 0.5)
