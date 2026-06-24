@@ -703,8 +703,8 @@ class MLAModule(Operation):
                 load_generation_mla_module_data(gen_sources), PerfDataFilename.mla_generation_module, gen_path
             )
 
-            cls._extrapolate_context(cls._context_data_cache[key])
-            cls._extrapolate_generation(cls._generation_data_cache[key])
+            # No grid pre-expansion: TableQuery does interp + util-hold extrap
+            # for both the context (sqrt) and generation (raw) module tables.
             cls._record_load()
 
         if "_context_mla_module_data" not in database.__dict__:
@@ -819,9 +819,20 @@ class MLAModule(Operation):
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             mla_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
-            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            # context MLA module ~ s² in full_s -> sqrt interp; util-hold extrapolation.
+            surrogate = TableQuery(
+                mla_dict,
+                method="linear",
+                value_transform="sqrt",
+                sol_fn=lambda q_n, q_full_s, q_b: get_sol(q_b, q_full_s, 0, q_n, kvcache_quant_mode, fmha_quant_mode)[
+                    0
+                ],
+                extrap_axes=(0, 1, 2),  # num_heads, full_s, b
+                extracted_metrics_cache=database._extracted_metrics_cache,
+            )
+            result = surrogate.query(num_heads, full_s, b)
+            latency = interpolation.get_value(result, "latency") * prefix_correction
+            energy = interpolation.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -898,9 +909,18 @@ class MLAModule(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             mla_dict = data_wrapper[fmha_quant_mode][kv_cache_dtype][gemm_quant_mode]
-            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
+            # generation MLA module ~ linear in s -> raw interp; util-hold extrapolation.
+            surrogate = TableQuery(
+                mla_dict,
+                method="bilinear",
+                value_transform="raw",
+                sol_fn=lambda q_n, q_b, q_s: get_sol(q_b, q_s, q_n, kv_cache_dtype)[0],
+                extrap_axes=(0, 1, 2),  # num_heads, b, s
+                extracted_metrics_cache=database._extracted_metrics_cache,
+            )
+            result = surrogate.query(num_heads, b, s)
+            latency = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -1015,7 +1035,7 @@ class WideEPGenerationMLA(Operation):
                     PerfDataFilename.wideep_generation_mla,
                     primary_path,
                 )
-                cls._extrapolate(cls._data_cache[key])
+                # No grid pre-expansion: TableQuery does raw interp + util-hold extrap.
             cls._record_load()
 
         if "_wideep_generation_mla_data" not in database.__dict__:
@@ -1168,9 +1188,19 @@ class WideEPGenerationMLA(Operation):
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
             mla_dict = attn_data[kvcache_quant_mode]
-            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
+            # wideep generation MLA ~ linear in s -> raw interp; util-hold extrapolation.
+            # Table is keyed by num_heads; SOL takes tp_size, so map q_n -> 128 // q_n.
+            surrogate = TableQuery(
+                mla_dict,
+                method="bilinear",
+                value_transform="raw",
+                sol_fn=lambda q_n, q_b, q_s: get_sol(q_b, q_s, 128 // q_n, kvcache_quant_mode, fmha_quant_mode)[0],
+                extrap_axes=(0, 1, 2),  # num_heads, b, s
+                extracted_metrics_cache=database._extracted_metrics_cache,
+            )
+            result = surrogate.query(num_heads, b, s)
+            latency = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -1266,7 +1296,7 @@ class WideEPContextMLA(Operation):
                     PerfDataFilename.wideep_context_mla,
                     primary_path,
                 )
-                cls._extrapolate(cls._data_cache[key])
+                # No grid pre-expansion: TableQuery does sqrt interp + util-hold extrap.
             cls._record_load()
 
         if "_wideep_context_mla_data" not in database.__dict__:
@@ -1423,9 +1453,21 @@ class WideEPContextMLA(Operation):
             mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            # wideep context MLA ~ s² in full_s -> sqrt interp; util-hold extrapolation.
+            # Table is keyed by num_heads; SOL takes tp_size, so map q_n -> 128 // q_n.
+            surrogate = TableQuery(
+                mla_dict,
+                method="linear",
+                value_transform="sqrt",
+                sol_fn=lambda q_n, q_full_s, q_b: get_sol(
+                    q_b, q_full_s, 0, 128 // q_n, kvcache_quant_mode, fmha_quant_mode
+                )[0],
+                extrap_axes=(0, 1, 2),  # num_heads, full_s, b
+                extracted_metrics_cache=database._extracted_metrics_cache,
+            )
+            result = surrogate.query(num_heads, full_s, b)
+            latency = interpolation.get_value(result, "latency") * prefix_correction
+            energy = interpolation.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(

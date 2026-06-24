@@ -658,7 +658,8 @@ class EncoderAttention(Operation):
                 load_encoder_attention_data(sources), PerfDataFilename.encoder_attention, primary_path
             )
 
-            cls._extrapolate(cls._data_cache[key])
+            # No load-time grid pre-expansion: TableQuery interpolates the raw grid
+            # (encoder is full N² ~ s²) and util-holds the extrapolation.
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -740,8 +741,21 @@ class EncoderAttention(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             attention_dict = data_wrapper[fmha_quant_mode][head_size]
-            result = interpolation.interp_3d(n, s, b, attention_dict, "cubic", database._extracted_metrics_cache)
-            return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
+            # encoder is full N² ~ s² -> interpolate in sqrt space (regime-agnostic);
+            # extrapolate seq_len/heads/batch via util-hold on SOL.
+            surrogate = TableQuery(
+                attention_dict,
+                method="linear",
+                value_transform="sqrt",
+                sol_fn=lambda q_n, q_s, q_b: get_sol(q_b, q_s, q_n, head_size, fmha_quant_mode)[0],
+                extrap_axes=(0, 1, 2),  # util-hold extrapolation on heads, s, batch
+                allow_singleton_axes=True,
+                extracted_metrics_cache=database._extracted_metrics_cache,
+            )
+            result = surrogate.query(n, s, b)
+            latency = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
+            return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,
