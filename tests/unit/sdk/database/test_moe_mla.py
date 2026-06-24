@@ -590,8 +590,26 @@ class TestMoECrossProfileTransfer:
         assert common.resolve_transfer_policy("conservative") == common.TRANSFER_PRESETS["conservative"]
         assert common.resolve_transfer_policy(["xshape", "xquant"]) == frozenset({tk.XSHAPE, tk.XQUANT})
         assert common.resolve_transfer_policy(tk.XPROFILE) == frozenset({tk.XPROFILE})
+        # comma-separated string (the CLI / flat-YAML form) splits into kinds
+        assert common.resolve_transfer_policy("xshape,xquant") == frozenset({tk.XSHAPE, tk.XQUANT})
+        assert common.resolve_transfer_policy(" xshape , xprofile ") == frozenset({tk.XSHAPE, tk.XPROFILE})
         with pytest.raises(ValueError):
             common.resolve_transfer_policy("not_a_kind")
+
+    def test_worst_provenance_picks_least_confident(self):
+        from aiconfigurator.sdk.operations import util_empirical as ue
+
+        assert ue.worst_provenance(set()) == "silicon"  # nothing fired
+        assert ue.worst_provenance({"empirical"}) == "empirical"
+        # least-confident (latest in PROVENANCE_ORDER) wins over a mixed set
+        assert ue.worst_provenance({"xshape", "xop", "empirical"}) == "xop"
+        assert ue.worst_provenance({"xshape", "xquant"}) == "xquant"
+        # capture round-trip: note inside the block, collected after
+        with ue.capture_provenance() as tags:
+            ue.note_provenance("xprofile")
+            ue.note_provenance("xshape")
+        assert tags == {"xprofile", "xshape"} and ue.worst_provenance(tags) == "xprofile"
+        ue.note_provenance("xop")  # outside any capture -> no-op, no error
 
     def test_transfer_policy_gates_cross_profile(self, comprehensive_perf_db):
         """With XPROFILE disabled, the absent-profile quant raises again instead of

@@ -125,6 +125,17 @@ class TestMOEParallelismResolution:
         assert model_config.moe_tp_size == 1
         assert model_config.moe_ep_size == 1
 
+    def test_minimax_m3_builds_with_msa_and_moe(self):
+        """MiniMax-M3 registers as its own family and wires the MSA attention op + MoE."""
+        from aiconfigurator.sdk.operations.msa import ContextMSAModule
+
+        model_config = config.ModelConfig(tp_size=1, attention_dp_size=1, moe_tp_size=1, moe_ep_size=1)
+        model = get_model("MiniMaxAI/MiniMax-M3", model_config, backend_name="trtllm")
+        assert model.model_family == "MINIMAXM3"
+        ctx = {op._name: op for op in model.context_ops}
+        assert "context_attention" in ctx and "context_moe" in ctx
+        assert isinstance(ctx["context_attention"], ContextMSAModule)  # MSA, not plain attention
+
     def test_both_missing_moe_parallelism_raises_clear_error(self):
         model_config = config.ModelConfig(
             tp_size=4,
