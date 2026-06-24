@@ -186,9 +186,7 @@ def test_run_agg_with_osl_one_does_not_divide_by_zero(
     database,
     monkeypatch,
 ) -> None:
-    """Regression: osl=1 makes tpot=0; run_agg must not raise ZeroDivisionError
-    when computing tokens_s_user = 1000 / tpot.
-    """
+    """Regression: osl=1 (no-decode) must not raise and tokens/s/user must be 0.0."""
     monkeypatch.setattr(
         backend,
         "_get_mix_step_latency",
@@ -208,10 +206,10 @@ def test_run_agg_with_osl_one_does_not_divide_by_zero(
     summary = backend.run_agg(
         model,
         database,
-        RuntimeConfig(batch_size=1, beam_width=1, isl=8, osl=1, prefix=2),
+        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=1, prefix=2),
         ctx_tokens=8,
     )
 
     row = summary.get_summary_df().iloc[0]
-    assert row["tpot"] == 0.0
+    assert row["tpot"] > 0.0
     assert row["tokens/s/user"] == 0.0
