@@ -99,10 +99,6 @@ windowed); MoE (regular, WideEP, low-latency kernel selection); MLA; DSA; DSV4
 (MHC / context / generation); MSA; NCCL + custom_allreduce. Sibling-version shared layer
 is enabled for EMPIRICAL as well as HYBRID.
 
-**Example — MiniMax-M3** (all-MoE + MSA sparse attention, no collected silicon data) runs
-end-to-end in HYBRID: MoE via `xshape`/`xprofile`, MSA via `xop` from DSA. Validated
-against the sglang B200 cookbook at TPOT 23.5 ms vs 24.1 ms measured (within 2%).
-
 ## Relationship to the silicon interpolation refactor
 
 The transfers split by axis type:
@@ -122,7 +118,6 @@ The transfers split by axis type:
 | Llama-3.1-70B (h100/trtllm, fp8), run_static | MAPE | 23.6% (constant) → **7.0%** |
 | DeepSeek-V3 (h200/trtllm, bf16), run_static | MAPE | **3.63%** |
 | GLM-5 gate | median MAPE | **1.47%** |
-| MiniMax-M3 (b200/sglang) | TPOT vs cookbook | within **2%** |
 
 Per-op silicon-vs-empirical invariant audits (MLA / DSA / dsv4 × trtllm / sglang / vllm)
 recover silicon to ≈ 1.0 at collected points.
