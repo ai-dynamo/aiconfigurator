@@ -272,7 +272,6 @@ class ContextAttention(Operation):
                 attention_dict,
                 "cubic",
                 database._extracted_metrics_cache,
-                allow_singleton_axes=True,
             )
             latency = result["latency"] * prefix_correction
             energy = result.get("energy", 0.0) * prefix_correction

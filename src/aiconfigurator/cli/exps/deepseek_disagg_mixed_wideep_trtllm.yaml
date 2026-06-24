@@ -1,181 +1,256 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# ============================================================================
-# DeepSeek PD disaggregation with per-phase WideEP/EPLB on TensorRT-LLM.
-#
-# Three experiments covering the WideEP x EPLB per-phase matrix:
-#
-#   Exp 1 – prefill WideEP+EPLB ON  / decode WideEP OFF
-#   Exp 2 – prefill WideEP OFF      / decode WideEP+EPLB ON
-#   Exp 3 – both WideEP ON, EPLB differs (prefill ON / decode OFF)
-#
-# Per-phase WideEP/EPLB settings are specified inside each worker_config.
-# If not specified, they fall back to the global enable_wideep / enable_eplb.
-# ============================================================================
+
+# Flat V2 task schema: one key per Task field, no mode/config/worker_config nesting.
+# `exps` lists which experiments to run (in order); each other top-level key is an experiment.
 
 exps:
-  - exp_disagg_prefill_wideep_decode_standard
-  - exp_disagg_prefill_standard_decode_wideep
-  - exp_disagg_both_wideep
-
-# ── Exp 1: Prefill WideEP+EPLB ON / Decode standard MoE ─────────────────────
+- exp_disagg_prefill_wideep_decode_standard
+- exp_disagg_prefill_standard_decode_wideep
+- exp_disagg_both_wideep
 exp_disagg_prefill_wideep_decode_standard:
-  mode: "patch"
-  serving_mode: "disagg"
-  model_path: "deepseek-ai/DeepSeek-V3"
-  total_gpus: 128
-  system_name: "gb200"
-  decode_system_name: "gb200"
-  backend_name: "trtllm"
   isl: 1000
-  osl: 100
-  ttft: 1000.0
+  serving_mode: disagg
+  total_gpus: 128
   tpot: 40.0
-  enable_wideep: true
-  enable_eplb: true
-  config:
-    nextn: 0
-    nextn_accept_rates: [0.85,0,0,0,0]
-    prefill_worker_config:
-      enable_wideep: true
-      enable_eplb: true
-      gemm_quant_mode: "nvfp4"
-      moe_quant_mode: "nvfp4"
-      kvcache_quant_mode: "fp8"
-      fmha_quant_mode: "fp8"
-      comm_quant_mode: "half"
-      num_gpu_per_worker: [4, 8, 16, 32]
-      tp_list: [1, 2, 4, 8]
-      pp_list: [1]
-      dp_list: [4, 8, 16, 32]
-      moe_tp_list: [1]
-      moe_ep_list: [4, 8, 16, 32]
-    decode_worker_config:
-      enable_wideep: false
-      enable_eplb: false
-      gemm_quant_mode: "nvfp4"
-      moe_quant_mode: "nvfp4"
-      kvcache_quant_mode: "fp8"
-      fmha_quant_mode: "bfloat16"
-      comm_quant_mode: "half"
-      num_gpu_per_worker: [4, 8]
-      tp_list: [1, 2, 4, 8]
-      pp_list: [1]
-      dp_list: [1, 2, 4, 8]
-      moe_tp_list: [1, 2, 4, 8]
-      moe_ep_list: [1, 2, 4, 8]
-
-    replica_config:
-      max_gpu_per_replica: 512
-
-    advanced_tuning_config:
-      prefill_latency_correction_scale: 1.1
-      decode_latency_correction_scale: 1.08
-      prefill_max_batch_size: 1
-      decode_max_batch_size: 512
-
-# ── Exp 2: Prefill standard MoE / Decode WideEP+EPLB ON ─────────────────────
+  ttft: 1000.0
+  osl: 100
+  nextn: 0
+  nextn_accept_rates:
+  - 0.85
+  - 0
+  - 0
+  - 0
+  - 0
+  prefill_model_path: deepseek-ai/DeepSeek-V3
+  prefill_backend_name: trtllm
+  prefill_enable_wideep: true
+  prefill_enable_eplb: true
+  decode_model_path: deepseek-ai/DeepSeek-V3
+  decode_backend_name: trtllm
+  decode_enable_wideep: false
+  decode_enable_eplb: false
+  prefill_system_name: gb200
+  decode_system_name: gb200
+  prefill_gemm_quant_mode: nvfp4
+  prefill_moe_quant_mode: nvfp4
+  prefill_kvcache_quant_mode: fp8
+  prefill_fmha_quant_mode: fp8
+  prefill_comm_quant_mode: half
+  prefill_num_gpu_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  prefill_tp_candidates:
+  - 1
+  - 2
+  - 4
+  - 8
+  prefill_pp_candidates:
+  - 1
+  prefill_dp_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  prefill_moe_tp_candidates:
+  - 1
+  prefill_moe_ep_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  decode_gemm_quant_mode: nvfp4
+  decode_moe_quant_mode: nvfp4
+  decode_kvcache_quant_mode: fp8
+  decode_fmha_quant_mode: bfloat16
+  decode_comm_quant_mode: half
+  decode_num_gpu_candidates:
+  - 4
+  - 8
+  decode_tp_candidates:
+  - 1
+  - 2
+  - 4
+  - 8
+  decode_pp_candidates:
+  - 1
+  decode_dp_candidates:
+  - 1
+  - 2
+  - 4
+  - 8
+  decode_moe_tp_candidates:
+  - 1
+  - 2
+  - 4
+  - 8
+  decode_moe_ep_candidates:
+  - 1
+  - 2
+  - 4
+  - 8
+  max_gpu_per_replica: 512
+  prefill_max_batch_size: 1
+  decode_max_batch_size: 512
+  prefill_latency_correction: 1.1
+  decode_latency_correction: 1.08
 exp_disagg_prefill_standard_decode_wideep:
-  mode: "patch"
-  serving_mode: "disagg"
-  model_path: "deepseek-ai/DeepSeek-V3"
-  total_gpus: 96
-  system_name: "gb200"
-  decode_system_name: "gb200"
-  backend_name: "trtllm"
   isl: 8192
-  osl: 1024
-  ttft: 5000.0
+  serving_mode: disagg
+  total_gpus: 96
   tpot: 80
-  config:
-    prefill_worker_config:
-      enable_wideep: false
-      enable_eplb: false
-      gemm_quant_mode: "nvfp4"
-      moe_quant_mode: "nvfp4"
-      kvcache_quant_mode: "fp8"
-      fmha_quant_mode: "bfloat16"
-      comm_quant_mode: "half"
-      num_gpu_per_worker: [4]
-      tp_list: [1]
-      pp_list: [1]
-      dp_list: [4]
-      moe_tp_list: [1]
-      moe_ep_list: [4]
-
-    decode_worker_config:
-      enable_wideep: true
-      enable_eplb: true
-      gemm_quant_mode: "nvfp4"
-      moe_quant_mode: "nvfp4"
-      kvcache_quant_mode: "fp8"
-      fmha_quant_mode: "bfloat16"
-      comm_quant_mode: "half"
-      num_gpu_per_worker: [4, 8, 16, 32, 64]
-      tp_list: [1]
-      pp_list: [1]
-      dp_list: [4, 8, 16, 32, 64]
-      moe_tp_list: [1]
-      moe_ep_list: [4, 8, 16, 32, 64]
-
-    replica_config:
-      max_gpu_per_replica: 512
-
-    advanced_tuning_config:
-      prefill_latency_correction_scale: 1.1
-      decode_latency_correction_scale: 1.08
-      prefill_max_batch_size: 1
-      decode_max_batch_size: 512
-
-# ── Exp 3: Both WideEP ON, EPLB differs (prefill ON / decode OFF) ───────────
+  ttft: 5000.0
+  osl: 1024
+  prefill_model_path: deepseek-ai/DeepSeek-V3
+  prefill_backend_name: trtllm
+  decode_model_path: deepseek-ai/DeepSeek-V3
+  decode_backend_name: trtllm
+  prefill_system_name: gb200
+  decode_system_name: gb200
+  prefill_enable_wideep: false
+  prefill_enable_eplb: false
+  prefill_gemm_quant_mode: nvfp4
+  prefill_moe_quant_mode: nvfp4
+  prefill_kvcache_quant_mode: fp8
+  prefill_fmha_quant_mode: bfloat16
+  prefill_comm_quant_mode: half
+  prefill_num_gpu_candidates:
+  - 4
+  prefill_tp_candidates:
+  - 1
+  prefill_pp_candidates:
+  - 1
+  prefill_dp_candidates:
+  - 4
+  prefill_moe_tp_candidates:
+  - 1
+  prefill_moe_ep_candidates:
+  - 4
+  decode_enable_wideep: true
+  decode_enable_eplb: true
+  decode_gemm_quant_mode: nvfp4
+  decode_moe_quant_mode: nvfp4
+  decode_kvcache_quant_mode: fp8
+  decode_fmha_quant_mode: bfloat16
+  decode_comm_quant_mode: half
+  decode_num_gpu_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  decode_tp_candidates:
+  - 1
+  decode_pp_candidates:
+  - 1
+  decode_dp_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  decode_moe_tp_candidates:
+  - 1
+  decode_moe_ep_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  max_gpu_per_replica: 512
+  prefill_max_batch_size: 1
+  decode_max_batch_size: 512
+  prefill_latency_correction: 1.1
+  decode_latency_correction: 1.08
 exp_disagg_both_wideep:
-  mode: "patch"
-  serving_mode: "disagg"
-  model_path: "deepseek-ai/DeepSeek-V3"
-  total_gpus: 128
-  system_name: "gb200"
-  decode_system_name: "gb200"
-  backend_name: "trtllm"
   isl: 1000
-  osl: 100
-  ttft: 1000.0
+  serving_mode: disagg
+  total_gpus: 128
   tpot: 40.0
-  enable_wideep: true
-  config:
-    nextn: 1
-    nextn_accept_rates: [0.85,0,0,0,0]
-    prefill_worker_config:
-      enable_eplb: true
-      gemm_quant_mode: "nvfp4"
-      moe_quant_mode: "nvfp4"
-      kvcache_quant_mode: "fp8"
-      fmha_quant_mode: "fp8"
-      comm_quant_mode: "half"
-      num_gpu_per_worker: [4, 8, 16, 32]
-      tp_list: [1, 2, 4, 8]
-      pp_list: [1]
-      dp_list: [4, 8, 16, 32]
-      moe_tp_list: [1]
-      moe_ep_list: [4, 8, 16, 32]
-    decode_worker_config:
-      enable_eplb: false
-      gemm_quant_mode: "nvfp4"
-      moe_quant_mode: "nvfp4"
-      kvcache_quant_mode: "fp8"
-      fmha_quant_mode: "fp8"
-      comm_quant_mode: "half"
-      num_gpu_per_worker: [4, 8, 16, 32, 64]
-      tp_list: [1, 2, 4, 8]
-      pp_list: [1]
-      dp_list: [4, 8, 16, 32, 64]
-      moe_tp_list: [1]
-      moe_ep_list: [4, 8, 16, 32, 64]
-
-    replica_config:
-      max_gpu_per_replica: 512
-
-    advanced_tuning_config:
-      prefill_latency_correction_scale: 1.1
-      decode_latency_correction_scale: 1.08
-      prefill_max_batch_size: 1
-      decode_max_batch_size: 512
+  ttft: 1000.0
+  osl: 100
+  nextn: 1
+  nextn_accept_rates:
+  - 0.85
+  - 0
+  - 0
+  - 0
+  - 0
+  prefill_model_path: deepseek-ai/DeepSeek-V3
+  prefill_backend_name: trtllm
+  prefill_enable_wideep: true
+  decode_model_path: deepseek-ai/DeepSeek-V3
+  decode_backend_name: trtllm
+  decode_enable_wideep: true
+  prefill_system_name: gb200
+  decode_system_name: gb200
+  prefill_enable_eplb: true
+  prefill_gemm_quant_mode: nvfp4
+  prefill_moe_quant_mode: nvfp4
+  prefill_kvcache_quant_mode: fp8
+  prefill_fmha_quant_mode: fp8
+  prefill_comm_quant_mode: half
+  prefill_num_gpu_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  prefill_tp_candidates:
+  - 1
+  - 2
+  - 4
+  - 8
+  prefill_pp_candidates:
+  - 1
+  prefill_dp_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  prefill_moe_tp_candidates:
+  - 1
+  prefill_moe_ep_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  decode_enable_eplb: false
+  decode_gemm_quant_mode: nvfp4
+  decode_moe_quant_mode: nvfp4
+  decode_kvcache_quant_mode: fp8
+  decode_fmha_quant_mode: fp8
+  decode_comm_quant_mode: half
+  decode_num_gpu_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  decode_tp_candidates:
+  - 1
+  - 2
+  - 4
+  - 8
+  decode_pp_candidates:
+  - 1
+  decode_dp_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  decode_moe_tp_candidates:
+  - 1
+  decode_moe_ep_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  max_gpu_per_replica: 512
+  prefill_max_batch_size: 1
+  decode_max_batch_size: 512
+  prefill_latency_correction: 1.1
+  decode_latency_correction: 1.08

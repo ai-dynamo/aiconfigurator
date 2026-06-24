@@ -423,3 +423,9 @@ class Gemma4MixModel(BaseModel):
         swa_bytes = num_swa * swa_kv_per_gpu * cfg.swa_head_dim * 2 * bytes_per_elem * swa_seq
         global_bytes = num_global * global_kv_per_gpu * cfg.global_head_dim * 2 * bytes_per_elem * seq_len
         return float(swa_bytes + global_bytes)
+
+    def get_kvcache_max_tokens(self, kv_budget_bytes: float) -> int:
+        """Capacity inverse over the window-capped KV curve (non-linear past the window)."""
+        if not self._gemma4_config:
+            return super().get_kvcache_max_tokens(kv_budget_bytes)
+        return self._binary_search_kvcache_max_tokens(kv_budget_bytes)

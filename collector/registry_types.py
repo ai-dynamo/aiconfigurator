@@ -51,10 +51,17 @@ class PerfFile(str, Enum):
     DSV4_CSA_GENERATION_MODULE = "dsv4_csa_generation_module_perf.txt"
     DSV4_HCA_GENERATION_MODULE = "dsv4_hca_generation_module_perf.txt"
     # DeepSeek-V4 sparse-kernel data — bench-collected (paged_mqa_logits +
-    # hca_attn).  topk_512 + csa_attn are modeled analytically in
-    # perf_database — no CSV is collected for them.
+    # hca_attn + csa_attn), each 1:1 with its owning CSA/HCA module rows.
     DSV4_PAGED_MQA_LOGITS_MODULE = "dsv4_paged_mqa_logits_module_perf.txt"
     DSV4_HCA_ATTN_MODULE = "dsv4_hca_attn_module_perf.txt"
+    DSV4_CSA_ATTN_MODULE = "dsv4_csa_attn_module_perf.txt"
+    # DeepSeek-V4 CSA topk_512 degenerate-vs-representative DELTA calibration
+    # (flat vs top_last scores).  Consumed by perf_database's
+    # _load_dsv4_topk_calib / _dsv4_csa_topk_latency_delta_ms.
+    DSV4_CSA_TOPK_CALIB = "dsv4_csa_topk_calib_perf.txt"
+    GLM5_MQA_LOGITS_MODULE = "glm5_mqa_logits_module_perf.txt"
+    GLM5_TOPK_MODULE = "glm5_topk_module_perf.txt"
+    GLM5_DSA_ATTN_MODULE = "glm5_dsa_attn_module_perf.txt"
     DSV4_MEGAMOE_MODULE = "dsv4_megamoe_module_perf.txt"
     NCCL = "nccl_perf.txt"
     CUSTOM_ALLREDUCE = "custom_allreduce_perf.txt"

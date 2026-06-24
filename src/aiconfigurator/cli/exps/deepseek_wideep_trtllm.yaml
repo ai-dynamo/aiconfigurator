@@ -1,131 +1,147 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# define your experiments here, the order will determine the execution order.
+# Flat V2 task schema: one key per Task field, no mode/config/worker_config nesting.
+# `exps` lists which experiments to run (in order); each other top-level key is an experiment.
+
 exps:
-  - gb200_wideep_agg
-  - gb200_wideep_disagg
-  - gb200_wideep_eplb_agg
-  - gb200_wideep_eplb_slots288_agg
-  - gb200_wideep_eplb_disagg
-  - gb200_wideep_eplb_slots288_disagg
-
+- gb200_wideep_agg
+- gb200_wideep_disagg
+- gb200_wideep_eplb_agg
+- gb200_wideep_eplb_slots288_agg
+- gb200_wideep_eplb_disagg
+- gb200_wideep_eplb_slots288_disagg
 gb200_wideep_agg:
-  mode: "patch"
-  serving_mode: "agg"
-  model_path: "nvidia/DeepSeek-V3.1-NVFP4"
+  isl: 4000
+  serving_mode: agg
   total_gpus: 512
-  system_name: "gb200"
-  enable_wideep: true # enable wide ep for prefill/decode
-  isl: 4000 # input sequence length
-  osl: 1000 # output sequence length
-  ttft: 1000.0  # Target TTFT in ms
-  tpot: 40.0   # Target TPOT in ms
-  config:
-    nextn: 1 # mtp 1
-    nextn_accept_rates: [0.85,0.3,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
-    
+  tpot: 40.0
+  ttft: 1000.0
+  osl: 1000
+  nextn: 1
+  nextn_accept_rates:
+  - 0.85
+  - 0.3
+  - 0
+  - 0
+  - 0
+  model_path: nvidia/DeepSeek-V3.1-NVFP4
+  system_name: gb200
+  enable_wideep: true
 gb200_wideep_eplb_agg:
-  mode: "patch"
-  serving_mode: "agg"
-  model_path: "deepseek-ai/DeepSeek-V3"
+  isl: 4000
+  serving_mode: agg
   total_gpus: 512
-  system_name: "gb200"
+  tpot: 40.0
+  ttft: 1000.0
+  osl: 1000
+  nextn: 1
+  nextn_accept_rates:
+  - 0.85
+  - 0.3
+  - 0
+  - 0
+  - 0
+  model_path: deepseek-ai/DeepSeek-V3
+  system_name: gb200
   enable_wideep: true
   enable_eplb: true
-  isl: 4000
-  osl: 1000
-  ttft: 1000.0
-  tpot: 40.0
-  config:
-    nextn: 1
-    nextn_accept_rates: [0.85,0.3,0,0,0]
-    worker_config:
-      gemm_quant_mode: "nvfp4"
-      moe_quant_mode: "nvfp4"
-
+  gemm_quant_mode: nvfp4
+  moe_quant_mode: nvfp4
 gb200_wideep_eplb_slots288_agg:
-  mode: "patch"
-  serving_mode: "agg"
-  model_path: "deepseek-ai/DeepSeek-V3"
+  isl: 4000
+  serving_mode: agg
   total_gpus: 512
-  system_name: "gb200"
+  tpot: 40.0
+  wideep_num_slots: 288
+  ttft: 1000.0
+  osl: 1000
+  nextn: 1
+  nextn_accept_rates:
+  - 0.85
+  - 0.3
+  - 0
+  - 0
+  - 0
+  model_path: deepseek-ai/DeepSeek-V3
+  system_name: gb200
   enable_wideep: true
   enable_eplb: true
-  wideep_num_slots: 288
-  isl: 4000
-  osl: 1000
-  ttft: 1000.0
-  tpot: 40.0
-  config:
-    nextn: 1
-    nextn_accept_rates: [0.85,0.3,0,0,0]
-    worker_config:
-      gemm_quant_mode: "nvfp4"
-      moe_quant_mode: "nvfp4"
-
+  gemm_quant_mode: nvfp4
+  moe_quant_mode: nvfp4
 gb200_wideep_disagg:
-  mode: "patch"
-  serving_mode: "disagg"
-  model_path: "nvidia/DeepSeek-V3.1-NVFP4"
+  isl: 4000
+  serving_mode: disagg
   total_gpus: 512
-  system_name: "gb200"
-  enable_wideep: true # enable wide ep for prefill/decode
-  isl: 4000 # input sequence length
-  osl: 1000 # output sequence length
-  ttft: 1000.0  # Target TTFT in ms
-  tpot: 40.0   # Target TPOT in ms
-  config:
-    nextn: 1 # mtp 1
-    nextn_accept_rates: [0.85,0.3,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
-    replica_config:
-      max_gpu_per_replica: 512 # max gpus per replica, if specified as 0, it means no limit.
-
+  tpot: 40.0
+  ttft: 1000.0
+  osl: 1000
+  nextn: 1
+  nextn_accept_rates:
+  - 0.85
+  - 0.3
+  - 0
+  - 0
+  - 0
+  prefill_model_path: nvidia/DeepSeek-V3.1-NVFP4
+  prefill_enable_wideep: true
+  decode_model_path: nvidia/DeepSeek-V3.1-NVFP4
+  decode_enable_wideep: true
+  prefill_system_name: gb200
+  decode_system_name: gb200
+  max_gpu_per_replica: 512
 gb200_wideep_eplb_disagg:
-  mode: "patch"
-  serving_mode: "disagg"
-  model_path: "deepseek-ai/DeepSeek-V3"
-  total_gpus: 512
-  system_name: "gb200"
-  enable_wideep: true
-  enable_eplb: true # enable EPLB
   isl: 4000
-  osl: 1000
-  ttft: 1000.0
+  serving_mode: disagg
+  total_gpus: 512
   tpot: 40.0
-  config:
-    nextn: 1
-    nextn_accept_rates: [0.85,0.3,0,0,0]
-    prefill_worker_config:
-      gemm_quant_mode: "nvfp4"
-      moe_quant_mode: "nvfp4"
-    decode_worker_config:
-      gemm_quant_mode: "nvfp4"
-      moe_quant_mode: "nvfp4"
-    replica_config:
-      max_gpu_per_replica: 512
-
+  ttft: 1000.0
+  osl: 1000
+  nextn: 1
+  nextn_accept_rates:
+  - 0.85
+  - 0.3
+  - 0
+  - 0
+  - 0
+  prefill_model_path: deepseek-ai/DeepSeek-V3
+  prefill_enable_wideep: true
+  prefill_enable_eplb: true
+  decode_model_path: deepseek-ai/DeepSeek-V3
+  decode_enable_wideep: true
+  decode_enable_eplb: true
+  prefill_system_name: gb200
+  decode_system_name: gb200
+  prefill_gemm_quant_mode: nvfp4
+  prefill_moe_quant_mode: nvfp4
+  decode_gemm_quant_mode: nvfp4
+  decode_moe_quant_mode: nvfp4
+  max_gpu_per_replica: 512
 gb200_wideep_eplb_slots288_disagg:
-  mode: "patch"
-  serving_mode: "disagg"
-  model_path: "deepseek-ai/DeepSeek-V3"
-  total_gpus: 512
-  system_name: "gb200"
-  enable_wideep: true
-  enable_eplb: true # enable EPLB
-  wideep_num_slots: 288 # EPLB with 288 slots (> 256 experts, redundant mode)
   isl: 4000
-  osl: 1000
-  ttft: 1000.0
+  serving_mode: disagg
+  total_gpus: 512
   tpot: 40.0
-  config:
-    nextn: 1
-    nextn_accept_rates: [0.85,0.3,0,0,0]
-    prefill_worker_config:
-      gemm_quant_mode: "nvfp4"
-      moe_quant_mode: "nvfp4"
-    decode_worker_config:
-      gemm_quant_mode: "nvfp4"
-      moe_quant_mode: "nvfp4"
-    replica_config:
-      max_gpu_per_replica: 512
+  wideep_num_slots: 288
+  ttft: 1000.0
+  osl: 1000
+  nextn: 1
+  nextn_accept_rates:
+  - 0.85
+  - 0.3
+  - 0
+  - 0
+  - 0
+  prefill_model_path: deepseek-ai/DeepSeek-V3
+  prefill_enable_wideep: true
+  prefill_enable_eplb: true
+  decode_model_path: deepseek-ai/DeepSeek-V3
+  decode_enable_wideep: true
+  decode_enable_eplb: true
+  prefill_system_name: gb200
+  decode_system_name: gb200
+  prefill_gemm_quant_mode: nvfp4
+  prefill_moe_quant_mode: nvfp4
+  decode_gemm_quant_mode: nvfp4
+  decode_moe_quant_mode: nvfp4
+  max_gpu_per_replica: 512

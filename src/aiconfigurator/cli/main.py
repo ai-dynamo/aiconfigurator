@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import copy
 import logging
 import os
 import sys
@@ -24,9 +23,9 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
-from aiconfigurator.sdk.errors import NoFeasibleConfigError
+from aiconfigurator.sdk.errors import NoFeasibleConfigError, UnsupportedWideepConfigError
 from aiconfigurator.sdk.models import check_is_moe
-from aiconfigurator.sdk.task import TaskConfig, TaskRunner, UnsupportedWideepConfigError
+from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -208,10 +207,13 @@ def _add_default_mode_arguments(parser):
         "globally optimal configuration is selected. Default: trtllm.",
     )
     parser.add_argument(
+        "--perf-db-version",
         "--backend-version",
+        dest="backend_version",
         type=str,
         default=None,
-        help="Backend database version. Default is latest",
+        help="[expert] Performance-database version used for the simulation/search "
+        "(search fidelity). Default: latest. Alias: --backend-version.",
     )
     parser.add_argument(
         "--database-mode",
@@ -404,12 +406,13 @@ def _add_estimate_mode_arguments(parser):
     )
     parser.add_argument(
         "--estimate-mode",
-        choices=["agg", "disagg", "static", "static_ctx", "static_gen"],
+        choices=["agg", "disagg", "afd", "static", "static_ctx", "static_gen"],
         type=str,
         default="agg",
         help="Estimation mode: 'agg' (default, IFB), 'disagg' (separate prefill/decode workers), "
-        "or one of the static modes 'static' / 'static_ctx' / 'static_gen' for a single-pass, "
-        "no-IFB latency/memory breakdown (mirrors the webapp Static Tab).",
+        "'afd' (attention-FFN disaggregated), or one of the static modes "
+        "'static' / 'static_ctx' / 'static_gen' for a single-pass, no-IFB latency/memory "
+        "breakdown (mirrors the webapp Static Tab).",
     )
     parser.add_argument(
         "--system",
@@ -434,13 +437,31 @@ def _add_estimate_mode_arguments(parser):
         help="Backend name (default: trtllm).",
     )
     parser.add_argument(
+        "--perf-db-version",
         "--backend-version",
+        dest="backend_version",
         type=str,
         default=None,
-        help="Backend database version. Default is latest.",
+        help="[expert] Performance-database version used for the simulation/search "
+        "(search fidelity). Default: latest. Alias: --backend-version.",
     )
     parser.add_argument("--isl", type=int, default=1024, help="Input sequence length. Default: 1024.")
     parser.add_argument("--osl", type=int, default=1024, help="Output sequence length. Default: 1024.")
+    parser.add_argument(
+        "--image-height",
+        type=int,
+        default=0,
+        help="Image height in pixels for vision-language models. Default: 0 (disabled).",
+    )
+    parser.add_argument(
+        "--image-width",
+        type=int,
+        default=0,
+        help="Image width in pixels for vision-language models. Default: 0 (disabled).",
+    )
+    parser.add_argument(
+        "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
+    )
     parser.add_argument(
         "--batch-size",
         "--bs",
@@ -614,6 +635,84 @@ def _add_estimate_mode_arguments(parser):
         help="Number of decode workers (disagg). Required for disagg mode. Alias: --d-workers.",
     )
 
+    # AFD (Attention-FFN Disaggregation) specific parameters
+    parser.add_argument(
+        "--n-a-nodes",
+        type=int,
+        default=None,
+        help="Number of A-Worker (attention) nodes (AFD mode). Required for afd mode.",
+    )
+    parser.add_argument(
+        "--n-f-nodes",
+        type=int,
+        default=None,
+        help="Number of F-Worker (FFN/MoE) nodes (AFD mode). Required for afd mode.",
+    )
+    parser.add_argument(
+        "--a-tp-size",
+        type=int,
+        default=1,
+        help="Attention-side tensor parallelism (AFD mode). Default: 1.",
+    )
+    parser.add_argument(
+        "--a-batch-size",
+        type=int,
+        default=128,
+        help=("Total in-flight batch size per A-Worker before microbatch splitting (AFD mode). Default: 128."),
+    )
+    parser.add_argument(
+        "--f-moe-ep-size",
+        type=int,
+        default=1,
+        help="FFN-side MoE expert parallelism (AFD mode). Default: 1.",
+    )
+    parser.add_argument(
+        "--num-microbatches",
+        type=int,
+        default=3,
+        help="Number of micro-batches for ping-pong pipeline (AFD mode). Default: 3.",
+    )
+    parser.add_argument(
+        "--pipeline-model",
+        choices=["optimistic", "conservative"],
+        type=str,
+        default="optimistic",
+        help="Pipeline model for AFD: 'optimistic' (K=3, comm hidden) or 'conservative' (K=2). Default: optimistic.",
+    )
+    parser.add_argument(
+        "--comm-overhead-factor",
+        type=float,
+        default=1.0,
+        help="Communication overhead multiplier (AFD mode). Default: 1.0.",
+    )
+    parser.add_argument(
+        "--afd-phase",
+        choices=["prefill", "decode", "both"],
+        type=str,
+        default="decode",
+        help="Which phase AFD is applied to. AFD is orthogonal to P/D disaggregation: "
+        "'decode' (default) models AFD on decode only (existing behavior), 'prefill' "
+        "models AFD on the context phase and reports TTFT, and 'both' reports TTFT+TPOT "
+        "for a deployment where AFD is used on both phases.",
+    )
+    parser.add_argument(
+        "--afd-combined-with-pd",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Combine the single-phase AFD estimate with a regular static "
+        "estimate for the other phase. When enabled (default), --afd-phase=decode "
+        "also runs a static prefill estimate (and vice versa), merging TTFT/TPOT, "
+        "throughput (rate-matched on min seq/s), and GPU budget into one result. "
+        "Pass --no-afd-combined-with-pd to report only the AFD phase. Required to "
+        "be off when --afd-phase=both (AFD covers both phases internally).",
+    )
+    parser.add_argument(
+        "--boundary-on-ffn",
+        action="store_true",
+        default=False,
+        help="Assign boundary ops (add_norm_2, logits_gemm) to F-Worker. Default is A-Worker; pass this flag to flip.",
+    )
+
     # Quantization
     parser.add_argument(
         "--gemm-quant-mode",
@@ -747,10 +846,12 @@ def _add_support_mode_arguments(parser):
         "Defaults to 'all' when --system is 'all', otherwise 'trtllm'.",
     )
     parser.add_argument(
+        "--perf-db-version",
         "--backend-version",
+        dest="backend_version",
         type=str,
         default=None,
-        help="Optional backend version to filter by.",
+        help="Optional backend / perf-db version to filter by. Alias: --backend-version.",
     )
 
 
@@ -762,17 +863,17 @@ aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --top-n 3 \\
     --total-gpus 8 --system h200_sxm \\
     --ttft 600 --tpot 50 --isl 4000 --osl 500 \\
-    --generator-dynamo-version 0.7.1 \\
+    --dynamo-version 0.7.1 \\
     --generator-set K8sConfig.k8s_pvc_name=$YOUR_PVC_NAME \\
     --generator-set K8sConfig.k8s_namespace=$YOUR_NAMESPACE \\
     --save-dir results
 
-# Sweep for trtllm 1.2.0rc5 but generate config matching trtllm 1.2.0rc6
+# Sweep against trtllm 1.2.0rc5 perf data but generate config matching trtllm 1.2.0rc6
 aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --backend trtllm \\
     --total-gpus 8 --system h200_sxm \\
-    --backend-version 1.2.0rc5 \\
-    --generated-config-version 1.2.0rc6 \\
+    --perf-db-version 1.2.0rc5 \\
+    --config-template-version 1.2.0rc6 \\
     --save-dir results
 """
 
@@ -968,7 +1069,7 @@ def _ensure_backend_version_available(system_name: str, backend_name: str, backe
     raise SystemExit(1)
 
 
-def build_default_task_configs(
+def build_default_tasks(
     model_path: str,
     total_gpus: int,
     system: str,
@@ -993,7 +1094,7 @@ def build_default_task_configs(
     enable_wideep: bool = False,
     moe_backend: str | None = None,
     engine_step_backend: str | None = None,
-) -> dict[str, TaskConfig]:
+) -> dict[str, Task]:
     """Build agg and disagg task configs for default mode comparison.
 
     Args:
@@ -1019,7 +1120,7 @@ def build_default_task_configs(
         engine_step_backend: Experimental static latency backend ("python" or "rust").
 
     Returns:
-        Dict with TaskConfig objects. When backend='auto', returns 6 configs
+        Dict with Task objects. When backend='auto', returns 6 configs
         (agg_trtllm, agg_vllm, agg_sglang, disagg_trtllm, disagg_vllm, disagg_sglang).
         Otherwise returns 2 configs ('agg' and 'disagg').
     """
@@ -1119,27 +1220,30 @@ def build_default_task_configs(
                     database_mode,
                 )
 
-    common_kwargs: dict[str, Any] = {
-        "model_path": model_path,
-        "system_name": system,
-        "backend_version": backend_version,
-        "total_gpus": total_gpus,
+    # v2 Task uses a flat schema. Global (both-mode) fields stay top-level;
+    # worker-spec fields are top-level for agg but must be fanned out to
+    # prefill_* / decode_* for disagg (v2 forbids shared top-level worker fields).
+    global_kwargs: dict[str, Any] = {
         "isl": isl,
         "osl": osl,
-        "image_height": image_height,
-        "image_width": image_width,
-        "num_images_per_request": num_images,
+        "prefix": prefix,
         "ttft": ttft,
         "tpot": tpot,
         "request_latency": request_latency,
-        "prefix": prefix,
+        "total_gpus": total_gpus,
         "database_mode": database_mode,
-        "enable_chunked_prefill": enable_chunked_prefill,
         "free_gpu_memory_fraction": free_gpu_memory_fraction,
         "max_seq_len": max_seq_len,
-        "enable_wideep": enable_wideep,
         "engine_step_backend": engine_step_backend,
     }
+    if nextn and nextn > 0:
+        global_kwargs["nextn"] = nextn
+        global_kwargs["nextn_accept_rates"] = nextn_accept_rates
+
+    if image_height or image_width or (num_images and num_images != 1):
+        global_kwargs["image_height"] = image_height
+        global_kwargs["image_width"] = image_width
+        global_kwargs["num_images_per_request"] = num_images
 
     def _sglang_moe_backend_override(backend_name: str) -> str | None:
         if backend_name != common.BackendName.sglang.value:
@@ -1148,30 +1252,45 @@ def build_default_task_configs(
         # (webapp/events/event_fn.py sets moe_backend="deepep_moe" when enable_wideep + sglang)
         return moe_backend or ("deepep_moe" if enable_wideep else None)
 
-    # Create yaml_config to pass nextn and nextn_accept_rates if specified
-    yaml_config = None
-    if nextn > 0:
-        yaml_config = {
-            "config": {
-                "nextn": nextn,
-                "nextn_accept_rates": nextn_accept_rates,
-            }
-        }
+    def _make_agg(backend_name: str, moe_backend_value: str | None) -> Task:
+        return Task(
+            serving_mode="agg",
+            model_path=model_path,
+            system_name=system,
+            backend_name=backend_name,
+            backend_version=backend_version,
+            enable_wideep=enable_wideep,
+            enable_chunked_prefill=enable_chunked_prefill,
+            moe_backend=moe_backend_value,
+            **global_kwargs,
+        )
 
-    task_configs: dict[str, TaskConfig] = {}
+    def _make_disagg(backend_name: str, moe_backend_value: str | None) -> Task:
+        # Fan out the shared worker spec to both roles (v2 disagg forbids top-level worker fields).
+        return Task(
+            serving_mode="disagg",
+            prefill_model_path=model_path,
+            decode_model_path=model_path,
+            prefill_system_name=system,
+            decode_system_name=decode_system,
+            prefill_backend_name=backend_name,
+            decode_backend_name=backend_name,
+            prefill_backend_version=backend_version,
+            decode_backend_version=backend_version,
+            prefill_enable_wideep=enable_wideep,
+            decode_enable_wideep=enable_wideep,
+            prefill_enable_chunked_prefill=enable_chunked_prefill,
+            moe_backend=moe_backend_value,
+            **global_kwargs,
+        )
+
+    tasks: dict[str, Task] = {}
     is_moe_model = check_is_moe(model_path)
 
     for backend_name in backends_to_sweep:
-        # Create agg task for this backend
-        agg_kwargs = dict(common_kwargs)
-        agg_kwargs["backend_name"] = backend_name
-        if backend_moe := _sglang_moe_backend_override(backend_name):
-            agg_kwargs["moe_backend"] = backend_moe
-        if yaml_config:
-            agg_kwargs["yaml_config"] = yaml_config
-        agg_task = TaskConfig(serving_mode="agg", **agg_kwargs)
+        backend_moe = _sglang_moe_backend_override(backend_name)
         exp_name = f"agg_{backend_name}" if backend == "auto" else "agg"
-        task_configs[exp_name] = agg_task
+        tasks[exp_name] = _make_agg(backend_name, backend_moe)
 
         # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
         if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
@@ -1179,31 +1298,20 @@ def build_default_task_configs(
             if skip_reason:
                 logger.info("Skipping SGLang DeepEP agg sweep: %s", skip_reason)
             else:
-                deepep_kwargs = dict(agg_kwargs)
-                deepep_kwargs["moe_backend"] = "deepep_moe"
                 try:
-                    deepep_task = TaskConfig(serving_mode="agg", **deepep_kwargs)
+                    deepep_task = _make_agg(backend_name, "deepep_moe")
                 except UnsupportedWideepConfigError as exc:
                     logger.info("Skipping SGLang DeepEP agg sweep: %s", exc)
                 else:
                     deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
-                    task_configs[deepep_name] = deepep_task
+                    tasks[deepep_name] = deepep_task
 
         if total_gpus < 2:
             logger.warning("Skipping disagg since it requires at least 2 GPUs.")
             continue
 
-        # Create disagg task for this backend
-        disagg_kwargs = dict(common_kwargs)
-        disagg_kwargs["backend_name"] = backend_name
-        disagg_kwargs["decode_system_name"] = decode_system
-        if backend_moe := _sglang_moe_backend_override(backend_name):
-            disagg_kwargs["moe_backend"] = backend_moe
-        if yaml_config:
-            disagg_kwargs["yaml_config"] = yaml_config
-        disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
         exp_name = f"disagg_{backend_name}" if backend == "auto" else "disagg"
-        task_configs[exp_name] = disagg_task
+        tasks[exp_name] = _make_disagg(backend_name, backend_moe)
 
         # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
         if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
@@ -1211,63 +1319,21 @@ def build_default_task_configs(
             if skip_reason:
                 logger.info("Skipping SGLang DeepEP disagg sweep: %s", skip_reason)
             else:
-                deepep_disagg_kwargs = dict(disagg_kwargs)
-                deepep_disagg_kwargs["moe_backend"] = "deepep_moe"
                 try:
-                    deepep_disagg_task = TaskConfig(serving_mode="disagg", **deepep_disagg_kwargs)
+                    deepep_disagg_task = _make_disagg(backend_name, "deepep_moe")
                 except UnsupportedWideepConfigError as exc:
                     logger.info("Skipping SGLang DeepEP disagg sweep: %s", exc)
                 else:
                     deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
-                    task_configs[deepep_name] = deepep_disagg_task
-    return task_configs
+                    tasks[deepep_name] = deepep_disagg_task
+    return tasks
 
 
-_EXPERIMENT_RESERVED_KEYS = {
-    "mode",
-    "serving_mode",
-    "model_path",
-    "system_name",
-    "decode_system_name",
-    "backend_name",
-    "backend_version",
-    "profiles",
-    "isl",
-    "osl",
-    "prefix",
-    "ttft",
-    "tpot",
-    "request_latency",
-    "enable_wideep",
-    "moe_backend",
-    "enable_eplb",
-    "total_gpus",
-    "database_mode",
-    "engine_step_backend",
-}
-
-
-def _build_yaml_config(exp_config: dict, config_section: dict) -> dict | None:
-    if not config_section:
-        config_section = {
-            key: copy.deepcopy(value) for key, value in exp_config.items() if key not in _EXPERIMENT_RESERVED_KEYS
-        }
-    if not config_section:
-        return None
-
-    yaml_config = {
-        "mode": exp_config.get("mode", "patch"),
-        "config": config_section,
-    }
-
-    return yaml_config
-
-
-def build_experiment_task_configs(
+def build_experiment_tasks(
     yaml_path: str | None = None,
     config: dict[str, Any] | None = None,
     engine_step_backend: str | None = None,
-) -> dict[str, TaskConfig]:
+) -> dict[str, Task]:
     """Build task configs from YAML file or config dict.
 
     Args:
@@ -1278,7 +1344,7 @@ def build_experiment_task_configs(
             Per-experiment ``engine_step_backend`` entries take precedence.
 
     Returns:
-        Dict mapping experiment names to TaskConfig objects.
+        Dict mapping experiment names to Task objects.
 
     Raises:
         ValueError: If both or neither of yaml_path/config provided, or YAML load fails.
@@ -1308,7 +1374,7 @@ def build_experiment_task_configs(
     else:
         experiment_names = [name for name in experiment_data if name != "exps"]
 
-    task_configs: dict[str, TaskConfig] = {}
+    tasks: dict[str, Task] = {}
 
     for exp_name in experiment_names:
         exp_config = experiment_data[exp_name]
@@ -1316,94 +1382,73 @@ def build_experiment_task_configs(
             logger.warning("Skipping experiment '%s': configuration is not a mapping.", exp_name)
             continue
 
-        config_section = exp_config.get("config")
-        if not isinstance(config_section, dict):
-            config_section = {}
-        else:
-            config_section = copy.deepcopy(config_section)
-
         serving_mode = exp_config.get("serving_mode")
-        model_path = exp_config.get("model_path")
+        # model_path / system_name are top-level for agg and legacy-V1 disagg, but
+        # flat-V2 disagg carries them only under prefill_* / decode_*.  Accept either.
+        model_path = (
+            exp_config.get("model_path") or exp_config.get("prefill_model_path") or exp_config.get("decode_model_path")
+        )
         if serving_mode not in {"agg", "disagg"} or not model_path:
             logger.warning("Skipping experiment '%s': missing serving_mode or model_path.", exp_name)
             continue
 
-        # system
-        if serving_mode == "agg":
-            inferred_system = exp_config.get("system_name")
-            inferred_decode_system = None
-        else:
-            inferred_system = exp_config.get("system_name")
-            inferred_decode_system = exp_config.get("decode_system_name") or inferred_system
-        system_name = inferred_system
+        system_name = (
+            exp_config.get("system_name")
+            or exp_config.get("prefill_system_name")
+            or exp_config.get("decode_system_name")
+        )
         if not system_name:
-            logger.warning(
-                "Skipping experiment '%s': no system name provided "
-                "(provide system_name at the top level or inside worker config).",
-                exp_name,
-            )
+            logger.warning("Skipping experiment '%s': no system_name provided.", exp_name)
             continue
 
-        # backend, default to trtllm
-        backend_name = exp_config.get("backend_name") or common.BackendName.trtllm.value
-        backend_version = exp_config.get("backend_version")
-
-        total_gpus = exp_config.get("total_gpus")
-        if total_gpus is None:
+        if exp_config.get("total_gpus") is None:
             logger.warning("Skipping experiment '%s': total_gpus not provided.", exp_name)
             continue
 
-        task_kwargs: dict[str, Any] = {
-            "serving_mode": serving_mode,
-            "model_path": model_path,
-            "system_name": system_name,
-            "backend_name": backend_name,
-            "total_gpus": total_gpus,
-            "profiles": exp_config.get("profiles", []),
-        }
-
-        if backend_version is not None:
-            _ensure_backend_version_available(system_name, backend_name, backend_version)
-            if serving_mode == "disagg" and inferred_decode_system and inferred_decode_system != system_name:
-                _ensure_backend_version_available(inferred_decode_system, backend_name, backend_version)
-            task_kwargs["backend_version"] = backend_version
-
+        # Early-fail on an unavailable backend version (clearer than failing deep in the sweep).
+        # Role-aware: agg and legacy-v1 disagg carry backend/version/system at the top level;
+        # flat-v2 disagg carries them per role (prefill_*/decode_*), falling back to top-level so
+        # v1 configs still validate.
         if serving_mode == "disagg":
-            task_kwargs["decode_system_name"] = inferred_decode_system or system_name
+            role_checks = [
+                (
+                    exp_config.get("prefill_system_name") or system_name,
+                    exp_config.get("prefill_backend_name") or exp_config.get("backend_name"),
+                    exp_config.get("prefill_backend_version") or exp_config.get("backend_version"),
+                ),
+                (
+                    exp_config.get("decode_system_name") or system_name,
+                    exp_config.get("decode_backend_name") or exp_config.get("backend_name"),
+                    exp_config.get("decode_backend_version") or exp_config.get("backend_version"),
+                ),
+            ]
+        else:
+            role_checks = [(system_name, exp_config.get("backend_name"), exp_config.get("backend_version"))]
+        seen_combos: set[tuple[str, str, str]] = set()
+        for sys_name, bname, bver in role_checks:
+            bname = bname or common.BackendName.trtllm.value
+            if bver is not None and sys_name and (sys_name, bname, bver) not in seen_combos:
+                seen_combos.add((sys_name, bname, bver))
+                _ensure_backend_version_available(sys_name, bname, bver)
 
-        # Per-experiment overrides for runtime numeric parameters if provided at top level
-        for numeric_key in ("isl", "osl", "prefix", "ttft", "tpot", "request_latency"):
-            if numeric_key in exp_config:
-                task_kwargs[numeric_key] = exp_config[numeric_key]
+        # Per-experiment engine_step_backend wins over the global default.
+        overrides: dict[str, Any] = {}
+        if engine_step_backend is not None and "engine_step_backend" not in exp_config:
+            overrides["engine_step_backend"] = engine_step_backend
 
-        if "enable_wideep" in exp_config:
-            task_kwargs["enable_wideep"] = exp_config["enable_wideep"]
-        if "moe_backend" in exp_config:
-            task_kwargs["moe_backend"] = exp_config["moe_backend"]
-        if "enable_eplb" in exp_config:
-            task_kwargs["enable_eplb"] = exp_config["enable_eplb"]
-        if "enable_chunked_prefill" in exp_config:
-            task_kwargs["enable_chunked_prefill"] = exp_config["enable_chunked_prefill"]
-        if "database_mode" in exp_config:
-            task_kwargs["database_mode"] = exp_config["database_mode"]
-        effective_engine_step_backend = exp_config.get("engine_step_backend", engine_step_backend)
-        if effective_engine_step_backend is not None:
-            task_kwargs["engine_step_backend"] = effective_engine_step_backend
-
-        yaml_config = _build_yaml_config(exp_config, config_section)
-        if yaml_config:
-            task_kwargs["yaml_config"] = yaml_config
-
+        # exp_config is a legacy V1 experiment dict (top-level fields + nested config /
+        # mode / profiles).  Task.from_yaml auto-detects and converts it to the flat V2
+        # schema (emitting a DeprecationWarning); a native V2 flat dict also works.
         try:
-            task_configs[exp_name] = TaskConfig(**task_kwargs)
+            tasks[exp_name] = Task.from_yaml(exp_config, **overrides)
         except Exception:
-            logger.exception("Failed to build TaskConfig for experiment '%s'", exp_name)
+            logger.exception("Failed to build Task for experiment '%s'", exp_name)
 
-    return task_configs
+    return tasks
 
 
-def _execute_task_configs(
-    task_configs: dict[str, TaskConfig],
+def _execute_tasks(
+    tasks: dict[str, Task],
     mode: str,
     top_n: int = 5,
     target_request_rate: float | None = None,
@@ -1417,7 +1462,7 @@ def _execute_task_configs(
     throughputs, and estimated latencies.
 
     Args:
-        task_configs: Dictionary mapping experiment names to TaskConfig objects to execute.
+        tasks: Dictionary mapping experiment names to Task objects to execute.
         mode: Execution mode ('default' or 'exp').
         top_n: Number of top configurations to return for each experiment.
         target_request_rate: If set, activates load-match picking (minimize
@@ -1443,22 +1488,18 @@ def _execute_task_configs(
     results: dict[str, dict[str, pd.DataFrame]] = {}
     failure_messages: list[str] = []
     start_time = time.time()
-    runner = TaskRunner()
-
     # TODO, can run in parallel
-    for exp_name, task_config in task_configs.items():
+    for exp_name, task in tasks.items():
         try:
             logger.info("Starting experiment: %s", exp_name)
-            logger.debug("Task config: \n%s", task_config.to_yaml())
-            task_result = runner.run(task_config)
-            if task_result is None:
-                raise RuntimeError(f"Task runner returned no result for {exp_name}")
-            pareto_df = task_result["pareto_df"]
+            logger.debug("Task config: \n%s", task.to_yaml())
+            pareto_df = task.run()
+            task_result = {"pareto_df": pareto_df}
             if pareto_df is not None and not pareto_df.empty:
                 results[exp_name] = task_result
                 logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_df))
             else:
-                db_mode = getattr(task_config, "database_mode", None)
+                db_mode = getattr(task, "database_mode", None)
                 hybrid_hint = (
                     " For frontier/new models without silicon data, try --database-mode HYBRID."
                     if db_mode == common.DatabaseMode.SILICON.name
@@ -1484,7 +1525,7 @@ def _execute_task_configs(
             failure_messages.append(f"Experiment {exp_name} failed: {exc}")
 
     if len(results) < 1:
-        first_config = next(iter(task_configs.values()), None)
+        first_config = next(iter(tasks.values()), None)
         db_mode = getattr(first_config, "database_mode", None) if first_config else None
         if db_mode == common.DatabaseMode.SILICON.name:
             logger.error(
@@ -1504,9 +1545,9 @@ def _execute_task_configs(
     pareto_fronts: dict[str, pd.DataFrame | None] = {}
     pareto_x_axis: dict[str, str] = {}
     for name, task_result in results.items():
-        task_config = task_configs[name]
+        task = tasks[name]
         best_config_df, best_throughput, pareto_frontier_df, x_axis_col, latencies = process_experiment_result(
-            task_config,
+            task,
             task_result,
             top_n,
             target_request_rate=target_request_rate,
@@ -1520,9 +1561,9 @@ def _execute_task_configs(
         pareto_fronts[name] = pareto_frontier_df
         pareto_x_axis[name] = x_axis_col
 
-    if mode == "default" and len(task_configs) > 2:
+    if mode == "default" and len(tasks) > 2:
         best_configs, best_throughputs, pareto_fronts, pareto_x_axis = merge_experiment_results_by_mode(
-            task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n
+            tasks, best_configs, pareto_fronts, pareto_x_axis, top_n
         )
 
     chosen_exp = max(best_throughputs, key=best_throughputs.get) if best_throughputs else "none"
@@ -1532,7 +1573,7 @@ def _execute_task_configs(
         best_throughputs=best_throughputs,  # for summary
         best_configs=best_configs,  # for table
         pareto_fronts=pareto_fronts,  # for plotting
-        task_configs=task_configs,  # for info in summary
+        tasks=tasks,  # for info in summary
         mode=mode,
         pareto_x_axis=pareto_x_axis,
         top_n=top_n,
@@ -1780,6 +1821,77 @@ def _run_support_mode(args):
     print("=" * 60 + "\n")
 
 
+def _print_per_ops_section(title: str, ops: dict) -> None:
+    """Print a single section of per-op latency breakdown."""
+    total = sum(ops.values())
+    print(f"  {title} (total: {total:.3f} ms)")
+    for op_name, latency in sorted(ops.items(), key=lambda x: -x[1]):
+        pct = latency / total * 100 if total > 0 else 0
+        print(f"    {op_name:<40s} {latency:>10.3f} ms  ({pct:>5.1f}%)")
+
+
+def _print_per_ops_latency(per_ops_data: dict) -> None:
+    """Print per-operation latency breakdown from run_agg / run_disagg / run_afd.
+
+    NOTE: ``cli estimate`` now surfaces per-op breakdowns through
+    ``format_estimate_detail_report`` (driven by ``--detail``). These helpers
+    are kept available for the AFD path / future callers that still want the
+    standalone summary print.
+    """
+    print("\n" + "-" * 60)
+    print("  Per-Operation Latency Breakdown")
+    print("-" * 60)
+
+    # Agg mode: mix_step + genonly_step + scheduling
+    scheduling = per_ops_data.get("scheduling")
+    if scheduling:
+        num_mix = scheduling.get("num_mix_steps", 0)
+        num_genonly = scheduling.get("num_genonly_steps", 0)
+        print(f"  Scheduling: {num_mix:.0f} mix steps + {num_genonly:.0f} gen-only steps")
+        print()
+
+    mix_ops = per_ops_data.get("mix_step", {})
+    if mix_ops:
+        _print_per_ops_section("Mix Step", mix_ops)
+
+    genonly_ops = per_ops_data.get("genonly_step", {})
+    if genonly_ops:
+        print()
+        _print_per_ops_section("Gen-Only Step", genonly_ops)
+
+    # Disagg mode: prefill + decode
+    prefill_ops = per_ops_data.get("prefill", {})
+    if prefill_ops:
+        _print_per_ops_section("Prefill (static_ctx)", prefill_ops)
+
+    decode_ops = per_ops_data.get("decode", {})
+    if decode_ops:
+        print()
+        _print_per_ops_section("Decode (static_gen)", decode_ops)
+
+    afd_sections = [
+        ("Prefill A-Worker", per_ops_data.get("prefill_a_worker", {})),
+        ("Prefill F-Worker", per_ops_data.get("prefill_f_worker", {})),
+        ("Decode A-Worker", per_ops_data.get("decode_a_worker", {})),
+        ("Decode F-Worker", per_ops_data.get("decode_f_worker", {})),
+    ]
+    afd_emitted = False
+    for title, ops in afd_sections:
+        if not ops:
+            continue
+        if not afd_emitted:
+            afd_emitted = True
+        print()
+        _print_per_ops_section(title, ops)
+
+    comm = per_ops_data.get("comm", {})
+    if comm:
+        directional = {k: v for k, v in comm.items() if k.endswith("_a2f") or k.endswith("_f2a")}
+        if directional:
+            print()
+            _print_per_ops_section("AFD Transfer (per layer, a2f + f2a)", directional)
+
+
 def _run_estimate_mode(args):
     """Run the estimate mode to predict TTFT, TPOT, and power for a single config."""
     from aiconfigurator.cli.api import cli_estimate
@@ -1824,6 +1936,9 @@ def _run_estimate_mode(args):
         database_mode=args.database_mode,
         isl=args.isl,
         osl=args.osl,
+        image_height=args.image_height,
+        image_width=args.image_width,
+        num_images=args.num_images,
         batch_size=args.batch_size,
         ctx_tokens=args.ctx_tokens,
         tp_size=args.tp_size,
@@ -1863,6 +1978,24 @@ def _run_estimate_mode(args):
             decode_batch_size=args.decode_batch_size,
             decode_num_workers=args.decode_num_workers,
         )
+    elif estimate_mode == "afd":
+        # gpus_per_node and f_tp_size are intentionally derived from the
+        # system_spec / topology by cli_estimate -> _run_afd_estimate;
+        # they are no longer exposed as CLI flags to prevent silent
+        # mis-shaping (e.g. gb200 has 4 GPUs/node, not the historical 8).
+        estimate_kwargs.update(
+            n_a_nodes=args.n_a_nodes,
+            n_f_nodes=args.n_f_nodes,
+            a_tp_size=args.a_tp_size,
+            a_batch_size=args.a_batch_size,
+            f_moe_ep_size=args.f_moe_ep_size,
+            num_microbatches=args.num_microbatches,
+            pipeline_model=args.pipeline_model,
+            comm_overhead_factor=args.comm_overhead_factor,
+            afd_phase=args.afd_phase,
+            afd_combined_with_pd=getattr(args, "afd_combined_with_pd", True),
+            afd_boundary_on_attn=not getattr(args, "boundary_on_ffn", False),
+        )
 
     result = cli_estimate(**estimate_kwargs)
     sol_result = None
@@ -1883,10 +2016,12 @@ def _run_estimate_mode(args):
     print("-" * 60)
     print(f"  ISL:              {result.isl}")
     print(f"  OSL:              {result.osl}")
+    if args.image_height > 0 and args.image_width > 0 and args.num_images > 0:
+        print(f"  Images:           {args.num_images} x {args.image_height}x{args.image_width}")
 
     # ``--prefix`` and ``--nextn`` are common parameters applied to every
-    # mode (agg / disagg / static*), so surface them in the summary box for
-    # all modes rather than gating on mode.
+    # mode (agg / disagg / afd / static*), so surface them in the summary box
+    # for all modes rather than gating on mode.
     if args.prefix:
         print(f"  Prefix:           {args.prefix}")
     if args.nextn:
@@ -1903,6 +2038,26 @@ def _run_estimate_mode(args):
         print(f"  (d) BS:           {raw.get('(d)bs', 'N/A')}")
         print(f"  (d) Workers:      {raw.get('(d)workers', 'N/A')}")
         print(f"  Total GPUs:       {raw.get('num_total_gpus', 'N/A')}")
+    elif result.mode == "afd":
+        raw = result.raw
+        print(f"  AFD Phase:        {raw.get('phase', 'decode')}")
+        if raw.get("combined_with_pd"):
+            print("  Combined w/ P/D:  yes")
+        print(f"  GPUs/Node:        {raw.get('gpus_per_node', 'N/A')}")
+        print(f"  (a) Nodes:        {raw.get('(a)nodes', 'N/A')}")
+        print(f"  (a) TP:           {raw.get('(a)tp', 'N/A')}")
+        print(f"  (a) BS:           {raw.get('(a)bs', 'N/A')}")
+        print(f"  (a) Workers(DP):  {raw.get('(a)workers', 'N/A')}")
+        print(f"  (f) Nodes:        {raw.get('(f)nodes', 'N/A')}")
+        print(f"  (f) TP:           {raw.get('(f)tp', 'N/A')}")
+        print(f"  (f) EP:           {raw.get('(f)ep', 'N/A')}")
+        print(f"  (f) Workers:      {raw.get('(f)workers', 'N/A')}")
+        print(f"  B_total:          {raw.get('b_total', 'N/A')}")
+        print(f"  Total GPUs:       {raw.get('num_total_gpus', 'N/A')}")
+        print(f"  Pipeline Model:   {raw.get('pipeline_model', 'N/A')}")
+        print(f"  Micro-batches:    {raw.get('num_microbatches', 'N/A')}")
+        boundary_side = "A-Worker" if raw.get("boundary_on_attn", True) else "F-Worker"
+        print(f"  Boundary on:      {boundary_side}")
     else:
         # agg / static / static_ctx / static_gen share the same single-replica shape.
         print(f"  Batch Size:       {result.batch_size}")
@@ -1921,10 +2076,56 @@ def _run_estimate_mode(args):
         print(f"  TPOT:             {result.tpot:.3f} ms")
     elif result.mode == "static_ctx":
         print(f"  TTFT:             {result.ttft:.3f} ms")
+    elif result.mode == "afd":
+        raw = result.raw
+        afd_phase = raw.get("phase")
+        if afd_phase == "both":
+            # phase="both" runs prefill + decode through AFD; un-prefixed
+            # layer scalars are deliberately NaN to keep the two estimates
+            # distinguishable. Render the paired ``prefill_*`` / ``decode_*``
+            # blocks instead so users can compare A/F balance per phase.
+            print("  -- Prefill (AFD) --")
+            print(f"  T_a_layer:        {raw.get('prefill_t_a_layer', 0):.3f} ms")
+            print(f"  T_f_layer:        {raw.get('prefill_t_f_layer', 0):.3f} ms")
+            print(f"  T_a2f_layer:      {raw.get('prefill_t_a2f_layer', 0):.3f} ms")
+            print(f"  T_f2a_layer:      {raw.get('prefill_t_f2a_layer', 0):.3f} ms")
+            print(f"  T_c_layer:        {raw.get('prefill_t_c_layer', 0):.3f} ms  (round-trip = a2f + f2a)")
+            print(f"  T_step:           {raw.get('prefill_t_step', 0):.3f} ms")
+            print(f"  Balance Ratio:    {raw.get('prefill_balance_ratio', 0):.3f}")
+            print("  -- Decode (AFD) --")
+            print(f"  T_a_layer:        {raw.get('decode_t_a_layer', 0):.3f} ms")
+            print(f"  T_f_layer:        {raw.get('decode_t_f_layer', 0):.3f} ms")
+            print(f"  T_a2f_layer:      {raw.get('decode_t_a2f_layer', 0):.3f} ms")
+            print(f"  T_f2a_layer:      {raw.get('decode_t_f2a_layer', 0):.3f} ms")
+            print(f"  T_c_layer:        {raw.get('decode_t_c_layer', 0):.3f} ms  (round-trip = a2f + f2a)")
+            print(f"  T_step:           {raw.get('decode_t_step', 0):.3f} ms")
+            print(f"  Balance Ratio:    {raw.get('decode_balance_ratio', 0):.3f}")
+        else:
+            print(f"  T_a_layer:        {raw.get('t_a_layer', 0):.3f} ms")
+            print(f"  T_f_layer:        {raw.get('t_f_layer', 0):.3f} ms")
+            print(f"  T_a2f_layer:      {raw.get('t_a2f_layer', 0):.3f} ms")
+            print(f"  T_f2a_layer:      {raw.get('t_f2a_layer', 0):.3f} ms")
+            print(f"  T_c_layer:        {raw.get('t_c_layer', 0):.3f} ms  (round-trip = a2f + f2a)")
+            print(f"  T_step:           {raw.get('t_step', 0):.3f} ms")
+            print(f"  Balance Ratio:    {raw.get('balance_ratio', 0):.3f}")
+        # Composition row: shown when the combined-with-PD merge has
+        # written (p)impl/(d)impl markers, i.e. when the AFD result was
+        # merged with a static estimate of the other phase. Lets the user
+        # see at a glance which phase is AFD vs static.
+        p_impl = raw.get("(p)impl")
+        d_impl = raw.get("(d)impl")
+        if p_impl or d_impl:
+            print(f"  Composition:      (p)={p_impl or 'unmodeled'}  (d)={d_impl or 'unmodeled'}")
+        print(f"  TTFT:             {result.ttft:.3f} ms")
+        print(f"  TPOT:             {result.tpot:.3f} ms")
+        print(f"  Request Latency:  {result.request_latency:.3f} ms")
     else:
         print(f"  TTFT:             {result.ttft:.3f} ms")
         print(f"  TPOT:             {result.tpot:.3f} ms")
         print(f"  Request Latency:  {result.request_latency:.3f} ms")
+    encoder_latency = float(result.raw.get("encoder_latency", 0.0) or 0.0)
+    if encoder_latency > 0.0:
+        print(f"  Encoder lat.:     {encoder_latency:.3f} ms")
     print(f"  Power (per GPU):  {result.power_w:.1f} W")
     print("-" * 60)
     print(f"  tokens/s:         {result.tokens_per_second:,.2f}")
@@ -1936,8 +2137,20 @@ def _run_estimate_mode(args):
         raw = result.raw
         print(f"  (p) Memory:       {raw.get('(p)memory', 'N/A')} GB")
         print(f"  (d) Memory:       {raw.get('(d)memory', 'N/A')} GB")
+        encoder_memory = float(raw.get("(e)memory", 0.0) or 0.0)
+        if encoder_memory > 0.0:
+            print(f"  Encoder memory:   {encoder_memory:.3f} GB (included in prefill)")
+    elif result.mode == "afd":
+        raw = result.raw
+        a_oom = " (OOM!)" if raw.get("(a)is_oom") else ""
+        f_oom = " (OOM!)" if raw.get("(f)is_oom") else ""
+        print(f"  (a) Memory:       {raw.get('(a)memory', 'N/A')} GB{a_oom}")
+        print(f"  (f) Memory:       {raw.get('(f)memory', 'N/A')} GB{f_oom}")
     else:
         print(f"  Memory (GPU):     {result.memory:.2f} GB")
+        encoder_memory = float(result.raw.get("encoder_memory", 0.0) or 0.0)
+        if encoder_memory > 0.0:
+            print(f"  Encoder memory:   {encoder_memory:.3f} GB (included)")
     print("=" * 60)
 
     if result.kv_cache_warning:
@@ -2011,7 +2224,7 @@ def main(args):
             args.tpot,
             args.backend,
         )
-        task_configs = build_default_task_configs(
+        tasks = build_default_tasks(
             model_path=args.model_path,
             total_gpus=args.total_gpus,
             system=args.system,
@@ -2042,11 +2255,11 @@ def main(args):
             build_kwargs: dict[str, Any] = {"yaml_path": args.yaml_path}
             if args.engine_step_backend is not None:
                 build_kwargs["engine_step_backend"] = args.engine_step_backend
-            task_configs = build_experiment_task_configs(**build_kwargs)
+            tasks = build_experiment_tasks(**build_kwargs)
         except (ValueError, TypeError) as exc:
             logger.exception("Failed to build experiment task configs")
             raise SystemExit(1) from exc
-        if not task_configs:
+        if not tasks:
             logger.error("No valid experiments found in '%s'.", args.yaml_path)
             raise SystemExit(1)
     else:
@@ -2057,8 +2270,8 @@ def main(args):
         execute_kwargs["strict_sla"] = True
     if getattr(args, "inclusive_tpot", False):
         execute_kwargs["inclusive_tpot"] = True
-    _, best_configs, pareto_fronts, _, _ = _execute_task_configs(
-        task_configs,
+    _, best_configs, pareto_fronts, _, _ = _execute_tasks(
+        tasks,
         args.mode,
         top_n=args.top_n,
         **execute_kwargs,
@@ -2069,7 +2282,7 @@ def main(args):
             args=args,
             best_configs=best_configs,
             pareto_fronts=pareto_fronts,
-            task_configs=task_configs,
+            tasks=tasks,
             save_dir=args.save_dir,
             generated_backend_version=args.generated_config_version,
             backend=args.backend if args.mode == "default" else None,

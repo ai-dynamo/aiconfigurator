@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
+import inspect
 import logging
 from collections import defaultdict
 from typing import ClassVar
@@ -98,6 +100,61 @@ class BaseBackend:
             return max(1, int(b // (steps_to_finish_ctx / osl)))
         return max(1, b - int(np.ceil(ctx_tokens / isl)))
 
+    def _mix_step_efficiency(self, ctx_tokens: int, gen_tokens: int) -> float:
+        """GPU batching efficiency factor for a mixed prefill/decode forward pass.
+
+        Per-op silicon data measures each operation in isolation, overstating the
+        marginal cost of prefill tokens when they share a forward pass with decode
+        tokens. Weight matrices are loaded once from HBM for the combined batch.
+        Default: 1.0 (no correction — preserves existing behaviour for backends
+        without empirical efficiency data).
+        """
+        return 1.0
+
+    def _tpot_mix_steps(self, num_mix_steps: int) -> int:
+        """Return the effective mix-step count for TPOT calculation.
+
+        Engines with pipeline-drain latency at the context/decode boundary
+        (requests cannot be immediately enqueued after prefill finishes) may
+        reduce the effective step count to account for that bubble. Default:
+        use the full mix step count. Subclasses should override with an
+        empirically calibrated correction.
+        """
+        return num_mix_steps
+
+    def _ttft_queuing_factor(self, b: int, steps_to_finish_ctx: float) -> float:
+        """Return the queuing factor applied to the per-request prefill time to get TTFT.
+
+        In a batch of b requests that all arrive simultaneously, each request waits
+        for the preceding ones to complete their context phase before its own first
+        token is produced. Default: the legacy heuristic formula (preserves existing
+        behaviour for non-vLLM backends). Subclasses should override with a model
+        appropriate to their engine's scheduling policy.
+        """
+        return min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)
+
+    def _prefill_dispatch_overhead_ms(self, model: "BaseModel") -> float:
+        """Return a constant per-request overhead added to T_prefill (ms).
+
+        Silicon benchmarks measure isolated kernel time. Production inference
+        engines carry a fixed per-request cost from CPU-side Python dispatch
+        across all layers (tensor creation, CUDA kernel launches) that does not
+        appear in per-kernel measurements and does not scale with batch size.
+        The model is provided so subclasses can factor in architecture properties
+        beyond layer count. Default: 0.0 (no correction).
+        """
+        return 0.0
+
+    def _throughput_cap(self, step_throughput: float, ttft: float, tpot: float, b: int, osl: int) -> float:
+        """Return the effective output throughput after any engine-specific cap.
+
+        Default: returns step_throughput unchanged. Subclasses may override to
+        apply a tighter constraint — e.g. a Little's Law cap that prevents the
+        model from recommending operating points that cannot be sustained in
+        steady state given the predicted request latency.
+        """
+        return step_throughput
+
     def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int) -> dict:
         """Resolve backend-specific run_agg kwargs to defaults.
 
@@ -121,6 +178,12 @@ class BaseBackend:
         """Build the cache key for ``run_agg`` results."""
         return (isl, osl, b, ctx_tokens, engine_step_backend_key)
 
+    @staticmethod
+    def _runtime_config_for_agg_candidate(runtime_config: RuntimeConfig, batch_size: int) -> RuntimeConfig:
+        candidate = copy.deepcopy(runtime_config)
+        candidate.batch_size = batch_size
+        return candidate
+
     def _memory_usage_kwargs_for_agg(self, num_tokens: int, agg_extra: dict) -> dict:
         """Kwargs for the ``_get_memory_usage`` call from ``run_agg``.
 
@@ -140,6 +203,102 @@ class BaseBackend:
         return {}
 
     # ============== STATIC INFERENCE (shared) ==========================
+
+    @staticmethod
+    def _visual_context_tokens_from_encoder_config(enc_cfg, runtime_config: RuntimeConfig) -> int:
+        if not isinstance(enc_cfg, common.VisionEncoderConfig) or runtime_config.num_images_per_request <= 0:
+            return 0
+        post_merge, _ = BaseBackend._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
+        return post_merge * runtime_config.num_images_per_request
+
+    @staticmethod
+    def _visual_context_tokens(model: BaseModel, runtime_config: RuntimeConfig) -> int:
+        return BaseBackend._visual_context_tokens_from_encoder_config(
+            getattr(model, "encoder_config", None), runtime_config
+        )
+
+    @staticmethod
+    def _encoder_pre_merge_per_visual(
+        runtime_config: RuntimeConfig,
+        enc_cfg,
+    ) -> tuple[int, int]:
+        """Resolve the per-image pre-merge / post-merge token counts from
+        RuntimeConfig + VisionEncoderConfig.
+
+        Resolution order:
+            1. image_height + image_width (computed from patch/merge sizes)
+            2. num_image_tokens (explicit per-image override)
+
+        Returns ``(tokens_post_merge_per_image, pre_merge_per_image)``.
+        Returns ``(0, 0)`` when neither is set (text-only path).
+        """
+        has_image_dims = runtime_config.image_height > 0 and runtime_config.image_width > 0
+        if has_image_dims:
+            img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
+            tokens_per_image = (runtime_config.image_height // img_stride) * (runtime_config.image_width // img_stride)
+            pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
+                runtime_config.image_width // enc_cfg.patch_size
+            )
+        elif runtime_config.num_image_tokens > 0:
+            tokens_per_image = runtime_config.num_image_tokens
+            pre_merge_per_image = tokens_per_image * (enc_cfg.spatial_merge_size**2)
+        else:
+            return 0, 0
+        if tokens_per_image <= 0 or pre_merge_per_image <= 0:
+            return 0, 0
+        return tokens_per_image, pre_merge_per_image
+
+    def _run_encoder_phase(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        runtime_config: RuntimeConfig,
+        batch_size: int,
+    ) -> tuple[dict[str, float], dict[str, float], dict[str, str], int]:
+        # Run the encoder phase (Currently VL models only).
+        encoder_latency_dict = defaultdict(float)
+        encoder_energy_wms_dict = defaultdict(float)
+        encoder_source_dict = {}
+
+        if not model.encoder_ops:
+            return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, 0
+
+        enc_cfg = getattr(model, "encoder_config", None)
+        num_images = runtime_config.num_images_per_request
+        if num_images <= 0 or not isinstance(enc_cfg, common.VisionEncoderConfig):
+            return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, 0
+
+        tokens_per_image, pre_merge_per_image = self._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
+        if tokens_per_image == 0:
+            # No image dimensions specified; skip encoder modeling.
+            return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, 0
+
+        n_img_post = tokens_per_image * num_images  # post-merge: injected into LLM context
+        n_img_pre = pre_merge_per_image * num_images  # pre-merge: processed by ViT transformer
+
+        for op in model.encoder_ops:
+            use_post = "encoder_projector" in op._name
+            # ViT attention uses cu_seqlens: each image is an independent
+            # varlen sequence of pre_merge_per_image patches.
+            use_varlen = "encoder_attention" in op._name
+            n_img = n_img_post if use_post else n_img_pre
+            eff_batch = batch_size * num_images if use_varlen else batch_size
+            eff_s = pre_merge_per_image if use_varlen else n_img
+            x = eff_batch * eff_s
+            result = op.query(
+                database,
+                x=x,
+                batch_size=eff_batch,
+                beam_width=1,
+                s=eff_s,
+                prefix=0,
+                model_name=getattr(model, "model_name", ""),
+            )
+            encoder_latency_dict[op._name] += float(result)
+            encoder_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
+            encoder_source_dict[op._name] = getattr(result, "source", "silicon")
+
+        return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, n_img_post
 
     def _run_context_phase(
         self,
@@ -261,6 +420,10 @@ class BaseBackend:
         generation_latency_dict, generation_energy_wms_dict, generation_source_dict = {}, {}, {}
 
         if should_use_rust_engine_step(runtime_config):
+            rust_runtime_config = runtime_config
+            if img_ctx_tokens:
+                rust_runtime_config = copy.copy(runtime_config)
+                rust_runtime_config.isl = isl_eff
             (
                 context_latency_dict,
                 generation_latency_dict,
@@ -269,7 +432,7 @@ class BaseBackend:
             ) = estimate_static_latency_breakdown_with_rust(
                 model,
                 database,
-                runtime_config,
+                rust_runtime_config,
                 mode,
                 stride,
                 latency_correction_scale,
@@ -334,6 +497,19 @@ class BaseBackend:
         This shares the same latency breakdown path as ``run_static`` but skips
         building an ``InferenceSummary``.
         """
+        if mode == "static_gen":
+            encoder_latency = 0.0
+            img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
+        else:
+            encoder_latency_dict, encoder_energy_wms_dict, _, img_ctx_tokens = self._run_encoder_phase(
+                model, database, runtime_config, runtime_config.batch_size
+            )
+            if latency_correction_scale != 1.0:
+                for op in encoder_latency_dict:
+                    encoder_latency_dict[op] *= latency_correction_scale
+                    encoder_energy_wms_dict[op] *= latency_correction_scale
+            encoder_latency = sum(encoder_latency_dict.values())
+
         (
             context_latency_dict,
             _,
@@ -341,8 +517,16 @@ class BaseBackend:
             _,
             _,
             _,
-        ) = self._run_static_breakdown(model, database, runtime_config, mode, stride, latency_correction_scale)
-        return sum(context_latency_dict.values()) + sum(generation_latency_dict.values())
+        ) = self._run_static_breakdown(
+            model,
+            database,
+            runtime_config,
+            mode,
+            stride,
+            latency_correction_scale,
+            img_ctx_tokens=img_ctx_tokens,
+        )
+        return encoder_latency + sum(context_latency_dict.values()) + sum(generation_latency_dict.values())
 
     def run_static(
         self,
@@ -368,81 +552,8 @@ class BaseBackend:
                 corrected latency = latency * latency_correction_scale
         """
 
-        def _run_encoder(batch_size: int) -> tuple[dict[str, float], dict[str, float], int]:
-            """
-            Run vision encoder phase (VL models only).
-
-            ViT transformer ops use pre-merge patch count: (H // patch_size)²
-            Only encoder_proj_to_llm_gemm uses post-merge token count: (H // stride)²
-            Returns img_ctx_tokens (post-merge x n_img) as effective ISL offset for
-            the LLM context and generation phases.
-
-            token count resolution order:
-                1. image_height + image_width (computed from VisionEncoderConfig patch/merge sizes)
-                2. num_image_tokens (explicit override, per image)
-                3. isl (fallback for text-only or unconfigured VL requests)
-
-            Returns:
-                tuple: (encoder_latency_dict, encoder_energy_wms_dict, img_ctx_tokens)
-                        latency in ms, energy in W·ms, img_ctx_tokens is post-merge token count
-            """
-            encoder_latency_dict = defaultdict(float)
-            encoder_energy_wms_dict = defaultdict(float)
-
-            if not model.encoder_ops:
-                return encoder_latency_dict, encoder_energy_wms_dict, 0
-
-            enc_cfg = getattr(model, "encoder_config", None)
-            num_images = runtime_config.num_images_per_request
-
-            if runtime_config.num_images_per_request <= 0 or enc_cfg is None:
-                return encoder_latency_dict, encoder_energy_wms_dict, 0
-
-            has_image_dims = runtime_config.image_height > 0 and runtime_config.image_width > 0
-            if has_image_dims:
-                img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
-                tokens_per_image = (runtime_config.image_height // img_stride) * (
-                    runtime_config.image_width // img_stride
-                )
-                pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
-                    runtime_config.image_width // enc_cfg.patch_size
-                )
-            elif runtime_config.num_image_tokens > 0:
-                tokens_per_image = runtime_config.num_image_tokens
-                pre_merge_per_image = tokens_per_image * (enc_cfg.spatial_merge_size**2)
-            else:
-                # No image dimensions or token override specified; model this as a text-only request.
-                return encoder_latency_dict, encoder_energy_wms_dict, 0
-
-            if tokens_per_image <= 0 or pre_merge_per_image <= 0:
-                return encoder_latency_dict, encoder_energy_wms_dict, 0
-
-            n_img_post = tokens_per_image * num_images  # post-merge: injected into LLM context
-            n_img_pre = pre_merge_per_image * num_images  # pre-merge: processed by ViT transformer
-
-            for op in model.encoder_ops:
-                use_post = "encoder_projector" in op._name
-                # ViT attention: each image is an independent varlen sequence.
-                # Model as batch_size*num_images sequences of pre_merge_per_image tokens
-                # rather than one concatenated sequence of n_img_pre tokens.
-                use_varlen = "encoder_attention" in op._name
-                n_img = n_img_post if use_post else n_img_pre
-                eff_batch = batch_size * num_images if use_varlen else batch_size
-                eff_s = pre_merge_per_image if use_varlen else n_img
-                x = eff_batch * eff_s
-                result = op.query(
-                    database,
-                    x=x,
-                    batch_size=eff_batch,
-                    beam_width=1,
-                    s=eff_s,
-                    prefix=0,
-                    model_name=getattr(model, "model_name", ""),
-                )
-                encoder_latency_dict[op._name] += float(result)
-                encoder_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
-
-            return encoder_latency_dict, encoder_energy_wms_dict, n_img_post
+        def _run_encoder(batch_size: int) -> tuple[dict[str, float], dict[str, float], dict[str, str], int]:
+            return self._run_encoder_phase(model, database, runtime_config, batch_size)
 
         def _run_context(bs: int, effective_isl: int, pfx: int):
             return self._run_context_phase(model, database, runtime_config, bs, effective_isl, pfx)
@@ -459,13 +570,26 @@ class BaseBackend:
             runtime_config.prefix,
         )
 
-        # Run encoder (VL models only; no-op for standard models)
-        encoder_latency_dict, encoder_energy_wms_dict, img_ctx_tokens = _run_encoder(batch_size)
+        if mode == "static_gen":
+            encoder_latency_dict, encoder_energy_wms_dict = defaultdict(float), defaultdict(float)
+            encoder_source_dict = {}
+            img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
+        else:
+            encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, img_ctx_tokens = _run_encoder(
+                batch_size
+            )
 
         if latency_correction_scale != 1.0:
             for op in encoder_latency_dict:
                 encoder_latency_dict[op] *= latency_correction_scale
                 encoder_energy_wms_dict[op] *= latency_correction_scale
+
+        encoder_memory = (
+            {}
+            if mode == "static_gen"
+            else self._get_encoder_component_memory_for_runtime(model, runtime_config, batch_size)
+        )
+        encoder_memory_total = encoder_memory.get("total", 0.0)
 
         (
             context_latency_dict,
@@ -486,7 +610,14 @@ class BaseBackend:
 
         if mode == "static_ctx":
             memory = self._get_memory_usage(
-                model, database, batch_size, beam_width, isl + img_ctx_tokens, 1, prefix=prefix
+                model,
+                database,
+                batch_size,
+                beam_width,
+                isl + img_ctx_tokens,
+                1,
+                prefix=prefix,
+                encoder_memory=encoder_memory,
             )
         elif mode == "static_gen":
             memory = self._get_memory_usage(
@@ -501,7 +632,14 @@ class BaseBackend:
             )
         else:
             memory = self._get_memory_usage(
-                model, database, batch_size, beam_width, isl + img_ctx_tokens, osl, prefix=prefix
+                model,
+                database,
+                batch_size,
+                beam_width,
+                isl + img_ctx_tokens,
+                osl,
+                prefix=prefix,
+                encoder_memory=encoder_memory,
             )
 
         # Calculate total latencies and energies (simple sums - decoupled!)
@@ -581,6 +719,7 @@ class BaseBackend:
                 tokens_s_user,
                 request_latency,
                 encoder_latency,
+                encoder_memory_total,
                 context_latency,
                 generation_latency,
                 num_total_gpus,
@@ -611,6 +750,7 @@ class BaseBackend:
         summary.set_encoder_energy_wms_dict(encoder_energy_wms_dict)
         summary.set_context_energy_wms_dict(context_energy_wms_dict)  # UPDATED: explicit units
         summary.set_generation_energy_wms_dict(generation_energy_wms_dict)  # UPDATED: explicit units
+        summary.set_encoder_source_dict(encoder_source_dict)
         summary.set_context_source_dict(context_source_dict)
         summary.set_generation_source_dict(generation_source_dict)
         summary.set_encoder_power_avg(encoder_power_avg)
@@ -620,26 +760,80 @@ class BaseBackend:
         summary.set_memory_and_check_oom(memory, database.system_spec["gpu"]["mem_capacity"])
         # KV-per-seq context for capacity probing in CLI detail reports.
         try:
-            kv_seq_len_used = isl + beam_width * osl
+            kv_seq_len_used = isl + img_ctx_tokens + beam_width * osl
             kv_bytes_per_seq = model.get_kvcache_bytes_per_sequence(kv_seq_len_used)
             summary.set_kv_per_seq(kv_bytes_per_seq, kv_seq_len_used)
         except Exception:
             # Best-effort; downstream report degrades gracefully when unset.
             pass
 
-        # Encoder-node memory (VL models only): weights = ViT only, activations = patches, kvcache = 0.
-        if img_ctx_tokens > 0:
-            enc_cfg = getattr(model, "encoder_config", None)
-            if enc_cfg is not None:
-                pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
-                    runtime_config.image_width // enc_cfg.patch_size
-                )
-                enc_num_tokens = batch_size * runtime_config.num_images_per_request * pre_merge_per_image
-                summary.set_encoder_memory(self._get_encoder_node_memory(model, database, enc_num_tokens))
+        if encoder_memory:
+            summary.set_encoder_memory(encoder_memory)
 
         summary.set_summary_df(summary_df)
 
         return summary
+
+    def get_default_free_gpu_memory_fraction(self) -> float | None:
+        """Default KV cache memory fraction for this backend, if it has one."""
+        return None
+
+    def get_kv_cache_memory_check_params(self) -> tuple[float, float]:
+        """Return backend-specific KV cache reserved fraction and tolerance."""
+        return 0.0, 0.0
+
+    def get_partition_memory_usage(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        *,
+        partition_ops,
+        batch_size: int,
+        beam_width: int,
+        isl: int,
+        osl: int,
+        num_tokens: int = 0,
+        prefix: int = 0,
+        max_seq_len: int | None = None,
+        include_kvcache: bool = True,
+        kvcache_multiplier: int = 1,
+    ) -> dict[str, float]:
+        """Get backend memory with weights replaced by a model partition.
+
+        AFD uses the same backend activation/KV/NCCL/other memory model as
+        agg/disagg, then substitutes the weights that actually live on the
+        A- or F-worker pool.
+        """
+        kwargs = {
+            "num_tokens": num_tokens,
+            "prefix": prefix,
+        }
+        if "max_seq_len" in inspect.signature(self._get_memory_usage).parameters:
+            kwargs["max_seq_len"] = max_seq_len
+
+        memory = self._get_memory_usage(
+            model,
+            database,
+            batch_size,
+            beam_width,
+            isl,
+            osl,
+            **kwargs,
+        )
+        memory = dict(memory)
+        memory["weights"] = sum(op.get_weights() for op in partition_ops) / max(model.config.pp_size, 1) / (1 << 30)
+        if include_kvcache:
+            memory["kvcache"] = memory.get("kvcache", 0.0) * max(kvcache_multiplier, 1)
+        else:
+            memory["kvcache"] = 0.0
+
+        memory.setdefault("activations", 0.0)
+        memory.setdefault("nccl", 0.0)
+        memory.setdefault("others", 0.0)
+        memory["total"] = (
+            memory["weights"] + memory["activations"] + memory["kvcache"] + memory["nccl"] + memory["others"]
+        )
+        return memory
 
     def _get_ctx_tokens_list_for_agg_sweep(
         self,
@@ -901,40 +1095,52 @@ class BaseBackend:
 
     # ============== AGG INFERENCE (shared) =============================
 
-    def _get_encoder_node_memory(self, model: BaseModel, database: PerfDatabase, num_tokens: int) -> dict[str, float]:
-        """
-        Encoder-node memory for VL disaggregated deployment.
-
-        Includes ViT weights only (no LLM weights), patch activations, and zero KV cache.
-        This is the memory footprint of a dedicated encoder node that runs only the ViT.
-        """
+    def _get_encoder_component_memory(self, model: BaseModel, num_tokens: int) -> dict[str, float]:
+        """Encoder memory component colocated with the prefill/agg worker."""
         weights = sum(op.get_weights() for op in model.encoder_ops)
         enc_cfg = getattr(model, "encoder_config", None)
         activations = 0.0
-        if enc_cfg is not None and num_tokens > 0:
+        if isinstance(enc_cfg, common.VisionEncoderConfig) and num_tokens > 0:
             # ~3x hidden_size per patch covers QKV, attention output, and FFN intermediates (bfloat16)
             activations = 2 * num_tokens * enc_cfg.hidden_size * 3
-        activations = max(activations, 32 * 1024 * 1024)  # 32 MiB minimum
-        nccl_mem = database.system_spec["misc"]["nccl_mem"][min(model.config.tp_size, 8)]
-        others_mem = database.system_spec["misc"]["other_mem"]
+            activations = max(activations, 32 * 1024 * 1024)  # 32 MiB minimum
         one_gib = 1 << 30
         return {
-            "total": (weights + activations + nccl_mem + others_mem) / one_gib,
+            "total": (weights + activations) / one_gib,
             "weights": weights / one_gib,
             "activations": activations / one_gib,
             "kvcache": 0.0,
-            "nccl": nccl_mem / one_gib,
-            "others": others_mem / one_gib,
+            "nccl": 0.0,
+            "others": 0.0,
         }
+
+    def _get_encoder_component_memory_for_runtime(
+        self,
+        model: BaseModel,
+        runtime_config: RuntimeConfig,
+        batch_size: int,
+    ) -> dict[str, float]:
+        enc_cfg = getattr(model, "encoder_config", None)
+        if not model.encoder_ops or not isinstance(enc_cfg, common.VisionEncoderConfig):
+            return {}
+        if runtime_config.num_images_per_request <= 0:
+            return {}
+        _, pre_merge_per_image = self._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
+        if pre_merge_per_image <= 0:
+            return {}
+        num_tokens = batch_size * runtime_config.num_images_per_request * pre_merge_per_image
+        return self._get_encoder_component_memory(model, num_tokens)
 
     def run_agg(
         self, model: BaseModel, database: PerfDatabase, runtime_config: RuntimeConfig, **kwargs
     ) -> InferenceSummary:
         """Run the agg (continuous-batching) inference for a single (b, ctx_tokens) point."""
-        isl = runtime_config.isl
+        text_isl = runtime_config.isl
         osl = runtime_config.osl
         prefix = runtime_config.prefix
         b = runtime_config.batch_size
+        img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
+        isl = text_isl + img_ctx_tokens
         engine_step_backend_key = "rust" if should_use_rust_engine_step(runtime_config) else "python"
         ctx_tokens = kwargs.get("ctx_tokens")
         assert ctx_tokens is not None, "ctx_tokens is required"
@@ -944,10 +1150,26 @@ class BaseBackend:
         # free_gpu_memory_fraction; others: {}).
         agg_extra = self._resolve_agg_kwargs(kwargs, isl=isl, osl=osl)
 
-        cache_key = self._make_agg_cache_key(isl, osl, b, ctx_tokens, engine_step_backend_key, agg_extra)
+        visual_cache_key = (
+            runtime_config.image_height,
+            runtime_config.image_width,
+            runtime_config.num_images_per_request,
+        )
+        cache_key = (
+            self._make_agg_cache_key(isl, osl, b, ctx_tokens, engine_step_backend_key, agg_extra),
+            visual_cache_key,
+        )
         cached = self._agg_cache.get(cache_key)
         if cached is not None:
             return cached
+
+        encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, _ = self._run_encoder_phase(
+            model, database, runtime_config, b
+        )
+        encoder_latency_ms = sum(encoder_latency_dict.values())
+        encoder_energy_wms = sum(encoder_energy_wms_dict.values())
+        encoder_memory = self._get_encoder_component_memory_for_runtime(model, runtime_config, b)
+        encoder_memory_total = encoder_memory.get("total", 0.0)
 
         # Compute num_mix_steps / num_genonly_steps within osl steps such that
         # all ctx tokens are consumed.
@@ -966,12 +1188,10 @@ class BaseBackend:
                 num_genonly_tokens = 0
                 num_mix_steps_for_tpot_calc = num_mix_steps
             else:
-                # 3-step is an empirical correction for pipelining requests where new requests
-                # cannot be enqueued immediately after last request's exit
                 num_mix_steps = steps_to_finish_ctx
                 num_genonly_steps = osl - num_mix_steps
                 num_genonly_tokens = b
-                num_mix_steps_for_tpot_calc = max(1, num_mix_steps - 3)
+                num_mix_steps_for_tpot_calc = self._tpot_mix_steps(num_mix_steps)
         elif b == 1:
             # special case for b=1
             num_mix_steps = 1
@@ -988,6 +1208,11 @@ class BaseBackend:
         mix_step_latency_ms, mix_step_energy_wms, mix_per_ops, mix_per_ops_src = self._get_mix_step_latency(
             model, database, runtime_config, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl, prefix
         )
+        mix_efficiency = self._mix_step_efficiency(num_mix_ctx_tokens, num_mix_gen_tokens)
+        mix_step_latency_ms *= mix_efficiency
+        mix_step_energy_wms *= mix_efficiency
+        if mix_efficiency != 1.0:
+            mix_per_ops = {op: v * mix_efficiency for op, v in mix_per_ops.items()}
         per_ops_data["mix_step"] = mix_per_ops
         per_ops_source["mix_step"] = mix_per_ops_src
 
@@ -1001,13 +1226,15 @@ class BaseBackend:
             per_ops_data["genonly_step"] = genonly_per_ops
             per_ops_source["genonly_step"] = genonly_per_ops_src
 
-        # TTFT: assume a 10x request queue, capped correction factor at 4.
-        ttft = mix_step_latency_ms * np.ceil(isl / ctx_tokens)
-        correction_factor = min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)
-        ttft *= correction_factor
+        # TTFT: per-request prefill time * queuing factor, plus encoder latency.
+        # _mix_step_efficiency reduces mix_step_latency_ms based on the fraction of
+        # decode tokens in the step. For TTFT we need the pure prefill cost (no decode
+        # tokens alongside), so we undo that efficiency reduction first.
+        _prefill_step_ms = mix_step_latency_ms / mix_efficiency if mix_efficiency > 0 else mix_step_latency_ms
+        _ttft_per_request = _prefill_step_ms * np.ceil(isl / ctx_tokens) + self._prefill_dispatch_overhead_ms(model)
+        ttft = encoder_latency_ms + _ttft_per_request * self._ttft_queuing_factor(b, steps_to_finish_ctx)
         logger.debug(
-            f"ttft correction factor: {2 + (steps_to_finish_ctx - 3) / 2 / 10} capped to "
-            f"{correction_factor} when b: {b}, ctx_tokens: {ctx_tokens} isl {isl}"
+            f"ttft: prefill_step={_prefill_step_ms:.2f}ms qf={self._ttft_queuing_factor(b, steps_to_finish_ctx):.2f}"
         )
 
         # Guard against osl == 1 (no-decode), which makes both denominators zero.
@@ -1018,10 +1245,13 @@ class BaseBackend:
             if _tpot_steps > 0
             else 0.0
         )
-        _total_step_latency_ms = num_mix_steps * mix_step_latency_ms + num_genonly_steps * genonly_step_latency_ms
-        output_throughput = (
+        _total_step_latency_ms = (
+            encoder_latency_ms + num_mix_steps * mix_step_latency_ms + num_genonly_steps * genonly_step_latency_ms
+        )
+        _step_throughput = (
             (1000 / _total_step_latency_ms * b * (osl - 1)) if (osl > 1 and _total_step_latency_ms > 0) else 0.0
         )
+        output_throughput = self._throughput_cap(_step_throughput, ttft, tpot, b, osl)
         logger.debug(
             f"ctx_tokens: {ctx_tokens}, b: {b}, osl: {osl}, isl: {isl}, "
             f"num_mix_steps: {num_mix_steps}, num_genonly_steps: {num_genonly_steps}, "
@@ -1036,8 +1266,10 @@ class BaseBackend:
         logger.debug(f"ttft: {ttft}, tpot: {tpot}, output_throughput: {output_throughput}")
 
         # Weighted average power: total energy / total latency.
-        total_energy_wms = num_mix_steps * mix_step_energy_wms + num_genonly_steps * genonly_step_energy_wms
-        total_latency_ms = num_mix_steps * mix_step_latency_ms + num_genonly_steps * genonly_step_latency_ms
+        total_energy_wms = (
+            encoder_energy_wms + num_mix_steps * mix_step_energy_wms + num_genonly_steps * genonly_step_energy_wms
+        )
+        total_latency_ms = _total_step_latency_ms
         agg_power_avg_w = total_energy_wms / total_latency_ms if total_latency_ms > 0 else 0.0
         logger.debug(f"Aggregated power: {agg_power_avg_w}W (from {total_energy_wms} W·ms / {total_latency_ms} ms)")
 
@@ -1068,6 +1300,7 @@ class BaseBackend:
             isl,
             osl,
             prefix=prefix,
+            encoder_memory=encoder_memory,
             **self._memory_usage_kwargs_for_agg(num_tokens=num_tokens, agg_extra=agg_extra),
         )
         tp = model.config.tp_size
@@ -1092,7 +1325,7 @@ class BaseBackend:
 
         result_dict = {
             "model": model.model_path,
-            "isl": isl,
+            "isl": text_isl,
             "osl": osl,
             "prefix": prefix,
             "concurrency": concurrency,
@@ -1107,6 +1340,8 @@ class BaseBackend:
             "tokens/s/gpu": tokens_s_gpu,
             "tokens/s/user": tokens_s_user,
             "request_latency": request_latency,
+            "encoder_latency": encoder_latency_ms,
+            "encoder_memory": encoder_memory_total,
             "num_total_gpus": num_total_gpus,
             "tp": tp,
             "pp": pp,
@@ -1138,8 +1373,14 @@ class BaseBackend:
             database.system_spec["gpu"]["mem_capacity"],
             **self._oom_check_kwargs(agg_extra),
         )
+        summary.set_encoder_latency_dict(encoder_latency_dict)
+        summary.set_encoder_energy_wms_dict(encoder_energy_wms_dict)
+        summary.set_encoder_power_avg(encoder_energy_wms / encoder_latency_ms if encoder_latency_ms > 0 else 0.0)
+        summary.set_encoder_source_dict(encoder_source_dict)
         summary.set_summary_df(result)
         summary.set_result_dict(result_dict)
+        if encoder_memory:
+            summary.set_encoder_memory(encoder_memory)
 
         # Scheduling counters: aggregate sums, not DB queries — recorded in
         # per_ops_data only; no per-op source applies.
@@ -1149,6 +1390,9 @@ class BaseBackend:
             "mix_step_latency_ms": float(mix_step_latency_ms),
             "genonly_step_latency_ms": float(genonly_step_latency_ms),
         }
+        if encoder_latency_dict:
+            per_ops_data["encoder"] = dict(encoder_latency_dict)
+            per_ops_source["encoder"] = dict(encoder_source_dict)
         summary.set_per_ops_data(per_ops_data)
         summary.set_per_ops_source(per_ops_source)
 
@@ -1177,10 +1421,10 @@ class BaseBackend:
             A summary of the best agg result under constraints.
         """
         isl = runtime_config.isl
+        isl_eff = isl + self._visual_context_tokens(model, runtime_config)
         osl = runtime_config.osl
         ttft = runtime_config.ttft
         tpot = runtime_config.tpot
-        prefix = runtime_config.prefix
         top_k = kwargs.get("top_k", 1)
         max_batch_size = kwargs.get("max_batch_size", 512)
         ctx_stride = kwargs.get("ctx_stride", 512)
@@ -1188,7 +1432,7 @@ class BaseBackend:
 
         # Resolve backend-specific kwargs once; forward into run_agg so each
         # (b, ctx_tokens) point sees the same backend params.
-        sweep_extra = self._resolve_agg_kwargs(kwargs, isl=isl, osl=osl)
+        sweep_extra = self._resolve_agg_kwargs(kwargs, isl=isl_eff, osl=osl)
 
         # when b is larger than 1024, the result is not good as the data collection is not enough
         # to cover this.
@@ -1211,7 +1455,7 @@ class BaseBackend:
         # during the loop, as b, ctx_tokens and system memory are monotonic, we can break the
         # inner loop when the system is oom.
         b_list = [b for b in b_list_default if b <= max_batch_size]
-        ctx_tokens_list = self._get_ctx_tokens_list_for_agg_sweep(isl, ctx_stride, enable_chunked_prefill)
+        ctx_tokens_list = self._get_ctx_tokens_list_for_agg_sweep(isl_eff, ctx_stride, enable_chunked_prefill)
 
         results_df = pd.DataFrame(columns=common.ColumnsAgg)
         results_dict_list: list[dict] = []
@@ -1220,16 +1464,16 @@ class BaseBackend:
         all_oom = True
         for b in b_list:
             for ctx_tokens in ctx_tokens_list:
-                if b - np.ceil(ctx_tokens / isl) < 0:  # allow b==1
+                if b - np.ceil(ctx_tokens / isl_eff) < 0:  # allow b==1
                     break
 
                 if b > 1 and (
-                    b - np.ceil(ctx_tokens / isl) < 1
+                    b - np.ceil(ctx_tokens / isl_eff) < 1
                 ):  # general case, to ensure there's at least one gen req
                     break
 
                 # filter out repeated records for balance score correction
-                balance_score = isl * b / ctx_tokens / osl
+                balance_score = isl_eff * b / ctx_tokens / osl
                 if balance_score > 1:
                     gen_tokens = b // balance_score
                     if gen_tokens > 1 and gen_tokens in capped_b:
@@ -1240,15 +1484,7 @@ class BaseBackend:
                 summary = self.run_agg(
                     model=model,
                     database=database,
-                    runtime_config=RuntimeConfig(
-                        batch_size=b,
-                        isl=isl,
-                        osl=osl,
-                        prefix=prefix,
-                        seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
-                        gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
-                        engine_step_backend=runtime_config.engine_step_backend,
-                    ),
+                    runtime_config=self._runtime_config_for_agg_candidate(runtime_config, b),
                     ctx_tokens=ctx_tokens,
                     **sweep_extra,
                 )
@@ -1290,6 +1526,7 @@ class BaseBackend:
         num_tokens: int = 0,
         prefix: int = 0,
         max_seq_len: int | None = None,
+        encoder_memory: dict[str, float] | None = None,
     ) -> dict[str, float]:
         """
         Get the memory usage of the backend.
@@ -1299,16 +1536,13 @@ class BaseBackend:
                 (per-request) and does not need activation computation.
             max_seq_len: per-slot KV cache pre-allocation budget. Defaults to
                 ``isl + beam_width * osl`` when not supplied.
-            role: reserved for disaggregated deployments (unused in this shared implementation).
+            encoder_memory: optional colocated encoder component to add to this worker.
         """
         weights = 0.0
         for op in model.context_ops:
             weights += op.get_weights()
         # count weights on a single GPU
         weights /= model.config.pp_size
-
-        for op in model.encoder_ops:
-            weights += op.get_weights()
 
         h = model._num_heads * model._head_size
         if num_tokens == 0:
@@ -1357,6 +1591,12 @@ class BaseBackend:
             others_mem *= 1.0 + self.OTHERS_OVERHEAD_FRAC
 
         one_gib = 1 << 30
+        if encoder_memory:
+            weights += float(encoder_memory.get("weights", 0.0) or 0.0) * one_gib
+            activations += float(encoder_memory.get("activations", 0.0) or 0.0) * one_gib
+            kvcache += float(encoder_memory.get("kvcache", 0.0) or 0.0) * one_gib
+            nccl_mem += float(encoder_memory.get("nccl", 0.0) or 0.0) * one_gib
+            others_mem += float(encoder_memory.get("others", 0.0) or 0.0) * one_gib
         return {
             "total": (weights + activations + kvcache + nccl_mem + others_mem) / one_gib,
             "weights": weights / one_gib,

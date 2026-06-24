@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Network transport profiles.
+#
+# Design: network is NOT N scattered knobs — pick one coherent stack.
+# Each profile is a self-contained unit: env vars + pod requirements.
+#
+# Boundary: transport env only.
+#   - UCX_TLS / FI_* / NIXL backend selection → here (transport selection).
+#   - NCCL silicon flags (NCCL_NVLS_ENABLE, NCCL_CUMEM_ENABLE, etc.)
+#     → hardware.yaml (they describe the hardware capability, not the transport).
+#
+# Provenance: derived from dynamo recipes:
+#   - EFA:    third_party/dynamo/recipes/glm-5-nvfp4/sglang/disagg/efa/deploy.yaml
+#   - IB/UCX: third_party/dynamo/recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
+
+profiles:
+
+  # ---------------------------------------------------------------------------
+  # nvlink — default intra-node / MNNVL baseline
+  # ---------------------------------------------------------------------------
+  # NVLink collectives are handled by NCCL using hardware-detected topology.
+  # No special transport env vars are needed here; silicon flags like
+  # NCCL_NVLS_ENABLE live in hardware.yaml. This profile is intentionally
+  # minimal — it is the "do nothing special" baseline for NVLink clusters.
+  nvlink:
+    description: >-
+      Default transport for intra-node NVLink / MNNVL clusters.
+      No transport-layer env vars required; NCCL uses hardware-detected topology.
+    env: {}
+
+  # ---------------------------------------------------------------------------
+  # ib — InfiniBand / RoCE via UCX
+  # ---------------------------------------------------------------------------
+  # NIXL's UCX control plane requires an active-message transport.
+  # CUDA IPC/copy handle GPU memory movement; TCP carries control traffic.
+  # Source: non-EFA recipe (deploy.yaml), decode/prefill env block.
+  ib:
+    description: >-
+      InfiniBand / RoCE inter-node transport using UCX.
+      NIXL backend defaults to UCX; selects cuda_copy+cuda_ipc for GPU buffers
+      and TCP for control-plane traffic.
+    env:
+      UCX_MEMTYPE_CACHE: "n"
+      # Transport selection: GPU memory via CUDA IPC/copy, control via TCP.
+      UCX_TLS: "cuda_copy,cuda_ipc,tcp"
+      # Enable MNNVL (multi-node NVLink) peer memory via CUDA IPC.
+      UCX_CUDA_IPC_ENABLE_MNNVL: "y"
+      UCX_LOG_LEVEL: error
+      NIXL_LOG_LEVEL: ERROR
+
+  # ---------------------------------------------------------------------------
+  # efa — AWS EFA (libfabric) — one coherent self-contained stack
+  # ---------------------------------------------------------------------------
+  # AWS EFA rides libfabric, not UCX. The entire stack is ONE unit:
+  #   - NIXL backend must be forced to LIBFABRIC (otherwise UCX → TCP fallback
+  #     on kernel >= 6.8, giving ~10 Gbps — ~10x worse TTFT).
+  #   - FI_* env block configures libfabric/EFA provider.
+  #   - Pod must run privileged so fi_mr_reg can pin GPU VRAM for RDMA
+  #     (IPC_LOCK alone fails on every EFA NIC).
+  #   - Each pod requests vpc.amazonaws.com/efa matching the GPU count
+  #     (1 EFA NIC per GPU on p6e-gb200.36xlarge).
+  #   - hostIPC required for cross-container shared-memory signalling.
+  #
+  # Source: third_party/dynamo/recipes/glm-5-nvfp4/sglang/disagg/efa/deploy.yaml
+  efa:
+    description: >-
+      AWS EFA RDMA transport via libfabric. Full self-contained stack —
+      env + privileged pod requirements. Used for inter-node KV transfer
+      on p6e/p5e EFA-equipped instances.
+    env:
+      # Force NIXL onto LIBFABRIC — without this, SGLang defaults to UCX
+      # which silently falls back to TCP on kernel >= 6.8 (~10 Gbps, ~10x worse TTFT).
+      SGLANG_DISAGGREGATION_NIXL_BACKEND: LIBFABRIC
+
+      # === EFA libfabric provider configuration ===
+      FI_PROVIDER: efa
+      FI_EFA_USE_DEVICE_RDMA: "1"
+      # MUST be 0: with shm transfer enabled, EFA's GPU buffers silently
+      # corrupt under load.
+      FI_EFA_ENABLE_SHM_TRANSFER: "0"
+      FI_EFA_ENABLE_SHM: "0"
+      FI_EFA_FORK_SAFE: "0"
+      # FI_EFA_USE_HUGE_PAGE=0: hugepages aren't allocated to this pod
+      # (would require additional cpu/memory limits per K8s admission).
+      # Performance delta on these workloads is <5%.
+      FI_EFA_USE_HUGE_PAGE: "0"
+      FI_EFA_MR_MAX_CACHED_COUNT: "524288"
+      # 0 = unlimited MR cache size
+      FI_EFA_MR_MAX_CACHED_SIZE: "0"
+
+      # === HMEM (heterogeneous memory) — CUDA GPU buffers over EFA ===
+      FI_HMEM: cuda
+      FI_HMEM_CUDA_ENABLE_XFER: "1"
+
+      FI_LOG_LEVEL: warn
+
+      # === Runtime library paths ===
+      # PATH: /opt/amazon/efa first so the patched libfabric is loaded at runtime.
+      PATH: /opt/dynamo/venv/bin:/opt/amazon/efa/bin:/usr/local/bin:/usr/bin:/bin
+      # LD_LIBRARY_PATH: includes aarch64-linux-gnu/ for debian multiarch arm64 plugins.
+      LD_LIBRARY_PATH: /opt/amazon/efa/lib:/opt/amazon/efa/lib64:/opt/aws-ofi-nccl/lib:/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins:/opt/nvidia/nvda_nixl/lib/aarch64-linux-gnu:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/lib64:/usr/local/lib
+
+      # === NIXL telemetry ===
+      NIXL_TELEMETRY_ENABLE: "y"
+      NIXL_TELEMETRY_EXPORTER: prometheus
+      NIXL_TELEMETRY_PROMETHEUS_PORT: "19090"
+      NIXL_LOG_LEVEL: ERROR
+
+    # Pod-level requirements — all three are required together for EFA RDMA to work.
+    pod:
+      # privileged: required so fi_mr_reg can pin GPU VRAM for RDMA.
+      # IPC_LOCK capability alone fails on every EFA NIC.
+      privileged: true
+      # hostIPC: required for cross-container shared-memory signalling.
+      host_ipc: true
+      # EFA NIC resource — 1 NIC per GPU on p6e-gb200.36xlarge.
+      # Request count = gpu count (set by the generator at render time).
+      efa_resource: "vpc.amazonaws.com/efa"

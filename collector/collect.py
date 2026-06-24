@@ -1137,6 +1137,15 @@ def collect_sglang(
 
     os.environ["FLASHINFER_LOG_LEVEL"] = "ERROR"
 
+    # DSV4-Pro mhc-pre fast path: the DeepGEMM tf32 prenorm + TileLang fused
+    # kernels must have these names present in os.environ at worker-spawn time,
+    # otherwise mhc-pre collects ~53% slow and diverges from the reference
+    # dataset. Both default to True in environ.py, but the effect is triggered
+    # by presence in the process env (consumed downstream in the JIT path), not
+    # just by .get(). setdefault so an explicit caller value still wins.
+    os.environ.setdefault("SGLANG_OPT_DEEPGEMM_HC_PRENORM", "1")
+    os.environ.setdefault("SGLANG_OPT_USE_TILELANG_MHC_PRE", "1")
+
     try:
         from importlib.metadata import version as get_version
 

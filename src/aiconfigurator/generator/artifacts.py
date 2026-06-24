@@ -59,6 +59,8 @@ class ArtifactWriter:
             return "prefill_config.yaml"
         if artifact_name == "extra_engine_args_decode.yaml":
             return "decode_config.yaml"
+        if artifact_name == "extra_engine_args_encode.yaml":
+            return "encode_config.yaml"
         return artifact_name
 
     def _emit_file(self, path: str, content: str, artifact_name: str | None = None) -> None:
@@ -84,7 +86,7 @@ class ArtifactWriter:
     def _should_skip_yaml_reformat(artifact_name: str | None) -> bool:
         if not artifact_name:
             return False
-        return artifact_name in {"k8s_deploy.yaml", "k8s_bench.yaml", "sflow.yaml"}
+        return artifact_name in {"k8s_deploy.yaml", "k8s_bench.yaml", "sflow.yaml", "epd_pod.yaml"}
 
     @staticmethod
     def _is_k8s_yaml(artifact_name: str | None) -> bool:

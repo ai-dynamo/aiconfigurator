@@ -257,9 +257,6 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
         elif gemm_type == "fp8":
             _persistent_bytes += N * K + M * K + N * 4 + M * 4
             _transient_bytes = N * K * 4
-        elif gemm_type == "fp8_static":
-            _persistent_bytes += M * K + N * K + M * 4 + N * 4
-            _transient_bytes = (M * K + N * K) * 4
         elif gemm_type == "fp8_block":
             _persistent_bytes += N * K + cdiv(N, 128) * cdiv(K, 128) * 4
             _transient_bytes = N * K * 4

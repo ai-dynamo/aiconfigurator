@@ -99,11 +99,11 @@ def _parse_assign(line: str) -> Optional[tuple[Optional[str], str, str]]:
     toks = left.split()
     if len(toks) == 1:
         return (None, toks[0], right)
-    if toks[0] in ("prefill", "decode", "agg"):
+    if toks[0] in ("prefill", "decode", "agg", "encode"):
         return (toks[0], " ".join(toks[1:]).strip(), right)
     # Support multi-scope alias or 'all'
     alias = toks[0]
-    allowed = {"prefill", "decode", "agg"}
+    allowed = {"prefill", "decode", "agg", "encode"}
     parts0 = alias.split("_")
     if "_" in alias and all(p in allowed for p in parts0):
         return (alias, " ".join(toks[1:]).strip(), right)
@@ -145,7 +145,7 @@ def _apply_line(
     if not sc:
         return
     # Expand multi-scope aliases like "prefill_decode", "agg_prefill_decode", or "all"
-    allowed = {"prefill", "decode", "agg"}
+    allowed = {"prefill", "decode", "agg", "encode"}
     if "_" in sc:
         scopes = [s for s in sc.split("_") if s in allowed]
     else:

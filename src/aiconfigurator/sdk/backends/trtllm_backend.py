@@ -65,6 +65,18 @@ class TRTLLMBackend(BaseBackend):
             return getattr(model, "_hidden_size", h)
         return h
 
+    def _tpot_mix_steps(self, num_mix_steps: int) -> int:
+        # TRT-LLM in-flight batching has a pipeline-drain latency at the
+        # context/decode boundary: ~3 steps elapse before new requests can be
+        # enqueued after the last prefill finishes. Empirical correction.
+        return max(1, num_mix_steps - 3)
+
+    def get_default_free_gpu_memory_fraction(self) -> float | None:
+        return TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
+
+    def get_kv_cache_memory_check_params(self) -> tuple[float, float]:
+        return KV_CACHE_MEMORY_RESERVED_FRACTION, KV_CACHE_MEMORY_TOLERANCE
+
     def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int) -> dict:
         # Use ``if x is None`` (rather than kwargs.get default) so that an
         # explicit None from the Python API still falls back to the constant.

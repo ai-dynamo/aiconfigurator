@@ -22,7 +22,7 @@ jobs:
     steps:
       - name: Download parquet diff artifact bundle
         id: download
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: perf-parquet-diff
           path: ./artifact
@@ -32,7 +32,7 @@ jobs:
 
       - name: Post comment with parquet diff summary
         if: steps.download.outcome == 'success'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |

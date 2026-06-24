@@ -24,7 +24,6 @@ from aiconfigurator.sdk.models import (
     get_model_family,
 )
 from aiconfigurator.sdk.performance_result import PerformanceResult
-from aiconfigurator.sdk.task import TaskConfig
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
 pytestmark = pytest.mark.unit
@@ -305,7 +304,7 @@ class TestHFModelSupport:
             ),
             (
                 "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
-                common.GEMMQuantMode.fp8,
+                common.GEMMQuantMode.fp8_static,
                 common.MoEQuantMode.fp8,
                 common.KVCacheQuantMode.fp8,
                 common.FMHAQuantMode.fp8,
@@ -654,23 +653,6 @@ class TestHFModelSupport:
         assert context_dsa._gemm_quant_mode == common.GEMMQuantMode.bfloat16
         assert generation_dsa._gemm_quant_mode == common.GEMMQuantMode.bfloat16
 
-    @pytest.mark.parametrize(
-        "model_path,replacement",
-        [
-            ("deepseek-ai/DeepSeek-V4-Flash", "sgl-project/DeepSeek-V4-Flash-FP8"),
-            ("deepseek-ai/DeepSeek-V4-Pro", "sgl-project/DeepSeek-V4-Pro-FP8"),
-        ],
-    )
-    def test_native_deepseek_v4_fp4_checkpoint_rejected_on_hopper(self, model_path, replacement):
-        with pytest.raises(ValueError, match=f"Use {replacement} instead"):
-            TaskConfig(
-                serving_mode="agg",
-                model_path=model_path,
-                system_name="h200_sxm",
-                backend_name="trtllm",
-                database_mode="SOL",
-            )
-
 
 class TestKVCacheElementsPerToken:
     """Regression tests for ``BaseModel.get_kvcache_elements_per_token``.
@@ -758,6 +740,66 @@ class TestKVCacheElementsPerToken:
         )
         assert gqa_elems != model.get_kvcache_elements_per_token()
         assert model.get_kvcache_elements_per_token() == model._num_layers * (512 + 64)
+
+
+class TestGetKvcacheMaxTokens:
+    """``Model.get_kvcache_max_tokens`` -- the capacity-sizing inverse of
+    ``get_kvcache_bytes_per_sequence``.
+
+    Linear-growth models (GQA / MLA) must invert to exact floor-division by the
+    per-token size; non-linear models (DeepSeek-V4's window-capped + compressed
+    attention) must follow the true piecewise curve via the monotonic search,
+    which also fits strictly more tokens than the seq_len=1 extrapolation.
+    """
+
+    @staticmethod
+    def _build_model(hf_id: str, tp_size: int, **extra):
+        model_config = config.ModelConfig(tp_size=tp_size, pp_size=1, attention_dp_size=1, **extra)
+        return models.get_model(hf_id, model_config, backend_name="trtllm")
+
+    @pytest.mark.parametrize(
+        "hf_id,tp,moe_kw",
+        [
+            ("meta-llama/Meta-Llama-3.1-8B", 1, {}),  # GQA, linear
+            ("Qwen/Qwen3-32B", 4, {}),  # GQA, linear
+            ("deepseek-ai/DeepSeek-V3.2", 4, {"moe_tp_size": 1, "moe_ep_size": 4}),  # MLA, linear
+        ],
+    )
+    def test_linear_models_invert_to_floor_division(self, hf_id, tp, moe_kw):
+        model = self._build_model(hf_id, tp, **moe_kw)
+        per_token = model.get_kvcache_bytes_per_sequence(1)
+        for seq_len in (1, 137, 4096, 200_000):
+            budget = model.get_kvcache_bytes_per_sequence(seq_len)
+            assert model.get_kvcache_max_tokens(budget) == int(budget // per_token) == seq_len
+
+    def test_zero_or_sub_token_budget_returns_zero(self):
+        model = self._build_model("Qwen/Qwen3-32B", 4)
+        assert model.get_kvcache_max_tokens(0) == 0
+        assert model.get_kvcache_max_tokens(model.get_kvcache_bytes_per_sequence(1) - 1) == 0
+
+    def test_deepseek_v4_inverts_nonlinear_curve(self):
+        """DeepSeek-V4 caps local attention at its window and compresses past it
+        (plus fixed decode-state buffers), so its KV growth is non-linear; the
+        inverse follows that curve and beats the seq_len=1 extrapolation."""
+        model_config = config.ModelConfig(
+            tp_size=8,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=1,
+            nextn=1,
+            nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+        )
+        model = models.get_model("sgl-project/DeepSeek-V4-Pro-FP8", model_config, backend_name="trtllm")
+        window = model.extra_params.sliding_window
+        budget = model.get_kvcache_bytes_per_sequence(window * 8)  # well past the window
+        tokens = model.get_kvcache_max_tokens(budget)
+        # Exact monotonic inverse: `tokens` fits, `tokens + 1` does not.
+        assert model.get_kvcache_bytes_per_sequence(tokens) <= budget
+        assert model.get_kvcache_bytes_per_sequence(tokens + 1) > budget
+        # The seq_len=1 slope (inflated by the fixed buffers + uncapped local KV)
+        # under-counts capacity; the curve-aware inverse fits more.
+        per_token = model.get_kvcache_bytes_per_sequence(1)
+        assert tokens > int(budget // per_token)
 
 
 class TestBackendConfiguration:

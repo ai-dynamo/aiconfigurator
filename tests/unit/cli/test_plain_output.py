@@ -90,10 +90,10 @@ def test_log_final_summary(caplog, use_ansi):
 
     model_path = "unit-test-model"
     tc = MagicMock()
-    tc.config.model_path = model_path
-    tc.config.is_moe = False
-    tc.config.runtime_config.tpot = 50.0
-    tc.config.runtime_config.request_latency = None
+    tc.primary_model_path = model_path
+    tc.is_moe = False
+    tc.tpot = 50.0
+    tc.request_latency = None
     tc.backend_name = "trtllm"
     tc.total_gpus = 8
 
@@ -130,7 +130,7 @@ def test_log_final_summary(caplog, use_ansi):
         best_throughputs={"agg": 100.0, "disagg": 0.0},
         best_configs=best_configs,
         pareto_fronts=pareto_fronts,
-        task_configs={"agg": tc},
+        tasks={"agg": tc},
         mode="default",
         pareto_x_axis={"agg": "tokens/s/user"},
         top_n=1,
@@ -158,15 +158,15 @@ def test_log_final_summary_no_disagg_results():
 
     Regression test for the KeyError: 'disagg' crash that occurs when backend='auto'
     and all disagg experiments yield nothing. merge_experiment_results_by_mode always
-    inserts a 'disagg' key into best_configs (possibly empty), but task_configs only
+    inserts a 'disagg' key into best_configs (possibly empty), but tasks only
     has per-backend keys like 'agg_trtllm'. The guard in the deployment table loop
     must skip 'disagg' rather than crashing.
     """
     tc = MagicMock()
-    tc.config.model_path = "unit-test-model"
-    tc.config.is_moe = False
-    tc.config.runtime_config.tpot = 50.0
-    tc.config.runtime_config.request_latency = None
+    tc.primary_model_path = "unit-test-model"
+    tc.is_moe = False
+    tc.tpot = 50.0
+    tc.request_latency = None
     tc.backend_name = "trtllm"
     tc.total_gpus = 8
 
@@ -195,8 +195,8 @@ def test_log_final_summary_no_disagg_results():
         "agg": pd.DataFrame([best_row]),
         "disagg": pd.DataFrame(),
     }
-    # task_configs only has per-backend keys; 'disagg' is intentionally absent.
-    task_configs = {"agg_trtllm": tc, "disagg_trtllm": tc}
+    # tasks only has per-backend keys; 'disagg' is intentionally absent.
+    tasks = {"agg_trtllm": tc, "disagg_trtllm": tc}
 
     log_final_summary(
         chosen_exp="agg",
@@ -206,7 +206,7 @@ def test_log_final_summary_no_disagg_results():
             "agg": pd.DataFrame({"tokens/s/user": [1.0], "tokens/s/gpu_cluster": [10.0]}),
             "disagg": pd.DataFrame(),
         },
-        task_configs=task_configs,
+        tasks=tasks,
         mode="default",
         pareto_x_axis={"agg": "tokens/s/user", "disagg": "tokens/s/user"},
         top_n=1,

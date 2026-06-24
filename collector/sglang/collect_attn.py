@@ -44,7 +44,11 @@ from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
-from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
+from collector.case_generator import (
+    get_attention_context_shape_sweeps,
+    get_attention_generation_shape_sweeps,
+    windows_for_head_dim,
+)
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
@@ -222,7 +226,7 @@ def get_context_attention_test_cases():
                             if sm_version >= 120 and b * s * n * head_dim >= max_kv_elements:
                                 continue
 
-                            for window_size in window_sizes:
+                            for window_size in windows_for_head_dim(window_sizes, head_dim):
                                 for precision_case in shape_sweep["precision_cases"]:
                                     use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
                                     use_fp8_context_fmha = bool(precision_case["fp8_context_fmha"])
@@ -297,7 +301,7 @@ def get_generation_attention_test_cases():
                     if b >= min_drop_batch:
                         target_s_list = target_s_list[:-1]
                     for s in target_s_list:
-                        for window_size in window_sizes:
+                        for window_size in windows_for_head_dim(window_sizes, head_dim):
                             for precision_case in shape_sweep["precision_cases"]:
                                 use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
                                 if skip_fp8 and use_fp8_kv_cache:
@@ -323,7 +327,7 @@ def get_generation_attention_test_cases():
                         if n_kv >= n:
                             continue
                         for s in target_s_list:
-                            for window_size in window_sizes:
+                            for window_size in windows_for_head_dim(window_sizes, head_dim):
                                 for precision_case in shape_sweep["precision_cases"]:
                                     use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
                                     if skip_fp8 and use_fp8_kv_cache:

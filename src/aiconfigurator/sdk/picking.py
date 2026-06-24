@@ -5,7 +5,7 @@
 Standalone picking functions for selecting engine configurations.
 
 These functions operate on perf DataFrames directly (ColumnsAgg, ColumnsDisagg,
-or ColumnsStatic schemas) without requiring a TaskConfig.  They can be called
+or ColumnsStatic schemas) without requiring a Task.  They can be called
 from either AIC's internal CLI pipeline or from an external real-GPU sweep.
 
 Three picking modes are supported:
@@ -82,6 +82,9 @@ def _build_disagg_summary_dict(
     osl = prefill_summary_dict["osl"]
     tokens_s = seq_s * osl
     tokens_s_gpu = tokens_s / num_total_gpus if num_total_gpus > 0 else 0.0
+    encoder_latency = float(prefill_summary_dict.get("encoder_latency", 0.0))
+    encoder_memory = float(prefill_summary_dict.get("encoder_memory", 0.0))
+    # static_ctx ttft already includes colocated encoder latency.
     request_latency = prefill_summary_dict["ttft"] + decode_summary_dict["tpot"] * max(osl - 1, 0)
 
     # Weighted average power
@@ -109,6 +112,7 @@ def _build_disagg_summary_dict(
         "ttft": ttft,
         "tpot": tpot,
         "request_latency": request_latency,
+        "encoder_latency": encoder_latency,
         "seq/s": seq_s,
         "seq/s/gpu": seq_s_gpu,
         "tokens/s": tokens_s,
@@ -151,7 +155,7 @@ def _build_disagg_summary_dict(
         "(e)tp": 0,
         "(e)pp": 0,
         "(e)parallel": "",
-        "(e)memory": 0.0,
+        "(e)memory": encoder_memory,
         "power_w": disagg_power_avg,
     }
 
@@ -393,6 +397,8 @@ def pick_autoscale(
     target_ttft: float,
     target_tpot: float,
     top_n: int = 5,
+    *,
+    ttft_correction_factor: float | None = None,
 ) -> dict[str, Any]:
     """Pick prefill and decode engines independently for autoscaling.
 
@@ -405,6 +411,9 @@ def pick_autoscale(
         target_ttft: TTFT SLA target in ms.
         target_tpot: TPOT SLA target in ms.
         top_n: Number of top combinations to return.
+        ttft_correction_factor: TTFT pre-correction multiplier for queueing
+            under concurrency.  Defaults to
+            :data:`_AUTOSCALE_TTFT_CORRECTION_FACTOR` when ``None``.
 
     Returns:
         Dict with keys:
@@ -421,7 +430,9 @@ def pick_autoscale(
     if prefill_df is None or prefill_df.empty or decode_df is None or decode_df.empty:
         return empty_result
 
-    correction_factor = _AUTOSCALE_TTFT_CORRECTION_FACTOR
+    correction_factor = (
+        ttft_correction_factor if ttft_correction_factor is not None else _AUTOSCALE_TTFT_CORRECTION_FACTOR
+    )
 
     # -- Filter prefill candidates by TTFT --
     prefill_candidates = prefill_df.copy()

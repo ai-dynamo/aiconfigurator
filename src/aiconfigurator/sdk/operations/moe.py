@@ -705,6 +705,7 @@ class MoEDispatch(Operation):
         self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
         self._quant_mode = kwargs.get("quant_mode")
         self._reduce_results = kwargs.get("reduce_results", True)
+        self._attn_cp_size = kwargs.get("attn_cp_size", 1)
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -1057,6 +1058,11 @@ class MoEDispatch(Operation):
                             "all_gather",
                             volume * self._attention_dp_size,
                         )
+                    elif self._attn_cp_size > 1:
+                        # attn-CP + moe-TP: pre = all_gather (NOT all_reduce)
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half, self.num_gpus, "all_gather", volume
+                        )
                     elif self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
                         comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
@@ -1083,6 +1089,11 @@ class MoEDispatch(Operation):
                             self._attention_tp_size,
                             "all_gather",
                             volume,
+                        )
+                    elif self._attn_cp_size > 1:
+                        # attn-CP + moe-TP: post = reduce_scatter (NOT all_reduce)
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half, self.num_gpus, "reduce_scatter", volume
                         )
                     elif self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
@@ -2090,6 +2101,23 @@ def load_moe_data(moe_file):
         energy = power * latency  # watt-milliseconds
 
         quant_mode = common.MoEQuantMode[quant_mode]
+
+        # DeepSeek-V4-Pro's Blackwell MoE runs the trtllm-gen MXFP4xMXFP8 kernel
+        # (moe_runner_backend=flashinfer_mxfp4 -> Mxfp4FlashinferTrtllmMoEMethod ->
+        # trtllm_fp4_block_scale_routed_moe -> bmm_MxE4m3_MxE2m1MxE4m3 ... sm100f),
+        # which is a distinct precision from the flashinfer cutedsl kernel that the
+        # collector also logs under moe_dtype=w4a8_mxfp4_mxfp8. Route those rows to
+        # the dedicated quant mode so DeepSeek-V4 modeling can select it on Blackwell.
+        if quant_mode is common.MoEQuantMode.w4a8_mxfp4_mxfp8 and kernel_source == "sglang_mxfp4_flashinfer_trtllm_moe":
+            quant_mode = common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+
+        # Same idea on Hopper: DeepSeek-V4-Pro runs the flashinfer cutlass SM90
+        # mixed-GEMM (cutlass_fused_moe(use_w4_group_scaling=True), MXFP4 weight x
+        # BF16 act), a distinct backend from GPT-OSS's triton_kernels mxfp4 that the
+        # collector also logs under moe_dtype=w4a16_mxfp4. Route those rows to the
+        # dedicated quant mode so DeepSeek-V4 modeling can select it on Hopper.
+        if quant_mode is common.MoEQuantMode.w4a16_mxfp4 and kernel_source == "sglang_flashinfer_cutlass_moe":
+            quant_mode = common.MoEQuantMode.w4a16_mxfp4_cutlass
 
         moe_data = moe_low_latency_data if kernel_source == "moe_torch_flow_min_latency" else moe_default_data
 

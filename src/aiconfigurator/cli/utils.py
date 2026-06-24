@@ -9,13 +9,13 @@ from aiconfigurator.sdk.pareto_analysis import (
     get_pareto_front,
 )
 from aiconfigurator.sdk.picking import pick_default, pick_load_match
-from aiconfigurator.sdk.task import TaskConfig
+from aiconfigurator.sdk.task_v2 import Task
 
 logger = logging.getLogger(__name__)
 
 
 def process_experiment_result(
-    task_config: TaskConfig,
+    task: Task,
     result: dict[str, pd.DataFrame],
     top_n: int = 5,
     target_request_rate: float | None = None,
@@ -28,10 +28,10 @@ def process_experiment_result(
 
     This is a thin wrapper around :func:`picking.pick_default` and
     :func:`picking.pick_load_match` that extracts parameters from the
-    ``TaskConfig``.
+    ``Task``.
 
     Args:
-        task_config: TaskConfig object for the experiment.
+        task: Task object for the experiment.
         result: Dictionary containing the pareto_df result of the experiment.
         top_n: Number of top configurations to return.
         target_request_rate: If set, activates load-match picking (minimize
@@ -58,12 +58,11 @@ def process_experiment_result(
     load_match = target_request_rate is not None or target_concurrency is not None
 
     pareto_df = result["pareto_df"]
-    runtime_cfg = task_config.config.runtime_config
-    target_tpot = runtime_cfg.tpot
-    target_request_latency = runtime_cfg.request_latency
+    target_tpot = task.tpot
+    target_request_latency = task.request_latency
     use_request_latency = target_request_latency is not None and target_request_latency > 0
-    total_gpus = getattr(task_config, "total_gpus", None) or 0
-    serving_mode = task_config.serving_mode
+    total_gpus = getattr(task, "total_gpus", None) or 0
+    serving_mode = task.serving_mode
 
     x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"
 
@@ -99,7 +98,7 @@ def process_experiment_result(
 
 def _merge_into_top_n(
     exps: list[str],
-    task_configs: dict[str, TaskConfig],
+    tasks: dict[str, Task],
     best_configs: dict[str, pd.DataFrame],
     pareto_fronts: dict[str, pd.DataFrame],
     pareto_x_axis: dict[str, str],
@@ -113,7 +112,7 @@ def _merge_into_top_n(
         if exp_name not in best_configs:
             continue
         retained_exps.append(exp_name)
-        backend_name = task_configs[exp_name].backend_name
+        backend_name = tasks[exp_name].primary_backend_name
         df = best_configs[exp_name].copy()
         if not df.empty:
             df["backend"] = backend_name
@@ -151,7 +150,7 @@ def _merge_into_top_n(
 
 
 def merge_experiment_results_by_mode(
-    task_configs: dict[str, TaskConfig],
+    tasks: dict[str, Task],
     best_configs: dict[str, pd.DataFrame],
     pareto_fronts: dict[str, pd.DataFrame],
     pareto_x_axis: dict[str, str],
@@ -165,7 +164,7 @@ def merge_experiment_results_by_mode(
 
     Args:
         results: Dictionary containing the results of the experiments.
-        task_configs: Dictionary containing the task configs of the experiments.
+        tasks: Dictionary containing the task configs of the experiments.
         best_configs: Dictionary containing the best configs of the experiments.
         best_throughputs: Dictionary containing the best throughputs of the experiments.
         pareto_fronts: Dictionary containing the pareto fronts of the experiments.
@@ -178,18 +177,18 @@ def merge_experiment_results_by_mode(
             - best_throughputs: Dictionary containing the best throughputs of the merged experiments.
             - pareto_fronts: Dictionary containing the pareto fronts of the merged experiments.
             - pareto_x_axis: Dictionary containing the pareto x-axis of the merged experiments.
-            - task_configs: Dictionary containing the task configs of the merged experiments.
+            - tasks: Dictionary containing the task configs of the merged experiments.
     """
-    agg_exps = [name for name, task_config in task_configs.items() if task_config.serving_mode == "agg"]
-    disagg_exps = [name for name, task_config in task_configs.items() if task_config.serving_mode == "disagg"]
+    agg_exps = [name for name, task in tasks.items() if task.serving_mode == "agg"]
+    disagg_exps = [name for name, task in tasks.items() if task.serving_mode == "disagg"]
 
     merged_best_configs = {}
     merged_best_throughputs = {}
     merged_pareto_fronts = {}
     merged_pareto_x_axis = {}
 
-    agg_merged = _merge_into_top_n(agg_exps, task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n)
-    disagg_merged = _merge_into_top_n(disagg_exps, task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n)
+    agg_merged = _merge_into_top_n(agg_exps, tasks, best_configs, pareto_fronts, pareto_x_axis, top_n)
+    disagg_merged = _merge_into_top_n(disagg_exps, tasks, best_configs, pareto_fronts, pareto_x_axis, top_n)
 
     merged_best_configs["agg"] = agg_merged[0]
     merged_best_throughputs["agg"] = agg_merged[1]

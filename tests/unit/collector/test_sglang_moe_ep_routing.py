@@ -43,6 +43,14 @@ finally:
 torch = _real_torch
 
 
+@pytest.fixture(autouse=True)
+def _use_real_torch(monkeypatch):
+    # At test execution time sys.modules["torch"] is still test_parallel_run.py's
+    # MagicMock. helper.py functions do lazy `import torch`, so they pick up the
+    # mock rather than the real module. Swap in real torch for each test's duration.
+    monkeypatch.setitem(sys.modules, "torch", _real_torch)
+
+
 @pytest.mark.unit
 def test_build_rank0_local_workload_masks_remote_experts():
     helper = _HELPER_MODULE

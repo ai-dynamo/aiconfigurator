@@ -13,7 +13,8 @@ import yaml
 
 DEFAULT_BACKEND = "trtllm"
 GENERATOR_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
-DEFAULT_BACKEND_VERSION_MATRIX_PATH = os.path.join(GENERATOR_CONFIG_DIR, "backend_version_matrix.yaml")
+GENERATOR_FACTS_DIR = os.path.join(os.path.dirname(__file__), "facts")
+DEFAULT_BACKEND_VERSION_MATRIX_PATH = os.path.join(GENERATOR_FACTS_DIR, "runtimes", "dynamo.yaml")
 
 
 def normalize_backend(backend: Optional[str], default: str = DEFAULT_BACKEND) -> str:

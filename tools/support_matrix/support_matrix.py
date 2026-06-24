@@ -29,7 +29,7 @@ from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk import config as sdk_config
 from aiconfigurator.sdk.models import _get_model_info
 from aiconfigurator.sdk.models.helpers import _apply_model_quant_defaults
-from aiconfigurator.sdk.task import TaskConfig, TaskRunner
+from aiconfigurator.sdk.task_v2 import Task
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +219,19 @@ def _is_known_framework_incompatible_gap(
         return False
 
     normalized = error_message.lower()
+
+    # MiMo-V2-Flash uses head_dim=192 attention, which the TRT-LLM kernel cannot run
+    # on Hopper/Blackwell (SM90/SM100): illegal-memory-access / cublas / OOM, so the
+    # attention data can't be collected on those GPUs. It collects fine on Ada (l40s,
+    # SM89) and on sglang/vllm. Treat MiMo+trtllm failures on the SM90+ datacenter GPUs
+    # as a framework gap; leave l40s (works) and a100 (Ampere, hardware-limited) alone.
+    if (
+        model == "XiaomiMiMo/MiMo-V2-Flash"
+        and backend == common.BackendName.trtllm.value
+        and system not in {"l40s", "a100_sxm"}
+    ):
+        return True
+
     if (
         backend == common.BackendName.vllm.value
         and version == "0.19.0"
@@ -673,7 +686,7 @@ class SupportMatrix:
         return combinations
 
     @staticmethod
-    def _create_task_config(
+    def _create_task(
         *,
         mode: str,
         model: str,
@@ -682,13 +695,8 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         engine_step_backend: str | None,
-    ) -> TaskConfig:
-        task_config_kwargs = {
-            "serving_mode": mode,
-            "model_path": model,
-            "system_name": system,
-            "backend_name": backend,
-            "backend_version": version,
+    ) -> Task:
+        common_kwargs = {
             "total_gpus": constraints.total_gpus,
             "isl": constraints.isl,
             "osl": constraints.osl,
@@ -698,8 +706,27 @@ class SupportMatrix:
             "engine_step_backend": engine_step_backend,
         }
         if mode == "disagg":
-            task_config_kwargs["decode_system_name"] = system
-        return TaskConfig(**task_config_kwargs)
+            # v2 disagg forbids shared top-level worker fields; fan out to both roles.
+            return Task(
+                serving_mode="disagg",
+                prefill_model_path=model,
+                decode_model_path=model,
+                prefill_system_name=system,
+                decode_system_name=system,
+                prefill_backend_name=backend,
+                decode_backend_name=backend,
+                prefill_backend_version=version,
+                decode_backend_version=version,
+                **common_kwargs,
+            )
+        return Task(
+            serving_mode="agg",
+            model_path=model,
+            system_name=system,
+            backend_name=backend,
+            backend_version=version,
+            **common_kwargs,
+        )
 
     @staticmethod
     def _run_mode(
@@ -712,7 +739,7 @@ class SupportMatrix:
         constraints: TestConstraints,
         engine_step_backend: str | None,
     ) -> pd.DataFrame | None:
-        task_config = SupportMatrix._create_task_config(
+        task = SupportMatrix._create_task(
             mode=mode,
             model=model,
             system=system,
@@ -721,8 +748,7 @@ class SupportMatrix:
             constraints=constraints,
             engine_step_backend=engine_step_backend,
         )
-        result = TaskRunner().run(task_config)
-        return result.get("pareto_df")
+        return task.run()
 
     @staticmethod
     def run_single_test(

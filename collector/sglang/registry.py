@@ -143,6 +143,45 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.DSV4_HCA_ATTN_MODULE,
     ),
     OpEntry(
+        op="dsv4_csa_attn_module",
+        module="collector.sglang.deepseekv4_sparse_modules",
+        get_func="get_dsv4_csa_attn_test_cases",
+        run_func="run_dsv4_sparse_kernel_worker",
+        perf_filename=PerfFile.DSV4_CSA_ATTN_MODULE,
+    ),
+    # CSA topk_512 DELTA calibration (flat vs top_last) — feeds the
+    # degenerate->representative topK correction in perf_database.
+    OpEntry(
+        op="dsv4_csa_topk_calib",
+        module="collector.sglang.deepseekv4_sparse_modules",
+        get_func="get_dsv4_topk_calib_test_cases",
+        run_func="run_dsv4_sparse_kernel_worker",
+        perf_filename=PerfFile.DSV4_CSA_TOPK_CALIB,
+    ),
+    # GLM-5 DSA sparse sub-kernels (mqa / topk / dsa_attn) — GLM-5 analogue of
+    # the DSV4 sparse family; shapes 1:1 from the GLM-5 DSA module CSV.
+    OpEntry(
+        op="glm5_mqa_logits_module",
+        module="collector.sglang.glm5_dsa_sparse_modules",
+        get_func="get_glm5_mqa_test_cases",
+        run_func="run_glm5_dsa_sparse_kernel_worker",
+        perf_filename=PerfFile.GLM5_MQA_LOGITS_MODULE,
+    ),
+    OpEntry(
+        op="glm5_topk_module",
+        module="collector.sglang.glm5_dsa_sparse_modules",
+        get_func="get_glm5_topk_test_cases",
+        run_func="run_glm5_dsa_sparse_kernel_worker",
+        perf_filename=PerfFile.GLM5_TOPK_MODULE,
+    ),
+    OpEntry(
+        op="glm5_dsa_attn_module",
+        module="collector.sglang.glm5_dsa_sparse_modules",
+        get_func="get_glm5_dsa_attn_test_cases",
+        run_func="run_glm5_dsa_sparse_kernel_worker",
+        perf_filename=PerfFile.GLM5_DSA_ATTN_MODULE,
+    ),
+    OpEntry(
         op="gdn",
         module="collector.sglang.collect_gdn",
         get_func="get_gdn_test_cases",

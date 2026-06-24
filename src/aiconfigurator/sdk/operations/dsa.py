@@ -96,6 +96,25 @@ _GENERATION_DSA_TARGET_Z: list[int] = [
 # fmt: on
 
 
+def _select_dsa_backend(arch_dict, dsa_backend):
+    """Pick the per-backend sub-dict from a context-DSA architecture node.
+
+    Context data is keyed ...[architecture][backend][num_heads]...; backend is
+    "trtllm" (faster kernel, non-CP default) or "flashmla_kv" (used under CP).
+    Falls back to whichever backend is present so single-backend parquets still
+    resolve. Legacy nodes without a backend axis (int head keys) pass through."""
+    if not isinstance(arch_dict, dict) or not arch_dict:
+        return arch_dict
+    if not any(isinstance(k, str) for k in arch_dict):
+        return arch_dict
+    return (
+        arch_dict.get(dsa_backend)
+        or arch_dict.get("flashmla_kv")
+        or arch_dict.get("trtllm")
+        or next(iter(arch_dict.values()))
+    )
+
+
 def _cache_key(database: PerfDatabase) -> tuple:
     """Shared cache key — same shape as GEMM, Attention, and Communication.
 
@@ -177,6 +196,7 @@ class ContextDSAModule(Operation):
         fmha_quant_mode: common.FMHAQuantMode,
         gemm_quant_mode: common.GEMMQuantMode,
         architecture: str = "DeepseekV32ForCausalLM",
+        cp_size: int = 1,
     ) -> None:
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
@@ -184,6 +204,7 @@ class ContextDSAModule(Operation):
         self._fmha_quant_mode = fmha_quant_mode
         self._gemm_quant_mode = gemm_quant_mode
         self._architecture = architecture
+        self._cp_size = cp_size
         self._weights = 0.0
 
     # ------------------------------------------------------------------
@@ -228,6 +249,7 @@ class ContextDSAModule(Operation):
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
         cls._raw_data_cache.clear()
+        cls._glm5_sparse_cache.clear()
 
     @classmethod
     def _extrapolate(cls, data_wrapper) -> None:
@@ -308,6 +330,7 @@ class ContextDSAModule(Operation):
         index_n_heads: int | None = None,
         index_head_dim: int | None = None,
         index_topk: int | None = None,
+        dsa_backend: str = "trtllm",
     ):
         """Query context DSA module table. Verbatim port of the legacy body."""
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
@@ -457,6 +480,7 @@ class ContextDSAModule(Operation):
                 )
             try:
                 dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
+                dsa_dict = _select_dsa_backend(dsa_dict, dsa_backend)
             except (KeyError, TypeError) as exc:
                 raise missing_context_dsa_error() from exc
             raw_dsa_dict = None
@@ -466,6 +490,7 @@ class ContextDSAModule(Operation):
                     raw_dsa_dict = raw_dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][
                         architecture
                     ]
+                    raw_dsa_dict = _select_dsa_backend(raw_dsa_dict, dsa_backend)
                 except (KeyError, TypeError):
                     raw_dsa_dict = None
 
@@ -624,6 +649,9 @@ class ContextDSAModule(Operation):
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix", 0)
 
+        if self._cp_size and self._cp_size > 1:
+            return self._query_cp(database, batch_size, isl, prefix)
+
         result = database.query_context_dsa_module(
             b=batch_size,
             s=isl,
@@ -639,6 +667,162 @@ class ContextDSAModule(Operation):
             energy=result.energy * self._scale_factor,
             source=getattr(result, "source", "silicon"),
         )
+
+    # ------------------------------------------------------------------
+    # Context-Parallel (CP) prefill model — GLM-5 DSA only.
+    # See docs/CONTEXT_PARALLEL_DSA_MODELING.md. Per-card =
+    #   base dsa_module(isl/cp, bf16-KV row)
+    #   + mqa(isl/cp)*(cp-1)                          (mqa ∝ isl², xcp identity)
+    #   - [topk_full(flat) - topk_full(top_last)]/cp  (topk ∝ full/cp; module is dummy/flat)
+    #   + AG_KV + AG_LSE                              (the two small attention all-gathers)
+    # AG_hidden + RS belong to the MoE comm (modeled by MoEDispatch), not here.
+    # ------------------------------------------------------------------
+    _glm5_sparse_cache: ClassVar[dict] = {}
+
+    def _query_cp(self, database: PerfDatabase, b: int, isl: int, prefix: int) -> PerformanceResult:
+        """CP (round-robin split) per-layer DSA, new strategy (2026-06-11):
+
+            result = dsa(isl/cp, prefix)
+                   + [mqa(isl, prefix)/cp      - mqa(isl/cp, prefix)]
+                   + [topk_last(isl, prefix)/cp - topk_flat(isl/cp, prefix)]
+                   + AG_KV + AG_LSE
+
+        The per-card monolithic dsa_module(isl/cp, prefix) is the base; its
+        internal mqa(isl/cp,prefix) and topk_flat(isl/cp,prefix) are swapped out
+        by the two deltas, leaving proj + dsa_attn (both prefix-independent: proj
+        by construction, dsa_attn topk-capped to index_topk) plus the CP-correct
+        full-chunk mqa/topk_last divided across cp ranks. All sub-kernels are
+        looked up at the REAL (q_len, prefix) shape — the parquet ``step`` column
+        IS the prefix (past_kv) length.
+        """
+        cp = self._cp_size
+        per_card = max(1, -(-isl // cp))  # ceil: critical path = busiest CP rank
+        sp = self._load_glm5_sparse(database)
+        g = sp.get("_2d", {})
+        # Fail fast: CP DSA modeling REQUIRES the sparse mqa/topk tables for
+        # the mqa/topk_last deltas. _lookup_2d clamps isl + interp/extrapolates
+        # step, so a None below means the table is absent entirely (parquet not
+        # collected) -- degrading silently to dsa_base would hide that.
+        missing = [k for k in ("mqa", "topk_last", "topk_flat") if not g.get(k)]
+        if missing:
+            raise ValueError(
+                f"GLM5 CP DSA modeling needs sparse tables {missing} for "
+                f"{self._architecture}; collect glm5_mqa_logits/glm5_topk first."
+            )
+        # Base: per-card monolithic dsa_module at (per_card, prefix), follows the
+        # run's kv_cache_dtype like the non-CP path.
+        dsa_base = float(
+            database.query_context_dsa_module(
+                b=b,
+                s=per_card,
+                prefix=prefix,
+                num_heads=self._num_heads,
+                kvcache_quant_mode=self._kvcache_quant_mode,
+                fmha_quant_mode=self._fmha_quant_mode,
+                gemm_quant_mode=self._gemm_quant_mode,
+                architecture=self._architecture,
+                dsa_backend="flashmla_kv",
+            )
+        )
+        mqa_full = self._lookup_2d(g.get("mqa"), isl, prefix)
+        mqa_perc = self._lookup_2d(g.get("mqa"), per_card, prefix)
+        tl_full = self._lookup_2d(g.get("topk_last"), isl, prefix)
+        tf_perc = self._lookup_2d(g.get("topk_flat"), per_card, prefix)
+        latency = dsa_base
+        if None not in (mqa_full, mqa_perc, tl_full, tf_perc):
+            delta_mqa = mqa_full / cp - mqa_perc
+            delta_topk = tl_full / cp - tf_perc
+            latency += delta_mqa + delta_topk
+        # CP communication: AG of compressed KV (kv_lora+rope) + AG of LSE (kv_lora).
+        dims = DSA_MODEL_DIMS.get(self._architecture, {})
+        kv_lora = dims.get("kv_lora_rank", 512)
+        rope = dims.get("qk_rope_head_dim", 64)
+        index_head_dim = dims.get("index_head_dim", 128)
+        # CP attention all-gather, verified by instrumenting sglang cp_utils
+        # (cp_all_gather_rerange_output): per current-chunk tokens (isl, not
+        # isl+prefix; prefix KV is already replicated), bf16. Two gathers:
+        #   - compressed KV latent: kv_lora_rank + qk_rope_head_dim (= 576)
+        #   - DSA indexer key: index_head_dim (= 128)
+        # (The hidden_states 6144 AG/RS is the MoE token dispatch, modeled in
+        # context_moe_pre/post_dispatch, not here.)
+        # ag_kv = MQA-stage gather: DSA indexer key (index_head_dim), bf16.
+        # ag_lse = FMHA-stage gather: compressed KV latent (kv_lora_rank +
+        # qk_rope_head_dim), bf16. Both over the current chunk (isl), verified by
+        # instrumenting sglang (dsa_indexer index_key 128; deepseek_v2
+        # rebuild_cp_kv_cache latent 576).
+        ag_kv = float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", isl * index_head_dim))
+        ag_lse = float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", isl * (kv_lora + rope)))
+        latency += ag_kv + ag_lse
+        return PerformanceResult(latency * self._scale_factor, energy=0.0, source="cp_model")
+
+    @classmethod
+    def _load_glm5_sparse(cls, database: PerfDatabase) -> dict:
+        key = cls._cache_key(database)
+        if key in cls._glm5_sparse_cache:
+            return cls._glm5_sparse_cache[key]
+        import os
+
+        import pandas as pd
+
+        data_dir = os.path.join(
+            database.systems_root, database.system_spec["data_dir"], database.backend, database.version
+        )
+        # 2D grids keyed by (isl, step) for the CP composition path.
+        out = {}
+        out2d = {"mqa": {}, "topk_last": {}, "topk_flat": {}, "dsa_attn": {}}
+
+        def _read(fn):
+            p = os.path.join(data_dir, fn)
+            return pd.read_parquet(p) if os.path.exists(p) else None
+
+        mdf = _read("glm5_mqa_logits_module_perf.parquet")
+        if mdf is not None:
+            mh = mdf[mdf["num_heads"] == 64] if "num_heads" in mdf else mdf
+            for _, r in mh[mh["batch_size"] == 1].iterrows():
+                out2d["mqa"][(int(r["isl"]), int(r["step"]))] = float(r["latency"])
+        tdf = _read("glm5_topk_module_perf.parquet")
+        if tdf is not None:
+            th = tdf[tdf["num_heads"] == 64] if "num_heads" in tdf else tdf
+            for _, r in th[th["batch_size"] == 1].iterrows():
+                mode = "topk_flat" if str(r.get("score_mode", "")) == "flat" else "topk_last"
+                out2d[mode][(int(r["isl"]), int(r["step"]))] = float(r["latency"])
+        adf = _read("glm5_dsa_attn_module_perf.parquet")
+        if adf is not None:
+            ah = adf[adf["num_heads"] == 64] if "num_heads" in adf else adf
+            for _, r in ah[ah["batch_size"] == 1].iterrows():
+                out2d["dsa_attn"][(int(r["isl"]), int(r["step"]))] = float(r["latency"])
+        out["_2d"] = out2d
+        cls._glm5_sparse_cache[key] = out
+        return out
+
+    @staticmethod
+    def _lookup_2d(table, isl, step):
+        """Lookup {(isl,step): latency} at a fixed isl (exact grid value), linear
+        interp/extrap on step. Used by the CP sub-kernel composition."""
+        if not table:
+            return None
+        isls = sorted({i for (i, _s) in table})
+        if isl > isls[-1]:
+            raise ValueError(
+                f"GLM5 CP DSA: isl={isl} exceeds the collected sparse-kernel grid "
+                f"(max isl={isls[-1]}); mqa/topk scale super-linearly with isl, so "
+                f"clamping the isl axis would silently under-estimate. Re-collect with "
+                f"AIC_CHUNKED_PREFILL_SIZE >= {isl} "
+                f"(docs/CONTEXT_PARALLEL_DSA_MODELING.md §9.1)."
+            )
+        use_isl = isl if isl in isls else min(isls, key=lambda x: abs(x - isl))
+        steps = sorted(st for (i, st) in table if i == use_isl)
+        if not steps:
+            return None
+        if (use_isl, step) in table:
+            return table[(use_isl, step)]
+        lo = max([st for st in steps if st <= step], default=steps[0])
+        hi = min([st for st in steps if st >= step], default=steps[-1])
+        if lo == hi:
+            return table[(use_isl, lo)]
+        a = table[(use_isl, lo)]
+        bb = table[(use_isl, hi)]
+        return a + (bb - a) * (step - lo) / (hi - lo)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -749,6 +933,7 @@ class GenerationDSAModule(Operation):
         index_n_heads: int | None = None,
         index_head_dim: int | None = None,
         index_topk: int | None = None,
+        dsa_backend: str = "trtllm",
     ):
         """Query generation DSA module table. Verbatim port of the legacy body."""
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
@@ -864,6 +1049,7 @@ class GenerationDSAModule(Operation):
                 )
             try:
                 dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
+                dsa_dict = _select_dsa_backend(dsa_dict, dsa_backend)
 
                 def sequence_value(seq_dict):
                     if s in seq_dict:
@@ -1018,7 +1204,9 @@ def load_context_dsa_module_data(dsa_file: str):
         lambda: defaultdict(
             lambda: defaultdict(
                 lambda: defaultdict(
-                    lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                    )
                 )
             )
         )
@@ -1044,7 +1232,9 @@ def load_context_dsa_module_data(dsa_file: str):
         fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
         kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
-        dsa_data[fmha_mode][kv_dtype][gemm_mode][arch][num_heads][prefix][s][b] = {
+        ks = row.get("kernel_source") or ""
+        dsa_backend = "trtllm" if "trtllm" in ks else "flashmla_kv"
+        dsa_data[fmha_mode][kv_dtype][gemm_mode][arch][dsa_backend][num_heads][prefix][s][b] = {
             "latency": latency,
             "power": power,
             "energy": energy,
@@ -1073,7 +1263,9 @@ def load_generation_dsa_module_data(dsa_file: str):
         return None
 
     dsa_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+        lambda: defaultdict(
+            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+        )
     )
 
     has_power = len(rows) > 0 and "power" in rows[0]
@@ -1090,7 +1282,9 @@ def load_generation_dsa_module_data(dsa_file: str):
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
-        dsa_data[kv_dtype][gemm_mode][arch][num_heads][b][s] = {
+        ks = row.get("kernel_source") or ""
+        dsa_backend = "trtllm" if "trtllm" in ks else "flashmla_kv"
+        dsa_data[kv_dtype][gemm_mode][arch][dsa_backend][num_heads][b][s] = {
             "latency": latency,
             "power": power,
             "energy": energy,

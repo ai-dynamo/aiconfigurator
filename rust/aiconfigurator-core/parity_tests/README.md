@@ -18,13 +18,15 @@ AICONFIGURATOR_RUST_CORE_AUTOBUILD=1 uv run pytest -q -rx rust/aiconfigurator-co
 The suite compares Python SDK output with Rust-backed output for:
 
 - `static`: `static_ctx`, `static_gen`, and `static_total`
-- `mixed_step`: one explicit mixed prefill/decode forward-pass metrics step
+- `mixed_step`: Python `_get_mix_step_latency` vs Rust
+  `estimate_mixed_step_latency_with_rust` for the same shape
 - `agg`: public `cli_estimate(mode="agg")`
 - `disagg`: public `cli_estimate(mode="disagg")`
 
-Current mismatches are reported through `pytest.xfail`. The xfail reason prints
-the Python value, Rust value, absolute delta, percent delta, tolerance, and
-status for each metric.
+After Phase 3 C8-C10, all 12 smoke surfaces (3 cases x 4 modes) pass within
+the 1% drift tolerance and the tests assert hard. If a parity assertion ever
+fails again, the failure message prints the Python value, Rust value, absolute
+delta, percent delta, tolerance, and status for each metric.
 
 ## Engine-Step Benchmark
 

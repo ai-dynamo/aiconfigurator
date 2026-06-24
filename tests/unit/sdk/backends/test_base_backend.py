@@ -46,6 +46,7 @@ class _TestBackend(BaseBackend):
         osl,
         num_tokens=0,
         prefix=0,
+        encoder_memory=None,
     ) -> dict[str, float]:
         return {"total": 1.0}
 
@@ -213,3 +214,9 @@ def test_run_agg_with_osl_one_does_not_divide_by_zero(
     row = summary.get_summary_df().iloc[0]
     assert row["tpot"] > 0.0
     assert row["tokens/s/user"] == 0.0
+
+
+def test_mix_step_efficiency_base_default_is_one(backend: BaseBackend) -> None:
+    assert backend._mix_step_efficiency(ctx_tokens=4096, gen_tokens=16) == 1.0
+    assert backend._mix_step_efficiency(ctx_tokens=4096, gen_tokens=0) == 1.0
+    assert backend._mix_step_efficiency(ctx_tokens=0, gen_tokens=0) == 1.0
