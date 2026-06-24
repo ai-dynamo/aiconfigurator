@@ -469,20 +469,12 @@ class ContextAttention(Operation):
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             n_kv_lookup = 0 if n == n_kv else n_kv
-            # Windowed attention: the per-model windowed slices are scattered and partly
-            # corrupt (e.g. hs192/win128 fp8 records ~83000x the full-attention latency).
-            # Always interpolate the window=0 (full-attention) measurement and scale by the
-            # SOL ratio, which captures the windowed O(seq*window) work analytically. SOL is
-            # already window-aware (get_sol caps the score region at the window).
-            lookup_window = window_size
-            sol_scale = 1.0
-            if window_size > 0:
-                lookup_window = 0
-                sol_full = get_sol(b, s, prefix, n, n_kv, head_size, 0, kvcache_quant_mode, fmha_quant_mode)[0]
-                sol_win = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
-                if sol_full > 0:
-                    sol_scale = sol_win / sol_full
-            attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][lookup_window]
+            # Use the real windowed slice when present -- validation shows it beats a
+            # window=0 + SOL-ratio reconstruction (the latter is ~25-77% off vs measured
+            # windowed data). When the windowed slice is absent or too sparse to
+            # interpolate, interp_3d fails accurately (raises) and HYBRID/EMPIRICAL fall
+            # back to get_empirical's window=0 + SOL derivation.
+            attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
             result = interpolation.interp_3d(
                 n,
                 full_s,
@@ -491,8 +483,8 @@ class ContextAttention(Operation):
                 "cubic",
                 database._extracted_metrics_cache,
             )
-            latency = result["latency"] * prefix_correction * sol_scale
-            energy = result.get("energy", 0.0) * prefix_correction * sol_scale
+            latency = result["latency"] * prefix_correction
+            energy = result.get("energy", 0.0) * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -832,18 +824,10 @@ class GenerationAttention(Operation):
             data_wrapper.raise_if_not_loaded()
             n_kv_lookup = n_kv if n_kv != n else 0
 
-            # Windowed decode: derive from the window=0 measurement scaled by the SOL ratio
-            # (get_sol caps decode kv_len at the window). The per-model windowed slices are
-            # scattered/partly corrupt, so we don't read them directly.
-            lookup_window = window_size
-            sol_scale = 1.0
-            if window_size > 0:
-                lookup_window = 0
-                sol_full = get_sol(b, s, n, n_kv, head_size, 0, kvcache_quant_mode)[0]
-                sol_win = get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
-                if sol_full > 0:
-                    sol_scale = sol_win / sol_full
-            attention_dict = data_wrapper[kvcache_quant_mode][n_kv_lookup][head_size][lookup_window]
+            # Use the real windowed slice when present (more accurate than a window=0 +
+            # SOL reconstruction); when absent/too sparse, interp_3d raises and
+            # HYBRID/EMPIRICAL fall back to get_empirical's window=0 + SOL derivation.
+            attention_dict = data_wrapper[kvcache_quant_mode][n_kv_lookup][head_size][window_size]
             s_min = max(1, int(s * 0.9))
             s_max = max(s_min, int(s * 1.1))
             sample_cnt = 5
@@ -856,8 +840,8 @@ class GenerationAttention(Operation):
                 latency_sum += float(r["latency"])
                 energy_sum += float(r.get("energy", 0.0))
 
-            latency = latency_sum / sample_cnt * sol_scale
-            energy = energy_sum / sample_cnt * sol_scale
+            latency = latency_sum / sample_cnt
+            energy = energy_sum / sample_cnt
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
