@@ -15,7 +15,7 @@ config == static/"disabled"):
 - otherwise -> a ``PlannerConfig`` -> the planner-bridge replay (scaling; goodput
   + gpu_hours). ``optimization_target`` is the planner's scaling objective derived
   from the sweep goal (see ``OptimizationTarget.planner_optimization_target``):
-  ``goodput``/``goodput_per_gpu_hour`` -> ``"sla"``, ``throughput`` ->
+  ``goodput``/``goodput_per_gpu`` -> ``"sla"``, ``throughput`` ->
   ``"throughput"``, ``e2e_latency`` -> ``"latency"``.
 
 Pure dict-building (no dynamo import), so it is unit-testable on its own.

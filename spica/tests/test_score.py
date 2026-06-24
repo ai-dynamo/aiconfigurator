@@ -16,7 +16,9 @@ from spica.score import (
     score_report,
 )
 
-# A representative trace_report (the keys the merged replay emits).
+# A representative trace_report (the keys the merged replay emits). duration_ms=0.5h
+# with gpu_hours=2.0 -> avg_gpu = gpu_hours / e2e_hours = 2.0 / 0.5 = 4.0 (deliberately
+# != gpu_hours so the per-gpu assertions discriminate rate/avg_gpu from a rate/gpu_hours regression).
 REPORT = {
     "output_throughput_tok_s": 5000.0,
     "mean_ttft_ms": 800.0,
@@ -24,6 +26,7 @@ REPORT = {
     "mean_e2e_latency_ms": 1200.0,
     "goodput_output_throughput_tok_s": 4000.0,
     "gpu_hours": 2.0,
+    "duration_ms": 1_800_000.0,  # 0.5 h
 }
 
 
@@ -31,42 +34,50 @@ def test_objective_per_target():
     assert objective_value(REPORT, OptimizationTarget.THROUGHPUT) == 5000.0
     assert objective_value(REPORT, OptimizationTarget.E2E_LATENCY) == 1200.0
     assert objective_value(REPORT, OptimizationTarget.GOODPUT) == 4000.0
-    # goodput_per_gpu_hour = goodput / gpu_hours = 4000 / 2 = 2000
-    assert objective_value(REPORT, OptimizationTarget.GOODPUT_PER_GPU_HOUR) == 2000.0
-    # throughput_per_gpu_hour = throughput / gpu_hours = 5000 / 2 = 2500
-    assert objective_value(REPORT, OptimizationTarget.THROUGHPUT_PER_GPU_HOUR) == 2500.0
+    # avg_gpu = gpu_hours / e2e_hours = 2.0 / 0.5 = 4.0
+    # goodput_per_gpu = goodput / avg_gpu = 4000 / 4 = 1000
+    assert objective_value(REPORT, OptimizationTarget.GOODPUT_PER_GPU) == 1000.0
+    # throughput_per_gpu = throughput / avg_gpu = 5000 / 4 = 1250
+    assert objective_value(REPORT, OptimizationTarget.THROUGHPUT_PER_GPU) == 1250.0
 
 
-def test_throughput_per_gpu_hour_zero_when_gpu_hours_missing_or_zero():
-    # mirrors goodput_per_gpu_hour: the gpu_hours>0 guard avoids dividing by zero.
+def test_throughput_per_gpu_zero_when_avg_gpu_unavailable():
+    # avg_gpu needs both gpu_hours>0 and duration_ms>0; either missing -> 0.0 (no divide-by-zero).
     assert (
         objective_value(
-            {"output_throughput_tok_s": 5000.0, "gpu_hours": 0.0}, OptimizationTarget.THROUGHPUT_PER_GPU_HOUR
+            {"output_throughput_tok_s": 5000.0, "gpu_hours": 0.0, "duration_ms": 1_800_000.0},
+            OptimizationTarget.THROUGHPUT_PER_GPU,
         )
         == 0.0
     )
-    assert objective_value({"output_throughput_tok_s": 5000.0}, OptimizationTarget.THROUGHPUT_PER_GPU_HOUR) == 0.0
+    # gpu_hours present but duration_ms absent -> avg_gpu undefined -> 0.0
+    assert (
+        objective_value({"output_throughput_tok_s": 5000.0, "gpu_hours": 2.0}, OptimizationTarget.THROUGHPUT_PER_GPU)
+        == 0.0
+    )
+    assert objective_value({"output_throughput_tok_s": 5000.0}, OptimizationTarget.THROUGHPUT_PER_GPU) == 0.0
 
 
-def test_goodput_per_gpu_hour_zero_when_no_gpu_hours():
+def test_goodput_per_gpu_zero_when_no_gpu_hours():
     assert (
         objective_value(
-            {"goodput_output_throughput_tok_s": 4000.0, "gpu_hours": 0.0}, OptimizationTarget.GOODPUT_PER_GPU_HOUR
+            {"goodput_output_throughput_tok_s": 4000.0, "gpu_hours": 0.0, "duration_ms": 1_800_000.0},
+            OptimizationTarget.GOODPUT_PER_GPU,
         )
         == 0.0
     )
 
 
-def test_goodput_per_gpu_hour_zero_when_gpu_hours_missing():
-    # gpu_hours absent -> defaults to 0.0, the guard avoids dividing by zero.
-    assert objective_value({"goodput_output_throughput_tok_s": 4000.0}, OptimizationTarget.GOODPUT_PER_GPU_HOUR) == 0.0
+def test_goodput_per_gpu_zero_when_gpu_hours_missing():
+    # gpu_hours absent -> avg_gpu defaults to 0.0, the guard avoids dividing by zero.
+    assert objective_value({"goodput_output_throughput_tok_s": 4000.0}, OptimizationTarget.GOODPUT_PER_GPU) == 0.0
 
 
 def test_objective_defaults_on_missing_report_keys():
     # An empty report falls back to each target's neutral default.
     assert objective_value({}, OptimizationTarget.THROUGHPUT) == 0.0
     assert objective_value({}, OptimizationTarget.GOODPUT) == 0.0
-    assert objective_value({}, OptimizationTarget.GOODPUT_PER_GPU_HOUR) == 0.0
+    assert objective_value({}, OptimizationTarget.GOODPUT_PER_GPU) == 0.0
     # latency minimizes, so a missing report is the worst-possible +inf
     assert objective_value({}, OptimizationTarget.E2E_LATENCY) == math.inf
 
@@ -86,7 +97,7 @@ def test_objective_value_unknown_target_raises():
 
 def test_score_sign():
     # maximized targets keep sign; e2e_latency is negated (higher score = lower latency)
-    assert score_report(REPORT, OptimizationTarget.GOODPUT_PER_GPU_HOUR) == 2000.0
+    assert score_report(REPORT, OptimizationTarget.GOODPUT_PER_GPU) == 1000.0
     assert score_report(REPORT, OptimizationTarget.E2E_LATENCY) == -1200.0
 
 
@@ -100,13 +111,14 @@ def test_is_feasible_budget_only():
 
 def test_make_candidate_and_rank():
     cfg = {"used_gpus": 16, "deployment_mode": "agg"}
-    c = make_candidate(cfg, REPORT, OptimizationTarget.GOODPUT_PER_GPU_HOUR)
+    c = make_candidate(cfg, REPORT, OptimizationTarget.GOODPUT_PER_GPU)
     assert c.used_gpus == 16
-    assert c.score == 2000.0
+    assert c.score == 1000.0  # goodput / avg_gpu = 4000 / 4
     assert c.metrics["goodput_output_throughput_tok_s"] == 4000.0 and c.metrics["gpu_hours"] == 2.0
 
-    a = make_candidate({"used_gpus": 8}, {**REPORT, "gpu_hours": 4.0}, OptimizationTarget.GOODPUT_PER_GPU_HOUR)  # 1000
-    b = make_candidate({"used_gpus": 16}, REPORT, OptimizationTarget.GOODPUT_PER_GPU_HOUR)  # 2000
-    tie = make_candidate({"used_gpus": 8}, REPORT, OptimizationTarget.GOODPUT_PER_GPU_HOUR)  # 2000, fewer gpus
+    # gpu_hours=4.0 over the same 0.5h -> avg_gpu = 8.0 -> goodput_per_gpu = 4000/8 = 500
+    a = make_candidate({"used_gpus": 8}, {**REPORT, "gpu_hours": 4.0}, OptimizationTarget.GOODPUT_PER_GPU)  # 500
+    b = make_candidate({"used_gpus": 16}, REPORT, OptimizationTarget.GOODPUT_PER_GPU)  # 1000
+    tie = make_candidate({"used_gpus": 8}, REPORT, OptimizationTarget.GOODPUT_PER_GPU)  # 1000, fewer gpus
     ranked = rank([a, b, tie])
-    assert ranked[0] is tie and ranked[1] is b and ranked[2] is a  # 2000(8gpu), 2000(16gpu), 1000
+    assert ranked[0] is tie and ranked[1] is b and ranked[2] is a  # 1000(8gpu), 1000(16gpu), 500

@@ -12,9 +12,9 @@ workload:
   trace_path: /data/replay/traffic.jsonl   # or omit and set isl/osl/request_rate
   trace_format: mooncake
 goal:
-  # throughput | throughput_per_gpu_hour | e2e_latency | goodput | goodput_per_gpu_hour
-  target: goodput_per_gpu_hour
-  sla: {ttft_ms: 2000, itl_ms: 30}  # required only for goodput / goodput_per_gpu_hour
+  # throughput | throughput_per_gpu | e2e_latency | goodput | goodput_per_gpu
+  target: goodput_per_gpu
+  sla: {ttft_ms: 2000, itl_ms: 30}  # required only for goodput / goodput_per_gpu
 sweep:
   max_rounds: 40
   parallel_evals: 16

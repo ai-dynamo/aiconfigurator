@@ -32,10 +32,10 @@ class OptimizationTarget(str, Enum):
     """What the search optimizes for."""
 
     THROUGHPUT = "throughput"  # maximize replay throughput
-    THROUGHPUT_PER_GPU_HOUR = "throughput_per_gpu_hour"  # maximize throughput / GPU-hour
+    THROUGHPUT_PER_GPU = "throughput_per_gpu"  # maximize throughput / avg GPU (tok/s/gpu)
     E2E_LATENCY = "e2e_latency"  # minimize mean end-to-end latency
     GOODPUT = "goodput"  # maximize SLA-satisfying throughput
-    GOODPUT_PER_GPU_HOUR = "goodput_per_gpu_hour"  # maximize goodput / GPU-hour
+    GOODPUT_PER_GPU = "goodput_per_gpu"  # maximize goodput / avg GPU (tok/s/gpu)
 
     @property
     def maximize(self) -> bool:
@@ -47,17 +47,17 @@ class OptimizationTarget(str, Enum):
         """The dynamo planner ``optimization_target`` this sweep goal maps to.
 
         The planner's scaling objective should match what the sweep optimizes:
-        ``goodput``/``goodput_per_gpu_hour`` -> ``"sla"`` (SLA-based scaling, the only
+        ``goodput``/``goodput_per_gpu`` -> ``"sla"`` (SLA-based scaling, the only
         mode that uses ttft/itl and enables predictive throughput scaling);
-        ``throughput``/``throughput_per_gpu_hour`` -> ``"throughput"``; ``e2e_latency``
+        ``throughput``/``throughput_per_gpu`` -> ``"throughput"``; ``e2e_latency``
         -> ``"latency"`` (both reactive, no SLA).
         """
         return {
             OptimizationTarget.THROUGHPUT: "throughput",
-            OptimizationTarget.THROUGHPUT_PER_GPU_HOUR: "throughput",
+            OptimizationTarget.THROUGHPUT_PER_GPU: "throughput",
             OptimizationTarget.E2E_LATENCY: "latency",
             OptimizationTarget.GOODPUT: "sla",
-            OptimizationTarget.GOODPUT_PER_GPU_HOUR: "sla",
+            OptimizationTarget.GOODPUT_PER_GPU: "sla",
         }[self]
 
 
@@ -77,13 +77,13 @@ class OptimizationGoal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     target: OptimizationTarget = OptimizationTarget.THROUGHPUT
-    sla: SLATarget | None = None  # required for goodput / goodput_per_gpu_hour
+    sla: SLATarget | None = None  # required for goodput / goodput_per_gpu
 
     @model_validator(mode="after")
     def _require_sla_for_goodput(self) -> "OptimizationGoal":
         needs_sla = self.target in (
             OptimizationTarget.GOODPUT,
-            OptimizationTarget.GOODPUT_PER_GPU_HOUR,
+            OptimizationTarget.GOODPUT_PER_GPU,
         )
         has_sla = self.sla is not None and (
             self.sla.e2e_ms is not None or (self.sla.ttft_ms is not None and self.sla.itl_ms is not None)

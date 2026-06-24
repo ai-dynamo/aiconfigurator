@@ -18,7 +18,7 @@ def test_example_yaml_loads():
     assert cfg.search_space.deployment_mode == ["disagg", "agg"]
     assert "disabled" in cfg.search_space.planner_scaling_policy
     assert cfg.workload.is_trace_based
-    assert cfg.goal.target is OptimizationTarget.GOODPUT_PER_GPU_HOUR
+    assert cfg.goal.target is OptimizationTarget.GOODPUT_PER_GPU
     assert cfg.sweep.max_rounds == 40
 
 
@@ -56,23 +56,23 @@ def test_goodput_requires_sla():
 
 def test_target_direction():
     assert OptimizationTarget.THROUGHPUT.maximize
-    assert OptimizationTarget.THROUGHPUT_PER_GPU_HOUR.maximize
-    assert OptimizationTarget.GOODPUT_PER_GPU_HOUR.maximize
+    assert OptimizationTarget.THROUGHPUT_PER_GPU.maximize
+    assert OptimizationTarget.GOODPUT_PER_GPU.maximize
     assert not OptimizationTarget.E2E_LATENCY.maximize
 
 
 def test_planner_optimization_target_mapping():
     # the planner's scaling objective is derived from the sweep goal
     assert OptimizationTarget.THROUGHPUT.planner_optimization_target == "throughput"
-    assert OptimizationTarget.THROUGHPUT_PER_GPU_HOUR.planner_optimization_target == "throughput"
+    assert OptimizationTarget.THROUGHPUT_PER_GPU.planner_optimization_target == "throughput"
     assert OptimizationTarget.E2E_LATENCY.planner_optimization_target == "latency"
     assert OptimizationTarget.GOODPUT.planner_optimization_target == "sla"
-    assert OptimizationTarget.GOODPUT_PER_GPU_HOUR.planner_optimization_target == "sla"
+    assert OptimizationTarget.GOODPUT_PER_GPU.planner_optimization_target == "sla"
 
 
-def test_throughput_per_gpu_hour_needs_no_sla():
-    # throughput_per_gpu_hour is throughput-based -> no SLA required (unlike goodput*)
-    OptimizationGoal(target=OptimizationTarget.THROUGHPUT_PER_GPU_HOUR)  # must validate without an SLA
+def test_throughput_per_gpu_needs_no_sla():
+    # throughput_per_gpu is throughput-based -> no SLA required (unlike goodput*)
+    OptimizationGoal(target=OptimizationTarget.THROUGHPUT_PER_GPU)  # must validate without an SLA
 
 
 def _search_space(**overrides):

@@ -68,7 +68,7 @@ def _config(**sweep_ov) -> SmartSearchConfig:
         },
         workload={"trace_path": TRACE},
         sweep=sweep,
-        goal={"target": "goodput_per_gpu_hour", "sla": {"ttft_ms": 8000.0, "itl_ms": 200.0}},
+        goal={"target": "goodput_per_gpu", "sla": {"ttft_ms": 8000.0, "itl_ms": 200.0}},
     )
 
 
@@ -96,9 +96,11 @@ def test_real_bridge_emits_goodput_and_gpu_hours():
 
     assert "goodput_output_throughput_tok_s" in report
     assert "gpu_hours" in report and report["gpu_hours"] > 0.0
-    # score == goodput / gpu_hours, computed from the real report
-    expected = report["goodput_output_throughput_tok_s"] / report["gpu_hours"]
-    assert objective_value(report, OptimizationTarget.GOODPUT_PER_GPU_HOUR) == pytest.approx(expected)
+    # score == goodput / avg_gpu, where avg_gpu = gpu_hours / e2e_hours (time-averaged
+    # provisioned GPU count) -- computed from the real report.
+    avg_gpu = report["gpu_hours"] / (report["duration_ms"] / 3_600_000.0)
+    expected = report["goodput_output_throughput_tok_s"] / avg_gpu
+    assert objective_value(report, OptimizationTarget.GOODPUT_PER_GPU) == pytest.approx(expected)
 
 
 def test_static_path_emits_goodput():
@@ -131,11 +133,12 @@ def test_smart_search_returns_ranked_candidate():
     """The full loop (Vizier sampler + real replay) returns ranked candidates."""
     candidates = run_smart_search(_config())
     assert candidates, "expected at least one feasible candidate"
-    # ranked best-first by goodput_per_gpu_hour
+    # ranked best-first by goodput_per_gpu
     scores = [c.score for c in candidates]
     assert scores == sorted(scores, reverse=True)
     best = candidates[0]
     assert "goodput_output_throughput_tok_s" in best.metrics
     assert best.metrics["gpu_hours"] > 0.0
     assert best.used_gpus <= 256
-    assert best.score == pytest.approx(best.metrics["goodput_output_throughput_tok_s"] / best.metrics["gpu_hours"])
+    avg_gpu = best.metrics["gpu_hours"] / (best.metrics["duration_ms"] / 3_600_000.0)
+    assert best.score == pytest.approx(best.metrics["goodput_output_throughput_tok_s"] / avg_gpu)

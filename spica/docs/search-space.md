@@ -85,8 +85,8 @@ Dict keys: `enable_throughput_scaling`, `enable_load_scaling`,
 intervals / fpm / sensitivity / predictor are emitted.
 
 **The planner's `optimization_target` is derived from the sweep goal, not from this
-policy** — `throughput`/`throughput_per_gpu_hour`→`"throughput"`, `e2e_latency`→`"latency"`,
-`goodput`/`goodput_per_gpu_hour`→`"sla"` (see `OptimizationTarget.planner_optimization_target`).
+policy** — `throughput`/`throughput_per_gpu`→`"throughput"`, `e2e_latency`→`"latency"`,
+`goodput`/`goodput_per_gpu`→`"sla"` (see `OptimizationTarget.planner_optimization_target`).
 The policy only decides *which* scaling loops run + their intervals.
 
 **Predictive throughput scaling needs an SLA**, so it only works under a goodput sweep

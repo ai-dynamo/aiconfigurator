@@ -85,7 +85,7 @@ def test_static_path_threads_goodput_sla(monkeypatch):
         "run_trace_replay",
         lambda **kw: rec.update(kw) or {"goodput_output_throughput_tok_s": 100.0, "gpu_hours": 1.0},
     )
-    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
     report = ReplayEvaluator(_wl(), goal).evaluate(_agg_plan(static=True))
     assert report["goodput_output_throughput_tok_s"] == 100.0
     assert rec["sla_ttft_ms"] == 2000.0 and rec["sla_itl_ms"] == 30.0  # SLA threaded to the plain path
@@ -101,7 +101,7 @@ def test_scaling_agg_uses_bridge_with_goodput_sla(monkeypatch):
             rec.update(kw) or SimpleNamespace(trace_report={"gpu_hours": 2.0, "goodput_output_throughput_tok_s": 100.0})
         ),
     )
-    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
     report = ReplayEvaluator(_wl(), goal).evaluate(_agg_plan(static=False))
     assert report["gpu_hours"] == 2.0
     # goodput SLA threaded to the bridge; planner config carried as inline JSON
@@ -161,7 +161,7 @@ def test_scaling_trace_threads_replay_concurrency(monkeypatch):
         lambda **kw: rec.update(kw) or SimpleNamespace(trace_report={"gpu_hours": 1.0}),
     )
     wl = Workload(trace_path="/tmp/t.jsonl", replay_concurrency=32)
-    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
     ReplayEvaluator(wl, goal).evaluate(_agg_plan(static=False))
     assert rec["replay_concurrency"] == 32 and rec["trace_file"] == "/tmp/t.jsonl"
 
@@ -192,7 +192,7 @@ def test_synthetic_static_uses_from_synthetic_bridge(monkeypatch):
             return _Bridge()
 
     monkeypatch.setattr(dynamo.mocker, "PlannerReplayBridge", _BridgeFactory)
-    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
     report = ReplayEvaluator(_syn_wl(concurrency=4.0), goal).evaluate(_agg_plan(static=True))
     assert report["goodput_output_throughput_tok_s"] == 50.0
     assert rec["input_tokens"] == 128 and rec["output_tokens"] == 64 and rec["request_count"] == 100
@@ -210,7 +210,7 @@ def test_synthetic_planner_uses_run_planner_replay(monkeypatch):
         "_run_planner_replay",
         lambda **kw: rec.update(kw) or SimpleNamespace(trace_report={"gpu_hours": 2.0}),
     )
-    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=1500.0, itl_ms=50.0))
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=1500.0, itl_ms=50.0))
     # request-rate workload -> open-loop (no cap); arrival_interval derived from the rate
     ReplayEvaluator(_syn_wl(request_rate=20.0), goal).evaluate(_agg_plan(static=False))
     assert rec["trace_file"] is None and rec["replay_concurrency"] is None
@@ -249,7 +249,7 @@ def test_scaling_trace_disagg_uses_run_planner_replay(monkeypatch):
             rec.update(kw) or SimpleNamespace(trace_report={"gpu_hours": 3.0, "goodput_output_throughput_tok_s": 90.0})
         ),
     )
-    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
     report = ReplayEvaluator(_wl(), goal).evaluate(_disagg_plan(static=False))
     assert report["gpu_hours"] == 3.0
     assert rec["extra_engine_args"] is None and rec["num_workers"] == 0
@@ -280,7 +280,7 @@ def test_synthetic_static_disagg_uses_from_synthetic_disagg(monkeypatch):
             return _Bridge()
 
     monkeypatch.setattr(dynamo.mocker, "PlannerReplayBridge", _BridgeFactory)
-    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
     report = ReplayEvaluator(_syn_wl(concurrency=4.0), goal).evaluate(_disagg_plan(static=True))
     assert report["goodput_output_throughput_tok_s"] == 60.0
     assert rec["prefill_engine_args"][1] == {"aic_tp_size": 2, "max_num_seqs": 256}
@@ -301,7 +301,7 @@ def test_synthetic_planner_disagg_uses_run_planner_replay(monkeypatch):
         "_run_planner_replay",
         lambda **kw: rec.update(kw) or SimpleNamespace(trace_report={"gpu_hours": 2.0}),
     )
-    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=1500.0, itl_ms=50.0))
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=1500.0, itl_ms=50.0))
     # request-rate workload -> open-loop (no cap); arrival_interval derived from the rate
     ReplayEvaluator(_syn_wl(request_rate=20.0), goal).evaluate(_disagg_plan(static=False))
     assert rec["trace_file"] is None and rec["replay_concurrency"] is None
@@ -340,7 +340,7 @@ def test_drive_static_bridge_loops_until_done(monkeypatch):
             return bridge
 
     monkeypatch.setattr(dynamo.mocker, "PlannerReplayBridge", _BridgeFactory)
-    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU_HOUR, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
     # synthetic + concurrency + static -> from_synthetic bridge driven to completion
     report = ReplayEvaluator(_syn_wl(concurrency=4.0), goal).evaluate(_agg_plan(static=True))
     assert bridge.advances == 2  # one not-done transition then done -> loop terminates
