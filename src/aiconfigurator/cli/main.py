@@ -86,13 +86,12 @@ def _latest_support_matrix_version(
 
 def _build_common_cli_parser() -> argparse.ArgumentParser:
     common_parser = argparse.ArgumentParser(add_help=False)
-    common_parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
     common_parser.add_argument(
         "--log-level",
         type=str.upper,
         default=None,
         choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
-        help=("Set the minimum log level (overrides --debug and the AICONFIGURATOR_LOG_LEVEL env var). Default: INFO."),
+        help=("Set the minimum log level. Priority: --log-level > AICONFIGURATOR_LOG_LEVEL > INFO."),
     )
     common_parser.add_argument(
         "--no-color",
@@ -2172,12 +2171,15 @@ def _run_estimate_mode(args):
 
 
 def _resolve_cli_log_level(args) -> int:
-    """Pick the log level with priority: --log-level > --debug > INFO."""
+    """Pick the log level with priority: --log-level > AICONFIGURATOR_LOG_LEVEL > INFO."""
     cli_level = getattr(args, "log_level", None)
     if cli_level:
         return getattr(logging, cli_level)
-    if getattr(args, "debug", False):
-        return logging.DEBUG
+    env_level = os.environ.get("AICONFIGURATOR_LOG_LEVEL")
+    if env_level:
+        resolved = env_level.strip().upper()
+        if resolved in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
+            return getattr(logging, resolved)
     return logging.INFO
 
 

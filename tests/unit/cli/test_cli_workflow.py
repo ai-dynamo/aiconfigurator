@@ -17,6 +17,7 @@ import pytest
 
 from aiconfigurator.cli.main import (
     _execute_tasks,
+    _resolve_cli_log_level,
     build_default_tasks,
     build_experiment_tasks,
     configure_parser,
@@ -26,6 +27,28 @@ from aiconfigurator.cli.report_and_save import _apply_inclusive_tpot
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 
 pytestmark = pytest.mark.unit
+
+
+class TestCLILogLevelResolution:
+    def test_defaults_to_info(self, monkeypatch) -> None:
+        monkeypatch.delenv("AICONFIGURATOR_LOG_LEVEL", raising=False)
+        args = argparse.Namespace(log_level=None)
+        assert _resolve_cli_log_level(args) == logging.INFO
+
+    def test_env_var_controls_level(self, monkeypatch) -> None:
+        monkeypatch.setenv("AICONFIGURATOR_LOG_LEVEL", "debug")
+        args = argparse.Namespace(log_level=None)
+        assert _resolve_cli_log_level(args) == logging.DEBUG
+
+    def test_cli_flag_overrides_env_var(self, monkeypatch) -> None:
+        monkeypatch.setenv("AICONFIGURATOR_LOG_LEVEL", "warning")
+        args = argparse.Namespace(log_level="DEBUG")
+        assert _resolve_cli_log_level(args) == logging.DEBUG
+
+    def test_invalid_env_var_falls_back_to_info(self, monkeypatch) -> None:
+        monkeypatch.setenv("AICONFIGURATOR_LOG_LEVEL", "not-a-level")
+        args = argparse.Namespace(log_level=None)
+        assert _resolve_cli_log_level(args) == logging.INFO
 
 
 class TestCLIIntegration:

@@ -107,7 +107,7 @@ class TestCLIArgumentParsing:
         assert args.backend == common.BackendName.trtllm.value
         assert args.backend_version is None
         assert args.database_mode == common.DatabaseMode.SILICON.name
-        assert args.debug is False
+        assert args.log_level is None
         assert args.decode_system is None
         assert args.generated_config_version is None
         assert args.generator_dynamo_version is None
@@ -131,8 +131,8 @@ class TestCLIArgumentParsing:
         args = cli_parser.parse_args(["exp", "--yaml-path", str(mock_exp_yaml_path), "--inclusive-tpot"])
         assert args.inclusive_tpot is True
 
-    def test_debug_mode_flag(self, cli_parser):
-        """Test that debug mode can be enabled."""
+    def test_log_level_flag(self, cli_parser):
+        """Test that --log-level is parsed and normalized."""
         args = cli_parser.parse_args(
             [
                 "default",
@@ -142,11 +142,12 @@ class TestCLIArgumentParsing:
                 "8",
                 "--system",
                 "h200_sxm",
-                "--debug",
+                "--log-level",
+                "debug",
             ]
         )
 
-        assert args.debug is True
+        assert args.log_level == "DEBUG"
 
     def test_engine_step_backend_flag(self, cli_parser):
         """Test that the experimental engine step backend can be selected."""
