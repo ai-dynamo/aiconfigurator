@@ -439,7 +439,9 @@ class ContextAttention(Operation):
                     scale = _attn_prefill_hs_ratio(database.backend, head_size) / _attn_prefill_hs_ratio(
                         database.backend, ref_hs
                     )
-                    latency, _ = util_empirical.estimate(sol_time, (n, s + prefix, b), ref_grid, util_scale=scale)
+                    latency, _ = util_empirical.estimate(
+                        sol_time, (n, s + prefix, b), ref_grid, util_scale=scale, provenance="xshape"
+                    )
                     return latency
 
             # No own-window, full-attention, or cross-head basis -> raise honestly.
@@ -798,7 +800,7 @@ class GenerationAttention(Operation):
                     else (None, None)
                 )
                 if ref_grid is not None:
-                    latency, _ = util_empirical.estimate(sol_time, (n, b, s), ref_grid)
+                    latency, _ = util_empirical.estimate(sol_time, (n, b, s), ref_grid, provenance="xshape")
                     return latency
 
             latency, _ = util_empirical.estimate(sol_time, (n, b, s), None)

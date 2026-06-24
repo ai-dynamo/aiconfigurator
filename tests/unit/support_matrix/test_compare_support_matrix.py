@@ -25,6 +25,7 @@ def _row(
     status: str,
     err_msg: str = "",
     command: str = "uv run aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8",
+    source: str = "silicon",
 ) -> list[str]:
     return [
         "Qwen/Qwen3-32B-FP8",
@@ -36,6 +37,7 @@ def _row(
         status,
         err_msg,
         command,
+        source,
     ]
 
 

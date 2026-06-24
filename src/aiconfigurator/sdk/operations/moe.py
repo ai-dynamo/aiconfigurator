@@ -406,6 +406,8 @@ class MoE(Operation):
             )
 
             util_scale = 1.0
+            prov = "empirical"  # own-shape util; tiers below override with their transfer kind
+            tier_hint = {"kind": None}
             if grid is None or not grid.samples:
                 # Transfer tiers (all borrow a collected MoE config's util curve and
                 # reconstruct with SOL). `sol_quant` is the quant whose SOL builds the
@@ -455,6 +457,7 @@ class MoE(Operation):
                         else []
                     )
                     if cands:
+                        tier_hint["kind"] = "xshape"
                         return cands
                     # Tier 2 (XQUANT): cross-quant within the same (memory, compute) profile.
                     # Same profile => same SOL coefficients and binding regime, so util
@@ -466,6 +469,8 @@ class MoE(Operation):
                             if q is quant_mode or (q.value.memory, q.value.compute) != qp:
                                 continue
                             cands.extend(_collect(q, quant_mode))
+                        if cands:
+                            tier_hint["kind"] = "xquant"
                     return cands
 
                 grid = util_empirical.grid_from_reference(
@@ -487,6 +492,8 @@ class MoE(Operation):
                     _moe_candidates,
                     depth=1,
                 )
+                if grid is not None and grid.samples and tier_hint["kind"]:
+                    prov = tier_hint["kind"]
 
                 # Tier 3: cross-PROFILE. No own- or same-profile data at all -> borrow the
                 # nearest collected quant's util curve, built with the REFERENCE quant's own
@@ -518,8 +525,9 @@ class MoE(Operation):
                         if g is not None and g.samples:
                             grid = g
                             util_scale = _moe_quant_util_level(quant_mode) / _moe_quant_util_level(ref_q)
+                            prov = "xprofile"
                             break
-            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, util_scale=util_scale)
+            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, util_scale=util_scale, provenance=prov)
             return latency
 
         def _estimate_overflow_with_last_token_util(

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
 from aiconfigurator.sdk.operations.base import Operation
+from aiconfigurator.sdk.operations.util_empirical import note_provenance
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -293,6 +294,7 @@ class ContextMSAModule(_BaseMSAModule):
                 f"MSA context: no DSA util to transfer from (arch={self._dsa_architecture}, "
                 f"b={b}, s={s}); collect DSA data or set msa_dsa_scale_k against an available quant."
             )
+        note_provenance("xop")  # cross-op transfer from DSA
         lat = sol / (util * self._dsa_scale_k)
         return PerformanceResult(lat * self._scale_factor, energy=0.0, source="empirical")
 
@@ -330,5 +332,6 @@ class GenerationMSAModule(_BaseMSAModule):
                 f"MSA generation: no DSA util to transfer from (arch={self._dsa_architecture}, "
                 f"b={b}, s={s}); collect DSA data or set msa_dsa_scale_k against an available quant."
             )
+        note_provenance("xop")  # cross-op transfer from DSA
         lat = sol / (util * self._dsa_scale_k)
         return PerformanceResult(lat * self._scale_factor, energy=0.0, source="empirical")

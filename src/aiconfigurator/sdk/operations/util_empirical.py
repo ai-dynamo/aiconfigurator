@@ -32,6 +32,8 @@ Extension seams (designed in, not yet wired):
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -40,6 +42,51 @@ import numpy as np
 from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
 
 Coords = tuple[float, ...]
+
+
+# ---------------------------------------------------------------------------
+# Provenance capture: record which empirical path produced a value, so a run's
+# overall data source can be summarised (e.g. the support matrix labelling a
+# config SILICON vs HYBRID and at which transfer tier). Any call to estimate()
+# means the silicon path was missed and an empirical/transfer value was used; the
+# caller tags the specific tier. Recording is a no-op unless a capture is active.
+# Tags ordered by DECREASING confidence (later = relies on more aggressive transfer).
+# ---------------------------------------------------------------------------
+PROVENANCE_ORDER: tuple[str, ...] = (
+    "silicon",  # pure silicon table data (never recorded here; the default when nothing fired)
+    "empirical",  # own-shape util (no transfer)
+    "xversion",  # sibling-version shared layer
+    "xshape",  # cross-shape, same quant
+    "xquant",  # cross-quant, same profile
+    "xprofile",  # cross-quant, cross profile
+    "xop",  # cross-op (borrowed a different op's util)
+)
+_PROVENANCE_RANK = {tag: i for i, tag in enumerate(PROVENANCE_ORDER)}
+_PROVENANCE: contextvars.ContextVar = contextvars.ContextVar("aic_provenance", default=None)
+
+
+def note_provenance(tag: str) -> None:
+    """Record that an empirical path of kind ``tag`` fired (no-op outside a capture)."""
+    sink = _PROVENANCE.get()
+    if sink is not None:
+        sink.add(tag)
+
+
+@contextlib.contextmanager
+def capture_provenance():
+    """Collect the set of empirical-path tags fired within the block."""
+    sink: set[str] = set()
+    token = _PROVENANCE.set(sink)
+    try:
+        yield sink
+    finally:
+        _PROVENANCE.reset(token)
+
+
+def worst_provenance(tags) -> str:
+    """The least-confident tag in ``tags`` (the run's effective data source);
+    ``"silicon"`` when empty (no empirical path fired)."""
+    return max(tags, key=lambda t: _PROVENANCE_RANK.get(t, 0), default="silicon")
 
 
 @dataclass(frozen=True)
@@ -131,7 +178,7 @@ def grid_for(cache_key, slice_fn: Callable[[], object], sol_fn: Callable[[Coords
         return None
 
 
-def estimate(sol_query: float, query: Coords, grid: UtilGrid | None, util_scale: float = 1.0):
+def estimate(sol_query: float, query: Coords, grid: UtilGrid | None, util_scale: float = 1.0, provenance="empirical"):
     """Return ``(latency_ms, util)`` from the util grid, or raise.
 
     Raises :class:`EmpiricalNotImplementedError` when no util sample is available
@@ -148,6 +195,7 @@ def estimate(sol_query: float, query: Coords, grid: UtilGrid | None, util_scale:
     """
     util = grid.util(query) if grid is not None else None
     if util and util > 0:
+        note_provenance(provenance)
         return sol_query / (util * util_scale), util
     raise EmpiricalNotImplementedError(
         f"No empirical utilisation data to estimate this op at query={query}: "

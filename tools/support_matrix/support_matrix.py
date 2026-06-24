@@ -29,6 +29,7 @@ from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk import config as sdk_config
 from aiconfigurator.sdk.models import _get_model_info
 from aiconfigurator.sdk.models.helpers import _apply_model_quant_defaults
+from aiconfigurator.sdk.operations.util_empirical import capture_provenance, worst_provenance
 from aiconfigurator.sdk.task_v2 import Task
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,9 @@ SUPPORT_MATRIX_BASE_HEADER = [
     "Status",
     "ErrMsg",
 ]
-SUPPORT_MATRIX_HEADER = SUPPORT_MATRIX_BASE_HEADER + ["Command"]
+# "Source" = data provenance of a PASS (silicon, or the worst empirical transfer tier
+# that fired: empirical/xversion/xshape/xquant/xprofile/xop). Empty for non-PASS rows.
+SUPPORT_MATRIX_HEADER = SUPPORT_MATRIX_BASE_HEADER + ["Command", "Source"]
 _BYTES_PER_PARAM = 2
 DEFAULT_ENGINE_STEP_COMPARISON_RTOL = 0.05
 DEFAULT_ENGINE_STEP_COMPARISON_ATOL = 1e-3
@@ -596,7 +599,7 @@ def _process_combination_worker(
     """
     assert _worker_matrix is not None  # this only works in linux, not in windows/macos
     model, system, backend, version = combo
-    status_dict, error_dict, command_dict = _worker_matrix.run_single_test(
+    status_dict, error_dict, command_dict, provenance_dict = _worker_matrix.run_single_test(
         model=model,
         system=system,
         backend=backend,
@@ -611,7 +614,18 @@ def _process_combination_worker(
     )
     architecture = _worker_matrix.get_architecture(model)
     return [
-        (model, architecture, system, backend, version, mode, status_dict[mode], error_dict[mode], command_dict[mode])
+        (
+            model,
+            architecture,
+            system,
+            backend,
+            version,
+            mode,
+            status_dict[mode],
+            error_dict[mode],
+            command_dict[mode],
+            provenance_dict.get(mode, ""),
+        )
         for mode in status_dict
     ]
 
@@ -706,6 +720,9 @@ class SupportMatrix:
             "engine_step_backend": engine_step_backend,
             # Default SILICON (matrix semantics); env override for HYBRID/EMPIRICAL coverage experiments.
             "database_mode": os.environ.get("AIC_SM_DATABASE_MODE", "SILICON"),
+            # Optional fine-grained HYBRID transfer policy for coverage experiments
+            # (e.g. AIC_SM_TRANSFERS="off" or "xshape,xquant"). None -> all kinds on.
+            "transfer_policy": os.environ.get("AIC_SM_TRANSFERS") or None,
         }
         if mode == "disagg":
             # v2 disagg forbids shared top-level worker fields; fan out to both roles.
@@ -798,6 +815,7 @@ class SupportMatrix:
         constraints = _get_test_constraints(model)
         statuses: dict[str, str] = {}
         error_messages = {}
+        provenance: dict[str, str] = dict.fromkeys(modes_to_test, "")
         commands = {
             mode: _support_matrix_row_command(
                 model=model,
@@ -835,20 +853,23 @@ class SupportMatrix:
                 statuses = dict.fromkeys(modes_to_test, STATUS_HW_INCOMPATIBLE)
                 error_messages = dict.fromkeys(modes_to_test, reason)
                 if include_commands:
-                    return statuses, error_messages, commands
+                    return statuses, error_messages, commands, provenance
                 return statuses, error_messages
 
         for mode in modes_to_test:
             try:
-                python_pareto_df = SupportMatrix._run_mode(
-                    mode=mode,
-                    model=model,
-                    system=system,
-                    backend=backend,
-                    version=version,
-                    constraints=constraints,
-                    engine_step_backend="python" if compare_engine_step_backends else None,
-                )
+                # capture_provenance spans task.run() (the contextvar propagates down the
+                # call stack), so we learn the worst empirical transfer tier that fired.
+                with capture_provenance() as prov_tags:
+                    python_pareto_df = SupportMatrix._run_mode(
+                        mode=mode,
+                        model=model,
+                        system=system,
+                        backend=backend,
+                        version=version,
+                        constraints=constraints,
+                        engine_step_backend="python" if compare_engine_step_backends else None,
+                    )
 
                 # Note that we do not use pareto_frontier_df here because for the pareto_df
                 # if is not None and not empty, it means the pareto_frontier_df is also not None and not empty.
@@ -882,6 +903,7 @@ class SupportMatrix:
 
                 statuses[mode] = STATUS_PASS
                 error_messages[mode] = None
+                provenance[mode] = worst_provenance(prov_tags)
 
             except Exception as e:
                 raw_error = traceback.format_exc()
@@ -917,7 +939,7 @@ class SupportMatrix:
 
             error_messages[mode] = _format_exception_for_csv(error_messages.get(mode))
         if include_commands:
-            return statuses, error_messages, commands
+            return statuses, error_messages, commands, provenance
         return statuses, error_messages
 
     def _run_parallel_combinations(
@@ -1058,7 +1080,7 @@ class SupportMatrix:
                     perf_database.unload_database(system, backend, version)
 
         # Also collect combos whose Phase 1 results had any failure
-        for model, _arch, system, backend, version, _mode, status, _err, _command in results:
+        for model, _arch, system, backend, version, _mode, status, _err, _command, _source in results:
             if status == STATUS_FAIL:
                 retry_combos.add((model, system, backend, version))
 
@@ -1077,7 +1099,7 @@ class SupportMatrix:
                         for combo in group_iter:
                             model, system, backend, version = combo
                             try:
-                                status_dict, error_dict, command_dict = self.run_single_test(
+                                status_dict, error_dict, command_dict, provenance_dict = self.run_single_test(
                                     model=model,
                                     system=system,
                                     backend=backend,
@@ -1103,6 +1125,7 @@ class SupportMatrix:
                                             status_dict[mode],
                                             error_dict[mode],
                                             command_dict[mode],
+                                            provenance_dict.get(mode, ""),
                                         )
                                     )
                             except Exception:
@@ -1138,6 +1161,7 @@ class SupportMatrix:
                                             STATUS_FAIL,
                                             traceback.format_exc().replace("\n", "\\n"),
                                             command,
+                                            "",
                                         )
                                     )
                             finally:
@@ -1156,12 +1180,10 @@ class SupportMatrix:
     def _print_results_summary(self, results: list[tuple[str, str, str, str, str, str, str, str | None, str]]) -> None:
         """Print summary of test results."""
         total_tests = len(results)
-        passed = sum(1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_PASS)
-        failed = sum(1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_FAIL)
-        hw_incompatible = sum(1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_HW_INCOMPATIBLE)
-        framework_incompatible = sum(
-            1 for _, _, _, _, _, _, status, _, _ in results if status == STATUS_FRAMEWORK_INCOMPATIBLE
-        )
+        passed = sum(1 for r in results if r[6] == STATUS_PASS)
+        failed = sum(1 for r in results if r[6] == STATUS_FAIL)
+        hw_incompatible = sum(1 for r in results if r[6] == STATUS_HW_INCOMPATIBLE)
+        framework_incompatible = sum(1 for r in results if r[6] == STATUS_FRAMEWORK_INCOMPATIBLE)
 
         print("\n" + "=" * 80)
         print("Test Results Summary")
@@ -1181,10 +1203,12 @@ class SupportMatrix:
         hw_incompatible_configs = []
         framework_incompatible_configs = []
 
-        for huggingface_id, architecture, system, backend, version, mode, status, _err, _command in results:
+        source_by_config: dict[tuple, str] = {}
+        for huggingface_id, architecture, system, backend, version, mode, status, _err, _command, source in results:
             config = (huggingface_id, architecture, system, backend, version, mode)
             if status == STATUS_PASS:
                 passed_configs.append(config)
+                source_by_config[config] = source or "silicon"
             elif status == STATUS_FAIL:
                 failed_configs.append(config)
             elif status == STATUS_HW_INCOMPATIBLE:
@@ -1192,11 +1216,16 @@ class SupportMatrix:
             elif status == STATUS_FRAMEWORK_INCOMPATIBLE:
                 framework_incompatible_configs.append(config)
 
-        # Print passed configurations
+        # Print passed configurations (with data source: silicon vs the empirical
+        # transfer tier that the prediction relied on)
         if passed_configs:
-            print(f"\n✓ Passed Configurations ({len(passed_configs)}):")
+            silicon_passes = sum(1 for c in passed_configs if source_by_config.get(c, "silicon") == "silicon")
+            print(f"\n✓ Passed Configurations ({len(passed_configs)}; {silicon_passes} silicon, ", end="")
+            print(f"{len(passed_configs) - silicon_passes} hybrid):")
             for huggingface_id, architecture, system, backend, version, mode in sorted(passed_configs):
-                print(f"  • {huggingface_id} ({architecture}) on {system} with {backend} v{version} ({mode})")
+                src = source_by_config.get((huggingface_id, architecture, system, backend, version, mode), "silicon")
+                tag = "silicon" if src == "silicon" else f"hybrid:{src}"
+                print(f"  • {huggingface_id} ({architecture}) on {system} with {backend} v{version} ({mode}) [{tag}]")
 
         # Print failed configurations
         if failed_configs:
@@ -1228,8 +1257,11 @@ class SupportMatrix:
         """
         output_path = Path(output_file)
 
-        def _row_values(row: tuple[str, ...]) -> tuple[str, str, str, str, str, str, str, str, str]:
-            if len(row) == 9:
+        def _row_values(row: tuple[str, ...]) -> tuple[str, str, str, str, str, str, str, str, str, str]:
+            source = ""
+            if len(row) == 10:
+                huggingface_id, architecture, system, backend, version, mode, status, err_msg, command, source = row
+            elif len(row) == 9:
                 huggingface_id, architecture, system, backend, version, mode, status, err_msg, command = row
             elif len(row) == 8:
                 huggingface_id, architecture, system, backend, version, mode, status, err_msg = row
@@ -1266,6 +1298,7 @@ class SupportMatrix:
                 status,
                 err_msg or "",
                 command,
+                source or "",
             )
 
         if output_path.suffix == ".csv":
@@ -1273,13 +1306,13 @@ class SupportMatrix:
                 writer = csv.writer(f, lineterminator="\n")
                 writer.writerow(SUPPORT_MATRIX_HEADER)
                 for row in results:
-                    huggingface_id, architecture, system, backend, version, mode, status, err_msg, command = (
+                    huggingface_id, architecture, system, backend, version, mode, status, err_msg, command, source = (
                         _row_values(row)
                     )
                     if status not in VALID_STATUSES:
                         raise ValueError(f"Invalid support-matrix status: {status}")
                     writer.writerow(
-                        [huggingface_id, architecture, system, backend, version, mode, status, err_msg, command]
+                        [huggingface_id, architecture, system, backend, version, mode, status, err_msg, command, source]
                     )
             print(f"\nResults saved to: {output_file}")
             return
@@ -1292,6 +1325,7 @@ class SupportMatrix:
             (_row_values(row) for row in results),
             key=lambda x: (common.get_support_matrix_system_sort_key(x[2]), x[0], x[1], x[3], x[4], x[5]),
         )
+        # _row_values rows are now 10-wide (… command, source)
         grouped_results = {
             system: list(system_results) for system, system_results in groupby(sorted_results, key=lambda x: x[2])
         }
@@ -1313,11 +1347,23 @@ class SupportMatrix:
                     status,
                     err_msg,
                     command,
+                    source,
                 ) in system_results:
                     if status not in VALID_STATUSES:
                         raise ValueError(f"Invalid support-matrix status: {status}")
                     writer.writerow(
-                        [huggingface_id, architecture, system, backend, version, mode, status, err_msg, command]
+                        [
+                            huggingface_id,
+                            architecture,
+                            system,
+                            backend,
+                            version,
+                            mode,
+                            status,
+                            err_msg,
+                            command,
+                            source,
+                        ]
                     )
 
         with open(output_path / "index.json", "w") as f:

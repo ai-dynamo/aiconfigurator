@@ -51,6 +51,24 @@ class TestContextAttention:
         assert windowed > 0
         assert windowed <= full * 1.0001  # s(256) > window(128): windowed work <= full
 
+    def test_provenance_capture_records_transfer_tier(self, comprehensive_perf_db):
+        """capture_provenance records which empirical tier a query relied on: a cross-head
+        transfer (uncollected head_size) tags 'xshape'; a silicon-covered query tags nothing
+        (worst_provenance -> 'silicon')."""
+        from aiconfigurator.sdk.operations import util_empirical as ue
+
+        base = (8, 256, 0, 16, 8, common.KVCacheQuantMode.bfloat16, common.FMHAQuantMode.bfloat16)
+        with ue.capture_provenance() as tags:
+            comprehensive_perf_db.query_context_attention(
+                *base, database_mode=common.DatabaseMode.EMPIRICAL, head_size=256, window_size=0
+            )  # head_size 256 not collected (stub has 64/128) -> cross-head transfer
+        assert ue.worst_provenance(tags) == "xshape"
+        with ue.capture_provenance() as tags2:
+            comprehensive_perf_db.query_context_attention(
+                *base, database_mode=common.DatabaseMode.SILICON, head_size=128, window_size=0
+            )  # collected -> pure silicon, no empirical path
+        assert ue.worst_provenance(tags2) == "silicon"
+
     def test_cross_head_transfer_gated_by_xshape_policy(self, comprehensive_perf_db):
         """Cross-head_size transfer is an XSHAPE transfer. A head_size with no own data
         (stub collects 64/128) borrows from the nearest collected head_size when XSHAPE
