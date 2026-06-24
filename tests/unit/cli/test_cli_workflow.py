@@ -160,6 +160,25 @@ class TestCLIIntegration:
         mock_builder.assert_called_once()
         mock_execute.assert_called_once_with({"agg": mock_task_config}, mode, top_n=5)
 
+    @patch("aiconfigurator.cli.main._run_spica_trace_default")
+    @patch("aiconfigurator.cli.main._execute_tasks")
+    @patch("aiconfigurator.cli.main.build_default_tasks")
+    def test_cli_default_trace_path_dispatches_to_spica(
+        self,
+        mock_build_default,
+        mock_execute,
+        mock_run_spica,
+        cli_args_factory,
+    ):
+        """default --trace-path should bypass legacy AIC tasks and run Spica."""
+        args = cli_args_factory(mode="default", trace_path="/tmp/traffic.jsonl")
+
+        cli_main(args)
+
+        mock_run_spica.assert_called_once_with(args)
+        mock_build_default.assert_not_called()
+        mock_execute.assert_not_called()
+
     @pytest.mark.parametrize(
         "builder_patch",
         [

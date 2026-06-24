@@ -361,6 +361,7 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--backend-version`: Backend database version. Default: latest.
 - `--free-gpu-memory-fraction`: Fraction of free GPU memory TRT-LLM allocates for KV cache (default: `1.0`). Filters batch sizes that would exceed KV cache capacity.
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls how many KV blocks are pre-allocated per sequence; set to match your deployment for accurate KV-capacity filtering.
+- `--trace-path`: Path to a replay trace. When set, `default` mode uses the Spica replay-backed smart sweeper instead of the legacy AIC Pareto sweep, and `--isl` / `--osl` are ignored because request lengths come from the trace.
 - `--enable-chunked-prefill`: Enable chunked prefill for a finer-grained context-token sweep. When off (default), the context-token stride is aligned to ISL for faster sweeping.
 - `--enable-wideep`: Enable Wide Expert Parallelism (WideEP) for MoE models — EP-only parallelism via the `deepep_moe` backend. Applies to DeepSeek and Qwen3-235B on SGLang.
 - `--moe-backend`: Explicit SGLang MoE backend — `deepep_moe` or `megamoe` (use `megamoe` to model DeepSeek-V4 MegaMoE on Blackwell).
@@ -392,6 +393,21 @@ Both agg and disagg results are merged across backends and the globally optimal 
 is selected. This is useful for finding the best backend without running separate commands.
 
 The command will create two experiments for the given problem, one is `agg` and another one is `disagg`. Compare them to find the better one and estimates the perf gain.
+
+#### Replay Trace Mode
+
+Pass `--trace-path` to run the replay-backed Spica smart sweeper from a trace instead of the legacy AIC Pareto estimator:
+
+```bash
+aiconfigurator cli default \
+  --model-path Qwen/Qwen3-32B-FP8 \
+  --total-gpus 32 \
+  --system h200_sxm \
+  --backend auto \
+  --trace-path /data/replay/traffic.jsonl
+```
+
+In trace mode, traffic shape and request lengths come from the trace, so `--isl` and `--osl` are ignored. The CLI still uses `--ttft` and `--tpot` as the goodput SLA for ranking candidates. If `--save-dir` is set, ranked Spica candidates are written to `spica_candidates.yaml`.
 
 #### Systems Paths
 

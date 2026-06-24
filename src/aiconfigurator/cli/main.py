@@ -292,6 +292,15 @@ def _add_default_mode_arguments(parser):
         help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
     )
     parser.add_argument(
+        "--trace-path",
+        type=str,
+        default=None,
+        help=(
+            "Path to a replay trace. When set, default mode runs the Spica replay-backed smart sweeper "
+            "instead of the legacy AIC Pareto sweep, and --isl/--osl are ignored."
+        ),
+    )
+    parser.add_argument(
         "--inclusive-tpot",
         action="store_true",
         default=False,
@@ -902,6 +911,12 @@ aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --perf-db-version 1.2.0rc5 \\
     --config-template-version 1.2.0rc6 \\
     --save-dir results
+
+# Run replay-backed Spica smart sweep from a Mooncake trace
+aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
+    --backend auto \\
+    --total-gpus 32 --system h200_sxm \\
+    --trace-path /data/replay/traffic.jsonl
 """
 
 
@@ -1634,6 +1649,119 @@ def _execute_tasks(
     return chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies
 
 
+def _spica_candidate_to_dict(candidate: Any) -> dict[str, Any]:
+    if hasattr(candidate, "model_dump"):
+        return candidate.model_dump()
+    if isinstance(candidate, dict):
+        return dict(candidate)
+    return {
+        "config": getattr(candidate, "config", {}),
+        "used_gpus": getattr(candidate, "used_gpus", None),
+        "score": getattr(candidate, "score", None),
+        "metrics": getattr(candidate, "metrics", {}),
+    }
+
+
+def _metric_value(metrics: dict[str, Any], *names: str) -> Any:
+    for name in names:
+        if name in metrics and metrics[name] is not None:
+            return metrics[name]
+    return None
+
+
+def _print_spica_trace_results(candidates: list[Any], *, top_n: int) -> None:
+    print("\n" + "=" * 60)
+    print("  Spica Trace Sweep Results")
+    print("=" * 60)
+    for rank, candidate in enumerate(candidates[:top_n], start=1):
+        payload = _spica_candidate_to_dict(candidate)
+        metrics = payload.get("metrics") or {}
+        print(f"  #{rank}: score={payload.get('score')} used_gpus={payload.get('used_gpus')}")
+        throughput = _metric_value(metrics, "goodput_output_throughput_tok_s", "output_throughput_tok_s")
+        ttft = _metric_value(metrics, "mean_ttft_ms", "ttft_ms")
+        e2e = _metric_value(metrics, "mean_e2e_latency_ms", "e2e_latency_ms")
+        if throughput is not None:
+            print(f"      throughput={throughput}")
+        if ttft is not None:
+            print(f"      ttft_ms={ttft}")
+        if e2e is not None:
+            print(f"      e2e_ms={e2e}")
+    print("=" * 60 + "\n")
+
+
+def _run_spica_trace_default(args) -> list[Any]:
+    """Run the Spica replay-backed smart sweeper for ``default --trace-path``."""
+    if args.decode_system is not None and args.decode_system != args.system:
+        raise SystemExit(
+            "--trace-path currently requires homogeneous hardware; omit --decode-system or set it to --system."
+        )
+
+    if args.backend_version is not None:
+        logger.warning("--backend-version is currently ignored in Spica trace mode; Spica resolves backend versions.")
+    if args.database_mode != common.DatabaseMode.SILICON.name:
+        logger.warning("--database-mode is currently ignored in Spica trace mode.")
+    if args.request_latency is not None:
+        logger.warning("--request-latency is currently ignored in Spica trace mode; using --ttft/--tpot as the SLA.")
+    if getattr(args, "enable_wideep", False):
+        logger.warning("--enable-wideep is currently ignored in Spica trace mode.")
+    if getattr(args, "moe_backend", None) is not None:
+        logger.warning("--moe-backend is currently ignored in Spica trace mode.")
+
+    try:
+        from spica.config import SmartSearchConfig
+        from spica.search import run_smart_search
+    except ImportError as exc:
+        raise SystemExit(
+            "Spica trace mode requires the optional 'spica' package and its replay dependencies. "
+            "Install Spica, then rerun with --trace-path."
+        ) from exc
+
+    backends = [backend.value for backend in common.BackendName] if args.backend == "auto" else [args.backend]
+    search_space: dict[str, Any] = {
+        "model_name": args.model_path,
+        "hardware_sku": args.system,
+        "gpu_budget": args.total_gpus,
+        "backend": backends,
+        "prefill_gpu_memory_utilization": args.free_gpu_memory_fraction,
+        "decode_gpu_memory_utilization": args.free_gpu_memory_fraction,
+        "agg_gpu_memory_utilization": args.free_gpu_memory_fraction,
+    }
+    if args.max_seq_len is not None:
+        search_space["context_length"] = args.max_seq_len
+    if args.nextn > 0:
+        search_space["aic_nextn"] = args.nextn
+
+    config = SmartSearchConfig(
+        search_space=search_space,
+        workload={"trace_path": args.trace_path},
+        goal={"target": "goodput_per_gpu", "sla": {"ttft_ms": args.ttft, "itl_ms": args.tpot}},
+    )
+
+    logger.info(
+        "Running Spica trace sweep: trace_path=%s, model=%s, system=%s, gpu_budget=%s, backend=%s",
+        args.trace_path,
+        args.model_path,
+        args.system,
+        args.total_gpus,
+        ",".join(backends),
+    )
+    candidates = run_smart_search(config)
+    if not candidates:
+        logger.error("Spica trace sweep returned no feasible candidates.")
+        raise SystemExit(1)
+
+    _print_spica_trace_results(candidates, top_n=args.top_n)
+
+    if args.save_dir:
+        os.makedirs(args.save_dir, exist_ok=True)
+        path = os.path.join(args.save_dir, "spica_candidates.yaml")
+        with open(path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump([_spica_candidate_to_dict(candidate) for candidate in candidates], fh, sort_keys=False)
+        logger.info("Saved Spica candidates to %s", path)
+
+    return candidates
+
+
 def _run_generate_mode(args):
     """Run the generate mode to create a naive agg config without sweeping."""
     model_path = args.model_path
@@ -2262,6 +2390,10 @@ def main(args):
         return
 
     if args.mode == "default":
+        if args.trace_path:
+            _run_spica_trace_default(args)
+            return
+
         # Warn when SLA/workload parameters are implicitly defaulted
         _default_params = {"isl": 4000, "osl": 1000, "ttft": 2000.0, "tpot": 30.0}
         _implicit = [

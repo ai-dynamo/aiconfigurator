@@ -117,9 +117,30 @@ class TestCLIArgumentParsing:
         assert args.ttft == 2000.0
         assert args.tpot == 30.0
         assert args.request_latency is None
+        assert args.trace_path is None
         assert args.inclusive_tpot is False
         assert args.prefix == 0
         assert args.engine_step_backend is None
+
+    def test_default_trace_path_parses(self, cli_parser):
+        """--trace-path selects replay-backed default mode without requiring ISL/OSL."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--trace-path",
+                "/tmp/traffic.jsonl",
+            ]
+        )
+
+        assert args.trace_path == "/tmp/traffic.jsonl"
+        assert args.isl == 4000
+        assert args.osl == 1000
 
     def test_inclusive_tpot_default_false_in_exp_mode(self, cli_parser, mock_exp_yaml_path):
         """--inclusive-tpot defaults to False in exp mode."""
