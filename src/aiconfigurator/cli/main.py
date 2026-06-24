@@ -302,6 +302,18 @@ def _add_default_mode_arguments(parser):
         ),
     )
     parser.add_argument(
+        "--trace-sweep-rounds",
+        type=int,
+        default=3,
+        help="Number of Spica smart-sweep rounds for --trace-path. Increase for deeper trace searches. Default: 3.",
+    )
+    parser.add_argument(
+        "--trace-parallel-evals",
+        type=int,
+        default=16,
+        help="Number of Spica candidate evaluations to request per trace sweep round. Default: 16.",
+    )
+    parser.add_argument(
         "--inclusive-tpot",
         action="store_true",
         default=False,
@@ -1955,6 +1967,34 @@ def _print_spica_trace_results(
     )
 
 
+def _build_spica_trace_search_space(args, backends: list[str]) -> dict[str, Any]:
+    search_space: dict[str, Any] = {
+        "model_name": args.model_path,
+        "hardware_sku": args.system,
+        "gpu_budget": args.total_gpus,
+        "backend": backends,
+        "prefill_gpu_memory_utilization": args.free_gpu_memory_fraction,
+        "decode_gpu_memory_utilization": args.free_gpu_memory_fraction,
+        "agg_gpu_memory_utilization": args.free_gpu_memory_fraction,
+    }
+    if args.max_seq_len is not None:
+        search_space["context_length"] = args.max_seq_len
+    if args.nextn > 0:
+        search_space["aic_nextn"] = args.nextn
+
+    if args.total_gpus == 1:
+        logger.info("Constraining Spica trace search to static aggregate round-robin for a single-GPU budget.")
+        search_space.update(
+            {
+                "deployment_mode": ["agg"],
+                "router_mode": ["round_robin"],
+                "planner_scaling_policy": ["disabled"],
+            }
+        )
+
+    return search_space
+
+
 def _run_spica_trace_default(args) -> list[Any]:
     """Run the Spica replay-backed smart sweeper for ``default --trace-path``."""
     if args.decode_system is not None and args.decode_system != args.system:
@@ -1983,24 +2023,13 @@ def _run_spica_trace_default(args) -> list[Any]:
         ) from exc
 
     backends = [backend.value for backend in common.BackendName] if args.backend == "auto" else [args.backend]
-    search_space: dict[str, Any] = {
-        "model_name": args.model_path,
-        "hardware_sku": args.system,
-        "gpu_budget": args.total_gpus,
-        "backend": backends,
-        "prefill_gpu_memory_utilization": args.free_gpu_memory_fraction,
-        "decode_gpu_memory_utilization": args.free_gpu_memory_fraction,
-        "agg_gpu_memory_utilization": args.free_gpu_memory_fraction,
-    }
-    if args.max_seq_len is not None:
-        search_space["context_length"] = args.max_seq_len
-    if args.nextn > 0:
-        search_space["aic_nextn"] = args.nextn
+    search_space = _build_spica_trace_search_space(args, backends)
 
     config = SmartSearchConfig(
         search_space=search_space,
         workload={"trace_path": args.trace_path, "trace_format": "mooncake"},
         goal={"target": "goodput_per_gpu", "sla": {"ttft_ms": args.ttft, "itl_ms": args.tpot}},
+        sweep={"max_rounds": args.trace_sweep_rounds, "parallel_evals": args.trace_parallel_evals},
     )
 
     logger.info(

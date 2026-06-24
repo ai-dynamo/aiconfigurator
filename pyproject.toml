@@ -66,6 +66,7 @@ dev = [
     "pytest-split>=0.10.0",
     "pytest-timeout>=2.3.1",
     "pytest-xdist==3.8.0",
+    "prometheus-api-client==0.6.0",
     "import-ipynb==0.2",
 ]
 webapp = [

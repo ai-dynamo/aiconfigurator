@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 
 from aiconfigurator.cli.main import (
+    _build_spica_trace_search_space,
     _execute_tasks,
     _format_spica_trace_summary,
     _resolve_cli_log_level,
@@ -179,6 +180,23 @@ class TestCLIIntegration:
         mock_run_spica.assert_called_once_with(args)
         mock_build_default.assert_not_called()
         mock_execute.assert_not_called()
+
+    def test_spica_trace_search_space_collapses_single_gpu_noops(self, cli_args_factory):
+        """Single-GPU trace sweeps should avoid routing/planner choices that cannot help."""
+        args = cli_args_factory(
+            mode="default",
+            total_gpus=1,
+            trace_path="/tmp/traffic.jsonl",
+            max_seq_len=8192,
+        )
+
+        search_space = _build_spica_trace_search_space(args, ["trtllm"])
+
+        assert search_space["gpu_budget"] == 1
+        assert search_space["context_length"] == 8192
+        assert search_space["deployment_mode"] == ["agg"]
+        assert search_space["router_mode"] == ["round_robin"]
+        assert search_space["planner_scaling_policy"] == ["disabled"]
 
     def test_spica_trace_summary_uses_default_result_shape(self):
         """Spica trace output should resemble the existing default-mode final summary."""

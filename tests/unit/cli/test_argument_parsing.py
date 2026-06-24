@@ -118,6 +118,8 @@ class TestCLIArgumentParsing:
         assert args.tpot == 30.0
         assert args.request_latency is None
         assert args.trace_path is None
+        assert args.trace_sweep_rounds == 3
+        assert args.trace_parallel_evals == 16
         assert args.inclusive_tpot is False
         assert args.prefix == 0
         assert args.engine_step_backend is None
@@ -135,10 +137,16 @@ class TestCLIArgumentParsing:
                 "h200_sxm",
                 "--trace-path",
                 "/tmp/traffic.jsonl",
+                "--trace-sweep-rounds",
+                "5",
+                "--trace-parallel-evals",
+                "8",
             ]
         )
 
         assert args.trace_path == "/tmp/traffic.jsonl"
+        assert args.trace_sweep_rounds == 5
+        assert args.trace_parallel_evals == 8
         assert args.isl == 4000
         assert args.osl == 1000
 
