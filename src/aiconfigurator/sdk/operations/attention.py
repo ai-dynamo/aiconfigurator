@@ -1024,7 +1024,7 @@ class EncoderAttention(Operation):
 
         def get_empirical(b: int, s: int, n: int, h: int, fmha_quant_mode: common.FMHAQuantMode) -> float:
             # SOL / util, util read best-effort from collected encoder-attention
-            # data (the (n, s, b) grid for this slice); falls back to 0.6 if none.
+            # data (the (n, s, b) grid for this slice); raises EmpiricalNotImplementedError if none.
             sol_time = get_sol(b, s, n, h, fmha_quant_mode)[0]
 
             def _slice():

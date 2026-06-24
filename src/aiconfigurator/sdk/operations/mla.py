@@ -228,7 +228,7 @@ class ContextMLA(Operation):
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
-            # SOL / util from own (num_heads, full_s, b) grid; falls back to 0.6.
+            # SOL / util from own (num_heads, full_s, b) grid; raises if no data.
             sol_time = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
 
             def _slice():
@@ -422,7 +422,7 @@ class GenerationMLA(Operation):
             num_heads: int,
             kvcache_quant_mode: common.KVCacheQuantMode,
         ) -> float:
-            # SOL / util from own (num_heads, b, s) grid; falls back to 0.8.
+            # SOL / util from own (num_heads, b, s) grid; raises if no data.
             sol_time = get_sol(b, s, num_heads, kvcache_quant_mode)[0]
 
             def _slice():
@@ -579,7 +579,7 @@ class MLABmm(Operation):
             quant_mode: common.GEMMQuantMode,
             if_pre: bool,
         ) -> float:
-            # SOL / util from own num_tokens curve; falls back to 0.8.
+            # SOL / util from own num_tokens curve; raises if no data.
             sol_time = get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
             op_name = "mla_gen_pre" if if_pre else "mla_gen_post"
 
@@ -829,7 +829,7 @@ class MLAModule(Operation):
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
-            # SOL / util from own (num_heads, full_s, b) grid; falls back to 0.6.
+            # SOL / util from own (num_heads, full_s, b) grid; raises if no data.
             sol_time = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
 
             def _slice():
@@ -934,7 +934,7 @@ class MLAModule(Operation):
             return sol_time, sol_math, sol_mem
 
         def get_empirical(b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode) -> float:
-            # SOL / util from own (num_heads, b, s) grid; falls back to 0.5.
+            # SOL / util from own (num_heads, b, s) grid; raises if no data.
             sol_time = get_sol(b, s, num_heads, kv_cache_dtype)[0]
 
             def _slice():

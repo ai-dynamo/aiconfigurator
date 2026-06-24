@@ -1081,7 +1081,7 @@ class GenerationDSAModule(Operation):
 
         def get_empirical(b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode) -> float:
             # SOL / util, util read best-effort from own collected data (the
-            # (num_heads, b, s) grid for this slice); falls back to 0.5 if no data.
+            # (num_heads, b, s) grid for this slice); raises EmpiricalNotImplementedError if no data.
             sol_time = get_sol(b, s, num_heads, kv_cache_dtype)[0]
 
             def _slice():

@@ -328,7 +328,7 @@ class MoE(Operation):
             workload_distribution: str,
         ) -> float:
             # SOL / util, util read best-effort from own collected data (the
-            # num_tokens curve for this slice); falls back to 0.4 if no data.
+            # num_tokens curve for this slice); raises EmpiricalNotImplementedError if no data.
             sol_time = get_sol(
                 num_tokens,
                 hidden_size,
@@ -1630,7 +1630,7 @@ class TrtLLMWideEPMoE(Operation):
             quant_mode: common.MoEQuantMode,
             workload_distribution: str,
         ) -> float:
-            """Empirical via SOL / util (util best-effort from own data; else 0.4)."""
+            """Empirical via SOL / util (util best-effort from own data; raises if no data)."""
             sol_time = get_sol(
                 num_tokens,
                 hidden_size,
@@ -2094,7 +2094,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
             quant_mode: common.MoEQuantMode,
             node_num: int,
         ) -> float:
-            """Empirical via SOL / util (util best-effort from own data; else 0.5)."""
+            """Empirical via SOL / util (util best-effort from own data; raises if no data)."""
             sol_time = get_sol(
                 num_tokens,
                 hidden_size,

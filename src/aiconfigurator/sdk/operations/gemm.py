@@ -392,7 +392,7 @@ class GEMM(Operation):
 
         def get_empirical(m_v: int, n_v: int, k_v: int, qm: common.GEMMQuantMode) -> float:
             # SOL / util, where util is read best-effort from this op's own
-            # collected data; falls back to the fixed 0.8 only when no data.
+            # collected data; raises EmpiricalNotImplementedError when no data.
             sol_time = get_sol(m_v, n_v, k_v, qm)[0]
             tqm = cls._normalize_gemm_quant_mode_for_table(qm)
 
@@ -513,7 +513,7 @@ class GEMM(Operation):
 
         def get_empirical(m_v: int, k_v: int) -> float:
             # SOL / util, util read best-effort from collected compute_scale data
-            # (the (m, k) grid for this quant); falls back to SOL / 0.8 if none.
+            # (the (m, k) grid for this quant); raises EmpiricalNotImplementedError if none.
             sol_time = get_sol(m_v, k_v)[0]
 
             def _slice():
@@ -608,7 +608,7 @@ class GEMM(Operation):
 
         def get_empirical(m_v: int, k_v: int) -> float:
             # SOL / util, util read best-effort from collected scale_matrix data
-            # (the (m, k) grid for this quant); falls back to SOL / 0.8 if none.
+            # (the (m, k) grid for this quant); raises EmpiricalNotImplementedError if none.
             sol_time = get_sol(m_v, k_v)[0]
 
             def _slice():

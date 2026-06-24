@@ -559,7 +559,7 @@ class DeepSeekV4MHCModule(Operation):
             return max(sol_math, sol_mem), sol_math, sol_mem
 
         def get_empirical() -> float:
-            # SOL / util from own num_tokens curve (per op slice); else 0.55.
+            # SOL / util from own num_tokens curve (per op slice); raises if no data.
             mhc_data = getattr(database, "_mhc_module_data", None)
 
             def _emp_for_op(op_name: str) -> float:
@@ -1066,7 +1066,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             )
 
         def get_empirical() -> float:
-            # SOL / util from own prefix-resolved (prefix, s, b) grid; else 0.55.
+            # SOL / util from own prefix-resolved (prefix, s, b) grid; raises if no data.
             sol_q = get_sol()[0]
 
             def _slice():
@@ -1316,7 +1316,7 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             )
 
         def get_empirical() -> float:
-            # SOL / util from own (b, s_total) grid; else 0.6.
+            # SOL / util from own (b, s_total) grid; raises if no data.
             sol_q = get_sol()[0]
 
             def _slice():

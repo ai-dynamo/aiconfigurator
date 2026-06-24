@@ -99,17 +99,24 @@ windowed); MoE (regular, WideEP, low-latency kernel selection); MLA; DSA; DSV4
 (MHC / context / generation); MSA; NCCL + custom_allreduce. Sibling-version shared layer
 is enabled for EMPIRICAL as well as HYBRID.
 
-## Relationship to the silicon interpolation refactor
+## Boundary with SILICON (and the silicon interpolation refactor)
 
-The transfers split by axis type:
+The split of responsibility is by **coverage**, not by axis type:
 
-- **Continuous-axis** (`xshape`, windowed) are *transitional*. Once the silicon
-  interpolation engine itself becomes util-based, it will extrapolate over those axes
-  directly and these HYBRID tiers stop being reached (silicon covers them).
-- **Categorical-axis** (`xquant`, `xprofile`, `xop`) stay HYBRID-only — there is no data
-  on the missing quant / op axis to interpolate; they require an explicit borrow + a
-  level correction.
-- `xversion` (shared layer) is load-time data sourcing that also migrates into SILICON.
+- **SILICON stays pure.** It interpolates only *within* the collected grid and raises
+  outside coverage. It does **not** extrapolate across an uncollected shape / window /
+  quant / op. This keeps SILICON reproducible and honest.
+- **HYBRID / `util_empirical` owns all gap-filling.** Every transfer — `xshape`,
+  windowed, `xquant`, `xprofile`, `xop`, `xversion` — lives here and stays here. None of
+  it migrates into SILICON.
+
+A parallel refactor makes the silicon interpolation engine able to interpolate in
+*latency-space or util-space* and pick the better per point. That improves **in-grid
+accuracy**; it does **not** absorb the HYBRID transfers (silicon must not reach an
+uncovered slice). The only thing the two share is the util definition: `util = SOL /
+measured` with `SOL = max(sol_math, sol_mem)` (single scalar — a compute/mem split was
+tried and rejected) and the same per-op `get_sol`. Keeping that definition consistent on
+both sides is the entire contract; no code coupling is required.
 
 ## Validation
 

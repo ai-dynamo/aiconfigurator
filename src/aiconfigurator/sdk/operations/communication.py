@@ -160,7 +160,9 @@ class CustomAllReduce(Operation):
                 lambda c: get_sol(quant_mode, eff, int(c[0]))[0],
                 depth=1,
             )
-            latency, _ = util_empirical.estimate(sol_q, (float(size),), grid)
+            # eff < tp_size means the tp slice was node-capped -> a cross-shape borrow.
+            prov = "xshape" if eff != tp_size else "empirical"
+            latency, _ = util_empirical.estimate(sol_q, (float(size),), grid, provenance=prov)
             return latency
 
         if database_mode is None:
@@ -414,7 +416,9 @@ class NCCL(Operation):
                 lambda c: get_sol(dtype, eff, operation, int(c[0]))[0],
                 depth=1,
             )
-            latency, _ = util_empirical.estimate(sol_q, (float(message_size),), grid)
+            # eff < num_gpus means the gpu-count slice was capped -> a cross-shape borrow.
+            prov = "xshape" if eff != num_gpus else "empirical"
+            latency, _ = util_empirical.estimate(sol_q, (float(message_size),), grid, provenance=prov)
             return latency
 
         if database_mode is None:
