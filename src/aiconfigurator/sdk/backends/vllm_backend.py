@@ -1953,18 +1953,6 @@ class VLLMBackend(BaseBackend):
                 except (AssertionError, KeyError, PerfDataNotAvailableError, ValueError):
                     decode_floor_ms = decode_ms
                 decode_delta_ms = max(0.0, decode_ms - decode_floor_ms)
-                # MoE: decode tokens route to their OWN experts, so the decode
-                # grouped-GEMM is NOT subsumed by the prefill-dominated fused GEMM
-                # (unlike the dense MLP increment, which is). The kv=1 floor above
-                # cancels the kv-independent MoE overlay, so re-add it for MoE
-                # models -- otherwise the decode expert/router/dispatch work is
-                # silently dropped (the dominant MoE mixed-step under-prediction).
-                is_moe_model = int(getattr(model, "_topk", 0) or 0) > 0 and int(getattr(model, "_num_experts", 0) or 0) > 0
-                if is_moe_model:
-                    decode_moe_overlay_ms = float(
-                        sum(v for k, v in decode_latency.items() if str(k).startswith("generation_moe"))
-                    )
-                    decode_delta_ms += decode_moe_overlay_ms
             latency_ms += decode_delta_ms
             energy_wms += float(sum(decode_energy.values()))
             per_ops["mixed_layerwise_decode_delta"] = decode_delta_ms
