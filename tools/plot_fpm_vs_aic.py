@@ -459,6 +459,9 @@ def plot_mixed(
                            label=f"ctx {b_label} (n={len(pts)}, {bmape:.0f}%)")
                 print(f"    ctx {b_label:>8}: n={len(pts):4d}  MAPE={bmape:5.1f}%")
             mape = float(np.mean([abs(a / f - 1.0) for f, a, _ in recs]) * 100.0)
+            _med_ratio = float(np.median([a / f for f, a, _ in recs]))
+            print(f"[mixed] {_par_label(tp, ep)} SUMMARY: n={len(recs)} MAPE={mape:.1f}% "
+                  f"median(AIC/FPM)={_med_ratio:.3f}")
             title += f"  (n={len(recs)}, MAPE={mape:.1f}%)"
             ax.legend(fontsize=8, title="prefill ctx = new+prefix (tokens)", title_fontsize=8, loc="upper left")
         else:
