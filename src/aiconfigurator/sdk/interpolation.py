@@ -23,9 +23,20 @@ import math
 
 import numpy as np
 from scipy import interpolate
+from scipy.spatial import QhullError
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
+
+
+class InterpolationDataNotAvailableError(ValueError):
+    """Raised when interpolation cannot produce a real value from available data.
+
+    Subclasses ``ValueError`` so existing callers that catch ``ValueError``
+    keep working. The perf-DB layer catches this specific class to classify
+    the failure as "missing silicon data" without swallowing genuine
+    programming bugs that raise plain ``ValueError`` deeper in the stack.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +56,7 @@ def validate_interpolation_result(value):
     """Validate that an interpolated value is finite; log a debug line if negative."""
     value_array = np.asarray(value)
     if not np.all(np.isfinite(value_array)):
-        raise ValueError(f"Non-finite value detected {value}")
+        raise InterpolationDataNotAvailableError(f"Non-finite value detected {value}")
     if np.any(value_array < 0.0):
         logger.debug(f"Negative value detected {value}, pass")
     return value
@@ -76,7 +87,7 @@ def _reduced_griddata(points: list[list[int]], values: list, target: tuple[int, 
         constant_dims = np.where(~varying)[0]
         for dim in constant_dims:
             if not math.isclose(target_array[dim], point_array[0, dim]):
-                raise ValueError(
+                raise InterpolationDataNotAvailableError(
                     f"Target coordinate does not match constant interpolation dimension. "
                     f"target={target_array[dim]}, value={point_array[0, dim]}, dim={dim}"
                 )
@@ -178,7 +189,7 @@ def _require_3d_axis_coverage(data: dict, *, context: str) -> None:
     ]
     if missing_axes:
         axes = ", ".join(missing_axes)
-        raise ValueError(
+        raise InterpolationDataNotAvailableError(
             f"{context} requires data that varies across all 3 dimensions; "
             f"missing variation on axis/axes: {axes}. "
             "Collect more perf data points instead of reducing to lower-dimensional interpolation."
@@ -195,7 +206,7 @@ def nearest_1d_point_helper(x: int, values: list[int], inner_only: bool = True) 
     assert values is not None and len(values) >= 1, "values is None or empty"
     if len(values) == 1:
         if inner_only and x != values[0]:
-            raise ValueError(f"x is not equal to the only value in the list. {x=}, {values=}")
+            raise InterpolationDataNotAvailableError(f"x is not equal to the only value in the list. {x=}, {values=}")
         return values[0], values[0]
 
     sorted_values = sorted(values)
@@ -204,11 +215,15 @@ def nearest_1d_point_helper(x: int, values: list[int], inner_only: bool = True) 
 
     if x < sorted_values[0]:
         if inner_only:
-            raise ValueError(f"x is less than the smallest value in the list. {x=}, {sorted_values=}")
+            raise InterpolationDataNotAvailableError(
+                f"x is less than the smallest value in the list. {x=}, {sorted_values=}"
+            )
         return sorted_values[0], sorted_values[1]
     if x > sorted_values[-1]:
         if inner_only:
-            raise ValueError(f"x is greater than the largest value in the list. {x=}, {sorted_values=}")
+            raise InterpolationDataNotAvailableError(
+                f"x is greater than the largest value in the list. {x=}, {sorted_values=}"
+            )
         return sorted_values[-2], sorted_values[-1]
 
     start = end = None
@@ -219,18 +234,10 @@ def nearest_1d_point_helper(x: int, values: list[int], inner_only: bool = True) 
         start = sorted_values[i - 1]
         break
     if start is None or end is None:
-        raise ValueError(f"start or end is None. {x=}, {sorted_values=}, start={start=}, end={end=}")
+        raise InterpolationDataNotAvailableError(
+            f"start or end is None. {x=}, {sorted_values=}, start={start=}, end={end=}"
+        )
     return start, end
-
-
-def nearest_1d_point_allow_singleton_axis(x: int, values: list[int]) -> tuple[int, int]:
-    """Return strict brackets, but allow sparse singleton axes to collapse."""
-    try:
-        return nearest_1d_point_helper(x, values)
-    except ValueError:
-        if len(values) == 1:
-            return values[0], values[0]
-        raise
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +427,6 @@ def interp_2d_1d(
     z: int,
     data: dict,
     method: str = "bilinear",
-    allow_singleton_axes: bool = False,
 ) -> float:
     """3-D interpolation done as 2-D (over y, z) followed by 1-D (over x)."""
     exact = _get_exact_3d(data, x, y, z)
@@ -428,7 +434,7 @@ def interp_2d_1d(
         return exact
 
     x_values = []
-    point_helper = nearest_1d_point_allow_singleton_axis if allow_singleton_axes else nearest_1d_point_helper
+    point_helper = nearest_1d_point_helper
     x_left, x_right = point_helper(x, list(data.keys()))
     slice_bounds = []
 
@@ -440,8 +446,7 @@ def interp_2d_1d(
             z_bounds.append((j, z_left, z_right))
         slice_bounds.append((i, y_left, y_right, z_bounds))
 
-    if not allow_singleton_axes:
-        _require_3d_axis_coverage(data, context=f"3-D {method} interpolation")
+    _require_3d_axis_coverage(data, context=f"3-D {method} interpolation")
 
     for i, y_left, y_right, z_bounds in slice_bounds:
         points_list = []
@@ -454,19 +459,12 @@ def interp_2d_1d(
         if method == "cubic":
             try:
                 value = _reduced_griddata(points_list, values_list, (y, z), "cubic")
-            except ValueError as exc:
-                if not allow_singleton_axes:
-                    raise
-                logger.debug("Falling back to rectangular interpolation for degenerate cubic slice: %s", exc)
-                value = interp_2d_rectangular_slice(
-                    y_left,
-                    y_right,
-                    z_bounds[0][1],
-                    z_bounds[0][2],
-                    y,
-                    z,
-                    data[i],
-                )
+            except QhullError as exc:
+                # Degenerate slice (collinear/coplanar/too few points): no usable
+                # cubic surface. Re-raise as InterpolationDataNotAvailableError so
+                # the perf DB classifies this as missing data instead of letting a
+                # raw RuntimeError escape.
+                raise InterpolationDataNotAvailableError(f"degenerate cubic slice: {exc}") from exc
             x_values.append(validate_interpolation_result(value))
         elif method == "bilinear":
             x_values.append(
@@ -521,7 +519,6 @@ def interp_3d(
     data: dict,
     method: str,
     extracted_metrics_cache: dict | None = None,
-    allow_singleton_axes: bool = False,
 ) -> dict:
     """3-D interpolation. Returns a metrics dict (latency/power/energy).
 
@@ -541,14 +538,14 @@ def interp_3d(
             latency = interp_3d_linear(x, y, z, latency_data)
             energy = interp_3d_linear(x, y, z, energy_data)
         else:
-            latency = interp_2d_1d(x, y, z, latency_data, method, allow_singleton_axes=allow_singleton_axes)
-            energy = interp_2d_1d(x, y, z, energy_data, method, allow_singleton_axes=allow_singleton_axes)
+            latency = interp_2d_1d(x, y, z, latency_data, method)
+            energy = interp_2d_1d(x, y, z, energy_data, method)
         return {"latency": latency, "power": 0.0, "energy": energy}
 
     if method == "linear":
         latency = interp_3d_linear(x, y, z, data)
     else:
-        latency = interp_2d_1d(x, y, z, data, method, allow_singleton_axes=allow_singleton_axes)
+        latency = interp_2d_1d(x, y, z, data, method)
     return {"latency": latency, "power": 0.0, "energy": 0.0}
 
 
