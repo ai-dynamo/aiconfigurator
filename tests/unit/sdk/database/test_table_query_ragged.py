@@ -71,3 +71,45 @@ def test_table_query_no_crash_across_all_holes():
     for n, s, b in holes:
         lat = interpolation.get_value(tq.query(n, s, b), "latency")
         assert math.isfinite(lat) and lat > 0, f"corner hole ({n},{s},{b}) -> {lat}"
+
+
+# --- kNN-util mesh-free fallback (asymmetric (n,k) the grid can't bracket) -----
+
+_Cg = 1e-9
+
+
+def _gemm_lat(m, n, k):
+    return _Cg * m * n * k
+
+
+def _asymmetric_gemm_grid():
+    """Coarse symmetric (n,k) grid + a dense-M anchor at ONE asymmetric (n,k)=(3072,5120).
+    Putting that anchor into a Cartesian grid would invent phantom shapes (e.g. (5120,3072))."""
+    data = {}
+    for m in (256, 4096):
+        data[m] = {n: {k: {"latency": _gemm_lat(m, n, k), "energy": 0.0} for k in (2048, 4096)} for n in (2048, 4096)}
+    for m in (512, 1024, 2048):
+        data.setdefault(m, {}).setdefault(3072, {})[5120] = {"latency": _gemm_lat(m, 3072, 5120), "energy": 0.0}
+    return data
+
+
+def test_grid_raises_on_asymmetric_nk_then_knn_rescues():
+    data = _asymmetric_gemm_grid()
+    sol = lambda m, n, k: _Cg * m * n * k
+    # m=300 forces the M-axis bracket to cross the coarse m=256, which has no (3072,5120) slice.
+    # Legacy interp_3d cannot bracket it:
+    with pytest.raises(ValueError):
+        interpolation.interp_3d(300, 3072, 5120, data, "cubic", {})
+    # TableQuery (grid -> util-hold -> kNN-util) returns the right value mesh-free:
+    tq = TableQuery(data, method="cubic", sol_fn=sol)
+    lat = interpolation.get_value(tq.query(300, 3072, 5120), "latency")
+    assert math.isfinite(lat) and lat > 0
+
+
+def test_knn_fallback_preserves_genuine_miss():
+    # A single-point table has too little data to interpolate -> the fallback returns
+    # None and the genuine miss re-raises (so PerfDataNotAvailableError semantics hold).
+    single = {1: {4096: {5120: {"latency": 1.0, "energy": 0.0}}}}
+    tq = TableQuery(single, method="cubic", sol_fn=lambda m, n, k: _Cg * m * n * k)
+    with pytest.raises((ValueError, KeyError)):
+        tq.query(1, 4096, 4096)

@@ -25,6 +25,8 @@ from __future__ import annotations
 import math
 from typing import Protocol, runtime_checkable
 
+from scipy.spatial import QhullError
+
 
 @runtime_checkable
 class PerfSurrogate(Protocol):
@@ -64,6 +66,21 @@ def _sqrt_view(data):
     view = {x: {y: {z: _sqrt_leaf(leaf) for z, leaf in yd.items()} for y, yd in xd.items()} for x, xd in data.items()}
     _SQRT_VIEW_CACHE[id(data)] = (data, view)
     return view
+
+
+# id-keyed cache of the flattened point cloud, built lazily only when the kNN
+# fallback fires (rare), so the common interp path pays nothing.
+_POINT_CLOUD_CACHE: dict[int, tuple] = {}
+
+
+def _point_cloud(data):
+    """Flatten ``data[x][y][z] -> leaf`` to ``[((x, y, z), leaf), ...]`` (cached)."""
+    cached = _POINT_CLOUD_CACHE.get(id(data))
+    if cached is not None and cached[0] is data:
+        return cached[1]
+    cloud = [((x, y, z), leaf) for x, xd in data.items() for y, yd in xd.items() for z, leaf in yd.items()]
+    _POINT_CLOUD_CACHE[id(data)] = (data, cloud)
+    return cloud
 
 
 class TableQuery:
@@ -118,10 +135,20 @@ class TableQuery:
             return data[x][y][z]
         try:
             return self._interior(x, y, z)
-        except ValueError:
+        except (ValueError, QhullError):
             if self.sol_fn is None:
                 raise
-            return self._util_hold_extrap(x, y, z)
+            try:
+                return self._util_hold_extrap(x, y, z)
+            except (ValueError, QhullError, KeyError, IndexError):
+                # Grid bracketing can't reach this point (ragged / scattered /
+                # asymmetric (n,k) densification). Mesh-free kNN in util space is
+                # the last resort; it returns None when there is too little data
+                # to interpolate, in which case the original miss re-raises.
+                fallback = self._knn_util(x, y, z)
+                if fallback is None:
+                    raise
+                return fallback
 
     def _snap_anchor(self, coords):
         """Snap the declared extrap axes to the nearest collected key along the
@@ -156,6 +183,53 @@ class TableQuery:
             return base
         latency = base_lat * self.sol_fn(x, y, z) / sol_anchor
         return {**base, "latency": latency} if isinstance(base, dict) else latency
+
+    def _knn_util(self, x, y, z, n_neighbors=8, power=2.0):
+        """Mesh-free fallback: ``n_neighbors`` nearest collected points (normalised
+        log-coordinate distance), combined by inverse-distance weighting in util
+        space (``util = SOL/latency``), then ``latency = SOL(x,y,z) / util``.
+
+        Needs no grid, so it serves the cases grid bracketing can't (asymmetric
+        ``(n, k)`` slices, scattered densification). util-space keeps it physically
+        anchored (SOL carries growth — no revert-to-mean). Returns ``None`` when
+        there is too little data to interpolate, so a genuine miss still raises.
+        """
+        if self.sol_fn is None or x <= 0 or y <= 0 or z <= 0:
+            return None
+        cloud = _point_cloud(self.data)
+        if len(cloud) < 2:
+            return None
+
+        from aiconfigurator.sdk import interpolation
+
+        logs = [(math.log(cx), math.log(cy), math.log(cz)) for (cx, cy, cz), _ in cloud]
+        means = [sum(c[i] for c in logs) / len(logs) for i in range(3)]
+        sds = [(sum((c[i] - means[i]) ** 2 for c in logs) / len(logs)) ** 0.5 + 1e-9 for i in range(3)]
+        q = [(math.log(v) - means[i]) / sds[i] for i, v in enumerate((x, y, z))]
+        dist2 = []
+        for j, c in enumerate(logs):
+            d2 = sum(((c[i] - means[i]) / sds[i] - q[i]) ** 2 for i in range(3))
+            dist2.append((d2, j))
+        dist2.sort()
+
+        wsum = util_acc = energy_acc = 0.0
+        for d2, j in dist2[:n_neighbors]:
+            (cx, cy, cz), leaf = cloud[j]
+            lat_i = interpolation.get_value(leaf, "latency")
+            sol_i = self.sol_fn(cx, cy, cz)
+            if lat_i <= 0 or sol_i <= 0:
+                continue
+            w = 1.0 / (d2 ** (power / 2) + 1e-12)
+            util_acc += w * (sol_i / lat_i)
+            energy_acc += w * interpolation.get_value(leaf, "energy")
+            wsum += w
+        if wsum <= 0:
+            return None
+        util = util_acc / wsum
+        sol_q = self.sol_fn(x, y, z)
+        if util <= 0 or sol_q <= 0:
+            return None
+        return {"latency": sol_q / util, "power": 0.0, "energy": energy_acc / wsum}
 
 
 if __name__ == "__main__":
