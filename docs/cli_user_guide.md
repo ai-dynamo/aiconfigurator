@@ -111,7 +111,7 @@ aiconfigurator cli estimate --model-path Qwen/Qwen3-32B --system h200_sxm --tp-s
 - `--system`: System name (`h200_sxm`, `h100_sxm`, `h100_pcie`, `b200_sxm`, `gb200`, `a100_sxm`, `a100_pcie`, `l40s`, `l4`, `a30`, `gb300`)
 
 **Optional arguments (shared):**
-- `--estimate-mode`: `agg` (default, IFB) or `disagg` (separate prefill/decode workers), or one of the single-pass static breakdown modes `static` / `static_ctx` / `static_gen` (mirrors the webapp Static tab)
+- `--estimate-mode`: `agg` (default, IFB) or `disagg` (separate prefill/decode workers), or one of the single-pass static breakdown modes `static` / `static_ctx` / `static_gen`
 - `--backend`: Backend name (`trtllm`, `vllm`, `sglang`). Default: `trtllm`
 - `--backend-version`: Backend database version. Default: latest
 - `--database-mode`: Database mode (`SILICON`, `HYBRID`, `EMPIRICAL`, `SOL`). Default: `SILICON`
@@ -213,7 +213,7 @@ result = cli_estimate(
 
 #### Static estimate modes (`static`, `static_ctx`, `static_gen`)
 
-`agg` and `disagg` model continuous (in-flight) batching. The three `static` modes instead run a **single forward pass** through the model — no IFB scheduling — and report the per-phase latency and memory layout for that one pass. They mirror the webapp's Static tab and are the quickest way to see where time and memory go for a given shape and parallelism.
+`agg` and `disagg` model continuous (in-flight) batching. The three `static` modes instead run a **single forward pass** through the model — no IFB scheduling — and report the per-phase latency and memory layout for that one pass. They are the quickest way to see where time and memory go for a given shape and parallelism.
 
 - `static` — one full pass over both phases; reports TTFT (context), TPOT (one decode step), and request latency.
 - `static_ctx` — context (prefill) phase only; reports TTFT.

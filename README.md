@@ -20,7 +20,7 @@ For a technical deep dive into the design and methodology of AIConfigurator, ple
 [**AIConfigurator: Lightning-Fast Configuration Optimization for Multi-Framework LLM Serving**](https://arxiv.org/abs/2601.06288).
 
 The tool models LLM inference using collected data for a target machine and framework. It evaluates thousands of
-configurations and runs anywhere via the CLI and the web app.
+configurations and runs anywhere via the CLI.
 
 Let's get started.
 
@@ -49,9 +49,6 @@ python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.9 or lat
 
 # 4. Install aiconfigurator
 pip3 install .
-
-# 5. Install aiconfigurator with webapp support
-pip3 install ".[webapp]"
 ```
 
 ### Build with Docker
@@ -341,19 +338,10 @@ Use `--generator-config path/to/file.yaml` to load a YAML payload with `ServiceC
 
 Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`. 
 
-## Webapp
-
-```bash
-aiconfigurator webapp
-```
-
-Visit `127.0.0.1:7860`.
-Refer to [Advanced Tuning](docs/advanced_tuning.md) and the webapp README tab before running experiments.
-
 ## Tuning with Advanced Features
 
 There are many features, such as different quantizations and parallelism strategies, to tune performance beyond the default configurations.
-These apply to both the CLI and the webapp. Refer to [Advanced Tuning](docs/advanced_tuning.md) for details.
+These apply to the CLI. Refer to [Advanced Tuning](docs/advanced_tuning.md) for details.
 
 ## How It Works
 
