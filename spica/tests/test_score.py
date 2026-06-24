@@ -33,6 +33,19 @@ def test_objective_per_target():
     assert objective_value(REPORT, OptimizationTarget.GOODPUT) == 4000.0
     # goodput_per_gpu_hour = goodput / gpu_hours = 4000 / 2 = 2000
     assert objective_value(REPORT, OptimizationTarget.GOODPUT_PER_GPU_HOUR) == 2000.0
+    # throughput_per_gpu_hour = throughput / gpu_hours = 5000 / 2 = 2500
+    assert objective_value(REPORT, OptimizationTarget.THROUGHPUT_PER_GPU_HOUR) == 2500.0
+
+
+def test_throughput_per_gpu_hour_zero_when_gpu_hours_missing_or_zero():
+    # mirrors goodput_per_gpu_hour: the gpu_hours>0 guard avoids dividing by zero.
+    assert (
+        objective_value(
+            {"output_throughput_tok_s": 5000.0, "gpu_hours": 0.0}, OptimizationTarget.THROUGHPUT_PER_GPU_HOUR
+        )
+        == 0.0
+    )
+    assert objective_value({"output_throughput_tok_s": 5000.0}, OptimizationTarget.THROUGHPUT_PER_GPU_HOUR) == 0.0
 
 
 def test_goodput_per_gpu_hour_zero_when_no_gpu_hours():

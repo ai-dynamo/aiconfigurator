@@ -56,6 +56,7 @@ def test_goodput_requires_sla():
 
 def test_target_direction():
     assert OptimizationTarget.THROUGHPUT.maximize
+    assert OptimizationTarget.THROUGHPUT_PER_GPU_HOUR.maximize
     assert OptimizationTarget.GOODPUT_PER_GPU_HOUR.maximize
     assert not OptimizationTarget.E2E_LATENCY.maximize
 
@@ -63,9 +64,15 @@ def test_target_direction():
 def test_planner_optimization_target_mapping():
     # the planner's scaling objective is derived from the sweep goal
     assert OptimizationTarget.THROUGHPUT.planner_optimization_target == "throughput"
+    assert OptimizationTarget.THROUGHPUT_PER_GPU_HOUR.planner_optimization_target == "throughput"
     assert OptimizationTarget.E2E_LATENCY.planner_optimization_target == "latency"
     assert OptimizationTarget.GOODPUT.planner_optimization_target == "sla"
     assert OptimizationTarget.GOODPUT_PER_GPU_HOUR.planner_optimization_target == "sla"
+
+
+def test_throughput_per_gpu_hour_needs_no_sla():
+    # throughput_per_gpu_hour is throughput-based -> no SLA required (unlike goodput*)
+    OptimizationGoal(target=OptimizationTarget.THROUGHPUT_PER_GPU_HOUR)  # must validate without an SLA
 
 
 def _search_space(**overrides):

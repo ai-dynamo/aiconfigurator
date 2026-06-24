@@ -8,7 +8,9 @@ Three steps, mirroring the existing profiler replay optimizer
 ``Candidate`` / ``OptimizationGoal`` and the merged replay report keys:
 
 1. **objective** — map the goal target to a number from the report (the
-   ``goodput_per_gpu_hour`` target is ``goodput / gpu_hour``, both from the report).
+   ``goodput_per_gpu_hour`` / ``throughput_per_gpu_hour`` targets are ``goodput`` /
+   ``throughput`` divided by ``gpu_hour``, all from the report; ``gpu_hour`` for a
+   static deployment is ``gpu_count * e2e_benchmark_time``).
 2. **feasibility** — within the GPU budget. SLA is intentionally *not* gated here:
    when the user cares about latency they pick a ``goodput`` / ``goodput_per_gpu_hour``
    target, whose metric already counts only SLA-satisfying requests (the bridge's
@@ -46,6 +48,10 @@ def objective_value(report: dict[str, float], target: OptimizationTarget) -> flo
         gpu_hours = float(report.get("gpu_hours", 0.0))
         goodput = float(report.get("goodput_output_throughput_tok_s", 0.0))
         return goodput / gpu_hours if gpu_hours > 0.0 else 0.0
+    if target is OptimizationTarget.THROUGHPUT_PER_GPU_HOUR:
+        gpu_hours = float(report.get("gpu_hours", 0.0))
+        throughput = float(report.get("output_throughput_tok_s", 0.0))
+        return throughput / gpu_hours if gpu_hours > 0.0 else 0.0
     raise ValueError(f"unknown optimization target: {target!r}")
 
 

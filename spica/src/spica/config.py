@@ -32,13 +32,14 @@ class OptimizationTarget(str, Enum):
     """What the search optimizes for."""
 
     THROUGHPUT = "throughput"  # maximize replay throughput
+    THROUGHPUT_PER_GPU_HOUR = "throughput_per_gpu_hour"  # maximize throughput / GPU-hour
     E2E_LATENCY = "e2e_latency"  # minimize mean end-to-end latency
     GOODPUT = "goodput"  # maximize SLA-satisfying throughput
     GOODPUT_PER_GPU_HOUR = "goodput_per_gpu_hour"  # maximize goodput / GPU-hour
 
     @property
     def maximize(self) -> bool:
-        """True when larger is better (throughput/goodput/goodput_per_gpu_hour)."""
+        """True when larger is better (everything except e2e_latency)."""
         return self is not OptimizationTarget.E2E_LATENCY
 
     @property
@@ -48,11 +49,12 @@ class OptimizationTarget(str, Enum):
         The planner's scaling objective should match what the sweep optimizes:
         ``goodput``/``goodput_per_gpu_hour`` -> ``"sla"`` (SLA-based scaling, the only
         mode that uses ttft/itl and enables predictive throughput scaling);
-        ``throughput`` -> ``"throughput"``; ``e2e_latency`` -> ``"latency"`` (both
-        reactive, no SLA).
+        ``throughput``/``throughput_per_gpu_hour`` -> ``"throughput"``; ``e2e_latency``
+        -> ``"latency"`` (both reactive, no SLA).
         """
         return {
             OptimizationTarget.THROUGHPUT: "throughput",
+            OptimizationTarget.THROUGHPUT_PER_GPU_HOUR: "throughput",
             OptimizationTarget.E2E_LATENCY: "latency",
             OptimizationTarget.GOODPUT: "sla",
             OptimizationTarget.GOODPUT_PER_GPU_HOUR: "sla",
