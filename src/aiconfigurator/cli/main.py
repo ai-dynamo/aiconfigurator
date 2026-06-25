@@ -32,6 +32,9 @@ from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model
 
 logger = logging.getLogger(__name__)
 
+SPICA_TRACE_SWEEP_ROUNDS = 3
+SPICA_TRACE_PARALLEL_EVALS = 16
+
 
 def _latest_support_matrix_version(
     matrix: list[dict[str, str]],
@@ -301,18 +304,6 @@ def _add_default_mode_arguments(parser):
             "Path to a Mooncake JSONL replay trace. When set, default mode runs the Spica replay-backed smart sweeper "
             "instead of the legacy AIC Pareto sweep, and --isl/--osl are ignored."
         ),
-    )
-    parser.add_argument(
-        "--trace-sweep-rounds",
-        type=int,
-        default=3,
-        help="Number of Spica smart-sweep rounds for --trace-path. Increase for deeper trace searches. Default: 3.",
-    )
-    parser.add_argument(
-        "--trace-parallel-evals",
-        type=int,
-        default=16,
-        help="Number of Spica candidate evaluations to request per trace sweep round. Default: 16.",
     )
     parser.add_argument(
         "--inclusive-tpot",
@@ -2224,7 +2215,7 @@ def _run_spica_trace_default(args) -> list[Any]:
         search_space=search_space,
         workload={"trace_path": args.trace_path, "trace_format": "mooncake"},
         goal={"target": "goodput_per_gpu", "sla": {"ttft_ms": args.ttft, "itl_ms": args.tpot}},
-        sweep={"max_rounds": args.trace_sweep_rounds, "parallel_evals": args.trace_parallel_evals},
+        sweep={"max_rounds": SPICA_TRACE_SWEEP_ROUNDS, "parallel_evals": SPICA_TRACE_PARALLEL_EVALS},
     )
 
     logger.info(

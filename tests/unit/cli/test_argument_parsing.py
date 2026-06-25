@@ -118,8 +118,6 @@ class TestCLIArgumentParsing:
         assert args.tpot == 30.0
         assert args.request_latency is None
         assert args.trace_path is None
-        assert args.trace_sweep_rounds == 3
-        assert args.trace_parallel_evals == 16
         assert args.inclusive_tpot is False
         assert args.prefix == 0
         assert args.engine_step_backend is None
@@ -137,18 +135,32 @@ class TestCLIArgumentParsing:
                 "h200_sxm",
                 "--trace-path",
                 "/tmp/traffic.jsonl",
-                "--trace-sweep-rounds",
-                "5",
-                "--trace-parallel-evals",
-                "8",
             ]
         )
 
         assert args.trace_path == "/tmp/traffic.jsonl"
-        assert args.trace_sweep_rounds == 5
-        assert args.trace_parallel_evals == 8
         assert args.isl == 4000
         assert args.osl == 1000
+
+    @pytest.mark.parametrize("flag", ["--trace-sweep-rounds", "--trace-parallel-evals"])
+    def test_default_trace_tuning_flags_are_not_public_cli(self, cli_parser, flag):
+        """Trace sweep tuning is intentionally internal while trace mode is a POC."""
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "default",
+                    "--model-path",
+                    "Qwen/Qwen3-32B",
+                    "--total-gpus",
+                    "8",
+                    "--system",
+                    "h200_sxm",
+                    "--trace-path",
+                    "/tmp/traffic.jsonl",
+                    flag,
+                    "5",
+                ]
+            )
 
     def test_inclusive_tpot_default_false_in_exp_mode(self, cli_parser, mock_exp_yaml_path):
         """--inclusive-tpot defaults to False in exp mode."""
