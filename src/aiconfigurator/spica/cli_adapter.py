@@ -21,9 +21,8 @@ from aiconfigurator.sdk import common, pareto_analysis, perf_database
 
 logger = logging.getLogger(__name__)
 
-SPICA_TRACE_SWEEP_ROUNDS = 1
-SPICA_TRACE_PARALLEL_EVALS = 2
-SPICA_TRACE_CANDIDATES_PER_ROUND = 2
+SPICA_TRACE_SWEEP_ROUNDS = 3
+SPICA_TRACE_PARALLEL_EVALS = 16
 
 
 @dataclass
@@ -75,13 +74,17 @@ def _positive_int_env(name: str, default: int) -> int:
 
 
 def _spica_trace_sweep_config() -> dict[str, int]:
-    return {
+    sweep_config = {
         "max_rounds": _positive_int_env("AIC_SPICA_TRACE_SWEEP_ROUNDS", SPICA_TRACE_SWEEP_ROUNDS),
         "parallel_evals": _positive_int_env("AIC_SPICA_TRACE_PARALLEL_EVALS", SPICA_TRACE_PARALLEL_EVALS),
-        "candidates_per_round": _positive_int_env(
-            "AIC_SPICA_TRACE_CANDIDATES_PER_ROUND", SPICA_TRACE_CANDIDATES_PER_ROUND
-        ),
     }
+    candidates_per_round = os.environ.get("AIC_SPICA_TRACE_CANDIDATES_PER_ROUND")
+    if candidates_per_round is not None:
+        sweep_config["candidates_per_round"] = _positive_int_env(
+            "AIC_SPICA_TRACE_CANDIDATES_PER_ROUND",
+            sweep_config["parallel_evals"],
+        )
+    return sweep_config
 
 
 def _spica_candidate_to_dict(candidate: Any) -> dict[str, Any]:
