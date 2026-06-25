@@ -691,8 +691,11 @@ class BaseBackend:
         dp = model.config.attention_dp_size
         moe_tp = model.config.moe_tp_size
         moe_ep = model.config.moe_ep_size
-        num_total_gpus = tp * pp * dp
-        parallel = f"tp{tp}pp{pp}dp{dp}etp{moe_tp}ep{moe_ep}"
+        cp = model.config.cp_size
+        # CP is an independent sequence-sharding dim -> folds into the per-worker
+        # GPU count (tp*pp*dp*cp), so throughput-per-GPU normalizes correctly.
+        num_total_gpus = model.config.total_gpus_per_worker
+        parallel = f"tp{tp}pp{pp}dp{dp}etp{moe_tp}ep{moe_ep}" + (f"cp{cp}" if cp > 1 else "")
         gemm = model.config.gemm_quant_mode.name
         kvcache = model.config.kvcache_quant_mode.name
         fmha = model.config.fmha_quant_mode.name
@@ -761,7 +764,8 @@ class BaseBackend:
         # KV-per-seq context for capacity probing in CLI detail reports.
         try:
             kv_seq_len_used = isl + img_ctx_tokens + beam_width * osl
-            kv_bytes_per_seq = model.get_kvcache_bytes_per_sequence(kv_seq_len_used)
+            # CP shards persistent KV across cp ranks (full/cp per rank).
+            kv_bytes_per_seq = model.get_kvcache_bytes_per_sequence(kv_seq_len_used) / model._cp_kv_memory_divisor()
             summary.set_kv_per_seq(kv_bytes_per_seq, kv_seq_len_used)
         except Exception:
             # Best-effort; downstream report degrades gracefully when unset.
@@ -1308,14 +1312,15 @@ class BaseBackend:
         dp = model.config.attention_dp_size
         moe_tp = model.config.moe_tp_size
         moe_ep = model.config.moe_ep_size
-        tokens_s_gpu = output_throughput / pp / tp / dp
+        cp = model.config.cp_size
+        tokens_s_gpu = output_throughput / pp / tp / dp / cp
         tokens_s_user = 1000.0 / tpot if (osl > 1 and tpot > 0.0) else 0.0
         seq_s = request_rate
-        seq_s_gpu = seq_s / pp / tp / dp
+        seq_s_gpu = seq_s / pp / tp / dp / cp
         tokens_s = output_throughput
         request_latency = ttft + tpot * max(osl - 1, 0)
-        num_total_gpus = tp * pp * dp
-        parallel = f"tp{tp}pp{pp}dp{dp}etp{moe_tp}ep{moe_ep}"
+        num_total_gpus = model.config.total_gpus_per_worker
+        parallel = f"tp{tp}pp{pp}dp{dp}etp{moe_tp}ep{moe_ep}" + (f"cp{cp}" if cp > 1 else "")
         gemm = model.config.gemm_quant_mode.name
         kvcache = model.config.kvcache_quant_mode.name
         fmha = model.config.fmha_quant_mode.name
@@ -1580,7 +1585,9 @@ class BaseBackend:
             activations *= 1.0 + self.ACTIVATION_OVERHEAD_FRAC
 
         seq_tokens = max_seq_len if max_seq_len is not None else isl + beam_width * osl
-        kvcache = batch_size * model.get_kvcache_bytes_per_sequence(seq_tokens)
+        # CP shards persistent KV across cp ranks (full/cp per rank); the
+        # all-gather is a transient compute buffer, not steady-state footprint.
+        kvcache = batch_size * model.get_kvcache_bytes_per_sequence(seq_tokens) / model._cp_kv_memory_divisor()
         # should not be divided by pp_size as you need to hold all kvcache for stages.
 
         # starting from 2.22

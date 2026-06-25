@@ -342,7 +342,7 @@ class EventFn:
                     enable_wideep=enable_wideep,
                 )
                 for parallel_config in parallel_config_list:
-                    tp, pp, dp, moe_tp, moe_ep = parallel_config
+                    tp, pp, dp, moe_tp, moe_ep, *_cp = parallel_config
                     if is_moe:
                         logger.info(f"enumerated config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} moe_ep {moe_ep}")
                     else:
@@ -458,7 +458,7 @@ class EventFn:
                     enable_wideep=enable_wideep,
                 )
                 for parallel_config in parallel_config_list:
-                    tp, pp, dp, moe_tp, moe_ep = parallel_config
+                    tp, pp, dp, moe_tp, moe_ep, *_cp = parallel_config
                     if is_moe:
                         logger.info(f"enumerated config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} moe_ep {moe_ep}")
                     else:
@@ -674,7 +674,7 @@ class EventFn:
                 )
 
                 for prefill_parallel_config in prefill_parallel_config_list:
-                    tp, pp, dp, moe_tp, moe_ep = prefill_parallel_config
+                    tp, pp, dp, moe_tp, moe_ep, *_cp = prefill_parallel_config
                     if is_moe:
                         logger.info(
                             f"enumerated prefill config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} moe_ep {moe_ep}"
@@ -683,7 +683,7 @@ class EventFn:
                         logger.info(f"enumerated prefill config: tp {tp} pp {pp}")
 
                 for decode_parallel_config in decode_parallel_config_list:
-                    tp, pp, dp, moe_tp, moe_ep = decode_parallel_config
+                    tp, pp, dp, moe_tp, moe_ep, *_cp = decode_parallel_config
                     if is_moe:
                         logger.info(
                             f"enumerated decode config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} moe_ep {moe_ep}"

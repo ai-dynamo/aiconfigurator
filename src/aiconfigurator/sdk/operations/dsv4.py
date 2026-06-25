@@ -445,6 +445,7 @@ class DeepSeekV4MHCModule(Operation):
     """DeepSeek-V4 manifold-constrained hyper-connection pre/post module."""
 
     _data_cache: ClassVar[dict] = {}
+    _CP_AWARE: ClassVar[bool] = True  # token-major: query divides num_tokens by self._seq_split
 
     def __init__(
         self,
@@ -455,8 +456,10 @@ class DeepSeekV4MHCModule(Operation):
         hc_mult: int,
         sinkhorn_iters: int,
         quant_mode: common.GEMMQuantMode,
+        *,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         if op not in {"pre", "post", "both"}:
             raise ValueError(f"Unsupported DeepSeek-V4 mHC op: {op}")
         self._op = op
@@ -632,7 +635,7 @@ class DeepSeekV4MHCModule(Operation):
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         result = database.query_mhc_module(
-            num_tokens=kwargs.get("x"),
+            num_tokens=kwargs.get("x") // self._seq_split,  # CP: per-rank token count
             hidden_size=self._hidden_size,
             hc_mult=self._hc_mult,
             sinkhorn_iters=self._sinkhorn_iters,
@@ -683,8 +686,11 @@ class _BaseDeepSeekV4AttentionModule(Operation):
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         gemm_quant_mode: common.GEMMQuantMode,
+        *,
+        cp_size: int = 1,
     ) -> None:
         super().__init__(name, scale_factor)
+        self._cp_size = cp_size  # context parallelism (sglang AllGather); >1 only on context modules
         self._num_heads = num_heads
         self._native_heads = native_heads
         self._tp_size = tp_size
@@ -823,6 +829,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         cls._data_cache.clear()
         cls._raw_data_cache.clear()
         cls._sparse_kernel_cache.clear()
+        cls._csa_topk_abs_cache.clear()
 
     # ------------------------------------------------------------------
     # Sparse-kernel lookup helper (formerly PerfDatabase._lookup_dsv4_sparse_kernel)
@@ -1102,11 +1109,12 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
     # Op contract
     # ------------------------------------------------------------------
 
-    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        result = database.query_context_deepseek_v4_attention_module(
-            b=kwargs.get("batch_size"),
-            s=kwargs.get("s"),
-            prefix=kwargs.get("prefix", 0),
+    def _module_base(self, database: PerfDatabase, b: int, s: int, prefix: int):
+        """The per-(b,s,prefix) context attention module latency (non-CP path)."""
+        return database.query_context_deepseek_v4_attention_module(
+            b=b,
+            s=s,
+            prefix=prefix,
             num_heads=self._num_heads,
             native_heads=self._native_heads,
             tp_size=self._tp_size,
@@ -1125,11 +1133,121 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             fmha_quant_mode=self._fmha_quant_mode,
             gemm_quant_mode=self._gemm_quant_mode,
         )
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        batch_size = kwargs.get("batch_size")
+        isl = kwargs.get("s")
+        prefix = kwargs.get("prefix", 0)
+        if self._cp_size and self._cp_size > 1:
+            return self._query_cp(database, batch_size, isl, prefix)
+        result = self._module_base(database, batch_size, isl, prefix)
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
             source=getattr(result, "source", "silicon"),
         )
+
+    # ------------------------------------------------------------------
+    # Context-Parallel (CP) prefill model — DeepSeek-V4 CSA / HCA.
+    # Self-contained branch (does NOT reuse the non-CP topk-DELTA correction).
+    # Mirrors GLM-5 ContextDSAModule._query_cp: per-card monolithic base +
+    # full/cp swap of the super-linear sub-kernels + CP all-gathers.
+    #   CSA (compress_ratio==4): base(per_card) + mqa full/cp + topk full/cp
+    #       + AG(indexer key) + AG(compressed KV).
+    #   HCA (compress_ratio==128 / SWA): base(per_card) + AG(windowed dense KV)
+    #       + AG(compressed KV)  — windowed dense, no indexer/topk selection.
+    # AG sizes follow DeepSeekV4Model.get_kvcache_bytes_per_sequence (head_dim
+    # entries; indexer index_head_dim; compressed isl//ratio; window-capped).
+    # ------------------------------------------------------------------
+    _csa_topk_abs_cache: ClassVar[dict] = {}
+
+    def _query_cp(self, database: PerfDatabase, b: int, isl: int, prefix: int) -> PerformanceResult:
+        cp = self._cp_size
+        per_card = max(1, -(-isl // cp))  # ceil: busiest CP rank = critical path
+        ratio = self._compress_ratio
+        latency = float(self._module_base(database, b, per_card, prefix))
+        head_dim = self._head_dim
+
+        # x b throughout: mqa/topk are linear in batch (b independent sequences)
+        # and the all-gather moves b sequences' worth of KV. The sparse lookups
+        # are at bs=1, so x b matches the batch-b base. (b==1 -> unchanged.)
+        def ag(message_elems):
+            return float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", int(b * message_elems)))
+
+        if ratio == 4:
+            # CSA: super-linear indexer (mqa) + topk -> full/cp swap (GLM-5 form).
+            # Look up at the REAL batch b (paged_mqa_logits interpolates the bs
+            # axis; csa_topk keeps every collected bs), so the delta matches the
+            # batch-b base WITHOUT an external x b linearity assumption.
+            mqa_full = self._lookup_sparse_kernel(
+                database, "paged_mqa_logits", b, isl, prefix, self._tp_size, self._native_heads
+            )
+            mqa_perc = self._lookup_sparse_kernel(
+                database, "paged_mqa_logits", b, per_card, prefix, self._tp_size, self._native_heads
+            )
+            tl_full = self._csa_topk_top_last(database, isl, prefix, self._native_heads, b)
+            tl_perc = self._csa_topk_top_last(database, per_card, prefix, self._native_heads, b)
+            # Fail loud (like GLM-5 ContextDSAModule._query_cp): the CSA CP deltas
+            # REQUIRE the sparse tables -- silently dropping them would hide a
+            # missing/uncollected parquet behind a too-small base-only estimate.
+            if None in (mqa_full, mqa_perc, tl_full, tl_perc):
+                raise ValueError(
+                    "DeepSeek-V4 CSA CP modeling needs sparse tables (paged_mqa_logits + "
+                    f"csa_topk_calib top_last) at num_heads={self._native_heads}, b={b}; "
+                    "collect dsv4_paged_mqa_logits_module / dsv4_csa_topk_calib first."
+                )
+            latency += (mqa_full / cp - mqa_perc) + (tl_full / cp - tl_perc)
+            latency += ag(isl * self._index_head_dim)  # AG indexer key (mqa stage)
+        else:
+            # HCA (128) / SWA: windowed dense; no indexer/topk selection.
+            window = self._window_size or isl
+            latency += ag(min(isl, window) * head_dim)  # AG windowed dense KV (the HCA "+1")
+
+        # Compressed-KV all-gather: both CSA and HCA gather the isl//ratio
+        # compressed entries (the fmha-stage KV). Common to both branches.
+        if ratio:
+            latency += ag((isl // ratio) * head_dim)
+
+        return PerformanceResult(latency * self._scale_factor, energy=0.0, source="cp_model")
+
+    @classmethod
+    def _csa_topk_top_last(cls, database: PerfDatabase, isl: int, step: int, native_heads: int, b: int):
+        """Absolute top_last topk latency at (isl, step) for batch ``b``. CP branch
+        only — reads the raw flat/top_last rows of dsv4_csa_topk_calib (the non-CP
+        path keeps only the flat-top_last DELTA), so this is a separate
+        self-contained loader. Looks up at the real batch (every collected bs is
+        kept) so the topk delta matches the batch-b base without an x b assumption."""
+        from aiconfigurator.sdk.operations.dsa import ContextDSAModule
+
+        by_bs = cls._load_csa_topk_top_last(database, native_heads)
+        return ContextDSAModule._lookup_2d(ContextDSAModule._bs_slice(by_bs, b), isl, step)
+
+    @classmethod
+    def _load_csa_topk_top_last(cls, database: PerfDatabase, native_heads: int) -> dict:
+        """{bs: {(isl, step): top_last_latency}} from dsv4_csa_topk_calib."""
+        key = (database.systems_root, database.backend, database.version, native_heads)
+        if key in cls._csa_topk_abs_cache:
+            return cls._csa_topk_abs_cache[key]
+        import os
+
+        import pandas as pd
+
+        from aiconfigurator.sdk.perf_database import PerfDataFilename
+
+        data_dir = os.path.join(
+            database.systems_root, database.system_spec["data_dir"], database.backend, database.version
+        )
+        path = os.path.join(data_dir, PerfDataFilename.dsv4_csa_topk_calib.value)
+        by_bs: dict = {}
+        if os.path.exists(path):
+            df = pd.read_parquet(path)
+            if "num_heads" in df:
+                df = df[df["num_heads"] == native_heads]
+            tl = df[df["score_mode"].astype(str) == "top_last"]
+            for _, r in tl.iterrows():
+                by_bs.setdefault(int(r["batch_size"]), {})[(int(r["isl"]), int(r["step"]))] = float(r["latency"])
+        cls._csa_topk_abs_cache[key] = by_bs
+        return by_bs
 
 
 # ───────────────────────────────────────────────────────────────────────

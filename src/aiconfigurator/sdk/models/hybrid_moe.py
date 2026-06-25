@@ -26,6 +26,11 @@ class HybridMoEModel(BaseModel):
     """
 
     @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # Dense SWA/global GQA prefill CP: SGLang AllGather (zigzag FMHA).
+        return backend_name == "sglang"
+
+    @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
         model = cls(
             model_info["topk"],
@@ -50,11 +55,12 @@ class HybridMoEModel(BaseModel):
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
         assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
+            self.config.tp_size * self.config.attention_dp_size * self.config.cp_size
+            == self.config.moe_tp_size * self.config.moe_ep_size
         ), (
             f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+            f"({self.config.attention_dp_size}) * cp_size ({self.config.cp_size}) should be equal to "
+            f"moe_tp_size ({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
         self._topk = topk
@@ -148,6 +154,8 @@ class HybridMoEModel(BaseModel):
             "global_proj_in": self._num_heads * global_v_hd // tp_size,
             "swa_hd": swa_hd,
             "global_hd": self._head_size,
+            "swa_v_hd": swa_v_hd,
+            "global_v_hd": global_v_hd,
             "dense_inter_per_tp": dense_inter // tp_size,
         }
 
@@ -326,6 +334,57 @@ class HybridMoEModel(BaseModel):
                 ops.P2P("context_p2p", pp - 1, h, pp),
             ]
         )
+
+        # cp (SGLang prefill AllGather CP). Heterogeneous KV per layer-type
+        # (global vs SWA, and K/V head dims can differ for MiMo-V2-Flash) ->
+        # emit one NCCL all_gather per type, weighted by its layer count.
+        # Dense FMHA uses zigzag (``cp_size`` on the attention op, balanced
+        # full/cp work); token-major ops shrink the M-axis via ``seq_split``.
+        # Bypasses the BaseModel CP helper (one uniform per-token KV size).
+        # TODO(cp-impl-assumption): SGLang AllGather-of-KV variant.
+        # TODO(cp-window-cap): SWA all_gather oversizes vs the window cap.
+        if self.config.cp_size > 1:
+            cp = self.config.cp_size
+            kvcache_bytes = self.config.kvcache_quant_mode.value.memory
+            comm_bytes = self.config.comm_quant_mode.value.memory
+            for op in self.context_ops:
+                if isinstance(op, ops.ContextAttention):
+                    op._cp_size = cp
+                elif isinstance(op, ops.MoEDispatch):
+                    # MoEDispatch keys CP off attn_cp_size (AG pre / RS post),
+                    # NOT seq_split; with moe_ep=cp its attention_tp_size>1 would
+                    # otherwise wrongly take the TP all-reduce path.
+                    op._attn_cp_size = cp
+                else:
+                    op._seq_split = cp
+            global_layers = counts.get("global_moe", 0) + counts.get("global_dense", 0)
+            swa_layers = counts.get("swa_moe", 0) + counts.get("swa_dense", 0)
+            # Per-layer KV bytes = n_kv * (k_hd + v_hd) * bytes (K and V head
+            # dims can differ for Hybrid configs), not the n_kv*2*head shortcut.
+            if global_layers > 0:
+                kv_bytes_per_token = d["global_n_kv_per_gpu"] * (d["global_hd"] + d["global_v_hd"]) * kvcache_bytes
+                self.context_ops.append(
+                    ops.NCCL(
+                        "context_cp_all_gather_global",
+                        global_layers,
+                        "all_gather",
+                        num_elements_per_token=kv_bytes_per_token / comm_bytes,
+                        num_gpus=cp,
+                        comm_quant_mode=self.config.comm_quant_mode,
+                    )
+                )
+            if swa_layers > 0:
+                kv_bytes_per_token = d["swa_n_kv_per_gpu"] * (d["swa_hd"] + d["swa_v_hd"]) * kvcache_bytes
+                self.context_ops.append(
+                    ops.NCCL(
+                        "context_cp_all_gather_swa",
+                        swa_layers,
+                        "all_gather",
+                        num_elements_per_token=kv_bytes_per_token / comm_bytes,
+                        num_gpus=cp,
+                        comm_quant_mode=self.config.comm_quant_mode,
+                    )
+                )
 
     def _build_generation_ops(self) -> None:
         """Build the generation (decoding) operations for all four layer types.

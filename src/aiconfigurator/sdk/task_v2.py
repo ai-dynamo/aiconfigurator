@@ -51,7 +51,7 @@ from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config
 
 logger = logging.getLogger(__name__)
 
-ParallelChoice = tuple[int, int, int, int, int]  # (tp, pp, dp, moe_tp, moe_ep)
+ParallelChoice = tuple[int, int, int, int, int, int]  # (tp, pp, dp, moe_tp, moe_ep, cp)
 
 
 _DEFAULT_NEXTN_ACCEPT_RATES: list[float] = [0.85, 0.8, 0.6, 0.0, 0.0]
@@ -356,6 +356,7 @@ class Task:
     agg_dp_candidates: list[int] | None = None
     agg_moe_tp_candidates: list[int] | None = None
     agg_moe_ep_candidates: list[int] | None = None
+    agg_cp_candidates: list[int] | None = None
 
     # ====== 4. Disagg prefill worker spec ======
     prefill_model_path: str = ""
@@ -378,6 +379,7 @@ class Task:
     prefill_dp_candidates: list[int] | None = None
     prefill_moe_tp_candidates: list[int] | None = None
     prefill_moe_ep_candidates: list[int] | None = None
+    prefill_cp_candidates: list[int] | None = None
 
     # ====== 6. Disagg decode worker spec ======
     decode_model_path: str = ""
@@ -399,6 +401,7 @@ class Task:
     decode_dp_candidates: list[int] | None = None
     decode_moe_tp_candidates: list[int] | None = None
     decode_moe_ep_candidates: list[int] | None = None
+    decode_cp_candidates: list[int] | None = None
 
     # ====== 8. Disagg orchestration ======
     num_gpu_per_replica: list[int] | None = None
@@ -930,10 +933,17 @@ class Task:
             "dp_list": f"{role}_dp_candidates",
             "moe_tp_list": f"{role}_moe_tp_candidates",
             "moe_ep_list": f"{role}_moe_ep_candidates",
+            "cp_list": f"{role}_cp_candidates",
         }
         for k_src, k_attr in map_to_attr.items():
             if getattr(self, k_attr) is None:
-                setattr(self, k_attr, src[k_src])
+                # cp_list is optional in worker-config dicts; default to [1]
+                # (CP off). Decode is always [1] -- CP is prefill-only.
+                default = [1] if k_src == "cp_list" else None
+                value = src.get(k_src, default) if k_src == "cp_list" else src[k_src]
+                if role == "decode" and k_src == "cp_list":
+                    value = [1]
+                setattr(self, k_attr, value)
 
     # =====================================================================
     # Role attribute access (no fallback across prefixes — strict discipline)
@@ -995,7 +1005,7 @@ class Task:
         )
 
     def iter_parallel(self, role: Literal["agg", "prefill", "decode"]) -> Iterator[ParallelChoice]:
-        """Yield (tp, pp, dp, moe_tp, moe_ep) tuples for the role.
+        """Yield (tp, pp, dp, moe_tp, moe_ep, cp) tuples for the role.
 
         Uses sdk.utils.enumerate_parallel_config so MoE constraints match
         the legacy path exactly.
@@ -1005,6 +1015,9 @@ class Task:
         def _cands(dim: str) -> list[int]:
             return getattr(self, f"{prefix}{dim}_candidates")
 
+        # CP is modeled for context/prefill only; decode always cp=1.
+        cp_list = [1] if role == "decode" else (_cands("cp") or [1])
+
         return iter(
             enumerate_parallel_config(
                 num_gpu_list=_cands("num_gpu"),
@@ -1013,6 +1026,7 @@ class Task:
                 dp_list=_cands("dp"),
                 moe_tp_list=_cands("moe_tp"),
                 moe_ep_list=_cands("moe_ep"),
+                cp_list=cp_list,
                 is_moe=self._is_moe,
                 backend=common.BackendName[self._role_attr(role, "backend_name")],
                 enable_wideep=self._role_attr(role, "enable_wideep"),

@@ -50,6 +50,7 @@ class GEMM(Operation):
     _data_cache: ClassVar[dict] = {}
     _compute_scale_cache: ClassVar[dict] = {}
     _scale_matrix_cache: ClassVar[dict] = {}
+    _CP_AWARE: ClassVar[bool] = True  # query divides x (token count) by self._seq_split
 
     def __init__(
         self,
@@ -60,7 +61,7 @@ class GEMM(Operation):
         quant_mode: common.GEMMQuantMode,
         **kwargs,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=kwargs.get("seq_split", 1))
         self._n = n
         self._k = k
         self._quant_mode = quant_mode
@@ -650,6 +651,7 @@ class GEMM(Operation):
         """
         x = kwargs.get("x")
         x //= self._scale_num_tokens
+        x //= self._seq_split  # CP: per-rank token count
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
         is_fp8_static = quant_mode == common.GEMMQuantMode.fp8_static

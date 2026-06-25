@@ -60,10 +60,11 @@ def agg_pareto(
     all_configs_oom = True
     all_kv_cache_oom = True
     for parallel_config in parallel_config_list:
-        tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
+        tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, *cp_rest = parallel_config
+        cp_size = cp_rest[0] if cp_rest else 1
         logger.debug(
             f"Getting candidate workers with parallel config: tp={tp_size}, pp={pp_size}, "
-            f"dp={dp_size}, moe_tp={moe_tp_size}, moe_ep={moe_ep_size}"
+            f"dp={dp_size}, moe_tp={moe_tp_size}, moe_ep={moe_ep_size}, cp={cp_size}"
         )
 
         try:
@@ -73,6 +74,7 @@ def agg_pareto(
             overwritten_model_config.moe_tp_size = moe_tp_size
             overwritten_model_config.moe_ep_size = moe_ep_size
             overwritten_model_config.attention_dp_size = dp_size
+            overwritten_model_config.cp_size = cp_size
             model = get_model(
                 model_path=model_path,
                 model_config=overwritten_model_config,

@@ -407,14 +407,16 @@ def sweep_agg(
     all_kv_cache_oom = True
 
     for parallel_config in parallel_config_list:
-        tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
+        tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, *cp_rest = parallel_config
+        cp_size = cp_rest[0] if cp_rest else 1
         logger.debug(
-            "sweep_agg: parallel tp=%s pp=%s dp=%s moe_tp=%s moe_ep=%s",
+            "sweep_agg: parallel tp=%s pp=%s dp=%s moe_tp=%s moe_ep=%s cp=%s",
             tp_size,
             pp_size,
             dp_size,
             moe_tp_size,
             moe_ep_size,
+            cp_size,
         )
         try:
             point_model_config = copy.deepcopy(model_config)
@@ -423,6 +425,7 @@ def sweep_agg(
             point_model_config.moe_tp_size = moe_tp_size
             point_model_config.moe_ep_size = moe_ep_size
             point_model_config.attention_dp_size = dp_size
+            point_model_config.cp_size = cp_size
 
             # Build backend + model ONCE per parallel choice so the backend's
             # internal _agg_cache survives across the tpot sweep below.
@@ -555,15 +558,17 @@ def _get_disagg_worker_candidates(
     all_configs_oom = True
 
     for parallel_config in parallel_config_list:
-        tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
+        tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, *cp_rest = parallel_config
+        cp_size = cp_rest[0] if cp_rest else 1
         logger.debug(
-            "sweep_disagg/%s: candidate parallel tp=%s pp=%s dp=%s moe_tp=%s moe_ep=%s",
+            "sweep_disagg/%s: candidate parallel tp=%s pp=%s dp=%s moe_tp=%s moe_ep=%s cp=%s",
             role,
             tp_size,
             pp_size,
             dp_size,
             moe_tp_size,
             moe_ep_size,
+            cp_size,
         )
         try:
             point_mc = copy.deepcopy(model_config)
@@ -572,6 +577,7 @@ def _get_disagg_worker_candidates(
             point_mc.moe_tp_size = moe_tp_size
             point_mc.moe_ep_size = moe_ep_size
             point_mc.attention_dp_size = dp_size
+            point_mc.cp_size = cp_size
 
             model = get_model(model_path=model_path, model_config=point_mc, backend_name=backend_name)
 

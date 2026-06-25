@@ -82,8 +82,9 @@ class Mamba2Kernel(Operation):
         d_conv: int,
         n_groups: int,
         chunk_size: int,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._kernel_source = kernel_source
         self._phase = phase
         self._hidden_size = hidden_size
@@ -306,8 +307,9 @@ class GDNKernel(Operation):
         num_v_heads: int,
         head_v_dim: int,
         d_conv: int,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._kernel_source = kernel_source
         self._phase = phase
         self._d_model = d_model
@@ -539,8 +541,9 @@ class Mamba2(Operation):
         chunk_size: int,
         tp_size: int,
         quant_mode: common.GEMMQuantMode,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._hidden_size = hidden_size
         self._nheads = nheads
         self._head_dim = head_dim
@@ -586,6 +589,10 @@ class Mamba2(Operation):
         4. out_proj GEMM: (x, d_inner) @ (d_inner, hidden_size)
         """
         x = kwargs.get("x")  # num tokens
+        # No ``_seq_split`` division here: the Mamba SSM scan is order-dependent,
+        # so CP cannot shard its tokens across ranks (each rank sees the full
+        # sequence). The ``_CP_AWARE = False`` default also makes the constructor
+        # raise if a caller ever passes ``seq_split > 1`` via __init__.
 
         # Apply TP sharding (matching TensorRT-LLM mamba2_mixer.py lines 81-84)
         nheads_per_gpu = self._nheads // self._tp_size

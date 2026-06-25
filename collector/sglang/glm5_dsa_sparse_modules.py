@@ -92,9 +92,9 @@ KERNEL_TO_KERNEL_SOURCE = {
 }
 
 
-def _make_perf_filename(kernel: str, output_path: str) -> str:
+def _make_perf_filename(kernel: str, output_path: str, op_name_map: dict = KERNEL_TO_OP_NAME) -> str:
     if os.path.isdir(output_path) or not output_path.endswith(".txt"):
-        return os.path.join(output_path, f"{KERNEL_TO_OP_NAME[kernel]}_perf.txt")
+        return os.path.join(output_path, f"{op_name_map[kernel]}_perf.txt")
     return output_path
 
 
@@ -112,12 +112,17 @@ def _write_row(
     model_path,
     score_mode=None,
     kernel_source=None,
+    architecture: str = GLM5_ARCHITECTURE,
+    op_name_map: dict = KERNEL_TO_OP_NAME,
 ):
+    # ``architecture`` / ``op_name_map`` default to GLM-5 so existing GLM-5
+    # callers are unchanged; DeepSeek-V3.2 reuses this with its own values
+    # (DeepseekV32ForCausalLM + dsv32_* names) -- see dsv32_dsa_sparse_modules.
     os.makedirs(os.path.dirname(os.path.abspath(perf_filename)) or ".", exist_ok=True)
     mla_dtype = "bfloat16" if kernel == "dsa_attn" else "fp8_e4m3"
     item = {
         "model": model_path,
-        "architecture": GLM5_ARCHITECTURE,
+        "architecture": architecture,
         "mla_dtype": mla_dtype,
         "kv_cache_dtype": "fp8_e4m3",
         "gemm_type": "fp8_block",
@@ -136,7 +141,7 @@ def _write_row(
         framework="SGLang",
         version="kernel-level",
         device_name=device_name,
-        op_name=KERNEL_TO_OP_NAME[kernel],
+        op_name=op_name_map[kernel],
         kernel_source=kernel_source or KERNEL_TO_KERNEL_SOURCE[kernel],
         perf_filename=perf_filename,
     )
@@ -449,12 +454,25 @@ def _dsa_generation_derived_shapes(model_path):
     return _derive_context_shapes(sweep.generation_batch_sizes, [1], sweep.generation_sequence_lengths, _valid)
 
 
-def run_glm5_dsa_sparse_kernel_worker(model_path, kernel, bs_only, *, perf_filename, device="cuda:0"):
-    if kernel not in KERNEL_TO_OP_NAME:
-        raise ValueError(f"unknown kernel={kernel}; expected one of {list(KERNEL_TO_OP_NAME)}")
+def run_glm5_dsa_sparse_kernel_worker(
+    model_path,
+    kernel,
+    bs_only,
+    *,
+    perf_filename,
+    device="cuda:0",
+    architecture: str = GLM5_ARCHITECTURE,
+    op_name_map: dict = KERNEL_TO_OP_NAME,
+):
+    # ``architecture`` / ``op_name_map`` default to GLM-5; DeepSeek-V3.2 reuses
+    # this same worker with its own values (the kernels/shapes are read from the
+    # model config, so only the output tag + filenames differ).
+    if kernel not in op_name_map:
+        raise ValueError(f"unknown kernel={kernel}; expected one of {list(op_name_map)}")
+    label = op_name_map[kernel].split("_")[0]  # "glm5" / "dsv32" — for log lines
     sc = _glm5_sparse_config(model_path)
     output_dir = os.path.dirname(perf_filename) or os.getcwd()
-    perf_path = _make_perf_filename(kernel, output_dir)
+    perf_path = _make_perf_filename(kernel, output_dir, op_name_map)
     # Both context and decode shapes are derived from the DSA module INPUT
     # sweeps (no perf.txt read): context from dsa_context, decode (isl==1)
     # from dsa_generation. The sparse kernels thus cover every shape the
@@ -466,10 +484,10 @@ def run_glm5_dsa_sparse_kernel_worker(model_path, kernel, bs_only, *, perf_filen
     # this task owns one bs (collect.py distributes bs across GPU workers)
     shapes = [(prefix, isl, bs) for (prefix, isl, bs) in shapes if bs == bs_only]
     if not shapes:
-        print(f"[glm5-sparse {kernel} bs={bs_only}] no shapes; skipping.")
+        print(f"[{label}-sparse {kernel} bs={bs_only}] no shapes; skipping.")
         return
     device_name = torch.cuda.get_device_name(device)
-    print(f"[glm5-sparse {kernel} bs={bs_only}] {len(shapes)} shapes -> {perf_path}")
+    print(f"[{label}-sparse {kernel} bs={bs_only}] {len(shapes)} shapes -> {perf_path}")
     n_ok = 0
     for prefix, isl, bs in shapes:
         out = _guarded_bench(
@@ -494,6 +512,8 @@ def run_glm5_dsa_sparse_kernel_worker(model_path, kernel, bs_only, *, perf_filen
                 model_path=model_path,
                 score_mode=score_mode,
                 kernel_source=kernel_source,
+                architecture=architecture,
+                op_name_map=op_name_map,
             )
     print(f"  {kernel}: benched {n_ok}/{len(shapes)} unique shapes")
 

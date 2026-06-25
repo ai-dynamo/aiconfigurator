@@ -23,9 +23,11 @@ class ModelConfig:
     moe_tp_size: int = None
     moe_ep_size: int = None
     attention_dp_size: int = 1
-    attention_cp_size: int = (
-        1  # context parallelism (splits attention tokens, not heads); attn_tp = tp_size // attention_cp_size
-    )
+    cp_size: int = 1  # context parallelism (splits attention tokens, not heads); attn_tp = tp_size // cp_size
+    # CP variant ("none" / "allgather" / "ulysses" / "ring"). Set by get_model
+    # from backend_name when cp_size > 1; default "none". Dense models branch on
+    # this in their op pipeline; GLM-5 DSA ignores it (handled in ContextDSAModule).
+    cp_style: str = "none"
     workload_distribution: str = "power_law"
     # quantization options
     nextn: int = 0  # at most mtp5
@@ -55,13 +57,13 @@ class ModelConfig:
 
         _validate_positive("tp_size", self.tp_size)
         _validate_positive("attention_dp_size", self.attention_dp_size)
-        _validate_positive("attention_cp_size", self.attention_cp_size)
+        _validate_positive("cp_size", self.cp_size)
         # Context parallelism is an INDEPENDENT attention dimension: it splits
         # tokens (sequence), orthogonal to tp_size (which splits heads). It
         # contributes to the total width that the MoE must match:
-        # tp_size * attention_dp_size * attention_cp_size == moe_tp * moe_ep.
+        # tp_size * attention_dp_size * cp_size == moe_tp * moe_ep.
 
-        attn_width = self.tp_size * self.attention_dp_size * self.attention_cp_size
+        attn_width = self.tp_size * self.attention_dp_size * self.cp_size
         moe_tp_size = self.moe_tp_size
         moe_ep_size = self.moe_ep_size
         if moe_tp_size is None and moe_ep_size is None:
@@ -71,7 +73,7 @@ class ModelConfig:
             if attn_width % moe_ep_size != 0:
                 raise ValueError(
                     f"Cannot infer moe_tp_size: tp_size({self.tp_size}) * "
-                    f"attention_dp_size({self.attention_dp_size}) = {attn_width} is not "
+                    f"attention_dp_size({self.attention_dp_size}) * cp_size({self.cp_size}) = {attn_width} is not "
                     f"divisible by moe_ep_size({moe_ep_size})."
                 )
             moe_tp_size = attn_width // moe_ep_size
@@ -80,7 +82,7 @@ class ModelConfig:
             if attn_width % moe_tp_size != 0:
                 raise ValueError(
                     f"Cannot infer moe_ep_size: tp_size({self.tp_size}) * "
-                    f"attention_dp_size({self.attention_dp_size}) = {attn_width} is not "
+                    f"attention_dp_size({self.attention_dp_size}) * cp_size({self.cp_size}) = {attn_width} is not "
                     f"divisible by moe_tp_size({moe_tp_size})."
                 )
             moe_ep_size = attn_width // moe_tp_size
@@ -93,7 +95,7 @@ class ModelConfig:
         if attn_width != moe_width:
             raise ValueError(
                 f"Parallelism width mismatch: tp_size({self.tp_size}) * "
-                f"attention_dp_size({self.attention_dp_size}) = {attn_width}, but "
+                f"attention_dp_size({self.attention_dp_size}) * cp_size({self.cp_size}) = {attn_width}, but "
                 f"moe_tp_size({moe_tp_size}) * moe_ep_size({moe_ep_size}) = "
                 f"{moe_width}. These must be equal."
             )
@@ -101,6 +103,25 @@ class ModelConfig:
         self.moe_tp_size = moe_tp_size
         self.moe_ep_size = moe_ep_size
         return self.moe_tp_size, self.moe_ep_size
+
+    @property
+    def total_gpus_per_worker(self) -> int:
+        """GPUs occupied by a single worker = tp * pp * dp * cp.
+
+        CP is an independent sequence-sharding dimension, so it multiplies the
+        worker's GPU count just like tp/pp/dp. Used by the enumeration and the
+        throughput-per-GPU normalization so cp configs are sized correctly.
+        """
+        return self.tp_size * self.pp_size * self.attention_dp_size * self.cp_size
+
+    @property
+    def attn_width(self) -> int:
+        """Attention/context-parallel width = tp * cp * dp.
+
+        Must equal moe_tp * moe_ep for MoE models (the width the __post_init__
+        validation enforces) and is the attention-side throughput normalizer.
+        """
+        return self.tp_size * self.cp_size * self.attention_dp_size
 
 
 @dataclass

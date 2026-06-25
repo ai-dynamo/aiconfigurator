@@ -68,15 +68,6 @@ def get_model(
     architecture = model_info["architecture"]
     model_family = _architecture_to_model_family(architecture)
 
-    # Context parallelism is currently implemented only for GLM-5 DSA prefill
-    # (see ContextDSAModule._query_cp / docs/CONTEXT_PARALLEL_DSA_MODELING.md).
-    if getattr(model_config, "attention_cp_size", 1) > 1 and architecture != "GlmMoeDsaForCausalLM":
-        raise NotImplementedError(
-            f"AIC does not support context parallelism (attention_cp_size="
-            f"{model_config.attention_cp_size}) for architecture '{architecture}'. "
-            f"CP is implemented only for GLM-5 (GlmMoeDsaForCausalLM)."
-        )
-
     _apply_model_quant_defaults(model_config, raw_config, architecture, backend_name)
     if check_is_moe(model_path, model_info=model_info):
         model_config.resolve_moe_parallelism()
@@ -93,6 +84,30 @@ def get_model(
         raise ValueError(
             f"Unknown model family: {model_family}. Registered families: {', '.join(sorted(_MODEL_REGISTRY.keys()))}"
         )
+
+    # Gate context parallelism BEFORE construction. ``supports_cp`` defaults to
+    # False; each CP-capable model class overrides it to declare which backends
+    # it supports. GLM-5 DSA handles CP inside ContextDSAModule; dense models
+    # use the 1145-style skeleton (seq_split + _cp_attn_comm_ops + zigzag FMHA).
+    if model_config.cp_size > 1:
+        if not cls.supports_cp(backend_name):
+            raise NotImplementedError(
+                f"Context parallelism (cp_size={model_config.cp_size}) is not supported for "
+                f"model_family={model_family!r} on backend={backend_name!r}. The model class "
+                f"must override ``supports_cp`` and implement CP in its op pipeline."
+            )
+        # sglang CP requires the attention side to be pure CP (no concurrent attn TP/DP).
+        if backend_name == "sglang" and (model_config.tp_size != 1 or model_config.attention_dp_size != 1):
+            raise ValueError(
+                f"sglang CP requires tp_size=1 and attention_dp_size=1 when cp_size>1 "
+                f"(CP and attention TP/DP are mutually exclusive on sglang). Got "
+                f"tp_size={model_config.tp_size}, attention_dp_size={model_config.attention_dp_size}, "
+                f"cp_size={model_config.cp_size}."
+            )
+        model_config.cp_style = cls._resolve_cp_style(backend_name)
+    else:
+        model_config.cp_style = "none"
+
     return cls.create(model_info, model_config, backend_name)
 
 

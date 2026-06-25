@@ -36,6 +36,11 @@ class Gemma4MixModel(BaseModel):
     """
 
     @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # Dense SWA/global GQA prefill CP: SGLang AllGather (zigzag FMHA).
+        return backend_name == "sglang"
+
+    @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
         model = cls(
             model_info["topk"],
@@ -67,11 +72,12 @@ class Gemma4MixModel(BaseModel):
         self._is_dense = not topk or not num_experts
         if not self._is_dense:
             assert (
-                self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
+                self.config.tp_size * self.config.attention_dp_size * self.config.cp_size
+                == self.config.moe_tp_size * self.config.moe_ep_size
             ), (
                 f"tp_size ({self.config.tp_size}) * attention_dp_size "
-                f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-                f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+                f"({self.config.attention_dp_size}) * cp_size ({self.config.cp_size}) should be equal to "
+                f"moe_tp_size ({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
             )
             assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
         else:
@@ -301,6 +307,49 @@ class Gemma4MixModel(BaseModel):
                 ops.P2P("context_p2p", pp - 1, h, pp),
             ]
         )
+
+        # cp (SGLang prefill AllGather CP). Gemma4 has heterogeneous KV per
+        # layer-type (SWA vs global) -> emit one NCCL all_gather per type,
+        # weighted by its layer count, so total comm matches the runtime.
+        # Dense FMHA uses zigzag (``cp_size`` on the attention op, balanced
+        # full/cp work); token-major ops shrink the M-axis via ``seq_split``
+        # (DB lookup at per-rank M). This bypasses the BaseModel CP helper,
+        # which assumes one uniform per-token KV size.
+        # TODO(cp-impl-assumption): SGLang AllGather-of-KV variant.
+        # TODO(cp-window-cap): SWA all_gather sizes linearly in seq_len, but
+        # actual SWA KV caps at ``min(seq_len, sliding_window_size)`` -- the
+        # overstatement grows with seq_len/window for long-context prompts.
+        if self.config.cp_size > 1:
+            cp = self.config.cp_size
+            kvcache_bytes = self.config.kvcache_quant_mode.value.memory
+            comm_bytes = self.config.comm_quant_mode.value.memory
+            for op in self.context_ops:
+                if isinstance(op, ops.ContextAttention):
+                    op._cp_size = cp
+                elif isinstance(op, ops.MoEDispatch):
+                    # MoEDispatch keys CP off attn_cp_size (AG pre / RS post),
+                    # NOT seq_split; with moe_ep=cp its attention_tp_size>1 would
+                    # otherwise wrongly take the TP all-reduce path.
+                    op._attn_cp_size = cp
+                else:
+                    op._seq_split = cp
+            for ctx_key, n_kv_per_gpu, head_dim in (
+                ("swa", d["swa_n_kv_per_gpu"], d["swa_hd"]),
+                ("global", d["global_n_kv_per_gpu"], d["global_hd"]),
+            ):
+                if counts[ctx_key] <= 0:
+                    continue
+                kv_bytes_per_token = n_kv_per_gpu * head_dim * 2 * kvcache_bytes
+                self.context_ops.append(
+                    ops.NCCL(
+                        f"context_cp_all_gather_{ctx_key}",
+                        counts[ctx_key],
+                        "all_gather",
+                        num_elements_per_token=kv_bytes_per_token / comm_bytes,
+                        num_gpus=cp,
+                        comm_quant_mode=self.config.comm_quant_mode,
+                    )
+                )
 
     def _build_generation_ops(self) -> None:
         if not self._gemma4_config:
