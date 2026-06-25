@@ -24,6 +24,7 @@ from aiconfigurator.generator.api import (
     generator_cli_helper,
     load_generator_overrides_from_args,
 )
+from aiconfigurator.generator.module_bridge import task_config_to_generator_config
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, pareto_analysis, perf_database
 from aiconfigurator.sdk.errors import NoFeasibleConfigError, UnsupportedWideepConfigError
@@ -1712,7 +1713,10 @@ def _spica_float(value: Any) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        number = float(value)
+        if pd.isna(number):
+            return None
+        return number
     except (TypeError, ValueError):
         return None
 
@@ -1721,7 +1725,10 @@ def _spica_int(value: Any) -> int | None:
     number = _spica_float(value)
     if number is None:
         return None
-    return int(number)
+    try:
+        return int(number)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _spica_deployment_mode(payload: dict[str, Any]) -> str:
@@ -1817,7 +1824,7 @@ def _spica_load_shape(metrics: dict[str, Any], metric_summary: dict[str, Any]) -
 
 def _spica_candidates_to_result_df(candidates: list[Any]) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
-    for candidate in candidates:
+    for candidate_index, candidate in enumerate(candidates):
         payload = _spica_candidate_to_dict(candidate)
         config = payload.get("config") or {}
         raw_metrics = payload.get("metrics") or {}
@@ -1833,6 +1840,7 @@ def _spica_candidates_to_result_df(candidates: list[Any]) -> pd.DataFrame:
         mode = _spica_deployment_mode(payload)
 
         row = {
+            "spica_candidate_id": candidate_index,
             "deployment_mode": mode,
             "backend": config.get("backend", "n/a"),
             "tokens/s/user": tokens_per_user,
@@ -2006,6 +2014,123 @@ def _spica_trace_result_dir(result_bundle: _SpicaTraceResultBundle, save_dir: st
     return os.path.join(save_dir, f"{result_prefix}_{random.randint(0, 1000000)}")
 
 
+def _spica_first_int(*values: Any, default: int = 1) -> int:
+    for value in values:
+        number = _spica_int(value)
+        if number is not None:
+            return number
+    return default
+
+
+def _spica_yaml_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _spica_yaml_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_spica_yaml_safe(item) for item in value]
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except (TypeError, ValueError):
+            pass
+    return value
+
+
+def _spica_generator_result_row(row: pd.Series) -> pd.Series:
+    generator_row = row.copy()
+    mode = str(generator_row.get("deployment_mode") or "")
+    if mode == "agg":
+        generator_row["workers"] = _spica_first_int(generator_row.get("replicas"), generator_row.get("workers"))
+        generator_row["bs"] = _spica_first_int(
+            generator_row.get("agg_max_num_seqs"),
+            generator_row.get("max_num_seqs"),
+            generator_row.get("bs"),
+        )
+    elif mode == "disagg":
+        generator_row["(p)bs"] = _spica_first_int(
+            generator_row.get("prefill_max_num_seqs"),
+            generator_row.get("(p)bs"),
+        )
+        generator_row["(d)bs"] = _spica_first_int(
+            generator_row.get("decode_max_num_seqs"),
+            generator_row.get("(d)bs"),
+        )
+    return generator_row
+
+
+def _spica_generator_task(task: _SpicaTraceTask, row: pd.Series) -> argparse.Namespace:
+    return argparse.Namespace(
+        primary_backend_name=str(row.get("backend") or task.primary_backend_name),
+        primary_system_name=task.primary_system_name,
+        primary_backend_version=task.primary_backend_version,
+        primary_model_path=task.primary_model_path,
+        prefix=0,
+        is_moe=task.is_moe,
+        nextn=0,
+        nextn_accept_rates=[0.85, 0.8, 0.6, 0.0, 0.0],
+        serving_mode=str(row.get("deployment_mode") or task.serving_mode),
+        total_gpus=_spica_first_int(row.get("total_gpus"), row.get("num_total_gpus"), task.total_gpus),
+        system_name=task.primary_system_name,
+        isl=task.isl,
+        osl=task.osl,
+        ttft=task.ttft,
+        tpot=task.tpot,
+    )
+
+
+def _spica_num_gpus_per_node(system_name: str) -> int:
+    try:
+        spec = perf_database.load_system_spec(system_name)
+        return int(((spec or {}).get("node") or {}).get("num_gpus_per_node") or 8)
+    except Exception:
+        return 8
+
+
+def _save_spica_top_config_artifacts(
+    result_bundle: _SpicaTraceResultBundle,
+    mode: str,
+    mode_dir: str,
+    best_config_df: pd.DataFrame,
+) -> list[str]:
+    task = result_bundle.tasks.get(mode)
+    if task is None or best_config_df.empty:
+        return []
+
+    written_paths: list[str] = []
+    num_gpus_per_node = _spica_num_gpus_per_node(task.primary_system_name)
+    for rank, (_, row) in enumerate(best_config_df.iterrows(), start=1):
+        top_config_dir = os.path.join(mode_dir, f"top{rank}")
+        os.makedirs(top_config_dir, exist_ok=True)
+
+        generator_row = _spica_generator_result_row(row)
+        generator_task = _spica_generator_task(task, generator_row)
+        generator_config = task_config_to_generator_config(
+            task_config=generator_task,
+            result_df=generator_row,
+            num_gpus_per_node=num_gpus_per_node,
+        )
+        generator_config_yaml = os.path.join(top_config_dir, "generator_config.yaml")
+        with open(generator_config_yaml, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(_spica_yaml_safe(generator_config), fh, sort_keys=False)
+        written_paths.append(generator_config_yaml)
+
+        candidate_id = _spica_int(row.get("spica_candidate_id"))
+        if candidate_id is not None and 0 <= candidate_id < len(result_bundle.candidates):
+            candidate_payload = result_bundle.candidates[candidate_id]
+        else:
+            candidate_payload = {"row": row.to_dict()}
+        candidate_yaml = os.path.join(top_config_dir, "spica_candidate.yaml")
+        with open(candidate_yaml, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(_spica_yaml_safe(candidate_payload), fh, sort_keys=False)
+        written_paths.append(candidate_yaml)
+
+    return written_paths
+
+
 def _save_spica_pareto_plot(result_bundle: _SpicaTraceResultBundle, save_dir: str) -> str | None:
     pareto_fronts = {name: df for name, df in result_bundle.pareto_fronts.items() if df is not None and not df.empty}
     if not pareto_fronts:
@@ -2087,8 +2212,10 @@ def _save_spica_trace_artifacts(result_bundle: _SpicaTraceResultBundle, save_dir
         written_paths.append(mode_pareto_csv)
 
         mode_best_csv = os.path.join(mode_dir, "best_config_topn.csv")
-        result_bundle.best_configs.get(mode, pd.DataFrame()).to_csv(mode_best_csv, index=False)
+        best_config_df = result_bundle.best_configs.get(mode, pd.DataFrame())
+        best_config_df.to_csv(mode_best_csv, index=False)
         written_paths.append(mode_best_csv)
+        written_paths.extend(_save_spica_top_config_artifacts(result_bundle, mode, mode_dir, best_config_df))
 
     return written_paths
 

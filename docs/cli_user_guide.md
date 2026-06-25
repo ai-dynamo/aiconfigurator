@@ -539,18 +539,24 @@ Each replica has a system of 4 prefill workers and 1 decode workers. Each prefil
 `bs` is required to be set in framework as it limits the largest batch_size of the worker which is crucial to control the TPOT of the deployment.  
 `concurrency` = `concurrency * replicas` Use it to benchmark your deployment on total GPUs. If you only want to benchmark 1 replica, divide it by `replicas`
 
-As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save-dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. For Spica trace mode, the CLI creates a similar run directory. It does not generate framework deployment manifests yet, but the replay ranking and Pareto artifacts use the same per-mode layout:
+As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save-dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. For Spica trace mode, the CLI creates a similar run directory with per-rank `topN` folders. It does not generate framework deployment manifests yet, but the replay ranking, generator bridge config, and Pareto artifacts use the same per-mode layout:
 
 ```text
 results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_904495
 ├── agg
 │   ├── best_config_topn.csv
 │   ├── exp_config.yaml
-│   └── pareto.csv
+│   ├── pareto.csv
+│   └── top1
+│       ├── generator_config.yaml
+│       └── spica_candidate.yaml
 ├── disagg
 │   ├── best_config_topn.csv
 │   ├── exp_config.yaml
-│   └── pareto.csv
+│   ├── pareto.csv
+│   └── top1
+│       ├── generator_config.yaml
+│       └── spica_candidate.yaml
 ├── pareto.csv
 ├── pareto_frontier.png
 ├── spica_candidates.csv

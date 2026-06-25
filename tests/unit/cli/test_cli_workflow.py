@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+import yaml
 
 from aiconfigurator.cli.main import (
     _build_spica_trace_result_bundle,
@@ -329,7 +330,7 @@ class TestCLIIntegration:
                     "deployment_mode": "agg",
                     "backend": "trtllm",
                     "model_name": "Qwen/Qwen3-32B-FP8",
-                    "tp": 1,
+                    "tp": 2,
                     "pp": 1,
                     "attention_dp": 1,
                     "replicas": 1,
@@ -338,7 +339,7 @@ class TestCLIIntegration:
                     "router_mode": "round_robin",
                     "planner_scaling_policy": "disabled",
                 },
-                "used_gpus": 1,
+                "used_gpus": 2,
                 "score": 80.0,
                 "metrics": {
                     "goodput_output_throughput_tok_s": 80.0,
@@ -387,7 +388,7 @@ class TestCLIIntegration:
             trace_path="/tmp/traffic.jsonl",
             model_path="Qwen/Qwen3-32B-FP8",
             total_gpus=2,
-            top_n=1,
+            top_n=2,
         )
         result_bundle = _build_spica_trace_result_bundle(candidates, args)
         written_paths = _save_spica_trace_artifacts(result_bundle, str(tmp_path))
@@ -402,9 +403,15 @@ class TestCLIIntegration:
             "agg/exp_config.yaml",
             "agg/pareto.csv",
             "agg/best_config_topn.csv",
+            "agg/top1/generator_config.yaml",
+            "agg/top1/spica_candidate.yaml",
+            "agg/top2/generator_config.yaml",
+            "agg/top2/spica_candidate.yaml",
             "disagg/exp_config.yaml",
             "disagg/pareto.csv",
             "disagg/best_config_topn.csv",
+            "disagg/top1/generator_config.yaml",
+            "disagg/top1/spica_candidate.yaml",
         }.issubset(written_names)
         assert result_dir.parent == tmp_path
         assert result_dir.name.startswith("Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_traffic_ttft2000_tpot30_")
@@ -413,6 +420,13 @@ class TestCLIIntegration:
         assert set(combined_pareto["deployment_mode"]) == {"agg", "disagg"}
         agg_best = pd.read_csv(result_dir / "agg" / "best_config_topn.csv")
         assert agg_best.loc[0, "tokens/s/gpu"] == pytest.approx(100.0)
+        agg_generator_config = yaml.safe_load((result_dir / "agg" / "top1" / "generator_config.yaml").read_text())
+        assert agg_generator_config["WorkerConfig"]["agg_workers"] == 1
+        assert agg_generator_config["params"]["agg"]["max_batch_size"] == 128
+        agg_top2_generator_config = yaml.safe_load((result_dir / "agg" / "top2" / "generator_config.yaml").read_text())
+        assert agg_top2_generator_config["params"]["agg"]["max_batch_size"] == 64
+        disagg_candidate = yaml.safe_load((result_dir / "disagg" / "top1" / "spica_candidate.yaml").read_text())
+        assert disagg_candidate["config"]["deployment_mode"] == "disagg"
 
     @pytest.mark.parametrize(
         "builder_patch",
