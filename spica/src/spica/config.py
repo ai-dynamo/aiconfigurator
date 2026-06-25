@@ -299,8 +299,8 @@ SEARCH_CHOICES: dict[str, tuple] = {
     "agg_max_num_batched_tokens": (8192, 16384, 32768),
     "agg_max_num_seqs": (256, 512, 1024),
     "router_mode": ("kv_router", "round_robin"),
-    "overlap_score_credit": (0.0, 0.5, 1.0),
-    "prefill_load_scale": (0.0, 0.25, 0.5, 1.0, 2.0, 4.0),
+    "overlap_score_credit": (0.0, 0.5, 1.0),  # kv-router hard-caps this at 1.0
+    "prefill_load_scale": (0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0),
     "host_cache_hit_weight": (0.5, 0.75, 1.0),
     "disk_cache_hit_weight": (0.0, 0.25, 0.5),
     "router_temperature": (0.0, 0.2, 0.5, 1.0),
@@ -432,8 +432,8 @@ class SearchSpace(BaseModel):
 
     # router (KV-router knobs are ignored under round_robin)
     router_mode: list[str] = ["kv_router", "round_robin"]
-    overlap_score_credit: list[float] = [0.0, 0.5, 1.0]
-    prefill_load_scale: list[float] = [0.0, 0.25, 0.5, 1.0, 2.0, 4.0]
+    overlap_score_credit: list[float] = [0.0, 0.5, 1.0]  # kv-router hard-caps this at 1.0
+    prefill_load_scale: list[float] = [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
     host_cache_hit_weight: list[float] = [0.5, 0.75, 1.0]
     disk_cache_hit_weight: list[float] = [0.0, 0.25, 0.5]
     router_temperature: list[float] = [0.0, 0.2, 0.5, 1.0]
