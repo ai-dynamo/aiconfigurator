@@ -79,6 +79,18 @@ search = [
     "chex==0.1.87",
     "tensorflow-probability[jax]==0.25.0",
 ]
+# GPU acceleration for the Vizier GP optimizer (XLA on CUDA). OPTIONAL / opt-in.
+# The jax CUDA wheels (jax-cuda12-plugin/-pjrt + nvidia-*-cu12) ship ONLY for
+# linux-x86_64, so this extra CANNOT resolve on macOS / Windows / linux-aarch64
+# — use [search] (CPU) there. On a linux-x86_64 box WITHOUT a GPU it still
+# installs (a few GB of CUDA wheels) but jax just warns and falls back to CPU at
+# import — same result as [search], only heavier. The multi-objective GP suggest
+# is slow on CPU (see sampler.py), so reach for [search-gpu] only when actually
+# running large sweeps on an NVIDIA GPU. Same jax 0.4.38 pin as [search].
+search-gpu = [
+    "spica[search]",
+    "jax[cuda12]==0.4.38",
+]
 
 [project.scripts]
 spica = "spica.__main__:main"

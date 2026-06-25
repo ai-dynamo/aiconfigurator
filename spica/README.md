@@ -64,6 +64,20 @@ the main `run_smart_search` sweep:
 GIT_LFS_SKIP_SMUDGE=1 uv pip install --python .venv/bin/python -e ".[dev,dynamo,search]"
 ```
 
+`[search]` installs **CPU** jax — it resolves on every platform, but the Vizier
+multi-objective GP suggest is slow on CPU (and can stall on larger sweeps). On a
+**linux-x86_64 box with an NVIDIA GPU**, swap `search` → `search-gpu` to run the
+optimizer on CUDA (XLA), which removes that bottleneck:
+
+```bash
+GIT_LFS_SKIP_SMUDGE=1 uv pip install --python .venv/bin/python -e ".[dev,dynamo,search-gpu]"
+```
+
+`search-gpu` pulls the jax CUDA wheels, which exist **only for linux-x86_64**
+(not macOS / Windows / aarch64 — those must use `[search]`). With no GPU present
+jax just warns and falls back to CPU, so there's no reason to use it without
+one — stay on `[search]`.
+
 ### Real replay (`aic-forward-pass`)
 
 The `[dynamo]` extra above is enough for the load-predictor sweep, but the
