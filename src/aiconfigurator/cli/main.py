@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import dataclasses
 import logging
 import os
 import random
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,11 +22,15 @@ from aiconfigurator.cli.report_and_save import log_final_summary, save_results
 from aiconfigurator.cli.utils import merge_experiment_results_by_mode, process_experiment_result
 from aiconfigurator.generator.api import (
     add_generator_override_arguments,
+    generate_from_request,
     generate_naive_config,
     generator_cli_helper,
+    get_default_dynamo_version_mapping,
     load_generator_overrides_from_args,
+    resolve_backend_version_for_dynamo,
 )
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
+from aiconfigurator.generator.request import from_legacy_params
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, pareto_analysis, perf_database
 from aiconfigurator.sdk.errors import NoFeasibleConfigError, UnsupportedWideepConfigError
@@ -2090,11 +2096,72 @@ def _spica_num_gpus_per_node(system_name: str) -> int:
         return 8
 
 
+def _spica_generated_backend_version(args: argparse.Namespace | None, backend_name: str) -> str | None:
+    if args is None:
+        return None
+    if generated_config_version := getattr(args, "generated_config_version", None):
+        return generated_config_version
+    generator_overrides = load_generator_overrides_from_args(args)
+    if dynamo_version := generator_overrides.get("generator_dynamo_version"):
+        try:
+            return resolve_backend_version_for_dynamo(dynamo_version, backend_name)
+        except ValueError:
+            logger.exception("Failed to resolve backend version for generator_dynamo_version=%s.", dynamo_version)
+            return None
+    default_dynamo_version, default_backend_versions = get_default_dynamo_version_mapping()
+    backend_version = default_backend_versions.get(backend_name)
+    if backend_version is None:
+        logger.warning(
+            "No default backend version mapping for backend '%s' in dynamo '%s'; using generator defaults.",
+            backend_name,
+            default_dynamo_version,
+        )
+    return backend_version
+
+
+def _spica_generated_artifact_paths(top_config_dir: str, known_paths: set[str]) -> list[str]:
+    paths: list[str] = []
+    for root, _, filenames in os.walk(top_config_dir):
+        for filename in filenames:
+            path = os.path.join(root, filename)
+            if path not in known_paths:
+                paths.append(path)
+    return sorted(paths)
+
+
+def _generate_spica_backend_artifacts(
+    args: argparse.Namespace | None,
+    generator_config: dict[str, Any],
+    generator_task: argparse.Namespace,
+    top_config_dir: str,
+    written_paths: list[str],
+) -> None:
+    try:
+        backend_version = _spica_generated_backend_version(args, generator_task.primary_backend_name)
+        deployment_target = getattr(args, "deployment_target", "dynamo-j2") if args is not None else "dynamo-j2"
+        req = from_legacy_params(generator_config, backend=generator_task.primary_backend_name)
+        req = dataclasses.replace(
+            req,
+            backend=dataclasses.replace(req.backend, generated_config_version=backend_version),
+            emit=dataclasses.replace(req.emit, deployment_target=deployment_target, output_dir=top_config_dir),
+        )
+        known_paths = set(written_paths)
+        generate_from_request(req)
+        written_paths.extend(_spica_generated_artifact_paths(top_config_dir, known_paths))
+    except Exception as exc:
+        logger.warning(
+            "Failed to generate backend config from Spica trace result: %s, %s",
+            exc,
+            traceback.format_exc(),
+        )
+
+
 def _save_spica_top_config_artifacts(
     result_bundle: _SpicaTraceResultBundle,
     mode: str,
     mode_dir: str,
     best_config_df: pd.DataFrame,
+    args: argparse.Namespace | None = None,
 ) -> list[str]:
     task = result_bundle.tasks.get(mode)
     if task is None or best_config_df.empty:
@@ -2111,12 +2178,14 @@ def _save_spica_top_config_artifacts(
         generator_config = task_config_to_generator_config(
             task_config=generator_task,
             result_df=generator_row,
+            generator_overrides=load_generator_overrides_from_args(args) if args is not None else None,
             num_gpus_per_node=num_gpus_per_node,
         )
         generator_config_yaml = os.path.join(top_config_dir, "generator_config.yaml")
         with open(generator_config_yaml, "w", encoding="utf-8") as fh:
             yaml.safe_dump(_spica_yaml_safe(generator_config), fh, sort_keys=False)
         written_paths.append(generator_config_yaml)
+        _generate_spica_backend_artifacts(args, generator_config, generator_task, top_config_dir, written_paths)
 
         candidate_id = _spica_int(row.get("spica_candidate_id"))
         if candidate_id is not None and 0 <= candidate_id < len(result_bundle.candidates):
@@ -2167,7 +2236,11 @@ def _save_spica_pareto_plot(result_bundle: _SpicaTraceResultBundle, save_dir: st
     return path
 
 
-def _save_spica_trace_artifacts(result_bundle: _SpicaTraceResultBundle, save_dir: str) -> list[str]:
+def _save_spica_trace_artifacts(
+    result_bundle: _SpicaTraceResultBundle,
+    save_dir: str,
+    args: argparse.Namespace | None = None,
+) -> list[str]:
     result_dir = _spica_trace_result_dir(result_bundle, save_dir)
     os.makedirs(result_dir, exist_ok=True)
     written_paths: list[str] = []
@@ -2215,7 +2288,7 @@ def _save_spica_trace_artifacts(result_bundle: _SpicaTraceResultBundle, save_dir
         best_config_df = result_bundle.best_configs.get(mode, pd.DataFrame())
         best_config_df.to_csv(mode_best_csv, index=False)
         written_paths.append(mode_best_csv)
-        written_paths.extend(_save_spica_top_config_artifacts(result_bundle, mode, mode_dir, best_config_df))
+        written_paths.extend(_save_spica_top_config_artifacts(result_bundle, mode, mode_dir, best_config_df, args))
 
     return written_paths
 
@@ -2318,7 +2391,7 @@ def _run_spica_trace_default(args) -> list[Any]:
     )
 
     if args.save_dir:
-        written_paths = _save_spica_trace_artifacts(result_bundle, args.save_dir)
+        written_paths = _save_spica_trace_artifacts(result_bundle, args.save_dir, args)
         logger.info("Saved Spica trace artifacts to %s: %s", args.save_dir, ", ".join(written_paths))
 
     return candidates
