@@ -2045,17 +2045,18 @@ def _model_defaults(model: str, tp: int, moe_tp: int, ep: int, *, workload_distr
             workload_distribution=workload_distribution,
         )
     if model == "Qwen/Qwen3.6-35B-A3B":
+        model_info = get_model_config_from_model_path(model)
         return _Model(
             model_path=model,
             tp_size=tp,
             moe_tp_size=moe_tp,
             moe_ep_size=ep,
-            num_layers=40,
-            hidden_size=2048,
+            num_layers=int(model_info["layers"]),
+            hidden_size=int(model_info["hidden_size"]),
             workload_distribution=workload_distribution,
-            topk=8,
-            num_experts=256,
-            moe_inter_size=256,
+            topk=int(model_info["topk"]),
+            num_experts=int(model_info["num_experts"]),
+            moe_inter_size=int(model_info["moe_inter_size"]),
             shared_expert_inter_size=512,
         )
     if model == "deepseek-ai/DeepSeek-V4-Flash":

@@ -1073,7 +1073,15 @@ class VLLMBackend(BaseBackend):
                 raise last_error
             moe = (0.0, 0.0, "silicon")
         moe_metadata = getattr(moe_result, "metadata", {}) if moe_result is not None else {}
-        if is_context and bool(moe_metadata.get("moe_module_level", False)):
+        # Module-level fused MoE rows (moe_module_level=True) already contain the
+        # router/top-k/gather/scatter work inside the measured kernel, so adding the
+        # separate router+dispatch terms double-counts them. This holds for BOTH phases:
+        # the guard is kernel-source-aware (keyed on the data the MoE query actually hit),
+        # not phase-gated. Decode hits the same fused rows as prefill for hybrid-MoE models
+        # (e.g. Qwen3.6), where phase-gating this to context inflated decode ~1.1ms/step
+        # (router+dispatch double-count, ~+30pp MAPE vs golden). Lower-level / main MoE
+        # data (no moe_module_level flag) still gets the explicit router+dispatch add-back.
+        if bool(moe_metadata.get("moe_module_level", False)):
             router = (0.0, 0.0, "silicon")
             dispatch = (0.0, 0.0, "silicon")
         else:

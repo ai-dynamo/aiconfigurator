@@ -627,6 +627,36 @@ def test_noop_moe_addback_skips_router_dispatch_for_module_level_moe() -> None:
     assert bundled is False
 
 
+def test_noop_moe_addback_skips_router_dispatch_for_module_level_moe_on_decode() -> None:
+    # Decode (is_context=False) must also skip router+dispatch when the MoE query hits the
+    # module-level fused rows -- the guard is kernel-source-aware, not phase-gated. Phase-
+    # gating this to context double-counted router+dispatch on decode for hybrid-MoE models.
+    class _MoeModel(_Model):
+        _topk = 2
+
+    class _Database:
+        def query_moe(self, **kwargs):
+            assert kwargs["num_tokens"] == 5
+            return PerformanceResult(1.25, energy=0.5, source="silicon", metadata={"moe_module_level": True})
+
+        def query_gemm(self, *args, **kwargs):
+            raise AssertionError("module-level MoE rows already include router work")
+
+    moe, router, dispatch, shared, bundled = VLLMBackend()._layerwise_noop_moe_addback(
+        _MoeModel(),
+        _Database(),
+        token_count=5,
+        num_layers=3,
+        is_context=False,
+    )
+
+    assert moe == (pytest.approx(3.75), pytest.approx(1.5), "silicon")
+    assert router == (0.0, 0.0, "silicon")
+    assert dispatch == (0.0, 0.0, "silicon")
+    assert shared == (0.0, 0.0, "silicon")
+    assert bundled is False
+
+
 def test_moe_compute_accepts_repo_moe_inter_size_metadata() -> None:
     class _MoeModel(_Model):
         _topk = 2
