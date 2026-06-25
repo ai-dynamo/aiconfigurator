@@ -1370,6 +1370,28 @@ def test_validate_database_check_rejects_unsupported_quant():
         assert "Unsupported gemm" in str(exc) or "Supported gemm" in str(exc)
 
 
+def test_validate_moe_quant_transfer_reachable_in_hybrid():
+    """supported_quant_mode is a data-presence list. A MoE quant absent from the DB
+    but sharing a (memory, compute) profile with a supported quant is XQUANT-reachable
+    in HYBRID (operations/moe.py), so HYBRID validate must admit it while SILICON stays
+    strict. Kimi-K2.5 infers int4_wo MoE (profile (0.5,1)) which b200/trtllm has no data
+    for, but w4a16_mxfp4 (same profile) is collected."""
+
+    def make(mode):
+        return Task(
+            serving_mode="agg",
+            model_path="moonshotai/Kimi-K2.5",
+            system_name="b200_sxm",
+            backend_name="trtllm",
+            backend_version="1.3.0rc10",
+            database_mode=mode,
+        )
+
+    with pytest.raises(ValueError, match="Unsupported moe quant mode 'int4_wo'"):
+        make("SILICON").validate()
+    make("HYBRID").validate()  # transfer-reachable -> no raise
+
+
 def test_validate_skips_db_check_when_database_unavailable():
     """If DB can't be loaded, DB validation silently skips (caller sees other errors)."""
     t = Task(
