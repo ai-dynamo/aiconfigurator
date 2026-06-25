@@ -89,6 +89,37 @@ to 32. Higher values keep helping but **saturate around 16–32** (2k subset, ov
 
 Going beyond 32 (64/128) is expected to give negligible further gain.
 
+## All searched configurations (2k-subset search)
+
+Every distinct config the Vizier sweep evaluated (2k subset, c=32), best mean-e2e first.
+`n` = how many of the 48 trials landed on it (Vizier concentrates samples on the optimum).
+`round_robin` ignores the kv-router weights (shown as —).
+
+| mean_e2e_ms | ttft_ms | tpot_ms | tput_tok/s | n | router_mode | overlap_score_credit | prefill_load_scale | router_temperature |
+|---|---|---|---|---|---|---|---|---|
+| 2135 | 162 | 13.2 | 2707 | 13 | kv_router | 1.0 | 32.0 | 0.0 |
+| 2141 | 163 | 14.8 | 2726 | 15 | kv_router | 1.0 | 16.0 | 0.0 |
+| 2147 | 162 | 13.5 | 2698 | 4 | kv_router | 0.5 | 32.0 | 0.0 |
+| 2155 | 166 | 15.2 | 2695 | 3 | kv_router | 1.0 | 8.0 | 0.0 |
+| 2162 | 166 | 14.1 | 2680 | 2 | kv_router | 0.5 | 16.0 | 0.0 |
+| 2180 | 170 | 17.5 | 2660 | 1 | kv_router | 1.0 | 4.0 | 0.0 |
+| 2183 | 169 | 17.2 | 2657 | 1 | kv_router | 0.5 | 8.0 | 0.0 |
+| 2186 | 181 | 13.1 | 2661 | 1 | kv_router | 1.0 | 16.0 | 0.2 |
+| 2199 | 180 | 13.5 | 2646 | 1 | kv_router | 1.0 | 32.0 | 0.2 |
+| 2203 | 183 | 13.3 | 2624 | 1 | kv_router | 0.5 | 8.0 | 0.2 |
+| 2215 | 184 | 14.4 | 2596 | 1 | kv_router | 1.0 | 8.0 | 0.2 |
+| 2236 | 197 | 18.4 | 2595 | 1 | kv_router | 1.0 | 0.25 | 0.0 |
+| 2239 | 184 | 16.0 | 2587 | 3 | kv_router | 0.0 | 8.0 | 0.0 |
+| 2242 | 198 | 14.2 | 2589 | 1 | kv_router | 0.0 | 4.0 | 0.2 |
+| 2255 | 218 | 16.2 | 2580 | 1 | kv_router | 1.0 | 0.0 | 0.2 |
+| 2260 | 186 | 17.8 | 2572 | 1 | kv_router | 0.0 | 4.0 | 0.0 |
+| 2265 | 219 | 13.3 | 2566 | 1 | kv_router | 0.5 | 16.0 | 0.5 |
+| 2268 | 211 | 13.1 | 2555 | 1 | kv_router | 1.0 | 8.0 | 0.5 |
+| 2292 | 231 | 13.2 | 2531 | 1 | kv_router | 0.0 | 4.0 | 0.5 |
+| 2306 | 220 | 13.8 | 2504 | 1 | kv_router | 0.0 | 8.0 | 0.5 |
+| 2317 | 263 | 11.0 | 2483 | 5 | round_robin | — | — | — |
+| 2352 | 255 | 12.9 | 2471 | 1 | kv_router | 0.5 | 32.0 | 1.0 |
+
 ## Takeaways
 
 - **kv_router ≫ round_robin** for e2e/TTFT (cache-affine placement → higher prefix reuse →

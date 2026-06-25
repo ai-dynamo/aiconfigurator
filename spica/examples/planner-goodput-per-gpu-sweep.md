@@ -96,6 +96,36 @@ The dominant factor is the **scaling-policy family** (48 trials → 19 distinct 
 **Static 37.6 → default planner 87.7 → optimized planner ≈ 121** — the tuned planner is
 **3.2× static** and **+38% over the default planner**.
 
+## All searched configurations (full-trace sweep)
+
+Every distinct planner config the Vizier sweep evaluated (48 trials → 19 distinct), best
+goodput-per-GPU first. `load_scaling_down_sensitivity` 70/80/90 = aggressive/default/conservative;
+`max_num_fpm_samples` is the FPM budget (small=32, default=64, large/fine=128) and **only affects
+the predictive throughput-scaling policies** — for the `load_*` policies it is inert (so its
+spread within the `load_180_10` family is noise).
+
+| goodput/gpu | avg_gpu | goodput | ttft_ms | tpot_ms | planner_scaling_policy | load_scaling_down_sensitivity | max_num_fpm_samples |
+|---|---|---|---|---|---|---|---|
+| 121.0 | 8.26 | 999 | 1121 | 77.8 | load_180_10 | 90 | 128 |
+| 119.1 | 7.76 | 924 | 1249 | 83.8 | load_180_10 | 90 | 32 |
+| 117.0 | 8.09 | 946 | 1207 | 81.6 | load_180_10 | 70 | 32 |
+| 116.7 | 8.43 | 984 | 1097 | 77.1 | load_180_10 | 80 | 64 |
+| 116.6 | 8.03 | 936 | 1248 | 83.5 | load_180_10 | 90 | 64 |
+| 116.4 | 8.30 | 966 | 1181 | 80.1 | load_180_10 | 70 | 64 |
+| 115.5 | 8.77 | 1013 | 1032 | 72.8 | load_180_10 | 70 | 128 |
+| 115.4 | 8.83 | 1019 | 1041 | 73.3 | load_180_10 | 80 | 128 |
+| 115.3 | 8.22 | 948 | 1193 | 80.4 | load_180_5 | 90 | 32 |
+| 115.3 | 8.10 | 934 | 1245 | 83.1 | load_180_10 | 80 | 32 |
+| 113.7 | 8.57 | 974 | 1163 | 79.0 | load_180_5 | 90 | 128 |
+| 111.0 | 8.87 | 984 | 1117 | 76.8 | load_180_5 | 80 | 64 |
+| 109.6 | 8.89 | 975 | 1113 | 76.1 | load_180_5 | 80 | 32 |
+| 108.4 | 9.42 | 1021 | 1014 | 71.3 | load_180_5 | 70 | 128 |
+| 85.9 | 13.75 | 1181 | 458 | 36.5 | hybrid_180_5 | 70 | 64 |
+| 82.0 | 14.10 | 1155 | 514 | 37.3 | hybrid_600_5 | 90 | 128 |
+| 81.8 | 14.51 | 1188 | 433 | 33.5 | hybrid_180_5 | 80 | 128 |
+| 59.5 | 20.17 | 1199 | 319 | 23.1 | throughput_180_5 | 90 | 32 |
+| 59.1 | 20.11 | 1189 | 370 | 27.5 | throughput_600_5 | 90 | 128 |
+
 ## Takeaways
 
 - **Reactive load scaling ≫ hybrid ≫ predictive throughput scaling** for goodput-per-GPU.
