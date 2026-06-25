@@ -74,6 +74,7 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 - We have four modes: `default`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
 - Use `default --trace-path` to run the Spica replay-backed smart sweeper from a Mooncake JSONL trace; `--isl` and `--osl` are ignored in this mode. Example trace: [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl).
+- In trace mode, `--save-dir DIR` writes replay result artifacts: `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, and per-mode `pareto.csv` / `best_config_topn.csv`.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
@@ -276,8 +277,24 @@ You can customize llm-d-specific settings using generator overrides:
 
 Please refer to the [Deployment Guide](docs/dynamo_deployment_guide.md) for details about deployment and reproduction especially about the benchmark methodology.
 
-To simplify the deployment and reproduction, in the `aiconfigurator` CLI, if you specify `--save-dir`, the tool generates configuration files for your chosen deployment target.
-The folder structure varies based on `--deployment-target`:
+To simplify the deployment and reproduction, in the `aiconfigurator` CLI, if you specify `--save-dir`, the tool writes the search results to disk. The legacy estimator also generates configuration files for your chosen deployment target.
+The folder structure varies based on mode and `--deployment-target`:
+
+**For Spica trace mode** (`default --trace-path /path/to/mooncake.jsonl`):
+
+```text
+results/trace_run
+├── agg
+│   ├── best_config_topn.csv
+│   └── pareto.csv
+├── disagg
+│   ├── best_config_topn.csv
+│   └── pareto.csv
+├── pareto.csv
+├── pareto_frontier.png
+├── spica_candidates.csv
+└── spica_candidates.yaml
+```
 
 **For Dynamo deployments** (`--deployment-target dynamo-j2` or `dynamo-python`):
 

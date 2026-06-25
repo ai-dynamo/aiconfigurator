@@ -20,6 +20,8 @@ from aiconfigurator.cli.main import (
     _execute_tasks,
     _format_spica_trace_summary,
     _resolve_cli_log_level,
+    _save_spica_trace_artifacts,
+    _spica_candidates_to_pareto_df,
     build_default_tasks,
     build_experiment_tasks,
     configure_parser,
@@ -279,6 +281,8 @@ class TestCLIIntegration:
         assert "AIConfigurator Final Results" in summary
         assert "Input Configuration & SLA Target" in summary
         assert "Overall Best Configuration" in summary
+        assert "Pareto Frontier:" in summary
+        assert "Spica Trace Pareto Frontier" in summary
         assert "Deployment Details" in summary
         assert "Trace: /data/replay/traffic.jsonl (Mooncake JSONL)" in summary
         assert "Best Experiment Chosen:" in summary
@@ -288,6 +292,108 @@ class TestCLIIntegration:
         assert "goodput/s/gpu" in summary
         assert "(p)parallel" in summary
         assert "kv_router" in summary
+
+    def test_spica_trace_artifacts_include_pareto_outputs(self, tmp_path):
+        candidates = [
+            {
+                "config": {
+                    "deployment_mode": "agg",
+                    "backend": "trtllm",
+                    "model_name": "Qwen/Qwen3-32B-FP8",
+                    "tp": 1,
+                    "pp": 1,
+                    "attention_dp": 1,
+                    "replicas": 1,
+                    "agg_max_num_batched_tokens": 4096,
+                    "agg_max_num_seqs": 128,
+                    "router_mode": "round_robin",
+                    "planner_scaling_policy": "disabled",
+                },
+                "used_gpus": 1,
+                "score": 100.0,
+                "metrics": {
+                    "goodput_output_throughput_tok_s": 100.0,
+                    "output_throughput_tok_s": 110.0,
+                    "mean_ttft_ms": 100.0,
+                    "mean_tpot_ms": 10.0,
+                    "mean_e2e_latency_ms": 500.0,
+                },
+            },
+            {
+                "config": {
+                    "deployment_mode": "agg",
+                    "backend": "trtllm",
+                    "model_name": "Qwen/Qwen3-32B-FP8",
+                    "tp": 1,
+                    "pp": 1,
+                    "attention_dp": 1,
+                    "replicas": 1,
+                    "agg_max_num_batched_tokens": 2048,
+                    "agg_max_num_seqs": 64,
+                    "router_mode": "round_robin",
+                    "planner_scaling_policy": "disabled",
+                },
+                "used_gpus": 1,
+                "score": 80.0,
+                "metrics": {
+                    "goodput_output_throughput_tok_s": 80.0,
+                    "output_throughput_tok_s": 90.0,
+                    "mean_ttft_ms": 90.0,
+                    "mean_tpot_ms": 20.0,
+                    "mean_e2e_latency_ms": 700.0,
+                },
+            },
+            {
+                "config": {
+                    "deployment_mode": "disagg",
+                    "backend": "trtllm",
+                    "model_name": "Qwen/Qwen3-32B-FP8",
+                    "prefill_replicas": 1,
+                    "prefill_tp": 1,
+                    "prefill_pp": 1,
+                    "prefill_attention_dp": 1,
+                    "decode_replicas": 1,
+                    "decode_tp": 1,
+                    "decode_pp": 1,
+                    "decode_attention_dp": 1,
+                    "router_mode": "kv_router",
+                    "planner_scaling_policy": "predictive",
+                    "enable_load_scaling": True,
+                },
+                "used_gpus": 2,
+                "score": 120.0,
+                "metrics": {
+                    "goodput_output_throughput_tok_s": 240.0,
+                    "output_throughput_tok_s": 260.0,
+                    "mean_ttft_ms": 80.0,
+                    "mean_tpot_ms": 12.5,
+                    "mean_e2e_latency_ms": 600.0,
+                },
+            },
+        ]
+
+        pareto_df = _spica_candidates_to_pareto_df(candidates)
+        assert pareto_df["tokens/s/user"].tolist() == pytest.approx([100.0, 50.0, 80.0])
+        assert pareto_df["goodput/s/gpu"].tolist() == pytest.approx([100.0, 80.0, 120.0])
+
+        written_paths = _save_spica_trace_artifacts(candidates, str(tmp_path), top_n=1)
+        written_names = {str(path).replace(f"{tmp_path}/", "") for path in written_paths}
+
+        assert {
+            "spica_candidates.yaml",
+            "spica_candidates.csv",
+            "pareto.csv",
+            "pareto_frontier.png",
+            "agg/pareto.csv",
+            "agg/best_config_topn.csv",
+            "disagg/pareto.csv",
+            "disagg/best_config_topn.csv",
+        }.issubset(written_names)
+
+        combined_pareto = pd.read_csv(tmp_path / "pareto.csv")
+        assert set(combined_pareto["deployment_mode"]) == {"agg", "disagg"}
+        agg_best = pd.read_csv(tmp_path / "agg" / "best_config_topn.csv")
+        assert agg_best.loc[0, "goodput/s/gpu"] == pytest.approx(100.0)
 
     @pytest.mark.parametrize(
         "builder_patch",

@@ -8,6 +8,7 @@ import sys
 import time
 from typing import Any
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import yaml
 from prettytable import PrettyTable
@@ -23,7 +24,7 @@ from aiconfigurator.generator.api import (
     load_generator_overrides_from_args,
 )
 from aiconfigurator.logging_utils import _cli_bold, _cli_underline, setup_logging
-from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk import common, pareto_analysis, perf_database
 from aiconfigurator.sdk.errors import NoFeasibleConfigError, UnsupportedWideepConfigError
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task_v2 import Task
@@ -1773,6 +1774,182 @@ def _spica_rank_key(payload: dict[str, Any]) -> tuple[float, int]:
     return -(_spica_float(payload.get("score")) or 0.0), _spica_int(payload.get("used_gpus")) or 0
 
 
+def _spica_tokens_per_user(metrics: dict[str, Any], metric_summary: dict[str, Any]) -> float | None:
+    tokens_per_user = _spica_float(
+        _metric_value(
+            metrics,
+            "mean_output_token_throughput_per_user",
+            "output_token_throughput_per_user",
+            "tokens_per_second_per_user",
+            "tokens/s/user",
+        )
+    )
+    if tokens_per_user is not None:
+        return tokens_per_user
+
+    # Legacy Pareto plots use generation speed on the x-axis; mean TPOT is its inverse.
+    tpot_ms = _spica_float(metric_summary.get("tpot"))
+    if tpot_ms is None or tpot_ms <= 0:
+        return None
+    return 1000.0 / tpot_ms
+
+
+def _spica_candidates_to_pareto_df(candidates: list[Any]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for candidate in candidates:
+        payload = _spica_candidate_to_dict(candidate)
+        config = payload.get("config") or {}
+        raw_metrics = payload.get("metrics") or {}
+        metrics = _spica_metric_summary(payload)
+        used_gpus = _spica_int(payload.get("used_gpus")) or _spica_int(config.get("used_gpus"))
+        goodput = _spica_float(metrics["goodput"])
+        score = _spica_float(metrics["score"])
+        if score is None and goodput is not None and used_gpus and used_gpus > 0:
+            score = goodput / used_gpus
+
+        row = {
+            "deployment_mode": _spica_deployment_mode(payload),
+            "backend": config.get("backend", "n/a"),
+            "tokens/s/user": _spica_tokens_per_user(raw_metrics, metrics),
+            "goodput/s/gpu": score,
+            "goodput": goodput,
+            "throughput": _spica_float(metrics["throughput"]),
+            "ttft": _spica_float(metrics["ttft"]),
+            "tpot": _spica_float(metrics["tpot"]),
+            "request_latency": _spica_float(metrics["request_latency"]),
+            "num_total_gpus": used_gpus,
+            "total_gpus": used_gpus,
+            "router": _spica_router(config),
+            "planner": _spica_planner(config),
+        }
+        for key, value in config.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                row.setdefault(key, value)
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    metric_cols = [
+        "tokens/s/user",
+        "goodput/s/gpu",
+        "goodput",
+        "throughput",
+        "ttft",
+        "tpot",
+        "request_latency",
+        "num_total_gpus",
+        "total_gpus",
+    ]
+    for col in metric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def _spica_pareto_fronts(candidates: list[Any]) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+    candidate_df = _spica_candidates_to_pareto_df(candidates)
+    if candidate_df.empty:
+        return candidate_df, {}
+
+    fronts: dict[str, pd.DataFrame] = {}
+    for mode, mode_df in candidate_df.groupby("deployment_mode", sort=False):
+        pareto_df = pareto_analysis.get_pareto_front(mode_df, "tokens/s/user", "goodput/s/gpu")
+        if not pareto_df.empty:
+            fronts[str(mode)] = pareto_df
+    return candidate_df, fronts
+
+
+def _spica_pareto_series(pareto_fronts: dict[str, pd.DataFrame]) -> list[dict[str, Any]]:
+    preferred_modes = [mode for mode in ("agg", "disagg") if mode in pareto_fronts]
+    other_modes = sorted(mode for mode in pareto_fronts if mode not in {"agg", "disagg"})
+    return [{"df": pareto_fronts[mode], "label": mode} for mode in [*preferred_modes, *other_modes]]
+
+
+def _save_spica_pareto_plot(pareto_fronts: dict[str, pd.DataFrame], save_dir: str) -> str | None:
+    if not pareto_fronts:
+        return None
+
+    path = os.path.join(save_dir, "pareto_frontier.png")
+    fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b", "#17becf"]
+
+    for idx, entry in enumerate(_spica_pareto_series(pareto_fronts)):
+        df = entry["df"]
+        if df.empty:
+            continue
+        pareto_analysis.draw_pareto(
+            df,
+            "tokens/s/user",
+            "goodput/s/gpu",
+            ax,
+            colors[idx % len(colors)],
+            entry["label"],
+        )
+
+    combined = pd.concat(pareto_fronts.values(), ignore_index=True)
+    if not combined.empty:
+        best = combined.sort_values(by="goodput/s/gpu", ascending=False).head(1)
+        ax.scatter(best["tokens/s/user"], best["goodput/s/gpu"], color="black", marker="x", label="best")
+
+    ax.set_title("Spica Trace Pareto Frontier")
+    ax.set_xlabel("tokens/s/user")
+    ax.set_ylabel("goodput/s/gpu")
+    ax.legend()
+    plt.savefig(path)
+    plt.close(fig)
+    return path
+
+
+def _save_spica_trace_artifacts(candidates: list[Any], save_dir: str, *, top_n: int) -> list[str]:
+    os.makedirs(save_dir, exist_ok=True)
+    payloads = [_spica_candidate_to_dict(candidate) for candidate in candidates]
+    candidate_df, pareto_fronts = _spica_pareto_fronts(payloads)
+    written_paths: list[str] = []
+
+    candidates_yaml = os.path.join(save_dir, "spica_candidates.yaml")
+    with open(candidates_yaml, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(payloads, fh, sort_keys=False)
+    written_paths.append(candidates_yaml)
+
+    if not candidate_df.empty:
+        candidates_csv = os.path.join(save_dir, "spica_candidates.csv")
+        candidate_df.to_csv(candidates_csv, index=False)
+        written_paths.append(candidates_csv)
+
+    if pareto_fronts:
+        combined_pareto = pd.concat(pareto_fronts.values(), ignore_index=True)
+    else:
+        combined_pareto = candidate_df.iloc[0:0].copy()
+    pareto_csv = os.path.join(save_dir, "pareto.csv")
+    combined_pareto.to_csv(pareto_csv, index=False)
+    written_paths.append(pareto_csv)
+
+    plot_path = _save_spica_pareto_plot(pareto_fronts, save_dir)
+    if plot_path is not None:
+        written_paths.append(plot_path)
+
+    if candidate_df.empty:
+        return written_paths
+
+    for mode, mode_df in candidate_df.groupby("deployment_mode", sort=False):
+        mode_dir = os.path.join(save_dir, str(mode))
+        os.makedirs(mode_dir, exist_ok=True)
+
+        mode_front = pareto_fronts.get(str(mode), mode_df.iloc[0:0].copy())
+        mode_pareto_csv = os.path.join(mode_dir, "pareto.csv")
+        mode_front.to_csv(mode_pareto_csv, index=False)
+        written_paths.append(mode_pareto_csv)
+
+        mode_best = mode_df.sort_values(by="goodput/s/gpu", ascending=False).head(top_n)
+        mode_best_csv = os.path.join(mode_dir, "best_config_topn.csv")
+        mode_best.to_csv(mode_best_csv, index=False)
+        written_paths.append(mode_best_csv)
+
+    return written_paths
+
+
 def _format_spica_mode_table(mode: str, payloads: list[dict[str, Any]], *, top_n: int) -> str:
     if not payloads:
         return ""
@@ -1922,6 +2099,24 @@ def _format_spica_trace_summary(
     summary_box.append(f"    - Backend: {chosen_config.get('backend', 'n/a')}")
     summary_box.append(f"    - GPUs Used: {chosen.get('used_gpus', 'n/a')}")
     summary_box.append("  " + "-" * 76)
+
+    # ============================= pareto frontier
+    _, pareto_fronts = _spica_pareto_fronts(payloads)
+    if pareto_fronts:
+        summary_box.append("  Pareto Frontier:")
+        pareto_title = f"{chosen_config.get('model_name', model_path)} Spica Trace Pareto Frontier"
+        summary_box.append(f"    {pareto_title}: goodput/s/gpu vs tokens/s/user")
+        chosen_df = _spica_candidates_to_pareto_df([chosen])
+        pareto_plot_buf = pareto_analysis.draw_pareto_to_string(
+            pareto_title,
+            _spica_pareto_series(pareto_fronts),
+            highlight={"df": chosen_df.head(1), "label": f"{chosen_mode} best"},
+            x_label="tokens/s/user",
+            y_label="goodput/s/gpu",
+        )
+        summary_box.append(pareto_plot_buf or "    n/a")
+        summary_box.append("  " + "-" * 76)
+
     summary_box.append("  Deployment Details:")
     summary_box.append(
         "    (p) stands for prefill, (d) stands for decode, bs is max_num_batched_tokens/max_num_seqs."
@@ -2056,11 +2251,8 @@ def _run_spica_trace_default(args) -> list[Any]:
     )
 
     if args.save_dir:
-        os.makedirs(args.save_dir, exist_ok=True)
-        path = os.path.join(args.save_dir, "spica_candidates.yaml")
-        with open(path, "w", encoding="utf-8") as fh:
-            yaml.safe_dump([_spica_candidate_to_dict(candidate) for candidate in candidates], fh, sort_keys=False)
-        logger.info("Saved Spica candidates to %s", path)
+        written_paths = _save_spica_trace_artifacts(candidates, args.save_dir, top_n=args.top_n)
+        logger.info("Saved Spica trace artifacts to %s: %s", args.save_dir, ", ".join(written_paths))
 
     return candidates
 

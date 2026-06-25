@@ -409,7 +409,7 @@ aiconfigurator cli default \
 
 The trace should use the Mooncake replay JSONL schema. Each row describes one request with fields such as `timestamp`, `input_length`, `output_length`, and `hash_ids`; see [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl) for a concrete example.
 
-In trace mode, traffic shape and request lengths come from the trace, so `--isl` and `--osl` are ignored. The CLI still uses `--ttft` and `--tpot` as the goodput SLA for ranking candidates. If `--save-dir` is set, ranked Spica candidates are written to `spica_candidates.yaml`.
+In trace mode, traffic shape and request lengths come from the trace, so `--isl` and `--osl` are ignored. The CLI still uses `--ttft` and `--tpot` as the goodput SLA for ranking candidates. The printed summary includes a Spica Pareto curve with `tokens/s/user` on the x-axis and replay `goodput/s/gpu` on the y-axis. If `--save-dir` is set, the CLI writes `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, and per-mode `pareto.csv` / `best_config_topn.csv` files.
 
 #### Systems Paths
 
@@ -539,7 +539,23 @@ Each replica has a system of 4 prefill workers and 1 decode workers. Each prefil
 `bs` is required to be set in framework as it limits the largest batch_size of the worker which is crucial to control the TPOT of the deployment.  
 `concurrency` = `concurrency * replicas` Use it to benchmark your deployment on total GPUs. If you only want to benchmark 1 replica, divide it by `replicas`
 
-As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save-dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. Here's a stucture of the output folder,
+As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save-dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. For Spica trace mode, the output contains replay ranking and Pareto artifacts:
+
+```text
+results/trace_run
+├── agg
+│   ├── best_config_topn.csv
+│   └── pareto.csv
+├── disagg
+│   ├── best_config_topn.csv
+│   └── pareto.csv
+├── pareto.csv
+├── pareto_frontier.png
+├── spica_candidates.csv
+└── spica_candidates.yaml
+```
+
+For the legacy estimator, here's a stucture of the output folder,
 ```text
 results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg
