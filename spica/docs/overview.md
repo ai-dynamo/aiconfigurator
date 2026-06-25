@@ -128,41 +128,34 @@ After all branches finish, candidates from every branch are merged (`src/spica/s
 
 ## Flow diagram
 
-```
-SmartSearchConfig YAML
-        │
-        ▼
-(1) parse + validate (config.py)
-        │
-        ▼
-(2) filter_scaling_policies ──drop throughput-scaling unless goal→"sla"
-        │                       (error if nothing left)
-        ▼
-(3) sweep_load_predictor ──── per distinct throughput interval: brute-force
-        │  (SEPARATE grid)     forecast-loss → pin winner  [skip if no tput
-        │                      policy; constant_last if static workload]
-        ▼
-(4) enumerate_branches ─────── one branch per deployment_mode (agg / disagg);
-        │                      backend = searched knob; parallel domain = ∪ backends
-        ▼
-(5) ┌──────────────── per branch: Vizier study ──────────────────────┐
-   │  for max_rounds:                                                │
-   │    ask  suggest(per_round)                                      │
-   │     ├─ gate (backend-unsupported) ─→ observe_infeasible         │
-   │     └─ eval ⇉ [parallel_evals workers]                          │
-   │           unroll_sample → build_deployment → ReplayEvaluator    │
-   │                            → score                              │
-   │    tell  feasible→observe(metrics) | gated→observe_infeasible   │
-   └────────────────────────────────────────────────────────────────┘
-        │
-        ▼
-   candidates from all branches
-        │
-        ▼
-(6) MERGE ── single-objective: rank()  |  pareto: pareto_front()
-        │
-        ▼
-   list[Candidate]  (best-first, or the non-dominated front)
+Steps 3 (load-predictor sub-sweep) and 4 (branch enumeration) both branch off step 2 — they
+are independent and both feed the per-branch loop; qualifiers (error-if-nothing-left,
+skip / `constant_last` shortcuts) are described in the prose above.
+
+```mermaid
+flowchart TD
+  Y(["SmartSearchConfig (YAML)"]):::io --> V["1 · parse + validate"]
+  V --> F["2 · filter scaling policies<br/>drop throughput-scaling unless goal → sla"]
+  F --> P["3 · load-predictor sub-sweep<br/>per throughput interval · forecast-loss winner"]
+  F --> E["4 · enumerate branches<br/>one per deployment_mode · backend = knob"]
+  P --> A
+  E --> A
+  subgraph L["5 · per branch — Vizier study (× max_rounds)"]
+    direction TB
+    A["ask · suggest(per_round)"] --> G{"backend supported?"}
+    G -->|no| OI["observe_infeasible"]
+    G -->|yes| EV["eval ⇉ parallel workers<br/>unroll → build_deployment → replay → score"]
+    EV --> T["tell · feasible: observe / gated: observe_infeasible"]
+  end
+  T --> C(["candidates from all branches"]):::io
+  C --> M{"merge by goal"}
+  M -->|single-objective| R["rank()<br/>best-first, ties → fewer GPUs"]
+  M -->|pareto| PF["pareto_front()<br/>non-dominated set"]
+  R --> OUT(["list[Candidate]"]):::io
+  PF --> OUT
+  classDef io fill:#dbeafe,stroke:#60a5fa,color:#1e3a8a;
+  classDef decision fill:#fef3c7,stroke:#fbbf24,color:#78350f;
+  class G,M decision;
 ```
 
 ## See also
