@@ -37,7 +37,7 @@ import json
 from typing import Any
 
 import aiconfigurator_core
-from aiconfigurator.cli.api import _build_model_config
+from aiconfigurator.sdk.config_builders import build_model_config
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.operations import (
     GEMM,
@@ -667,7 +667,7 @@ def compile_engine(
     # does not take a model_path (quant inference is done inside `get_model`).
     resolved_moe_tp = moe_tp_size if moe_tp_size is not None else 1
     resolved_moe_ep = moe_ep_size if moe_ep_size is not None else 1
-    model_config = _build_model_config(
+    model_config = build_model_config(
         tp_size=tp_size,
         pp_size=pp_size,
         attention_dp_size=attention_dp_size,
