@@ -16,12 +16,12 @@ import pandas as pd
 import pytest
 
 from aiconfigurator.cli.main import (
+    _build_spica_trace_result_bundle,
     _build_spica_trace_search_space,
     _execute_tasks,
-    _format_spica_trace_summary,
     _resolve_cli_log_level,
     _save_spica_trace_artifacts,
-    _spica_candidates_to_pareto_df,
+    _spica_candidates_to_result_df,
     build_default_tasks,
     build_experiment_tasks,
     configure_parser,
@@ -200,8 +200,8 @@ class TestCLIIntegration:
         assert search_space["router_mode"] == ["round_robin"]
         assert search_space["planner_scaling_policy"] == ["disabled"]
 
-    def test_spica_trace_summary_uses_default_result_shape(self):
-        """Spica trace output should resemble the existing default-mode final summary."""
+    def test_spica_trace_results_use_default_result_shape(self, cli_args_factory):
+        """Spica trace candidates should be adapted to the legacy default-mode result bundle."""
         candidates = [
             {
                 "config": {
@@ -268,32 +268,37 @@ class TestCLIIntegration:
             },
         ]
 
-        summary = _format_spica_trace_summary(
-            candidates,
-            top_n=5,
+        args = cli_args_factory(
+            mode="default",
+            trace_path="/data/replay/traffic.jsonl",
             model_path="Qwen/Qwen3-32B-FP8",
             total_gpus=16,
-            trace_path="/data/replay/traffic.jsonl",
+            top_n=5,
             ttft=2000.0,
             tpot=30.0,
         )
+        result_bundle = _build_spica_trace_result_bundle(candidates, args)
 
-        assert "AIConfigurator Final Results" in summary
-        assert "Input Configuration & SLA Target" in summary
-        assert "Overall Best Configuration" in summary
-        assert "Pareto Frontier:" in summary
-        assert "Spica Trace Pareto Frontier" in summary
-        assert "Deployment Details" in summary
-        assert "Trace: /data/replay/traffic.jsonl (Mooncake JSONL)" in summary
-        assert "Best Experiment Chosen:" in summary
-        assert "disagg at 321.50 goodput/s/gpu" in summary
-        assert "agg Top Configurations: (Sorted by goodput/s/gpu)" in summary
-        assert "disagg Top Configurations: (Sorted by goodput/s/gpu)" in summary
-        assert "goodput/s/gpu" in summary
-        assert "(p)parallel" in summary
-        assert "kv_router" in summary
+        assert result_bundle.chosen_exp == "disagg"
+        assert set(result_bundle.tasks) == {"agg", "disagg"}
+        assert result_bundle.tasks["disagg"].serving_mode == "disagg"
+        assert result_bundle.tasks["disagg"].primary_model_path == "Qwen/Qwen3-32B-FP8"
+        assert result_bundle.best_throughputs["disagg"] == pytest.approx(321.5)
+        assert result_bundle.pareto_x_axis == {"disagg": "tokens/s/user", "agg": "tokens/s/user"}
 
-    def test_spica_trace_artifacts_include_pareto_outputs(self, tmp_path):
+        disagg_best = result_bundle.best_configs["disagg"].iloc[0]
+        assert disagg_best["tokens/s/gpu"] == pytest.approx(321.5)
+        assert disagg_best["tokens/s/gpu_cluster"] == pytest.approx(321.5)
+        assert disagg_best["tokens/s/user"] == pytest.approx(125.0)
+        assert disagg_best["(p)parallel"] == "tp2_pp1"
+        assert disagg_best["(d)parallel"] == "tp1_pp1"
+        assert disagg_best["router"] == "kv_router"
+
+        agg_best = result_bundle.best_configs["agg"].iloc[0]
+        assert agg_best["parallel"] == "tp2_pp1"
+        assert agg_best["tokens/s/gpu"] == pytest.approx(280.0)
+
+    def test_spica_trace_artifacts_include_pareto_outputs(self, tmp_path, cli_args_factory):
         candidates = [
             {
                 "config": {
@@ -372,11 +377,20 @@ class TestCLIIntegration:
             },
         ]
 
-        pareto_df = _spica_candidates_to_pareto_df(candidates)
+        pareto_df = _spica_candidates_to_result_df(candidates)
         assert pareto_df["tokens/s/user"].tolist() == pytest.approx([100.0, 50.0, 80.0])
+        assert pareto_df["tokens/s/gpu"].tolist() == pytest.approx([100.0, 80.0, 120.0])
         assert pareto_df["goodput/s/gpu"].tolist() == pytest.approx([100.0, 80.0, 120.0])
 
-        written_paths = _save_spica_trace_artifacts(candidates, str(tmp_path), top_n=1)
+        args = cli_args_factory(
+            mode="default",
+            trace_path="/tmp/traffic.jsonl",
+            model_path="Qwen/Qwen3-32B-FP8",
+            total_gpus=2,
+            top_n=1,
+        )
+        result_bundle = _build_spica_trace_result_bundle(candidates, args)
+        written_paths = _save_spica_trace_artifacts(result_bundle, str(tmp_path))
         written_names = {str(path).replace(f"{tmp_path}/", "") for path in written_paths}
 
         assert {
@@ -393,7 +407,7 @@ class TestCLIIntegration:
         combined_pareto = pd.read_csv(tmp_path / "pareto.csv")
         assert set(combined_pareto["deployment_mode"]) == {"agg", "disagg"}
         agg_best = pd.read_csv(tmp_path / "agg" / "best_config_topn.csv")
-        assert agg_best.loc[0, "goodput/s/gpu"] == pytest.approx(100.0)
+        assert agg_best.loc[0, "tokens/s/gpu"] == pytest.approx(100.0)
 
     @pytest.mark.parametrize(
         "builder_patch",

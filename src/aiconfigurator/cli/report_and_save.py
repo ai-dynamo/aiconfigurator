@@ -299,6 +299,7 @@ def log_final_summary(
     target_request_rate: float | None = None,
     target_concurrency: float | None = None,
     inclusive_tpot: bool = False,
+    extra_input_lines: list[str] | None = None,
 ):
     """Log final summary of configuration results"""
     # display_* copies carry inclusive TPOT for printed values only.
@@ -338,6 +339,9 @@ def log_final_summary(
 
     summary_box.append(f"    Model: {chosen_task.primary_model_path} (is_moe: {chosen_task.is_moe})")
     summary_box.append(f"    Total GPUs: {chosen_task.total_gpus}")
+    if extra_input_lines:
+        for line in extra_input_lines:
+            summary_box.append(f"    {line}")
 
     if load_match:
         # Load-match mode summary
@@ -361,17 +365,21 @@ def log_final_summary(
     elif mode == "default":
         agg_value = best_throughputs.get("agg", 0.0)
         disagg_value = best_throughputs.get("disagg", 0.0)
-        if agg_value > 0 and disagg_value > 0:
-            benefit_ratio = disagg_value / agg_value
-        elif agg_value == 0 and disagg_value > 0:
-            benefit_ratio = float("inf")
-        elif agg_value > 0 and disagg_value == 0:
-            benefit_ratio = 0.0
+        if "agg" in best_throughputs and "disagg" in best_throughputs:
+            if agg_value > 0 and disagg_value > 0:
+                benefit_ratio = disagg_value / agg_value
+            elif agg_value == 0 and disagg_value > 0:
+                benefit_ratio = float("inf")
+            elif agg_value > 0 and disagg_value == 0:
+                benefit_ratio = 0.0
+            else:
+                benefit_ratio = 0.0  # handle case where both are 0
+            bold_msg = _cli_bold(
+                f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu "
+                f"(disagg {benefit_ratio:.2f}x better)"
+            )
         else:
-            benefit_ratio = 0.0  # handle case where both are 0
-        bold_msg = _cli_bold(
-            f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu (disagg {benefit_ratio:.2f}x better)"
-        )
+            bold_msg = _cli_bold(f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu")
         summary_box.append(f"    Best Experiment Chosen: {bold_msg}")
     else:
         bold_msg = _cli_bold(f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu")

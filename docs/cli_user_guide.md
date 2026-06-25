@@ -409,7 +409,7 @@ aiconfigurator cli default \
 
 The trace should use the Mooncake replay JSONL schema. Each row describes one request with fields such as `timestamp`, `input_length`, `output_length`, and `hash_ids`; see [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl) for a concrete example.
 
-In trace mode, traffic shape and request lengths come from the trace, so `--isl` and `--osl` are ignored. The CLI still uses `--ttft` and `--tpot` as the goodput SLA for ranking candidates. The printed summary includes a Spica Pareto curve with `tokens/s/user` on the x-axis and replay `goodput/s/gpu` on the y-axis. If `--save-dir` is set, the CLI writes `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, and per-mode `pareto.csv` / `best_config_topn.csv` files.
+In trace mode, traffic shape and request lengths come from the trace, so `--isl` and `--osl` are ignored. The CLI still uses `--ttft` and `--tpot` as the goodput SLA for ranking candidates. The printed summary uses the same default-mode result layout and Pareto axes (`tokens/s/user` vs `tokens/s/gpu_cluster`), with Spica replay goodput normalized into the standard throughput columns. If `--save-dir` is set, the CLI writes `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, and per-mode `pareto.csv` / `best_config_topn.csv` files.
 
 #### Systems Paths
 
