@@ -19,6 +19,11 @@ import yaml
 from jinja2 import Environment, FileSystemLoader, Undefined
 from packaging.version import InvalidVersion, Version
 
+from aiconfigurator.generator.dynamo_features import (
+    frontend_cli_args_string,
+    kvbm_shell_exports_from_dyn_config,
+)
+
 from .rule_engine import apply_rule_plugins
 
 _JINJA_ENV = Environment(trim_blocks=True, lstrip_blocks=True)
@@ -1043,6 +1048,13 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     dyn_config = param_values.get("DynConfig", {})
     if isinstance(dyn_config, dict):
         context["DynConfig"] = dyn_config
+        frontend_dyn = dyn_config if dyn_config.get("router_mode") or dyn_config.get("router_config") else {}
+        context["frontend_extra_args"] = frontend_cli_args_string(
+            frontend_dyn,
+            service_config,
+            include_http_port=False,
+        )
+        context["kvbm_env_exports"] = kvbm_shell_exports_from_dyn_config(dyn_config)
     mode_value = dyn_config.get("mode") if isinstance(dyn_config, dict) else None
     mode_value = mode_value or "disagg"
     enable_router = bool(dyn_config.get("enable_router")) if isinstance(dyn_config, dict) else False

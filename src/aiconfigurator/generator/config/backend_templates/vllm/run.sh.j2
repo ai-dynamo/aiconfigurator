@@ -3,13 +3,15 @@ set -e
 trap 'echo "Cleaning up..."; kill 0 2>/dev/null || true' EXIT INT TERM
 
 {% set enable_router = DynConfig.enable_router | default(false) %}
+{% set frontend_args = frontend_extra_args | default('') %}
+{% set kvbm_enabled = (kvbm_env_exports | default([]) | length) > 0 %}
 {% set _device_env = 'ONEAPI_DEVICE_SELECTOR=level_zero:$GPU_LIST' if (NodeConfig.system_name | default('')) == 'b60' else 'CUDA_VISIBLE_DEVICES=$GPU_LIST' %}
 {% if enable_router %}
 export PYTHONHASHSEED=0
 {% endif %}
 export MODEL_PATH=${MODEL_PATH:-"{{ ServiceConfig.model_path }}"}
 export HF_TOKEN=${HF_TOKEN:-"{{ ServiceConfig.hf_token }}"}
-python3 -m dynamo.frontend {% if enable_router %}--router-mode kv --router-reset-states {% endif %}--http-port "{{ ServiceConfig.port }}" 2>&1 | sed "s/^/[Frontend] /" &
+python3 -m dynamo.frontend {% if frontend_args %}{{ frontend_args }} {% elif enable_router %}--router-mode kv --router-reset-states {% endif %}--http-port "{{ ServiceConfig.port }}" 2>&1 | sed "s/^/[Frontend] /" &
 
 {% if DynConfig.mode | default('disagg') == 'agg' %}
 AGG_GPU={{ agg_gpu }}
@@ -27,13 +29,17 @@ for ((w=0; w<AGG_WORKERS; w++)); do
   fi
   EVENT_PORT=$(( AGG_EVENT_PORT_BASE + w ))
   SIDE_CHANNEL_PORT=$(( AGG_SIDE_CHANNEL_PORT_BASE + w ))
-  ( DYN_SYSTEM_PORT=$SYSTEM_PORT \
+  (
+    {% for export_line in kvbm_env_exports | default([]) %}
+    {{ export_line }}
+    {% endfor %}
+    DYN_SYSTEM_PORT=$SYSTEM_PORT \
     DYN_VLLM_KV_EVENT_PORT=$EVENT_PORT \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     {{ _device_env }} python3 -m dynamo.vllm \
     --model "$MODEL_PATH" \
     {% if enable_router %}--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${EVENT_PORT}\",\"enable_kv_cache_events\":true}" {% endif %}\
-    {{ agg_cli_args }} 2>&1 | sed "s/^/[Worker $w] /" ) &
+    {{ agg_cli_args }} {% if kvbm_enabled %}--kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}' {% endif %}2>&1 | sed "s/^/[Worker $w] /" ) &
 done
 wait
 {% else %}
@@ -54,14 +60,18 @@ for ((w=0; w<PREFILL_WORKERS; w++)); do
   SYSTEM_PORT=$(( PREFILL_SYSTEM_PORT_BASE + w ))
   EVENT_PORT=$(( PREFILL_EVENT_PORT_BASE + w ))
   SIDE_CHANNEL_PORT=$(( PREFILL_SIDE_CHANNEL_PORT_BASE + w ))
-  ( DYN_SYSTEM_PORT=$SYSTEM_PORT \
+  (
+  {% for export_line in kvbm_env_exports | default([]) %}
+  {{ export_line }}
+  {% endfor %}
+  DYN_SYSTEM_PORT=$SYSTEM_PORT \
   DYN_VLLM_KV_EVENT_PORT=$EVENT_PORT \
   VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
   {{ _device_env }} \
     python3 -m dynamo.vllm \
       --model "$MODEL_PATH" \
       {% if enable_router %}--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${EVENT_PORT}\",\"enable_kv_cache_events\":true}" {% endif %}\
-      {{ prefill_cli_args }} --is-prefill-worker --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' 2>&1 | sed "s/^/[Prefill $w] /" ) &
+      {{ prefill_cli_args }} --is-prefill-worker --kv-transfer-config '{% if kvbm_enabled %}{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}{% else %}{"kv_connector":"NixlConnector","kv_role":"kv_both"}{% endif %}' 2>&1 | sed "s/^/[Prefill $w] /" ) &
 done
 {% endif %}
 

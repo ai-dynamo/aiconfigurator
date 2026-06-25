@@ -9,6 +9,7 @@ while keeping heavy computation mocked out.
 """
 
 import argparse
+import json
 import logging
 from unittest.mock import MagicMock, patch
 
@@ -384,8 +385,24 @@ class TestCLIIntegration:
                     "decode_enable_prefix_caching": False,
                     "context_length": 8192,
                     "router_mode": "kv_router",
+                    "overlap_score_credit": 0.5,
+                    "prefill_load_scale": 2.0,
+                    "router_temperature": 0.2,
+                    "active_decode_blocks_threshold": 0.75,
+                    "active_prefill_tokens_threshold": 10000,
+                    "active_prefill_tokens_threshold_frac": 2.0,
+                    "no_admission_control": False,
                     "planner_scaling_policy": "predictive",
+                    "enable_throughput_scaling": True,
                     "enable_load_scaling": True,
+                    "throughput_adjustment_interval_seconds": 180,
+                    "load_adjustment_interval_seconds": 5,
+                    "max_num_fpm_samples": 25,
+                    "fpm_sample_bucket_size": 4,
+                    "load_scaling_down_sensitivity": 20,
+                    "load_min_observations": 6,
+                    "num_g2_blocks": 4096,
+                    "offload_batch_size": 32,
                 },
                 "used_gpus": 3,
                 "score": 120.0,
@@ -481,6 +498,31 @@ class TestCLIIntegration:
             (result_dir / "disagg" / "top1" / "generator_config.yaml").read_text()
         )
         assert disagg_generator_config["DynConfig"]["enable_router"] is True
+        assert disagg_generator_config["DynConfig"]["router_mode"] == "kv"
+        router_config = disagg_generator_config["DynConfig"]["router_config"]
+        assert router_config["kv_cache_block_size"] == 32
+        assert router_config["overlap_score_credit"] == pytest.approx(0.5)
+        assert router_config["prefill_load_scale"] == pytest.approx(2.0)
+        assert router_config["router_temperature"] == pytest.approx(0.2)
+        assert router_config["admission_control"] == "token-capacity"
+        assert router_config["active_decode_blocks_threshold"] == pytest.approx(0.75)
+        assert router_config["active_prefill_tokens_threshold"] == 10000
+        assert router_config["active_prefill_tokens_threshold_frac"] == pytest.approx(2.0)
+        planner_config = disagg_generator_config["DynConfig"]["planner_config"]
+        assert planner_config["enable_throughput_scaling"] is True
+        assert planner_config["enable_load_scaling"] is True
+        assert planner_config["throughput_adjustment_interval_seconds"] == 180
+        assert planner_config["load_adjustment_interval_seconds"] == 5
+        assert planner_config["max_num_fpm_samples"] == 25
+        assert planner_config["fpm_sample_bucket_size"] == 4
+        assert planner_config["load_scaling_down_sensitivity"] == 20
+        assert planner_config["load_min_observations"] == 6
+        assert planner_config["prefill_engine_num_gpu"] == 1
+        assert planner_config["decode_engine_num_gpu"] == 2
+        assert planner_config["ttft_ms"] == pytest.approx(2000.0)
+        assert planner_config["itl_ms"] == pytest.approx(30.0)
+        assert disagg_generator_config["DynConfig"]["kvbm_config"]["cpu_cache_override_num_blocks"] == 4096
+        assert disagg_generator_config["DynConfig"]["kvbm_config"]["max_transfer_batch_size"] == 32
         assert disagg_generator_config["params"]["prefill"]["max_num_tokens"] == 8192
         assert disagg_generator_config["params"]["decode"]["max_num_tokens"] == 4096
         assert disagg_generator_config["params"]["decode"]["enable_attention_dp"] is True
@@ -496,14 +538,42 @@ class TestCLIIntegration:
         assert decode_engine_config["cache_transceiver_config"]["max_tokens_in_buffer"] == 8192
         assert decode_engine_config["kv_cache_config"]["enable_block_reuse"] is False
         k8s_deploy = yaml.safe_load((result_dir / "disagg" / "top1" / "k8s_deploy.yaml").read_text())
+        services = k8s_deploy["spec"]["services"]
+        frontend = services["Frontend"]["extraPodSpec"]["mainContainer"]
+        assert frontend["command"] == ["python3", "-m", "dynamo.frontend"]
+        assert frontend["args"][:4] == ["--http-port", "8000", "--router-mode", "kv"]
+        assert "--router-kv-overlap-score-credit" in frontend["args"]
+        assert "0.5" in frontend["args"]
+        assert "--router-prefill-load-scale" in frontend["args"]
+        assert "2.0" in frontend["args"]
+        assert "--router-temperature" in frontend["args"]
+        assert "0.2" in frontend["args"]
+        assert "--admission-control" in frontend["args"]
+        assert "token-capacity" in frontend["args"]
+        planner = services["Planner"]["extraPodSpec"]["mainContainer"]
+        assert planner["command"] == ["python3", "-m", "dynamo.planner"]
+        planner_payload = json.loads(planner["args"][planner["args"].index("--config") + 1])
+        assert planner_payload["enable_throughput_scaling"] is True
+        assert planner_payload["enable_load_scaling"] is True
+        assert planner_payload["prefill_engine_num_gpu"] == 1
+        assert planner_payload["decode_engine_num_gpu"] == 2
+        prefill_envs = {item["name"]: item["value"] for item in services["TRTLLMPrefillWorker"]["envs"]}
+        assert prefill_envs["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] == "4096"
+        assert prefill_envs["DYN_KVBM_MAX_TRANSFER_BATCH_SIZE"] == "32"
         decode_script = k8s_deploy["spec"]["services"]["TRTLLMDecodeWorker"]["extraPodSpec"]["mainContainer"][
             "args"
         ][0]
         assert "max_num_tokens: 4096" in decode_script
         assert "enable_attention_dp: true" in decode_script
         assert "max_tokens_in_buffer: 8192" in decode_script
-        assert "max_num_tokens: 4096" in (result_dir / "disagg" / "top1" / "sflow.yaml").read_text()
-        assert "max_tokens_in_buffer: 8192" in (result_dir / "disagg" / "top1" / "sflow.yaml").read_text()
+        sflow_yaml = (result_dir / "disagg" / "top1" / "sflow.yaml").read_text()
+        assert "--router-kv-overlap-score-credit 0.5" in sflow_yaml
+        assert "export DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=4096" in sflow_yaml
+        assert "max_num_tokens: 4096" in sflow_yaml
+        assert "max_tokens_in_buffer: 8192" in sflow_yaml
+        run_script = (result_dir / "disagg" / "top1" / "run_0.sh").read_text()
+        assert "--router-kv-overlap-score-credit 0.5" in run_script
+        assert "export DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=4096" in run_script
         disagg_candidate = yaml.safe_load((result_dir / "disagg" / "top1" / "spica_candidate.yaml").read_text())
         assert disagg_candidate["config"]["deployment_mode"] == "disagg"
 

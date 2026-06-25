@@ -24,6 +24,7 @@ from aiconfigurator.generator.api import (
     load_generator_overrides_from_args,
     resolve_backend_version_for_dynamo,
 )
+from aiconfigurator.generator.dynamo_features import normalize_router_mode
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
 from aiconfigurator.generator.request import from_legacy_params
 from aiconfigurator.sdk import common, pareto_analysis, perf_database
@@ -452,7 +453,7 @@ def _spica_deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[st
 
 def _spica_set_if_present(target: dict[str, Any], key: str, value: Any) -> None:
     if _spica_value_present(value):
-        target[key] = value
+        target[key] = _spica_yaml_safe(value)
 
 
 def _spica_role_worker_overrides(
@@ -520,7 +521,143 @@ def _spica_router_enabled(row: pd.Series) -> bool | None:
     if not _spica_value_present(router_mode):
         return None
     normalized = str(router_mode).strip().lower()
-    return normalized not in {"", "n/a", "none", "disabled", "round_robin"}
+    return normalized not in {"", "n/a", "none", "disabled", "round_robin", "round-robin"}
+
+
+def _spica_router_mode(row: pd.Series) -> str | None:
+    if not _spica_value_present(row.get("router_mode")):
+        return None
+    return normalize_router_mode(str(row.get("router_mode")))
+
+
+def _spica_router_block_size(row: pd.Series) -> int | None:
+    mode = str(row.get("deployment_mode") or "")
+    if mode == "agg":
+        return _spica_int(row.get("agg_block_size"))
+    return _spica_first_int(row.get("decode_block_size"), row.get("prefill_block_size"), default=0) or None
+
+
+def _spica_router_config(row: pd.Series) -> dict[str, Any] | None:
+    if _spica_router_enabled(row) is not True:
+        return None
+
+    router: dict[str, Any] = {}
+    _spica_set_if_present(router, "kv_cache_block_size", _spica_router_block_size(row))
+    for key in (
+        "overlap_score_credit",
+        "prefill_load_scale",
+        "router_temperature",
+    ):
+        _spica_set_if_present(router, key, row.get(key))
+
+    no_admission_control = _spica_bool(row.get("no_admission_control"))
+    if no_admission_control is True:
+        router["admission_control"] = "none"
+    else:
+        threshold_keys = (
+            "active_decode_blocks_threshold",
+            "active_prefill_tokens_threshold",
+            "active_prefill_tokens_threshold_frac",
+        )
+        for key in threshold_keys:
+            _spica_set_if_present(router, key, row.get(key))
+        if any(_spica_value_present(row.get(key)) for key in threshold_keys):
+            router["admission_control"] = "token-capacity"
+
+    return router or None
+
+
+def _spica_engine_num_gpu(row: pd.Series, role: str) -> int:
+    if role == "agg":
+        return (
+            _spica_first_int(row.get("tp"), default=1)
+            * _spica_first_int(row.get("pp"), default=1)
+            * _spica_first_int(row.get("attention_dp"), default=1)
+        )
+    return (
+        _spica_first_int(row.get(f"{role}_tp"), default=1)
+        * _spica_first_int(row.get(f"{role}_pp"), default=1)
+        * _spica_first_int(row.get(f"{role}_attention_dp"), default=1)
+    )
+
+
+def _spica_planner_config(args: argparse.Namespace | None, row: pd.Series) -> dict[str, Any] | None:
+    enable_throughput = bool(_spica_bool(row.get("enable_throughput_scaling")))
+    enable_load = bool(_spica_bool(row.get("enable_load_scaling")))
+    if not (enable_throughput or enable_load):
+        return None
+
+    backend = str(
+        row.get("backend")
+        or getattr(args, "backend", None)
+        or getattr(args, "primary_backend_name", None)
+        or "trtllm"
+    )
+    mode = str(row.get("deployment_mode") or "disagg")
+    model_name = None
+    if args is not None:
+        model_name = getattr(args, "model_path", None) or getattr(args, "primary_model_path", None)
+    planner: dict[str, Any] = {
+        "environment": "kubernetes",
+        "backend": backend,
+        "mode": mode,
+        "optimization_target": "sla",
+        "enable_throughput_scaling": enable_throughput,
+        "enable_load_scaling": enable_load,
+    }
+    if model_name or _spica_value_present(row.get("model_name")):
+        planner["model_name"] = model_name or row.get("model_name")
+
+    for key in (
+        "throughput_adjustment_interval_seconds",
+        "load_adjustment_interval_seconds",
+        "max_num_fpm_samples",
+        "fpm_sample_bucket_size",
+        "load_scaling_down_sensitivity",
+        "load_min_observations",
+        "load_predictor",
+        "load_predictor_log1p",
+        "prophet_window_size",
+        "kalman_q_level",
+        "kalman_q_trend",
+        "kalman_r",
+        "kalman_min_points",
+        "max_gpu_budget",
+        "min_gpu_budget",
+        "min_endpoint",
+    ):
+        _spica_set_if_present(planner, key, row.get(key))
+
+    gpu_budget = _spica_int(row.get("gpu_budget"))
+    if gpu_budget is not None and "max_gpu_budget" not in planner:
+        planner["max_gpu_budget"] = gpu_budget
+
+    if mode == "agg":
+        planner["decode_engine_num_gpu"] = _spica_engine_num_gpu(row, "agg")
+    else:
+        planner["prefill_engine_num_gpu"] = _spica_engine_num_gpu(row, "prefill")
+        planner["decode_engine_num_gpu"] = _spica_engine_num_gpu(row, "decode")
+
+    if args is not None:
+        _spica_set_if_present(planner, "ttft_ms", getattr(args, "ttft", None))
+        _spica_set_if_present(planner, "itl_ms", getattr(args, "tpot", None))
+
+    # Spica replay suppresses large periodic planner reports; keep live deploy
+    # artifacts similarly quiet unless the user overrides this later.
+    planner.setdefault("report_interval_hours", None)
+    planner.setdefault("live_dashboard_port", 0)
+    return planner
+
+
+def _spica_kvbm_config(row: pd.Series) -> dict[str, Any] | None:
+    kvbm: dict[str, Any] = {}
+    num_g2_blocks = _spica_int(row.get("num_g2_blocks"))
+    if num_g2_blocks is not None and num_g2_blocks > 0:
+        kvbm["cpu_cache_override_num_blocks"] = num_g2_blocks
+    offload_batch_size = _spica_int(row.get("offload_batch_size"))
+    if offload_batch_size is not None and offload_batch_size > 0:
+        kvbm["max_transfer_batch_size"] = offload_batch_size
+    return kvbm or None
 
 
 def _spica_generator_overrides(args: argparse.Namespace | None, row: pd.Series) -> dict[str, Any]:
@@ -535,9 +672,24 @@ def _spica_generator_overrides(args: argparse.Namespace | None, row: pd.Series) 
     if not spica_overrides["Workers"]:
         spica_overrides.pop("Workers")
 
+    dyn_overrides: dict[str, Any] = {}
     router_enabled = _spica_router_enabled(row)
     if router_enabled is not None:
-        spica_overrides["DynConfig"] = {"enable_router": router_enabled}
+        dyn_overrides["enable_router"] = router_enabled
+        router_mode = _spica_router_mode(row)
+        if router_mode is not None:
+            dyn_overrides["router_mode"] = router_mode
+        router_config = _spica_router_config(row)
+        if router_config:
+            dyn_overrides["router_config"] = router_config
+    planner_config = _spica_planner_config(args, row)
+    if planner_config:
+        dyn_overrides["planner_config"] = planner_config
+    kvbm_config = _spica_kvbm_config(row)
+    if kvbm_config:
+        dyn_overrides["kvbm_config"] = kvbm_config
+    if dyn_overrides:
+        spica_overrides["DynConfig"] = dyn_overrides
 
     nextn = _spica_int(row.get("aic_nextn"))
     if nextn is not None and nextn > 0:
@@ -677,10 +829,11 @@ def _save_spica_top_config_artifacts(
 
         generator_row = _spica_generator_result_row(row)
         generator_task = _spica_generator_task(task, generator_row)
+        override_args = args if args is not None else task
         generator_config = task_config_to_generator_config(
             task_config=generator_task,
             result_df=generator_row,
-            generator_overrides=_spica_generator_overrides(args, generator_row),
+            generator_overrides=_spica_generator_overrides(override_args, generator_row),
             num_gpus_per_node=num_gpus_per_node,
         )
         generator_config_yaml = os.path.join(top_config_dir, "generator_config.yaml")

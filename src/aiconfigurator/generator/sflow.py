@@ -24,6 +24,11 @@ import re
 import shlex
 from typing import Any
 
+from aiconfigurator.generator.dynamo_features import (
+    frontend_cli_args_string,
+    kvbm_shell_exports_from_dyn_config,
+)
+
 _SUPPORTED_BACKENDS = {"trtllm", "sglang", "vllm"}
 _SFLOW_EXPR_RE = re.compile(r"\$\[\[(.+?)\]\]")
 _SFLOW_VARIABLE_PROFILES = {"minimal", "expanded"}
@@ -75,7 +80,17 @@ def enrich_context_for_sflow(
     if ctx["sflow_slurm_timelimit"] in (None, ""):
         ctx["sflow_slurm_timelimit"] = 240
     ctx["sflow_aiperf_image"] = sflow_cfg.get("aiperf_image") or "python:3.12-slim"
-    ctx["sflow_extra_frontend_args"] = sflow_cfg.get("extra_frontend_args") or ""
+    frontend_dyn = dyn if dyn.get("router_mode") or dyn.get("router_config") else {}
+    generated_frontend_args = frontend_cli_args_string(
+        frontend_dyn,
+        param_values.get("ServiceConfig", {}),
+        include_http_port=False,
+    )
+    user_frontend_args = sflow_cfg.get("extra_frontend_args") or ""
+    ctx["sflow_extra_frontend_args"] = " ".join(
+        part for part in [generated_frontend_args, user_frontend_args] if part
+    )
+    ctx["sflow_kvbm_env_exports"] = kvbm_shell_exports_from_dyn_config(dyn)
     ctx["sflow_variable_profile"] = variable_profile
 
     total_gpus = _total_gpus(wp, worker_cfg, mode)
@@ -183,6 +198,12 @@ def _build_server_script(
     return _trtllm_server_script(role, disagg_mode, context)
 
 
+def _kvbm_export_lines(context: dict[str, Any], role: str) -> list[str]:
+    if role not in {"agg", "prefill"}:
+        return []
+    return [f"- {line}" for line in context.get("sflow_kvbm_env_exports") or []]
+
+
 def _sglang_server_script(
     role: str,
     disagg_mode: str | None,
@@ -213,6 +234,7 @@ def _sglang_server_script(
         "- echo ${CUDA_VISIBLE_DEVICES}",
         "- export FIRST_CUDA_DEVICE=$(echo ${CUDA_VISIBLE_DEVICES} | cut -d',' -f1)",
     ]
+    lines.extend(_kvbm_export_lines(context, role))
 
     if npw > 1:
         lines.extend(
@@ -285,6 +307,7 @@ def _trtllm_server_script(
         "- env | grep UCX",
         "- unset UCX_TLS",
     ]
+    lines.extend(_kvbm_export_lines(context, role))
 
     cmd_parts = [
         "trtllm-llmapi-launch python3 -m dynamo.trtllm \\",
@@ -318,6 +341,7 @@ def _vllm_server_script(
         '- echo "Worker starting"',
         "- echo ${CUDA_VISIBLE_DEVICES}",
     ]
+    lines.extend(_kvbm_export_lines(context, role))
 
     cmd_parts = [
         "python3 -m dynamo.vllm \\",
@@ -328,10 +352,24 @@ def _vllm_server_script(
 
     if disagg_mode == "prefill":
         cmd_parts.append("  --is-prefill-worker \\")
-        cmd_parts.append('  --kv-transfer-config \'{"kv_connector":"NixlConnector","kv_role":"kv_both"}\' \\')
+        if context.get("sflow_kvbm_env_exports"):
+            cmd_parts.append(
+                '  --kv-transfer-config \'{"kv_connector":"PdConnector","kv_role":"kv_both",'
+                '"kv_connector_extra_config":{"connectors":[{"kv_connector":"DynamoConnector",'
+                '"kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"},'
+                '{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},'
+                '"kv_connector_module_path":"kvbm.vllm_integration.connector"}\' \\'
+            )
+        else:
+            cmd_parts.append('  --kv-transfer-config \'{"kv_connector":"NixlConnector","kv_role":"kv_both"}\' \\')
     elif disagg_mode == "decode":
         cmd_parts.append("  --is-decode-worker \\")
         cmd_parts.append('  --kv-transfer-config \'{"kv_connector":"NixlConnector","kv_role":"kv_both"}\' \\')
+    elif context.get("sflow_kvbm_env_exports"):
+        cmd_parts.append(
+            '  --kv-transfer-config \'{"kv_connector":"DynamoConnector",'
+            '"kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}\' \\'
+        )
 
     cmd_parts.append(f"  ${{{extra_var}}}")
 
