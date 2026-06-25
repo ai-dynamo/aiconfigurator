@@ -74,7 +74,7 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 - We have four modes: `default`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
 - Use `default --trace-path` to run the Spica replay-backed smart sweeper from a Mooncake JSONL trace; `--isl` and `--osl` are ignored in this mode. Example trace: [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl).
-- In trace mode, `--save-dir DIR` writes replay result artifacts: `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, and per-mode `pareto.csv` / `best_config_topn.csv`.
+- In trace mode, `--save-dir DIR` writes replay result artifacts and generated Dynamo configs: `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, per-mode `pareto.csv` / `best_config_topn.csv`, and per-rank `topN` deployment artifacts.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
@@ -295,6 +295,7 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_9
 │       ├── k8s_bench.yaml
 │       ├── k8s_deploy.yaml
 │       ├── run_0.sh
+│       ├── sflow.yaml
 │       └── spica_candidate.yaml
 ├── disagg
 │   ├── best_config_topn.csv
@@ -308,12 +309,15 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_9
 │       ├── k8s_deploy.yaml
 │       ├── prefill_config.yaml
 │       ├── run_0.sh
+│       ├── sflow.yaml
 │       └── spica_candidate.yaml
 ├── pareto.csv
 ├── pareto_frontier.png
 ├── spica_candidates.csv
 └── spica_candidates.yaml
 ```
+
+Spica candidate knobs that map to Dynamo/TRT-LLM runtime fields, such as batch/token limits, cache-transfer buffer sizing, block size, GPU memory fraction, prefix caching, attention-DP, max sequence length, and NextN, are copied into `generator_config.yaml` and the generated engine/K8s/SFlow artifacts. Trace-search planner and scaling-policy metadata without a Dynamo generator field stays in `spica_candidate.yaml`.
 
 **For Dynamo deployments** (`--deployment-target dynamo-j2` or `dynamo-python`):
 

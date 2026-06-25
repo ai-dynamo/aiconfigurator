@@ -310,8 +310,13 @@ class TestCLIIntegration:
                     "pp": 1,
                     "attention_dp": 1,
                     "replicas": 1,
+                    "aic_nextn": 2,
                     "agg_max_num_batched_tokens": 4096,
                     "agg_max_num_seqs": 128,
+                    "agg_block_size": 64,
+                    "agg_gpu_memory_utilization": 0.91,
+                    "agg_enable_prefix_caching": True,
+                    "context_length": 8192,
                     "router_mode": "round_robin",
                     "planner_scaling_policy": "disabled",
                 },
@@ -336,6 +341,9 @@ class TestCLIIntegration:
                     "replicas": 1,
                     "agg_max_num_batched_tokens": 2048,
                     "agg_max_num_seqs": 64,
+                    "agg_block_size": 32,
+                    "agg_gpu_memory_utilization": 0.82,
+                    "agg_enable_prefix_caching": False,
                     "router_mode": "round_robin",
                     "planner_scaling_policy": "disabled",
                 },
@@ -358,15 +366,26 @@ class TestCLIIntegration:
                     "prefill_tp": 1,
                     "prefill_pp": 1,
                     "prefill_attention_dp": 1,
+                    "prefill_max_num_batched_tokens": 8192,
+                    "prefill_max_num_seqs": 64,
+                    "prefill_block_size": 64,
+                    "prefill_gpu_memory_utilization": 0.88,
+                    "prefill_enable_prefix_caching": True,
                     "decode_replicas": 1,
                     "decode_tp": 1,
                     "decode_pp": 1,
-                    "decode_attention_dp": 1,
+                    "decode_attention_dp": 2,
+                    "decode_max_num_batched_tokens": 4096,
+                    "decode_max_num_seqs": 128,
+                    "decode_block_size": 32,
+                    "decode_gpu_memory_utilization": 0.86,
+                    "decode_enable_prefix_caching": False,
+                    "context_length": 8192,
                     "router_mode": "kv_router",
                     "planner_scaling_policy": "predictive",
                     "enable_load_scaling": True,
                 },
-                "used_gpus": 2,
+                "used_gpus": 3,
                 "score": 120.0,
                 "metrics": {
                     "goodput_output_throughput_tok_s": 240.0,
@@ -387,8 +406,9 @@ class TestCLIIntegration:
             mode="default",
             trace_path="/tmp/traffic.jsonl",
             model_path="Qwen/Qwen3-32B-FP8",
-            total_gpus=2,
+            total_gpus=3,
             top_n=2,
+            max_seq_len=8192,
         )
         result_bundle = _build_spica_trace_result_bundle(candidates, args)
         written_paths = _save_spica_trace_artifacts(result_bundle, str(tmp_path))
@@ -409,9 +429,11 @@ class TestCLIIntegration:
             "agg/top1/k8s_bench.yaml",
             "agg/top1/k8s_deploy.yaml",
             "agg/top1/run_0.sh",
+            "agg/top1/sflow.yaml",
             "agg/top1/spica_candidate.yaml",
             "agg/top2/agg_config.yaml",
             "agg/top2/generator_config.yaml",
+            "agg/top2/sflow.yaml",
             "agg/top2/spica_candidate.yaml",
             "disagg/exp_config.yaml",
             "disagg/pareto.csv",
@@ -423,6 +445,7 @@ class TestCLIIntegration:
             "disagg/top1/k8s_deploy.yaml",
             "disagg/top1/prefill_config.yaml",
             "disagg/top1/run_0.sh",
+            "disagg/top1/sflow.yaml",
             "disagg/top1/spica_candidate.yaml",
         }.issubset(written_names)
         assert result_dir.parent == tmp_path
@@ -435,8 +458,50 @@ class TestCLIIntegration:
         agg_generator_config = yaml.safe_load((result_dir / "agg" / "top1" / "generator_config.yaml").read_text())
         assert agg_generator_config["WorkerConfig"]["agg_workers"] == 1
         assert agg_generator_config["params"]["agg"]["max_batch_size"] == 128
+        assert agg_generator_config["params"]["agg"]["max_num_tokens"] == 4096
+        assert agg_generator_config["params"]["agg"]["tokens_per_block"] == 64
+        assert agg_generator_config["params"]["agg"]["kv_cache_free_gpu_memory_fraction"] == pytest.approx(0.91)
+        assert agg_generator_config["params"]["agg"]["disable_prefix_cache"] is False
+        assert agg_generator_config["params"]["agg"]["max_seq_len"] == 8192
+        assert agg_generator_config["params"]["agg"]["extra_engine_args"]["max_num_tokens"] == 4096
+        assert agg_generator_config["ModelConfig"]["nextn"] == 2
+        agg_engine_config = yaml.safe_load((result_dir / "agg" / "top1" / "agg_config.yaml").read_text())
+        assert agg_engine_config["max_num_tokens"] == 4096
+        assert agg_engine_config["max_seq_len"] == 8192
+        assert agg_engine_config["kv_cache_config"]["free_gpu_memory_fraction"] == pytest.approx(0.91)
+        assert agg_engine_config["kv_cache_config"]["tokens_per_block"] == 64
+        assert agg_engine_config["kv_cache_config"]["enable_block_reuse"] is True
+        assert agg_engine_config["speculative_config"]["num_nextn_predict_layers"] == 2
         agg_top2_generator_config = yaml.safe_load((result_dir / "agg" / "top2" / "generator_config.yaml").read_text())
         assert agg_top2_generator_config["params"]["agg"]["max_batch_size"] == 64
+        assert agg_top2_generator_config["params"]["agg"]["disable_prefix_cache"] is True
+        disagg_generator_config = yaml.safe_load(
+            (result_dir / "disagg" / "top1" / "generator_config.yaml").read_text()
+        )
+        assert disagg_generator_config["DynConfig"]["enable_router"] is True
+        assert disagg_generator_config["params"]["prefill"]["max_num_tokens"] == 8192
+        assert disagg_generator_config["params"]["decode"]["max_num_tokens"] == 4096
+        assert disagg_generator_config["params"]["decode"]["enable_attention_dp"] is True
+        assert disagg_generator_config["params"]["decode"]["cache_transceiver_max_tokens_in_buffer"] == 8192
+        assert disagg_generator_config["params"]["decode"]["extra_engine_args"]["max_num_tokens"] == 4096
+        prefill_engine_config = yaml.safe_load((result_dir / "disagg" / "top1" / "prefill_config.yaml").read_text())
+        decode_engine_config = yaml.safe_load((result_dir / "disagg" / "top1" / "decode_config.yaml").read_text())
+        assert prefill_engine_config["max_num_tokens"] == 8192
+        assert prefill_engine_config["cache_transceiver_config"]["max_tokens_in_buffer"] == 8192
+        assert prefill_engine_config["kv_cache_config"]["enable_block_reuse"] is True
+        assert decode_engine_config["max_num_tokens"] == 4096
+        assert decode_engine_config["enable_attention_dp"] is True
+        assert decode_engine_config["cache_transceiver_config"]["max_tokens_in_buffer"] == 8192
+        assert decode_engine_config["kv_cache_config"]["enable_block_reuse"] is False
+        k8s_deploy = yaml.safe_load((result_dir / "disagg" / "top1" / "k8s_deploy.yaml").read_text())
+        decode_script = k8s_deploy["spec"]["services"]["TRTLLMDecodeWorker"]["extraPodSpec"]["mainContainer"][
+            "args"
+        ][0]
+        assert "max_num_tokens: 4096" in decode_script
+        assert "enable_attention_dp: true" in decode_script
+        assert "max_tokens_in_buffer: 8192" in decode_script
+        assert "max_num_tokens: 4096" in (result_dir / "disagg" / "top1" / "sflow.yaml").read_text()
+        assert "max_tokens_in_buffer: 8192" in (result_dir / "disagg" / "top1" / "sflow.yaml").read_text()
         disagg_candidate = yaml.safe_load((result_dir / "disagg" / "top1" / "spica_candidate.yaml").read_text())
         assert disagg_candidate["config"]["deployment_mode"] == "disagg"
 

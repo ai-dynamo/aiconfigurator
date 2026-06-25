@@ -2046,6 +2046,136 @@ def _spica_yaml_safe(value: Any) -> Any:
     return value
 
 
+def _spica_value_present(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        return not bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return True
+
+
+def _spica_bool(value: Any) -> bool | None:
+    if not _spica_value_present(value):
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
+
+
+def _spica_deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = {key: _spica_deep_merge(value, {}) if isinstance(value, dict) else value for key, value in base.items()}
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _spica_deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _spica_set_if_present(target: dict[str, Any], key: str, value: Any) -> None:
+    if _spica_value_present(value):
+        target[key] = value
+
+
+def _spica_role_worker_overrides(
+    row: pd.Series,
+    role: str,
+    args: argparse.Namespace | None,
+) -> dict[str, Any]:
+    prefix = "agg" if role == "agg" else role
+    worker: dict[str, Any] = {}
+    engine_overrides: dict[str, Any] = {}
+
+    max_tokens = _spica_int(row.get(f"{prefix}_max_num_batched_tokens"))
+    if max_tokens is not None:
+        worker["max_num_tokens"] = max_tokens
+        worker["max_prefill_tokens"] = max_tokens
+        engine_overrides["max_num_tokens"] = max_tokens
+
+    _spica_set_if_present(worker, "tokens_per_block", _spica_int(row.get(f"{prefix}_block_size")))
+    _spica_set_if_present(
+        worker,
+        "kv_cache_free_gpu_memory_fraction",
+        _spica_float(row.get(f"{prefix}_gpu_memory_utilization")),
+    )
+
+    prefix_caching = _spica_bool(row.get(f"{prefix}_enable_prefix_caching"))
+    if prefix_caching is not None:
+        worker["disable_prefix_cache"] = not prefix_caching
+
+    attention_dp_key = "attention_dp" if role == "agg" else f"{prefix}_attention_dp"
+    attention_dp = _spica_int(row.get(attention_dp_key))
+    if attention_dp is not None and attention_dp > 1:
+        worker["enable_attention_dp"] = True
+        engine_overrides["enable_attention_dp"] = True
+
+    max_seq_len = _spica_first_int(row.get("context_length"), getattr(args, "max_seq_len", None), default=0)
+    if max_seq_len > 0:
+        worker["max_seq_len"] = max_seq_len
+        engine_overrides["max_seq_len"] = max_seq_len
+
+    transfer_buffer_tokens = max(max_tokens or 0, max_seq_len)
+    if role != "agg" and transfer_buffer_tokens > 0:
+        worker["cache_transceiver_max_tokens_in_buffer"] = transfer_buffer_tokens
+        engine_overrides["cache_transceiver_config"] = {
+            "backend": "DEFAULT",
+            "max_tokens_in_buffer": transfer_buffer_tokens,
+        }
+
+    nextn = _spica_int(row.get("aic_nextn"))
+    if nextn is not None and nextn > 0:
+        worker["speculative_decoding_type"] = "MTP"
+        worker["num_nextn_predict_layers"] = nextn
+        engine_overrides["speculative_config"] = {
+            "decoding_type": "MTP",
+            "num_nextn_predict_layers": nextn,
+        }
+
+    if engine_overrides:
+        worker["extra_engine_args"] = engine_overrides
+
+    return worker
+
+
+def _spica_router_enabled(row: pd.Series) -> bool | None:
+    router_mode = row.get("router_mode")
+    if not _spica_value_present(router_mode):
+        return None
+    normalized = str(router_mode).strip().lower()
+    return normalized not in {"", "n/a", "none", "disabled", "round_robin"}
+
+
+def _spica_generator_overrides(args: argparse.Namespace | None, row: pd.Series) -> dict[str, Any]:
+    mode = str(row.get("deployment_mode") or "")
+    roles = ["agg"] if mode == "agg" else ["prefill", "decode"]
+    spica_overrides: dict[str, Any] = {"Workers": {}}
+
+    for role in roles:
+        worker = _spica_role_worker_overrides(row, role, args)
+        if worker:
+            spica_overrides["Workers"][role] = worker
+    if not spica_overrides["Workers"]:
+        spica_overrides.pop("Workers")
+
+    router_enabled = _spica_router_enabled(row)
+    if router_enabled is not None:
+        spica_overrides["DynConfig"] = {"enable_router": router_enabled}
+
+    nextn = _spica_int(row.get("aic_nextn"))
+    if nextn is not None and nextn > 0:
+        spica_overrides["ModelConfig"] = {"nextn": nextn}
+
+    user_overrides = load_generator_overrides_from_args(args) if args is not None else {}
+    return _spica_deep_merge(spica_overrides, user_overrides)
+
+
 def _spica_generator_result_row(row: pd.Series) -> pd.Series:
     generator_row = row.copy()
     mode = str(generator_row.get("deployment_mode") or "")
@@ -2069,6 +2199,7 @@ def _spica_generator_result_row(row: pd.Series) -> pd.Series:
 
 
 def _spica_generator_task(task: _SpicaTraceTask, row: pd.Series) -> argparse.Namespace:
+    nextn = _spica_int(row.get("aic_nextn")) or 0
     return argparse.Namespace(
         primary_backend_name=str(row.get("backend") or task.primary_backend_name),
         primary_system_name=task.primary_system_name,
@@ -2076,7 +2207,7 @@ def _spica_generator_task(task: _SpicaTraceTask, row: pd.Series) -> argparse.Nam
         primary_model_path=task.primary_model_path,
         prefix=0,
         is_moe=task.is_moe,
-        nextn=0,
+        nextn=nextn,
         nextn_accept_rates=[0.85, 0.8, 0.6, 0.0, 0.0],
         serving_mode=str(row.get("deployment_mode") or task.serving_mode),
         total_gpus=_spica_first_int(row.get("total_gpus"), row.get("num_total_gpus"), task.total_gpus),
@@ -2178,7 +2309,7 @@ def _save_spica_top_config_artifacts(
         generator_config = task_config_to_generator_config(
             task_config=generator_task,
             result_df=generator_row,
-            generator_overrides=load_generator_overrides_from_args(args) if args is not None else None,
+            generator_overrides=_spica_generator_overrides(args, generator_row),
             num_gpus_per_node=num_gpus_per_node,
         )
         generator_config_yaml = os.path.join(top_config_dir, "generator_config.yaml")

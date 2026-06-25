@@ -409,7 +409,7 @@ aiconfigurator cli default \
 
 The trace should use the Mooncake replay JSONL schema. Each row describes one request with fields such as `timestamp`, `input_length`, `output_length`, and `hash_ids`; see [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl) for a concrete example.
 
-In trace mode, traffic shape and request lengths come from the trace, so `--isl` and `--osl` are ignored. The CLI still uses `--ttft` and `--tpot` as the goodput SLA for ranking candidates. The printed summary uses the same default-mode result layout and Pareto axes (`tokens/s/user` vs `tokens/s/gpu_cluster`), with Spica replay goodput normalized into the standard throughput columns. If `--save-dir` is set, the CLI writes `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, and per-mode `pareto.csv` / `best_config_topn.csv` files.
+In trace mode, traffic shape and request lengths come from the trace, so `--isl` and `--osl` are ignored. The CLI still uses `--ttft` and `--tpot` as the goodput SLA for ranking candidates. The printed summary uses the same default-mode result layout and Pareto axes (`tokens/s/user` vs `tokens/s/gpu_cluster`), with Spica replay goodput normalized into the standard throughput columns. If `--save-dir` is set, the CLI writes `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, per-mode `pareto.csv` / `best_config_topn.csv`, and per-rank `topN` deployment artifacts.
 
 #### Systems Paths
 
@@ -539,7 +539,7 @@ Each replica has a system of 4 prefill workers and 1 decode workers. Each prefil
 `bs` is required to be set in framework as it limits the largest batch_size of the worker which is crucial to control the TPOT of the deployment.  
 `concurrency` = `concurrency * replicas` Use it to benchmark your deployment on total GPUs. If you only want to benchmark 1 replica, divide it by `replicas`
 
-As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save-dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. For Spica trace mode, the CLI creates a similar run directory with per-rank `topN` folders. It does not generate framework deployment manifests yet, but the replay ranking, generator bridge config, and Pareto artifacts use the same per-mode layout:
+As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save-dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. For Spica trace mode, the CLI creates a similar run directory with per-rank `topN` folders, including the replay ranking, generator bridge config, Pareto artifacts, and generated Dynamo deployment artifacts:
 
 ```text
 results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_904495
@@ -554,6 +554,7 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_9
 │       ├── k8s_bench.yaml
 │       ├── k8s_deploy.yaml
 │       ├── run_0.sh
+│       ├── sflow.yaml
 │       └── spica_candidate.yaml
 ├── disagg
 │   ├── best_config_topn.csv
@@ -567,12 +568,15 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_9
 │       ├── k8s_deploy.yaml
 │       ├── prefill_config.yaml
 │       ├── run_0.sh
+│       ├── sflow.yaml
 │       └── spica_candidate.yaml
 ├── pareto.csv
 ├── pareto_frontier.png
 ├── spica_candidates.csv
 └── spica_candidates.yaml
 ```
+
+Spica candidate knobs that map to Dynamo/TRT-LLM runtime fields, such as batch/token limits, cache-transfer buffer sizing, block size, GPU memory fraction, prefix caching, attention-DP, max sequence length, and NextN, are copied into `generator_config.yaml` and the generated engine/K8s/SFlow artifacts. Trace-search planner and scaling-policy metadata without a Dynamo generator field stays in `spica_candidate.yaml`.
 
 For the legacy estimator, here's a structure of the output folder,
 ```text
