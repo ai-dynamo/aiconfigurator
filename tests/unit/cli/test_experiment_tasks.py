@@ -122,7 +122,7 @@ def test_build_experiment_preflight_uses_per_role_backend_version_for_flat_v2_di
     monkeypatch.setattr(
         cli_main,
         "_ensure_backend_version_available",
-        lambda system, backend, version: calls.append((system, backend, version)),
+        lambda system, backend, version, **_: calls.append((system, backend, version)),
     )
     build_experiment_tasks(
         config={

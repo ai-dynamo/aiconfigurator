@@ -1052,7 +1052,8 @@ def _ensure_backend_version_available(
 
     if versions and _shared_layer_allows_missing_version(database_mode):
         logger.warning(
-            "No exact perf database for system=%s backend=%s version=%s; allowing shared-layer reuse from sibling version(s): %s",
+            "No exact perf database for system=%s backend=%s version=%s; "
+            "allowing shared-layer reuse from sibling version(s): %s",
             system_name,
             backend_name,
             backend_version,
