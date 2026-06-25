@@ -26,7 +26,7 @@ from aiconfigurator.cli.main import (
 from aiconfigurator.cli.main import main as cli_main
 from aiconfigurator.cli.report_and_save import _apply_inclusive_tpot
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
-from aiconfigurator.spica.trace_adapter import (
+from aiconfigurator.spica.cli_adapter import (
     _build_spica_trace_result_bundle,
     _build_spica_trace_search_space,
     _save_spica_trace_artifacts,

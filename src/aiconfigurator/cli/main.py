@@ -27,7 +27,7 @@ from aiconfigurator.sdk.errors import NoFeasibleConfigError, UnsupportedWideepCo
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
-from aiconfigurator.spica.trace_adapter import run_spica_trace_default
+from aiconfigurator.spica.cli_adapter import run_spica_trace_default
 
 logger = logging.getLogger(__name__)
 
