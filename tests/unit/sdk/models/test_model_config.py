@@ -136,6 +136,28 @@ class TestMOEParallelismResolution:
         assert "context_attention" in ctx and "context_moe" in ctx
         assert isinstance(ctx["context_attention"], ContextMSAModule)  # MSA, not plain attention
 
+    def test_nemotron_h_mtp_scales_generation_only(self):
+        """Nemotron-3 ships num_nextn_predict_layers=1; MTP must build (no assert) and
+        scale only the generation path. nextn=0 must be an exact 1.0 no-op."""
+
+        def build(nextn):
+            mc = config.ModelConfig(
+                tp_size=8,
+                moe_tp_size=1,
+                moe_ep_size=8,
+                nextn=nextn,
+                nextn_accept_rates=[0.85, 0.7, 0.5, 0.3, 0.2],
+            )
+            return get_model("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", mc, backend_name="trtllm")
+
+        # nextn=0: factor is an exact no-op so non-MTP Nemotron is unchanged.
+        assert build(0)._mtp_scale_factor == 1.0
+        # nextn=1: MTP is a per-token speedup, so the generation factor is in (0, 1).
+        m = build(1)
+        assert 0.0 < m._mtp_scale_factor < 1.0
+        # context (prefill) ops must not carry the mtp factor.
+        assert m.context_ops
+
     def test_both_missing_moe_parallelism_raises_clear_error(self):
         model_config = config.ModelConfig(
             tp_size=4,
