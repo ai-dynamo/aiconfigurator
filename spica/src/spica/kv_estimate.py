@@ -91,7 +91,14 @@ def estimate_kv_tokens(
             allow_naive_fallback=False,
         )
     except ValueError as exc:
-        if "no KV budget" in str(exc):  # weights + activations fill VRAM -> shape OOMs
+        msg = str(exc)
+        # Shape-specific infeasibility -> skip this shape (don't abort the whole enumeration):
+        #  - "no KV budget": weights + activations already fill VRAM (the shape OOMs).
+        #  - "Invalid quantized MoE configuration": the shape's moe_tp/moe_ep doesn't evenly
+        #    shard the model's (FP8 block-)quantized MoE dims (e.g. MiniMax-M2.5 moe_tp=8:
+        #    moe_intermediate_size 1536 / 8 not divisible by weight_block_size 128). This is a
+        #    property of *this shape*, not the model, so the enumerator should just drop it.
+        if "no KV budget" in msg or "Invalid quantized MoE configuration" in msg:
             return None
         raise
     return int(est["total_kv_size_tokens"])

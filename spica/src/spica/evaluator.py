@@ -3,20 +3,25 @@
 
 """Replay-backed deployment evaluator: a :class:`DeploymentPlan` -> a trace_report.
 
-Three load shapes (``Workload``) × two deployment cases (static / planner) all route
-to a dynamo replay entrypoint that emits the same flat ``trace_report`` dict:
+Three load shapes (``Workload``) x two deployment cases (static / planner) all route to
+a single dynamo replay entrypoint that emits the same flat ``trace_report`` dict:
 
-| load | static (no planner) | planner-in-the-loop |
-|---|---|---|
-| **mooncake trace** | ``run_trace_replay`` (arrival, or closed-loop if ``replay_concurrency``) | ``_run_planner_replay(trace_file=…)`` |
-| **synthetic** (rate or concurrency) | ``PlannerReplayBridge.from_synthetic`` driven to completion with no scaling | ``_run_planner_replay(synthetic=…)`` |
+| load | entrypoint |
+|---|---|
+| **mooncake trace** | ``run_trace_replay(trace_path, ...)`` |
+| **synthetic** (rate or concurrency) | ``run_synthetic_trace_replay(isl, osl, request_count, ...)`` |
 
-A synthetic *static* run reuses the planner bridge (``from_synthetic``) without ever
-calling ``apply_scaling`` — i.e. a fixed-fleet replay — because that constructor threads
-the goodput SLA (and emits gpu_hours), whereas the plain ``run_synthetic_trace_replay``
-does not yet take an SLA. The closed-loop in-flight cap is ``replay_concurrency`` for a
-trace and ``concurrency`` for a synthetic workload (``Workload.effective_in_flight_cap``;
-a pareto sweep overrides it per-trial via ``concurrency_override``).
+``planner_config`` selects the case on either entrypoint: ``None`` -> a static
+fixed-fleet replay (the mocker's event-driven ``run()`` loop, no scaling); a dict ->
+planner-in-the-loop, where the Rust bridge owns the same loop and calls back into the
+Python planner adapter once per ``PlannerTick``. Static returns the bare ``trace_report``
+dict; planner-in-the-loop returns a ``ReplayPlannerReport`` whose ``.trace_report`` is the
+identical flat dict (:func:`_unwrap` normalizes both). By construction
+``plan.is_static == (plan.planner_config is None)``.
+
+The closed-loop in-flight cap is ``replay_concurrency`` for a trace and ``concurrency``
+for a synthetic workload (``Workload.effective_in_flight_cap``; a pareto sweep overrides
+it per-trial via ``concurrency_override``).
 
 The **goodput SLA** (``goal.sla``) is passed as ``sla_*_ms`` on every path (the mocker
 classifies SLA-satisfying requests per-request to compute goodput); it is independent of
@@ -34,9 +39,6 @@ import json
 from .config import OptimizationGoal, Workload
 from .deploy import DeploymentPlan
 
-# A simulated-time horizon large enough to drain any replay in one advance.
-_SIM_FOREVER_MS = 1.0e15
-
 
 def _build_kv_router_config(payload: dict | None):
     """A dynamo ``KvRouterConfig`` from spica's router-knob dict (its keys map 1:1 to
@@ -46,6 +48,13 @@ def _build_kv_router_config(payload: dict | None):
     from dynamo.llm import KvRouterConfig
 
     return KvRouterConfig(**payload)
+
+
+def _unwrap(report) -> dict[str, float]:
+    """Normalize a replay result to the flat ``trace_report`` dict: a static replay
+    returns that dict directly; planner-in-the-loop returns a ``ReplayPlannerReport``
+    whose ``.trace_report`` carries the identical shape."""
+    return report.trace_report if hasattr(report, "trace_report") else report
 
 
 class ReplayEvaluator:
@@ -74,8 +83,8 @@ class ReplayEvaluator:
         return _build_kv_router_config(plan.router_config)
 
     def _synthetic_kwargs(self, concurrency_override: int | None = None) -> dict:
-        """Common synthetic-workload params shared by ``from_synthetic[_disagg]`` and
-        ``SyntheticWorkload`` (arrival_interval_ms is ignored in closed-loop mode).
+        """The synthetic-workload params ``run_synthetic_trace_replay`` takes
+        (``arrival_interval_ms`` is ignored in closed-loop mode).
 
         ``request_count`` is derived from ``num_request_ratio`` and the effective load
         (the per-trial ``concurrency_override`` under a pareto sweep, else the workload's
@@ -92,14 +101,6 @@ class ReplayEvaluator:
             inter_turn_delay_ms=wl.inter_turn_delay_ms,
         )
 
-    @staticmethod
-    def _drive_static_bridge(bridge) -> dict[str, float]:
-        """Run a ``from_synthetic`` bridge to completion with no ``apply_scaling`` —
-        a fixed-fleet (static) synthetic replay — and return its trace_report."""
-        while not bridge.advance_to(_SIM_FOREVER_MS)["is_done"]:
-            pass
-        return bridge.finalize()
-
     def evaluate(self, plan: DeploymentPlan, *, concurrency_override: int | None = None) -> dict[str, float]:
         """Run one replay and return its trace_report dict.
 
@@ -115,160 +116,62 @@ class ReplayEvaluator:
 
     def _evaluate_trace(self, plan: DeploymentPlan) -> dict[str, float]:
         from dynamo.mocker import MockEngineArgs
+        from dynamo.replay.api import run_trace_replay
 
         wl = self.workload
-        cap = wl.effective_in_flight_cap()  # replay_concurrency (None -> arrival timestamps)
-        sla = self._goodput_sla_kwargs()
         common = dict(
-            trace_file=wl.trace_path,
+            trace_files=wl.trace_path,
             router_mode=plan.router_mode,
             router_config=self._router_config(plan),
             arrival_speedup_ratio=wl.arrival_speedup_ratio,
             trace_block_size=self.trace_block_size,
+            replay_concurrency=wl.effective_in_flight_cap(),  # None -> arrival timestamps
+            planner_config=None if plan.is_static else plan.planner_config,
+            benchmark_granularity=self.benchmark_granularity,
+            **self._goodput_sla_kwargs(),
         )
         if plan.deployment_mode == "agg":
             extra = MockEngineArgs.from_json(json.dumps(plan.agg_engine_args))
-            if plan.is_static:
-                from dynamo.replay.api import run_trace_replay
-
-                return run_trace_replay(
-                    extra_engine_args=extra,
-                    num_workers=plan.num_workers,
-                    replay_concurrency=cap,
-                    **sla,
-                    **common,
-                )
-            from dynamo.replay.main import _run_planner_replay
-
-            report = _run_planner_replay(
-                extra_engine_args=extra,
-                prefill_engine_args=None,
-                decode_engine_args=None,
-                num_workers=plan.num_workers,
-                num_prefill_workers=0,
-                num_decode_workers=0,
-                planner_config_arg=json.dumps(plan.planner_config),
-                benchmark_granularity=self.benchmark_granularity,
-                replay_concurrency=cap,
-                **sla,
-                **common,
-            )
-            return report.trace_report
-
-        prefill = MockEngineArgs.from_json(json.dumps(plan.prefill_engine_args))
-        decode = MockEngineArgs.from_json(json.dumps(plan.decode_engine_args))
-        if plan.is_static:
-            from dynamo.replay.api import run_trace_replay
-
-            return run_trace_replay(
+            report = run_trace_replay(extra_engine_args=extra, num_workers=plan.num_workers, **common)
+        else:
+            prefill = MockEngineArgs.from_json(json.dumps(plan.prefill_engine_args))
+            decode = MockEngineArgs.from_json(json.dumps(plan.decode_engine_args))
+            report = run_trace_replay(
                 prefill_engine_args=prefill,
                 decode_engine_args=decode,
                 num_prefill_workers=plan.num_prefill_workers,
                 num_decode_workers=plan.num_decode_workers,
-                replay_concurrency=cap,
-                **sla,
                 **common,
             )
-        from dynamo.replay.main import _run_planner_replay
-
-        report = _run_planner_replay(
-            extra_engine_args=None,
-            prefill_engine_args=prefill,
-            decode_engine_args=decode,
-            num_workers=0,
-            num_prefill_workers=plan.num_prefill_workers,
-            num_decode_workers=plan.num_decode_workers,
-            planner_config_arg=json.dumps(plan.planner_config),
-            benchmark_granularity=self.benchmark_granularity,
-            replay_concurrency=cap,
-            **sla,
-            **common,
-        )
-        return report.trace_report
+        return _unwrap(report)
 
     # -- synthetic workloads ---------------------------------------------------
 
     def _evaluate_synthetic(self, plan: DeploymentPlan, *, concurrency_override: int | None = None) -> dict[str, float]:
         from dynamo.mocker import MockEngineArgs
+        from dynamo.replay.api import run_synthetic_trace_replay
 
-        # int(concurrency) or the per-trial swept value, or None for request-rate (open-loop)
-        cap = self.workload.effective_in_flight_cap(concurrency_override)
-        sla = self._goodput_sla_kwargs()
-        syn = self._synthetic_kwargs(concurrency_override)
-        router_config = self._router_config(plan)
-
+        common = dict(
+            router_mode=plan.router_mode,
+            router_config=self._router_config(plan),
+            arrival_speedup_ratio=1.0,
+            replay_concurrency=self.workload.effective_in_flight_cap(concurrency_override),
+            planner_config=None if plan.is_static else plan.planner_config,
+            benchmark_granularity=self.benchmark_granularity,
+            **self._goodput_sla_kwargs(),
+            **self._synthetic_kwargs(concurrency_override),
+        )
         if plan.deployment_mode == "agg":
             extra = MockEngineArgs.from_json(json.dumps(plan.agg_engine_args))
-            if plan.is_static:
-                from dynamo.mocker import PlannerReplayBridge
-
-                bridge = PlannerReplayBridge.from_synthetic(
-                    extra_engine_args=extra,
-                    num_workers=plan.num_workers,
-                    router_mode=plan.router_mode,
-                    router_config=router_config,
-                    replay_concurrency=cap,
-                    **syn,
-                    **sla,
-                )
-                return self._drive_static_bridge(bridge)
-            from dynamo.replay.main import SyntheticWorkload, _run_planner_replay
-
-            report = _run_planner_replay(
-                trace_file=None,
-                extra_engine_args=extra,
-                prefill_engine_args=None,
-                decode_engine_args=None,
-                router_config=router_config,
-                num_workers=plan.num_workers,
-                num_prefill_workers=0,
-                num_decode_workers=0,
-                router_mode=plan.router_mode,
-                arrival_speedup_ratio=1.0,
-                trace_block_size=self.trace_block_size,
-                planner_config_arg=json.dumps(plan.planner_config),
-                benchmark_granularity=self.benchmark_granularity,
-                replay_concurrency=cap,
-                synthetic=SyntheticWorkload(**syn),
-                **sla,
-            )
-            return report.trace_report
-
-        prefill = MockEngineArgs.from_json(json.dumps(plan.prefill_engine_args))
-        decode = MockEngineArgs.from_json(json.dumps(plan.decode_engine_args))
-        if plan.is_static:
-            from dynamo.mocker import PlannerReplayBridge
-
-            bridge = PlannerReplayBridge.from_synthetic_disagg(
+            report = run_synthetic_trace_replay(extra_engine_args=extra, num_workers=plan.num_workers, **common)
+        else:
+            prefill = MockEngineArgs.from_json(json.dumps(plan.prefill_engine_args))
+            decode = MockEngineArgs.from_json(json.dumps(plan.decode_engine_args))
+            report = run_synthetic_trace_replay(
                 prefill_engine_args=prefill,
                 decode_engine_args=decode,
                 num_prefill_workers=plan.num_prefill_workers,
                 num_decode_workers=plan.num_decode_workers,
-                router_mode=plan.router_mode,
-                router_config=router_config,
-                replay_concurrency=cap,
-                **syn,
-                **sla,
+                **common,
             )
-            return self._drive_static_bridge(bridge)
-        from dynamo.replay.main import SyntheticWorkload, _run_planner_replay
-
-        report = _run_planner_replay(
-            trace_file=None,
-            extra_engine_args=None,
-            prefill_engine_args=prefill,
-            decode_engine_args=decode,
-            router_config=router_config,
-            num_workers=0,
-            num_prefill_workers=plan.num_prefill_workers,
-            num_decode_workers=plan.num_decode_workers,
-            router_mode=plan.router_mode,
-            arrival_speedup_ratio=1.0,
-            trace_block_size=self.trace_block_size,
-            planner_config_arg=json.dumps(plan.planner_config),
-            benchmark_granularity=self.benchmark_granularity,
-            replay_concurrency=cap,
-            synthetic=SyntheticWorkload(**syn),
-            **sla,
-        )
-        return report.trace_report
+        return _unwrap(report)

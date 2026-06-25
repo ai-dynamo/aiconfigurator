@@ -156,15 +156,16 @@ def parallel_configs_for(
         raise ValueError(f"max_seq_len is required: {model_name} config exposes no max context length")
 
     # Enumerate from 1 GPU/worker; the KV estimate is the sole feasibility filter.
-    # MLA+MoE excludes pure expert-TP (AIC's allow_moe_pure_tp=False); dense
-    # models are unaffected (their plain-TP shapes do not go through that gate).
+    # MoE tensor-parallel (moe_ep == 1) is enabled for every MoE model, MLA
+    # included: real deployments (e.g. InferenceX GLM-5, reported as EP=1) run it,
+    # so the search must be able to find it rather than have it filtered out here.
     common = dict(
         is_moe=mh.is_moe,
         backend=backend,
         gpu_budget=gpu_budget,
         min_gpu_budget=min_gpu_budget,
         enable_wideep=mh.enable_wideep,
-        allow_moe_pure_tp=not mh.mla,
+        allow_moe_pure_tp=True,
     )
     if deployment_mode == "disagg":
         configs = enumerate_disagg_configs(**common)

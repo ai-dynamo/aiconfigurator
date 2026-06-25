@@ -24,6 +24,8 @@ knobs are always offered as params; ``unroll_sample`` ignores them under
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
@@ -126,7 +128,10 @@ class VizierBranchSampler:
             goal = vz.ObjectiveMetricGoal.MAXIMIZE if maximize else vz.ObjectiveMetricGoal.MINIMIZE
             problem.metric_information.append(vz.MetricInformation(name=name, goal=goal))
         study_config = vz.StudyConfig.from_problem(problem)
-        study_config.algorithm = "DEFAULT"
+        # EXPERIMENT (env-gated; default DEFAULT = GP-bandit). The multi-objective GP suggest
+        # can spin/hang at low observation counts; SPICA_VIZIER_ALGO=RANDOM_SEARCH bypasses the
+        # GP (instant suggest, uniform exploration) to cover the curve ends without that stall.
+        study_config.algorithm = os.environ.get("SPICA_VIZIER_ALGO", "DEFAULT")
         self._study = clients.Study.from_study_config(study_config, owner="spica", study_id=study_id)
 
     def suggest(self, count: int) -> list[Suggestion]:

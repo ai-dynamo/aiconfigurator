@@ -71,7 +71,7 @@ def test_static_agg_uses_plain_path(monkeypatch):
     ev = ReplayEvaluator(_wl(), OptimizationGoal(target=OptimizationTarget.THROUGHPUT))
     report = ev.evaluate(_agg_plan(static=True))
     assert report["output_throughput_tok_s"] == 42.0
-    assert rec["num_workers"] == 2 and rec["trace_file"] == "/tmp/t.jsonl" and rec["router_mode"] == "round_robin"
+    assert rec["num_workers"] == 2 and rec["trace_files"] == "/tmp/t.jsonl" and rec["router_mode"] == "round_robin"
     assert "sla_ttft_ms" not in rec  # no SLA on a throughput goal -> none threaded
 
 
@@ -91,7 +91,9 @@ def test_static_path_threads_goodput_sla(monkeypatch):
     assert rec["sla_ttft_ms"] == 2000.0 and rec["sla_itl_ms"] == 30.0  # SLA threaded to the plain path
 
 
-def test_scaling_agg_uses_bridge_with_goodput_sla(monkeypatch):
+def test_scaling_agg_uses_run_planner_replay(monkeypatch):
+    # planner -> run_trace_replay(planner_config=...) routes into _run_planner_replay
+    # (the Rust bridge owns the sim loop and calls back into the Python planner adapter).
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
     rec = {}
     monkeypatch.setattr(
@@ -104,7 +106,7 @@ def test_scaling_agg_uses_bridge_with_goodput_sla(monkeypatch):
     goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
     report = ReplayEvaluator(_wl(), goal).evaluate(_agg_plan(static=False))
     assert report["gpu_hours"] == 2.0
-    # goodput SLA threaded to the bridge; planner config carried as inline JSON
+    # goodput SLA threaded to the planner path; planner config carried as inline JSON
     assert rec["sla_ttft_ms"] == 2000.0 and rec["sla_itl_ms"] == 30.0
     assert json.loads(rec["planner_config_arg"])["optimization_target"] == "sla"
     assert rec["num_workers"] == 2
@@ -174,32 +176,24 @@ def _syn_wl(**kw):
     return Workload(**base)
 
 
-def test_synthetic_static_uses_from_synthetic_bridge(monkeypatch):
-    # synthetic + static -> PlannerReplayBridge.from_synthetic, driven to completion with
-    # no scaling; goodput SLA threaded; closed-loop in-flight cap = concurrency.
+def test_synthetic_static_uses_run_synthetic_trace_replay(monkeypatch):
+    # synthetic + static -> a single run_synthetic_trace_replay call with planner_config=None
+    # (fixed-fleet replay, no scaling); goodput SLA threaded; in-flight cap = concurrency.
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
     rec = {}
-
-    class _Bridge:
-        def advance_to(self, until_ms):
-            return {"is_done": True}
-
-        def finalize(self):
-            return {"goodput_output_throughput_tok_s": 50.0, "gpu_hours": 0.5}
-
-    class _BridgeFactory:
-        @staticmethod
-        def from_synthetic(**kw):
-            rec.update(kw)
-            return _Bridge()
-
-    monkeypatch.setattr(dynamo.mocker, "PlannerReplayBridge", _BridgeFactory)
+    monkeypatch.setattr(
+        dynamo.replay.api,
+        "run_synthetic_trace_replay",
+        lambda **kw: rec.update(kw) or {"goodput_output_throughput_tok_s": 50.0, "gpu_hours": 0.5},
+    )
     goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
     report = ReplayEvaluator(_syn_wl(concurrency=4.0), goal).evaluate(_agg_plan(static=True))
     assert report["goodput_output_throughput_tok_s"] == 50.0
     assert rec["input_tokens"] == 128 and rec["output_tokens"] == 64 and rec["request_count"] == 100
     assert rec["replay_concurrency"] == 4  # closed-loop cap from concurrency
     assert rec["sla_ttft_ms"] == 2000.0
+    assert rec["planner_config"] is None  # static -> no planner in the loop
+    assert rec["num_workers"] == 2
 
 
 def test_concurrency_override_drives_cap_and_request_count(monkeypatch):
@@ -207,26 +201,17 @@ def test_concurrency_override_drives_cap_and_request_count(monkeypatch):
     # BOTH the closed-loop in-flight cap and the num_request_ratio-scaled request count.
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
     rec = {}
-
-    class _Bridge:
-        def advance_to(self, until_ms):
-            return {"is_done": True}
-
-        def finalize(self):
-            return {"goodput_output_throughput_tok_s": 50.0, "gpu_hours": 0.5}
-
-    class _BridgeFactory:
-        @staticmethod
-        def from_synthetic(**kw):
-            rec.update(kw)
-            return _Bridge()
-
-    monkeypatch.setattr(dynamo.mocker, "PlannerReplayBridge", _BridgeFactory)
+    monkeypatch.setattr(
+        dynamo.replay.api,
+        "run_synthetic_trace_replay",
+        lambda **kw: rec.update(kw) or {"output_throughput_tok_s": 50.0, "gpu_hours": 0.5},
+    )
     wl = Workload(isl=128, osl=64, concurrency=[4, 8, 16], num_request_ratio=25)  # swept dimension
     goal = OptimizationGoal(target=OptimizationTarget.PARETO)  # no SLA needed
     ReplayEvaluator(wl, goal).evaluate(_agg_plan(static=True), concurrency_override=8)
     assert rec["replay_concurrency"] == 8  # cap = the per-trial swept concurrency
     assert rec["request_count"] == 200  # num_request_ratio(25) * 8
+    assert rec["planner_config"] is None
 
 
 def test_synthetic_planner_uses_run_planner_replay(monkeypatch):
@@ -281,7 +266,9 @@ def test_scaling_trace_disagg_uses_run_planner_replay(monkeypatch):
     goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
     report = ReplayEvaluator(_wl(), goal).evaluate(_disagg_plan(static=False))
     assert report["gpu_hours"] == 3.0
-    assert rec["extra_engine_args"] is None and rec["num_workers"] == 0
+    # disagg -> the wrapper's default num_workers=1 flows through but the binding ignores it
+    # (it sizes the deployment from the per-role prefill/decode worker counts).
+    assert rec["extra_engine_args"] is None and rec["num_workers"] == 1
     assert rec["prefill_engine_args"][1] == {"aic_tp_size": 2, "max_num_seqs": 256}
     assert rec["decode_engine_args"][1] == {"aic_tp_size": 4, "max_num_seqs": 512}
     assert rec["num_prefill_workers"] == 3 and rec["num_decode_workers"] == 5
@@ -289,26 +276,16 @@ def test_scaling_trace_disagg_uses_run_planner_replay(monkeypatch):
     assert json.loads(rec["planner_config_arg"])["mode"] == "disagg"
 
 
-def test_synthetic_static_disagg_uses_from_synthetic_disagg(monkeypatch):
-    # disagg + synthetic + static -> PlannerReplayBridge.from_synthetic_disagg, driven to
-    # completion; goodput SLA threaded; closed-loop in-flight cap = concurrency.
+def test_synthetic_static_disagg_uses_run_synthetic_trace_replay(monkeypatch):
+    # disagg + synthetic + static -> run_synthetic_trace_replay with prefill/decode args and
+    # planner_config=None; goodput SLA threaded; closed-loop in-flight cap = concurrency.
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
     rec = {}
-
-    class _Bridge:
-        def advance_to(self, until_ms):
-            return {"is_done": True}
-
-        def finalize(self):
-            return {"goodput_output_throughput_tok_s": 60.0, "gpu_hours": 0.75}
-
-    class _BridgeFactory:
-        @staticmethod
-        def from_synthetic_disagg(**kw):
-            rec.update(kw)
-            return _Bridge()
-
-    monkeypatch.setattr(dynamo.mocker, "PlannerReplayBridge", _BridgeFactory)
+    monkeypatch.setattr(
+        dynamo.replay.api,
+        "run_synthetic_trace_replay",
+        lambda **kw: rec.update(kw) or {"goodput_output_throughput_tok_s": 60.0, "gpu_hours": 0.75},
+    )
     goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
     report = ReplayEvaluator(_syn_wl(concurrency=4.0), goal).evaluate(_disagg_plan(static=True))
     assert report["goodput_output_throughput_tok_s"] == 60.0
@@ -318,6 +295,8 @@ def test_synthetic_static_disagg_uses_from_synthetic_disagg(monkeypatch):
     assert rec["input_tokens"] == 128 and rec["output_tokens"] == 64 and rec["request_count"] == 100
     assert rec["replay_concurrency"] == 4  # closed-loop cap from concurrency
     assert rec["sla_ttft_ms"] == 2000.0
+    assert rec["planner_config"] is None
+    assert "num_workers" not in rec and "extra_engine_args" not in rec
 
 
 def test_synthetic_planner_disagg_uses_run_planner_replay(monkeypatch):
@@ -334,46 +313,15 @@ def test_synthetic_planner_disagg_uses_run_planner_replay(monkeypatch):
     # request-rate workload -> open-loop (no cap); arrival_interval derived from the rate
     ReplayEvaluator(_syn_wl(request_rate=20.0), goal).evaluate(_disagg_plan(static=False))
     assert rec["trace_file"] is None and rec["replay_concurrency"] is None
-    assert rec["extra_engine_args"] is None and rec["num_workers"] == 0
+    # disagg -> the wrapper's default num_workers=1 flows through but the binding ignores it
+    # (it sizes the deployment from the per-role prefill/decode worker counts).
+    assert rec["extra_engine_args"] is None and rec["num_workers"] == 1
     assert rec["prefill_engine_args"][1] == {"aic_tp_size": 2, "max_num_seqs": 256}
     assert rec["decode_engine_args"][1] == {"aic_tp_size": 4, "max_num_seqs": 512}
     assert rec["num_prefill_workers"] == 3 and rec["num_decode_workers"] == 5
     assert rec["synthetic"][0] == "SYN"
     assert rec["synthetic"][1]["arrival_interval_ms"] == 50.0  # 1000 / 20
     assert rec["sla_ttft_ms"] == 1500.0
-
-
-def test_drive_static_bridge_loops_until_done(monkeypatch):
-    # the drive loop keeps advancing while is_done is False, then reaches finalize().
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
-
-    class _Bridge:
-        def __init__(self):
-            self.advances = 0
-            self.finalized = False
-
-        def advance_to(self, until_ms):
-            self.advances += 1
-            # not done on the first advance, done on the second
-            return {"is_done": self.advances >= 2}
-
-        def finalize(self):
-            self.finalized = True
-            return {"goodput_output_throughput_tok_s": 11.0, "gpu_hours": 0.25}
-
-    bridge = _Bridge()
-
-    class _BridgeFactory:
-        @staticmethod
-        def from_synthetic(**kw):
-            return bridge
-
-    monkeypatch.setattr(dynamo.mocker, "PlannerReplayBridge", _BridgeFactory)
-    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
-    # synthetic + concurrency + static -> from_synthetic bridge driven to completion
-    report = ReplayEvaluator(_syn_wl(concurrency=4.0), goal).evaluate(_agg_plan(static=True))
-    assert bridge.advances == 2  # one not-done transition then done -> loop terminates
-    assert bridge.finalized and report["goodput_output_throughput_tok_s"] == 11.0
 
 
 def test_workload_validation():

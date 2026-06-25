@@ -21,11 +21,11 @@ without real replay / Vizier (use ``parallel_evals=1`` to avoid spawning process
 
 from __future__ import annotations
 
-import contextlib
 import multiprocessing as mp
+import time
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from typing import Any, Protocol
 
@@ -132,6 +132,7 @@ def run_smart_search(
     evaluator: _Evaluator | None = None,
     sampler_factory: Callable[..., BranchSampler] = make_branch_sampler,
     show_progress: bool = True,
+    on_round: Callable[[int, list[Candidate]], None] | None = None,
 ) -> list[Candidate]:
     """Run the sweep and return feasible candidates sorted best-first.
 
@@ -199,20 +200,29 @@ def run_smart_search(
     # dynamo's tokio runtime isn't fork-safe); shared read-only state goes once via the
     # initializer; one pool for the whole run amortizes the per-worker dynamo import.
     use_pool = sweep.parallel_evals > 1 and per_round > 1
-    pool_cm: Any = (
-        ProcessPoolExecutor(
+    max_eval_seconds = sweep.max_eval_seconds
+
+    def _new_pool() -> ProcessPoolExecutor:
+        # spawn (not fork — dynamo's tokio runtime isn't fork-safe); shared read-only state
+        # goes once via the initializer; one pool amortizes the per-worker dynamo import.
+        return ProcessPoolExecutor(
             max_workers=min(sweep.parallel_evals, per_round),
             mp_context=mp.get_context("spawn"),
             initializer=_init_worker,
             initargs=(config, goal, load_predictor, evaluator),
         )
-        if use_pool
-        else contextlib.nullcontext()
-    )
 
-    def _eval_batch(pool, todo: list[Suggestion]):
-        """Yield ``(suggestion, _EvalResult)`` for each supported suggestion — across
-        worker processes when ``pool`` is set, else sequentially in-process."""
+    # One-element box so a runtime timeout can kill the hung pool and swap in a fresh one
+    # (the closures below read/replace pool_box[0]).
+    pool_box: list[Any] = [_new_pool() if use_pool else None]
+
+    def _eval_batch(todo: list[Suggestion]):
+        """Yield ``(suggestion, _EvalResult)`` for each supported suggestion — across worker
+        processes when a pool is set, else sequentially in-process. On the pool path it
+        enforces the per-candidate ``max_eval_seconds`` cap: a replay that overruns is
+        reported infeasible ("exceed runtime") and its worker is force-killed (a shared pool
+        can't cancel a running task), then a fresh pool is swapped in for the next rounds."""
+        pool = pool_box[0]
         if pool is None:
             for s in todo:
                 yield (
@@ -226,22 +236,42 @@ def run_smart_search(
                         evaluator=evaluator,
                     ),
                 )
-        else:
-            try:
-                # submit() can also raise BrokenProcessPool (a worker died before/while
-                # tasks were queued), so it must be inside the friendly-error wrapper too.
-                futures = {pool.submit(_worker_eval, s.selection, s.parallel_config): s for s in todo}
-                for fut in as_completed(futures):
-                    yield futures[fut], fut.result()
-            except BrokenProcessPool as exc:
-                raise RuntimeError(
-                    "smart-sweep worker pool died (parallel_evals>1 uses spawned processes). The "
-                    "usual cause is calling run_smart_search at a script's top level without guarding "
-                    "the entrypoint: spawn re-imports the module, so wrap it in `if __name__ == "
-                    '"__main__":`. Or set sweep.parallel_evals=1 to evaluate sequentially (no pool)."'
-                ) from exc
+            return
+        try:
+            # submit() can also raise BrokenProcessPool (a worker died before/while tasks
+            # were queued), so it must be inside the friendly-error wrapper too.
+            futures = {pool.submit(_worker_eval, s.selection, s.parallel_config): s for s in todo}
+        except BrokenProcessPool as exc:
+            raise RuntimeError(
+                "smart-sweep worker pool died (parallel_evals>1 uses spawned processes). The "
+                "usual cause is calling run_smart_search at a script's top level without guarding "
+                "the entrypoint: spawn re-imports the module, so wrap it in `if __name__ == "
+                '"__main__":`. Or set sweep.parallel_evals=1 to evaluate sequentially (no pool)."'
+            ) from exc
+        pending = set(futures)
+        # Workers run concurrently (max_workers >= len(todo) here), so one wall-clock
+        # deadline approximates the per-candidate cap. None -> no cap.
+        deadline = (time.monotonic() + max_eval_seconds) if max_eval_seconds else None
+        while pending:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            done, pending = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+            if not done:
+                break  # deadline hit with nothing newly finished -> the rest are hung
+            for fut in done:
+                yield futures[fut], fut.result()
+        if pending:
+            secs = max_eval_seconds or 0.0
+            for fut in pending:
+                yield futures[fut], (None, None, "infeasible", f"exceed runtime: replay > {secs:.0f}s")
+            # Force-kill the hung workers first (shutdown(wait=False) only lets running
+            # tasks finish, which never happens for a hang, and clears _processes), then
+            # tear the pool down and swap in a fresh one.
+            for proc in list((getattr(pool, "_processes", None) or {}).values()):
+                proc.terminate()
+            pool.shutdown(wait=False, cancel_futures=True)
+            pool_box[0] = _new_pool()
 
-    with pool_cm as pool, tqdm(total=total, desc="smart-sweep", unit="eval", disable=not show_progress) as bar:
+    with tqdm(total=total, desc="smart-sweep", unit="eval", disable=not show_progress) as bar:
 
         def _record(outcome: str, candidate: Candidate | None) -> None:
             tally[outcome] += 1
@@ -253,6 +283,7 @@ def run_smart_search(
             )
             bar.update(1)
 
+        round_no = 0
         for branch in branches:
             sampler = sampler_factory(
                 branch, study_id=f"spica_{branch.deployment_mode}_{run_nonce}", objectives=sampler_objectives
@@ -271,7 +302,7 @@ def run_smart_search(
                             s, f"backend {s.selection['backend']!r} does not support this parallel config"
                         )
                         _record("unsupported", None)
-                for s, (candidate, observe_metrics, outcome, reason) in _eval_batch(pool, todo):
+                for s, (candidate, observe_metrics, outcome, reason) in _eval_batch(todo):
                     # "failed" (replay error) and "infeasible" (over gpu_budget) are both
                     # gated: tell the sampler observe_infeasible so it learns to avoid that
                     # region instead of being steered toward it by a high objective score.
@@ -280,6 +311,16 @@ def run_smart_search(
                     else:
                         sampler.observe(s, observe_metrics)
                     _record(outcome, candidate)
+                round_no += 1
+                if on_round is not None:
+                    on_round(round_no, list(candidates))
+
+    # Tear down the (possibly recreated) worker pool; force-kill any lingering workers.
+    final_pool = pool_box[0]
+    if final_pool is not None:
+        for proc in list((getattr(final_pool, "_processes", None) or {}).values()):
+            proc.terminate()
+        final_pool.shutdown(wait=False, cancel_futures=True)
 
     # Single-objective -> rank best-first by score; pareto -> the non-dominated front.
     result = pareto_front(candidates, goal.resolved_pareto_objectives) if goal.is_pareto else rank(candidates)

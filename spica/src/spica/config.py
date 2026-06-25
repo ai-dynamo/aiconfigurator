@@ -553,6 +553,11 @@ class SweepConfig(BaseModel):
     parallel_evals: int = Field(default=16, ge=1)  # default candidates-per-round fan-out (v1 evaluates sequentially)
     candidates_per_round: int | None = Field(default=None, ge=1)  # suggestions per round; defaults to parallel_evals
     random_seed: int = 1
+    # Per-candidate wall-clock cap for the replay. A candidate whose replay exceeds this is
+    # killed and reported as infeasible ("exceed runtime") so the optimizer avoids that region
+    # instead of hanging the sweep (e.g. an over-subscribed config that churns). Only enforced
+    # on the worker-pool path (parallel_evals > 1); None disables the cap.
+    max_eval_seconds: float | None = Field(default=600.0, gt=0)
 
 
 class Candidate(BaseModel):

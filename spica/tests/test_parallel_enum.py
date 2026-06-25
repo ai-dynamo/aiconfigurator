@@ -22,11 +22,11 @@ def test_dense_shape_is_plain_tp():
 
 
 def test_moe_scans_tp_tep_dep():
-    # Every MoE model scans TP + TEP + DEP (no MLA carve-out).
+    # Every MoE model scans TEP + DEP + MoE-TP under both attention modes (no MLA carve-out).
     shapes = enumerate_worker_shapes(is_moe=True, backend="vllm", gpus_per_worker=4)
-    # TEP (4,1,1,4), DEP (1,4,1,4), pure-TP (4,1,4,1)
-    assert _tuples(shapes) == {(4, 1, 1, 4), (1, 4, 1, 4), (4, 1, 4, 1)}
-    assert {s.strategy for s in shapes} == {"tep", "dep", "tp"}
+    # TEP (4,1,1,4), DEP (1,4,1,4), MoE-TP+TP-attn (4,1,4,1), MoE-TP+DP-attn (1,4,4,1)
+    assert _tuples(shapes) == {(4, 1, 1, 4), (1, 4, 1, 4), (4, 1, 4, 1), (1, 4, 4, 1)}
+    assert {s.strategy for s in shapes} == {"tep", "dep", "tp", "dtp"}
     for s in shapes:  # width constraint dp*tp == moe_tp*moe_ep == gpus_per_worker
         assert s.dp * s.tp == s.moe_tp * s.moe_ep == 4
         assert s.gpus_per_worker == 4
@@ -59,10 +59,17 @@ def test_allow_moe_pure_tp_threads_through_configs():
     assert any(c.shape.moe_tp > 1 for c in agg_default)
 
 
-def test_sglang_wideep_forbids_pure_tp():
-    # The EP-only backend filter still drops pure expert-TP (moe_tp>1), leaving TEP/DEP.
+def test_sglang_wideep_keeps_moe_tp():
+    # wideEP no longer forces EP-only: sglang keeps MoE pure expert-TP (4,1,4,1)
+    # alongside TEP/DEP, matching real GLM-5 multinode deployments (InferenceX EP=1).
     shapes = enumerate_worker_shapes(is_moe=True, backend="sglang", gpus_per_worker=4, enable_wideep=True)
-    assert _tuples(shapes) == {(4, 1, 1, 4), (1, 4, 1, 4)}
+    assert _tuples(shapes) == {(4, 1, 1, 4), (1, 4, 1, 4), (4, 1, 4, 1), (1, 4, 4, 1)}
+    # The explicit EP-only MoE kernels still drop MoE-TP (both attention modes), even under wideep.
+    for moe_backend in ("deepep_moe", "megamoe"):
+        ep_only = enumerate_worker_shapes(
+            is_moe=True, backend="sglang", gpus_per_worker=4, enable_wideep=True, moe_backend=moe_backend
+        )
+        assert _tuples(ep_only) == {(4, 1, 1, 4), (1, 4, 1, 4)}, moe_backend
 
 
 def test_sglang_moe_backend_filters():
@@ -113,7 +120,7 @@ def test_moe_budget_includes_pure_tp():
 
 def test_disagg_pairs_share_budget():
     cfgs = enumerate_disagg_configs(is_moe=True, backend="trtllm", gpu_budget=8)
-    assert len(cfgs) == 99
+    assert len(cfgs) == 176
     for c in cfgs:
         assert c.total_gpus == c.prefill.total_gpus + c.decode.total_gpus <= 8
         assert c.prefill.total_gpus >= 2 and c.decode.total_gpus >= 2  # each role >= 1 worker
@@ -123,7 +130,7 @@ def test_disagg_pairs_share_budget():
 
 def test_disagg_min_gpu_budget_full_utilization():
     cfgs = enumerate_disagg_configs(is_moe=True, backend="trtllm", gpu_budget=8, min_gpu_budget=8)
-    assert len(cfgs) == 54
+    assert len(cfgs) == 96
     assert all(c.total_gpus == 8 for c in cfgs)
 
 

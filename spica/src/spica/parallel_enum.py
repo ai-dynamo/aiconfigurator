@@ -6,9 +6,9 @@
 The per-worker shape enumeration mirrors
 ``aiconfigurator.sdk.utils.enumerate_parallel_config`` + ``filter_real_silicon_configs``
 (real-silicon profile): ``pp`` is pinned to 1; the MoE width constraint
-``dp*tp == moe_tp*moe_ep`` holds; for MoE only the pure TEP / DEP / TP patterns are
-kept (pure expert-TP gated by ``allow_moe_pure_tp`` — excluded for MLA+MoE, matching
-``filter_real_silicon_configs(allow_moe_pure_tp=False)``); dense models use plain TP.
+``dp*tp == moe_tp*moe_ep`` holds; for MoE only the pure TEP / DEP / MoE-TP patterns are
+kept (MoE-TP — moe_ep==1 under tensor- or DP-attention — gated by ``allow_moe_pure_tp``,
+now enabled for every MoE model incl. MLA); dense models use plain TP.
 The backend-specific MoE filters are mirrored too.
 
 ``enumerate_parallel_config`` stops at *one worker's* shape (GPUs/worker = tp*pp*dp).
@@ -51,9 +51,10 @@ class ParallelShape:
 
     @property
     def strategy(self) -> str:
-        """Label per AIC's real-silicon patterns: ``tp`` (dense, or MoE pure
-        expert-TP), ``tep`` (attention-TP + expert-EP), ``dep`` (attention-DP +
-        expert-EP)."""
+        """Label per AIC's real-silicon patterns: ``tp`` (dense, or MoE tensor-parallel
+        under tensor-attention), ``tep`` (attention-TP + expert-EP), ``dep``
+        (attention-DP + expert-EP), ``dtp`` (attention-DP + MoE tensor-parallel —
+        e.g. InferenceX GLM-5's EP=1 + DP-attention)."""
         if self.moe_tp == 1 and self.moe_ep == 1:
             return "tp"  # dense
         if self.tp > 1 and self.dp == 1 and self.moe_tp == 1 and self.moe_ep > 1:
@@ -61,7 +62,9 @@ class ParallelShape:
         if self.tp == 1 and self.dp > 1 and self.moe_tp == 1 and self.moe_ep > 1:
             return "dep"
         if self.tp > 1 and self.dp == 1 and self.moe_tp > 1 and self.moe_ep == 1:
-            return "tp"  # MoE pure expert-TP
+            return "tp"  # MoE tensor-parallel, tensor-attention
+        if self.tp == 1 and self.dp > 1 and self.moe_tp > 1 and self.moe_ep == 1:
+            return "dtp"  # MoE tensor-parallel, DP-attention
         return "mixed"
 
 
@@ -96,8 +99,12 @@ def _ladder_upto(max_value: int, ladder: tuple[int, ...] = _DIM_LADDER) -> list[
 
 
 def _backend_allows_moe_tp(backend: str, *, enable_wideep: bool, moe_backend: str | None) -> bool:
-    """sglang EP-only MoE backends (wideep / deepep_moe / megamoe) require moe_tp=1."""
-    if backend == "sglang" and (enable_wideep or moe_backend in {"deepep_moe", "megamoe"}):
+    """sglang's EP-only MoE *kernels* (deepep_moe / megamoe) require moe_tp=1. wideEP
+    (multinode wide expert-parallelism) does NOT force it on its own: real GLM-5 sglang
+    deployments run MoE tensor-parallel multinode (InferenceX reports EP=1), so MoE-TP
+    stays available. ``enable_wideep`` is accepted for call-site compatibility."""
+    del enable_wideep  # no longer gates MoE-TP; kept in the signature for callers
+    if backend == "sglang" and moe_backend in {"deepep_moe", "megamoe"}:
         return False
     return True
 
@@ -114,12 +121,11 @@ def enumerate_worker_shapes(
     """Legal per-worker shapes at exactly ``gpus_per_worker`` GPUs (``pp`` = 1).
 
     Mirrors ``enumerate_parallel_config`` (width + backend filters) followed by
-    ``filter_real_silicon_configs``. For MoE, TEP / DEP are always scanned; pure
-    expert-TP is kept only when ``allow_moe_pure_tp`` (GQA+MoE models). MLA+MoE
-    models pass ``allow_moe_pure_tp=False`` to exclude pure expert-TP, matching
-    AIC's ``filter_real_silicon_configs(allow_moe_pure_tp=False)``. Dense models
-    scan plain TP and are unaffected. Backend EP-only filters (sglang wideep)
-    still apply.
+    ``filter_real_silicon_configs``. For MoE, TEP / DEP are always scanned; MoE
+    tensor-parallel (moe_ep == 1, under tensor- or DP-attention) is kept when
+    ``allow_moe_pure_tp`` — now enabled for every MoE model, MLA included, since
+    real deployments run it (InferenceX GLM-5 reports EP=1). Dense models scan
+    plain TP and are unaffected. Backend EP-only filters (sglang wideep) still apply.
     """
     g = gpus_per_worker
     if not is_moe:
@@ -151,9 +157,17 @@ def enumerate_worker_shapes(
                     # real-silicon pure-pattern filter
                     is_tep = tp > 1 and dp == 1 and moe_tp == 1 and moe_ep > 1
                     is_dep = tp == 1 and dp > 1 and moe_tp == 1 and moe_ep > 1
-                    # pure expert-TP only for GQA+MoE; MLA+MoE excludes it.
-                    is_pure_tp = allow_moe_pure_tp and tp > 1 and dp == 1 and moe_tp > 1 and moe_ep == 1
-                    if not (is_tep or is_dep or is_pure_tp):
+                    # MoE tensor-parallel (moe_ep==1) under tensor-attention (tp>1,dp==1,
+                    # strategy "tp") OR DP-attention (tp==1,dp>1, strategy "dtp"). Gated by
+                    # allow_moe_pure_tp, now enabled for every MoE model incl. MLA
+                    # (InferenceX GLM-5 runs MoE-TP, reported as EP=1, with DPA on or off).
+                    is_moe_tp = (
+                        allow_moe_pure_tp
+                        and moe_tp > 1
+                        and moe_ep == 1
+                        and ((tp > 1 and dp == 1) or (tp == 1 and dp > 1))
+                    )
+                    if not (is_tep or is_dep or is_moe_tp):
                         continue
                     shapes.append(ParallelShape(tp=tp, dp=dp, moe_tp=moe_tp, moe_ep=moe_ep))
     return shapes
