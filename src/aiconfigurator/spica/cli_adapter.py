@@ -16,23 +16,14 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import yaml
 
-from aiconfigurator.cli.report_and_save import log_final_summary
-from aiconfigurator.cli.utils import process_experiment_result
-from aiconfigurator.generator.api import (
-    generate_from_request,
-    get_default_dynamo_version_mapping,
-    load_generator_overrides_from_args,
-    resolve_backend_version_for_dynamo,
-)
 from aiconfigurator.generator.dynamo_features import normalize_router_mode
-from aiconfigurator.generator.module_bridge import task_config_to_generator_config
-from aiconfigurator.generator.request import from_legacy_params
 from aiconfigurator.sdk import common, pareto_analysis, perf_database
 
 logger = logging.getLogger(__name__)
 
-SPICA_TRACE_SWEEP_ROUNDS = 3
-SPICA_TRACE_PARALLEL_EVALS = 16
+SPICA_TRACE_SWEEP_ROUNDS = 1
+SPICA_TRACE_PARALLEL_EVALS = 2
+SPICA_TRACE_CANDIDATES_PER_ROUND = 2
 
 
 @dataclass
@@ -66,6 +57,32 @@ class _SpicaTraceResultBundle:
     best_throughputs: dict[str, float]
     best_latencies: dict[str, dict[str, float]]
     pareto_x_axis: dict[str, str]
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        logger.warning("Ignoring %s=%r; expected a positive integer.", name, raw_value)
+        return default
+    if value < 1:
+        logger.warning("Ignoring %s=%r; expected a positive integer.", name, raw_value)
+        return default
+    return value
+
+
+def _spica_trace_sweep_config() -> dict[str, int]:
+    return {
+        "max_rounds": _positive_int_env("AIC_SPICA_TRACE_SWEEP_ROUNDS", SPICA_TRACE_SWEEP_ROUNDS),
+        "parallel_evals": _positive_int_env("AIC_SPICA_TRACE_PARALLEL_EVALS", SPICA_TRACE_PARALLEL_EVALS),
+        "candidates_per_round": _positive_int_env(
+            "AIC_SPICA_TRACE_CANDIDATES_PER_ROUND", SPICA_TRACE_CANDIDATES_PER_ROUND
+        ),
+    }
+
 
 def _spica_candidate_to_dict(candidate: Any) -> dict[str, Any]:
     if hasattr(candidate, "model_dump"):
@@ -327,6 +344,8 @@ def _spica_trace_task(args, mode: str, candidate_df: pd.DataFrame) -> _SpicaTrac
 
 
 def _build_spica_trace_result_bundle(candidates: list[Any], args) -> _SpicaTraceResultBundle:
+    from aiconfigurator.cli.utils import process_experiment_result
+
     payloads = [_spica_candidate_to_dict(candidate) for candidate in candidates]
     candidate_df = _spica_candidates_to_result_df(payloads)
     tasks: dict[str, _SpicaTraceTask] = {}
@@ -338,6 +357,7 @@ def _build_spica_trace_result_bundle(candidates: list[Any], args) -> _SpicaTrace
 
     for mode, mode_df in candidate_df.groupby("deployment_mode", sort=False):
         mode = str(mode)
+        mode_df = mode_df.dropna(axis=1, how="all").copy()
         task = _spica_trace_task(args, mode, mode_df)
         tasks[mode] = task
         best_config_df, best_throughput, pareto_frontier_df, x_axis_col, latencies = process_experiment_result(
@@ -661,6 +681,8 @@ def _spica_kvbm_config(row: pd.Series) -> dict[str, Any] | None:
 
 
 def _spica_generator_overrides(args: argparse.Namespace | None, row: pd.Series) -> dict[str, Any]:
+    from aiconfigurator.generator.api import load_generator_overrides_from_args
+
     mode = str(row.get("deployment_mode") or "")
     roles = ["agg"] if mode == "agg" else ["prefill", "decode"]
     spica_overrides: dict[str, Any] = {"Workers": {}}
@@ -751,6 +773,12 @@ def _spica_num_gpus_per_node(system_name: str) -> int:
 
 
 def _spica_generated_backend_version(args: argparse.Namespace | None, backend_name: str) -> str | None:
+    from aiconfigurator.generator.api import (
+        get_default_dynamo_version_mapping,
+        load_generator_overrides_from_args,
+        resolve_backend_version_for_dynamo,
+    )
+
     if args is None:
         return None
     if generated_config_version := getattr(args, "generated_config_version", None):
@@ -790,6 +818,9 @@ def _generate_spica_backend_artifacts(
     top_config_dir: str,
     written_paths: list[str],
 ) -> None:
+    from aiconfigurator.generator.api import generate_from_request
+    from aiconfigurator.generator.request import from_legacy_params
+
     try:
         backend_version = _spica_generated_backend_version(args, generator_task.primary_backend_name)
         deployment_target = getattr(args, "deployment_target", "dynamo-j2") if args is not None else "dynamo-j2"
@@ -817,6 +848,8 @@ def _save_spica_top_config_artifacts(
     best_config_df: pd.DataFrame,
     args: argparse.Namespace | None = None,
 ) -> list[str]:
+    from aiconfigurator.generator.module_bridge import task_config_to_generator_config
+
     task = result_bundle.tasks.get(mode)
     if task is None or best_config_df.empty:
         return []
@@ -978,6 +1011,8 @@ def _build_spica_trace_search_space(args, backends: list[str]) -> dict[str, Any]
 
 def run_spica_trace_default(args) -> list[Any]:
     """Run the Spica replay-backed smart sweeper for ``default --trace-path``."""
+    from aiconfigurator.cli.report_and_save import log_final_summary
+
     if args.decode_system is not None and args.decode_system != args.system:
         raise SystemExit(
             "--trace-path currently requires homogeneous hardware; omit --decode-system or set it to --system."
@@ -1006,20 +1041,22 @@ def run_spica_trace_default(args) -> list[Any]:
     backends = [backend.value for backend in common.BackendName] if args.backend == "auto" else [args.backend]
     search_space = _build_spica_trace_search_space(args, backends)
 
+    sweep_config = _spica_trace_sweep_config()
     config = SmartSearchConfig(
         search_space=search_space,
         workload={"trace_path": args.trace_path, "trace_format": "mooncake"},
         goal={"target": "goodput_per_gpu", "sla": {"ttft_ms": args.ttft, "itl_ms": args.tpot}},
-        sweep={"max_rounds": SPICA_TRACE_SWEEP_ROUNDS, "parallel_evals": SPICA_TRACE_PARALLEL_EVALS},
+        sweep=sweep_config,
     )
 
     logger.info(
-        "Running Spica trace sweep: trace_path=%s, model=%s, system=%s, gpu_budget=%s, backend=%s",
+        "Running Spica trace sweep: trace_path=%s, model=%s, system=%s, gpu_budget=%s, backend=%s, sweep=%s",
         args.trace_path,
         args.model_path,
         args.system,
         args.total_gpus,
         ",".join(backends),
+        sweep_config,
     )
     candidates = run_smart_search(config)
     if not candidates:

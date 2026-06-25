@@ -299,6 +299,7 @@ class TestCLIIntegration:
         assert disagg_best["router"] == "kv_router"
 
         agg_best = result_bundle.best_configs["agg"].iloc[0]
+        assert "(p)tp" not in result_bundle.best_configs["agg"].columns
         assert agg_best["parallel"] == "tp2_pp1"
         assert agg_best["tokens/s/gpu"] == pytest.approx(280.0)
 
