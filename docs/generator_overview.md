@@ -62,7 +62,7 @@ flowchart TD
   Jinja templates that turn mapped parameters into CLI args, engine configs, run scripts, and Kubernetes manifests (optionally versioned). 
 
 ### Using the Generator
-You can use the generator in three ways: AIConfigurator CLI, webapp, or standalone (code/CLI).
+You can use the generator in two ways: AIConfigurator CLI or standalone (code/CLI).
 - AIConfigurator CLI end-to-end (Dynamo deployment):
   ```
   aiconfigurator cli default \
@@ -97,7 +97,6 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
   - For Dynamo deployments: Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag. If not provided, defaults to `1.0.0`.
   - For llm-d deployments: Container image versions are specified via `LlmdConfig.vllm_image` or `LlmdConfig.sglang_image` (defaults to `latest` tags).
   - If `--generated-config-version` is provided, it overrides the generated backend version for any deployment target.
-- Webapp: start with `--enable_profiling` when launching the webapp to surface generator-driven configs.
 - Standalone:
   - In code:
     ```python

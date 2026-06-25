@@ -412,7 +412,7 @@ def _add_estimate_mode_arguments(parser):
         help="Estimation mode: 'agg' (default, IFB), 'disagg' (separate prefill/decode workers), "
         "'afd' (attention-FFN disaggregated), or one of the static modes "
         "'static' / 'static_ctx' / 'static_gen' for a single-pass, no-IFB latency/memory "
-        "breakdown (mirrors the webapp Static Tab).",
+        "breakdown.",
     )
     parser.add_argument(
         "--system",
@@ -1248,8 +1248,7 @@ def build_default_tasks(
     def _sglang_moe_backend_override(backend_name: str) -> str | None:
         if backend_name != common.BackendName.sglang.value:
             return None
-        # Auto-set moe_backend for SGLang wideep, matching webapp behavior
-        # (webapp/events/event_fn.py sets moe_backend="deepep_moe" when enable_wideep + sglang)
+        # Auto-set moe_backend for SGLang wideep to preserve existing UI parity.
         return moe_backend or ("deepep_moe" if enable_wideep else None)
 
     def _make_agg(backend_name: str, moe_backend_value: str | None) -> Task:
