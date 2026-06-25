@@ -8,10 +8,25 @@ SPDX-License-Identifier: Apache-2.0
 
 Spica is the Replay-backed **smart sweeper** for Dynamo deployments (Profiler V2).
 It searches engine / router / planner configuration with a black-box optimizer,
-evaluates each candidate with Dynamo Replay, and returns a ranked candidate set.
+evaluates each candidate with Dynamo Replay, and returns a ranked candidate set
+(or a Pareto front under a `pareto` goal).
 
 Design proposal: `docs/proposals/dgdr-profiler-smart-search-plan.md` in
 [ai-dynamo/dynamo](https://github.com/ai-dynamo/dynamo).
+
+## Docs
+
+- [overview.md](docs/overview.md) — what Spica is + the end-to-end sweep flow
+  (validate → filter policies → load-predictor sub-sweep → enumerate branches →
+  per-branch Vizier study → merge by goal).
+- [optimization-goal.md](docs/optimization-goal.md) — the `OptimizationGoal` targets,
+  the per-GPU metric, the SLA rule, and how **`pareto`** (multi-objective) works.
+- [traffic.md](docs/traffic.md) — the `Workload` load shapes (trace / request-rate /
+  concurrency), `num_request_ratio`, and the pareto concurrency sweep.
+- [search-space.md](docs/search-space.md) — every knob (type, default, searched/pinned,
+  choices), the composite presets, and how `parallel_configs` are derived.
+- [sample.md](docs/sample.md) — the flat *unrolled sample* and the three ways to
+  pin/override what it emits.
 
 It is an **independent project** living inside the aiconfigurator repo. It
 depends on `aiconfigurator` (lower-layer forward-pass / memory provider) and,

@@ -7,12 +7,14 @@ SPDX-License-Identifier: Apache-2.0
 
 A `SearchSpace` (the `search_space:` block of a `SmartSearchConfig` YAML) is the input
 to one smart-sweep run: the knobs to **explore**, plus the **pinned** context (model,
-hardware, GPU budget, and the engine/router/kv-manager scalars). The optimizer runs one
-study per `(deployment_mode, backend)` branch and ranks candidates across branches.
+hardware, GPU budget, and the engine/router/kv-manager/planner scalars). The optimizer
+runs one Vizier study per `deployment_mode` branch and ranks candidates across branches.
 
-This document is the reference for **what you can pin and how**.
+This document is the reference for **every knob**: its type, default, whether it is
+searched or pinned, and its allowed choices. Source of truth: `src/spica/config.py`
+(`SearchSpace`, `SEARCH_CHOICES`, `COMPOSITE_DICT_KEYS`, `COMPOSITE_REQUIRED_KEYS`).
 
-## The pinning model
+## Kinds of knob
 
 There are four kinds of knob:
 
@@ -21,53 +23,170 @@ There are four kinds of knob:
 | **Atomic list knob** | a single-element list, `[x]` | a multi-element list, `[a, b, c]` |
 | **Pinned scalar** | just set the value (always one value) | — (never searched) |
 | **Composite knob** | one entry: a preset id **or** a dict | multiple entries (presets and/or dicts) |
-| **`parallel_configs`** | one `dict` entry | multiple `dict` entries (a custom menu) |
+| **`parallel_configs`** | one `dict` entry (+ single mode) | multiple `dict` entries (a custom menu) |
 
-Everything is pinnable **except** the parallel shape + replica count when you leave
-`parallel_configs` empty — then it is *derived* by KV-feasible enumeration. Provide
-`parallel_configs` to pin or to search a custom menu (see below).
+- **Atomic list knob** — a list whose entries must be a non-empty subset of that knob's
+  `SEARCH_CHOICES`. One element pins; many search.
+- **Pinned scalar** — a plain value; never enters the sweep.
+- **Composite knob** — bundles several coupled *unrolled* planner/predictor fields behind a
+  named preset; each list entry is a preset id **or** a self-contained dict.
+- **`parallel_configs`** — the parallel shape + replica count. Left **empty** it is *derived*
+  by KV-feasible enumeration (see [Parallel configs](#parallel-configs-derived)); provide a
+  list of dicts to pin one or search a custom menu.
 
-### Atomic list knobs
+`_validate_search_choices` enforces list knobs are non-empty and every entry is legal.
 
-A list whose entries must be a non-empty subset of the allowed choices. One element pins it.
+## Deployment
 
-- `deployment_mode` (`disagg` / `agg`), `backend` (`vllm` / `sglang` / `trtllm`)
-- engine batching: `agg_max_num_batched_tokens` / `agg_max_num_seqs`,
-  `prefill_max_num_batched_tokens` / `prefill_max_num_seqs`,
-  `decode_max_num_batched_tokens` / `decode_max_num_seqs`
-- router: `router_mode` (`kv_router` / `round_robin`) + the kv-router weights
-  `overlap_score_credit`, `prefill_load_scale`, `router_temperature`.
-  `host_cache_hit_weight` and `disk_cache_hit_weight` are **only swept when multi-tier
-  KV offload is enabled** (`num_g2_blocks > 0`): in the router's scoring they weight the
-  host/disk *extension* blocks, which are 0 with offload off (the default), so they can't
-  affect a replay and are dropped from the search to avoid dead dimensions.
+| knob | type | default | searched / pinned | allowed choices |
+|---|---|---|---|---|
+| `deployment_mode` | list[str] | `["disagg", "agg"]` | searched (branch) | `disagg`, `agg` |
+| `backend` | list[str] | `["vllm"]` | searched | `vllm`, `sglang`, `trtllm` |
+| `model_name` | str | — (required) | pinned | HF id or private model name |
+| `hardware_sku` | str | — (required) | pinned | any SKU with a system YAML (e.g. `h200_sxm`) |
+| `gpu_budget` | int | `32` | pinned | max GPUs per candidate |
+| `min_gpu_budget` | int? | `None` | pinned | `0 < min_gpu_budget <= gpu_budget` |
+| `min_endpoint` | int? | `None` | pinned | declared-but-unused (kept as-is) |
+| `context_length` | int? | `None` | pinned | `max_seq_len` for KV feasibility; `None` → model max |
+| `startup_time` | float? | `None` | pinned | — |
+| `aic_nextn` | int? | `None` | pinned | speculative-decode (MTP) depth (the `1..5` in the source is a comment hint; **not** validated) |
 
-### Pinned scalars (one value, never searched)
+`deployment_mode` is the only knob that branches the sweep (agg / disagg have structurally
+different parallel configs); `backend` is a *searched knob within each branch*, not a
+separate study. `min_gpu_budget` is validated against `gpu_budget` by `_validate_gpu_budget`.
 
-`model_name`, `hardware_sku`, `gpu_budget`, `min_gpu_budget`, `min_endpoint`,
-`context_length`, `startup_time`, `aic_nextn`; the per-role `*_block_size`,
-`*_gpu_memory_utilization`, `*_enable_prefix_caching`; the kv-manager fields
-(`num_g2_blocks`, `bandwidth_g1_to_g2_gbps`, `bandwidth_g2_to_g1_gbps`,
-`offload_batch_size`); and admission control (`active_decode_blocks_threshold`,
-`active_prefill_tokens_threshold`, `active_prefill_tokens_threshold_frac`,
-`no_admission_control`).
+## Prefill engine (disagg branch)
 
-## Composite knobs
+| knob | type | default | searched / pinned | allowed choices |
+|---|---|---|---|---|
+| `prefill_max_num_batched_tokens` | list[int] | `[8192, 16384, 32768]` | searched | `8192`, `16384`, `32768` |
+| `prefill_max_num_seqs` | list[int] | `[1, 2, 4, 8]` | searched | `1`, `2`, `4`, `8` |
+| `prefill_block_size` | int | `64` | pinned | — |
+| `prefill_gpu_memory_utilization` | float | `0.9` | pinned | — |
+| `prefill_enable_prefix_caching` | bool | `True` | pinned | — |
 
-A composite knob bundles several coupled *unrolled* fields behind a named **preset**.
-Each list entry is **either** a preset id (string) **or** a `dict` that pins those
-unrolled fields directly — the escape hatch for a value no preset offers. The list is a
-candidate set: one entry = pin, several = search; presets and dicts can be mixed.
+## Decode engine (disagg branch)
 
-A dict entry is **self-contained**: it *replaces* the preset expansion (no partial / merge).
-Required keys are enforced at config load — the three **planner** composites must provide
-*all* of their unrolled fields; a **`load_predictor_candidates`** dict needs at least
-`load_predictor` (the family), and its family params default per family. Unknown keys are
-rejected. To tweak one field off a preset, copy that composite's fields into a dict and
-change the one. The *legality* of the values (perfect-square fpm bucket, interval > 0,
-scale-up > scale-down, …) is validated downstream by dynamo's `PlannerConfig`.
+| knob | type | default | searched / pinned | allowed choices |
+|---|---|---|---|---|
+| `decode_max_num_batched_tokens` | list[int] | `[8192]` | searched | `8192` |
+| `decode_max_num_seqs` | list[int] | `[256, 512, 1024]` | searched | `256`, `512`, `1024` |
+| `decode_block_size` | int | `64` | pinned | — |
+| `decode_gpu_memory_utilization` | float | `0.9` | pinned | — |
+| `decode_enable_prefix_caching` | bool | `False` | pinned | forced off for decode workers |
+
+## Agg engine (agg branch)
+
+| knob | type | default | searched / pinned | allowed choices |
+|---|---|---|---|---|
+| `agg_max_num_batched_tokens` | list[int] | `[8192, 16384, 32768]` | searched | `8192`, `16384`, `32768` |
+| `agg_max_num_seqs` | list[int] | `[256, 512, 1024]` | searched | `256`, `512`, `1024` |
+| `agg_block_size` | int | `64` | pinned | — |
+| `agg_gpu_memory_utilization` | float | `0.9` | pinned | — |
+| `agg_enable_prefix_caching` | bool | `True` | pinned | — |
+
+## KV manager (multi-tier offload)
+
+All pinned. G3/G4 extend G2; offload is **off by default** (`num_g2_blocks = 0`).
+
+| knob | type | default | searched / pinned | allowed choices |
+|---|---|---|---|---|
+| `num_g2_blocks` | int | `0` | pinned | `0` disables host offload |
+| `bandwidth_g1_to_g2_gbps` | float? | `None` | pinned | — |
+| `bandwidth_g2_to_g1_gbps` | float? | `None` | pinned | — |
+| `offload_batch_size` | int? | `None` | pinned | — |
+
+## Router
+
+KV-router weights are ignored under `round_robin`.
+
+| knob | type | default | searched / pinned | allowed choices |
+|---|---|---|---|---|
+| `router_mode` | list[str] | `["kv_router", "round_robin"]` | searched | `kv_router`, `round_robin` |
+| `overlap_score_credit` | list[float] | `[0.0, 0.5, 1.0]` | searched | `0.0`, `0.5`, `1.0` |
+| `prefill_load_scale` | list[float] | `[0.0, 0.25, 0.5, 1.0, 2.0, 4.0]` | searched | `0.0`, `0.25`, `0.5`, `1.0`, `2.0`, `4.0` |
+| `router_temperature` | list[float] | `[0.0, 0.2, 0.5, 1.0]` | searched | `0.0`, `0.2`, `0.5`, `1.0` |
+| `host_cache_hit_weight` | list[float] | `[0.5, 0.75, 1.0]` | searched **iff** `num_g2_blocks > 0` | `0.5`, `0.75`, `1.0` |
+| `disk_cache_hit_weight` | list[float] | `[0.0, 0.25, 0.5]` | searched **iff** `num_g2_blocks > 0` | `0.0`, `0.25`, `0.5` |
+
+`host_cache_hit_weight` / `disk_cache_hit_weight` weight the **host/disk extension blocks**
+in the router's scoring. With offload off (the default `num_g2_blocks = 0`) those blocks are
+0, so the weights can't affect a replay and are dropped from the search to avoid dead
+dimensions. They are only swept when multi-tier KV offload is enabled (`num_g2_blocks > 0`).
+
+## Admission control (pinned)
+
+| knob | type | default | searched / pinned | allowed choices |
+|---|---|---|---|---|
+| `active_decode_blocks_threshold` | int? | `None` | pinned | — |
+| `active_prefill_tokens_threshold` | int? | `None` | pinned | — |
+| `active_prefill_tokens_threshold_frac` | float? | `None` | pinned | — |
+| `no_admission_control` | bool | `False` | pinned | — |
+
+## Planner composites
+
+Composite knobs. Each list entry is a preset id (string) **or** a dict; one entry pins,
+several search; presets and dicts can be mixed. Choices below are the preset ids; the
+preset → field expansions are in [Composite presets](#composite-presets).
+
+| knob | type | default | searched / pinned | allowed preset ids |
+|---|---|---|---|---|
+| `planner_scaling_policy` | list[str\|dict] | `["disabled", "throughput_180_5", "throughput_600_5", "load_180_5", "load_180_10", "hybrid_180_5", "hybrid_600_5"]` | searched | `disabled`, `throughput_180_5`, `throughput_600_5`, `load_180_5`, `load_180_10`, `hybrid_180_5`, `hybrid_600_5` |
+| `planner_fpm_sampling` | list[str\|dict] | `["small", "default", "large", "fine"]` | searched | `small`, `default`, `large`, `fine` |
+| `planner_load_sensitivity` | list[str\|dict] | `["aggressive", "default", "conservative"]` | searched | `aggressive`, `default`, `conservative` |
+
+## Load predictor
+
+| knob | type | default | searched / pinned | allowed preset ids |
+|---|---|---|---|---|
+| `load_predictor_candidates` | list[str\|dict] | `["constant_last", "arima_raw", "arima_log1p", "prophet_w20_raw", "prophet_w20_log1p", "prophet_w50_raw", "prophet_w50_log1p", "kalman_default_raw", "kalman_default_log1p", "kalman_reactive_raw", "kalman_reactive_log1p"]` | swept **separately** | the 11 ids in the default |
+
+`load_predictor_candidates` is the forecaster for predictive throughput scaling. It is
+**not** part of the main Vizier study: a separate forecast-loss sub-sweep
+(`sweep_load_predictor`) scores every entry against the trace by one-step-ahead loss and
+pins the per-interval winner into the main sweep. Triggered only when some
+`planner_scaling_policy` candidate enables throughput scaling; for a static (non-trace)
+workload it short-circuits to `constant_last` for every interval.
+
+## How the sweep uses these (branches & backend)
+
+The sweep runs **one Vizier study per `deployment_mode`**. **`backend` is a searched knob,
+not a branch**: listing multiple backends searches them *together* within each mode's study,
+and the cross-branch merge picks the global best — `rank()` for a single-objective goal, or
+`pareto_front()` (the non-dominated set) under a `pareto` goal. The parallel-config menu is the **union** of every
+backend's KV-feasible configs; a sampled `(backend, parallel_config)` pair the backend can't
+run is marked infeasible (no replay), so the optimizer learns to avoid it. A backend with no
+perf DB / no viable config for a mode is dropped; a **mode** for which no backend is viable
+is **skipped with a warning** (a viable mode still runs); only if *no* mode is viable does
+the run error. A *pinned* config legal for no backend is a hard error (fail fast).
+
+The planner's `optimization_target` is derived from the sweep **goal**, not from
+`planner_scaling_policy` (see `OptimizationTarget.planner_optimization_target`):
+`throughput`/`throughput_per_gpu`/`throughput_per_user` → `"throughput"`, `e2e_latency` →
+`"latency"`, `goodput`/`goodput_per_gpu` → `"sla"`, `pareto` → `"throughput"`. The policy
+only decides *which* scaling loops run and their intervals.
+
+**Predictive throughput scaling needs an SLA**, so it only works under a goodput sweep
+(`optimization_target="sla"`). For a `throughput`/`e2e_latency`/`pareto` sweep,
+`filter_scaling_policies(allow_throughput=False)` **drops** every throughput-scaling entry
+(`throughput_*`, `hybrid_*`, or any dict with `enable_throughput_scaling: true`); only
+`disabled` / `load_*` survive. Listing *only* throughput-scaling policies for a non-SLA
+sweep errors (nothing left to search). Both scaling flags false ⇒ planner off (static
+replica count, same as `disabled`).
+
+## Composite presets
+
+A composite dict entry **replaces** the preset expansion (no partial / merge). Required keys
+are enforced at load by `_validate_search_choices` against `COMPOSITE_REQUIRED_KEYS`: the
+three **planner** composites must provide *all* their unrolled fields; a
+`load_predictor_candidates` dict needs at least `load_predictor` (the family), with family
+params defaulting per family. Unknown keys are rejected. Value *legality* (perfect-square fpm
+bucket, positive intervals, `load_scaling_down_sensitivity` in 0–100, …) is validated
+downstream by dynamo's `PlannerConfig`.
 
 ### `planner_scaling_policy`
+
+Decoded by `SCALING_POLICIES` in `src/spica/planner.py`.
 
 | preset | `enable_throughput_scaling` | `enable_load_scaling` | `throughput_adjustment_interval_seconds` | `load_adjustment_interval_seconds` |
 |---|---|---|---|---|
@@ -79,29 +198,12 @@ scale-up > scale-down, …) is validated downstream by dynamo's `PlannerConfig`.
 | `hybrid_180_5` | True | True | 180 | 5 |
 | `hybrid_600_5` | True | True | 600 | 5 |
 
-Dict keys: `enable_throughput_scaling`, `enable_load_scaling`,
+Dict keys (all required): `enable_throughput_scaling`, `enable_load_scaling`,
 `throughput_adjustment_interval_seconds`, `load_adjustment_interval_seconds`.
-**Both flags `false` ⇒ planner off** (static replica count — same as `disabled`); no
-intervals / fpm / sensitivity / predictor are emitted.
-
-**The planner's `optimization_target` is derived from the sweep goal, not from this
-policy** — `throughput`/`throughput_per_gpu`/`throughput_per_user`→`"throughput"`,
-`e2e_latency`→`"latency"`, `goodput`/`goodput_per_gpu`→`"sla"`, `pareto`→`"throughput"`
-(see `OptimizationTarget.planner_optimization_target`). The policy only decides *which*
-scaling loops run + their intervals. A `pareto` goal is multi-objective (default objectives
-`throughput_per_gpu` × `throughput_per_user` — the InferenceX tok/s/gpu vs tok/s/user
-frontier) and returns the non-dominated front instead of a ranked list; under it
-`workload.concurrency` may be a **list** (the swept Pareto dimension), whereas every other
-goal needs a single concurrency value.
-
-**Predictive throughput scaling needs an SLA**, so it only works under a goodput sweep
-(`optimization_target="sla"`). For a `throughput`/`e2e_latency` sweep, the
-throughput-scaling presets (`throughput_*`, `hybrid_*`, or any dict with
-`enable_throughput_scaling: true`) are **automatically dropped** from the search (with a
-log); only `disabled` / `load_*` survive. If you list *only* throughput-scaling policies
-for a non-goodput sweep, the run errors (nothing left to search).
 
 ### `planner_fpm_sampling`
+
+Decoded by `FPM_SAMPLING`.
 
 | preset | `max_num_fpm_samples` | `fpm_sample_bucket_size` |
 |---|---|---|
@@ -110,9 +212,12 @@ for a non-goodput sweep, the run errors (nothing left to search).
 | `large` | 128 | 16 |
 | `fine` | 128 | 64 |
 
-Dict keys: `max_num_fpm_samples`, `fpm_sample_bucket_size` (must be a perfect square).
+Dict keys (all required): `max_num_fpm_samples`, `fpm_sample_bucket_size` (a perfect square,
+checked downstream).
 
 ### `planner_load_sensitivity`
+
+Decoded by `LOAD_SENSITIVITY`.
 
 | preset | `load_scaling_down_sensitivity` | `load_min_observations` |
 |---|---|---|
@@ -120,63 +225,92 @@ Dict keys: `max_num_fpm_samples`, `fpm_sample_bucket_size` (must be a perfect sq
 | `default` | 80 | 5 |
 | `conservative` | 90 | 8 |
 
-Dict keys: `load_scaling_down_sensitivity` (0–100), `load_min_observations`.
+Dict keys (all required): `load_scaling_down_sensitivity` (0–100), `load_min_observations`.
 
 ### `load_predictor_candidates`
 
-The forecaster for predictive throughput scaling. It is **not** part of the main study:
-a separate forecast-loss sub-sweep scores every entry against the trace and pins the
-per-interval winner into the main sweep. A dict entry is therefore a *custom predictor*
-the sub-sweep will also score.
+Decoded by `LOAD_PREDICTOR_PRESETS` in `src/spica/load_predictor_sweep.py`.
 
 | preset | `load_predictor` | `load_predictor_log1p` | extra family fields |
 |---|---|---|---|
 | `constant_last` | constant | False | — |
 | `arima_raw` / `arima_log1p` | arima | False / True | — |
-| `prophet_w20_*` | prophet | raw / log1p | `prophet_window_size`=20 |
-| `prophet_w50_*` | prophet | raw / log1p | `prophet_window_size`=50 |
-| `kalman_default_*` | kalman | raw / log1p | `kalman_q_level`=1.0, `kalman_q_trend`=0.1, `kalman_r`=10.0, `kalman_min_points`=5 |
-| `kalman_reactive_*` | kalman | raw / log1p | `kalman_q_level`=10.0, `kalman_q_trend`=1.0, `kalman_r`=5.0, `kalman_min_points`=3 |
+| `prophet_w20_raw` / `prophet_w20_log1p` | prophet | False / True | `prophet_window_size`=20 |
+| `prophet_w50_raw` / `prophet_w50_log1p` | prophet | False / True | `prophet_window_size`=50 |
+| `kalman_default_raw` / `kalman_default_log1p` | kalman | False / True | `kalman_q_level`=1.0, `kalman_q_trend`=0.1, `kalman_r`=10.0, `kalman_min_points`=5 |
+| `kalman_reactive_raw` / `kalman_reactive_log1p` | kalman | False / True | `kalman_q_level`=10.0, `kalman_q_trend`=1.0, `kalman_r`=5.0, `kalman_min_points`=3 |
 
-Dict keys: `load_predictor` (`constant` / `arima` / `prophet` / `kalman`),
+Dict keys: `load_predictor` (required; one of `constant` / `arima` / `prophet` / `kalman`),
 `load_predictor_log1p`, `prophet_window_size` (prophet), and
 `kalman_q_level` / `kalman_q_trend` / `kalman_r` / `kalman_min_points` (kalman). Omitted
-family fields take the planner defaults.
+family fields take the planner defaults (`prophet_window_size`=50, `kalman_q_level`=1.0,
+`kalman_q_trend`=0.1, `kalman_r`=10.0, `kalman_min_points`=5).
 
-## Branches & backend
+## Parallel configs (derived)
 
-The sweep runs **one Vizier study per `deployment_mode`** (agg / disagg — they have
-structurally different parallel configs). **`backend` is a searched knob, not a branch**:
-listing multiple backends searches them *together* within each mode's study (the optimizer
-can shift budget toward the better backend), and `rank()` picks the global best across all.
-The parallel-config menu is the **union** of every backend's KV-feasible configs; a sampled
-`(backend, parallel_config)` pair the backend can't run is marked infeasible (no replay), so
-the optimizer learns to avoid it. A backend with no perf DB / no viable config for a mode is
-dropped from the search; a **mode** for which no backend is viable is **skipped with a
-warning** (a viable mode still runs), and only if *no* mode is viable does the run error.
-(A *pinned* config legal for no backend is a hard error — fail fast.)
+Left empty, `parallel_configs` is **enumerated** by `parallel_configs_for`
+(`src/spica/model_hw.py`) on top of `enumerate_parallel_configs` /
+`enumerate_disagg_configs` (`src/spica/parallel_enum.py`). Per `(model, hardware,
+gpu_budget, backend)`:
 
-## `parallel_configs` (the derived dimension you can also pin)
+1. **GPUs per worker** is drawn from the ladder `{1, 2, 4, 8, 16}`
+   (`_DEFAULT_GPUS_PER_WORKER`), capped at `gpu_budget`. A worker spans `tp * pp * dp` GPUs
+   with `pp` pinned to 1, so `gpus_per_worker = tp * dp`.
+2. **Dense models** use plain TP only: `{tp: g, dp: 1, moe_tp: 1, moe_ep: 1}`.
+3. **MoE models** scan `tp / dp / moe_tp / moe_ep` over `{1, 2, 4, 8, …}` subject to the MoE
+   width constraint `tp * attention_dp == moe_tp * moe_ep` (here `dp` = `attention_dp`), and
+   keep only these three pure patterns:
+   - **TEP** — attention-TP + expert-EP: `tp > 1`, `dp == 1`, `moe_tp == 1`, `moe_ep > 1`.
+   - **DEP** — attention-DP + expert-EP: `tp == 1`, `dp > 1`, `moe_tp == 1`, `moe_ep > 1`.
+   - **pure expert-TP** — `tp > 1`, `dp == 1`, `moe_tp > 1`, `moe_ep == 1`. **Only kept for
+     GQA+MoE** (`allow_moe_pure_tp`, gated on the architecture being in
+     `_GQA_MOE_ARCHITECTURES` = `{Qwen3MoeForCausalLM}`). **MLA+MoE excludes it** —
+     `resolve_model_hardware` sets `mla = is_moe and not allow_pure_tp`, and
+     `parallel_configs_for` passes `allow_moe_pure_tp=not mla`.
+4. **Backend filters** (mirroring AIC's `enumerate_parallel_config`):
+   - `trtllm` forbids `tp > 1 & attention_dp > 1`.
+   - `sglang` EP-only MoE backends (wideep / `deepep_moe` / `megamoe`) force `moe_tp == 1`.
+   - `vllm` forbids `moe_tp > 1 & moe_ep > 1`.
+   Large MoE that a node can't hold (`gpus_per_node * vram_per_gpu < 2 * weight_bytes`)
+   auto-enables multi-node wideEP.
+5. **KV feasibility** (`spica.kv_estimate.feasible_shape_tokens`, via AIC's
+   `estimate_kv_cache`): a shape is kept iff its total KV capacity in tokens (after quantized
+   weights + activation reservations) holds at least one longest sequence —
+   `total_kv_size_tokens > max_seq_len`, where `max_seq_len` = `context_length` if set, else
+   the model's max context. This is per-shape (TEP / DEP / TP differ at the same GPU count)
+   and uses the real (often FP8) weights. SKUs with no perf DB raise `NoPerfDatabase` (no
+   naive fallback). If no shape is feasible within budget, `NoViableParallelConfig` is raised
+   for that branch.
+6. **Replicas** fill the budget: for each kept worker shape, replica counts
+   `r ∈ 1..(gpu_budget // g)` such that `g * r` lies in
+   `[min_gpu_budget, gpu_budget]`.
+7. **disagg** enumerates prefill × decode **independently** (each role its own shape +
+   replica count) and pairs them so `prefill.total_gpus + decode.total_gpus` fits the budget;
+   prefill/decode throughput rate-matching is applied downstream at replay.
 
-Left empty, the parallel shape + replica count are **enumerated**: for `(model, hardware,
-gpu_budget)` and each backend, every KV-feasible per-worker shape × replica count that fits
-the budget (unioned across backends). Provide a list of dicts to **pin** (one entry) or to
-search a **custom menu** (several entries) instead of the full enumeration; a pinned config is
-kept for whichever backends it's legal+feasible on (errors if none).
+**Derived, not settable:** `strategy` (`tp` / `tep` / `dep`, computed from the shape's
+`ParallelShape.strategy` — it also has a `mixed` fallback for shapes outside those patterns,
+but enumeration never produces one) and `used_gpus` (`gpus_per_worker × replicas`, summed
+across roles for disagg).
+
+### Pinning `parallel_configs`
+
+Provide a list of dicts to **pin** (one entry) or search a **custom menu** (several entries).
+A pinned config is kept for whichever backends it is legal + feasible on (errors if none).
+`_validate_parallel_configs` requires `deployment_mode` to list **exactly one mode** when
+`parallel_configs` is non-empty.
 
 - **agg** entry — a flat shape dict: `tp` (required), `attention_dp`, `moe_tp`, `moe_ep`,
-  `pp`, `replicas`. Omitted dims default to `1`; `replicas` defaults to `1`. Dense models
-  can write just `{tp: N}`.
-- **disagg** entry — nests two shape dicts: `{prefill: <shape>, decode: <shape>}`, each
-  with its own `replicas`.
-- **Derived, not settable:** `strategy` (computed from the shape — `tp` / `tep` / `dep`)
-  and `used_gpus` (`gpus_per_worker × replicas`, summed across roles for disagg).
+  `pp`, `replicas`. Omitted dims default to `1`; `replicas` defaults to `1`. Dense models can
+  write just `{tp: N}`.
+- **disagg** entry — nests two shape dicts: `{prefill: <shape>, decode: <shape>}`, each with
+  its own `replicas`.
 
 Each pinned shape is validated against the same rules the enumerator applies — MoE width
-(`tp × attention_dp == moe_tp × moe_ep`), `gpus_per_worker ∈ {1,2,4,8,16}`, backend
-filters (e.g. trtllm forbids `tp>1 & attention_dp>1`), KV-cache feasibility for the model's
-max sequence, and `used_gpus ≤ gpu_budget`. An illegal pin is rejected (it never reaches
-replay). **Pinning `parallel_configs` requires `deployment_mode` to list exactly one mode.**
+(`tp × attention_dp == moe_tp × moe_ep`), `gpus_per_worker ∈ {1, 2, 4, 8, 16}`, backend
+filters, KV feasibility for the model's max sequence, `used_gpus ≤ gpu_budget`. Structural +
+single-mode checks run at config load; full legality / KV-feasibility when branches are
+enumerated. An illegal pin is rejected before replay.
 
 ## Examples
 
@@ -219,9 +353,13 @@ Pin a disagg parallel config (prefill TEP, decode DEP):
 
 ## Validation summary
 
-- **List knob** — non-empty; string entries must be a listed choice.
-- **Composite dict** — no unknown keys, and the required keys are present (all fields for
-  the planner composites; at least `load_predictor` for `load_predictor_candidates`). Value
-  legality is checked downstream by dynamo's `PlannerConfig`.
-- **`parallel_configs`** — structural + single-mode at config load; full legality /
-  KV-feasibility when branches are enumerated.
+- **List knob** — non-empty; string entries must be a listed `SEARCH_CHOICES` value
+  (`_validate_search_choices`).
+- **Composite dict** — no unknown keys, and the required keys are present (all unrolled
+  fields for the planner composites; at least `load_predictor` for
+  `load_predictor_candidates`). Value legality is checked downstream by dynamo's
+  `PlannerConfig`.
+- **`gpu_budget` / `min_gpu_budget`** — `0 < min_gpu_budget <= gpu_budget`
+  (`_validate_gpu_budget`).
+- **`parallel_configs`** — structural + single-mode at config load
+  (`_validate_parallel_configs`); full legality / KV-feasibility when branches are enumerated.
