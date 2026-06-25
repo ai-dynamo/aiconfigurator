@@ -4,6 +4,7 @@
 import argparse
 import logging
 import os
+import random
 import sys
 import time
 from dataclasses import dataclass
@@ -60,6 +61,7 @@ class _SpicaTraceResultBundle:
     candidates: list[dict[str, Any]]
     candidate_df: pd.DataFrame
     tasks: dict[str, _SpicaTraceTask]
+    trace_path: str | None
     chosen_exp: str
     best_configs: dict[str, pd.DataFrame]
     pareto_fronts: dict[str, pd.DataFrame | None]
@@ -1969,6 +1971,7 @@ def _build_spica_trace_result_bundle(candidates: list[Any], args) -> _SpicaTrace
         candidates=payloads,
         candidate_df=candidate_df,
         tasks=tasks,
+        trace_path=getattr(args, "trace_path", None),
         chosen_exp=chosen_exp,
         best_configs=best_configs,
         pareto_fronts=pareto_fronts,
@@ -1976,6 +1979,31 @@ def _build_spica_trace_result_bundle(candidates: list[Any], args) -> _SpicaTrace
         best_latencies=best_latencies,
         pareto_x_axis=pareto_x_axis,
     )
+
+
+def _spica_safe_path_component(value: Any, *, strip_extension: bool = False) -> str:
+    text = str(value or "unknown")
+    if os.path.exists(text):
+        text = os.path.basename(os.path.abspath(text))
+    if strip_extension:
+        stem, ext = os.path.splitext(text)
+        if ext:
+            text = stem
+    safe = "".join(char if char.isalnum() or char in "._-" else "_" for char in text)
+    safe = safe.strip("._-")
+    return safe or "unknown"
+
+
+def _spica_trace_result_dir(result_bundle: _SpicaTraceResultBundle, save_dir: str) -> str:
+    first_task = next(iter(result_bundle.tasks.values()), None)
+    model = _spica_safe_path_component(getattr(first_task, "primary_model_path", "model"))
+    system = _spica_safe_path_component(getattr(first_task, "primary_system_name", "system"))
+    backend = _spica_safe_path_component(getattr(first_task, "primary_backend_name", "backend"))
+    trace = _spica_safe_path_component(os.path.basename(result_bundle.trace_path or "trace"), strip_extension=True)
+    ttft = int(getattr(first_task, "ttft", 0) or 0)
+    tpot = int(getattr(first_task, "tpot", 0) or 0)
+    result_prefix = f"{model}_{system}_{backend}_trace_{trace}_ttft{ttft}_tpot{tpot}"
+    return os.path.join(save_dir, f"{result_prefix}_{random.randint(0, 1000000)}")
 
 
 def _save_spica_pareto_plot(result_bundle: _SpicaTraceResultBundle, save_dir: str) -> str | None:
@@ -2015,16 +2043,17 @@ def _save_spica_pareto_plot(result_bundle: _SpicaTraceResultBundle, save_dir: st
 
 
 def _save_spica_trace_artifacts(result_bundle: _SpicaTraceResultBundle, save_dir: str) -> list[str]:
-    os.makedirs(save_dir, exist_ok=True)
+    result_dir = _spica_trace_result_dir(result_bundle, save_dir)
+    os.makedirs(result_dir, exist_ok=True)
     written_paths: list[str] = []
 
-    candidates_yaml = os.path.join(save_dir, "spica_candidates.yaml")
+    candidates_yaml = os.path.join(result_dir, "spica_candidates.yaml")
     with open(candidates_yaml, "w", encoding="utf-8") as fh:
         yaml.safe_dump(result_bundle.candidates, fh, sort_keys=False)
     written_paths.append(candidates_yaml)
 
     if not result_bundle.candidate_df.empty:
-        candidates_csv = os.path.join(save_dir, "spica_candidates.csv")
+        candidates_csv = os.path.join(result_dir, "spica_candidates.csv")
         result_bundle.candidate_df.to_csv(candidates_csv, index=False)
         written_paths.append(candidates_csv)
 
@@ -2033,17 +2062,23 @@ def _save_spica_trace_artifacts(result_bundle: _SpicaTraceResultBundle, save_dir
         combined_pareto = pd.concat(nonempty_fronts, ignore_index=True)
     else:
         combined_pareto = result_bundle.candidate_df.iloc[0:0].copy()
-    pareto_csv = os.path.join(save_dir, "pareto.csv")
+    pareto_csv = os.path.join(result_dir, "pareto.csv")
     combined_pareto.to_csv(pareto_csv, index=False)
     written_paths.append(pareto_csv)
 
-    plot_path = _save_spica_pareto_plot(result_bundle, save_dir)
+    plot_path = _save_spica_pareto_plot(result_bundle, result_dir)
     if plot_path is not None:
         written_paths.append(plot_path)
 
     for mode, pareto_df in result_bundle.pareto_fronts.items():
-        mode_dir = os.path.join(save_dir, str(mode))
+        mode_dir = os.path.join(result_dir, str(mode))
         os.makedirs(mode_dir, exist_ok=True)
+
+        if mode in result_bundle.tasks:
+            mode_config_yaml = os.path.join(mode_dir, "exp_config.yaml")
+            with open(mode_config_yaml, "w", encoding="utf-8") as fh:
+                fh.write(result_bundle.tasks[mode].to_yaml())
+            written_paths.append(mode_config_yaml)
 
         mode_pareto_csv = os.path.join(mode_dir, "pareto.csv")
         if pareto_df is None:

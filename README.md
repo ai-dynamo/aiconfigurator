@@ -283,12 +283,14 @@ The folder structure varies based on mode and `--deployment-target`:
 **For Spica trace mode** (`default --trace-path /path/to/mooncake.jsonl`):
 
 ```text
-results/trace_run
+results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_904495
 ├── agg
 │   ├── best_config_topn.csv
+│   ├── exp_config.yaml
 │   └── pareto.csv
 ├── disagg
 │   ├── best_config_topn.csv
+│   ├── exp_config.yaml
 │   └── pareto.csv
 ├── pareto.csv
 ├── pareto_frontier.png

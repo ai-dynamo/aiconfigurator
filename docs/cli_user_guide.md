@@ -539,15 +539,17 @@ Each replica has a system of 4 prefill workers and 1 decode workers. Each prefil
 `bs` is required to be set in framework as it limits the largest batch_size of the worker which is crucial to control the TPOT of the deployment.  
 `concurrency` = `concurrency * replicas` Use it to benchmark your deployment on total GPUs. If you only want to benchmark 1 replica, divide it by `replicas`
 
-As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save-dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. For Spica trace mode, the output contains replay ranking and Pareto artifacts:
+As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save-dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. For Spica trace mode, the CLI creates a similar run directory. It does not generate framework deployment manifests yet, but the replay ranking and Pareto artifacts use the same per-mode layout:
 
 ```text
-results/trace_run
+results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_904495
 ├── agg
 │   ├── best_config_topn.csv
+│   ├── exp_config.yaml
 │   └── pareto.csv
 ├── disagg
 │   ├── best_config_topn.csv
+│   ├── exp_config.yaml
 │   └── pareto.csv
 ├── pareto.csv
 ├── pareto_frontier.png
@@ -555,7 +557,7 @@ results/trace_run
 └── spica_candidates.yaml
 ```
 
-For the legacy estimator, here's a stucture of the output folder,
+For the legacy estimator, here's a structure of the output folder,
 ```text
 results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg

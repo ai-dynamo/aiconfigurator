@@ -391,22 +391,27 @@ class TestCLIIntegration:
         )
         result_bundle = _build_spica_trace_result_bundle(candidates, args)
         written_paths = _save_spica_trace_artifacts(result_bundle, str(tmp_path))
-        written_names = {str(path).replace(f"{tmp_path}/", "") for path in written_paths}
+        result_dir = next(tmp_path.iterdir())
+        written_names = {str(path).replace(f"{result_dir}/", "") for path in written_paths}
 
         assert {
             "spica_candidates.yaml",
             "spica_candidates.csv",
             "pareto.csv",
             "pareto_frontier.png",
+            "agg/exp_config.yaml",
             "agg/pareto.csv",
             "agg/best_config_topn.csv",
+            "disagg/exp_config.yaml",
             "disagg/pareto.csv",
             "disagg/best_config_topn.csv",
         }.issubset(written_names)
+        assert result_dir.parent == tmp_path
+        assert result_dir.name.startswith("Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_traffic_ttft2000_tpot30_")
 
-        combined_pareto = pd.read_csv(tmp_path / "pareto.csv")
+        combined_pareto = pd.read_csv(result_dir / "pareto.csv")
         assert set(combined_pareto["deployment_mode"]) == {"agg", "disagg"}
-        agg_best = pd.read_csv(tmp_path / "agg" / "best_config_topn.csv")
+        agg_best = pd.read_csv(result_dir / "agg" / "best_config_topn.csv")
         assert agg_best.loc[0, "tokens/s/gpu"] == pytest.approx(100.0)
 
     @pytest.mark.parametrize(
