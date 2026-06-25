@@ -375,8 +375,7 @@ def log_final_summary(
             else:
                 benefit_ratio = 0.0  # handle case where both are 0
             bold_msg = _cli_bold(
-                f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu "
-                f"(disagg {benefit_ratio:.2f}x better)"
+                f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu (disagg {benefit_ratio:.2f}x better)"
             )
         else:
             bold_msg = _cli_bold(f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu")

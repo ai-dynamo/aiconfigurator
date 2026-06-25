@@ -87,9 +87,7 @@ def enrich_context_for_sflow(
         include_http_port=False,
     )
     user_frontend_args = sflow_cfg.get("extra_frontend_args") or ""
-    ctx["sflow_extra_frontend_args"] = " ".join(
-        part for part in [generated_frontend_args, user_frontend_args] if part
-    )
+    ctx["sflow_extra_frontend_args"] = " ".join(part for part in [generated_frontend_args, user_frontend_args] if part)
     ctx["sflow_kvbm_env_exports"] = kvbm_shell_exports_from_dyn_config(dyn)
     ctx["sflow_variable_profile"] = variable_profile
 

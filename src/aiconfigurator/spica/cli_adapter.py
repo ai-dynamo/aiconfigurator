@@ -611,10 +611,7 @@ def _spica_planner_config(args: argparse.Namespace | None, row: pd.Series) -> di
         return None
 
     backend = str(
-        row.get("backend")
-        or getattr(args, "backend", None)
-        or getattr(args, "primary_backend_name", None)
-        or "trtllm"
+        row.get("backend") or getattr(args, "backend", None) or getattr(args, "primary_backend_name", None) or "trtllm"
     )
     mode = str(row.get("deployment_mode") or "disagg")
     model_name = None

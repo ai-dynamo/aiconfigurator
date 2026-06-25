@@ -495,9 +495,7 @@ class TestCLIIntegration:
         agg_top2_generator_config = yaml.safe_load((result_dir / "agg" / "top2" / "generator_config.yaml").read_text())
         assert agg_top2_generator_config["params"]["agg"]["max_batch_size"] == 64
         assert agg_top2_generator_config["params"]["agg"]["disable_prefix_cache"] is True
-        disagg_generator_config = yaml.safe_load(
-            (result_dir / "disagg" / "top1" / "generator_config.yaml").read_text()
-        )
+        disagg_generator_config = yaml.safe_load((result_dir / "disagg" / "top1" / "generator_config.yaml").read_text())
         assert disagg_generator_config["DynConfig"]["enable_router"] is True
         assert disagg_generator_config["DynConfig"]["router_mode"] == "kv"
         router_config = disagg_generator_config["DynConfig"]["router_config"]
@@ -561,9 +559,7 @@ class TestCLIIntegration:
         prefill_envs = {item["name"]: item["value"] for item in services["TRTLLMPrefillWorker"]["envs"]}
         assert prefill_envs["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] == "4096"
         assert prefill_envs["DYN_KVBM_MAX_TRANSFER_BATCH_SIZE"] == "32"
-        decode_script = k8s_deploy["spec"]["services"]["TRTLLMDecodeWorker"]["extraPodSpec"]["mainContainer"][
-            "args"
-        ][0]
+        decode_script = k8s_deploy["spec"]["services"]["TRTLLMDecodeWorker"]["extraPodSpec"]["mainContainer"]["args"][0]
         assert "max_num_tokens: 4096" in decode_script
         assert "enable_attention_dp: true" in decode_script
         assert "max_tokens_in_buffer: 8192" in decode_script
