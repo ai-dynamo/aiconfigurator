@@ -1,21 +1,43 @@
 # MoE Layerwise Modeling — Investigation Summary
 
-**Goal:** improve AIC's MoE perf model (started from Frontier's skew-feature idea).
-**Bottom line:** we chased 4 suspected modeling bugs. 3 were collection/measurement
-artifacts. The 4th (decode MoE over-prediction) traced to a **config bug in the
-diagnostics tool, not a main-line modeling bug** — and fixing it revealed the
-real, smaller remaining gap. Details in the per-topic docs in this folder
-(MIX_STEP_FIX_VALIDATION / SMALL_PREFILL_ENVELOPE_ROOTCAUSE / DECODE_FIDELITY_CHECK
-/ CLEAN_CTX_ENVELOPE_RESULTS); this is the plain-English summary.
+**Goal:** improve AIC's MoE perf model (started from Frontier's skew-feature idea); the
+downstream forward-step-latency API needs this accurate.
 
-## What we chased vs what it actually was
+## Navigation — the two-layer frame (read this first)
 
-| Suspected modeling bug | What it actually was | Status |
-| --- | --- | --- |
-| skew (CV/Gini) drives the mixed-step error | skew self-averages → near-constant per step (CV ~1.8%); explains ~2% of the residual | dead end |
-| mixed-step composition (README#1 "MoE mixed really bad") | collection artifact: context timed with `worker_wall` (host overhead) instead of `execute_model_gpu` | fixed in collector (mixed MAPE ~halved) |
-| small-prefill (≤512 tok) over-prediction 2.4× | 1-GPU-sharded collection runs prefill EAGER; real tp4 replays a captured graph. Topology gap, not a model bug; bounded (≤512 tok, doesn't move throughput) | documented, not fixed |
-| **decode MoE over-prediction ~10×** | **two fixes**: a diagnostics config bug (wrong moe_inter) + a real decode double-count in the layerwise overlay | both fixed + GPU-validated (decode MAPE 51.3%→21.2%) |
+Every forward step decomposes as two independent layers:
+
+```
+step latency = backbone (non-MoE, per-layer wall)  +  MoE overlay (routed/router/dispatch/comm/shared)
+```
+
+We investigated 4 directions; each hits a **different component**. Knowing which layer a
+finding lands in is the whole key to not getting lost:
+
+| # | direction | component | status |
+| --- | --- | --- | --- |
+| 1 | expert imbalance / router dominates | MoE overlay | ❌ rejected — skew self-averages (per-step CV ~1.8%); AIC's power-law label is enough |
+| 2 | layerwise data not apple-to-apple vs FPM | measurement | ❌ small portion — ctx timed with `worker_wall` (host overhead); fixed → `execute_model_gpu` |
+| 3 | **MoE overlay modeling inaccurate** | **MoE overlay** | ✅ **FIXED** — decode double-count: the fused `routed` kernel already contains router/dispatch, AIC added them again; MAPE 51→21% |
+| 4 | **small-prefill gap (latest)** | **backbone (non-MoE)** | 🆕 **NEW, MoE-unrelated** — comm-bound (golden) vs launch-bound (1-GPU collection); not yet fixed |
+
+**The #3 vs #4 boundary (the thing that's easy to confuse):**
+- **#3 is the MoE overlay.** Fixed by using the measured fused per-layer latency and
+  deleting the router/dispatch AIC double-added (fusion). Done.
+- **#4 is the backbone.** MoE-unrelated: **moe-noop (MoE removed) still shows the 33ms-vs-16ms
+  gap** → it is not the overlay. It is the non-MoE per-layer wall, mis-measured because the
+  collector models tp4 as a **1-GPU sharded** config that has **no TP all-reduce**.
+
+Both share the roofline insight `total = max(compute, memory, comm)`, but on **different
+components / regimes**:
+- #3 (overlay, decode): comm is **hidden** under the memory-bound weight load → overlap ≈ 0
+  (that's why we deleted the double-counted terms).
+- #4 (backbone, small-prefill): compute is tiny so **comm dominates** → golden is comm-bound
+  ~16ms; the 1-GPU collection has no comm and mis-measures a launch-bound ~33ms floor.
+
+Per-topic docs: `DECODE_MOE_OVERLAY_VERDICT` (#3); `SMALL_PREFILL_WHY_GOLDEN_16MS` +
+`SMALL_PREFILL_MECHANISM_DISCRIMINATION` + `SMALL_PREFILL_ENVELOPE_ROOTCAUSE` (#4);
+`MIX_STEP_FIX_VALIDATION` + `CLEAN_CTX_ENVELOPE_RESULTS` (#2); `DECODE_FIDELITY_CHECK` (backbone-OK baseline).
 
 ## The real root cause: wrong moe_inter in the diagnostics tool
 
