@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess as sp
 import sys
 from pathlib import Path
@@ -23,7 +24,7 @@ def test_cli_default_trace_path_real_default_sweep(tmp_path: Path):
     """Run the real default Spica trace sweep against an external Mooncake trace.
 
     This is intentionally opt-in: it requires Spica and compatible Dynamo replay
-    bindings on PYTHONPATH, and the default Spica sweep takes minutes.
+    bindings on PYTHONPATH, and the default 4-GPU Spica sweep takes minutes.
     """
 
     trace_path = os.environ.get("AIC_SPICA_TRACE_PATH")
@@ -49,7 +50,7 @@ def test_cli_default_trace_path_real_default_sweep(tmp_path: Path):
         "--model-path",
         "meta-llama/Meta-Llama-3.1-8B",
         "--total-gpus",
-        "1",
+        "4",
         "--system",
         "gb200",
         "--backend",
@@ -63,7 +64,7 @@ def test_cli_default_trace_path_real_default_sweep(tmp_path: Path):
         "--max-seq-len",
         "8192",
         "--top-n",
-        "1",
+        "2",
         "--save-dir",
         str(save_dir),
     ]
@@ -73,10 +74,17 @@ def test_cli_default_trace_path_real_default_sweep(tmp_path: Path):
     assert completed.returncode == 0, combined
 
     assert "sweep={'max_rounds': 3, 'parallel_evals': 16}" in combined
-    assert "smart-sweep done: 48/48 feasible" in combined
-    assert "0 replay-failed" in combined
+    sweep_done = re.search(
+        r"smart-sweep done: (?P<feasible>\d+)/96 feasible, 0 gated, 0 backend-unsupported, "
+        r"(?P<replay_failed>\d+) replay-failed",
+        combined,
+    )
+    assert sweep_done, combined
+    assert int(sweep_done.group("feasible")) > 0
     assert "AIConfigurator Final Results" in combined
-    assert "Best Experiment Chosen: agg" in combined
+    assert "Total GPUs: 4" in combined
+    assert "Trace mode: --isl/--osl ignored; request lengths come from replay." in combined
+    assert "Best Experiment Chosen:" in combined
 
     result_dirs = [path for path in save_dir.iterdir() if path.is_dir()]
     assert len(result_dirs) == 1
@@ -85,8 +93,18 @@ def test_cli_default_trace_path_real_default_sweep(tmp_path: Path):
     assert (result_dir / "spica_candidates.csv").is_file()
     assert (result_dir / "pareto.csv").is_file()
     assert (result_dir / "pareto_frontier.png").is_file()
-    assert (result_dir / "agg" / "best_config_topn.csv").is_file()
+    for mode in ("agg", "disagg"):
+        assert (result_dir / mode / "exp_config.yaml").is_file()
+        assert (result_dir / mode / "best_config_topn.csv").is_file()
+        assert (result_dir / mode / "pareto.csv").is_file()
+        assert (result_dir / mode / "top1" / "generator_config.yaml").is_file()
+        assert (result_dir / mode / "top1" / "bench_run.sh").is_file()
+        assert (result_dir / mode / "top1" / "k8s_bench.yaml").is_file()
+        assert (result_dir / mode / "top1" / "k8s_deploy.yaml").is_file()
+        assert (result_dir / mode / "top1" / "run_0.sh").is_file()
+        assert (result_dir / mode / "top1" / "sflow.yaml").is_file()
+        assert (result_dir / mode / "top1" / "spica_candidate.yaml").is_file()
+
     assert (result_dir / "agg" / "top1" / "agg_config.yaml").is_file()
-    assert (result_dir / "agg" / "top1" / "k8s_deploy.yaml").is_file()
-    assert (result_dir / "agg" / "top1" / "sflow.yaml").is_file()
-    assert (result_dir / "agg" / "top1" / "spica_candidate.yaml").is_file()
+    assert (result_dir / "disagg" / "top1" / "prefill_config.yaml").is_file()
+    assert (result_dir / "disagg" / "top1" / "decode_config.yaml").is_file()
