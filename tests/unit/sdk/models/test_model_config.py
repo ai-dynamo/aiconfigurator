@@ -1349,6 +1349,10 @@ class TestDSAAttentionQuantExclusion:
         raw = {"quantization_config": {"ignore": ["re:.*self_attn.*"]}}
         assert self._excluded(raw) is True
 
+    def test_hf_quant_ignore_key_pattern(self):
+        raw = {"hf_quant_config": {"quantization": {"ignore": ["model.layers.3.self_attn*"]}}}
+        assert self._excluded(raw) is True
+
     def test_attention_quantized_returns_false(self):
         raw = {"quantization_config": {"exclude_modules": ["lm_head", "model.layers.0.mlp.shared_experts.gate"]}}
         assert self._excluded(raw) is False
