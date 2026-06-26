@@ -381,6 +381,60 @@ fn fallback_regression_predicts_prefill_decode_and_mixed_workload_kinds() {
 }
 
 #[test]
+fn fallback_regression_prefill_weighted_hinge_avoids_small_token_collapse() {
+    let mut model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        min_observations: 6,
+        max_observations: 64,
+        ..Default::default()
+    })
+    .unwrap();
+
+    // Production-shaped prefill observations: low-token passes are dominated by
+    // fixed overhead, while larger passes steepen. A single global line can
+    // drive the intercept negative and collapse small-token predictions to the
+    // 1e-6 ms floor.
+    model
+        .tune_with_fpms(&[
+            vec![prefill_fpm(59, 0.0317)],
+            vec![prefill_fpm(120, 0.0450)],
+            vec![prefill_fpm(1_500, 0.0400)],
+            vec![prefill_fpm(5_000, 0.0540)],
+            vec![prefill_fpm(8_000, 0.1000)],
+            vec![prefill_fpm(12_000, 0.1300)],
+            vec![prefill_fpm(20_000, 0.2260)],
+            vec![prefill_fpm(50_000, 0.7290)],
+            vec![prefill_fpm(100_000, 1.5680)],
+        ])
+        .unwrap();
+
+    let small = model
+        .estimate_forward_pass_time_ms(&[prefill_fpm(1_000, 0.0)])
+        .unwrap()
+        .unwrap();
+    let mid = model
+        .estimate_forward_pass_time_ms(&[prefill_fpm(12_000, 0.0)])
+        .unwrap()
+        .unwrap();
+    let large = model
+        .estimate_forward_pass_time_ms(&[prefill_fpm(100_000, 0.0)])
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        small > 1.0,
+        "small prefill should not collapse to the 1e-6 ms floor, got {small}"
+    );
+    assert!(
+        small < mid && mid < large,
+        "prefill estimates should remain monotonic: small={small}, mid={mid}, large={large}"
+    );
+    assert!(
+        large > 1_000.0,
+        "large prefill should stay in the observed seconds-scale regime, got {large} ms"
+    );
+}
+
+#[test]
 fn tune_with_fpms_uses_one_rank_feature_vector() {
     let mut model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
         min_observations: 1,
