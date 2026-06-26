@@ -68,7 +68,6 @@ docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist 
 aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm
 aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --thorough-sweep
 aiconfigurator cli default --thorough-config spica_smart_sweep.yaml
-aiconfigurator cli default --thorough-config spica_mooncake_trace.yaml
 aiconfigurator cli exp --yaml-path exp.yaml
 aiconfigurator cli generate --model-path Qwen/Qwen3-32B-FP8 --total-gpus 8 --system h200_sxm
 aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
