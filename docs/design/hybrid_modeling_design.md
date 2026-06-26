@@ -87,10 +87,31 @@ time, so a cached DB can be retuned. External surfaces:
 ## Provenance (observability)
 
 The transfer kind that produced a value is captured (`capture_provenance()` wraps a run;
-`estimate()` notes its tier at the single chokepoint, ops tag the specific kind). The
-support matrix records the worst (least-confident) tier per PASS in a `Source` column and
-splits passes into *silicon* vs *hybrid:&lt;tier&gt;*. Predictions are unchanged — this is
-purely observability.
+`estimate()` notes its tier at the single chokepoint, ops tag the specific kind). The worst
+(least-confident) tier per PASS is recorded in a `Source` column. Predictions are unchanged —
+this is purely observability.
+
+### Support matrix: silicon-first with hybrid rescue (default)
+
+The support matrix runs each cell in **pure SILICON first** (shared layer off) and re-runs
+**only the genuine FAILs** in HYBRID. A `FAIL → PASS` transition is therefore unambiguously a
+hybrid rescue, which lets the `Source` be derived from the two-pass outcome **without any
+per-row provenance plumbing**:
+
+| silicon | hybrid | `Source` |
+|---|---|---|
+| PASS | — | `silicon` |
+| FAIL | PASS, an empirical tier fired | that tier (`xshape` / `xquant` / `xprofile` / `xop`) |
+| FAIL | PASS, no empirical tier | `xversion` (sibling-version shared layer) |
+| FAIL | FAIL | FAIL |
+| HW / FRAMEWORK incompatible | — | unchanged (not rescuable, not retried) |
+
+The `xversion` derivation is the key win: because the silicon pass runs with the shared layer
+**off**, a silicon-fail / hybrid-pass with no empirical tier can only be the shared layer, so
+shared-layer rescues are attributed correctly (a single all-HYBRID pass cannot distinguish a
+sibling-row hit from a primary-row hit and mislabels them `silicon`). Runtime is ~unchanged
+since only the minority of FAILs get a second pass. Set `AIC_SM_ALLOW_HYBRID=0` for a
+pure-silicon matrix (no rescue).
 
 ## Scope
 
