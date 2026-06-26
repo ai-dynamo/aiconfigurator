@@ -1067,7 +1067,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
         def get_empirical() -> float:
             # SOL / util from own prefix-resolved (prefix, s, b) grid; raises if no data.
-            sol_q = get_sol()[0]
+            sol_q = get_sol()[0]  # true SOL(s, prefix)
 
             def _slice():
                 data = getattr(database, "_context_deepseek_v4_attention_module_data", None)
@@ -1082,9 +1082,36 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     raise KeyError("no compress_ratio")
                 return cr_dict  # {prefix: {s: {b: leaf}}}
 
+            try:
+                prefix_keys = tuple(sorted(_slice().keys()))
+            except Exception:
+                prefix_keys = ()
+            # Genuine prefix interpolation needs >=2 collected prefix points bracketing the
+            # query. A degenerate axis (e.g. prefix=0 only, as collected on sglang) or an
+            # out-of-range query would otherwise borrow util at the query's own small-s point,
+            # crossing the indexer/window regime and the launch-overhead floor and inflating the
+            # estimate. Anchor instead at the prefix=0 slice at full_s = s + prefix (regime-
+            # matched), with the prefix effect carried by sol_q -- same as context attention/MLA
+            # and the DSA context fallback.
+            interp_prefix = len(prefix_keys) >= 2 and prefix_keys[0] <= prefix <= prefix_keys[-1]
+
+            if interp_prefix:
+                depth, query, slice_fn, key_tag = 3, (prefix, s, b), _slice, "dsv4_ctx_attn"
+
+                def _sol(c):
+                    return get_sol(c[2], c[1], c[0])[0]  # c=(prefix, s, b)
+            else:
+                depth, query, key_tag = 2, (s + prefix, b), "dsv4_ctx_attn_p0anchor"
+
+                def slice_fn():
+                    return _slice()[0]  # prefix=0 sub-slice -> {s: {b: leaf}}
+
+                def _sol(c):
+                    return get_sol(c[1], c[0], 0)[0]  # c=(s, b); anchor prefix=0
+
             grid = util_empirical.grid_for(
                 (
-                    "dsv4_ctx_attn",
+                    key_tag,
                     database.system,
                     database.backend,
                     database.version,
@@ -1093,12 +1120,13 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     gemm_quant_mode.name,
                     num_heads,
                     compress_ratio,
+                    depth,
                 ),
-                _slice,
-                lambda c: get_sol(c[2], c[1], c[0])[0],  # c=(prefix, s, b)
-                depth=3,
+                slice_fn,
+                _sol,
+                depth=depth,
             )
-            lat, _ = util_empirical.estimate(sol_q, (prefix, s, b), grid)
+            lat, _ = util_empirical.estimate(sol_q, query, grid)
             return lat
 
         if database_mode is None:
