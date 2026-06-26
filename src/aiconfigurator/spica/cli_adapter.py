@@ -110,10 +110,6 @@ def _spica_thorough_sweep_config() -> dict[str, int]:
     return sweep_config
 
 
-def _spica_trace_sweep_config() -> dict[str, int]:
-    return _spica_thorough_sweep_config()
-
-
 def _spica_candidate_to_dict(candidate: Any) -> dict[str, Any]:
     if hasattr(candidate, "model_dump"):
         return candidate.model_dump()
@@ -497,7 +493,7 @@ def _spica_trace_path_from_config(config: Any | None) -> str | None:
 
 
 def _spica_workload_label(config: Any | None, args, config_path: str | None) -> str:
-    if _spica_trace_path_from_config(config) or getattr(args, "trace_path", None):
+    if _spica_trace_path_from_config(config):
         return "trace"
     if config_path:
         return "config"
@@ -544,7 +540,7 @@ def _build_spica_trace_result_bundle(
         candidates=payloads,
         candidate_df=candidate_df,
         tasks=tasks,
-        trace_path=_spica_trace_path_from_config(config) or getattr(args, "trace_path", None),
+        trace_path=_spica_trace_path_from_config(config),
         config_path=config_path,
         workload_label=_spica_workload_label(config, args, config_path),
         chosen_exp=chosen_exp,
@@ -1205,9 +1201,6 @@ def _spica_synthetic_request_count() -> int:
 
 
 def _build_spica_default_workload(args) -> dict[str, Any]:
-    if getattr(args, "trace_path", None):
-        return {"trace_path": args.trace_path, "trace_format": "mooncake"}
-
     workload: dict[str, Any] = {
         "isl": args.isl,
         "osl": args.osl,
@@ -1257,8 +1250,11 @@ def _spica_extra_input_lines(config: Any, config_path: str | None) -> list[str]:
     if config_path:
         lines.append(f"Spica Config: {config_path}")
     if getattr(workload, "trace_path", None):
-        lines.append(f"Trace: {workload.trace_path} (Mooncake JSONL)")
-        lines.append("Trace mode: --isl/--osl ignored; request lengths come from replay.")
+        trace_format = getattr(workload, "trace_format", None)
+        lines.append(f"Trace: {workload.trace_path}")
+        if trace_format:
+            lines.append(f"Trace Format: {trace_format}")
+        lines.append("Trace workload: request lengths come from replay.")
     else:
         lines.append(
             "Synthetic Workload: "
@@ -1280,10 +1276,6 @@ def _spica_extra_input_lines(config: Any, config_path: str | None) -> list[str]:
 def _load_spica_config(args, smart_search_config_cls):
     config_path = getattr(args, "thorough_config", None)
     if config_path:
-        if getattr(args, "trace_path", None):
-            raise SystemExit(
-                "--thorough-config cannot be combined with --trace-path; put trace_path in the Spica config."
-            )
         return smart_search_config_cls.from_yaml(config_path), config_path
 
     backends = [backend.value for backend in common.BackendName] if args.backend == "auto" else [args.backend]
@@ -1323,7 +1315,7 @@ class _SpicaReplayEvaluatorCompat:
 
 
 def run_spica_thorough_default(args) -> list[Any]:
-    """Run the Spica smart sweeper for ``default --thorough-sweep`` / ``--trace-path``."""
+    """Run the Spica smart sweeper for ``default --thorough-sweep`` / ``--thorough-config``."""
     from aiconfigurator.cli.report_and_save import log_final_summary
 
     if (
@@ -1355,7 +1347,7 @@ def run_spica_thorough_default(args) -> list[Any]:
     except ImportError as exc:
         raise SystemExit(
             "Spica thorough sweep requires the optional 'spica' package and its replay dependencies. "
-            "Install Spica, then rerun with --thorough-sweep or --trace-path."
+            "Install Spica, then rerun with --thorough-sweep or --thorough-config."
         ) from exc
 
     _install_dynamo_planner_bridge_compat()
@@ -1395,8 +1387,3 @@ def run_spica_thorough_default(args) -> list[Any]:
         logger.info("Saved Spica thorough artifacts to %s: %s", args.save_dir, ", ".join(written_paths))
 
     return candidates
-
-
-def run_spica_trace_default(args) -> list[Any]:
-    """Backward-compatible wrapper for the original ``default --trace-path`` entrypoint."""
-    return run_spica_thorough_default(args)

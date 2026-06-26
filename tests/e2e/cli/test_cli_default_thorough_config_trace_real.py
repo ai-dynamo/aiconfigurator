@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 pytestmark = [pytest.mark.e2e, pytest.mark.sweep]
 
@@ -20,8 +21,8 @@ def _enabled() -> bool:
 
 @pytest.mark.skipif(not _enabled(), reason="set AIC_RUN_SPICA_TRACE_E2E=true to run real Spica trace replay")
 @pytest.mark.timeout(900)
-def test_cli_default_trace_path_real_default_sweep(tmp_path: Path):
-    """Run the real default Spica trace sweep against an external Mooncake trace.
+def test_cli_default_thorough_config_trace_real_default_sweep(tmp_path: Path):
+    """Run the real default Spica trace sweep from a SmartSearchConfig YAML.
 
     This is intentionally opt-in: it requires Spica and compatible Dynamo replay
     bindings on PYTHONPATH, and the default 4-GPU Spica sweep takes minutes.
@@ -41,28 +42,47 @@ def test_cli_default_trace_path_real_default_sweep(tmp_path: Path):
     ):
         env.pop(key, None)
 
+    config_path = tmp_path / "spica_trace.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "search_space": {
+                    "deployment_mode": ["disagg", "agg"],
+                    "model_name": "meta-llama/Meta-Llama-3.1-8B",
+                    "hardware_sku": "gb200",
+                    "gpu_budget": 4,
+                    "backend": ["trtllm"],
+                    "context_length": 8192,
+                },
+                "workload": {
+                    "trace_path": trace_path,
+                    "trace_format": "mooncake",
+                },
+                "goal": {
+                    "target": "goodput_per_gpu",
+                    "sla": {
+                        "ttft_ms": 8000,
+                        "itl_ms": 200,
+                    },
+                },
+                "sweep": {
+                    "max_rounds": 3,
+                    "parallel_evals": 16,
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
     save_dir = tmp_path / "trace-default"
     cmd = [
         sys.executable,
         "-m",
         "aiconfigurator.cli.main",
         "default",
-        "--model-path",
-        "meta-llama/Meta-Llama-3.1-8B",
-        "--total-gpus",
-        "4",
-        "--system",
-        "gb200",
-        "--backend",
-        "trtllm",
-        "--trace-path",
-        trace_path,
-        "--ttft",
-        "8000",
-        "--tpot",
-        "200",
-        "--max-seq-len",
-        "8192",
+        "--thorough-config",
+        str(config_path),
         "--top-n",
         "2",
         "--save-dir",
@@ -83,7 +103,8 @@ def test_cli_default_trace_path_real_default_sweep(tmp_path: Path):
     assert int(sweep_done.group("feasible")) > 0
     assert "AIConfigurator Final Results" in combined
     assert "Total GPUs: 4" in combined
-    assert "Trace mode: --isl/--osl ignored; request lengths come from replay." in combined
+    assert "Trace Format: mooncake" in combined
+    assert "Trace workload: request lengths come from replay." in combined
     assert "Best Experiment Chosen:" in combined
 
     result_dirs = [path for path in save_dir.iterdir() if path.is_dir()]

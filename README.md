@@ -67,8 +67,8 @@ docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist 
 ```bash
 aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm
 aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --thorough-sweep
-aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --trace-path /data/replay/traffic.jsonl
 aiconfigurator cli default --thorough-config spica_smart_sweep.yaml
+aiconfigurator cli default --thorough-config spica_mooncake_trace.yaml
 aiconfigurator cli exp --yaml-path exp.yaml
 aiconfigurator cli generate --model-path Qwen/Qwen3-32B-FP8 --total-gpus 8 --system h200_sxm
 aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
@@ -77,8 +77,8 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 - Use `default` to find the estimated best deployment by searching the configuration space.
 - Use `default --thorough-sweep` to run Spica's smart sweeper. Without `--thorough-config`, AIC converts the normal default CLI inputs into a legacy-compatible Spica `SmartSearchConfig` that keeps routing round-robin and planner scaling disabled.
 - Use `default --thorough-config spica_smart_sweep.yaml` to pass a native Spica `SmartSearchConfig` YAML that owns the search space, workload, goal, and sweep controls.
-- Use `default --trace-path` to run Spica from a Mooncake JSONL trace; this implies `--thorough-sweep`, and `--isl` / `--osl` are ignored because request lengths come from the trace. Example trace: [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl).
-- In Spica thorough mode, `--save-dir DIR` writes replay result artifacts and generated Dynamo configs: `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, per-mode `pareto.csv` / `best_config_topn.csv`, and per-rank `topN` deployment artifacts.
+- For replay-backed Spica sweeps, put `workload.trace_path` and `workload.trace_format` in the `--thorough-config` YAML. Today Spica supports `trace_format: mooncake`; example trace: [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl).
+- In Spica thorough mode, `--save-dir DIR` writes sweep result artifacts and generated Dynamo configs: `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, per-mode `pareto.csv` / `best_config_topn.csv`, and per-rank `topN` deployment artifacts.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
@@ -284,7 +284,7 @@ Please refer to the [Deployment Guide](docs/dynamo_deployment_guide.md) for deta
 To simplify the deployment and reproduction, in the `aiconfigurator` CLI, if you specify `--save-dir`, the tool writes the search results to disk. The legacy estimator also generates configuration files for your chosen deployment target.
 The folder structure varies based on mode and `--deployment-target`:
 
-**For Spica thorough mode** (`default --thorough-sweep`, `default --trace-path /path/to/mooncake.jsonl`, or `default --thorough-config spica_smart_sweep.yaml`):
+**For Spica thorough mode** (`default --thorough-sweep` or `default --thorough-config spica_smart_sweep.yaml`; trace replay is configured in the Spica YAML):
 
 ```text
 results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_904495

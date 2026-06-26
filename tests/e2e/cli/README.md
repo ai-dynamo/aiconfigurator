@@ -25,7 +25,7 @@ python3 -m pytest tests/e2e/cli -m sweep
 
 ### Real Spica Trace Thorough Sweep
 
-`test_cli_default_trace_path_real.py` is skipped by default because it requires
+`test_cli_default_thorough_config_trace_real.py` is skipped by default because it requires
 Spica plus compatible Dynamo replay bindings on `PYTHONPATH`, and it runs the
 real default Spica thorough smart sweep (`max_rounds=3`, `parallel_evals=16`). The test
 uses a 4-GPU GB200 trace case so the resulting Pareto frontier includes both
@@ -35,5 +35,5 @@ aggregate and disaggregate candidates.
 AIC_RUN_SPICA_TRACE_E2E=true \
 AIC_SPICA_TRACE_PATH=/path/to/mooncake_tiny.jsonl \
 PYTHONPATH=/path/to/spica/src:/path/to/dynamo/components/src:/path/to/dynamo/lib/bindings/python/src \
-python3 -m pytest tests/e2e/cli/test_cli_default_trace_path_real.py -q
+python3 -m pytest tests/e2e/cli/test_cli_default_thorough_config_trace_real.py -q
 ```

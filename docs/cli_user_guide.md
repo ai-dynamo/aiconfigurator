@@ -366,8 +366,7 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--free-gpu-memory-fraction`: Fraction of free GPU memory TRT-LLM allocates for KV cache (default: `1.0`). Filters batch sizes that would exceed KV cache capacity.
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls how many KV blocks are pre-allocated per sequence; set to match your deployment for accurate KV-capacity filtering.
 - `--thorough-sweep`: Use Spica's smart sweeper instead of the legacy AIC Pareto sweep. Without `--thorough-config`, CLI inputs are converted to a legacy-compatible Spica `SmartSearchConfig` that keeps routing round-robin and planner scaling disabled.
-- `--thorough-config`: Path to a native Spica `SmartSearchConfig` YAML file. The file defines the search space, workload, goal, and sweep controls.
-- `--trace-path`: Path to a Mooncake JSONL replay trace. This implies `--thorough-sweep`, and `--isl` / `--osl` are ignored because request lengths come from the trace. See [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl) for an example.
+- `--thorough-config`: Path to a native Spica `SmartSearchConfig` YAML file. The file defines the search space, workload, goal, and sweep controls. For replay-backed sweeps, put `workload.trace_path` and `workload.trace_format` in this file.
 - `--enable-chunked-prefill`: Enable chunked prefill for a finer-grained context-token sweep. When off (default), the context-token stride is aligned to ISL for faster sweeping.
 - `--enable-wideep`: Enable Wide Expert Parallelism (WideEP) for MoE models — EP-only parallelism via the `deepep_moe` backend. Applies to DeepSeek and Qwen3-235B on SGLang.
 - `--moe-backend`: Explicit SGLang MoE backend — `deepep_moe` or `megamoe` (use `megamoe` to model DeepSeek-V4 MegaMoE on Blackwell).
@@ -445,20 +444,33 @@ sweep:
   parallel_evals: 16
 ```
 
-Pass `--trace-path` to use a Mooncake JSONL trace as the Spica workload:
+For replay-backed sweeps, put the trace information in the Spica config and pass it with `--thorough-config`. This keeps the CLI independent of any single trace schema while Spica can add more `trace_format` values over time. Today Spica supports Mooncake JSONL traces with `trace_format: mooncake`:
 
-```bash
-aiconfigurator cli default \
-  --model-path Qwen/Qwen3-32B-FP8 \
-  --total-gpus 32 \
-  --system h200_sxm \
-  --backend auto \
-  --trace-path /data/replay/traffic.jsonl
+```yaml
+search_space:
+  deployment_mode: [disagg, agg]
+  model_name: Qwen/Qwen3-32B-FP8
+  hardware_sku: h200_sxm
+  gpu_budget: 32
+  backend: [trtllm]
+workload:
+  trace_path: /data/replay/traffic.jsonl
+  trace_format: mooncake
+goal:
+  target: goodput_per_gpu
+  sla: {ttft_ms: 2000, itl_ms: 30}
+sweep:
+  max_rounds: 40
+  parallel_evals: 16
 ```
 
-The trace should use the Mooncake replay JSONL schema. Each row describes one request with fields such as `timestamp`, `input_length`, `output_length`, and `hash_ids`; see [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl) for a concrete example.
+```bash
+aiconfigurator cli default --thorough-config spica_mooncake_trace.yaml
+```
 
-In trace mode, traffic shape and request lengths come from the trace, so `--isl` and `--osl` are ignored. The CLI still uses `--ttft` and `--tpot` as the goodput SLA for ranking candidates unless `--thorough-config` provides its own goal. The printed summary uses the same default-mode result layout and Pareto axes (`tokens/s/user` vs `tokens/s/gpu_cluster`), with Spica replay goodput normalized into the standard throughput columns. If `--save-dir` is set, the CLI writes `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, per-mode `pareto.csv` / `best_config_topn.csv`, and per-rank `topN` deployment artifacts.
+For Mooncake, each JSONL row describes one request with fields such as `timestamp`, `input_length`, `output_length`, and `hash_ids`; see [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl) for a concrete example.
+
+In trace mode, traffic shape and request lengths come from the trace, so the workload must not also set synthetic `isl` / `osl` fields. The printed summary uses the same default-mode result layout and Pareto axes (`tokens/s/user` vs `tokens/s/gpu_cluster`), with Spica replay goodput normalized into the standard throughput columns. If `--save-dir` is set, the CLI writes `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, per-mode `pareto.csv` / `best_config_topn.csv`, and per-rank `topN` deployment artifacts.
 
 #### Systems Paths
 
@@ -588,7 +600,7 @@ Each replica has a system of 4 prefill workers and 1 decode workers. Each prefil
 `bs` is required to be set in framework as it limits the largest batch_size of the worker which is crucial to control the TPOT of the deployment.  
 `concurrency` = `concurrency * replicas` Use it to benchmark your deployment on total GPUs. If you only want to benchmark 1 replica, divide it by `replicas`
 
-As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save-dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. For Spica thorough mode, the CLI creates a similar run directory with per-rank `topN` folders, including the replay ranking, generator bridge config, Pareto artifacts, and generated Dynamo deployment artifacts:
+As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save-dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. For Spica thorough mode, the CLI creates a similar run directory with per-rank `topN` folders, including the Spica ranking, generator bridge config, Pareto artifacts, and generated Dynamo deployment artifacts:
 
 ```text
 results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_904495

@@ -172,25 +172,6 @@ class TestCLIIntegration:
     @patch("aiconfigurator.cli.main.run_spica_thorough_default")
     @patch("aiconfigurator.cli.main._execute_tasks")
     @patch("aiconfigurator.cli.main.build_default_tasks")
-    def test_cli_default_trace_path_dispatches_to_spica(
-        self,
-        mock_build_default,
-        mock_execute,
-        mock_run_spica,
-        cli_args_factory,
-    ):
-        """default --trace-path should bypass legacy AIC tasks and run Spica."""
-        args = cli_args_factory(mode="default", trace_path="/tmp/traffic.jsonl")
-
-        cli_main(args)
-
-        mock_run_spica.assert_called_once_with(args)
-        mock_build_default.assert_not_called()
-        mock_execute.assert_not_called()
-
-    @patch("aiconfigurator.cli.main.run_spica_thorough_default")
-    @patch("aiconfigurator.cli.main._execute_tasks")
-    @patch("aiconfigurator.cli.main.build_default_tasks")
     def test_cli_default_thorough_sweep_dispatches_to_spica(
         self,
         mock_build_default,
@@ -239,12 +220,11 @@ class TestCLIIntegration:
         with pytest.raises(SystemExit, match="default mode requires"):
             cli_main(args)
 
-    def test_spica_trace_search_space_collapses_single_gpu_noops(self, cli_args_factory):
-        """Single-GPU trace sweeps should avoid routing/planner choices that cannot help."""
+    def test_spica_default_search_space_collapses_single_gpu_noops(self, cli_args_factory):
+        """Single-GPU Spica default sweeps should avoid routing/planner choices that cannot help."""
         args = cli_args_factory(
             mode="default",
             total_gpus=1,
-            trace_path="/tmp/traffic.jsonl",
             max_seq_len=8192,
         )
 
@@ -368,16 +348,17 @@ class TestCLIIntegration:
 
         args = cli_args_factory(
             mode="default",
-            trace_path="/data/replay/traffic.jsonl",
             model_path="Qwen/Qwen3-32B-FP8",
             total_gpus=16,
             top_n=5,
             ttft=2000.0,
             tpot=30.0,
         )
-        result_bundle = _build_spica_trace_result_bundle(candidates, args)
+        config = argparse.Namespace(workload=argparse.Namespace(trace_path="/data/replay/traffic.jsonl"))
+        result_bundle = _build_spica_trace_result_bundle(candidates, args, config=config)
 
         assert result_bundle.chosen_exp == "disagg"
+        assert result_bundle.trace_path == "/data/replay/traffic.jsonl"
         assert set(result_bundle.tasks) == {"agg", "disagg"}
         assert result_bundle.tasks["disagg"].serving_mode == "disagg"
         assert result_bundle.tasks["disagg"].primary_model_path == "Qwen/Qwen3-32B-FP8"
@@ -414,7 +395,6 @@ class TestCLIIntegration:
             model_path=None,
             system=None,
             total_gpus=None,
-            trace_path=None,
             top_n=1,
             strict_sla=False,
             ttft=2000.0,
@@ -583,13 +563,15 @@ class TestCLIIntegration:
 
         args = cli_args_factory(
             mode="default",
-            trace_path="/tmp/traffic.jsonl",
             model_path="Qwen/Qwen3-32B-FP8",
             total_gpus=3,
             top_n=2,
             max_seq_len=8192,
         )
-        result_bundle = _build_spica_trace_result_bundle(candidates, args)
+        config = argparse.Namespace(
+            workload=argparse.Namespace(trace_path="/tmp/traffic.jsonl", trace_format="mooncake")
+        )
+        result_bundle = _build_spica_trace_result_bundle(candidates, args, config=config)
         written_paths = _save_spica_trace_artifacts(result_bundle, str(tmp_path))
         result_dir = next(tmp_path.iterdir())
         written_names = {str(path).replace(f"{result_dir}/", "") for path in written_paths}

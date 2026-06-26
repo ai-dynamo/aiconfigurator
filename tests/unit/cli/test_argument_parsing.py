@@ -117,32 +117,28 @@ class TestCLIArgumentParsing:
         assert args.ttft == 2000.0
         assert args.tpot == 30.0
         assert args.request_latency is None
-        assert args.trace_path is None
         assert args.thorough_sweep is False
         assert args.thorough_config is None
         assert args.inclusive_tpot is False
         assert args.prefix == 0
         assert args.engine_step_backend is None
 
-    def test_default_trace_path_parses(self, cli_parser):
-        """--trace-path selects replay-backed default mode without requiring ISL/OSL."""
-        args = cli_parser.parse_args(
-            [
-                "default",
-                "--model-path",
-                "Qwen/Qwen3-32B",
-                "--total-gpus",
-                "8",
-                "--system",
-                "h200_sxm",
-                "--trace-path",
-                "/tmp/traffic.jsonl",
-            ]
-        )
-
-        assert args.trace_path == "/tmp/traffic.jsonl"
-        assert args.isl == 4000
-        assert args.osl == 1000
+    def test_default_trace_path_is_not_public_cli(self, cli_parser):
+        """Trace replay should be configured through --thorough-config, not a single-format CLI shortcut."""
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "default",
+                    "--model-path",
+                    "Qwen/Qwen3-32B",
+                    "--total-gpus",
+                    "8",
+                    "--system",
+                    "h200_sxm",
+                    "--trace-path",
+                    "/tmp/traffic.jsonl",
+                ]
+            )
 
     def test_default_thorough_sweep_parses(self, cli_parser):
         """--thorough-sweep selects Spica while still using regular default inputs."""
@@ -173,19 +169,13 @@ class TestCLIArgumentParsing:
 
     @pytest.mark.parametrize("flag", ["--trace-sweep-rounds", "--trace-parallel-evals"])
     def test_default_trace_tuning_flags_are_not_public_cli(self, cli_parser, flag):
-        """Trace sweep tuning is intentionally internal while trace mode is a POC."""
+        """Trace sweep tuning is intentionally configured by Spica config or internal env defaults."""
         with pytest.raises(SystemExit):
             cli_parser.parse_args(
                 [
                     "default",
-                    "--model-path",
-                    "Qwen/Qwen3-32B",
-                    "--total-gpus",
-                    "8",
-                    "--system",
-                    "h200_sxm",
-                    "--trace-path",
-                    "/tmp/traffic.jsonl",
+                    "--thorough-config",
+                    "/tmp/spica.yaml",
                     flag,
                     "5",
                 ]

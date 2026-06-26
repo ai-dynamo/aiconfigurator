@@ -293,15 +293,6 @@ def _add_default_mode_arguments(parser):
         help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
     )
     parser.add_argument(
-        "--trace-path",
-        type=str,
-        default=None,
-        help=(
-            "Path to a Mooncake JSONL replay trace. Implies --thorough-sweep: default mode runs the Spica "
-            "replay-backed smart sweeper instead of the legacy AIC Pareto sweep, and --isl/--osl are ignored."
-        ),
-    )
-    parser.add_argument(
         "--thorough-sweep",
         action="store_true",
         default=False,
@@ -930,12 +921,6 @@ aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --perf-db-version 1.2.0rc5 \\
     --config-template-version 1.2.0rc6 \\
     --save-dir results
-
-# Run replay-backed Spica smart sweep from a Mooncake trace
-aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
-    --backend auto \\
-    --total-gpus 32 --system h200_sxm \\
-    --trace-path /data/replay/traffic.jsonl
 
 # Run Spica smart sweep from normal default CLI inputs
 aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
@@ -2328,9 +2313,7 @@ def main(args):
 
     if args.mode == "default":
         _validate_default_mode_inputs(args)
-        if getattr(args, "thorough_sweep", False) or args.thorough_config or args.trace_path:
-            if args.trace_path and not getattr(args, "thorough_sweep", False):
-                logger.info("--trace-path implies --thorough-sweep.")
+        if getattr(args, "thorough_sweep", False) or getattr(args, "thorough_config", None):
             run_spica_thorough_default(args)
             return
 
