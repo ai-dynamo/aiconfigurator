@@ -186,23 +186,24 @@ class BaseModel:
         return []
 
     def _cp_kv_memory_divisor(self) -> int:
-        """Per-rank persistent-KV divisor for this model's ``cp_style``.
+        """Per-rank persistent-KV divisor under CP (always 1: full KV per rank).
 
-        Every wired CP variant seq/round-robin shards the KV cache across the
-        ``cp_size`` ranks, so each rank's persistent footprint is ``full / cp``:
+        Verified against sglang v0.5.13 that CP gives **no** per-rank KV-memory
+        savings for any family -- each rank holds the FULL KV:
 
-        - **AllGather (sglang)**: each rank stores only its 1/cp of the tokens'
-          KV (round-robin for DSA, zigzag for dense); the all-gather is a
-          transient compute buffer freed after FMHA, and sglang CP mandates
-          PD-disaggregation so decode runs on separate (non-CP) workers.
-        - **Ring (trtllm) / Ulysses**: seq- / head-sliced -- also ``full / cp``.
+        - **Dense GQA**: prefill CP gathers + writes the full KV to every rank's
+          pool (``cp_all_gather_rerange_kv_cache`` -> ``cp_allgather_and_save_kv_cache``,
+          "write the full result into each rank's local memory pool").
+        - **MLA / DSA** (DeepSeek V3/V3.2/V4, Kimi): the prefill gather is
+          transient, but **decode does not run CP** (``*_use_prefill_cp`` require
+          ``is_context_parallel_extend``) and reads the full KV resident in the
+          local pool (decode page_table / ``cache_seqlens`` span the full seq_len
+          with no gather) -- so the full KV must reside per rank.
 
-        ``get_kvcache_bytes_per_sequence`` stays CP-agnostic (full, the single
-        source of truth + the un-divided per-token value ``_cp_attn_comm_ops``
-        needs); memory consumers apply this divisor.
+        CP therefore saves prefill *compute*, not KV memory. Kept as a method so
+        a future seq-sliced variant (e.g. Ring) can override.
         """
-        cp_size = self.config.cp_size
-        return cp_size if cp_size > 1 else 1
+        return 1
 
     def get_kvcache_elements_per_token(self) -> int:
         """KV cache size per token (per GPU) summed over all layers, in elements.

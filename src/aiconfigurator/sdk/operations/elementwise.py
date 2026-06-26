@@ -54,7 +54,7 @@ class ElementWise(Operation):
         if self._scale_num_tokens <= 0:
             raise ValueError(f"ElementWise.query: scale_num_tokens must be > 0, got {self._scale_num_tokens}.")
         x //= self._scale_num_tokens
-        x //= self._seq_split  # CP: per-rank token count
+        x = -(-x // self._seq_split)  # CP: per-rank token count (ceil = busiest rank)
         read_bytes = x * self._dim_in * 2  # bfloat16 for act
         write_bytes = x * self._dim_out * 2
 

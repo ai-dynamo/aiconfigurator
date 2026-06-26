@@ -51,7 +51,7 @@ class Embedding(Operation):
         x = kwargs.get("x")
         if x is None:
             raise ValueError("Embedding.query requires 'x' (num tokens).")
-        x //= self._seq_split  # CP: per-rank token count
+        x = -(-x // self._seq_split)  # CP: per-rank token count (ceil = busiest rank)
         d2d_bytes = x * self._column_size * 2
 
         result = database.query_mem_op(d2d_bytes)

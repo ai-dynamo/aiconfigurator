@@ -635,7 +635,7 @@ class DeepSeekV4MHCModule(Operation):
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         result = database.query_mhc_module(
-            num_tokens=kwargs.get("x") // self._seq_split,  # CP: per-rank token count
+            num_tokens=-(-kwargs.get("x") // self._seq_split),  # CP: per-rank token count (ceil = busiest rank)
             hidden_size=self._hidden_size,
             hc_mult=self._hc_mult,
             sinkhorn_iters=self._sinkhorn_iters,
@@ -1225,7 +1225,16 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
     @classmethod
     def _load_csa_topk_top_last(cls, database: PerfDatabase, native_heads: int) -> dict:
         """{bs: {(isl, step): top_last_latency}} from dsv4_csa_topk_calib."""
-        key = (database.systems_root, database.backend, database.version, native_heads)
+        # Full database identity so two systems under the same root/backend/
+        # version don't reuse each other's dsv4_csa_topk_calib table.
+        key = (
+            database.systems_root,
+            database.system,
+            database.backend,
+            database.version,
+            database.enable_shared_layer,
+            native_heads,
+        )
         if key in cls._csa_topk_abs_cache:
             return cls._csa_topk_abs_cache[key]
         import os

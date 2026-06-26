@@ -9,7 +9,7 @@ Covers the parts added on top of the GLM-5 DSA CP path (see
 - ``ModelConfig`` CP geometry: ``total_gpus_per_worker`` / ``attn_width``.
 - ``enumerate_parallel_config`` CP sweep (6-tuple, width match, sglang guard).
 - ``ContextAttention`` zigzag chunk math for balanced per-rank prefill work.
-- ``BaseModel._cp_kv_memory_divisor`` (persistent KV is full/cp per rank).
+- ``BaseModel._cp_kv_memory_divisor`` (CP keeps full KV per rank; divisor 1).
 - ``supports_cp`` capability matrix.
 - gemma4 / hybrid_moe heterogeneous-KV CP wiring (per-type all-gather).
 """
@@ -110,6 +110,19 @@ def test_enumerate_non_cp_is_six_tuple_cp_one():
     assert r and all(len(c) == 6 and c[5] == 1 for c in r)
 
 
+def test_default_cp_list_auto_sweep_policy():
+    # Capability-derived: any family whose class supports_cp on sglang auto-sweeps.
+    from aiconfigurator.sdk.task_v2 import _default_cp_list_for
+
+    for fam in ("DEEPSEEKV32", "DEEPSEEKV4", "LLAMA", "GPT", "MOE", "GEMMA4MIX", "HYBRIDMOE"):
+        assert _default_cp_list_for(fam, "sglang") == [1, 2, 4, 8], fam
+    # CP only on sglang -> non-sglang backends never sweep.
+    assert _default_cp_list_for("DEEPSEEKV32", "trtllm") == [1]
+    assert _default_cp_list_for("LLAMA", "trtllm") == [1]
+    # Unknown / non-CP family falls back to [1].
+    assert _default_cp_list_for("NOT_A_REAL_FAMILY", "sglang") == [1]
+
+
 def test_enumerate_dense_cp_sweep():
     r = enumerate_parallel_config(
         num_gpu_list=[8],
@@ -196,8 +209,14 @@ def test_cp_kv_memory_divisor():
     def _m(cp):
         return LLAMAModel("l", "LLAMA", "LlamaForCausalLM", 4, 32, 8, 128, 4096, 14336, 128256, 131072, _mkcfg(cp), {})
 
+    # CP gives no per-rank KV-memory savings for any family: each rank holds the
+    # FULL KV (dense gathers+replicates; MLA/DSA decode reads full resident KV
+    # since decode does not run CP). Verified vs sglang v0.5.13. -> divisor 1.
     assert _m(1)._cp_kv_memory_divisor() == 1
-    assert _m(8)._cp_kv_memory_divisor() == 8
+    assert _m(8)._cp_kv_memory_divisor() == 1
+    dsa = _m(8)
+    dsa.model_family = "DEEPSEEKV32"
+    assert dsa._cp_kv_memory_divisor() == 1
 
 
 def test_supports_cp_matrix():

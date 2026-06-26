@@ -227,7 +227,7 @@ class CustomAllReduce(Operation):
             # silicon leakage in the breakdown report.
             return PerformanceResult(0.0, 0.0, source="empirical")
         # count, not size in bytes
-        size = (kwargs.get("x") // self._seq_split) * self._h
+        size = (-(-kwargs.get("x") // self._seq_split)) * self._h  # CP: ceil = busiest rank
 
         result = database.query_custom_allreduce(common.CommQuantMode.half, self._tp_size, size)
         return PerformanceResult(
@@ -425,7 +425,8 @@ class NCCL(Operation):
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query NCCL latency with power data."""
-        message_size = (kwargs.get("x") // self._seq_split) * self._num_elements_per_token
+        # CP: ceil = busiest rank
+        message_size = (-(-kwargs.get("x") // self._seq_split)) * self._num_elements_per_token
 
         result = database.query_nccl(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size)
         return PerformanceResult(
@@ -503,7 +504,7 @@ class P2P(Operation):
             # CustomAllReduce.query for source-tag rationale.
             return PerformanceResult(0.0, 0.0, source="empirical")
 
-        size = (kwargs.get("x") // self._seq_split) * self._h
+        size = (-(-kwargs.get("x") // self._seq_split)) * self._h  # CP: ceil = busiest rank
         p2p_bytes = size * 2
 
         result = database.query_p2p(p2p_bytes)

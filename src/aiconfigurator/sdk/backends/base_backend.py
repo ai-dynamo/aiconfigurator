@@ -1314,6 +1314,7 @@ class BaseBackend:
         moe_ep = model.config.moe_ep_size
         cp = model.config.cp_size
         tokens_s_gpu = output_throughput / pp / tp / dp / cp
+        # tpot can be 0.0 for valid no-decode agg runs (osl<=1 / _tpot_steps==0).
         tokens_s_user = 1000.0 / tpot if (osl > 1 and tpot > 0.0) else 0.0
         seq_s = request_rate
         seq_s_gpu = seq_s / pp / tp / dp / cp

@@ -315,10 +315,12 @@ class Gemma4MixModel(BaseModel):
         # full/cp work); token-major ops shrink the M-axis via ``seq_split``
         # (DB lookup at per-rank M). This bypasses the BaseModel CP helper,
         # which assumes one uniform per-token KV size.
-        # TODO(cp-impl-assumption): SGLang AllGather-of-KV variant.
-        # TODO(cp-window-cap): SWA all_gather sizes linearly in seq_len, but
-        # actual SWA KV caps at ``min(seq_len, sliding_window_size)`` -- the
-        # overstatement grows with seq_len/window for long-context prompts.
+        # NOTE: the SWA all_gather is sized by the full new-token count (not the
+        # window) on purpose -- this matches sglang v0.5.13
+        # ``cp_allgather_and_save_kv_cache`` / ``cp_all_gather_rerange_kv_cache``,
+        # which gather the FULL per-layer new-token KV across CP ranks; the
+        # sliding window only caps the SWA write target / stored KV (handled in
+        # get_kvcache_bytes_per_sequence), not this per-layer comm volume.
         if self.config.cp_size > 1:
             cp = self.config.cp_size
             kvcache_bytes = self.config.kvcache_quant_mode.value.memory
@@ -331,8 +333,17 @@ class Gemma4MixModel(BaseModel):
                     # NOT seq_split; with moe_ep=cp its attention_tp_size>1 would
                     # otherwise wrongly take the TP all-reduce path.
                     op._attn_cp_size = cp
-                else:
+                elif op._CP_AWARE:
+                    # Token-major op: shrink the M-axis. This post-construction
+                    # mutation bypasses the constructor's _CP_AWARE gate, so
+                    # re-assert the opt-in here -- an un-audited op in a
+                    # CP-enabled pipeline must fail loud, not silently skip CP.
                     op._seq_split = cp
+                else:
+                    raise NotImplementedError(
+                        f"{type(op).__name__} ('{op._name}') has not been audited for "
+                        f"context parallelism but appears in a CP-enabled context pipeline."
+                    )
             for ctx_key, n_kv_per_gpu, head_dim in (
                 ("swa", d["swa_n_kv_per_gpu"], d["swa_hd"]),
                 ("global", d["global_n_kv_per_gpu"], d["global_hd"]),

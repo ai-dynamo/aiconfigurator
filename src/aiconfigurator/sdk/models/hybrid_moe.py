@@ -341,8 +341,11 @@ class HybridMoEModel(BaseModel):
         # Dense FMHA uses zigzag (``cp_size`` on the attention op, balanced
         # full/cp work); token-major ops shrink the M-axis via ``seq_split``.
         # Bypasses the BaseModel CP helper (one uniform per-token KV size).
-        # TODO(cp-impl-assumption): SGLang AllGather-of-KV variant.
-        # TODO(cp-window-cap): SWA all_gather oversizes vs the window cap.
+        # NOTE: the SWA all_gather is sized by the full new-token count (not the
+        # window) on purpose -- matches sglang v0.5.13
+        # ``cp_allgather_and_save_kv_cache``, which gathers the FULL per-layer
+        # new-token KV across CP ranks; the sliding window only caps stored KV,
+        # not this per-layer comm volume.
         if self.config.cp_size > 1:
             cp = self.config.cp_size
             kvcache_bytes = self.config.kvcache_quant_mode.value.memory
@@ -355,8 +358,17 @@ class HybridMoEModel(BaseModel):
                     # NOT seq_split; with moe_ep=cp its attention_tp_size>1 would
                     # otherwise wrongly take the TP all-reduce path.
                     op._attn_cp_size = cp
-                else:
+                elif op._CP_AWARE:
+                    # Token-major op: shrink the M-axis. This post-construction
+                    # mutation bypasses the constructor's _CP_AWARE gate, so
+                    # re-assert the opt-in here -- an un-audited op in a
+                    # CP-enabled pipeline must fail loud, not silently skip CP.
                     op._seq_split = cp
+                else:
+                    raise NotImplementedError(
+                        f"{type(op).__name__} ('{op._name}') has not been audited for "
+                        f"context parallelism but appears in a CP-enabled context pipeline."
+                    )
             global_layers = counts.get("global_moe", 0) + counts.get("global_dense", 0)
             swa_layers = counts.get("swa_moe", 0) + counts.get("swa_dense", 0)
             # Per-layer KV bytes = n_kv * (k_hd + v_hd) * bytes (K and V head

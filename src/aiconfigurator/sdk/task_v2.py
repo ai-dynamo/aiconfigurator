@@ -61,6 +61,23 @@ _DEFAULT_NEXTN_ACCEPT_RATES: list[float] = [0.85, 0.8, 0.6, 0.0, 0.0]
 # A config that explicitly states the field (including 0, e.g. Kimi-K2.5) wins.
 _MTP_DEFAULT_FAMILIES = {"DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25", "QWEN35"}
 
+
+def _default_cp_list_for(model_family: str, backend_name: str) -> list[int]:
+    """Default prefill/agg ``cp_list`` for the CP auto-sweep; ``[1]`` otherwise.
+
+    Capability-derived: any model whose class declares ``supports_cp`` on this
+    backend is auto-swept over cp ∈ {1,2,4,8}. Keying off the registry (not a
+    hardcoded family list) means the sweep policy never drifts from
+    ``BaseModel.supports_cp``. Decode is always forced to cp=1 by iter_parallel.
+    """
+    from aiconfigurator.sdk.models.base import _MODEL_REGISTRY
+
+    cls = _MODEL_REGISTRY.get(model_family)
+    if cls is not None and cls.supports_cp(backend_name):
+        return [1, 2, 4, 8]
+    return [1]
+
+
 # Legacy V1 TaskRunner swept TPOT over this fixed grid to build the latency/throughput
 # Pareto frontier. Used when ``pareto_sweep=True`` (the default) so v2 matches v1.
 _LEGACY_TPOT_SWEEP: list[int] = list(range(1, 20, 1)) + list(range(20, 300, 5))
@@ -841,6 +858,10 @@ class Task:
             if getattr(self, name) is None:
                 setattr(self, name, values)
 
+        # CP auto-sweep for validated families (sglang); [1] otherwise. agg runs
+        # prefill in-worker, so cp applies; decode-cp=1 is enforced in iter_parallel.
+        _set("agg_cp_candidates", _default_cp_list_for(self._model_family, self.backend_name))
+
         if not self._is_moe:
             blackwell = self.system_name in ("gb200", "gb300")
             wide = [1, 2, 4, 8, 16] if blackwell else [1, 2, 4, 8]
@@ -937,12 +958,18 @@ class Task:
         }
         for k_src, k_attr in map_to_attr.items():
             if getattr(self, k_attr) is None:
-                # cp_list is optional in worker-config dicts; default to [1]
-                # (CP off). Decode is always [1] -- CP is prefill-only.
-                default = [1] if k_src == "cp_list" else None
-                value = src.get(k_src, default) if k_src == "cp_list" else src[k_src]
-                if role == "decode" and k_src == "cp_list":
-                    value = [1]
+                if k_src == "cp_list":
+                    # Decode is always cp=1 (CP is prefill-only). prefill/agg
+                    # auto-sweep cp for CP-validated families (else [1]); an
+                    # explicit worker-config cp_list still wins. A user-supplied
+                    # non-1 decode cp is rejected in iter_parallel.
+                    if role == "decode":
+                        value = [1]
+                    else:
+                        backend = self._role_attr(role, "backend_name")
+                        value = src.get(k_src, _default_cp_list_for(self._model_family, backend))
+                else:
+                    value = src[k_src]
                 setattr(self, k_attr, value)
 
     # =====================================================================
@@ -1015,8 +1042,14 @@ class Task:
         def _cands(dim: str) -> list[int]:
             return getattr(self, f"{prefix}{dim}_candidates")
 
-        # CP is modeled for context/prefill only; decode always cp=1.
-        cp_list = [1] if role == "decode" else (_cands("cp") or [1])
+        # CP is modeled for context/prefill only; decode must be cp=1. Fail loud
+        # rather than silently coercing a user-supplied decode cp>1.
+        cp_list = _cands("cp") or [1]
+        if role == "decode" and any(c != 1 for c in cp_list):
+            raise ValueError(
+                f"decode CP must be 1 (CP is modeled for prefill only); got "
+                f"decode_cp_candidates={cp_list}. Enable CP via prefill/agg instead."
+            )
 
         return iter(
             enumerate_parallel_config(

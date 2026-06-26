@@ -23,7 +23,7 @@ class ModelConfig:
     moe_tp_size: int = None
     moe_ep_size: int = None
     attention_dp_size: int = 1
-    cp_size: int = 1  # context parallelism (splits attention tokens, not heads); attn_tp = tp_size // cp_size
+    cp_size: int = 1  # context parallelism: splits sequence tokens (not heads); folds into attn_width = tp*cp*dp
     # CP variant ("none" / "allgather" / "ulysses" / "ring"). Set by get_model
     # from backend_name when cp_size > 1; default "none". Dense models branch on
     # this in their op pipeline; GLM-5 DSA ignores it (handled in ContextDSAModule).

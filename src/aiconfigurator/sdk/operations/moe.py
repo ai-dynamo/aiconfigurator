@@ -75,6 +75,12 @@ def _cache_key(database: PerfDatabase) -> tuple:
 class MoE(Operation):
     """MoE operation with power tracking."""
 
+    # CP-invariant: the A2A dispatch globalizes tokens across all (cp*ep) ranks,
+    # so expert compute sees the full token set regardless of CP and deliberately
+    # ignores ``seq_split`` (per-rank cp sharding does not reduce expert work).
+    # Marked audited so the post-construction CP wiring (gemma4/hybrid) does not
+    # trip the _CP_AWARE gate.
+    _CP_AWARE: ClassVar[bool] = True
     _data_cache: ClassVar[dict] = {}
     _low_latency_data_cache: ClassVar[dict] = {}
     _wideep_context_data_cache: ClassVar[dict] = {}
