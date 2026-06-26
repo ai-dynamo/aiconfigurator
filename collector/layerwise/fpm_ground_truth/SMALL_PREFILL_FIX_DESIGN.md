@@ -80,30 +80,33 @@ small terminal/standalone points (128/400/496), all ≤512 → so ctx-phase MAPE
 **small-prefill-only probe over 3 points, NOT a general ctx-accuracy number**. Product accuracy is the
 mixed phase (38.8%), where ≤512 is only 7/71 steps (the >512 bulk is ~1.2×).
 
-## How collector SHOULD collect: measure GPU-busy (launch-gap-free) + comm — NOT wall
-Root of the error: collector measures the **wall of an ISOLATED step**, which includes ~30 ms of
-host-dispatch idle that serving overlaps away. Fix = measure the **launch-gap-free GPU-busy**
-(Σ per-kernel durations) + comm, because in serving steady-state the step IS busy-bound:
-- GPU-busy is a *physical* quantity (kernel durations) — independent of isolated-vs-serving and of
-  host dispatch → it equals the serving busy-bound latency.
-- **Much LESS dead than it looked, but NOT reconciled** (NEW, from Part 1): A (1-GPU, **real MoE**)
-  GPU-busy = **8.7 ms** — far above the **3.4 ms moe-noop** busy the prior "dead" call used. So the
-  busy-metric starts close to golden 16, not at 3.4. BUT completing 8.7 → 16 needs the comm term, and
-  that number is **contested**: golden-busy − A-busy ≈ **7 ms** by subtraction, vs the synced-AR-floor
-  **~1.85 ms** from `SMALL_PREFILL_GAP_MICROCAUSALITY`/prefill_floor — they don't cleanly add
-  (8.7 + 1.85 = 10.5 ≠ 16; these come from different nsys runs w/ inflation). So: **promising, NOT
-  proven.** Needs GPU verification that backbone-busy + MoE-overlay + comm ≈ golden across shapes.
+## How to FIX — VERDICT IN (`runs/BUSY_METRIC_VERDICT.md`): pure busy-metric is DEAD; viable = busy + comm + regime host-residual + shard-correct MoE
+GPU-validated across all sizes (attribute, not fit). **golden sits BETWEEN the collector's two
+estimates, and neither matches:**
+```
+busy+comm   <   GOLDEN   <   isolated WALL
+~10 ms          15.5 ms       ~45 ms     (256 tok)
+```
+- **WALL over-predicts** (counts the full ~30 ms host idle serving overlaps away).
+- **busy+comm UNDER-predicts at every size** — by a **non-kernel, regime-constant host residual**:
+  ~5 ms in CAPTURED (≤512), ~30 ms in EAGER (>512), jumping at the 512 capture boundary. It is **not
+  any kernel class** (all 6 compute classes are fully measured and sum to GPU-busy) and **does NOT
+  scale with tokens** (golden is flat across sizes; the gap is constant, not growing) → it's the
+  per-step host-dispatch/launch/cross-rank-sync idle that Σ-kernel-duration is blind to by construction.
+- **Shard inequivalence** (advisor trap, confirmed): 1-GPU-sharded MoE-expert GEMM = **1.82×** golden's
+  per-GPU value (ep4-on-1-GPU carries ~1.8× the per-expert token load). Non-MoE classes match ±5–15%.
+  So the collector backbone over-counts MoE compute → the under-prediction gap is a *lower bound*.
 
-**So collector should:**
-1. measure **GPU-busy = Σ per-kernel durations** (CUPTI), NOT execute_model wall → drops the isolated
-   host-dispatch idle uniformly (and it's regime-independent, so isolated collection is fine);
-2. keep the **comm (all-reduce) model** (a 1-GPU collection physically can't measure it);
-3. assemble **backbone-busy + MoE-overlay + comm**.
-   ⚠️ Needs GPU verification that this sum ≈ golden across shapes (one shape reconciling ≠ proof).
+So promoting `latency_source=gpu`+comm just **swaps WALL's over-prediction for a comparable
+under-prediction** — it fixes neither small-prefill nor the 22%.
 
-**Alternatives:** real-tp full-step serving collection (most faithful, but abandons per-layer
-decomposition) · calibration of the ≤512 envelope (cheap, per-model). The GPU-busy metric (above)
-is the cleanest IF it verifies across shapes.
+**Viable model (per the verdict):**
+`golden ≈ GPU-busy + comm + regime-dependent host-residual (one const for captured ≤512, one for
+eager >512, calibrated vs golden FPM) + a shard-correct MoE-expert term (ep-correct per-GPU, not
+1-GPU-collapsed).`
+- This is **calibration-flavored** (2 fitted constants per model), not pure physics.
+- Equivalent alternative: **serving full-step collection** — golden's own path already contains the
+  residual; but it abandons the per-layer decomposition.
 
 ## Why DEFERRED (the ROI call)
 - **payoff is bounded**: shape-narrow (~1 shape class: terminal chunks of chunked prefills),
@@ -148,15 +151,16 @@ The dominant factor is **isolated-vs-serving (host overlap), and topology (1-GPU
 → inherently host-dispatch-exposed → it can NOT see the serving busy-bound value by measuring wall.
 (Strong inference across experiments — 34.7 / 40 / 14 / 16 from different runs — not one side-by-side.)
 
-## When/how to FIX (if revisited)
-- **Leading candidate: GPU-busy + comm** (see "How collector SHOULD collect"). Promising (real-MoE busy
-  8.7 ≫ moe-noop 3.4, so close to golden 16) but **NOT proven** — the comm term is contested (~7 by
-  subtraction vs ~1.85 synced-floor) and 8.7+1.85≠16. Build = measure Σ-per-kernel-durations (CUPTI)
-  instead of wall; assemble backbone-busy + MoE-overlay + comm. **Gate: GPU-verify sum ≈ golden across
-  shapes** AND resolve the comm number first.
-- Alternatives: real-tp full-step serving collection (most faithful, abandons per-layer decomposition)
-  · calibration of the ≤512 envelope. All: validate on a BROADER hybrid workload (not the 1 terminal-
-  chunk shape); guard inert for large-prefill + decode (those match golden ~1.0×).
+## When/how to FIX (if revisited) — verdict settled
+Pure GPU-busy+comm is **dead** (proven, above). Two viable paths, both calibration-flavored:
+1. **busy + comm + regime host-residual + shard-correct MoE** (the verdict's model): measure
+   GPU-busy (CUPTI) + comm; add a host-residual constant per regime (captured ≤512 / eager >512)
+   calibrated vs golden FPM; use an **ep-correct** per-GPU MoE-expert term (not the 1.82×-inflated
+   1-GPU-collapsed one). 2 fitted constants/model.
+2. **serving full-step collection** (golden's own path) — contains the residual already, but abandons
+   per-layer decomposition.
+- Either way: validate on a BROADER hybrid workload (not the 1 terminal-chunk shape); guard inert for
+  decode (matches golden ~1.0×). The shard-correct MoE term is needed regardless.
 
 ## The OTHER ~22% of mixed (after small-prefill) is the SAME family — not composition
 Checked by reading `_get_mix_step_latency`: it is already `context_total + decode_delta` (decode
