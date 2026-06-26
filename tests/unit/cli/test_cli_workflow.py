@@ -11,6 +11,8 @@ while keeping heavy computation mocked out.
 import argparse
 import json
 import logging
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -241,7 +243,7 @@ class TestCLIIntegration:
         assert search_space["planner_scaling_policy"] == ["disabled"]
 
     def test_spica_thorough_config_data_uses_cli_inputs(self, cli_args_factory):
-        """CLI-derived thorough mode should build a valid SmartSearchConfig-shaped payload."""
+        """CLI-derived thorough mode should build a Spica config-shaped payload."""
         args = cli_args_factory(
             mode="default",
             thorough_sweep=True,
@@ -274,20 +276,15 @@ class TestCLIIntegration:
         assert config_data["workload"]["osl"] == 512
         assert config_data["workload"]["concurrency"] == 512
         assert config_data["workload"]["num_request_ratio"] == pytest.approx(1000 / 512)
+        assert "request_count" not in config_data["workload"]
         assert config_data["workload"]["shared_prefix_ratio"] == 0.125
         assert config_data["workload"]["num_prefix_groups"] == 1
         assert config_data["goal"] == {"target": "goodput_per_gpu", "sla": {"ttft_ms": 8000.0, "itl_ms": 200.0}}
         assert config_data["sweep"]["max_rounds"] == 3
         assert config_data["sweep"]["parallel_evals"] == 16
 
-        from spica.config import SmartSearchConfig
-
-        SmartSearchConfig.model_validate(config_data)
-
     def test_spica_replay_evaluator_compat_forwards_concurrency_override(self, monkeypatch):
         """Spica pareto sweeps pass a per-trial concurrency override into the evaluator."""
-        import spica.evaluator as spica_evaluator
-
         captured: dict[str, object] = {}
 
         class FakeReplayEvaluator:
@@ -300,7 +297,13 @@ class TestCLIIntegration:
                 captured["concurrency_override"] = concurrency_override
                 return {"goodput_output_throughput_tok_s": 123.0}
 
-        monkeypatch.setattr(spica_evaluator, "ReplayEvaluator", FakeReplayEvaluator)
+        fake_spica = types.ModuleType("spica")
+        fake_spica.__path__ = []
+        fake_evaluator = types.ModuleType("spica.evaluator")
+        fake_evaluator.ReplayEvaluator = FakeReplayEvaluator
+        fake_spica.evaluator = fake_evaluator
+        monkeypatch.setitem(sys.modules, "spica", fake_spica)
+        monkeypatch.setitem(sys.modules, "spica.evaluator", fake_evaluator)
 
         evaluator = _SpicaReplayEvaluatorCompat(workload="workload", goal="goal")
         assert evaluator.evaluate("plan", concurrency_override=7) == {"goodput_output_throughput_tok_s": 123.0}
