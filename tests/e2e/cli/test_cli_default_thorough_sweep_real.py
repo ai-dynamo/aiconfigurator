@@ -30,7 +30,7 @@ def test_cli_default_thorough_sweep_real_static_workload(tmp_path: Path):
             "AIC_SPICA_THOROUGH_PARALLEL_EVALS": "4",
             "AIC_SPICA_THOROUGH_CANDIDATES_PER_ROUND": "4",
             "AIC_SPICA_THOROUGH_SYNTHETIC_CONCURRENCY": "1",
-            "AIC_SPICA_THOROUGH_SYNTHETIC_REQUEST_COUNT": "4",
+            "AIC_SPICA_THOROUGH_SYNTHETIC_NUM_REQUEST_RATIO": "4",
         }
     )
     for key in (
@@ -85,7 +85,7 @@ def test_cli_default_thorough_sweep_real_static_workload(tmp_path: Path):
     assert int(sweep_done.group("feasible")) > 0
     assert "AIConfigurator Final Results" in combined
     assert "Total GPUs: 4" in combined
-    assert "Synthetic Workload: ISL=128, OSL=16, concurrency=1, request_count=4" in combined
+    assert "Synthetic Workload: ISL=128, OSL=16, concurrency=1, num_request_ratio=4.0" in combined
     assert "Best Experiment Chosen:" in combined
 
     result_dirs = [path for path in save_dir.iterdir() if path.is_dir()]

@@ -435,7 +435,7 @@ workload:
   isl: 4000
   osl: 1000
   concurrency: 4096
-  request_count: 1000
+  num_request_ratio: 2
 goal:
   target: goodput_per_gpu
   sla: {ttft_ms: 2000, itl_ms: 30}
@@ -470,7 +470,7 @@ aiconfigurator cli default --thorough-config spica_mooncake_trace.yaml
 
 For Mooncake, each JSONL row describes one request with fields such as `timestamp`, `input_length`, `output_length`, and `hash_ids`; see [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl) for a concrete example.
 
-In trace mode, traffic shape and request lengths come from the trace, so the workload must not also set synthetic `isl` / `osl` fields. The printed summary uses the same default-mode result layout and Pareto axes (`tokens/s/user` vs `tokens/s/gpu_cluster`), with Spica replay goodput normalized into the standard throughput columns. If `--save-dir` is set, the CLI writes `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, per-mode `pareto.csv` / `best_config_topn.csv`, and per-rank `topN` deployment artifacts.
+In trace mode, traffic shape and request lengths come from the trace, so the workload must not also set synthetic `isl` / `osl` fields. For synthetic workloads, `num_request_ratio` controls the generated request count relative to load (`round(num_request_ratio * concurrency)` for closed-loop concurrency). The printed summary uses the same default-mode result layout and Pareto axes (`tokens/s/user` vs `tokens/s/gpu_cluster`), with Spica replay goodput normalized into the standard throughput columns. If `--save-dir` is set, the CLI writes `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, per-mode `pareto.csv` / `best_config_topn.csv`, and per-rank `topN` deployment artifacts.
 
 #### Systems Paths
 

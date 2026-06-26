@@ -77,6 +77,16 @@ service = [
     "orjson>=3.10.16",
     "uvicorn>=0.34.2"
 ]
+spica = [
+    "pydantic>=2.5",
+    "google-vizier[jax]==0.1.21; python_version < '3.13'",
+    "jax==0.4.38; python_version < '3.13'",
+    "jaxlib==0.4.38; python_version < '3.13'",
+    "flax==0.10.0; python_version < '3.13'",
+    "optax==0.2.4; python_version < '3.13'",
+    "chex==0.1.87; python_version < '3.13'",
+    "tensorflow-probability[jax]==0.25.0; python_version < '3.13'",
+]
 
 [project.urls]
 GitHub = "https://github.com/ai-dynamo/aiconfigurator"
@@ -98,13 +108,14 @@ include-package-data = false
 "aiconfigurator.webapp.components.profiling" = ["styles.css", "js/*.js"]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "spica/src"]
 include = [
     "aiconfigurator",
     "aiconfigurator.cli*",
     "aiconfigurator.generator*",
     "aiconfigurator.spica*",
     "aiconfigurator.webapp*",
+    "spica*",
 ]
 exclude = ["aiconfigurator.sdk*", "aiconfigurator.systems*", "aiconfigurator.model_configs*", "aiconfigurator_core*"]
 

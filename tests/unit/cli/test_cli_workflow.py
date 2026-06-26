@@ -36,6 +36,7 @@ from aiconfigurator.spica.cli_adapter import (
     _spica_generator_overrides,
     _spica_role_worker_overrides,
     _spica_router_enabled,
+    _SpicaReplayEvaluatorCompat,
 )
 
 pytestmark = pytest.mark.unit
@@ -269,17 +270,46 @@ class TestCLIIntegration:
         assert config_data["search_space"]["planner_scaling_policy"] == ["disabled"]
         assert config_data["search_space"]["planner_fpm_sampling"] == ["default"]
         assert config_data["search_space"]["planner_load_sensitivity"] == ["default"]
-        assert config_data["workload"] == {
-            "isl": 2048,
-            "osl": 512,
-            "concurrency": 512,
-            "request_count": 1000,
-            "shared_prefix_ratio": 0.125,
-            "num_prefix_groups": 1,
-        }
+        assert config_data["workload"]["isl"] == 2048
+        assert config_data["workload"]["osl"] == 512
+        assert config_data["workload"]["concurrency"] == 512
+        assert config_data["workload"]["num_request_ratio"] == pytest.approx(1000 / 512)
+        assert config_data["workload"]["shared_prefix_ratio"] == 0.125
+        assert config_data["workload"]["num_prefix_groups"] == 1
         assert config_data["goal"] == {"target": "goodput_per_gpu", "sla": {"ttft_ms": 8000.0, "itl_ms": 200.0}}
         assert config_data["sweep"]["max_rounds"] == 3
         assert config_data["sweep"]["parallel_evals"] == 16
+
+        from spica.config import SmartSearchConfig
+
+        SmartSearchConfig.model_validate(config_data)
+
+    def test_spica_replay_evaluator_compat_forwards_concurrency_override(self, monkeypatch):
+        """Spica pareto sweeps pass a per-trial concurrency override into the evaluator."""
+        import spica.evaluator as spica_evaluator
+
+        captured: dict[str, object] = {}
+
+        class FakeReplayEvaluator:
+            def __init__(self, workload, goal):
+                captured["workload"] = workload
+                captured["goal"] = goal
+
+            def evaluate(self, plan, *, concurrency_override=None):
+                captured["plan"] = plan
+                captured["concurrency_override"] = concurrency_override
+                return {"goodput_output_throughput_tok_s": 123.0}
+
+        monkeypatch.setattr(spica_evaluator, "ReplayEvaluator", FakeReplayEvaluator)
+
+        evaluator = _SpicaReplayEvaluatorCompat(workload="workload", goal="goal")
+        assert evaluator.evaluate("plan", concurrency_override=7) == {"goodput_output_throughput_tok_s": 123.0}
+        assert captured == {
+            "workload": "workload",
+            "goal": "goal",
+            "plan": "plan",
+            "concurrency_override": 7,
+        }
 
     def test_spica_trace_results_use_default_result_shape(self, cli_args_factory):
         """Spica trace candidates should be adapted to the legacy default-mode result bundle."""

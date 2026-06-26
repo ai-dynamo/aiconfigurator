@@ -6,9 +6,9 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import logging
+import math
 import os
 import secrets
-import traceback
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 SPICA_THOROUGH_SWEEP_ROUNDS = 3
 SPICA_THOROUGH_PARALLEL_EVALS = 16
 SPICA_THOROUGH_SYNTHETIC_CONCURRENCY_PER_GPU = 128
-SPICA_THOROUGH_SYNTHETIC_REQUEST_COUNT = 1000
+SPICA_THOROUGH_SYNTHETIC_REQUEST_COUNT_TARGET = 1000
 
 
 @dataclass
@@ -81,6 +81,28 @@ def _positive_int_env(name: str, default: int, *, aliases: tuple[str, ...] = ())
     if value < 1:
         logger.warning("Ignoring %s=%r; expected a positive integer.", selected_name, raw_value)
         return default
+    return value
+
+
+def _positive_float_env(name: str, *, aliases: tuple[str, ...] = ()) -> float | None:
+    selected_name = name
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        for alias in aliases:
+            raw_value = os.environ.get(alias)
+            if raw_value is not None:
+                selected_name = alias
+                break
+    if raw_value is None:
+        return None
+    try:
+        value = float(raw_value)
+    except ValueError:
+        logger.warning("Ignoring %s=%r; expected a positive float.", selected_name, raw_value)
+        return None
+    if value <= 0 or not math.isfinite(value):
+        logger.warning("Ignoring %s=%r; expected a positive finite float.", selected_name, raw_value)
+        return None
     return value
 
 
@@ -1019,24 +1041,22 @@ def _generate_spica_backend_artifacts(
     from aiconfigurator.generator.api import generate_from_request
     from aiconfigurator.generator.request import from_legacy_params
 
+    backend_version = _spica_generated_backend_version(args, generator_task.primary_backend_name)
+    deployment_target = getattr(args, "deployment_target", "dynamo-j2") if args is not None else "dynamo-j2"
+    req = from_legacy_params(generator_config, backend=generator_task.primary_backend_name)
+    req = dataclasses.replace(
+        req,
+        backend=dataclasses.replace(req.backend, generated_config_version=backend_version),
+        emit=dataclasses.replace(req.emit, deployment_target=deployment_target, output_dir=top_config_dir),
+    )
+    known_paths = set(written_paths)
     try:
-        backend_version = _spica_generated_backend_version(args, generator_task.primary_backend_name)
-        deployment_target = getattr(args, "deployment_target", "dynamo-j2") if args is not None else "dynamo-j2"
-        req = from_legacy_params(generator_config, backend=generator_task.primary_backend_name)
-        req = dataclasses.replace(
-            req,
-            backend=dataclasses.replace(req.backend, generated_config_version=backend_version),
-            emit=dataclasses.replace(req.emit, deployment_target=deployment_target, output_dir=top_config_dir),
-        )
-        known_paths = set(written_paths)
         generate_from_request(req)
-        written_paths.extend(_spica_generated_artifact_paths(top_config_dir, known_paths))
     except Exception as exc:
-        logger.warning(
-            "Failed to generate backend config from Spica trace result: %s, %s",
-            exc,
-            traceback.format_exc(),
-        )
+        raise RuntimeError(
+            f"Failed to generate backend config from Spica result in {top_config_dir}: {exc}"
+        ) from exc
+    written_paths.extend(_spica_generated_artifact_paths(top_config_dir, known_paths))
 
 
 def _save_spica_top_config_artifacts(
@@ -1232,16 +1252,29 @@ def _spica_synthetic_concurrency(args) -> int:
     return _positive_int_env("AIC_SPICA_THOROUGH_SYNTHETIC_CONCURRENCY", default)
 
 
-def _spica_synthetic_request_count() -> int:
-    return _positive_int_env("AIC_SPICA_THOROUGH_SYNTHETIC_REQUEST_COUNT", SPICA_THOROUGH_SYNTHETIC_REQUEST_COUNT)
+def _spica_synthetic_num_request_ratio(concurrency: int) -> float:
+    ratio = _positive_float_env(
+        "AIC_SPICA_THOROUGH_SYNTHETIC_NUM_REQUEST_RATIO",
+        aliases=("AIC_SPICA_TRACE_SYNTHETIC_NUM_REQUEST_RATIO",),
+    )
+    if ratio is not None:
+        return ratio
+
+    target_request_count = _positive_int_env(
+        "AIC_SPICA_THOROUGH_SYNTHETIC_REQUEST_COUNT",
+        SPICA_THOROUGH_SYNTHETIC_REQUEST_COUNT_TARGET,
+        aliases=("AIC_SPICA_TRACE_SYNTHETIC_REQUEST_COUNT",),
+    )
+    return float(target_request_count) / float(concurrency)
 
 
 def _build_spica_default_workload(args) -> dict[str, Any]:
+    concurrency = _spica_synthetic_concurrency(args)
     workload: dict[str, Any] = {
         "isl": args.isl,
         "osl": args.osl,
-        "concurrency": _spica_synthetic_concurrency(args),
-        "request_count": _spica_synthetic_request_count(),
+        "concurrency": concurrency,
+        "num_request_ratio": _spica_synthetic_num_request_ratio(concurrency),
     }
     if getattr(args, "prefix", 0) > 0 and args.isl > 0:
         workload["shared_prefix_ratio"] = min(1.0, max(0.0, float(args.prefix) / float(args.isl)))
@@ -1297,7 +1330,7 @@ def _spica_extra_input_lines(config: Any, config_path: str | None) -> list[str]:
             f"ISL={getattr(workload, 'isl', 'n/a')}, "
             f"OSL={getattr(workload, 'osl', 'n/a')}, "
             f"concurrency={getattr(workload, 'concurrency', 'n/a')}, "
-            f"request_count={getattr(workload, 'request_count', 'n/a')}"
+            f"num_request_ratio={getattr(workload, 'num_request_ratio', 'n/a')}"
         )
     if sla is not None:
         if getattr(sla, "ttft_ms", None) is not None:
@@ -1320,17 +1353,17 @@ def _load_spica_config(args, smart_search_config_cls):
 
 
 def _install_dynamo_planner_bridge_compat() -> None:
-    """Keep older Spica synthetic replay working with newer Dynamo module layout."""
+    """Keep older Spica synthetic replay imports working with newer Dynamo module layout."""
     try:
         import dynamo.mocker as dynamo_mocker
+        from dynamo.llm import MockEngineArgs, PlannerReplayBridge
 
-        if hasattr(dynamo_mocker, "PlannerReplayBridge"):
-            return
-        from dynamo.llm import PlannerReplayBridge
-
-        dynamo_mocker.PlannerReplayBridge = PlannerReplayBridge
+        if not hasattr(dynamo_mocker, "MockEngineArgs"):
+            dynamo_mocker.MockEngineArgs = MockEngineArgs
+        if not hasattr(dynamo_mocker, "PlannerReplayBridge"):
+            dynamo_mocker.PlannerReplayBridge = PlannerReplayBridge
     except Exception as exc:
-        logger.debug("Could not install Dynamo PlannerReplayBridge compatibility shim: %s", exc)
+        logger.debug("Could not install Dynamo replay compatibility shim: %s", exc)
 
 
 class _SpicaReplayEvaluatorCompat:
@@ -1341,13 +1374,13 @@ class _SpicaReplayEvaluatorCompat:
         self.goal = goal
         self._evaluator: Any | None = None
 
-    def evaluate(self, plan: Any) -> dict[str, float]:
+    def evaluate(self, plan: Any, *, concurrency_override: int | None = None) -> dict[str, float]:
         _install_dynamo_planner_bridge_compat()
         if self._evaluator is None:
             from spica.evaluator import ReplayEvaluator
 
             self._evaluator = ReplayEvaluator(self.workload, self.goal)
-        return self._evaluator.evaluate(plan)
+        return self._evaluator.evaluate(plan, concurrency_override=concurrency_override)
 
 
 def run_spica_thorough_default(args) -> list[Any]:
@@ -1382,8 +1415,8 @@ def run_spica_thorough_default(args) -> list[Any]:
         from spica.search import run_smart_search
     except ImportError as exc:
         raise SystemExit(
-            "Spica thorough sweep requires the optional 'spica' package and its replay dependencies. "
-            "Install Spica, then rerun with --thorough-sweep or --thorough-config."
+            "Spica thorough sweep requires the optional Spica smart-sweep dependencies. "
+            "Install AIC with the 'spica' extra, then rerun with --thorough-sweep or --thorough-config."
         ) from exc
 
     _install_dynamo_planner_bridge_compat()
