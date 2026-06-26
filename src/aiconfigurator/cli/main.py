@@ -1463,7 +1463,8 @@ def build_experiment_tasks(
         # mode / profiles).  Task.from_yaml auto-detects and converts it to the flat V2
         # schema (emitting a DeprecationWarning); a native V2 flat dict also works.
         try:
-            tasks[exp_name] = Task.from_yaml(exp_config, **overrides)
+            task_config = {**exp_config, "database_mode": database_mode}
+            tasks[exp_name] = Task.from_yaml(task_config, **overrides)
         except Exception:
             logger.exception("Failed to build Task for experiment '%s'", exp_name)
 

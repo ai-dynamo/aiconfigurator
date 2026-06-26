@@ -533,6 +533,22 @@ class TestBuildExperimentTaskConfigs:
         assert by_backend["rust"]["model_path"] == "Qwen/Qwen3-32B"
         assert by_backend["python"]["model_path"] == "Qwen/Qwen3-32B"
 
+    @patch("aiconfigurator.cli.main.Task")
+    def test_default_database_mode_is_passed_to_task_yaml(self, mock_task):
+        config = {
+            "default_mode": {
+                "serving_mode": "agg",
+                "model_path": "Qwen/Qwen3-32B",
+                "system_name": "h200_sxm",
+                "total_gpus": 8,
+            }
+        }
+
+        build_experiment_tasks(config=config)
+
+        yaml_data = mock_task.from_yaml.call_args.args[0]
+        assert yaml_data["database_mode"] == "SILICON"
+
 
 class TestInclusiveTpot:
     """Unit tests for _apply_inclusive_tpot output transformation."""
