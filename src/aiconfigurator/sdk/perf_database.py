@@ -1521,6 +1521,9 @@ class PerfDatabase:
         """
         if mode != self._default_database_mode:
             self.clear_runtime_caches()
+            from aiconfigurator.sdk.operations import util_empirical
+
+            util_empirical.clear_grid_cache()  # mode change alters which data/transfers feed grids
             self._default_database_mode = mode
 
     def get_default_database_mode(self) -> common.DatabaseMode:
@@ -1539,6 +1542,11 @@ class PerfDatabase:
         policy = common.resolve_transfer_policy(spec)
         if policy != self._transfer_policy:
             self.clear_runtime_caches()
+            from aiconfigurator.sdk.operations import util_empirical
+
+            # The util grid cache key doesn't encode the policy (xshape/xquant share a
+            # key), so a stale grid would mask the new policy -- drop it.
+            util_empirical.clear_grid_cache()
             self._transfer_policy = policy
 
     @property

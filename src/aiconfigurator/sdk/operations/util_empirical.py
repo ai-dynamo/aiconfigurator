@@ -167,6 +167,19 @@ def get_grid(cache_key, builder: Callable[[], UtilGrid]) -> UtilGrid:
     return grid
 
 
+def clear_grid_cache() -> None:
+    """Drop all built util grids.
+
+    The cache key identifies an op/slice but deliberately does NOT encode the
+    transfer policy or default database mode (e.g. MoE's xshape and xquant tiers
+    share one ``"moe_xshape"`` key). So when a database's transfer policy or mode
+    changes, a previously cached grid -- built under the old policy's candidate set
+    -- would otherwise be returned unchanged, silently bypassing the new policy.
+    PerfDatabase calls this whenever either changes.
+    """
+    _GRID_CACHE.clear()
+
+
 def grid_for(cache_key, slice_fn: Callable[[], object], sol_fn: Callable[[Coords], float], depth: int):
     """Best-effort build/fetch of a :class:`UtilGrid`.
 

@@ -391,6 +391,30 @@ def test_empirical_and_silicon_databases_do_not_alias(perf_database):
     assert sil._shared_layer_mode is False  # SILICON stays pure
 
 
+def test_transfer_policy_and_mode_change_clear_global_grid_cache(perf_database):
+    """The util grid cache key doesn't encode policy/mode (MoE xshape/xquant share a key),
+    so a stale grid would silently bypass a new transfer policy. set_transfer_policy and
+    set_default_database_mode must drop the global grid cache -- but only on an actual
+    change (the guards avoid thrashing it in hot paths)."""
+    from aiconfigurator.sdk import common
+    from aiconfigurator.sdk.operations import util_empirical
+
+    db = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="HYBRID")
+
+    util_empirical._GRID_CACHE["__s1__"] = object()
+    db.set_transfer_policy("conservative")  # != default ALL -> clears
+    assert "__s1__" not in util_empirical._GRID_CACHE
+
+    util_empirical._GRID_CACHE["__s2__"] = object()
+    db.set_transfer_policy("conservative")  # no-op -> preserved
+    assert "__s2__" in util_empirical._GRID_CACHE
+
+    util_empirical._GRID_CACHE["__s3__"] = object()
+    db.set_default_database_mode(common.DatabaseMode.EMPIRICAL)  # != HYBRID -> clears
+    assert "__s3__" not in util_empirical._GRID_CACHE
+    util_empirical._GRID_CACHE.clear()
+
+
 def test_clear_database_runtime_caches_clears_matching_cached_database_once(perf_database):
     class FakeDatabase:
         def __init__(self):
