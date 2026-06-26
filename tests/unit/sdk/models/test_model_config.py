@@ -1304,3 +1304,58 @@ class TestQwen3VLModel:
     def test_both_vl_variants_return_qwen3vl_model(self, model_id, model_config):
         model = get_model(model_id, model_config, "trtllm")
         assert isinstance(model, Qwen3VLModel)
+
+
+class TestDSAAttentionQuantExclusion:
+    """GLM-5 DSA: detect ModelOpt keeping attention projections unquantized (bf16).
+
+    Regression for the nvidia/GLM-5-NVFP4 exclude format — layer-prefixed
+    ``model.layers.N.self_attn*`` globs and the ``ignore`` key — which the
+    earlier full-projection-name substring check missed, silently modeling DSA
+    attention at NVFP4 instead of bf16.
+    """
+
+    @staticmethod
+    def _excluded(raw):
+        from aiconfigurator.sdk.models.deepseek_v32 import (
+            _dsa_attention_modules_excluded_from_quant,
+        )
+
+        return _dsa_attention_modules_excluded_from_quant(raw)
+
+    def test_modelopt_layer_prefixed_self_attn_globs(self):
+        raw = {
+            "quantization_config": {
+                "quant_algo": "NVFP4",
+                "ignore": ["lm_head", "model.layers.10.self_attn*"],
+            },
+            "hf_quant_config": {
+                "quantization": {
+                    "exclude_modules": [
+                        "lm_head",
+                        "model.layers.10.self_attn*",
+                        "model.layers.10.mlp.shared_experts*",
+                    ]
+                }
+            },
+        }
+        assert self._excluded(raw) is True
+
+    def test_full_projection_names_backward_compatible(self):
+        raw = {"quantization_config": {"modules_to_not_convert": ["model.layers.0.self_attn.q_a_proj"]}}
+        assert self._excluded(raw) is True
+
+    def test_ignore_key_regex_pattern(self):
+        raw = {"quantization_config": {"ignore": ["re:.*self_attn.*"]}}
+        assert self._excluded(raw) is True
+
+    def test_hf_quant_ignore_key_pattern(self):
+        raw = {"hf_quant_config": {"quantization": {"ignore": ["model.layers.3.self_attn*"]}}}
+        assert self._excluded(raw) is True
+
+    def test_attention_quantized_returns_false(self):
+        raw = {"quantization_config": {"exclude_modules": ["lm_head", "model.layers.0.mlp.shared_experts.gate"]}}
+        assert self._excluded(raw) is False
+
+    def test_empty_config_returns_false(self):
+        assert self._excluded({}) is False
