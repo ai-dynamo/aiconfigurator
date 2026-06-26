@@ -99,7 +99,13 @@ include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["aiconfigurator", "aiconfigurator.cli*", "aiconfigurator.generator*", "aiconfigurator.webapp*"]
+include = [
+    "aiconfigurator",
+    "aiconfigurator.cli*",
+    "aiconfigurator.generator*",
+    "aiconfigurator.spica*",
+    "aiconfigurator.webapp*",
+]
 exclude = ["aiconfigurator.sdk*", "aiconfigurator.systems*", "aiconfigurator.model_configs*", "aiconfigurator_core*"]
 
 [tool.uv.sources]

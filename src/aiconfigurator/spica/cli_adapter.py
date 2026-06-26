@@ -7,7 +7,7 @@ import argparse
 import dataclasses
 import logging
 import os
-import random
+import secrets
 import traceback
 from dataclasses import dataclass
 from typing import Any
@@ -585,7 +585,7 @@ def _spica_trace_result_dir(result_bundle: _SpicaTraceResultBundle, save_dir: st
         osl = int(getattr(first_task, "osl", 0) or 0)
         workload = f"thorough_isl{isl}_osl{osl}"
     result_prefix = f"{model}_{system}_{backend}_{workload}_ttft{ttft}_tpot{tpot}"
-    return os.path.join(save_dir, f"{result_prefix}_{random.randint(0, 1000000)}")
+    return os.path.join(save_dir, f"{result_prefix}_{secrets.randbelow(1_000_000)}")
 
 
 def _spica_first_int(*values: Any, default: int = 1) -> int:
@@ -661,13 +661,18 @@ def _spica_role_worker_overrides(
     worker: dict[str, Any] = {}
     engine_overrides: dict[str, Any] = {}
 
+    block_size = _spica_int(row.get(f"{prefix}_block_size"))
     max_tokens = _spica_int(row.get(f"{prefix}_max_num_batched_tokens"))
+    if block_size and max_tokens is not None and max_tokens % block_size != 0:
+        raise ValueError(
+            f"{prefix}_max_num_batched_tokens={max_tokens} must be divisible by {prefix}_block_size={block_size}"
+        )
     if max_tokens is not None:
         worker["max_num_tokens"] = max_tokens
         worker["max_prefill_tokens"] = max_tokens
         engine_overrides["max_num_tokens"] = max_tokens
 
-    _spica_set_if_present(worker, "tokens_per_block", _spica_int(row.get(f"{prefix}_block_size")))
+    _spica_set_if_present(worker, "tokens_per_block", block_size)
     _spica_set_if_present(
         worker,
         "kv_cache_free_gpu_memory_fraction",
@@ -691,6 +696,11 @@ def _spica_role_worker_overrides(
 
     transfer_buffer_tokens = max(max_tokens or 0, max_seq_len)
     if role != "agg" and transfer_buffer_tokens > 0:
+        if block_size and transfer_buffer_tokens % block_size != 0:
+            raise ValueError(
+                f"{role} cache_transceiver_max_tokens_in_buffer={transfer_buffer_tokens} must be divisible by "
+                f"{prefix}_block_size={block_size}"
+            )
         worker["cache_transceiver_max_tokens_in_buffer"] = transfer_buffer_tokens
         engine_overrides["cache_transceiver_config"] = {
             "backend": "DEFAULT",
@@ -717,7 +727,7 @@ def _spica_router_enabled(row: pd.Series) -> bool | None:
     if not _spica_value_present(router_mode):
         return None
     normalized = str(router_mode).strip().lower()
-    return normalized not in {"", "n/a", "none", "disabled", "round_robin", "round-robin"}
+    return normalized not in {"", "n/a", "none", "disabled"}
 
 
 def _spica_router_mode(row: pd.Series) -> str | None:
@@ -1081,9 +1091,19 @@ def _save_spica_pareto_plot(result_bundle: _SpicaTraceResultBundle, save_dir: st
     if not pareto_fronts:
         return None
 
+    axes = {result_bundle.pareto_x_axis.get(name, "tokens/s/user") for name in pareto_fronts}
+    if len(axes) > 1:
+        logger.warning("Skipping combined Spica Pareto plot because modes use different X axes: %s", sorted(axes))
+        return None
+    x_axis = axes.pop()
+    if any(x_axis not in df.columns for df in pareto_fronts.values()):
+        logger.warning("Skipping Spica Pareto plot because X axis %s is missing from one or more frontiers", x_axis)
+        return None
+
     path = os.path.join(save_dir, "pareto_frontier.png")
     fig, ax = plt.subplots(1, 1, figsize=(8, 5))
     colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b", "#17becf"]
+    maximize_x = x_axis != "request_latency"
 
     preferred_modes = [mode for mode in ("agg", "disagg") if mode in pareto_fronts]
     other_modes = sorted(mode for mode in pareto_fronts if mode not in {"agg", "disagg"})
@@ -1091,20 +1111,21 @@ def _save_spica_pareto_plot(result_bundle: _SpicaTraceResultBundle, save_dir: st
         df = pareto_fronts[mode]
         pareto_analysis.draw_pareto(
             df,
-            "tokens/s/user",
+            x_axis,
             "tokens/s/gpu",
             ax,
             colors[idx % len(colors)],
             mode,
+            maximize_x=maximize_x,
         )
 
     combined = pd.concat(pareto_fronts.values(), ignore_index=True)
     if not combined.empty:
         best = combined.sort_values(by="tokens/s/gpu_cluster", ascending=False).head(1)
-        ax.scatter(best["tokens/s/user"], best["tokens/s/gpu"], color="black", marker="x", label="best")
+        ax.scatter(best[x_axis], best["tokens/s/gpu"], color="black", marker="x", label="best")
 
     ax.set_title("Spica Pareto Frontier")
-    ax.set_xlabel("tokens/s/user")
+    ax.set_xlabel(x_axis)
     ax.set_ylabel("tokens/s/gpu")
     ax.legend()
     plt.savefig(path)

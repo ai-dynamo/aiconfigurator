@@ -1208,7 +1208,8 @@ class TestParseCompressedTensorsQuant:
         assert overrides.get("gemm_quant_mode") == common.GEMMQuantMode.int4_wo
         assert overrides.get("moe_quant_mode") == common.MoEQuantMode.int4_wo
 
-    def test_modelopt_mixed_precision_config_groups_map_sdk_modes(self):
+    @pytest.mark.parametrize("quant_algo", ["MIXED_PRECISION", "mixed-precision", "mixedprecision"])
+    def test_modelopt_mixed_precision_config_groups_map_sdk_modes(self, quant_algo):
         """ModelOpt MIXED_PRECISION config groups map FP8 dense layers and NVFP4 routed experts."""
         from aiconfigurator.sdk import common
         from aiconfigurator.sdk.models import _infer_quant_modes_from_raw_config
@@ -1217,7 +1218,7 @@ class TestParseCompressedTensorsQuant:
         raw_config = _attach_inferred_quant_fields(
             {
                 "quantization_config": {
-                    "quant_algo": "MIXED_PRECISION",
+                    "quant_algo": quant_algo,
                     "kv_cache_scheme": {"type": "float", "num_bits": 8},
                     "config_groups": {
                         "group_0": {
@@ -1256,7 +1257,8 @@ class TestParseCompressedTensorsQuant:
         assert overrides["kvcache_quant_mode"] == common.KVCacheQuantMode.fp8
         assert overrides["fmha_quant_mode"] == common.FMHAQuantMode.fp8
 
-    def test_modelopt_mixed_precision_hf_quant_layers_map_sdk_modes(self):
+    @pytest.mark.parametrize("quant_algo", ["MIXED_PRECISION", "mixed-precision", "mixedprecision"])
+    def test_modelopt_mixed_precision_hf_quant_layers_map_sdk_modes(self, quant_algo):
         """Standalone hf_quant_config.json MIXED_PRECISION metadata no longer raises unsupported quant_algo."""
         from aiconfigurator.sdk import common
         from aiconfigurator.sdk.models import _infer_quant_modes_from_raw_config
@@ -1266,7 +1268,7 @@ class TestParseCompressedTensorsQuant:
             {
                 "hf_quant_config": {
                     "quantization": {
-                        "quant_algo": "MIXED_PRECISION",
+                        "quant_algo": quant_algo,
                         "kv_cache_quant_algo": "FP8",
                         "quantized_layers": {
                             "backbone.layers.0.mixer.in_proj": {"quant_algo": "FP8"},

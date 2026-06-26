@@ -34,6 +34,8 @@ from aiconfigurator.spica.cli_adapter import (
     _save_spica_trace_artifacts,
     _spica_candidates_to_result_df,
     _spica_generator_overrides,
+    _spica_role_worker_overrides,
+    _spica_router_enabled,
 )
 
 pytestmark = pytest.mark.unit
@@ -485,6 +487,49 @@ class TestCLIIntegration:
         assert planner_config["itl_ms"] == pytest.approx(200.0)
         assert planner_config["prefill_engine_num_gpu"] == 1
         assert planner_config["decode_engine_num_gpu"] == 2
+
+    def test_spica_round_robin_router_mode_still_enables_router(self):
+        row = pd.Series(
+            {
+                "deployment_mode": "agg",
+                "router_mode": "round_robin",
+                "agg_block_size": 64,
+            }
+        )
+        args = argparse.Namespace(
+            generator_config=None,
+            generator_set=None,
+            generator_dynamo_version=None,
+            namespace=None,
+            transport=None,
+            image_pull_secret=None,
+            model_cache=None,
+        )
+        task = argparse.Namespace(primary_model_path="Qwen/Qwen3-32B-FP8", ttft=8000.0, tpot=200.0)
+
+        overrides = _spica_generator_overrides(args, row, task)
+
+        assert _spica_router_enabled(row) is True
+        assert overrides["DynConfig"]["enable_router"] is True
+
+    @pytest.mark.parametrize(
+        ("row_data", "expected_message"),
+        [
+            (
+                {"decode_block_size": 64, "decode_max_num_batched_tokens": 4100, "context_length": 8192},
+                "decode_max_num_batched_tokens=4100 must be divisible by decode_block_size=64",
+            ),
+            (
+                {"decode_block_size": 64, "decode_max_num_batched_tokens": 4096, "context_length": 8200},
+                "decode cache_transceiver_max_tokens_in_buffer=8200 must be divisible by decode_block_size=64",
+            ),
+        ],
+    )
+    def test_spica_worker_overrides_reject_unaligned_token_limits(self, row_data, expected_message):
+        row = pd.Series(row_data)
+
+        with pytest.raises(ValueError, match=expected_message):
+            _spica_role_worker_overrides(row, "decode", argparse.Namespace(max_seq_len=None))
 
     def test_spica_trace_artifacts_include_pareto_outputs(self, tmp_path, cli_args_factory):
         candidates = [

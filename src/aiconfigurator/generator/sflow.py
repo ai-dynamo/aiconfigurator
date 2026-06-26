@@ -80,7 +80,7 @@ def enrich_context_for_sflow(
     if ctx["sflow_slurm_timelimit"] in (None, ""):
         ctx["sflow_slurm_timelimit"] = 240
     ctx["sflow_aiperf_image"] = sflow_cfg.get("aiperf_image") or "python:3.12-slim"
-    frontend_dyn = dyn if dyn.get("router_mode") or dyn.get("router_config") else {}
+    frontend_dyn = dyn if dyn.get("enable_router") or dyn.get("router_mode") or dyn.get("router_config") else {}
     generated_frontend_args = frontend_cli_args_string(
         frontend_dyn,
         param_values.get("ServiceConfig", {}),

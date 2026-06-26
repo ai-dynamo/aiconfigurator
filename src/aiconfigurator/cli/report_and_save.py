@@ -366,17 +366,15 @@ def log_final_summary(
         agg_value = best_throughputs.get("agg", 0.0)
         disagg_value = best_throughputs.get("disagg", 0.0)
         if "agg" in best_throughputs and "disagg" in best_throughputs:
-            if agg_value > 0 and disagg_value > 0:
-                benefit_ratio = disagg_value / agg_value
-            elif agg_value == 0 and disagg_value > 0:
-                benefit_ratio = float("inf")
-            elif agg_value > 0 and disagg_value == 0:
-                benefit_ratio = 0.0
+            if agg_value == disagg_value:
+                comparison = "agg and disagg tied"
             else:
-                benefit_ratio = 0.0  # handle case where both are 0
-            bold_msg = _cli_bold(
-                f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu (disagg {benefit_ratio:.2f}x better)"
-            )
+                winner = "disagg" if disagg_value > agg_value else "agg"
+                loser = "agg" if winner == "disagg" else "disagg"
+                loser_value = best_throughputs[loser]
+                benefit_ratio = float("inf") if loser_value == 0 else best_throughputs[winner] / loser_value
+                comparison = f"{winner} {benefit_ratio:.2f}x better than {loser}"
+            bold_msg = _cli_bold(f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu ({comparison})")
         else:
             bold_msg = _cli_bold(f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu")
         summary_box.append(f"    Best Experiment Chosen: {bold_msg}")
