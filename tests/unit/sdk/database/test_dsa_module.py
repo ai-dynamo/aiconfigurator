@@ -539,6 +539,50 @@ class TestContextDSAModule:
         assert math.isfinite(lo) and math.isfinite(hi)
         assert hi > lo  # prefix axis genuinely used; not collapsed to one slice
 
+    def test_empirical_prefix_cache_is_faster_at_fixed_isl_on_prefix0_only_data(self, mutable_comprehensive_perf_db):
+        """When the prefix axis is degenerate (only prefix=0 collected), prefix>0 must anchor
+        util at the prefix=0 slice at full_s=s+prefix (regime-matched) and carry the prefix
+        effect via SOL -- NOT borrow util at the query's own small-s point (which sits below
+        the indexer-on boundary and on the launch-overhead floor, inflating the estimate). The
+        physical check: at a fixed total length (ISL), reusing a cached prefix (fewer new tokens
+        to compute) must be FASTER than computing all tokens fresh."""
+
+        def _latency(result):
+            return (
+                result.latency if hasattr(result, "latency") else (result[0] if isinstance(result, tuple) else result)
+            )
+
+        db = mutable_comprehensive_perf_db
+        # 4D shape but ONLY prefix=0 collected (mirrors DeepseekV32 on trtllm). Latencies are
+        # launch-overhead-floored at small s (so the old same-s util borrow would misfire).
+        s_grid = {1024: 2.4, 2048: 2.8, 3072: 3.4, 4096: 4.0, 6144: 5.6, 8192: 7.5}
+        nh = {128: {0: {s: {1: _dsa_value(lat)} for s, lat in s_grid.items()}}}
+        db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data_with_backend(nh, architecture="DeepseekV32ForCausalLM"),
+            common.PerfDataFilename.dsa_context_module,
+            "measured",
+        )
+
+        def query(s, prefix):
+            return _latency(
+                db.query_context_dsa_module(
+                    b=1,
+                    s=s,
+                    prefix=prefix,
+                    num_heads=128,
+                    kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+                    fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+                    gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                    database_mode=common.DatabaseMode.EMPIRICAL,
+                    architecture="DeepseekV32ForCausalLM",
+                )
+            )
+
+        all_fresh = query(s=4096, prefix=0)  # ISL=4096, nothing cached
+        cached = query(s=2048, prefix=2048)  # ISL=4096, half cached -> fewer new tokens
+        assert math.isfinite(all_fresh) and math.isfinite(cached)
+        assert cached < all_fresh  # prefix-cache win; full_s anchor avoids the inflation artifact
+
     def test_different_index_params_change_sol(self, comprehensive_perf_db):
         """Different index_topk should yield different SOL estimates."""
         r1 = comprehensive_perf_db.query_context_dsa_module(

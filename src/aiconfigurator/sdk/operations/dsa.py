@@ -485,24 +485,57 @@ class ContextDSAModule(Operation):
                 return _select_dsa_backend(arch_node, dsa_backend)
 
             try:
-                has_prefix = _dsa_module_has_prefix_axis(_slice())
+                slc = _slice()
+                has_prefix = _dsa_module_has_prefix_axis(slc)
             except Exception:
+                slc = None
                 has_prefix = architecture == "GlmMoeDsaForCausalLM"  # data unavailable: prior heuristic
 
-            if has_prefix:  # c = (num_heads, prefix, s, b); s is new tokens
-                depth, query = 4, (num_heads, prefix, s, b)
+            # Collected prefix values, when the slice carries an explicit prefix axis.
+            prefix_keys: tuple = ()
+            if has_prefix and isinstance(slc, dict):
+                seen: set = set()
+                for head_data in slc.values():
+                    if isinstance(head_data, dict):
+                        seen.update(head_data.keys())
+                prefix_keys = tuple(sorted(seen))
+            # Genuine prefix interpolation needs >=2 collected prefix points bracketing the
+            # query (mirrors the silicon path). A degenerate axis (e.g. prefix=0 only) or an
+            # out-of-range query would otherwise borrow util at the query's own (prefix, s) --
+            # which crosses the indexer on/off boundary (full_s vs index_topk) and the small-s
+            # overhead floor, inflating the estimate. Fall back to anchoring util at the
+            # prefix=0 slice at full_s = s + prefix (regime-matched) while the prefix effect is
+            # carried entirely by the (true) SOL -- the windowed-attention correction pattern.
+            interp_prefix = len(prefix_keys) >= 2 and prefix_keys[0] <= prefix <= prefix_keys[-1]
+
+            if has_prefix and interp_prefix:  # c = (num_heads, prefix, s, b); s is new tokens
+                depth, query, slice_fn, key_tag = 4, (num_heads, prefix, s, b), _slice, "ctx_dsa"
 
                 def _sol(c):
                     return get_sol(c[3], c[2], c[1], c[0], kvcache_quant_mode, fmha_quant_mode)[0]
-            else:  # legacy c = (num_heads, full_s, b); samples are prefix=0
-                depth, query = 3, (num_heads, s + prefix, b)
+            else:
+                # prefix=0 anchor at full_s: util comes from the prefix=0 slice (regime-matched),
+                # the prefix effect stays in sol_time = SOL(s, prefix). c = (num_heads, full_s, b).
+                depth, query, key_tag = 3, (num_heads, s + prefix, b), "ctx_dsa_p0anchor"
+
+                if has_prefix and prefix_keys and prefix_keys[0] == 0:
+
+                    def slice_fn():
+                        base = _slice()
+                        return {
+                            head: head_data[0]
+                            for head, head_data in base.items()
+                            if isinstance(head_data, dict) and 0 in head_data
+                        }
+                else:
+                    slice_fn = _slice  # legacy [num_heads][s][b]: samples are already prefix=0
 
                 def _sol(c):
                     return get_sol(c[2], c[1], 0, c[0], kvcache_quant_mode, fmha_quant_mode)[0]
 
             grid = util_empirical.grid_for(
                 (
-                    "ctx_dsa",
+                    key_tag,
                     database.system,
                     database.backend,
                     database.version,
@@ -511,9 +544,9 @@ class ContextDSAModule(Operation):
                     gemm_quant_mode.name,
                     architecture,
                     dsa_backend,
-                    has_prefix,
+                    depth,
                 ),
-                _slice,
+                slice_fn,
                 _sol,
                 depth=depth,
             )
