@@ -40,10 +40,10 @@ import os
 from collections.abc import Callable
 from typing import Any
 
-from aiconfigurator.cli.api import _apply_nextn, _build_model_config
 from aiconfigurator.sdk import perf_database
 from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.common import DefaultHFModels
+from aiconfigurator.sdk.config_builders import apply_nextn, build_model_config
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.utils import (
     _download_hf_config,
@@ -285,7 +285,7 @@ class KVCacheEstimator:
         """
         resolved_moe_tp = moe_tp_size if moe_tp_size is not None else 1
         resolved_moe_ep = moe_ep_size if moe_ep_size is not None else 1
-        model_config = _build_model_config(
+        model_config = build_model_config(
             tp_size=tp_size,
             pp_size=pp_size,
             attention_dp_size=attention_dp_size,
@@ -301,7 +301,7 @@ class KVCacheEstimator:
         # model.config.nextn to scale activation memory for speculative decoding, so
         # skipping this would size non-KV memory as if nextn=0 and overstate the KV
         # budget. Mirrors the agg/disagg/static estimate paths in cli.api.
-        _apply_nextn(model_config, nextn, nextn_accept_rates)
+        apply_nextn(model_config, nextn, nextn_accept_rates)
         model = get_model(model_path, model_config, backend)
         backend_obj = get_backend(backend)
         database = perf_database.get_database(system, backend, backend_version)

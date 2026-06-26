@@ -47,14 +47,15 @@ git lfs pull
 # 3. Create and activate a virtual environment
 python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.9 or later)
 
-# 4. Install aiconfigurator
+# 4. Install aiconfigurator-core, then aiconfigurator
+pip3 install ./src/aiconfigurator-core
 pip3 install .
 ```
 
 ### Build with Docker
 
 ```bash
-# This will create a ./dist/ folder containing the wheel file
+# This will create a ./dist/ folder containing the core and upper wheel files
 docker build -f docker/Dockerfile --no-cache --target build -t aiconfigurator:latest .
 docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist dist/ && docker rm aic
 ```
