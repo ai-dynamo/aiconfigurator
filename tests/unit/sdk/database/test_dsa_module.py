@@ -500,6 +500,45 @@ class TestContextDSAModule:
         val = result.latency if hasattr(result, "latency") else (result[0] if isinstance(result, tuple) else result)
         assert math.isfinite(val) and val > 0
 
+    def test_empirical_explicit_prefix_axis_is_used_under_backend_data(self, mutable_comprehensive_perf_db):
+        """The explicit-prefix shape nests ...[dsa_backend][num_heads][prefix][s][b]. After
+        descending past dsa_backend, the prefix axis must be DETECTED and USED, so two queries
+        that differ only in prefix must resolve to different measured slices (a collapse here
+        would mean the prefix axis was folded away). Data gives distinct per-prefix latencies."""
+
+        def _latency(result):
+            return (
+                result.latency if hasattr(result, "latency") else (result[0] if isinstance(result, tuple) else result)
+            )
+
+        db = mutable_comprehensive_perf_db
+        # num_heads -> prefix -> s -> b, with a large gap between the two prefix slices.
+        nh = {32: {0: {256: {1: _dsa_value(5.0)}}, 256: {256: {1: _dsa_value(50.0)}}}}
+        db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data_with_backend(nh, architecture=GLM5_ARCHITECTURE),
+            common.PerfDataFilename.dsa_context_module,
+            "measured",
+        )
+
+        def query(prefix):
+            return _latency(
+                db.query_context_dsa_module(
+                    b=1,
+                    s=256,
+                    prefix=prefix,
+                    num_heads=32,
+                    kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+                    fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+                    gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                    database_mode=common.DatabaseMode.EMPIRICAL,
+                    architecture=GLM5_ARCHITECTURE,
+                )
+            )
+
+        lo, hi = query(0), query(256)
+        assert math.isfinite(lo) and math.isfinite(hi)
+        assert hi > lo  # prefix axis genuinely used; not collapsed to one slice
+
     def test_different_index_params_change_sol(self, comprehensive_perf_db):
         """Different index_topk should yield different SOL estimates."""
         r1 = comprehensive_perf_db.query_context_dsa_module(
