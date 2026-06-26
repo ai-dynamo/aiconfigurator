@@ -164,7 +164,9 @@ class ReplayEvaluator:
         workloads ignore it (they cap via ``replay_concurrency``)."""
         if self.workload.is_trace_based:
             return _with_goodput_fallback(self._evaluate_trace(plan), self.goal)
-        return _with_goodput_fallback(self._evaluate_synthetic(plan, concurrency_override=concurrency_override), self.goal)
+        return _with_goodput_fallback(
+            self._evaluate_synthetic(plan, concurrency_override=concurrency_override), self.goal
+        )
 
     # -- trace workloads -------------------------------------------------------
 

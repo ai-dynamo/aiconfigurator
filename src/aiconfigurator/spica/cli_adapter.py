@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import secrets
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -1053,9 +1054,7 @@ def _generate_spica_backend_artifacts(
     try:
         generate_from_request(req)
     except Exception as exc:
-        raise RuntimeError(
-            f"Failed to generate backend config from Spica result in {top_config_dir}: {exc}"
-        ) from exc
+        raise RuntimeError(f"Failed to generate backend config from Spica result in {top_config_dir}: {exc}") from exc
     written_paths.extend(_spica_generated_artifact_paths(top_config_dir, known_paths))
 
 
@@ -1409,6 +1408,12 @@ def run_spica_thorough_default(args) -> list[Any]:
         logger.warning("--enable-wideep is currently ignored in Spica thorough mode.")
     if getattr(args, "moe_backend", None) is not None:
         logger.warning("--moe-backend is currently ignored in Spica thorough mode.")
+
+    if sys.version_info >= (3, 13):
+        raise SystemExit(
+            "Spica thorough sweep currently requires Python 3.10-3.12 because its Vizier/JAX search "
+            "dependencies are not supported on Python 3.13 yet."
+        )
 
     try:
         from spica.config import SmartSearchConfig

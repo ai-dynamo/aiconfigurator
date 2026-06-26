@@ -78,7 +78,7 @@ service = [
     "uvicorn>=0.34.2"
 ]
 spica = [
-    "pydantic>=2.5",
+    "pydantic>=2.5; python_version < '3.13'",
     "google-vizier[jax]==0.1.21; python_version < '3.13'",
     "jax==0.4.38; python_version < '3.13'",
     "jaxlib==0.4.38; python_version < '3.13'",

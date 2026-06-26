@@ -96,7 +96,9 @@ def test_current_trace_api_filters_legacy_kwargs_and_falls_back_goodput(monkeypa
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
 
-    def run_trace_replay(trace_file, *, extra_engine_args=None, num_workers=1, replay_concurrency=None, router_mode=None):
+    def run_trace_replay(
+        trace_file, *, extra_engine_args=None, num_workers=1, replay_concurrency=None, router_mode=None
+    ):
         rec.update(
             trace_file=trace_file,
             extra_engine_args=extra_engine_args,
