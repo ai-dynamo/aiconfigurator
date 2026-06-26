@@ -460,9 +460,9 @@ def _spica_trace_task(args, mode: str, candidate_df: pd.DataFrame, config: Any |
     )
     total_gpus = _spica_first_scalar(
         _spica_pinned_scalar(_spica_search_space_value(config, "gpu_budget")),
-        getattr(args, "total_gpus", None),
         first_row.get("gpu_budget"),
         first_row.get("total_gpus"),
+        getattr(args, "total_gpus", None),
         default=0,
     )
     ttft = _spica_sla_value(config, "ttft_ms", getattr(args, "ttft", 0.0) or 0.0) or 0.0
@@ -777,7 +777,11 @@ def _spica_engine_num_gpu(row: pd.Series, role: str) -> int:
     )
 
 
-def _spica_planner_config(args: argparse.Namespace | None, row: pd.Series) -> dict[str, Any] | None:
+def _spica_planner_config(
+    args: argparse.Namespace | None,
+    row: pd.Series,
+    task: _SpicaTraceTask | argparse.Namespace | None = None,
+) -> dict[str, Any] | None:
     enable_throughput = bool(_spica_bool(row.get("enable_throughput_scaling")))
     enable_load = bool(_spica_bool(row.get("enable_load_scaling")))
     if not (enable_throughput or enable_load):
@@ -787,8 +791,10 @@ def _spica_planner_config(args: argparse.Namespace | None, row: pd.Series) -> di
         row.get("backend") or getattr(args, "backend", None) or getattr(args, "primary_backend_name", None) or "trtllm"
     )
     mode = str(row.get("deployment_mode") or "disagg")
-    model_name = None
-    if args is not None:
+    model_name = row.get("model_name")
+    if not _spica_value_present(model_name) and task is not None:
+        model_name = getattr(task, "primary_model_path", None)
+    if not _spica_value_present(model_name) and args is not None:
         model_name = getattr(args, "model_path", None) or getattr(args, "primary_model_path", None)
     planner: dict[str, Any] = {
         "environment": "kubernetes",
@@ -831,9 +837,14 @@ def _spica_planner_config(args: argparse.Namespace | None, row: pd.Series) -> di
         planner["prefill_engine_num_gpu"] = _spica_engine_num_gpu(row, "prefill")
         planner["decode_engine_num_gpu"] = _spica_engine_num_gpu(row, "decode")
 
-    if args is not None:
-        _spica_set_if_present(planner, "ttft_ms", getattr(args, "ttft", None))
-        _spica_set_if_present(planner, "itl_ms", getattr(args, "tpot", None))
+    ttft = getattr(task, "ttft", None) if task is not None else None
+    tpot = getattr(task, "tpot", None) if task is not None else None
+    if not _spica_value_present(ttft) and args is not None:
+        ttft = getattr(args, "ttft", None)
+    if not _spica_value_present(tpot) and args is not None:
+        tpot = getattr(args, "tpot", None)
+    _spica_set_if_present(planner, "ttft_ms", ttft)
+    _spica_set_if_present(planner, "itl_ms", tpot)
 
     # Spica replay suppresses large periodic planner reports; keep live deploy
     # artifacts similarly quiet unless the user overrides this later.
@@ -853,7 +864,11 @@ def _spica_kvbm_config(row: pd.Series) -> dict[str, Any] | None:
     return kvbm or None
 
 
-def _spica_generator_overrides(args: argparse.Namespace | None, row: pd.Series) -> dict[str, Any]:
+def _spica_generator_overrides(
+    args: argparse.Namespace | None,
+    row: pd.Series,
+    task: _SpicaTraceTask | argparse.Namespace | None = None,
+) -> dict[str, Any]:
     from aiconfigurator.generator.api import load_generator_overrides_from_args
 
     mode = str(row.get("deployment_mode") or "")
@@ -877,7 +892,7 @@ def _spica_generator_overrides(args: argparse.Namespace | None, row: pd.Series) 
         router_config = _spica_router_config(row)
         if router_config:
             dyn_overrides["router_config"] = router_config
-    planner_config = _spica_planner_config(args, row)
+    planner_config = _spica_planner_config(args, row, task)
     if planner_config:
         dyn_overrides["planner_config"] = planner_config
     kvbm_config = _spica_kvbm_config(row)
@@ -1039,7 +1054,7 @@ def _save_spica_top_config_artifacts(
         generator_config = task_config_to_generator_config(
             task_config=generator_task,
             result_df=generator_row,
-            generator_overrides=_spica_generator_overrides(override_args, generator_row),
+            generator_overrides=_spica_generator_overrides(override_args, generator_row, generator_task),
             num_gpus_per_node=num_gpus_per_node,
         )
         generator_config_yaml = os.path.join(top_config_dir, "generator_config.yaml")

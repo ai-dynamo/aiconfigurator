@@ -33,6 +33,7 @@ from aiconfigurator.spica.cli_adapter import (
     _build_spica_trace_search_space,
     _save_spica_trace_artifacts,
     _spica_candidates_to_result_df,
+    _spica_generator_overrides,
 )
 
 pytestmark = pytest.mark.unit
@@ -392,13 +393,13 @@ class TestCLIIntegration:
         )
         args = argparse.Namespace(
             backend="auto",
-            model_path=None,
-            system=None,
-            total_gpus=None,
+            model_path="Wrong/CLI-Model",
+            system="wrong_cli_system",
+            total_gpus=99,
             top_n=1,
             strict_sla=False,
-            ttft=2000.0,
-            tpot=30.0,
+            ttft=1.0,
+            tpot=2.0,
         )
         candidates = [
             {
@@ -440,7 +441,50 @@ class TestCLIIntegration:
         assert task.total_gpus == 4
         assert task.isl == 128
         assert task.osl == 16
+        assert task.ttft == 8000.0
+        assert task.tpot == 200.0
         assert result_bundle.workload_label == "config"
+
+    def test_spica_generator_overrides_prefer_task_over_cli_for_planner(self):
+        """Generated planner config should use evaluated Spica config values, not stale default CLI args."""
+        args = argparse.Namespace(
+            model_path="Wrong/CLI-Model",
+            total_gpus=99,
+            system="wrong_cli_system",
+            ttft=1.0,
+            tpot=2.0,
+            generator_config=None,
+            generator_set=None,
+            generator_dynamo_version=None,
+            namespace=None,
+            transport=None,
+            image_pull_secret=None,
+            model_cache=None,
+        )
+        task = argparse.Namespace(primary_model_path="Qwen/Qwen3-32B-FP8", ttft=8000.0, tpot=200.0)
+        row = pd.Series(
+            {
+                "deployment_mode": "disagg",
+                "backend": "trtllm",
+                "model_name": "Qwen/Qwen3-32B-FP8",
+                "enable_throughput_scaling": True,
+                "enable_load_scaling": True,
+                "prefill_tp": 1,
+                "prefill_pp": 1,
+                "prefill_attention_dp": 1,
+                "decode_tp": 2,
+                "decode_pp": 1,
+                "decode_attention_dp": 1,
+            }
+        )
+
+        planner_config = _spica_generator_overrides(args, row, task)["DynConfig"]["planner_config"]
+
+        assert planner_config["model_name"] == "Qwen/Qwen3-32B-FP8"
+        assert planner_config["ttft_ms"] == pytest.approx(8000.0)
+        assert planner_config["itl_ms"] == pytest.approx(200.0)
+        assert planner_config["prefill_engine_num_gpu"] == 1
+        assert planner_config["decode_engine_num_gpu"] == 2
 
     def test_spica_trace_artifacts_include_pareto_outputs(self, tmp_path, cli_args_factory):
         candidates = [
