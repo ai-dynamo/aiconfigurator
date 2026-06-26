@@ -611,6 +611,62 @@ class TestMoECrossProfileTransfer:
         assert tags == {"xprofile", "xshape"} and ue.worst_provenance(tags) == "xprofile"
         ue.note_provenance("xop")  # outside any capture -> no-op, no error
 
+    def test_tier1_xshape_borrows_same_quant_other_shape(self, comprehensive_perf_db):
+        """Tier 1: a collected quant (fp8) queried at an UNcollected shape borrows its own
+        nearest collected shape -> finite estimate tagged xshape. Gating XSHAPE off raises."""
+        from aiconfigurator.sdk.operations import util_empirical as ue
+
+        kwargs = dict(
+            num_tokens=16,
+            hidden_size=9999,  # absent shape -> own-shape grid empty -> Tier 1
+            inter_size=8192,
+            topk=2,
+            num_experts=8,
+            moe_tp_size=2,
+            moe_ep_size=2,
+            quant_mode=common.MoEQuantMode.fp8,
+            workload_distribution="uniform",
+            database_mode=common.DatabaseMode.EMPIRICAL,
+        )
+        try:
+            comprehensive_perf_db.set_transfer_policy(None)  # all on (also clears grid cache)
+            with ue.capture_provenance() as tags:
+                v = float(comprehensive_perf_db.query_moe(**kwargs))
+            assert v > 0 and ue.worst_provenance(tags) == "xshape"
+            comprehensive_perf_db.set_transfer_policy(["xquant"])  # XSHAPE disabled
+            with pytest.raises(EmpiricalNotImplementedError):
+                comprehensive_perf_db.query_moe(**kwargs)
+        finally:
+            comprehensive_perf_db.set_transfer_policy(None)
+
+    def test_tier2_xquant_borrows_same_profile_quant(self, comprehensive_perf_db):
+        """Tier 2: fp8_block has no data but shares fp8's (1,2) profile -> borrows fp8 ->
+        finite estimate tagged xquant. Gating XQUANT off (and xprofile off) raises."""
+        from aiconfigurator.sdk.operations import util_empirical as ue
+
+        kwargs = dict(
+            num_tokens=16,
+            hidden_size=2048,
+            inter_size=8192,
+            topk=2,
+            num_experts=8,
+            moe_tp_size=2,
+            moe_ep_size=2,
+            quant_mode=common.MoEQuantMode.fp8_block,  # no data; same profile as fp8
+            workload_distribution="uniform",
+            database_mode=common.DatabaseMode.EMPIRICAL,
+        )
+        try:
+            comprehensive_perf_db.set_transfer_policy(None)
+            with ue.capture_provenance() as tags:
+                v = float(comprehensive_perf_db.query_moe(**kwargs))
+            assert v > 0 and ue.worst_provenance(tags) == "xquant"
+            comprehensive_perf_db.set_transfer_policy(["xshape"])  # XQUANT + XPROFILE disabled
+            with pytest.raises(EmpiricalNotImplementedError):
+                comprehensive_perf_db.query_moe(**kwargs)
+        finally:
+            comprehensive_perf_db.set_transfer_policy(None)
+
     def test_transfer_policy_gates_cross_profile(self, comprehensive_perf_db):
         """With XPROFILE disabled, the absent-profile quant raises again instead of
         falling through to cross-profile transfer. The policy is read at query time."""

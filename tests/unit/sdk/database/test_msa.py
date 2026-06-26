@@ -37,12 +37,18 @@ def _ctx_msa():
     )
 
 
-def test_msa_sol_positive(comprehensive_perf_db):
-    """SOL mode computes the three-group MSA SOL (gemm + fp8 indexer + sparse attn)."""
+def test_msa_sol_scales_with_workload(comprehensive_perf_db):
+    """SOL mode computes the three-group MSA SOL (gemm + fp8 indexer + sparse attn). Assert it
+    RESPONDS to the workload rather than returning a constant: more new tokens (s) add work, and
+    a longer cached prefix adds indexer/attention work (full_s > index_topk)."""
     comprehensive_perf_db.set_default_database_mode(common.DatabaseMode.SOL)
     try:
-        v = float(_ctx_msa().query(comprehensive_perf_db, batch_size=8, s=2048, prefix=0))
-        assert v > 0
+        op = _ctx_msa()
+        small = float(op.query(comprehensive_perf_db, batch_size=8, s=512, prefix=0))
+        large = float(op.query(comprehensive_perf_db, batch_size=8, s=2048, prefix=0))
+        with_prefix = float(op.query(comprehensive_perf_db, batch_size=8, s=2048, prefix=2048))
+        assert 0 < small < large  # scales with new-token count
+        assert with_prefix > large  # cached prefix adds indexer work beyond index_topk
     finally:
         comprehensive_perf_db.set_default_database_mode(common.DatabaseMode.SILICON)
 
