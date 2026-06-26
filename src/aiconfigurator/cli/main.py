@@ -1010,14 +1010,6 @@ def _sglang_deepep_perf_data_skip_reason(
     return None
 
 
-def _shared_layer_allows_missing_version(database_mode: str | None) -> bool:
-    mode = database_mode.name if hasattr(database_mode, "name") else str(database_mode or "")
-    return mode.upper() in {
-        common.DatabaseMode.SILICON.name,
-        common.DatabaseMode.HYBRID.name,
-    }
-
-
 def _ensure_backend_version_available(
     system_name: str,
     backend_name: str,
@@ -1050,17 +1042,6 @@ def _ensure_backend_version_available(
     if backend_version is None or backend_version in versions:
         return
 
-    if versions and _shared_layer_allows_missing_version(database_mode):
-        logger.warning(
-            "No exact perf database for system=%s backend=%s version=%s; "
-            "allowing shared-layer reuse from sibling version(s): %s",
-            system_name,
-            backend_name,
-            backend_version,
-            ", ".join(versions),
-        )
-        return
-
     systems_paths = perf_database.get_systems_paths()
     systems_paths_display = ", ".join(systems_paths) if systems_paths else "<none>"
 
@@ -1077,7 +1058,9 @@ def _ensure_backend_version_available(
     if versions:
         logger.error("Available versions: %s", ", ".join(versions))
         logger.error(
-            "Fix: switch --backend-version to one of the available versions, or remove --backend-version to use latest."
+            "Fix: switch --backend-version to one of the available versions, remove --backend-version to use latest, "
+            "or add a declared version directory with %s when this version intentionally reuses shared-layer data.",
+            perf_database.SHARED_LAYER_REUSE_MARKER,
         )
     else:
         logger.error("Available versions: none")

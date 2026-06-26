@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
 _MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError, InterpolationDataNotAvailableError)
+SHARED_LAYER_REUSE_MARKER = "SHARED_LAYER_REUSE.txt"
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
@@ -370,9 +371,9 @@ def get_database(
         systems_paths: the systems search paths
         allow_missing_data: instantiate a database from system specs even when
             backend/version data files are absent. This is intended for SOL/EMPIRICAL
-            estimate-only modes. SILICON/HYBRID can also instantiate a shell
-            database when the shared layer is enabled so sibling rows can supply
-            the requested version's missing op files.
+            estimate-only modes. SILICON/HYBRID shared-layer reuse still requires
+            an explicit backend/version directory; marker-only directories can
+            declare new framework versions whose rows come from siblings.
         database_mode: the mode the caller will query under (`SILICON` / `HYBRID` /
             `EMPIRICAL` / `SOL`). SILICON and HYBRID enable the shared layer
             (sibling-row inheritance, including `kernel_source=default` fallback
@@ -429,7 +430,7 @@ def get_database(
                         f"failed to load {system=}, {backend=}, {version=}, continuing searching",
                         exc_info=True,
                     )
-        elif allow_missing_data or shared_flag:
+        elif allow_missing_data:
             if missing_data_candidate is None:
                 missing_data_candidate = (systems_root, cache_key)
         else:
@@ -444,8 +445,7 @@ def get_database(
             database = databases_cache[cache_key][backend][version]
             return database
         except KeyError:
-            load_kind = "estimate-only" if allow_missing_data else "shared-layer shell"
-            logger.info(f"Loading {load_kind} database for {system=}, {backend=}, {version=}")
+            logger.info(f"Loading estimate-only database for {system=}, {backend=}, {version=}")
             try:
                 database = PerfDatabase(system, backend, version, systems_root, database_mode=database_mode)
                 databases_cache[cache_key][backend][version] = database

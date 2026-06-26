@@ -25,6 +25,7 @@ import pytest
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.perf_database import (
+    SHARED_LAYER_REUSE_MARKER,
     PerfDatabase,
     _load_op_kernel_source_manifest_entries,
     databases_cache,
@@ -219,12 +220,16 @@ def test_shared_layer_on_in_silicon_mode(env: Path) -> None:
     assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
 
 
-def test_get_database_shared_layer_shell_when_active_version_directory_missing(env: Path) -> None:
-    """SILICON shared-layer reuse should not require an empty active-version dir.
+def test_get_database_shared_layer_uses_declared_marker_version(env: Path) -> None:
+    """SILICON shared-layer reuse can use a marker-only active-version dir.
 
     The requested backend/version may be a new framework release whose silicon
-    rows are intentionally inherited from an older sibling version.
+    rows are intentionally inherited from an older sibling version, but the
+    version still needs an explicit declaration in the data tree.
     """
+    marker_dir = _backend_csv(env).parent
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    (marker_dir / SHARED_LAYER_REUSE_MARKER).write_text("declared shared-layer reuse\n", encoding="utf-8")
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
     _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
 
@@ -242,6 +247,26 @@ def test_get_database_shared_layer_shell_when_active_version_directory_missing(e
         assert db.version == "1.0"
         assert db.enable_shared_layer is True
         assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
+    finally:
+        databases_cache.clear()
+
+
+def test_get_database_shared_layer_rejects_undeclared_active_version(env: Path) -> None:
+    """A sibling version alone does not make arbitrary framework versions loadable."""
+    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+
+    databases_cache.clear()
+    try:
+        db = get_database(
+            "h100_sxm",
+            "trtllm",
+            "1.0",
+            systems_paths=str(env),
+            database_mode="SILICON",
+        )
+
+        assert db is None
     finally:
         databases_cache.clear()
 
