@@ -857,7 +857,14 @@ def cli_estimate(
 
     def _load_database(sys_name: str):
         resolved_version = _resolve_version_for(sys_name)
-        database_kwargs = {"allow_missing_data": database_mode != "SILICON"}
+        # database_mode is needed at construction (not just set_default_database_mode below):
+        # PerfDatabase.__init__ uses it to enable the sibling-version shared layer (XVERSION)
+        # for HYBRID/EMPIRICAL. Without it, `cli estimate --database-mode HYBRID` would run
+        # with the query mode set but no sibling data loaded.
+        database_kwargs = {
+            "allow_missing_data": database_mode != "SILICON",
+            "database_mode": database_mode,
+        }
         if active_systems_paths is not None:
             database_kwargs["systems_paths"] = active_systems_paths
         db = get_database(

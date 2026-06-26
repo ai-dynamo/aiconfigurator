@@ -36,7 +36,9 @@ class TestCLIEstimateUnit:
             latest_calls.append((system, backend, systems_paths))
             return "estimate"
 
-        def fake_get_database(system, backend, version, systems_paths=None, allow_missing_data=False):
+        def fake_get_database(
+            system, backend, version, systems_paths=None, allow_missing_data=False, database_mode=None
+        ):
             database_calls.append((system, backend, version, systems_paths, allow_missing_data))
             return FakeDatabase()
 
@@ -78,7 +80,7 @@ class TestCLIEstimateUnit:
         def fake_latest_version(system, backend):
             return {"h200_sxm": "prefill-version", "h100_pcie": None}[system]
 
-        def fake_get_database(system, backend, version, allow_missing_data=False):
+        def fake_get_database(system, backend, version, allow_missing_data=False, database_mode=None):
             database_calls.append((system, backend, version, allow_missing_data))
             return FakeDatabase()
 
