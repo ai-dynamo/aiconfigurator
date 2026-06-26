@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""AIC_SM_DATABASE_MODE=HYBRID_RESCUE: run pure SILICON first, re-run only the genuine
-FAILs in HYBRID, and derive the source from the two-pass outcome (silicon / empirical
-tier / xversion) without per-row provenance plumbing."""
+"""Support-matrix default: run pure SILICON first, re-run only the genuine FAILs in HYBRID,
+and derive the source from the two-pass outcome (silicon / empirical tier / xversion) without
+per-row provenance plumbing. AIC_SM_ALLOW_HYBRID=0 disables the rescue (pure-silicon matrix)."""
 
 import pandas as pd
 import pytest
@@ -15,8 +15,9 @@ from tools.support_matrix.support_matrix import STATUS_FAIL, STATUS_PASS, Suppor
 pytestmark = pytest.mark.unit
 
 
-def _run_rescue(monkeypatch, *, silicon_ok, hybrid_ok=True, hybrid_tier=None):
-    """Drive run_single_test in HYBRID_RESCUE with a faked _run_mode keyed on database_mode."""
+def _run_rescue(monkeypatch, *, silicon_ok, hybrid_ok=True, hybrid_tier=None, allow_hybrid=None):
+    """Drive run_single_test with a faked _run_mode keyed on database_mode. Rescue is on by
+    default; pass allow_hybrid="0" to disable it."""
     calls: list[str] = []
 
     def fake_run_mode(**kwargs):
@@ -32,7 +33,11 @@ def _run_rescue(monkeypatch, *, silicon_ok, hybrid_ok=True, hybrid_tier=None):
             note_provenance(hybrid_tier)
         return pd.DataFrame({"x": [1.0]})
 
-    monkeypatch.setenv("AIC_SM_DATABASE_MODE", "HYBRID_RESCUE")
+    monkeypatch.delenv("AIC_SM_DATABASE_MODE", raising=False)
+    if allow_hybrid is not None:
+        monkeypatch.setenv("AIC_SM_ALLOW_HYBRID", allow_hybrid)
+    else:
+        monkeypatch.delenv("AIC_SM_ALLOW_HYBRID", raising=False)
     monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
     monkeypatch.setattr(
         support_matrix_module,
@@ -75,3 +80,10 @@ def test_silicon_fail_hybrid_fail_stays_fail(monkeypatch):
     status, src, calls = _run_rescue(monkeypatch, silicon_ok=False, hybrid_ok=False)
     assert status == STATUS_FAIL and src == ""
     assert calls == ["SILICON", "HYBRID"]
+
+
+def test_allow_hybrid_off_is_pure_silicon_no_rescue(monkeypatch):
+    # AIC_SM_ALLOW_HYBRID=0 -> a silicon FAIL is NOT rescued; HYBRID is never run.
+    status, src, calls = _run_rescue(monkeypatch, silicon_ok=False, hybrid_tier="xshape", allow_hybrid="0")
+    assert status == STATUS_FAIL and src == ""
+    assert calls == ["SILICON"]

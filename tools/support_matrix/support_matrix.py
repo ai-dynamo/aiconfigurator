@@ -711,13 +711,10 @@ class SupportMatrix:
         engine_step_backend: str | None,
         database_mode: str | None = None,
     ) -> Task:
-        # Default SILICON (matrix semantics); env override for HYBRID/EMPIRICAL coverage
-        # experiments. ``database_mode`` (when given) overrides the env -- used by the
-        # silicon-first/hybrid-rescue two-pass in run_single_test. HYBRID_RESCUE is a
-        # run_single_test-only orchestration value, never a real per-task mode.
+        # ``database_mode`` is supplied per-pass by run_single_test's silicon-first /
+        # hybrid-rescue two-pass ("SILICON" then "HYBRID"); the env is only a fallback
+        # default for any direct caller.
         resolved_mode = database_mode or os.environ.get("AIC_SM_DATABASE_MODE", "SILICON")
-        if resolved_mode == "HYBRID_RESCUE":
-            resolved_mode = "SILICON"
         common_kwargs = {
             "total_gpus": constraints.total_gpus,
             "isl": constraints.isl,
@@ -865,12 +862,13 @@ class SupportMatrix:
                     return statuses, error_messages, commands, provenance
                 return statuses, error_messages
 
-        # HYBRID_RESCUE: run pure SILICON first (shared layer OFF), and only re-run the
-        # genuine FAILs in HYBRID. A FAIL->PASS rescue is therefore unambiguously hybrid,
+        # By default the matrix runs pure SILICON first (shared layer OFF) and re-runs only
+        # the genuine FAILs in HYBRID. A FAIL->PASS rescue is therefore unambiguously hybrid,
         # and the source is derived without per-row provenance plumbing: the worst empirical
         # tier that fired, or "xversion" when none did (the rescue came from the sibling-
         # version shared layer, which resolves via the silicon path and notes no tier).
-        rescue = os.environ.get("AIC_SM_DATABASE_MODE", "SILICON").upper() == "HYBRID_RESCUE"
+        # Set AIC_SM_ALLOW_HYBRID to a falsey value (0/false/no/off) for a pure-silicon matrix.
+        allow_hybrid = os.environ.get("AIC_SM_ALLOW_HYBRID", "1").strip().lower() not in ("0", "false", "no", "off")
 
         def _attempt(mode: str, db_mode: str | None) -> tuple[str, str | None, str]:
             """One (mode, database_mode) attempt -> (status, raw_error_or_None, source_tier)."""
@@ -940,20 +938,18 @@ class SupportMatrix:
                 perf_database.clear_database_runtime_caches(system, backend, version)
 
         for mode in modes_to_test:
-            if rescue:
-                status, raw_error, tier = _attempt(mode, "SILICON")
-                # Only a genuine data gap (FAIL) can be rescued by HYBRID; HW/FRAMEWORK
-                # incompatibilities can't, so leave those as-is.
-                if status == STATUS_FAIL:
-                    h_status, h_error, h_tier = _attempt(mode, "HYBRID")
-                    if h_status == STATUS_PASS:
-                        status, raw_error = STATUS_PASS, None
-                        # No empirical tier fired -> the shared layer (XVERSION) rescued it.
-                        tier = h_tier if h_tier and h_tier != "silicon" else "xversion"
-                    else:
-                        status, raw_error, tier = h_status, h_error, ""
-            else:
-                status, raw_error, tier = _attempt(mode, None)  # single pass in the env mode
+            status, raw_error, tier = _attempt(mode, "SILICON")
+            # Only a genuine data gap (FAIL) can be rescued by HYBRID; HW/FRAMEWORK
+            # incompatibilities can't, so leave those as-is. Rescue is on by default and
+            # disabled by AIC_SM_ALLOW_HYBRID=0 (pure-silicon matrix).
+            if allow_hybrid and status == STATUS_FAIL:
+                h_status, h_error, h_tier = _attempt(mode, "HYBRID")
+                if h_status == STATUS_PASS:
+                    status, raw_error = STATUS_PASS, None
+                    # No empirical tier fired -> the shared layer (XVERSION) rescued it.
+                    tier = h_tier if h_tier and h_tier != "silicon" else "xversion"
+                else:
+                    status, raw_error, tier = h_status, h_error, ""
 
             statuses[mode] = status
             error_messages[mode] = _format_exception_for_csv(raw_error)
