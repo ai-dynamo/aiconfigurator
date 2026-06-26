@@ -83,7 +83,7 @@ You can use the generator in two ways: AIConfigurator CLI or standalone (code/CL
   ```
   aiconfigurator cli default \
     --backend vllm \
-    --deployment-target llm-d \
+    --deployment-target llm-d-helm \
     --model-path Qwen/Qwen3-32B \
     --system h200_sxm \
     --total-gpus 32 \

@@ -277,3 +277,18 @@ inputs:
   - key: LlmdConfig.monitoring_enabled
     required: false
     default: false
+  - key: LlmdConfig.accelerator_type
+    required: false
+    default: "nvidia"
+  - key: LlmdConfig.xpu_rdma_enabled
+    required: false
+    default: false
+  - key: LlmdConfig.xpu_kv_buffer_device
+    required: false
+    default: "cpu"
+  - key: LlmdConfig.kustomize_base_path
+    required: false
+    default: ""
+  - key: LlmdConfig.kustomize_name_prefix
+    required: false
+    default: ""
