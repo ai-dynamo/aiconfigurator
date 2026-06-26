@@ -33,9 +33,6 @@ class _StaticOp:
 
 
 class _TestBackend(BaseBackend):
-    def run_agg(self, model, database, runtime_config, **kwargs):
-        raise NotImplementedError
-
     def find_best_agg_result_under_constraints(self, model, database, runtime_config, **kwargs):
         raise NotImplementedError
 
@@ -182,6 +179,41 @@ def test_run_static_can_route_to_rust_engine_step_backend(
     assert summary.get_generation_energy_wms_dict() == {"rust_engine_step_generation": 0.0}
     assert summary.get_context_source_dict() == {"rust_engine_step_context": "rust"}
     assert summary.get_generation_source_dict() == {"rust_engine_step_generation": "rust"}
+
+
+def test_run_agg_with_osl_one_does_not_divide_by_zero(
+    backend: BaseBackend,
+    model,
+    database,
+    monkeypatch,
+) -> None:
+    """Regression: osl=1 (no-decode) must not raise and tokens/s/user must be 0.0."""
+    monkeypatch.setattr(
+        backend,
+        "_get_mix_step_latency",
+        lambda *args, **kwargs: (1.0, 1.0, {}, {}),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *args, **kwargs: (0.0, 0.0, {}, {}),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_memory_usage",
+        lambda *args, **kwargs: {"total": 1.0},
+    )
+
+    summary = backend.run_agg(
+        model,
+        database,
+        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=1, prefix=2),
+        ctx_tokens=8,
+    )
+
+    row = summary.get_summary_df().iloc[0]
+    assert row["tpot"] > 0.0
+    assert row["tokens/s/user"] == 0.0
 
 
 def test_mix_step_efficiency_base_default_is_one(backend: BaseBackend) -> None:
