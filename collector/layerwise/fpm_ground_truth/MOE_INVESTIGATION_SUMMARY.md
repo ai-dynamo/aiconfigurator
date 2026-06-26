@@ -19,7 +19,7 @@ finding lands in is the whole key to not getting lost:
 | 1 | expert imbalance / router dominates | MoE overlay | ❌ rejected — skew self-averages (per-step CV ~1.8%); AIC's power-law label is enough |
 | 2 | layerwise data not apple-to-apple vs FPM | measurement | ❌ small portion — ctx timed with `worker_wall` (host overhead); fixed → `execute_model_gpu` |
 | 3 | **MoE overlay modeling inaccurate** | **MoE overlay** | ✅ **FIXED** — decode double-count: the fused `routed` kernel already contains router/dispatch, AIC added them again; MAPE 51→21% |
-| 4 | **small-prefill gap (latest)** | **backbone (non-MoE)** | 🆕 **NEW, MoE-unrelated** — comm-bound (golden) vs launch-bound (1-GPU collection); not yet fixed |
+| 4 | **small-prefill gap** | **backbone (non-MoE)** | ✅ **diagnosed, fix-shape known, DEFERRED** — 1-GPU-collection launch-gap artifact (NOT comm/topology/capture); fix = backbone wall→busy; parked (bounded, doesn't move recommendation, needs collector instrumentation). See SMALL_PREFILL_FIX_DESIGN.md |
 
 **The #3 vs #4 boundary (the thing that's easy to confuse):**
 - **#3 is the MoE overlay.** Fixed by using the measured fused per-layer latency and
@@ -32,8 +32,10 @@ Both share the roofline insight `total = max(compute, memory, comm)`, but on **d
 components / regimes**:
 - #3 (overlay, decode): comm is **hidden** under the memory-bound weight load → overlap ≈ 0
   (that's why we deleted the double-counted terms).
-- #4 (backbone, small-prefill): compute is tiny so **comm dominates** → golden is comm-bound
-  ~16ms; the 1-GPU collection has no comm and mis-measures a launch-bound ~33ms floor.
+- #4 (backbone, small-prefill): NOT comm after all — golden's fast ~16ms is busy-bound (GPU kept
+  full, launches hidden); the 1-GPU collection idles between launches → mis-measures a launch-bound
+  ~33ms floor. (The earlier "comm dominates" reading was rank-desync spin-wait misread as comm;
+  synced comm floor is only ~1.85ms. See SMALL_PREFILL_FIX_DESIGN.md.)
 
 Per-topic docs: `DECODE_MOE_OVERLAY_VERDICT` (#3); `SMALL_PREFILL_WHY_GOLDEN_16MS` +
 `SMALL_PREFILL_MECHANISM_DISCRIMINATION` + `SMALL_PREFILL_ENVELOPE_ROOTCAUSE` (#4);
