@@ -709,7 +709,15 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         engine_step_backend: str | None,
+        database_mode: str | None = None,
     ) -> Task:
+        # Default SILICON (matrix semantics); env override for HYBRID/EMPIRICAL coverage
+        # experiments. ``database_mode`` (when given) overrides the env -- used by the
+        # silicon-first/hybrid-rescue two-pass in run_single_test. HYBRID_RESCUE is a
+        # run_single_test-only orchestration value, never a real per-task mode.
+        resolved_mode = database_mode or os.environ.get("AIC_SM_DATABASE_MODE", "SILICON")
+        if resolved_mode == "HYBRID_RESCUE":
+            resolved_mode = "SILICON"
         common_kwargs = {
             "total_gpus": constraints.total_gpus,
             "isl": constraints.isl,
@@ -718,8 +726,7 @@ class SupportMatrix:
             "ttft": constraints.ttft,
             "tpot": constraints.tpot,
             "engine_step_backend": engine_step_backend,
-            # Default SILICON (matrix semantics); env override for HYBRID/EMPIRICAL coverage experiments.
-            "database_mode": os.environ.get("AIC_SM_DATABASE_MODE", "SILICON"),
+            "database_mode": resolved_mode,
             # Optional fine-grained HYBRID transfer policy for coverage experiments
             # (e.g. AIC_SM_TRANSFERS="off" or "xshape,xquant"). None -> all kinds on.
             "transfer_policy": os.environ.get("AIC_SM_TRANSFERS") or None,
@@ -757,6 +764,7 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         engine_step_backend: str | None,
+        database_mode: str | None = None,
     ) -> pd.DataFrame | None:
         task = SupportMatrix._create_task(
             mode=mode,
@@ -766,6 +774,7 @@ class SupportMatrix:
             version=version,
             constraints=constraints,
             engine_step_backend=engine_step_backend,
+            database_mode=database_mode,
         )
         return task.run()
 
@@ -856,7 +865,15 @@ class SupportMatrix:
                     return statuses, error_messages, commands, provenance
                 return statuses, error_messages
 
-        for mode in modes_to_test:
+        # HYBRID_RESCUE: run pure SILICON first (shared layer OFF), and only re-run the
+        # genuine FAILs in HYBRID. A FAIL->PASS rescue is therefore unambiguously hybrid,
+        # and the source is derived without per-row provenance plumbing: the worst empirical
+        # tier that fired, or "xversion" when none did (the rescue came from the sibling-
+        # version shared layer, which resolves via the silicon path and notes no tier).
+        rescue = os.environ.get("AIC_SM_DATABASE_MODE", "SILICON").upper() == "HYBRID_RESCUE"
+
+        def _attempt(mode: str, db_mode: str | None) -> tuple[str, str | None, str]:
+            """One (mode, database_mode) attempt -> (status, raw_error_or_None, source_tier)."""
             try:
                 # capture_provenance spans task.run() (the contextvar propagates down the
                 # call stack), so we learn the worst empirical transfer tier that fired.
@@ -869,10 +886,9 @@ class SupportMatrix:
                         version=version,
                         constraints=constraints,
                         engine_step_backend="python" if compare_engine_step_backends else None,
+                        database_mode=db_mode,
                     )
-
-                # Note that we do not use pareto_frontier_df here because for the pareto_df
-                # if is not None and not empty, it means the pareto_frontier_df is also not None and not empty.
+                # pareto_frontier_df is non-empty iff pareto_df is, so we only check pareto_df.
                 if python_pareto_df is None or python_pareto_df.empty:
                     raise RuntimeError("Configuration returned no results, failed to catch traceback")
 
@@ -886,10 +902,10 @@ class SupportMatrix:
                             version=version,
                             constraints=constraints,
                             engine_step_backend="rust",
+                            database_mode=db_mode,
                         )
                     if rust_pareto_df is None or rust_pareto_df.empty:
                         raise RuntimeError("Rust engine-step backend returned no results")
-
                     mismatch = _compare_pareto_dfs(
                         python_pareto_df,
                         rust_pareto_df,
@@ -901,10 +917,7 @@ class SupportMatrix:
                     if mismatch:
                         raise RuntimeError(mismatch)
 
-                statuses[mode] = STATUS_PASS
-                error_messages[mode] = None
-                provenance[mode] = worst_provenance(prov_tags)
-
+                return STATUS_PASS, None, worst_provenance(prov_tags)
             except Exception as e:
                 raw_error = traceback.format_exc()
                 logger.warning(
@@ -916,28 +929,36 @@ class SupportMatrix:
                     mode,
                     str(e),
                 )
-
-                if _is_known_hw_incompatible_gap(
-                    system=system,
-                    error_message=raw_error,
+                if _is_known_hw_incompatible_gap(system=system, error_message=raw_error):
+                    return STATUS_HW_INCOMPATIBLE, raw_error, ""
+                if _is_known_framework_incompatible_gap(
+                    model=model, system=system, backend=backend, version=version, error_message=raw_error
                 ):
-                    statuses[mode] = STATUS_HW_INCOMPATIBLE
-                elif _is_known_framework_incompatible_gap(
-                    model=model,
-                    system=system,
-                    backend=backend,
-                    version=version,
-                    error_message=raw_error,
-                ):
-                    statuses[mode] = STATUS_FRAMEWORK_INCOMPATIBLE
-                else:
-                    statuses[mode] = STATUS_FAIL
-                error_messages[mode] = raw_error
-
+                    return STATUS_FRAMEWORK_INCOMPATIBLE, raw_error, ""
+                return STATUS_FAIL, raw_error, ""
             finally:
                 perf_database.clear_database_runtime_caches(system, backend, version)
 
-            error_messages[mode] = _format_exception_for_csv(error_messages.get(mode))
+        for mode in modes_to_test:
+            if rescue:
+                status, raw_error, tier = _attempt(mode, "SILICON")
+                # Only a genuine data gap (FAIL) can be rescued by HYBRID; HW/FRAMEWORK
+                # incompatibilities can't, so leave those as-is.
+                if status == STATUS_FAIL:
+                    h_status, h_error, h_tier = _attempt(mode, "HYBRID")
+                    if h_status == STATUS_PASS:
+                        status, raw_error = STATUS_PASS, None
+                        # No empirical tier fired -> the shared layer (XVERSION) rescued it.
+                        tier = h_tier if h_tier and h_tier != "silicon" else "xversion"
+                    else:
+                        status, raw_error, tier = h_status, h_error, ""
+            else:
+                status, raw_error, tier = _attempt(mode, None)  # single pass in the env mode
+
+            statuses[mode] = status
+            error_messages[mode] = _format_exception_for_csv(raw_error)
+            provenance[mode] = tier if status == STATUS_PASS else ""
+
         if include_commands:
             return statuses, error_messages, commands, provenance
         return statuses, error_messages
