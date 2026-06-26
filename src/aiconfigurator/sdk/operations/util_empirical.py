@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Data-calibrated empirical estimation via SOL-utilization.
 
 Replaces each op's fixed ``scale_factor`` with a utilization read from real

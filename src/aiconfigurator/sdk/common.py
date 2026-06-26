@@ -501,6 +501,7 @@ DefaultHFModels = {
     "nvidia/MiniMax-M2.5-NVFP4",
     "MiniMaxAI/MiniMax-M2.7",
     "nvidia/MiniMax-M2.7-NVFP4",
+    "MiniMaxAI/MiniMax-M3",
     # GPT-OSS Models
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
