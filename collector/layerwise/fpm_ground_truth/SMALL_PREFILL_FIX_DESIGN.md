@@ -110,29 +110,24 @@ roofline). **But the numbers don't reconcile, so this is probably dead:**
 - **curve-fit risk**: ~1 shape class is too narrow to validate a model change; needs a broader
   hybrid workload first.
 
-## OPEN QUESTION: why does 1-GPU idle more than tp4? (NOT nsys-confirmed)
-Resolving the paradox ("collector strips work AND is slower"): collector 33 ms = **3.4 ms stripped
-busy + ~30 ms idle**. Two *separate* differences — (1) it skips ~13 ms of real MoE + all-reduce work
-(would be *faster*); (2) ~30 ms of GPU idle (slower). **The open part is ONLY (2), the 30 ms idle** —
-don't conflate it with the work-skipping.
+## RESOLVED (nsys-confirmed): the 30ms idle is per-layer host-dispatch starvation
+GPU experiment nailed it — see `SMALL_PREFILL_GAP_MICROCAUSALITY.md` (commit 5492156d):
 
-- **Confirmed**: it's the **1-GPU-sharded-vs-real-tp4 topology** (control: plain vLLM, no marker, on
-  the 1-GPU sharded config = ~34.7 ms; real tp4 = ~16 ms) — NOT marker/moe-noop, NOT capture mode.
-- **Note**: the 1-GPU config is *sharded* (1 rank's 1/4 dims = same per-GPU work as one tp4 rank), so
-  34.7 (A) vs 16 (D) at equal per-GPU compute *strongly implies A is gap-bound, not "no parallelism"* —
-  but A's busy/gap split was never measured.
-- **NOT confirmed**: the micro-mechanism of the 30 ms idle. Under symmetric per-launch cost it doesn't
-  close (golden busy 16 ms couldn't hide a 30 ms launch chain either) → the 1-GPU gap is *genuinely
-  larger*, reason unverified.
+- **A (1-GPU, real MoE, no marker) is gap-bound**: GPU-busy 8.7 ms ≪ wall 45.5 ms (**81% idle**).
+  Same 510 eager + 41 graph launches as B → B's gap is **not** a marker/moe-noop artifact.
+- **Idle host-time split**: launch-API (`cudaLaunchKernel`) 13%, sync 0.5% (ruled out), D2H 1.5%
+  (ruled out), **host-dispatch between kernels (Python/PyTorch eager) 84.6% — dominant**.
+- **Layer-count scan**: `wall_k = 1.61 + 0.854·k` (R²=0.996). Per-step fixed overhead (intercept)
+  only **~1.6 ms**; the cost is **per-layer** (~0.85 ms/layer, ~0.65 ms of it idle launch-gap).
+- **The "single-layer fixed overhead, amortizable" hypothesis is REFUTED** (intercept 1.6 ms, not
+  ~30 ms). It's per-layer, repeated every layer (40 × ~0.65 ms ≈ 26 ms idle), **NOT** amortizable
+  by collecting more layers — each layer brings its own dispatch bubble.
 
-**Resolution plan (GPU, ≤1 hr, only if revisited — don't open for a deferred item):**
-1. Split GPU-busy vs idle for **A** (1-GPU, real MoE, no marker) and **B** (collector, moe-noop), not
-   just D. If A is busy-bound → "1-GPU slow" is trivially no-parallelism + B's gap is a moe-noop/sharded
-   artifact. If A is gap-bound → real micro-causality, go to (2).
-2. Characterize the 30 ms gap on `runs/nsys_ctx256`: read the CPU/CUDA-API during the largest
-   inter-kernel idles — `cudaLaunchKernel` spin = launch-rate-bound; `cudaStreamSynchronize`/D2H =
-   **sync-bound (host-GPU lockstep)**; Python no-CUDA = host-compute (GDN/Mamba metadata).
-   Prior: likely host/sync in the eager GDN path (30/40 layers) that tp4's all-reduce happens to overlap.
+**Mechanism**: in the eager GDN path (30/40 hybrid layers) the GPU sits idle between kernels
+waiting for the host (Python/PyTorch eager dispatch) to issue the next op → GPU starved ~80% of
+the step. tp4's all-reduce (GPU kernel + cross-rank sync) overlaps/fills that gap; 1-GPU has no
+all-reduce → the host-dispatch idle is exposed. **Fix lever = capture coverage** (full cudagraph
+replay removes per-kernel host dispatch) — consistent with the original root cause.
 
 ## When/how to FIX (if revisited)
 - The "WALL → busy" metric fix is **probably invalid** (see Fix shape) — don't build it without first
