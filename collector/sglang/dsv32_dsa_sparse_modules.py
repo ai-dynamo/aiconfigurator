@@ -44,6 +44,7 @@ def run_dsv32_dsa_sparse_kernel_worker(model_path, kernel, bs_only, *, perf_file
         device=device,
         architecture=DSV32_ARCHITECTURE,
         op_name_map=KERNEL_TO_OP_NAME,
+        label="dsv32",
     )
 
 

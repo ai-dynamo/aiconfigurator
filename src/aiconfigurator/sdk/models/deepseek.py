@@ -491,6 +491,8 @@ class DeepSeekModel(BaseModel):
                 attention_dp_size,
                 True,
                 quant_mode=moe_quant_mode,
+                attn_cp_size=cp,
+                is_context=False,
             ),
             ops.MoE(
                 "generation_moe",
@@ -516,6 +518,8 @@ class DeepSeekModel(BaseModel):
                 attention_dp_size,
                 False,
                 quant_mode=moe_quant_mode,
+                attn_cp_size=cp,
+                is_context=False,
             ),
         ]
 
@@ -1345,6 +1349,7 @@ class WideEPDeepSeekModel(BaseModel):
                     sms=sms,
                     moe_backend=moe_backend,
                     is_context=False,
+                    attn_cp_size=cp,
                 )
             ]
         )

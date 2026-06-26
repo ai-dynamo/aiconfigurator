@@ -92,7 +92,9 @@ KERNEL_TO_KERNEL_SOURCE = {
 }
 
 
-def _make_perf_filename(kernel: str, output_path: str, op_name_map: dict = KERNEL_TO_OP_NAME) -> str:
+def _make_perf_filename(kernel: str, output_path: str, op_name_map: dict | None = None) -> str:
+    if op_name_map is None:
+        op_name_map = KERNEL_TO_OP_NAME
     if os.path.isdir(output_path) or not output_path.endswith(".txt"):
         return os.path.join(output_path, f"{op_name_map[kernel]}_perf.txt")
     return output_path
@@ -113,11 +115,13 @@ def _write_row(
     score_mode=None,
     kernel_source=None,
     architecture: str = GLM5_ARCHITECTURE,
-    op_name_map: dict = KERNEL_TO_OP_NAME,
+    op_name_map: dict | None = None,
 ):
     # ``architecture`` / ``op_name_map`` default to GLM-5 so existing GLM-5
     # callers are unchanged; DeepSeek-V3.2 reuses this with its own values
     # (DeepseekV32ForCausalLM + dsv32_* names) -- see dsv32_dsa_sparse_modules.
+    if op_name_map is None:
+        op_name_map = KERNEL_TO_OP_NAME
     os.makedirs(os.path.dirname(os.path.abspath(perf_filename)) or ".", exist_ok=True)
     mla_dtype = "bfloat16" if kernel == "dsa_attn" else "fp8_e4m3"
     item = {
@@ -462,14 +466,16 @@ def run_glm5_dsa_sparse_kernel_worker(
     perf_filename,
     device="cuda:0",
     architecture: str = GLM5_ARCHITECTURE,
-    op_name_map: dict = KERNEL_TO_OP_NAME,
+    op_name_map: dict | None = None,
+    label: str = "glm5",
 ):
-    # ``architecture`` / ``op_name_map`` default to GLM-5; DeepSeek-V3.2 reuses
-    # this same worker with its own values (the kernels/shapes are read from the
-    # model config, so only the output tag + filenames differ).
+    # ``architecture`` / ``op_name_map`` / ``label`` default to GLM-5; DeepSeek-V3.2
+    # reuses this same worker with its own values (kernels/shapes come from the
+    # model config, so only the output tag + filenames + log label differ).
+    if op_name_map is None:
+        op_name_map = KERNEL_TO_OP_NAME
     if kernel not in op_name_map:
         raise ValueError(f"unknown kernel={kernel}; expected one of {list(op_name_map)}")
-    label = op_name_map[kernel].split("_")[0]  # "glm5" / "dsv32" — for log lines
     sc = _glm5_sparse_config(model_path)
     output_dir = os.path.dirname(perf_filename) or os.getcwd()
     perf_path = _make_perf_filename(kernel, output_dir, op_name_map)

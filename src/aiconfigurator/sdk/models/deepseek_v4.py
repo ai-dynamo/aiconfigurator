@@ -340,6 +340,7 @@ class DeepSeekV4Model(BaseModel):
             "generation",
             self._num_layers * self._mtp_scale_factor,
             is_context=False,
+            attn_cp=cp,
         )
         gen_routed_ops = [
             ops.GEMM(

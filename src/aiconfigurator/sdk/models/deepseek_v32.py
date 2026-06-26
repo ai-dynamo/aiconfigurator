@@ -304,6 +304,7 @@ class DeepSeekV32Model(BaseModel):
                 True,
                 quant_mode=moe_quant_mode,
                 attn_cp_size=self.config.cp_size,
+                is_context=False,  # decode: MoEDispatch picks the decode-CP comm path
             ),
             ops.MoE(
                 "generation_moe",
@@ -330,6 +331,7 @@ class DeepSeekV32Model(BaseModel):
                 False,
                 quant_mode=moe_quant_mode,
                 attn_cp_size=self.config.cp_size,
+                is_context=False,  # decode: MoEDispatch picks the decode-CP comm path
             ),
         ]
         self.generation_ops.append(

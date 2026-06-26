@@ -1065,10 +1065,17 @@ class MoEDispatch(Operation):
                             volume * self._attention_dp_size,
                         )
                     elif self._attn_cp_size > 1:
-                        # attn-CP + moe-TP: pre = all_gather (NOT all_reduce)
-                        comm_latency = database.query_nccl(
-                            common.CommQuantMode.half, self.num_gpus, "all_gather", volume
-                        )
+                        if self._is_context:
+                            # prefill: tokens are CP-sharded across ranks -> all_gather
+                            # to assemble the full token set for expert routing.
+                            comm_latency = database.query_nccl(
+                                common.CommQuantMode.half, self.num_gpus, "all_gather", volume
+                            )
+                        else:
+                            # decode: CP does not run; attention is replicated across the
+                            # CP ranks so every rank already holds all tokens -> the
+                            # pre-dispatch selection is local, no comm.
+                            comm_latency = 0
                     elif self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
                         comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
@@ -1097,10 +1104,18 @@ class MoEDispatch(Operation):
                             volume,
                         )
                     elif self._attn_cp_size > 1:
-                        # attn-CP + moe-TP: post = reduce_scatter (NOT all_reduce)
-                        comm_latency = database.query_nccl(
-                            common.CommQuantMode.half, self.num_gpus, "reduce_scatter", volume
-                        )
+                        if self._is_context:
+                            # prefill: scatter results back to the CP-sharded layout.
+                            comm_latency = database.query_nccl(
+                                common.CommQuantMode.half, self.num_gpus, "reduce_scatter", volume
+                            )
+                        else:
+                            # decode: each rank computed its owned experts' partial outputs
+                            # for all (replicated) tokens; combine into the full per-token
+                            # sum every rank needs (next layer re-replicates) -> all_reduce.
+                            comm_latency = database.query_custom_allreduce(
+                                common.CommQuantMode.half, self.num_gpus, volume
+                            )
                     elif self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
                         comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)

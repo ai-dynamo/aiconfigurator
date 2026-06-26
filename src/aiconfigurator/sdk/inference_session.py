@@ -369,7 +369,7 @@ class DisaggInferenceSession:
         self,
         model_path: str,
         model_config: config.ModelConfig,
-        parallel_config_list: list[tuple[int, int, int, int, int]],
+        parallel_config_list: list[tuple[int, int, int, int, int, int]],
         b_list: list[int] | range,
         runtime_config: config.RuntimeConfig,
         mode: str,
@@ -384,7 +384,7 @@ class DisaggInferenceSession:
         Args:
             model_path: HuggingFace model ID or local path.
             model_config: Model configuration (quant modes etc.).
-            parallel_config_list: List of (tp, pp, dp, moe_tp, moe_ep) tuples.
+            parallel_config_list: List of (tp, pp, dp, moe_tp, moe_ep, cp) tuples.
             b_list: Batch sizes to sweep.
             runtime_config: Runtime config (isl, osl, etc.).
             mode: ``"static_ctx"`` for prefill or ``"static_gen"`` for decode.
@@ -404,8 +404,7 @@ class DisaggInferenceSession:
 
         for parallel_config in parallel_config_list:
             # 6-tuple (tp, pp, dp, moe_tp, moe_ep, cp); tolerate legacy 5-tuples.
-            tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, *cp_rest = parallel_config
-            cp_size = cp_rest[0] if cp_rest else 1
+            tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, cp_size = parallel_config
             logger.debug(
                 "Getting candidate workers with parallel config: tp=%d, pp=%d, dp=%d, moe_tp=%d, moe_ep=%d, cp=%d",
                 tp_size,
@@ -534,11 +533,11 @@ class DisaggInferenceSession:
         model_path: str,
         runtime_config: config.RuntimeConfig,
         prefill_model_config: config.ModelConfig,
-        prefill_parallel_config_list: list[tuple[int, int, int, int, int]],
+        prefill_parallel_config_list: list[tuple[int, int, int, int, int, int]],
         prefill_max_num_tokens: int,
         prefill_num_worker_list: list[int],
         decode_model_config: config.ModelConfig,
-        decode_parallel_config_list: list[tuple[int, int, int, int, int]],
+        decode_parallel_config_list: list[tuple[int, int, int, int, int, int]],
         decode_max_num_tokens: int,
         decode_num_worker_list: list[int],
         num_gpu_list: list[int] | None,

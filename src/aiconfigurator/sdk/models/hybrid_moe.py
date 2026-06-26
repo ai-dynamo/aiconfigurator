@@ -114,6 +114,16 @@ class HybridMoEModel(BaseModel):
         self._hybrid_config = cfg
         self._build_context_ops()
         self._build_generation_ops()
+        if self.config.cp_size > 1:
+            # decode never runs CP. Route the generation MoEDispatch ops to their
+            # decode-CP comm path (pre=0 / post=all_reduce) rather than prefill's
+            # all_gather/reduce_scatter -- attn_cp_size>1 + is_context=False. The
+            # context loop in _build_context_ops handles the prefill side.
+            cp = self.config.cp_size
+            for op in self.generation_ops:
+                if isinstance(op, ops.MoEDispatch):
+                    op._attn_cp_size = cp
+                    op._is_context = False
 
     def _count_layer_types(self) -> dict[str, int]:
         """Count layers per type: global_moe, swa_moe, swa_dense, global_dense."""
@@ -350,6 +360,11 @@ class HybridMoEModel(BaseModel):
             cp = self.config.cp_size
             kvcache_bytes = self.config.kvcache_quant_mode.value.memory
             comm_bytes = self.config.comm_quant_mode.value.memory
+            # Post-construction CP wiring (not the __init__ _CP_AWARE gate): this
+            # family has heterogeneous layer types (SWA vs global / dense vs MoE)
+            # built across separate passes, so CP is applied here once every op
+            # exists. The per-op _CP_AWARE opt-in is re-asserted in the loop so an
+            # un-audited op still fails loud instead of silently skipping CP.
             for op in self.context_ops:
                 if isinstance(op, ops.ContextAttention):
                     op._cp_size = cp
