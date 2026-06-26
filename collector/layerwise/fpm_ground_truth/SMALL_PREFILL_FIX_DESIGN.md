@@ -80,21 +80,30 @@ small terminal/standalone points (128/400/496), all ≤512 → so ctx-phase MAPE
 **small-prefill-only probe over 3 points, NOT a general ctx-accuracy number**. Product accuracy is the
 mixed phase (38.8%), where ≤512 is only 7/71 steps (the >512 bulk is ~1.2×).
 
-## Fix shape: candidate was "WALL → busy", but it's PROBABLY INVALID (advisor)
-The tempting fix: drop the launch-gap, use `busy_compute + comm` (the `max(compute,memory,comm)`
-roofline). **But the numbers don't reconcile, so this is probably dead:**
-- golden's ~16 ms is *mostly real GPU work* — MoE weight loads (memory-bound) + all-reduce — that
-  the moe-noop 1-GPU collection **never executes** (its GPU-busy is only ~3.4 ms).
-- so "busy = sum of collector kernel durations" = **3.4 ms, not 16 ms**. Reconstructing 16 ms would
-  need backbone-busy(3.4) + a correct MoE-overlay + comm to sum to 16 — and that 3.4-vs-16 (or the
-  earlier "floor ≈ 9 ms" vs golden 16) **never reconciled**. The busy-metric correction likely
-  **under-predicts**. Treat as unverified/probably-invalid, not the fix.
+## How collector SHOULD collect: measure GPU-busy (launch-gap-free) + comm — NOT wall
+Root of the error: collector measures the **wall of an ISOLATED step**, which includes ~30 ms of
+host-dispatch idle that serving overlaps away. Fix = measure the **launch-gap-free GPU-busy**
+(Σ per-kernel durations) + comm, because in serving steady-state the step IS busy-bound:
+- GPU-busy is a *physical* quantity (kernel durations) — independent of isolated-vs-serving and of
+  host dispatch → it equals the serving busy-bound latency.
+- **Much LESS dead than it looked, but NOT reconciled** (NEW, from Part 1): A (1-GPU, **real MoE**)
+  GPU-busy = **8.7 ms** — far above the **3.4 ms moe-noop** busy the prior "dead" call used. So the
+  busy-metric starts close to golden 16, not at 3.4. BUT completing 8.7 → 16 needs the comm term, and
+  that number is **contested**: golden-busy − A-busy ≈ **7 ms** by subtraction, vs the synced-AR-floor
+  **~1.85 ms** from `SMALL_PREFILL_GAP_MICROCAUSALITY`/prefill_floor — they don't cleanly add
+  (8.7 + 1.85 = 10.5 ≠ 16; these come from different nsys runs w/ inflation). So: **promising, NOT
+  proven.** Needs GPU verification that backbone-busy + MoE-overlay + comm ≈ golden across shapes.
 
-**Faithful options (only two):**
-1. **real-tp full-step collection** = golden's own path (real tp4, real MoE, no marker, batched) —
-   gives the busy-bound ~16 ms, but it is a FULL-step measurement, NOT the per-layer decomposition
-   layerwise is built on.
-2. **calibration** of the ≤512 ctx envelope down to the captured regime — cheap, bounded, per-model.
+**So collector should:**
+1. measure **GPU-busy = Σ per-kernel durations** (CUPTI), NOT execute_model wall → drops the isolated
+   host-dispatch idle uniformly (and it's regime-independent, so isolated collection is fine);
+2. keep the **comm (all-reduce) model** (a 1-GPU collection physically can't measure it);
+3. assemble **backbone-busy + MoE-overlay + comm**.
+   ⚠️ Needs GPU verification that this sum ≈ golden across shapes (one shape reconciling ≠ proof).
+
+**Alternatives:** real-tp full-step serving collection (most faithful, but abandons per-layer
+decomposition) · calibration of the ≤512 envelope (cheap, per-model). The GPU-busy metric (above)
+is the cleanest IF it verifies across shapes.
 
 ## Why DEFERRED (the ROI call)
 - **payoff is bounded**: shape-narrow (~1 shape class: terminal chunks of chunked prefills),
@@ -129,19 +138,34 @@ the step. tp4's all-reduce (GPU kernel + cross-rank sync) overlaps/fills that ga
 all-reduce → the host-dispatch idle is exposed. **Fix lever = capture coverage** (full cudagraph
 replay removes per-kernel host dispatch) — consistent with the original root cause.
 
+**Deeper framing — it's ISOLATED-vs-SERVING, not really topology (resolves "30 ms idle > 16 ms golden"):**
+the 30 ms idle is an *isolated-single-step* artifact. real-tp4 **ISOLATED is also ~40 ms** (host-dispatch
+exposed), but real-tp4 **STREAM/serving is ~14 ms** — batching 3×. golden's 16 ms is the SERVING steady
+state: the host pipeline is full, so dispatch hides under the continuous multi-request work stream. So
+the "30 idle vs 16 wall" paradox dissolves — they're *different execution modes*, not the same step.
+The dominant factor is **isolated-vs-serving (host overlap), and topology (1-GPU vs tp4) is secondary**
+(tp4 isolated is slow too). The collector measures an isolated single step (for per-layer attribution)
+→ inherently host-dispatch-exposed → it can NOT see the serving busy-bound value by measuring wall.
+(Strong inference across experiments — 34.7 / 40 / 14 / 16 from different runs — not one side-by-side.)
+
 ## When/how to FIX (if revisited)
-- The "WALL → busy" metric fix is **probably invalid** (see Fix shape) — don't build it without first
-  reconciling the 3.4-vs-16 (busy-vs-golden) gap.
-- Faithful options: **real-tp full-step collection** (golden's path; abandons per-layer decomposition)
-  OR **calibration** of the ≤512 envelope. Validate on a BROADER hybrid workload (not the 1 terminal-
+- **Leading candidate: GPU-busy + comm** (see "How collector SHOULD collect"). Promising (real-MoE busy
+  8.7 ≫ moe-noop 3.4, so close to golden 16) but **NOT proven** — the comm term is contested (~7 by
+  subtraction vs ~1.85 synced-floor) and 8.7+1.85≠16. Build = measure Σ-per-kernel-durations (CUPTI)
+  instead of wall; assemble backbone-busy + MoE-overlay + comm. **Gate: GPU-verify sum ≈ golden across
+  shapes** AND resolve the comm number first.
+- Alternatives: real-tp full-step serving collection (most faithful, abandons per-layer decomposition)
+  · calibration of the ≤512 envelope. All: validate on a BROADER hybrid workload (not the 1 terminal-
   chunk shape); guard inert for large-prefill + decode (those match golden ~1.0×).
 
-## Decision-complete conclusion (true now, no more nsys needed for the decision)
-The 1-GPU decomposed collection **cannot reproduce golden's busy-bound tp4 step**: it strips real
-MoE/comm work AND adds ~30 ms of gaps. So the cheap busy-metric correction is invalid, and the only
-faithful fixes are real-tp full-step or calibration — both heavy/per-model for a **bounded, deferred,
-non-recommendation-moving** regime. Hence: DEFERRED. (The micro-causality of the 30 ms idle is an open
-curiosity, not on the critical path.)
+## Decision-complete conclusion (the DEFERRED call stands)
+Measuring the **wall of an isolated 1-GPU step** can't reproduce golden's serving busy-bound tp4 step
+(isolated exposes ~30 ms host-dispatch idle that serving overlaps away). The clean direction — measure
+**GPU-busy + comm** instead of wall (regime-independent) — is **promising but unverified** (real-MoE
+busy 8.7 vs moe-noop 3.4 makes it far less dead, but the 8.7→16 completion + the contested comm term
+need CUPTI instrumentation + cross-shape GPU verification). For a **bounded, deferred,
+non-recommendation-moving** regime that's not worth opening now → DEFERRED. The 30 ms idle
+micro-causality is settled (per-layer host-dispatch); isolated-vs-serving is the framing.
 
 ## Artifacts
 - `runs/` (analyzers committed; heavy `.sqlite`/`.nsys-rep` are GPU-local):
