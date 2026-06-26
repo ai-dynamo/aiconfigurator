@@ -10,31 +10,29 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 pytestmark = [pytest.mark.e2e, pytest.mark.sweep]
 
 
 def _enabled() -> bool:
-    return os.environ.get("AIC_RUN_SPICA_TRACE_E2E", "").lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("AIC_RUN_SPICA_THOROUGH_E2E", "").lower() in {"1", "true", "yes", "on"}
 
 
-@pytest.mark.skipif(not _enabled(), reason="set AIC_RUN_SPICA_TRACE_E2E=true to run real Spica trace replay")
-@pytest.mark.timeout(900)
-def test_cli_default_thorough_config_trace_real_default_sweep(tmp_path: Path):
-    """Run the real default Spica trace sweep from a SmartSearchConfig YAML.
-
-    This is intentionally opt-in: it requires Spica and compatible Dynamo replay
-    bindings on PYTHONPATH, and the default 4-GPU Spica sweep takes minutes.
-    """
-
-    trace_path = os.environ.get("AIC_SPICA_TRACE_PATH")
-    if not trace_path:
-        pytest.fail("AIC_SPICA_TRACE_PATH must point to a Mooncake JSONL trace when AIC_RUN_SPICA_TRACE_E2E=true")
-    if not Path(trace_path).exists():
-        pytest.fail(f"AIC_SPICA_TRACE_PATH does not exist: {trace_path}")
+@pytest.mark.skipif(not _enabled(), reason="set AIC_RUN_SPICA_THOROUGH_E2E=true to run real Spica thorough sweep")
+@pytest.mark.timeout(300)
+def test_cli_default_thorough_sweep_real_static_workload(tmp_path: Path):
+    """Run a small real Spica thorough sweep from ordinary default CLI inputs."""
 
     env = os.environ.copy()
+    env.update(
+        {
+            "AIC_SPICA_THOROUGH_SWEEP_ROUNDS": "1",
+            "AIC_SPICA_THOROUGH_PARALLEL_EVALS": "4",
+            "AIC_SPICA_THOROUGH_CANDIDATES_PER_ROUND": "4",
+            "AIC_SPICA_THOROUGH_SYNTHETIC_CONCURRENCY": "1",
+            "AIC_SPICA_THOROUGH_SYNTHETIC_REQUEST_COUNT": "4",
+        }
+    )
     for key in (
         "AIC_SPICA_TRACE_SWEEP_ROUNDS",
         "AIC_SPICA_TRACE_PARALLEL_EVALS",
@@ -42,60 +40,44 @@ def test_cli_default_thorough_config_trace_real_default_sweep(tmp_path: Path):
     ):
         env.pop(key, None)
 
-    config_path = tmp_path / "spica_trace.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "search_space": {
-                    "deployment_mode": ["disagg", "agg"],
-                    "model_name": "meta-llama/Meta-Llama-3.1-8B",
-                    "hardware_sku": "gb200",
-                    "gpu_budget": 4,
-                    "backend": ["trtllm"],
-                    "context_length": 8192,
-                },
-                "workload": {
-                    "trace_path": trace_path,
-                    "trace_format": "mooncake",
-                },
-                "goal": {
-                    "target": "goodput_per_gpu",
-                    "sla": {
-                        "ttft_ms": 8000,
-                        "itl_ms": 200,
-                    },
-                },
-                "sweep": {
-                    "max_rounds": 3,
-                    "parallel_evals": 16,
-                },
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-
-    save_dir = tmp_path / "trace-default"
+    save_dir = tmp_path / "thorough-default"
     cmd = [
         sys.executable,
         "-m",
         "aiconfigurator.cli.main",
         "default",
-        "--thorough-config",
-        str(config_path),
+        "--model-path",
+        "meta-llama/Meta-Llama-3.1-8B",
+        "--total-gpus",
+        "4",
+        "--system",
+        "gb200",
+        "--backend",
+        "trtllm",
+        "--isl",
+        "128",
+        "--osl",
+        "16",
+        "--ttft",
+        "8000",
+        "--tpot",
+        "200",
+        "--max-seq-len",
+        "8192",
         "--top-n",
         "2",
+        "--thorough-sweep",
         "--save-dir",
         str(save_dir),
     ]
 
-    completed = sp.run(cmd, capture_output=True, text=True, timeout=900, env=env)
+    completed = sp.run(cmd, capture_output=True, text=True, timeout=300, env=env)
     combined = f"{completed.stdout}\n{completed.stderr}"
     assert completed.returncode == 0, combined
 
-    assert "sweep={'max_rounds': 3, 'parallel_evals': 16}" in combined
+    assert "sweep={'max_rounds': 1, 'parallel_evals': 4, 'candidates_per_round': 4}" in combined
     sweep_done = re.search(
-        r"smart-sweep done: (?P<feasible>\d+)/96 feasible, 0 gated, 0 backend-unsupported, "
+        r"smart-sweep done: (?P<feasible>\d+)/8 feasible, 0 gated, 0 backend-unsupported, "
         r"(?P<replay_failed>\d+) replay-failed",
         combined,
     )
@@ -103,13 +85,15 @@ def test_cli_default_thorough_config_trace_real_default_sweep(tmp_path: Path):
     assert int(sweep_done.group("feasible")) > 0
     assert "AIConfigurator Final Results" in combined
     assert "Total GPUs: 4" in combined
-    assert "Trace Format: mooncake" in combined
-    assert "Trace workload: request lengths come from replay." in combined
+    assert "Synthetic Workload: ISL=128, OSL=16, concurrency=1, request_count=4" in combined
     assert "Best Experiment Chosen:" in combined
 
     result_dirs = [path for path in save_dir.iterdir() if path.is_dir()]
     assert len(result_dirs) == 1
     result_dir = result_dirs[0]
+    assert result_dir.name.startswith(
+        "meta-llama_Meta-Llama-3.1-8B_gb200_trtllm_thorough_isl128_osl16_ttft8000_tpot200_"
+    )
     assert (result_dir / "spica_candidates.yaml").is_file()
     assert (result_dir / "spica_candidates.csv").is_file()
     assert (result_dir / "pareto.csv").is_file()
