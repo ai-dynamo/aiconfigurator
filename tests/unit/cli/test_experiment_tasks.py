@@ -122,7 +122,7 @@ def test_build_experiment_preflight_uses_per_role_backend_version_for_flat_v2_di
     monkeypatch.setattr(
         cli_main,
         "_ensure_backend_version_available",
-        lambda system, backend, version: calls.append((system, backend, version)),
+        lambda system, backend, version, **_: calls.append((system, backend, version)),
     )
     build_experiment_tasks(
         config={
@@ -144,3 +144,33 @@ def test_build_experiment_preflight_uses_per_role_backend_version_for_flat_v2_di
     # The preflight runs before Task construction, so the per-role version is validated
     # even if downstream construction differs; top-level-only code would have recorded nothing.
     assert ("h200_sxm", "sglang", "0.5.10") in calls
+
+
+def test_build_experiment_skips_backend_version_preflight_for_formula_modes(monkeypatch):
+    import aiconfigurator.cli.main as cli_main
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        cli_main,
+        "_ensure_backend_version_available",
+        lambda system, backend, version: calls.append((system, backend, version)),
+    )
+    monkeypatch.setattr(cli_main.Task, "from_yaml", staticmethod(lambda config, **_: config))
+
+    tasks = build_experiment_tasks(
+        config={
+            "exps": ["exp_empirical"],
+            "exp_empirical": {
+                "serving_mode": "agg",
+                "model_path": "Qwen/Qwen3-32B-FP8",
+                "system_name": "h200_sxm",
+                "backend_name": "sglang",
+                "backend_version": "future-version",
+                "database_mode": "EMPIRICAL",
+                "total_gpus": 8,
+            },
+        }
+    )
+
+    assert "exp_empirical" in tasks
+    assert calls == []

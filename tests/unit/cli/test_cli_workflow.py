@@ -312,6 +312,110 @@ class TestBuildDefaultTaskConfigs:
 
     @patch("aiconfigurator.cli.main.Task")
     @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
+    def test_silicon_mode_allows_declared_explicit_version_for_shared_layer(
+        self,
+        mock_supported_databases,
+        mock_task_config,
+    ):
+        """A marker-only version dir is enough to declare shared-layer reuse."""
+        mock_supported_databases.return_value = {"b200_sxm": {"sglang": ["0.5.10", "0.5.12"]}}
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        result = build_default_tasks(
+            model_path="Qwen/Qwen3-0.6B",
+            total_gpus=4,
+            system="b200_sxm",
+            backend="sglang",
+            backend_version="0.5.12",
+            database_mode="SILICON",
+        )
+
+        assert set(result) == {"agg", "disagg"}
+        assert mock_task_config.call_count == 2
+        assert mock_task_config.call_args_list[0].kwargs["backend_version"] == "0.5.12"
+        assert mock_task_config.call_args_list[1].kwargs["prefill_backend_version"] == "0.5.12"
+        assert mock_task_config.call_args_list[1].kwargs["decode_backend_version"] == "0.5.12"
+
+    @patch("aiconfigurator.cli.main.Task")
+    @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
+    def test_silicon_mode_rejects_undeclared_explicit_version_for_shared_layer(
+        self,
+        mock_supported_databases,
+        mock_task_config,
+    ):
+        """Sibling data does not make an arbitrary framework version supported."""
+        mock_supported_databases.return_value = {"b200_sxm": {"sglang": ["0.5.10"]}}
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        with pytest.raises(SystemExit):
+            build_default_tasks(
+                model_path="Qwen/Qwen3-0.6B",
+                total_gpus=4,
+                system="b200_sxm",
+                backend="sglang",
+                backend_version="0.5.12",
+                database_mode="SILICON",
+            )
+
+        mock_task_config.assert_not_called()
+
+    @patch("aiconfigurator.cli.main.Task")
+    @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
+    def test_auto_hybrid_mode_filters_to_declared_shared_layer_versions(
+        self,
+        mock_supported_databases,
+        mock_task_config,
+    ):
+        """Auto backend sweeps in HYBRID should only include declared framework versions."""
+        mock_supported_databases.return_value = {
+            "b200_sxm": {
+                "trtllm": ["1.3.0rc10"],
+                "sglang": ["0.5.10", "0.5.12"],
+                "vllm": ["0.19.0"],
+            }
+        }
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        result = build_default_tasks(
+            model_path="Qwen/Qwen3-0.6B",
+            total_gpus=4,
+            system="b200_sxm",
+            backend="auto",
+            backend_version="0.5.12",
+            database_mode="HYBRID",
+        )
+
+        assert set(result) == {"agg_sglang", "disagg_sglang"}
+        assert mock_task_config.call_count == 2
+        assert mock_task_config.call_args_list[0].kwargs["backend_version"] == "0.5.12"
+        assert mock_task_config.call_args_list[1].kwargs["prefill_backend_version"] == "0.5.12"
+        assert mock_task_config.call_args_list[1].kwargs["decode_backend_version"] == "0.5.12"
+
+    @patch("aiconfigurator.cli.main.Task")
+    @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
+    def test_hybrid_mode_rejects_undeclared_explicit_version_for_shared_layer(
+        self,
+        mock_supported_databases,
+        mock_task_config,
+    ):
+        """HYBRID also uses shared-layer data, so arbitrary framework versions are rejected."""
+        mock_supported_databases.return_value = {"b200_sxm": {"sglang": ["0.5.10"]}}
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        with pytest.raises(SystemExit):
+            build_default_tasks(
+                model_path="Qwen/Qwen3-0.6B",
+                total_gpus=4,
+                system="b200_sxm",
+                backend="sglang",
+                backend_version="0.5.12",
+                database_mode="HYBRID",
+            )
+
+        mock_task_config.assert_not_called()
+
+    @patch("aiconfigurator.cli.main.Task")
+    @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
     def test_auto_megamoe_sweeps_only_sglang(self, mock_supported_databases, mock_task_config):
         """The SGLang-only MegaMoE override must not be passed to TRT-LLM or vLLM."""
         mock_supported_databases.return_value = {
@@ -428,6 +532,22 @@ class TestBuildExperimentTaskConfigs:
         assert set(by_backend) == {"rust", "python"}
         assert by_backend["rust"]["model_path"] == "Qwen/Qwen3-32B"
         assert by_backend["python"]["model_path"] == "Qwen/Qwen3-32B"
+
+    @patch("aiconfigurator.cli.main.Task")
+    def test_default_database_mode_is_passed_to_task_yaml(self, mock_task):
+        config = {
+            "default_mode": {
+                "serving_mode": "agg",
+                "model_path": "Qwen/Qwen3-32B",
+                "system_name": "h200_sxm",
+                "total_gpus": 8,
+            }
+        }
+
+        build_experiment_tasks(config=config)
+
+        yaml_data = mock_task.from_yaml.call_args.args[0]
+        assert yaml_data["database_mode"] == "SILICON"
 
 
 class TestInclusiveTpot:
