@@ -45,6 +45,32 @@ isolated step still shows ~8.5 ms launch-gap, but production batching fills it �
 vs batched-stream 14 ms, a ~3× swing larger than any sliced term. A single "correct 16 ms"
 independent of occupancy may not exist.)
 
+### Confirmation: the gap is exactly ≤512 new tokens (big prefill is fine)
+A filter-off check (`--no-filter-pathological-context`) exposes the big non-terminal chunks the
+ctx-phase metric normally hides. golden's own latency has a STEP at the 512 capture boundary, and
+AIC matches above it:
+
+| ctx_tokens | ctx_kv | golden | AIC | error |
+|---|---|---|---|---|
+| 128 | 0 | 15.9 | 37.0 | +133% |
+| 400 | 3696 | 16.4 | 51.5 | +214% |
+| 496 | 528 | 16.2 | 51.8 | +220% |
+| 528 | 0 | 40.6 | 39.3 | **−3%** |
+| 3696 | 0 | 43.7 | 57.4 | **+31%** |
+
+- ≤512 new tokens → golden ~16 ms (captured fast path); AIC ~37–51 ms (eager floor) → over 2.3–3.2×.
+- >512 new tokens → golden ~40 ms (eager); AIC ~39–57 ms → matches (big-chunk MAPE 17%, ratio 1.14).
+So the over-prediction is cleanly isolated to **≤512 new tokens**. Big prefill is accurate — no hidden
+large-prefill bug (an earlier plot_fpm_vs_aic "4–8k=208%" was a different-grid artifact, refuted here).
+
+### ctx-phase metric caveat (don't misread the "189%")
+The summary tool's ctx-phase evaluates only CLEAN standalone/terminal-chunk targets: it filters
+non-terminal prefill chunks (the big first chunks like 3696@0, 528@0) because their chunk boundary is
+the scheduler's choice and AIC chunks differently → not apples-to-apples per-step. What's left is 3
+small terminal/standalone points (128/400/496), all ≤512 → so ctx-phase MAPE (120–189%) is a
+**small-prefill-only probe over 3 points, NOT a general ctx-accuracy number**. Product accuracy is the
+mixed phase (38.8%), where ≤512 is only 7/71 steps (the >512 bulk is ~1.2×).
+
 ## Fix shape (known): backbone WALL → busy, no threshold
 ```
 ctx step ≈ busy_compute + synced-comm floor   (drop the launch-gap term entirely)
