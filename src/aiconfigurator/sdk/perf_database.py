@@ -421,13 +421,12 @@ def get_latest_database_version(
 def _shared_layer_enabled(database_mode: str | None) -> bool:
     """Whether the shared layer (sibling/cross-version row inheritance) loads.
 
-    Enabled for SILICON and HYBRID: both consult the silicon tables, so both
-    benefit from reusing older collected data points when the active
-    backend/version lacks a shape. EMPIRICAL/SOL compute from formulas, and an
-    unspecified (None) mode stays off so callers that don't thread a mode to the
-    loader keep bit-identical loads.
+    Enabled for the default database mode, SILICON, and HYBRID: all consult the
+    silicon tables, so they benefit from reusing older collected data points when
+    the active backend/version lacks a shape. Explicit formula-only modes
+    compute without sibling silicon rows.
     """
-    return (database_mode or "").upper() in ("SILICON", "HYBRID")
+    return database_mode is None or database_mode.upper() in ("SILICON", "HYBRID")
 
 
 def get_database(
@@ -448,14 +447,14 @@ def get_database(
         systems_paths: the systems search paths
         allow_missing_data: instantiate a database from system specs even when
             backend/version data files are absent. This is intended for SOL/EMPIRICAL
-            estimate-only modes. SILICON/HYBRID shared-layer reuse still requires
+            formula-only modes. Silicon shared-layer reuse still requires
             an explicit backend/version directory; marker-only directories can
             declare new framework versions whose rows come from siblings.
         database_mode: the mode the caller will query under (`SILICON` / `HYBRID` /
-            `EMPIRICAL` / `SOL`). SILICON and HYBRID enable the shared layer
-            (sibling-row inheritance, including `kernel_source=default` fallback
-            rows) so missing shapes are filled from older collected data;
-            EMPIRICAL/SOL and an unspecified mode keep it off.
+            `EMPIRICAL` / `SOL`). The default mode, SILICON, and HYBRID enable
+            the shared layer (sibling-row inheritance, including
+            `kernel_source=default` fallback rows) so missing shapes are filled
+            from older collected data; explicit formula-only modes keep it off.
 
     Returns:
         PerfDatabase for the given system, backend, version.
@@ -1298,10 +1297,10 @@ class PerfDatabase:
         Initialize the perf database.
 
         Args:
-            database_mode: drives the shared-layer load behavior. `"SILICON"` and
-                `"HYBRID"` enable sibling-row inheritance (including
-                `kernel_source=default` fallback rows); EMPIRICAL/SOL and an
-                unspecified mode keep it off. Doesn't change which rows are
+            database_mode: drives the shared-layer load behavior. The default
+                mode, `"SILICON"`, and `"HYBRID"` enable sibling-row inheritance
+                (including `kernel_source=default` fallback rows); explicit
+                formula-only modes keep it off. Doesn't change which rows are
                 interpolated at query time; that's controlled by
                 `set_default_database_mode`.
         """

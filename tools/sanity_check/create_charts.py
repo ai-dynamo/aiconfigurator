@@ -16,7 +16,6 @@ import sys
 import textwrap
 from collections import defaultdict
 
-from aiconfigurator.sdk.common import DatabaseMode
 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError, get_database
 
 # Disable interactive backend
@@ -356,7 +355,6 @@ def create_charts(
         system=system,
         backend=backend,
         version=backend_version,
-        database_mode=DatabaseMode.SILICON.name,
     )
     if database is None:
         with open(output_md_file, "a") as f:

@@ -969,7 +969,7 @@ _SGLANG_DEEPEP_REQUIRED_FILES = (
 )
 
 
-def _database_mode_enables_shared_layer(database_mode: str | None) -> bool:
+def _database_mode_requires_declared_perf_database(database_mode: str | None) -> bool:
     return (database_mode or "").upper() in {
         common.DatabaseMode.SILICON.name,
         common.DatabaseMode.HYBRID.name,
@@ -1023,7 +1023,6 @@ def _ensure_backend_version_available(
     system_name: str,
     backend_name: str,
     backend_version: str | None = None,
-    database_mode: str | None = common.DatabaseMode.SILICON.name,
 ) -> None:
     """
     Validate that the backend is supported for the given system and version.
@@ -1032,8 +1031,6 @@ def _ensure_backend_version_available(
         system_name: System name (e.g., 'gb200_sxm')
         backend_name: Backend name (e.g., 'vllm')
         backend_version: Backend database version. Default is None, which means latest version.
-        database_mode: Database mode that determines whether a declared shared-layer version is required.
-
     Raises:
         SystemExit: If the backend is not supported for the given system and version.
     """
@@ -1067,15 +1064,12 @@ def _ensure_backend_version_available(
     logger.error("Configured systems paths: %s", systems_paths_display)
     if versions:
         logger.error("Available versions: %s", ", ".join(versions))
-        if _database_mode_enables_shared_layer(database_mode):
-            logger.error(
-                "Fix: switch --backend-version to one of the available versions, "
-                "remove --backend-version to use latest, "
-                "or add a declared version directory with %s when this version intentionally reuses shared-layer data.",
-                perf_database.SHARED_LAYER_REUSE_MARKER,
-            )
-        else:
-            logger.error("Fix: switch --backend-version to one of the available versions or remove --backend-version.")
+        logger.error(
+            "Fix: switch --backend-version to one of the available versions, "
+            "remove --backend-version to use latest, "
+            "or add a declared version directory with %s when this version intentionally reuses shared-layer data.",
+            perf_database.SHARED_LAYER_REUSE_MARKER,
+        )
     else:
         logger.error("Available versions: none")
         logger.error(
@@ -1155,11 +1149,11 @@ def build_default_tasks(
     if backend == "auto":
         supported = perf_database.get_supported_databases()
         available = []
-        shared_layer_mode = _database_mode_enables_shared_layer(database_mode)
+        requires_declared_perf_database = _database_mode_requires_declared_perf_database(database_mode)
         for backend_name in backends_to_sweep:
             sys_backends = supported.get(system, {})
             decode_backends = supported.get(decode_system, {}) if decode_system != system else sys_backends
-            if not shared_layer_mode:
+            if not requires_declared_perf_database:
                 sys_versions = sys_backends.get(backend_name, [])
                 decode_versions = decode_backends.get(backend_name, [])
                 if not sys_versions or (decode_system != system and not decode_versions):
@@ -1216,10 +1210,10 @@ def build_default_tasks(
             )
             raise SystemExit(1)
         backends_to_sweep = available
-    elif _database_mode_enables_shared_layer(database_mode):
-        _ensure_backend_version_available(system, backend, backend_version, database_mode=database_mode)
+    elif _database_mode_requires_declared_perf_database(database_mode):
+        _ensure_backend_version_available(system, backend, backend_version)
         if decode_system != system:
-            _ensure_backend_version_available(decode_system, backend, backend_version, database_mode=database_mode)
+            _ensure_backend_version_available(decode_system, backend, backend_version)
     else:
         supported = perf_database.get_supported_databases()
         for role, sys_name in (("prefill", system), ("decode", decode_system)):
@@ -1428,31 +1422,32 @@ def build_experiment_tasks(
             logger.warning("Skipping experiment '%s': total_gpus not provided.", exp_name)
             continue
 
-        # Early-fail on an unavailable backend version (clearer than failing deep in the sweep).
-        # Role-aware: agg and legacy-v1 disagg carry backend/version/system at the top level;
-        # flat-v2 disagg carries them per role (prefill_*/decode_*), falling back to top-level so
-        # v1 configs still validate.
-        if serving_mode == "disagg":
-            role_checks = [
-                (
-                    exp_config.get("prefill_system_name") or system_name,
-                    exp_config.get("prefill_backend_name") or exp_config.get("backend_name"),
-                    exp_config.get("prefill_backend_version") or exp_config.get("backend_version"),
-                ),
-                (
-                    exp_config.get("decode_system_name") or system_name,
-                    exp_config.get("decode_backend_name") or exp_config.get("backend_name"),
-                    exp_config.get("decode_backend_version") or exp_config.get("backend_version"),
-                ),
-            ]
-        else:
-            role_checks = [(system_name, exp_config.get("backend_name"), exp_config.get("backend_version"))]
-        seen_combos: set[tuple[str, str, str]] = set()
-        for sys_name, bname, bver in role_checks:
-            bname = bname or common.BackendName.trtllm.value
-            if bver is not None and sys_name and (sys_name, bname, bver) not in seen_combos:
-                seen_combos.add((sys_name, bname, bver))
-                _ensure_backend_version_available(sys_name, bname, bver, database_mode=database_mode)
+        if _database_mode_requires_declared_perf_database(database_mode):
+            # Early-fail on an unavailable backend version (clearer than failing deep in the sweep).
+            # Role-aware: agg and legacy-v1 disagg carry backend/version/system at the top level;
+            # flat-v2 disagg carries them per role (prefill_*/decode_*), falling back to top-level so
+            # v1 configs still validate.
+            if serving_mode == "disagg":
+                role_checks = [
+                    (
+                        exp_config.get("prefill_system_name") or system_name,
+                        exp_config.get("prefill_backend_name") or exp_config.get("backend_name"),
+                        exp_config.get("prefill_backend_version") or exp_config.get("backend_version"),
+                    ),
+                    (
+                        exp_config.get("decode_system_name") or system_name,
+                        exp_config.get("decode_backend_name") or exp_config.get("backend_name"),
+                        exp_config.get("decode_backend_version") or exp_config.get("backend_version"),
+                    ),
+                ]
+            else:
+                role_checks = [(system_name, exp_config.get("backend_name"), exp_config.get("backend_version"))]
+            seen_combos: set[tuple[str, str, str]] = set()
+            for sys_name, bname, bver in role_checks:
+                bname = bname or common.BackendName.trtllm.value
+                if bver is not None and sys_name and (sys_name, bname, bver) not in seen_combos:
+                    seen_combos.add((sys_name, bname, bver))
+                    _ensure_backend_version_available(sys_name, bname, bver)
 
         # Per-experiment engine_step_backend wins over the global default.
         overrides: dict[str, Any] = {}

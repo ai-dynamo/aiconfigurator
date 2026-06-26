@@ -127,9 +127,9 @@ def _backend_csv(env: Path, backend: str = "trtllm", version: str = "1.0") -> Pa
 
 def _build_db(systems_root: Path, *, database_mode: str | None = "HYBRID") -> PerfDatabase:
     """Build a PerfDatabase. Defaults to HYBRID so the shared layer is on, which is
-    what most tests exercise. SILICON also enables it (see
-    `test_shared_layer_on_in_silicon_mode`); an unspecified / EMPIRICAL / SOL mode
-    keeps it off (see `test_shared_layer_off_when_mode_unspecified`).
+    what most tests exercise. SILICON also enables it, and an unspecified mode
+    follows PerfDatabase's default SILICON behavior. Explicit EMPIRICAL / SOL
+    modes keep it off.
     """
     return PerfDatabase(
         system="h100_sxm",
@@ -170,11 +170,8 @@ def test_backend_only(env: Path) -> None:
     assert _gemm_lookup(db, 1024, 4096, 4096) == 0.5
 
 
-def test_shared_layer_off_when_mode_unspecified(env: Path) -> None:
-    """An unspecified database_mode (None) keeps the shared layer OFF and does not
-    consult sibling rows — preserves bit-for-bit compatibility with `main` for
-    callers that don't thread a mode to the loader.
-    """
+def test_shared_layer_on_when_mode_unspecified(env: Path) -> None:
+    """An unspecified database_mode follows PerfDatabase's default SILICON behavior."""
     active_csv = _backend_csv(env)
     active_csv.parent.mkdir(parents=True, exist_ok=True)
     active_csv.write_text(_GEMM_HEADER)
@@ -183,13 +180,13 @@ def test_shared_layer_off_when_mode_unspecified(env: Path) -> None:
     _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
 
     db = _build_db(env, database_mode=None)
-    assert db.enable_shared_layer is False
-    assert _gemm_lookup(db, 1024, 4096, 4096) is None
+    assert db.enable_shared_layer is True
+    assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
 
 
-@pytest.mark.parametrize("mode", ["EMPIRICAL", "SOL"])
+@pytest.mark.parametrize("mode", ["EMPIRICAL", "SOL", "SOL_FULL"])
 def test_shared_layer_off_in_estimate_modes(env: Path, mode: str) -> None:
-    """EMPIRICAL/SOL compute from formulas and do not reuse sibling silicon rows."""
+    """Formula-only modes do not reuse sibling silicon rows."""
     active_csv = _backend_csv(env)
     active_csv.parent.mkdir(parents=True, exist_ok=True)
     active_csv.write_text(_GEMM_HEADER)
@@ -240,7 +237,6 @@ def test_get_database_shared_layer_uses_declared_marker_version(env: Path) -> No
             "trtllm",
             "1.0",
             systems_paths=str(env),
-            database_mode="SILICON",
         )
 
         assert db is not None
