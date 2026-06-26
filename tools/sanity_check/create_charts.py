@@ -16,6 +16,7 @@ import sys
 import textwrap
 from collections import defaultdict
 
+from aiconfigurator.sdk.common import DatabaseMode
 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError, get_database
 
 # Disable interactive backend
@@ -351,7 +352,12 @@ def create_charts(
             f"system: {system}, backend: {backend}, backend_version: {backend_version}\n"
         )
 
-    database = get_database(system=system, backend=backend, version=backend_version)
+    database = get_database(
+        system=system,
+        backend=backend,
+        version=backend_version,
+        database_mode=DatabaseMode.SILICON.name,
+    )
     if database is None:
         with open(output_md_file, "a") as f:
             f.write("- Skipped ⚠️: no complete perf database is available for this system/backend/version\n")
