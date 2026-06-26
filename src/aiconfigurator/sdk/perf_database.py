@@ -376,7 +376,12 @@ def get_database(
         logger.error(f"No database version available for {system=}, {backend=}")
         return None
 
-    shared_flag = (database_mode or "").upper() == "HYBRID"
+    # Must match PerfDatabase.__init__'s _shared_layer_mode (HYBRID *and* EMPIRICAL
+    # enable the sibling shared layer). If this only matched HYBRID, an EMPIRICAL DB
+    # would land on the same (systems_root, system, shared_flag=False) cache entry as
+    # SILICON/default and the two would alias -- leaking sibling rows into SILICON
+    # (breaking its purity) or stripping XVERSION from EMPIRICAL, depending on load order.
+    shared_flag = (database_mode or "").upper() in ("HYBRID", "EMPIRICAL")
     missing_data_candidate = None
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")

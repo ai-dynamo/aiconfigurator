@@ -378,6 +378,19 @@ def test_enable_shared_layer_gated_by_xversion_policy(perf_database):
     assert object.__new__(perf_database.PerfDatabase).enable_shared_layer is False  # bare, no crash
 
 
+def test_empirical_and_silicon_databases_do_not_alias(perf_database):
+    """EMPIRICAL enables the sibling shared layer just like HYBRID, so it must NOT share
+    a cache entry with SILICON/default. If get_database's shared_flag only matched HYBRID,
+    EMPIRICAL would alias SILICON and (depending on load order) either leak sibling rows
+    into SILICON or strip them from EMPIRICAL. Loading both must yield distinct objects
+    with the correct shared-layer state regardless of order."""
+    emp = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="EMPIRICAL")
+    sil = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    assert emp is not sil
+    assert emp._shared_layer_mode is True  # EMPIRICAL keeps the sibling shared layer
+    assert sil._shared_layer_mode is False  # SILICON stays pure
+
+
 def test_clear_database_runtime_caches_clears_matching_cached_database_once(perf_database):
     class FakeDatabase:
         def __init__(self):
