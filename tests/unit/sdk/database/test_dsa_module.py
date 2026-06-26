@@ -47,6 +47,19 @@ def _generation_dsa_data(dsa_dict: dict) -> dict:
     }
 
 
+# The real loader nests an extra dsa_backend axis: ...[architecture][dsa_backend][num_heads]...
+# (see load_context/generation_dsa_module_data). The empirical path must descend past it
+# exactly like silicon's _select_dsa_backend, or the grid never resolves.
+def _context_dsa_data_with_backend(
+    dsa_dict: dict, architecture: str = DEFAULT_DSA_ARCHITECTURE, dsa_backend: str = "flashmla_kv"
+) -> dict:
+    return _context_dsa_data({dsa_backend: dsa_dict}, architecture)
+
+
+def _generation_dsa_data_with_backend(dsa_dict: dict, dsa_backend: str = "flashmla_kv") -> dict:
+    return _generation_dsa_data({dsa_backend: dsa_dict})
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Context DSA Module
 # ═══════════════════════════════════════════════════════════════════════
@@ -465,6 +478,28 @@ class TestContextDSAModule:
                 database_mode=common.DatabaseMode.HYBRID,
             )
 
+    def test_empirical_resolves_loader_shaped_backend_axis_data(self, mutable_comprehensive_perf_db):
+        """Regression: the loader nests ...[architecture][dsa_backend][num_heads]...; the
+        empirical slice must descend past the backend axis (like silicon's
+        _select_dsa_backend) or it raises EmpiricalNotImplementedError on real data."""
+        db = mutable_comprehensive_perf_db
+        nh = {32: {256: {1: _dsa_value(5.0), 2: _dsa_value(8.0)}, 512: {1: _dsa_value(10.0), 2: _dsa_value(15.0)}}}
+        db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data_with_backend(nh), common.PerfDataFilename.dsa_context_module, "measured"
+        )
+        result = db.query_context_dsa_module(
+            b=1,
+            s=256,
+            prefix=0,
+            num_heads=32,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.EMPIRICAL,
+        )
+        val = result.latency if hasattr(result, "latency") else (result[0] if isinstance(result, tuple) else result)
+        assert math.isfinite(val) and val > 0
+
     def test_different_index_params_change_sol(self, comprehensive_perf_db):
         """Different index_topk should yield different SOL estimates."""
         r1 = comprehensive_perf_db.query_context_dsa_module(
@@ -652,3 +687,22 @@ class TestGenerationDSAModule:
                 gemm_quant_mode=common.GEMMQuantMode.bfloat16,
                 database_mode=common.DatabaseMode.HYBRID,
             )
+
+    def test_empirical_resolves_loader_shaped_backend_axis_data(self, mutable_comprehensive_perf_db):
+        """Regression: generation loader nests ...[architecture][dsa_backend][num_heads][b][s];
+        the empirical slice must descend past the backend axis or it raises on real data."""
+        db = mutable_comprehensive_perf_db
+        nh = {32: {1: {256: _dsa_value(2.0), 1024: _dsa_value(3.0)}, 4: {256: _dsa_value(4.0), 1024: _dsa_value(6.0)}}}
+        db._generation_dsa_module_data = LoadedOpData(
+            _generation_dsa_data_with_backend(nh), common.PerfDataFilename.dsa_generation_module, "measured"
+        )
+        result = db.query_generation_dsa_module(
+            b=1,
+            s=256,
+            num_heads=32,
+            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.EMPIRICAL,
+        )
+        val = result.latency if hasattr(result, "latency") else (result[0] if isinstance(result, tuple) else result)
+        assert math.isfinite(val) and val > 0

@@ -478,7 +478,11 @@ class ContextDSAModule(Operation):
                 wrapper = database._context_dsa_module_data
                 if wrapper is None:
                     raise KeyError("context dsa module data not loaded")
-                return wrapper[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
+                arch_node = wrapper[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
+                # Loader stores ...[architecture][dsa_backend][num_heads]...; descend past
+                # the backend axis exactly like the silicon path. Without this the grid sees
+                # dsa_backend strings where it expects the num_heads axis and never resolves.
+                return _select_dsa_backend(arch_node, dsa_backend)
 
             try:
                 has_prefix = _dsa_module_has_prefix_axis(_slice())
@@ -506,6 +510,7 @@ class ContextDSAModule(Operation):
                     kvcache_quant_mode.name,
                     gemm_quant_mode.name,
                     architecture,
+                    dsa_backend,
                     has_prefix,
                 ),
                 _slice,
@@ -1089,7 +1094,10 @@ class GenerationDSAModule(Operation):
                 wrapper = database._generation_dsa_module_data
                 if wrapper is None:
                     raise KeyError("generation dsa module data not loaded")
-                return wrapper[kv_cache_dtype][gemm_quant_mode][architecture]
+                arch_node = wrapper[kv_cache_dtype][gemm_quant_mode][architecture]
+                # ...[architecture][dsa_backend][num_heads]...; descend past the backend
+                # axis like the silicon path so the grid resolves the num_heads axis.
+                return _select_dsa_backend(arch_node, dsa_backend)
 
             grid = util_empirical.grid_for(
                 (
@@ -1100,6 +1108,7 @@ class GenerationDSAModule(Operation):
                     kv_cache_dtype.name,
                     gemm_quant_mode.name,
                     architecture,
+                    dsa_backend,
                 ),
                 _slice,
                 lambda c: get_sol(c[1], c[2], c[0], kv_cache_dtype)[0],  # c = (num_heads, b, s)
