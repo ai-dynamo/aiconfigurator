@@ -368,7 +368,15 @@ class MoE(Operation):
                 return database._moe_data
 
             moe_table = _moe_table()
-            kernel_tag = "ll" if moe_table is database._moe_low_latency_data else "std"
+            # kernel_tag distinguishes the kernel/table the util grid is built from so the
+            # process-global grid cache can't serve a wideep grid to a regular query (or
+            # vice versa) for an otherwise-identical shape.
+            if moe_table is database._moe_low_latency_data:
+                kernel_tag = "ll"
+            elif moe_table is database._wideep_context_moe_data or moe_table is database._wideep_generation_moe_data:
+                kernel_tag = "wideep"
+            else:
+                kernel_tag = "std"
 
             def _slice():
                 moe_table.raise_if_not_loaded()
