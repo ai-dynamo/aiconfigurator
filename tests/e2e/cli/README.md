@@ -23,11 +23,11 @@ python3 -m pytest tests/e2e/cli -m build
 python3 -m pytest tests/e2e/cli -m sweep
 ```
 
-### Real Spica Trace Sweep
+### Real Spica Trace Thorough Sweep
 
 `test_cli_default_trace_path_real.py` is skipped by default because it requires
 Spica plus compatible Dynamo replay bindings on `PYTHONPATH`, and it runs the
-real default Spica smart sweep (`max_rounds=3`, `parallel_evals=16`). The test
+real default Spica thorough smart sweep (`max_rounds=3`, `parallel_evals=16`). The test
 uses a 4-GPU GB200 trace case so the resulting Pareto frontier includes both
 aggregate and disaggregate candidates.
 

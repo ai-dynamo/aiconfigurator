@@ -27,7 +27,7 @@ from aiconfigurator.sdk.errors import NoFeasibleConfigError, UnsupportedWideepCo
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
-from aiconfigurator.spica.cli_adapter import run_spica_trace_default
+from aiconfigurator.spica.cli_adapter import run_spica_thorough_default
 
 logger = logging.getLogger(__name__)
 
@@ -184,15 +184,15 @@ def _add_default_mode_arguments(parser):
         "--model",
         dest="model_path",
         type=_validate_model_path,
-        required=True,
+        default=None,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
         "local path to directory containing config.json.",
     )
-    parser.add_argument("--total-gpus", type=int, required=True, help="Total GPUs for deployment.")
+    parser.add_argument("--total-gpus", type=int, default=None, help="Total GPUs for deployment.")
     parser.add_argument(
         "--system",
         type=str,
-        required=True,
+        default=None,
         help=(
             "System name (GPU type). Example: "
             "h200_sxm,h100_sxm,h100_pcie,b200_sxm,b300_sxm,gb200,a100_sxm,a100_pcie,l40s,l4,a30,gb300."
@@ -297,8 +297,26 @@ def _add_default_mode_arguments(parser):
         type=str,
         default=None,
         help=(
-            "Path to a Mooncake JSONL replay trace. When set, default mode runs the Spica replay-backed smart sweeper "
-            "instead of the legacy AIC Pareto sweep, and --isl/--osl are ignored."
+            "Path to a Mooncake JSONL replay trace. Implies --thorough-sweep: default mode runs the Spica "
+            "replay-backed smart sweeper instead of the legacy AIC Pareto sweep, and --isl/--osl are ignored."
+        ),
+    )
+    parser.add_argument(
+        "--thorough-sweep",
+        action="store_true",
+        default=False,
+        help=(
+            "Use Spica's smart sweeper instead of the legacy AIC Pareto sweep. "
+            "Without --thorough-config, CLI inputs are converted to a Spica SmartSearchConfig."
+        ),
+    )
+    parser.add_argument(
+        "--thorough-config",
+        type=str,
+        default=None,
+        help=(
+            "Path to a native Spica SmartSearchConfig YAML file. Implies --thorough-sweep and lets the file "
+            "define the Spica search space, workload, goal, and sweep controls."
         ),
     )
     parser.add_argument(
@@ -918,6 +936,16 @@ aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --backend auto \\
     --total-gpus 32 --system h200_sxm \\
     --trace-path /data/replay/traffic.jsonl
+
+# Run Spica smart sweep from normal default CLI inputs
+aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
+    --backend trtllm \\
+    --total-gpus 32 --system h200_sxm \\
+    --isl 4000 --osl 1000 \\
+    --thorough-sweep
+
+# Run Spica smart sweep from a native SmartSearchConfig YAML
+aiconfigurator cli default --thorough-config spica_smart_sweep.yaml
 """
 
 
@@ -2248,6 +2276,27 @@ def _resolve_cli_log_level(args) -> int:
     return logging.INFO
 
 
+def _validate_default_mode_inputs(args) -> None:
+    """Validate default-mode args that are conditional on the selected sweeper."""
+    if args.mode != "default":
+        return
+    if getattr(args, "thorough_config", None):
+        return
+
+    required = {
+        "model_path": "--model-path/--model",
+        "total_gpus": "--total-gpus",
+        "system": "--system",
+    }
+    missing = [flag for attr, flag in required.items() if getattr(args, attr, None) is None]
+    if missing:
+        raise SystemExit(
+            "default mode requires "
+            + ", ".join(missing)
+            + " unless --thorough-config provides a native Spica SmartSearchConfig."
+        )
+
+
 def main(args):
     setup_logging(
         level=_resolve_cli_log_level(args),
@@ -2278,8 +2327,11 @@ def main(args):
         return
 
     if args.mode == "default":
-        if args.trace_path:
-            run_spica_trace_default(args)
+        _validate_default_mode_inputs(args)
+        if getattr(args, "thorough_sweep", False) or args.thorough_config or args.trace_path:
+            if args.trace_path and not getattr(args, "thorough_sweep", False):
+                logger.info("--trace-path implies --thorough-sweep.")
+            run_spica_thorough_default(args)
             return
 
         # Warn when SLA/workload parameters are implicitly defaulted

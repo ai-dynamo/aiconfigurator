@@ -17,8 +17,8 @@ pytestmark = pytest.mark.unit
 class TestCLIArgumentParsing:
     """Test CLI argument parsing and validation."""
 
-    def test_default_mode_required_args(self, cli_parser):
-        """Test that configure_parser creates a valid argument parser."""
+    def test_default_mode_core_args_are_conditionally_required(self, cli_parser):
+        """Default core args are validated after parsing so --thorough-config can stand alone."""
         subparsers = [action for action in cli_parser._actions if action.dest == "mode"]
         assert len(subparsers) == 1
 
@@ -28,9 +28,9 @@ class TestCLIArgumentParsing:
         required_actions = [action for action in default_parser._actions if getattr(action, "required", False)]
         required_args = [action.dest for action in required_actions]
 
-        assert "model_path" in required_args
-        assert "total_gpus" in required_args
-        assert "system" in required_args
+        assert "model_path" not in required_args
+        assert "total_gpus" not in required_args
+        assert "system" not in required_args
 
     def test_exp_mode_required_args(self, cli_parser):
         """Test that exp mode requires the yaml_path argument."""
@@ -118,6 +118,8 @@ class TestCLIArgumentParsing:
         assert args.tpot == 30.0
         assert args.request_latency is None
         assert args.trace_path is None
+        assert args.thorough_sweep is False
+        assert args.thorough_config is None
         assert args.inclusive_tpot is False
         assert args.prefix == 0
         assert args.engine_step_backend is None
@@ -141,6 +143,33 @@ class TestCLIArgumentParsing:
         assert args.trace_path == "/tmp/traffic.jsonl"
         assert args.isl == 4000
         assert args.osl == 1000
+
+    def test_default_thorough_sweep_parses(self, cli_parser):
+        """--thorough-sweep selects Spica while still using regular default inputs."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--thorough-sweep",
+            ]
+        )
+
+        assert args.thorough_sweep is True
+        assert args.thorough_config is None
+
+    def test_default_thorough_config_parses_without_legacy_required_args(self, cli_parser):
+        """A native Spica config owns model/system/GPU inputs."""
+        args = cli_parser.parse_args(["default", "--thorough-config", "/tmp/spica.yaml"])
+
+        assert args.thorough_config == "/tmp/spica.yaml"
+        assert args.model_path is None
+        assert args.total_gpus is None
+        assert args.system is None
 
     @pytest.mark.parametrize("flag", ["--trace-sweep-rounds", "--trace-parallel-evals"])
     def test_default_trace_tuning_flags_are_not_public_cli(self, cli_parser, flag):

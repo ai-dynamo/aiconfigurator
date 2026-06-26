@@ -21,8 +21,10 @@ from aiconfigurator.sdk import common, pareto_analysis, perf_database
 
 logger = logging.getLogger(__name__)
 
-SPICA_TRACE_SWEEP_ROUNDS = 3
-SPICA_TRACE_PARALLEL_EVALS = 16
+SPICA_THOROUGH_SWEEP_ROUNDS = 3
+SPICA_THOROUGH_PARALLEL_EVALS = 16
+SPICA_THOROUGH_SYNTHETIC_CONCURRENCY_PER_GPU = 128
+SPICA_THOROUGH_SYNTHETIC_REQUEST_COUNT = 1000
 
 
 @dataclass
@@ -50,6 +52,8 @@ class _SpicaTraceResultBundle:
     candidate_df: pd.DataFrame
     tasks: dict[str, _SpicaTraceTask]
     trace_path: str | None
+    config_path: str | None
+    workload_label: str
     chosen_exp: str
     best_configs: dict[str, pd.DataFrame]
     pareto_fronts: dict[str, pd.DataFrame | None]
@@ -58,33 +62,56 @@ class _SpicaTraceResultBundle:
     pareto_x_axis: dict[str, str]
 
 
-def _positive_int_env(name: str, default: int) -> int:
+def _positive_int_env(name: str, default: int, *, aliases: tuple[str, ...] = ()) -> int:
+    selected_name = name
     raw_value = os.environ.get(name)
+    if raw_value is None:
+        for alias in aliases:
+            raw_value = os.environ.get(alias)
+            if raw_value is not None:
+                selected_name = alias
+                break
     if raw_value is None:
         return default
     try:
         value = int(raw_value)
     except ValueError:
-        logger.warning("Ignoring %s=%r; expected a positive integer.", name, raw_value)
+        logger.warning("Ignoring %s=%r; expected a positive integer.", selected_name, raw_value)
         return default
     if value < 1:
-        logger.warning("Ignoring %s=%r; expected a positive integer.", name, raw_value)
+        logger.warning("Ignoring %s=%r; expected a positive integer.", selected_name, raw_value)
         return default
     return value
 
 
-def _spica_trace_sweep_config() -> dict[str, int]:
+def _spica_thorough_sweep_config() -> dict[str, int]:
     sweep_config = {
-        "max_rounds": _positive_int_env("AIC_SPICA_TRACE_SWEEP_ROUNDS", SPICA_TRACE_SWEEP_ROUNDS),
-        "parallel_evals": _positive_int_env("AIC_SPICA_TRACE_PARALLEL_EVALS", SPICA_TRACE_PARALLEL_EVALS),
+        "max_rounds": _positive_int_env(
+            "AIC_SPICA_THOROUGH_SWEEP_ROUNDS",
+            SPICA_THOROUGH_SWEEP_ROUNDS,
+            aliases=("AIC_SPICA_TRACE_SWEEP_ROUNDS",),
+        ),
+        "parallel_evals": _positive_int_env(
+            "AIC_SPICA_THOROUGH_PARALLEL_EVALS",
+            SPICA_THOROUGH_PARALLEL_EVALS,
+            aliases=("AIC_SPICA_TRACE_PARALLEL_EVALS",),
+        ),
     }
-    candidates_per_round = os.environ.get("AIC_SPICA_TRACE_CANDIDATES_PER_ROUND")
+    candidates_per_round = os.environ.get("AIC_SPICA_THOROUGH_CANDIDATES_PER_ROUND")
+    candidates_env = "AIC_SPICA_THOROUGH_CANDIDATES_PER_ROUND"
+    if candidates_per_round is None:
+        candidates_per_round = os.environ.get("AIC_SPICA_TRACE_CANDIDATES_PER_ROUND")
+        candidates_env = "AIC_SPICA_TRACE_CANDIDATES_PER_ROUND"
     if candidates_per_round is not None:
         sweep_config["candidates_per_round"] = _positive_int_env(
-            "AIC_SPICA_TRACE_CANDIDATES_PER_ROUND",
+            candidates_env,
             sweep_config["parallel_evals"],
         )
     return sweep_config
+
+
+def _spica_trace_sweep_config() -> dict[str, int]:
+    return _spica_thorough_sweep_config()
 
 
 def _spica_candidate_to_dict(candidate: Any) -> dict[str, Any]:
@@ -325,28 +352,164 @@ def _spica_trace_is_moe(candidate_df: pd.DataFrame) -> bool:
     return any((pd.to_numeric(candidate_df[col], errors="coerce").fillna(1) > 1).any() for col in moe_cols)
 
 
-def _spica_trace_task(args, mode: str, candidate_df: pd.DataFrame) -> _SpicaTraceTask:
-    backend = args.backend
+_SPICA_INTEGER_RESULT_COLUMNS = (
+    "spica_candidate_id",
+    "num_total_gpus",
+    "total_gpus",
+    "tp",
+    "pp",
+    "dp",
+    "moe_tp",
+    "moe_ep",
+    "replicas",
+    "(p)workers",
+    "(p)tp",
+    "(p)pp",
+    "(p)dp",
+    "(p)moe_tp",
+    "(p)moe_ep",
+    "(d)workers",
+    "(d)tp",
+    "(d)pp",
+    "(d)dp",
+    "(d)moe_tp",
+    "(d)moe_ep",
+)
+
+
+def _normalize_spica_result_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    for col in _SPICA_INTEGER_RESULT_COLUMNS:
+        if col not in df.columns:
+            continue
+        numeric = pd.to_numeric(df[col], errors="coerce")
+        if numeric.notna().all():
+            df[col] = numeric.round().astype(int)
+    return df
+
+
+def _spica_search_space_value(config: Any, name: str, default: Any = None) -> Any:
+    search_space = getattr(config, "search_space", None)
+    return getattr(search_space, name, default)
+
+
+def _spica_workload_value(config: Any, name: str, default: Any = None) -> Any:
+    workload = getattr(config, "workload", None)
+    return getattr(workload, name, default)
+
+
+def _spica_sla_value(config: Any, name: str, default: Any = None) -> Any:
+    goal = getattr(config, "goal", None)
+    sla = getattr(goal, "sla", None)
+    return getattr(sla, name, default)
+
+
+def _spica_scalar_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            scalar = _spica_scalar_value(item)
+            if scalar is not None:
+                return scalar
+        return None
+    if isinstance(value, set):
+        for item in sorted(value, key=str):
+            scalar = _spica_scalar_value(item)
+            if scalar is not None:
+                return scalar
+        return None
+    if isinstance(value, dict):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
+def _spica_first_scalar(*values: Any, default: Any = None) -> Any:
+    for value in values:
+        scalar = _spica_scalar_value(value)
+        if scalar is not None:
+            return scalar
+    return default
+
+
+def _spica_pinned_scalar(value: Any) -> Any:
+    if isinstance(value, (list, tuple, set, dict)):
+        return None
+    return _spica_scalar_value(value)
+
+
+def _spica_trace_task(args, mode: str, candidate_df: pd.DataFrame, config: Any | None = None) -> _SpicaTraceTask:
+    first_row = candidate_df.iloc[0] if not candidate_df.empty else pd.Series(dtype=object)
+    backend = getattr(args, "backend", None) or "spica"
     backend_series = candidate_df["backend"] if "backend" in candidate_df else pd.Series(dtype=object)
     mode_backends = sorted(str(backend_name) for backend_name in backend_series.dropna().unique())
-    if backend == "auto" and mode_backends:
+    if mode_backends and (backend == "auto" or config is not None):
         backend = ",".join(mode_backends)
 
+    model_path = _spica_first_scalar(
+        first_row.get("model_name"),
+        _spica_search_space_value(config, "model_name"),
+        getattr(args, "model_path", None),
+        default="unknown",
+    )
+    system = _spica_first_scalar(
+        first_row.get("hardware_sku"),
+        _spica_search_space_value(config, "hardware_sku"),
+        getattr(args, "system", None),
+        default="unknown",
+    )
+    total_gpus = _spica_first_scalar(
+        _spica_pinned_scalar(_spica_search_space_value(config, "gpu_budget")),
+        getattr(args, "total_gpus", None),
+        first_row.get("gpu_budget"),
+        first_row.get("total_gpus"),
+        default=0,
+    )
+    ttft = _spica_sla_value(config, "ttft_ms", getattr(args, "ttft", 0.0) or 0.0) or 0.0
+    tpot = _spica_sla_value(config, "itl_ms", getattr(args, "tpot", 0.0) or 0.0) or 0.0
+    request_latency = _spica_sla_value(config, "e2e_ms", None)
+    workload_isl = _spica_first_scalar(_spica_workload_value(config, "isl"), getattr(args, "isl", None), default=0)
+    workload_osl = _spica_first_scalar(_spica_workload_value(config, "osl"), getattr(args, "osl", None), default=0)
+
     return _SpicaTraceTask(
-        primary_model_path=args.model_path,
-        primary_system_name=args.system,
+        primary_model_path=str(model_path),
+        primary_system_name=str(system),
         primary_backend_name=backend,
         primary_backend_version="spica",
-        total_gpus=args.total_gpus,
+        total_gpus=int(total_gpus),
         serving_mode=mode,
-        ttft=args.ttft,
-        tpot=args.tpot,
-        request_latency=None,
+        ttft=float(ttft),
+        tpot=float(tpot),
+        request_latency=request_latency,
         is_moe=_spica_trace_is_moe(candidate_df),
+        isl=int(workload_isl),
+        osl=int(workload_osl),
     )
 
 
-def _build_spica_trace_result_bundle(candidates: list[Any], args) -> _SpicaTraceResultBundle:
+def _spica_trace_path_from_config(config: Any | None) -> str | None:
+    trace_path = _spica_workload_value(config, "trace_path", None)
+    return str(trace_path) if trace_path else None
+
+
+def _spica_workload_label(config: Any | None, args, config_path: str | None) -> str:
+    if _spica_trace_path_from_config(config) or getattr(args, "trace_path", None):
+        return "trace"
+    if config_path:
+        return "config"
+    return "synthetic"
+
+
+def _build_spica_trace_result_bundle(
+    candidates: list[Any],
+    args,
+    config: Any | None = None,
+    config_path: str | None = None,
+) -> _SpicaTraceResultBundle:
     from aiconfigurator.cli.utils import process_experiment_result
 
     payloads = [_spica_candidate_to_dict(candidate) for candidate in candidates]
@@ -361,7 +524,8 @@ def _build_spica_trace_result_bundle(candidates: list[Any], args) -> _SpicaTrace
     for mode, mode_df in candidate_df.groupby("deployment_mode", sort=False):
         mode = str(mode)
         mode_df = mode_df.dropna(axis=1, how="all").copy()
-        task = _spica_trace_task(args, mode, mode_df)
+        mode_df = _normalize_spica_result_dtypes(mode_df)
+        task = _spica_trace_task(args, mode, mode_df, config)
         tasks[mode] = task
         best_config_df, best_throughput, pareto_frontier_df, x_axis_col, latencies = process_experiment_result(
             task,
@@ -380,7 +544,9 @@ def _build_spica_trace_result_bundle(candidates: list[Any], args) -> _SpicaTrace
         candidates=payloads,
         candidate_df=candidate_df,
         tasks=tasks,
-        trace_path=getattr(args, "trace_path", None),
+        trace_path=_spica_trace_path_from_config(config) or getattr(args, "trace_path", None),
+        config_path=config_path,
+        workload_label=_spica_workload_label(config, args, config_path),
         chosen_exp=chosen_exp,
         best_configs=best_configs,
         pareto_fronts=pareto_fronts,
@@ -408,10 +574,21 @@ def _spica_trace_result_dir(result_bundle: _SpicaTraceResultBundle, save_dir: st
     model = _spica_safe_path_component(getattr(first_task, "primary_model_path", "model"))
     system = _spica_safe_path_component(getattr(first_task, "primary_system_name", "system"))
     backend = _spica_safe_path_component(getattr(first_task, "primary_backend_name", "backend"))
-    trace = _spica_safe_path_component(os.path.basename(result_bundle.trace_path or "trace"), strip_extension=True)
     ttft = int(getattr(first_task, "ttft", 0) or 0)
     tpot = int(getattr(first_task, "tpot", 0) or 0)
-    result_prefix = f"{model}_{system}_{backend}_trace_{trace}_ttft{ttft}_tpot{tpot}"
+    if result_bundle.trace_path:
+        trace_name = _spica_safe_path_component(os.path.basename(result_bundle.trace_path), strip_extension=True)
+        workload = f"trace_{trace_name}"
+    elif result_bundle.config_path:
+        workload = "thorough_" + _spica_safe_path_component(
+            os.path.basename(result_bundle.config_path),
+            strip_extension=True,
+        )
+    else:
+        isl = int(getattr(first_task, "isl", 0) or 0)
+        osl = int(getattr(first_task, "osl", 0) or 0)
+        workload = f"thorough_isl{isl}_osl{osl}"
+    result_prefix = f"{model}_{system}_{backend}_{workload}_ttft{ttft}_tpot{tpot}"
     return os.path.join(save_dir, f"{result_prefix}_{random.randint(0, 1000000)}")
 
 
@@ -915,7 +1092,7 @@ def _save_spica_pareto_plot(result_bundle: _SpicaTraceResultBundle, save_dir: st
         best = combined.sort_values(by="tokens/s/gpu_cluster", ascending=False).head(1)
         ax.scatter(best["tokens/s/user"], best["tokens/s/gpu"], color="black", marker="x", label="best")
 
-    ax.set_title("Spica Trace Pareto Frontier")
+    ax.set_title("Spica Pareto Frontier")
     ax.set_xlabel("tokens/s/user")
     ax.set_ylabel("tokens/s/gpu")
     ax.legend()
@@ -981,12 +1158,19 @@ def _save_spica_trace_artifacts(
     return written_paths
 
 
-def _build_spica_trace_search_space(args, backends: list[str]) -> dict[str, Any]:
+def _build_spica_default_search_space(args, backends: list[str]) -> dict[str, Any]:
     search_space: dict[str, Any] = {
         "model_name": args.model_path,
         "hardware_sku": args.system,
         "gpu_budget": args.total_gpus,
         "backend": backends,
+        "router_mode": ["round_robin"],
+        "overlap_score_credit": [0.0],
+        "prefill_load_scale": [0.0],
+        "router_temperature": [0.0],
+        "planner_scaling_policy": ["disabled"],
+        "planner_fpm_sampling": ["default"],
+        "planner_load_sensitivity": ["default"],
         "prefill_gpu_memory_utilization": args.free_gpu_memory_fraction,
         "decode_gpu_memory_utilization": args.free_gpu_memory_fraction,
         "agg_gpu_memory_utilization": args.free_gpu_memory_fraction,
@@ -997,73 +1181,202 @@ def _build_spica_trace_search_space(args, backends: list[str]) -> dict[str, Any]
         search_space["aic_nextn"] = args.nextn
 
     if args.total_gpus == 1:
-        logger.info("Constraining Spica trace search to static aggregate round-robin for a single-GPU budget.")
+        logger.info("Constraining Spica default search to aggregate mode for a single-GPU budget.")
         search_space.update(
             {
                 "deployment_mode": ["agg"],
-                "router_mode": ["round_robin"],
-                "planner_scaling_policy": ["disabled"],
             }
         )
 
     return search_space
 
 
-def run_spica_trace_default(args) -> list[Any]:
-    """Run the Spica replay-backed smart sweeper for ``default --trace-path``."""
+def _build_spica_trace_search_space(args, backends: list[str]) -> dict[str, Any]:
+    return _build_spica_default_search_space(args, backends)
+
+
+def _spica_synthetic_concurrency(args) -> int:
+    default = max(1, int(args.total_gpus or 1) * SPICA_THOROUGH_SYNTHETIC_CONCURRENCY_PER_GPU)
+    return _positive_int_env("AIC_SPICA_THOROUGH_SYNTHETIC_CONCURRENCY", default)
+
+
+def _spica_synthetic_request_count() -> int:
+    return _positive_int_env("AIC_SPICA_THOROUGH_SYNTHETIC_REQUEST_COUNT", SPICA_THOROUGH_SYNTHETIC_REQUEST_COUNT)
+
+
+def _build_spica_default_workload(args) -> dict[str, Any]:
+    if getattr(args, "trace_path", None):
+        return {"trace_path": args.trace_path, "trace_format": "mooncake"}
+
+    workload: dict[str, Any] = {
+        "isl": args.isl,
+        "osl": args.osl,
+        "concurrency": _spica_synthetic_concurrency(args),
+        "request_count": _spica_synthetic_request_count(),
+    }
+    if getattr(args, "prefix", 0) > 0 and args.isl > 0:
+        workload["shared_prefix_ratio"] = min(1.0, max(0.0, float(args.prefix) / float(args.isl)))
+        workload["num_prefix_groups"] = 1
+    return workload
+
+
+def _build_spica_thorough_config_data(args, backends: list[str]) -> dict[str, Any]:
+    return {
+        "search_space": _build_spica_default_search_space(args, backends),
+        "workload": _build_spica_default_workload(args),
+        "goal": {"target": "goodput_per_gpu", "sla": {"ttft_ms": args.ttft, "itl_ms": args.tpot}},
+        "sweep": _spica_thorough_sweep_config(),
+    }
+
+
+def _spica_config_summary(config: Any) -> dict[str, Any]:
+    search_space = getattr(config, "search_space", None)
+    workload = getattr(config, "workload", None)
+    goal = getattr(config, "goal", None)
+    sweep = getattr(config, "sweep", None)
+    return {
+        "model": getattr(search_space, "model_name", None),
+        "system": getattr(search_space, "hardware_sku", None),
+        "gpu_budget": getattr(search_space, "gpu_budget", None),
+        "backend": getattr(search_space, "backend", None),
+        "workload": workload,
+        "goal": goal,
+        "sweep": {
+            "max_rounds": getattr(sweep, "max_rounds", None),
+            "parallel_evals": getattr(sweep, "parallel_evals", None),
+            "candidates_per_round": getattr(sweep, "candidates_per_round", None),
+        },
+    }
+
+
+def _spica_extra_input_lines(config: Any, config_path: str | None) -> list[str]:
+    workload = getattr(config, "workload", None)
+    goal = getattr(config, "goal", None)
+    sla = getattr(goal, "sla", None)
+    lines: list[str] = []
+    if config_path:
+        lines.append(f"Spica Config: {config_path}")
+    if getattr(workload, "trace_path", None):
+        lines.append(f"Trace: {workload.trace_path} (Mooncake JSONL)")
+        lines.append("Trace mode: --isl/--osl ignored; request lengths come from replay.")
+    else:
+        lines.append(
+            "Synthetic Workload: "
+            f"ISL={getattr(workload, 'isl', 'n/a')}, "
+            f"OSL={getattr(workload, 'osl', 'n/a')}, "
+            f"concurrency={getattr(workload, 'concurrency', 'n/a')}, "
+            f"request_count={getattr(workload, 'request_count', 'n/a')}"
+        )
+    if sla is not None:
+        if getattr(sla, "ttft_ms", None) is not None:
+            lines.append(f"TTFT Target: {sla.ttft_ms:.2f}ms")
+        if getattr(sla, "itl_ms", None) is not None:
+            lines.append(f"TPOT Target: {sla.itl_ms:.2f}ms")
+        if getattr(sla, "e2e_ms", None) is not None:
+            lines.append(f"Request Latency Target: {sla.e2e_ms:.2f}ms")
+    return lines
+
+
+def _load_spica_config(args, smart_search_config_cls):
+    config_path = getattr(args, "thorough_config", None)
+    if config_path:
+        if getattr(args, "trace_path", None):
+            raise SystemExit(
+                "--thorough-config cannot be combined with --trace-path; put trace_path in the Spica config."
+            )
+        return smart_search_config_cls.from_yaml(config_path), config_path
+
+    backends = [backend.value for backend in common.BackendName] if args.backend == "auto" else [args.backend]
+    config_data = _build_spica_thorough_config_data(args, backends)
+    return smart_search_config_cls.model_validate(config_data), None
+
+
+def _install_dynamo_planner_bridge_compat() -> None:
+    """Keep older Spica synthetic replay working with newer Dynamo module layout."""
+    try:
+        import dynamo.mocker as dynamo_mocker
+
+        if hasattr(dynamo_mocker, "PlannerReplayBridge"):
+            return
+        from dynamo.llm import PlannerReplayBridge
+
+        dynamo_mocker.PlannerReplayBridge = PlannerReplayBridge
+    except Exception as exc:
+        logger.debug("Could not install Dynamo PlannerReplayBridge compatibility shim: %s", exc)
+
+
+class _SpicaReplayEvaluatorCompat:
+    """ReplayEvaluator wrapper that installs AIC/Dynamo compatibility in spawned workers."""
+
+    def __init__(self, workload: Any, goal: Any):
+        self.workload = workload
+        self.goal = goal
+        self._evaluator: Any | None = None
+
+    def evaluate(self, plan: Any) -> dict[str, float]:
+        _install_dynamo_planner_bridge_compat()
+        if self._evaluator is None:
+            from spica.evaluator import ReplayEvaluator
+
+            self._evaluator = ReplayEvaluator(self.workload, self.goal)
+        return self._evaluator.evaluate(plan)
+
+
+def run_spica_thorough_default(args) -> list[Any]:
+    """Run the Spica smart sweeper for ``default --thorough-sweep`` / ``--trace-path``."""
     from aiconfigurator.cli.report_and_save import log_final_summary
 
-    if args.decode_system is not None and args.decode_system != args.system:
+    if (
+        getattr(args, "thorough_config", None) is None
+        and getattr(args, "decode_system", None) is not None
+        and getattr(args, "decode_system", None) != getattr(args, "system", None)
+    ):
         raise SystemExit(
-            "--trace-path currently requires homogeneous hardware; omit --decode-system or set it to --system."
+            "Spica thorough sweep currently requires homogeneous hardware when deriving config from CLI inputs; "
+            "omit --decode-system, set it to --system, or provide a native --thorough-config."
         )
 
-    if args.backend_version is not None:
-        logger.warning("--backend-version is currently ignored in Spica trace mode; Spica resolves backend versions.")
-    if args.database_mode != common.DatabaseMode.SILICON.name:
-        logger.warning("--database-mode is currently ignored in Spica trace mode.")
-    if args.request_latency is not None:
-        logger.warning("--request-latency is currently ignored in Spica trace mode; using --ttft/--tpot as the SLA.")
+    if getattr(args, "backend_version", None) is not None:
+        logger.warning(
+            "--backend-version is currently ignored in Spica thorough mode; Spica resolves backend versions."
+        )
+    if getattr(args, "database_mode", common.DatabaseMode.SILICON.name) != common.DatabaseMode.SILICON.name:
+        logger.warning("--database-mode is currently ignored in Spica thorough mode.")
+    if getattr(args, "request_latency", None) is not None:
+        logger.warning("--request-latency is currently ignored in Spica thorough mode; using --ttft/--tpot as the SLA.")
     if getattr(args, "enable_wideep", False):
-        logger.warning("--enable-wideep is currently ignored in Spica trace mode.")
+        logger.warning("--enable-wideep is currently ignored in Spica thorough mode.")
     if getattr(args, "moe_backend", None) is not None:
-        logger.warning("--moe-backend is currently ignored in Spica trace mode.")
+        logger.warning("--moe-backend is currently ignored in Spica thorough mode.")
 
     try:
         from spica.config import SmartSearchConfig
         from spica.search import run_smart_search
     except ImportError as exc:
         raise SystemExit(
-            "Spica trace mode requires the optional 'spica' package and its replay dependencies. "
-            "Install Spica, then rerun with --trace-path."
+            "Spica thorough sweep requires the optional 'spica' package and its replay dependencies. "
+            "Install Spica, then rerun with --thorough-sweep or --trace-path."
         ) from exc
 
-    backends = [backend.value for backend in common.BackendName] if args.backend == "auto" else [args.backend]
-    search_space = _build_spica_trace_search_space(args, backends)
-
-    sweep_config = _spica_trace_sweep_config()
-    config = SmartSearchConfig(
-        search_space=search_space,
-        workload={"trace_path": args.trace_path, "trace_format": "mooncake"},
-        goal={"target": "goodput_per_gpu", "sla": {"ttft_ms": args.ttft, "itl_ms": args.tpot}},
-        sweep=sweep_config,
-    )
+    _install_dynamo_planner_bridge_compat()
+    config, config_path = _load_spica_config(args, SmartSearchConfig)
+    config_summary = _spica_config_summary(config)
 
     logger.info(
-        "Running Spica trace sweep: trace_path=%s, model=%s, system=%s, gpu_budget=%s, backend=%s, sweep=%s",
-        args.trace_path,
-        args.model_path,
-        args.system,
-        args.total_gpus,
-        ",".join(backends),
-        sweep_config,
+        "Running Spica thorough sweep: model=%s, system=%s, gpu_budget=%s, backend=%s, workload=%s, sweep=%s",
+        config_summary["model"],
+        config_summary["system"],
+        config_summary["gpu_budget"],
+        config_summary["backend"],
+        config_summary["workload"],
+        config_summary["sweep"],
     )
-    candidates = run_smart_search(config)
+    candidates = run_smart_search(config, evaluator=_SpicaReplayEvaluatorCompat(config.workload, config.goal))
     if not candidates:
-        logger.error("Spica trace sweep returned no feasible candidates.")
+        logger.error("Spica thorough sweep returned no feasible candidates.")
         raise SystemExit(1)
 
-    result_bundle = _build_spica_trace_result_bundle(candidates, args)
+    result_bundle = _build_spica_trace_result_bundle(candidates, args, config=config, config_path=config_path)
     log_final_summary(
         chosen_exp=result_bundle.chosen_exp,
         best_throughputs=result_bundle.best_throughputs,
@@ -1074,16 +1387,16 @@ def run_spica_trace_default(args) -> list[Any]:
         pareto_x_axis=result_bundle.pareto_x_axis,
         top_n=args.top_n,
         inclusive_tpot=args.inclusive_tpot,
-        extra_input_lines=[
-            f"Trace: {args.trace_path} (Mooncake JSONL)",
-            f"TTFT Target: {args.ttft:.2f}ms",
-            f"TPOT Target: {args.tpot:.2f}ms",
-            "Trace mode: --isl/--osl ignored; request lengths come from replay.",
-        ],
+        extra_input_lines=_spica_extra_input_lines(config, config_path),
     )
 
     if args.save_dir:
         written_paths = _save_spica_trace_artifacts(result_bundle, args.save_dir, args)
-        logger.info("Saved Spica trace artifacts to %s: %s", args.save_dir, ", ".join(written_paths))
+        logger.info("Saved Spica thorough artifacts to %s: %s", args.save_dir, ", ".join(written_paths))
 
     return candidates
+
+
+def run_spica_trace_default(args) -> list[Any]:
+    """Backward-compatible wrapper for the original ``default --trace-path`` entrypoint."""
+    return run_spica_thorough_default(args)

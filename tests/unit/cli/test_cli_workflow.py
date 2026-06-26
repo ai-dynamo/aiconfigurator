@@ -28,6 +28,7 @@ from aiconfigurator.cli.main import main as cli_main
 from aiconfigurator.cli.report_and_save import _apply_inclusive_tpot
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.spica.cli_adapter import (
+    _build_spica_thorough_config_data,
     _build_spica_trace_result_bundle,
     _build_spica_trace_search_space,
     _save_spica_trace_artifacts,
@@ -168,7 +169,7 @@ class TestCLIIntegration:
         mock_builder.assert_called_once()
         mock_execute.assert_called_once_with({"agg": mock_task_config}, mode, top_n=5)
 
-    @patch("aiconfigurator.cli.main.run_spica_trace_default")
+    @patch("aiconfigurator.cli.main.run_spica_thorough_default")
     @patch("aiconfigurator.cli.main._execute_tasks")
     @patch("aiconfigurator.cli.main.build_default_tasks")
     def test_cli_default_trace_path_dispatches_to_spica(
@@ -187,6 +188,57 @@ class TestCLIIntegration:
         mock_build_default.assert_not_called()
         mock_execute.assert_not_called()
 
+    @patch("aiconfigurator.cli.main.run_spica_thorough_default")
+    @patch("aiconfigurator.cli.main._execute_tasks")
+    @patch("aiconfigurator.cli.main.build_default_tasks")
+    def test_cli_default_thorough_sweep_dispatches_to_spica(
+        self,
+        mock_build_default,
+        mock_execute,
+        mock_run_spica,
+        cli_args_factory,
+    ):
+        """default --thorough-sweep should use Spica with CLI-derived config."""
+        args = cli_args_factory(mode="default", thorough_sweep=True)
+
+        cli_main(args)
+
+        mock_run_spica.assert_called_once_with(args)
+        mock_build_default.assert_not_called()
+        mock_execute.assert_not_called()
+
+    @patch("aiconfigurator.cli.main.run_spica_thorough_default")
+    @patch("aiconfigurator.cli.main._execute_tasks")
+    @patch("aiconfigurator.cli.main.build_default_tasks")
+    def test_cli_default_thorough_config_dispatches_without_default_inputs(
+        self,
+        mock_build_default,
+        mock_execute,
+        mock_run_spica,
+        tmp_path,
+    ):
+        """default --thorough-config should not require dummy model/system/GPU args."""
+        parser = argparse.ArgumentParser()
+        configure_parser(parser)
+        config_path = tmp_path / "spica.yaml"
+        config_path.write_text("search_space: {}\n", encoding="utf-8")
+        args = parser.parse_args(["default", "--thorough-config", str(config_path)])
+
+        cli_main(args)
+
+        mock_run_spica.assert_called_once_with(args)
+        mock_build_default.assert_not_called()
+        mock_execute.assert_not_called()
+
+    def test_cli_default_missing_required_inputs_raises(self):
+        """Legacy default still needs model/system/GPU when no native Spica config is provided."""
+        parser = argparse.ArgumentParser()
+        configure_parser(parser)
+        args = parser.parse_args(["default"])
+
+        with pytest.raises(SystemExit, match="default mode requires"):
+            cli_main(args)
+
     def test_spica_trace_search_space_collapses_single_gpu_noops(self, cli_args_factory):
         """Single-GPU trace sweeps should avoid routing/planner choices that cannot help."""
         args = cli_args_factory(
@@ -203,6 +255,48 @@ class TestCLIIntegration:
         assert search_space["deployment_mode"] == ["agg"]
         assert search_space["router_mode"] == ["round_robin"]
         assert search_space["planner_scaling_policy"] == ["disabled"]
+
+    def test_spica_thorough_config_data_uses_cli_inputs(self, cli_args_factory):
+        """CLI-derived thorough mode should build a valid SmartSearchConfig-shaped payload."""
+        args = cli_args_factory(
+            mode="default",
+            thorough_sweep=True,
+            model_path="meta-llama/Meta-Llama-3.1-8B",
+            total_gpus=4,
+            system="gb200",
+            backend="trtllm",
+            isl=2048,
+            osl=512,
+            prefix=256,
+            max_seq_len=8192,
+            nextn=1,
+            ttft=8000.0,
+            tpot=200.0,
+        )
+
+        config_data = _build_spica_thorough_config_data(args, ["trtllm"])
+
+        assert config_data["search_space"]["model_name"] == "meta-llama/Meta-Llama-3.1-8B"
+        assert config_data["search_space"]["hardware_sku"] == "gb200"
+        assert config_data["search_space"]["gpu_budget"] == 4
+        assert config_data["search_space"]["backend"] == ["trtllm"]
+        assert config_data["search_space"]["context_length"] == 8192
+        assert config_data["search_space"]["aic_nextn"] == 1
+        assert config_data["search_space"]["router_mode"] == ["round_robin"]
+        assert config_data["search_space"]["planner_scaling_policy"] == ["disabled"]
+        assert config_data["search_space"]["planner_fpm_sampling"] == ["default"]
+        assert config_data["search_space"]["planner_load_sensitivity"] == ["default"]
+        assert config_data["workload"] == {
+            "isl": 2048,
+            "osl": 512,
+            "concurrency": 512,
+            "request_count": 1000,
+            "shared_prefix_ratio": 0.125,
+            "num_prefix_groups": 1,
+        }
+        assert config_data["goal"] == {"target": "goodput_per_gpu", "sla": {"ttft_ms": 8000.0, "itl_ms": 200.0}}
+        assert config_data["sweep"]["max_rounds"] == 3
+        assert config_data["sweep"]["parallel_evals"] == 16
 
     def test_spica_trace_results_use_default_result_shape(self, cli_args_factory):
         """Spica trace candidates should be adapted to the legacy default-mode result bundle."""
@@ -302,6 +396,71 @@ class TestCLIIntegration:
         assert "(p)tp" not in result_bundle.best_configs["agg"].columns
         assert agg_best["parallel"] == "tp2_pp1"
         assert agg_best["tokens/s/gpu"] == pytest.approx(280.0)
+
+    def test_spica_thorough_config_result_bundle_uses_candidate_scalars(self):
+        """Native Spica configs can use multi-value search-space fields; reports use evaluated candidate values."""
+        config = argparse.Namespace(
+            search_space=argparse.Namespace(
+                model_name=["Qwen/Qwen3-32B-FP8"],
+                hardware_sku=["gb200"],
+                gpu_budget=[1, 4],
+                backend=["trtllm", "vllm"],
+            ),
+            workload=argparse.Namespace(isl=128, osl=16),
+            goal=argparse.Namespace(sla=argparse.Namespace(ttft_ms=8000.0, itl_ms=200.0, e2e_ms=None)),
+        )
+        args = argparse.Namespace(
+            backend="auto",
+            model_path=None,
+            system=None,
+            total_gpus=None,
+            trace_path=None,
+            top_n=1,
+            strict_sla=False,
+            ttft=2000.0,
+            tpot=30.0,
+        )
+        candidates = [
+            {
+                "config": {
+                    "deployment_mode": "agg",
+                    "backend": "trtllm",
+                    "model_name": "Qwen/Qwen3-32B-FP8",
+                    "hardware_sku": "gb200",
+                    "tp": 4,
+                    "pp": 1,
+                    "attention_dp": 1,
+                    "replicas": 1,
+                    "router_mode": "round_robin",
+                    "planner_scaling_policy": "disabled",
+                },
+                "used_gpus": 4,
+                "score": 250.0,
+                "metrics": {
+                    "goodput_output_throughput_tok_s": 1000.0,
+                    "output_throughput_tok_s": 1100.0,
+                    "mean_ttft_ms": 100.0,
+                    "mean_tpot_ms": 10.0,
+                    "mean_e2e_latency_ms": 260.0,
+                },
+            }
+        ]
+
+        result_bundle = _build_spica_trace_result_bundle(
+            candidates,
+            args,
+            config=config,
+            config_path="/tmp/spica.yaml",
+        )
+
+        task = result_bundle.tasks["agg"]
+        assert task.primary_model_path == "Qwen/Qwen3-32B-FP8"
+        assert task.primary_system_name == "gb200"
+        assert task.primary_backend_name == "trtllm"
+        assert task.total_gpus == 4
+        assert task.isl == 128
+        assert task.osl == 16
+        assert result_bundle.workload_label == "config"
 
     def test_spica_trace_artifacts_include_pareto_outputs(self, tmp_path, cli_args_factory):
         candidates = [
