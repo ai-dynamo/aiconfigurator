@@ -104,7 +104,7 @@ KV-router weights are ignored under `round_robin`.
 |---|---|---|---|---|
 | `router_mode` | list[str] | `["kv_router", "round_robin"]` | searched | `kv_router`, `round_robin` |
 | `overlap_score_credit` | list[float] | `[0.0, 0.5, 1.0]` | searched | `0.0`, `0.5`, `1.0` |
-| `prefill_load_scale` | list[float] | `[0.0, 0.25, 0.5, 1.0, 2.0, 4.0]` | searched | `0.0`, `0.25`, `0.5`, `1.0`, `2.0`, `4.0` |
+| `prefill_load_scale` | list[float] | `[0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]` | searched | `0.0`, `0.25`, `0.5`, `1.0`, `2.0`, `4.0`, `8.0`, `16.0`, `32.0` |
 | `router_temperature` | list[float] | `[0.0, 0.2, 0.5, 1.0]` | searched | `0.0`, `0.2`, `0.5`, `1.0` |
 | `host_cache_hit_weight` | list[float] | `[0.5, 0.75, 1.0]` | searched **iff** `num_g2_blocks > 0` | `0.5`, `0.75`, `1.0` |
 | `disk_cache_hit_weight` | list[float] | `[0.0, 0.25, 0.5]` | searched **iff** `num_g2_blocks > 0` | `0.0`, `0.25`, `0.5` |
@@ -173,6 +173,11 @@ only decides *which* scaling loops run and their intervals.
 `disabled` / `load_*` survive. Listing *only* throughput-scaling policies for a non-SLA
 sweep errors (nothing left to search). Both scaling flags false ⇒ planner off (static
 replica count, same as `disabled`).
+
+An e2e-only goodput SLA can be replay-scored, but it cannot seed the planner's ttft/itl SLA
+target. In that case the main sweep drops every planner-scaling entry (throughput, load, and
+hybrid) and keeps only static policies such as `disabled`; if nothing static remains, it raises a
+clear config error.
 
 ## Composite presets
 
@@ -262,11 +267,8 @@ gpu_budget, backend)`:
    keep only these three pure patterns:
    - **TEP** — attention-TP + expert-EP: `tp > 1`, `dp == 1`, `moe_tp == 1`, `moe_ep > 1`.
    - **DEP** — attention-DP + expert-EP: `tp == 1`, `dp > 1`, `moe_tp == 1`, `moe_ep > 1`.
-   - **pure expert-TP** — `tp > 1`, `dp == 1`, `moe_tp > 1`, `moe_ep == 1`. **Only kept for
-     GQA+MoE** (`allow_moe_pure_tp`, gated on the architecture being in
-     `_GQA_MOE_ARCHITECTURES` = `{Qwen3MoeForCausalLM}`). **MLA+MoE excludes it** —
-     `resolve_model_hardware` sets `mla = is_moe and not allow_pure_tp`, and
-     `parallel_configs_for` passes `allow_moe_pure_tp=not mla`.
+   - **pure expert-TP** — `tp > 1`, `dp == 1`, `moe_tp > 1`, `moe_ep == 1`. It is scanned for
+     every MoE model; backend filters below can still remove unsupported combinations.
 4. **Backend filters** (mirroring AIC's `enumerate_parallel_config`):
    - `trtllm` forbids `tp > 1 & attention_dp > 1`.
    - `sglang` EP-only MoE backends (wideep / `deepep_moe` / `megamoe`) force `moe_tp == 1`.

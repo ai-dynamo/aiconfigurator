@@ -527,6 +527,13 @@ class SearchSpace(BaseModel):
         ``enumerate_branches`` against the model+hardware."""
         if not self.parallel_configs:
             return self
+
+        def validate_shape_dict(value: Any, label: str) -> None:
+            if not isinstance(value, dict):
+                raise ValueError(f"{label} parallel_configs shape must be a dict")
+            if "tp" not in value:
+                raise ValueError(f"{label} parallel_configs shape needs a 'tp' field")
+
         if len(self.deployment_mode) != 1:
             raise ValueError(
                 "pinning parallel_configs requires deployment_mode to list exactly one mode "
@@ -537,10 +544,12 @@ class SearchSpace(BaseModel):
             if not isinstance(entry, dict):
                 raise ValueError("each parallel_configs entry must be a dict")
             if mode == "agg":
-                if "tp" not in entry:
-                    raise ValueError("an agg parallel_configs entry needs a 'tp' field")
-            elif "prefill" not in entry or "decode" not in entry:
-                raise ValueError("a disagg parallel_configs entry needs 'prefill' and 'decode' sub-dicts")
+                validate_shape_dict(entry, "an agg")
+            else:
+                if "prefill" not in entry or "decode" not in entry:
+                    raise ValueError("a disagg parallel_configs entry needs 'prefill' and 'decode' sub-dicts")
+                validate_shape_dict(entry["prefill"], "a disagg prefill")
+                validate_shape_dict(entry["decode"], "a disagg decode")
         return self
 
 

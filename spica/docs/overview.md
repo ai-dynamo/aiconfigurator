@@ -53,6 +53,11 @@ is logged. **Error-if-nothing-left:** if dropping leaves `kept` empty (every pol
 throughput scaling under a non-`sla` goal), the run raises `ValueError`. The kept list is
 written back via `config.model_copy`.
 
+For goodput with an **e2e-only SLA**, Spica applies a second filter: planner scaling is dropped
+entirely and only static policies such as `disabled` survive. Replay can score e2e goodput, but
+the planner's SLA scaling target needs `ttft_ms` + `itl_ms`; filtering here prevents Vizier from
+sampling candidates that would fail during deployment-plan construction.
+
 ### 3. Load-predictor sub-sweep (`sweep_load_predictor`) — separate from Vizier
 
 `sweep_load_predictor` (`src/spica/load_predictor_sweep.py`) picks the forecaster for

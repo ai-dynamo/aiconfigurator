@@ -220,6 +220,72 @@ def test_non_goodput_sweep_drops_throughput_scaling_and_proceeds(monkeypatch):
     assert [c.score for c in cands] == [512.0, 256.0]  # ran fine (throughput == max_num_seqs)
 
 
+def test_e2e_only_goodput_drops_planner_scaling_and_proceeds(monkeypatch):
+    # e2e-only SLA is valid for goodput, but cannot seed the planner's ttft/itl target.
+    # Scaling policies are filtered out before Vizier can sample a build-time-invalid plan.
+    branch = _branch(ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2))
+    seen = {}
+
+    def fake_enumerate_branches(config, *, max_seq_len=None):
+        seen["policies"] = list(config.search_space.planner_scaling_policy)
+        return [branch]
+
+    monkeypatch.setattr(search_mod, "enumerate_branches", fake_enumerate_branches)
+    monkeypatch.setattr(search_mod, "sweep_load_predictor", lambda config: LoadPredictorResult(reason="static"))
+    monkeypatch.setattr(search_mod, "resolve_backend_version", lambda hw, be: "1.3.0rc10")
+    cfg = SmartSearchConfig(
+        search_space={
+            "model_name": "deepseek-ai/DeepSeek-V3",
+            "hardware_sku": "gb200",
+            "backend": ["trtllm"],
+            "deployment_mode": ["agg"],
+            "gpu_budget": 32,
+            "planner_scaling_policy": ["disabled", "throughput_180_5", "load_180_5", "hybrid_180_5"],
+        },
+        workload={"trace_path": "/tmp/t.jsonl"},
+        sweep={"max_rounds": 1, "candidates_per_round": 1, "parallel_evals": 1},
+        goal={"target": "goodput_per_gpu", "sla": {"e2e_ms": 5000.0}},
+    )
+
+    cands = run_smart_search(cfg, evaluator=_FakeEvaluator(), sampler_factory=_FakeSampler, show_progress=False)
+
+    assert seen["policies"] == ["disabled"]
+    assert len(cands) == 1
+
+
+def test_candidate_build_error_is_reported_not_raised(monkeypatch):
+    branch = _branch(ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2))
+    _stub(monkeypatch, branch)
+    sampler_seen = {}
+
+    class BadSampler(_FakeSampler):
+        def suggest(self, count):
+            sel = {
+                "deployment_mode": "agg",
+                "backend": "trtllm",
+                "router_mode": "round_robin",
+                "planner_scaling_policy": "disabled",
+                "planner_fpm_sampling": "default",
+                "planner_load_sensitivity": "default",
+                "agg_max_num_batched_tokens": 8192,
+                # missing agg_max_num_seqs -> unroll/build failure
+            }
+            return [Suggestion(selection=sel, parallel_config=self.branch.parallel_configs[0], handle=sel)]
+
+    def factory(b, study_id, objectives=None):
+        s = BadSampler(b, study_id)
+        sampler_seen["s"] = s
+        return s
+
+    cands = run_smart_search(_config(), evaluator=_FakeEvaluator(), sampler_factory=factory, show_progress=False)
+
+    assert cands == []
+    scored = sampler_seen["s"].scored
+    assert len(scored) == 1
+    assert scored[0][0] == "infeasible"
+    assert "candidate build failed" in scored[0][1]
+
+
 # --- pareto (multi-objective) sweep over a swept concurrency ---
 
 

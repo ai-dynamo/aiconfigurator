@@ -27,7 +27,7 @@ dev = [
     "pytest>=8.0",
     "ruff",
 ]
-# Planner load-predictor sweep + (later) Replay evaluator.
+# Planner load-predictor sweep + Replay evaluator.
 #
 # Pinned to the #10964 merge commit (c7378f8e). main now carries the unified
 # run_trace_replay that takes planner_config / benchmark_granularity / goodput SLA on the

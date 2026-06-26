@@ -29,9 +29,9 @@ Design proposal: `docs/proposals/dgdr-profiler-smart-search-plan.md` in
   pin/override what it emits.
 
 It is an **independent project** living inside the aiconfigurator repo. It
-depends on `aiconfigurator` (lower-layer forward-pass / memory provider) and,
-later, on `ai-dynamo` (Replay). The `aiconfigurator` package never imports
-Spica — Spica is the upper layer.
+depends on `aiconfigurator` (lower-layer forward-pass / memory provider) and
+uses `ai-dynamo` for Replay-backed evaluation when the real sweep runs. The
+`aiconfigurator` package never imports Spica — Spica is the upper layer.
 
 ## Status
 

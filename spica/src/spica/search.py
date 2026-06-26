@@ -36,7 +36,7 @@ from .deploy import build_deployment
 from .evaluator import ReplayEvaluator
 from .kv_estimate import resolve_backend_version
 from .load_predictor_sweep import LoadPredictorResult, sweep_load_predictor
-from .planner import filter_scaling_policies
+from .planner import filter_scaling_policies, scaling_fields
 from .sample import unroll_sample
 from .sampler import BranchSampler, Suggestion, make_branch_sampler
 from .score import is_feasible, make_candidate, pareto_front, rank
@@ -68,24 +68,27 @@ def _evaluate_one(
 ) -> _EvalResult:
     """Pure unroll -> deploy -> replay -> score for one (already backend-supported)
     suggestion. No Vizier, no shared mutable state -> safe to run in a worker process."""
-    sample = unroll_sample(
-        search_space=config.search_space,
-        selection=selection,
-        parallel_config=parallel_config,
-        load_predictor=load_predictor,
-    )
-    # A pareto concurrency sweep carries the per-trial in-flight cap on the selection;
-    # record it on the sample (so each Pareto point knows its concurrency) and drive replay with it.
-    concurrency = selection.get("concurrency")
-    if concurrency is not None:
-        sample["concurrency"] = concurrency
-    backend_version = resolve_backend_version(config.search_space.hardware_sku, selection["backend"])
-    plan = build_deployment(
-        sample,
-        backend_version=backend_version,
-        optimization_target=goal.target.planner_optimization_target,
-        planner_sla=goal.sla,
-    )
+    try:
+        sample = unroll_sample(
+            search_space=config.search_space,
+            selection=selection,
+            parallel_config=parallel_config,
+            load_predictor=load_predictor,
+        )
+        # A pareto concurrency sweep carries the per-trial in-flight cap on the selection;
+        # record it on the sample (so each Pareto point knows its concurrency) and drive replay with it.
+        concurrency = selection.get("concurrency")
+        if concurrency is not None:
+            sample["concurrency"] = concurrency
+        backend_version = resolve_backend_version(config.search_space.hardware_sku, selection["backend"])
+        plan = build_deployment(
+            sample,
+            backend_version=backend_version,
+            optimization_target=goal.target.planner_optimization_target,
+            planner_sla=goal.sla,
+        )
+    except Exception as exc:
+        return None, None, "failed", f"candidate build failed: {type(exc).__name__}: {exc}"
     try:
         report = evaluator.evaluate(plan, concurrency_override=concurrency)
     except Exception as exc:  # one candidate failing must not abort the sweep
@@ -172,6 +175,37 @@ def run_smart_search(
         config = config.model_copy(
             update={"search_space": config.search_space.model_copy(update={"planner_scaling_policy": kept})}
         )
+
+    # Goodput can be defined by an end-to-end SLA, but the planner's SLA scaling
+    # target can only be seeded from ttft+itl. With e2e-only SLA, keep static
+    # candidates and drop every scaling policy before Vizier can sample it.
+    sla = goal.sla
+    if (
+        goal.target.planner_optimization_target == "sla"
+        and sla is not None
+        and (sla.ttft_ms is None or sla.itl_ms is None)
+    ):
+        kept = []
+        dropped = []
+        for policy in config.search_space.planner_scaling_policy:
+            fields = scaling_fields(policy)
+            target = dropped if (fields["enable_throughput_scaling"] or fields["enable_load_scaling"]) else kept
+            target.append(policy)
+        if dropped:
+            if not kept:
+                raise ValueError(
+                    "every planner_scaling_policy enables planner scaling, but an e2e-only SLA "
+                    "cannot seed the planner's ttft/itl scaling target; use ttft_ms+itl_ms, "
+                    "or include 'disabled'"
+                )
+            if show_progress:
+                tqdm.write(
+                    f"smart-sweep: dropped {len(dropped)} planner-scaling policy option(s) "
+                    f"for e2e-only SLA (planner needs ttft_ms+itl_ms): {dropped}"
+                )
+            config = config.model_copy(
+                update={"search_space": config.search_space.model_copy(update={"planner_scaling_policy": kept})}
+            )
 
     # Thread the configured context_length into KV feasibility so parallel configs that
     # can't fit the requested sequence length are dropped up front (None -> model max).

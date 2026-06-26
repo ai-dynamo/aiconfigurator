@@ -43,7 +43,8 @@ from .parallel_enum import (
     enumerate_parallel_configs,
 )
 
-# GQA+MoE architectures that allow pure expert-TP; others (e.g. MLA) only TEP/DEP.
+# GQA+MoE architectures. Pure expert-TP is no longer gated on this list; it is
+# scanned for every MoE model and then filtered by backend/KV feasibility.
 _GQA_MOE_ARCHITECTURES = frozenset({"Qwen3MoeForCausalLM"})
 
 
@@ -78,7 +79,7 @@ class ModelHardware:
     hardware_sku: str
     backend: str
     is_moe: bool
-    mla: bool  # MoE that only allows TEP/DEP (no pure expert-TP)
+    mla: bool  # non-GQA MoE marker retained for reporting/model facts
     enable_wideep: bool
     weight_bytes: int
     vram_per_gpu: int

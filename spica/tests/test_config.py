@@ -205,6 +205,20 @@ def test_parallel_configs_shape_matches_mode():
             search_space=_search_space(deployment_mode=["disagg"], parallel_configs=[{"tp": 4}]),
             workload={"isl": 1, "osl": 1, "concurrency": 1, "num_request_ratio": 1},
         )
+    with pytest.raises(ValidationError, match="prefill.*dict"):
+        SmartSearchConfig(
+            search_space=_search_space(
+                deployment_mode=["disagg"], parallel_configs=[{"prefill": 1, "decode": {"tp": 1}}]
+            ),
+            workload={"isl": 1, "osl": 1, "concurrency": 1, "num_request_ratio": 1},
+        )
+    with pytest.raises(ValidationError, match="decode.*'tp' field"):
+        SmartSearchConfig(
+            search_space=_search_space(
+                deployment_mode=["disagg"], parallel_configs=[{"prefill": {"tp": 1}, "decode": {"replicas": 1}}]
+            ),
+            workload={"isl": 1, "osl": 1, "concurrency": 1, "num_request_ratio": 1},
+        )
     # well-formed agg + disagg entries pass structural validation
     SmartSearchConfig(
         search_space=_search_space(deployment_mode=["agg"], parallel_configs=[{"tp": 4, "moe_ep": 4, "replicas": 2}]),
