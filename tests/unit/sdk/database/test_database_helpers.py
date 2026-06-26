@@ -115,9 +115,7 @@ def test_get_supported_databases_includes_shared_layer_marker_versions(temp_syst
     assert result["h100"]["vllm"] == ["0.19.0", "0.22.0"]
 
 
-def test_get_latest_database_version_skips_marker_only_versions_by_default(
-    temp_systems_dir: Path, perf_database
-):
+def test_get_latest_database_version_skips_marker_only_versions_by_default(temp_systems_dir: Path, perf_database):
     setup_mock_filesystem(temp_systems_dir, {"h100": {"vllm": ["0.19.0"]}})
     marker_path = temp_systems_dir / "data_h100" / "vllm" / "0.22.0" / perf_database.SHARED_LAYER_REUSE_MARKER
     marker_path.parent.mkdir(parents=True)
