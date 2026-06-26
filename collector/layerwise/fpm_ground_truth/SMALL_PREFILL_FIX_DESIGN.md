@@ -158,6 +158,20 @@ The dominant factor is **isolated-vs-serving (host overlap), and topology (1-GPU
   · calibration of the ≤512 envelope. All: validate on a BROADER hybrid workload (not the 1 terminal-
   chunk shape); guard inert for large-prefill + decode (those match golden ~1.0×).
 
+## The OTHER ~22% of mixed (after small-prefill) is the SAME family — not composition
+Checked by reading `_get_mix_step_latency`: it is already `context_total + decode_delta` (decode
+KV-attention increment), with `max(context,decode)` **explicitly rejected** (max drops decode
+attention when prefill dominates). So the mixed residual is **NOT** a sum-vs-max composition bug —
+that idea is dead. The remaining ~22% lives in the **ctx envelope**: golden ctx has the 512 capture
+jump (≤512 ~16 ms → 528 ~40 ms → 1056 ~53 ms → 3696 ~50 ms), and AIC is over/under by size
+(528 matches −3%; 3696 AIC 57 vs golden 50, **+14%**; mixed buckets: 512–1k **under** 0.93, 2–4k/>4k
+**over** 1.22–1.27 — mixed directions, not a single bias).
+
+So the full mixed 38.8 % (small-prefill ~17 pp + this ~22 %) is **ONE root**: layerwise *isolated wall*
+vs golden *serving busy-bound / capture coverage*. It's a serving-fidelity problem, **not several quick
+SDK fixes**. The fix family is the same for both: **busy-metric (GPU-busy + comm)** / **serving
+full-step collection** / **calibration** — all need the same GPU validation (below).
+
 ## Decision-complete conclusion (the DEFERRED call stands)
 Measuring the **wall of an isolated 1-GPU step** can't reproduce golden's serving busy-bound tp4 step
 (isolated exposes ~30 ms host-dispatch idle that serving overlaps away). The clean direction — measure
