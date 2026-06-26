@@ -969,6 +969,13 @@ _SGLANG_DEEPEP_REQUIRED_FILES = (
 )
 
 
+def _database_mode_enables_shared_layer(database_mode: str | None) -> bool:
+    return (database_mode or "").upper() in {
+        common.DatabaseMode.SILICON.name,
+        common.DatabaseMode.HYBRID.name,
+    }
+
+
 def _sglang_deepep_perf_data_skip_reason(
     system_name: str,
     decode_system_name: str | None,
@@ -1025,6 +1032,7 @@ def _ensure_backend_version_available(
         system_name: System name (e.g., 'gb200_sxm')
         backend_name: Backend name (e.g., 'vllm')
         backend_version: Backend database version. Default is None, which means latest version.
+        database_mode: Database mode that determines whether a declared shared-layer version is required.
 
     Raises:
         SystemExit: If the backend is not supported for the given system and version.
@@ -1059,11 +1067,15 @@ def _ensure_backend_version_available(
     logger.error("Configured systems paths: %s", systems_paths_display)
     if versions:
         logger.error("Available versions: %s", ", ".join(versions))
-        logger.error(
-            "Fix: switch --backend-version to one of the available versions, remove --backend-version to use latest, "
-            "or add a declared version directory with %s when this version intentionally reuses shared-layer data.",
-            perf_database.SHARED_LAYER_REUSE_MARKER,
-        )
+        if _database_mode_enables_shared_layer(database_mode):
+            logger.error(
+                "Fix: switch --backend-version to one of the available versions, "
+                "remove --backend-version to use latest, "
+                "or add a declared version directory with %s when this version intentionally reuses shared-layer data.",
+                perf_database.SHARED_LAYER_REUSE_MARKER,
+            )
+        else:
+            logger.error("Fix: switch --backend-version to one of the available versions or remove --backend-version.")
     else:
         logger.error("Available versions: none")
         logger.error(
@@ -1143,10 +1155,11 @@ def build_default_tasks(
     if backend == "auto":
         supported = perf_database.get_supported_databases()
         available = []
+        shared_layer_mode = _database_mode_enables_shared_layer(database_mode)
         for backend_name in backends_to_sweep:
             sys_backends = supported.get(system, {})
             decode_backends = supported.get(decode_system, {}) if decode_system != system else sys_backends
-            if database_mode != common.DatabaseMode.SILICON.name:
+            if not shared_layer_mode:
                 sys_versions = sys_backends.get(backend_name, [])
                 decode_versions = decode_backends.get(backend_name, [])
                 if not sys_versions or (decode_system != system and not decode_versions):
@@ -1203,7 +1216,7 @@ def build_default_tasks(
             )
             raise SystemExit(1)
         backends_to_sweep = available
-    elif database_mode == common.DatabaseMode.SILICON.name:
+    elif _database_mode_enables_shared_layer(database_mode):
         _ensure_backend_version_available(system, backend, backend_version, database_mode=database_mode)
         if decode_system != system:
             _ensure_backend_version_available(decode_system, backend, backend_version, database_mode=database_mode)

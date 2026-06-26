@@ -233,9 +233,7 @@ def get_supported_databases(
                     versions = [
                         v
                         for v in os.listdir(backend_path)
-                        if not v.startswith(".")
-                        and os.path.isdir(os.path.join(backend_path, v))
-                        and not os.path.isfile(os.path.join(backend_path, v, "INCOMPLETE.txt"))
+                        if not v.startswith(".") and _database_version_dir_is_declared(os.path.join(backend_path, v))
                     ]
                     if versions:
                         supported_sets[system][backend.value].update(versions)
@@ -290,6 +288,20 @@ def _database_version_dir_has_perf_files(version_path: str) -> bool:
     return False
 
 
+def _database_version_dir_has_shared_layer_marker(version_path: str) -> bool:
+    return os.path.isfile(os.path.join(version_path, SHARED_LAYER_REUSE_MARKER))
+
+
+def _database_version_dir_is_declared(version_path: str) -> bool:
+    if not os.path.isdir(version_path):
+        return False
+    if os.path.isfile(os.path.join(version_path, "INCOMPLETE.txt")):
+        return False
+    return _database_version_dir_has_perf_files(version_path) or _database_version_dir_has_shared_layer_marker(
+        version_path
+    )
+
+
 def is_shared_layer_marker_only_version(
     system: str,
     backend: str,
@@ -305,6 +317,25 @@ def is_shared_layer_marker_only_version(
             return False
         saw_marker = saw_marker or os.path.isfile(os.path.join(version_path, SHARED_LAYER_REUSE_MARKER))
     return saw_marker
+
+
+def is_shared_layer_declared_version(
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
+) -> bool:
+    """True when every declared copy of a version is marked for shared-layer reuse."""
+    saw_marker = False
+    saw_unmarked_declared_version = False
+    for version_path in _iter_database_version_paths(system, backend, version, systems_paths=systems_paths):
+        if not _database_version_dir_is_declared(version_path):
+            continue
+        if _database_version_dir_has_shared_layer_marker(version_path):
+            saw_marker = True
+        else:
+            saw_unmarked_declared_version = True
+    return saw_marker and not saw_unmarked_declared_version
 
 
 def get_latest_database_version(
@@ -327,7 +358,7 @@ def get_latest_database_version(
         database_versions = [
             version
             for version in database_versions
-            if not is_shared_layer_marker_only_version(system, backend, version, systems_paths=systems_paths)
+            if not is_shared_layer_declared_version(system, backend, version, systems_paths=systems_paths)
         ]
     if not database_versions:
         logger.info("database not found for %s, %s", system, backend)
