@@ -1377,7 +1377,7 @@ def test_validate_moe_quant_transfer_reachable_in_hybrid():
     strict. Kimi-K2.5 infers int4_wo MoE (profile (0.5,1)) which b200/trtllm has no data
     for, but w4a16_mxfp4 (same profile) is collected."""
 
-    def make(mode):
+    def make(mode, policy=None):
         return Task(
             serving_mode="agg",
             model_path="moonshotai/Kimi-K2.5",
@@ -1385,11 +1385,19 @@ def test_validate_moe_quant_transfer_reachable_in_hybrid():
             backend_name="trtllm",
             backend_version="1.3.0rc10",
             database_mode=mode,
+            transfer_policy=policy,
         )
 
     with pytest.raises(ValueError, match="Unsupported moe quant mode 'int4_wo'"):
         make("SILICON").validate()
-    make("HYBRID").validate()  # transfer-reachable -> no raise
+    make("HYBRID").validate()  # default policy (all on) -> XQUANT reachable -> no raise
+    make("HYBRID", "xquant").validate()  # XQUANT explicitly enabled -> no raise
+
+    # The admission must respect the transfer policy: if XQUANT is disabled, moe.py would
+    # reject the quant at query time, so validate must NOT pre-admit it.
+    for disabled in ("off", "conservative"):
+        with pytest.raises(ValueError, match="Unsupported moe quant mode 'int4_wo'"):
+            make("HYBRID", disabled).validate()
 
 
 def test_validate_skips_db_check_when_database_unavailable():

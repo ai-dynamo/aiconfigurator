@@ -1198,7 +1198,14 @@ class Task:
         # (XQUANT cross-quant transfer, see operations/moe.py) -- only MoE implements
         # this, so only MoE relaxes. Truly-unreachable quants (no same-profile data)
         # still fail early here rather than crashing late in the sweep.
-        non_silicon = self.database_mode not in (None, common.DatabaseMode.SILICON.name)
+        # Admission via the XQUANT cross-quant transfer only holds if (a) we're in a
+        # non-SILICON mode AND (b) the resolved transfer policy actually enables XQUANT.
+        # Otherwise operations/moe.py rejects the quant at query time by policy, so
+        # validate must not pre-admit it (e.g. transfer_policy="off"/"conservative").
+        xquant_enabled = self.database_mode not in (
+            None,
+            common.DatabaseMode.SILICON.name,
+        ) and common.TransferKind.XQUANT in common.resolve_transfer_policy(self.transfer_policy)
 
         def _profile_reachable(mode: Any, supported_names: list) -> bool:
             enum_cls = type(mode)
@@ -1222,8 +1229,8 @@ class Task:
             name = mode.name if hasattr(mode, "name") else str(mode)
             if name in modes:
                 return
-            if profile_transfer and non_silicon and _profile_reachable(mode, modes):
-                return  # transfer-reachable in HYBRID/EMPIRICAL
+            if profile_transfer and xquant_enabled and _profile_reachable(mode, modes):
+                return  # transfer-reachable in HYBRID/EMPIRICAL with XQUANT enabled
             exc_type = UnsupportedWideepConfigError if op.startswith("wideep_") else ValueError
             raise exc_type(
                 f"Unsupported {op} quant mode {name!r} for system={system!r}, "
