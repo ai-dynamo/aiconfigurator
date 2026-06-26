@@ -1,4 +1,0 @@
-L40S vLLM 0.22.0 data is intentionally excluded from supported database discovery.
-The available generation attention data is too sparse for the sanity-check workload
-and can fail interpolation, so keep using the older L40S vLLM database until this
-version is recollected with sufficient coverage.
