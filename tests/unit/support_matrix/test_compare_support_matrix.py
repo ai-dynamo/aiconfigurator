@@ -84,6 +84,17 @@ def test_csv_sanity_requires_hardware_incompatible_reason():
     assert any("must include a hardware incompatibility reason" in err for err in errors)
 
 
+def test_csv_sanity_accepts_transitional_9col_header():
+    """Committed per-system CSVs generated at the base+Command (9-col, pre-Source) stage
+    must still validate -- compare rejecting them would break the daily diff."""
+    from tools.support_matrix.support_matrix import SUPPORT_MATRIX_BASE_HEADER
+
+    header9 = SUPPORT_MATRIX_BASE_HEADER + ["Command"]
+    row9 = _row(STATUS_PASS)[:9]  # drop the Source column
+    errors = check_csv_sanity(header9, [row9])
+    assert not any("Invalid header" in e for e in errors), errors
+
+
 def test_csv_sanity_requires_command_for_current_header():
     errors = check_csv_sanity(HEADER, [_row(STATUS_PASS, command="")])
 

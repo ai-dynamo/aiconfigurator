@@ -41,7 +41,16 @@ from tools.support_matrix.support_matrix import (
     SupportMatrix,
 )
 
-SUPPORTED_HEADERS = (SUPPORT_MATRIX_HEADER, SUPPORT_MATRIX_BASE_HEADER)
+# Accept the transitional 9-col header (base + Command, pre-Source) alongside the
+# current 10-col (base + Command + Source) and the legacy 8-col base. Some committed
+# per-system CSVs were generated at the 9-col stage; rejecting them breaks compare.
+# Mirrors support_matrix.py:_row_values, which already reads 8/9/10-col rows.
+_SUPPORT_MATRIX_HEADER_WITH_COMMAND = SUPPORT_MATRIX_BASE_HEADER + ["Command"]
+SUPPORTED_HEADERS = (
+    SUPPORT_MATRIX_HEADER,
+    _SUPPORT_MATRIX_HEADER_WITH_COMMAND,
+    SUPPORT_MATRIX_BASE_HEADER,
+)
 
 
 def _read_single_csv(csv_path: Path) -> tuple[list[str], list[list[str]]]:
