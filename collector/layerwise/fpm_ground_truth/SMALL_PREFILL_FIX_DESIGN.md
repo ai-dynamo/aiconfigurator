@@ -14,12 +14,21 @@ single largest residual: mixed MAPE 38.8%, with the <=512-new-tok bucket at 171%
 (10% of steps but 43% of error mass; 6/7 are the terminal chunk of a chunked 4096 prefill,
 ~400 new + 3696 prefix).
 
-## Root cause (settled): 1-GPU-collection launch-gap artifact — NOT comm / topology / capture
-golden's real per-step is busy-bound (the GPU is kept full, so the ~470 eager kernel launches
-hide behind the work). AIC's collector models tp4 as a **1-GPU sharded** config: no TP
-all-reduce, tiny moe-noop kernels (~3.4 ms busy), so the GPU idles ~60 µs between ~510 eager
-launches → ~30 ms of launch-gap → a launch-bound ~33 ms floor that is *higher* than golden's
-real busy-bound step.
+## Root cause: 1-GPU-collection launch-gap artifact — NOT comm / topology / capture
+**Phenomenon (confirmed):** collector's 1-GPU-sharded step is launch-bound (~33 ms, GPU-busy only
+~3.4 ms → ~30 ms GPU idle), while golden's real-tp4 step is busy-bound (~16 ms). golden's GPU is
+kept full (TP all-reduce + real MoE), so its ~470 eager launches hide behind the work; the
+1-GPU-sharded collection has no all-reduce + tiny moe-noop kernels, so the GPU idles between
+launches and the gap is exposed.
+
+**⚠️ Micro-causality NOT fully nailed (strong inference, not side-by-side nsys-confirmed):**
+*why* the 1-GPU idle is larger than tp4's is the open part. Under a symmetric per-launch-cost model
+it doesn't close: if CPU launch were identical both ways, golden (busy 16 ms) couldn't hide a 30 ms
+launch chain either → it would also be ~30 ms. So the 1-GPU gap must be genuinely larger than tp4's,
+and we have NOT nsys-confirmed why. What IS confirmed: it's the **1-GPU-sharded-vs-real-tp4 topology**
+(control: plain vLLM, no marker, on the 1-GPU sharded config also ~34.7 ms; real tp4 ~16 ms) — not
+the marker/moe-noop and not capture mode. The micro-mechanism (CPU launch pacing / scheduling /
+inter-kernel sync that makes 1-GPU idle more) is unverified. See Open Questions.
 
 ### The wrong turns (do not re-run — each was empirically refuted)
 | we suspected | refuted by |
@@ -71,15 +80,21 @@ small terminal/standalone points (128/400/496), all ≤512 → so ctx-phase MAPE
 **small-prefill-only probe over 3 points, NOT a general ctx-accuracy number**. Product accuracy is the
 mixed phase (38.8%), where ≤512 is only 7/71 steps (the >512 bulk is ~1.2×).
 
-## Fix shape (known): backbone WALL → busy, no threshold
-```
-ctx step ≈ busy_compute + synced-comm floor   (drop the launch-gap term entirely)
-```
-No `<=512` conditional: busy scales with compute (tokens), so small-new-token → low busy,
-large-prefill → high busy; the crossover is physical, not an empirical token threshold. This is
-the `max(compute, memory, comm)` roofline with the launch-gap (a 1-GPU/isolation artifact)
-removed. For the BATCHED target this is correct because batching fills the gap → the step is
-busy-bound.
+## Fix shape: candidate was "WALL → busy", but it's PROBABLY INVALID (advisor)
+The tempting fix: drop the launch-gap, use `busy_compute + comm` (the `max(compute,memory,comm)`
+roofline). **But the numbers don't reconcile, so this is probably dead:**
+- golden's ~16 ms is *mostly real GPU work* — MoE weight loads (memory-bound) + all-reduce — that
+  the moe-noop 1-GPU collection **never executes** (its GPU-busy is only ~3.4 ms).
+- so "busy = sum of collector kernel durations" = **3.4 ms, not 16 ms**. Reconstructing 16 ms would
+  need backbone-busy(3.4) + a correct MoE-overlay + comm to sum to 16 — and that 3.4-vs-16 (or the
+  earlier "floor ≈ 9 ms" vs golden 16) **never reconciled**. The busy-metric correction likely
+  **under-predicts**. Treat as unverified/probably-invalid, not the fix.
+
+**Faithful options (only two):**
+1. **real-tp full-step collection** = golden's own path (real tp4, real MoE, no marker, batched) —
+   gives the busy-bound ~16 ms, but it is a FULL-step measurement, NOT the per-layer decomposition
+   layerwise is built on.
+2. **calibration** of the ≤512 ctx envelope down to the captured regime — cheap, bounded, per-model.
 
 ## Why DEFERRED (the ROI call)
 - **payoff is bounded**: shape-narrow (~1 shape class: terminal chunks of chunked prefills),
@@ -95,17 +110,46 @@ busy-bound.
 - **curve-fit risk**: ~1 shape class is too narrow to validate a model change; needs a broader
   hybrid workload first.
 
-## When/how to revisit (future implementer)
-1. Add a launch-gap-free busy metric to the collector (sum of per-kernel durations, CUPTI), OR
-   collect the small-new-token regime under realistic batching so the measured wall is busy-bound.
-2. Backbone: use busy (not wall) for the launch-bound small-new-token regime; let ctx + mixed
-   FPM-vs-AIC MAPE arbitrate (no more nsys). If it lands near golden → done; if it undershoots
-   ~8 ms → the launch-gap is a real production per-step cost and needs one term.
-3. Validate on a BROADER hybrid workload (not just the terminal-chunk shape) before shipping.
-4. Guard: must be provably inert for compute-bound (large prefill) and memory-bound (decode) —
-   those already match golden ~1.0×.
+## OPEN QUESTION: why does 1-GPU idle more than tp4? (NOT nsys-confirmed)
+Resolving the paradox ("collector strips work AND is slower"): collector 33 ms = **3.4 ms stripped
+busy + ~30 ms idle**. Two *separate* differences — (1) it skips ~13 ms of real MoE + all-reduce work
+(would be *faster*); (2) ~30 ms of GPU idle (slower). **The open part is ONLY (2), the 30 ms idle** —
+don't conflate it with the work-skipping.
 
-## Artifacts (GPU-local, runs/ gitignored; analyzers committed)
-- `runs/analyze_decode_escape.py`, `runs/analyze_prefill_floor.py` — the capture/spin decomposition.
+- **Confirmed**: it's the **1-GPU-sharded-vs-real-tp4 topology** (control: plain vLLM, no marker, on
+  the 1-GPU sharded config = ~34.7 ms; real tp4 = ~16 ms) — NOT marker/moe-noop, NOT capture mode.
+- **Note**: the 1-GPU config is *sharded* (1 rank's 1/4 dims = same per-GPU work as one tp4 rank), so
+  34.7 (A) vs 16 (D) at equal per-GPU compute *strongly implies A is gap-bound, not "no parallelism"* —
+  but A's busy/gap split was never measured.
+- **NOT confirmed**: the micro-mechanism of the 30 ms idle. Under symmetric per-launch cost it doesn't
+  close (golden busy 16 ms couldn't hide a 30 ms launch chain either) → the 1-GPU gap is *genuinely
+  larger*, reason unverified.
+
+**Resolution plan (GPU, ≤1 hr, only if revisited — don't open for a deferred item):**
+1. Split GPU-busy vs idle for **A** (1-GPU, real MoE, no marker) and **B** (collector, moe-noop), not
+   just D. If A is busy-bound → "1-GPU slow" is trivially no-parallelism + B's gap is a moe-noop/sharded
+   artifact. If A is gap-bound → real micro-causality, go to (2).
+2. Characterize the 30 ms gap on `runs/nsys_ctx256`: read the CPU/CUDA-API during the largest
+   inter-kernel idles — `cudaLaunchKernel` spin = launch-rate-bound; `cudaStreamSynchronize`/D2H =
+   **sync-bound (host-GPU lockstep)**; Python no-CUDA = host-compute (GDN/Mamba metadata).
+   Prior: likely host/sync in the eager GDN path (30/40 layers) that tp4's all-reduce happens to overlap.
+
+## When/how to FIX (if revisited)
+- The "WALL → busy" metric fix is **probably invalid** (see Fix shape) — don't build it without first
+  reconciling the 3.4-vs-16 (busy-vs-golden) gap.
+- Faithful options: **real-tp full-step collection** (golden's path; abandons per-layer decomposition)
+  OR **calibration** of the ≤512 envelope. Validate on a BROADER hybrid workload (not the 1 terminal-
+  chunk shape); guard inert for large-prefill + decode (those match golden ~1.0×).
+
+## Decision-complete conclusion (true now, no more nsys needed for the decision)
+The 1-GPU decomposed collection **cannot reproduce golden's busy-bound tp4 step**: it strips real
+MoE/comm work AND adds ~30 ms of gaps. So the cheap busy-metric correction is invalid, and the only
+faithful fixes are real-tp full-step or calibration — both heavy/per-model for a **bounded, deferred,
+non-recommendation-moving** regime. Hence: DEFERRED. (The micro-causality of the 30 ms idle is an open
+curiosity, not on the critical path.)
+
+## Artifacts
+- `runs/` (analyzers committed; heavy `.sqlite`/`.nsys-rep` are GPU-local):
+  `analyze_decode_escape.py`, `analyze_prefill_floor.py` — capture/spin decomposition.
 - Verdict docs: SMALL_PREFILL_MECHANISM_DISCRIMINATION, SMALL_PREFILL_WHY_GOLDEN_16MS,
   SMALL_PREFILL_BATCHED_TARGET, SMALL_PREFILL_ENVELOPE_ROOTCAUSE (the full trail).
