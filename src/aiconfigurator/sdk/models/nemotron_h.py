@@ -54,11 +54,20 @@ class NemotronHModel(BaseModel):
         self._hybrid_config: common.NemotronHConfig | None = None
         self._power_law_alpha = 1.01  # follow DeepSeek MoE
         # MTP (num_nextn_predict_layers > 0): scale generation by the accepted-token
-        # speedup 1/(1+E[accept]) and the small extra-layer factor (nextn+L)/L, same
-        # first-order model as DeepSeek. nextn == 0 -> factor 1.0 (exact no-op, so
-        # non-MTP NemotronH is unchanged). The MTP block here is attention+moe; the
-        # tiny (nextn+L)/L term is applied uniformly across layer types (negligible
-        # for large L) rather than only to the attention/moe groups.
+        # speedup 1/(1+E[accept]) and the small extra-layer factor (nextn+L)/L, the
+        # same first-order model as DeepSeek. nextn == 0 -> factor 1.0 (exact no-op, so
+        # non-MTP NemotronH is unchanged).
+        #
+        # APPROXIMATION (intentional, hybrid architecture). NemotronH is a mixed
+        # Mamba / attention / MoE stack (e.g. Ultra-550B = 48 mamba + 48 moe + 12
+        # attention over 108 layers) and its MTP block is attention+moe -- NOT the
+        # dominant Mamba layer type. DeepSeek's uniform (nextn+L)/L is exact there only
+        # because every layer is homogeneous (attn+MoE). Here we still spread that term
+        # uniformly over all layer-type groups, so the extra MTP-block cost is slightly
+        # mis-attributed: we add a little fake Mamba and under-count the real attn+moe
+        # MTP block. This is bounded by ~1/L of one layer's cost (<1% of TPOT for these
+        # deep models), and the dominant, exactly-correct term is the 1/(1+E[accept])
+        # speedup. Not worth modeling an explicit attn+moe MTP block for sub-1% gain.
         self._mtp_scale_factor = (
             1.0
             / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
