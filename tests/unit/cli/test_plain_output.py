@@ -33,8 +33,8 @@ def _reset_logging_after_test(monkeypatch):
     monkeypatch.delenv("NO_COLOR", raising=False)
     setup_logging(no_color=False)
     yield
-    setup_logging(no_color=False)
     monkeypatch.delenv("NO_COLOR", raising=False)
+    setup_logging(no_color=False)
 
 
 def test_cli_parser_accepts_no_color(cli_parser):
