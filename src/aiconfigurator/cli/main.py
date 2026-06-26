@@ -213,7 +213,8 @@ def _add_default_mode_arguments(parser):
         type=str,
         default=None,
         help="[expert] Performance-database version used for the simulation/search "
-        "(search fidelity). Default: latest. Alias: --backend-version.",
+        "(search fidelity). Default: latest measured version; marker-only shared-layer versions "
+        "require an explicit value. Alias: --backend-version.",
     )
     parser.add_argument(
         "--database-mode",
@@ -443,7 +444,8 @@ def _add_estimate_mode_arguments(parser):
         type=str,
         default=None,
         help="[expert] Performance-database version used for the simulation/search "
-        "(search fidelity). Default: latest. Alias: --backend-version.",
+        "(search fidelity). Default: latest measured version; marker-only shared-layer versions "
+        "require an explicit value. Alias: --backend-version.",
     )
     parser.add_argument("--isl", type=int, default=1024, help="Input sequence length. Default: 1024.")
     parser.add_argument("--osl", type=int, default=1024, help="Output sequence length. Default: 1024.")

@@ -115,6 +115,26 @@ def test_get_supported_databases_includes_shared_layer_marker_versions(temp_syst
     assert result["h100"]["vllm"] == ["0.19.0", "0.22.0"]
 
 
+def test_get_latest_database_version_skips_marker_only_versions_by_default(
+    temp_systems_dir: Path, perf_database
+):
+    setup_mock_filesystem(temp_systems_dir, {"h100": {"vllm": ["0.19.0"]}})
+    marker_path = temp_systems_dir / "data_h100" / "vllm" / "0.22.0" / perf_database.SHARED_LAYER_REUSE_MARKER
+    marker_path.parent.mkdir(parents=True)
+    marker_path.write_text("declared shared-layer reuse\n", encoding="utf-8")
+
+    assert perf_database.get_latest_database_version("h100", "vllm", systems_paths=str(temp_systems_dir)) == "0.19.0"
+    assert (
+        perf_database.get_latest_database_version(
+            "h100",
+            "vllm",
+            systems_paths=str(temp_systems_dir),
+            include_shared_layer_marker_versions=True,
+        )
+        == "0.22.0"
+    )
+
+
 def test_get_supported_databases_empty_dir(temp_systems_dir: Path, perf_database):
     result = perf_database.get_supported_databases(str(temp_systems_dir))
     # defaultdict, but empty

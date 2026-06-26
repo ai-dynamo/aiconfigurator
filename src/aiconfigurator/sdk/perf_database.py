@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
 _MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError, InterpolationDataNotAvailableError)
 SHARED_LAYER_REUSE_MARKER = "SHARED_LAYER_REUSE.txt"
+_DATABASE_VERSION_METADATA_FILES = {SHARED_LAYER_REUSE_MARKER, "INCOMPLETE.txt"}
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
@@ -249,10 +250,68 @@ def get_supported_databases(
     return supported_dict
 
 
+def _iter_database_version_paths(
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
+):
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
+
+    for systems_root in systems_paths:
+        system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
+        if not os.path.isfile(system_yaml_path):
+            continue
+        try:
+            with open(system_yaml_path) as f:
+                system_spec = yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.warning("Could not process system config %s: %s", os.path.basename(system_yaml_path), e)
+            continue
+        data_dir = os.path.join(systems_root, system_spec.get("data_dir", ""))
+        version_path = os.path.join(data_dir, backend, version)
+        if os.path.isdir(version_path):
+            yield version_path
+
+
+def _database_version_dir_has_perf_files(version_path: str) -> bool:
+    try:
+        entries = os.listdir(version_path)
+    except Exception:
+        return False
+    for entry in entries:
+        if entry.startswith(".") or entry in _DATABASE_VERSION_METADATA_FILES:
+            continue
+        if os.path.isfile(os.path.join(version_path, entry)):
+            return True
+    return False
+
+
+def is_shared_layer_marker_only_version(
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
+) -> bool:
+    """True when a declared version has only the shared-layer marker and no measured files."""
+    saw_marker = False
+    for version_path in _iter_database_version_paths(system, backend, version, systems_paths=systems_paths):
+        if os.path.isfile(os.path.join(version_path, "INCOMPLETE.txt")):
+            continue
+        if _database_version_dir_has_perf_files(version_path):
+            return False
+        saw_marker = saw_marker or os.path.isfile(os.path.join(version_path, SHARED_LAYER_REUSE_MARKER))
+    return saw_marker
+
+
 def get_latest_database_version(
     system: str,
     backend: str,
     systems_paths: str | list[str] | None = None,
+    include_shared_layer_marker_versions: bool = False,
 ) -> str | None:
     """
     Get the latest database version for a given system and backend
@@ -264,6 +323,12 @@ def get_latest_database_version(
     else:
         supported_databases = get_supported_databases(systems_paths=systems_paths)
     database_versions = supported_databases.get(system, {}).get(backend, [])
+    if not include_shared_layer_marker_versions:
+        database_versions = [
+            version
+            for version in database_versions
+            if not is_shared_layer_marker_only_version(system, backend, version, systems_paths=systems_paths)
+        ]
     if not database_versions:
         logger.info("database not found for %s, %s", system, backend)
         return None
