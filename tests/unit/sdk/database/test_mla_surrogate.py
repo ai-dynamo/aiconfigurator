@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import aiconfigurator.sdk.operations.mla as mla_module
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.operations.mla import ContextMLA, GenerationMLA, WideEPGenerationMLA
+from aiconfigurator.sdk.operations.mla import ContextMLA, GenerationMLA, MLABmm, WideEPGenerationMLA
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 
@@ -87,6 +87,37 @@ def test_generation_off_grid_interpolates_power_consistent_energy(monkeypatch) -
     assert float(result) == 5
     assert result.energy == 25  # interpolated 5 W * predicted 5 ms
     assert set(table[4]) == {1, 3} and set(table[4][1]) == {10, 20}
+
+
+def test_mla_bmm_uses_sparse_curve_for_exact_interior_and_exterior(monkeypatch) -> None:
+    def fail_legacy_interpolation(*_args, **_kwargs):
+        raise AssertionError("legacy interpolation used")
+
+    monkeypatch.setattr(MLABmm, "load_data", classmethod(lambda _cls, _db: None))
+    monkeypatch.setattr("aiconfigurator.sdk.interpolation.nearest_1d_point_helper", fail_legacy_interpolation)
+    monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_1d", fail_legacy_interpolation)
+    db = _Database()
+    quant = common.GEMMQuantMode.bfloat16
+    table = {10: _metric(2, 3), 20: _metric(4, 5)}
+    db._mla_bmm_data = _Data({quant: {"mla_gen_pre": {4: table}}})
+
+    def query(tokens: int) -> PerformanceResult:
+        return MLABmm._query_mla_bmm_table(db, tokens, 4, quant, if_pre=True, database_mode=common.DatabaseMode.SILICON)
+
+    exact = query(10)
+    assert float(exact) == 2
+    assert exact.energy == 6
+
+    interior = query(15)
+    assert float(interior) == 3
+    assert interior.energy == 12  # interpolated 4 W * predicted 3 ms
+
+    for tokens, boundary_tokens, boundary_latency, boundary_power in ((5, 10, 2, 3), (30, 20, 4, 5)):
+        boundary_sol = float(MLABmm._query_mla_bmm_table(db, boundary_tokens, 4, quant, True, common.DatabaseMode.SOL))
+        query_sol = float(MLABmm._query_mla_bmm_table(db, tokens, 4, quant, True, common.DatabaseMode.SOL))
+        exterior = query(tokens)
+        assert float(exterior) == boundary_latency * query_sol / boundary_sol
+        assert exterior.energy == boundary_power * float(exterior)
 
 
 def test_wideep_backend_categories_do_not_share_exact_values(monkeypatch) -> None:

@@ -34,7 +34,7 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.perf_surrogate import Axis, estimate_sparse
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -70,6 +70,7 @@ _GENERATION_AXES = (
     Axis("batch", extrapolate="both"),
     Axis("tokens", extrapolate="both"),
 )
+_MLA_BMM_AXES = (Axis("tokens", extrapolate="both"),)
 
 
 def _estimate_context(database, key, table, heads, tokens, batch, baseline, *, sqrt_curve=False):
@@ -427,8 +428,8 @@ class GenerationMLA(Operation):
 class MLABmm(Operation):
     """
     MLABmm operation — pre/post BMM for MLA decoding. Owns ``_mla_bmm_data``.
-    No extrapolation in the legacy ``__init__`` path; data is 1D-keyed by
-    num_tokens within each (quant_mode, op_name, num_heads) bucket.
+    Data is 1D-keyed by num_tokens within each
+    (quant_mode, op_name, num_heads) bucket.
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -457,8 +458,7 @@ class MLABmm(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads mla_bmm CSV, binds ``database._mla_bmm_data``.
-        No extrapolation (1D table)."""
+        """Idempotent. Loads mla_bmm CSV and binds ``database._mla_bmm_data``."""
         import os
 
         from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
@@ -532,24 +532,18 @@ class MLABmm(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             quant_mode_lookup = quant_mode if quant_mode in data_wrapper else common.GEMMQuantMode.bfloat16
-            mla_bmm_dict = data_wrapper[quant_mode_lookup]["mla_gen_pre" if if_pre else "mla_gen_post"][num_heads]
-            num_left, num_right = interpolation.nearest_1d_point_helper(
-                num_tokens,
-                list(mla_bmm_dict.keys()),
-                inner_only=False,
+            op_name = "mla_gen_pre" if if_pre else "mla_gen_post"
+            mla_bmm_dict = data_wrapper[quant_mode_lookup][op_name][num_heads]
+            latency, energy = estimate_sparse(
+                database,
+                ("mla_bmm", quant_mode_lookup, op_name, num_heads),
+                mla_bmm_dict,
+                {"tokens": num_tokens},
+                axes=_MLA_BMM_AXES,
+                varying="tokens",
+                baseline=lambda point: get_sol(point["tokens"], num_heads, quant_mode, if_pre)[0],
             )
-            result = interpolation.interp_1d(
-                [num_left, num_right],
-                [mla_bmm_dict[num_left], mla_bmm_dict[num_right]],
-                num_tokens,
-            )
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
-            return database._interp_pr(lat, energy=energy)
+            return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,

@@ -530,29 +530,27 @@ class DeepSeekV4MHCModule(Operation):
         hc_dim = hc_mult * hidden_size
         mix_hc = (2 + hc_mult) * hc_mult
 
-        def get_sol() -> tuple[float, float, float]:
+        def get_sol(tokens: float = num_tokens, op_value: str = op) -> tuple[float, float, float]:
             pre_ops = sites * (
-                2 * num_tokens * hc_dim * mix_hc
-                + num_tokens * hc_dim * 3
-                + num_tokens * (hc_mult * hc_mult + 2 * hc_mult) * sinkhorn_iters
-                + 2 * num_tokens * hc_mult * hidden_size
+                2 * tokens * hc_dim * mix_hc
+                + tokens * hc_dim * 3
+                + tokens * (hc_mult * hc_mult + 2 * hc_mult) * sinkhorn_iters
+                + 2 * tokens * hc_mult * hidden_size
             )
-            post_ops = sites * (
-                2 * num_tokens * hc_mult * hc_mult * hidden_size + 2 * num_tokens * hc_mult * hidden_size
-            )
-            if op == "pre":
+            post_ops = sites * (2 * tokens * hc_mult * hc_mult * hidden_size + 2 * tokens * hc_mult * hidden_size)
+            if op_value == "pre":
                 ops = pre_ops
-            elif op == "post":
+            elif op_value == "post":
                 ops = post_ops
-            elif op == "both":
+            elif op_value == "both":
                 ops = pre_ops + post_ops
             else:
-                raise ValueError(f"Unsupported DeepSeek-V4 mHC op: {op}")
+                raise ValueError(f"Unsupported DeepSeek-V4 mHC op: {op_value}")
 
             param_bytes = sites * (mix_hc * hc_dim + mix_hc + 3) * quant_mode.value.memory
-            activation_bytes = sites * num_tokens * hc_dim * quant_mode.value.memory * (3 if op == "both" else 2)
-            if op in {"pre", "both"}:
-                activation_bytes += sites * num_tokens * (2 * hc_mult + hc_mult * hc_mult) * 4
+            activation_bytes = sites * tokens * hc_dim * quant_mode.value.memory * (3 if op_value == "both" else 2)
+            if op_value in {"pre", "both"}:
+                activation_bytes += sites * tokens * (2 * hc_mult + hc_mult * hc_mult) * 4
             sol_math = ops / GEMM._get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = (param_bytes + activation_bytes) / database.system_spec["gpu"]["mem_bw"] * 1000
             return max(sol_math, sol_mem), sol_math, sol_mem
@@ -580,10 +578,8 @@ class DeepSeekV4MHCModule(Operation):
             def _lookup_single(op_name: str) -> PerformanceResult:
                 # Validate bucket presence before chained indexing; mhc_data is
                 # a nested defaultdict, so `mhc_data[op][hc_mult][hidden_size]`
-                # would silently materialize empty dicts and then fall through
-                # to _nearest_1d_point_helper with an empty key list, surfacing
-                # as an opaque AssertionError instead of a structured
-                # PerfDataNotAvailableError.
+                # would silently materialize an empty table and lose the
+                # category context before the sparse estimator reports a miss.
                 if (
                     op_name not in mhc_data
                     or hc_mult not in mhc_data[op_name]
@@ -594,10 +590,15 @@ class DeepSeekV4MHCModule(Operation):
                         f"No mHC silicon data for op='{op_name}', hc_mult={hc_mult}, hidden_size={hidden_size}."
                     )
                 mhc_dict = mhc_data[op_name][hc_mult][hidden_size]
-                left, right = interpolation.nearest_1d_point_helper(num_tokens, list(mhc_dict.keys()), inner_only=False)
-                result = interpolation.interp_1d([left, right], [mhc_dict[left], mhc_dict[right]], num_tokens)
-                latency = result["latency"] if isinstance(result, dict) else result
-                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+                latency, energy = estimate_sparse(
+                    database,
+                    ("dsv4-mhc", op_name, hc_mult, hidden_size),
+                    mhc_dict,
+                    {"tokens": num_tokens},
+                    axes=(Axis("tokens", extrapolate="both"),),
+                    varying="tokens",
+                    baseline=lambda point: get_sol(point["tokens"], op_name)[0],
+                )
                 return database._interp_pr(latency, energy=energy)
 
             # Silicon tables only store "pre" and "post" rows. For op=="both"
@@ -1525,18 +1526,32 @@ class DeepSeekV4MegaMoEModule(Operation):
                 f"{moe_tp_size=}, {moe_ep_size=}."
             ) from exc
 
-        num_left, num_right = interpolation.nearest_1d_point_helper(
-            num_tokens, list(token_dict.keys()), inner_only=False
+        minimum_tokens = float(min(token_dict))
+        latency, energy = estimate_sparse(
+            database,
+            (
+                "dsv4-megamoe",
+                phase,
+                kernel_source,
+                kernel_dtype,
+                quant_mode,
+                pre_dispatch,
+                source_policy,
+                workload_distribution,
+                topk,
+                num_experts,
+                num_fused_shared_experts,
+                hidden_size,
+                inter_size,
+                moe_tp_size,
+                moe_ep_size,
+            ),
+            token_dict,
+            {"tokens": num_tokens},
+            axes=(Axis("tokens", extrapolate="both"),),
+            varying="tokens",
+            baseline=lambda point: max(point["tokens"], minimum_tokens),
         )
-        result = interpolation.interp_1d(
-            [num_left, num_right], [token_dict[num_left], token_dict[num_right]], num_tokens
-        )
-        if isinstance(result, dict):
-            latency = float(result["latency"])
-            energy = float(result["energy"])
-        else:
-            latency = float(result)
-            energy = 0.0
         return PerformanceResult(latency, energy=energy)
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:

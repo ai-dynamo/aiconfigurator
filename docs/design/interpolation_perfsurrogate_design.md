@@ -139,8 +139,10 @@ table[axis_0][axis_1]...[axis_n] -> metric leaf
 
 A leaf may be a latency scalar or a mapping with `latency` and optional
 `energy` or `power`. If only power is present, the core derives
-`energy = power * latency`. Coordinates and metrics must be finite; log axes
-must be positive; latency and energy must be non-negative.
+`energy = power * latency`; explicit energy takes precedence when both fields
+exist. Scalar leaves and mappings without either energy or power default to
+zero energy. Coordinates and metrics must be finite; log axes must be positive;
+latency and energy must be non-negative.
 
 The estimator flattens and sorts every leaf supplied by the adapter. It has no
 provenance field that can distinguish a measurement from a previously generated
@@ -201,7 +203,8 @@ correction must separately preserve the desired power/energy semantics.
 
 ## Query state machine
 
-The current implementation resolves a query in this order:
+After a cache hit or model compilation, the current implementation resolves a
+query in this order:
 
 1. Validate that query names exactly match the declared axes.
 2. Return an exact measured point when present.
@@ -210,7 +213,8 @@ The current implementation resolves a query in this order:
 4. Otherwise locate the fixed key inside a real line segment or Delaunay
    triangle and evaluate the supporting curves.
 5. If the fixed key is outside the convex hull, choose an allowed boundary
-   candidate from a line endpoint or two-dimensional hull edge.
+   candidate from a one-dimensional line segment/endpoint or a two-dimensional
+   hull edge.
 6. If the varying coordinate lies outside a supporting curve, use its permitted
    endpoint.
 7. Use the requested curve or mesh response for an interior result. If either
@@ -231,9 +235,11 @@ The fixed-key mesh supports at most two axes:
 - two active fixed axes: standardize coordinates and build a SciPy Delaunay
   triangulation when at least three non-collinear points exist.
 
-Exactly constant fixed axes are treated as inactive. A query must match an
-inactive axis unless that axis explicitly authorizes the requested exterior
-direction.
+Fixed axes whose encoded span is within numerical tolerance are treated as
+inactive. A query must match an inactive axis within tolerance unless that axis
+explicitly authorizes the requested exterior direction. `lower` and `upper`
+describe the query relative to the selected boundary candidate, not merely its
+position relative to the table's global minimum or maximum.
 
 For a two-dimensional exterior query, the implementation scans convex-hull
 edges. Candidate boundary points include both endpoints, the orthogonal
@@ -260,16 +266,21 @@ must be driven by holdout results rather than an arbitrary constant.
 | Generation attention | sequence curves over heads and batch; raw curve response | Five-point sequence smoothing and SOL correction |
 | Communication | one-dimensional message-size curves | GPU-count selection, cross-node topology/bandwidth scaling; P2P remains separate |
 | Mamba/GDN | context sequence curves over batch; generation batch curves | Existing same-`d_model` structural fallback, GDN head-distance selection and kernel alias, then SOL fallback on a miss |
-| MLA | token curves over heads and batch | Backend/kernel routing, TP-to-head mapping, prefix correction, composite module formulas |
+| MLA | token curves over heads and batch; MLABmm uses a one-dimensional token curve | Backend/kernel routing, TP-to-head mapping, prefix correction, composite module formulas |
 | MoE | token curves; selected DeepEP tables also include SM count | Exact categorical routing, low-token launch policy, high-token utilization policy, dispatch/combine composition |
 | DSA | context `s` and generation `s_total` curves over heads and batch | Pre/post-top-k table split, outer prefix handling, backend selection, CP assembly |
 | DeepSeek-V4 attention | context sequence curves over prefix and batch; generation sequence curves over batch | Exact head/TP/compression/quantization selection and CSA top-k correction |
+| DeepSeek-V4 MHC/MegaMoE | one-dimensional token curves | Exact module/category selection; MHC uses its SOL baseline, while MegaMoE holds below its first token sample and scales proportionally above its frontier |
 
-These are the targeted measured-table paths, not every operation
-class in the repository. Intentionally unchanged paths include Rust, P2P,
-formula-only operations, `MLABmm`'s simple one-dimensional lookup, DeepSeek-V4
-MHC, and DeepSeek-V4 MegaMoE. DSA context prefix blending and CP composition
-also remain layered adapters rather than one monolithic surrogate call.
+These are the targeted measured-table paths, not every operation class in the
+repository. Intentionally unchanged paths include Rust, P2P, and formula-only
+operations. DSA context prefix blending and CP composition also remain layered
+adapters rather than one monolithic surrogate call.
+
+All 24 concrete Python operation classes that own measured performance tables
+now route their main SILICON numeric lookup through `estimate_sparse`. Measured
+correction surfaces such as the DSV4 top-k delta remain adapter logic rather
+than independent operation classes.
 
 ## Cache and mutation contract
 
@@ -357,6 +368,58 @@ common layer does not reinterpret a missing category as a nearby numeric point.
 12. **Prediction quality is not yet established.** Structural correctness and
     finite outputs do not prove that held-out measurements are estimated well.
 
+## Future four-dimensional attention
+
+Future attention tables may retain prefix as an independent numeric dimension,
+for example:
+
+```text
+prefix x heads x sequence x batch -> metrics
+```
+
+With `sequence` as the semantic varying axis, this leaves three fixed axes and
+therefore exceeds the current mesh limit. This change deliberately does not
+generalize `_FixedMesh` to three dimensions before representative four-
+dimensional data and holdouts exist.
+
+Collectors and loaders for this shape must retain prefix as a real numeric axis
+rather than pre-filling prefix combinations or collapsing them into synthetic
+samples. Existing full-sequence reductions may remain operation-specific only
+where the measured data demonstrates that prefix has no independent effect.
+
+The preferred first extension is an explicit sliced axis rather than an
+unconditional three-dimensional Delaunay mesh:
+
+1. Select categorical regimes before numerical interpolation as today.
+2. Partition the table into exact prefix slices.
+3. Evaluate each usable prefix slice with the existing
+   `sequence + (heads, batch)` surrogate.
+4. For an off-grid prefix, use only bracketing prefix slices that can both
+   answer the complete inner query.
+5. Blend latency in the declared response space and blend average power before
+   reconstructing energy. Do not independently interpolate latency, power, and
+   energy.
+6. Apply baseline-ratio exterior behavior on prefix only when the adapter
+   explicitly authorizes it.
+7. Split any regime defined by `prefix + sequence`, such as a top-k boundary,
+   before selecting prefix support.
+
+The future API should declare the sliced axis explicitly, for example through
+an `outer="prefix"` policy, rather than infer it from axis order. Exact API
+naming is deferred until the first caller is implemented.
+
+A full tetrahedral mesh over `(prefix, heads, batch)` remains an alternative,
+but it would add three-dimensional Delaunay memory, sliver-tetrahedron behavior,
+triangular hull-facet projection, and more complex directional constraints. It
+should be adopted only if holdout data shows a material accuracy advantage over
+the sliced design.
+
+Four-dimensional validation must remove complete prefix slices as well as
+individual sequence points, exercise prefix/sequence regime boundaries, and
+report error versus prefix distance. Until that validation exists, the current
+DSA outer-prefix adapter is a compatibility layer, not the final generic 4-D
+implementation.
+
 ## Alternatives considered
 
 ### Dense Cartesian expansion
@@ -390,8 +453,8 @@ accuracy advantage justifies a second backend and its interface.
 
 The current implementation has:
 
-- focused changed-area tests: 180 passed;
-- broader Python unit selection: 1,470 passed and 8 skipped;
+- focused surrogate/MLA/DSV4/loader/model tests: 302 passed;
+- broader Python unit selection: 1,471 passed and 8 skipped;
 - passing Ruff, formatting, unit, e2e, DCO, and build checks; and
 - real-table smoke coverage for the DeepSeek-V4 head/TP loader variants.
 

@@ -241,6 +241,48 @@ class TestDeepSeekV4MHCModule:
 
         assert float(result) == pytest.approx(2.5)
 
+    def test_mhc_sparse_token_curve_uses_sol_ratio_at_upper_boundary(self, mutable_comprehensive_perf_db, tmp_path):
+        path = _write_mhc_perf(
+            tmp_path / "mhc_module_perf.txt",
+            [
+                "VLLM,test,H20,pre,mhc,DeepseekV4ForCausalLM,256,4,7168,1.0",
+                "VLLM,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,3.0",
+            ],
+        )
+        db = mutable_comprehensive_perf_db
+        db._mhc_module_data = load_mhc_module_data(path)
+
+        kwargs = {
+            "hidden_size": 7168,
+            "hc_mult": 4,
+            "sinkhorn_iters": 20,
+            "op": "pre",
+            "quant_mode": common.GEMMQuantMode.bfloat16,
+        }
+        interior = db.query_mhc_module(
+            num_tokens=384,
+            **kwargs,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+        endpoint_sol = db.query_mhc_module(
+            num_tokens=512,
+            **kwargs,
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )[0]
+        query_sol = db.query_mhc_module(
+            num_tokens=1024,
+            **kwargs,
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )[0]
+        exterior = db.query_mhc_module(
+            num_tokens=1024,
+            **kwargs,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        assert float(interior) == pytest.approx(2.0)
+        assert float(exterior) == pytest.approx(3.0 * query_sol / endpoint_sol)
+
 
 class TestDeepSeekV4AttentionModule:
     def test_generation_uses_pre_decode_kv_length(self, comprehensive_perf_db):

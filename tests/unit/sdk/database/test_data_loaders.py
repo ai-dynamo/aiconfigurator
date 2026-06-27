@@ -605,7 +605,7 @@ def test_query_dsv4_megamoe_module_missing_data_raises(tmp_path):
         )
 
 
-def test_query_dsv4_megamoe_module_interpolates_energy_from_rows(tmp_path):
+def test_query_dsv4_megamoe_module_interpolates_power_consistently(tmp_path):
     systems_root = tmp_path / "systems"
     data_dir = systems_root / "data" / "sglang" / "0.5.10"
     data_dir.mkdir(parents=True)
@@ -618,22 +618,28 @@ def test_query_dsv4_megamoe_module_interpolates_energy_from_rows(tmp_path):
     )
 
     db = PerfDatabase("gb200", "sglang", "0.5.10", str(systems_root))
-    result = db.query_dsv4_megamoe_module(
-        num_tokens=1536,
-        hidden_size=7168,
-        inter_size=3072,
-        topk=6,
-        num_experts=384,
-        moe_tp_size=1,
-        moe_ep_size=8,
-        quant_mode=MoEQuantMode.w4a8_mxfp4_mxfp8,
-        workload_distribution="balanced",
-        is_context=True,
-    )
+    kwargs = {
+        "hidden_size": 7168,
+        "inter_size": 3072,
+        "topk": 6,
+        "num_experts": 384,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8,
+        "quant_mode": MoEQuantMode.w4a8_mxfp4_mxfp8,
+        "workload_distribution": "balanced",
+        "is_context": True,
+    }
+    result = db.query_dsv4_megamoe_module(num_tokens=1536, **kwargs)
+    lower = db.query_dsv4_megamoe_module(num_tokens=512, **kwargs)
+    upper = db.query_dsv4_megamoe_module(num_tokens=4096, **kwargs)
 
     assert float(result) == pytest.approx(2.0)
-    assert result.power == pytest.approx(175.0)
-    assert result.energy == pytest.approx(350.0)
+    assert result.power == pytest.approx(150.0)
+    assert result.energy == pytest.approx(300.0)
+    assert float(lower) == pytest.approx(1.0)
+    assert lower.power == pytest.approx(100.0)
+    assert float(upper) == pytest.approx(6.0)
+    assert upper.power == pytest.approx(200.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
