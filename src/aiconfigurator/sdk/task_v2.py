@@ -1400,8 +1400,9 @@ class Task:
 
     def _load_database(self, system: str, backend: str, version: str):
         """Load the perf DB honoring database_mode (SILICON/HYBRID/EMPIRICAL). Non-SILICON
-        modes allow missing measured data. Returns a request-local lightweight view so
-        mode and transfer policy cannot mutate the process-cached data template."""
+        modes allow missing measured data. Returns an immutable, configuration-scoped
+        lightweight view so mode and transfer policy cannot mutate the process-cached
+        data template."""
         from aiconfigurator.sdk.perf_database import get_database_view
 
         allow_missing = self.database_mode is not None and self.database_mode != common.DatabaseMode.SILICON.name

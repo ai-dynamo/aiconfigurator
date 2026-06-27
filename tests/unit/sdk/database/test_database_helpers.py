@@ -416,192 +416,135 @@ def test_perf_database_clear_runtime_caches_clears_interpolation_and_lru_state(p
     assert cache_clear_calls == ["cleared"]
 
 
-def test_empirical_and_silicon_databases_do_not_alias(perf_database):
-    """SILICON loads sibling collected rows while formula-only EMPIRICAL does not."""
-    emp = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="EMPIRICAL")
-    sil = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
-    assert emp is not sil
-    assert emp._shared_layer_mode is False
-    assert sil._shared_layer_mode is True
+def test_empirical_and_silicon_views_use_distinct_shared_layer_templates(perf_database):
+    """Formula-only views must not inherit sibling SILICON rows."""
+    empirical = perf_database.get_database_view("b200_sxm", "trtllm", "1.3.0rc10", database_mode="EMPIRICAL")
+    silicon = perf_database.get_database_view("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+
+    assert empirical._root_database_template is not silicon._root_database_template
+    assert empirical.enable_shared_layer is False
+    assert silicon.enable_shared_layer is True
 
 
-def test_database_view_is_lightweight_and_request_local(perf_database):
+def test_database_view_configuration_is_isolated_and_same_key_is_reused(perf_database):
     from aiconfigurator.sdk import common
-    from aiconfigurator.sdk.operations import util_empirical
 
     template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    template.set_default_database_mode(common.DatabaseMode.SILICON)
+    template.set_transfer_policy(None)
+    template.clear_runtime_caches()
     shared_table = {"large": object()}
     template._test_loaded_table = shared_table
-    template_cache = template._extracted_metrics_cache
-    sentinel_grid = object()
-    util_empirical._GRID_CACHE["query-view-sentinel"] = sentinel_grid
-
-    view = perf_database.get_database_view(
-        "b200_sxm",
-        "trtllm",
-        "1.3.0rc10",
-        database_mode="HYBRID",
-        transfer_policy="off",
-    )
-
-    assert view is not template
-    assert view._test_loaded_table is shared_table
-    assert view._extracted_metrics_cache is not template_cache
-    assert view.get_default_database_mode() is common.DatabaseMode.HYBRID
-    assert view.transfer_policy == frozenset()
-    assert template.transfer_policy == common.ALL_TRANSFERS
-    assert view.supported_quant_mode._database is view
-    assert util_empirical._GRID_CACHE["query-view-sentinel"] is sentinel_grid
-
-    same_view = perf_database.get_database_view(
-        "b200_sxm",
-        "trtllm",
-        "1.3.0rc10",
-        database_mode="HYBRID",
-        transfer_policy="off",
-    )
-    assert same_view is view
-    assert len(template._query_view_cache) == 1
-
-    with pytest.raises(RuntimeError, match="immutable mode/policy"):
-        view.set_transfer_policy(None)
-    with pytest.raises(RuntimeError, match="immutable mode/policy"):
-        view.set_default_database_mode(common.DatabaseMode.SILICON)
-
-    empirical_view = perf_database.get_database_view("b200_sxm", "trtllm", "1.3.0rc10", database_mode="EMPIRICAL")
-    assert empirical_view.enable_shared_layer is False
-    assert empirical_view.get_default_database_mode() is common.DatabaseMode.EMPIRICAL
-    util_empirical._GRID_CACHE.pop("query-view-sentinel", None)
-
-
-def test_query_view_same_key_is_single_identity_under_concurrency(perf_database, monkeypatch):
-    import threading
-    import time
-    from concurrent.futures import ThreadPoolExecutor
-
-    from aiconfigurator.sdk import common
-
-    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
-    template.clear_runtime_caches()
-    original_copy = perf_database.copy.copy
-    copy_calls = []
-
-    def slow_copy(value):
-        copy_calls.append(value)
-        time.sleep(0.02)  # release the GIL so racing callers reach query_view
-        return original_copy(value)
-
-    monkeypatch.setattr(perf_database.copy, "copy", slow_copy)
-    workers = 8
-    start = threading.Barrier(workers)
-
-    def get_view():
-        start.wait()
-        return template.query_view(common.DatabaseMode.SILICON, "off")
-
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        views = list(executor.map(lambda _: get_view(), range(workers)))
-
-    assert len({id(view) for view in views}) == 1
-    assert len(copy_calls) == 1
-
-
-def test_query_view_support_matrix_list_values_are_isolated(perf_database):
-    from aiconfigurator.sdk import common
-
-    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
-    original_support = template.supported_quant_mode
-    marker = "__query_view_isolation__"
-    previous = original_support._resolved.get(marker)
 
     try:
-        original_support._resolved[marker] = ["fp8"]
-        template.clear_runtime_caches()
-        lazy_view = template.query_view(common.DatabaseMode.SILICON, "off")
-        lazy_view.supported_quant_mode._resolved[marker].append("nvfp4")
-        original_support._resolved[marker].append("bfloat16")
+        view = perf_database.get_database_view(
+            "b200_sxm",
+            "trtllm",
+            "1.3.0rc10",
+            database_mode="HYBRID",
+            transfer_policy="off",
+        )
+        same_view = perf_database.get_database_view(
+            "b200_sxm",
+            "trtllm",
+            "1.3.0rc10",
+            database_mode="HYBRID",
+            transfer_policy="off",
+        )
+        aggressive = perf_database.get_database_view(
+            "b200_sxm",
+            "trtllm",
+            "1.3.0rc10",
+            database_mode="HYBRID",
+            transfer_policy="aggressive",
+        )
 
-        assert lazy_view.supported_quant_mode._resolved[marker] == ["fp8", "nvfp4"]
-        assert original_support._resolved[marker] == ["fp8", "bfloat16"]
+        assert view is same_view
+        assert aggressive is not view
+        assert view is not template
+        assert view._root_database_template is template
+        assert view._test_loaded_table is shared_table
+        assert view._extracted_metrics_cache is not template._extracted_metrics_cache
+        assert view.supported_quant_mode._database is view
+        assert view.get_default_database_mode() is common.DatabaseMode.HYBRID
+        assert view.transfer_policy == frozenset()
+        assert aggressive.transfer_policy == common.ALL_TRANSFERS
+        assert template.get_default_database_mode() is common.DatabaseMode.SILICON
+        assert template.transfer_policy == common.ALL_TRANSFERS
 
-        template.clear_runtime_caches()
-        template.supported_quant_mode = {"moe": ["fp8"]}
-        dict_view = template.query_view(common.DatabaseMode.SILICON, "off")
-        dict_view.supported_quant_mode["moe"].append("nvfp4")
-        template.supported_quant_mode["moe"].append("bfloat16")
-
-        assert dict_view.supported_quant_mode["moe"] == ["fp8", "nvfp4"]
-        assert template.supported_quant_mode["moe"] == ["fp8", "bfloat16"]
+        with pytest.raises(RuntimeError, match="immutable mode/policy"):
+            view.set_transfer_policy(None)
+        with pytest.raises(RuntimeError, match="immutable mode/policy"):
+            view.set_default_database_mode(common.DatabaseMode.SILICON)
     finally:
-        template.supported_quant_mode = original_support
-        if previous is None:
-            original_support._resolved.pop(marker, None)
-        else:
-            original_support._resolved[marker] = previous
+        del template._test_loaded_table
         template.clear_runtime_caches()
 
 
-def test_clearing_template_runtime_caches_invalidates_query_views(perf_database):
-    first = perf_database.get_database_view(
-        "b200_sxm",
-        "trtllm",
-        "1.3.0rc10",
-        database_mode="HYBRID",
-    )
-    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="HYBRID")
+def test_configured_view_cache_normalizes_keys_and_separates_roots(perf_database):
+    import copy
 
+    from aiconfigurator.sdk import common
+
+    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
     template.clear_runtime_caches()
-    second = perf_database.get_database_view(
-        "b200_sxm",
-        "trtllm",
-        "1.3.0rc10",
-        database_mode="HYBRID",
+    other_template = copy.copy(template)
+    other_template._is_query_view = False
+
+    view = perf_database._get_configured_database_view(template, "hybrid", None)
+    enum_view = perf_database._get_configured_database_view(
+        template,
+        common.DatabaseMode.HYBRID,
+        common.ALL_TRANSFERS,
     )
+    list_view = perf_database._get_configured_database_view(
+        template,
+        common.DatabaseMode.HYBRID,
+        list(common.TransferKind),
+    )
+    other_view = perf_database._get_configured_database_view(other_template, "HYBRID", "aggressive")
 
-    assert second is not first
+    assert view is enum_view is list_view
+    assert other_view is not view
+    assert view._root_database_template is template
+    assert other_view._root_database_template is other_template
+    template.clear_runtime_caches()
 
 
-def test_query_view_rejects_mode_with_incompatible_shared_layer_template(perf_database):
+def test_clearing_template_runtime_caches_refreshes_configured_copy(perf_database):
+    from aiconfigurator.sdk import common
+
+    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    template.clear_runtime_caches()
+    old_marker = object()
+    new_marker = object()
+    template._configured_view_marker = old_marker
+
+    try:
+        first = perf_database._get_configured_database_view(template, common.DatabaseMode.HYBRID, "off")
+        template._configured_view_marker = new_marker
+        cached = perf_database._get_configured_database_view(template, common.DatabaseMode.HYBRID, "off")
+
+        assert cached is first
+        assert cached._configured_view_marker is old_marker
+
+        template.clear_runtime_caches()
+        refreshed = perf_database._get_configured_database_view(template, common.DatabaseMode.HYBRID, "off")
+
+        assert refreshed is not first
+        assert refreshed._configured_view_marker is new_marker
+    finally:
+        del template._configured_view_marker
+        template.clear_runtime_caches()
+
+
+def test_configured_view_rejects_incompatible_shared_layer_template(perf_database):
     from aiconfigurator.sdk import common
 
     silicon_template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
 
     with pytest.raises(ValueError, match="use get_database_view"):
-        silicon_template.query_view(common.DatabaseMode.EMPIRICAL)
-
-
-def test_database_view_legacy_fallback_deep_copies_and_resets_default_policy(perf_database, monkeypatch):
-    from aiconfigurator.sdk import common
-
-    class LegacyDatabase:
-        def __init__(self):
-            self.mode = common.DatabaseMode.HYBRID
-            self.policy = frozenset()
-            self.nested = {"history": []}
-
-        def get_default_database_mode(self):
-            return self.mode
-
-        def set_default_database_mode(self, mode):
-            self.mode = mode
-            self.nested["history"].append(("mode", mode))
-
-        def set_transfer_policy(self, policy):
-            self.policy = common.resolve_transfer_policy(policy)
-            self.nested["history"].append(("policy", policy))
-
-    cached = LegacyDatabase()
-    monkeypatch.setattr(perf_database, "get_database", lambda **kwargs: cached)
-
-    view = perf_database.get_database_view("test", "backend", "version", database_mode="SILICON")
-
-    assert view is not cached
-    assert view.nested is not cached.nested
-    assert view.policy == common.ALL_TRANSFERS
-    assert view.mode is common.DatabaseMode.SILICON
-    assert cached.policy == frozenset()
-    assert cached.mode is common.DatabaseMode.HYBRID
-    assert cached.nested["history"] == []
+        perf_database._get_configured_database_view(silicon_template, common.DatabaseMode.EMPIRICAL)
 
 
 def test_transfer_policy_and_mode_change_clear_global_grid_cache(perf_database):

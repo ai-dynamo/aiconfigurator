@@ -8,7 +8,6 @@ import functools
 import importlib.resources as pkg_resources
 import logging
 import os
-import threading
 import traceback
 from collections import UserDict, defaultdict
 from collections.abc import Callable, Iterable
@@ -31,25 +30,6 @@ _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "
 _MISSING_SILICON_DATA_EXCEPTIONS = (PerfDataNotAvailableError, InterpolationDataNotAvailableError)
 SHARED_LAYER_REUSE_MARKER = "SHARED_LAYER_REUSE.txt"
 _DATABASE_VERSION_METADATA_FILES = {SHARED_LAYER_REUSE_MARKER, "INCOMPLETE.txt"}
-
-
-class _QueryViewLock:
-    """Small pickle/deepcopy-safe wrapper around a re-entrant thread lock."""
-
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-
-    def __enter__(self):
-        self._lock.acquire()
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        self._lock.release()
-
-    def __reduce__(self):
-        # Runtime locks have no serializable state. A copied/unpickled database
-        # must coordinate its own view cache with a fresh lock.
-        return (type(self), ())
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
@@ -91,6 +71,7 @@ def set_systems_paths(raw_paths: str | Iterable[str] | None) -> None:
         )
     _SYSTEMS_PATHS = resolved_paths
     _load_system_spec_from_paths.cache_clear()
+    _cached_configured_database_view.cache_clear()
     from aiconfigurator.sdk.operations.base import clear_all_op_caches
 
     clear_all_op_caches()
@@ -554,6 +535,63 @@ def get_database(
     return None
 
 
+def _normalize_database_mode(database_mode: str | common.DatabaseMode | None) -> common.DatabaseMode:
+    if database_mode is None:
+        return common.DatabaseMode.SILICON
+    if isinstance(database_mode, common.DatabaseMode):
+        return database_mode
+    return common.DatabaseMode[database_mode.upper()]
+
+
+@functools.cache
+def _cached_configured_database_view(
+    root_template: PerfDatabase,
+    mode: common.DatabaseMode,
+    policy: frozenset[common.TransferKind],
+) -> PerfDatabase:
+    """Build one lightweight immutable query view per normalized configuration."""
+    view = copy.copy(root_template)
+    view._root_database_template = root_template
+    view._default_database_mode = mode
+    view._transfer_policy = policy
+    view._extracted_metrics_cache = {}
+    view._is_query_view = True
+
+    # Lazy support resolution binds loaded op tables onto its database. Rebind
+    # it to the configured copy while preserving already-resolved values; the
+    # loaded table objects themselves remain shared and read-only.
+    supported = getattr(root_template, "supported_quant_mode", None)
+    if isinstance(supported, _LazySupportMatrix):
+        lazy_support = _LazySupportMatrix(view)
+        lazy_support._resolved = {key: list(value) for key, value in supported._resolved.items()}
+        view.supported_quant_mode = lazy_support
+    elif isinstance(supported, dict):
+        view.supported_quant_mode = copy.deepcopy(supported)
+
+    return view
+
+
+def _get_configured_database_view(
+    database: PerfDatabase,
+    mode: str | common.DatabaseMode | None,
+    transfer_policy=None,
+) -> PerfDatabase:
+    """Return a cached configured copy rooted at the original data template."""
+    normalized_mode = _normalize_database_mode(mode)
+    policy = common.resolve_transfer_policy(transfer_policy)
+    root_template = getattr(database, "_root_database_template", database)
+
+    expected_shared_layer = _shared_layer_enabled(normalized_mode.name)
+    if root_template.enable_shared_layer != expected_shared_layer:
+        raise ValueError(
+            f"Cannot create a {normalized_mode.name} query view from a database template with "
+            f"enable_shared_layer={root_template.enable_shared_layer}; use get_database_view() "
+            "so the correct data template is selected."
+        )
+
+    return _cached_configured_database_view(root_template, normalized_mode, policy)
+
+
 def get_database_view(
     system: str,
     backend: str,
@@ -566,21 +604,14 @@ def get_database_view(
     """Return an isolated, lightweight query view over a cached database.
 
     The cached :class:`PerfDatabase` is a data template. Query mode and transfer
-    policy are request-local state and must never be mutated on that template.
-    The view shares loaded, read-only perf tables while owning its interpolation
-    cache and lazy support-matrix binding. ``database_mode`` is also forwarded to
+    policy are immutable, configuration-scoped state: callers requesting the
+    same normalized configuration reuse a cached copy. The copy shares loaded,
+    read-only perf tables while owning its interpolation cache and lazy
+    support-matrix binding. ``database_mode`` is also forwarded to
     :func:`get_database` so EMPIRICAL/SOL views do not accidentally inherit the
     shared SILICON data layer.
     """
-    mode = (
-        common.DatabaseMode.SILICON
-        if database_mode is None
-        else (
-            database_mode
-            if isinstance(database_mode, common.DatabaseMode)
-            else common.DatabaseMode[database_mode.upper()]
-        )
-    )
+    mode = _normalize_database_mode(database_mode)
     database_kwargs = {
         "system": system,
         "backend": backend,
@@ -593,28 +624,7 @@ def get_database_view(
     database = get_database(**database_kwargs)
     if database is None:
         return None
-
-    query_view = getattr(database, "query_view", None)
-    if callable(query_view):
-        return query_view(mode, transfer_policy)
-
-    # Keep custom/injected database implementations working. Production
-    # PerfDatabase instances always take the query_view path above; the rare
-    # duck-typed fallback uses a deep copy because custom setters may mutate
-    # nested state we cannot safely classify as read-only.
-    view = copy.deepcopy(database)
-    set_transfer_policy = getattr(view, "set_transfer_policy", None)
-    if callable(set_transfer_policy):
-        # ``None`` resolves to the default/all policy; it must not inherit a
-        # narrowed policy from the cached legacy object.
-        set_transfer_policy(transfer_policy)
-    set_mode = getattr(view, "set_default_database_mode", None)
-    if callable(set_mode):
-        get_mode = getattr(view, "get_default_database_mode", None)
-        current_mode = get_mode() if callable(get_mode) else None
-        if current_mode != mode:
-            set_mode(mode)
-    return view
+    return _get_configured_database_view(database, mode, transfer_policy)
 
 
 DatabaseRef = tuple[str, str, str, str]
@@ -752,6 +762,9 @@ def _store_loaded_database(
     database: PerfDatabase,
 ) -> None:
     system, backend, version, systems_root = ref
+    # A worker result may replace an existing root object for this data key.
+    # Drop configured copies keyed by the old root so they cannot accumulate.
+    _cached_configured_database_view.cache_clear()
     database_dict[system][backend][version] = database
     # get_all_databases() constructs the default (shared-enabled) view. Preserve
     # that identity when importing a database from a worker; putting it in the
@@ -790,6 +803,7 @@ def clear_database_runtime_caches(system: str, backend: str, version: str) -> No
     from aiconfigurator.sdk.operations.base import clear_all_op_caches
 
     clear_all_op_caches()
+    _cached_configured_database_view.cache_clear()
 
 
 def unload_database(system: str, backend: str, version: str) -> None:
@@ -823,6 +837,7 @@ def unload_database(system: str, backend: str, version: str) -> None:
     from aiconfigurator.sdk.operations.base import clear_all_op_caches
 
     clear_all_op_caches()
+    _cached_configured_database_view.cache_clear()
 
 
 def _load_database_ref_in_parent(ref: DatabaseRef) -> PerfDatabase | None:
@@ -1417,12 +1432,6 @@ class PerfDatabase:
         # matrix below) needs it. ``PerfDatabase()`` opens zero CSVs.
         self.supported_quant_mode = _LazySupportMatrix(self)
         self._finalize_loaded_data()
-        # A template owns at most one immutable lightweight view per
-        # (mode, transfer-policy) pair. Reusing those views keeps function-level
-        # query LRUs effective and prevents them from retaining an unbounded
-        # sequence of one-shot ``self`` objects.
-        self._query_view_cache: dict[tuple[common.DatabaseMode, frozenset[common.TransferKind]], PerfDatabase] = {}
-        self._query_view_lock = _QueryViewLock()
         self._is_query_view = False
 
     def _finalize_loaded_data(self) -> None:
@@ -1709,57 +1718,6 @@ class PerfDatabase:
             util_empirical.clear_grid_cache()  # mode change alters which data/transfers feed grids
             self._default_database_mode = mode
 
-    def query_view(self, mode: common.DatabaseMode, transfer_policy=None) -> PerfDatabase:
-        """Return an immutable mode/policy view without copying loaded tables."""
-        expected_shared_layer = _shared_layer_enabled(mode.name)
-        if self.enable_shared_layer != expected_shared_layer:
-            raise ValueError(
-                f"Cannot create a {mode.name} query view from a database template with "
-                f"enable_shared_layer={self.enable_shared_layer}; use get_database_view() "
-                "so the correct data template is selected."
-            )
-
-        policy = common.resolve_transfer_policy(transfer_policy)
-        with self._get_query_view_lock():
-            cache = getattr(self, "_query_view_cache", None)
-            if cache is None:
-                cache = self._query_view_cache = {}
-            cache_key = (mode, policy)
-            cached = cache.get(cache_key)
-            if cached is not None:
-                return cached
-
-            view = copy.copy(self)
-            view._extracted_metrics_cache = {}
-            view._query_view_cache = {}
-            view._query_view_lock = _QueryViewLock()
-            view._is_query_view = True
-
-            if isinstance(self.supported_quant_mode, _LazySupportMatrix):
-                lazy_support = _LazySupportMatrix(view)
-                lazy_support._resolved = {
-                    key: list(value) for key, value in self.supported_quant_mode._resolved.items()
-                }
-                view.supported_quant_mode = lazy_support
-            elif isinstance(self.supported_quant_mode, dict):
-                view.supported_quant_mode = copy.deepcopy(self.supported_quant_mode)
-
-            # A fresh view has no per-self query entries and owns an empty metric
-            # cache, so assign request-local state directly. Calling the public
-            # setters here would unnecessarily clear function-level LRU caches and
-            # util grids belonging to other live views.
-            view._default_database_mode = mode
-            view._transfer_policy = policy
-            cache[cache_key] = view
-            return view
-
-    def _get_query_view_lock(self) -> _QueryViewLock:
-        """Return this database's lock, lazily supporting bare test doubles."""
-        lock = getattr(self, "_query_view_lock", None)
-        if lock is None:
-            lock = self._query_view_lock = _QueryViewLock()
-        return lock
-
     def get_default_database_mode(self) -> common.DatabaseMode:
         """
         Get the default database mode
@@ -1806,14 +1764,13 @@ class PerfDatabase:
 
     def clear_runtime_caches(self) -> None:
         """Clear cached query/interpolation state while preserving loaded op data."""
-        with self._get_query_view_lock():
-            self._extracted_metrics_cache.clear()
-            getattr(self, "_query_view_cache", {}).clear()
-            for attr_name in dir(self):
-                attr = getattr(self, attr_name)
-                cache_clear = getattr(attr, "cache_clear", None)
-                if callable(cache_clear):
-                    cache_clear()
+        self._extracted_metrics_cache.clear()
+        _cached_configured_database_view.cache_clear()
+        for attr_name in dir(self):
+            attr = getattr(self, attr_name)
+            cache_clear = getattr(attr, "cache_clear", None)
+            if callable(cache_clear):
+                cache_clear()
 
     @staticmethod
     def _interp_pr(latency: float, energy: float = 0.0) -> PerformanceResult:
