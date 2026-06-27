@@ -3,6 +3,10 @@
 Collector v2 plans collection from model/SM YAML instead of treating the
 collector as a flat op list.
 
+The proposed common population, physical-key deduplication, compatibility
+manifest, and incremental migration contract is documented in
+[`docs/perf_database/collector-v2-population-design.md`](../../docs/perf_database/collector-v2-population-design.md).
+
 ## File Layout
 
 - `base_ops/<op>.yaml`: shared recipe library. Only recipes named by a model's
