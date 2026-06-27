@@ -87,18 +87,22 @@ class TestContextAttention:
 
         assert math.isclose(result, expected, rel_tol=1e-6)
 
-    def test_windowed_context_attention_not_above_full(self, comprehensive_perf_db):
-        """SWA (windowed) context attention must never exceed full attention -- it does
-        strictly less work. Regression for corrupt per-model windowed silicon data
-        (hs192/win128 fp8 recorded ~83000x the full-attention latency, blowing up TTFT
-        for hybrid models). Windowed latency is now derived from the window=0 measurement
-        scaled by the window-aware SOL ratio, so the invariant holds by construction."""
+    def test_missing_window_slice_uses_full_attention_empirical(self, mutable_comprehensive_perf_db):
+        """HYBRID preserves SWA coverage by borrowing full-attention utilization."""
+        db = mutable_comprehensive_perf_db
+        del db._context_attention_data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][8][128][128]
+        db.clear_runtime_caches()
+
         args = (2, 256, 0, 16, 8, common.KVCacheQuantMode.bfloat16, common.FMHAQuantMode.bfloat16)
-        kw = dict(database_mode=common.DatabaseMode.HYBRID, head_size=128)
-        full = float(comprehensive_perf_db.query_context_attention(*args, window_size=0, **kw))
-        windowed = float(comprehensive_perf_db.query_context_attention(*args, window_size=128, **kw))
-        assert windowed > 0
-        assert windowed <= full * 1.0001  # s(256) > window(128): windowed work <= full
+        result = db.query_context_attention(
+            *args,
+            database_mode=common.DatabaseMode.HYBRID,
+            head_size=128,
+            window_size=128,
+        )
+
+        assert float(result) > 0
+        assert result.source == "empirical"
 
     def test_cross_head_transfer_gated_by_xshape_policy(self, comprehensive_perf_db):
         """Cross-head_size transfer is an XSHAPE transfer. A head_size with no own data
@@ -288,65 +292,56 @@ class TestGenerationAttention:
         )
         assert result > 0
 
-    def test_exact_head_empirical_uses_ragged_bracketed_util(self, comprehensive_perf_db, monkeypatch):
-        """Exact-head empirical lookup interpolates utilization across batch and sequence."""
+    def test_generation_empirical_calibrates_from_raw_rows(self, comprehensive_perf_db, monkeypatch):
+        """Synthesized working-grid points must not become empirical calibration data."""
         from aiconfigurator.sdk.operations import util_empirical
         from aiconfigurator.sdk.perf_database import LoadedOpData
 
         quant = common.KVCacheQuantMode.bfloat16
         args = dict(n=8, n_kv=1, kvcache_quant_mode=quant, head_size=128)
+        b, s = 3, 200
 
-        def leaf(latency):
-            return {"latency": latency, "power": 0.0, "energy": 0.0}
-
-        def sol(batch, sequence):
+        def sol(sequence):
             return float(
                 comprehensive_perf_db.query_generation_attention(
-                    batch,
+                    b,
                     sequence,
                     database_mode=common.DatabaseMode.SOL,
                     **args,
                 )
             )
 
-        # At s=150, the b=2 and b=4 curves interpolate to util 0.3 and
-        # 0.6 respectively; b=3 therefore has util 0.45.
-        exact_head = {
-            2: {
-                100: leaf(sol(2, 100) / 0.2),
-                200: leaf(sol(2, 200) / 0.4),
-            },
-            4: {
-                100: leaf(sol(4, 100) / 0.4),
-                200: leaf(sol(4, 200) / 0.8),
-            },
-        }
-        raw = LoadedOpData(
-            {quant: {1: {128: {0: {8: exact_head}}}}},
-            common.PerfDataFilename.generation_attention,
-            "raw",
-        )
-        working = LoadedOpData(
-            {quant: {1: {128: {0: {8: {3: {150: leaf(999.0)}}}}}}},
-            common.PerfDataFilename.generation_attention,
-            "working",
-        )
+        def wrapper(points, name):
+            return LoadedOpData(
+                {quant: {1: {128: {0: {8: {b: points}}}}}},
+                common.PerfDataFilename.generation_attention,
+                name,
+            )
 
-        monkeypatch.setattr(comprehensive_perf_db, "_generation_attention_data", working)
-        monkeypatch.setattr(comprehensive_perf_db, "_raw_generation_attention_data", raw, raising=False)
+        # Grid coordinates are (n, batch, sequence). 100 and 400 bracket the
+        # off-grid query at their log midpoint, so generic k=2 IDW averages
+        # the two measured utilizations: (0.2 + 0.6) / 2 = 0.4.
+        raw_points = {
+            100: {"latency": sol(100) / 0.2},
+            400: {"latency": sol(400) / 0.6},
+        }
+        monkeypatch.setattr(comprehensive_perf_db, "_raw_generation_attention_data", wrapper(raw_points, "raw"))
+        monkeypatch.setattr(
+            comprehensive_perf_db,
+            "_generation_attention_data",
+            wrapper({s: {"latency": 999.0}}, "working"),
+        )
         util_empirical.clear_grid_cache()
         comprehensive_perf_db.query_generation_attention.cache_clear()
         try:
             result = comprehensive_perf_db.query_generation_attention(
-                3,
-                150,
+                b,
+                s,
                 database_mode=common.DatabaseMode.EMPIRICAL,
                 **args,
             )
-
-            assert float(result) == pytest.approx(sol(3, 150) / 0.45)
+            assert float(result) == pytest.approx(sol(s) / 0.4)
             assert float(result) != pytest.approx(999.0)
-            assert result.source == "empirical"
         finally:
             util_empirical.clear_grid_cache()
             comprehensive_perf_db.query_generation_attention.cache_clear()

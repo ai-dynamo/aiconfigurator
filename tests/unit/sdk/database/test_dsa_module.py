@@ -25,6 +25,10 @@ def _dsa_value(latency: float) -> dict[str, float]:
     return {"latency": latency, "power": 10.0, "energy": latency * 10.0}
 
 
+def _latency(result) -> float:
+    return result.latency if hasattr(result, "latency") else (result[0] if isinstance(result, tuple) else result)
+
+
 def _context_dsa_data(dsa_dict: dict, architecture: str = DEFAULT_DSA_ARCHITECTURE) -> dict:
     return {
         common.FMHAQuantMode.bfloat16: {
@@ -508,144 +512,48 @@ class TestContextDSAModule:
                 database_mode=common.DatabaseMode.HYBRID,
             )
 
-    def test_empirical_exact_raw_head_uses_log_ragged_2d_util(self, mutable_comprehensive_perf_db):
-        db = mutable_comprehensive_perf_db
-        backend = "unit_ctx_exact_raw"
-        raw = {
-            32: {
-                0: {
-                    100: {1: _dsa_value(10.0), 9: _dsa_value(30.0)},
-                    400: {1: _dsa_value(20.0), 9: _dsa_value(90.0)},
-                }
-            }
-        }
-        # A synthesized working-table exact point must not masquerade as an
-        # empirical calibration row.
-        working = {32: {0: {**raw[32][0], 200: {3: _dsa_value(999.0)}}}}
-        db._raw_context_dsa_module_data = LoadedOpData(
-            _context_dsa_data_with_backend(raw, dsa_backend=backend),
-            common.PerfDataFilename.dsa_context_module,
-            "raw",
-        )
-        db._context_dsa_module_data = LoadedOpData(
-            _context_dsa_data_with_backend(working, dsa_backend=backend),
-            common.PerfDataFilename.dsa_context_module,
-            "working",
-        )
-        db.clear_runtime_caches()
-
-        def sol(batch, sequence):
-            return float(
-                db.query_context_dsa_module(
-                    b=batch,
-                    s=sequence,
-                    prefix=0,
-                    num_heads=32,
-                    kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
-                    fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-                    gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-                    database_mode=common.DatabaseMode.SOL,
-                    dsa_backend=backend,
-                )
-            )
-
-        sequence_alpha = math.log(200 / 100) / math.log(400 / 100)
-        batch_alpha = math.log(3 / 1) / math.log(9 / 1)
-        util_b1 = sol(1, 100) / 10.0 + sequence_alpha * (sol(1, 400) / 20.0 - sol(1, 100) / 10.0)
-        util_b9 = sol(9, 100) / 30.0 + sequence_alpha * (sol(9, 400) / 90.0 - sol(9, 100) / 30.0)
-        expected_util = util_b1 + batch_alpha * (util_b9 - util_b1)
-        expected = sol(3, 200) / expected_util
-
-        result = db.query_context_dsa_module(
-            b=3,
-            s=200,
-            prefix=0,
-            num_heads=32,
-            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
-            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.EMPIRICAL,
-            dsa_backend=backend,
-        )
-
-        assert float(result) == pytest.approx(expected)
-        assert float(result) != pytest.approx(999.0)
-        assert result.source == "empirical"
-
-    def test_empirical_ragged_2d_excludes_truncated_upper_batch(self, mutable_comprehensive_perf_db):
-        db = mutable_comprehensive_perf_db
-        backend = "unit_ctx_ragged_coverage"
-        raw = {
-            32: {
-                0: {
-                    100: {1: _dsa_value(8.0), 2: _dsa_value(10.0), 4: _dsa_value(2.0)},
-                    120: {4: _dsa_value(2.5)},
-                    400: {1: _dsa_value(16.0), 2: _dsa_value(20.0)},
-                }
-            }
-        }
-        wrapper = LoadedOpData(
-            _context_dsa_data_with_backend(raw, dsa_backend=backend),
-            common.PerfDataFilename.dsa_context_module,
-            "measured",
-        )
-        db._raw_context_dsa_module_data = wrapper
-        db._context_dsa_module_data = wrapper
-        db.clear_runtime_caches()
-
-        def sol(batch, sequence):
-            return float(
-                db.query_context_dsa_module(
-                    b=batch,
-                    s=sequence,
-                    prefix=0,
-                    num_heads=32,
-                    kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
-                    fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-                    gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-                    database_mode=common.DatabaseMode.SOL,
-                    dsa_backend=backend,
-                )
-            )
-
-        alpha = math.log(200 / 100) / math.log(400 / 100)
-        # b=4 stops at s=120 and is ineligible. With no eligible upper curve,
-        # utilization freezes on the largest lower curve, b=2.
-        expected_util = sol(2, 100) / 10.0 + alpha * (sol(2, 400) / 20.0 - sol(2, 100) / 10.0)
-        expected = sol(3, 200) / expected_util
-        result = db.query_context_dsa_module(
-            b=3,
-            s=200,
-            prefix=0,
-            num_heads=32,
-            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
-            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.EMPIRICAL,
-            dsa_backend=backend,
-        )
-
-        assert float(result) == pytest.approx(expected)
-
     @pytest.mark.parametrize(
-        "raw,expected",
+        ("raw_heads", "expected_path"),
         [
-            pytest.param(
-                {32: {0: {100: {1: _dsa_value(10.0)}, 120: {1: _dsa_value(12.0)}}}},
-                77.0,
-                id="exact-head-without-sequence-coverage",
-            ),
-            pytest.param(
-                {64: {0: {200: {3: _dsa_value(999.0)}}}},
-                55.0,
-                id="nonexact-head",
-            ),
+            pytest.param(32, "exact-head", id="exact-head"),
+            pytest.param(64, "cross-head-fallback", id="cross-head-fallback"),
         ],
     )
-    def test_empirical_unsafe_raw_slice_keeps_existing_nn_fallback(self, mutable_comprehensive_perf_db, raw, expected):
+    def test_empirical_uses_raw_head_grid(self, mutable_comprehensive_perf_db, raw_heads, expected_path):
         db = mutable_comprehensive_perf_db
-        backend = "unit_ctx_ragged_miss"
-        working = {32: {0: {200: {3: _dsa_value(expected)}}}}
+        backend = "unit_ctx_exact_raw"
+
+        def sol(batch, sequence, num_heads):
+            return float(
+                db.query_context_dsa_module(
+                    b=batch,
+                    s=sequence,
+                    prefix=0,
+                    num_heads=num_heads,
+                    kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+                    fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+                    gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                    database_mode=common.DatabaseMode.SOL,
+                    dsa_backend=backend,
+                )
+            )
+
+        # Exact-head and cross-head fallback both use raw coordinates
+        # (num_heads, prefix, sequence, batch). Sequence 200 is the normalized-
+        # log midpoint of 100 and 400, so generic k=2 IDW yields util 0.4.
+        raw = {
+            raw_heads: {
+                0: {
+                    100: {3: _dsa_value(sol(3, 100, raw_heads) / 0.2)},
+                    400: {3: _dsa_value(sol(3, 400, raw_heads) / 0.6)},
+                }
+            }
+        }
+        if expected_path == "exact-head":
+            # A different TP/head slice has an exact query point but must not
+            # beat the requested head's two measured neighbors.
+            raw[64] = {0: {200: {3: _dsa_value(999.0)}}}
+        working = {32: {0: {200: {3: _dsa_value(777.0)}}}}
         db._raw_context_dsa_module_data = LoadedOpData(
             _context_dsa_data_with_backend(raw, dsa_backend=backend),
             common.PerfDataFilename.dsa_context_module,
@@ -670,7 +578,10 @@ class TestContextDSAModule:
             dsa_backend=backend,
         )
 
-        assert float(result) == pytest.approx(expected)
+        assert float(result) == pytest.approx(sol(3, 200, 32) / 0.4)
+        assert float(result) != pytest.approx(777.0)
+        assert float(result) != pytest.approx(999.0)
+        assert result.source == "empirical"
 
     def test_empirical_explicit_prefix_axis_is_used_under_backend_data(self, mutable_comprehensive_perf_db):
         """The explicit-prefix shape nests ...[dsa_backend][num_heads][prefix][s][b]. After
@@ -678,19 +589,16 @@ class TestContextDSAModule:
         that differ only in prefix must resolve to different measured slices (a collapse here
         would mean the prefix axis was folded away). Data gives distinct per-prefix latencies."""
 
-        def _latency(result):
-            return (
-                result.latency if hasattr(result, "latency") else (result[0] if isinstance(result, tuple) else result)
-            )
-
         db = mutable_comprehensive_perf_db
         # num_heads -> prefix -> s -> b, with a large gap between the two prefix slices.
         nh = {32: {0: {256: {1: _dsa_value(5.0)}}, 256: {256: {1: _dsa_value(50.0)}}}}
-        db._context_dsa_module_data = LoadedOpData(
+        wrapper = LoadedOpData(
             _context_dsa_data_with_backend(nh, architecture=GLM5_ARCHITECTURE),
             common.PerfDataFilename.dsa_context_module,
             "measured",
         )
+        db._raw_context_dsa_module_data = wrapper
+        db._context_dsa_module_data = wrapper
 
         def query(prefix):
             return _latency(
@@ -719,21 +627,18 @@ class TestContextDSAModule:
         physical check: at a fixed total length (ISL), reusing a cached prefix (fewer new tokens
         to compute) must be FASTER than computing all tokens fresh."""
 
-        def _latency(result):
-            return (
-                result.latency if hasattr(result, "latency") else (result[0] if isinstance(result, tuple) else result)
-            )
-
         db = mutable_comprehensive_perf_db
         # 4D shape but ONLY prefix=0 collected (mirrors DeepseekV32 on trtllm). Latencies are
         # launch-overhead-floored at small s (so the old same-s util borrow would misfire).
         s_grid = {1024: 2.4, 2048: 2.8, 3072: 3.4, 4096: 4.0, 6144: 5.6, 8192: 7.5}
         nh = {128: {0: {s: {1: _dsa_value(lat)} for s, lat in s_grid.items()}}}
-        db._context_dsa_module_data = LoadedOpData(
+        wrapper = LoadedOpData(
             _context_dsa_data_with_backend(nh, architecture="DeepseekV32ForCausalLM"),
             common.PerfDataFilename.dsa_context_module,
             "measured",
         )
+        db._raw_context_dsa_module_data = wrapper
+        db._context_dsa_module_data = wrapper
 
         def query(s, prefix):
             return _latency(
@@ -1037,14 +942,9 @@ class TestGenerationDSAModule:
             }
         }
         # b=3 is a synthetic working-table batch and must not take the exact
-        # fast path.  Extrapolate each measured batch in util-space first,
+        # fast path. Extrapolate each measured batch in util-space first,
         # then interpolate those two results along batch.
-        working = {
-            32: {
-                **raw[32],
-                3: {1024: _dsa_value(999.0)},
-            }
-        }
+        working = {32: {**raw[32], 3: {1024: _dsa_value(999.0)}}}
         db._raw_generation_dsa_module_data = LoadedOpData(
             _generation_dsa_data_with_backend(raw), common.PerfDataFilename.dsa_generation_module, "raw"
         )

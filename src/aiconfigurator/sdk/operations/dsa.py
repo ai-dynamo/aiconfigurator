@@ -491,10 +491,6 @@ class ContextDSAModule(Operation):
                     raise PerfDataNotAvailableError(f"No context DSA data for backend {dsa_backend!r}.")
                 return selected
 
-            def _slice():
-                cls.load_data(database)
-                return _select_slice(database._context_dsa_module_data)
-
             def _raw_slice():
                 cls.load_data(database)
                 raw_wrapper = getattr(database, "_raw_context_dsa_module_data", None)
@@ -502,85 +498,31 @@ class ContextDSAModule(Operation):
                     raise PerfDataNotAvailableError("Raw context DSA module data is not loaded.")
                 return _select_slice(raw_wrapper)
 
-            # Context DSA's measured grid is ragged in batch: larger batches
-            # often stop at shorter sequences.  When the exact categorical
-            # slice exists, interpolate utilization only among measured batch
-            # curves whose original sequence range covers the query.  The
-            # generic multi-D NN below remains the fallback for a missing head,
-            # prefix, or safe bracket.
             try:
-                raw_slc = _raw_slice()
-                raw_has_prefix = _dsa_module_has_prefix_axis(raw_slc)
-                raw_head_data = raw_slc.get(num_heads) if isinstance(raw_slc, dict) else None
-                raw_sequence_data = None
-                raw_prefix = 0
-                if isinstance(raw_head_data, dict):
-                    if raw_has_prefix and prefix in raw_head_data:
-                        raw_sequence_data = raw_head_data[prefix]
-                        raw_prefix = prefix
-                    elif not raw_has_prefix and prefix == 0:
-                        raw_sequence_data = raw_head_data
-
-                batch_curves: dict = {}
-                if isinstance(raw_sequence_data, dict):
-                    for sequence, batch_data in raw_sequence_data.items():
-                        if not isinstance(batch_data, dict):
-                            continue
-                        for batch, leaf in batch_data.items():
-                            batch_curves.setdefault(batch, {})[sequence] = leaf
-                if not batch_curves:
-                    raise PerfDataNotAvailableError("The exact raw context DSA slice is empty.")
-
-                raw_grid = util_empirical.grid_for(
-                    (
-                        "ctx_dsa_exact_raw_2d",
-                        database.systems_root,
-                        database.system,
-                        database.backend,
-                        database.version,
-                        fmha_quant_mode.name,
-                        kvcache_quant_mode.name,
-                        gemm_quant_mode.name,
-                        architecture,
-                        dsa_backend,
-                        num_heads,
-                        raw_prefix,
-                        id(raw_sequence_data),
-                    ),
-                    lambda: batch_curves,
-                    lambda c: get_sol(c[0], c[1], raw_prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0],
-                    depth=2,
-                )
-                bracketed = util_empirical.estimate_bracketed_2d(
-                    sol_time,
-                    (b, s),
-                    raw_grid,
-                    log_space=True,
-                    require_y_coverage=True,
-                )
-                if bracketed is not None:
-                    return bracketed[0]
-            except PerfDataNotAvailableError:
-                # Exact raw data is an optimization of the own-shape path, not
-                # a new failure mode. Preserve the established NN / transfer
-                # fallback for absent or non-exact slices.
-                pass
-
-            try:
-                slc = _slice()
+                slc = _raw_slice()
                 has_prefix = _dsa_module_has_prefix_axis(slc)
             except PerfDataNotAvailableError:
                 slc = None
                 has_prefix = architecture == "GlmMoeDsaForCausalLM"  # data unavailable: prior heuristic
 
+            # num_heads identifies a TP/model shape. Keep a query on its exact
+            # measured head slice whenever that slice exists; only retain the
+            # historical cross-head fallback when the exact slice is absent.
+            head_data = slc.get(num_heads) if isinstance(slc, dict) else None
+            exact_head = isinstance(head_data, dict) and bool(head_data)
+            calibration_data = head_data if exact_head else slc
+
             # Collected prefix values, when the slice carries an explicit prefix axis.
             prefix_keys: tuple = ()
-            if has_prefix and isinstance(slc, dict):
-                seen: set = set()
-                for head_data in slc.values():
-                    if isinstance(head_data, dict):
-                        seen.update(head_data.keys())
-                prefix_keys = tuple(sorted(seen))
+            if has_prefix and isinstance(calibration_data, dict):
+                if exact_head:
+                    prefix_keys = tuple(sorted(calibration_data))
+                else:
+                    seen: set = set()
+                    for candidate_head_data in calibration_data.values():
+                        if isinstance(candidate_head_data, dict):
+                            seen.update(candidate_head_data.keys())
+                    prefix_keys = tuple(sorted(seen))
             # Genuine prefix interpolation needs >=2 collected prefix points bracketing the
             # query (mirrors the silicon path). A degenerate axis (e.g. prefix=0 only) or an
             # out-of-range query would otherwise borrow util at the query's own (prefix, s) --
@@ -590,30 +532,72 @@ class ContextDSAModule(Operation):
             # carried entirely by the (true) SOL -- the windowed-attention correction pattern.
             interp_prefix = len(prefix_keys) >= 2 and prefix_keys[0] <= prefix <= prefix_keys[-1]
 
-            if has_prefix and interp_prefix:  # c = (num_heads, prefix, s, b); s is new tokens
-                depth, query, slice_fn, key_tag = 4, (num_heads, prefix, s, b), _slice, "ctx_dsa"
+            if has_prefix and interp_prefix:
+                # Genuine measured prefix axis. Samples are (prefix, s, b) on
+                # an exact head, otherwise (num_heads, prefix, s, b).
+                if exact_head:
+                    depth, query, key_tag = 3, (prefix, s, b), "ctx_dsa_exact_head"
+
+                    def _sol(c):
+                        return get_sol(c[2], c[1], c[0], num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+
+                else:
+                    depth, query, key_tag = 4, (num_heads, prefix, s, b), "ctx_dsa"
+
+                    def _sol(c):
+                        return get_sol(c[3], c[2], c[1], c[0], kvcache_quant_mode, fmha_quant_mode)[0]
+            elif has_prefix and 0 in prefix_keys:
+                # Degenerate/out-of-range prefix axis: anchor utilization at
+                # prefix=0 and full_s=s+prefix so indexer/top-k regime changes
+                # remain in the true query SOL.
+                key_tag = "ctx_dsa_p0anchor_exact_head" if exact_head else "ctx_dsa_p0anchor"
+                if exact_head:
+                    calibration_data = calibration_data[0]
+                    depth, query = 2, (s + prefix, b)
+
+                    def _sol(c):
+                        return get_sol(c[1], c[0], 0, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+
+                else:
+                    calibration_data = {
+                        head: candidate_head_data[0]
+                        for head, candidate_head_data in calibration_data.items()
+                        if isinstance(candidate_head_data, dict) and 0 in candidate_head_data
+                    }
+                    depth, query = 3, (num_heads, s + prefix, b)
+
+                    def _sol(c):
+                        return get_sol(c[2], c[1], 0, c[0], kvcache_quant_mode, fmha_quant_mode)[0]
+            elif has_prefix:
+                # No prefix=0 anchor exists. Preserve coverage by freezing the
+                # generic raw-grid utilization at the nearest measured prefix.
+                if exact_head:
+                    depth, query, key_tag = 3, (prefix, s, b), "ctx_dsa_prefix_boundary_exact_head"
+
+                    def _sol(c):
+                        return get_sol(c[2], c[1], c[0], num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+
+                else:
+                    depth, query, key_tag = 4, (num_heads, prefix, s, b), "ctx_dsa_prefix_boundary"
+
+                    def _sol(c):
+                        return get_sol(c[3], c[2], c[1], c[0], kvcache_quant_mode, fmha_quant_mode)[0]
+            elif exact_head:
+                # Legacy raw [num_heads][s][b] table.
+                depth, query, key_tag = 2, (s + prefix, b), "ctx_dsa_legacy_exact_head"
 
                 def _sol(c):
-                    return get_sol(c[3], c[2], c[1], c[0], kvcache_quant_mode, fmha_quant_mode)[0]
+                    return get_sol(c[1], c[0], 0, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
             else:
-                # prefix=0 anchor at full_s: util comes from the prefix=0 slice (regime-matched),
-                # the prefix effect stays in sol_time = SOL(s, prefix). c = (num_heads, full_s, b).
-                depth, query, key_tag = 3, (num_heads, s + prefix, b), "ctx_dsa_p0anchor"
-
-                if has_prefix and prefix_keys and prefix_keys[0] == 0:
-
-                    def slice_fn():
-                        base = _slice()
-                        return {
-                            head: head_data[0]
-                            for head, head_data in base.items()
-                            if isinstance(head_data, dict) and 0 in head_data
-                        }
-                else:
-                    slice_fn = _slice  # legacy [num_heads][s][b]: samples are already prefix=0
+                depth, query, key_tag = 3, (num_heads, s + prefix, b), "ctx_dsa_legacy"
 
                 def _sol(c):
                     return get_sol(c[2], c[1], 0, c[0], kvcache_quant_mode, fmha_quant_mode)[0]
+
+            def slice_fn():
+                if calibration_data is None:
+                    raise PerfDataNotAvailableError("Raw context DSA calibration data is not available.")
+                return calibration_data
 
             grid = util_empirical.grid_for(
                 (

@@ -585,8 +585,8 @@ class GenerationAttention(Operation):
     Generation (decode) attention operation.
 
     Owns an extrapolated SILICON working cache plus a raw measured cache for
-    EMPIRICAL utilization calibration. ``load_data`` applies SOL clamping,
-    snapshots the raw rows, then expands the working grid.
+    empirical utilization calibration. ``load_data`` applies SOL clamping,
+    snapshots the measured rows, then expands the working grid.
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -623,8 +623,9 @@ class GenerationAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads generation_attention CSV, clamps to SOL, preserves
-        measured rows, extrapolates the working grid, and binds both views.
+        """Idempotent. Loads generation_attention CSV, clamps to SOL,
+        preserves measured rows, extrapolates the working grid, and binds both
+        database views.
 
         Mirrors ``GEMM.load_data``: correction/extrapolation operate on the
         canonical class-cache value (passed explicitly), then the instance
@@ -644,9 +645,6 @@ class GenerationAttention(Operation):
             )
 
             cls._correct_sol(database, cls._data_cache[key])
-            # EMPIRICAL calibration must use collected rows, not latency-space
-            # points synthesized by the SILICON extrapolator below.  Preserve
-            # the SOL-clamped measured table before expanding the working grid.
             cls._raw_data_cache[key] = copy.deepcopy(cls._data_cache[key])
             cls._extrapolate(cls._data_cache[key])
             # Re-clamp after extrapolation: interpolated/extrapolated grid
@@ -795,53 +793,12 @@ class GenerationAttention(Operation):
             sol_time = get_sol(b, s, n, n_kv, h, w, kvcache_quant_mode)[0]
             n_kv_lookup = n_kv if n_kv != n else 0
 
-            def _exact_raw_n_grid(slice_window):
-                """Measured exact-head slice for safe ragged (batch, seq) interpolation."""
-                cls.load_data(database)
-                raw_wrapper = getattr(database, "_raw_generation_attention_data", None)
-                if raw_wrapper is None or not getattr(raw_wrapper, "loaded", True):
-                    return None
-                try:
-                    raw_slice = util_empirical.require_data_slice(
-                        raw_wrapper,
-                        kvcache_quant_mode,
-                        n_kv_lookup,
-                        h,
-                        slice_window,
-                    )
-                except PerfDataNotAvailableError:
-                    return None
-                if n not in raw_slice:
-                    return None
-
-                def _sol(c):  # c = (b, s), n is an exact shape identity
-                    nkv = n if n_kv_lookup == 0 else n_kv_lookup
-                    return get_sol(c[0], c[1], n, nkv, h, slice_window, kvcache_quant_mode)[0]
-
-                return util_empirical.grid_for(
-                    (
-                        "gen_attn_raw_exact_n",
-                        database.systems_root,
-                        database.system,
-                        database.backend,
-                        database.version,
-                        bool(database.enable_shared_layer),
-                        id(raw_wrapper),
-                        kvcache_quant_mode.name,
-                        n_kv_lookup,
-                        h,
-                        slice_window,
-                        n,
-                    ),
-                    lambda: raw_slice[n],
-                    _sol,
-                    depth=2,
-                )
-
             def _own_grid(slice_window):
                 def _slice():
                     cls.load_data(database)
-                    wrapper = database._generation_attention_data
+                    wrapper = getattr(database, "_raw_generation_attention_data", None)
+                    if wrapper is None:
+                        raise PerfDataNotAvailableError("Raw generation attention data is not loaded.")
                     wrapper.raise_if_not_loaded()
                     return util_empirical.require_data_slice(
                         wrapper,
@@ -872,13 +829,6 @@ class GenerationAttention(Operation):
                 )
 
             for slice_window in [w, 0] if w > 0 else [w]:
-                exact_grid = _exact_raw_n_grid(slice_window)
-                bracketed = util_empirical.estimate_bracketed_2d(sol_time, (b, s), exact_grid)
-                if bracketed is not None:
-                    return bracketed[0]
-
-                # Preserve the prior multidimensional nearest-neighbour path for
-                # non-exact heads and malformed/sparse exact-head slices.
                 grid = _own_grid(slice_window)
                 if grid is not None and grid.samples:
                     latency, _ = util_empirical.estimate(sol_time, (n, b, s), grid)

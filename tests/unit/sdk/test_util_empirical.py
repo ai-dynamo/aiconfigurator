@@ -11,18 +11,35 @@ from aiconfigurator.sdk.operations.util_empirical import (
     ReferenceCandidate,
     UtilGrid,
     UtilSample,
-    bracketed_2d_util,
+    capture_provenance,
     clear_grid_cache,
-    estimate_bracketed_2d,
+    estimate,
     grid_for,
     grid_from_reference,
     require_data_slice,
+    worst_provenance,
 )
 
 pytestmark = pytest.mark.unit
 
 
-def test_1d_exact_hit_preserves_measured_util_with_unsorted_samples():
+def test_exact_singleton_duplicate_and_empty_grid_contracts():
+    exact = UtilGrid(
+        [
+            UtilSample((16.0,), 0.8),
+            UtilSample((8.0,), 0.2),
+            UtilSample((9.0,), 0.4),
+        ]
+    )
+    duplicate = UtilGrid([UtilSample((4.0,), 0.6), UtilSample((4.0,), 0.7)])
+
+    assert exact.util((9.0,)) == pytest.approx(0.4)
+    assert UtilGrid([UtilSample((0.0,), 0.3)]).util((100.0,)) == pytest.approx(0.3)
+    assert duplicate.util((4.0,)) == pytest.approx(0.6)
+    assert UtilGrid([]).util((1.0, 2.0)) is None
+
+
+def test_1d_k2_idw_uses_nearest_samples_in_normalized_log_space():
     grid = UtilGrid(
         [
             UtilSample((16.0,), 0.8),
@@ -30,159 +47,44 @@ def test_1d_exact_hit_preserves_measured_util_with_unsorted_samples():
             UtilSample((9.0,), 0.4),
         ]
     )
-
-    assert grid.util((9.0,)) == pytest.approx(0.4)
-
-
-def test_1d_uses_bracketing_samples_with_log_space_idw():
-    # The two globally nearest samples to 11 are 9 and 8 in log space. The
-    # interpolation contract must instead bracket the query with 9 and 16.
-    grid = UtilGrid(
-        [
-            UtilSample((16.0,), 0.8),
-            UtilSample((8.0,), 0.2),
-            UtilSample((9.0,), 0.4),
-        ]
-    )
-    alpha = (math.log(11.0) - math.log(9.0)) / (math.log(16.0) - math.log(9.0))
-    expected = 0.4 + alpha * (0.8 - 0.4)
+    distance_9 = math.log(11.0) - math.log(9.0)
+    distance_8 = math.log(11.0) - math.log(8.0)
+    expected = (0.4 / distance_9 + 0.2 / distance_8) / (1.0 / distance_9 + 1.0 / distance_8)
 
     assert grid.util((11.0,)) == pytest.approx(expected)
 
 
-def test_1d_extrapolation_freezes_boundary_util():
+def test_multidimensional_k2_idw_uses_nearest_samples():
     grid = UtilGrid(
         [
-            UtilSample((16.0,), 0.8),
-            UtilSample((8.0,), 0.2),
+            UtilSample((1.0, 1.0), 0.2),
+            UtilSample((100.0, 1.0), 0.6),
+            UtilSample((100.0, 100.0), 1.0),
         ]
     )
+
+    # (10, 1) is equidistant from the first two normalized-log samples.
+    assert grid.util((10.0, 1.0)) == pytest.approx(0.4)
+
+
+def test_1d_extrapolation_clamps_to_measured_bounds():
+    grid = UtilGrid([UtilSample((8.0,), 0.2), UtilSample((16.0,), 0.8)])
 
     assert grid.util((1.0,)) == pytest.approx(0.2)
     assert grid.util((128.0,)) == pytest.approx(0.8)
 
 
-def test_1d_singleton_and_constant_log_coordinate_return_only_util():
-    singleton = UtilGrid([UtilSample((0.0,), 0.3)])
-    repeated_coordinate = UtilGrid(
-        [
-            UtilSample((4.0,), 0.6),
-            UtilSample((4.0,), 0.7),
-            UtilSample((16.0,), 0.9),
-        ]
-    )
-    alpha = (math.log(8.0) - math.log(4.0)) / (math.log(16.0) - math.log(4.0))
-
-    assert singleton.util((100.0,)) == pytest.approx(0.3)
-    assert repeated_coordinate.util((4.0,)) == pytest.approx(0.6)
-    assert repeated_coordinate.util((8.0,)) == pytest.approx(0.6 + alpha * (0.9 - 0.6))
-
-
-def test_multidimensional_grid_retains_single_nearest_neighbour():
+def test_multidimensional_extrapolation_clamps_each_axis():
     grid = UtilGrid(
         [
-            UtilSample((1.0, 100.0), 0.1),
-            UtilSample((10.0, 10.0), 0.5),
-            UtilSample((100.0, 1.0), 0.9),
+            UtilSample((1.0, 1.0), 0.2),
+            UtilSample((1.0, 10.0), 0.4),
+            UtilSample((10.0, 1.0), 0.8),
         ]
     )
 
-    assert grid.util((9.0, 9.0)) == pytest.approx(0.5)
-
-
-def test_bracketed_2d_interpolates_each_ragged_curve_then_first_axis():
-    # The two batch curves intentionally have different sequence anchors: no
-    # Cartesian rectangle exists at the query's neighbouring coordinates.
-    samples = [
-        UtilSample((2.0, 100.0), 0.2),
-        UtilSample((2.0, 200.0), 0.4),
-        UtilSample((4.0, 80.0), 0.4),
-        UtilSample((4.0, 240.0), 0.8),
-    ]
-
-    # Backward-compatible default: physical-coordinate interpolation.
-    assert bracketed_2d_util(samples, (3.0, 150.0)) == pytest.approx(0.4375)
-
-
-def test_bracketed_2d_can_use_log_coordinates_explicitly():
-    samples = [
-        UtilSample((2.0, 100.0), 0.2),
-        UtilSample((2.0, 200.0), 0.4),
-        UtilSample((4.0, 80.0), 0.4),
-        UtilSample((4.0, 240.0), 0.8),
-    ]
-
-    seq_alpha_2 = math.log(150.0 / 100.0) / math.log(200.0 / 100.0)
-    seq_alpha_4 = math.log(150.0 / 80.0) / math.log(240.0 / 80.0)
-    batch_alpha = math.log(3.0 / 2.0) / math.log(4.0 / 2.0)
-    batch_2_util = 0.2 + seq_alpha_2 * (0.4 - 0.2)
-    batch_4_util = 0.4 + seq_alpha_4 * (0.8 - 0.4)
-    expected = batch_2_util + batch_alpha * (batch_4_util - batch_2_util)
-
-    assert bracketed_2d_util(samples, (3.0, 150.0), log_space=True) == pytest.approx(expected)
-
-
-def test_bracketed_2d_default_freezes_each_axis_boundary_util():
-    samples = [
-        UtilSample((2.0, 100.0), 0.2),
-        UtilSample((2.0, 200.0), 0.4),
-        UtilSample((4.0, 80.0), 0.5),
-        UtilSample((4.0, 240.0), 0.9),
-    ]
-
-    assert bracketed_2d_util(samples, (1.0, 1000.0)) == pytest.approx(0.4)
-    assert bracketed_2d_util(samples, (10.0, 1.0)) == pytest.approx(0.5)
-
-
-def test_bracketed_2d_excludes_curves_that_do_not_cover_sequence():
-    samples = [
-        UtilSample((1.0, 100.0), 0.1),
-        UtilSample((1.0, 200.0), 0.3),
-        UtilSample((2.0, 100.0), 0.2),
-        UtilSample((2.0, 200.0), 0.4),
-        # This nominal upper curve stopped before sequence=150. It must not
-        # bracket batch=3; the largest eligible lower curve (batch=2) wins.
-        UtilSample((4.0, 80.0), 0.5),
-        UtilSample((4.0, 120.0), 0.9),
-    ]
-    seq_alpha = math.log(150.0 / 100.0) / math.log(200.0 / 100.0)
-    expected = 0.2 + seq_alpha * (0.4 - 0.2)
-
-    assert bracketed_2d_util(
-        samples,
-        (3.0, 150.0),
-        log_space=True,
-        require_y_coverage=True,
-    ) == pytest.approx(expected)
-
-
-def test_bracketed_2d_returns_none_when_no_curve_covers_sequence():
-    samples = [
-        UtilSample((2.0, 100.0), 0.2),
-        UtilSample((2.0, 200.0), 0.4),
-        UtilSample((4.0, 80.0), 0.5),
-        UtilSample((4.0, 240.0), 0.9),
-    ]
-
-    assert bracketed_2d_util(samples, (3.0, 1000.0), require_y_coverage=True) is None
-
-
-def test_estimate_bracketed_2d_records_provenance_only_on_success():
-    from aiconfigurator.sdk.operations import util_empirical
-
-    grid = UtilGrid(
-        [
-            UtilSample((2.0, 100.0), 0.2),
-            UtilSample((2.0, 200.0), 0.4),
-            UtilSample((4.0, 100.0), 0.4),
-            UtilSample((4.0, 200.0), 0.8),
-        ]
-    )
-    with util_empirical.capture_provenance() as tags:
-        result = estimate_bracketed_2d(0.9, (3.0, 150.0), grid)
-
-    assert result == pytest.approx((2.0, 0.45))
-    assert tags == {"empirical"}
+    # Clamping (0.1, 100) produces the exact measured boundary (1, 10).
+    assert grid.util((0.1, 100.0)) == pytest.approx(0.4)
 
 
 @pytest.mark.parametrize(
@@ -232,49 +134,52 @@ def test_reference_grid_cache_isolated_by_selected_candidate_identity():
     assert first_again is first
 
 
-def test_reference_selection_cache_is_policy_isolated_and_preserves_provenance():
+def test_reference_selection_is_policy_isolated_and_preserves_provenance():
     clear_grid_cache()
-    data = {1: 2.0}
-    calls = []
+    shape_data = {1: 2.0}
+    quant_data = {1: 4.0}
 
-    def candidates(provenance):
-        calls.append(provenance)
+    shape_candidate = ReferenceCandidate(
+        features=(1.0,),
+        node=shape_data,
+        sol_fn=lambda _: 1.0,
+        provenance="xshape",
+    )
+
+    def aggressive_candidates():
         return [
+            shape_candidate,
             ReferenceCandidate(
-                features=(1.0,),
-                node=data,
+                features=(100.0,),
+                node=quant_data,
                 sol_fn=lambda _: 1.0,
-                provenance=provenance,
-            )
+                provenance="xquant",
+            ),
         ]
 
-    first = grid_from_reference(
-        ("stable-selection",),
-        (1.0,),
-        lambda: candidates("xshape"),
+    conservative = grid_from_reference(
+        ("nearest-reference",),
+        (90.0,),
+        lambda: [shape_candidate],
         depth=1,
-        selection_key=(id(data), "xshape-policy"),
+        selection_key=(id(shape_data), "conservative"),
     )
-    first_again = grid_from_reference(
-        ("stable-selection",),
-        (1.0,),
-        lambda: candidates("xshape"),
+    aggressive = grid_from_reference(
+        ("nearest-reference",),
+        (90.0,),
+        aggressive_candidates,
         depth=1,
-        selection_key=(id(data), "xshape-policy"),
-    )
-    second = grid_from_reference(
-        ("stable-selection",),
-        (1.0,),
-        lambda: candidates("xquant"),
-        depth=1,
-        selection_key=(id(data), "xquant-policy"),
+        selection_key=(id(quant_data), "aggressive"),
     )
 
-    assert first_again is first
-    assert second is not first
-    assert calls == ["xshape", "xquant"]
-    assert first.reference_provenance == "xshape"
-    assert second.reference_provenance == "xquant"
+    with capture_provenance() as tags:
+        conservative_result = estimate(1.0, (1.0,), conservative, provenance=conservative.reference_provenance)
+        aggressive_result = estimate(1.0, (1.0,), aggressive, provenance=aggressive.reference_provenance)
+
+    assert conservative_result == pytest.approx((2.0, 0.5))
+    assert aggressive_result == pytest.approx((4.0, 0.25))
+    assert tags == {"xshape", "xquant"}
+    assert worst_provenance(tags) == "xquant"
 
 
 def test_require_data_slice_types_only_explicit_missing_keys():

@@ -22,15 +22,12 @@ latency = SOL(query) / util ,   util = SOL / measured > 0
 `util` is an effective calibration factor, not a bounded physical efficiency. It can
 exceed 1 when hardware/kernel effects are not represented by the analytic SOL baseline;
 large values are data/model sanity signals and are not silently clamped. It is read
-best-effort from collected data in per-axis normalised log space. One-dimensional curves use the two bracketing samples
-(`k=2`, `p=1` inverse-distance weighting), with exact hits preserved and out-of-range
-queries clamped to boundary util. Generic multi-dimensional grids retain nearest-
-neighbour lookup because their axes may mix numeric coordinates with categorical/kernel
-regimes. Operations can explicitly opt into the ragged 2-D bracket helper when they know
-the axes: GenerationAttention interpolates exact-head raw `(batch, sequence)` curves in
-physical coordinates; Context DSA uses log coordinates and admits only batch curves whose
-original sequence range covers the query. Neither path requires a Cartesian product, and
-both fall back to the existing NN/transfer chain on a miss. SOL is analytic and
+best-effort from the operation's calibration rows in per-axis normalised log space. Every
+numeric grid uses the same two-neighbour inverse-distance weighting (`k=2`, `p=1`): exact hits are
+preserved, each query axis is clamped to the measured range, and the two nearest samples
+are blended without requiring a Cartesian product. Operations select categorical/kernel-
+regime slices before building the grid; the shared estimator only sees numeric
+coordinates. SOL is analytic and
 quant-aware, so it carries the structural part of a query (sizes, quant coefficients)
 while `util` carries only efficiency. Because the SOL ratio cancels, the reconstruction
 is largely insensitive to absolute SOL error — it removes the constant-fallback tail
@@ -157,39 +154,39 @@ the number of comparable points in parentheses. Unless marked, a row contains te
 deterministic irregular off-grid points per phase on B200/SGLang 0.5.10.
 
 Across every phase and sample kind in the primary matrix, 518/546 silicon-eligible pairs
-are comparable: **1.69% mean, 0.98% median, 4.69% p90, 8.68% max, and 1.13% WAPE**.
+are comparable: **1.88% mean, 1.05% median, 4.99% p90, 10.18% max, and 1.67% WAPE**.
 
 | model / configuration | type | quantization | prefill | decode | encoder |
 |---|---|---|---:|---:|---:|
-| **Primary off-grid aggregate** | mixed | mixed | **1.16 / 2.73 / 7.04 (n=185)** | **2.58 / 5.87 / 8.68 (n=170)** | — |
-| Qwen3-32B | dense | BF16 | 0.72 / 1.34 / 1.53 (n=10) | 1.03 / 1.52 / 3.59 (n=10) | — |
-| Qwen3-32B | dense | FP8 | 0.98 / 1.30 / 4.29 (n=10) | 2.28 / 4.70 / 6.82 (n=10) | — |
-| Qwen3-32B | dense | FP8-static | 0.56 / 1.19 / 1.37 (n=10) | 2.23 / 2.65 / 3.38 (n=10) | — |
-| Llama-3.1-70B | dense | FP8-static | 0.71 / 1.01 / 1.10 (n=10) | 3.38 / 3.73 / 3.87 (n=10) | — |
-| Qwen3.5-27B⁴ | dense/GDN | BF16 | 4.68 / 5.33 / 5.46 (n=10) | 6.25 / 7.75 / 7.91 (n=10) | — |
-| Qwen3-235B-A22B | MoE | BF16 | 0.53 / 0.40 / 2.71 (n=10) | 2.42 / 3.38 / 3.47 (n=10) | — |
-| Qwen3-235B-A22B | MoE | FP8 | 0.59 / 0.83 / 2.25 (n=10) | 2.90 / 3.82 / 3.85 (n=10) | — |
-| Qwen3-235B-A22B | MoE | NVFP4 | 0.26 / 0.57 / 0.67 (n=10) | 4.15 / 5.91 / 5.96 (n=10) | — |
-| MiniMax-M2.5 | MoE | FP8-block | 0.24 / 0.30 / 1.07 (n=10) | 2.60 / 3.93 / 4.24 (n=10) | — |
-| MiniMax-M2.5 | MoE | NVFP4 | 0.53 / 1.43 / 2.34 (n=10) | 3.67 / 6.52 / 7.04 (n=10) | — |
-| Nemotron-Nano | hybrid/MoE | BF16 | 0.17 / 0.34 / 0.34 (n=10) | 3.43 / 5.53 / 7.28 (n=10) | — |
+| **Primary off-grid aggregate** | mixed | mixed | **1.45 / 4.34 / 10.07 (n=185)** | **2.64 / 5.66 / 8.91 (n=170)** | — |
+| Qwen3-32B | dense | BF16 | 0.40 / 0.62 / 0.80 (n=10) | 2.35 / 3.39 / 4.49 (n=10) | — |
+| Qwen3-32B | dense | FP8 | 0.43 / 0.96 / 1.17 (n=10) | 2.83 / 5.38 / 5.66 (n=10) | — |
+| Qwen3-32B | dense | FP8-static | 0.35 / 0.68 / 0.89 (n=10) | 3.13 / 4.72 / 5.64 (n=10) | — |
+| Llama-3.1-70B | dense | FP8-static | 0.35 / 0.55 / 1.04 (n=10) | 3.41 / 5.24 / 5.96 (n=10) | — |
+| Qwen3.5-27B⁴ | dense/GDN | BF16 | 4.48 / 5.12 / 5.28 (n=10) | 5.43 / 6.57 / 7.24 (n=10) | — |
+| Qwen3-235B-A22B | MoE | BF16 | 0.36 / 0.36 / 2.63 (n=10) | 2.92 / 4.24 / 4.99 (n=10) | — |
+| Qwen3-235B-A22B | MoE | FP8 | 0.43 / 0.54 / 2.22 (n=10) | 3.76 / 4.84 / 7.31 (n=10) | — |
+| Qwen3-235B-A22B | MoE | NVFP4 | 0.34 / 0.56 / 0.58 (n=10) | 4.26 / 6.12 / 6.13 (n=10) | — |
+| MiniMax-M2.5 | MoE | FP8-block | 0.29 / 0.41 / 1.29 (n=10) | 1.64 / 2.37 / 3.32 (n=10) | — |
+| MiniMax-M2.5 | MoE | NVFP4 | 0.58 / 1.79 / 2.95 (n=10) | 2.36 / 4.00 / 4.13 (n=10) | — |
+| Nemotron-Nano | hybrid/MoE | BF16 | 0.09 / 0.18 / 0.34 (n=10) | 3.85 / 6.39 / 7.03 (n=10) | — |
 | Kimi-K2.5 | MLA/MoE | BF16 + INT4-WO | — | — | — |
-| DeepSeek-V3.2 (TP2/PP2) | DSA | FP8-block | 2.62 / 5.91 / 5.91 (n=5) | 0.51 / 0.82 / 0.98 (n=10) | — |
-| DeepSeek-V3.2 (TP8) | DSA | FP8-block | 2.00 / 6.40 / 7.04 (n=10) | 0.74 / 1.36 / 2.33 (n=14)¹ | — |
-| GLM-5 (PP2) | DSA | BF16 | 1.30 / 2.20 / 2.25 (n=10) | 0.68 / 1.59 / 1.69 (n=10) | — |
-| GLM-5 | DSA | FP8 | 1.34 / 2.00 / 2.23 (n=10) | 1.12 / 1.93 / 2.52 (n=10) | — |
-| GLM-5 | DSA | NVFP4 | 2.10 / 3.05 / 3.63 (n=10) | 1.31 / 2.29 / 2.66 (n=10) | — |
-| DeepSeek-V4-Pro (PP2) | DSV4 | FP8-block | 0.89 / 1.30 / 1.42 (n=10) | 3.73 / 6.26 / 8.68 (n=10) | — |
-| DeepSeek-V4-Pro | DSV4 | FP8 + MXFP4/MXFP8 | 1.12 / 1.32 / 1.98 (n=10) | 2.20 / 4.93 / 5.36 (n=10) | — |
-| DeepSeek-V4-Flash | DSV4 | FP8 + MXFP4/MXFP8 | 1.45 / 2.49 / 2.73 (n=10) | — | — |
-| Qwen3-VL-32B image | dense/VL | BF16 | 0.58 (n=1)² | 0.29 (n=1)² | 5.06 (n=1)² |
-| Qwen3-VL-30B-A3B image | MoE/VL | BF16 | 0.34 (n=1)² | 2.45 (n=1)² | 5.23 (n=1)² |
-| **Cross-stack off-grid aggregate**³ | mixed | mixed | **0.89 / 1.50 / 9.87 (n=64)** | **1.07 / 1.83 / 3.25 (n=64)** | — |
+| DeepSeek-V3.2 (TP2/PP2) | DSA | FP8-block | 4.08 / 7.92 / 7.92 (n=5) | 0.39 / 0.87 / 1.02 (n=10) | — |
+| DeepSeek-V3.2 (TP8) | DSA | FP8-block | 4.09 / 10.03 / 10.07 (n=10) | 0.65 / 1.40 / 2.24 (n=14)¹ | — |
+| GLM-5 (PP2) | DSA | BF16 | 1.77 / 2.47 / 2.56 (n=10) | 0.53 / 1.14 / 1.39 (n=10) | — |
+| GLM-5 | DSA | FP8 | 2.89 / 4.93 / 6.54 (n=10) | 0.96 / 2.48 / 2.99 (n=10) | — |
+| GLM-5 | DSA | NVFP4 | 4.33 / 6.97 / 9.50 (n=10) | 1.07 / 2.24 / 2.50 (n=10) | — |
+| DeepSeek-V4-Pro (PP2) | DSV4 | FP8-block | 1.60 / 3.96 / 4.55 (n=10) | 3.86 / 6.31 / 8.91 (n=10) | — |
+| DeepSeek-V4-Pro | DSV4 | FP8 + MXFP4/MXFP8 | 0.85 / 1.29 / 1.64 (n=10) | 2.10 / 5.00 / 5.68 (n=10) | — |
+| DeepSeek-V4-Flash | DSV4 | FP8 + MXFP4/MXFP8 | 1.15 / 1.73 / 1.83 (n=10) | — | — |
+| Qwen3-VL-32B image | dense/VL | BF16 | 0.81 (n=1)² | 2.79 (n=1)² | 3.31 (n=1)² |
+| Qwen3-VL-30B-A3B image | MoE/VL | BF16 | 0.63 (n=1)² | 4.70 (n=1)² | 3.42 (n=1)² |
+| **Cross-stack off-grid aggregate**³ | mixed | mixed | **1.02 / 2.33 / 15.72 (n=64)** | **2.14 / 4.82 / 6.63 (n=64)** | — |
 
 1. The TP8 decode row uses all 14 boundary-util extrapolation probes; its ten irregular
-   probes have 0.84% mean APE with the same 1.36% p90 and 2.33% max.
+   probes have 0.73% mean APE with the same 1.40% p90 and 2.24% max.
 2. VL image values are one-point smoke checks, not distributions.
-3. The separate stack sweep covers B200/H100/B300 and SGLang/TRT-LLM/vLLM. Its 9.87%
+3. The separate stack sweep covers B200/H100/B300 and SGLang/TRT-LLM/vLLM. Its 15.72%
    maximum is the DSA `index_topk` transition; the B300/TRT-LLM MoE case has no SILICON
    reference and is excluded.
 4. Qwen3.5's SILICON path reuses sibling-version collected GDN kernels; strict EMPIRICAL
