@@ -27,6 +27,7 @@ from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import MLATokenToKVPool, ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
+from collector.case_generator import get_context_mla_case_specs, get_generation_mla_case_specs
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.registry_types import PerfFile
 
@@ -228,33 +229,11 @@ def get_context_mla_test_cases():
 
     backend = _select_default_mla_backend()
     dtype_list = [torch.bfloat16] if backend == "triton" else [torch.bfloat16, torch.float8_e4m3fn]
-    test_cases = []
-    n_list = [64, 128]
-    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 32768]
-    for n in n_list:
-        for b in b_list:
-            for s in s_list:
-                for dtype in dtype_list:
-                    for tp_size in [1, 2, 4, 8, 16, 32, 64]:
-                        if b * s > 65536:
-                            continue
-                        test_cases.append(
-                            [
-                                s,
-                                b,
-                                1,
-                                dtype,
-                                n,
-                                tp_size,
-                                tp_size,
-                                64,
-                                10,
-                                6,
-                                True,
-                            ]
-                        )
-    return test_cases
+    return _build_mla_test_cases(
+        get_context_mla_case_specs(),
+        dtype_list=dtype_list,
+        tp_sizes=(1, 2, 4, 8, 16, 32, 64),
+    )
 
 
 def get_generation_mla_test_cases():
@@ -269,58 +248,83 @@ def get_generation_mla_test_cases():
         dtype_list = [torch.bfloat16]
     else:
         dtype_list = [torch.bfloat16, torch.float8_e4m3fn]
+    return _build_mla_test_cases(
+        get_generation_mla_case_specs(),
+        dtype_list=dtype_list,
+        tp_sizes=(1, 2, 4, 8, 16, 32, 64),
+        backend=backend,
+        sm_version=sm_version,
+    )
+
+
+def _build_mla_test_cases(case_specs, *, dtype_list, tp_sizes, backend=None, sm_version=None):
+    """Adapt the shared YAML MLA catalog to SGLang's legacy run tuple.
+
+    The perf DB key does not contain a model name, so model aliases that resolve
+    to the same physical shape are emitted once.  SGLang's standalone MLA
+    harness currently supports the DeepSeek/Kimi geometry declared below; fail
+    loudly if a future catalog entry needs a different kernel layout instead of
+    silently collecting it under the wrong DB key.
+    """
+
     test_cases = []
-    n_list = [64, 128]
-    for n in n_list:
-        for b in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]:
-            for s in [
-                2,
-                4,
-                8,
-                16,
-                32,
-                64,
-                128,
-                256,
-                512,
-                1024,
-                2048,
-                4096,
-                8192,
-                16384,
-                32768,
-                65536,
-                131072,
-            ]:
-                for dtype in dtype_list:
-                    for tp_size in [1, 2, 4, 8, 16, 32, 64]:
-                        if backend == "trtllm_mla" and sm_version == 120 and n // tp_size != 128:
-                            # XQA MLA kernel has head_group_ratio=128 hardcoded; it always reads
-                            # 128 Q heads from the q tensor regardless of the runtime head count.
-                            # local_heads != 128 causes out-of-bounds GPU memory reads and crashes.
-                            # Only n=128, tp=1 (local_heads=128) is safe.
-                            continue
-                        if b * s > 1024 * 4096 * 4:
-                            continue
-                        total_len = s
-                        # Guard against hitting int32 limits in the legacy flashmla kernel path.
-                        if (b * total_len) + MLA_PAGE_SIZE > MAX_KV_LOC:
-                            continue
-                        test_cases.append(
-                            [
-                                s - 1,
-                                b,
-                                1,
-                                dtype,
-                                n,
-                                tp_size,
-                                tp_size,
-                                64,
-                                10,
-                                6,
-                                False,
-                            ]
-                        )
+    seen = set()
+    expected_geometry = (KV_LORA_RANK, QK_NOPE_HEAD_DIM, QK_ROPE_HEAD_DIM, 128)
+    for spec in case_specs:
+        geometry = (spec.kv_lora_rank, spec.qk_nope_head_dim, spec.qk_rope_head_dim, spec.v_head_dim)
+        if geometry != expected_geometry:
+            raise ValueError(f"Unsupported SGLang MLA geometry for {spec.model_name}: {geometry}")
+        if spec.kv_cache_block_size != MLA_PAGE_SIZE:
+            raise ValueError(
+                f"Unsupported SGLang MLA page size for {spec.model_name}: "
+                f"{spec.kv_cache_block_size} (expected {MLA_PAGE_SIZE})"
+            )
+
+        for dtype in dtype_list:
+            for tp_size in tp_sizes:
+                if spec.num_heads % tp_size:
+                    continue
+                if (
+                    not spec.is_context_phase
+                    and backend == "trtllm_mla"
+                    and sm_version == 120
+                    and spec.num_heads // tp_size != 128
+                ):
+                    # XQA MLA kernel has head_group_ratio=128 hardcoded; it always reads
+                    # 128 Q heads from the q tensor regardless of the runtime head count.
+                    # local_heads != 128 causes out-of-bounds GPU memory reads and crashes.
+                    continue
+                if not spec.is_context_phase and (spec.batch_size * (spec.input_len + 1)) + MLA_PAGE_SIZE > MAX_KV_LOC:
+                    # Guard against int32 overflow in the legacy flashmla kernel path.
+                    continue
+
+                case = (
+                    spec.input_len,
+                    spec.batch_size,
+                    1,
+                    dtype,
+                    spec.num_heads,
+                    tp_size,
+                    tp_size,
+                    spec.kv_cache_block_size,
+                    10,
+                    6,
+                    spec.is_context_phase,
+                )
+                # This is the exact loader key (phase/file and backend are fixed
+                # for one getter).  Total heads and TP are only two ways to
+                # produce the same local-head kernel shape and are not stored by
+                # load_{context,generation}_mla_data.
+                physical_key = (
+                    dtype,
+                    spec.num_heads // tp_size,
+                    spec.batch_size,
+                    spec.input_len,
+                )
+                if physical_key in seen:
+                    continue
+                seen.add(physical_key)
+                test_cases.append(list(case))
     return test_cases
 
 

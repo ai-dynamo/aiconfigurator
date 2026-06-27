@@ -760,17 +760,13 @@ mod tests {
     }
 
     #[test]
-    fn encoder_attention_absent_on_vllm_b200_errors_clearly() {
-        // vLLM b200 doesn't ship encoder_attention_perf.txt; expect a clear
-        // IO error from the lazy loader.
+    fn encoder_attention_loads_from_vllm_b200() {
+        // The active vLLM B200 database ships the Qwen-VL encoder table.
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
-        let err = table
+        let latency = table
             .query_encoder(1, 1024, 16, 64, FmhaQuantMode::Bfloat16)
-            .unwrap_err();
-        match err {
-            AicError::Io { .. } | AicError::PerfDatabase(_) => {}
-            other => panic!("unexpected error variant: {other:?}"),
-        }
+            .expect("encoder attention table must load and resolve an exact point");
+        assert!(latency.is_finite() && latency > 0.0);
     }
 
     #[test]

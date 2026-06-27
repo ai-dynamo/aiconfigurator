@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
 import csv
 from itertools import pairwise
 from pathlib import Path
 
-from collector.case_generator import moe_model_allows_quantization, windows_for_head_dim
+from collector.case_generator import get_attention_head_configs, moe_model_allows_quantization
 from collector.helper import create_test_case_id
 from collector.model_cases import (
     CaseSelector,
@@ -23,13 +24,14 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SUPPORT_MATRIX_ROOT = REPO_ROOT / "src" / "aiconfigurator" / "systems" / "support_matrix"
 
 
-def test_model_case_plan_merges_base_op_and_framework_specific_ops():
+def test_model_case_plan_merges_required_base_and_framework_specific_ops():
     plan = build_collection_case_plan(backend="sglang", model_path="deepseek-ai/DeepSeek-V3")
 
     assert plan.model_architecture == "DeepseekV3ForCausalLM"
     assert plan.model_cases_paths == [default_architecture_cases_path("DeepseekV3ForCausalLM")]
     assert "gemm" in plan.op_cases
-    assert "attention_context" in plan.op_cases
+    assert "attention_context" not in plan.op_cases
+    assert "attention_generation" not in plan.op_cases
     assert "moe" in plan.op_cases
     assert "mla_context" in plan.op_cases
     assert "wideep_mla_context" in plan.op_cases
@@ -37,23 +39,283 @@ def test_model_case_plan_merges_base_op_and_framework_specific_ops():
     assert "trtllm_moe_wideep" not in plan.op_cases
 
 
-def test_windows_for_head_dim_gates_sliding_window_by_head_dim():
-    # head_dim -> the only sliding-window value any surveyed model uses at that head_dim:
-    #   64=gpt-oss(128), 128=Llama-4(8192), 192=MiMo-V2-Flash(128), 256=gemma-4(1024).
-    # window=0 (dense) is always kept; unrelated window values for that head_dim are pruned.
-    sweep = [0, 128, 1024, 8192]
-    assert windows_for_head_dim(sweep, 64) == [0, 128]
-    assert windows_for_head_dim(sweep, 128) == [0, 8192]
-    assert windows_for_head_dim(sweep, 192) == [0, 128]
-    assert windows_for_head_dim(sweep, 256) == [0, 1024]
-    # unknown head_dim keeps only the dense (window=0) case
-    assert windows_for_head_dim(sweep, 96) == [0]
-    # order is preserved and no spurious values are added
-    assert windows_for_head_dim([128, 0], 64) == [128, 0]
+def test_attention_head_configs_preserve_real_model_structures_without_cross_mixing():
+    from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
+
+    expected_model_structures = {
+        # Gemma 4 local/global attention.
+        (16, 8, 256, 1024),
+        (16, 2, 512, 0),
+        # Llama 4 local attention.
+        (40, 8, 128, 8192),
+        # MiMo-V2 global/local attention.
+        (64, 4, 192, 0),
+        (64, 8, 192, 128),
+    }
+    impossible_cross_model_mixes = {
+        (64, 8, 256, 1024),
+        (40, 8, 192, 8192),
+        (16, 8, 512, 1024),
+        (64, 4, 64, 128),
+    }
+
+    for phase, get_shape_sweeps in (
+        ("context", get_attention_context_shape_sweeps),
+        ("generation", get_attention_generation_shape_sweeps),
+    ):
+        configs = {
+            (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
+            for config in get_attention_head_configs(get_shape_sweeps("sglang")[0], phase=phase)
+        }
+
+        assert expected_model_structures <= configs
+        assert configs.isdisjoint(impossible_cross_model_mixes)
+
+
+def test_full_attention_profiles_are_a_collector_v1_head_key_superset(monkeypatch):
+    """Freeze the v1 physical head/window footprint while allowing v2 additions."""
+    from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
+
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+
+    context_query_heads = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64, 96]
+    generation_mha_heads = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
+    generation_xqa_heads = [1, 2, 4, 8, 16, 32, 64, 96, 128]
+    kv_heads = [1, 2, 4, 8]
+
+    def context_keys(
+        head_windows,
+        query_heads=context_query_heads,
+        *,
+        include_self=True,
+        allow_explicit_equal=False,
+        max_gqa_ratio=None,
+    ):
+        keys = set()
+        for head_dim, windows in head_windows.items():
+            for num_heads in query_heads:
+                if include_self:
+                    keys.update((num_heads, num_heads, head_dim, window) for window in windows)
+                for num_kv_heads in kv_heads:
+                    if num_kv_heads > num_heads or (num_kv_heads == num_heads and not allow_explicit_equal):
+                        continue
+                    if num_heads % num_kv_heads:
+                        continue
+                    if max_gqa_ratio is not None and num_heads // num_kv_heads > max_gqa_ratio:
+                        continue
+                    keys.update((num_heads, num_kv_heads, head_dim, window) for window in windows)
+        return keys
+
+    def generation_keys(
+        head_windows,
+        *,
+        mha_heads=generation_mha_heads,
+        xqa_heads=generation_xqa_heads,
+        require_divisible=False,
+        allow_xqa_mha=False,
+        max_gqa_ratio=None,
+    ):
+        keys = set()
+        for head_dim, windows in head_windows.items():
+            for num_heads in mha_heads:
+                keys.update((num_heads, num_heads, head_dim, window) for window in windows)
+            for num_heads in xqa_heads:
+                for num_kv_heads in kv_heads:
+                    if num_kv_heads > num_heads or (num_kv_heads == num_heads and not allow_xqa_mha):
+                        continue
+                    if require_divisible and num_heads % num_kv_heads:
+                        continue
+                    if max_gqa_ratio is not None and num_heads // num_kv_heads > max_gqa_ratio:
+                        continue
+                    keys.update((num_heads, num_kv_heads, head_dim, window) for window in windows)
+        return keys
+
+    expected = {
+        ("sglang", "context"): context_keys({128: [0], 256: [0]}),
+        ("trtllm", "context"): context_keys({64: [0, 128], 128: [0], 256: [0]}),
+        ("vllm", "context"): context_keys(
+            {64: [0, 128], 128: [0, 128]},
+            query_heads=context_query_heads[:-1],
+        ),
+        ("vllm_xpu", "context"): context_keys(
+            {64: [0, 128], 128: [0]},
+            query_heads=context_query_heads[:-1],
+            include_self=False,
+            allow_explicit_equal=True,
+            max_gqa_ratio=16,
+        ),
+        ("sglang", "generation"): generation_keys({128: [0], 256: [0]}),
+        ("trtllm", "generation"): generation_keys({64: [0], 128: [0], 256: [0]})
+        | generation_keys({64: [128]}, mha_heads=[]),
+        ("vllm", "generation"): generation_keys(
+            {64: [0, 128], 128: [0, 128]},
+            mha_heads=[],
+            xqa_heads=generation_mha_heads,
+            require_divisible=True,
+            allow_xqa_mha=True,
+            max_gqa_ratio=16,
+        ),
+        ("vllm_xpu", "generation"): generation_keys(
+            {64: [0, 128], 128: [0]},
+            mha_heads=[],
+            xqa_heads=generation_mha_heads,
+            require_divisible=True,
+            allow_xqa_mha=True,
+            max_gqa_ratio=16,
+        ),
+    }
+
+    for (backend, phase), v1_keys in expected.items():
+        get_sweeps = get_attention_context_shape_sweeps if phase == "context" else get_attention_generation_shape_sweeps
+        current_keys = {
+            (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
+            for sweep in get_sweeps(backend)
+            for config in get_attention_head_configs(sweep, phase=phase)
+        }
+        assert not (v1_keys - current_keys), f"{backend} {phase} dropped collector-v1 head keys"
+
+
+def test_targeted_attention_profile_replaces_legacy_cartesian_grid(monkeypatch):
+    from collector.case_generator import get_attention_context_shape_sweeps
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "Qwen/Qwen3-32B-FP8")
+    configs = {
+        (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
+        for config in get_attention_head_configs(
+            get_attention_context_shape_sweeps("sglang")[0],
+            phase="context",
+        )
+    }
+
+    assert configs == {
+        (64, 8, 128, 0),
+        (32, 4, 128, 0),
+        (16, 2, 128, 0),
+        (8, 1, 128, 0),
+        (4, 1, 128, 0),
+        (2, 1, 128, 0),
+        (1, 1, 128, 0),
+    }
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "moonshotai/Kimi-K2.5")
+    kimi_configs = {
+        (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
+        for config in get_attention_head_configs(
+            get_attention_context_shape_sweeps("vllm")[0],
+            phase="context",
+        )
+    }
+    assert kimi_configs == {
+        (64, 64, 128, 0),
+        (32, 32, 128, 0),
+        (16, 16, 128, 0),
+        (8, 8, 128, 0),
+        (4, 4, 128, 0),
+        (2, 2, 128, 0),
+        (1, 1, 128, 0),
+    }
+
+
+def test_mimo_attention_profile_matches_aic_full_attention_window(monkeypatch):
+    from collector.case_generator import get_attention_context_shape_sweeps
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "XiaomiMiMo/MiMo-7B-Base")
+    configs = {
+        (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
+        for config in get_attention_head_configs(
+            get_attention_context_shape_sweeps("vllm")[0],
+            phase="context",
+        )
+    }
+
+    assert configs == {
+        (32, 8, 128, 0),
+        (16, 4, 128, 0),
+        (8, 2, 128, 0),
+        (4, 1, 128, 0),
+        (2, 1, 128, 0),
+        (1, 1, 128, 0),
+    }
+
+
+def test_qwen_vl_attention_profiles_stop_at_sdk_valid_tp16(monkeypatch):
+    from collector.case_generator import get_attention_context_shape_sweeps
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "Qwen/Qwen3-VL-32B-Instruct")
+    configs = {
+        (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
+        for config in get_attention_head_configs(
+            get_attention_context_shape_sweeps("vllm")[0],
+            phase="context",
+        )
+    }
+
+    assert configs == {
+        (64, 8, 128, 0),
+        (32, 4, 128, 0),
+        (16, 2, 128, 0),
+        (8, 1, 128, 0),
+        (4, 1, 128, 0),
+    }
+
+
+def test_full_encoder_attention_profiles_preserve_v1_and_add_qwen_tp16(monkeypatch):
+    from collector.case_generator import get_attention_encoder_head_configs, get_attention_encoder_shape_sweeps
+
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    sweep = get_attention_encoder_shape_sweeps("vllm")[0]
+    configs = get_attention_encoder_head_configs(sweep)
+    keys = {(config.num_heads, config.head_dim) for config in configs}
+    legacy_keys = {(num_heads, head_dim) for head_dim in sweep["head_dims"] for num_heads in sweep["head_counts"]}
+
+    assert legacy_keys <= keys
+    assert keys - legacy_keys == {(1, 64), (1, 72)}
+
+    case_count = sum(
+        1
+        for config in configs
+        for sequence_length in sweep["sequence_lengths"]
+        for batch_size in sweep["batch_sizes"]
+        if batch_size * sequence_length <= 131072
+        and 4 * batch_size * sequence_length * config.num_heads * config.head_dim * 2 < 2**31
+    )
+    assert case_count == 6699  # collector-v1 6315 + two n=1 model deltas (192 each)
+
+
+def test_targeted_encoder_attention_profile_is_model_exact(monkeypatch):
+    from collector.case_generator import get_attention_encoder_head_configs, get_attention_encoder_shape_sweeps
+
+    sweep = get_attention_encoder_shape_sweeps("vllm")[0]
+    for model_path, head_dim in (
+        ("Qwen/Qwen3-VL-4B-Instruct", 64),
+        ("Qwen/Qwen3-VL-32B-Instruct", 72),
+        ("Qwen/Qwen3-VL-235B-A22B-Instruct", 72),
+    ):
+        monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+        configs = get_attention_encoder_head_configs(sweep)
+
+        assert {(config.num_heads, config.head_dim) for config in configs} == {
+            (16, head_dim),
+            (8, head_dim),
+            (4, head_dim),
+            (2, head_dim),
+            (1, head_dim),
+        }
+        assert (
+            sum(
+                1
+                for config in configs
+                for sequence_length in sweep["sequence_lengths"]
+                for batch_size in sweep["batch_sizes"]
+                if batch_size * sequence_length <= 131072
+                and 4 * batch_size * sequence_length * config.num_heads * config.head_dim * 2 < 2**31
+            )
+            == 960
+        )
 
 
 def test_base_gemm_cases_are_readable_shape_specs():
-    plan = build_collection_case_plan(backend="sglang", model_path="deepseek-ai/DeepSeek-V3")
+    plan = build_collection_case_plan(backend="sglang", model_path="Qwen/Qwen3-32B")
     gemm_plan = plan.op_cases["gemm"]
     context_plan = plan.op_cases["attention_context"]
     generation_plan = plan.op_cases["attention_generation"]
@@ -153,7 +415,7 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     moe_cases = get_common_moe_test_cases()
-    assert len(moe_cases) == 4548
+    assert len(moe_cases) == 2931
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -166,11 +428,287 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
         and case.inter_size == 5120
         for case in moe_cases
     )
-    assert len(get_context_mla_case_specs()) == 550
-    assert len(get_generation_mla_case_specs()) == 885
-    assert len(get_common_mamba2_test_cases()) == 8
+    assert len(get_context_mla_case_specs()) == 220
+    assert len(get_generation_mla_case_specs()) == 362
+    mamba_cases = get_common_mamba2_test_cases()
+    assert len(mamba_cases) == 12
+    assert {case.model_name for case in mamba_cases} >= {"MAMBA2_GENERIC_4K", "MAMBA2_GENERIC_1K"}
     assert len(get_common_gdn_test_cases()) == 16
-    assert len(get_common_mhc_test_cases()) == 8
+    assert len(get_common_mhc_test_cases()) == 4
+
+
+def test_targeted_gdn_plan_contains_only_unique_kernel_physical_points(monkeypatch):
+    from collector.case_generator import get_common_gdn_test_cases
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "Qwen/Qwen3.5-27B")
+    cases = get_common_gdn_test_cases()
+
+    assert [(case.phase, case.model_name) for case in cases] == [
+        ("context", "Qwen/Qwen3.5-27B"),
+        ("generation", "Qwen/Qwen3.5-27B"),
+    ]
+
+    physical_points = []
+    for case in cases:
+        for batch_size in case.batch_size_list:
+            sequence_lengths = case.seq_len_list if case.phase == "context" else [1]
+            for seq_len in sequence_lengths:
+                physical_points.extend(
+                    [
+                        (
+                            case.phase,
+                            "conv",
+                            batch_size,
+                            seq_len,
+                            case.d_conv,
+                            case.num_k_heads,
+                            case.head_k_dim,
+                        ),
+                        (
+                            case.phase,
+                            "delta_rule",
+                            batch_size,
+                            seq_len,
+                            case.num_k_heads,
+                            case.head_k_dim,
+                            case.num_v_heads,
+                            case.head_v_dim,
+                        ),
+                    ]
+                )
+
+    assert len(physical_points) == 246
+    assert len(set(physical_points)) == len(physical_points)
+
+
+def test_mla_registry_getters_consume_the_yaml_catalog():
+    from collector.sglang.registry import REGISTRY as SGLANG_REGISTRY
+    from collector.trtllm.registry import REGISTRY as TRTLLM_REGISTRY
+
+    expected_catalog_call = {
+        "get_context_mla_test_cases": "get_context_mla_case_specs",
+        "get_generation_mla_test_cases": "get_generation_mla_case_specs",
+    }
+    for registry in (SGLANG_REGISTRY, TRTLLM_REGISTRY):
+        for entry in (item for item in registry if item.op in {"mla_context", "mla_generation"}):
+            source_path = REPO_ROOT / Path(*entry.module.split(".")).with_suffix(".py")
+            tree = ast.parse(source_path.read_text(), filename=str(source_path))
+            function = next(
+                node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == entry.get_func
+            )
+            calls = {
+                node.func.id
+                for node in ast.walk(function)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            }
+            assert expected_catalog_call[entry.get_func] in calls
+
+
+def test_mla_collectors_dedupe_on_loader_physical_keys(monkeypatch):
+    from types import SimpleNamespace
+
+    from collector.case_generator import get_context_mla_case_specs, get_generation_mla_case_specs
+
+    def load_adapter(module_path: str, globals_dict: dict):
+        source_path = REPO_ROOT / module_path
+        tree = ast.parse(source_path.read_text(), filename=str(source_path))
+        function = next(
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_build_mla_test_cases"
+        )
+        namespace = dict(globals_dict)
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
+        return namespace["_build_mla_test_cases"]
+
+    sglang_adapter = load_adapter(
+        "collector/sglang/collect_mla.py",
+        {
+            "KV_LORA_RANK": 512,
+            "QK_NOPE_HEAD_DIM": 128,
+            "QK_ROPE_HEAD_DIM": 64,
+            "MLA_PAGE_SIZE": 64,
+            "MAX_KV_LOC": 2**31,
+        },
+    )
+    trtllm_adapter = load_adapter(
+        "collector/trtllm/collect_mla.py",
+        {
+            "Scenario": lambda: SimpleNamespace(
+                q_lora_rank=1536,
+                kv_lora_rank=512,
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+            ),
+            "_mla_tokens_per_block": lambda: 32,
+        },
+    )
+
+    def physical_keys(cases):
+        return {(case[3], case[4] // case[6], case[1], case[0]) for case in cases}
+
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    full_specs = (get_context_mla_case_specs(), get_generation_mla_case_specs())
+    for adapter, kwargs in (
+        (sglang_adapter, {"tp_sizes": (1, 2, 4, 8, 16, 32, 64)}),
+        (trtllm_adapter, {}),
+    ):
+        context_cases = adapter(full_specs[0], dtype_list=("bf16", "fp8"), **kwargs)
+        generation_cases = adapter(full_specs[1], dtype_list=("bf16", "fp8"), **kwargs)
+        assert (len(context_cases), len(generation_cases)) == (1760, 2896)
+        assert len(context_cases) == len(physical_keys(context_cases))
+        assert len(generation_cases) == len(physical_keys(generation_cases))
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "moonshotai/Kimi-K2.5")
+    kimi_specs = (get_context_mla_case_specs(), get_generation_mla_case_specs())
+    for adapter, kwargs in (
+        (sglang_adapter, {"tp_sizes": (1, 2, 4, 8, 16, 32, 64)}),
+        (trtllm_adapter, {}),
+    ):
+        assert len(adapter(kimi_specs[0], dtype_list=("bf16", "fp8"), **kwargs)) == 1540
+        assert len(adapter(kimi_specs[1], dtype_list=("bf16", "fp8"), **kwargs)) == 2534
+
+
+def test_kimi_mla_plan_includes_generation_bmm_helpers(monkeypatch):
+    from collector.case_generator import (
+        get_context_mla_case_specs,
+        get_generation_mla_case_specs,
+        get_mla_bmm_case_specs,
+    )
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "moonshotai/Kimi-K2.5")
+    required_ops = {"mla_context", "mla_generation", "mla_bmm_gen_pre", "mla_bmm_gen_post"}
+    for backend in ("sglang", "trtllm"):
+        plan = build_collection_case_plan(backend=backend, model_path="moonshotai/Kimi-K2.5")
+        assert required_ops <= set(plan.op_cases)
+
+        for op_name, specs, expected_count in (
+            ("mla_context", get_context_mla_case_specs(), 880),
+            ("mla_generation", get_generation_mla_case_specs(), 1448),
+        ):
+            cases = [
+                [
+                    spec.input_len,
+                    spec.batch_size,
+                    1,
+                    dtype,
+                    spec.num_heads,
+                    tp_size,
+                    tp_size,
+                    spec.kv_cache_block_size,
+                    10,
+                    6,
+                    spec.is_context_phase,
+                ]
+                for spec in specs
+                for dtype in ("bf16", "fp8")
+                for tp_size in (1, 2, 4, 8, 16, 32, 64)
+                if spec.num_heads % tp_size == 0
+            ]
+            filtered = filter_test_cases(
+                cases,
+                plan=plan.op_cases[op_name],
+                full_module_name=f"{backend}.mla",
+                run_func_name="run_mla",
+            )
+            assert len(filtered) == expected_count
+            assert {case[6] for case in filtered} == {1, 2, 4, 8}
+
+        for op_name, expected_count in (("mla_bmm_gen_pre", 200), ("mla_bmm_gen_post", 224)):
+            cases = [
+                [case.num_tokens, case.num_heads, case.dtype, case.num_warmups, case.num_runs]
+                for case in get_mla_bmm_case_specs(backend, op_name)
+            ]
+            filtered = filter_test_cases(
+                cases,
+                plan=plan.op_cases[op_name],
+                full_module_name=f"{backend}.mla_bmm",
+                run_func_name="run_mla_gen_pre" if op_name.endswith("pre") else "run_mla_gen_post",
+            )
+            assert len(filtered) == expected_count
+            assert {case[1] for case in filtered} == {64, 32, 16, 8}
+
+
+def test_cross_model_catalog_is_a_collector_v1_physical_key_superset(monkeypatch):
+    from collector.case_generator import (
+        get_common_mamba2_test_cases,
+        get_common_mhc_test_cases,
+        get_common_moe_test_cases,
+        get_generation_mla_case_specs,
+    )
+
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+
+    # Unique v1 MoE shapes. Kimi-Instruct and Kimi-NVFP4 intentionally collapse
+    # to one physical shape because quantization is expanded by the collectors.
+    legacy_moe_shapes = [
+        (4096, 14336, 2, 8, None),
+        (6144, 16384, 2, 8, None),
+        (7168, 2048, 8, 256, None),
+        (4096, 2048, 6, 256, None),
+        (7168, 3072, 6, 384, None),
+        (6144, 2048, 8, 256, None),
+        (2048, 768, 8, 128, 8),
+        (4096, 1536, 8, 128, None),
+        (6144, 2560, 8, 160, None),
+        (7168, 2048, 8, 384, None),
+        (3072, 1536, 8, 256, None),
+        (2880, 2880, 4, 128, None),
+        (2880, 2880, 4, 32, None),
+        (2688, 1856, 6, 128, None),
+        (4096, 2688, 22, 512, None),
+        (4096, 1024, 10, 512, None),
+    ]
+    parallel_sizes = [1, 2, 4, 8, 16, 32]
+    expert_parallel_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    distributions = [("balanced", 0.0), ("power_law", 1.01), ("power_law", 1.2)]
+    expected_moe_keys = set()
+    for hidden_size, inter_size, topk, num_experts, max_tp_exclusive in legacy_moe_shapes:
+        for tp in parallel_sizes:
+            for ep in expert_parallel_sizes:
+                if max_tp_exclusive is not None and tp >= max_tp_exclusive:
+                    continue
+                if tp * ep > 256 or ep > num_experts or num_experts % ep or inter_size % tp:
+                    continue
+                for distribution, alpha in distributions:
+                    expected_moe_keys.add((hidden_size, inter_size, topk, num_experts, tp, ep, distribution, alpha))
+
+    current_moe_keys = {
+        (
+            case.hidden_size,
+            case.inter_size,
+            case.topk,
+            case.num_experts,
+            case.tp,
+            case.ep,
+            case.token_expert_distribution,
+            case.power_law_alpha,
+        )
+        for case in get_common_moe_test_cases()
+    }
+    assert len(expected_moe_keys) == 1683
+    assert not (expected_moe_keys - current_moe_keys)
+
+    generation_mla_cases = get_generation_mla_case_specs()
+    restored_mla_boundaries = {
+        (num_heads, batch_size, target_length - 1)
+        for num_heads in (64, 128)
+        for batch_size, target_length in ((128, 131072), (256, 65536), (512, 32768), (1024, 16384))
+    }
+    assert restored_mla_boundaries <= {
+        (case.num_heads, case.batch_size, case.input_len) for case in generation_mla_cases
+    }
+
+    mamba_shapes = {
+        (case.d_model, case.d_state, case.nheads, case.head_dim, case.n_groups, case.chunk_size)
+        for case in get_common_mamba2_test_cases()
+    }
+    assert {
+        (8192, 128, 64, 64, 8, 256),
+        (1024, 64, 16, 64, 4, 128),
+    } <= mamba_shapes
+
+    mhc_keys = {(case.phase, case.hidden_size, case.hc_mult) for case in get_common_mhc_test_cases()}
+    assert {(phase, hidden_size, 4) for phase in ("pre", "post") for hidden_size in (4096, 7168)} <= mhc_keys
 
 
 def test_dsa_module_prefix_context_sweeps_are_yaml_backed():
@@ -396,11 +934,27 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         "nvidia/GLM-5-NVFP4",
     }
     assert {spec.native_num_heads for spec in dsa_specs if spec.architecture == "GlmMoeDsaForCausalLM"} == {64}
-    assert {spec.model_path for spec in wideep_specs} == {
-        "deepseek-ai/DeepSeek-R1",
-        "deepseek-ai/DeepSeek-V3",
-        "nvidia/DeepSeek-V3.1-NVFP4",
-    }
+    assert {spec.model_path for spec in wideep_specs} == {"deepseek-ai/DeepSeek-V3"}
+
+
+def test_mla_module_checkpoint_aliases_resolve_to_one_architecture_safe_case(monkeypatch):
+    from collector.case_generator import get_mla_module_model_specs
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/DeepSeek-V3.1-NVFP4")
+    specs = get_mla_module_model_specs(attention_type="mla")
+
+    assert [(spec.model_path, spec.architecture) for spec in specs] == [
+        ("deepseek-ai/DeepSeek-V3", "DeepseekV3ForCausalLM")
+    ]
+    assert not any(spec.attention_type == "dsa" for spec in specs)
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "moonshotai/Kimi-K2-Instruct")
+    from collector.case_generator import get_context_mla_case_specs
+
+    kimi_specs = get_context_mla_case_specs()
+    assert kimi_specs
+    assert {spec.model_name for spec in kimi_specs} == {"moonshotai/Kimi-K2.5"}
+    assert {spec.num_heads for spec in kimi_specs} == {64}
 
 
 def test_model_cases_path_can_infer_model_path():
@@ -411,7 +965,13 @@ def test_model_cases_path_can_infer_model_path():
     assert plan.model_path == "sgl-project/DeepSeek-V4-Flash-FP8"
     assert plan.model_architecture == "DeepseekV4ForCausalLM"
     assert "dsv4_csa_context_module" in plan.op_cases
+    assert "dsv4_csa_topk_calib" in plan.op_cases
     assert "mhc_module" in plan.op_cases
+    assert {
+        "dsv4_paged_mqa_logits_module",
+        "dsv4_hca_attn_module",
+        "dsv4_csa_attn_module",
+    }.isdisjoint(plan.op_cases)
 
 
 def test_model_architecture_can_select_case_file():
@@ -431,6 +991,96 @@ def test_model_path_alias_resolves_architecture_case_file():
     assert plan.model_architecture == "Qwen3MoeForCausalLM"
     assert plan.model_cases_paths == [default_architecture_cases_path("Qwen3MoeForCausalLM")]
     assert "moe" in plan.op_cases
+
+
+def test_encoder_attention_plan_matches_sdk_model_and_backend_support():
+    dense_plan = build_collection_case_plan(backend="sglang", model_path="Qwen/Qwen3-32B")
+    multimodal_plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="Qwen/Qwen3-VL-32B-Instruct",
+    )
+    multimodal_xpu_plan = build_collection_case_plan(
+        backend="vllm_xpu",
+        model_path="Qwen/Qwen3-VL-32B-Instruct",
+    )
+    llama4_plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="meta-llama/Llama-4-Maverick-17B-128E-Instruct",
+    )
+
+    assert dense_plan.ops == ["attention_context", "attention_generation", "gemm"]
+    assert "encoder_attention" not in dense_plan.op_cases
+    assert "mla_bmm_gen_pre" not in dense_plan.op_cases
+    assert "mla_bmm_gen_post" not in dense_plan.op_cases
+    assert "encoder_attention" in multimodal_plan.op_cases
+    assert "encoder_attention" not in multimodal_xpu_plan.op_cases
+    assert "encoder_attention" not in llama4_plan.op_cases
+    assert "attention_encoder" not in multimodal_plan.op_cases
+    assert "encoder_attention" in build_collection_case_plan(backend="vllm", full=True).op_cases
+    assert "encoder_attention" not in build_collection_case_plan(backend="vllm_xpu", full=True).op_cases
+
+    for backend in ("sglang", "trtllm", "vllm"):
+        assert (
+            "encoder_attention"
+            in build_collection_case_plan(
+                backend=backend,
+                model_path="Qwen/Qwen3-VL-32B-Instruct",
+            ).op_cases
+        )
+
+    for model_path in (
+        "google/gemma-4-26B-A4B",
+        "moonshotai/Kimi-K2.5",
+        "Qwen/Qwen3.5-27B",
+        "Qwen/Qwen3.5-397B-A17B",
+    ):
+        assert (
+            "encoder_attention"
+            not in build_collection_case_plan(
+                backend="sglang",
+                model_path=model_path,
+            ).op_cases
+        )
+
+
+def test_compute_scale_is_selected_only_for_static_fp8_artifact():
+    static_model = "Qwen/Qwen3-32B-FP8-Static-PerTensor"
+    non_static_models = ("Qwen/Qwen3-32B", "Qwen/Qwen3-32B-FP8", "Qwen/Qwen3-0.6B")
+
+    for backend in ("sglang", "trtllm", "vllm"):
+        static_plan = build_collection_case_plan(backend=backend, model_path=static_model, sm_version=100)
+        assert "compute_scale" in static_plan.op_cases
+        assert "compute_scale" in build_collection_case_plan(backend=backend, full=True).op_cases
+
+        for model_path in non_static_models:
+            plan = build_collection_case_plan(backend=backend, model_path=model_path, sm_version=100)
+            assert "compute_scale" not in plan.op_cases
+
+    xpu_plan = build_collection_case_plan(backend="vllm_xpu", model_path=static_model)
+    assert "compute_scale" not in xpu_plan.op_cases
+
+
+def test_model_plans_do_not_request_ops_missing_from_backend_registry():
+    deepseek_vllm = build_collection_case_plan(backend="vllm", model_path="deepseek-ai/DeepSeek-V3")
+    kimi_vllm = build_collection_case_plan(backend="vllm", model_path="moonshotai/Kimi-K2.5")
+    nemotron_sglang = build_collection_case_plan(
+        backend="sglang",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+    )
+    nemotron_trtllm = build_collection_case_plan(
+        backend="trtllm",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+    )
+
+    assert "mla_context" not in deepseek_vllm.op_cases
+    assert "mla_generation" not in deepseek_vllm.op_cases
+    assert "mla_context_module" in deepseek_vllm.op_cases
+    assert "attention_context" in kimi_vllm.op_cases
+    assert "attention_generation" in kimi_vllm.op_cases
+    assert "mla_context" not in kimi_vllm.op_cases
+    assert "mla_generation" not in kimi_vllm.op_cases
+    assert "mamba2" not in nemotron_sglang.op_cases
+    assert "mamba2" in nemotron_trtllm.op_cases
 
 
 def test_full_mode_aggregates_all_model_case_files():
@@ -470,7 +1120,32 @@ def test_support_matrix_moe_alias_generates_targeted_cases(monkeypatch):
     cases = get_common_moe_test_cases()
 
     assert cases
-    assert {case.model_name for case in cases} == {"Qwen/Qwen3-235B-A22B-FP8"}
+    assert {case.model_name for case in cases} == {"Qwen/Qwen3-235B-A22B"}
+
+
+def test_qwen3_30b_fp8_alias_reuses_canonical_case_and_tp_constraints(monkeypatch):
+    from collector.case_generator import get_common_moe_test_cases
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "Qwen/Qwen3-30B-A3B-FP8")
+
+    cases = get_common_moe_test_cases()
+
+    assert cases
+    assert {case.model_name for case in cases} == {"Qwen/Qwen3-30B-A3B"}
+    assert all(case.tp < 8 for case in cases)
+
+
+def test_nemotron_ultra_quant_alias_reuses_physical_moe_and_mamba_profiles(monkeypatch):
+    from collector.case_generator import get_common_mamba2_test_cases, get_common_moe_test_cases
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8")
+
+    moe_cases = get_common_moe_test_cases()
+    mamba_cases = get_common_mamba2_test_cases()
+
+    canonical = "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+    assert moe_cases and {case.model_name for case in moe_cases} == {canonical}
+    assert mamba_cases and {case.model_name for case in mamba_cases} == {canonical}
 
 
 def test_support_matrix_mamba_alias_generates_targeted_cases(monkeypatch):
@@ -509,6 +1184,19 @@ framework_specific_op_exceptions:
     assert plan.sm_exceptions_path == exceptions.resolve()
     assert "wideep_moe" not in plan.op_cases
     assert "wideep_mla_context" in plan.op_cases
+
+
+def test_sm_exception_catalog_does_not_activate_unrelated_ops():
+    base_plan = build_collection_case_plan(backend="sglang", model_path="Qwen/Qwen3-32B")
+    sm120_plan = build_collection_case_plan(
+        backend="sglang",
+        model_path="Qwen/Qwen3-32B",
+        sm_version=120,
+    )
+
+    assert sm120_plan.ops == base_plan.ops == ["attention_context", "attention_generation", "gemm"]
+    assert "moe" not in sm120_plan.op_cases
+    assert "wideep_mla_context" not in sm120_plan.op_cases
 
 
 def test_gpu_type_resolves_default_sm_exception_file(tmp_path: Path, monkeypatch):
@@ -596,6 +1284,42 @@ def test_filter_test_cases_supports_case_ids_contains_and_indices():
     filtered = filter_test_cases(cases, plan=plan, full_module_name="sglang.moe", run_func_name="run_moe_torch")
 
     assert filtered == ["tp=2 ep=1", "tp=4 ep=1"]
+
+
+def test_yaml_include_selector_can_narrow_a_new_op_plan(tmp_path: Path):
+    cases = ["case0", "case1", "case2"]
+    selected_case_id = create_test_case_id(cases[1], "run_gemm", "sglang.gemm")
+    model_cases = tmp_path / "SelectorArchitecture_cases.yaml"
+    model_cases.write_text(
+        f"""
+schema_version: 1
+architecture: SelectorArchitecture
+model_path: test/selector-model
+include_base: true
+base_ops:
+  - gemm
+all_frameworks_op_cases:
+  gemm:
+    case_ids:
+      - '{selected_case_id}'
+""",
+        encoding="utf-8",
+    )
+
+    plan = build_collection_case_plan(
+        backend="sglang",
+        model_cases_path=str(model_cases),
+    )
+    gemm_plan = plan.op_cases["gemm"]
+
+    assert not gemm_plan.include.all_cases
+    assert gemm_plan.include.case_ids == {selected_case_id}
+    assert filter_test_cases(
+        cases,
+        plan=gemm_plan,
+        full_module_name="sglang.gemm",
+        run_func_name="run_gemm",
+    ) == [cases[1]]
 
 
 def test_filter_test_cases_supports_index_ranges_and_limit():

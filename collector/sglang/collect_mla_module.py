@@ -50,10 +50,14 @@ except ModuleNotFoundError:
     from helper import benchmark_with_power, get_sm_version, log_perf
 
 try:
-    from collector.case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
+    from collector.case_generator import (
+        get_mla_module_model_specs,
+        get_mla_module_precision_specs,
+        get_mla_module_sweep_spec,
+    )
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
+    from case_generator import get_mla_module_model_specs, get_mla_module_precision_specs, get_mla_module_sweep_spec
 
 try:
     from collector.sglang.runtime_limits import (
@@ -385,7 +389,7 @@ def _module_model_native_heads(model_path: str) -> int:
     return 128
 
 
-def get_context_test_cases(attn_type: str):
+def get_context_test_cases(attn_type: str, precision_combos=None):
     """Context-phase test cases.
 
     Returns list of [seq_len, batch_size, num_heads, kv_cache_dtype,
@@ -393,7 +397,8 @@ def get_context_test_cases(attn_type: str):
     """
     sweep = get_mla_module_sweep_spec("sglang")
     cases = []
-    for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context"):
+    precision_combos = precision_combos or _get_precision_combos("context")
+    for compute_dtype, kv_dtype, gemm_type in precision_combos:
         for num_heads in sweep.inner_sweep_head_counts:
             for batch_size in sweep.context_batch_sizes:
                 for seq_len in sweep.context_sequence_lengths:
@@ -408,7 +413,7 @@ def get_context_test_cases(attn_type: str):
     return cases
 
 
-def get_generation_test_cases(attn_type: str):
+def get_generation_test_cases(attn_type: str, precision_combos=None):
     """Generation-phase test cases.
 
     Returns list of [kv_cache_len, batch_size, num_heads, kv_cache_dtype,
@@ -416,7 +421,8 @@ def get_generation_test_cases(attn_type: str):
     """
     sweep = get_mla_module_sweep_spec("sglang")
     cases = []
-    for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation"):
+    precision_combos = precision_combos or _get_precision_combos("generation")
+    for compute_dtype, kv_dtype, gemm_type in precision_combos:
         for num_heads in sweep.inner_sweep_head_counts:
             for batch_size in sweep.generation_batch_sizes:
                 for seq_len in sweep.generation_sequence_lengths:
@@ -431,20 +437,13 @@ def get_generation_test_cases(attn_type: str):
     return cases
 
 
-def _get_module_precision_combos():
-    """Return a single baseline precision combo for module-level benchmarks.
+def _get_module_precision_combos(phase: str | None = None):
+    """Return YAML precision combos runnable in this phase and GPU SM."""
 
-    Module benchmarks spawn a subprocess per (model, precision, heads) group.
-    Each subprocess loads a full ModelRunner (~15-20 s), so fewer groups means
-    faster overall collection.  Use a single bfloat16 baseline — matching the
-    wideep MLA pattern — so the total subprocess count stays manageable.
-
-    Precision-specific kernel performance is already captured by kernel-level
-    collectors (collect_mla.py, collect_attn.py).  The module benchmark
-    captures module-level overhead (scheduling, memory management, attention
-    dispatch) which is largely precision-independent with dummy weights.
-    """
-    return get_mla_module_sweep_spec("sglang").module_precision_combos
+    return [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("sglang", phase=phase, sm_version=get_sm_version())
+    ]
 
 
 def _model_max_position_embeddings(model_id: str) -> int | None:
@@ -601,7 +600,7 @@ def _build_module_test_cases(attn_type: str, mode: str):
         # Prevents e.g. gemm_type=fp8_block being applied to the NVFP4 checkpoint
         # (a different model), which dies at model load with "Cannot find quant_algo".
         native_quant = _model_native_gemm_quant(model_spec.model_path)
-        for compute_dtype, kv_dtype, gemm_type in _get_module_precision_combos():
+        for compute_dtype, kv_dtype, gemm_type in _get_module_precision_combos(mode):
             if not _gemm_type_supported_by_model(gemm_type, native_quant):
                 continue
             target_tps = sweep.module_tp_sizes if attn_type == "dsa" else [1]
@@ -644,16 +643,16 @@ def _build_module_test_cases(attn_type: str, mode: str):
 
 
 def _build_wideep_mla_test_cases(mode: str):
-    """Build test cases for wideep MLA collection (backward-compatible).
+    """Build WideEP MLA cases for the checkpoint's real serving precision.
 
     Output format: [seq_len, batch_size, num_heads, kv_cache_dtype,
                     compute_dtype, gemm_type, model_path,
                     attn_type, attention_backend]
 
-    Matches the old collect_wideep_attn.py behavior:
-    - Single precision combo (bfloat16 run, logged as fp8_block/fp8)
-    - Sweeps multiple attention backends per SM version
-    - Only DeepSeek-V3 (the MLA model), not V3.2/GLM-5 (DSA models)
+    Checkpoint aliases are collapsed by the YAML catalog, while precision is
+    expanded from ``mla_module_sglang.module_precision_combos``.  WideEP tables
+    do not key on GEMM precision, so collect only the checkpoint's native GEMM
+    path (DeepSeek-V3 is block-FP8) and keep BF16/FP8 KV cache as real axes.
 
     perf_filename is supplied by collect.py via functools.partial as a keyword
     argument, so it is not included in the test case tuple.
@@ -665,24 +664,26 @@ def _build_wideep_mla_test_cases(mode: str):
     backends = _get_mla_backend_list()
     cases = []
     for model_spec in model_specs:
+        native_gemm_type = _model_native_gemm_quant(model_spec.model_path) or "bfloat16"
+        precision_combos = [combo for combo in _get_module_precision_combos(mode) if combo[2] == native_gemm_type]
         for backend in backends:
             for num_heads in sweep.inner_sweep_head_counts:
                 if num_heads > model_spec.native_num_heads:
                     continue
-                # Single precision: run with bfloat16, log as fp8_block/fp8
-                cases.append(
-                    [
-                        0,
-                        0,
-                        num_heads,
-                        "bfloat16",
-                        "bfloat16",
-                        "bfloat16",
-                        model_spec.model_path,
-                        "mla",
-                        backend,
-                    ]
-                )
+                for compute_dtype, kv_dtype, gemm_type in precision_combos:
+                    cases.append(
+                        [
+                            0,
+                            0,
+                            num_heads,
+                            kv_dtype,
+                            compute_dtype,
+                            gemm_type,
+                            model_spec.model_path,
+                            "mla",
+                            backend,
+                        ]
+                    )
     return cases
 
 
@@ -1167,22 +1168,11 @@ def run_attention_torch(
     version = get_version("sglang")
     device_name = torch.cuda.get_device_name(device)
 
-    # Wideep MLA backward-compatibility: the old collect_wideep_attn.py logged
-    # mla_dtype="fp8_block", kv_cache_dtype="fp8" for all runs, used the raw
-    # backend name as kernel_source, and different op_name / filename patterns.
-    # perf_database loaders (load_wideep_*_mla_data) expect these conventions.
-    is_wideep_mla = attn_type == "mla"
-
-    if is_wideep_mla:
-        log_mla_dtype = "fp8_block"
-        log_kv_dtype = "fp8"
-        log_gemm_type = "fp8_block"
-    else:
-        # DSA: log dtype strings that match the common.*QuantMode enum member
-        # names expected by perf_database loaders (e.g. "bfloat16", "fp8").
-        log_mla_dtype = compute_dtype
-        log_kv_dtype = kv_cache_dtype
-        log_gemm_type = gemm_type
+    # These strings match the common.*QuantMode enum member names consumed by
+    # the perf database loaders (e.g. "bfloat16", "fp8", "fp8_block").
+    log_mla_dtype = compute_dtype
+    log_kv_dtype = kv_cache_dtype
+    log_gemm_type = gemm_type
 
     # QKV latent dimensions for AttentionInputs
     q_lora_rank = getattr(attention_module, "q_lora_rank", 1536) or 1536
@@ -2158,10 +2148,10 @@ def run_mla_module(
         attention_backend = _get_backends(attn_type)
 
     if is_prefill:
-        all_cases = get_context_test_cases(attn_type)
+        all_cases = get_context_test_cases(attn_type, _get_module_precision_combos("context"))
         phase_name = "Context"
     else:
-        all_cases = get_generation_test_cases(attn_type)
+        all_cases = get_generation_test_cases(attn_type, _get_module_precision_combos("generation"))
         phase_name = "Generation"
 
     # Filter to matching precision combo.

@@ -9,34 +9,28 @@
 //! `AttnKind` to use; the operator just routes to the right
 //! `db.dsv4.query_*` slice.
 //!
-//! Slice selection resolves the model's rank-LOCAL head count
-//! (`native_heads / tp_size`, passed as `num_heads`) against the CSV `num_heads`
-//! head keys, mirroring Python `_dsv4_resolve_head_key`. The `tp_size` axis is
-//! NOT an interpolation axis — Python's loaders ignore the CSV `tp_size` column,
-//! so the table is collapsed to the last (max) tp measurement at load time. See
-//! `perf_database::dsv4` and Python `load_context_dsv4_kind_module_data`.
+//! Slice selection uses the physical `(model profile, tp_size, local_heads)`
+//! key, mirroring Python `_dsv4_resolve_head_key`. Keeping the three together
+//! prevents overlapping local-head counts from different V4 variants or TP
+//! shardings from overwriting one another.
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::perf_database::dsv4::AttnKind;
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Dsv4ModuleOp {
     pub name: String,
     pub scale_factor: f64,
     pub attn_kind: AttnKind,
-    /// Per-rank partitioned head count (`native_heads / tp_size`). This is the
-    /// value resolved against the CSV `num_heads` head keys for slice selection
-    /// (Python `_dsv4_resolve_head_key`).
+    /// Per-rank partitioned head count (`native_heads / tp_size`).
     pub num_heads: u32,
-    /// Model total attention head count. Retained for provenance and SOL
-    /// fallbacks; NOT used for table slice selection (see `num_heads`).
+    /// Model total attention head count; selects Flash (64) vs Pro (128).
     pub native_heads: u32,
-    /// Tensor-parallel size. Retained for provenance; the DSV4 table collapses
-    /// the tp axis at load time, so this does not select a latency.
+    /// Tensor-parallel size; part of the physical module lookup key.
     pub tp_size: u32,
     pub kv_cache_dtype: KvCacheQuantMode,
     pub fmha_quant_mode: FmhaQuantMode,
@@ -103,6 +97,8 @@ impl Dsv4ModuleOp {
             batch_size,
             isl,
             self.num_heads,
+            self.native_heads,
+            self.tp_size,
             self.kv_cache_dtype,
             self.fmha_quant_mode,
             self.gemm_quant_mode,
@@ -124,6 +120,8 @@ impl Dsv4ModuleOp {
             batch_size,
             s,
             self.num_heads,
+            self.native_heads,
+            self.tp_size,
             self.kv_cache_dtype,
             self.fmha_quant_mode,
             self.gemm_quant_mode,

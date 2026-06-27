@@ -32,6 +32,7 @@ from tensorrt_llm.models.modeling_utils import QuantConfig
 from tensorrt_llm.quantization.mode import QuantAlgo
 from tensorrt_llm.sampling_params import SamplingParams
 
+from collector.case_generator import get_context_mla_case_specs, get_generation_mla_case_specs
 from collector.helper import benchmark_with_power, log_perf
 
 
@@ -45,83 +46,69 @@ def _mla_tokens_per_block() -> int:
 
 def get_context_mla_test_cases():
     dtype_list = [tensorrt_llm.bindings.DataType.BF16, tensorrt_llm.bindings.DataType.FP8]
-    test_cases = []
-    n_list = [128]
-    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 32768]
-    for n in n_list:
-        for b in b_list:
-            for s in s_list:  # [2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072]:
-                for dtype in dtype_list:
-                    for tp_size in [1, 2, 4, 8, 16, 32, 64, 128]:
-                        if b * s > 65536:
-                            continue
-                        # (input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size,
-                        #  tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
-                        test_cases.append(
-                            [
-                                s,
-                                b,
-                                1,
-                                dtype,
-                                n,
-                                tp_size,
-                                tp_size,
-                                _mla_tokens_per_block(),
-                                10,
-                                6,
-                                True,
-                            ]
-                        )
-    return test_cases
+    return _build_mla_test_cases(get_context_mla_case_specs(), dtype_list=dtype_list)
 
 
 def get_generation_mla_test_cases():
     dtype_list = [tensorrt_llm.bindings.DataType.BF16, tensorrt_llm.bindings.DataType.FP8]
+    return _build_mla_test_cases(get_generation_mla_case_specs(), dtype_list=dtype_list)
+
+
+def _build_mla_test_cases(case_specs, *, dtype_list):
+    """Adapt the shared YAML MLA catalog to TRT-LLM's legacy run tuple."""
+
     test_cases = []
-    n_list = [128]
-    for n in n_list:
-        for b in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]:
-            for s in [
-                2,
-                4,
-                8,
-                16,
-                32,
-                64,
-                128,
-                256,
-                512,
-                1024,
-                2048,
-                4096,
-                8192,
-                16384,
-                32768,
-                65536,
-                131072,
-            ]:  # [target token s] is equivalent to [in: s-1, step=1]
-                for dtype in dtype_list:
-                    for tp_size in [1, 2, 4, 8, 16, 32, 64, 128]:
-                        if b * s > 1024 * 4096 * 2 * 2:
-                            continue
-                        # (input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size,
-                        #  tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
-                        test_cases.append(
-                            [
-                                s - 1,
-                                b,
-                                1,
-                                dtype,
-                                n,
-                                tp_size,
-                                tp_size,
-                                _mla_tokens_per_block(),
-                                10,
-                                6,
-                                False,
-                            ]
-                        )
+    seen = set()
+    scenario = Scenario()
+    expected_geometry = (
+        scenario.q_lora_rank,
+        scenario.kv_lora_rank,
+        scenario.qk_nope_head_dim,
+        scenario.qk_rope_head_dim,
+        scenario.v_head_dim,
+    )
+    for spec in case_specs:
+        geometry = (
+            spec.q_lora_rank,
+            spec.kv_lora_rank,
+            spec.qk_nope_head_dim,
+            spec.qk_rope_head_dim,
+            spec.v_head_dim,
+        )
+        if geometry != expected_geometry:
+            raise ValueError(f"Unsupported TRT-LLM MLA geometry for {spec.model_name}: {geometry}")
+
+        for dtype in dtype_list:
+            for tp_size in (1, 2, 4, 8, 16, 32, 64, 128):
+                if spec.num_heads % tp_size:
+                    continue
+                case = (
+                    spec.input_len,
+                    spec.batch_size,
+                    1,
+                    dtype,
+                    spec.num_heads,
+                    tp_size,
+                    tp_size,
+                    _mla_tokens_per_block(),
+                    10,
+                    6,
+                    spec.is_context_phase,
+                )
+                # The perf loader keys on local heads, not total heads or TP.
+                # In a full catalog Kimi-64 therefore reuses DeepSeek-128 rows
+                # whenever both map to the same local kernel shape.  A targeted
+                # Kimi run still emits its complete standalone grid.
+                physical_key = (
+                    dtype,
+                    spec.num_heads // tp_size,
+                    spec.batch_size,
+                    spec.input_len,
+                )
+                if physical_key in seen:
+                    continue
+                seen.add(physical_key)
+                test_cases.append(list(case))
     return test_cases
 
 
@@ -204,7 +191,7 @@ def run_mla(
     v_head_dim = scenario.v_head_dim
     rope_config = RopeConfig(
         hidden_size=scenario.hidden_size,
-        num_attention_heads=scenario.num_heads,
+        num_attention_heads=num_heads,
         rope_scaling={
             "beta_fast": scenario.rope_beta_fast,
             "beta_slow": scenario.rope_beta_slow,

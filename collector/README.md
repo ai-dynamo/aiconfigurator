@@ -106,9 +106,15 @@ model_paths:
   - Qwen/Qwen3-30B-A3B
   - Qwen/Qwen3-235B-A22B
 include_base: true
+base_ops:
+  - attention_context
+  - attention_generation
+  - gemm
 ```
 
-It can include shared base op cases with `include_base: true`, then add:
+`include_base: true` selects only the universal recipes declared by base-file
+`model_ops`; it no longer means every file under `cases/base_ops/`. Use
+`base_ops` for model-required auxiliary recipes, then add model ops:
 
 ```yaml
 model_ops:
@@ -151,6 +157,25 @@ for K, and `output_feature_sizes` for N; `feature_sizes` is shorthand when K and
 N use the same explicit size list. Base attention specs use `batch_sizes`,
 `sequence_lengths`, `query_head_counts`, `kv_head_options`, and `head_dims`;
 `kv_head_options: self` means the KV head count equals the query head count.
+
+Native attention tuples live in `model_case_values.attention`. They keep query
+heads, KV heads, head dimension, window, and valid TP sizes correlated. A
+targeted model run uses its exact structural profiles instead of crossing global
+head/window axes; full/raw runs retain the collector-v1 compatibility grid plus
+all model-specific deltas.
+
+The compatibility contract is defined on physical lookup keys: full/raw case
+generation must be a superset of collector v1, and v2 may only add new physical
+points. Scheduler identities may still shrink when multiple checkpoint names
+map to the same shape and quantization is swept independently. Targeted model
+runs are intentionally model-exact rather than v1-wide. Synthetic v1
+interpolation anchors that do not belong to a real model stay in the base-op
+YAML as `legacy_model_cases`.
+
+Within `model_case_values`, use `model_aliases` when artifact names share one
+physical kernel case (for example base and FP8 checkpoints whose quantization is
+already swept independently). Keep `model_paths` only for path-sensitive cases
+that must be instantiated separately.
 
 For targeted support-matrix healing, a case selector can run a subset using
 exact `case_ids`, string `contains` matches, `indices`, `ranges`, or `limit`.

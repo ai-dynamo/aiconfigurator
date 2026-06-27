@@ -359,8 +359,8 @@ def _dsv4_module(
         "scale_factor": op._scale_factor,
         "attn_kind": _attn_kind_for_ratio(op._compress_ratio),
         "num_heads": op._num_heads,
-        # native_heads (model total head count) selects the table slice;
-        # tp_size is the table's primary interpolation axis. See
+        # native_heads + tp_size + rank-local num_heads select one physical
+        # model/TP slice. See
         # `perf_database::dsv4` / `load_context_dsv4_kind_module_data`.
         "native_heads": op._native_heads,
         "tp_size": op._tp_size,

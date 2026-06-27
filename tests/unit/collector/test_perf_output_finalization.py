@@ -5,11 +5,41 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from collector.helper import finalize_perf_files, finalize_perf_outputs, find_perf_csv_outputs
+from collector.helper import (
+    delta_latency_power_stats,
+    finalize_perf_files,
+    finalize_perf_outputs,
+    find_perf_csv_outputs,
+)
 
 
 def _write_perf_csv(path: Path, latency: float = 1.25) -> None:
     path.write_text(f"op,latency\nmatmul,{latency}\n")
+
+
+def test_delta_latency_power_stats_preserves_energy_difference():
+    latency, power_stats = delta_latency_power_stats(
+        dynamic_latency=10.0,
+        static_latency=6.0,
+        dynamic_power_stats={"power": 100.0, "power_limit": 700.0},
+        static_power_stats={"power": 50.0, "power_limit": 700.0},
+    )
+
+    assert latency == 4.0
+    assert power_stats["power"] * latency == 700.0  # 100*10 - 50*6
+    assert power_stats["power_limit"] == 700.0
+
+
+def test_delta_latency_power_stats_clamps_noisy_negative_delta():
+    latency, power_stats = delta_latency_power_stats(
+        dynamic_latency=5.0,
+        static_latency=6.0,
+        dynamic_power_stats={"power": 100.0},
+        static_power_stats={"power": 50.0},
+    )
+
+    assert latency == 0.0
+    assert power_stats["power"] == 0.0
 
 
 def test_find_perf_csv_outputs_is_non_recursive_by_default(tmp_path):

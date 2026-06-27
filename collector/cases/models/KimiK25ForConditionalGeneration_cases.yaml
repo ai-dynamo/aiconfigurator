@@ -9,14 +9,31 @@ model_paths:
   - moonshotai/Kimi-K2.5
   - nvidia/Kimi-K2.5-NVFP4
 include_base: true
+base_ops:
+  - gemm
+framework_specific_base_ops:
+  vllm:
+    - attention_context
+    - attention_generation
 description: >
   Kimi-K2.5 hybrid MLA/MoE model-centric collection plan.
 
 model_case_values:
-  moe:
-    - model_paths:
+  attention:
+    - id: kimi_k25_vllm_attention
+      model_path: moonshotai/Kimi-K2.5
+      model_aliases:
         - moonshotai/Kimi-K2-Instruct
-        - moonshotai/Kimi-K2.5
+        - nvidia/Kimi-K2.5-NVFP4
+      num_attention_heads: 64
+      num_key_value_heads: 64
+      head_dim: 128
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
+  moe:
+    - model_path: moonshotai/Kimi-K2.5
+      model_aliases:
+        - moonshotai/Kimi-K2-Instruct
         - nvidia/Kimi-K2.5-NVFP4
       hidden_size: 7168
       inter_size: 2048
@@ -24,8 +41,9 @@ model_case_values:
       num_experts: 384
       wideep: true
   mla:
-    - model_paths:
-        - moonshotai/Kimi-K2.5
+    - model_path: moonshotai/Kimi-K2.5
+      model_aliases:
+        - moonshotai/Kimi-K2-Instruct
         - nvidia/Kimi-K2.5-NVFP4
       num_heads: 64
       q_lora_rank: 1536
@@ -37,12 +55,57 @@ model_case_values:
 all_frameworks_op_cases:
   moe:
     cases: all
-  mla_context:
-    cases: all
-  mla_generation:
-    cases: all
 
 framework_specific_op_cases:
   trtllm:
+    mla_context:
+      rules:
+        - fields: [input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase]
+          match:
+            tp_size:
+              in: [1, 2, 4, 8]
+    mla_generation:
+      rules:
+        - fields: [input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase]
+          match:
+            tp_size:
+              in: [1, 2, 4, 8]
+    mla_bmm_gen_pre:
+      rules:
+        - fields: [num_tokens, num_heads, dtype, num_warmups, num_runs]
+          match:
+            num_heads:
+              in: [64, 32, 16, 8]
+    mla_bmm_gen_post:
+      rules:
+        - fields: [num_tokens, num_heads, dtype, num_warmups, num_runs]
+          match:
+            num_heads:
+              in: [64, 32, 16, 8]
     trtllm_moe_wideep:
       cases: all
+  sglang:
+    mla_context:
+      rules:
+        - fields: [input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase]
+          match:
+            tp_size:
+              in: [1, 2, 4, 8]
+    mla_generation:
+      rules:
+        - fields: [input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase]
+          match:
+            tp_size:
+              in: [1, 2, 4, 8]
+    mla_bmm_gen_pre:
+      rules:
+        - fields: [num_tokens, num_heads, dtype, num_warmups, num_runs]
+          match:
+            num_heads:
+              in: [64, 32, 16, 8]
+    mla_bmm_gen_post:
+      rules:
+        - fields: [num_tokens, num_heads, dtype, num_warmups, num_runs]
+          match:
+            num_heads:
+              in: [64, 32, 16, 8]

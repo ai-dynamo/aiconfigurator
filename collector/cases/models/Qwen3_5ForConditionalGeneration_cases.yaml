@@ -11,10 +11,22 @@ model_paths:
   - Qwen/Qwen3.5-9B
   - Qwen/Qwen3.5-27B
 include_base: true
+base_ops:
+  - attention_context
+  - attention_generation
+  - gemm
 description: >
   Qwen3.5 dense/GDN model-centric collection plan.
 
 model_case_values:
+  attention:
+    - id: qwen35_27b_attention
+      model_path: Qwen/Qwen3.5-27B
+      num_attention_heads: 24
+      num_key_value_heads: 4
+      head_dim: 256
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8]
   gdn:
     - model_path: Qwen/Qwen3.5-0.8B
       d_model: 1024

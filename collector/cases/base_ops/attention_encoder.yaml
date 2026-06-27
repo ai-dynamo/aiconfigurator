@@ -2,12 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
-op: attention_encoder
-description: Base collector v2 cases for attention_encoder (non-causal / encoder attention).
-model_ops:
-- attention_encoder
+op: encoder_attention
+description: Base collector v2 cases for encoder_attention (non-causal / encoder attention).
 all_frameworks_op_cases:
-  attention_encoder:
+  encoder_attention:
     cases:
     - id: base_attention_encoder_shape_sweep
       description: 'Encoder (non-causal) attention shapes for multimodal ViT / audio encoders. MHA only, bf16 only.
@@ -73,3 +71,10 @@ all_frameworks_op_cases:
       - 64
       - 72
       - 80
+      # Preserve the collector-v1 physical grid for full/raw collection. A
+      # targeted model with an encoder profile replaces this broad grid with
+      # its native ViT topology.
+      legacy_head_profiles:
+      - id: collector_v1
+        head_counts: [2, 4, 5, 8, 10, 12, 14, 16, 20, 24, 32]
+        head_dims: [64, 72, 80]

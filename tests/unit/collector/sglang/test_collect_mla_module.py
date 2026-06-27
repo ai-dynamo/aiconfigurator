@@ -256,11 +256,7 @@ class TestBuildModuleTestCases:
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("mla", "context")
         model_paths = {c[6] for c in cases}
-        assert model_paths == {
-            "deepseek-ai/DeepSeek-R1",
-            "deepseek-ai/DeepSeek-V3",
-            "nvidia/DeepSeek-V3.1-NVFP4",
-        }
+        assert model_paths == {"deepseek-ai/DeepSeek-V3"}
 
     def test_format_length_10(self):
         """Each DSA module test case includes a target TP size."""
@@ -405,16 +401,12 @@ class TestBuildWideepMlaTestCases:
         assert {c[7] for c in cases} == {"mla"}
 
     def test_only_mla_models(self):
-        """Wideep MLA only includes MLA-type models, not DSA."""
+        """WideEP uses one canonical checkpoint, not its artifact aliases."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_wideep_mla_test_cases("context")
         model_paths = {c[6] for c in cases}
-        assert model_paths == {
-            "deepseek-ai/DeepSeek-R1",
-            "deepseek-ai/DeepSeek-V3",
-            "nvidia/DeepSeek-V3.1-NVFP4",
-        }
+        assert model_paths == {"deepseek-ai/DeepSeek-V3"}
 
     def test_sweeps_backends(self):
         """Hopper should sweep flashinfer and fa3 backends."""
@@ -424,11 +416,17 @@ class TestBuildWideepMlaTestCases:
         backends = {c[8] for c in cases}
         assert backends == {"flashinfer", "fa3"}
 
-    def test_single_precision_bfloat16(self):
-        """All wideep MLA cases use bfloat16 precision (logged as fp8_block/fp8)."""
+    def test_uses_real_checkpoint_and_kv_precisions(self):
+        """DeepSeek-V3 runs native block-FP8 GEMMs with both real KV dtypes."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
-            for case in mod._build_wideep_mla_test_cases("context"):
-                assert case[3] == "bfloat16"  # kv_cache_dtype
-                assert case[4] == "bfloat16"  # compute_dtype
-                assert case[5] == "bfloat16"  # gemm_type
+            cases = mod._build_wideep_mla_test_cases("context")
+        assert {case[3] for case in cases} == {"bfloat16", "fp8"}
+        assert {case[4] for case in cases} == {"bfloat16"}
+        assert {case[5] for case in cases} == {"fp8_block"}
+
+    def test_blackwell_kernel_source_matches_query_key(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=100):
+            cases = mod._build_wideep_mla_test_cases("generation")
+        assert {case[8] for case in cases} == {"trtllm_mla"}

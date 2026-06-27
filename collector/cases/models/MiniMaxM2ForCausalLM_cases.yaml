@@ -15,8 +15,8 @@ description: >
 
 model_case_values:
   moe:
-    - model_paths:
-        - MiniMaxAI/MiniMax-M2.5
+    - model_path: MiniMaxAI/MiniMax-M2.5
+      model_aliases:
         - MiniMaxAI/MiniMax-M2.7
         - nvidia/MiniMax-M2.5-NVFP4
         - nvidia/MiniMax-M2.7-NVFP4

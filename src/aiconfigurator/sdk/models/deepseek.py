@@ -121,6 +121,12 @@ class DeepSeekModel(BaseModel):
 
         h = self._hidden_size  # 7168
         tp_size = self.config.tp_size
+        local_mla_heads = self._num_heads // tp_size
+        mla_qk_nope_head_dim = 128
+        mla_qk_rope_head_dim = (
+            self.extra_params.get("qk_rope_head_dim", 64) if isinstance(self.extra_params, dict) else 64
+        )
+        mla_v_head_dim = self._vllm_head_size
         moe_tp_size = self.config.moe_tp_size
         moe_ep_size = self.config.moe_ep_size
         attention_dp_size = self.config.attention_dp_size
@@ -144,7 +150,7 @@ class DeepSeekModel(BaseModel):
                         "context_mla_module",
                         self._num_layers,
                         True,
-                        128 // tp_size,
+                        local_mla_heads,
                         kvcache_quant_mode,
                         fmha_quant_mode,
                         gemm_quant_mode,
@@ -154,14 +160,14 @@ class DeepSeekModel(BaseModel):
                         ops.GEMM(
                             "context_q_b_proj_gemm",
                             self._num_layers,
-                            24576 // tp_size,
+                            local_mla_heads * (mla_qk_nope_head_dim + mla_qk_rope_head_dim),
                             1536,
                             gemm_quant_mode,
                         ),
                         ops.GEMM(
                             "context_kv_b_proj_gemm",
                             self._num_layers,
-                            32768 // tp_size,
+                            local_mla_heads * (mla_qk_nope_head_dim + mla_v_head_dim),
                             512,
                             gemm_quant_mode,
                         ),
@@ -178,11 +184,17 @@ class DeepSeekModel(BaseModel):
                         else ops.ContextMLA(
                             "context_attention",
                             self._num_layers,
-                            128 // tp_size,
+                            local_mla_heads,
                             kvcache_quant_mode,
                             fmha_quant_mode,
                         ),
-                        ops.GEMM("context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, gemm_quant_mode),
+                        ops.GEMM(
+                            "context_proj_gemm",
+                            self._num_layers,
+                            h,
+                            local_mla_heads * mla_v_head_dim,
+                            gemm_quant_mode,
+                        ),
                     ],
                 ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
@@ -328,7 +340,7 @@ class DeepSeekModel(BaseModel):
                         "generation_mla_module",
                         self._num_layers * self._mtp_scale_factor,
                         False,
-                        128 // tp_size,
+                        local_mla_heads,
                         kvcache_quant_mode,
                         fmha_quant_mode,
                         gemm_quant_mode,
@@ -344,7 +356,7 @@ class DeepSeekModel(BaseModel):
                         ops.GEMM(
                             "generation_q_b_proj_gemm",
                             self._num_layers * self._mtp_scale_factor,
-                            24576 // tp_size,
+                            local_mla_heads * (mla_qk_nope_head_dim + mla_qk_rope_head_dim),
                             1536,
                             gemm_quant_mode,
                         ),
@@ -375,7 +387,7 @@ class DeepSeekModel(BaseModel):
                                 ops.GenerationMLA(
                                     "generation_attention",
                                     self._num_layers * self._mtp_scale_factor,
-                                    128 // tp_size,
+                                    local_mla_heads,
                                     kvcache_quant_mode,
                                 ),
                                 ops.MLABmm(
@@ -391,7 +403,7 @@ class DeepSeekModel(BaseModel):
                             "generation_proj_gemm",
                             self._num_layers * self._mtp_scale_factor,
                             h,
-                            h // tp_size,
+                            local_mla_heads * mla_v_head_dim,
                             gemm_quant_mode,
                         ),
                     ],

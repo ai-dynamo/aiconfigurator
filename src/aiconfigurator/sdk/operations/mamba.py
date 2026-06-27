@@ -41,6 +41,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Frameworks currently expose the production decode recurrence as
+# ``fused_recurrent_gated_delta_rule`` and collector-v1 databases use that
+# kernel_source.  Older AIC model graphs used the descriptive (but non-runtime)
+# name below.  Normalize both spellings at the SDK boundary so existing model
+# configs and existing perf databases meet on one stable key.
+_GDN_CANONICAL_RECURRENCE_KERNEL = "fused_recurrent_gated_delta_rule"
+_GDN_KERNEL_SOURCE_ALIASES = {
+    "fused_sigmoid_gating_delta_rule_update": _GDN_CANONICAL_RECURRENCE_KERNEL,
+}
+
+
+def _canonical_gdn_kernel_source(kernel_source: str) -> str:
+    return _GDN_KERNEL_SOURCE_ALIASES.get(kernel_source, kernel_source)
+
+
 def _cache_key(database: PerfDatabase) -> tuple:
     """Shared cache key — same shape as every other migrated op.
 
@@ -285,7 +300,10 @@ class GDNKernel(Operation):
         - "chunk_gated_delta_rule": GDN chunked scan (core recurrence)
       Generation phase:
         - "causal_conv1d_update": Single-step causal conv state update
-        - "fused_sigmoid_gating_delta_rule_update": Single-step GDN recurrence
+        - "fused_recurrent_gated_delta_rule": Single-step GDN recurrence
+
+    ``fused_sigmoid_gating_delta_rule_update`` remains accepted as a legacy
+    model-graph alias and is normalized to the production kernel id.
 
     Uses full (unsharded) dimensions for database lookup; collector data is per-layer.
 
@@ -308,7 +326,7 @@ class GDNKernel(Operation):
         d_conv: int,
     ) -> None:
         super().__init__(name, scale_factor)
-        self._kernel_source = kernel_source
+        self._kernel_source = _canonical_gdn_kernel_source(kernel_source)
         self._phase = phase
         self._d_model = d_model
         self._num_k_heads = num_k_heads
@@ -369,6 +387,7 @@ class GDNKernel(Operation):
         d_conv: int,
     ) -> PerformanceResult:
         """Query GDN kernel table. Verbatim port of the legacy body."""
+        kernel_source = _canonical_gdn_kernel_source(kernel_source)
         cls.load_data(database)
         gdn_data = database._gdn_data
         if not getattr(gdn_data, "loaded", False):
@@ -377,7 +396,9 @@ class GDNKernel(Operation):
         def get_sol() -> tuple[float, float, float]:
             x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
             if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
-                conv_channels = num_k_heads * head_k_dim + num_v_heads * head_v_dim
+                # Qwen3.5 applies the causal convolution to K channels only;
+                # V bypasses Conv1D and enters the delta-rule kernel directly.
+                conv_channels = num_k_heads * head_k_dim
                 read_bytes = x * conv_channels * (d_conv + 1) * 2
                 write_bytes = x * conv_channels * 2
             elif kernel_source == "chunk_gated_delta_rule":
@@ -400,7 +421,7 @@ class GDNKernel(Operation):
                     + state_size * 2 * batch_size
                     + h_chunks_bytes  # chunk_delta_h writes h_chunks to global memory
                 )
-            elif kernel_source == "fused_sigmoid_gating_delta_rule_update":
+            elif kernel_source == _GDN_CANONICAL_RECURRENCE_KERNEL:
                 # GDN single-step decode. State stored as BF16 in global memory.
                 state_size = num_v_heads * head_k_dim * head_v_dim
                 read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 2 * batch_size
@@ -771,7 +792,7 @@ def load_gdn_data(gdn_file: str):
         logger.debug("Legacy database format detected (gdn) - power will default to 0.0")
 
     for row in rows:
-        kernel_source = row["kernel_source"]
+        kernel_source = _canonical_gdn_kernel_source(row["kernel_source"])
         phase = row["phase"]
         batch_size = int(row["batch_size"])
         seq_len = int(row["seq_len"])

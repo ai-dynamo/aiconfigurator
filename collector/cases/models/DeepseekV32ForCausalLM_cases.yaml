@@ -7,18 +7,14 @@ model_path: deepseek-ai/DeepSeek-V3.2
 model_paths:
   - deepseek-ai/DeepSeek-V3.2
 include_base: true
+base_ops:
+  - gemm
 description: >
   DeepSeek-V3.2 DSA model-centric collection plan. DSA module data is
-  framework-specific while MoE and base attention/GEMM cases stay shared.
+  framework-specific; its shared expert shape reuses the DeepSeek-V3 physical
+  MoE profile and this plan adds only the common GEMM recipe.
 
 model_case_values:
-  moe:
-    - model_path: deepseek-ai/DeepSeek-V3.2
-      hidden_size: 7168
-      inter_size: 2048
-      topk: 8
-      num_experts: 256
-      wideep: true
   mla_module:
     - model_path: deepseek-ai/DeepSeek-V3.2
       attention_type: dsa

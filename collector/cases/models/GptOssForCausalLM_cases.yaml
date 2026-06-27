@@ -12,6 +12,16 @@ description: >
   GPT-OSS MoE model-centric collection plan.
 
 model_case_values:
+  attention:
+    - id: gpt_oss_attention
+      model_path: openai/gpt-oss-120b
+      model_aliases:
+        - openai/gpt-oss-20b
+      num_attention_heads: 64
+      num_key_value_heads: 8
+      head_dim: 64
+      window_sizes: [0, 128]
+      tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
   moe:
     - model_path: openai/gpt-oss-120b
       hidden_size: 2880

@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::common::error::AicError;
 use super::interpolation::{interp_1d, nearest_neighbors};
+use crate::common::error::AicError;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct StateSpaceTable {
@@ -64,6 +64,18 @@ struct GdnKey {
     num_v_heads: u32,
     head_v_dim: u32,
     // See `Mamba2Key`: shape is the key, `model_name` is metadata.
+}
+
+/// Canonical perf-table id for the production GDN decode recurrence.
+///
+/// Python model graphs historically emitted the descriptive
+/// `fused_sigmoid_gating_delta_rule_update` name, while framework collectors
+/// and collector-v1 parquet files use the actual runtime API name below.
+pub(crate) fn canonical_gdn_kernel_source(kernel_source: &str) -> &str {
+    match kernel_source {
+        "fused_sigmoid_gating_delta_rule_update" => "fused_recurrent_gated_delta_rule",
+        _ => kernel_source,
+    }
 }
 
 impl StateSpaceTable {
@@ -167,7 +179,7 @@ impl StateSpaceTable {
     ) -> Result<f64, AicError> {
         let grids = self.load_gdn()?;
         let key = GdnKey {
-            kernel_source: kernel_source.to_string(),
+            kernel_source: canonical_gdn_kernel_source(kernel_source).to_string(),
             phase: phase.to_string(),
             d_model,
             d_conv,
@@ -261,8 +273,7 @@ fn bs_seq_interp(
     // `list(table.keys())`. Mirror that: when no row matches `seq_len`,
     // pick the unique seq_len present in the table and interpolate by
     // batch_size at that slice.
-    let unique_seqs: std::collections::BTreeSet<u32> =
-        by_bs_seq.keys().map(|&(_, s)| s).collect();
+    let unique_seqs: std::collections::BTreeSet<u32> = by_bs_seq.keys().map(|&(_, s)| s).collect();
     if let Some(&only_seq) = unique_seqs.iter().next().filter(|_| unique_seqs.len() == 1) {
         let bs_keys: Vec<u32> = by_bs_seq
             .keys()
@@ -351,8 +362,9 @@ fn load_gdn_parquet(path: &Path) -> Result<GdnGrids, AicError> {
     let mut by_keys: BTreeMap<GdnKey, BTreeMap<(u32, u32), f64>> = BTreeMap::new();
     for row in reader.rows()? {
         let row = row?;
+        let raw_kernel_source = row.str_owned(kernel_source_col)?;
         let key = GdnKey {
-            kernel_source: row.str_owned(kernel_source_col)?,
+            kernel_source: canonical_gdn_kernel_source(&raw_kernel_source).to_string(),
             phase: row.str_owned(phase_col)?,
             d_model: row.u32(d_model_col)?,
             d_conv: row.u32(d_conv_col)?,
@@ -378,7 +390,10 @@ fn load_gdn_parquet(path: &Path) -> Result<GdnGrids, AicError> {
 }
 
 fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
-    AicError::PerfDatabase(format!("{table} data missing for {descriptor} at {}", data_root.display()))
+    AicError::PerfDatabase(format!(
+        "{table} data missing for {descriptor} at {}",
+        data_root.display()
+    ))
 }
 
 fn clone_err(err: &AicError) -> AicError {
@@ -388,6 +403,18 @@ fn clone_err(err: &AicError) -> AicError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gdn_kernel_source_alias_is_canonicalized() {
+        assert_eq!(
+            canonical_gdn_kernel_source("fused_sigmoid_gating_delta_rule_update"),
+            "fused_recurrent_gated_delta_rule"
+        );
+        assert_eq!(
+            canonical_gdn_kernel_source("fused_recurrent_gated_delta_rule"),
+            "fused_recurrent_gated_delta_rule"
+        );
+    }
 
     #[test]
     fn state_space_loaders_smoke() {

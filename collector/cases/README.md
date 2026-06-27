@@ -5,7 +5,8 @@ collector as a flat op list.
 
 ## File Layout
 
-- `base_ops/<op>.yaml`: shared common case values and op cases every model can include.
+- `base_ops/<op>.yaml`: shared recipe library. Only recipes named by a model's
+  `base_ops` (or declared universal through the base file's `model_ops`) are activated.
 - `models/<architecture>_cases.yaml`: architecture-specific op cases and model path aliases.
 - `sm_exceptions/sm<version>_exceptions.yaml`: SM-specific exceptions applied after base-op/model cases are merged.
 
@@ -22,10 +23,15 @@ model_paths:
   - Qwen/Qwen3-30B-A3B
   - Qwen/Qwen3-235B-A22B
 include_base: true
+base_ops:
+  - attention_context
+  - attention_generation
+  - gemm
 ```
 
-`model_path` is the default representative model. `model_paths` is the alias
-list used for support-matrix lookup and targeted collection.
+`model_path` is the default representative model. The top-level `model_paths`
+list resolves support-matrix names to this architecture plan; it does not by
+itself multiply kernel cases.
 
 ### Op Sections
 
@@ -76,8 +82,47 @@ model_case_values:
 
 The collector loads these values by op name and honors `COLLECTOR_MODEL_PATH`,
 so support-matrix healing can request cases for one model without editing
-Python. Use `model_paths` when aliases share the same dimensions, or
-`model_path` for a single model-specific entry.
+Python. There are two deliberately different multi-name forms:
+
+- `model_aliases` resolves multiple artifact names to one canonical physical
+  case. Use it for base/FP8/NVFP4 checkpoints when quantization is already an
+  independent collector dimension and the kernel shape is identical.
+- `model_paths` expands one physical case per path. Use it only when the model
+  name changes runtime behavior, quantization policy, activation, or module
+  loading (for example a collector that actually loads each checkpoint).
+
+Keeping these meanings separate prevents checkpoint suffixes from multiplying
+the same shape by every independently swept quantization mode.
+
+### Structural Attention Profiles
+
+Attention correlations belong to the model, not to a global Cartesian product.
+Store a native topology under `model_case_values.attention`:
+
+```yaml
+model_case_values:
+  attention:
+    - model_path: openai/gpt-oss-120b
+      model_aliases: [openai/gpt-oss-20b]
+      num_attention_heads: 64
+      num_key_value_heads: 8
+      head_dim: 64
+      window_sizes: [0, 128]
+      tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
+```
+
+The generator expands only valid TP shards of that tuple. It never crosses one
+model's query/KV heads with another model's head dimension or window. A targeted
+run with an explicit profile uses only that model profile; models not yet
+migrated fall back to the collector-v1 compatibility profiles. Full/raw runs
+combine the compatibility profiles with all model deltas.
+
+Treat that last rule as a physical-coverage invariant: the full/raw key set must
+contain every collector-v1 lookup key. Do not infer compatibility from total
+case counts alone. Alias canonicalization may remove duplicate scheduler cases,
+but it must not remove a distinct database key. Put synthetic v1 interpolation
+anchors under the base recipe's `legacy_model_cases`; targeted real-model runs
+will not inherit those unrelated anchors.
 
 ### Framework-Specific Model Dimensions
 
@@ -123,6 +168,25 @@ The MoE Python generator only combines those shared sweep values with each
 model's `hidden_size`, `inter_size`, `topk`, and `num_experts`. The same pattern
 applies to MLA, Mamba2, GDN, and MHC: model YAML stores model dimensions, while
 base op YAML stores the reusable sweep policy.
+
+`include_base: true` means "include the small universal base set" declared by
+base-file `model_ops` (currently dense attention and GEMM). It does not opt a
+model into every recipe that happens to exist under `base_ops/`. Use an explicit
+model `base_ops` list for auxiliary recipes such as `encoder_attention`, or a
+`framework_specific_base_ops` list for framework-only recipes. When an op is
+required by one concrete checkpoint rather than the whole architecture, use an
+artifact-keyed `model_specific_base_ops` mapping. For example, the Qwen3 static
+FP8 checkpoint opts into `compute_scale` without making base Qwen3 or dynamic
+FP8 checkpoints collect it. Adding a new base recipe therefore cannot silently
+fan out across every model or artifact.
+
+```yaml
+model_specific_base_ops:
+  Qwen/Qwen3-32B-FP8-Static-PerTensor:
+    sglang: [compute_scale]
+    trtllm: [compute_scale]
+    vllm: [compute_scale]
+```
 
 ### Explicit Case Specs
 
@@ -199,6 +263,9 @@ framework_specific_op_exceptions:
 Use `drop: true` only when the whole op should be removed for the SM/backend.
 For narrower exclusions, use a case selector on the op.
 
+An SM exception only constrains an op already selected by the model plan. It
+never activates an unrelated op merely because the SM catalog mentions it.
+
 `reason_type` should be `hardware_unsupported` for SM capability/kernel-shape
 limits and `framework_version_unsupported` for a known runtime or framework
 version gap. Version-scoped rules can add `version_prefixes`, and computed
@@ -223,7 +290,9 @@ failures.
 Selectors are OR-based: a case matches when it satisfies any selector field. For
 include selectors, matched cases are kept. For exception selectors, matched cases
 are skipped or classified as expected failures. `limit` is applied after
-selection.
+selection. A concrete selector in a model file overrides the inherited
+base-recipe `cases: all`, so `case_ids` or `rules` can genuinely narrow a shared
+base op.
 
 Supported generated-case selector fields:
 
@@ -236,10 +305,12 @@ Supported generated-case selector fields:
 - `limit`: keeps only the first N cases after selection.
 - `rules`: structured matches over positional collector case fields.
 
-There is one important distinction: a dictionary under `cases` is a generation
-recipe, not a selector. For example, a GEMM shape sweep dictionary tells the
-collector to create many concrete GEMM cases. It should live in an include
-section such as `all_frameworks_op_cases` or `framework_specific_op_cases`.
+There is one important distinction: a dictionary under `cases` in a
+`base_ops/<op>.yaml` file is a generation recipe, not a selector. For example,
+a GEMM shape sweep dictionary tells the collector to create many concrete GEMM
+cases. Model files should put physical dimensions in `model_case_values` and use
+generated-case selectors (`rules`, `case_ids`, and so on) in op sections; they
+should not define a second generator recipe there.
 
 SM exceptions run after those concrete cases are generated. They should match
 the generated cases with `rules`, `contains`, `case_ids`, `indices`, or

@@ -83,6 +83,41 @@ def _deep_merge_dsv4_dicts(dest, src):
     return dest
 
 
+def _dsv4_profile_id(
+    model: object | None = None,
+    *,
+    native_heads: int | None = None,
+    hidden_size: int | None = None,
+    index_topk: int | None = None,
+) -> str:
+    """Return the physical DeepSeek-V4 attention profile identifier.
+
+    Checkpoint aliases (for example the ``sgl-project`` FP8 artifacts) share a
+    profile, while Flash and Pro must never share module rows: their hidden
+    sizes, native head counts, and indexer top-k differ.  Persisted collector
+    rows already carry ``model`` so this also works with existing parquet data.
+    The structural fallback keeps SDK-created queries independent of a model
+    path string.
+    """
+
+    model_name = str(model or "").lower()
+    if "deepseek-v4-flash" in model_name:
+        return "flash"
+    if "deepseek-v4-pro" in model_name:
+        return "pro"
+    if native_heads == 64 or (hidden_size == 4096 and index_topk == 512):
+        return "flash"
+    if native_heads == 128 or (hidden_size == 7168 and index_topk == 1024):
+        return "pro"
+    return f"heads={native_heads or 0}:hidden={hidden_size or 0}:topk={index_topk or 0}"
+
+
+def _dsv4_module_head_key(profile_id: str, tp_size: int, local_heads: int) -> tuple[str, int, int]:
+    """Canonical module-table key for one physical model/TP/head shard."""
+
+    return profile_id, int(tp_size), int(local_heads)
+
+
 def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
     """DeepSeek-V4 3D lookup: exact, cubic, then sampled-batch fallback.
 
@@ -193,18 +228,50 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
     raise ValueError(f"DeepSeek-V4 robust lookup failed (tp={x}, s={y}, b={z})")
 
 
-def _dsv4_resolve_head_key(quant_data, num_heads):
-    """SCHEME A head-key resolution.
+def _dsv4_resolve_head_key(
+    quant_data,
+    num_heads,
+    *,
+    native_heads: int | None = None,
+    tp_size: int | None = None,
+    hidden_size: int | None = None,
+    index_topk: int | None = None,
+):
+    """Resolve a profile-aware module head key, with legacy compatibility.
 
-    The head axis is the rank-local head count (``native // tp``).  Prefer an
-    exact match on the value the model passes.  The b300 module data is a
-    universal sweep collected with a single local-head value; if the model's
-    local head count is not an exact bench point, fall back to the single
-    available head key so the universal data still resolves.  Returns the head
-    key to index ``quant_data`` with, or ``None`` if no head data is loaded.
+    New data uses ``(profile_id, tp_size, local_heads)``.  Older in-memory test
+    fixtures and pre-profile databases use a bare local-head integer; those are
+    still readable, but profile-aware data never falls across Flash/Pro or TP
+    boundaries.
     """
     if not isinstance(quant_data, dict) or not quant_data:
         return None
+
+    if native_heads is not None and tp_size is not None:
+        profile_id = _dsv4_profile_id(
+            native_heads=native_heads,
+            hidden_size=hidden_size,
+            index_topk=index_topk,
+        )
+        profile_key = _dsv4_module_head_key(profile_id, tp_size, num_heads)
+        if profile_key in quant_data:
+            return profile_key
+
+        # A collector may contain one local-head value for a fixed profile/TP.
+        # Preserve that narrow fallback, but never borrow another profile or TP.
+        same_profile_tp = [
+            key
+            for key in quant_data
+            if isinstance(key, tuple) and len(key) == 3 and key[:2] == (profile_id, int(tp_size))
+        ]
+        if len(same_profile_tp) == 1:
+            return same_profile_tp[0]
+
+        # If the table is profile-aware, absence of this profile is a real miss.
+        if any(isinstance(key, tuple) for key in quant_data):
+            return None
+
+    # Legacy local-head-only data.
     if num_heads in quant_data:
         return num_heads
     head_keys = [k for k in quant_data if isinstance(k, int)]
@@ -1050,7 +1117,14 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 )
             # SCHEME A: head axis is the rank-local head count the model passes.
             quant_data = data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
-            head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
+            head_axis = _dsv4_resolve_head_key(
+                quant_data,
+                num_heads,
+                native_heads=native_heads,
+                tp_size=tp_size,
+                hidden_size=hidden_size,
+                index_topk=index_topk,
+            )
             if head_axis is None:
                 raise PerfDataNotAvailableError(
                     f"No DeepSeek-V4 context attention silicon data for num_heads={num_heads}, "
@@ -1081,7 +1155,12 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             # representative silicon topK). HCA (cr==128) is left untouched.
             if compress_ratio == 4 and _TOPK_CORRECTION_ENABLED:
                 calib = _get_dsv4_topk_calib(database)
-                delta = _dsv4_topk_delta_ms(calib, int(prefix), int(s), int(b))
+                profile_id = _dsv4_profile_id(
+                    native_heads=native_heads,
+                    hidden_size=hidden_size,
+                    index_topk=index_topk,
+                )
+                delta = _dsv4_topk_delta_ms(calib, int(prefix), int(s), int(b), profile_id=profile_id)
                 corrected_latency = max(0.0, latency - delta)
                 if latency > 0.0 and energy:
                     energy *= corrected_latency / latency
@@ -1267,7 +1346,14 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 )
             # SCHEME A: head axis is the rank-local head count the model passes.
             quant_data = data[kvcache_quant_mode][gemm_quant_mode]
-            head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
+            head_axis = _dsv4_resolve_head_key(
+                quant_data,
+                num_heads,
+                native_heads=native_heads,
+                tp_size=tp_size,
+                hidden_size=hidden_size,
+                index_topk=index_topk,
+            )
             if head_axis is None:
                 raise PerfDataNotAvailableError(
                     f"No DeepSeek-V4 generation attention silicon data for num_heads={num_heads}, "
@@ -1291,7 +1377,12 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             if compress_ratio == 4 and _TOPK_CORRECTION_ENABLED:
                 calib = _get_dsv4_topk_calib(database)
                 decode_prefix = max(int(s) - 1, 0)
-                delta = _dsv4_topk_delta_ms(calib, decode_prefix, 1, int(b))
+                profile_id = _dsv4_profile_id(
+                    native_heads=native_heads,
+                    hidden_size=hidden_size,
+                    index_topk=index_topk,
+                )
+                delta = _dsv4_topk_delta_ms(calib, decode_prefix, 1, int(b), profile_id=profile_id)
                 corrected_latency = max(0.0, latency - delta)
                 if latency > 0.0 and energy:
                     energy *= corrected_latency / latency
@@ -1671,23 +1762,33 @@ def _build_topk_calib_from_rows(by_mode):
     """
     if not by_mode:
         return None
-    exact = {}
-    by_pi = {}
-    for step, isl_d in by_mode.items():
-        for isl, bs_d in isl_d.items():
-            for bs, mode_d in bs_d.items():
-                flat = mode_d.get("flat")
-                top_last = mode_d.get("top_last")
-                if not isinstance(flat, dict) or not isinstance(top_last, dict):
-                    continue
-                delta = max(0.0, float(flat["latency"]) - float(top_last["latency"]))
-                exact[(step, isl, bs)] = delta
-                by_pi.setdefault((step, isl), []).append((bs, delta))
-    if not exact:
-        return None
-    for k in by_pi:
-        by_pi[k].sort()
-    return {"exact": exact, "by_pi": by_pi}
+
+    def _build_one(rows):
+        exact = {}
+        by_pi = {}
+        for step, isl_d in rows.items():
+            for isl, bs_d in isl_d.items():
+                for bs, mode_d in bs_d.items():
+                    flat = mode_d.get("flat")
+                    top_last = mode_d.get("top_last")
+                    if not isinstance(flat, dict) or not isinstance(top_last, dict):
+                        continue
+                    delta = max(0.0, float(flat["latency"]) - float(top_last["latency"]))
+                    exact[(step, isl, bs)] = delta
+                    by_pi.setdefault((step, isl), []).append((bs, delta))
+        if not exact:
+            return None
+        for key in by_pi:
+            by_pi[key].sort()
+        return {"exact": exact, "by_pi": by_pi}
+
+    # Profile-aware rows are ``profile -> step -> isl -> bs -> mode``.
+    # Accept the historical unprofiled shape for compatibility with callers
+    # that inject calibration dictionaries directly in tests.
+    if all(isinstance(key, str) for key in by_mode):
+        result = {profile: built for profile, rows in by_mode.items() if (built := _build_one(rows)) is not None}
+        return result or None
+    return _build_one(by_mode)
 
 
 def _dsv4_interp_1d_from_points(points, x):
@@ -1715,7 +1816,7 @@ def _dsv4_interp_1d_from_points(points, x):
     return vals[left] * (1.0 - t) + vals[right] * t
 
 
-def _dsv4_topk_delta_ms(calib, prefix, isl, bs):
+def _dsv4_topk_delta_ms(calib, prefix, isl, bs, *, profile_id: str | None = None):
     """Return topK DELTA (flat_ms - top_last_ms) from measured calibration.
 
     Exact (prefix, isl, bs) rows are preferred; off-grid shapes are
@@ -1724,6 +1825,10 @@ def _dsv4_topk_delta_ms(calib, prefix, isl, bs):
     """
     if not calib:
         return 0.0
+    if profile_id is not None and "exact" not in calib:
+        calib = calib.get(profile_id)
+        if not calib:
+            return 0.0
     prefix = int(prefix)
     isl = int(isl)
     bs = int(bs)
@@ -1787,13 +1892,13 @@ _MISSING = object()
 def load_context_dsv4_kind_module_data(file_path: str):
     """Load ONE DeepSeek-V4 context CSV (single attn_kind / compress_ratio).
 
-    SCHEME A.  Returns a 7-level prefix-resolved nested dict:
-        data[fmha_quant][kv_quant][gemm_quant][num_heads_local][compress_ratio]
+    Returns a 7-level prefix-resolved nested dict:
+        data[fmha_quant][kv_quant][gemm_quant][module_head_key][compress_ratio]
             [prefix][s][b] = {"latency": ms, "power": W, "energy": J}
 
-    The head axis is the rank-LOCAL head count = ``int(row["num_heads"])``
-    (the collector writes ``local_attention_heads = native // tp``).  There is
-    NO separate ``tp_size`` key and NO reconstructed native-head key.
+    ``module_head_key`` is ``(profile_id, tp_size, local_heads)``.  Keeping all
+    three axes is required because Flash and Pro overlap on local head counts,
+    while some historical collectors logged native rather than local heads.
 
     ``prefix`` is the past-KV length, ``int(float(row["step"]))``; ``s`` is the
     context chunk length (``isl``).  Multiple files (csa/hca) merge cleanly
@@ -1826,8 +1931,16 @@ def load_context_dsv4_kind_module_data(file_path: str):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        # SCHEME A: head key is the rank-local head count straight from the CSV.
-        num_heads_local = int(row["num_heads"])
+        tp_size = int(row.get("tp_size") or 1)
+        model = row.get("model")
+        profile_id = _dsv4_profile_id(model)
+        native_heads = 64 if profile_id == "flash" else 128 if profile_id == "pro" else None
+        logged_heads = int(row["num_heads"])
+        num_heads_local = native_heads // tp_size if native_heads is not None else logged_heads
+        # CSVs predating the ``model`` column keep their legacy integer axis.
+        # New collector rows are profile-aware and cannot collide across V4
+        # variants or tensor-parallel shardings.
+        module_head_key = _dsv4_module_head_key(profile_id, tp_size, num_heads_local) if model else num_heads_local
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
@@ -1835,7 +1948,7 @@ def load_context_dsv4_kind_module_data(file_path: str):
         # NOTE: the topK DELTA correction (degenerate -> representative) is
         # applied ONCE at query time for compress_ratio==4 (CSA). Do NOT
         # subtract it here, or the CSA module latency would be double-corrected.
-        data[fmha_mode][kv_dtype][gemm_mode][num_heads_local][cr][prefix][s][b] = {
+        data[fmha_mode][kv_dtype][gemm_mode][module_head_key][cr][prefix][s][b] = {
             "latency": latency,
             "power": power,
             "energy": power * latency,
@@ -1848,7 +1961,7 @@ def load_generation_dsv4_kind_module_data(file_path: str):
 
     Generation lookup uses absolute KV length ``s_total = isl + step`` (decode
     is q_len=1 with past_kv = step).  SCHEME A dict shape:
-        data[kv_quant][gemm_quant][num_heads_local][compress_ratio]
+        data[kv_quant][gemm_quant][module_head_key][compress_ratio]
             [b][s_total]
     """
     rows = _read_filtered_rows(file_path)
@@ -1877,14 +1990,17 @@ def load_generation_dsv4_kind_module_data(file_path: str):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        # SCHEME A: head key is the rank-local head count straight from the CSV;
-        # no tp_size key, no native reconstruction.  Generation convention puts
-        # ``b`` before ``s_total`` (matches the (head, b, s) lookup order).
-        num_heads_local = int(row["num_heads"])
+        tp_size = int(row.get("tp_size") or 1)
+        model = row.get("model")
+        profile_id = _dsv4_profile_id(model)
+        native_heads = 64 if profile_id == "flash" else 128 if profile_id == "pro" else None
+        logged_heads = int(row["num_heads"])
+        num_heads_local = native_heads // tp_size if native_heads is not None else logged_heads
+        module_head_key = _dsv4_module_head_key(profile_id, tp_size, num_heads_local) if model else num_heads_local
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
 
-        data[kv_dtype][gemm_mode][num_heads_local][cr][b][s_total] = {
+        data[kv_dtype][gemm_mode][module_head_key][cr][b][s_total] = {
             "latency": latency,
             "power": power,
             "energy": power * latency,
@@ -2024,7 +2140,7 @@ def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
 # ``load_dsv4_sparse_op_data``; each consumer just supplies the key columns it
 # indexes on (declared here so callers stay in sync).
 _SPARSE_KERNEL_KEYS = ("num_heads", "tp_size", "step", "isl", "batch_size")
-_TOPK_CALIB_KEYS = ("step", "isl", "batch_size", "score_mode")
+_TOPK_CALIB_KEYS = ("model", "step", "isl", "batch_size", "score_mode")
 
 
 def load_dsv4_sparse_op_data(file_or_sources, key_columns):
@@ -2040,7 +2156,7 @@ def load_dsv4_sparse_op_data(file_or_sources, key_columns):
 
     Consumers:
       - sparse kernels: ``_SPARSE_KERNEL_KEYS`` -> data[heads][tp][past_kv][isl][bs]
-      - topk calib:     ``_TOPK_CALIB_KEYS``    -> data[step][isl][bs][score_mode]
+      - topk calib:     ``_TOPK_CALIB_KEYS``    -> data[profile][step][isl][bs][score_mode]
     """
     rows = _read_filtered_rows(file_or_sources)
     if rows is None:
@@ -2078,7 +2194,7 @@ def load_dsv4_sparse_op_data(file_or_sources, key_columns):
         if row.get("batch_size") in (None, "", "batch_size"):
             continue
         try:
-            keys = [_coerce(row[col]) for col in key_columns]
+            keys = [_dsv4_profile_id(row[col]) if col == "model" else _coerce(row[col]) for col in key_columns]
             latency = float(row["latency"])
         except (KeyError, TypeError, ValueError):
             continue

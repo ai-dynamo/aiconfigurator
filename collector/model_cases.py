@@ -242,7 +242,10 @@ def _parse_selector(raw: Any, *, default_all: bool) -> CaseSelector:
     if not isinstance(raw, dict):
         raise TypeError(f"case selector must be 'all', a list, or a mapping; got {type(raw).__name__}")
 
-    cases = raw.get("cases", "all" if default_all else None)
+    has_specific_selector = any(
+        field_name in raw for field_name in ("case_ids", "contains", "indices", "ranges", "rules")
+    )
+    cases = raw.get("cases", "all" if default_all and not has_specific_selector else None)
     selector = CaseSelector(all_cases=cases == "all" or cases is True)
     if cases not in (None, "all", True):
         if not isinstance(cases, list):
@@ -270,23 +273,51 @@ def _parse_selector(raw: Any, *, default_all: bool) -> CaseSelector:
 
 def _ensure_op_plan(op_cases: dict[str, OpCasePlan], op: str) -> OpCasePlan:
     if op not in op_cases:
-        op_cases[op] = OpCasePlan()
+        # A newly discovered op has not selected any generated cases yet.  The
+        # merge that activates it (``model_ops`` or an op case section) decides
+        # whether it means "all" or a narrower selector.  Starting at ``all``
+        # makes a YAML ``case_ids``/``rules`` selector impossible to narrow.
+        op_cases[op] = OpCasePlan(include=CaseSelector())
     return op_cases[op]
 
 
 def _merge_model_ops(op_cases: dict[str, OpCasePlan], data: dict[str, Any]) -> None:
     for op in _as_list(data.get("model_ops"), field_name="model_ops"):
-        _ensure_op_plan(op_cases, str(op))
+        _ensure_op_plan(op_cases, str(op)).include.all_cases = True
 
 
-def _merge_case_section(op_cases: dict[str, OpCasePlan], section: dict[str, Any]) -> None:
+def _merge_case_section(
+    op_cases: dict[str, OpCasePlan],
+    section: dict[str, Any],
+    *,
+    allowed_ops: set[str] | None = None,
+    override_specific_selectors: bool = False,
+) -> None:
     for op, raw_selector in section.items():
-        _ensure_op_plan(op_cases, str(op)).include.merge(_parse_selector(raw_selector, default_all=True))
+        op = str(op)
+        if allowed_ops is not None and op not in allowed_ops:
+            continue
+        plan = _ensure_op_plan(op_cases, op)
+        selector = _parse_selector(raw_selector, default_all=True)
+        if override_specific_selectors and selector.has_specific_selectors() and not selector.all_cases:
+            # Base files activate generator recipes and therefore select all
+            # generated cases by default.  A model's concrete selector is an
+            # intentional narrowing of that base workload, not an OR with the
+            # inherited ``all``.  Keep recipe specs for plan inspection while
+            # replacing the runnable selector state.
+            selector.case_specs = [*plan.include.case_specs, *selector.case_specs]
+            plan.include = selector
+        else:
+            plan.include.merge(selector)
 
 
 def _merge_exception_section(op_cases: dict[str, OpCasePlan], section: dict[str, Any]) -> None:
     for op, raw_selector in section.items():
-        plan = _ensure_op_plan(op_cases, str(op))
+        # Exceptions constrain an existing workload; they must never activate a
+        # model-unrelated op merely because an SM catalog happens to mention it.
+        plan = op_cases.get(str(op))
+        if plan is None:
+            continue
         if raw_selector is True:
             plan.drop = True
             continue
@@ -389,19 +420,43 @@ def _merge_known_exception_section(op_cases: dict[str, OpCasePlan], data: dict[s
             raise ValueError("known_exceptions entries must include op")
         selector = _parse_selector(raw_exception, default_all=False)
         selector.rules.extend(_known_exception_rules(raw_exception))
-        _ensure_op_plan(op_cases, str(op)).expected_failures.merge(selector)
+        plan = op_cases.get(str(op))
+        if plan is not None:
+            plan.expected_failures.merge(selector)
 
 
-def _merge_case_file(op_cases: dict[str, OpCasePlan], data: dict[str, Any], backend: str) -> None:
-    _merge_model_ops(op_cases, data)
-    _merge_case_section(op_cases, _section(data, "all_frameworks_op_cases"))
+def _merge_case_file(
+    op_cases: dict[str, OpCasePlan],
+    data: dict[str, Any],
+    backend: str,
+    *,
+    allowed_ops: set[str] | None = None,
+    override_specific_selectors: bool = False,
+) -> None:
+    if allowed_ops is None:
+        _merge_model_ops(op_cases, data)
+    else:
+        model_ops = {str(op) for op in _as_list(data.get("model_ops"), field_name="model_ops")}
+        for op in sorted(model_ops & allowed_ops):
+            _ensure_op_plan(op_cases, op).include.all_cases = True
+    _merge_case_section(
+        op_cases,
+        _section(data, "all_frameworks_op_cases"),
+        allowed_ops=allowed_ops,
+        override_specific_selectors=override_specific_selectors,
+    )
     framework_cases = _section(data, "framework_specific_op_cases")
     backend_cases = framework_cases.get(backend, {})
     if backend_cases is None:
         return
     if not isinstance(backend_cases, dict):
         raise TypeError(f"framework_specific_op_cases.{backend} must be a mapping")
-    _merge_case_section(op_cases, backend_cases)
+    _merge_case_section(
+        op_cases,
+        backend_cases,
+        allowed_ops=allowed_ops,
+        override_specific_selectors=override_specific_selectors,
+    )
 
 
 def _merge_exception_file(op_cases: dict[str, OpCasePlan], data: dict[str, Any], backend: str) -> None:
@@ -495,6 +550,98 @@ def _load_model_case_files(
     return []
 
 
+def _base_case_file_ops(data: dict[str, Any], backend: str) -> set[str]:
+    """Return collectable op names exposed by one base case document."""
+
+    ops = {str(op) for op in _as_list(data.get("model_ops"), field_name="model_ops")}
+    ops.update(str(op) for op in _section(data, "all_frameworks_op_cases"))
+    framework_cases = _section(data, "framework_specific_op_cases")
+    backend_cases = framework_cases.get(backend, {})
+    if backend_cases is not None:
+        if not isinstance(backend_cases, dict):
+            raise TypeError(f"framework_specific_op_cases.{backend} must be a mapping")
+        ops.update(str(op) for op in backend_cases)
+    return ops
+
+
+def _selected_base_ops(
+    base_data_files: list[dict[str, Any]],
+    model_data: list[dict[str, Any]],
+    backend: str,
+    model_path: str | None,
+) -> set[str]:
+    """Resolve the shared recipe ops required by the selected model plans.
+
+    ``base_ops`` is an explicit allowlist.  Legacy model files that only set
+    ``include_base: true`` receive the small universal set declared through
+    base-file ``model_ops``; they no longer activate every auxiliary recipe
+    merely because another base YAML was added to the repository.
+    """
+
+    available_ops: set[str] = set()
+    default_ops: set[str] = set()
+    for data in base_data_files:
+        available_ops.update(_base_case_file_ops(data, backend))
+        default_ops.update(str(op) for op in _as_list(data.get("model_ops"), field_name="model_ops"))
+    # Preserve compatibility with a legacy monolithic base catalog that did not
+    # distinguish universal model ops from auxiliary recipes.
+    if not default_ops:
+        default_ops = set(available_ops)
+
+    if not model_data:
+        return default_ops
+
+    selected: set[str] = set()
+    for data in model_data:
+        explicit = data.get("base_ops")
+        if explicit is not None:
+            selected.update(str(op) for op in _as_list(explicit, field_name="base_ops"))
+        elif bool(data.get("include_base", True)):
+            selected.update(default_ops)
+
+        framework_base_ops = data.get("framework_specific_base_ops", {})
+        if not isinstance(framework_base_ops, dict):
+            raise TypeError("framework_specific_base_ops must be a mapping")
+        backend_base_ops = framework_base_ops.get(backend, [])
+        selected.update(
+            str(op)
+            for op in _as_list(
+                backend_base_ops,
+                field_name=f"framework_specific_base_ops.{backend}",
+            )
+        )
+
+        model_specific_base_ops = data.get("model_specific_base_ops", {})
+        if not isinstance(model_specific_base_ops, dict):
+            raise TypeError("model_specific_base_ops must be a mapping")
+        if model_path is None:
+            # Full/raw plans collect the union needed by every listed artifact.
+            selected_model_specific_ops = model_specific_base_ops.values()
+        else:
+            selected_model_specific_ops = [model_specific_base_ops.get(model_path, [])]
+        for artifact_config in selected_model_specific_ops:
+            if isinstance(artifact_config, dict):
+                artifact_ops = artifact_config.get(backend, [])
+                field_name = f"model_specific_base_ops.<model_path>.{backend}"
+            else:
+                # A flat list remains valid for artifacts whose recipe applies
+                # to every backend exposing that base op.
+                artifact_ops = artifact_config
+                field_name = "model_specific_base_ops.<model_path>"
+            selected.update(
+                str(op)
+                for op in _as_list(
+                    artifact_ops,
+                    field_name=field_name,
+                )
+            )
+
+    unknown = selected - available_ops
+    if unknown:
+        raise ValueError(f"Unknown base_ops entries for backend {backend}: {sorted(unknown)}")
+    return selected
+
+
 def build_collection_case_plan(
     *,
     backend: str,
@@ -519,16 +666,12 @@ def build_collection_case_plan(
     if model_architecture is None and len(model_data) == 1:
         model_architecture = _model_case_architecture(model_data[0])
 
-    include_base = True
-    if len(model_data) == 1:
-        include_base = bool(model_data[0].get("include_base", True))
-
     op_cases: dict[str, OpCasePlan] = {}
-    if include_base:
-        for base_data in base_data_files:
-            _merge_case_file(op_cases, base_data, backend)
+    selected_base_ops = _selected_base_ops(base_data_files, model_data, backend, model_path)
+    for base_data in base_data_files:
+        _merge_case_file(op_cases, base_data, backend, allowed_ops=selected_base_ops)
     for data in model_data:
-        _merge_case_file(op_cases, data, backend)
+        _merge_case_file(op_cases, data, backend, override_specific_selectors=True)
 
     resolved_sm_version = resolve_sm_version(gpu_type=gpu_type, sm_version=sm_version)
     resolved_sm_exceptions_path = None

@@ -105,30 +105,293 @@ def get_attention_generation_shape_sweeps(backend: str) -> list[dict[str, object
 
 def get_attention_encoder_shape_sweeps(backend: str) -> list[dict[str, object]]:
     """Return YAML-backed encoder (non-causal) attention shape sweeps for one backend."""
-    return get_merged_base_op_case_specs(backend, "attention_encoder")
+    return get_merged_base_op_case_specs(backend, "encoder_attention")
 
 
-# GQA/MQA sliding-window: each head_dim is used by models with a SPECIFIC window,
-# so collecting the full head_dim x window_sizes cross is wasteful. Keep window=0
-# (full attention) for every head_dim, and a non-zero window only for the
-# (head_dim, window) pairs a real GQA/MQA model actually uses:
-#   head_dim 64  -> gpt-oss (sliding_window=128)
-#   head_dim 128 -> Llama-4 Scout/Maverick (attention_chunk_size=8192)
-#   head_dim 192 -> MiMo-V2-Flash (sliding_window=128)
-#   head_dim 256 -> gemma-4 (sliding_window=1024)
-# Update this map when a windowed model with a new (head_dim, window) is added.
-_HEAD_DIM_WINDOW_SIZES: dict[int, set[int]] = {64: {128}, 128: {8192}, 192: {128}, 256: {1024}}
+@dataclasses.dataclass(frozen=True)
+class AttentionHeadConfig:
+    """One structural attention lookup key before the batch/sequence sweep."""
+
+    num_heads: int
+    num_kv_heads: int
+    head_dim: int
+    window_size: int
 
 
-def windows_for_head_dim(window_sizes: list[int], head_dim: int) -> list[int]:
-    """Filter a window_sizes sweep to the values valid for ``head_dim``.
+@dataclasses.dataclass(frozen=True)
+class EncoderAttentionHeadConfig:
+    """One encoder-attention structural lookup key before the workload sweep."""
 
-    window=0 (full attention) is always kept; a non-zero window is kept only if a
-    real GQA/MQA model uses that (head_dim, window) pair (see ``_HEAD_DIM_WINDOW_SIZES``).
-    Order is preserved.
+    num_heads: int
+    head_dim: int
+
+
+def _profile_int_values(
+    profile: dict[str, object],
+    plural: str,
+    singular: str,
+    *,
+    fallback: object = None,
+) -> list[int]:
+    value = profile.get(plural)
+    if value is None and profile.get(singular) is not None:
+        value = [profile[singular]]
+    if value is None:
+        value = fallback
+    if not isinstance(value, list):
+        raise TypeError(f"attention profile {plural} must be a list")
+    return [int(item) for item in value]
+
+
+def _attention_profiles(
+    shape_sweep: dict[str, object],
+    *,
+    phase: str,
+) -> list[dict[str, object]]:
+    legacy_profiles = []
+    inline_model_profiles = []
+    for field_name, destination in (
+        ("legacy_head_profiles", legacy_profiles),
+        ("model_head_profiles", inline_model_profiles),
+    ):
+        raw_profiles = shape_sweep.get(field_name, [])
+        if not isinstance(raw_profiles, list):
+            raise TypeError(f"attention.{field_name} must be a list")
+        for profile in raw_profiles:
+            if not isinstance(profile, dict):
+                raise TypeError(f"attention.{field_name} entries must be mappings")
+            destination.append(profile)
+
+    # Model-only structural deltas live with their architecture instead of in
+    # the global base sweep.  ``_model_case_values`` honors
+    # COLLECTOR_MODEL_PATH, so a targeted healing run adds only that model's
+    # native topology while full/raw collection still sees the union.
+    selected_model_profiles = []
+    for profile in _model_case_values("attention"):
+        phases = profile.get("phases")
+        if phases is not None:
+            if not isinstance(phases, list):
+                raise TypeError("model_case_values.attention.phases must be a list")
+            if phase not in {str(value) for value in phases}:
+                continue
+        selected_model_profiles.append(profile)
+
+    # A targeted model with an explicit topology should collect that topology,
+    # not the broad collector-v1 compatibility grid.  Models not migrated to a
+    # structural profile retain the legacy fallback; full/raw runs retain both
+    # the v1 grid and every model delta.
+    if _get_model_path_filter() and selected_model_profiles:
+        return [*inline_model_profiles, *selected_model_profiles]
+
+    # Backwards-compatible fallback for custom case files that still describe
+    # independent axes.  Repository-owned cases use structural profiles.
+    profiles = [*legacy_profiles, *inline_model_profiles, *selected_model_profiles]
+    return profiles or [shape_sweep]
+
+
+def get_attention_head_configs(
+    shape_sweep: dict[str, object],
+    *,
+    phase: str,
+) -> list[AttentionHeadConfig]:
+    """Expand only valid ``(q, kv, head_dim, window)`` structural tuples.
+
+    Profiles may either describe a legacy rectangular sub-grid or one native
+    model topology plus its valid tensor-parallel sizes.  The latter preserves
+    correlations between query heads, KV heads, head dimension, and window
+    instead of forming a global Cartesian product across unrelated models.
     """
-    allowed = _HEAD_DIM_WINDOW_SIZES.get(head_dim, set())
-    return [w for w in window_sizes if w == 0 or w in allowed]
+
+    if phase not in {"context", "generation"}:
+        raise ValueError(f"Unknown attention phase: {phase}")
+
+    configs: list[AttentionHeadConfig] = []
+    seen: set[AttentionHeadConfig] = set()
+
+    def append(num_heads: int, num_kv_heads: int, head_dim: int, window_size: int) -> None:
+        if num_heads <= 0 or num_kv_heads <= 0 or head_dim <= 0 or window_size < 0:
+            return
+        config = AttentionHeadConfig(num_heads, num_kv_heads, head_dim, window_size)
+        if config not in seen:
+            seen.add(config)
+            configs.append(config)
+
+    for profile in _attention_profiles(shape_sweep, phase=phase):
+        head_dims = _profile_int_values(
+            profile,
+            "head_dims",
+            "head_dim",
+            fallback=shape_sweep.get("head_dims"),
+        )
+        window_sizes = _profile_int_values(
+            profile,
+            "window_sizes",
+            "window_size",
+            fallback=shape_sweep.get("window_sizes", [0]),
+        )
+
+        native_num_heads = profile.get("num_attention_heads")
+        if native_num_heads is not None:
+            native_num_kv_heads = profile.get("num_key_value_heads")
+            if native_num_kv_heads is None:
+                raise ValueError("native attention profiles require num_key_value_heads")
+            tp_sizes = _profile_int_values(
+                profile,
+                "tensor_parallel_sizes",
+                "tensor_parallel_size",
+            )
+            native_num_heads = int(native_num_heads)
+            native_num_kv_heads = int(native_num_kv_heads)
+            for tp_size in tp_sizes:
+                if tp_size <= 0 or native_num_heads % tp_size != 0:
+                    continue
+                num_heads = native_num_heads // tp_size
+                num_kv_heads = (native_num_kv_heads + tp_size - 1) // tp_size
+                for head_dim in head_dims:
+                    for window_size in window_sizes:
+                        append(num_heads, num_kv_heads, head_dim, window_size)
+            continue
+
+        if phase == "context":
+            query_head_counts = _profile_int_values(
+                profile,
+                "query_head_counts",
+                "query_head_count",
+                fallback=shape_sweep.get("query_head_counts"),
+            )
+            kv_head_options = profile.get("kv_head_options", shape_sweep.get("kv_head_options"))
+            if not isinstance(kv_head_options, list):
+                raise TypeError("attention profile kv_head_options must be a list")
+            for head_dim in head_dims:
+                for num_heads in sorted(query_head_counts, reverse=True):
+                    for raw_num_kv_heads in kv_head_options:
+                        num_kv_heads = (
+                            num_heads if raw_num_kv_heads in {"self", 0, "0", None} else int(raw_num_kv_heads)
+                        )
+                        if num_kv_heads != num_heads and (num_kv_heads >= num_heads or num_heads % num_kv_heads != 0):
+                            continue
+                        for window_size in window_sizes:
+                            append(num_heads, num_kv_heads, head_dim, window_size)
+            continue
+
+        mha_query_head_counts = _profile_int_values(
+            profile,
+            "mha_query_head_counts",
+            "mha_query_head_count",
+            fallback=shape_sweep.get("mha_query_head_counts", []),
+        )
+        xqa_query_head_counts = _profile_int_values(
+            profile,
+            "xqa_query_head_counts",
+            "xqa_query_head_count",
+            fallback=shape_sweep.get("xqa_query_head_counts", []),
+        )
+        kv_head_counts = _profile_int_values(
+            profile,
+            "kv_head_counts",
+            "kv_head_count",
+            fallback=shape_sweep.get("kv_head_counts", []),
+        )
+        allow_xqa_mha = bool(profile.get("allow_xqa_mha", False))
+        require_divisible = bool(profile.get("require_divisible", False))
+        for head_dim in head_dims:
+            for num_heads in sorted(mha_query_head_counts, reverse=True):
+                for window_size in window_sizes:
+                    append(num_heads, num_heads, head_dim, window_size)
+            for num_heads in sorted(xqa_query_head_counts, reverse=True):
+                for num_kv_heads in kv_head_counts:
+                    if num_kv_heads > num_heads or (num_kv_heads == num_heads and not allow_xqa_mha):
+                        continue
+                    if require_divisible and num_heads % num_kv_heads != 0:
+                        continue
+                    for window_size in window_sizes:
+                        append(num_heads, num_kv_heads, head_dim, window_size)
+    return configs
+
+
+def _encoder_attention_profiles(shape_sweep: dict[str, object]) -> list[dict[str, object]]:
+    """Return legacy and model-native encoder head profiles for one run.
+
+    Full/raw collection retains the collector-v1 rectangular grid and adds the
+    current model deltas. A model-targeted healing run uses only that model's
+    native ViT topology when one is declared.
+    """
+
+    legacy_profiles = []
+    inline_model_profiles = []
+    for field_name, destination in (
+        ("legacy_head_profiles", legacy_profiles),
+        ("model_head_profiles", inline_model_profiles),
+    ):
+        raw_profiles = shape_sweep.get(field_name, [])
+        if not isinstance(raw_profiles, list):
+            raise TypeError(f"encoder_attention.{field_name} must be a list")
+        for profile in raw_profiles:
+            if not isinstance(profile, dict):
+                raise TypeError(f"encoder_attention.{field_name} entries must be mappings")
+            destination.append(profile)
+
+    selected_model_profiles = _model_case_values("encoder_attention")
+    if _get_model_path_filter() and selected_model_profiles:
+        return [*inline_model_profiles, *selected_model_profiles]
+
+    profiles = [*legacy_profiles, *inline_model_profiles, *selected_model_profiles]
+    return profiles or [shape_sweep]
+
+
+def get_attention_encoder_head_configs(shape_sweep: dict[str, object]) -> list[EncoderAttentionHeadConfig]:
+    """Expand valid ``(num_heads, head_dim)`` encoder-attention structures.
+
+    Native profiles describe a ViT's unsharded head count and valid tensor
+    parallel sizes. Legacy profiles describe the collector-v1 rectangular
+    head-count/head-dimension grid. Duplicate physical keys are removed while
+    preserving their first-seen order.
+    """
+
+    configs: list[EncoderAttentionHeadConfig] = []
+    seen: set[EncoderAttentionHeadConfig] = set()
+
+    def append(num_heads: int, head_dim: int) -> None:
+        if num_heads <= 0 or head_dim <= 0:
+            return
+        config = EncoderAttentionHeadConfig(num_heads, head_dim)
+        if config not in seen:
+            seen.add(config)
+            configs.append(config)
+
+    for profile in _encoder_attention_profiles(shape_sweep):
+        head_dims = _profile_int_values(
+            profile,
+            "head_dims",
+            "head_dim",
+            fallback=shape_sweep.get("head_dims"),
+        )
+        native_num_heads = profile.get("num_attention_heads")
+        if native_num_heads is not None:
+            native_num_heads = int(native_num_heads)
+            tp_sizes = _profile_int_values(
+                profile,
+                "tensor_parallel_sizes",
+                "tensor_parallel_size",
+            )
+            for tp_size in tp_sizes:
+                if tp_size <= 0 or native_num_heads % tp_size != 0:
+                    continue
+                for head_dim in head_dims:
+                    append(native_num_heads // tp_size, head_dim)
+            continue
+
+        head_counts = _profile_int_values(
+            profile,
+            "head_counts",
+            "head_count",
+            fallback=shape_sweep.get("head_counts"),
+        )
+        for head_dim in head_dims:
+            for num_heads in sorted(head_counts):
+                append(num_heads, head_dim)
+
+    return configs
 
 
 def get_base_common_case_values(name: str) -> dict[str, object]:
@@ -174,6 +437,20 @@ def _expand_model_case_entry(raw_value: object, *, field_name: str) -> list[dict
         raise TypeError(f"{field_name} entries must be mappings")
     value = dict(raw_value)
     raw_model_paths = value.pop("model_paths", None)
+    raw_model_aliases = value.get("model_aliases")
+    if raw_model_aliases is not None:
+        if raw_model_paths is not None:
+            raise ValueError(f"{field_name} entries cannot set both model_paths and model_aliases")
+        if value.get("model_path") is None:
+            raise ValueError(f"{field_name}.model_aliases requires model_path")
+        value["model_aliases"] = _as_str_list(
+            raw_model_aliases,
+            field_name=f"{field_name}.model_aliases",
+        )
+        # Aliases share one physical collector case.  Keep the representative
+        # model path instead of multiplying the same kernel shape by artifact
+        # names such as base/FP8/NVFP4.
+        return [value]
     if raw_model_paths is None:
         return [value]
     if value.get("model_path") is not None:
@@ -182,6 +459,10 @@ def _expand_model_case_entry(raw_value: object, *, field_name: str) -> list[dict
         {**value, "model_path": model_path}
         for model_path in _as_str_list(raw_model_paths, field_name=f"{field_name}.model_paths")
     ]
+
+
+def _model_case_matches_path(value: dict, model_path: str) -> bool:
+    return value.get("model_path") == model_path or model_path in (value.get("model_aliases") or [])
 
 
 def _model_case_values(op_name: str, *, apply_model_filter: bool = True) -> list[dict]:
@@ -210,7 +491,7 @@ def _model_case_values(op_name: str, *, apply_model_filter: bool = True) -> list
 
     model_path = _get_model_path_filter() if apply_model_filter else None
     if model_path:
-        values = [value for value in values if value.get("model_path") == model_path]
+        values = [value for value in values if _model_case_matches_path(value, model_path)]
     return values
 
 
@@ -246,7 +527,7 @@ def _framework_specific_model_case_values(op_name: str, backend: str, *, apply_m
 
     model_path = _get_model_path_filter() if apply_model_filter else None
     if model_path:
-        values = [value for value in values if value.get("model_path") == model_path]
+        values = [value for value in values if _model_case_matches_path(value, model_path)]
     return values
 
 
@@ -319,7 +600,7 @@ def get_mla_module_model_specs(
         for index, raw_value in enumerate(raw_values):
             for value in _expand_model_case_entry(raw_value, field_name=f"model_case_values.mla_module[{index}]"):
                 value.setdefault("architecture", architecture)
-                if model_path_filter and value.get("model_path") != model_path_filter:
+                if model_path_filter and not _model_case_matches_path(value, model_path_filter):
                     continue
                 if attention_type is not None and value.get("attention_type") != attention_type:
                     continue
@@ -495,7 +776,7 @@ def get_mla_module_sweep_spec(backend: str | None = None) -> MLAModuleSweepSpec:
 def is_wideep_moe_model(model_name: str) -> bool:
     """Return True if *model_name* needs WideEP MoE collection."""
     return any(
-        value.get("model_path") == model_name and value.get("wideep")
+        _model_case_matches_path(value, model_name) and value.get("wideep")
         for value in _model_case_values("moe", apply_model_filter=False)
     )
 
@@ -517,7 +798,10 @@ def get_all_model_names() -> list[str]:
                 values.extend(_expand_model_case_entry(item, field_name=f"{field_name}[{index}]"))
         else:
             return
-        model_names.extend(str(value["model_path"]) for value in values if value.get("model_path"))
+        for value in values:
+            if value.get("model_path"):
+                model_names.append(str(value["model_path"]))
+            model_names.extend(str(alias) for alias in value.get("model_aliases", []))
 
     model_names = []
     for data in _load_model_cases_data():
@@ -659,7 +943,7 @@ def get_moe_quantization_modes(
 
 def _model_moe_backend_quantization(model_name: str, backend: str) -> dict[str, object]:
     for model_case in _model_case_values("moe", apply_model_filter=False):
-        if model_case.get("model_path") != model_name:
+        if not _model_case_matches_path(model_case, model_name):
             continue
         framework_quantization = model_case.get("framework_quantization", {})
         if not isinstance(framework_quantization, dict):
@@ -816,7 +1100,7 @@ def _moe_backend_model_cases(backend: str) -> list[dict[str, object]]:
         if not isinstance(raw_case, dict):
             raise TypeError(f"common_case_values.moe_{backend}.model_cases entries must be mappings")
         case = dict(raw_case)
-        if model_path_filter and case.get("model_path") != model_path_filter:
+        if model_path_filter and not _model_case_matches_path(case, model_path_filter):
             continue
         cases.append(case)
 
@@ -848,7 +1132,7 @@ def get_moe_backend_model_activation(backend: str, model_name: str, *, default: 
     """Return YAML-backed activation metadata for a backend-specific MoE model."""
 
     for model_case in _moe_backend_model_cases(backend):
-        if model_case.get("model_path") == model_name:
+        if _model_case_matches_path(model_case, model_name):
             return str(model_case.get("activation", default))
     return default
 
@@ -1270,7 +1554,25 @@ def get_common_mamba2_test_cases() -> list[Mamba2CommonTestCase]:
         field_name="mamba2.generation_batch_sizes",
     )
 
-    model_config_list = _model_case_values("mamba2")
+    raw_legacy_model_cases = mamba2_sweep.get("legacy_model_cases", [])
+    if not isinstance(raw_legacy_model_cases, list):
+        raise TypeError("common_case_values.mamba2.legacy_model_cases must be a list")
+    legacy_model_cases = []
+    for index, raw_case in enumerate(raw_legacy_model_cases):
+        legacy_model_cases.extend(
+            _expand_model_case_entry(
+                raw_case,
+                field_name=f"common_case_values.mamba2.legacy_model_cases[{index}]",
+            )
+        )
+    model_path = _get_model_path_filter()
+    if model_path:
+        legacy_model_cases = [case for case in legacy_model_cases if _model_case_matches_path(case, model_path)]
+
+    # Full/raw collection is a strict collector-v1 physical-shape superset.
+    # Targeted collection remains model-exact and therefore does not inherit
+    # unrelated synthetic interpolation anchors.
+    model_config_list = [*legacy_model_cases, *_model_case_values("mamba2")]
 
     for model_config in model_config_list:
         d_model = int(model_config["d_model"])

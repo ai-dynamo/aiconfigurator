@@ -1138,10 +1138,8 @@ class WideEPGenerationMLA(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             attn_backend = attention_backend or "flashinfer"
-            if attn_backend == "flashinfer":
-                attn_data = data_wrapper["flashinfer"]
-            elif attn_backend == "fa3":
-                attn_data = data_wrapper["fa3"]
+            if attn_backend in {"flashinfer", "fa3", "trtllm_mla"}:
+                attn_data = data_wrapper[attn_backend]
             else:
                 raise ValueError(f"Unsupported attention backend: {attn_backend}")
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
@@ -1390,10 +1388,8 @@ class WideEPContextMLA(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             attn_backend = attention_backend or "flashinfer"
-            if attn_backend == "flashinfer":
-                attn_data = data_wrapper["flashinfer"]
-            elif attn_backend == "fa3":
-                attn_data = data_wrapper["fa3"]
+            if attn_backend in {"flashinfer", "fa3", "trtllm_mla"}:
+                attn_data = data_wrapper[attn_backend]
             else:
                 raise ValueError(f"Unsupported attention backend: {attn_backend}")
 

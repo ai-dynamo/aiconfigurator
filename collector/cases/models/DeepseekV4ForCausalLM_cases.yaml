@@ -10,6 +10,8 @@ model_paths:
   - sgl-project/DeepSeek-V4-Flash-FP8
   - sgl-project/DeepSeek-V4-Pro-FP8
 include_base: true
+base_ops:
+  - gemm
 description: >
   DeepSeek-V4 model-centric collection plan. DSV4 attention and sparse kernel
   cases use the upstream DeepSeek-V4 op names and can target any listed V4
@@ -17,16 +19,16 @@ description: >
 
 model_case_values:
   moe:
-    - model_paths:
-        - deepseek-ai/DeepSeek-V4-Flash
+    - model_path: deepseek-ai/DeepSeek-V4-Flash
+      model_aliases:
         - sgl-project/DeepSeek-V4-Flash-FP8
       hidden_size: 4096
       inter_size: 2048
       topk: 6
       num_experts: 256
       wideep: true
-    - model_paths:
-        - deepseek-ai/DeepSeek-V4-Pro
+    - model_path: deepseek-ai/DeepSeek-V4-Pro
+      model_aliases:
         - sgl-project/DeepSeek-V4-Pro-FP8
       hidden_size: 7168
       inter_size: 3072
@@ -34,13 +36,13 @@ model_case_values:
       num_experts: 384
       wideep: true
   mhc:
-    - model_paths:
-        - deepseek-ai/DeepSeek-V4-Flash
+    - model_path: deepseek-ai/DeepSeek-V4-Flash
+      model_aliases:
         - sgl-project/DeepSeek-V4-Flash-FP8
       hidden_size: 4096
       hc_mult: 4
-    - model_paths:
-        - deepseek-ai/DeepSeek-V4-Pro
+    - model_path: deepseek-ai/DeepSeek-V4-Pro
+      model_aliases:
         - sgl-project/DeepSeek-V4-Pro-FP8
       hidden_size: 7168
       hc_mult: 4
@@ -213,18 +215,10 @@ framework_specific_op_cases:
     # after the csa module entries).
     dsv4_csa_topk_calib:
       cases: all
-    # These kernel-level cases are kept as auxiliary data for future
-    # prefix/past_kv correction.  Current DeepSeek-V4 SGLang modeling uses the
-    # full CSA/HCA attention-module rows above as the primary path.
-    dsv4_paged_mqa_logits_module:
-      cases: all
-    dsv4_hca_attn_module:
-      cases: all
-    # CSA sparse FMLA over the topk-selected c4 positions. Same source as
-    # paged_mqa_logits/topk_calib (reads dsv4_csa_*_module_perf.txt), so it must
-    # run AFTER the CSA module ops (guaranteed by registry order).
-    dsv4_csa_attn_module:
-      cases: all
+    # Standalone paged_mqa/hca_attn/csa_attn rows are experimental-only: the
+    # production SDK has no query call-site for them. Keep their registry
+    # entries available for explicit research runs, but do not schedule them in
+    # the default model plan.
     mhc_module:
       cases: all
     wideep_moe:
@@ -238,12 +232,7 @@ framework_specific_op_cases:
       cases: all
     dsv4_hca_generation_module:
       cases: all
-    # These kernel-level cases are kept as auxiliary data for future
-    # prefix/past_kv correction.  Current DeepSeek-V4 SGLang modeling uses the
-    # full CSA/HCA attention-module rows above as the primary path.
-    dsv4_paged_mqa_logits_module:
-      cases: all
-    dsv4_hca_attn_module:
-      cases: all
+    # Standalone sparse sub-kernels are intentionally omitted until the SDK has
+    # a production consumer. They remain callable explicitly through registry.
     mhc_module:
       cases: all

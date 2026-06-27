@@ -12,5 +12,42 @@ model_paths:
   - Qwen/Qwen3-32B-FP8
   - Qwen/Qwen3-32B-FP8-Static-PerTensor
 include_base: true
+model_specific_base_ops:
+  Qwen/Qwen3-32B-FP8-Static-PerTensor:
+    sglang:
+      - compute_scale
+    trtllm:
+      - compute_scale
+    vllm:
+      - compute_scale
 description: >
   Qwen3 dense-family model-centric collection plan.
+
+model_case_values:
+  attention:
+    - id: qwen3_small_attention
+      model_path: Qwen/Qwen3-0.6B
+      model_aliases:
+        - Qwen/Qwen3-1.7B
+      num_attention_heads: 16
+      num_key_value_heads: 8
+      head_dim: 128
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
+    - id: qwen3_8b_attention
+      model_path: Qwen/Qwen3-8B
+      num_attention_heads: 32
+      num_key_value_heads: 8
+      head_dim: 128
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16, 32]
+    - id: qwen3_32b_attention
+      model_path: Qwen/Qwen3-32B
+      model_aliases:
+        - Qwen/Qwen3-32B-FP8
+        - Qwen/Qwen3-32B-FP8-Static-PerTensor
+      num_attention_heads: 64
+      num_key_value_heads: 8
+      head_dim: 128
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]

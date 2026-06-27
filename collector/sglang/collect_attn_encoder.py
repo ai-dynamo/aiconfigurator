@@ -19,7 +19,7 @@ from typing import NamedTuple
 import pkg_resources
 import torch
 
-from collector.case_generator import get_attention_encoder_shape_sweeps
+from collector.case_generator import get_attention_encoder_head_configs, get_attention_encoder_shape_sweeps
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
 
@@ -37,19 +37,18 @@ def get_encoder_attention_test_cases():
     for shape_sweep in get_attention_encoder_shape_sweeps("sglang"):
         batch_sizes = _int_list(shape_sweep["batch_sizes"])
         sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
-        head_counts = _int_list(shape_sweep["head_counts"])
-        head_dims = _int_list(shape_sweep["head_dims"])
 
-        for head_dim in head_dims:
-            for n in sorted(head_counts):
-                for s in sorted(sequence_lengths):
-                    for b in sorted(batch_sizes):
-                        # Workload token budget (128K) + 32-bit indexing safety.
-                        if b * s > 131072:
-                            continue
-                        if 4 * b * s * n * head_dim * 2 >= 2**31:
-                            continue
-                        test_cases.append([b, s, n, head_dim])
+        for head_config in get_attention_encoder_head_configs(shape_sweep):
+            n = head_config.num_heads
+            head_dim = head_config.head_dim
+            for s in sorted(sequence_lengths):
+                for b in sorted(batch_sizes):
+                    # Workload token budget (128K) + 32-bit indexing safety.
+                    if b * s > 131072:
+                        continue
+                    if 4 * b * s * n * head_dim * 2 >= 2**31:
+                        continue
+                    test_cases.append([b, s, n, head_dim])
 
     return test_cases
 

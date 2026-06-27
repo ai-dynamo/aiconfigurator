@@ -68,7 +68,7 @@ common_case_values:
     kv_cache_block_sizes:
     - 64
     max_context_tokens: 65536
-    max_generation_tokens: 8388608
+    max_generation_tokens: 16777216
     constraints:
     - 'context: batch_size * sequence_length <= max_context_tokens'
     - 'generation: batch_size * target_sequence_length <= max_generation_tokens'

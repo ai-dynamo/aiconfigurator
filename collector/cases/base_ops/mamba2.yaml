@@ -43,3 +43,23 @@ common_case_values:
     - 256
     - 512
     - 1024
+    # Frozen collector-v1 interpolation anchors. These are synthetic shapes,
+    # not deployable model identities, so full/raw collection keeps them while
+    # a COLLECTOR_MODEL_PATH-targeted run selects only that model's profile.
+    legacy_model_cases:
+    - model_path: MAMBA2_GENERIC_4K
+      d_model: 8192
+      d_state: 128
+      d_conv: 4
+      nheads: 64
+      head_dim: 64
+      n_groups: 8
+      chunk_size: 256
+    - model_path: MAMBA2_GENERIC_1K
+      d_model: 1024
+      d_state: 64
+      d_conv: 4
+      nheads: 16
+      head_dim: 64
+      n_groups: 4
+      chunk_size: 128

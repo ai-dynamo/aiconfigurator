@@ -651,6 +651,35 @@ def create_test_case_id(test_case, test_type, module_name):
     return f"{module_name}:{test_type}:{test_case}"
 
 
+def delta_latency_power_stats(
+    dynamic_latency: float,
+    static_latency: float,
+    dynamic_power_stats: dict | None,
+    static_power_stats: dict | None,
+) -> tuple[float, dict]:
+    """Return a non-negative latency/energy delta encoded as power stats.
+
+    ``log_perf`` stores power and the SDK loader derives energy as
+    ``power * latency``.  For a delta measurement, reusing dynamic power would
+    therefore produce ``P_dynamic * (t_dynamic - t_static)`` instead of the
+    physically meaningful ``E_dynamic - E_static``.  Convert that energy delta
+    to an equivalent power over the latency delta so the existing CSV schema
+    and legacy loader retain the correct energy semantics.
+    """
+
+    latency = max(0.0, float(dynamic_latency) - float(static_latency))
+    dynamic_stats = dict(dynamic_power_stats or {})
+    static_stats = dict(static_power_stats or {})
+    dynamic_power = float(dynamic_stats.get("power") or 0.0)
+    static_power = float(static_stats.get("power") or 0.0)
+    energy = max(0.0, dynamic_power * float(dynamic_latency) - static_power * float(static_latency))
+    equivalent_power = energy / latency if latency > 0.0 else 0.0
+
+    result = dynamic_stats
+    result["power"] = equivalent_power
+    return latency, result
+
+
 def log_perf(
     item_list: list[dict],
     framework: str,
