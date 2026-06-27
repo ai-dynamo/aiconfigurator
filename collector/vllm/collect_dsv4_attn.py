@@ -91,6 +91,13 @@ MAX_CONTEXT_QUERY_TOKENS = 262144
 MAX_GENERATION_KV_TOKENS = 1024 * 1024
 
 
+def _dsv4_local_num_heads(num_attention_heads: int, tp_size: int) -> int:
+    """Return the rank-local head count used by the persisted lookup key."""
+    if tp_size <= 0 or num_attention_heads % tp_size:
+        raise ValueError(f"num_attention_heads={num_attention_heads} is not divisible by tp_size={tp_size}")
+    return num_attention_heads // tp_size
+
+
 def _resolve_perf_path(output_path: str | None, filename: str | None) -> str:
     if filename is None:
         raise ValueError("filename is required")
@@ -595,7 +602,7 @@ def _bench_attention_shape(
                 "mla_dtype": "bfloat16",
                 "kv_cache_dtype": "fp8",
                 "gemm_type": gemm_type,
-                "num_heads": int(hf_config.num_attention_heads),
+                "num_heads": _dsv4_local_num_heads(int(hf_config.num_attention_heads), tp_size),
                 "batch_size": batch_size,
                 "isl": seq_len if is_context else 1,
                 "tp_size": tp_size,

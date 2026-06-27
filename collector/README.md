@@ -462,9 +462,18 @@ python3 collect.py --backend trtllm --resume
 python3 collect.py --backend trtllm --resume --checkpoint-dir /path/to/checkpoints
 ```
 
-A task is marked **done** once it is attempted (success or failure).
-Only tasks that never finished are re-queued on `--resume`.
+A task is tracked as passed, failed, or expected-failed. Plain `--resume`
+skips all previously attempted tasks; add `--resume-retry-failed` to retry the
+failed set while retaining successful checkpoints. A checkpoint with unresolved
+failures still exits nonzero even when plain resume skips those tasks. Unexpected
+errors preserve CSV staging files and prevent parquet finalization until a clean
+retry; the clean resume finalizes requested staging files from every chunk.
 Running without `--resume` always starts fresh (overwrites old checkpoint).
+
+```bash
+python3 collect.py --backend trtllm --resume \
+  --resume-retry-failed --checkpoint-dir /path/to/checkpoints
+```
 
 ## For SGLang
 

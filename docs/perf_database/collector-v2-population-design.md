@@ -23,17 +23,24 @@ model has an explicit structural profile.
 
 ## Scope
 
-This work changes Collector inputs and case generation only:
+This work changes Collector population and collection-integrity behavior only:
 
 - `collector/cases/**/*.yaml`
 - `collector/case_generator.py`
 - `collector/model_cases.py`
 - operation-local case getters
+- Collector-only output/error guards needed to keep resumable runs honest
 - Collector tests and documentation
 
 It does not change AIC SDK or Rust lookup behavior, EngineSpec, or Dynamo
 Planner. Collector output must continue to satisfy the existing consumers.
 Consumer problems found during the audit belong in separate changes.
+
+An unexpected worker failure, or an SGLang MLA persistence failure, leaves CSV
+staging files untouched, returns a failed collector run, and requires
+resume/retry before parquet finalization. Unresolved checkpoint failures remain
+failed under plain resume, and a clean retry finalizes requested staging files
+from all chunks. This prevents a partial 4-hour batch from looking complete.
 
 ## Baselines
 
@@ -127,14 +134,14 @@ cases. `Removed` is always measured against the V1 baseline.
 | Backend | Operation | V1 | V2 before | Cleaned V2 | Added | Removed |
 |---|---|---:|---:|---:|---:|---:|
 | SGLang | context | 33,714 | 122,676 | 50,901 | 17,187 | 0 |
-| SGLang | generation | 19,484 | 53,654 | 39,556 | 20,072 | 0 |
+| SGLang | generation | 19,484 | 53,654 | 40,468 | 20,984 | 0 |
 | TRT-LLM | context | 63,192 | 143,739 | 75,483 | 12,291 | 0 |
-| TRT-LLM | generation | 40,240 | 155,582 | 54,318 | 14,078 | 0 |
-| vLLM | context | 40,392 | 84,296 | 50,932 | 10,540 | 0 |
-| vLLM | generation | 36,288 | 68,920 | 53,638 | 17,350 | 0 |
+| TRT-LLM | generation | 40,240 | 155,582 | 55,230 | 14,990 | 0 |
+| vLLM | context | 40,392 | 84,296 | 51,408 | 11,016 | 0 |
+| vLLM | generation | 36,288 | 68,920 | 54,270 | 17,982 | 0 |
 | vLLM XPU | context | 16,188 | 16,188 | 17,838 | 1,650 | 0 |
 | vLLM XPU | generation | 26,322 | 26,322 | 30,728 | 4,406 | 0 |
-| **Total** | | **275,820** | **671,377** | **373,394** | **97,574** | **0** |
+| **Total** | | **275,820** | **671,377** | **376,326** | **100,506** | **0** |
 
 The unpruned V2 vLLM grids also removed 10,098 context and 8,774 generation
 V1 cases, all from the historical `(head_dim=128, window=128)` region. The
@@ -153,7 +160,7 @@ may multiply a recipe by dtype, TP/EP, or token lists.
 |---|---:|---:|---:|---|
 | GEMM | 35,742 | 35,742 | 35,742 | unchanged |
 | ComputeScale | 1,628 | 1,628 | 1,628 | shared recipe unchanged; V2 also activates SGLang/vLLM |
-| MoE common | 1,797 | 4,548 | 2,931 | artifact duplicates removed; V2 physical additions retained |
+| MoE common | 1,797 | 4,548 | 3,048 | artifact duplicates removed; V2 physical additions retained |
 | MLA context specs | 220 | 550 | 220 | getter emits 1,760 unique loader keys |
 | MLA generation specs | 362 | 885 | 362 | getter emits 2,896 unique loader keys |
 | Mamba | 8 | 8 | 12 | four V1-compatible interpolation anchors added |
@@ -162,8 +169,9 @@ may multiply a recipe by dtype, TP/EP, or token lists.
 | MLA BMM pre/post | 400 / 448 | 400 / 448 | 400 / 448 | unchanged |
 
 For MoE on B200, the cleaned schedules remove repeated artifact tasks without
-removing any expanded physical tuple. For example, SGLang drops from 366,072
-V2 tasks to 218,514 while retaining all 211,920 distinct conservative tuples.
+removing any expanded physical tuple. New model profiles are then additive;
+for example, Qwen3.5-122B-A10B adds its previously missing physical MoE shape
+without restoring artifact-only duplication.
 
 DSA module population removes artifact-only repetition only where quantization
 and architecture are already explicit. SGLang keeps its checkpoint tasks
@@ -183,6 +191,37 @@ set is unchanged:
 The analogous GLM MoE artifacts are deliberately not merged: SGLang selects
 native FP8/NVFP4 MoE quantization by artifact path, so those paths represent
 real additional measurements rather than scheduler duplicates.
+
+## Current-model completeness and DeepSeek V4 safety
+
+The correlated-profile audit also covers model paths that were advertised by
+Collector V2 but previously fell back to the broad legacy grid or produced no
+model-specific cases:
+
+- Qwen3.5 dense 0.8B/2B and 4B/9B share their exact attention topologies.
+- Qwen3.5-122B-A10B has exact attention and MoE profiles.
+- MiniMax M2/M2.5/M2.7 share one exact attention topology.
+- Qwen3-30B-A3B includes its valid TP8 attention point, and the Qwen3
+  235B-2507 artifact resolves to the existing 235B MoE shape.
+
+DeepSeek V4 has two additional population constraints:
+
+1. The persisted module and top-k calibration keys do not contain enough
+   model geometry to distinguish Flash from Pro. Full/raw collection therefore
+   uses one canonical `sgl-project/DeepSeek-V4-Flash-FP8` profile and never
+   combines both models in one output. Targeted native and FP8 artifact paths
+   remain supported.
+2. The model YAML is the source of truth for backend-specific operations.
+   SGLang schedules CSA/HCA context and generation modules, top-k calibration,
+   mHC, MoE, and WideEP MoE. vLLM's DSV4 collectors remain registry-only until
+   the declared runtime compatibility floor and prefix-aware context contract
+   are both satisfied. TRT-LLM continues to schedule only the operations its
+   registry implements.
+
+mHC keeps native and converted artifacts separate until its model-loading
+path has resolved checkpoint-native expert precision. Its getter may still
+deduplicate identical phase/hidden-size/hc-mult invocations in a non-targeted
+run, while a targeted run preserves the artifact the user requested.
 
 ## Review checklist
 

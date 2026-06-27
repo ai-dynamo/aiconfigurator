@@ -3,6 +3,9 @@
 
 import ast
 import csv
+import json
+import subprocess
+import sys
 from itertools import pairwise
 from pathlib import Path
 
@@ -70,6 +73,28 @@ def test_attention_head_configs_preserve_real_model_structures_without_cross_mix
 
         assert expected_model_structures <= configs
         assert configs.isdisjoint(impossible_cross_model_mixes)
+
+
+def test_native_attention_profiles_drop_non_integral_local_gqa(monkeypatch):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "example/unregistered-model")
+    shape_sweep = {
+        "model_head_profiles": [
+            {
+                "num_attention_heads": 6,
+                "num_key_value_heads": 3,
+                "head_dim": 128,
+                "window_size": 0,
+                "tensor_parallel_sizes": [1, 2],
+            }
+        ]
+    }
+
+    assert [
+        (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
+        for config in get_attention_head_configs(shape_sweep, phase="generation")
+    ] == [
+        (6, 3, 128, 0),
+    ]
 
 
 def test_full_attention_profiles_are_a_collector_v1_head_key_superset(monkeypatch):
@@ -214,6 +239,96 @@ def test_targeted_attention_profile_replaces_legacy_cartesian_grid(monkeypatch):
         (2, 2, 128, 0),
         (1, 1, 128, 0),
     }
+
+
+def test_new_model_targeted_attention_profiles_match_physical_topology(monkeypatch):
+    from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
+
+    expected_by_model = {
+        "Qwen/Qwen3.5-0.8B": {(8, 2, 256, 0), (4, 1, 256, 0), (2, 1, 256, 0), (1, 1, 256, 0)},
+        "Qwen/Qwen3.5-2B": {(8, 2, 256, 0), (4, 1, 256, 0), (2, 1, 256, 0), (1, 1, 256, 0)},
+        "Qwen/Qwen3.5-4B": {
+            (16, 4, 256, 0),
+            (8, 2, 256, 0),
+            (4, 1, 256, 0),
+            (2, 1, 256, 0),
+            (1, 1, 256, 0),
+        },
+        "Qwen/Qwen3.5-9B": {
+            (16, 4, 256, 0),
+            (8, 2, 256, 0),
+            (4, 1, 256, 0),
+            (2, 1, 256, 0),
+            (1, 1, 256, 0),
+        },
+        "Qwen/Qwen3.5-122B-A10B": {
+            (32, 2, 256, 0),
+            (16, 1, 256, 0),
+            (8, 1, 256, 0),
+            (4, 1, 256, 0),
+            (2, 1, 256, 0),
+            (1, 1, 256, 0),
+        },
+        "MiniMaxAI/MiniMax-M2": {
+            (48, 8, 128, 0),
+            (24, 4, 128, 0),
+            (12, 2, 128, 0),
+            (6, 1, 128, 0),
+            (3, 1, 128, 0),
+        },
+        "MiniMaxAI/MiniMax-M2.5": {
+            (48, 8, 128, 0),
+            (24, 4, 128, 0),
+            (12, 2, 128, 0),
+            (6, 1, 128, 0),
+            (3, 1, 128, 0),
+        },
+        "MiniMaxAI/MiniMax-M2.7": {
+            (48, 8, 128, 0),
+            (24, 4, 128, 0),
+            (12, 2, 128, 0),
+            (6, 1, 128, 0),
+            (3, 1, 128, 0),
+        },
+        "Qwen/Qwen3-30B-A3B": {
+            (32, 4, 128, 0),
+            (16, 2, 128, 0),
+            (8, 1, 128, 0),
+            (4, 1, 128, 0),
+        },
+    }
+
+    for model_path, expected in expected_by_model.items():
+        monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+        for phase, get_shape_sweeps in (
+            ("context", get_attention_context_shape_sweeps),
+            ("generation", get_attention_generation_shape_sweeps),
+        ):
+            configs = {
+                (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
+                for sweep in get_shape_sweeps("sglang")
+                for config in get_attention_head_configs(sweep, phase=phase)
+            }
+            assert configs == expected, f"{model_path} {phase}"
+
+
+def test_new_model_targeted_moe_profiles_match_physical_topology(monkeypatch):
+    from collector.case_generator import get_common_moe_test_cases
+
+    expected_by_model = {
+        "Qwen/Qwen3.5-122B-A10B": ("Qwen/Qwen3.5-122B-A10B", 3072, 1024, 8, 256),
+        "Qwen/Qwen3-235B-A22B-Instruct-2507": ("Qwen/Qwen3-235B-A22B", 4096, 1536, 8, 128),
+        "MiniMaxAI/MiniMax-M2": ("MiniMaxAI/MiniMax-M2.5", 3072, 1536, 8, 256),
+    }
+
+    for model_path, expected in expected_by_model.items():
+        monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+        cases = get_common_moe_test_cases()
+
+        assert cases
+        assert {
+            (case.model_name, case.hidden_size, case.inter_size, case.topk, case.num_experts) for case in cases
+        } == {expected}
 
 
 def test_mimo_attention_profile_matches_aic_full_attention_window(monkeypatch):
@@ -417,7 +532,7 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     moe_cases = get_common_moe_test_cases()
-    assert len(moe_cases) == 2931
+    assert len(moe_cases) == 3048
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -984,6 +1099,31 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
     }
 
 
+def test_mla_module_backend_can_explicitly_disable_all_precision_combos(monkeypatch):
+    import collector.case_generator as case_generator
+
+    monkeypatch.setattr(
+        case_generator,
+        "_required_base_common_case_values",
+        lambda op: {
+            "module_precision_combos": [
+                {
+                    "compute_dtype": "bfloat16",
+                    "kv_cache_dtype": "bfloat16",
+                    "gemm_type": "bfloat16",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        case_generator,
+        "get_base_common_case_values",
+        lambda op: {"module_precision_combos": []} if op == "mla_module_sglang" else {},
+    )
+
+    assert case_generator.get_mla_module_precision_specs("sglang") == []
+
+
 def test_mla_module_keeps_path_sensitive_checkpoints_but_shape_only_mla_uses_aliases(monkeypatch):
     from collector.case_generator import get_mla_module_model_specs
 
@@ -1023,6 +1163,78 @@ def test_model_cases_path_can_infer_model_path():
         "dsv4_hca_attn_module",
         "dsv4_csa_attn_module",
     }.isdisjoint(plan.op_cases)
+
+
+def test_dsv4_plan_only_uses_backend_specific_case_plan():
+    model_path = "deepseek-ai/DeepSeek-V4-Pro"
+    expected_ops = build_collection_case_plan(backend="sglang", model_path=model_path).ops
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "collector/collect.py",
+            "--backend",
+            "sglang",
+            "--model-path",
+            model_path,
+            "--plan-only",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["ops"] == expected_ops
+    assert "dsv4_csa_topk_calib" in payload["ops"]
+    assert "wideep_moe" in payload["ops"]
+
+
+def test_vllm_dsv4_collectors_are_registry_only():
+    from collector.vllm.registry import REGISTRY
+
+    dsv4_ops = {
+        "dsv4_csa_context_module",
+        "dsv4_hca_context_module",
+        "dsv4_csa_generation_module",
+        "dsv4_hca_generation_module",
+        "mhc_module",
+    }
+    plan = build_collection_case_plan(backend="vllm", model_path="sgl-project/DeepSeek-V4-Pro-FP8")
+
+    assert plan.ops == ["gemm", "moe"]
+    assert dsv4_ops.isdisjoint(plan.op_cases)
+    assert dsv4_ops <= {entry.op for entry in REGISTRY}
+
+
+def test_vllm_dsv4_persists_rank_local_head_count():
+    source_path = REPO_ROOT / "collector/vllm/collect_dsv4_attn.py"
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    helper = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_dsv4_local_num_heads"
+    )
+    namespace = {}
+    exec(compile(ast.Module(body=[helper], type_ignores=[]), str(source_path), "exec"), namespace)
+
+    assert namespace["_dsv4_local_num_heads"](64, 1) == 64
+    assert namespace["_dsv4_local_num_heads"](64, 8) == 8
+    assert namespace["_dsv4_local_num_heads"](128, 8) == 16
+
+    bench = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_bench_attention_shape"
+    )
+    num_heads_values = [
+        value
+        for node in ast.walk(bench)
+        if isinstance(node, ast.Dict)
+        for key, value in zip(node.keys, node.values, strict=True)
+        if isinstance(key, ast.Constant) and key.value == "num_heads"
+    ]
+    assert any(
+        isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "_dsv4_local_num_heads"
+        for value in num_heads_values
+    )
 
 
 def test_model_architecture_can_select_case_file():
@@ -1066,6 +1278,7 @@ def test_encoder_attention_plan_matches_sdk_model_and_backend_support():
     assert "encoder_attention" in multimodal_plan.op_cases
     assert "encoder_attention" not in multimodal_xpu_plan.op_cases
     assert "encoder_attention" not in llama4_plan.op_cases
+    # Guard the old/mistyped spelling separately from the canonical key above.
     assert "attention_encoder" not in multimodal_plan.op_cases
     assert "encoder_attention" in build_collection_case_plan(backend="vllm", full=True).op_cases
     assert "encoder_attention" not in build_collection_case_plan(backend="vllm_xpu", full=True).op_cases

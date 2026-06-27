@@ -211,6 +211,8 @@ def get_attention_head_configs(
     def append(num_heads: int, num_kv_heads: int, head_dim: int, window_size: int) -> None:
         if num_heads <= 0 or num_kv_heads <= 0 or head_dim <= 0 or window_size < 0:
             return
+        if num_kv_heads > num_heads or num_heads % num_kv_heads != 0:
+            return
         config = AttentionHeadConfig(num_heads, num_kv_heads, head_dim, window_size)
         if config not in seen:
             seen.add(config)
@@ -1686,11 +1688,16 @@ def get_common_mhc_test_cases() -> list[MhcCommonTestCase]:
     model_config_list = _model_case_values("mhc")
 
     test_cases: list[MhcCommonTestCase] = []
+    seen: set[tuple[str, int, int]] = set()
     for model_config in model_config_list:
         hidden_size = int(model_config["hidden_size"])
         hc_mult = int(model_config["hc_mult"])
         model_name = str(model_config["model_path"])
         for phase in ("pre", "post"):
+            key = (phase, hidden_size, hc_mult)
+            if key in seen:
+                continue
+            seen.add(key)
             test_cases.append(
                 MhcCommonTestCase(
                     phase=phase,
@@ -1835,6 +1842,11 @@ def _dsv4_config() -> dict:
         default_model_paths = supported_model_paths
     if not default_model_paths:
         raise RuntimeError("model_case_values.dsv4 needs at least one default model path")
+    if len(default_model_paths) != 1:
+        raise ValueError(
+            "DeepSeek-V4 module keys cannot distinguish models; "
+            "dsv4.default_model_paths must contain one canonical path"
+        )
 
     config["default_model_paths"] = default_model_paths
     config["supported_model_paths"] = _dedupe_strs([*supported_model_paths, *default_model_paths])
@@ -1881,11 +1893,6 @@ _DSV4_SPARSE_TP_LIST_INDEXER = _as_int_list(
     _DSV4_SPARSE_TP_SIZES["paged_mqa_logits"],
     field_name="dsv4.sparse_tp_sizes.paged_mqa_logits",
 )
-
-
-def is_dsv4_attention_model(model_name: str) -> bool:
-    """Return True for DeepSeek-V4 Flash/Pro models using the DSV4 attention collectors."""
-    return model_name in _DSV4_SUPPORTED_MODELS
 
 
 def _selected_dsv4_models() -> tuple[str, ...]:

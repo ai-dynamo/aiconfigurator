@@ -5,6 +5,7 @@ schema_version: 1
 architecture: MiniMaxM2ForCausalLM
 model_path: MiniMaxAI/MiniMax-M2.5
 model_paths:
+  - MiniMaxAI/MiniMax-M2
   - MiniMaxAI/MiniMax-M2.5
   - MiniMaxAI/MiniMax-M2.7
   - nvidia/MiniMax-M2.5-NVFP4
@@ -14,9 +15,23 @@ description: >
   MiniMax-M2 MoE model-centric collection plan.
 
 model_case_values:
+  attention:
+    - id: minimax_m2_attention
+      model_path: MiniMaxAI/MiniMax-M2.5
+      model_aliases:
+        - MiniMaxAI/MiniMax-M2
+        - MiniMaxAI/MiniMax-M2.7
+        - nvidia/MiniMax-M2.5-NVFP4
+        - nvidia/MiniMax-M2.7-NVFP4
+      num_attention_heads: 48
+      num_key_value_heads: 8
+      head_dim: 128
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
   moe:
     - model_path: MiniMaxAI/MiniMax-M2.5
       model_aliases:
+        - MiniMaxAI/MiniMax-M2
         - MiniMaxAI/MiniMax-M2.7
         - nvidia/MiniMax-M2.5-NVFP4
         - nvidia/MiniMax-M2.7-NVFP4
