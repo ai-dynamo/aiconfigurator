@@ -57,8 +57,8 @@ class TestGetPrecisionCombos:
             combos = mod._get_precision_combos("context")
         assert ("bfloat16", "bfloat16", "bfloat16") in combos
         assert ("bfloat16", "fp8", "bfloat16") in combos
-        assert ("bfloat16", "bfloat16", "fp8_block") in combos
-        assert ("bfloat16", "fp8", "fp8_block") in combos
+        assert ("bfloat16", "bfloat16", "nvfp4") in combos
+        assert ("bfloat16", "fp8", "nvfp4") in combos
         assert len(combos) == 4
 
     def test_ada_sm89_no_fp8(self):
@@ -67,7 +67,7 @@ class TestGetPrecisionCombos:
             combos = mod._get_precision_combos("context")
         assert combos == [
             ("bfloat16", "bfloat16", "bfloat16"),
-            ("bfloat16", "bfloat16", "fp8_block"),
+            ("bfloat16", "bfloat16", "nvfp4"),
         ]
 
     def test_blackwell_sm100(self):
@@ -169,69 +169,39 @@ class TestDsaRuntimeLimits:
 
 
 class TestDsaPiecewiseCudaGraph:
-    def test_glm5_dsa_piecewise_graph_is_opt_in(self, monkeypatch):
+    def test_glm5_dsa_piecewise_graph_is_only_for_trtllm_prefill(self):
         mod = _import_module()
-        monkeypatch.delenv("AIC_ENABLE_PIECEWISE_CUDA_GRAPH", raising=False)
-        monkeypatch.delenv("AIC_DISABLE_PIECEWISE_CUDA_GRAPH", raising=False)
 
         assert not mod._enable_glm5_dsa_piecewise_graph("dsa", "nvidia/GLM-5-NVFP4")
-        assert not mod._enable_glm5_dsa_piecewise_graph("dsa", "zai-org/GLM-5")
-        assert not mod._enable_glm5_dsa_piecewise_graph("mla", "nvidia/GLM-5-NVFP4")
-        assert not mod._enable_glm5_dsa_piecewise_graph("dsa", "deepseek-ai/DeepSeek-V3.2")
+        assert mod._enable_glm5_dsa_piecewise_graph("dsa", "zai-org/GLM-5", "trtllm")
+        assert not mod._enable_glm5_dsa_piecewise_graph("mla", "zai-org/GLM-5", "trtllm")
+        assert not mod._enable_glm5_dsa_piecewise_graph("dsa", "deepseek-ai/DeepSeek-V3.2", "trtllm")
 
-    def test_glm5_dsa_piecewise_graph_can_be_enabled(self, monkeypatch):
+    def test_generation_cuda_graph_uses_max_batch_tokens(self):
         mod = _import_module()
-        monkeypatch.setenv("AIC_ENABLE_PIECEWISE_CUDA_GRAPH", "1")
-        monkeypatch.delenv("AIC_DISABLE_PIECEWISE_CUDA_GRAPH", raising=False)
+        runner = types.SimpleNamespace(
+            server_args=types.SimpleNamespace(disable_cuda_graph=False, cuda_graph_bs=None, cuda_graph_max_bs=256)
+        )
 
-        assert mod._enable_glm5_dsa_piecewise_graph("dsa", "nvidia/GLM-5-NVFP4")
-        assert mod._enable_glm5_dsa_piecewise_graph("dsa", "zai-org/GLM-5")
-        assert not mod._enable_glm5_dsa_piecewise_graph("mla", "nvidia/GLM-5-NVFP4")
+        assert mod._generation_cuda_graph_enabled_for_tokens(runner, 256)
+        assert not mod._generation_cuda_graph_enabled_for_tokens(runner, 257)
 
-    def test_piecewise_graph_can_be_disabled(self, monkeypatch):
+    def test_generation_cuda_graph_uses_explicit_batch_list(self):
         mod = _import_module()
-        monkeypatch.setenv("AIC_DISABLE_PIECEWISE_CUDA_GRAPH", "1")
-        monkeypatch.setenv("AIC_ENABLE_PIECEWISE_CUDA_GRAPH", "1")
+        runner = types.SimpleNamespace(
+            server_args=types.SimpleNamespace(disable_cuda_graph=False, cuda_graph_bs=[1, 4, 16])
+        )
 
-        assert not mod._enable_glm5_dsa_piecewise_graph("dsa", "nvidia/GLM-5-NVFP4")
+        assert mod._generation_cuda_graph_enabled_for_tokens(runner, 4)
+        assert not mod._generation_cuda_graph_enabled_for_tokens(runner, 8)
 
-    def test_piecewise_token_buckets_follow_case_shape(self, monkeypatch):
+    def test_generation_cuda_graph_can_be_disabled(self):
         mod = _import_module()
-        monkeypatch.delenv("AIC_PIECEWISE_CUDA_GRAPH_TOKENS", raising=False)
-        cases = [(2, 128, True, 0), (4, 64, True, 1024)]
+        runner = types.SimpleNamespace(
+            server_args=types.SimpleNamespace(disable_cuda_graph=True, cuda_graph_bs=[1, 4, 16])
+        )
 
-        assert mod._piecewise_cuda_graph_tokens_for_cases(cases, is_prefill=True) == [256]
-        assert mod._piecewise_cuda_graph_tokens_for_cases(cases, is_prefill=False) == [2, 4]
-
-    def test_piecewise_token_buckets_accept_env_override(self, monkeypatch):
-        mod = _import_module()
-        monkeypatch.setenv("AIC_PIECEWISE_CUDA_GRAPH_TOKENS", "256,512")
-
-        assert mod._piecewise_cuda_graph_tokens_for_cases([(2, 128, True, 0)], is_prefill=True) == [256, 512]
-
-    def test_generation_cuda_graph_uses_max_batch_tokens(self, monkeypatch):
-        mod = _import_module()
-        monkeypatch.delenv("AIC_CUDA_GRAPH_BS", raising=False)
-        monkeypatch.delenv("AIC_DISABLE_CUDA_GRAPH", raising=False)
-        monkeypatch.setenv("AIC_CUDA_GRAPH_MAX_BS", "256")
-
-        assert mod._generation_cuda_graph_enabled_for_tokens(256)
-        assert not mod._generation_cuda_graph_enabled_for_tokens(257)
-
-    def test_generation_cuda_graph_uses_explicit_batch_list(self, monkeypatch):
-        mod = _import_module()
-        monkeypatch.delenv("AIC_DISABLE_CUDA_GRAPH", raising=False)
-        monkeypatch.setenv("AIC_CUDA_GRAPH_BS", "1,4,16")
-
-        assert mod._generation_cuda_graph_enabled_for_tokens(4)
-        assert not mod._generation_cuda_graph_enabled_for_tokens(8)
-
-    def test_generation_cuda_graph_can_be_disabled(self, monkeypatch):
-        mod = _import_module()
-        monkeypatch.setenv("AIC_DISABLE_CUDA_GRAPH", "1")
-        monkeypatch.setenv("AIC_CUDA_GRAPH_BS", "1,4,16")
-
-        assert not mod._generation_cuda_graph_enabled_for_tokens(4)
+        assert not mod._generation_cuda_graph_enabled_for_tokens(runner, 4)
 
 
 class TestBuildModuleTestCases:
@@ -258,22 +228,23 @@ class TestBuildModuleTestCases:
         model_paths = {c[6] for c in cases}
         assert model_paths == {"deepseek-ai/DeepSeek-V3"}
 
-    def test_format_length_10(self):
-        """Each DSA module test case includes a target TP size."""
+    def test_format_length_11(self):
+        """Each DSA module case includes target TP and prefill backend."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             for case in mod._build_module_test_cases("dsa", "generation"):
-                assert len(case) == 10
+                assert len(case) == 11
                 assert case[7] == "dsa"
                 assert case[8] is None  # DSA backend resolved at runtime
                 assert case[9] in {1, 2, 4, 8}
+                assert case[10] == "flashmla_kv"
 
     def test_deduplication(self):
         """One entry per top-level sweep tuple, not per inner (seq, batch) shape."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("dsa", "context")
-        keys = {(c[6], c[2], c[3], c[4], c[5], c[1]) for c in cases}
+        keys = {(c[6], c[2], c[3], c[4], c[5], c[1], c[9], c[10]) for c in cases}
         assert len(cases) == len(keys)
         assert all(c[0] == 0 for c in cases)
 
@@ -337,6 +308,60 @@ class TestDsaTpShapeValidation:
         )
         with pytest.raises(RuntimeError, match=r"q_b_proj\.output_size"):
             mod._validate_dsa_tp_module_shapes(self._runner(attn), local_num_heads=8, target_tp_size=8)
+
+
+class TestPerfLogFailures:
+    def test_log_failure_is_wrapped_with_case_context(self):
+        mod = _import_module()
+
+        with (
+            patch.object(mod, "log_perf", side_effect=OSError("disk full")),
+            pytest.raises(mod.PerfLogWriteError, match=r"prefill metrics for b=2, s=128: disk full") as exc_info,
+        ):
+            mod._log_perf_strict(
+                phase="prefill",
+                batch_size=2,
+                seq_length=128,
+                item_list=[],
+                perf_filename="unused.txt",
+            )
+
+        assert isinstance(exc_info.value.__cause__, OSError)
+
+    def test_partial_sweep_log_failure_propagates(self):
+        mod = _import_module()
+        runner = types.SimpleNamespace(
+            model=types.SimpleNamespace(
+                model=types.SimpleNamespace(layers=[types.SimpleNamespace(self_attn=types.SimpleNamespace())])
+            ),
+            server_args=types.SimpleNamespace(attention_backend="fake_backend"),
+            req_to_token_pool=types.SimpleNamespace(clear=lambda: None),
+            token_to_kv_pool_allocator=types.SimpleNamespace(clear=lambda: None),
+        )
+        log_error = mod.PerfLogWriteError("failed to persist second row")
+
+        with (
+            patch.object(mod, "get_version", return_value="test"),
+            patch.object(mod, "_run_prefill", side_effect=[True, log_error]) as run_prefill,
+            pytest.raises(mod.PerfLogWriteError, match="failed to persist second row"),
+        ):
+            mod.run_attention_torch(
+                model_runner=runner,
+                test_cases=[(1, 128, True), (2, 128, True)],
+                head_num=8,
+                test_layer=0,
+                num_warmup=0,
+                num_iterations=1,
+                device="cuda:0",
+                output_path=None,
+                attn_type="dsa",
+                model_path="test/model",
+                kv_cache_dtype="bfloat16",
+                compute_dtype="bfloat16",
+                gemm_type="bfloat16",
+            )
+
+        assert run_prefill.call_count == 2
 
 
 class TestEntryPoints:

@@ -4,6 +4,7 @@
 from collections import defaultdict
 from itertools import product
 
+import pyarrow as pa
 import pyarrow.csv as pc
 import pyarrow.parquet as pq
 import pytest
@@ -61,6 +62,13 @@ def test_read_perf_rows_normalizes_missing_csv_fields(tmp_path):
     data_path.write_text("a,b,c\n1,2\n")
 
     assert _read_perf_rows(str(data_path)) == [{"a": "1", "b": "2", "c": ""}]
+
+
+def test_read_perf_rows_omits_null_parquet_fields(tmp_path):
+    data_path = tmp_path / "nullable_perf.parquet"
+    pq.write_table(pa.table({"present": [1], "missing": pa.array([None], type=pa.int64())}), data_path)
+
+    assert _read_perf_rows(str(data_path)) == [{"present": 1}]
 
 
 def test_perf_database_finalize_loaded_data_converts_defaultdicts():
@@ -820,6 +828,29 @@ def test_load_context_mla_data_basic(tmp_path):
     assert 2 in data[qm][kcd][num_heads]  # s == 2
     assert 1 in data[qm][kcd][num_heads][2]  # b == 1
     assert data[qm][kcd][num_heads][2][1]["latency"] == pytest.approx(1.111)
+
+
+def test_load_context_mla_data_parquet_null_num_heads_uses_legacy_tp_fallback(tmp_path):
+    data_path = tmp_path / "context_mla_perf.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "mla_dtype": ["bfloat16"],
+                "kv_cache_dtype": ["bfloat16"],
+                "batch_size": [1],
+                "isl": [2],
+                "tp_size": [4],
+                "num_heads": pa.array([None], type=pa.int64()),
+                "latency": [1.111],
+            }
+        ),
+        data_path,
+    )
+
+    data = load_context_mla_data(str(data_path))
+
+    value = data[FMHAQuantMode.bfloat16][KVCacheQuantMode.bfloat16][32][2][1]
+    assert value["latency"] == pytest.approx(1.111)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

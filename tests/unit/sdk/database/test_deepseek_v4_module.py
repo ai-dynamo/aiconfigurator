@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import csv
 import math
 
 import pytest
@@ -13,7 +14,10 @@ from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.operations.dsv4 import (
     _deep_merge_dsv4_dicts,
+    _dsv4_lookup_prefix_resolved,
     _dsv4_robust_3d_lookup,
+    load_context_dsv4_kind_module_data,
+    load_generation_dsv4_kind_module_data,
 )
 from aiconfigurator.sdk.perf_database import (
     LoadedOpData,
@@ -55,6 +59,28 @@ def _deepseek_v4_value(latency: float) -> dict[str, float]:
 def _write_mhc_perf(path, rows: list[str]) -> str:
     header = "framework,version,device,op_name,kernel_source,architecture,num_tokens,hc_mult,hidden_size,latency"
     path.write_text(header + "\n" + "\n".join(rows) + "\n")
+    return str(path)
+
+
+def _write_dsv4_module_perf(path, rows: list[dict[str, object]]) -> str:
+    fieldnames = [
+        "model",
+        "architecture",
+        "mla_dtype",
+        "kv_cache_dtype",
+        "gemm_type",
+        "num_heads",
+        "tp_size",
+        "batch_size",
+        "isl",
+        "step",
+        "compress_ratio",
+        "latency",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as destination:
+        writer = csv.DictWriter(destination, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
     return str(path)
 
 
@@ -239,6 +265,68 @@ class TestDeepSeekV4MHCModule:
 
 
 class TestDeepSeekV4AttentionModule:
+    def test_phase_loaders_use_consumer_axes_for_architecture_and_fmha(self, tmp_path):
+        base_row = {
+            "model": "deepseek-ai/DeepSeek-V4-Flash",
+            "kv_cache_dtype": "fp8",
+            "gemm_type": "fp8_block",
+            "num_heads": 64,
+            "tp_size": 1,
+            "batch_size": 1,
+            "isl": 128,
+            "step": 0,
+            "compress_ratio": 4,
+        }
+        context_path = _write_dsv4_module_perf(
+            tmp_path / "dsv4_csa_context_module_perf.txt",
+            [
+                {**base_row, "architecture": "ArchitectureA", "mla_dtype": "bfloat16", "latency": 11.0},
+                {**base_row, "architecture": "ArchitectureB", "mla_dtype": "bfloat16", "latency": 19.0},
+                {**base_row, "architecture": "ArchitectureB", "mla_dtype": "fp8", "latency": 23.0},
+            ],
+        )
+
+        context = load_context_dsv4_kind_module_data(context_path)
+        head_key = ("flash", 1, 64)
+        assert (
+            context[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][
+                head_key
+            ][4][0][128][1]["latency"]
+            == 19.0
+        )
+        assert (
+            context[common.FMHAQuantMode.fp8][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][head_key][4][
+                0
+            ][128][1]["latency"]
+            == 23.0
+        )
+
+        generation_path = _write_dsv4_module_perf(
+            tmp_path / "dsv4_csa_generation_module_perf.txt",
+            [
+                {**base_row, "architecture": "ArchitectureA", "mla_dtype": "bfloat16", "latency": 29.0},
+                {**base_row, "architecture": "ArchitectureB", "mla_dtype": "fp8", "latency": 31.0},
+            ],
+        )
+
+        generation = load_generation_dsv4_kind_module_data(generation_path)
+        assert (
+            generation[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][head_key][4][1][128]["latency"]
+            == 31.0
+        )
+
+    def test_context_prefix_lookup_interpolates_between_anchors(self, mutable_comprehensive_perf_db):
+        prefix_grid = {
+            0: {128: {1: _deepseek_v4_value(10.0)}},
+            512: {128: {1: _deepseek_v4_value(30.0)}},
+        }
+
+        result = _dsv4_lookup_prefix_resolved(mutable_comprehensive_perf_db, prefix_grid, 256, 128, 1)
+
+        assert result["latency"] == pytest.approx(20.0)
+        assert result["power"] == pytest.approx(10.0)
+        assert result["energy"] == pytest.approx(200.0)
+
     def test_generation_uses_pre_decode_kv_length(self, comprehensive_perf_db):
         base = _deepseek_v4_attn_kwargs(4)
         base.pop("prefix")

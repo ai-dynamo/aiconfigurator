@@ -19,6 +19,8 @@ from typing import Optional
 
 import yaml
 
+from collector.planner.context import get_active_case_catalog, get_active_model_path
+
 COLLECTOR_ROOT = Path(__file__).resolve().parent
 BASE_OP_CASES_DIR = COLLECTOR_ROOT / "cases" / "base_ops"
 MODEL_CASES_DIR = COLLECTOR_ROOT / "cases" / "models"
@@ -44,13 +46,27 @@ def _merge_base_case_data(target: dict, source: dict) -> None:
 
 
 @functools.lru_cache(maxsize=1)
-def _load_base_cases_data() -> dict:
+def _load_default_base_cases_data() -> dict:
     merged: dict = {}
     if not BASE_OP_CASES_DIR.exists():
         return merged
 
     for path in sorted(BASE_OP_CASES_DIR.glob("*.yaml")):
         _merge_base_case_data(merged, _load_yaml_mapping(path))
+    return merged
+
+
+def _load_base_cases_data() -> dict:
+    """Return base data from the active plan catalog or the repository."""
+
+    catalog = get_active_case_catalog()
+    documents = getattr(catalog, "base_documents", None)
+    if documents is None:
+        return _load_default_base_cases_data()
+
+    merged: dict = {}
+    for document in documents:
+        _merge_base_case_data(merged, document.data)
     return merged
 
 
@@ -416,12 +432,15 @@ def _required_base_common_case_values(name: str) -> dict[str, object]:
 
 def _get_model_path_filter() -> str | None:
     """Return the model-path filter from the environment, or None for 'all'."""
+    active_model_path = get_active_model_path()
+    if active_model_path:
+        return active_model_path
     val = os.environ.get("COLLECTOR_MODEL_PATH", "").strip()
     return val if val else None
 
 
 @functools.lru_cache(maxsize=1)
-def _load_model_cases_data() -> tuple[dict, ...]:
+def _load_default_model_cases_data() -> tuple[dict, ...]:
     data = []
     for path in sorted(MODEL_CASES_DIR.glob("*_cases.yaml")):
         with open(path, encoding="utf-8") as f:
@@ -430,6 +449,16 @@ def _load_model_cases_data() -> tuple[dict, ...]:
             raise TypeError(f"{path}: top-level YAML value must be a mapping")
         data.append(raw)
     return tuple(data)
+
+
+def _load_model_cases_data() -> tuple[dict, ...]:
+    """Return model data from the active plan catalog or the repository."""
+
+    catalog = get_active_case_catalog()
+    documents = getattr(catalog, "model_documents", None)
+    if documents is not None:
+        return tuple(document.data for document in documents)
+    return _load_default_model_cases_data()
 
 
 def _expand_model_case_entry(raw_value: object, *, field_name: str) -> list[dict]:

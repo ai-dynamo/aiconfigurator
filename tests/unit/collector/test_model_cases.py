@@ -279,7 +279,9 @@ def test_full_encoder_attention_profiles_preserve_v1_and_add_qwen_tp16(monkeypat
         if batch_size * sequence_length <= 131072
         and 4 * batch_size * sequence_length * config.num_heads * config.head_dim * 2 < 2**31
     )
-    assert case_count == 6699  # collector-v1 6315 + two n=1 model deltas (192 each)
+    # The protected collector-v1 grid contributes 7,008 cases. The two n=1
+    # model profiles add 671 physical cases after the shared safety guards.
+    assert case_count == 7679
 
 
 def test_targeted_encoder_attention_profile_is_model_exact(monkeypatch):
@@ -310,7 +312,7 @@ def test_targeted_encoder_attention_profile_is_model_exact(monkeypatch):
                 if batch_size * sequence_length <= 131072
                 and 4 * batch_size * sequence_length * config.num_heads * config.head_dim * 2 < 2**31
             )
-            == 960
+            == 1100
         )
 
 
@@ -1093,6 +1095,13 @@ def test_full_mode_aggregates_all_model_case_files():
     assert "gdn" in plan.op_cases
 
 
+def test_full_mode_unions_model_selectors_instead_of_last_model_wins():
+    for backend in ("sglang", "trtllm"):
+        plan = build_collection_case_plan(backend=backend, full=True)
+        for op in ("mla_context", "mla_generation", "mla_bmm_gen_pre", "mla_bmm_gen_post"):
+            assert plan.op_cases[op].include.all_cases, f"{backend}/{op} was narrowed by a later model document"
+
+
 def test_support_matrix_models_have_model_case_aliases():
     case_aliases = set()
     for path in (REPO_ROOT / "collector" / "cases" / "models").glob("*_cases.yaml"):
@@ -1442,7 +1451,7 @@ def test_filter_test_cases_reports_expected_sm_exception_reasons():
     ]
 
 
-def test_sm89_exception_marks_sglang_head_dim_256_context_attention_expected_failure():
+def test_sm89_exception_excludes_sglang_head_dim_256_context_attention_before_execution():
     plan = build_collection_case_plan(
         backend="sglang",
         model_path="google/gemma-4-26B-A4B",
@@ -1451,25 +1460,40 @@ def test_sm89_exception_marks_sglang_head_dim_256_context_attention_expected_fai
     case = [1, 256, 2, 1, 256, False, False, True, 1024]
 
     for version in ("0.5.9", "0.5.10", "0.5.12"):
-        expected = expected_failure_for_test_case(
-            case,
+        filtered, skipped = filter_test_cases_with_report(
+            [case],
             plan=plan.op_cases["attention_context"],
             full_module_name="sglang.attention_context",
             run_func_name="run_attention_torch",
             runtime_version=version,
         )
 
-        assert expected is not None
-        assert expected["reason_type"] == "framework_version_unsupported"
-        assert "head_dim=256" in expected["reason"]
+        assert filtered == []
+        assert skipped[0]["reason_type"] == "framework_version_unsupported"
+        assert "head_dim=256" in skipped[0]["reason"]
+
+    filtered, skipped = filter_test_cases_with_report(
+        [case],
+        plan=plan.op_cases["attention_context"],
+        full_module_name="sglang.attention_context",
+        run_func_name="run_attention_torch",
+        runtime_version="0.5.8",
+    )
+    assert filtered == [case]
+    assert skipped == []
+
+
+def test_expected_failure_matching_does_not_consider_exclude_selector():
+    case = ["remaining"]
+    plan = OpCasePlan(exclude=CaseSelector(indices={1}))
 
     assert (
         expected_failure_for_test_case(
             case,
-            plan=plan.op_cases["attention_context"],
-            full_module_name="sglang.attention_context",
-            run_func_name="run_attention_torch",
-            runtime_version="0.5.8",
+            plan=plan,
+            full_module_name="sglang.unmigrated_op",
+            run_func_name="run_case",
+            index=1,
         )
         is None
     )
@@ -1496,31 +1520,34 @@ def test_sm120_exception_filters_trtllm_gptoss_mxfp4():
         1.01,
     ]
 
-    expected = expected_failure_for_test_case(
-        case,
+    filtered, skipped = filter_test_cases_with_report(
+        [case],
         plan=plan.op_cases["moe"],
         full_module_name="trtllm.moe",
         run_func_name="run_moe_torch",
         runtime_version="1.3.0rc10",
     )
 
-    assert expected == {
-        "case_id": create_test_case_id(case, "run_moe_torch", "trtllm.moe"),
-        "source": "sm_exception",
-        "selector": "rule",
-        "reason_type": "framework_version_unsupported",
-        "reason": "TRT-LLM 1.3.0rc5/rc10 TRTLLMGenFusedMoE rejects GPT-OSS MXFP4 paths on SM120.",
-    }
-    assert (
-        expected_failure_for_test_case(
-            case,
-            plan=plan.op_cases["moe"],
-            full_module_name="trtllm.moe",
-            run_func_name="run_moe_torch",
-            runtime_version="1.3.0rc4",
-        )
-        is None
+    assert filtered == []
+    assert skipped == [
+        {
+            "case_id": create_test_case_id(case, "run_moe_torch", "trtllm.moe"),
+            "index": 0,
+            "source": "sm_exception",
+            "selector": "rule",
+            "reason_type": "framework_version_unsupported",
+            "reason": "TRT-LLM 1.3.0rc5/rc10 TRTLLMGenFusedMoE rejects GPT-OSS MXFP4 paths on SM120.",
+        }
+    ]
+    filtered, skipped = filter_test_cases_with_report(
+        [case],
+        plan=plan.op_cases["moe"],
+        full_module_name="trtllm.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="1.3.0rc4",
     )
+    assert filtered == [case]
+    assert skipped == []
 
 
 def test_sm100_exception_filters_trtllm_int4_wo():
@@ -1544,34 +1571,37 @@ def test_sm100_exception_filters_trtllm_int4_wo():
         1.2,
     ]
 
-    expected = expected_failure_for_test_case(
-        case,
+    filtered, skipped = filter_test_cases_with_report(
+        [case],
         plan=plan.op_cases["moe"],
         full_module_name="trtllm.moe",
         run_func_name="run_moe_torch",
         runtime_version="1.3.0rc10",
     )
 
-    assert expected == {
-        "case_id": create_test_case_id(case, "run_moe_torch", "trtllm.moe"),
-        "source": "sm_exception",
-        "selector": "rule",
-        "reason_type": "framework_version_unsupported",
-        "reason": (
-            "TRT-LLM 1.3.0rc10 SM100 CutlassFusedMoE rejects plain W4A16/int4_wo "
-            "in create_moe with ValueError Unsupported quantization mode [1]."
-        ),
-    }
-    assert (
-        expected_failure_for_test_case(
-            case,
-            plan=plan.op_cases["moe"],
-            full_module_name="trtllm.moe",
-            run_func_name="run_moe_torch",
-            runtime_version="1.3.0rc9",
-        )
-        is None
+    assert filtered == []
+    assert skipped == [
+        {
+            "case_id": create_test_case_id(case, "run_moe_torch", "trtllm.moe"),
+            "index": 0,
+            "source": "sm_exception",
+            "selector": "rule",
+            "reason_type": "framework_version_unsupported",
+            "reason": (
+                "TRT-LLM 1.3.0rc10 SM100 CutlassFusedMoE rejects plain W4A16/int4_wo "
+                "in create_moe with ValueError Unsupported quantization mode [1]."
+            ),
+        }
+    ]
+    filtered, skipped = filter_test_cases_with_report(
+        [case],
+        plan=plan.op_cases["moe"],
+        full_module_name="trtllm.moe",
+        run_func_name="run_moe_torch",
+        runtime_version="1.3.0rc9",
     )
+    assert filtered == [case]
+    assert skipped == []
 
 
 def test_filter_test_cases_supports_computed_rule_conditions():

@@ -23,34 +23,18 @@ from vllm.v1.attention.ops.vit_attn_wrappers import (
 )
 from vllm.version import __version__ as vllm_version
 
-from collector.case_generator import get_attention_encoder_head_configs, get_attention_encoder_shape_sweeps
-from collector.helper import benchmark_with_power, log_perf
-
-
-def _int_list(values):
-    return [int(value) for value in values]
+from collector.case_generator import get_attention_encoder_shape_sweeps
+from collector.helper import benchmark_with_power, get_sm_version, log_perf
+from collector.planner.schemas.attention import build_encoder_attention_cases
 
 
 def get_encoder_attention_test_cases():
-    test_cases = []
-
-    for shape_sweep in get_attention_encoder_shape_sweeps("vllm"):
-        batch_sizes = _int_list(shape_sweep["batch_sizes"])
-        sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
-
-        for head_config in get_attention_encoder_head_configs(shape_sweep):
-            n = head_config.num_heads
-            head_dim = head_config.head_dim
-            for s in sorted(sequence_lengths):
-                for b in sorted(batch_sizes):
-                    # Workload token budget (128K) + 32-bit indexing safety.
-                    if b * s > 131072:
-                        continue
-                    if 4 * b * s * n * head_dim * 2 >= 2**31:
-                        continue
-                    test_cases.append([b, s, n, head_dim])
-
-    return test_cases
+    return build_encoder_attention_cases(
+        "vllm",
+        get_attention_encoder_shape_sweeps("vllm"),
+        sm_version=get_sm_version(),
+        framework_version=vllm_version,
+    )
 
 
 def run_encoder_attention_torch(

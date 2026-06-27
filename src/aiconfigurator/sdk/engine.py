@@ -84,7 +84,7 @@ from aiconfigurator.sdk.rust_engine_step import (
 
 # Schema versions must match the Rust crate constants
 # (`ENGINE_SPEC_SCHEMA_VERSION` / `ENGINE_CONFIG_SCHEMA_VERSION` in `lib.rs`).
-ENGINE_SPEC_SCHEMA_VERSION = 1
+ENGINE_SPEC_SCHEMA_VERSION = 2
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 
@@ -328,6 +328,12 @@ def _dsa_module(op: ContextDSAModule | GenerationDSAModule, *, architecture: str
     # the default DSA architecture); mirror that so the Rust op-spec carries the
     # same boundary. Field name MUST match the Rust `DsaModuleOp.index_topk`.
     dims = DSA_MODEL_DIMS.get(arch, DSA_MODEL_DIMS[DEFAULT_DSA_ARCHITECTURE])
+    # Python selects the FlashMLA KV kernel for context-parallel prefill and
+    # TRT-LLM otherwise. Carry that physical table axis into the Rust op spec;
+    # the Rust loader keeps the same single-backend fallback as Python.
+    dsa_backend = (
+        "flashmla_kv" if isinstance(op, ContextDSAModule) and (getattr(op, "_cp_size", 1) or 1) > 1 else "trtllm"
+    )
     return {
         "name": op._name,
         "scale_factor": op._scale_factor,
@@ -336,6 +342,7 @@ def _dsa_module(op: ContextDSAModule | GenerationDSAModule, *, architecture: str
         "fmha_quant_mode": _quant_name(fmha) if fmha is not None else "bfloat16",
         "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
         "architecture": arch,
+        "dsa_backend": dsa_backend,
         "index_topk": int(dims["index_topk"]),
     }
 

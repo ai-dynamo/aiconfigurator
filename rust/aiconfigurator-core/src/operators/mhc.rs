@@ -6,10 +6,10 @@
 //! Wraps `db.mhc.query_module`. The MHC module is collected as a single
 //! fused kernel; this operator scales the raw latency by `scale_factor`.
 
-use serde::{Deserialize, Serialize};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MhcModuleOp {
@@ -20,6 +20,8 @@ pub struct MhcModuleOp {
     pub op: String,
     pub hc_mult: u32,
     pub hidden_size: u32,
+    /// Retained as model provenance on the op wire; MHC silicon lookup is
+    /// intentionally keyed only by compute shape.
     pub architecture: String,
 }
 
@@ -42,9 +44,9 @@ impl MhcModuleOp {
     }
 
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
-        let latency =
-            db.mhc
-                .query_module(&self.op, num_tokens, self.hc_mult, self.hidden_size, &self.architecture)?;
+        let latency = db
+            .mhc
+            .query_module(&self.op, num_tokens, self.hc_mult, self.hidden_size)?;
         Ok(PerformanceResult::new(latency, Source::Silicon)
             .clamp_non_negative()
             .scaled(self.scale_factor))

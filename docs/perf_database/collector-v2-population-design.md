@@ -1,542 +1,305 @@
-# Design: Collector v2 Rule Population and Physical-Case Deduplication
+# Collector v2 Population and Physical-Case Deduplication
 
 ## Status
 
-Proposed.
+Phase 1 is implemented. The common population path is active for every
+collector invocation, and attention/encoder are the first operation family
+with consumer-aligned physical deduplication and checked-in historical coverage
+manifests.
 
-## Summary
+Other operations already receive stable invocation IDs, additive-rule
+deduplication, resume isolation, and output conflict validation. They continue
+to use the explicit `legacy_passthrough` schema until their positional ABI can
+be projected to a physical row before execution.
 
-Collector v2 should allow model and backend coverage to grow by appending YAML
-rules without requiring every YAML author to reason about scheduler duplication,
-consumer lookup keys, or collector-v1 compatibility.
+## Contract
 
-This document proposes treating case population as a small compiler:
+Collector YAML is additive. Python owns execution and database identity.
 
 ```text
-YAML rules
-  -> parse and validate
-  -> expand logical candidates lazily
-  -> normalize aliases and defaults
-  -> filter unreachable and unsupported candidates
-  -> derive invocation and physical-row identities
-  -> deduplicate and detect conflicts
-  -> enforce compatibility manifests
-  -> emit a deterministic executable plan and an explanation report
+one parsed YAML catalog
+  -> independently expand base and model rules
+  -> normalize through an op schema
+  -> reject unreachable or unsupported candidates
+  -> derive stable invocation identity
+  -> deduplicate and merge provenance
+  -> apply selectors once to the populated union
+  -> enforce scoped historical physical coverage
+  -> launch workers
+  -> validate emitted physical rows
+  -> atomically merge into parquet
 ```
 
-YAML remains additive and model-centric. Python code remains authoritative for
-physical identity and consumer compatibility. This division lets the YAML
-catalog grow while preventing duplicate collection and accidental loss of old
-coverage.
+This separates three questions that were previously mixed together:
 
-## Motivation
+1. Why does a model need a case? YAML and `RuleSource` answer this.
+2. Is it one benchmark execution? `InvocationKey` answers this.
+3. Is it one AIC database lookup point? `PhysicalRowKey` answers this.
 
-Collector v2 moved model intent into YAML, which is the right ownership model,
-but several failure modes remain possible as the catalog grows:
-
-1. Independent dimensions can form structurally impossible Cartesian products.
-2. Multiple model artifacts can schedule the same kernel when quantization is
-   already an independent axis.
-3. A collector, output writer, Python database loader, and Rust database loader
-   can silently disagree about the identity or ordering of a case.
-4. Comparing only case counts cannot prove that collector-v1 lookup keys are
-   preserved.
-5. Local `seen` sets in individual collectors deduplicate different notions of
-   identity and are difficult to audit globally.
-
-The current collector already contains pieces of the desired design: explicit
-base-op activation, correlated attention profiles, model aliases, targeted
-model plans, and several collector-local physical-key deduplicators. The
-proposal makes these mechanisms a common population contract.
-
-There is also a current split-brain integration point to remove. `model_cases.py`
-loads YAML to build op selectors, while `case_generator.py` scans the model YAML
-catalog again and uses `COLLECTOR_MODEL_PATH` to narrow generated values. As a
-result, a selector plan and a generated case list can follow related but not
-identical merge semantics. The proposed compiler becomes the single YAML-to-plan
-path. During migration it may adapt typed logical cases back to legacy tuples,
-but backend collectors must not independently reload the catalog.
+Counts alone are not a compatibility proof. A full/raw plan is compatible only
+when every protected historical physical key is still present.
 
 ## Goals
 
-- Let authors add independent YAML rules without deep-merging their dimensions
-  into one global Cartesian product.
-- Remove duplicate benchmark invocations after canonical normalization.
-- Reject conflicting rows instead of relying on last-write-wins behavior.
-- Filter model-unreachable and backend-unsupported candidates before workers
-  are launched.
-- Guarantee that a full/raw plan contains every protected collector-v1
-  physical key.
-- Preserve provenance so every scheduled or skipped case can be explained.
-- Keep plan generation deterministic and memory-bounded.
-- Support incremental migration one op at a time.
+- Let authors append model/backend cases without deep-merging independent
+  dimensions into a global Cartesian product.
+- Collapse artifact aliases when quantization is already a separate axis.
+- Keep correlated attention heads, KV heads, head dimension, window, and TP
+  topology together.
+- Preserve every protected historical lookup point in full/raw collection.
+- Make targeted model collection model-exact and substantially smaller.
+- Prevent resume, subprocess logging, and incremental finalization from losing
+  already collected data.
+- Migrate operation families incrementally without forcing one large schema
+  rewrite.
 
-## Non-goals
+## One catalog and one population path
 
-- The YAML format will not become a general expression language.
-- The planner will not infer arbitrary model architecture facts from checkpoint
-  code at collection time.
-- The first implementation will not generate Python and Rust query code from a
-  shared schema.
-- The planner will not replace framework-specific benchmark setup.
-- This design does not automatically reduce every valid but low-value sampling
-  point; sampling policy remains an explicit sweep-policy concern.
+`collector.model_cases.load_case_catalog()` parses the selected base, model,
+and SM YAML documents once. The same `CaseCatalog` is activated while legacy
+case generators run, so op selection and case generation see the same source
+documents and model path.
 
-## Design principle
+Both model-planned and raw registry runs pass through `compile_population()`.
+An unmigrated op uses `legacy_passthrough`; it is not allowed to bypass stable
+identity, central ordering, or reporting. Attention runtime getters and
+`--plan-only` call the same framework-free builders.
 
-YAML authors append rules. They do not define physical identity.
+Some module collectors still load inner sweep values inside a spawned
+subprocess. Their complete migration requires moving that inner sweep into the
+top-level task ABI; this is tracked as a later operation-schema phase.
 
-A rule describes why a workload should exist and which logical dimensions it
-uses. An op schema in Python decides how that workload is normalized, whether
-it is reachable, how it is invoked, and how its output maps to a database row.
+## YAML semantics implemented now
 
-This distinction is important. Deduplication can remove two candidates that
-normalize to the same physical key, but it cannot determine that two distinct
-keys represent an impossible model topology. Structural correlation must come
-from a model profile or a structured capability constraint.
+Existing schema-v1 sections remain supported:
 
-## Proposed YAML semantics
+- `all_frameworks_op_cases` and `framework_specific_op_cases` activate ops and
+  define generator recipes or selectors;
+- `model_case_values` owns model structure and artifact aliasing;
+- `sm_exceptions` owns hardware/framework exclusions.
 
-Rules are additive clauses. Each clause expands independently, and the planner
-takes the union of their normalized output. Lists from different clauses are
-never implicitly crossed.
+Schema v2 adds exact, additive `population_rules` and
+`framework_specific_population_rules`. Each rule expands independently. Values
+from two rules are unioned; their dimensions are never implicitly crossed.
 
 ```yaml
 schema_version: 2
-op: attention_context
+architecture: Qwen3ForCausalLM
+model_path: Qwen/Qwen3-32B
+base_ops: [attention_generation]
 
-rules:
-  - id: collector_v1_compat
-    profiles:
-      - query_heads: 64
-        kv_heads: 8
-        head_dim: 128
-        window_size: 0
-        tensor_parallel_sizes: [1, 2, 4, 8]
-      - query_heads: 48
-        kv_heads: 8
-        head_dim: 128
-        window_size: 4096
-        tensor_parallel_sizes: [1, 2, 4, 8]
-    sweep:
-      batch_sizes: [1, 2, 4, 8, 16]
-      sequence_lengths: [128, 512, 2048, 8192]
-
-  - id: qwen3_vl_delta
-    when:
-      model_families: [qwen3_vl]
-      backends: [sglang, trtllm, vllm]
-    profiles:
-      - query_heads: 32
-        kv_heads: 8
-        head_dim: 128
-        window_size: 0
-        tensor_parallel_sizes: [1, 2, 4, 8, 16]
-
-model_aliases:
-  Qwen/Qwen3-32B-FP8: Qwen/Qwen3-32B
-
-compatibility:
-  preserve_manifest: collector_v1/attention_context.json
+population_rules:
+  attention_generation:
+    - id: qwen_decode_delta
+      when:
+        backends: [sglang, trtllm, vllm]
+        model_paths: [Qwen/Qwen3-32B, Qwen/Qwen3-32B-FP8]
+        min_sm: 90
+      cases:
+        - batch_size: 2
+          sequence_length: 8191
+          num_heads: 32
+          num_kv_heads: 4
+          head_dim: 128
+          use_fp8_kv_cache: true
+          window_size: 0
 ```
 
-### Structured predicates
+Attention mappings also accept `query_heads`/`kv_heads` and
+`fp8_kv_cache` aliases. A native topology can request TP projection:
 
-`when`, `requires`, and `exclude` should accept schema-validated mappings, not
-Python-like expression strings. Initially supported predicates should remain
-small:
+```yaml
+cases:
+  - batch_size: 4
+    sequence_length: 2047
+    num_attention_heads: 64
+    num_key_value_heads: 8
+    tensor_parallel_size: 8
+    head_dim: 128
+    window_size: 0
+```
 
-- backend membership;
-- SM membership or numeric range;
-- model family or canonical model membership;
-- precision/quantization membership;
-- divisibility and maximum/minimum constraints for TP, EP, heads, batch, and
-  sequence length.
+The schema requires query heads to divide TP and uses the same ceil-division
+rule as the existing generator for local KV heads. It then emits the exact
+backend positional tuple consumed by `run_*(*case)`.
 
-More complex op semantics belong in the op schema's `is_reachable` or
-`is_supported` implementation.
+Supported `when` fields are `backends`, `model_paths`,
+`model_architectures`, `sm_versions`, `min_sm`, and `max_sm`. In full mode,
+model predicates are evaluated against each source model document, so rules
+for different models remain an additive union. A rule cannot activate an op
+that the model/base plan did not select.
 
-### Alias semantics
+`profiles`/`sweep` inside schema-v2 population rules, rule inheritance,
+`extends`, `replace`, and a general predicate language are not implemented.
+Existing structural attention profiles under `model_case_values.attention`
+remain the supported compact sweep form. Adding another syntax before more op
+schemas exist would create two competing expansion systems.
 
-A model alias states that two artifact names share model structure. It does not
-silently change quantization policy. If the artifact name implies a precision,
-that implication is normalized into an explicit quantization field before the
-physical key is derived.
-
-Aliases must not be used when an artifact changes runtime behavior, valid
-parallel ranges, activation, kernel selection, or model loading.
-
-## Planner data model
-
-### RuleSource
-
-Identifies the YAML file, rule id, model path, architecture, backend, and SM
-context responsible for a candidate. Sources are accumulated during
-deduplication rather than discarded.
-
-### LogicalCase
-
-A typed, normalized candidate before scheduling. It contains semantic fields
-such as query heads, KV heads, head dimension, TP size, quantization, batch, and
-sequence length. It must not depend on the string representation used by
-`create_test_case_id`.
+## Identity
 
 ### InvocationKey
 
-Identifies one benchmark execution. Two logical cases with the same
-`InvocationKey` are run once even if several model rules require them.
+An invocation key contains the normalized payload plus its execution scope:
 
-The invocation key may include setup fields that do not appear in the database
-query. For example, a collector that loads a real checkpoint may need a model
-artifact in its invocation key even when a shape-only microbenchmark does not.
+- backend variant and operation;
+- performance filename and planner schema version;
+- framework version, GPU/system ID, and SM;
+- model path and architecture;
+- a fingerprint of the selected YAML catalog;
+- schema-projected payload.
+
+The canonical JSON form is SHA-256 hashed. Dict order, tuple/list spelling,
+sets, enums, dataclasses, and paths do not make IDs unstable. Resume
+checkpoints use the same execution dimensions and reject a framework, hardware,
+model, YAML-content, power-measurement mode, or measurement-duration change.
 
 ### PhysicalRowKey
 
-Identifies one performance database row after output normalization. It includes
-every field that changes the consumer lookup result and excludes provenance-only
-fields such as an alias artifact name.
+A physical key is versioned and scoped by performance table. Its fields match
+the key that AIC's Python consumer uses; representative Rust consumers are
+kept in parity tests. Measurement fields and provenance-only artifact names
+are excluded.
 
-One invocation may emit several physical rows when a subprocess performs an
-internal sweep. Schemas should predict those rows when practical and must
-validate actual rows during output finalization.
+Attention examples:
 
-### QueryKey
+- MHA normalizes `num_key_value_heads == num_heads` to the consumer's zero-KV
+  sentinel;
+- generation uses `isl + step` as total sequence length;
+- a generation-only context-FMHA flag is not a distinct database key;
+- encoder keys are `(dtype, head_dim, heads, isl, batch)`.
 
-Represents the key constructed by an AIC consumer. The first implementation
-does not need to call consumers from the planner, but checked-in parity fixtures
-must demonstrate that Python and Rust build the same key from representative
-rows.
+For attention/encoder, the planner's invocation projection is the physical
+row key, so redundant consumer points are pruned before workers start. For
+grouped module invocations that emit many rows, the top-level invocation stays
+distinct and actual rows are validated during finalization.
 
-### PlannedCase
+### Duplicate metadata
 
-Contains the normalized logical case, invocation key, predicted row keys,
-merged provenance, and any expected-failure metadata needed by the runner.
+Duplicate candidates merge ordered provenance. Non-overlapping metadata is
+merged; conflicting values fail planning rather than silently keeping the
+first rule's expected-failure or ownership metadata.
 
-### CaseDecision
+## Selectors
 
-Records a candidate's outcome and reason:
+All legacy cases and schema-v2 rules are populated and deduplicated first.
+`case_ids`, structured rules, indices, ranges, and `include.limit` are then
+applied once to the combined ordered plan. A limit of `N` therefore selects at
+most `N` cases, not `N` cases from every additive rule.
 
-```text
-scheduled
-duplicate_invocation
-unreachable_model_shape
-unsupported_backend
-unsupported_hardware
-excluded_by_rule
-conflicting_metadata
-compatibility_removal
-```
+`--shuffle` and CLI `--limit` remain runner controls and are applied after
+population and YAML selectors.
 
-The report aggregates decisions but can also dump them as JSON for auditing.
+## Historical coverage guard
 
-## Op schema contract
+Canonical gzip JSONL manifests live under
+`collector/planner/manifests/collector_v1/`. Each header fixes source ref,
+backend variant, an exact framework version or compatibility range,
+GPU/system ID, SM, performance table, and physical-key schema version. A hard
+subset assertion runs only for a full/raw plan whose scope matches the
+manifest. Targeted model plans are intentionally
+not v1-wide. Other scopes report `out_of_scope`, never a false compatibility
+claim.
 
-Each migrated op registers an implementation similar to:
+Current exact B200/SM100 and XPU baselines are:
 
-```python
-class OpCaseSchema(Protocol):
-    op_name: str
+| Backend | Operation | Historical | Current full/raw | Added | Removed |
+| --- | --- | ---: | ---: | ---: | ---: |
+| SGLang | context attention | 33,714 | 50,901 | 17,187 | 0 |
+| SGLang | generation attention | 19,484 | 39,556 | 20,072 | 0 |
+| TensorRT-LLM | context attention | 63,192 | 75,483 | 12,291 | 0 |
+| TensorRT-LLM | generation attention | 40,240 | 54,318 | 14,078 | 0 |
+| vLLM | context attention | 40,392 | 50,932 | 10,540 | 0 |
+| vLLM | generation attention | 36,288 | 53,638 | 17,350 | 0 |
+| vLLM XPU | context attention | 16,188 | 17,838 | 1,650 | 0 |
+| vLLM XPU | generation attention | 26,322 | 30,728 | 4,406 | 0 |
+| SGLang | encoder attention | 7,008 | 7,679 | 671 | 0 |
+| TensorRT-LLM | encoder attention | 7,008 | 7,679 | 671 | 0 |
+| vLLM | encoder attention | 7,008 | 7,679 | 671 | 0 |
 
-    def expand(self, rule: Rule, context: PlanContext) -> Iterable[LogicalCase]: ...
-    def normalize(self, case: LogicalCase, context: PlanContext) -> LogicalCase: ...
-    def is_reachable(self, case: LogicalCase, context: PlanContext) -> Decision: ...
-    def is_supported(self, case: LogicalCase, context: PlanContext) -> Decision: ...
-    def invocation_key(self, case: LogicalCase) -> Hashable: ...
-    def predicted_row_keys(self, case: LogicalCase) -> Iterable[Hashable]: ...
-    def row_key(self, output_row: Mapping[str, object]) -> Hashable: ...
-```
+Context/generation use the pre-collector-v2 source
+`a4827ce203e9fbc24fe6c6779a7eaa2a7dc79f1a`. Encoder did not exist at that
+ref; its honest initial baseline is the original hardcoded PR #1092 commit
+`36808ecced9af9d0d71d944c716ae96d1d4a2a47`. Restoring sequence lengths
+13/26/52/104 recovered 924 encoder keys that the later YAML conversion had
+dropped, while retaining new sequence length 1 and model profiles.
 
-The registry is the only source of physical identity for planning. Backend
-collectors may retain temporary assertions during migration, but they should
-not independently invent different deduplication keys.
+For a targeted SGLang Qwen3-32B plan, context/generation are only 2,448 and
+2,354 cases. The base and `-FP8` artifacts produce the same structural set;
+quantization is not multiplied by the model suffix.
 
-## Population pipeline
+There is currently no removal allowlist. Deliberately deleting a historical
+low-value point requires a separately reviewed policy and manifest update.
 
-### 1. Parse and validate
-
-Load YAML with strict unknown-field validation. Resolve model aliases and rule
-references, but retain source locations for diagnostics.
-
-### 2. Resolve additive rules
-
-Select rules for the requested model, backend, and SM. Do not merge sweep lists
-across different rule ids. Duplicate rule ids are an error by default. Reusing
-or modifying a rule requires an explicit relationship such as `extends` or
-`replace`; it must never trigger an implicit `dict.update()` overlay. This
-prevents an additive catalog from becoming a large rectangle again when two
-files happen to use the same descriptive id.
-
-### 3. Expand lazily
-
-Each rule yields candidates as an iterator. The planner must not materialize a
-large Cartesian product before it can apply cheap structural filters.
-
-Within a rule, explicitly independent sweep dimensions may still form a
-product. Correlated dimensions such as heads, head dimension, window, and valid
-TP sizes belong in profile records.
-
-### 4. Normalize
-
-Normalization applies canonical enums, default values, model aliases, MHA KV
-sentinels, quantization aliases, and op-specific field normalization before any
-key is computed.
-
-Normalization must be idempotent:
-
-```text
-normalize(normalize(case)) == normalize(case)
-```
-
-### 5. Filter reachability and capability
-
-Reachability answers whether the case represents a declared model topology.
-Capability answers whether the selected backend/hardware/kernel supports it.
-Keeping these decisions separate makes reports actionable.
-
-### 6. Deduplicate invocations
-
-Use an ordered mapping from `InvocationKey` to `PlannedCase`. A duplicate merges
-provenance and compatible metadata. Conflicting expected-failure or setup
-metadata is an error unless an explicit merge policy exists.
-
-The planner must never use last-rule-wins for a physical identity conflict.
-
-### 7. Validate physical rows
-
-At plan time, detect collisions among predicted physical-row keys. During
-output finalization, derive the actual row key and reject conflicting duplicate
-rows. Identical duplicate rows may be coalesced with their provenance recorded.
-
-### 8. Enforce compatibility
-
-For full/raw plans, compare generated physical keys with a checked-in legacy
-manifest:
-
-```text
-legacy physical keys <= generated physical keys
-```
-
-Missing keys fail plan generation unless listed in a reviewed removal allowlist
-with a reason and expiry/version. Targeted model plans do not need to contain
-the complete legacy grid.
-
-### 9. Emit deterministic output
-
-Sort cases by a schema-defined stable ordering after deduplication. Shuffling,
-when requested for execution balance, happens later in the runner and uses an
-explicit seed.
-
-## Compatibility manifests
-
-Manifests should contain normalized physical keys, not collector case strings
-or only aggregate counts. Because common attention manifests contain hundreds
-of thousands of keys, store one deterministic compressed JSON Lines file per
-backend/op under `tests/fixtures/collector_v1/`, together with a small
-human-readable summary. Do not store only a total hash: CI must be able to
-report the exact missing keys.
-
-```json
-{"op":"attention_context","backend":"vllm","key":["fp8","fp8",8,128,0,64,2048,4]}
-```
-
-Manifest generation must be a separate explicit maintenance command. Normal
-tests consume checked-in manifests but never rewrite them.
-
-Suggested commands:
+Regenerate or verify manifests with:
 
 ```bash
-python -m collector.planner manifest create --source collector-v1 --output ...
-python -m collector.planner manifest diff --base ... --plan ...
+.venv/bin/python tools/collector/generate_v1_attention_manifests.py --check
 ```
 
-## Plan explanation
+## Output and resume safety
 
-`--plan-only` should report both scheduler and physical coverage:
+Every worker runs inside a scoped collector invocation. `log_perf()` writes the
+invocation ID to a staging-only CSV column. An environment bridge carries that
+ID into module collector subprocesses; the field is removed before parquet is
+published.
 
-```text
-attention_context (vllm, sm100)
-  expanded logical candidates:       90,824
-  unreachable model shapes:         -24,512
-  unsupported backend/hardware:      -8,116
-  duplicate invocations:             -7,264
-  scheduled invocations:             50,932
+Finalization applies these rules:
 
-  collector-v1 physical keys:        40,392
-  retained collector-v1 keys:        40,392
-  true physical additions:           10,540
-  removed protected keys:                 0
-```
+- the same known invocation and physical key is a retry; the last successful
+  staging row wins;
+- different known invocations producing one physical key are a conflict;
+- unattributed legacy rows are never silently reclassified as retries;
+- validation writes a temporary clean CSV, so a conversion failure leaves the
+  original staging bytes and invocation IDs intact;
+- an existing parquet is merged with new unique physical keys instead of being
+  overwritten by a targeted or resumed run;
+- parquet replacement is atomic;
+- any remaining collector error keeps CSV staging in place and skips
+  finalization.
 
-`--plan-json` should write all aggregate counters plus optional per-case
-decisions and provenance. This artifact can be attached to collection PRs.
+`log_perf()` lock or write failures raise into the worker. They are not marked
+as completed resume tasks.
 
-## Proposed package layout
+## Consumer compatibility
 
-```text
-collector/planner/
-  __init__.py
-  models.py            # contexts, rules, cases, decisions, reports
-  compiler.py          # common lazy population pipeline
-  registry.py          # op-name -> OpCaseSchema
-  predicates.py        # small structured predicate vocabulary
-  manifests.py         # compatibility manifest loading and diffing
-  reporting.py         # text and JSON explain output
-  schemas/
-    attention.py
-    mla.py
-    gemm.py
-    moe.py
-    state_space.py
-    dsv4.py
+The physical-key registry covers the active performance tables without
+guessing keys for unknown files. Known tables fail on a missing key field;
+unknown tables retain legacy behavior.
 
-tests/fixtures/collector_v1/
-  <backend>/<op>.json.gz
-```
+This change also closes consumer discrepancies discovered while tracing case
+consumption:
 
-`collector/model_cases.py` remains responsible for resolving model, base-op,
-framework, and SM YAML sources. It should produce typed additive rules for the
-compiler instead of directly representing only string selectors.
+- Mamba and GDN generation use their batch-only physical key in Python and
+  Rust; duplicate rows retain the same file-order winner.
+- DSA context/generation use phase-correct quant fields and preserve the
+  physical `trtllm` versus `flashmla_kv` backend axis.
+- MHC treats architecture as provenance, while MoE preserves the two
+  kernel-source-specific effective quant modes.
+- DSV4 context prefix lookup and generation `isl + step` collision handling
+  are consistent across Python and Rust.
 
-`collector/collect.py` remains the execution coordinator. It consumes the
-compiled invocation plan and continues to own shuffle, limit, resume, worker,
-and expected-failure behavior.
+Adding the DSA backend field changes the positional Rust op wire, so
+`EngineSpec` schema version 2 rejects older bincode payloads from the leading
+version word before attempting to decode changed op layouts. These are query
+and wire semantics, not collector-only details; a case is not useful coverage
+unless AIC can retrieve it unambiguously.
 
-## Incremental rollout
+## Migration state and roadmap
 
-### Phase 0: shadow planning and reports
+| Capability | Attention/encoder | Other registered ops |
+| --- | --- | --- |
+| Central population and stable ID | active | active |
+| Additive schema-v2 exact cases | active | positional exact cases via passthrough |
+| Pre-worker consumer-key dedupe | active | pending op schema |
+| Historical exact manifest guard | active for checked scopes | pending manifests |
+| Final output physical conflict guard | active | active for registered tables |
 
-- Add core models, registry, compiler, and reporting.
-- Adapt one existing case list into logical candidates without changing which
-  cases execute.
-- Compare old and new invocation lists in tests and `--plan-only` output.
-- Do not enforce deduplication in production yet.
+Next operation families should be migrated in this order:
 
-### Phase 1: attention and encoder
+1. MLA, DSA, Mamba, GDN, and MHC, where one invocation may emit many rows.
+2. GEMM, ComputeScale, MoE, WideEP, and DSV4.
+3. Only after those schemas exist, consider compact schema-v2 sweep syntax and
+   explicit reviewed removal manifests.
 
-- Register attention schemas for SGLang, TRT-LLM, vLLM, and XPU.
-- Move current profile normalization and physical-key logic behind the schema.
-- Check in collector-v1 attention manifests.
-- Enable invocation deduplication and compatibility enforcement for these ops.
-
-Attention is the best first migration because it has the largest case volume,
-well-understood consumer keys, and the clearest benefit.
-
-### Phase 2: MLA and state-space ops
-
-- Migrate micro MLA, MLA module, MLA BMM, WideEP MLA, GDN, Mamba, and MHC.
-- Replace collector-local `seen` sets with schema assertions.
-- Add Python/Rust row-to-query parity fixtures for ops consumed by Rust.
-
-### Phase 3: remaining common and model-specific ops
-
-- Migrate GEMM, ComputeScale, MoE, WideEP MoE, and DSV4.
-- Make physical-row conflict validation mandatory during output finalization.
-- Require every collector-v1-compatible op to name a manifest.
-
-### Phase 4: schema-v2 YAML default
-
-- Make additive rules the documented default.
-- Retain a compatibility reader for schema-v1 YAML during one release window.
-- Remove local deduplication only after plan and output-key parity are proven.
-
-## Estimated implementation size
-
-The estimates below are changed lines, not net-new lines, and include refactoring
-existing logic into the common contract.
-
-| Work item | Production code | Tests/tools | Likely files |
-|---|---:|---:|---:|
-| Core models, compiler, registry, predicates | 600-900 | 350-500 | 6-9 |
-| Reporting, manifest tooling, CLI integration | 350-550 | 250-400 | 5-7 |
-| Attention/encoder schema migration | 500-800 | 400-600 | 8-12 |
-| MLA and state-space schema migration | 700-1,050 | 400-600 | 10-15 |
-| GEMM/MoE/ComputeScale/DSV4 migration | 900-1,400 | 450-700 | 10-16 |
-| Remaining active-op adapters and parity glue | 450-800 | 300-500 | 6-10 |
-| Python/Rust consumer parity fixtures | 150-250 | 250-400 | 5-8 |
-| Total full migration | 3,500-5,500 | 2,000-3,000 | 25-40 |
-
-A useful first slice covering additive rules, the common compiler,
-`InvocationKey`, explain output, and the main attention/encoder/MLA adapters is
-approximately 1,500-2,200 production lines plus 1,000-1,500 test/tool lines
-across 10-15 files. It can be reviewed independently before introducing hard
-physical-row manifest enforcement.
-
-The complete estimate covers roughly 32 active registry op names grouped into
-about 14-16 schema families. Precise `PhysicalRowKey` support requires adapters
-for collectors such as MLA module, Mamba, GDN, and DSV4, where one invocation
-performs an internal sweep and emits multiple rows.
-
-The manifest data itself may contain many rows but should be generated and is
-not included in the hand-written code estimate.
-
-## Testing strategy
-
-Every schema should have the following contract tests:
-
-1. normalization is idempotent;
-2. case ordering is deterministic;
-3. aliases that should collapse share an invocation and row key;
-4. artifacts with different runtime policy do not collapse;
-5. structurally impossible profiles are rejected before scheduling;
-6. unsupported backend/SM combinations receive a stable reason code;
-7. no two scheduled invocations predict conflicting physical rows;
-8. the protected legacy manifest is a subset of the full/raw output;
-9. targeted model output contains only the selected model's reachable profiles;
-10. representative output rows map to the same Python and Rust query key.
-
-Integration tests should run the new compiler in shadow mode against current
-collector outputs, compare exact ordered keys, and then switch the op to
-enforcement mode only after parity is established.
-
-## Failure behavior
-
-The planner should fail before launching workers when it encounters:
-
-- an unknown YAML field;
-- an unknown op schema;
-- a conflicting invocation definition;
-- a predicted physical-row collision with incompatible metadata;
-- a protected legacy-key removal;
-- a rule that expands beyond a configurable safety threshold before filtering.
-
-Expected runtime kernel failures remain handled by the existing SM exception
-and resume mechanisms.
-
-## Alternatives considered
-
-### Deduplicate only after full Cartesian expansion
-
-Rejected. It wastes memory and cannot remove structurally impossible cases that
-have distinct physical keys.
-
-### Put arbitrary filter expressions in YAML
-
-Rejected. It creates an untyped programming language, makes schema evolution
-unsafe, and spreads kernel semantics across configuration files.
-
-### Keep per-collector `seen` sets
-
-Rejected as the long-term contract. Local sets are useful assertions during
-migration but cannot enforce global provenance, compatibility manifests, or
-consumer-key parity.
-
-### Include model path in every key
-
-Rejected. Many microbenchmarks are shape-only, and including artifact names
-would preserve exactly the duplicate collection this design is intended to
-remove. Model path belongs in an invocation key only when it changes setup or
-runtime behavior.
-
-## Acceptance criteria
-
-The design is complete when:
-
-- adding two YAML rules that normalize to one invocation schedules one worker;
-- every deduplicated case retains all contributing rule/model provenance;
-- full/raw plans cannot remove a protected collector-v1 physical key silently;
-- impossible model profiles and unsupported backend cases are reported with
-  distinct reason codes;
-- output finalization detects conflicting physical rows;
-- Python and Rust parity fixtures cover every Rust-consumed migrated op;
-- `--plan-only` reports logical, invocation, and physical-key counts; and
-- migrated collectors no longer need independent production deduplication logic.
+Local collector `seen` sets should be removed only after the corresponding
+schema, manifest, and Python/Rust query parity tests are active.

@@ -295,11 +295,9 @@ def _get_precision_combos(phase: str, model_id: str | None = None):
                       FMHA internally, but the latency is captured under the
                       fp8 KV row).
       kv_cache_dtype: "bfloat16" always; "fp8" on SM >= 90 (Hopper+).
-      gemm_type:      "bfloat16" for bf16 weights; "fp8_block" on SM >= 89,
-                      in which case load_model_runner launches sglang with
-                      quantization="fp8" so the inner attention projections
-                      (q_b_proj, kv_b_proj, o_proj, wq_b, wk) and the fp8
-                      paged MQA scoring kernel fire on real fp8 weights.
+      gemm_type:      "bfloat16" for bf16 weights; "nvfp4" on SM >= 89 for
+                      modelopt checkpoints. Attention projections excluded
+                      from NVFP4 remain on their serving BF16 path.
 
     fp4_e2m1 omitted — SGLang supports it on SM >= 100, but KVCacheQuantMode
     enum has no fp4 entry, so perf_database cannot consume it yet.
@@ -873,6 +871,17 @@ def _patch_nsa_indexer_compile_for_module_cuda_graph(attention_module) -> None:
 
 class CudaIllegalAccessError(RuntimeError):
     """Stop the current subprocess after a CUDA illegal access poisons context."""
+
+
+class PerfLogWriteError(RuntimeError):
+    """Fail the current collector task when a measured row cannot be persisted."""
+
+
+def _log_perf_strict(*, phase: str, batch_size: int, seq_length: int, **kwargs) -> None:
+    try:
+        log_perf(**kwargs)
+    except Exception as exc:
+        raise PerfLogWriteError(f"failed to log {phase} metrics for b={batch_size}, s={seq_length}: {exc}") from exc
 
 
 def _expect_module_attr(module, attr_name: str, expected: int, module_name: str) -> None:
@@ -1797,44 +1806,43 @@ def _run_prefill(
         avg_time_ms = start_event.elapsed_time(end_event) / num_iterations
 
         # Log perf — wideep MLA uses old filename/op_name/kernel_source conventions
-        try:
-            if is_wideep_mla:
-                perf_fname = "wideep_context_mla_perf.txt"
-                op_name = "mla_context"
-                kernel_source = backend_name
-            else:
-                perf_fname = f"{attn_type}_context_module_perf.txt"
-                op_name = f"{attn_type}_context_module"
-                kernel_source = f"{attn_type}_{backend_name}"
-                if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
-                    kernel_source = f"{kernel_source}_trtllm"
-            perf_filename = _resolve_perf_path(output_path, perf_fname)
-            log_perf(
-                item_list=[
-                    {
-                        "model": model_path,
-                        "architecture": architecture,
-                        "mla_dtype": log_mla_dtype,
-                        "kv_cache_dtype": log_kv_dtype,
-                        "gemm_type": log_gemm_type,
-                        "num_heads": head_num,
-                        "batch_size": batch_size,
-                        "isl": seq_length,
-                        "tp_size": target_tp_size,
-                        "step": prefix_len,
-                        "latency": f"{avg_time_ms:.4f}",
-                    }
-                ],
-                framework="SGLang",
-                version=version,
-                device_name=device_name,
-                op_name=op_name,
-                kernel_source=kernel_source,
-                perf_filename=perf_filename,
-            )
-        except Exception as e:
-            print(f"  Warning: failed to log prefill metrics: {e}")
-            return False
+        if is_wideep_mla:
+            perf_fname = "wideep_context_mla_perf.txt"
+            op_name = "mla_context"
+            kernel_source = backend_name
+        else:
+            perf_fname = f"{attn_type}_context_module_perf.txt"
+            op_name = f"{attn_type}_context_module"
+            kernel_source = f"{attn_type}_{backend_name}"
+            if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
+                kernel_source = f"{kernel_source}_trtllm"
+        perf_filename = _resolve_perf_path(output_path, perf_fname)
+        _log_perf_strict(
+            phase="prefill",
+            batch_size=batch_size,
+            seq_length=seq_length,
+            item_list=[
+                {
+                    "model": model_path,
+                    "architecture": architecture,
+                    "mla_dtype": log_mla_dtype,
+                    "kv_cache_dtype": log_kv_dtype,
+                    "gemm_type": log_gemm_type,
+                    "num_heads": head_num,
+                    "batch_size": batch_size,
+                    "isl": seq_length,
+                    "tp_size": target_tp_size,
+                    "step": prefix_len,
+                    "latency": f"{avg_time_ms:.4f}",
+                }
+            ],
+            framework="SGLang",
+            version=version,
+            device_name=device_name,
+            op_name=op_name,
+            kernel_source=kernel_source,
+            perf_filename=perf_filename,
+        )
 
         print(f"  Prefill: {avg_time_ms:.3f} ms (back-to-back avg over {num_iterations} iters)")
         return True
@@ -1843,6 +1851,8 @@ def _run_prefill(
         print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
         torch.cuda.empty_cache()
         return False
+    except PerfLogWriteError:
+        raise
     except Exception as e:
         traceback.print_exc()
         error_str = str(e).lower()
@@ -2030,49 +2040,48 @@ def _run_decode(
         # DSA uses isl=1, step=seq_len, where seq_len is past-KV length.
         # The wideep generation loader computes s = isl + step, so both
         # conventions yield the same effective key when step=0 → s=seq_len.
-        try:
-            if is_wideep_mla:
-                perf_fname = "wideep_generation_mla_perf.txt"
-                op_name = "mla_generation"
-                kernel_source = backend_name
-                log_isl = seq_length
-                log_step = 0
-            else:
-                perf_fname = f"{attn_type}_generation_module_perf.txt"
-                op_name = f"{attn_type}_generation_module"
-                kernel_source = f"{attn_type}_{backend_name}"
-                if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
-                    kernel_source = f"{kernel_source}_trtllm"
-                log_isl = 1
-                log_step = seq_length
-            perf_filename = _resolve_perf_path(output_path, perf_fname)
-            log_perf(
-                item_list=[
-                    {
-                        "model": model_path,
-                        "architecture": architecture,
-                        "mla_dtype": log_mla_dtype,
-                        "kv_cache_dtype": log_kv_dtype,
-                        "gemm_type": log_gemm_type,
-                        "num_heads": head_num,
-                        "batch_size": batch_size,
-                        "isl": log_isl,
-                        "tp_size": target_tp_size,
-                        "step": log_step,
-                        "latency": f"{avg_time_ms:.4f}",
-                    }
-                ],
-                framework="SGLang",
-                version=version,
-                device_name=device_name,
-                op_name=op_name,
-                kernel_source=kernel_source,
-                perf_filename=perf_filename,
-                power_stats=power_stats,
-            )
-        except Exception as e:
-            print(f"  Warning: failed to log decode metrics: {e}")
-            return False
+        if is_wideep_mla:
+            perf_fname = "wideep_generation_mla_perf.txt"
+            op_name = "mla_generation"
+            kernel_source = backend_name
+            log_isl = seq_length
+            log_step = 0
+        else:
+            perf_fname = f"{attn_type}_generation_module_perf.txt"
+            op_name = f"{attn_type}_generation_module"
+            kernel_source = f"{attn_type}_{backend_name}"
+            if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
+                kernel_source = f"{kernel_source}_trtllm"
+            log_isl = 1
+            log_step = seq_length
+        perf_filename = _resolve_perf_path(output_path, perf_fname)
+        _log_perf_strict(
+            phase="decode",
+            batch_size=batch_size,
+            seq_length=seq_length,
+            item_list=[
+                {
+                    "model": model_path,
+                    "architecture": architecture,
+                    "mla_dtype": log_mla_dtype,
+                    "kv_cache_dtype": log_kv_dtype,
+                    "gemm_type": log_gemm_type,
+                    "num_heads": head_num,
+                    "batch_size": batch_size,
+                    "isl": log_isl,
+                    "tp_size": target_tp_size,
+                    "step": log_step,
+                    "latency": f"{avg_time_ms:.4f}",
+                }
+            ],
+            framework="SGLang",
+            version=version,
+            device_name=device_name,
+            op_name=op_name,
+            kernel_source=kernel_source,
+            perf_filename=perf_filename,
+            power_stats=power_stats,
+        )
 
         print(f"  Decode: {avg_time_ms:.3f} ms")
         return True
@@ -2081,6 +2090,8 @@ def _run_decode(
         print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
         torch.cuda.empty_cache()
         return False
+    except PerfLogWriteError:
+        raise
     except Exception as e:
         traceback.print_exc()
         error_str = str(e).lower()

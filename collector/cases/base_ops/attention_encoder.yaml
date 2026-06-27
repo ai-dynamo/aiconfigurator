@@ -20,10 +20,17 @@ all_frameworks_op_cases:
       - 32
       - 64
       sequence_lengths:
+      # Keep the original PR #1092 hardcoded collector grid (13/26/52/104)
+      # as protected physical coverage. The final squash added sequence 1;
+      # it remains a useful current-grid addition rather than a replacement.
       - 1
+      - 13
       - 16
+      - 26
       - 32
+      - 52
       - 64
+      - 104
       - 128
       - 192
       - 256
@@ -71,10 +78,10 @@ all_frameworks_op_cases:
       - 64
       - 72
       - 80
-      # Preserve the collector-v1 physical grid for full/raw collection. A
-      # targeted model with an encoder profile replaces this broad grid with
-      # its native ViT topology.
+      # Preserve the initial hardcoded encoder collector's physical grid for
+      # full/raw collection. A targeted model with an encoder profile replaces
+      # this broad grid with its native ViT topology.
       legacy_head_profiles:
-      - id: collector_v1
+      - id: encoder_initial_baseline
         head_counts: [2, 4, 5, 8, 10, 12, 14, 16, 20, 24, 32]
         head_dims: [64, 72, 80]

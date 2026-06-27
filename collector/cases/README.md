@@ -3,8 +3,8 @@
 Collector v2 plans collection from model/SM YAML instead of treating the
 collector as a flat op list.
 
-The proposed common population, physical-key deduplication, compatibility
-manifest, and incremental migration contract is documented in
+The common population, physical-key deduplication, compatibility manifest, and
+incremental migration contract is documented in
 [`docs/perf_database/collector-v2-population-design.md`](../../docs/perf_database/collector-v2-population-design.md).
 
 ## File Layout
@@ -246,6 +246,44 @@ without creating a new collectable op. Their per-model attention type, native
 head count, WideEP eligibility, and architecture come from
 `model_case_values.mla_module`. Precision combinations can include `min_sm` and
 `phases` when a backend has hardware-gated context/generation support.
+
+### Schema-v2 Additive Population Rules
+
+`schema_version: 2` files can append exact cases through `population_rules` or
+`framework_specific_population_rules`. Rules are expanded independently and
+deduplicated centrally; dimensions from separate rules are never crossed.
+
+```yaml
+schema_version: 2
+population_rules:
+  attention_generation:
+    - id: model_decode_delta
+      when:
+        backends: [sglang, trtllm, vllm]
+        model_paths: [Qwen/Qwen3-32B, Qwen/Qwen3-32B-FP8]
+        min_sm: 90
+      cases:
+        - batch_size: 2
+          sequence_length: 8191
+          query_heads: 32
+          kv_heads: 4
+          head_dim: 128
+          fp8_kv_cache: true
+          window_size: 0
+```
+
+The rule's op must already be activated by `base_ops` or an op section.
+Supported `when` fields are `backends`, `model_paths`,
+`model_architectures`, `sm_versions`, `min_sm`, and `max_sm`. Attention and
+encoder rules accept semantic mappings and compile them to each backend's
+positional runtime ABI. Other ops currently accept their existing exact
+positional case shape through `legacy_passthrough` while their typed schemas
+are migrated.
+
+Compact `profiles`/`sweep` syntax inside `population_rules`, inheritance, and
+rule replacement are not supported. Continue using the existing base-op
+generator recipes and `model_case_values` structural profiles for compact
+sweeps.
 
 ## SM Exception Files
 

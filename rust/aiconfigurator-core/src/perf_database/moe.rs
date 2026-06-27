@@ -24,9 +24,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use super::interpolation::{interp_1d, nearest_neighbors};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
-use super::interpolation::{interp_1d, nearest_neighbors};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct MoeTable {
@@ -58,6 +58,20 @@ struct MoeKey {
     inter_size: u32,
     moe_tp_size: u32,
     moe_ep_size: u32,
+}
+
+/// Return the effective MoE quant mode used by the Python perf-DB loader.
+///
+/// Two framework kernels share their logged `moe_dtype` with a different
+/// numerical path.  Their `kernel_source` disambiguates the consumer key.
+fn effective_moe_quant_mode(moe_dtype: &str, kernel_source: &str) -> String {
+    match (moe_dtype, kernel_source) {
+        ("w4a8_mxfp4_mxfp8", "sglang_mxfp4_flashinfer_trtllm_moe") => {
+            "w4a8_mxfp4_mxfp8_trtllm".to_string()
+        }
+        ("w4a16_mxfp4", "sglang_flashinfer_cutlass_moe") => "w4a16_mxfp4_cutlass".to_string(),
+        _ => moe_dtype.to_string(),
+    }
 }
 
 impl MoeTable {
@@ -283,8 +297,9 @@ fn load_moe_parquet(path: &Path) -> Result<LoadedMoeGrids, AicError> {
     let mut low_latency_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
     for row in reader.rows()? {
         let row = row?;
+        let kernel_source = row.str_optional(kernel_source_col)?.unwrap_or("");
         let key = MoeKey {
-            quant: row.str_owned(moe_dtype_col)?,
+            quant: effective_moe_quant_mode(row.str(moe_dtype_col)?, kernel_source),
             distribution: row.str_owned(distribution_col)?,
             topk: row.u32(topk_col)?,
             num_experts: row.u32(num_experts_col)?,
@@ -293,7 +308,6 @@ fn load_moe_parquet(path: &Path) -> Result<LoadedMoeGrids, AicError> {
             moe_tp_size: row.u32(moe_tp_size_col)?,
             moe_ep_size: row.u32(moe_ep_size_col)?,
         };
-        let kernel_source = row.str_optional(kernel_source_col)?.unwrap_or("");
         let target = if kernel_source == "moe_torch_flow_min_latency" {
             &mut low_latency_keys
         } else {
@@ -316,8 +330,12 @@ fn load_moe_parquet(path: &Path) -> Result<LoadedMoeGrids, AicError> {
         )));
     }
     Ok(LoadedMoeGrids {
-        default: MoeGrids { by_keys: default_keys },
-        low_latency: MoeGrids { by_keys: low_latency_keys },
+        default: MoeGrids {
+            by_keys: default_keys,
+        },
+        low_latency: MoeGrids {
+            by_keys: low_latency_keys,
+        },
     })
 }
 
@@ -384,6 +402,60 @@ mod tests {
         let r1 = table.load();
         let r2 = table.load();
         assert_eq!(r1.is_ok(), r2.is_ok());
+    }
+
+    #[test]
+    fn moe_special_kernel_sources_have_dedicated_effective_quant_modes() {
+        assert_eq!(
+            effective_moe_quant_mode("w4a8_mxfp4_mxfp8", "sglang_mxfp4_flashinfer_trtllm_moe"),
+            "w4a8_mxfp4_mxfp8_trtllm"
+        );
+        assert_eq!(
+            effective_moe_quant_mode("w4a16_mxfp4", "sglang_flashinfer_cutlass_moe"),
+            "w4a16_mxfp4_cutlass"
+        );
+        assert_eq!(
+            effective_moe_quant_mode("w4a8_mxfp4_mxfp8", "flashinfer_cutedsl_moe"),
+            "w4a8_mxfp4_mxfp8"
+        );
+    }
+
+    #[test]
+    fn moe_query_keeps_base_and_special_quant_modes_distinct() {
+        let shape = |quant: &str| MoeKey {
+            quant: quant.to_string(),
+            distribution: "uniform".to_string(),
+            topk: 8,
+            num_experts: 256,
+            hidden_size: 7168,
+            inter_size: 2048,
+            moe_tp_size: 1,
+            moe_ep_size: 8,
+        };
+        let mut by_keys = BTreeMap::new();
+        by_keys.insert(shape("w4a8_mxfp4_mxfp8"), BTreeMap::from([(128, 1.0)]));
+        by_keys.insert(
+            shape("w4a8_mxfp4_mxfp8_trtllm"),
+            BTreeMap::from([(128, 2.0)]),
+        );
+        by_keys.insert(shape("w4a16_mxfp4"), BTreeMap::from([(128, 3.0)]));
+        by_keys.insert(shape("w4a16_mxfp4_cutlass"), BTreeMap::from([(128, 4.0)]));
+
+        let table = MoeTable {
+            data_root: PathBuf::new(),
+            moe: OnceLock::from(Ok(LoadedMoeGrids {
+                default: MoeGrids { by_keys },
+                low_latency: MoeGrids {
+                    by_keys: BTreeMap::new(),
+                },
+            })),
+        };
+        let query = |quant| table.query(128, 7168, 2048, 8, 256, 1, 8, quant, "uniform");
+
+        assert_eq!(query(MoeQuantMode::W4a8Mxfp4Mxfp8).unwrap(), 1.0);
+        assert_eq!(query(MoeQuantMode::W4a8Mxfp4Mxfp8Trtllm).unwrap(), 2.0);
+        assert_eq!(query(MoeQuantMode::W4a16Mxfp4).unwrap(), 3.0);
+        assert_eq!(query(MoeQuantMode::W4a16Mxfp4Cutlass).unwrap(), 4.0);
     }
 
     fn b200_trtllm_data_root() -> PathBuf {

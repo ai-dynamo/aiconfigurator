@@ -108,6 +108,30 @@ class TestContextDSAModule:
         ]["flashmla_kv"][32][0][256][1]
         assert value["latency"] == pytest.approx(10.0)
 
+    def test_context_loader_parquet_null_architecture_uses_legacy_default(self, tmp_path):
+        data_path = tmp_path / "dsa_context_module_perf.parquet"
+        table = pa.table(
+            {
+                "architecture": pa.array([None], type=pa.string()),
+                "gemm_type": ["bfloat16"],
+                "mla_dtype": ["bfloat16"],
+                "kv_cache_dtype": ["bfloat16"],
+                "num_heads": [32],
+                "batch_size": [1],
+                "isl": [256],
+                "step": [0],
+                "latency": [10.0],
+            }
+        )
+        pq.write_table(table, data_path)
+
+        data = load_context_dsa_module_data(str(data_path))
+
+        value = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][
+            DEFAULT_DSA_ARCHITECTURE
+        ]["flashmla_kv"][32][0][256][1]
+        assert value["latency"] == pytest.approx(10.0)
+
     def test_default_context_loader_treats_whitespace_step_as_missing(self, tmp_path):
         data_path = tmp_path / "dsa_context_module_perf.txt"
         data_path.write_text(
