@@ -100,6 +100,7 @@ def test_save_results_to_csv_upgrades_legacy_rows_to_valid_current_schema(tmp_pa
     header, rows = read_csv(str(output_file))
 
     assert [row[9] for row in rows] == ["silicon", "silicon", ""]
+    assert rows[1][8] == silicon_command
     assert check_csv_sanity(header, rows) == []
 
 

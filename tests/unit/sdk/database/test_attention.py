@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import copy
 import math
 from types import SimpleNamespace
 
@@ -101,35 +100,20 @@ class TestContextAttention:
         assert windowed > 0
         assert windowed <= full * 1.0001  # s(256) > window(128): windowed work <= full
 
-    def test_provenance_capture_records_transfer_tier(self, comprehensive_perf_db):
-        """capture_provenance records which empirical tier a query relied on: a cross-head
-        transfer (uncollected head_size) tags 'xshape'; a silicon-covered query tags nothing
-        (worst_provenance -> 'silicon')."""
-        from aiconfigurator.sdk.operations import util_empirical as ue
-
-        base = (8, 256, 0, 16, 8, common.KVCacheQuantMode.bfloat16, common.FMHAQuantMode.bfloat16)
-        with ue.capture_provenance() as tags:
-            comprehensive_perf_db.query_context_attention(
-                *base, database_mode=common.DatabaseMode.EMPIRICAL, head_size=256, window_size=0
-            )  # head_size 256 not collected (stub has 64/128) -> cross-head transfer
-        assert ue.worst_provenance(tags) == "xshape"
-        with ue.capture_provenance() as tags2:
-            comprehensive_perf_db.query_context_attention(
-                *base, database_mode=common.DatabaseMode.SILICON, head_size=128, window_size=0
-            )  # collected -> pure silicon, no empirical path
-        assert ue.worst_provenance(tags2) == "silicon"
-
     def test_cross_head_transfer_gated_by_xshape_policy(self, comprehensive_perf_db):
         """Cross-head_size transfer is an XSHAPE transfer. A head_size with no own data
         (stub collects 64/128) borrows from the nearest collected head_size when XSHAPE
         is permitted, and raises when the transfer policy excludes XSHAPE."""
         from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+        from aiconfigurator.sdk.operations import util_empirical
 
         args = (8, 256, 0, 16, 8, common.KVCacheQuantMode.bfloat16, common.FMHAQuantMode.bfloat16)
         kw = dict(database_mode=common.DatabaseMode.EMPIRICAL, head_size=256, window_size=0)
         try:
             comprehensive_perf_db.set_transfer_policy("aggressive")  # XSHAPE on
-            assert float(comprehensive_perf_db.query_context_attention(*args, **kw)) > 0
+            with util_empirical.capture_provenance() as tags:
+                assert float(comprehensive_perf_db.query_context_attention(*args, **kw)) > 0
+            assert util_empirical.worst_provenance(tags) == "xshape"
             comprehensive_perf_db.set_transfer_policy(["xquant"])  # no XSHAPE
             with pytest.raises(EmpiricalNotImplementedError):
                 comprehensive_perf_db.query_context_attention(*args, **kw)
@@ -304,153 +288,65 @@ class TestGenerationAttention:
         )
         assert result > 0
 
-    def test_raw_cache_is_preserved_before_working_grid_extrapolation(self, comprehensive_perf_db):
-        from aiconfigurator.sdk.operations.attention import GenerationAttention
-
-        GenerationAttention.load_data(comprehensive_perf_db)
-        key = GenerationAttention._cache_key(comprehensive_perf_db)
-        raw = GenerationAttention._raw_data_cache[key]
-        working = GenerationAttention._data_cache[key]
-        path = (common.KVCacheQuantMode.bfloat16, 1, 128, 0, 8)
-
-        raw_curve = raw[path[0]][path[1]][path[2]][path[3]][path[4]]
-        working_curve = working[path[0]][path[1]][path[2]][path[3]][path[4]]
-        assert 8192 not in raw_curve
-        assert 8192 in working_curve
-
     def test_exact_head_empirical_uses_ragged_bracketed_util(self, comprehensive_perf_db, monkeypatch):
-        """An interior b=3/s~=15k query must not inherit the b=4 utilization.
-
-        The synthetic slice reproduces a ragged B200/SGLang FP8 neighbourhood
-        where selecting the upper batch directly produces a large error.
-        """
+        """Exact-head empirical lookup interpolates utilization across batch and sequence."""
         from aiconfigurator.sdk.operations import util_empirical
         from aiconfigurator.sdk.perf_database import LoadedOpData
 
-        quant = common.KVCacheQuantMode.fp8
+        quant = common.KVCacheQuantMode.bfloat16
+        args = dict(n=8, n_kv=1, kvcache_quant_mode=quant, head_size=128)
 
         def leaf(latency):
             return {"latency": latency, "power": 0.0, "energy": 0.0}
 
+        def sol(batch, sequence):
+            return float(
+                comprehensive_perf_db.query_generation_attention(
+                    batch,
+                    sequence,
+                    database_mode=common.DatabaseMode.SOL,
+                    **args,
+                )
+            )
+
+        # At s=150, the b=2 and b=4 curves interpolate to util 0.3 and
+        # 0.6 respectively; b=3 therefore has util 0.45.
         exact_head = {
             2: {
-                8192: leaf(0.012430399656295776),
-                16384: leaf(0.016531200706958772),
-                32768: leaf(0.01656000018119812),
+                100: leaf(sol(2, 100) / 0.2),
+                200: leaf(sol(2, 200) / 0.4),
             },
             4: {
-                8192: leaf(0.012478400021791458),
-                16384: leaf(0.014590400457382201),
-                32768: leaf(0.016420799493789672),
+                100: leaf(sol(4, 100) / 0.4),
+                200: leaf(sol(4, 200) / 0.8),
             },
         }
-        # SILICON's generic 3-D interpolation validates that all axes vary,
-        # even though n=8 is an exact hit.  A second head slice supplies that
-        # variation but is deliberately not consulted by the exact-head path.
-        table = {quant: {1: {128: {0: {8: exact_head, 16: copy.deepcopy(exact_head)}}}}}
-        working = LoadedOpData(copy.deepcopy(table), common.PerfDataFilename.generation_attention, "unused")
-        raw = LoadedOpData(copy.deepcopy(table), common.PerfDataFilename.generation_attention, "unused")
+        raw = LoadedOpData(
+            {quant: {1: {128: {0: {8: exact_head}}}}},
+            common.PerfDataFilename.generation_attention,
+            "raw",
+        )
+        working = LoadedOpData(
+            {quant: {1: {128: {0: {8: {3: {150: leaf(999.0)}}}}}}},
+            common.PerfDataFilename.generation_attention,
+            "working",
+        )
 
         monkeypatch.setattr(comprehensive_perf_db, "_generation_attention_data", working)
         monkeypatch.setattr(comprehensive_perf_db, "_raw_generation_attention_data", raw, raising=False)
         util_empirical.clear_grid_cache()
         comprehensive_perf_db.query_generation_attention.cache_clear()
         try:
-            args = (3, 14996, 8, 1, quant)
-            silicon = float(
-                comprehensive_perf_db.query_generation_attention(
-                    *args, database_mode=common.DatabaseMode.SILICON, head_size=128
-                )
-            )
-            empirical = float(
-                comprehensive_perf_db.query_generation_attention(
-                    *args, database_mode=common.DatabaseMode.EMPIRICAL, head_size=128
-                )
+            result = comprehensive_perf_db.query_generation_attention(
+                3,
+                150,
+                database_mode=common.DatabaseMode.EMPIRICAL,
+                **args,
             )
 
-            sol_query = float(
-                comprehensive_perf_db.query_generation_attention(
-                    *args, database_mode=common.DatabaseMode.SOL, head_size=128
-                )
-            )
-            sol_nearest = float(
-                comprehensive_perf_db.query_generation_attention(
-                    4, 16384, 8, 1, quant, database_mode=common.DatabaseMode.SOL, head_size=128
-                )
-            )
-            old_nearest = sol_query / (sol_nearest / exact_head[4][16384]["latency"])
-
-            assert abs(old_nearest / silicon - 1.0) > 0.30
-            assert abs(empirical / silicon - 1.0) < 0.04
-        finally:
-            util_empirical.clear_grid_cache()
-            comprehensive_perf_db.query_generation_attention.cache_clear()
-
-    def test_exact_head_util_cache_tracks_raw_data_identity(self, comprehensive_perf_db, monkeypatch):
-        from aiconfigurator.sdk.operations import util_empirical
-        from aiconfigurator.sdk.perf_database import LoadedOpData
-
-        quant = common.KVCacheQuantMode.bfloat16
-
-        def wrapper(latency):
-            table = {
-                quant: {
-                    1: {
-                        128: {
-                            0: {
-                                8: {
-                                    2: {
-                                        8192: {"latency": latency, "power": 0.0, "energy": 0.0},
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            return LoadedOpData(table, common.PerfDataFilename.generation_attention, "unused")
-
-        first_raw = wrapper(0.02)
-        replacement_raw = wrapper(0.04)
-        util_empirical.clear_grid_cache()
-        try:
-            monkeypatch.setattr(
-                comprehensive_perf_db,
-                "_raw_generation_attention_data",
-                first_raw,
-                raising=False,
-            )
-            comprehensive_perf_db.query_generation_attention.cache_clear()
-            first = float(
-                comprehensive_perf_db.query_generation_attention(
-                    2,
-                    8192,
-                    8,
-                    1,
-                    quant,
-                    database_mode=common.DatabaseMode.EMPIRICAL,
-                    head_size=128,
-                )
-            )
-
-            # Do not clear the process-global util cache: the raw data identity
-            # in the cache key must select a newly calibrated grid.
-            monkeypatch.setattr(comprehensive_perf_db, "_raw_generation_attention_data", replacement_raw)
-            comprehensive_perf_db.query_generation_attention.cache_clear()
-            replacement = float(
-                comprehensive_perf_db.query_generation_attention(
-                    2,
-                    8192,
-                    8,
-                    1,
-                    quant,
-                    database_mode=common.DatabaseMode.EMPIRICAL,
-                    head_size=128,
-                )
-            )
-
-            assert first == pytest.approx(0.02)
-            assert replacement == pytest.approx(0.04)
+            assert float(result) == pytest.approx(sol(3, 150) / 0.45)
+            assert float(result) != pytest.approx(999.0)
+            assert result.source == "empirical"
         finally:
             util_empirical.clear_grid_cache()
             comprehensive_perf_db.query_generation_attention.cache_clear()

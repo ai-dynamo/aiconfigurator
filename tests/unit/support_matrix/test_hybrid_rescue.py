@@ -30,6 +30,7 @@ def _run_rescue(
     silicon_tier=None,
     hybrid_tier=None,
     allow_hybrid=None,
+    silicon_error=None,
 ):
     """Drive run_single_test with a faked _run_mode keyed on database_mode. Rescue is on by
     default; pass allow_hybrid="0" to disable it."""
@@ -38,6 +39,8 @@ def _run_rescue(
     def fake_run_mode(**kwargs):
         calls.append(kwargs["database_mode"])
         if kwargs["database_mode"] == "SILICON":
+            if silicon_error is not None:
+                raise silicon_error
             if silicon_ok:
                 if silicon_tier:
                     note_provenance(silicon_tier)
@@ -61,7 +64,7 @@ def _run_rescue(
         "_get_test_constraints",
         lambda _m: TestConstraints(total_gpus=8, isl=256, osl=256, prefix=0, ttft=2_000_000, tpot=50_000),
     )
-    statuses, _errors, _cmds, prov = SupportMatrix.run_single_test(
+    statuses, errors, commands, prov = SupportMatrix.run_single_test(
         model="Qwen/Qwen3-32B",
         system="b200_sxm",
         backend="trtllm",
@@ -70,79 +73,58 @@ def _run_rescue(
         modes_to_test=["agg"],
         include_commands=True,
     )
-    return statuses["agg"], prov["agg"], calls, _cmds["agg"]
+    return statuses["agg"], errors["agg"], prov["agg"], calls, commands["agg"]
 
 
-def test_silicon_pass_stays_silicon_no_hybrid_retry(monkeypatch):
-    status, src, calls, command = _run_rescue(monkeypatch, silicon_ok=True)
-    assert status == STATUS_PASS and src == "silicon"
-    assert calls == ["SILICON"]  # silicon passed -> no hybrid pass run
-    assert "--database-mode SILICON" in command
+@pytest.mark.parametrize(
+    ("run_kwargs", "expected"),
+    [
+        pytest.param(
+            {"silicon_ok": True},
+            (STATUS_PASS, "silicon", ["SILICON"], "SILICON", None),
+            id="silicon-pass",
+        ),
+        pytest.param(
+            {"silicon_ok": True, "silicon_tier": "xshape"},
+            (STATUS_FAIL, "", ["SILICON"], "SILICON", "SILICON support run emitted empirical provenance"),
+            id="silicon-provenance-invariant",
+        ),
+        pytest.param(
+            {"silicon_ok": False, "hybrid_tier": "xshape"},
+            (STATUS_HYBRID_PASS, "xshape", ["SILICON", "HYBRID"], "HYBRID", None),
+            id="hybrid-transfer",
+        ),
+        pytest.param(
+            {"silicon_ok": False},
+            (STATUS_HYBRID_PASS, "empirical", ["SILICON", "HYBRID"], "HYBRID", None),
+            id="hybrid-own-data",
+        ),
+        pytest.param(
+            {"silicon_ok": False, "hybrid_ok": False},
+            (STATUS_FAIL, "", ["SILICON", "HYBRID"], "SILICON", "No silicon data"),
+            id="hybrid-miss",
+        ),
+        pytest.param(
+            {"silicon_ok": False, "hybrid_tier": "xshape", "allow_hybrid": "0"},
+            (STATUS_FAIL, "", ["SILICON"], "SILICON", "No silicon data"),
+            id="hybrid-disabled",
+        ),
+        pytest.param(
+            {"silicon_ok": False, "silicon_error": TypeError("unexpected schema")},
+            (STATUS_FAIL, "", ["SILICON"], "SILICON", "TypeError: unexpected schema"),
+            id="programming-error",
+        ),
+    ],
+)
+def test_silicon_first_hybrid_rescue_state_machine(monkeypatch, run_kwargs, expected):
+    status, error, source, calls, command = _run_rescue(monkeypatch, **run_kwargs)
+    expected_status, expected_source, expected_calls, command_mode, error_fragment = expected
 
-
-def test_silicon_run_with_empirical_provenance_fails_invariant(monkeypatch):
-    status, src, calls, command = _run_rescue(monkeypatch, silicon_ok=True, silicon_tier="xshape")
-
-    assert status == STATUS_FAIL
-    assert src == ""
-    assert calls == ["SILICON"]
-    assert "--database-mode SILICON" in command
-
-
-def test_silicon_fail_hybrid_transfer_tagged_with_tier(monkeypatch):
-    status, src, calls, command = _run_rescue(monkeypatch, silicon_ok=False, hybrid_tier="xshape")
-    assert status == STATUS_HYBRID_PASS and src == "xshape"
-    assert calls == ["SILICON", "HYBRID"]
-    assert "--database-mode HYBRID" in command
-
-
-def test_silicon_fail_hybrid_pass_no_tier_is_empirical(monkeypatch):
-    # Shared-layer rows are already visible to SILICON. A no-tier HYBRID rescue is an
-    # analytic empirical path that did not emit finer-grained provenance.
-    status, src, calls, command = _run_rescue(monkeypatch, silicon_ok=False, hybrid_tier=None)
-    assert status == STATUS_HYBRID_PASS and src == "empirical"
-    assert "--database-mode HYBRID" in command
-
-
-def test_silicon_fail_hybrid_fail_stays_fail(monkeypatch):
-    status, src, calls, command = _run_rescue(monkeypatch, silicon_ok=False, hybrid_ok=False)
-    assert status == STATUS_FAIL and src == ""
-    assert calls == ["SILICON", "HYBRID"]
-    assert "--database-mode SILICON" in command
-
-
-def test_allow_hybrid_off_is_pure_silicon_no_rescue(monkeypatch):
-    # AIC_SM_ALLOW_HYBRID=0 -> a silicon FAIL is NOT rescued; HYBRID is never run.
-    status, src, calls, command = _run_rescue(monkeypatch, silicon_ok=False, hybrid_tier="xshape", allow_hybrid="0")
-    assert status == STATUS_FAIL and src == ""
-    assert calls == ["SILICON"]
-    assert "--database-mode SILICON" in command
-
-
-def test_programming_error_is_not_hidden_by_hybrid_retry(monkeypatch):
-    calls: list[str] = []
-
-    def fake_run_mode(**kwargs):
-        calls.append(kwargs["database_mode"])
-        if kwargs["database_mode"] == "SILICON":
-            raise TypeError("unexpected schema")
-        return pd.DataFrame({"x": [1.0]})
-
-    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
-    monkeypatch.setattr(
-        support_matrix_module,
-        "_get_test_constraints",
-        lambda _m: TestConstraints(total_gpus=8, isl=256, osl=256, prefix=0, ttft=2_000_000, tpot=50_000),
-    )
-    statuses, errors = SupportMatrix.run_single_test(
-        model="Qwen/Qwen3-32B",
-        system="b200_sxm",
-        backend="trtllm",
-        version="1.3.0rc10",
-        system_spec={"gpu": {"sm_version": 100, "fp8_tc_flops": 1, "fp4_tc_flops": 1}},
-        modes_to_test=["agg"],
-    )
-
-    assert statuses == {"agg": STATUS_FAIL}
-    assert "TypeError: unexpected schema" in errors["agg"]
-    assert calls == ["SILICON"]
+    assert status == expected_status
+    assert source == expected_source
+    assert calls == expected_calls
+    assert f"--database-mode {command_mode}" in command
+    if error_fragment is None:
+        assert error is None
+    else:
+        assert error_fragment in error

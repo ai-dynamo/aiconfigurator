@@ -150,13 +150,19 @@ class TestMOEParallelismResolution:
             )
             return get_model("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", mc, backend_name="trtllm")
 
-        # nextn=0: factor is an exact no-op so non-MTP Nemotron is unchanged.
-        assert build(0)._mtp_scale_factor == 1.0
-        # nextn=1: MTP is a per-token speedup, so the generation factor is in (0, 1).
-        m = build(1)
-        assert 0.0 < m._mtp_scale_factor < 1.0
-        # context (prefill) ops must not carry the mtp factor.
-        assert m.context_ops
+        baseline = build(0)
+        mtp = build(1)
+        assert baseline._mtp_scale_factor == 1.0
+        assert 0.0 < mtp._mtp_scale_factor < 1.0
+
+        baseline_context = {op._name: op._scale_factor for op in baseline.context_ops}
+        mtp_context = {op._name: op._scale_factor for op in mtp.context_ops}
+        assert mtp_context["context_mamba_norm"] == baseline_context["context_mamba_norm"]
+
+        baseline_generation = {op._name: op._scale_factor for op in baseline.generation_ops}
+        mtp_generation = {op._name: op._scale_factor for op in mtp.generation_ops}
+        for name in ("generation_embedding", "generation_mamba_norm", "generation_logits_gemm"):
+            assert mtp_generation[name] == pytest.approx(baseline_generation[name] * mtp._mtp_scale_factor)
 
     def test_both_missing_moe_parallelism_raises_clear_error(self):
         model_config = config.ModelConfig(

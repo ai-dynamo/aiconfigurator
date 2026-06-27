@@ -164,41 +164,30 @@ class TestFallbackOp:
         assert mock_db._extracted_metrics_cache == {"table": {"hits": []}}
         assert mock_db._default_database_mode == common.DatabaseMode.HYBRID
 
-    def test_primary_reuses_cached_silicon_query_view(self):
-        """Repeated HYBRID fallback attempts reuse one immutable SILICON child."""
+    def test_primary_uses_silicon_query_view(self):
+        """HYBRID queries the primary through the database's SILICON view."""
 
         class FakeDatabase:
             def __init__(self, mode):
                 self._default_database_mode = mode
                 self.transfer_policy = common.ALL_TRANSFERS
-                self.views = {}
+                self.view_calls = []
+                self.silicon_view = None
 
             def query_view(self, mode, transfer_policy=None):
-                key = (mode, common.resolve_transfer_policy(transfer_policy))
-                if key not in self.views:
-                    child = FakeDatabase(mode)
-                    child.transfer_policy = key[1]
-                    self.views[key] = child
-                return self.views[key]
+                self.view_calls.append((mode, transfer_policy))
+                return self.silicon_view
 
         hybrid_db = FakeDatabase(common.DatabaseMode.HYBRID)
+        silicon_db = FakeDatabase(common.DatabaseMode.SILICON)
+        hybrid_db.silicon_view = silicon_db
         primary = _make_mock_op(10.0, 100.0)
-        seen = []
-
-        def _query(database, **kwargs):
-            seen.append((database, database._default_database_mode, hybrid_db._default_database_mode))
-            return PerformanceResult(10.0, energy=100.0)
-
-        primary.query.side_effect = _query
         op = FallbackOp("test", primary=primary, fallback=[_make_mock_op(5.0, 50.0)])
 
         op.query(hybrid_db, batch_size=4)
-        op.query(hybrid_db, batch_size=8)
 
-        assert len({id(database) for database, _, _ in seen}) == 1
-        assert all(database is not hybrid_db for database, _, _ in seen)
-        assert all(mode is common.DatabaseMode.SILICON for _, mode, _ in seen)
-        assert all(original_mode is common.DatabaseMode.HYBRID for _, _, original_mode in seen)
+        assert hybrid_db.view_calls == [(common.DatabaseMode.SILICON, common.ALL_TRANSFERS)]
+        assert primary.query.call_args.args[0] is silicon_db
         assert hybrid_db._default_database_mode is common.DatabaseMode.HYBRID
 
     def test_primary_respects_explicit_sol_mode(self):

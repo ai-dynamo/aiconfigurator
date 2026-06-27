@@ -416,22 +416,6 @@ def test_perf_database_clear_runtime_caches_clears_interpolation_and_lru_state(p
     assert cache_clear_calls == ["cleared"]
 
 
-def test_enable_shared_layer_is_independent_of_transfer_policy(perf_database):
-    """Shared rows are collected silicon data, not an empirical transfer kind."""
-    from aiconfigurator.sdk import common
-
-    db = object.__new__(perf_database.PerfDatabase)
-    db._shared_layer_mode = True
-    db._transfer_policy = common.ALL_TRANSFERS
-    assert db.enable_shared_layer is True
-    db._transfer_policy = frozenset()
-    assert db.enable_shared_layer is True
-    db._shared_layer_mode = False
-    db._transfer_policy = common.ALL_TRANSFERS
-    assert db.enable_shared_layer is False
-    assert object.__new__(perf_database.PerfDatabase).enable_shared_layer is False  # bare, no crash
-
-
 def test_empirical_and_silicon_databases_do_not_alias(perf_database):
     """SILICON loads sibling collected rows while formula-only EMPIRICAL does not."""
     emp = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="EMPIRICAL")

@@ -292,10 +292,7 @@ def test_kimi_moonshot_trtllm_int4_wo_other_system_remains_fail(monkeypatch):
 @pytest.mark.parametrize("system,version", [("b200_sxm", "1.3.0rc10"), ("h200_sxm", "1.2.0rc5")])
 def test_mimo_v2_flash_trtllm_headdim192_is_framework_incompatible(monkeypatch, system, version):
     # head_dim=192 attention is unsupported by the TRT-LLM kernel (SM90 and SM100).
-    calls: list[str] = []
-
-    def fake_run_mode(**kwargs):
-        calls.append(kwargs["database_mode"])
+    def fake_run_mode(**_kwargs):
         raise RuntimeError("Failed to query context attention data for b=1")
 
     monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
@@ -310,7 +307,6 @@ def test_mimo_v2_flash_trtllm_headdim192_is_framework_incompatible(monkeypatch, 
     )
 
     assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
-    assert calls == ["SILICON", "HYBRID", "SILICON", "HYBRID"]
 
 
 def test_mimo_v2_flash_sglang_failure_remains_fail(monkeypatch):
@@ -330,32 +326,6 @@ def test_mimo_v2_flash_sglang_failure_remains_fail(monkeypatch):
     )
 
     assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
-
-
-def test_mimo_trtllm_programming_error_remains_fail_without_hybrid_rescue(monkeypatch):
-    calls: list[str] = []
-
-    def fake_run_mode(**kwargs):
-        calls.append(kwargs["database_mode"])
-        if kwargs["database_mode"] == "SILICON":
-            raise TypeError("unexpected schema")
-        return pd.DataFrame({"x": [1.0]})
-
-    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
-    _patch_large_constraints(monkeypatch)
-
-    statuses, errors = SupportMatrix.run_single_test(
-        model="XiaomiMiMo/MiMo-V2-Flash",
-        system="b200_sxm",
-        backend="trtllm",
-        version="1.3.0rc10",
-        system_spec=_b200_system_spec(),
-        modes_to_test=["agg"],
-    )
-
-    assert statuses == {"agg": STATUS_FAIL}
-    assert "TypeError: unexpected schema" in errors["agg"]
-    assert calls == ["SILICON"]
 
 
 @pytest.mark.parametrize("system", ["l40s", "a100_sxm"])

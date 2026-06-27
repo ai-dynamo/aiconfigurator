@@ -24,7 +24,6 @@ class TestGEMMCacheStructure:
         assert isinstance(GEMM._data_cache, dict)
         assert isinstance(GEMM._compute_scale_cache, dict)
         assert isinstance(GEMM._scale_matrix_cache, dict)
-        assert isinstance(GEMM._compute_scale_delta_lookup_cache, dict)
 
     def test_cache_key_includes_systems_root_and_shared_layer(self, stub_perf_db):
         """Cache key components must include systems_root + enable_shared_layer

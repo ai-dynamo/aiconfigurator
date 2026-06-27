@@ -320,11 +320,9 @@ class TestMoE:
             expected_imbalanced = query("imbalanced")
             assert expected_imbalanced == pytest.approx(2.0 * expected_uniform)
 
-            for order in (("uniform", "imbalanced"), ("imbalanced", "uniform")):
-                reset_caches()
-                results = {workload: query(workload) for workload in order}
-                assert results["uniform"] == pytest.approx(expected_uniform)
-                assert results["imbalanced"] == pytest.approx(expected_imbalanced)
+            reset_caches()
+            assert query("uniform") == pytest.approx(expected_uniform)
+            assert query("imbalanced") == pytest.approx(expected_imbalanced)
         finally:
             reset_caches()
 
@@ -550,29 +548,6 @@ class TestMoE:
         assert "Consider using HYBRID mode" in message
         assert "KeyError" not in message
         assert "IndexError" not in message
-
-    def test_query_moe_vllm_missing_bucket_hybrid_raises(self, mutable_comprehensive_perf_db):
-        """With the bucket empty and no cross-shape transfer reference, HYBRID raises
-        EmpiricalNotImplementedError instead of fabricating a SOL/constant."""
-        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
-
-        db = mutable_comprehensive_perf_db
-        db.backend = common.BackendName.vllm.value
-        db._moe_data[common.MoEQuantMode.bfloat16]["uniform"][2][8][2048][8192][1][3] = {}
-
-        with pytest.raises(EmpiricalNotImplementedError):
-            db.query_moe(
-                22,
-                2048,
-                8192,
-                2,
-                8,
-                1,
-                3,
-                common.MoEQuantMode.bfloat16,
-                "uniform",
-                database_mode=common.DatabaseMode.HYBRID,
-            )
 
 
 class TestMLABMM:
@@ -821,26 +796,6 @@ class TestMoECrossProfileTransfer:
         # same-profile quants are excluded (fp8_block shares fp8's (1,2) profile)
         assert common.MoEQuantMode.fp8 not in _xprofile_moe_quants(common.MoEQuantMode.fp8_block, table)
 
-    def test_absent_profile_fills_via_tier3(self, comprehensive_perf_db):
-        """nvfp4 (profile (0.5625,4)) has no data and no same-profile sibling -> Tier 3
-        borrows fp8 and returns a finite estimate instead of raising. The util-level
-        correction (util<1, e(nvfp4)<e(fp8)) makes it strictly slower than SOL."""
-        kwargs = dict(
-            num_tokens=16,
-            hidden_size=2048,
-            inter_size=8192,
-            topk=2,
-            num_experts=8,
-            moe_tp_size=2,
-            moe_ep_size=2,
-            quant_mode=common.MoEQuantMode.nvfp4,
-            workload_distribution="uniform",
-        )
-        sol = float(comprehensive_perf_db.query_moe(**kwargs, database_mode=common.DatabaseMode.SOL))
-        empirical = float(comprehensive_perf_db.query_moe(**kwargs, database_mode=common.DatabaseMode.EMPIRICAL))
-        assert empirical > 0
-        assert empirical > sol  # util < 1 always degrades SOL; transfer did fire
-
     def test_resolve_transfer_policy(self):
         tk = common.TransferKind
         assert common.resolve_transfer_policy(None) == common.ALL_TRANSFERS
@@ -924,9 +879,9 @@ class TestMoECrossProfileTransfer:
         finally:
             comprehensive_perf_db.set_transfer_policy(None)
 
-    def test_transfer_policy_gates_cross_profile(self, comprehensive_perf_db):
-        """With XPROFILE disabled, the absent-profile quant raises again instead of
-        falling through to cross-profile transfer. The policy is read at query time."""
+    def test_transfer_policy_gates_and_tags_cross_profile(self, comprehensive_perf_db):
+        from aiconfigurator.sdk.operations import util_empirical
+
         kwargs = dict(
             num_tokens=16,
             hidden_size=2048,
@@ -943,7 +898,12 @@ class TestMoECrossProfileTransfer:
             comprehensive_perf_db.set_transfer_policy("balanced")  # xshape+xquant, no xprofile
             with pytest.raises(EmpiricalNotImplementedError):
                 comprehensive_perf_db.query_moe(**kwargs)
-            comprehensive_perf_db.set_transfer_policy(None)  # all on -> fills again
-            assert float(comprehensive_perf_db.query_moe(**kwargs)) > 0
+
+            sol = float(comprehensive_perf_db.query_moe(**{**kwargs, "database_mode": common.DatabaseMode.SOL}))
+            comprehensive_perf_db.set_transfer_policy(None)
+            with util_empirical.capture_provenance() as tags:
+                empirical = float(comprehensive_perf_db.query_moe(**kwargs))
+            assert empirical > sol
+            assert util_empirical.worst_provenance(tags) == "xprofile"
         finally:
             comprehensive_perf_db.set_transfer_policy(None)

@@ -21,6 +21,8 @@ from tools.support_matrix.support_matrix import (
 pytestmark = pytest.mark.unit
 
 HEADER = SUPPORT_MATRIX_HEADER
+SILICON_REPLAY = "uv run aiconfigurator cli default --database-mode SILICON"
+HYBRID_REPLAY = "uv run aiconfigurator cli default --database-mode HYBRID"
 
 
 def _row(
@@ -96,7 +98,7 @@ def test_csv_sanity_accepts_transitional_9col_header():
     header9 = SUPPORT_MATRIX_BASE_HEADER + ["Command"]
     row9 = _row(STATUS_PASS)[:9]  # drop the Source column
     errors = check_csv_sanity(header9, [row9])
-    assert not any("Invalid header" in e for e in errors), errors
+    assert errors == []
 
 
 def test_csv_sanity_rejects_hybrid_pass_without_source_column():
@@ -115,107 +117,69 @@ def test_csv_sanity_requires_command_for_current_header():
     assert any("Command column must include" in err for err in errors)
 
 
-def test_csv_sanity_accepts_explicit_hybrid_pass_with_replayable_command():
-    errors = check_csv_sanity(
-        HEADER,
-        [
-            _row(
-                STATUS_HYBRID_PASS,
-                command=("uv run aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --database-mode HYBRID"),
-                source="xshape",
-            )
-        ],
-    )
-
-    assert errors == []
-
-
-def test_csv_sanity_rejects_hybrid_pass_with_silicon_replay_command():
-    errors = check_csv_sanity(HEADER, [_row(STATUS_HYBRID_PASS, source="xshape")])
-
-    assert any("exactly one effective --database-mode HYBRID" in err for err in errors)
-
-
-def test_csv_sanity_rejects_pass_with_hybrid_replay_command():
-    errors = check_csv_sanity(
-        HEADER,
-        [
-            _row(
-                STATUS_PASS,
-                command=("uv run aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --database-mode HYBRID"),
-            )
-        ],
-    )
-
-    assert any("exactly one effective --database-mode SILICON" in err for err in errors)
-
-
-def test_csv_sanity_requires_explicit_silicon_source_for_current_pass():
-    errors = check_csv_sanity(HEADER, [_row(STATUS_PASS, source="")])
-
-    assert any("PASS is reserved for SILICON support" in err for err in errors)
+@pytest.mark.parametrize(
+    "_case,status,command,source",
+    [
+        (
+            "silicon-equals-form",
+            STATUS_PASS,
+            SILICON_REPLAY.replace("--database-mode ", "--database-mode="),
+            "silicon",
+        ),
+        ("hybrid-transfer", STATUS_HYBRID_PASS, HYBRID_REPLAY, "xshape"),
+    ],
+)
+def test_csv_sanity_accepts_replay_contract(_case, status, command, source):
+    assert check_csv_sanity(HEADER, [_row(status, command=command, source=source)]) == []
 
 
 @pytest.mark.parametrize(
-    "command",
+    "_case,status,command,source,expected_error",
     [
-        "uv run aiconfigurator cli default --database-mode SILICON --database-mode HYBRID",
-        "uv run aiconfigurator cli default --database-mode HYBRID --database-mode SILICON",
+        (
+            "hybrid-pass-with-silicon-command",
+            STATUS_HYBRID_PASS,
+            SILICON_REPLAY,
+            "xshape",
+            "exactly one effective --database-mode HYBRID",
+        ),
+        (
+            "pass-with-hybrid-command",
+            STATUS_PASS,
+            HYBRID_REPLAY,
+            "silicon",
+            "exactly one effective --database-mode SILICON",
+        ),
+        ("pass-without-silicon-source", STATUS_PASS, SILICON_REPLAY, "", "PASS is reserved for SILICON support"),
+        (
+            "duplicate-database-mode",
+            STATUS_PASS,
+            f"{SILICON_REPLAY} --database-mode HYBRID",
+            "silicon",
+            "exactly one effective --database-mode SILICON",
+        ),
+        (
+            "missing-database-mode-value",
+            STATUS_PASS,
+            "uv run aiconfigurator cli default --database-mode",
+            "silicon",
+            "exactly one effective --database-mode SILICON",
+        ),
+        ("malformed-command", STATUS_PASS, "uv run 'unterminated", "silicon", "not valid shell syntax"),
+        (
+            "nonpass-with-hybrid-command",
+            STATUS_FAIL,
+            HYBRID_REPLAY,
+            "",
+            "exactly one effective --database-mode SILICON",
+        ),
+        ("unknown-hybrid-source", STATUS_HYBRID_PASS, HYBRID_REPLAY, "made-up-tier", "Invalid Source"),
+        ("nonpass-with-source", STATUS_FAIL, SILICON_REPLAY, "xshape", "must not include Source"),
     ],
 )
-def test_csv_sanity_rejects_duplicate_database_mode_flags(command):
-    errors = check_csv_sanity(HEADER, [_row(STATUS_PASS, command=command)])
-
-    assert any("exactly one effective --database-mode SILICON" in err for err in errors)
-
-
-def test_csv_sanity_accepts_equals_form_database_mode():
-    command = "uv run aiconfigurator cli default --database-mode=SILICON"
-
-    assert check_csv_sanity(HEADER, [_row(STATUS_PASS, command=command)]) == []
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "uv run aiconfigurator cli default --database-mode --top-n 1",
-        "uv run aiconfigurator cli default --database-mode",
-    ],
-)
-def test_csv_sanity_rejects_missing_database_mode_value(command):
-    errors = check_csv_sanity(HEADER, [_row(STATUS_PASS, command=command)])
-
-    assert any("exactly one effective --database-mode SILICON" in err for err in errors)
-
-
-def test_csv_sanity_rejects_malformed_replay_command():
-    errors = check_csv_sanity(HEADER, [_row(STATUS_PASS, command="uv run 'unterminated")])
-
-    assert any("not valid shell syntax" in err for err in errors)
-
-
-def test_csv_sanity_requires_silicon_replay_for_nonpass_status():
-    command = "uv run aiconfigurator cli default --database-mode HYBRID"
-    errors = check_csv_sanity(HEADER, [_row(STATUS_FAIL, command=command)])
-
-    assert any("exactly one effective --database-mode SILICON" in err for err in errors)
-
-
-def test_csv_sanity_rejects_unknown_or_nonpass_source():
-    hybrid_errors = check_csv_sanity(
-        HEADER,
-        [
-            _row(
-                STATUS_HYBRID_PASS,
-                command=("uv run aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --database-mode HYBRID"),
-                source="made-up-tier",
-            )
-        ],
-    )
-    fail_errors = check_csv_sanity(HEADER, [_row(STATUS_FAIL, source="xshape")])
-
-    assert any("Invalid Source" in err for err in hybrid_errors)
-    assert any("must not include Source" in err for err in fail_errors)
+def test_csv_sanity_rejects_invalid_replay_contract(_case, status, command, source, expected_error):
+    errors = check_csv_sanity(HEADER, [_row(status, command=command, source=source)])
+    assert any(expected_error in error for error in errors)
 
 
 def test_csv_sanity_rejects_duplicate_configuration_key():
@@ -224,20 +188,21 @@ def test_csv_sanity_rejects_duplicate_configuration_key():
     assert any("duplicate support-matrix key" in err for err in errors)
 
 
-def test_csv_sanity_rejects_legacy_pass_with_empirical_source():
-    errors = check_csv_sanity(HEADER, [_row(STATUS_PASS, source="empirical")])
-
-    assert any("PASS is reserved for SILICON support" in err for err in errors)
-
-
-def test_metadata_diff_detects_source_and_replay_command_changes():
-    old = _row(STATUS_HYBRID_PASS, command="old command", source="xshape")
-    new = _row(STATUS_HYBRID_PASS, command="new command", source="xop")
+@pytest.mark.parametrize(
+    "old_command,new_command,old_source,new_source",
+    [
+        ("old command", "new command", "xshape", "xshape"),
+        ("same command", "same command", "xshape", "xop"),
+    ],
+)
+def test_metadata_diff_detects_replay_command_or_source_changes(old_command, new_command, old_source, new_source):
+    old = _row(STATUS_HYBRID_PASS, command=old_command, source=old_source)
+    new = _row(STATUS_HYBRID_PASS, command=new_command, source=new_source)
 
     changes = find_metadata_changes([old], [new])
 
     assert len(changes) == 1
-    assert changes[0][-4:] == ("old command", "new command", "xshape", "xop")
+    assert changes[0][-4:] == (old_command, new_command, old_source, new_source)
 
 
 def test_pass_to_hardware_incompatible_is_blocking_transition():
@@ -247,11 +212,15 @@ def test_pass_to_hardware_incompatible_is_blocking_transition():
     assert "PASS -> HW_INCOMPATIBLE" in errors[0]
 
 
-def test_pass_to_hybrid_pass_is_a_blocking_silicon_regression():
-    errors = find_blocking_status_transitions([_changed(STATUS_PASS, STATUS_HYBRID_PASS)])
+@pytest.mark.parametrize(
+    "old_status,new_status",
+    [(STATUS_PASS, STATUS_HYBRID_PASS), (STATUS_HYBRID_PASS, STATUS_FAIL)],
+)
+def test_hybrid_status_regressions_are_blocking(old_status, new_status):
+    errors = find_blocking_status_transitions([_changed(old_status, new_status)])
 
     assert len(errors) == 1
-    assert "PASS -> HYBRID_PASS" in errors[0]
+    assert f"{old_status} -> {new_status}" in errors[0]
 
 
 def test_hybrid_pass_to_pass_is_a_non_blocking_silicon_fix():
@@ -260,13 +229,6 @@ def test_hybrid_pass_to_pass_is_a_non_blocking_silicon_fix():
 
     assert errors == []
     assert "Silicon fixes" in pr_description
-
-
-def test_hybrid_pass_to_fail_is_blocking():
-    errors = find_blocking_status_transitions([_changed(STATUS_HYBRID_PASS, STATUS_FAIL)])
-
-    assert len(errors) == 1
-    assert "HYBRID_PASS -> FAIL" in errors[0]
 
 
 def test_hardware_incompatible_to_fail_is_blocking_transition():

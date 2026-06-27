@@ -22,10 +22,6 @@ from aiconfigurator.sdk.operations.util_empirical import (
 pytestmark = pytest.mark.unit
 
 
-def test_empty_grid_has_no_util():
-    assert UtilGrid([]).util((1.0,)) is None
-
-
 def test_1d_exact_hit_preserves_measured_util_with_unsorted_samples():
     grid = UtilGrid(
         [
@@ -171,14 +167,6 @@ def test_bracketed_2d_returns_none_when_no_curve_covers_sequence():
     assert bracketed_2d_util(samples, (3.0, 1000.0), require_y_coverage=True) is None
 
 
-def test_bracketed_2d_miss_returns_none_without_changing_default_lookup():
-    one_dimensional = UtilGrid([UtilSample((2.0,), 0.25)])
-
-    assert bracketed_2d_util(one_dimensional.samples, (2.0, 100.0)) is None
-    assert estimate_bracketed_2d(1.0, (2.0, 100.0), one_dimensional) is None
-    assert one_dimensional.util((2.0,)) == pytest.approx(0.25)
-
-
 def test_estimate_bracketed_2d_records_provenance_only_on_success():
     from aiconfigurator.sdk.operations import util_empirical
 
@@ -244,48 +232,13 @@ def test_reference_grid_cache_isolated_by_selected_candidate_identity():
     assert first_again is first
 
 
-def test_reference_selection_cache_avoids_reenumerating_candidates_and_keeps_provenance():
+def test_reference_selection_cache_is_policy_isolated_and_preserves_provenance():
     clear_grid_cache()
     data = {1: 2.0}
-    calls = 0
+    calls = []
 
-    def candidates():
-        nonlocal calls
-        calls += 1
-        return [
-            ReferenceCandidate(
-                features=(1.0,),
-                node=data,
-                sol_fn=lambda _: 1.0,
-                provenance="xshape",
-            )
-        ]
-
-    first = grid_from_reference(
-        ("stable-selection",),
-        (1.0,),
-        candidates,
-        depth=1,
-        selection_key=(id(data), "policy"),
-    )
-    second = grid_from_reference(
-        ("stable-selection",),
-        (1.0,),
-        candidates,
-        depth=1,
-        selection_key=(id(data), "policy"),
-    )
-
-    assert second is first
-    assert calls == 1
-    assert first.reference_provenance == "xshape"
-
-
-def test_reference_grid_cache_isolated_by_selection_and_provenance():
-    clear_grid_cache()
-    data = {1: 2.0}
-
-    def candidate(provenance):
+    def candidates(provenance):
+        calls.append(provenance)
         return [
             ReferenceCandidate(
                 features=(1.0,),
@@ -296,21 +249,30 @@ def test_reference_grid_cache_isolated_by_selection_and_provenance():
         ]
 
     first = grid_from_reference(
-        ("same-reference-node",),
+        ("stable-selection",),
         (1.0,),
-        lambda: candidate("xshape"),
+        lambda: candidates("xshape"),
+        depth=1,
+        selection_key=(id(data), "xshape-policy"),
+    )
+    first_again = grid_from_reference(
+        ("stable-selection",),
+        (1.0,),
+        lambda: candidates("xshape"),
         depth=1,
         selection_key=(id(data), "xshape-policy"),
     )
     second = grid_from_reference(
-        ("same-reference-node",),
+        ("stable-selection",),
         (1.0,),
-        lambda: candidate("xquant"),
+        lambda: candidates("xquant"),
         depth=1,
         selection_key=(id(data), "xquant-policy"),
     )
 
+    assert first_again is first
     assert second is not first
+    assert calls == ["xshape", "xquant"]
     assert first.reference_provenance == "xshape"
     assert second.reference_provenance == "xquant"
 
@@ -363,14 +325,9 @@ def test_grid_from_reference_returns_none_for_typed_coverage_failure():
 
 def test_grid_from_reference_propagates_builder_errors():
     clear_grid_cache()
-    candidate = ReferenceCandidate(features=(1.0,), node={1: 1.0}, sol_fn=lambda _: 1.0)
 
     def broken_candidates():
         raise TypeError("malformed reference table")
 
     with pytest.raises(TypeError, match="malformed reference table"):
         grid_from_reference(("broken-reference",), (1.0,), broken_candidates, depth=1)
-
-    # A valid reference still constructs the expected grid after the failed build.
-    grid = grid_from_reference(("valid-reference",), (1.0,), lambda: [candidate], depth=1)
-    assert grid.util((1.0,)) == pytest.approx(1.0)

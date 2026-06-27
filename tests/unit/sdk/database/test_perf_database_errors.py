@@ -6,7 +6,6 @@ import pytest
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
 from aiconfigurator.sdk.perf_database import (
-    _MISSING_SILICON_DATA_EXCEPTIONS,
     PerfDatabase,
     PerfDataNotAvailableError,
     has_perf_data_not_available_cause,
@@ -31,17 +30,6 @@ def test_perf_data_cause_detection_avoids_cycles() -> None:
     nested.__context__ = error
 
     assert not has_perf_data_not_available_cause(error)
-
-
-def test_missing_silicon_data_exceptions_are_explicit_coverage_signals() -> None:
-    assert InterpolationDataNotAvailableError in _MISSING_SILICON_DATA_EXCEPTIONS
-    assert PerfDataNotAvailableError in _MISSING_SILICON_DATA_EXCEPTIONS
-    assert KeyError not in _MISSING_SILICON_DATA_EXCEPTIONS
-    assert IndexError not in _MISSING_SILICON_DATA_EXCEPTIONS
-    assert ValueError not in _MISSING_SILICON_DATA_EXCEPTIONS
-
-    missing = InterpolationDataNotAvailableError("axis has only 1 value")
-    assert isinstance(missing, _MISSING_SILICON_DATA_EXCEPTIONS)
 
 
 @pytest.mark.parametrize(

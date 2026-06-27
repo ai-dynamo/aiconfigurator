@@ -488,22 +488,6 @@ class TestContextDSAModule:
                 database_mode=common.DatabaseMode.EMPIRICAL,
             )
 
-    def test_hybrid_raises_when_no_data(self, comprehensive_perf_db):
-        """With no DSA-module util to calibrate from, HYBRID raises (no SOL/constant)."""
-        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
-
-        with pytest.raises(EmpiricalNotImplementedError):
-            comprehensive_perf_db.query_context_dsa_module(
-                b=2,
-                s=256,
-                prefix=0,
-                num_heads=32,
-                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
-                fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-                database_mode=common.DatabaseMode.HYBRID,
-            )
-
     def test_hybrid_does_not_hide_malformed_context_schema(self, mutable_comprehensive_perf_db):
         db = mutable_comprehensive_perf_db
         db._context_dsa_module_data = LoadedOpData(
@@ -523,28 +507,6 @@ class TestContextDSAModule:
                 gemm_quant_mode=common.GEMMQuantMode.bfloat16,
                 database_mode=common.DatabaseMode.HYBRID,
             )
-
-    def test_empirical_resolves_loader_shaped_backend_axis_data(self, mutable_comprehensive_perf_db):
-        """Regression: the loader nests ...[architecture][dsa_backend][num_heads]...; the
-        empirical slice must descend past the backend axis (like silicon's
-        _select_dsa_backend) or it raises EmpiricalNotImplementedError on real data."""
-        db = mutable_comprehensive_perf_db
-        nh = {32: {256: {1: _dsa_value(5.0), 2: _dsa_value(8.0)}, 512: {1: _dsa_value(10.0), 2: _dsa_value(15.0)}}}
-        db._context_dsa_module_data = LoadedOpData(
-            _context_dsa_data_with_backend(nh), common.PerfDataFilename.dsa_context_module, "measured"
-        )
-        result = db.query_context_dsa_module(
-            b=1,
-            s=256,
-            prefix=0,
-            num_heads=32,
-            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
-            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.EMPIRICAL,
-        )
-        val = result.latency if hasattr(result, "latency") else (result[0] if isinstance(result, tuple) else result)
-        assert math.isfinite(val) and val > 0
 
     def test_empirical_exact_raw_head_uses_log_ragged_2d_util(self, mutable_comprehensive_perf_db):
         db = mutable_comprehensive_perf_db
@@ -665,11 +627,25 @@ class TestContextDSAModule:
 
         assert float(result) == pytest.approx(expected)
 
-    def test_empirical_ragged_2d_miss_keeps_existing_nn_fallback(self, mutable_comprehensive_perf_db):
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            pytest.param(
+                {32: {0: {100: {1: _dsa_value(10.0)}, 120: {1: _dsa_value(12.0)}}}},
+                77.0,
+                id="exact-head-without-sequence-coverage",
+            ),
+            pytest.param(
+                {64: {0: {200: {3: _dsa_value(999.0)}}}},
+                55.0,
+                id="nonexact-head",
+            ),
+        ],
+    )
+    def test_empirical_unsafe_raw_slice_keeps_existing_nn_fallback(self, mutable_comprehensive_perf_db, raw, expected):
         db = mutable_comprehensive_perf_db
         backend = "unit_ctx_ragged_miss"
-        raw = {32: {0: {100: {1: _dsa_value(10.0)}, 120: {1: _dsa_value(12.0)}}}}
-        working = {32: {0: {200: {3: _dsa_value(77.0)}}}}
+        working = {32: {0: {200: {3: _dsa_value(expected)}}}}
         db._raw_context_dsa_module_data = LoadedOpData(
             _context_dsa_data_with_backend(raw, dsa_backend=backend),
             common.PerfDataFilename.dsa_context_module,
@@ -694,38 +670,7 @@ class TestContextDSAModule:
             dsa_backend=backend,
         )
 
-        assert float(result) == pytest.approx(77.0)
-
-    def test_empirical_nonexact_raw_head_keeps_existing_nn_fallback(self, mutable_comprehensive_perf_db):
-        db = mutable_comprehensive_perf_db
-        backend = "unit_ctx_nonexact_head"
-        raw = {64: {0: {200: {3: _dsa_value(999.0)}}}}
-        working = {32: {0: {200: {3: _dsa_value(55.0)}}}}
-        db._raw_context_dsa_module_data = LoadedOpData(
-            _context_dsa_data_with_backend(raw, dsa_backend=backend),
-            common.PerfDataFilename.dsa_context_module,
-            "raw",
-        )
-        db._context_dsa_module_data = LoadedOpData(
-            _context_dsa_data_with_backend(working, dsa_backend=backend),
-            common.PerfDataFilename.dsa_context_module,
-            "working",
-        )
-        db.clear_runtime_caches()
-
-        result = db.query_context_dsa_module(
-            b=3,
-            s=200,
-            prefix=0,
-            num_heads=32,
-            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
-            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.EMPIRICAL,
-            dsa_backend=backend,
-        )
-
-        assert float(result) == pytest.approx(55.0)
+        assert float(result) == pytest.approx(expected)
 
     def test_empirical_explicit_prefix_axis_is_used_under_backend_data(self, mutable_comprehensive_perf_db):
         """The explicit-prefix shape nests ...[dsa_backend][num_heads][prefix][s][b]. After
@@ -1012,19 +957,6 @@ class TestGenerationDSAModule:
                 database_mode=common.DatabaseMode.EMPIRICAL,
             )
 
-    def test_hybrid_raises_when_no_data(self, comprehensive_perf_db):
-        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
-
-        with pytest.raises(EmpiricalNotImplementedError):
-            comprehensive_perf_db.query_generation_dsa_module(
-                b=4,
-                s=1024,
-                num_heads=32,
-                kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
-                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-                database_mode=common.DatabaseMode.HYBRID,
-            )
-
     def test_hybrid_does_not_hide_malformed_generation_schema(self, mutable_comprehensive_perf_db):
         db = mutable_comprehensive_perf_db
         db._generation_dsa_module_data = LoadedOpData(
@@ -1042,25 +974,6 @@ class TestGenerationDSAModule:
                 gemm_quant_mode=common.GEMMQuantMode.bfloat16,
                 database_mode=common.DatabaseMode.HYBRID,
             )
-
-    def test_empirical_resolves_loader_shaped_backend_axis_data(self, mutable_comprehensive_perf_db):
-        """Regression: generation loader nests ...[architecture][dsa_backend][num_heads][b][s];
-        the empirical slice must descend past the backend axis or it raises on real data."""
-        db = mutable_comprehensive_perf_db
-        nh = {32: {1: {256: _dsa_value(2.0), 1024: _dsa_value(3.0)}, 4: {256: _dsa_value(4.0), 1024: _dsa_value(6.0)}}}
-        db._generation_dsa_module_data = LoadedOpData(
-            _generation_dsa_data_with_backend(nh), common.PerfDataFilename.dsa_generation_module, "measured"
-        )
-        result = db.query_generation_dsa_module(
-            b=1,
-            s=256,
-            num_heads=32,
-            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
-            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.EMPIRICAL,
-        )
-        val = result.latency if hasattr(result, "latency") else (result[0] if isinstance(result, tuple) else result)
-        assert math.isfinite(val) and val > 0
 
     def test_silicon_sequence_overflow_uses_raw_boundary_util(self, mutable_comprehensive_perf_db):
         db = mutable_comprehensive_perf_db

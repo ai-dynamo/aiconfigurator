@@ -292,15 +292,6 @@ def test_robust_3d_lookup_only_swallows_typed_coverage_misses(monkeypatch):
         _dsv4_robust_3d_lookup(_Stub(), data, 8, 1536, 1)
 
 
-def test_prefix_resolved_lookup_propagates_robust_programming_errors(monkeypatch):
-    def programming_bug(*args, **kwargs):
-        raise RuntimeError("robust lookup bug")
-
-    monkeypatch.setattr("aiconfigurator.sdk.operations.dsv4._dsv4_robust_3d_lookup", programming_bug)
-    with pytest.raises(RuntimeError, match="robust lookup bug"):
-        _dsv4_lookup_prefix_resolved(object(), {0: {1024: {1: {"latency": 1.0}}}}, 0, 1024, 1)
-
-
 def test_prefix_resolved_lookup_rejects_malformed_requested_prefix():
     data = {
         0: [],

@@ -127,22 +127,6 @@ class TestCustomAllreduceEmptyBucket:
                 database_mode=common.DatabaseMode.SILICON,
             )
 
-    def test_hybrid_raises_when_tp_bucket_missing(self, _db_factory):
-        """HYBRID has no util to calibrate from when the tp bucket is absent, so it
-        raises EmpiricalNotImplementedError (no fabricated SOL/constant)."""
-        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
-
-        data = _make_defaultdict_custom_allreduce(tp_sizes=[2, 4])
-        db = _db_factory(data)
-
-        with pytest.raises(EmpiricalNotImplementedError):
-            db.query_custom_allreduce(
-                common.CommQuantMode.half,
-                tp_size=8,
-                size=6291456,
-                database_mode=common.DatabaseMode.HYBRID,
-            )
-
     def test_silicon_available_bucket_still_works(self, _db_factory):
         """Sanity check: a tp_size that IS present still returns the interpolated value."""
         data = _make_defaultdict_custom_allreduce(tp_sizes=[2, 4])

@@ -53,10 +53,17 @@ def test_msa_sol_scales_with_workload(comprehensive_perf_db):
         comprehensive_perf_db.set_default_database_mode(common.DatabaseMode.SILICON)
 
 
-def test_msa_xop_gating(comprehensive_perf_db):
-    """The DSA->MSA borrow is the XOP transfer kind. With XOP excluded, MSA (no own data)
-    raises at the gate; with XOP enabled the gate is passed (it then either transfers or
-    raises 'no DSA util' — not the policy gate)."""
+def test_msa_xop_gating(comprehensive_perf_db, monkeypatch):
+    """The DSA-to-MSA utilization transfer is gated and tagged as XOP."""
+    from aiconfigurator.sdk.operations import util_empirical
+
+    util_queries = []
+
+    def dsa_util(_database, **kwargs):
+        util_queries.append(kwargs)
+        return 0.5
+
+    monkeypatch.setattr("aiconfigurator.sdk.operations.msa._dsa_context_util", dsa_util)
     comprehensive_perf_db.set_default_database_mode(common.DatabaseMode.HYBRID)
     kw = dict(batch_size=8, s=2048, prefix=0)
     try:
@@ -64,12 +71,13 @@ def test_msa_xop_gating(comprehensive_perf_db):
         with pytest.raises(EmpiricalNotImplementedError) as exc:
             _ctx_msa().query(comprehensive_perf_db, **kw)
         assert "xop" in str(exc.value).lower()  # gated at the policy, not a data miss
+        assert util_queries == []
 
         comprehensive_perf_db.set_transfer_policy(None)  # XOP allowed
-        try:
+        with util_empirical.capture_provenance() as tags:
             assert float(_ctx_msa().query(comprehensive_perf_db, **kw)) > 0
-        except EmpiricalNotImplementedError as exc2:
-            assert "xop" not in str(exc2).lower()  # got past the gate (DSA data simply absent)
+        assert len(util_queries) == 1
+        assert util_empirical.worst_provenance(tags) == "xop"
     finally:
         comprehensive_perf_db.set_transfer_policy(None)
         comprehensive_perf_db.set_default_database_mode(common.DatabaseMode.SILICON)

@@ -146,22 +146,19 @@ def test_mhc_module_loader_returns_none_for_missing_file(tmp_path):
 
 
 class TestDeepSeekV4MHCModule:
-    def test_mhc_sol_positive_hybrid_raises_without_data(self, comprehensive_perf_db):
-        """SOL is analytic (always positive); HYBRID raises when the fixture has no
-        mHC util to calibrate from (the legacy SOL/constant fallback was removed)."""
+    def test_mhc_empirical_raises_without_data(self, comprehensive_perf_db):
         from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
 
-        kwargs = dict(
-            num_tokens=512,
-            hidden_size=7168,
-            hc_mult=4,
-            sinkhorn_iters=20,
-            op="pre",
-            quant_mode=common.GEMMQuantMode.bfloat16,
-        )
-        assert float(comprehensive_perf_db.query_mhc_module(**kwargs, database_mode=common.DatabaseMode.SOL)) > 0
         with pytest.raises(EmpiricalNotImplementedError):
-            comprehensive_perf_db.query_mhc_module(**kwargs, database_mode=common.DatabaseMode.HYBRID)
+            comprehensive_perf_db.query_mhc_module(
+                num_tokens=512,
+                hidden_size=7168,
+                hc_mult=4,
+                sinkhorn_iters=20,
+                op="pre",
+                quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.EMPIRICAL,
+            )
 
     def test_mhc_sol_full_shape(self, comprehensive_perf_db):
         result = comprehensive_perf_db.query_mhc_module(
@@ -175,6 +172,7 @@ class TestDeepSeekV4MHCModule:
         )
         assert len(result) == 3
         sol_time, sol_math, sol_mem = result
+        assert sol_time > 0
         assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
 
     def test_mhc_weight_memory_uses_quant_mode(self, comprehensive_perf_db):
@@ -680,7 +678,7 @@ class TestDeepSeekV4AttentionModule:
         assert result.energy >= 0
 
 
-def test_deepseek_v4_static_sol_and_hybrid_run_end_to_end(mutable_comprehensive_perf_db):
+def test_deepseek_v4_static_sol_runs_end_to_end(mutable_comprehensive_perf_db):
     db = mutable_comprehensive_perf_db
     db.system_spec["gpu"]["mem_capacity"] = 288400343040
     db.system_spec["misc"]["nccl_mem"] = {1: 0, 2: 0, 4: 0, 8: 0}
@@ -697,20 +695,10 @@ def test_deepseek_v4_static_sol_and_hybrid_run_end_to_end(mutable_comprehensive_
     backend = TRTLLMBackend()
     runtime = RuntimeConfig(batch_size=1, beam_width=1, isl=128, osl=4, prefix=0)
 
-    # SOL is analytic and runs the full pipeline. HYBRID raises here because this
-    # synthetic fixture has no DSV4-module util to calibrate from (a real DSV4
-    # system would); the legacy SOL/constant fallback that used to mask this was
-    # removed, so the gap now surfaces as EmpiricalNotImplementedError.
-    from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
-
     db.set_default_database_mode(common.DatabaseMode.SOL)
     summary = backend.run_static(model, db, runtime, mode="static", stride=1)
     assert sum(summary.get_context_latency_dict().values()) > 0
     assert sum(summary.get_generation_latency_dict().values()) > 0
-
-    db.set_default_database_mode(common.DatabaseMode.HYBRID)
-    with pytest.raises(EmpiricalNotImplementedError):
-        backend.run_static(model, db, runtime, mode="static", stride=1)
 
 
 def test_sglang_deepseek_v4_pro_moe_workspace_uses_residual_hidden_size(mutable_comprehensive_perf_db):

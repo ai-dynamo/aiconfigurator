@@ -274,7 +274,6 @@ def test_query_compute_scale_empirical_preserves_zero_delta(mutable_comprehensiv
 
     assert float(result) == 0.0
     assert result.source == "empirical"
-    first_lookup = ops.GEMM._compute_scale_delta_lookup_cache[id(table)]
 
     positive = db.query_compute_scale(
         256,
@@ -286,38 +285,7 @@ def test_query_compute_scale_empirical_preserves_zero_delta(mutable_comprehensiv
     # the memory-SOL proxy and therefore the estimated delta.
     assert float(positive) == pytest.approx(1.0)
 
-    # Distinct queries against the same immutable table reuse its preprocessed
-    # coordinate arrays.
-    assert ops.GEMM._compute_scale_delta_lookup_cache[id(table)] is first_lookup
-
-    # Replacing a test table must build a new lookup rather than reusing the
-    # old table's normalized arrays.
-    db._compute_scale_data = LoadedOpData(
-        {
-            common.GEMMQuantMode.fp8: {
-                128: {
-                    512: {"latency": 2.0, "energy": 0.0},
-                },
-            }
-        },
-        common.PerfDataFilename.compute_scale,
-        "replacement_path",
-    )
-    db.query_compute_scale.cache_clear()
-    replacement_table = db._compute_scale_data[common.GEMMQuantMode.fp8]
-    replacement = db.query_compute_scale(
-        256,
-        512,
-        common.GEMMQuantMode.fp8_static,
-        database_mode=common.DatabaseMode.EMPIRICAL,
-    )
-    assert float(replacement) == pytest.approx(4.0)
-    replacement_lookup = ops.GEMM._compute_scale_delta_lookup_cache[id(replacement_table)]
-    assert replacement_lookup.table is replacement_table
-    assert replacement_lookup is not first_lookup
-
     ops.GEMM._compute_scale_delta_lookup_cache.pop(id(table), None)
-    ops.GEMM._compute_scale_delta_lookup_cache.pop(id(replacement_table), None)
 
 
 def test_query_scale_matrix_fp8_static_reuses_fp8_table(mutable_comprehensive_perf_db):

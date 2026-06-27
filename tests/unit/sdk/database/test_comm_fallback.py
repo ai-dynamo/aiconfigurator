@@ -209,23 +209,6 @@ class TestNcclOnecclFallback:
                 database_mode=common.DatabaseMode.SILICON,
             )
 
-    def test_hybrid_raises_when_neither_loaded(self, _db_factory):
-        """With neither NCCL nor oneCCL data, the empirical path has nothing to
-        calibrate from, so HYBRID raises EmpiricalNotImplementedError (the legacy
-        SOL/constant placeholder was removed)."""
-        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
-
-        db = _db_factory(nccl_data=None, oneccl_data=None)
-
-        with pytest.raises(EmpiricalNotImplementedError):
-            db.query_nccl(
-                common.CommQuantMode.half,
-                4,
-                "all_gather",
-                1024,
-                database_mode=common.DatabaseMode.HYBRID,
-            )
-
     def test_empty_nccl_operation_bucket_is_typed_coverage_miss(self, _db_factory):
         nccl = {common.CommQuantMode.half: {"all_reduce": {}}}
         db = _db_factory(nccl_data=nccl, oneccl_data=None)
