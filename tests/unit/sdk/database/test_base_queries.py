@@ -67,30 +67,15 @@ def test_query_gemm_exact_match_skips_3d_interpolation(comprehensive_perf_db, mo
     assert math.isclose(float(observed), expected)
 
 
-def test_query_gemm_interpolates_only_on_m_when_nk_match(comprehensive_perf_db, monkeypatch):
-    """GEMM lookup should use 1D interpolation on m when n and k match."""
+def test_query_gemm_interpolates_only_on_m_when_nk_match(comprehensive_perf_db):
+    """GEMM lookup should use its semantic m curve when n and k match."""
     quant_mode = common.GEMMQuantMode.bfloat16
     m, n, k = 12, 128, 128
-    calls = {}
-
-    def _fail_interp_3d(*args, **kwargs):
-        raise AssertionError("_interp_3d should not be used when n/k match and only m needs interpolation")
-
-    def _spy_interp_1d(x, y, value):
-        calls["x"] = x
-        calls["y"] = y
-        calls["value"] = value
-        return {"latency": 0.1 + value * 0.001 + n * 0.0001 + k * 0.00001, "power": 0.0, "energy": 0.0}
-
-    monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", _fail_interp_3d)
-    monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_1d", _spy_interp_1d)
 
     observed = comprehensive_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SILICON)
     expected = 0.1 + m * 0.001 + n * 0.0001 + k * 0.00001
 
     assert math.isclose(float(observed), expected)
-    assert calls["x"] == [8, 16]
-    assert calls["value"] == m
     assert observed.source == "silicon"
 
 

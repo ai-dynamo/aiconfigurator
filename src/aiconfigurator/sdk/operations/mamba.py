@@ -29,16 +29,69 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
+from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.perf_surrogate import Axis, estimate_sparse
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
     from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+
+
+_GDN_DATA_KERNEL_ALIASES = {
+    "fused_sigmoid_gating_delta_rule_update": "fused_recurrent_gated_delta_rule",
+}
+
+
+def _generation_entry(value):
+    """Normalize direct and legacy ``batch -> seq -> metric`` leaves."""
+    if not isinstance(value, Mapping) or "latency" in value:
+        return value
+    for candidate in value.values():
+        if not isinstance(candidate, Mapping) or "latency" in candidate:
+            return candidate
+    return None
+
+
+def _estimate_kernel_table(
+    database: PerfDatabase,
+    key: tuple,
+    table: Mapping,
+    phase: str,
+    batch_size: int,
+    seq_len: int | None,
+    baseline,
+) -> tuple[float, float]:
+    if phase == "context":
+        return estimate_sparse(
+            database,
+            key,
+            table,
+            {"batch_size": batch_size, "seq_len": seq_len},
+            axes=(Axis("batch_size"), Axis("seq_len", extrapolate="both")),
+            varying="seq_len",
+            mesh="baseline_ratio",
+            baseline=baseline,
+        )
+
+    normalized = table
+    if any(not isinstance(value, Mapping) or "latency" not in value for value in table.values()):
+        normalized = {batch: entry for batch, value in table.items() if (entry := _generation_entry(value)) is not None}
+    return estimate_sparse(
+        database,
+        key,
+        normalized,
+        {"batch_size": batch_size},
+        axes=(Axis("batch_size", extrapolate="both"),),
+        varying="batch_size",
+        baseline=baseline,
+    )
 
 
 def _cache_key(database: PerfDatabase) -> tuple:
@@ -161,10 +214,13 @@ class Mamba2Kernel(Operation):
         if not getattr(mamba2_data, "loaded", False):
             mamba2_data = {}
 
-        def get_sol() -> tuple[float, float, float]:
+        def get_sol(
+            batch_value: float = batch_size,
+            seq_value: float | None = seq_len,
+        ) -> tuple[float, float, float]:
             d_inner = nheads * head_dim
             conv_dim = d_inner + 2 * n_groups * d_state
-            x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
+            x = (batch_value * seq_value) if phase == "context" and seq_value else batch_value
             if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
                 conv_read_bytes = x * conv_dim * (d_conv + 1) * 2
                 conv_write_bytes = x * conv_dim * 2
@@ -177,6 +233,8 @@ class Mamba2Kernel(Operation):
             return sol_mem, 0, sol_mem
 
         if not mamba2_data:
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+        if phase == "context" and (seq_len is None or seq_len <= 0):
             return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
 
         model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
@@ -198,51 +256,19 @@ class Mamba2Kernel(Operation):
 
         table = by_key[model_key]
 
-        if phase == "context":
-            if seq_len is None or seq_len <= 0:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            try:
-                result = interpolation.interp_2d_linear(batch_size, seq_len, table, database._extracted_metrics_cache)
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            return database._interp_pr(
-                result["latency"],
-                energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
-            )
-        else:
-            try:
-                batch_left, batch_right = interpolation.nearest_1d_point_helper(
-                    batch_size, list(table.keys()), inner_only=False
-                )
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-            # Ensure we pass entry dicts {latency, power, energy}; handle legacy nested batch_size -> seq_len -> entry
-            def _mamba2_gen_entry(val):
-                if isinstance(val, dict) and "latency" in val:
-                    return val
-                if isinstance(val, dict) and val:
-                    inner = next(iter(val.values()))
-                    if isinstance(inner, dict) and "latency" in inner:
-                        return inner
-                return None
-
-            y_left = _mamba2_gen_entry(table[batch_left])
-            y_right = _mamba2_gen_entry(table[batch_right])
-            if y_left is None or y_right is None:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            result = interpolation.interp_1d(
-                [batch_left, batch_right],
-                [y_left, y_right],
+        try:
+            latency, energy = _estimate_kernel_table(
+                database,
+                ("mamba2", kernel_source, phase, model_key),
+                table,
+                phase,
                 batch_size,
+                seq_len,
+                lambda point: get_sol(point["batch_size"], point.get("seq_len"))[0],
             )
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", result.get("power", 0.0) * lat)
-            else:
-                lat = result
-                energy = 0.0
-            return database._interp_pr(lat, energy=energy)
+        except InterpolationDataNotAvailableError:
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+        return database._interp_pr(latency, energy=energy)
 
     # ------------------------------------------------------------------
     # Op contract
@@ -374,8 +400,11 @@ class GDNKernel(Operation):
         if not getattr(gdn_data, "loaded", False):
             gdn_data = {}
 
-        def get_sol() -> tuple[float, float, float]:
-            x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
+        def get_sol(
+            batch_value: float = batch_size,
+            seq_value: float | None = seq_len,
+        ) -> tuple[float, float, float]:
+            x = (batch_value * seq_value) if phase == "context" and seq_value else batch_value
             if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
                 conv_channels = num_k_heads * head_k_dim + num_v_heads * head_v_dim
                 read_bytes = x * conv_channels * (d_conv + 1) * 2
@@ -388,23 +417,28 @@ class GDNKernel(Operation):
                 # (no dtype override), so matches input dtype: FP16/BF16 → 2 bytes.
                 chunk_size = 64  # flash-linear-attention default for chunk_gated_delta_rule
                 state_size = num_v_heads * head_k_dim * head_v_dim
-                num_chunks = (seq_len // chunk_size) if seq_len else 0
-                h_chunks_bytes = num_chunks * state_size * 2 * batch_size
+                num_chunks = (seq_value // chunk_size) if seq_value else 0
+                h_chunks_bytes = num_chunks * state_size * 2 * batch_value
                 read_bytes = (
                     x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2
-                    + state_size * 2 * batch_size
+                    + state_size * 2 * batch_value
                     + h_chunks_bytes  # chunk_o reads h_chunks from global memory
                 )
                 write_bytes = (
                     x * num_v_heads * head_v_dim * 2
-                    + state_size * 2 * batch_size
+                    + state_size * 2 * batch_value
                     + h_chunks_bytes  # chunk_delta_h writes h_chunks to global memory
                 )
-            elif kernel_source == "fused_sigmoid_gating_delta_rule_update":
+            elif kernel_source in (
+                "fused_sigmoid_gating_delta_rule_update",
+                "fused_recurrent_gated_delta_rule",
+            ):
                 # GDN single-step decode. State stored as BF16 in global memory.
                 state_size = num_v_heads * head_k_dim * head_v_dim
-                read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 2 * batch_size
-                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 2 * batch_size
+                read_bytes = (
+                    x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 2 * batch_value
+                )
+                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 2 * batch_value
             else:
                 read_bytes = x * d_model * 2
                 write_bytes = x * d_model * 2
@@ -413,12 +447,19 @@ class GDNKernel(Operation):
 
         if not gdn_data:
             return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+        if phase == "context" and (seq_len is None or seq_len <= 0):
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
 
         model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
-        try:
-            by_phase = gdn_data[kernel_source]
-        except KeyError:
+        alias = _GDN_DATA_KERNEL_ALIASES.get(kernel_source)
+        candidates = (kernel_source,) if alias is None else (kernel_source, alias)
+        data_kernel_source = next(
+            (candidate for candidate in candidates if candidate in gdn_data and phase in gdn_data[candidate]),
+            None,
+        )
+        if data_kernel_source is None:
             return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+        by_phase = gdn_data[data_kernel_source]
         try:
             by_key = by_phase[phase]
         except KeyError:
@@ -433,50 +474,19 @@ class GDNKernel(Operation):
 
         table = by_key[model_key]
 
-        if phase == "context":
-            if seq_len is None or seq_len <= 0:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            try:
-                result = interpolation.interp_2d_linear(batch_size, seq_len, table, database._extracted_metrics_cache)
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            return database._interp_pr(
-                result["latency"],
-                energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
-            )
-        else:
-            try:
-                batch_left, batch_right = interpolation.nearest_1d_point_helper(
-                    batch_size, list(table.keys()), inner_only=False
-                )
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-            def _gdn_gen_entry(val):
-                if isinstance(val, dict) and "latency" in val:
-                    return val
-                if isinstance(val, dict) and val:
-                    inner = next(iter(val.values()))
-                    if isinstance(inner, dict) and "latency" in inner:
-                        return inner
-                return None
-
-            y_left = _gdn_gen_entry(table[batch_left])
-            y_right = _gdn_gen_entry(table[batch_right])
-            if y_left is None or y_right is None:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            result = interpolation.interp_1d(
-                [batch_left, batch_right],
-                [y_left, y_right],
+        try:
+            latency, energy = _estimate_kernel_table(
+                database,
+                ("gdn", data_kernel_source, phase, model_key),
+                table,
+                phase,
                 batch_size,
+                seq_len,
+                lambda point: get_sol(point["batch_size"], point.get("seq_len"))[0],
             )
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", result.get("power", 0.0) * lat)
-            else:
-                lat = result
-                energy = 0.0
-            return database._interp_pr(lat, energy=energy)
+        except InterpolationDataNotAvailableError:
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+        return database._interp_pr(latency, energy=energy)
 
     # ------------------------------------------------------------------
     # Op contract

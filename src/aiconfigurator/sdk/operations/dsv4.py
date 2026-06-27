@@ -41,6 +41,7 @@ import numpy as np
 
 from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.perf_surrogate import Axis, estimate_sparse
 
 logger = logging.getLogger(__name__)
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -58,6 +59,17 @@ def _cache_key(database: PerfDatabase) -> tuple:
         database.version,
         database.enable_shared_layer,
     )
+
+
+_DSV4_CONTEXT_AXES = (
+    Axis("prefix", extrapolate="both"),
+    Axis("sequence", extrapolate="both"),
+    Axis("batch", extrapolate="both"),
+)
+_DSV4_GENERATION_AXES = (
+    Axis("batch", extrapolate="both"),
+    Axis("sequence", extrapolate="both"),
+)
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -193,28 +205,14 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
     raise ValueError(f"DeepSeek-V4 robust lookup failed (tp={x}, s={y}, b={z})")
 
 
-def _dsv4_resolve_head_key(quant_data, num_heads):
-    """SCHEME A head-key resolution.
-
-    The head axis is the rank-local head count (``native // tp``).  Prefer an
-    exact match on the value the model passes.  The b300 module data is a
-    universal sweep collected with a single local-head value; if the model's
-    local head count is not an exact bench point, fall back to the single
-    available head key so the universal data still resolves.  Returns the head
-    key to index ``quant_data`` with, or ``None`` if no head data is loaded.
-    """
+def _dsv4_resolve_head_key(quant_data, native_heads, tp_size):
+    """Resolve native-head rows and older collector rows that stored local heads."""
     if not isinstance(quant_data, dict) or not quant_data:
         return None
-    if num_heads in quant_data:
-        return num_heads
-    head_keys = [k for k in quant_data if isinstance(k, int)]
-    if len(head_keys) == 1:
-        return head_keys[0]
-    if head_keys:
-        # Multiple head keys but no exact match: pick the nearest <= request,
-        # else the smallest available.
-        le = [k for k in head_keys if k <= num_heads]
-        return max(le) if le else min(head_keys)
+    candidates = (native_heads, max(1, native_heads // tp_size))
+    for head_key in candidates:
+        if head_key in quant_data and tp_size in quant_data[head_key]:
+            return head_key
     return None
 
 
@@ -1005,13 +1003,13 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
         cls.load_data(database)
 
-        def get_sol() -> tuple[float, float, float]:
+        def get_sol(query_b=b, query_s=s, query_prefix=prefix) -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(
                 database,
                 is_context=True,
-                b=b,
-                s=s,
-                prefix=prefix,
+                b=query_b,
+                s=query_s,
+                prefix=query_prefix,
                 num_heads=num_heads,
                 hidden_size=hidden_size,
                 q_lora_rank=q_lora_rank,
@@ -1048,33 +1046,45 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     f"DeepSeek-V4 context attention module data not loaded for system='{database.system}', "
                     f"backend='{database.backend}', version='{database.version}'."
                 )
-            # SCHEME A: head axis is the rank-local head count the model passes.
+            # Native-head and TP are independent exact physical categories.
             quant_data = data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
-            head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
+            head_axis = _dsv4_resolve_head_key(quant_data, native_heads, tp_size)
             if head_axis is None:
                 raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 context attention silicon data for num_heads={num_heads}, "
+                    f"No DeepSeek-V4 context attention silicon data for native_heads={native_heads}, "
                     f"loaded head keys={list(quant_data.keys())}."
                 )
-            cr_dict = quant_data[head_axis].get(compress_ratio)
+            tp_data = quant_data[head_axis].get(tp_size)
+            if tp_data is None:
+                raise PerfDataNotAvailableError(
+                    f"No DeepSeek-V4 context attention silicon data for native_heads={native_heads}, "
+                    f"tp_size={tp_size}, loaded TP keys={list(quant_data[head_axis].keys())}."
+                )
+            cr_dict = tp_data.get(compress_ratio)
             if cr_dict is None:
                 raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 context attention silicon data for num_heads={num_heads}, "
+                    f"No DeepSeek-V4 context attention silicon data for native_heads={native_heads}, "
                     f"compress_ratio={compress_ratio}, loaded cr keys="
-                    f"{list(quant_data[head_axis].keys())}."
+                    f"{list(tp_data.keys())}."
                 )
 
-            # SCHEME A: cr_dict is prefix-resolved -> {prefix: {s: {b: leaf}}}.
-            # Look the measured silicon up at the requested prefix (interpolating
-            # over the prefix axis when the exact prefix was not benched).
-            result = _dsv4_lookup_prefix_resolved(database, cr_dict, prefix, s, b)
-            if result is None:
-                raise PerfDataNotAvailableError(
-                    f"DeepSeek-V4 prefix-resolved context attention module data not available for "
-                    f"{b=}, {s=}, {prefix=}, {num_heads=}, {compress_ratio=}."
-                )
-            latency = float(result["latency"])
-            energy = float(result.get("energy", 0.0))
+            latency, energy = estimate_sparse(
+                database,
+                (
+                    "dsv4-context",
+                    fmha_quant_mode,
+                    kvcache_quant_mode,
+                    gemm_quant_mode,
+                    head_axis,
+                    tp_size,
+                    compress_ratio,
+                ),
+                cr_dict,
+                {"prefix": prefix, "sequence": s, "batch": b},
+                axes=_DSV4_CONTEXT_AXES,
+                varying="sequence",
+                baseline=lambda point: get_sol(point["batch"], point["sequence"], point["prefix"])[0],
+            )
 
             # SCHEME A: for CSA (compress_ratio==4) ONLY, subtract the measured
             # topK DELTA = flat_ms - top_last_ms (degenerate collector topK vs
@@ -1222,12 +1232,12 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
         cls.load_data(database)
 
-        def get_sol() -> tuple[float, float, float]:
+        def get_sol(query_b=b, query_s=s) -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(
                 database,
                 is_context=False,
-                b=b,
-                s=s,
+                b=query_b,
+                s=query_s,
                 prefix=0,
                 num_heads=num_heads,
                 hidden_size=hidden_size,
@@ -1265,26 +1275,43 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     f"DeepSeek-V4 generation attention module data not loaded for system='{database.system}', "
                     f"backend='{database.backend}', version='{database.version}'."
                 )
-            # SCHEME A: head axis is the rank-local head count the model passes.
-            quant_data = data[kvcache_quant_mode][gemm_quant_mode]
-            head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
+            # Keep native-head, TP, and FMHA categories exact.
+            quant_data = data[kvcache_quant_mode][gemm_quant_mode][fmha_quant_mode]
+            head_axis = _dsv4_resolve_head_key(quant_data, native_heads, tp_size)
             if head_axis is None:
                 raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 generation attention silicon data for num_heads={num_heads}, "
+                    f"No DeepSeek-V4 generation attention silicon data for native_heads={native_heads}, "
                     f"loaded head keys={list(quant_data.keys())}."
                 )
-            deepseek_v4_dict = quant_data[head_axis].get(compress_ratio)
+            tp_data = quant_data[head_axis].get(tp_size)
+            if tp_data is None:
+                raise PerfDataNotAvailableError(
+                    f"No DeepSeek-V4 generation attention silicon data for native_heads={native_heads}, "
+                    f"tp_size={tp_size}, loaded TP keys={list(quant_data[head_axis].keys())}."
+                )
+            deepseek_v4_dict = tp_data.get(compress_ratio)
             if deepseek_v4_dict is None:
                 raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 generation attention silicon data for num_heads={num_heads}, "
-                    f"compress_ratio={compress_ratio}, loaded cr keys={list(quant_data[head_axis].keys())}."
+                    f"No DeepSeek-V4 generation attention silicon data for native_heads={native_heads}, "
+                    f"compress_ratio={compress_ratio}, loaded cr keys={list(tp_data.keys())}."
                 )
-            # SCHEME A generation dict is {head}{cr}{b}{s_total}; wrap with the
-            # head key and let the robust lookup walk (head -> b -> s_total).
-            wrapped = {head_axis: deepseek_v4_dict}
-            result = _dsv4_robust_3d_lookup(database, wrapped, head_axis, b, s, batch_axis="y")
-            latency = float(result["latency"])
-            energy = float(result.get("energy", 0.0))
+            latency, energy = estimate_sparse(
+                database,
+                (
+                    "dsv4-generation",
+                    kvcache_quant_mode,
+                    gemm_quant_mode,
+                    fmha_quant_mode,
+                    head_axis,
+                    tp_size,
+                    compress_ratio,
+                ),
+                deepseek_v4_dict,
+                {"batch": b, "sequence": s},
+                axes=_DSV4_GENERATION_AXES,
+                varying="sequence",
+                baseline=lambda point: get_sol(point["batch"], point["sequence"])[0],
+            )
 
             # SCHEME A: subtract the topK DELTA for CSA (cr==4) only. Decode is
             # q_len=1 with past_kv = s_total - 1.
@@ -1787,13 +1814,13 @@ _MISSING = object()
 def load_context_dsv4_kind_module_data(file_path: str):
     """Load ONE DeepSeek-V4 context CSV (single attn_kind / compress_ratio).
 
-    SCHEME A.  Returns a 7-level prefix-resolved nested dict:
-        data[fmha_quant][kv_quant][gemm_quant][num_heads_local][compress_ratio]
-            [prefix][s][b] = {"latency": ms, "power": W, "energy": J}
+    Returns a TP- and prefix-resolved nested dict:
+        data[fmha_quant][kv_quant][gemm_quant][native_heads][tp_size]
+            [compress_ratio][prefix][s][b] = metrics
 
-    The head axis is the rank-LOCAL head count = ``int(row["num_heads"])``
-    (the collector writes ``local_attention_heads = native // tp``).  There is
-    NO separate ``tp_size`` key and NO reconstructed native-head key.
+    Existing databases store native heads while some collector revisions wrote
+    rank-local heads. The query adapter accepts either representation; TP stays
+    a separate physical category in both cases.
 
     ``prefix`` is the past-KV length, ``int(float(row["step"]))``; ``s`` is the
     context chunk length (``isl``).  Multiple files (csa/hca) merge cleanly
@@ -1804,13 +1831,13 @@ def load_context_dsv4_kind_module_data(file_path: str):
         logger.debug(f"DSV4 module data file {file_path} not found.")
         return None
 
-    # 7-level nesting: fmha → kv → gemm → num_heads_local → cr → prefix → s → b
+    # fmha → kv → gemm → stored head key → TP → cr → prefix → s → b
     def _make_nested(depth: int):
         if depth == 0:
             return defaultdict()
         return defaultdict(lambda d=depth: _make_nested(d - 1))
 
-    data = _make_nested(7)
+    data = _make_nested(8)
     has_power = bool(rows) and "power" in rows[0]
 
     for row in rows:
@@ -1821,13 +1848,13 @@ def load_context_dsv4_kind_module_data(file_path: str):
             s = int(row["isl"])
             prefix = int(float(row.get("step", 0) or 0))
             cr = int(row["compress_ratio"])
+            tp_size = int(row["tp_size"])
             latency = float(row["latency"])
         except (TypeError, ValueError, KeyError):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        # SCHEME A: head key is the rank-local head count straight from the CSV.
-        num_heads_local = int(row["num_heads"])
+        head_key = int(row["num_heads"])
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
@@ -1835,7 +1862,7 @@ def load_context_dsv4_kind_module_data(file_path: str):
         # NOTE: the topK DELTA correction (degenerate -> representative) is
         # applied ONCE at query time for compress_ratio==4 (CSA). Do NOT
         # subtract it here, or the CSA module latency would be double-corrected.
-        data[fmha_mode][kv_dtype][gemm_mode][num_heads_local][cr][prefix][s][b] = {
+        data[fmha_mode][kv_dtype][gemm_mode][head_key][tp_size][cr][prefix][s][b] = {
             "latency": latency,
             "power": power,
             "energy": power * latency,
@@ -1847,22 +1874,22 @@ def load_generation_dsv4_kind_module_data(file_path: str):
     """Load ONE DeepSeek-V4 generation CSV.
 
     Generation lookup uses absolute KV length ``s_total = isl + step`` (decode
-    is q_len=1 with past_kv = step).  SCHEME A dict shape:
-        data[kv_quant][gemm_quant][num_heads_local][compress_ratio]
-            [b][s_total]
+    is q_len=1 with past_kv = step). Dict shape:
+        data[kv_quant][gemm_quant][fmha_quant][native_heads][tp_size]
+            [compress_ratio][b][s_total]
     """
     rows = _read_filtered_rows(file_path)
     if rows is None:
         logger.debug(f"DSV4 module data file {file_path} not found.")
         return None
 
-    # SCHEME A: 5-level nesting kv → gemm → num_heads_local → cr → b → s_total
+    # kv → gemm → fmha → stored head key → TP → cr → b → s_total
     def _make_nested(depth: int):
         if depth == 0:
             return defaultdict()
         return defaultdict(lambda d=depth: _make_nested(d - 1))
 
-    data = _make_nested(5)
+    data = _make_nested(7)
     has_power = bool(rows) and "power" in rows[0]
 
     for row in rows:
@@ -1872,19 +1899,19 @@ def load_generation_dsv4_kind_module_data(file_path: str):
             b = int(row["batch_size"])
             s_total = int(row["isl"]) + int(row["step"])
             cr = int(row["compress_ratio"])
+            tp_size = int(row["tp_size"])
             latency = float(row["latency"])
         except (TypeError, ValueError, KeyError):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        # SCHEME A: head key is the rank-local head count straight from the CSV;
-        # no tp_size key, no native reconstruction.  Generation convention puts
-        # ``b`` before ``s_total`` (matches the (head, b, s) lookup order).
-        num_heads_local = int(row["num_heads"])
+        # Generation convention puts ``b`` before ``s_total``.
+        head_key = int(row["num_heads"])
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
 
-        data[kv_dtype][gemm_mode][num_heads_local][cr][b][s_total] = {
+        data[kv_dtype][gemm_mode][fmha_mode][head_key][tp_size][cr][b][s_total] = {
             "latency": latency,
             "power": power,
             "energy": power * latency,

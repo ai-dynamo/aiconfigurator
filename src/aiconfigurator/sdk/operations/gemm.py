@@ -4,7 +4,7 @@
 """GEMM operation and its associated CSV-backed data (compute_scale, scale_matrix).
 
 Stage 2 of ISSUE-05/AIC-542: GEMM now owns its three CSV tables, SOL
-correction, and grid extrapolation. ``PerfDatabase.query_gemm /
+correction, and sparse query path. ``PerfDatabase.query_gemm /
 query_compute_scale / query_scale_matrix`` delegate here.
 
 Lazy-load Pattern A: ``query()`` (and the delegating ``_query_*_table``
@@ -22,8 +22,9 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.perf_surrogate import Axis, estimate_sparse
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -93,8 +94,8 @@ class GEMM(Operation):
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
         """Idempotent. On cache miss: parses the three CSVs into the class-
-        level caches, applies SOL correction + grid extrapolation directly
-        on those canonical wrappers, and records the load. Always: binds
+        level caches, applies SOL correction directly on the canonical GEMM
+        wrapper, and records the load. Always: binds
         ``database._gemm_data``/``_compute_scale_data``/``_scale_matrix_data``
         to the cached wrappers.
 
@@ -126,29 +127,17 @@ class GEMM(Operation):
             compute_scale_loaded = _load(PerfDataFilename.compute_scale, load_compute_scale_data)
             scale_matrix_loaded = _load(PerfDataFilename.scale_matrix, load_scale_matrix_data)
 
-            # Correct + extrapolate the CANONICAL class-cache values directly
+            # Correct the CANONICAL class-cache value directly
             # (not via ``database._gemm_data``) so a pre-set test override
             # can't leave the cached wrapper uncorrected — a later DB sharing
-            # the same cache key would otherwise bind unextrapolated data.
+            # the same cache key would otherwise bind uncorrected data.
             #
-            # The ordering (clamp THEN extrapolate) matches the legacy
-            # ``PerfDatabase.__init__`` flow exactly: ``_correct_data()``
-            # ran before the GEMM extrapolation block. Newly-extrapolated
-            # rows are derived from already-clamped real measurements so
-            # they sit at or above the SOL bound by construction.
             # ``PerfDatabase._correct_data`` re-clamps via the backward-compat
             # forward when called from ``__init__``, but standalone callers
             # of ``GEMM.load_data`` get the legacy single-pass semantics.
             cls._correct_sol(database, gemm_loaded)
-            cls._extrapolate_gemm_data(gemm_loaded)
-            # Re-clamp after extrapolation: interpolated/extrapolated grid
-            # points can land below the SOL bound. The legacy init path ran
-            # ``_correct_data()`` a second time which caught these; replicate
-            # that here so standalone ``load_data`` callers get the same
-            # physically-consistent floor.
-            cls._correct_sol(database, gemm_loaded)
 
-            # All three loads + correction + extrapolation succeeded — commit
+            # All three loads + correction succeeded — commit
             # atomically so partially-populated cache state can never be observed.
             cls._data_cache[key] = gemm_loaded
             cls._compute_scale_cache[key] = compute_scale_loaded
@@ -268,103 +257,6 @@ class GEMM(Operation):
                                 gemm_data[quant_mode][m][n][k] = float(max(sol, current_latency))
 
     # ------------------------------------------------------------------
-    # Grid extrapolation (formerly in PerfDatabase.__init__)
-    # ------------------------------------------------------------------
-
-    # GEMM extrapolation target grid (lifted verbatim from perf_database.py
-    # so behavior stays bit-identical).
-    _EXTRAPOLATION_TARGET_X: ClassVar[list] = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        224,
-        256,
-        320,
-        384,
-        448,
-        512,
-        640,
-        768,
-        896,
-        1024,
-        2048,
-        4096,
-        8192,
-        16384,
-        32768,
-        131072,
-        524288,
-        1048576,
-        2097152 * 8,
-    ]  # num_tokens
-
-    _EXTRAPOLATION_TARGET_Y: ClassVar[list] = [
-        32,
-        64,
-        128,
-        256,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        2560,
-        3072,
-        3584,
-        4096,
-        5120,
-        6144,
-        7168,
-        8192,
-        10240,
-        12288,
-        14336,
-        16384,
-        20480,
-        24576,
-        28672,
-        32768,
-        40960,
-        49152,
-        57344,
-        65536,
-        131072,
-        262144,
-    ]  # to fit vocab gemm
-
-    @classmethod
-    def _extrapolate_gemm_data(cls, gemm_data) -> None:
-        """Apply the 3D extrapolation grid to each quant_mode's table.
-
-        Takes the GEMM data wrapper explicitly. ``load_data`` passes the
-        canonical class-cache value; tests that need to extrapolate a
-        custom-loaded dict can call this with their own LoadedOpData."""
-        if gemm_data is None or not gemm_data.loaded:
-            return
-
-        target_x_list = cls._EXTRAPOLATION_TARGET_X
-        target_y_list = cls._EXTRAPOLATION_TARGET_Y
-        target_z_list = cls._EXTRAPOLATION_TARGET_Y
-
-        for _quant_mode, data_dict in gemm_data.items():
-            interpolation.extrapolate_data_grid(
-                data_dict=data_dict,
-                target_x_list=target_x_list,
-                target_y_list=target_y_list,
-                target_z_list=target_z_list,
-            )
-
-    # ------------------------------------------------------------------
     # Table query classmethods (formerly PerfDatabase.query_*)
     # ------------------------------------------------------------------
 
@@ -449,16 +341,23 @@ class GEMM(Operation):
                 result = gemm_data[m][n][k]
                 return _to_performance_result(result)
 
-            m_values = sorted(m_key for m_key in gemm_data if n in gemm_data[m_key] and k in gemm_data[m_key][n])
-            if len(m_values) >= 2:
-                m_left, m_right = interpolation.nearest_1d_point_helper(m, m_values, inner_only=False)
-                result = interpolation.interp_1d(
-                    [m_left, m_right], [gemm_data[m_left][n][k], gemm_data[m_right][n][k]], m
-                )
-                return _to_performance_result(result)
-
             try:
-                result = interpolation.interp_3d(m, n, k, gemm_data, "cubic", database._extracted_metrics_cache)
+                latency, energy = estimate_sparse(
+                    database,
+                    ("gemm", table_quant_mode, quant_mode),
+                    gemm_data,
+                    {"m": m, "n": n, "k": k},
+                    axes=(
+                        Axis("m", extrapolate="both"),
+                        Axis("n", log=True, extrapolate="both"),
+                        Axis("k", log=True, extrapolate="both"),
+                    ),
+                    varying="m",
+                    curve="raw",
+                    mesh="baseline_ratio",
+                    exterior="baseline_ratio",
+                    baseline=lambda point: get_sol(point["m"], point["n"], point["k"], quant_mode)[0],
+                )
             except ValueError as exc:
                 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
@@ -467,7 +366,8 @@ class GEMM(Operation):
                     f"system='{database.system}', backend='{database.backend}', version='{database.version}', "
                     f"quant_mode='{quant_mode.name}', m={m}, n={n}, k={k}."
                 ) from exc
-            return _to_performance_result(result)
+            latency = max(latency, get_sol(m, n, k, quant_mode)[0])
+            return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,
@@ -525,27 +425,21 @@ class GEMM(Operation):
                     f"Supported modes: {supported}"
                 )
             table = compute_scale_wrapper[table_quant_mode]
-            m_i = int(m)
-            k_i = int(k)
-
-            m_keys = sorted(table.keys())
-            m_i = max(m_keys[0], min(m_i, m_keys[-1]))
-
-            k_min = None
-            k_max = None
-            for row in table.values():
-                if not row:
-                    continue
-                row_min = min(row.keys())
-                row_max = max(row.keys())
-                k_min = row_min if k_min is None else min(k_min, row_min)
-                k_max = row_max if k_max is None else max(k_max, row_max)
-
-            if k_min is not None and k_max is not None:
-                k_i = max(k_min, min(k_i, k_max))
-
-            result = interpolation.interp_2d_linear(m_i, k_i, table, database._extracted_metrics_cache)
-            return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
+            if m == 0:
+                return database._interp_pr(0.0)
+            latency, energy = estimate_sparse(
+                database,
+                ("compute_scale", table_quant_mode),
+                table,
+                {"m": m, "k": k},
+                axes=(Axis("m", extrapolate="both"), Axis("k", log=True, extrapolate="both")),
+                varying="m",
+                curve="raw",
+                mesh="raw",
+                exterior="baseline_ratio",
+                baseline=lambda point: get_sol(point["m"], point["k"])[0],
+            )
+            return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,
@@ -603,27 +497,21 @@ class GEMM(Operation):
                     f"Supported modes: {supported}"
                 )
             table = scale_matrix_wrapper[table_quant_mode]
-            m_i = int(m)
-            k_i = int(k)
-
-            m_keys = sorted(table.keys())
-            m_i = max(m_keys[0], min(m_i, m_keys[-1]))
-
-            k_min = None
-            k_max = None
-            for row in table.values():
-                if not row:
-                    continue
-                row_min = min(row.keys())
-                row_max = max(row.keys())
-                k_min = row_min if k_min is None else min(k_min, row_min)
-                k_max = row_max if k_max is None else max(k_max, row_max)
-
-            if k_min is not None and k_max is not None:
-                k_i = max(k_min, min(k_i, k_max))
-
-            result = interpolation.interp_2d_linear(m_i, k_i, table, database._extracted_metrics_cache)
-            return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
+            if m == 0:
+                return database._interp_pr(0.0)
+            latency, energy = estimate_sparse(
+                database,
+                ("scale_matrix", table_quant_mode),
+                table,
+                {"m": m, "k": k},
+                axes=(Axis("m", extrapolate="both"), Axis("k", log=True, extrapolate="both")),
+                varying="m",
+                curve="raw",
+                mesh="raw",
+                exterior="baseline_ratio",
+                baseline=lambda point: get_sol(point["m"], point["k"])[0],
+            )
+            return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,

@@ -1613,6 +1613,9 @@ class PerfDatabase:
     def clear_runtime_caches(self) -> None:
         """Clear cached query/interpolation state while preserving loaded op data."""
         self._extracted_metrics_cache.clear()
+        sparse_cache = getattr(self, "_sparse_surrogate_cache", None)
+        if sparse_cache is not None:
+            sparse_cache.clear()
         for attr_name in dir(self):
             attr = getattr(self, attr_name)
             cache_clear = getattr(attr, "cache_clear", None)

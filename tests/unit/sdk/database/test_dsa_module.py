@@ -203,33 +203,17 @@ class TestContextDSAModule:
         assert above["latency"] == pytest.approx(80.0 + (100.0 - 80.0) / 1024.0 * (2049 - 3072))
         assert above["latency"] > raw_dsa_dict[32][2048][1]["latency"]
 
-    def test_topk_plus_one_uses_raw_piecewise_instead_of_cubic_fallback(self, stub_perf_db, monkeypatch):
-        raw_dsa_dict = {
+    def test_topk_plus_one_uses_only_post_topk_sparse_samples(self, stub_perf_db):
+        dsa_dict = {
             32: {
                 2048: {1: _dsa_value(20.0)},
                 3072: {1: _dsa_value(80.0)},
                 4096: {1: _dsa_value(100.0)},
             }
         }
-        extrapolated_dsa_dict = {
-            32: {
-                2048: {1: _dsa_value(20.0)},
-                2049: {1: _dsa_value(21.0)},
-                3072: {1: _dsa_value(80.0)},
-                4096: {1: _dsa_value(100.0)},
-            }
-        }
-        stub_perf_db._raw_context_dsa_module_data = LoadedOpData(
-            _context_dsa_data(raw_dsa_dict), common.PerfDataFilename.dsa_context_module, "raw"
-        )
         stub_perf_db._context_dsa_module_data = LoadedOpData(
-            _context_dsa_data(extrapolated_dsa_dict), common.PerfDataFilename.dsa_context_module, "extrapolated"
+            _context_dsa_data(dsa_dict), common.PerfDataFilename.dsa_context_module, "sparse"
         )
-
-        def fail_interp_3d(*args, **kwargs):
-            raise AssertionError("_interp_3d should not be used for topk + 1 when raw right-regime anchors exist")
-
-        monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", fail_interp_3d)
 
         result = stub_perf_db.query_context_dsa_module(
             b=1,
@@ -242,32 +226,7 @@ class TestContextDSAModule:
             gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             database_mode=common.DatabaseMode.SILICON,
         )
-
-        assert float(result) == pytest.approx(80.0 + (100.0 - 80.0) / 1024.0 * (2049 - 3072))
-        assert result.energy == pytest.approx((80.0 + (100.0 - 80.0) / 1024.0 * (2049 - 3072)) * 10.0)
-
-    def test_topk_piecewise_falls_back_when_raw_same_regime_anchors_are_unavailable(self, stub_perf_db, monkeypatch):
-        raw_dsa_dict = {
-            32: {
-                2048: {1: _dsa_value(20.0)},
-                4096: {1: _dsa_value(100.0)},
-            }
-        }
-        stub_perf_db._raw_context_dsa_module_data = LoadedOpData(
-            _context_dsa_data(raw_dsa_dict), common.PerfDataFilename.dsa_context_module, "raw"
-        )
-        stub_perf_db._context_dsa_module_data = LoadedOpData(
-            _context_dsa_data(raw_dsa_dict), common.PerfDataFilename.dsa_context_module, "extrapolated"
-        )
-        cubic_calls = []
-
-        def fake_interp_3d(*args, **kwargs):
-            cubic_calls.append((args, kwargs))
-            return {"latency": 123.0, "power": 0.0, "energy": 456.0}
-
-        monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", fake_interp_3d)
-
-        result = stub_perf_db.query_context_dsa_module(
+        query_sol = stub_perf_db.query_context_dsa_module(
             b=1,
             s=2049,
             prefix=0,
@@ -276,12 +235,22 @@ class TestContextDSAModule:
             kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
             fmha_quant_mode=common.FMHAQuantMode.bfloat16,
             gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.SILICON,
+            database_mode=common.DatabaseMode.SOL,
         )
-
-        assert float(result) == pytest.approx(123.0)
-        assert result.energy == pytest.approx(456.0)
-        assert len(cubic_calls) == 1
+        anchor_sol = stub_perf_db.query_context_dsa_module(
+            b=1,
+            s=3072,
+            prefix=0,
+            num_heads=32,
+            index_topk=2048,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SOL,
+        )
+        expected = 80.0 * float(query_sol) / float(anchor_sol)
+        assert float(result) == pytest.approx(expected)
+        assert result.energy == pytest.approx(expected * 10.0)
 
     def test_prefix_axis_interpolates_measured_prefix_slices(self, stub_perf_db):
         dsa_dict = {
@@ -495,6 +464,28 @@ class TestContextDSAModule:
 
 class TestGenerationDSAModule:
     """Tests for query_generation_dsa_module."""
+
+    def test_sparse_ragged_mesh_stays_inside_topk_regime(self, stub_perf_db):
+        table = {
+            16: {
+                1: {1: _dsa_value(1.0), 5: _dsa_value(5.0), 6: _dsa_value(106.0), 10: _dsa_value(110.0)},
+                3: {1: _dsa_value(3.0), 5: _dsa_value(15.0), 6: _dsa_value(118.0), 10: _dsa_value(130.0)},
+            }
+        }
+        stub_perf_db._generation_dsa_module_data = LoadedOpData(
+            _generation_dsa_data(table), common.PerfDataFilename.dsa_generation_module, "sparse"
+        )
+
+        pre = stub_perf_db.query_generation_dsa_module(
+            2, 3, 16, common.KVCacheQuantMode.bfloat16, index_topk=5, database_mode=common.DatabaseMode.SILICON
+        )
+        post = stub_perf_db.query_generation_dsa_module(
+            2, 8, 16, common.KVCacheQuantMode.bfloat16, index_topk=5, database_mode=common.DatabaseMode.SILICON
+        )
+
+        assert float(pre) == pytest.approx(6.0)
+        assert float(post) == pytest.approx(116.0)
+        assert post.energy == pytest.approx(1160.0)
 
     def test_missing_architecture_raises_perf_data_not_available(self, stub_perf_db):
         dsa_dict = {32: {1: {256: _dsa_value(10.0)}}}

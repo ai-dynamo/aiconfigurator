@@ -45,8 +45,9 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.perf_surrogate import Axis, estimate_sparse
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -54,6 +55,27 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+_TOKEN_AXES = (Axis("tokens", extrapolate="both"),)
+_SMS_TOKEN_AXES = (Axis("sms"), *_TOKEN_AXES)
+
+
+def _estimate_token_table(database, key, table, tokens, baseline=None) -> tuple[float, float]:
+    if baseline is None:
+        minimum = float(min(table))
+
+        def baseline(point):
+            return max(point["tokens"], minimum)
+
+    return estimate_sparse(
+        database,
+        key,
+        table,
+        {"tokens": tokens},
+        axes=_TOKEN_AXES,
+        varying="tokens",
+        baseline=baseline,
+    )
 
 
 def _cache_key(database: PerfDatabase) -> tuple:
@@ -376,6 +398,87 @@ class MoE(Operation):
                 f"workload_distribution='{used_workload_distribution}'."
             )
 
+        def _estimate_moe_curve(
+            query_tokens: int,
+            moe_dict: dict,
+            used_workload_distribution: str,
+            curve_source: str,
+        ) -> PerformanceResult:
+            token_points = _require_moe_token_points(
+                moe_dict,
+                query_tokens,
+                used_workload_distribution,
+            )
+            if query_tokens > token_points[-1]:
+                return _estimate_overflow_with_last_token_util(
+                    query_tokens,
+                    moe_dict,
+                    hidden_size,
+                    inter_size,
+                    topk,
+                    num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    quant_mode,
+                    workload_distribution,
+                )
+
+            if query_tokens < token_points[0]:
+                first_tokens = token_points[0]
+                first = moe_dict[first_tokens]
+                first_latency = float(first["latency"] if isinstance(first, dict) else first)
+                if isinstance(first, dict):
+                    first_power = float(first.get("power", 0.0))
+                    if first_power == 0.0 and first_latency > 0:
+                        first_power = float(first.get("energy", 0.0)) / first_latency
+                else:
+                    first_power = 0.0
+                launch_latency = first_latency
+                if len(token_points) > 1:
+                    second_tokens = token_points[1]
+                    second = moe_dict[second_tokens]
+                    second_latency = float(second["latency"] if isinstance(second, dict) else second)
+                    slope = max(0.0, (second_latency - first_latency) / (second_tokens - first_tokens))
+                    launch_latency = max(0.0, first_latency - slope * first_tokens)
+                latency = launch_latency + (first_latency - launch_latency) * query_tokens / first_tokens
+                latency = max(
+                    latency,
+                    get_sol(
+                        query_tokens,
+                        hidden_size,
+                        inter_size,
+                        topk,
+                        num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        quant_mode,
+                        workload_distribution,
+                    )[0],
+                )
+                return database._interp_pr(latency, energy=first_power * latency)
+
+            latency, energy = estimate_sparse(
+                database,
+                (
+                    "moe",
+                    curve_source,
+                    quant_mode,
+                    used_workload_distribution,
+                    topk,
+                    num_experts,
+                    hidden_size,
+                    inter_size,
+                    moe_tp_size,
+                    moe_ep_size,
+                ),
+                moe_dict,
+                {"tokens": query_tokens},
+                axes=_TOKEN_AXES,
+                varying="tokens",
+                exterior="raw",
+            )
+            return database._interp_pr(latency, energy=energy)
+
         if database_mode is None:
             database_mode = database._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
@@ -419,15 +522,19 @@ class MoE(Operation):
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
+                query_tokens = num_tokens
+                curve_source = "regular"
                 if database.backend == common.BackendName.sglang.value:
                     # deepep_moe is for sglang wideep only
                     # Apply num_tokens correction when eplb is enabled (only during prefill)
-                    num_tokens_corrected = int(num_tokens * 0.8) if enable_eplb and is_context else num_tokens
+                    query_tokens = int(num_tokens * 0.8) if enable_eplb and is_context else num_tokens
                     if moe_backend == "deepep_moe":
                         if is_context:
                             moe_data = database._wideep_context_moe_data
+                            curve_source = "deepep_context"
                         else:
                             moe_data = database._wideep_generation_moe_data
+                            curve_source = "deepep_generation"
                     else:
                         moe_data = database._moe_data
 
@@ -439,41 +546,6 @@ class MoE(Operation):
                     moe_dict = moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
                         inter_size
                     ][moe_tp_size][moe_ep_size]
-                    token_points = _require_moe_token_points(
-                        moe_dict,
-                        num_tokens_corrected,
-                        used_workload_distribution,
-                    )
-                    if num_tokens_corrected > token_points[-1]:
-                        return _estimate_overflow_with_last_token_util(
-                            num_tokens_corrected,
-                            moe_dict,
-                            hidden_size,
-                            inter_size,
-                            topk,
-                            num_experts,
-                            moe_tp_size,
-                            moe_ep_size,
-                            quant_mode,
-                            workload_distribution,
-                        )
-                    num_left, num_right = interpolation.nearest_1d_point_helper(
-                        num_tokens_corrected,
-                        list(moe_dict.keys()),
-                        inner_only=False,
-                    )
-                    result = interpolation.interp_1d(
-                        [num_left, num_right],
-                        [moe_dict[num_left], moe_dict[num_right]],
-                        num_tokens_corrected,
-                    )
-                    if isinstance(result, dict):
-                        lat = result["latency"]
-                        energy = result.get("energy", 0.0)
-                    else:
-                        lat = result
-                        energy = 0.0
-                    return database._interp_pr(lat, energy=energy)
                 elif database.backend == common.BackendName.trtllm.value:
                     if database._moe_data is None and database._moe_low_latency_data is None:
                         raise PerfDataNotAvailableError(
@@ -510,6 +582,7 @@ class MoE(Operation):
                                 f"{workload_distribution} {topk} {num_experts} {hidden_size} "
                                 f"{inter_size} {moe_tp_size} {moe_ep_size}."
                             )
+                            curve_source = "low_latency"
                         except:
                             used_workload_distribution = (
                                 workload_distribution
@@ -528,37 +601,6 @@ class MoE(Operation):
                         moe_dict = database._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
                             hidden_size
                         ][inter_size][moe_tp_size][moe_ep_size]
-                    token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
-                    if num_tokens > token_points[-1]:
-                        return _estimate_overflow_with_last_token_util(
-                            num_tokens,
-                            moe_dict,
-                            hidden_size,
-                            inter_size,
-                            topk,
-                            num_experts,
-                            moe_tp_size,
-                            moe_ep_size,
-                            quant_mode,
-                            workload_distribution,
-                        )
-                    num_left, num_right = interpolation.nearest_1d_point_helper(
-                        num_tokens,
-                        list(moe_dict.keys()),
-                        inner_only=False,
-                    )
-                    result = interpolation.interp_1d(
-                        [num_left, num_right],
-                        [moe_dict[num_left], moe_dict[num_right]],
-                        num_tokens,
-                    )
-                    if isinstance(result, dict):
-                        lat = result["latency"]
-                        energy = result.get("energy", 0.0)
-                    else:
-                        lat = result
-                        energy = 0.0
-                    return database._interp_pr(lat, energy=energy)
                 elif database.backend == common.BackendName.vllm.value:
                     database._moe_data.raise_if_not_loaded()
                     used_workload_distribution = (
@@ -567,35 +609,15 @@ class MoE(Operation):
                     moe_dict = database._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
                         hidden_size
                     ][inter_size][moe_tp_size][moe_ep_size]
-                    token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
-                    if num_tokens > token_points[-1]:
-                        return _estimate_overflow_with_last_token_util(
-                            num_tokens,
-                            moe_dict,
-                            hidden_size,
-                            inter_size,
-                            topk,
-                            num_experts,
-                            moe_tp_size,
-                            moe_ep_size,
-                            quant_mode,
-                            workload_distribution,
-                        )
-                    num_left, num_right = interpolation.nearest_1d_point_helper(
-                        num_tokens, list(moe_dict.keys()), inner_only=False
-                    )
-                    result = interpolation.interp_1d(
-                        [num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens
-                    )
-                    if isinstance(result, dict):
-                        latency = result["latency"]
-                        energy = result.get("energy", 0.0)
-                    else:
-                        latency = result
-                        energy = 0.0
-                    return database._interp_pr(latency, energy=energy)
                 else:
                     raise NotImplementedError(f"backend {database.backend} not supported for moe")
+
+                return _estimate_moe_curve(
+                    query_tokens,
+                    moe_dict,
+                    used_workload_distribution,
+                    curve_source,
+                )
 
             return database._query_silicon_or_hybrid(
                 get_silicon=get_silicon,
@@ -800,10 +822,12 @@ class MoEDispatch(Operation):
             return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0, source="empirical")
         else:
             data = database._wideep_deepep_ll_data[node_num][hidden_size][topk][num_experts]
-            num_left, num_right = interpolation.nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
-            result = interpolation.interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
-            lat = result["latency"] if isinstance(result, dict) else result
-            energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+            lat, energy = _estimate_token_table(
+                database,
+                ("deepep_ll", node_num, hidden_size, topk, num_experts),
+                data,
+                num_tokens,
+            )
             return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
 
     @classmethod
@@ -840,19 +864,26 @@ class MoEDispatch(Operation):
                 get_empirical(num_tokens, num_experts, topk, hidden_size), energy=0.0, source="empirical"
             )
         else:
+            category = ("deepep_normal", node_num, hidden_size, topk, num_experts)
+            data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
             if node_num == 1 and sms == 20:  # only collect sm=20 for now
-                data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
-                num_left, num_right = interpolation.nearest_1d_point_helper(
-                    num_tokens, list(data.keys()), inner_only=False
+                lat, energy = _estimate_token_table(
+                    database,
+                    (*category, sms),
+                    data[sms],
+                    num_tokens,
                 )
-                result = interpolation.interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
-                lat = result["latency"] if isinstance(result, dict) else result
-                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
             else:
-                data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
-                result = interpolation.interp_2d_linear(sms, num_tokens, data, database._extracted_metrics_cache)
-                lat = result["latency"] if isinstance(result, dict) else result
-                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+                minimum = min(float(token) for token_data in data.values() for token in token_data)
+                lat, energy = estimate_sparse(
+                    database,
+                    category,
+                    data,
+                    {"sms": sms, "tokens": num_tokens},
+                    axes=_SMS_TOKEN_AXES,
+                    varying="tokens",
+                    baseline=lambda point: max(point["tokens"], minimum),
+                )
             return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
 
     # ------------------------------------------------------------------
@@ -1477,23 +1508,42 @@ class TrtLLMWideEPMoE(Operation):
                 num_slots
             ][moe_tp_size][moe_ep_size]
 
-            num_left, num_right = interpolation.nearest_1d_point_helper(
-                num_tokens,
-                list(moe_dict.keys()),
-                inner_only=False,
-            )
-            result = interpolation.interp_1d(
-                [num_left, num_right],
-                [moe_dict[num_left], moe_dict[num_right]],
-                num_tokens,
-            )
+            def baseline(point):
+                return max(
+                    get_sol(
+                        point["tokens"],
+                        hidden_size,
+                        inter_size,
+                        topk,
+                        num_experts,
+                        num_slots,
+                        moe_tp_size,
+                        moe_ep_size,
+                        quant_mode,
+                        used_distribution,
+                    )[0],
+                    1e-12,
+                )
 
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
+            lat, energy = _estimate_token_table(
+                database,
+                (
+                    "wideep_compute",
+                    kernel_source,
+                    quant_mode,
+                    used_distribution,
+                    topk,
+                    num_experts,
+                    hidden_size,
+                    inter_size,
+                    num_slots,
+                    moe_tp_size,
+                    moe_ep_size,
+                ),
+                moe_dict,
+                num_tokens,
+                baseline,
+            )
 
             return database._interp_pr(lat, energy=energy)
 
@@ -1889,23 +1939,37 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 moe_ep_size
             ]
 
-            num_left, num_right = interpolation.nearest_1d_point_helper(
-                num_tokens,
-                list(alltoall_dict.keys()),
-                inner_only=False,
-            )
-            result = interpolation.interp_1d(
-                [num_left, num_right],
-                [alltoall_dict[num_left], alltoall_dict[num_right]],
-                num_tokens,
-            )
+            def baseline(point):
+                return max(
+                    get_sol(
+                        point["tokens"],
+                        hidden_size,
+                        topk,
+                        num_experts,
+                        moe_ep_size,
+                        quant_mode,
+                        node_num,
+                    )[0],
+                    1e-12,
+                )
 
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
+            lat, energy = _estimate_token_table(
+                database,
+                (
+                    "trtllm_alltoall",
+                    kernel_source,
+                    op_name,
+                    table_quant_mode,
+                    node_num,
+                    hidden_size,
+                    topk,
+                    num_experts,
+                    moe_ep_size,
+                ),
+                alltoall_dict,
+                num_tokens,
+                baseline,
+            )
 
             return database._interp_pr(lat, energy=energy)
 

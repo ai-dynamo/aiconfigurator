@@ -9,6 +9,7 @@ future drift -- the nsys validation in docs/CONTEXT_PARALLEL_DSA_MODELING.md is
 not a CI regression gate.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,12 +20,12 @@ pytestmark = pytest.mark.unit
 
 
 def test_lookup_2d_exact_and_step_interp():
-    # table keyed by (isl, step) -> latency; linear interp/extrap on the step axis.
+    db = SimpleNamespace()
     t = {(4096, 0): 100.0, (4096, 1024): 200.0, (8192, 0): 400.0}
-    assert ContextDSAModule._lookup_2d(t, 4096, 0) == 100.0  # exact grid point
-    assert ContextDSAModule._lookup_2d(t, 4096, 512) == pytest.approx(150.0)  # step interp
-    assert ContextDSAModule._lookup_2d(t, 4096, 4096) == 200.0  # step clamp to max
-    assert ContextDSAModule._lookup_2d({}, 4096, 0) is None  # empty table
+    assert ContextDSAModule._lookup_2d(db, "mqa", t, 4096, 0) == 100.0
+    assert ContextDSAModule._lookup_2d(db, "mqa", t, 4096, 512) == pytest.approx(150.0)
+    assert ContextDSAModule._lookup_2d(db, "mqa", t, 4096, 4096) == 200.0
+    assert ContextDSAModule._lookup_2d(db, "mqa", {}, 4096, 0) is None
 
 
 def test_lookup_2d_fails_loud_on_out_of_grid_isl():
@@ -32,7 +33,7 @@ def test_lookup_2d_fails_loud_on_out_of_grid_isl():
     # quadratic in isl, so clamping 16384->8192 would halve... quarter it.
     t = {(4096, 0): 100.0, (8192, 0): 400.0}
     with pytest.raises(ValueError, match="exceeds the collected"):
-        ContextDSAModule._lookup_2d(t, 16384, 0)
+        ContextDSAModule._lookup_2d(SimpleNamespace(), "mqa", t, 16384, 0)
 
 
 def test_query_cp_composition(monkeypatch):
@@ -50,6 +51,7 @@ def test_query_cp_composition(monkeypatch):
     monkeypatch.setattr(ContextDSAModule, "_load_glm5_sparse", classmethod(lambda cls, db: tables))
 
     db = MagicMock()
+    db._sparse_surrogate_cache = {}
     db.query_context_dsa_module.return_value = 4300.0  # per-card monolithic base
     db.query_nccl.return_value = 50.0  # each AG
 
@@ -88,6 +90,7 @@ def test_query_cp_raises_when_isl_beyond_grid(monkeypatch):
     }
     monkeypatch.setattr(ContextDSAModule, "_load_glm5_sparse", classmethod(lambda cls, db: tables))
     db = MagicMock()
+    db._sparse_surrogate_cache = {}
     db.query_context_dsa_module.return_value = 4300.0
     db.query_nccl.return_value = 50.0
 

@@ -134,13 +134,8 @@ class TestAllreduceEdgeCases:
 class TestInitializationEdgeCases:
     """Test edge cases during PerfDatabase initialization."""
 
-    def test_extrapolation_during_init(self, tmp_path, monkeypatch, caplog):
-        """Test that extrapolation runs when ContextAttention's data is loaded.
-
-        Previously ``PerfDatabase.__init__`` warmed every op eagerly, so
-        extrapolation ran during construction. Now the load is lazy: we
-        explicitly trigger ``ContextAttention.load_data`` below (with
-        the loader patches still active) and assert on the result."""
+    def test_sparse_data_remains_raw_during_init(self, tmp_path, monkeypatch, caplog):
+        """Loading keeps measured rows sparse; off-grid queries compile lazily."""
         # Set up minimal system spec
         import yaml
 
@@ -217,15 +212,14 @@ class TestInitializationEdgeCases:
                 loader_func = lambda path, d=depth: create_nested_defaultdict(d)
             monkeypatch.setattr(f"aiconfigurator.sdk.operations.{module}.{loader}", loader_func)
 
-        # Initialize database, then trigger the lazy load explicitly so
-        # extrapolation runs while loader patches are still active.
+        # Initialize database, then trigger the lazy load explicitly while
+        # loader patches are still active.
         from aiconfigurator.sdk.operations.attention import ContextAttention
 
         db = PerfDatabase("test", "backend", "v1", str(tmp_path))
         ContextAttention.load_data(db)
 
-        # Check that extrapolation created new data points
-        # Should have more than the 4 original points
+        # Loading must not synthesize Cartesian rows.
         total_points = 0
         for quant_mode in db._context_attention_data:
             for kv_cache in db._context_attention_data[quant_mode]:
@@ -242,7 +236,19 @@ class TestInitializationEdgeCases:
                                         ][s]
                                     )
 
-        assert total_points > 4, "Extrapolation should have created additional data points"
+        assert total_points == 4
+
+        result = db.query_context_attention(
+            1,
+            24,
+            0,
+            6,
+            6,
+            common.KVCacheQuantMode.bfloat16,
+            common.FMHAQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+        assert result > 0
 
 
 class TestGemmInterpolation:

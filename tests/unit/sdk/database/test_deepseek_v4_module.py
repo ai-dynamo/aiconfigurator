@@ -58,13 +58,13 @@ def _write_mhc_perf(path, rows: list[str]) -> str:
     return str(path)
 
 
-def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict, native_heads: int = 128) -> dict:
+def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict, native_heads: int = 128, tp_size: int = 8) -> dict:
     return {
         common.FMHAQuantMode.bfloat16: {
             common.KVCacheQuantMode.fp8: {
                 common.GEMMQuantMode.fp8_block: {
                     native_heads: {
-                        compress_ratio: attn_dict,
+                        tp_size: {compress_ratio: attn_dict},
                     },
                 },
             },
@@ -72,12 +72,16 @@ def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict, native_heads
     }
 
 
-def _generation_deepseek_v4_data(compress_ratio: int, attn_dict: dict, native_heads: int = 128) -> dict:
+def _generation_deepseek_v4_data(
+    compress_ratio: int, attn_dict: dict, native_heads: int = 128, tp_size: int = 8
+) -> dict:
     return {
         common.KVCacheQuantMode.fp8: {
             common.GEMMQuantMode.fp8_block: {
-                native_heads: {
-                    compress_ratio: attn_dict,
+                common.FMHAQuantMode.bfloat16: {
+                    native_heads: {
+                        tp_size: {compress_ratio: attn_dict},
+                    },
                 },
             },
         },
@@ -264,13 +268,12 @@ class TestDeepSeekV4AttentionModule:
         assert math.isclose(result["latency"], expected, rel_tol=1e-6)
         assert math.isclose(result["energy"], expected * 10.0, rel_tol=1e-6)
 
-    def test_generation_silicon_extrapolates_query_below_min_sampled_s_total(self, mutable_comprehensive_perf_db):
-        """Full-query regression for generated query b=1, s_total=1, tp=8."""
+    def test_generation_silicon_extrapolates_below_sampled_batch_and_sequence(self, mutable_comprehensive_perf_db):
+        """Lower exterior estimates stay positive and anchored to measured data."""
         db = mutable_comprehensive_perf_db
-        # SCHEME A silicon data is {head}{cr}{b}{s_total} — no tp level. The shared
-        # grid is {tp}{b}{s_total} (for the direct _dsv4_robust_3d_lookup test);
-        # strip the tp wrapper so it lands as {b}{s_total} under {head}{cr}.
-        mock_grid = _dsv4_generation_sampled_grid()[8]
+        # The shared fixture is {tp}{b}{s_total}; select the TP=8 slice before
+        # placing it under the loader's exact head/TP/category hierarchy.
+        mock_grid = {2: _dsv4_generation_sampled_grid()[8][2]}
         db._generation_deepseek_v4_attention_module_data = LoadedOpData(
             _generation_deepseek_v4_data(4, mock_grid),
             common.PerfDataFilename.dsv4_csa_generation_module,
@@ -289,9 +292,8 @@ class TestDeepSeekV4AttentionModule:
             database_mode=common.DatabaseMode.SILICON,
         )
 
-        expected = 0.20 + (0.50 - 0.20) * (1 - 2) / (5 - 2)
-        assert float(result) == pytest.approx(expected)
-        assert result.energy == pytest.approx(expected * 10.0)
+        assert 0 < float(result) <= 0.40
+        assert result.energy == pytest.approx(float(result) * 10.0)
 
     def test_csa_topk_changes_attention_workload(self, comprehensive_perf_db):
         base = _deepseek_v4_attn_kwargs(4)
@@ -382,7 +384,7 @@ class TestDeepSeekV4AttentionModule:
         }
         db = mutable_comprehensive_perf_db
         db._context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(4, attn_dict, native_heads=16),
+            _context_deepseek_v4_data(4, attn_dict),
             common.PerfDataFilename.dsv4_csa_context_module,
             "models",
         )
@@ -449,23 +451,21 @@ class TestDeepSeekV4AttentionModule:
             f"num_heads."
         )
 
-    def test_context_silicon_resolves_rank_local_head_bucket(self, mutable_comprehensive_perf_db):
-        # SCHEME A: the head axis is the rank-local head count (native // tp), in
-        # line with the universal attention convention (per-rank heads, no tp
-        # axis). A Pro query at tp=8 (native 128 -> num_heads=16) must resolve the
-        # 16-head bucket, not a smaller local-head bucket. cr=4 / prefix=0 ->
+    def test_context_silicon_resolves_native_head_bucket(self, mutable_comprehensive_perf_db):
+        # A Pro query at tp=8 (native 128, local 16) must resolve the 128-head
+        # model bucket, not the 64-head Flash bucket. cr=4 / prefix=0 ->
         # c4_len=64 <= index_topk, so the topK DELTA is 0 and the raw latency is
-        # returned unchanged. Data is prefix-resolved: {head}{cr}{prefix}{s}{b}.
+        # returned unchanged.
         db = mutable_comprehensive_perf_db
         data = _context_deepseek_v4_data(
             4,
             {0: {256: {2: _deepseek_v4_value(11.0)}}},
-            native_heads=8,
+            native_heads=64,
         )
         pro_data = _context_deepseek_v4_data(
             4,
             {0: {256: {2: _deepseek_v4_value(22.0)}}},
-            native_heads=16,
+            native_heads=128,
         )
         _deep_merge_dsv4_dicts(data, pro_data)
         db._context_deepseek_v4_attention_module_data = LoadedOpData(
@@ -614,7 +614,7 @@ class TestDeepSeekV4AttentionModule:
         # prefix-resolved {head}{cr}{prefix}{s}{b}; prefix=8192/s=54 -> c4_len=2061
         # > index_topk, so a correction WOULD apply if a calib were loaded.
         db._context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(4, {8192: {54: {1: _deepseek_v4_value(5.0)}}}, native_heads=16),
+            _context_deepseek_v4_data(4, {8192: {54: {1: _deepseek_v4_value(5.0)}}}),
             common.PerfDataFilename.dsv4_csa_context_module,
             "models",
         )
