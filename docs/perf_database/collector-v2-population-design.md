@@ -6,15 +6,20 @@ Collector V2 should keep Collector V1's useful measurement coverage, retain
 intentional V2 additions, and avoid scheduling cases created only by unrelated
 Cartesian-product axes or repeated model artifact names.
 
-The compatibility invariant is:
+For full/raw collection, the compatibility invariant is:
 
 ```text
 V1 physical cases ⊆ cleaned V2 physical cases
 ```
 
-For every migrated operation, `removed_v1_cases` must be zero. A lower total
-case count is not sufficient evidence because a plan can add many new cases
-while still deleting old interpolation anchors.
+For every migrated operation with a frozen historical baseline,
+`removed_v1_cases` must be zero. A lower total case count is not sufficient
+evidence because a plan can add many new cases while still deleting old
+interpolation anchors.
+
+Targeted model collection has a different contract: it is model-exact. It does
+not inherit unrelated synthetic V1 interpolation anchors when the selected
+model has an explicit structural profile.
 
 ## Scope
 
@@ -38,8 +43,26 @@ Consumer problems found during the audit belong in separate changes.
   pre-V2 attention baseline predates this collector.
 - Collector V2 before pruning: upstream `66c6e05fef00cbee6546847fa2280116ef4a38cd`.
 
-The comparison uses physical benchmark inputs, not model aliases or scheduler
-task IDs. Measurement fields such as latency and power are not case identity.
+The comparison uses consumer-visible physical lookup keys, not model aliases,
+scheduler task IDs, latency, or power measurements.
+
+## Three identities
+
+Collector population must keep three different identities separate:
+
+1. **Recipe identity** explains why YAML requested a case. Multiple model
+   documents may provide provenance for the same work.
+2. **Benchmark invocation identity** contains everything that can change the
+   executed kernel or runtime setup, including path-dependent checkpoint
+   quantization.
+3. **Persisted physical key** is the unchanged key used by the current AIC
+   consumer to load a measurement.
+
+Deduplication is safe only when benchmark invocation identity is equivalent and
+the persisted physical key is also equivalent. A consumer-key collision alone
+does not prove two invocations are interchangeable. In particular, a BF16,
+FP8, or NVFP4 checkpoint path may select different runtime behavior before its
+native quantization becomes explicit.
 
 ## Population flow
 
@@ -48,7 +71,8 @@ additive YAML profiles
     -> select the model/backend operations
     -> expand correlated structural tuples
     -> reject unreachable/backend-unsupported tuples
-    -> stable operation-local deduplication
+    -> derive operation-local invocation identity
+    -> stable deduplication of proven-equivalent invocations
     -> apply model and SM selectors
     -> benchmark queue
 ```
@@ -66,7 +90,8 @@ and resume behavior remain deterministic.
 ## Safe deduplication rules
 
 1. Never change a downstream consumer to make a Collector case appear useful.
-2. Preserve a field if any current Python or Rust consumer distinguishes it.
+2. Preserve a field if it changes either the benchmark invocation or any
+   current Python/Rust consumer key.
 3. Collapse artifact aliases only for shape-only collectors where the model
    path is neither loaded by the benchmark nor part of its persisted key.
 4. Do not alias BF16, FP8, or NVFP4 checkpoints before a module benchmark has
@@ -79,10 +104,21 @@ and resume behavior remain deterministic.
 7. Unknown or unproved equivalence is retained. It is better to prune less than
    to silently remove a V1 interpolation anchor.
 
+## Pruning decisions
+
+| Situation | Population behavior | Reason |
+|---|---|---|
+| Head/KV-head/head-dim/window values from different models | Keep correlated model profiles; do not cross them | Cross-model tuples are not deployable shapes |
+| Shape-only collector with base/FP8/NVFP4 names and an independent quant axis | Canonicalize artifact aliases | Artifact name does not change the invocation or persisted key |
+| Module collector that reads checkpoint-native quantization | Retain each path until native quantization is explicit | The path can change the executed kernel |
+| Different total-head/TP pairs with the same standalone-MLA local-head key | Deduplicate in the getter | Both invocation and current loader key are equivalent |
+| Experimental op with no production consumer | Keep the registry entry, omit it from default model plans | Explicit research runs remain possible without default collection cost |
+| Equivalence is uncertain | Retain the cases | Conservative pruning avoids silent coverage loss |
+
 ## Attention result
 
-The following canonical B200/SM100 counts compare physical attention cases.
-`Removed` is always measured against the V1 baseline.
+The following canonical B200/SM100 counts compare full/raw physical attention
+cases. `Removed` is always measured against the V1 baseline.
 
 | Backend | Operation | V1 | V2 before | Cleaned V2 | Added | Removed |
 |---|---|---:|---:|---:|---:|---:|
@@ -154,9 +190,12 @@ When adding or changing a model profile:
 3. State whether quantization is selected by the model artifact or expanded by
    the collector.
 4. Compare physical key sets, not only totals.
-5. Require `V1 - candidate == ∅` for full/raw collection.
-6. Verify targeted model plans do not activate unrelated base operations.
-7. Keep an old synthetic anchor when an unchanged consumer still queries it,
+5. Derive benchmark invocation identity before deciding that artifact names or
+   quantization variants are duplicates.
+6. Require `V1 - candidate == ∅` for full/raw collection.
+7. Verify targeted model plans do not activate unrelated base operations or
+   inherit unrelated synthetic V1 anchors.
+8. Keep an old synthetic anchor when an unchanged consumer still queries it,
    even if the current model metadata would choose a different value.
 
 ## Validation
