@@ -11,7 +11,6 @@ modules own benchmark setup, while `model_cases.py` and YAML own case selection.
 
 import contextlib
 import functools
-import hashlib
 import os
 import warnings
 
@@ -69,7 +68,6 @@ setup_warning_filters()
 
 import argparse
 import cProfile
-import csv
 import importlib
 import importlib.util
 import io
@@ -85,20 +83,17 @@ from inspect import Parameter, signature
 from pathlib import Path
 
 from helper import (
-    COLLECTOR_INVOCATION_FIELD,
     EXIT_CODE_RESTART,
-    collector_invocation,
     create_test_case_id,
     finalize_perf_files,
     find_perf_csv_outputs,
-    get_sm_version,
     save_error_report,
     setup_logging,
     setup_signal_handlers,
 )
 
 logger = None
-RESUME_SCHEMA_VERSION = "collector-resume-v3"
+RESUME_SCHEMA_VERSION = "collector-resume-v1"
 STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before stall bailout
 
 
@@ -114,153 +109,6 @@ def _cuda_available() -> bool:
 
 def _xpu_available() -> bool:
     return torch is not None and hasattr(torch, "xpu") and torch.xpu.is_available()
-
-
-def _backend_variant(backend: str, device: str = "auto") -> str:
-    """Resolve the planner backend variant without changing framework routing."""
-
-    if backend != "vllm":
-        return backend
-    if device == "xpu" or (device == "auto" and _xpu_available()):
-        return "vllm_xpu"
-    return "vllm"
-
-
-def _planner_hardware_scope(
-    backend_variant: str,
-    gpu_type: str | None,
-    sm_version: int | None,
-) -> tuple[str | None, int | None]:
-    """Supply the non-CUDA XPU capability scope when no hardware is present."""
-
-    if backend_variant == "vllm_xpu":
-        return gpu_type or "xpu", 0 if sm_version is None else sm_version
-    return gpu_type, sm_version
-
-
-def _validate_runtime_device_choice(backend: str, requested_device: str) -> None:
-    """Reject an explicit planner device that runtime routing would ignore."""
-
-    if requested_device == "auto":
-        return
-    if backend != "vllm" and requested_device != "cuda":
-        raise ValueError(f"{backend} collectors support CUDA only; got --device {requested_device}")
-    detected_device = "cuda" if _cuda_available() else "xpu" if _xpu_available() else None
-    if detected_device is None:
-        raise ValueError("no supported CUDA or XPU runtime device is available")
-    if requested_device != detected_device:
-        raise ValueError(
-            f"--device {requested_device} conflicts with runtime routing to {detected_device}; "
-            "use --plan-only to inspect a different device plan"
-        )
-
-
-def _runtime_hardware_identity(backend_variant: str) -> tuple[str | None, int | None]:
-    """Best-effort hardware identity for invocation and resume isolation."""
-
-    # XPU manifests intentionally describe one backend capability scope rather
-    # than a vendor marketing string. Keep raw/runtime collection in that same
-    # canonical scope so the protected subset check cannot be skipped merely
-    # because torch reports a concrete Intel device name.
-    if backend_variant == "vllm_xpu":
-        return "xpu", 0
-
-    device_module = get_device_module()
-    gpu_type = None
-    get_device_name = getattr(device_module, "get_device_name", None)
-    if callable(get_device_name):
-        try:
-            detected = get_device_name(0)
-            if isinstance(detected, str) and detected:
-                normalized_name = detected.lower()
-                if "b200" in normalized_name and "gb200" not in normalized_name:
-                    gpu_type = "b200_sxm"
-                elif "h200" in normalized_name:
-                    gpu_type = "h200_sxm"
-                elif "h100" in normalized_name:
-                    gpu_type = "h100_sxm"
-                else:
-                    gpu_type = detected
-        except Exception:
-            pass
-
-    try:
-        detected_sm = get_sm_version()
-        sm_version = int(detected_sm) if isinstance(detected_sm, int) and not isinstance(detected_sm, bool) else None
-    except Exception:
-        sm_version = None
-    return gpu_type, sm_version
-
-
-def _plan_execution_fingerprint(case_plan, model_path: str | None) -> str:
-    """Fingerprint logical model/catalog state that can affect inner sweeps.
-
-    Filesystem locations are deliberately excluded. Two worktrees containing
-    the same selected YAML must produce the same invocation identities; only
-    parsed content and the logical selection are execution inputs.
-    """
-
-    from collector.planner import canonical_json
-
-    catalog = getattr(case_plan, "catalog", None)
-    catalog_documents = None
-    if catalog is not None:
-        sm_document = getattr(catalog, "sm_exceptions_document", None)
-        catalog_documents = {
-            "base": [document.data for document in getattr(catalog, "base_documents", ())],
-            "models": [document.data for document in getattr(catalog, "model_documents", ())],
-            "sm_exceptions": sm_document.data if sm_document is not None else None,
-        }
-
-    measure_power = os.environ.get("COLLECTOR_MEASURE_POWER", "false").lower() in {"1", "true", "yes"}
-    power_test_duration_sec = float(os.environ.get("COLLECTOR_POWER_MIN_DURATION", "1.0")) if measure_power else None
-
-    payload = {
-        "model_path": model_path,
-        "requested_model_path": getattr(case_plan, "requested_model_path", None),
-        "canonical_model_path": getattr(case_plan, "model_path", None),
-        "model_architecture": getattr(case_plan, "model_architecture", None),
-        "full": getattr(case_plan, "full", False),
-        "catalog_documents": catalog_documents,
-        "measurement": {
-            "measure_power": measure_power,
-            "power_test_duration_sec": power_test_duration_sec,
-        },
-    }
-    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
-
-
-def _staging_csv_contains_invocation(path: Path, invocation_ids: set[str]) -> bool:
-    """Return whether a staging CSV contains a task from the current plan."""
-
-    if not invocation_ids:
-        return False
-    try:
-        with path.open(newline="", encoding="utf-8") as source:
-            reader = csv.DictReader(source)
-            if not reader.fieldnames or COLLECTOR_INVOCATION_FIELD not in reader.fieldnames:
-                return False
-            return any(str(row.get(COLLECTOR_INVOCATION_FIELD) or "") in invocation_ids for row in reader)
-    except (OSError, UnicodeError, csv.Error):
-        return False
-
-
-def _select_finalizable_perf_outputs(
-    output_root: Path,
-    existing_perf_outputs: dict[Path, int],
-    invocation_ids: set[str],
-) -> list[Path]:
-    """Select this run's new files plus retained staging from the same plan."""
-
-    selected = []
-    for path in find_perf_csv_outputs(output_root):
-        resolved = path.resolve()
-        was_touched = (
-            resolved not in existing_perf_outputs or path.stat().st_mtime_ns != existing_perf_outputs[resolved]
-        )
-        if was_touched or _staging_csv_contains_invocation(path, invocation_ids):
-            selected.append(path)
-    return selected
 
 
 def _wideep_registry_for_backend(backend: str) -> list:
@@ -299,18 +147,7 @@ class ResumeCheckpoint:
 
     FLUSH_INTERVAL_SEC = 2.0
 
-    def __init__(
-        self,
-        backend: str,
-        module_name: str,
-        run_func_name: str,
-        checkpoint_dir: str,
-        *,
-        framework_version: str | None = None,
-        gpu_type: str | None = None,
-        sm_version: int | None = None,
-        plan_fingerprint: str | None = None,
-    ):
+    def __init__(self, backend: str, module_name: str, run_func_name: str, checkpoint_dir: str):
         self.module_name = module_name
         self._dirty = False
         self._last_flush = 0.0
@@ -319,10 +156,6 @@ class ResumeCheckpoint:
             "backend": backend,
             "module": module_name,
             "run_func": run_func_name,
-            "framework_version": framework_version,
-            "gpu_type": gpu_type,
-            "sm_version": sm_version,
-            "plan_fingerprint": plan_fingerprint,
         }
         self._done: set[str] = set()
         self._failed: set[str] = set()
@@ -346,7 +179,7 @@ class ResumeCheckpoint:
                 f"Failed to load checkpoint {self._path}: {e}. Run without --resume to start fresh."
             ) from e
 
-        for key in self._metadata:
+        for key in ("schema", "backend", "module", "run_func"):
             if data.get(key) != self._metadata[key]:
                 raise RuntimeError(
                     f"{self.module_name}: checkpoint mismatch "
@@ -620,18 +453,6 @@ def collect_module_safe(
         ]
 
 
-def _mark_task_accounted(accounted_tasks, task_id) -> bool:
-    """Record terminal task accounting through one idempotent manager write."""
-
-    if accounted_tasks is None:
-        return False
-    try:
-        accounted_tasks[task_id] = True
-    except Exception:
-        return False
-    return True
-
-
 def worker(
     queue,
     device_id: int,
@@ -646,7 +467,6 @@ def worker(
     current_task_ids=None,
     consumed_sentinel=None,
     expected_failure_context=None,
-    accounted_tasks=None,
 ):
     """worker with automatic logging setup"""
 
@@ -694,8 +514,7 @@ def worker(
 
         try:
             worker_logger.debug(f"Starting task {task_id}")
-            with collector_invocation(task_id):
-                func(*task, device=device)
+            func(*task, device=device)
             worker_logger.debug(f"Completed task {task_id}")
 
             # Mark done ONLY on success — failed tasks should be retried on resume
@@ -704,7 +523,9 @@ def worker(
                     done_tasks[task_id] = True
                 except Exception:
                     pass
-            _mark_task_accounted(accounted_tasks, task_id)
+            # Clear task ID on success so crash handler knows it completed
+            if current_task_ids is not None:
+                current_task_ids[device_id] = None
         except SystemExit as e:
             # EXIT_CODE_RESTART: task completed successfully, worker exits to free GPU memory
             # (e.g., MOE collectors call sys.exit(EXIT_CODE_RESTART) after finishing)
@@ -714,33 +535,9 @@ def worker(
                         done_tasks[task_id] = True
                     except Exception:
                         pass
-                _mark_task_accounted(accounted_tasks, task_id)
-                raise  # re-raise so the worker actually exits
-
-            # Other SystemExit codes are task failures. Record them before
-            # ending this worker cleanly: re-raising would let ``finally``
-            # advance progress, and a last-task exit could then escape the
-            # parent's health-check loop without an error or checkpoint state.
-            error_info = {
-                "module": module_name,
-                "device_id": device_id,
-                "task_id": task_id,
-                "task_params": str(task),
-                "error_type": "SystemExit",
-                "error_message": f"worker requested exit with status {e.code}",
-                "traceback": traceback.format_exc(),
-                "exit_code": e.code,
-                "timestamp": datetime.now().isoformat(),
-            }
-            if error_queue:
-                error_queue.put(error_info)
-            if failed_tasks is not None:
-                failed_tasks[task_id] = True
-            _mark_task_accounted(accounted_tasks, task_id)
-            worker_logger.exception(f"Task {task_id} requested unexpected process exit {e.code}")
-            for handler in worker_logger.handlers:
-                handler.flush()
-            return
+                if current_task_ids is not None:
+                    current_task_ids[device_id] = None
+            raise  # re-raise so the worker actually exits
         except Exception as e:
             expected_failure = _expected_failure_for_task(task, task_index, expected_failure_context)
             if expected_failure:
@@ -753,7 +550,8 @@ def worker(
                         expected_failed_tasks[task_id] = True
                     except Exception:
                         pass
-                _mark_task_accounted(accounted_tasks, task_id)
+                if current_task_ids is not None:
+                    current_task_ids[device_id] = None
                 for handler in worker_logger.handlers:
                     handler.flush()
                 if _is_cuda_fatal_exception(e, torch_mod):
@@ -790,7 +588,9 @@ def worker(
                     failed_tasks[task_id] = True
                 except Exception:
                     pass
-            _mark_task_accounted(accounted_tasks, task_id)
+            # Clear task ID so crash handler knows it was handled
+            if current_task_ids is not None:
+                current_task_ids[device_id] = None
 
             # Force flush logs before any potential exit
             for handler in worker_logger.handlers:
@@ -809,29 +609,11 @@ def worker(
                 # which we don't want (error already reported above).
                 exit(0)
         finally:
-            try:
-                task_accounted = accounted_tasks is None or task_id in accounted_tasks
-            except Exception:
-                task_accounted = False
-
-            if task_accounted:
-                if accounted_tasks is None:
-                    # Backward-compatible fallback for direct worker callers.
-                    with lock:
-                        progress_value.value += 1
-                else:
-                    # Derive progress from unique task IDs. Repeated writes are
-                    # harmless, and the parent can reconstruct this value after
-                    # a worker dies between status and progress bookkeeping.
-                    progress_value.value = len(accounted_tasks)
-
-                # Keep the task visible to the crash monitor until its terminal
-                # status and progress accounting have both been published.
-                if current_task_ids is not None:
-                    current_task_ids[device_id] = None
+            with lock:
+                progress_value.value += 1
 
             # Periodic memory cleanup to reduce fragmentation
-            if task_accounted and progress_value.value > 0 and progress_value.value % 100 == 0:
+            if progress_value.value % 100 == 0:
                 import gc
 
                 gc.collect()
@@ -852,12 +634,10 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
         if isinstance(task, dict) and "id" in task and "params" in task:
             task_id = task["id"]
             task_params = task["params"]
-            task_index = task.get("index", i)
         else:
             task_id = create_test_case_id(task, func_name, module_name)
             task_params = task
-            task_index = i
-        raw_task_infos.append({"id": task_id, "params": task_params, "index": task_index})
+        raw_task_infos.append({"id": task_id, "params": task_params, "index": i})
     task_info_by_id = {task_info["id"]: task_info for task_info in raw_task_infos}
 
     checkpoint_dir = (
@@ -868,10 +648,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
         module_name=module_name,
         run_func_name=func_name,
         checkpoint_dir=checkpoint_dir,
-        framework_version=resume_options.get("framework_version") if resume_options else None,
-        gpu_type=resume_options.get("gpu_type") if resume_options else None,
-        sm_version=resume_options.get("sm_version") if resume_options else None,
-        plan_fingerprint=resume_options.get("plan_fingerprint") if resume_options else None,
     )
 
     if resume_options and resume_options.get("resume"):
@@ -900,17 +676,14 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     # Used to decide whether a replacement sentinel is needed on restart.
     consumed_sentinel = manager.dict(dict.fromkeys(range(num_processes), False))
     current_task_ids = manager.dict(dict.fromkeys(range(num_processes), None))
-    # Synchronous records of terminal task status. Unlike mp.Queue (async
-    # feeder thread), manager writes cannot be lost when a worker is killed by
-    # a signal on a subsequent task.
+    # Synchronous record of completed task IDs.  Workers write here via
+    # manager RPC in their finally block — same mechanism as progress_value,
+    # so it is guaranteed to be visible before the worker touches the next
+    # task.  Unlike mp.Queue (async feeder thread) this cannot be lost when
+    # a worker is killed by a signal on a subsequent task.
     done_tasks = manager.dict()
     failed_tasks = manager.dict()
     expected_failed_tasks = manager.dict()
-    # Monotonic terminal-task set used as the source of truth for progress.
-    # Status dicts feed the checkpoint and may be drained; this one is retained
-    # so a hard exit between status publication and ``finally`` cannot strand
-    # the monitor one count short forever.
-    accounted_tasks = manager.dict()
 
     def start_process(device_id):
         p = mp.Process(
@@ -929,7 +702,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 current_task_ids,
                 consumed_sentinel,
                 expected_failure_context,
-                accounted_tasks,
             ),
         )
         p.start()
@@ -969,26 +741,22 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     def sync_done_to_checkpoint():
         for task_id in list(done_tasks.keys()):
             resume_tracker.mark_passed(task_id)
-            if _mark_task_accounted(accounted_tasks, task_id):
-                try:
-                    del done_tasks[task_id]
-                except KeyError:
-                    pass
+            try:
+                del done_tasks[task_id]
+            except KeyError:
+                pass
         for task_id in list(failed_tasks.keys()):
             resume_tracker.mark_failed(task_id)
-            if _mark_task_accounted(accounted_tasks, task_id):
-                try:
-                    del failed_tasks[task_id]
-                except KeyError:
-                    pass
+            try:
+                del failed_tasks[task_id]
+            except KeyError:
+                pass
         for task_id in list(expected_failed_tasks.keys()):
             resume_tracker.mark_expected_failed(task_id)
-            if _mark_task_accounted(accounted_tasks, task_id):
-                try:
-                    del expected_failed_tasks[task_id]
-                except KeyError:
-                    pass
-        progress_value.value = len(accounted_tasks)
+            try:
+                del expected_failed_tasks[task_id]
+            except KeyError:
+                pass
 
     # Start processes
     for device_id in range(num_processes):
@@ -1022,31 +790,8 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 task_params = task_info["params"]
 
                 try:
-                    with collector_invocation(task_id):
-                        func(*task_params, device=device)
+                    func(*task_params, device=device)
                     resume_tracker.mark_passed(task_id)
-                except SystemExit as e:
-                    if e.code == EXIT_CODE_RESTART:
-                        # In sequential/profile mode there is no worker process
-                        # to recycle. The collector uses this code only after a
-                        # successful task, so record success and continue.
-                        resume_tracker.mark_passed(task_id)
-                    else:
-                        resume_tracker.mark_failed(task_id)
-                        errors.append(
-                            {
-                                "module": module_name,
-                                "device_id": 0,
-                                "task_id": task_id,
-                                "task_params": str(task_params),
-                                "error_type": "SystemExit",
-                                "error_message": f"collector requested exit with status {e.code}",
-                                "traceback": traceback.format_exc(),
-                                "exit_code": e.code,
-                                "timestamp": datetime.now().isoformat(),
-                            }
-                        )
-                        logger.exception(f"Task {task_id} requested unexpected process exit {e.code}")
                 except Exception as e:
                     expected_failure = _expected_failure_for_task(
                         task_params,
@@ -1133,7 +878,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
 
                     # Mark active task as failed if the process died while running it
                     expected_failure = None
-                    if active_task_id is not None and active_task_id not in accounted_tasks:
+                    if active_task_id is not None and active_task_id not in done_tasks:
                         task_info = task_info_by_id.get(active_task_id)
                         if task_info is not None:
                             expected_failure = _expected_failure_for_task(
@@ -1155,9 +900,9 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                                 failed_tasks[active_task_id] = True
                             except Exception:
                                 pass
-                        _mark_task_accounted(accounted_tasks, active_task_id)
-                    if active_task_id is not None:
                         current_task_ids[i] = None
+                        with lock:
+                            progress_value.value += 1
 
                     crash_error = (
                         None
@@ -1179,16 +924,11 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                         processes[i] = None
                         continue
 
-                    remaining = len(task_infos) - len(accounted_tasks)
+                    remaining = len(task_infos) - progress_value.value
                     if remaining > 0:
                         processes[i] = start_process(i)
                     else:
                         processes[i] = None
-
-            # A worker or the crash handler may have published a terminal task
-            # since the last checkpoint sync. Always reconcile from the retained
-            # ID set instead of relying on a vulnerable increment operation.
-            progress_value.value = len(accounted_tasks)
 
             current = progress_value.value
             if current > pbar.n:
@@ -1212,14 +952,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
         if p.is_alive():
             logger.warning(f"Process {p.pid} did not terminate, forcing...")
             p.terminate()
-
-    # A last task can advance the manager-backed progress counter immediately
-    # before its worker exits. Join first, then drain once more so the worker's
-    # queue feeder and checkpoint writes cannot race the loop termination.
-    while not error_queue.empty():
-        errors.append(error_queue.get())
-    sync_done_to_checkpoint()
-    resume_tracker.flush(force=True)
 
     # Shutdown manager to clean up resources (semaphores, etc.)
     manager.shutdown()
@@ -1248,7 +980,6 @@ def collect_ops(
     resume_options: dict | None = None,
     model_path: str | None = None,
     case_plan=None,
-    run_invocation_ids: set[str] | None = None,
 ) -> list[dict]:
     """Run collection for a list of resolved collection entries.
 
@@ -1281,12 +1012,9 @@ def collect_ops(
                 os.environ["COLLECTOR_MODEL_PATH"] = previous
 
     def _get_test_cases(get_func, model_path: str | None):
-        from collector.planner import use_case_catalog
-
-        catalog = case_plan.catalog if case_plan is not None else None
-        with use_case_catalog(catalog, model_path=model_path), _collector_model_path(model_path):
-            if not model_path:
-                return get_func()
+        if not model_path:
+            return get_func()
+        with _collector_model_path(model_path):
             sig = signature(get_func)
             params = sig.parameters
             if "model_path" in params or any(param.kind == Parameter.VAR_KEYWORD for param in params.values()):
@@ -1302,21 +1030,6 @@ def collect_ops(
                 logger.info(f"Skipping {collection['name']}.{collection['type']} — not in collector v2 case plan")
                 continue
             module_name = collection["module"]
-            backend_variant = (
-                case_plan.backend
-                if case_plan is not None
-                else _backend_variant(backend, "xpu" if "_xpu" in module_name else "auto")
-            )
-            detected_gpu_type, detected_sm_version = _runtime_hardware_identity(backend_variant)
-            population_gpu_type = (
-                case_plan.gpu_type if case_plan is not None and case_plan.gpu_type else detected_gpu_type
-            )
-            population_sm_version = (
-                case_plan.sm_version
-                if case_plan is not None and case_plan.sm_version is not None
-                else detected_sm_version
-            )
-            execution_plan_fingerprint = _plan_execution_fingerprint(case_plan, model_path)
             get_module = __import__(module_name, fromlist=[collection["get_func"]])
             run_module = __import__(module_name, fromlist=[collection["run_func"]])
 
@@ -1347,126 +1060,33 @@ def collect_ops(
             def get_func_with_limit(get_func=get_func):
                 cases = _get_test_cases(get_func, model_path)
                 skipped = []
-                selector_filtered = 0
-                full_module_name = f"{collection['name']}.{collection['type']}"
-                run_func_name = getattr(run_func, "__name__", None) or getattr(run_func, "func", run_func).__name__
-
-                from collector.planner import (
-                    PlanContext,
-                    PopulationResult,
-                    RuleSource,
-                    compile_population,
-                    legacy_rule,
-                )
-                from collector.planner.schemas import register_attention_schemas
-
-                raw_cases = [
-                    case["params"] if isinstance(case, dict) and "id" in case and "params" in case else case
-                    for case in cases
-                ]
-                population_context = PlanContext(
-                    backend=backend_variant,
-                    op=collection["type"],
-                    perf_file=str(collection["perf_filename"]),
-                    schema_version="planner-v1",
-                    model_path=model_path,
-                    model_architecture=case_plan.model_architecture if case_plan is not None else None,
-                    gpu_type=population_gpu_type,
-                    sm_version=population_sm_version,
-                    framework_version=runtime_version,
-                    plan_fingerprint=execution_plan_fingerprint,
-                    attributes={
-                        "module": module_name,
-                        "get_func": collection["get_func"],
-                        "run_func": collection["run_func"],
-                        "framework_version": runtime_version,
-                    },
-                )
-                population_rules = [
-                    legacy_rule(
-                        raw_cases,
-                        source=RuleSource(
-                            rule_id=f"legacy:{module_name}.{collection['get_func']}",
-                            model_path=model_path,
-                            backend=backend_variant,
-                            sm_version=population_sm_version,
-                        ),
-                    )
-                ]
-                if op_plan is not None and op_plan.population_rules:
-                    population_rules.extend(op_plan.population_rules)
-                register_attention_schemas()
-                population = compile_population(
-                    population_rules,
-                    population_context,
-                    record_decisions=False,
-                )
-                selected_indices = list(range(len(population.cases)))
                 if op_plan is not None:
-                    from collector.model_cases import select_test_case_indices_with_report
+                    from collector.model_cases import filter_test_cases_with_report
 
-                    selected_indices, skipped = select_test_case_indices_with_report(
-                        [planned.payload for planned in population.cases],
+                    full_module_name = f"{collection['name']}.{collection['type']}"
+                    run_func_name = getattr(run_func, "__name__", None) or getattr(run_func, "func", run_func).__name__
+                    before_count = len(cases)
+                    cases, skipped = filter_test_cases_with_report(
+                        cases,
                         plan=op_plan,
                         full_module_name=full_module_name,
                         run_func_name=run_func_name,
                         runtime_version=runtime_version,
                     )
-                    selector_filtered = len(population.cases) - len(selected_indices) - len(skipped)
-                    message = (
-                        f"{full_module_name}: collector v2 case plan kept "
-                        f"{len(selected_indices)}/{len(population.cases)} populated cases"
-                    )
+                    message = f"{full_module_name}: collector v2 case plan kept {len(cases)}/{before_count} cases"
                     if skipped:
                         message += (
                             f"; skipped {len(skipped)} expected SM exceptions ({_summarize_expected_skips(skipped)})"
                         )
                     logger.info(message)
-                from collector.planner.compatibility import check_protected_coverage
-
-                selected_population = PopulationResult(
-                    cases=tuple(population.cases[index] for index in selected_indices),
-                    report=population.report,
-                )
-                protected_coverage = (
-                    check_protected_coverage(selected_population, population_context)
-                    if case_plan is None or case_plan.full
-                    else {"status": "targeted_plan_not_enforced"}
-                )
-                cases = [
-                    {
-                        "id": population.cases[index].id,
-                        "params": population.cases[index].payload,
-                        "index": index,
-                    }
-                    for index in selected_indices
-                ]
-                report = population.report.to_dict()
-                report["selected"] = len(cases)
-                report["selector_skipped"] = len(skipped)
-                report["selector_filtered"] = selector_filtered
-                report["protected_coverage"] = protected_coverage
-                report_key = f"{backend_variant}.{collection['type']}"
-                if case_plan is not None:
-                    case_plan.population_reports[report_key] = report
-                logger.info(f"{report_key}: population report {report}")
                 if shuffle:
                     rng = random.Random(shuffle_seed)
                     rng.shuffle(cases)
                 if limit is not None:
                     cases = cases[:limit]
-                if run_invocation_ids is not None:
-                    run_invocation_ids.update(case["id"] for case in cases)
                 return cases
 
-            merged_resume = {
-                **(resume_options or {}),
-                "backend": backend_variant,
-                "framework_version": runtime_version,
-                "gpu_type": population_gpu_type,
-                "sm_version": population_sm_version,
-                "plan_fingerprint": execution_plan_fingerprint,
-            }
+            merged_resume = {**(resume_options or {}), "backend": backend}
             errors = collect_module_safe(
                 collection["name"],
                 collection["type"],
@@ -1510,7 +1130,6 @@ def collect_sglang(
     resume_options: dict | None = None,
     model_path: str | None = None,
     case_plan=None,
-    run_invocation_ids: set[str] | None = None,
 ):
     """Collect performance data for SGLang with enhanced error tracking"""
     from collector.sglang.registry import REGISTRY
@@ -1548,11 +1167,9 @@ def collect_sglang(
         resume_options=resume_options,
         model_path=model_path,
         case_plan=case_plan,
-        run_invocation_ids=run_invocation_ids,
     )
 
     generate_collection_summary(all_errors, "sglang", version)
-    return all_errors
 
 
 def collect_vllm(
@@ -1563,7 +1180,6 @@ def collect_vllm(
     resume_options: dict | None = None,
     model_path: str | None = None,
     case_plan=None,
-    run_invocation_ids: set[str] | None = None,
 ):
     """Collect performance data for vLLM"""
     from collector.version_resolver import build_collections
@@ -1595,11 +1211,9 @@ def collect_vllm(
         resume_options=resume_options,
         model_path=model_path,
         case_plan=case_plan,
-        run_invocation_ids=run_invocation_ids,
     )
 
     generate_collection_summary(all_errors, "vllm", version)
-    return all_errors
 
 
 def collect_trtllm(
@@ -1610,7 +1224,6 @@ def collect_trtllm(
     resume_options: dict | None = None,
     model_path: str | None = None,
     case_plan=None,
-    run_invocation_ids: set[str] | None = None,
 ):
     """Collect performance data for TensorRT LLM with enhanced error tracking"""
     from collector.trtllm.registry import REGISTRY
@@ -1645,11 +1258,9 @@ def collect_trtllm(
         resume_options=resume_options,
         model_path=model_path,
         case_plan=case_plan,
-        run_invocation_ids=run_invocation_ids,
     )
 
     generate_collection_summary(all_errors, "trtllm", version)
-    return all_errors
 
 
 def generate_collection_summary(all_errors, backend, version):
@@ -1724,12 +1335,6 @@ def main():
     global logger
     parser = argparse.ArgumentParser(description="Collect performance data for backends")
     parser.add_argument("--backend", type=str, choices=["trtllm", "sglang", "vllm"], default="trtllm")
-    parser.add_argument(
-        "--device",
-        choices=["auto", "cuda", "xpu"],
-        default="auto",
-        help="Device variant. Use xpu with --plan-only when hardware auto-detection is unavailable.",
-    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
         "--ops",
@@ -1853,11 +1458,6 @@ def main():
         help="Keep collector CSV staging files instead of finalizing *_perf.txt outputs to parquet.",
     )
     args = parser.parse_args()
-    if not args.plan_only:
-        try:
-            _validate_runtime_device_choice(args.backend, args.device)
-        except ValueError as exc:
-            parser.error(str(exc))
     ops = args.ops
     _dsv4_auto_expand = False
     case_plan = None
@@ -1873,18 +1473,12 @@ def main():
         else:
             os.environ.pop("COLLECTOR_MODEL_PATH", None)
 
-        planner_backend = _backend_variant(args.backend, args.device)
-        planner_gpu_type, planner_sm_version = _planner_hardware_scope(
-            planner_backend,
-            args.gpu,
-            args.sm,
-        )
         case_plan = build_collection_case_plan(
-            backend=planner_backend,
+            backend=args.backend,
             model_path=args.model_path,
             model_architecture=args.model_architecture,
-            gpu_type=planner_gpu_type,
-            sm_version=planner_sm_version,
+            gpu_type=args.gpu,
+            sm_version=args.sm,
             model_cases_path=args.model_cases,
             sm_exceptions_path=args.sm_exceptions or args.gpu_exceptions,
             full=args.model_cases_full,
@@ -1927,21 +1521,8 @@ def main():
             ]
             _dsv4_auto_expand = True
         if args.plan_only:
-            from collector.framework_manifest import get_collector_runtime
-            from collector.planner.reporting import build_plan_only_population_reports
-
-            framework_name = "vllm" if case_plan.backend == "vllm_xpu" else case_plan.backend
-            framework_version = get_collector_runtime(framework_name).version
-            case_plan.population_reports.update(
-                build_plan_only_population_reports(
-                    case_plan,
-                    ops,
-                    framework_version=framework_version,
-                )
-            )
             log_dict = case_plan.to_log_dict()
             log_dict["ops"] = ops
-            log_dict["framework_version"] = framework_version
             print(json.dumps(log_dict, indent=2))
             return
     else:
@@ -2032,13 +1613,15 @@ def main():
 
     output_root = Path.cwd()
     existing_perf_outputs = {path.resolve(): path.stat().st_mtime_ns for path in find_perf_csv_outputs(output_root)}
-    run_invocation_ids: set[str] = set()
+
+    def was_touched_by_run(path: Path) -> bool:
+        resolved = path.resolve()
+        return resolved not in existing_perf_outputs or path.stat().st_mtime_ns != existing_perf_outputs[resolved]
 
     # Use profiling context manager
-    collection_errors = []
     with ProfilerContext(args.backend, enabled=args.profile):
         if args.backend == "trtllm":
-            collection_errors = collect_trtllm(
+            collect_trtllm(
                 num_processes,
                 ops,
                 limit=limit,
@@ -2046,10 +1629,9 @@ def main():
                 resume_options=resume_options,
                 model_path=case_plan.model_path if case_plan is not None else None,
                 case_plan=case_plan,
-                run_invocation_ids=run_invocation_ids,
             )
         elif args.backend == "sglang":
-            collection_errors = collect_sglang(
+            collect_sglang(
                 num_processes,
                 ops,
                 limit=limit,
@@ -2057,10 +1639,9 @@ def main():
                 resume_options=resume_options,
                 model_path=case_plan.model_path if case_plan is not None else None,
                 case_plan=case_plan,
-                run_invocation_ids=run_invocation_ids,
             )
         elif args.backend == "vllm":
-            collection_errors = collect_vllm(
+            collect_vllm(
                 num_processes,
                 ops,
                 limit=limit,
@@ -2068,28 +1649,18 @@ def main():
                 resume_options=resume_options,
                 model_path=case_plan.model_path if case_plan is not None else None,
                 case_plan=case_plan,
-                run_invocation_ids=run_invocation_ids,
             )
 
-    if collection_errors:
-        logger.error(
-            f"Preserving collector CSV staging files because {len(collection_errors)} error(s) remain; "
-            "resume/retry before finalization"
-        )
-    elif args.keep_csv:
+    if args.keep_csv:
         logger.info("Keeping collector CSV staging files because --keep-csv was passed")
     else:
-        finalizable_perf_outputs = _select_finalizable_perf_outputs(
-            output_root,
-            existing_perf_outputs,
-            run_invocation_ids,
-        )
-        if finalizable_perf_outputs:
+        touched_perf_outputs = [path for path in find_perf_csv_outputs(output_root) if was_touched_by_run(path)]
+        if touched_perf_outputs:
             logger.info(
                 "Finalizing collector CSV staging files as parquet:\n  "
-                + "\n  ".join(str(path) for path in finalizable_perf_outputs)
+                + "\n  ".join(str(path) for path in touched_perf_outputs)
             )
-        converted = finalize_perf_files(finalizable_perf_outputs)
+        converted = finalize_perf_files(touched_perf_outputs)
         if converted:
             logger.info(f"Finalized {len(converted)} collector perf files as parquet")
 

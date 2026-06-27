@@ -29,10 +29,106 @@ from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 from collector.case_generator import (
     get_attention_context_shape_sweeps,
     get_attention_generation_shape_sweeps,
+    get_attention_head_configs,
 )
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
-from collector.planner.schemas.attention import build_attention_context_cases, build_attention_generation_cases
 from collector.registry_types import PerfFile
+
+
+def _skip_trtllm_sm120_fp8_context_fmha(
+    batch_size: int,
+    input_len: int,
+    num_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+) -> bool:
+    if not (tensorrt_llm.__version__.startswith(("1.3.0rc5", "1.3.0rc10")) and get_sm_version() >= 120):
+        return False
+
+    num_tokens = batch_size * input_len
+    if tensorrt_llm.__version__.startswith("1.3.0rc5"):
+        return (
+            # MHA h=128 max-token cases crash with an illegal memory access in
+            # the SM120 FP8 context FMHA kernel.
+            (num_heads == num_key_value_heads == 96 and head_dim == 128 and num_tokens == 65536)
+            # h=256 cases fail in the qkv_256 SM120 FP8 FMHA kernel.
+            or head_dim == 256
+        )
+
+    if head_dim != 256:
+        return False
+
+    return (
+        # TRT-LLM 1.3.0rc10 SM120 qkv_256 FP8 context FMHA crashes with
+        # cudaErrorIllegalAddress for these verified high-token regions.
+        (num_heads == 96 and num_key_value_heads == 8 and num_tokens >= 81920)
+        or (num_heads == 48 and num_key_value_heads == 8 and num_tokens >= 131072)
+        or (num_heads == num_key_value_heads == 96 and batch_size >= 2 and input_len >= 16384)
+    )
+
+
+def _skip_trtllm_sm89_rc15_long_context_gqa(
+    batch_size: int,
+    input_len: int,
+    num_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+) -> bool:
+    if not (tensorrt_llm.__version__.startswith("1.3.0rc15") and get_sm_version() == 89):
+        return False
+
+    if num_key_value_heads not in {1, 2, 4, 8}:
+        return False
+
+    num_tokens = batch_size * input_len
+    if num_heads == 96:
+        if head_dim == 128:
+            return num_tokens >= 98304
+        if head_dim >= 256:
+            return num_tokens >= 49152
+        return head_dim >= 192 and num_tokens >= 65536
+    if num_heads == 64:
+        if head_dim >= 256:
+            return num_tokens >= 81920
+        return head_dim >= 192 and num_tokens >= 98304
+    if num_heads == 48:
+        if head_dim >= 256:
+            return num_tokens >= 98304
+        return head_dim >= 192 and num_tokens >= 131072
+    if num_heads == 40:
+        return head_dim >= 256 and num_tokens >= 131072
+    return False
+
+
+def _skip_trtllm_sm89_rc15_fp8_context_mha(
+    batch_size: int,
+    input_len: int,
+    num_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+    use_fp8_kv_cache: bool,
+    use_fp8_context_fmha: bool,
+) -> bool:
+    if not (tensorrt_llm.__version__.startswith("1.3.0rc15") and get_sm_version() == 89):
+        return False
+
+    if not (use_fp8_kv_cache and use_fp8_context_fmha and num_heads == num_key_value_heads):
+        return False
+
+    num_tokens = batch_size * input_len
+    if num_heads == 96:
+        if head_dim == 128:
+            return num_tokens >= 65536
+        if head_dim >= 256:
+            return num_tokens >= 32768
+        return head_dim >= 192 and num_tokens >= 40960
+    if num_heads == 64:
+        if head_dim >= 256:
+            return num_tokens >= 49152
+        return head_dim >= 192 and num_tokens >= 65536
+    if num_heads == 48:
+        return head_dim >= 256 and num_tokens >= 65536
+    return False
 
 
 def run_attention_torch(
@@ -287,22 +383,159 @@ def run_attention_torch(
     kv_cache_manager.shutdown()
 
 
+def _int_list(values):
+    return [int(value) for value in values]
+
+
 def get_context_attention_test_cases():
-    return build_attention_context_cases(
-        "trtllm",
-        get_attention_context_shape_sweeps("trtllm"),
-        sm_version=get_sm_version(),
-        framework_version=tensorrt_llm.__version__,
-    )
+    has_fp8 = get_sm_version() > 86
+    test_cases = []
+
+    for shape_sweep in get_attention_context_shape_sweeps("trtllm"):
+        batch_sizes = _int_list(shape_sweep["batch_sizes"])
+        sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
+        max_tokens_self_attention = int(shape_sweep["max_tokens_self_attention"])
+        max_tokens_grouped_query_attention = int(shape_sweep["max_tokens_grouped_query_attention"])
+        max_batch_size_self_attention = int(shape_sweep["max_batch_size_self_attention"])
+        max_kv_elements = int(shape_sweep["max_kv_elements"])
+
+        for head_config in get_attention_head_configs(shape_sweep, phase="context"):
+            n = head_config.num_heads
+            num_kv_heads = head_config.num_kv_heads
+            h = head_config.head_dim
+            attention_window_size = head_config.window_size
+            if num_kv_heads != n and (num_kv_heads >= n or n % num_kv_heads != 0):
+                continue
+
+            for s in sorted(sequence_lengths, reverse=True):
+                for b in sorted(batch_sizes, reverse=True):
+                    if num_kv_heads == n:
+                        if b * s > max_tokens_self_attention or b > max_batch_size_self_attention:
+                            continue
+                    else:
+                        if b * s > max_tokens_grouped_query_attention:
+                            continue
+                    if b * s * num_kv_heads * h * 2 >= max_kv_elements:
+                        continue
+                    if get_sm_version() >= 100:
+                        # though it's a precheck of gen kernels during the attention op init,
+                        # this cannot be skipped for now
+                        # TLLM_CHECK_WITH_INFO((params.m_num_heads_q_per_kv < max_num_heads_q_per_kv_in_cta || params.m_num_heads_q_per_kv % max_num_heads_q_per_kv_in_cta == 0), # noqa: E501
+                        m_num_heads_q_per_kv = n // num_kv_heads
+                        max_num_heads_q_per_kv_in_cta = 32
+                        if (
+                            m_num_heads_q_per_kv >= max_num_heads_q_per_kv_in_cta
+                            and m_num_heads_q_per_kv % max_num_heads_q_per_kv_in_cta != 0
+                        ):
+                            continue
+
+                    skip_fp8_context_fmha = _skip_trtllm_sm120_fp8_context_fmha(
+                        b,
+                        s,
+                        n,
+                        num_kv_heads,
+                        h,
+                    )
+                    if _skip_trtllm_sm89_rc15_long_context_gqa(b, s, n, num_kv_heads, h):
+                        continue
+                    for precision_case in shape_sweep["precision_cases"]:
+                        use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                        use_fp8_context_fmha = bool(precision_case["fp8_context_fmha"])
+                        if not has_fp8 and use_fp8_kv_cache:
+                            continue
+                        if skip_fp8_context_fmha and use_fp8_context_fmha:
+                            continue
+                        if _skip_trtllm_sm89_rc15_fp8_context_mha(
+                            b,
+                            s,
+                            n,
+                            num_kv_heads,
+                            h,
+                            use_fp8_kv_cache,
+                            use_fp8_context_fmha,
+                        ):
+                            continue
+                        test_cases.append(
+                            [
+                                b,
+                                s,
+                                n,
+                                num_kv_heads,
+                                h,
+                                attention_window_size,
+                                use_fp8_kv_cache,
+                                use_fp8_context_fmha,
+                                True,
+                            ]
+                        )
+
+    return test_cases
+
+
+def _generation_target_sequence_lengths(batch_sizes, sequence_lengths, num_heads, max_tokens, shape_sweep):
+    b_s_dict = {}
+    s_b_dict = {}
+    for s in sequence_lengths:
+        max_b = max_tokens // s // num_heads
+        for b in batch_sizes:
+            if b > max_b:
+                break
+            if s not in s_b_dict:
+                s_b_dict[s] = {b}
+            else:
+                s_b_dict[s].add(b)
+    for s, b_set in s_b_dict.items():
+        if len(b_set) < int(shape_sweep["min_batch_options_per_sequence"]):
+            continue
+        for b in b_set:
+            if b not in b_s_dict:
+                b_s_dict[b] = {s - 1}
+            b_s_dict[b].add(s - 1)
+    return b_s_dict
 
 
 def get_generation_attention_test_cases():
-    return build_attention_generation_cases(
-        "trtllm",
-        get_attention_generation_shape_sweeps("trtllm"),
-        sm_version=get_sm_version(),
-        framework_version=tensorrt_llm.__version__,
-    )
+    has_fp8 = get_sm_version() > 86
+    test_cases = []
+
+    for shape_sweep in get_attention_generation_shape_sweeps("trtllm"):
+        batch_sizes = _int_list(shape_sweep["batch_sizes"])
+        sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
+        min_drop_batch = int(shape_sweep["drop_largest_sequence_for_batch_at_least"])
+
+        for head_config in get_attention_head_configs(shape_sweep, phase="generation"):
+            n = head_config.num_heads
+            n_kv = head_config.num_kv_heads
+            h = head_config.head_dim
+            attention_window_size = head_config.window_size
+            max_tokens_key = "max_mha_tokens_per_step" if n == n_kv else "max_xqa_tokens_per_step"
+            b_s_dict = _generation_target_sequence_lengths(
+                batch_sizes,
+                sequence_lengths,
+                n,
+                int(shape_sweep[max_tokens_key]),
+                shape_sweep,
+            )
+            if n_kv != n and get_sm_version() >= 100:
+                # TLLM_CHECK_WITH_INFO((params.m_num_heads_q_per_kv < max_num_heads_q_per_kv_in_cta || params.m_num_heads_q_per_kv % max_num_heads_q_per_kv_in_cta == 0), # noqa: E501
+                m_num_heads_q_per_kv = n // n_kv
+                max_num_heads_q_per_kv_in_cta = 32
+                if (
+                    m_num_heads_q_per_kv >= max_num_heads_q_per_kv_in_cta
+                    and m_num_heads_q_per_kv % max_num_heads_q_per_kv_in_cta != 0
+                ):
+                    continue
+            for b, s_list_limited in b_s_dict.items():
+                target_s_list = sorted(s_list_limited)
+                if b >= min_drop_batch:
+                    target_s_list = target_s_list[:-1]
+                for s in target_s_list:
+                    for precision_case in shape_sweep["precision_cases"]:
+                        use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                        if not has_fp8 and use_fp8_kv_cache:
+                            continue
+                        test_cases.append([b, s, n, n_kv, h, attention_window_size, use_fp8_kv_cache, False, False])
+    return test_cases
 
 
 if __name__ == "__main__":

@@ -45,6 +45,21 @@ model_case_values:
       model_aliases:
         - moonshotai/Kimi-K2-Instruct
         - nvidia/Kimi-K2.5-NVFP4
+      # The current SGLang/TRT-LLM AIC MLA consumer queries the historical
+      # DeepSeek-compatible 128-head table. vLLM's native 64-head attention
+      # shape is represented separately by the attention profile above.
+      num_heads: 128
+      q_lora_rank: 1536
+      kv_lora_rank: 512
+      qk_nope_head_dim: 128
+      qk_rope_head_dim: 64
+      v_head_dim: 128
+    # Preserve the V1 n=64 sweep. Populate-time local-head dedup keeps only
+    # the one extra physical anchor not already produced by n=128.
+    - model_path: moonshotai/Kimi-K2.5
+      model_aliases:
+        - moonshotai/Kimi-K2-Instruct
+        - nvidia/Kimi-K2.5-NVFP4
       num_heads: 64
       q_lora_rank: 1536
       kv_lora_rank: 512

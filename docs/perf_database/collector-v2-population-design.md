@@ -1,305 +1,175 @@
-# Collector v2 Population and Physical-Case Deduplication
+# Collector V2 Case Pruning
 
-## Status
+## Goal
 
-Phase 1 is implemented. The common population path is active for every
-collector invocation, and attention/encoder are the first operation family
-with consumer-aligned physical deduplication and checked-in historical coverage
-manifests.
+Collector V2 should keep Collector V1's useful measurement coverage, retain
+intentional V2 additions, and avoid scheduling cases created only by unrelated
+Cartesian-product axes or repeated model artifact names.
 
-Other operations already receive stable invocation IDs, additive-rule
-deduplication, resume isolation, and output conflict validation. They continue
-to use the explicit `legacy_passthrough` schema until their positional ABI can
-be projected to a physical row before execution.
-
-## Contract
-
-Collector YAML is additive. Python owns execution and database identity.
+The compatibility invariant is:
 
 ```text
-one parsed YAML catalog
-  -> independently expand base and model rules
-  -> normalize through an op schema
-  -> reject unreachable or unsupported candidates
-  -> derive stable invocation identity
-  -> deduplicate and merge provenance
-  -> apply selectors once to the populated union
-  -> enforce scoped historical physical coverage
-  -> launch workers
-  -> validate emitted physical rows
-  -> atomically merge into parquet
+V1 physical cases ⊆ cleaned V2 physical cases
 ```
 
-This separates three questions that were previously mixed together:
+For every migrated operation, `removed_v1_cases` must be zero. A lower total
+case count is not sufficient evidence because a plan can add many new cases
+while still deleting old interpolation anchors.
 
-1. Why does a model need a case? YAML and `RuleSource` answer this.
-2. Is it one benchmark execution? `InvocationKey` answers this.
-3. Is it one AIC database lookup point? `PhysicalRowKey` answers this.
+## Scope
 
-Counts alone are not a compatibility proof. A full/raw plan is compatible only
-when every protected historical physical key is still present.
+This work changes Collector inputs and case generation only:
 
-## Goals
+- `collector/cases/**/*.yaml`
+- `collector/case_generator.py`
+- `collector/model_cases.py`
+- operation-local case getters
+- Collector tests and documentation
 
-- Let authors append model/backend cases without deep-merging independent
-  dimensions into a global Cartesian product.
-- Collapse artifact aliases when quantization is already a separate axis.
-- Keep correlated attention heads, KV heads, head dimension, window, and TP
-  topology together.
-- Preserve every protected historical lookup point in full/raw collection.
-- Make targeted model collection model-exact and substantially smaller.
-- Prevent resume, subprocess logging, and incremental finalization from losing
-  already collected data.
-- Migrate operation families incrementally without forcing one large schema
-  rewrite.
+It does not change AIC SDK or Rust lookup behavior, EngineSpec, or Dynamo
+Planner. Collector output must continue to satisfy the existing consumers.
+Consumer problems found during the audit belong in separate changes.
 
-## One catalog and one population path
+## Baselines
 
-`collector.model_cases.load_case_catalog()` parses the selected base, model,
-and SM YAML documents once. The same `CaseCatalog` is activated while legacy
-case generators run, so op selection and case generation see the same source
-documents and model path.
+- Attention V1: `a4827ce203e9fbc24fe6c6779a7eaa2a7dc79f1a`, immediately before
+  Collector V2.
+- Encoder attention: the original hardcoded grid from PR #1092, because the
+  pre-V2 attention baseline predates this collector.
+- Collector V2 before pruning: upstream `66c6e05fef00cbee6546847fa2280116ef4a38cd`.
 
-Both model-planned and raw registry runs pass through `compile_population()`.
-An unmigrated op uses `legacy_passthrough`; it is not allowed to bypass stable
-identity, central ordering, or reporting. Attention runtime getters and
-`--plan-only` call the same framework-free builders.
+The comparison uses physical benchmark inputs, not model aliases or scheduler
+task IDs. Measurement fields such as latency and power are not case identity.
 
-Some module collectors still load inner sweep values inside a spawned
-subprocess. Their complete migration requires moving that inner sweep into the
-top-level task ABI; this is tracked as a later operation-schema phase.
+## Population flow
 
-## YAML semantics implemented now
-
-Existing schema-v1 sections remain supported:
-
-- `all_frameworks_op_cases` and `framework_specific_op_cases` activate ops and
-  define generator recipes or selectors;
-- `model_case_values` owns model structure and artifact aliasing;
-- `sm_exceptions` owns hardware/framework exclusions.
-
-Schema v2 adds exact, additive `population_rules` and
-`framework_specific_population_rules`. Each rule expands independently. Values
-from two rules are unioned; their dimensions are never implicitly crossed.
-
-```yaml
-schema_version: 2
-architecture: Qwen3ForCausalLM
-model_path: Qwen/Qwen3-32B
-base_ops: [attention_generation]
-
-population_rules:
-  attention_generation:
-    - id: qwen_decode_delta
-      when:
-        backends: [sglang, trtllm, vllm]
-        model_paths: [Qwen/Qwen3-32B, Qwen/Qwen3-32B-FP8]
-        min_sm: 90
-      cases:
-        - batch_size: 2
-          sequence_length: 8191
-          num_heads: 32
-          num_kv_heads: 4
-          head_dim: 128
-          use_fp8_kv_cache: true
-          window_size: 0
+```text
+additive YAML profiles
+    -> select the model/backend operations
+    -> expand correlated structural tuples
+    -> reject unreachable/backend-unsupported tuples
+    -> stable operation-local deduplication
+    -> apply model and SM selectors
+    -> benchmark queue
 ```
 
-Attention mappings also accept `query_heads`/`kv_heads` and
-`fp8_kv_cache` aliases. A native topology can request TP projection:
+The important distinction is between an axis list and a structural profile.
+For attention, `(query heads, KV heads, head dimension, window size, TP)` is a
+correlated tuple. Combining global lists for those fields produces shapes that
+no model uses. Batch and sequence axes can still be swept after the structural
+tuple is selected.
 
-```yaml
-cases:
-  - batch_size: 4
-    sequence_length: 2047
-    num_attention_heads: 64
-    num_key_value_heads: 8
-    tensor_parallel_size: 8
-    head_dim: 128
-    window_size: 0
-```
+YAML remains additive. Deduplication happens after enough information is known
+to identify the actual benchmark point. The first occurrence wins so ordering
+and resume behavior remain deterministic.
 
-The schema requires query heads to divide TP and uses the same ceil-division
-rule as the existing generator for local KV heads. It then emits the exact
-backend positional tuple consumed by `run_*(*case)`.
+## Safe deduplication rules
 
-Supported `when` fields are `backends`, `model_paths`,
-`model_architectures`, `sm_versions`, `min_sm`, and `max_sm`. In full mode,
-model predicates are evaluated against each source model document, so rules
-for different models remain an additive union. A rule cannot activate an op
-that the model/base plan did not select.
+1. Never change a downstream consumer to make a Collector case appear useful.
+2. Preserve a field if any current Python or Rust consumer distinguishes it.
+3. Collapse artifact aliases only for shape-only collectors where the model
+   path is neither loaded by the benchmark nor part of its persisted key.
+4. Do not alias BF16, FP8, or NVFP4 checkpoints before a module benchmark has
+   resolved path-dependent native quantization. Once quantization is explicit,
+   an operation-local key may collapse only truly identical benchmark inputs.
+5. For standalone MLA, total heads and TP may produce the same local-head
+   kernel. The getter deduplicates on `(dtype, local heads, batch, sequence)`.
+6. SM exclusions are pre-execution skips. They are not expected failures after
+   a case has already run.
+7. Unknown or unproved equivalence is retained. It is better to prune less than
+   to silently remove a V1 interpolation anchor.
 
-`profiles`/`sweep` inside schema-v2 population rules, rule inheritance,
-`extends`, `replace`, and a general predicate language are not implemented.
-Existing structural attention profiles under `model_case_values.attention`
-remain the supported compact sweep form. Adding another syntax before more op
-schemas exist would create two competing expansion systems.
+## Attention result
 
-## Identity
+The following canonical B200/SM100 counts compare physical attention cases.
+`Removed` is always measured against the V1 baseline.
 
-### InvocationKey
+| Backend | Operation | V1 | V2 before | Cleaned V2 | Added | Removed |
+|---|---|---:|---:|---:|---:|---:|
+| SGLang | context | 33,714 | 122,676 | 50,901 | 17,187 | 0 |
+| SGLang | generation | 19,484 | 53,654 | 39,556 | 20,072 | 0 |
+| TRT-LLM | context | 63,192 | 143,739 | 75,483 | 12,291 | 0 |
+| TRT-LLM | generation | 40,240 | 155,582 | 54,318 | 14,078 | 0 |
+| vLLM | context | 40,392 | 84,296 | 50,932 | 10,540 | 0 |
+| vLLM | generation | 36,288 | 68,920 | 53,638 | 17,350 | 0 |
+| vLLM XPU | context | 16,188 | 16,188 | 17,838 | 1,650 | 0 |
+| vLLM XPU | generation | 26,322 | 26,322 | 30,728 | 4,406 | 0 |
+| **Total** | | **275,820** | **671,377** | **373,394** | **97,574** | **0** |
 
-An invocation key contains the normalized payload plus its execution scope:
+The unpruned V2 vLLM grids also removed 10,098 context and 8,774 generation
+V1 cases, all from the historical `(head_dim=128, window=128)` region. The
+legacy profile restores those points, while model-native profiles add valid
+new window/head combinations without recreating the global Cartesian product.
 
-- backend variant and operation;
-- performance filename and planner schema version;
-- framework version, GPU/system ID, and SM;
-- model path and architecture;
-- a fingerprint of the selected YAML catalog;
-- schema-projected payload.
+Encoder attention retains all 7,008 original hardcoded cases and adds 671
+model-native cases, for 7,679 total.
 
-The canonical JSON form is SHA-256 hashed. Dict order, tuple/list spelling,
-sets, enums, dataclasses, and paths do not make IDs unstable. Resume
-checkpoints use the same execution dimensions and reject a framework, hardware,
-model, YAML-content, power-measurement mode, or measurement-duration change.
+## Other operation results
 
-### PhysicalRowKey
+These are deterministic shared YAML recipe counts. Backend-specific expansion
+may multiply a recipe by dtype, TP/EP, or token lists.
 
-A physical key is versioned and scoped by performance table. Its fields match
-the key that AIC's Python consumer uses; representative Rust consumers are
-kept in parity tests. Measurement fields and provenance-only artifact names
-are excluded.
+| Operation | V1 | V2 before | Cleaned V2 | Notes |
+|---|---:|---:|---:|---|
+| GEMM | 35,742 | 35,742 | 35,742 | unchanged |
+| ComputeScale | 1,628 | 1,628 | 1,628 | shared recipe unchanged; V2 also activates SGLang/vLLM |
+| MoE common | 1,797 | 4,548 | 2,931 | artifact duplicates removed; V2 physical additions retained |
+| MLA context specs | 220 | 550 | 220 | getter emits 1,760 unique loader keys |
+| MLA generation specs | 362 | 885 | 362 | getter emits 2,896 unique loader keys |
+| Mamba | 8 | 8 | 12 | four V1-compatible interpolation anchors added |
+| GDN | 16 | 16 | 16 | unchanged |
+| mHC | 8 | 8 | 4 | four unique shape/phase profiles; token expansion is unchanged |
+| MLA BMM pre/post | 400 / 448 | 400 / 448 | 400 / 448 | unchanged |
 
-Attention examples:
+For MoE on B200, the cleaned schedules remove repeated artifact tasks without
+removing any expanded physical tuple. For example, SGLang drops from 366,072
+V2 tasks to 218,514 while retaining all 211,920 distinct conservative tuples.
 
-- MHA normalizes `num_key_value_heads == num_heads` to the consumer's zero-KV
-  sentinel;
-- generation uses `isl + step` as total sequence length;
-- a generation-only context-FMHA flag is not a distinct database key;
-- encoder keys are `(dtype, head_dim, heads, isl, batch)`.
+DSA module population removes artifact-only repetition only where quantization
+and architecture are already explicit. SGLang keeps its checkpoint tasks
+because native quantization is path-dependent; TRT-LLM and vLLM can safely
+deduplicate after their explicit module inputs are known. Every projected key
+set is unchanged:
 
-For attention/encoder, the planner's invocation projection is the physical
-row key, so redundant consumer points are pruned before workers start. For
-grouped module invocations that emit many rows, the top-level invocation stays
-distinct and actual rows are validated during finalization.
+| Backend | Operation | Scheduled before | Scheduled cleaned | Removed projected keys |
+|---|---|---:|---:|---:|
+| SGLang | context | 792 | 792 | 0 |
+| SGLang | generation | 48 | 48 | 0 |
+| TRT-LLM | context | 46,848 | 23,424 | 0 |
+| TRT-LLM | generation | 35,328 | 17,664 | 0 |
+| vLLM | context | 70,272 | 35,136 | 0 |
+| vLLM | generation | 35,328 | 17,664 | 0 |
 
-### Duplicate metadata
+The analogous GLM MoE artifacts are deliberately not merged: SGLang selects
+native FP8/NVFP4 MoE quantization by artifact path, so those paths represent
+real additional measurements rather than scheduler duplicates.
 
-Duplicate candidates merge ordered provenance. Non-overlapping metadata is
-merged; conflicting values fail planning rather than silently keeping the
-first rule's expected-failure or ownership metadata.
+## Review checklist
 
-## Selectors
+When adding or changing a model profile:
 
-All legacy cases and schema-v2 rules are populated and deduplicated first.
-`case_ids`, structured rules, indices, ranges, and `include.limit` are then
-applied once to the combined ordered plan. A limit of `N` therefore selects at
-most `N` cases, not `N` cases from every additive rule.
+1. Identify whether the collector loads the model or only uses its dimensions.
+2. Keep correlated dimensions in one profile; do not append them to unrelated
+   global axes.
+3. State whether quantization is selected by the model artifact or expanded by
+   the collector.
+4. Compare physical key sets, not only totals.
+5. Require `V1 - candidate == ∅` for full/raw collection.
+6. Verify targeted model plans do not activate unrelated base operations.
+7. Keep an old synthetic anchor when an unchanged consumer still queries it,
+   even if the current model metadata would choose a different value.
 
-`--shuffle` and CLI `--limit` remain runner controls and are applied after
-population and YAML selectors.
-
-## Historical coverage guard
-
-Canonical gzip JSONL manifests live under
-`collector/planner/manifests/collector_v1/`. Each header fixes source ref,
-backend variant, an exact framework version or compatibility range,
-GPU/system ID, SM, performance table, and physical-key schema version. A hard
-subset assertion runs only for a full/raw plan whose scope matches the
-manifest. Targeted model plans are intentionally
-not v1-wide. Other scopes report `out_of_scope`, never a false compatibility
-claim.
-
-Current exact B200/SM100 and XPU baselines are:
-
-| Backend | Operation | Historical | Current full/raw | Added | Removed |
-| --- | --- | ---: | ---: | ---: | ---: |
-| SGLang | context attention | 33,714 | 50,901 | 17,187 | 0 |
-| SGLang | generation attention | 19,484 | 39,556 | 20,072 | 0 |
-| TensorRT-LLM | context attention | 63,192 | 75,483 | 12,291 | 0 |
-| TensorRT-LLM | generation attention | 40,240 | 54,318 | 14,078 | 0 |
-| vLLM | context attention | 40,392 | 50,932 | 10,540 | 0 |
-| vLLM | generation attention | 36,288 | 53,638 | 17,350 | 0 |
-| vLLM XPU | context attention | 16,188 | 17,838 | 1,650 | 0 |
-| vLLM XPU | generation attention | 26,322 | 30,728 | 4,406 | 0 |
-| SGLang | encoder attention | 7,008 | 7,679 | 671 | 0 |
-| TensorRT-LLM | encoder attention | 7,008 | 7,679 | 671 | 0 |
-| vLLM | encoder attention | 7,008 | 7,679 | 671 | 0 |
-
-Context/generation use the pre-collector-v2 source
-`a4827ce203e9fbc24fe6c6779a7eaa2a7dc79f1a`. Encoder did not exist at that
-ref; its honest initial baseline is the original hardcoded PR #1092 commit
-`36808ecced9af9d0d71d944c716ae96d1d4a2a47`. Restoring sequence lengths
-13/26/52/104 recovered 924 encoder keys that the later YAML conversion had
-dropped, while retaining new sequence length 1 and model profiles.
-
-For a targeted SGLang Qwen3-32B plan, context/generation are only 2,448 and
-2,354 cases. The base and `-FP8` artifacts produce the same structural set;
-quantization is not multiplied by the model suffix.
-
-There is currently no removal allowlist. Deliberately deleting a historical
-low-value point requires a separately reviewed policy and manifest update.
-
-Regenerate or verify manifests with:
+## Validation
 
 ```bash
-.venv/bin/python tools/collector/generate_v1_attention_manifests.py --check
+pytest -q tests/unit/collector
+ruff check collector tests/unit/collector
+ruff format --check collector tests/unit/collector
 ```
 
-## Output and resume safety
-
-Every worker runs inside a scoped collector invocation. `log_perf()` writes the
-invocation ID to a staging-only CSV column. An environment bridge carries that
-ID into module collector subprocesses; the field is removed before parquet is
-published.
-
-Finalization applies these rules:
-
-- the same known invocation and physical key is a retry; the last successful
-  staging row wins;
-- different known invocations producing one physical key are a conflict;
-- unattributed legacy rows are never silently reclassified as retries;
-- validation writes a temporary clean CSV, so a conversion failure leaves the
-  original staging bytes and invocation IDs intact;
-- an existing parquet is merged with new unique physical keys instead of being
-  overwritten by a targeted or resumed run;
-- parquet replacement is atomic;
-- any remaining collector error keeps CSV staging in place and skips
-  finalization.
-
-`log_perf()` lock or write failures raise into the worker. They are not marked
-as completed resume tasks.
-
-## Consumer compatibility
-
-The physical-key registry covers the active performance tables without
-guessing keys for unknown files. Known tables fail on a missing key field;
-unknown tables retain legacy behavior.
-
-This change also closes consumer discrepancies discovered while tracing case
-consumption:
-
-- Mamba and GDN generation use their batch-only physical key in Python and
-  Rust; duplicate rows retain the same file-order winner.
-- DSA context/generation use phase-correct quant fields and preserve the
-  physical `trtllm` versus `flashmla_kv` backend axis.
-- MHC treats architecture as provenance, while MoE preserves the two
-  kernel-source-specific effective quant modes.
-- DSV4 context prefix lookup and generation `isl + step` collision handling
-  are consistent across Python and Rust.
-
-Adding the DSA backend field changes the positional Rust op wire, so
-`EngineSpec` schema version 2 rejects older bincode payloads from the leading
-version word before attempting to decode changed op layouts. These are query
-and wire semantics, not collector-only details; a case is not useful coverage
-unless AIC can retrieve it unambiguously.
-
-## Migration state and roadmap
-
-| Capability | Attention/encoder | Other registered ops |
-| --- | --- | --- |
-| Central population and stable ID | active | active |
-| Additive schema-v2 exact cases | active | positional exact cases via passthrough |
-| Pre-worker consumer-key dedupe | active | pending op schema |
-| Historical exact manifest guard | active for checked scopes | pending manifests |
-| Final output physical conflict guard | active | active for registered tables |
-
-Next operation families should be migrated in this order:
-
-1. MLA, DSA, Mamba, GDN, and MHC, where one invocation may emit many rows.
-2. GEMM, ComputeScale, MoE, WideEP, and DSV4.
-3. Only after those schemas exist, consider compact schema-v2 sweep syntax and
-   explicit reviewed removal manifests.
-
-Local collector `seen` sets should be removed only after the corresponding
-schema, manifest, and Python/Rust query parity tests are active.
+The unit coverage loads test-only V1 physical-key fixtures and executes the
+current backend getter bodies, so batch, sequence, precision, head topology,
+window, and phase keys are all checked for zero removal. It also freezes encoder
+anchors, per-operation recipe counts, selector narrowing, alias handling, and
+operation-local physical deduplication. No coverage fixture is loaded by the
+Collector runtime.

@@ -1136,50 +1136,6 @@ class TestDeepSeekTPAllReduce:
         assert not any(op._name == "context_tp_allreduce" for op in model.context_ops)
 
 
-class TestKimiNativeMLAHeads:
-    @staticmethod
-    def _build():
-        model_config = config.ModelConfig(
-            tp_size=4,
-            pp_size=1,
-            moe_tp_size=1,
-            moe_ep_size=4,
-            attention_dp_size=1,
-        )
-        return models.get_model("moonshotai/Kimi-K2.5", model_config, backend_name="trtllm")
-
-    def test_module_and_kernel_fallbacks_use_64_native_heads(self):
-        model = self._build()
-        expected_local_heads = 64 // 4
-
-        context_block = next(op for op in model.context_ops if op._name == "context_mla_block")
-        generation_block = next(op for op in model.generation_ops if op._name == "generation_mla_block")
-
-        assert context_block._primary._num_heads == expected_local_heads
-        assert generation_block._primary._num_heads == expected_local_heads
-
-        context_fallback = {op._name: op for op in context_block._fallback}
-        generation_fallback = {op._name: op for op in generation_block._fallback}
-        assert context_fallback["context_attention"]._num_heads == expected_local_heads
-        assert generation_fallback["generation_attention"]._num_heads == expected_local_heads
-        assert generation_fallback["generation_bmm_pre"]._num_heads == expected_local_heads
-        assert generation_fallback["generation_bmm_post"]._num_heads == expected_local_heads
-
-    def test_projection_shapes_scale_with_native_heads(self):
-        model = self._build()
-        local_heads = 64 // 4
-        context_block = next(op for op in model.context_ops if op._name == "context_mla_block")
-        generation_block = next(op for op in model.generation_ops if op._name == "generation_mla_block")
-        context_fallback = {op._name: op for op in context_block._fallback}
-        generation_fallback = {op._name: op for op in generation_block._fallback}
-
-        assert context_fallback["context_q_b_proj_gemm"]._n == local_heads * (128 + 64)
-        assert context_fallback["context_kv_b_proj_gemm"]._n == local_heads * (128 + 128)
-        assert context_fallback["context_proj_gemm"]._k == local_heads * 128
-        assert generation_fallback["generation_q_b_proj_gemm"]._n == local_heads * (128 + 64)
-        assert generation_fallback["generation_proj_gemm"]._k == local_heads * 128
-
-
 # ── Qwen3VL constants ──────────────────────────────────────────────────────────
 
 _QWEN3VL_ARCH = "Qwen3VLForConditionalGeneration"

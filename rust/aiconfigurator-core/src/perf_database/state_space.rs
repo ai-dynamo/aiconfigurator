@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use super::interpolation::{interp_1d, nearest_neighbors};
 use crate::common::error::AicError;
+use super::interpolation::{interp_1d, nearest_neighbors};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct StateSpaceTable {
@@ -66,18 +66,6 @@ struct GdnKey {
     // See `Mamba2Key`: shape is the key, `model_name` is metadata.
 }
 
-/// Canonical perf-table id for the production GDN decode recurrence.
-///
-/// Python model graphs historically emitted the descriptive
-/// `fused_sigmoid_gating_delta_rule_update` name, while framework collectors
-/// and collector-v1 parquet files use the actual runtime API name below.
-pub(crate) fn canonical_gdn_kernel_source(kernel_source: &str) -> &str {
-    match kernel_source {
-        "fused_sigmoid_gating_delta_rule_update" => "fused_recurrent_gated_delta_rule",
-        _ => kernel_source,
-    }
-}
-
 impl StateSpaceTable {
     pub fn new(data_root: PathBuf) -> Self {
         Self {
@@ -105,6 +93,27 @@ impl StateSpaceTable {
         n_groups: u32,
         chunk_size: u32,
     ) -> Result<f64, AicError> {
+        // Mirror Python `load_mamba2_data`'s defaultdict-without-KeyError
+        // bug: for `phase == "generation"`, the row-population pattern
+        // `try { data[ks][ph][mk][bs] } except KeyError: data[ks][ph][mk][bs]
+        // = entry` never reaches the `except` branch because every level
+        // is a `defaultdict` that lazily materialises an empty dict on
+        // access (no KeyError raised). Python's generation Mamba2 leaves
+        // therefore end up empty and every generation query silently falls
+        // through to SOL. The Rust parquet loader populates the rows
+        // correctly, so returning silicon here would give a numerically
+        // different (and arguably "more correct") answer — but for
+        // apple-to-apple parity we mirror Python by returning a
+        // PerfDatabase error so the operator-layer SOL branch fires.
+        // GDN's loader is fine (uses explicit `in` checks), so this
+        // workaround is Mamba2-generation-only.
+        if phase == "generation" {
+            return Err(AicError::PerfDatabase(format!(
+                "Mamba2 generation data intentionally not used (matches Python `load_mamba2_data` \
+                 defaultdict bug at operations/mamba.py:719); operator must fall to SOL. \
+                 ks={kernel_source}, d_model={d_model}"
+            )));
+        }
         let grids = self.load_mamba2()?;
         let key = Mamba2Key {
             kernel_source: kernel_source.to_string(),
@@ -124,6 +133,8 @@ impl StateSpaceTable {
         // shares d_model, surface as `PerfDatabase` so the operator layer's
         // SOL fallback applies.
         //
+        // Only the context phase reaches this point — generation queries are
+        // short-circuited above to match Python's degenerate behaviour.
         let by_bs_seq = match grids.by_keys.get(&key) {
             Some(table) => table,
             None => grids
@@ -137,11 +148,7 @@ impl StateSpaceTable {
                 .map(|(_, table)| table)
                 .ok_or_else(|| missing("Mamba2", &self.data_root, format!("{key:?}")))?,
         };
-        // Python stores decode leaves by batch only. Normalize the unused
-        // sequence coordinate to zero so arbitrary runtime decode lengths hit
-        // the same collected one-token row.
-        let seq_lookup = state_space_sequence_key(phase, seq_len);
-        bs_seq_interp(by_bs_seq, batch_size, seq_lookup)
+        bs_seq_interp(by_bs_seq, batch_size, seq_len)
     }
 
     /// GDN latency for a layer instance. Same lookup semantics as Mamba2.
@@ -160,7 +167,7 @@ impl StateSpaceTable {
     ) -> Result<f64, AicError> {
         let grids = self.load_gdn()?;
         let key = GdnKey {
-            kernel_source: canonical_gdn_kernel_source(kernel_source).to_string(),
+            kernel_source: kernel_source.to_string(),
             phase: phase.to_string(),
             d_model,
             d_conv,
@@ -192,8 +199,7 @@ impl StateSpaceTable {
                 }
             }
         };
-        let seq_lookup = state_space_sequence_key(phase, seq_len);
-        bs_seq_interp(by_bs_seq, batch_size, seq_lookup)
+        bs_seq_interp(by_bs_seq, batch_size, seq_len)
     }
 
     fn load_mamba2(&self) -> Result<&Mamba2Grids, AicError> {
@@ -255,7 +261,8 @@ fn bs_seq_interp(
     // `list(table.keys())`. Mirror that: when no row matches `seq_len`,
     // pick the unique seq_len present in the table and interpolate by
     // batch_size at that slice.
-    let unique_seqs: std::collections::BTreeSet<u32> = by_bs_seq.keys().map(|&(_, s)| s).collect();
+    let unique_seqs: std::collections::BTreeSet<u32> =
+        by_bs_seq.keys().map(|&(_, s)| s).collect();
     if let Some(&only_seq) = unique_seqs.iter().next().filter(|_| unique_seqs.len() == 1) {
         let bs_keys: Vec<u32> = by_bs_seq
             .keys()
@@ -282,53 +289,6 @@ fn bs_seq_interp(
     )))
 }
 
-fn state_space_sequence_key(phase: &str, seq_len: u32) -> u32 {
-    if phase == "context" {
-        seq_len
-    } else {
-        0
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn insert_mamba2_measurement(
-    by_keys: &mut BTreeMap<Mamba2Key, BTreeMap<(u32, u32), f64>>,
-    key: Mamba2Key,
-    phase: &str,
-    batch_size: u32,
-    seq_len: u32,
-    latency: f64,
-) {
-    let point = (batch_size, state_space_sequence_key(phase, seq_len));
-    let by_point = by_keys.entry(key).or_default();
-    if phase == "context" {
-        // Python preserves the first duplicate context point.
-        by_point.entry(point).or_insert(latency);
-    } else {
-        // Python generation assigns `by_model[batch_size] = entry`, so the
-        // last file row wins after seq_len is dropped from the physical key.
-        by_point.insert(point, latency);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn insert_gdn_measurement(
-    by_keys: &mut BTreeMap<GdnKey, BTreeMap<(u32, u32), f64>>,
-    key: GdnKey,
-    phase: &str,
-    batch_size: u32,
-    seq_len: u32,
-    latency: f64,
-) {
-    // Python GDN preserves the first duplicate in both phases. Generation is
-    // still batch-only, so normalize its unused sequence coordinate to zero.
-    by_keys
-        .entry(key)
-        .or_default()
-        .entry((batch_size, state_space_sequence_key(phase, seq_len)))
-        .or_insert(latency);
-}
-
 fn load_mamba2_parquet(path: &Path) -> Result<Mamba2Grids, AicError> {
     let reader = PerfReader::open(path)?;
     let kernel_source_col = reader.col("kernel_source")?;
@@ -347,10 +307,9 @@ fn load_mamba2_parquet(path: &Path) -> Result<Mamba2Grids, AicError> {
     let mut by_keys: BTreeMap<Mamba2Key, BTreeMap<(u32, u32), f64>> = BTreeMap::new();
     for row in reader.rows()? {
         let row = row?;
-        let phase = row.str_owned(phase_col)?;
         let key = Mamba2Key {
             kernel_source: row.str_owned(kernel_source_col)?,
-            phase: phase.clone(),
+            phase: row.str_owned(phase_col)?,
             d_model: row.u32(d_model_col)?,
             d_state: row.u32(d_state_col)?,
             d_conv: row.u32(d_conv_col)?,
@@ -359,14 +318,12 @@ fn load_mamba2_parquet(path: &Path) -> Result<Mamba2Grids, AicError> {
             n_groups: row.u32(n_groups_col)?,
             chunk_size: row.u32(chunk_size_col)?,
         };
-        insert_mamba2_measurement(
-            &mut by_keys,
-            key,
-            &phase,
-            row.u32(batch_size_col)?,
-            row.u32(seq_len_col)?,
-            row.f64(latency_col)?,
-        );
+        // First-wins parity with Python `load_mamba2_data`.
+        by_keys
+            .entry(key)
+            .or_default()
+            .entry((row.u32(batch_size_col)?, row.u32(seq_len_col)?))
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -394,11 +351,9 @@ fn load_gdn_parquet(path: &Path) -> Result<GdnGrids, AicError> {
     let mut by_keys: BTreeMap<GdnKey, BTreeMap<(u32, u32), f64>> = BTreeMap::new();
     for row in reader.rows()? {
         let row = row?;
-        let raw_kernel_source = row.str_owned(kernel_source_col)?;
-        let phase = row.str_owned(phase_col)?;
         let key = GdnKey {
-            kernel_source: canonical_gdn_kernel_source(&raw_kernel_source).to_string(),
-            phase: phase.clone(),
+            kernel_source: row.str_owned(kernel_source_col)?,
+            phase: row.str_owned(phase_col)?,
             d_model: row.u32(d_model_col)?,
             d_conv: row.u32(d_conv_col)?,
             num_k_heads: row.u32(num_k_heads_col)?,
@@ -406,14 +361,12 @@ fn load_gdn_parquet(path: &Path) -> Result<GdnGrids, AicError> {
             num_v_heads: row.u32(num_v_heads_col)?,
             head_v_dim: row.u32(head_v_dim_col)?,
         };
-        insert_gdn_measurement(
-            &mut by_keys,
-            key,
-            &phase,
-            row.u32(batch_size_col)?,
-            row.u32(seq_len_col)?,
-            row.f64(latency_col)?,
-        );
+        // First-wins parity with Python `load_gdn_data`.
+        by_keys
+            .entry(key)
+            .or_default()
+            .entry((row.u32(batch_size_col)?, row.u32(seq_len_col)?))
+            .or_insert(row.f64(latency_col)?);
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -425,10 +378,7 @@ fn load_gdn_parquet(path: &Path) -> Result<GdnGrids, AicError> {
 }
 
 fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
-    AicError::PerfDatabase(format!(
-        "{table} data missing for {descriptor} at {}",
-        data_root.display()
-    ))
+    AicError::PerfDatabase(format!("{table} data missing for {descriptor} at {}", data_root.display()))
 }
 
 fn clone_err(err: &AicError) -> AicError {
@@ -438,18 +388,6 @@ fn clone_err(err: &AicError) -> AicError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn gdn_kernel_source_alias_is_canonicalized() {
-        assert_eq!(
-            canonical_gdn_kernel_source("fused_sigmoid_gating_delta_rule_update"),
-            "fused_recurrent_gated_delta_rule"
-        );
-        assert_eq!(
-            canonical_gdn_kernel_source("fused_recurrent_gated_delta_rule"),
-            "fused_recurrent_gated_delta_rule"
-        );
-    }
 
     #[test]
     fn state_space_loaders_smoke() {
@@ -473,116 +411,6 @@ mod tests {
                 128,
             )
             .err();
-    }
-
-    #[test]
-    fn mamba2_generation_uses_batch_only_silicon_key() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/aiconfigurator/systems/data/b200_sxm/trtllm/1.3.0rc10");
-        let path = root.join("mamba2_perf.parquet");
-        if std::fs::metadata(&path).map_or(true, |metadata| metadata.len() < 1_000) {
-            return; // git-lfs data not materialized
-        }
-
-        let table = StateSpaceTable::new(root);
-        let query = |seq_len| {
-            table.query_mamba2(
-                "causal_conv1d_update",
-                "generation",
-                1,
-                seq_len,
-                4096,
-                128,
-                4,
-                128,
-                64,
-                8,
-                128,
-            )
-        };
-        let at_one = query(1).expect("Mamba2 decode silicon lookup must succeed");
-        let at_long_context = query(32_768).expect("decode seq_len must not change the lookup key");
-
-        assert!((at_one - 0.004428799822926521).abs() < 1e-9);
-        assert_eq!(at_one, at_long_context);
-    }
-
-    #[test]
-    fn mamba2_generation_duplicate_sequence_metadata_is_last_wins() {
-        let key = Mamba2Key {
-            kernel_source: "causal_conv1d_update".into(),
-            phase: "generation".into(),
-            d_model: 4096,
-            d_state: 128,
-            d_conv: 4,
-            nheads: 128,
-            head_dim: 64,
-            n_groups: 8,
-            chunk_size: 128,
-        };
-        let mut by_keys = BTreeMap::new();
-        insert_mamba2_measurement(&mut by_keys, key.clone(), "generation", 2, 1, 11.0);
-        insert_mamba2_measurement(&mut by_keys, key, "generation", 2, 32_768, 19.0);
-
-        let table = StateSpaceTable {
-            data_root: PathBuf::new(),
-            mamba2: OnceLock::from(Ok(Mamba2Grids { by_keys })),
-            gdn: OnceLock::new(),
-        };
-        let latency = table
-            .query_mamba2(
-                "causal_conv1d_update",
-                "generation",
-                2,
-                65_536,
-                4096,
-                128,
-                4,
-                128,
-                64,
-                8,
-                128,
-            )
-            .unwrap();
-        assert_eq!(latency, 19.0);
-    }
-
-    #[test]
-    fn gdn_generation_uses_batch_only_first_wins_key() {
-        let key = GdnKey {
-            kernel_source: "fused_recurrent_gated_delta_rule".into(),
-            phase: "generation".into(),
-            d_model: 5120,
-            d_conv: 4,
-            num_k_heads: 16,
-            head_k_dim: 128,
-            num_v_heads: 48,
-            head_v_dim: 128,
-        };
-        let mut by_keys = BTreeMap::new();
-        insert_gdn_measurement(&mut by_keys, key.clone(), "generation", 2, 1, 11.0);
-        insert_gdn_measurement(&mut by_keys, key, "generation", 2, 32_768, 19.0);
-
-        let table = StateSpaceTable {
-            data_root: PathBuf::new(),
-            mamba2: OnceLock::new(),
-            gdn: OnceLock::from(Ok(GdnGrids { by_keys })),
-        };
-        let latency = table
-            .query_gdn(
-                "fused_recurrent_gated_delta_rule",
-                "generation",
-                2,
-                65_536,
-                5120,
-                4,
-                16,
-                128,
-                48,
-                128,
-            )
-            .unwrap();
-        assert_eq!(latency, 11.0);
     }
 
     #[test]

@@ -51,7 +51,7 @@ def _read_perf_rows(perf_file: str) -> list[dict[str, object]]:
                 "Install aiconfigurator with its declared runtime dependencies."
             ) from exc
         return [
-            {key: value for key, value in row.items() if value is not None}
+            {key: "" if value is None else value for key, value in row.items()}
             for row in pq.read_table(perf_file).to_pylist()
         ]
 

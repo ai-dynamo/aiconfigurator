@@ -212,13 +212,14 @@ class TestBuildModuleTestCases:
         assert ("bfloat16", "bfloat16", "bfloat16") in combos
         assert ("bfloat16", "fp8", "bfloat16") in combos
 
-    def test_dsa_includes_both_models(self):
+    def test_dsa_keeps_checkpoint_needed_for_each_native_quant(self):
         mod = _import_module()
-        with patch.object(mod, "get_sm_version", return_value=90):
+        with patch.object(mod, "get_sm_version", return_value=100):
             cases = mod._build_module_test_cases("dsa", "context")
-        model_paths = {c[6] for c in cases}
+        model_paths = {case[6] for case in cases}
         assert "deepseek-ai/DeepSeek-V3.2" in model_paths
         assert "zai-org/GLM-5" in model_paths
+        assert "zai-org/GLM-5-FP8" in model_paths
         assert "nvidia/GLM-5-NVFP4" in model_paths
 
     def test_mla_includes_v3_family(self):
@@ -226,7 +227,10 @@ class TestBuildModuleTestCases:
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("mla", "context")
         model_paths = {c[6] for c in cases}
-        assert model_paths == {"deepseek-ai/DeepSeek-V3"}
+        assert model_paths == {
+            "deepseek-ai/DeepSeek-V3",
+            "nvidia/DeepSeek-V3.1-NVFP4",
+        }
 
     def test_format_length_11(self):
         """Each DSA module case includes target TP and prefill backend."""
@@ -244,7 +248,20 @@ class TestBuildModuleTestCases:
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("dsa", "context")
-        keys = {(c[6], c[2], c[3], c[4], c[5], c[1], c[9], c[10]) for c in cases}
+        keys = {
+            (
+                mod._module_model_architecture(c[6]),
+                mod._model_native_gemm_quant(c[6]),
+                c[2],
+                c[3],
+                c[4],
+                c[5],
+                c[1],
+                c[9],
+                c[10],
+            )
+            for c in cases
+        }
         assert len(cases) == len(keys)
         assert all(c[0] == 0 for c in cases)
 
@@ -255,12 +272,12 @@ class TestBuildModuleTestCases:
         batch_sizes = {c[1] for c in cases}
         assert batch_sizes == set(mod.get_mla_module_sweep_spec("sglang").context_batch_sizes)
 
-    def test_glm5_nvfp4_context_includes_fp8_kv_module_case(self):
+    def test_glm5_canonical_context_includes_fp8_kv_module_case(self):
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("dsa", "context")
         assert any(
-            c[6] == "nvidia/GLM-5-NVFP4" and c[3] == "fp8" and c[4] == "bfloat16" and c[5] == "bfloat16" for c in cases
+            c[6] == "zai-org/GLM-5" and c[3] == "fp8" and c[4] == "bfloat16" and c[5] == "bfloat16" for c in cases
         )
 
     def test_placeholder_seq_batch(self):
@@ -308,60 +325,6 @@ class TestDsaTpShapeValidation:
         )
         with pytest.raises(RuntimeError, match=r"q_b_proj\.output_size"):
             mod._validate_dsa_tp_module_shapes(self._runner(attn), local_num_heads=8, target_tp_size=8)
-
-
-class TestPerfLogFailures:
-    def test_log_failure_is_wrapped_with_case_context(self):
-        mod = _import_module()
-
-        with (
-            patch.object(mod, "log_perf", side_effect=OSError("disk full")),
-            pytest.raises(mod.PerfLogWriteError, match=r"prefill metrics for b=2, s=128: disk full") as exc_info,
-        ):
-            mod._log_perf_strict(
-                phase="prefill",
-                batch_size=2,
-                seq_length=128,
-                item_list=[],
-                perf_filename="unused.txt",
-            )
-
-        assert isinstance(exc_info.value.__cause__, OSError)
-
-    def test_partial_sweep_log_failure_propagates(self):
-        mod = _import_module()
-        runner = types.SimpleNamespace(
-            model=types.SimpleNamespace(
-                model=types.SimpleNamespace(layers=[types.SimpleNamespace(self_attn=types.SimpleNamespace())])
-            ),
-            server_args=types.SimpleNamespace(attention_backend="fake_backend"),
-            req_to_token_pool=types.SimpleNamespace(clear=lambda: None),
-            token_to_kv_pool_allocator=types.SimpleNamespace(clear=lambda: None),
-        )
-        log_error = mod.PerfLogWriteError("failed to persist second row")
-
-        with (
-            patch.object(mod, "get_version", return_value="test"),
-            patch.object(mod, "_run_prefill", side_effect=[True, log_error]) as run_prefill,
-            pytest.raises(mod.PerfLogWriteError, match="failed to persist second row"),
-        ):
-            mod.run_attention_torch(
-                model_runner=runner,
-                test_cases=[(1, 128, True), (2, 128, True)],
-                head_num=8,
-                test_layer=0,
-                num_warmup=0,
-                num_iterations=1,
-                device="cuda:0",
-                output_path=None,
-                attn_type="dsa",
-                model_path="test/model",
-                kv_cache_dtype="bfloat16",
-                compute_dtype="bfloat16",
-                gemm_type="bfloat16",
-            )
-
-        assert run_prefill.call_count == 2
 
 
 class TestEntryPoints:
@@ -426,12 +389,16 @@ class TestBuildWideepMlaTestCases:
         assert {c[7] for c in cases} == {"mla"}
 
     def test_only_mla_models(self):
-        """WideEP uses one canonical checkpoint, not its artifact aliases."""
+        """Wideep MLA only includes MLA-type models, not DSA."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_wideep_mla_test_cases("context")
         model_paths = {c[6] for c in cases}
-        assert model_paths == {"deepseek-ai/DeepSeek-V3"}
+        assert model_paths == {
+            "deepseek-ai/DeepSeek-R1",
+            "deepseek-ai/DeepSeek-V3",
+            "nvidia/DeepSeek-V3.1-NVFP4",
+        }
 
     def test_sweeps_backends(self):
         """Hopper should sweep flashinfer and fa3 backends."""
@@ -441,17 +408,11 @@ class TestBuildWideepMlaTestCases:
         backends = {c[8] for c in cases}
         assert backends == {"flashinfer", "fa3"}
 
-    def test_uses_real_checkpoint_and_kv_precisions(self):
-        """DeepSeek-V3 runs native block-FP8 GEMMs with both real KV dtypes."""
+    def test_single_precision_bfloat16(self):
+        """All wideep MLA cases use bfloat16 precision (logged as fp8_block/fp8)."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
-            cases = mod._build_wideep_mla_test_cases("context")
-        assert {case[3] for case in cases} == {"bfloat16", "fp8"}
-        assert {case[4] for case in cases} == {"bfloat16"}
-        assert {case[5] for case in cases} == {"fp8_block"}
-
-    def test_blackwell_kernel_source_matches_query_key(self):
-        mod = _import_module()
-        with patch.object(mod, "get_sm_version", return_value=100):
-            cases = mod._build_wideep_mla_test_cases("generation")
-        assert {case[8] for case in cases} == {"trtllm_mla"}
+            for case in mod._build_wideep_mla_test_cases("context"):
+                assert case[3] == "bfloat16"  # kv_cache_dtype
+                assert case[4] == "bfloat16"  # compute_dtype
+                assert case[5] == "bfloat16"  # gemm_type

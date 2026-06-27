@@ -47,9 +47,9 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMo
 from collector.case_generator import (
     get_attention_context_shape_sweeps,
     get_attention_generation_shape_sweeps,
+    get_attention_head_configs,
 )
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
-from collector.planner.schemas.attention import build_attention_context_cases, build_attention_generation_cases
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
 
@@ -176,22 +176,131 @@ def create_req_to_token_pool(batch_size, total_len, page_size, torch_device, dev
     return pool, token_matrix.contiguous()
 
 
+def _int_list(values):
+    return [int(value) for value in values]
+
+
 def get_context_attention_test_cases():
-    return build_attention_context_cases(
-        "sglang",
-        get_attention_context_shape_sweeps("sglang"),
-        sm_version=get_sm_version(),
-        framework_version=pkg_resources.get_distribution("sglang").version,
-    )
+    test_cases = []
+
+    # FP8 attention requires SM90+ (Hopper)
+    sm_version = get_sm_version()
+    skip_fp8 = sm_version < 90
+
+    for shape_sweep in get_attention_context_shape_sweeps("sglang"):
+        batch_sizes = _int_list(shape_sweep["batch_sizes"])
+        sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
+        max_tokens_self_attention = int(shape_sweep["max_tokens_self_attention"])
+        max_tokens_grouped_query_attention = int(shape_sweep["max_tokens_grouped_query_attention"])
+        max_batch_size_self_attention = int(shape_sweep["max_batch_size_self_attention"])
+        max_kv_elements = int(shape_sweep["max_kv_elements"])
+
+        for head_config in get_attention_head_configs(shape_sweep, phase="context"):
+            n = head_config.num_heads
+            num_kv_heads = head_config.num_kv_heads
+            head_dim = head_config.head_dim
+            window_size = head_config.window_size
+            for s in sorted(sequence_lengths, reverse=True):
+                for b in sorted(batch_sizes, reverse=True):
+                    if num_kv_heads == n:
+                        if b * s > max_tokens_self_attention or b > max_batch_size_self_attention:
+                            continue
+                    else:
+                        if b * s > max_tokens_grouped_query_attention:
+                            continue
+                    if b * s * num_kv_heads * head_dim * 2 >= max_kv_elements:
+                        continue
+                    # SGLang's SM120 Triton context attention path uses
+                    # 32-bit indexing for large Q/O tensors.  Shapes at or
+                    # above this element boundary crash with an illegal
+                    # memory access and poison the worker CUDA context.
+                    if sm_version >= 120 and b * s * n * head_dim >= max_kv_elements:
+                        continue
+
+                    for precision_case in shape_sweep["precision_cases"]:
+                        use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                        use_fp8_context_fmha = bool(precision_case["fp8_context_fmha"])
+                        if skip_fp8 and use_fp8_kv_cache:
+                            continue
+                        test_cases.append(
+                            [
+                                b,
+                                s,
+                                n,
+                                num_kv_heads,
+                                head_dim,
+                                use_fp8_kv_cache,
+                                use_fp8_context_fmha,
+                                True,
+                                window_size,
+                            ]
+                        )
+
+    return test_cases
+
+
+def _generation_target_sequence_lengths(batch_sizes, sequence_lengths, num_heads, head_dim, max_tokens, shape_sweep):
+    b_s_dict = {}
+    s_b_dict = {}
+    for s in sequence_lengths:
+        max_b = max_tokens // s // num_heads * 128 // head_dim
+        for b in sorted(batch_sizes):
+            if b > max_b:
+                break
+            if s not in s_b_dict:
+                s_b_dict[s] = {b}
+            else:
+                s_b_dict[s].add(b)
+    for s, b_set in s_b_dict.items():
+        if len(b_set) < int(shape_sweep["min_batch_options_per_sequence"]):
+            continue
+        for b in b_set:
+            if b not in b_s_dict:
+                b_s_dict[b] = {s - 1}
+            b_s_dict[b].add(s - 1)
+    return b_s_dict
 
 
 def get_generation_attention_test_cases():
-    return build_attention_generation_cases(
-        "sglang",
-        get_attention_generation_shape_sweeps("sglang"),
-        sm_version=get_sm_version(),
-        framework_version=pkg_resources.get_distribution("sglang").version,
-    )
+    test_cases = []
+
+    # FP8 attention requires SM90+ (Hopper)
+    sm_version = get_sm_version()
+    skip_fp8 = sm_version < 90
+
+    for shape_sweep in get_attention_generation_shape_sweeps("sglang"):
+        batch_sizes = _int_list(shape_sweep["batch_sizes"])
+        sequence_lengths = _int_list(shape_sweep["sequence_lengths"])
+        min_drop_batch = int(shape_sweep["drop_largest_sequence_for_batch_at_least"])
+        for head_config in get_attention_head_configs(shape_sweep, phase="generation"):
+            n = head_config.num_heads
+            n_kv = head_config.num_kv_heads
+            head_dim = head_config.head_dim
+            window_size = head_config.window_size
+            max_tokens = (
+                int(shape_sweep["max_mha_tokens_per_step"])
+                if n == n_kv
+                else int(shape_sweep["max_xqa_tokens_per_step"])
+            )
+            b_s_dict = _generation_target_sequence_lengths(
+                batch_sizes,
+                sequence_lengths,
+                n,
+                head_dim,
+                max_tokens,
+                shape_sweep,
+            )
+            for b, s_list_limited in b_s_dict.items():
+                target_s_list = sorted(s_list_limited)
+                if b >= min_drop_batch:
+                    target_s_list = target_s_list[:-1]
+                for s in target_s_list:
+                    for precision_case in shape_sweep["precision_cases"]:
+                        use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
+                        if skip_fp8 and use_fp8_kv_cache:
+                            continue
+                        test_cases.append([b, s, n, n_kv, head_dim, use_fp8_kv_cache, False, False, window_size])
+    return test_cases
 
 
 def run_attention_torch(

@@ -21,8 +21,8 @@ all_frameworks_op_cases:
       - 64
       sequence_lengths:
       # Keep the original PR #1092 hardcoded collector grid (13/26/52/104)
-      # as protected physical coverage. The final squash added sequence 1;
-      # it remains a useful current-grid addition rather than a replacement.
+      # as protected physical coverage. Sequence 1 remains a useful V2
+      # addition rather than replacing those historical anchors.
       - 1
       - 13
       - 16

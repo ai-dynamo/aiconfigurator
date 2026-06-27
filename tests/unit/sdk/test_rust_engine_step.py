@@ -12,37 +12,8 @@ import pytest
 
 from aiconfigurator.sdk import common, rust_engine_step
 from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
-from aiconfigurator.sdk.engine import _dsa_module
-from aiconfigurator.sdk.operations.dsa import ContextDSAModule, GenerationDSAModule
 
 pytestmark = pytest.mark.unit
-
-
-@pytest.mark.parametrize(
-    ("op_class", "cp_size", "expected_backend"),
-    [
-        (ContextDSAModule, 1, "trtllm"),
-        (ContextDSAModule, 2, "flashmla_kv"),
-        (GenerationDSAModule, None, "trtllm"),
-    ],
-)
-def test_dsa_op_spec_preserves_physical_backend_axis(op_class, cp_size, expected_backend) -> None:
-    op = object.__new__(op_class)
-    op._name = "dsa_module"
-    op._scale_factor = 1.0
-    op._num_heads = 128
-    op._architecture = "DeepseekV32ForCausalLM"
-    op._gemm_quant_mode = common.GEMMQuantMode.bfloat16
-    if op_class is ContextDSAModule:
-        op._kvcache_quant_mode = common.KVCacheQuantMode.bfloat16
-        op._fmha_quant_mode = common.FMHAQuantMode.bfloat16
-        op._cp_size = cp_size
-    else:
-        op._kv_cache_dtype = common.KVCacheQuantMode.bfloat16
-
-    spec = _dsa_module(op, architecture="DeepseekV32ForCausalLM")
-
-    assert spec["dsa_backend"] == expected_backend
 
 
 def test_should_use_rust_engine_step_supports_runtime_config_and_env(monkeypatch) -> None:

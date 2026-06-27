@@ -69,9 +69,6 @@ aic_debug = int(os.getenv("aic_gdn_debug", "0"))  # noqa: SIM112
 # Use cached inputs (same data each iteration) instead of randomized inputs
 aic_cached_inputs = int(os.getenv("AIC_GDN_CACHED_INPUTS", "0"))
 
-# Canonical perf-database id for the production decode recurrence.
-GDN_GENERATION_RECURRENCE_KERNEL = "fused_recurrent_gated_delta_rule"
-
 
 def get_gdn_test_cases():
     """
@@ -506,7 +503,7 @@ def run_gdn_generation_benchmark(
                         version=sglang_version,
                         device_name=torch.cuda.get_device_name(device),
                         op_name="gdn",
-                        kernel_source=GDN_GENERATION_RECURRENCE_KERNEL,
+                        kernel_source="fused_recurrent_gated_delta_rule",
                         perf_filename=perf_filename,
                         power_stats=results["power_stats"],
                     )
@@ -602,7 +599,7 @@ def run_gdn_generation_benchmark(
                         version=sglang_version,
                         device_name=torch.cuda.get_device_name(device),
                         op_name="gdn",
-                        kernel_source=GDN_GENERATION_RECURRENCE_KERNEL,
+                        kernel_source="fused_recurrent_gated_delta_rule",
                         perf_filename=perf_filename,
                         power_stats=results["power_stats"],
                     )

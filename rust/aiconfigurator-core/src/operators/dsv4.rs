@@ -9,28 +9,34 @@
 //! `AttnKind` to use; the operator just routes to the right
 //! `db.dsv4.query_*` slice.
 //!
-//! Slice selection uses the physical `(model profile, tp_size, local_heads)`
-//! key, mirroring Python `_dsv4_resolve_head_key`. Keeping the three together
-//! prevents overlapping local-head counts from different V4 variants or TP
-//! shardings from overwriting one another.
+//! Slice selection resolves the model's rank-LOCAL head count
+//! (`native_heads / tp_size`, passed as `num_heads`) against the CSV `num_heads`
+//! head keys, mirroring Python `_dsv4_resolve_head_key`. The `tp_size` axis is
+//! NOT an interpolation axis — Python's loaders ignore the CSV `tp_size` column,
+//! so the table is collapsed to the last (max) tp measurement at load time. See
+//! `perf_database::dsv4` and Python `load_context_dsv4_kind_module_data`.
 
+use serde::{Deserialize, Serialize};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::perf_database::dsv4::AttnKind;
 use crate::perf_database::PerfDatabase;
-use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Dsv4ModuleOp {
     pub name: String,
     pub scale_factor: f64,
     pub attn_kind: AttnKind,
-    /// Per-rank partitioned head count (`native_heads / tp_size`).
+    /// Per-rank partitioned head count (`native_heads / tp_size`). This is the
+    /// value resolved against the CSV `num_heads` head keys for slice selection
+    /// (Python `_dsv4_resolve_head_key`).
     pub num_heads: u32,
-    /// Model total attention head count; selects Flash (64) vs Pro (128).
+    /// Model total attention head count. Retained for provenance and SOL
+    /// fallbacks; NOT used for table slice selection (see `num_heads`).
     pub native_heads: u32,
-    /// Tensor-parallel size; part of the physical module lookup key.
+    /// Tensor-parallel size. Retained for provenance; the DSV4 table collapses
+    /// the tp axis at load time, so this does not select a latency.
     pub tp_size: u32,
     pub kv_cache_dtype: KvCacheQuantMode,
     pub fmha_quant_mode: FmhaQuantMode,
@@ -72,17 +78,35 @@ impl Dsv4ModuleOp {
         isl: u32,
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
+        // Mirror Python `ContextDeepSeekV4AttentionModule._query_context_attn_table`
+        // -> `_dsv4_lookup_prefix_resolved`. The context module CSVs collected
+        // to date carry a SINGLE prefix anchor (`step=0`): the new-token count
+        // `isl` IS the kernel work, and the caller already supplies the
+        // new-token count as `isl` (Python's `s = effective_isl = isl - prefix`,
+        // computed in `run_context_ops`). With one prefix anchor, Python's
+        // prefix-resolved lookup returns that anchor's `(s, b)` slice for ANY
+        // prefix, so `prefix` does not select a different latency here — it is
+        // an intentional no-op for the table lookup.
+        //
+        // (If a future collection adds genuine `step>0` context rows, this
+        // would need a prefix-resolved slice mirroring `_dsv4_lookup_prefix_resolved`;
+        // the present data has none, so adding it would be dead code.)
+        //
+        // The prefix>0 parity bug fixed alongside this comment was NOT in the
+        // prefix handling: it was the missing exact-hit short-circuit in the
+        // shared `interp_2d_1d_grid` (see `perf_database::interpolation`), which
+        // corrupted the `(tp, isl, b)` lookup whenever `isl` had a sparse
+        // adjacent grid row (e.g. `isl=129`).
+        let _ = prefix;
         let raw = db.dsv4.query_context(
             self.attn_kind,
             batch_size,
             isl,
-            prefix,
             self.num_heads,
-            self.native_heads,
-            self.tp_size,
             self.kv_cache_dtype,
             self.fmha_quant_mode,
             self.gemm_quant_mode,
+            &self.architecture,
         )?;
         Ok(PerformanceResult::new(raw, Source::Silicon)
             .clamp_non_negative()
@@ -100,10 +124,10 @@ impl Dsv4ModuleOp {
             batch_size,
             s,
             self.num_heads,
-            self.native_heads,
-            self.tp_size,
             self.kv_cache_dtype,
+            self.fmha_quant_mode,
             self.gemm_quant_mode,
+            &self.architecture,
         )?;
         Ok(PerformanceResult::new(latency, Source::Silicon)
             .clamp_non_negative()

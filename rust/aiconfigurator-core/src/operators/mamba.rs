@@ -6,11 +6,10 @@
 //!
 //! Each wraps `db.state_space.query_*` with `scale_factor` + `clamp`.
 
+use serde::{Deserialize, Serialize};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
-use crate::perf_database::state_space::canonical_gdn_kernel_source;
 use crate::perf_database::PerfDatabase;
-use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Mamba2Op {
@@ -99,8 +98,7 @@ pub struct GdnOp {
     pub scale_factor: f64,
     /// GDN kernel name. Context uses `causal_conv1d_fn` and
     /// `chunk_gated_delta_rule`; generation uses `causal_conv1d_update`
-    /// and `fused_recurrent_gated_delta_rule`. The historical
-    /// `fused_sigmoid_gating_delta_rule_update` alias remains accepted.
+    /// and `fused_sigmoid_gating_delta_rule_update`.
     pub kernel_source: String,
     pub phase: String, // "context" | "generation" (matches Python; SOL branch keys on phase == "context")
     pub d_model: u32,
@@ -121,9 +119,8 @@ impl GdnOp {
         // Mirrors Python `GDNKernel.query`: try the silicon table; on a
         // `PerfDataNotAvailableError`-class miss (the perf DB doesn't ship
         // every kernel/phase slice), fall back to a per-kernel SOL formula.
-        let kernel_source = canonical_gdn_kernel_source(&self.kernel_source);
         match db.state_space.query_gdn(
-            kernel_source,
+            &self.kernel_source,
             &self.phase,
             batch_size,
             seq_len,
@@ -160,6 +157,7 @@ impl GdnOp {
         let hk = self.head_k_dim as f64;
         let nv = self.num_v_heads as f64;
         let hv = self.head_v_dim as f64;
+        let conv_channels = nk * hk + nv * hv;
         let d_conv = self.d_conv as f64;
         let d_model = self.d_model as f64;
         let state_size = nv * hk * hv;
@@ -172,16 +170,16 @@ impl GdnOp {
         let h_chunks_bytes = num_chunks * state_size * 2.0 * bs;
         let _ = chunk_size; // reserved for clarity / future use
 
-        let kernel_source = canonical_gdn_kernel_source(&self.kernel_source);
-        let (read_bytes, write_bytes) = match kernel_source {
-            "causal_conv1d_fn" | "causal_conv1d_update" => {
-                (x * nk * hk * (d_conv + 1.0) * 2.0, x * nk * hk * 2.0)
-            }
+        let (read_bytes, write_bytes) = match self.kernel_source.as_str() {
+            "causal_conv1d_fn" | "causal_conv1d_update" => (
+                x * conv_channels * (d_conv + 1.0) * 2.0,
+                x * conv_channels * 2.0,
+            ),
             "chunk_gated_delta_rule" => (
                 x * (nk * hk + nv * hv) * 2.0 + state_size * 2.0 * bs + h_chunks_bytes,
                 x * nv * hv * 2.0 + state_size * 2.0 * bs + h_chunks_bytes,
             ),
-            "fused_recurrent_gated_delta_rule" => (
+            "fused_sigmoid_gating_delta_rule_update" => (
                 x * (nk * hk + nv * hv) * 2.0 + state_size * 2.0 * bs,
                 x * nv * hv * 2.0 + state_size * 2.0 * bs,
             ),

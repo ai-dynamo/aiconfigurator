@@ -12,15 +12,11 @@
 //! `index_topk` is the top-k boundary (per-architecture; 2048 for both
 //! DeepSeek-V3.2 and GLM-5). It is plumbed from the Python op-spec emitter.
 
+use serde::{Deserialize, Serialize};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::perf_database::PerfDatabase;
-use serde::{Deserialize, Serialize};
-
-fn default_dsa_backend() -> String {
-    "trtllm".to_string()
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DsaModuleOp {
@@ -31,9 +27,6 @@ pub struct DsaModuleOp {
     pub fmha_quant_mode: FmhaQuantMode,
     pub gemm_quant_mode: GemmQuantMode,
     pub architecture: String,
-    /// Physical DSA kernel family: `trtllm` or `flashmla_kv`.
-    #[serde(default = "default_dsa_backend")]
-    pub dsa_backend: String,
     /// Top-k boundary for the sparse-attention regime split. Sourced from
     /// `DSA_MODEL_DIMS[architecture]["index_topk"]` on the Python side.
     pub index_topk: u32,
@@ -48,7 +41,6 @@ impl DsaModuleOp {
         fmha_quant_mode: FmhaQuantMode,
         gemm_quant_mode: GemmQuantMode,
         architecture: impl Into<String>,
-        dsa_backend: impl Into<String>,
         index_topk: u32,
     ) -> Self {
         Self {
@@ -59,7 +51,6 @@ impl DsaModuleOp {
             fmha_quant_mode,
             gemm_quant_mode,
             architecture: architecture.into(),
-            dsa_backend: dsa_backend.into(),
             index_topk,
         }
     }
@@ -83,7 +74,6 @@ impl DsaModuleOp {
             self.fmha_quant_mode,
             self.gemm_quant_mode,
             &self.architecture,
-            &self.dsa_backend,
             prefix,
             self.index_topk,
         )?;
@@ -103,9 +93,9 @@ impl DsaModuleOp {
             s,
             self.num_heads,
             self.kv_cache_dtype,
+            self.fmha_quant_mode,
             self.gemm_quant_mode,
             &self.architecture,
-            &self.dsa_backend,
         )?;
         Ok(PerformanceResult::new(latency, Source::Silicon)
             .clamp_non_negative()

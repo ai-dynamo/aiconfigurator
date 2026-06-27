@@ -24,6 +24,9 @@ model_case_values:
       num_experts: 256
       wideep: true
   mla_module:
+    # SGLang reads native quantization from the checkpoint. Preserve one input
+    # artifact for BF16, FP8, and NVFP4; the getter deduplicates only after the
+    # native precision has become an explicit physical-key field.
     - model_paths:
         - zai-org/GLM-5
         - zai-org/GLM-5-FP8

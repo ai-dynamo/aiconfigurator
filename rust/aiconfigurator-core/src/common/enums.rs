@@ -126,8 +126,6 @@ pub enum MoeQuantMode {
     Nvfp4,
     W4a16Mxfp4,
     W4a8Mxfp4Mxfp8,
-    W4a8Mxfp4Mxfp8Trtllm,
-    W4a16Mxfp4Cutlass,
 }
 
 impl MoeQuantMode {
@@ -142,12 +140,6 @@ impl MoeQuantMode {
             Self::W4a16Mxfp4 => QuantMapping { memory: 0.5, compute: 1.0, name: "w4a16_mxfp4" },
             Self::W4a8Mxfp4Mxfp8 => {
                 QuantMapping { memory: 0.5, compute: 2.0, name: "w4a8_mxfp4_mxfp8" }
-            }
-            Self::W4a8Mxfp4Mxfp8Trtllm => {
-                QuantMapping { memory: 0.5, compute: 2.0, name: "w4a8_mxfp4_mxfp8_trtllm" }
-            }
-            Self::W4a16Mxfp4Cutlass => {
-                QuantMapping { memory: 0.5, compute: 1.0, name: "w4a16_mxfp4_cutlass" }
             }
         }
     }
@@ -400,22 +392,6 @@ mod tests {
         assert_eq!(
             MoeQuantMode::W4a8Mxfp4Mxfp8.mapping(),
             QuantMapping { memory: 0.5, compute: 2.0, name: "w4a8_mxfp4_mxfp8" }
-        );
-        assert_eq!(
-            MoeQuantMode::W4a8Mxfp4Mxfp8Trtllm.mapping(),
-            QuantMapping { memory: 0.5, compute: 2.0, name: "w4a8_mxfp4_mxfp8_trtllm" }
-        );
-        assert_eq!(
-            MoeQuantMode::W4a16Mxfp4Cutlass.mapping(),
-            QuantMapping { memory: 0.5, compute: 1.0, name: "w4a16_mxfp4_cutlass" }
-        );
-        assert_eq!(
-            serde_json::to_string(&MoeQuantMode::W4a8Mxfp4Mxfp8Trtllm).unwrap(),
-            "\"w4a8_mxfp4_mxfp8_trtllm\""
-        );
-        assert_eq!(
-            serde_json::from_str::<MoeQuantMode>("\"w4a16_mxfp4_cutlass\"").unwrap(),
-            MoeQuantMode::W4a16Mxfp4Cutlass
         );
     }
 

@@ -279,8 +279,8 @@ def test_full_encoder_attention_profiles_preserve_v1_and_add_qwen_tp16(monkeypat
         if batch_size * sequence_length <= 131072
         and 4 * batch_size * sequence_length * config.num_heads * config.head_dim * 2 < 2**31
     )
-    # The protected collector-v1 grid contributes 7,008 cases. The two n=1
-    # model profiles add 671 physical cases after the shared safety guards.
+    # The protected baseline contributes 7,008 cases. The two n=1 model
+    # profiles add 671 physical cases after the shared safety guards.
     assert case_count == 7679
 
 
@@ -506,6 +506,37 @@ def test_mla_registry_getters_consume_the_yaml_catalog():
             assert expected_catalog_call[entry.get_func] in calls
 
 
+def test_dsa_module_getters_dedupe_artifacts_by_architecture():
+    from types import SimpleNamespace
+
+    base_case = [1, 1, 64, "bfloat16", "bfloat16", "bfloat16"]
+    model_specs = [
+        SimpleNamespace(model_path="glm-base", architecture="glm"),
+        SimpleNamespace(model_path="glm-fp8", architecture="glm"),
+        SimpleNamespace(model_path="deepseek", architecture="deepseek"),
+    ]
+
+    for module_path in (
+        "collector/trtllm/collect_mla_module.py",
+        "collector/vllm/collect_mla_module.py",
+    ):
+        source_path = REPO_ROOT / module_path
+        tree = ast.parse(source_path.read_text(), filename=str(source_path))
+        function = next(
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_build_module_test_cases"
+        )
+        namespace = {
+            "get_context_test_cases": lambda _attn_type: [base_case],
+            "get_generation_test_cases": lambda _attn_type: [base_case],
+            "get_mla_module_model_specs": lambda **_kwargs: model_specs,
+        }
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
+
+        cases = namespace["_build_module_test_cases"]("dsa", "context")
+
+        assert [case[6] for case in cases] == ["glm-base", "deepseek"]
+
+
 def test_mla_collectors_dedupe_on_loader_physical_keys(monkeypatch):
     from types import SimpleNamespace
 
@@ -566,8 +597,8 @@ def test_mla_collectors_dedupe_on_loader_physical_keys(monkeypatch):
         (sglang_adapter, {"tp_sizes": (1, 2, 4, 8, 16, 32, 64)}),
         (trtllm_adapter, {}),
     ):
-        assert len(adapter(kimi_specs[0], dtype_list=("bf16", "fp8"), **kwargs)) == 1540
-        assert len(adapter(kimi_specs[1], dtype_list=("bf16", "fp8"), **kwargs)) == 2534
+        assert len(adapter(kimi_specs[0], dtype_list=("bf16", "fp8"), **kwargs)) == 1760
+        assert len(adapter(kimi_specs[1], dtype_list=("bf16", "fp8"), **kwargs)) == 2896
 
 
 def test_kimi_mla_plan_includes_generation_bmm_helpers(monkeypatch):
@@ -606,8 +637,18 @@ def test_kimi_mla_plan_includes_generation_bmm_helpers(monkeypatch):
                 for tp_size in (1, 2, 4, 8, 16, 32, 64)
                 if spec.num_heads % tp_size == 0
             ]
+            # Mirror the collector adapter: total heads and TP are two ways to
+            # produce the same loader-visible local-head benchmark point.
+            deduped_cases = []
+            seen = set()
+            for case in cases:
+                physical_key = (case[3], case[4] // case[6], case[1], case[0])
+                if physical_key in seen:
+                    continue
+                seen.add(physical_key)
+                deduped_cases.append(case)
             filtered = filter_test_cases(
-                cases,
+                deduped_cases,
                 plan=plan.op_cases[op_name],
                 full_module_name=f"{backend}.mla",
                 run_func_name="run_mla",
@@ -936,19 +977,27 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         "nvidia/GLM-5-NVFP4",
     }
     assert {spec.native_num_heads for spec in dsa_specs if spec.architecture == "GlmMoeDsaForCausalLM"} == {64}
-    assert {spec.model_path for spec in wideep_specs} == {"deepseek-ai/DeepSeek-V3"}
+    assert {spec.model_path for spec in wideep_specs} == {
+        "deepseek-ai/DeepSeek-R1",
+        "deepseek-ai/DeepSeek-V3",
+        "nvidia/DeepSeek-V3.1-NVFP4",
+    }
 
 
-def test_mla_module_checkpoint_aliases_resolve_to_one_architecture_safe_case(monkeypatch):
+def test_mla_module_keeps_path_sensitive_checkpoints_but_shape_only_mla_uses_aliases(monkeypatch):
     from collector.case_generator import get_mla_module_model_specs
 
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/DeepSeek-V3.1-NVFP4")
     specs = get_mla_module_model_specs(attention_type="mla")
 
     assert [(spec.model_path, spec.architecture) for spec in specs] == [
-        ("deepseek-ai/DeepSeek-V3", "DeepseekV3ForCausalLM")
+        ("nvidia/DeepSeek-V3.1-NVFP4", "DeepseekV3ForCausalLM")
     ]
     assert not any(spec.attention_type == "dsa" for spec in specs)
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/GLM-5-NVFP4")
+    specs = get_mla_module_model_specs(attention_type="dsa")
+    assert [(spec.model_path, spec.architecture) for spec in specs] == [("nvidia/GLM-5-NVFP4", "GlmMoeDsaForCausalLM")]
 
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "moonshotai/Kimi-K2-Instruct")
     from collector.case_generator import get_context_mla_case_specs
@@ -956,7 +1005,7 @@ def test_mla_module_checkpoint_aliases_resolve_to_one_architecture_safe_case(mon
     kimi_specs = get_context_mla_case_specs()
     assert kimi_specs
     assert {spec.model_name for spec in kimi_specs} == {"moonshotai/Kimi-K2.5"}
-    assert {spec.num_heads for spec in kimi_specs} == {64}
+    assert {spec.num_heads for spec in kimi_specs} == {64, 128}
 
 
 def test_model_cases_path_can_infer_model_path():

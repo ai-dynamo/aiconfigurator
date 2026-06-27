@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 2;
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 1;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].

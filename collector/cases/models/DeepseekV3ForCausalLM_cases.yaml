@@ -39,8 +39,11 @@ model_case_values:
       qk_rope_head_dim: 64
       v_head_dim: 128
   mla_module:
-    - model_path: deepseek-ai/DeepSeek-V3
-      model_aliases:
+    # Module collectors load checkpoint-specific quantization metadata. Keep
+    # every native-precision artifact available; operation-local deduplication
+    # may collapse only cases whose explicit precision key is already equal.
+    - model_paths:
+        - deepseek-ai/DeepSeek-V3
         - deepseek-ai/DeepSeek-R1
         - nvidia/DeepSeek-V3.1-NVFP4
       attention_type: mla

@@ -19,13 +19,9 @@ import pytest
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.dsv4 import (
-    _TOPK_CALIB_KEYS,
     ContextDeepSeekV4AttentionModule,
-    _build_topk_calib_from_rows,
     _deep_merge_dsv4_dicts,
     _dsv4_robust_3d_lookup,
-    _dsv4_topk_delta_ms,
-    load_dsv4_sparse_op_data,
 )
 from aiconfigurator.sdk.perf_database import (
     LoadedOpData,
@@ -165,8 +161,10 @@ def test_load_dsv4_sparse_kernel_data_missing_returns_none(tmp_path):
 # ───────────────────────────────────────────────────────────────────────
 
 
-def test_load_context_dsv4_kind_module_data_keys_by_profile_tp_and_local_head(tmp_path):
-    """The module axis preserves profile, TP, and rank-local head count."""
+def test_load_context_dsv4_kind_module_data_keys_by_local_head(tmp_path):
+    """SCHEME A: TP is folded into the rank-LOCAL ``num_heads`` (native // tp),
+    so the loader keys the head axis by local head count — there is NO separate
+    tp_size key. Axis order after the head is [cr][prefix][s][b]."""
     # Pro native=128 sharded at tp=1/2/4/8 -> local heads 128/64/32/16.
     rows = [
         _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=1, lat=18.0, model=_PRO_MODEL, num_heads=128),
@@ -177,17 +175,12 @@ def test_load_context_dsv4_kind_module_data_keys_by_profile_tp_and_local_head(tm
     path = _write_csv(tmp_path / "csa_ctx.txt", _CTX_HEADER, rows)
     data = load_context_dsv4_kind_module_data(path)
     quant = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block]
-    expected_keys = {
-        ("pro", 1, 128),
-        ("pro", 2, 64),
-        ("pro", 4, 32),
-        ("pro", 8, 16),
-    }
-    assert set(quant.keys()) == expected_keys
+    # head axis keyed by local head count {128, 64, 32, 16} (no tp_size axis)
+    assert set(quant.keys()) == {128, 64, 32, 16}
     # axis order after the head is [cr][prefix][s][b]
-    assert quant[("pro", 8, 16)][4][0][8192][1]["latency"] == pytest.approx(10.5)
+    assert quant[16][4][0][8192][1]["latency"] == pytest.approx(10.5)
     # more local heads (less sharded) is slower
-    assert quant[("pro", 1, 128)][4][0][8192][1]["latency"] > quant[("pro", 8, 16)][4][0][8192][1]["latency"]
+    assert quant[128][4][0][8192][1]["latency"] > quant[16][4][0][8192][1]["latency"]
 
 
 def test_load_generation_dsv4_kind_module_data_b_before_s(tmp_path):
@@ -204,8 +197,8 @@ def test_load_generation_dsv4_kind_module_data_b_before_s(tmp_path):
     ]
     path = _write_csv(tmp_path / "csa_gen.txt", _CTX_HEADER, rows)
     data = load_generation_dsv4_kind_module_data(path)
-    sub = data[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][("flash", 1, 64)][4]
-    # Axis order after [module_head_key][cr] is [b][s_total]; b first.
+    sub = data[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][_FLASH_NATIVE_HEADS][4]
+    # SCHEME A axis order after [head][cr] is [b][s_total] (no tp axis); b first
     s_total_short = 1 + 1023  # isl + step
     s_total_long = 1 + 8191
     assert sub[1][s_total_short]["latency"] == pytest.approx(0.1)
@@ -221,8 +214,9 @@ def test_load_context_dsv4_kind_module_data_keeps_native_heads_separate(tmp_path
     path = _write_csv(tmp_path / "csa_ctx_models.txt", _CTX_HEADER, rows)
     data = load_context_dsv4_kind_module_data(path)
     data = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block]
-    assert data[("flash", 1, 64)][4][0][8192][1]["latency"] == pytest.approx(18.0)
-    assert data[("pro", 1, 128)][4][0][8192][1]["latency"] == pytest.approx(23.0)
+    # SCHEME A: [local_head][cr][prefix][s][b]; tp=1 rows -> local head == native, prefix=0
+    assert data[_FLASH_NATIVE_HEADS][4][0][8192][1]["latency"] == pytest.approx(18.0)
+    assert data[_PRO_NATIVE_HEADS][4][0][8192][1]["latency"] == pytest.approx(23.0)
 
 
 def test_load_generation_dsv4_kind_module_data_keeps_native_heads_separate(tmp_path):
@@ -233,39 +227,9 @@ def test_load_generation_dsv4_kind_module_data_keeps_native_heads_separate(tmp_p
     path = _write_csv(tmp_path / "hca_gen_models.txt", _CTX_HEADER, rows)
     data = load_generation_dsv4_kind_module_data(path)
     data = data[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block]
-    assert data[("flash", 1, 64)][128][1][1024]["latency"] == pytest.approx(0.2)
-    assert data[("pro", 1, 128)][128][1][1024]["latency"] == pytest.approx(0.6)
-
-
-def test_module_loader_does_not_collide_flash_tp1_with_pro_tp2(tmp_path):
-    """Flash TP1 and Pro TP2 both have 64 local heads but are distinct kernels."""
-    rows = [
-        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=1, lat=11.0, model=_FLASH_MODEL),
-        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=2, lat=19.0, model=_PRO_MODEL),
-    ]
-    path = _write_csv(tmp_path / "csa_ctx_collision.txt", _CTX_HEADER, rows)
-    data = load_context_dsv4_kind_module_data(path)
-    quant = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block]
-
-    assert set(quant) == {("flash", 1, 64), ("pro", 2, 64)}
-    assert quant[("flash", 1, 64)][4][0][8192][1]["latency"] == pytest.approx(11.0)
-    assert quant[("pro", 2, 64)][4][0][8192][1]["latency"] == pytest.approx(19.0)
-
-
-def test_topk_calibration_keeps_flash_and_pro_separate(tmp_path):
-    header = _CTX_HEADER + ",score_mode"
-    rows = [
-        _ctx_row(attn_kind="csa_topk_calib", cr=4, bs=1, isl=1, tp=1, lat=0.9, model=_FLASH_MODEL) + ",flat",
-        _ctx_row(attn_kind="csa_topk_calib", cr=4, bs=1, isl=1, tp=1, lat=0.4, model=_FLASH_MODEL) + ",top_last",
-        _ctx_row(attn_kind="csa_topk_calib", cr=4, bs=1, isl=1, tp=1, lat=1.8, model=_PRO_MODEL) + ",flat",
-        _ctx_row(attn_kind="csa_topk_calib", cr=4, bs=1, isl=1, tp=1, lat=0.6, model=_PRO_MODEL) + ",top_last",
-    ]
-    path = _write_csv(tmp_path / "topk_calib.txt", header, rows)
-    nested = load_dsv4_sparse_op_data(path, _TOPK_CALIB_KEYS)
-    calib = _build_topk_calib_from_rows(nested)
-
-    assert _dsv4_topk_delta_ms(calib, 0, 1, 1, profile_id="flash") == pytest.approx(0.5)
-    assert _dsv4_topk_delta_ms(calib, 0, 1, 1, profile_id="pro") == pytest.approx(1.2)
+    # SCHEME A: [local_head][cr][b][s_total]; tp=1 -> local head == native, no tp axis
+    assert data[_FLASH_NATIVE_HEADS][128][1][1024]["latency"] == pytest.approx(0.2)
+    assert data[_PRO_NATIVE_HEADS][128][1][1024]["latency"] == pytest.approx(0.6)
 
 
 # ───────────────────────────────────────────────────────────────────────

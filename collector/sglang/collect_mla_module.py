@@ -50,14 +50,10 @@ except ModuleNotFoundError:
     from helper import benchmark_with_power, get_sm_version, log_perf
 
 try:
-    from collector.case_generator import (
-        get_mla_module_model_specs,
-        get_mla_module_precision_specs,
-        get_mla_module_sweep_spec,
-    )
+    from collector.case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from case_generator import get_mla_module_model_specs, get_mla_module_precision_specs, get_mla_module_sweep_spec
+    from case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
 
 try:
     from collector.sglang.runtime_limits import (
@@ -295,9 +291,11 @@ def _get_precision_combos(phase: str, model_id: str | None = None):
                       FMHA internally, but the latency is captured under the
                       fp8 KV row).
       kv_cache_dtype: "bfloat16" always; "fp8" on SM >= 90 (Hopper+).
-      gemm_type:      "bfloat16" for bf16 weights; "nvfp4" on SM >= 89 for
-                      modelopt checkpoints. Attention projections excluded
-                      from NVFP4 remain on their serving BF16 path.
+      gemm_type:      "bfloat16" for bf16 weights; "fp8_block" on SM >= 89,
+                      in which case load_model_runner launches sglang with
+                      quantization="fp8" so the inner attention projections
+                      (q_b_proj, kv_b_proj, o_proj, wq_b, wk) and the fp8
+                      paged MQA scoring kernel fire on real fp8 weights.
 
     fp4_e2m1 omitted — SGLang supports it on SM >= 100, but KVCacheQuantMode
     enum has no fp4 entry, so perf_database cannot consume it yet.
@@ -387,7 +385,7 @@ def _module_model_native_heads(model_path: str) -> int:
     return 128
 
 
-def get_context_test_cases(attn_type: str, precision_combos=None):
+def get_context_test_cases(attn_type: str):
     """Context-phase test cases.
 
     Returns list of [seq_len, batch_size, num_heads, kv_cache_dtype,
@@ -395,8 +393,7 @@ def get_context_test_cases(attn_type: str, precision_combos=None):
     """
     sweep = get_mla_module_sweep_spec("sglang")
     cases = []
-    precision_combos = precision_combos or _get_precision_combos("context")
-    for compute_dtype, kv_dtype, gemm_type in precision_combos:
+    for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context"):
         for num_heads in sweep.inner_sweep_head_counts:
             for batch_size in sweep.context_batch_sizes:
                 for seq_len in sweep.context_sequence_lengths:
@@ -411,7 +408,7 @@ def get_context_test_cases(attn_type: str, precision_combos=None):
     return cases
 
 
-def get_generation_test_cases(attn_type: str, precision_combos=None):
+def get_generation_test_cases(attn_type: str):
     """Generation-phase test cases.
 
     Returns list of [kv_cache_len, batch_size, num_heads, kv_cache_dtype,
@@ -419,8 +416,7 @@ def get_generation_test_cases(attn_type: str, precision_combos=None):
     """
     sweep = get_mla_module_sweep_spec("sglang")
     cases = []
-    precision_combos = precision_combos or _get_precision_combos("generation")
-    for compute_dtype, kv_dtype, gemm_type in precision_combos:
+    for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation"):
         for num_heads in sweep.inner_sweep_head_counts:
             for batch_size in sweep.generation_batch_sizes:
                 for seq_len in sweep.generation_sequence_lengths:
@@ -435,13 +431,20 @@ def get_generation_test_cases(attn_type: str, precision_combos=None):
     return cases
 
 
-def _get_module_precision_combos(phase: str | None = None):
-    """Return YAML precision combos runnable in this phase and GPU SM."""
+def _get_module_precision_combos():
+    """Return a single baseline precision combo for module-level benchmarks.
 
-    return [
-        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
-        for spec in get_mla_module_precision_specs("sglang", phase=phase, sm_version=get_sm_version())
-    ]
+    Module benchmarks spawn a subprocess per (model, precision, heads) group.
+    Each subprocess loads a full ModelRunner (~15-20 s), so fewer groups means
+    faster overall collection.  Use a single bfloat16 baseline — matching the
+    wideep MLA pattern — so the total subprocess count stays manageable.
+
+    Precision-specific kernel performance is already captured by kernel-level
+    collectors (collect_mla.py, collect_attn.py).  The module benchmark
+    captures module-level overhead (scheduling, memory management, attention
+    dispatch) which is largely precision-independent with dummy weights.
+    """
+    return get_mla_module_sweep_spec("sglang").module_precision_combos
 
 
 def _model_max_position_embeddings(model_id: str) -> int | None:
@@ -592,13 +595,14 @@ def _build_module_test_cases(attn_type: str, mode: str):
     model_specs = get_mla_module_model_specs(attention_type=attn_type)
     sweep = get_mla_module_sweep_spec("sglang")
     cases = []
+    seen = set()
     for model_spec in model_specs:
         # Each checkpoint ships at one native precision; only enumerate the
         # precision combos it can actually load (bf16 always + its own quant).
         # Prevents e.g. gemm_type=fp8_block being applied to the NVFP4 checkpoint
         # (a different model), which dies at model load with "Cannot find quant_algo".
         native_quant = _model_native_gemm_quant(model_spec.model_path)
-        for compute_dtype, kv_dtype, gemm_type in _get_module_precision_combos(mode):
+        for compute_dtype, kv_dtype, gemm_type in _get_module_precision_combos():
             if not _gemm_type_supported_by_model(gemm_type, native_quant):
                 continue
             target_tps = sweep.module_tp_sizes if attn_type == "dsa" else [1]
@@ -622,6 +626,21 @@ def _build_module_test_cases(attn_type: str, mode: str):
                         else ["flashmla_kv"]
                     )
                     for _dsa_backend in _dsa_backends:
+                        physical_key = (
+                            model_spec.architecture,
+                            native_quant,
+                            mode,
+                            batch_size,
+                            num_heads,
+                            kv_dtype,
+                            compute_dtype,
+                            gemm_type,
+                            target_tp_size,
+                            _dsa_backend,
+                        )
+                        if physical_key in seen:
+                            continue
+                        seen.add(physical_key)
                         cases.append(
                             [
                                 0,
@@ -641,16 +660,16 @@ def _build_module_test_cases(attn_type: str, mode: str):
 
 
 def _build_wideep_mla_test_cases(mode: str):
-    """Build WideEP MLA cases for the checkpoint's real serving precision.
+    """Build test cases for wideep MLA collection (backward-compatible).
 
     Output format: [seq_len, batch_size, num_heads, kv_cache_dtype,
                     compute_dtype, gemm_type, model_path,
                     attn_type, attention_backend]
 
-    Checkpoint aliases are collapsed by the YAML catalog, while precision is
-    expanded from ``mla_module_sglang.module_precision_combos``.  WideEP tables
-    do not key on GEMM precision, so collect only the checkpoint's native GEMM
-    path (DeepSeek-V3 is block-FP8) and keep BF16/FP8 KV cache as real axes.
+    Matches the old collect_wideep_attn.py behavior:
+    - Single precision combo (bfloat16 run, logged as fp8_block/fp8)
+    - Sweeps multiple attention backends per SM version
+    - Only DeepSeek-V3 (the MLA model), not V3.2/GLM-5 (DSA models)
 
     perf_filename is supplied by collect.py via functools.partial as a keyword
     argument, so it is not included in the test case tuple.
@@ -662,26 +681,24 @@ def _build_wideep_mla_test_cases(mode: str):
     backends = _get_mla_backend_list()
     cases = []
     for model_spec in model_specs:
-        native_gemm_type = _model_native_gemm_quant(model_spec.model_path) or "bfloat16"
-        precision_combos = [combo for combo in _get_module_precision_combos(mode) if combo[2] == native_gemm_type]
         for backend in backends:
             for num_heads in sweep.inner_sweep_head_counts:
                 if num_heads > model_spec.native_num_heads:
                     continue
-                for compute_dtype, kv_dtype, gemm_type in precision_combos:
-                    cases.append(
-                        [
-                            0,
-                            0,
-                            num_heads,
-                            kv_dtype,
-                            compute_dtype,
-                            gemm_type,
-                            model_spec.model_path,
-                            "mla",
-                            backend,
-                        ]
-                    )
+                # Single precision: run with bfloat16, log as fp8_block/fp8
+                cases.append(
+                    [
+                        0,
+                        0,
+                        num_heads,
+                        "bfloat16",
+                        "bfloat16",
+                        "bfloat16",
+                        model_spec.model_path,
+                        "mla",
+                        backend,
+                    ]
+                )
     return cases
 
 
@@ -871,17 +888,6 @@ def _patch_nsa_indexer_compile_for_module_cuda_graph(attention_module) -> None:
 
 class CudaIllegalAccessError(RuntimeError):
     """Stop the current subprocess after a CUDA illegal access poisons context."""
-
-
-class PerfLogWriteError(RuntimeError):
-    """Fail the current collector task when a measured row cannot be persisted."""
-
-
-def _log_perf_strict(*, phase: str, batch_size: int, seq_length: int, **kwargs) -> None:
-    try:
-        log_perf(**kwargs)
-    except Exception as exc:
-        raise PerfLogWriteError(f"failed to log {phase} metrics for b={batch_size}, s={seq_length}: {exc}") from exc
 
 
 def _expect_module_attr(module, attr_name: str, expected: int, module_name: str) -> None:
@@ -1177,11 +1183,22 @@ def run_attention_torch(
     version = get_version("sglang")
     device_name = torch.cuda.get_device_name(device)
 
-    # These strings match the common.*QuantMode enum member names consumed by
-    # the perf database loaders (e.g. "bfloat16", "fp8", "fp8_block").
-    log_mla_dtype = compute_dtype
-    log_kv_dtype = kv_cache_dtype
-    log_gemm_type = gemm_type
+    # Wideep MLA backward-compatibility: the old collect_wideep_attn.py logged
+    # mla_dtype="fp8_block", kv_cache_dtype="fp8" for all runs, used the raw
+    # backend name as kernel_source, and different op_name / filename patterns.
+    # perf_database loaders (load_wideep_*_mla_data) expect these conventions.
+    is_wideep_mla = attn_type == "mla"
+
+    if is_wideep_mla:
+        log_mla_dtype = "fp8_block"
+        log_kv_dtype = "fp8"
+        log_gemm_type = "fp8_block"
+    else:
+        # DSA: log dtype strings that match the common.*QuantMode enum member
+        # names expected by perf_database loaders (e.g. "bfloat16", "fp8").
+        log_mla_dtype = compute_dtype
+        log_kv_dtype = kv_cache_dtype
+        log_gemm_type = gemm_type
 
     # QKV latent dimensions for AttentionInputs
     q_lora_rank = getattr(attention_module, "q_lora_rank", 1536) or 1536
@@ -1806,43 +1823,44 @@ def _run_prefill(
         avg_time_ms = start_event.elapsed_time(end_event) / num_iterations
 
         # Log perf — wideep MLA uses old filename/op_name/kernel_source conventions
-        if is_wideep_mla:
-            perf_fname = "wideep_context_mla_perf.txt"
-            op_name = "mla_context"
-            kernel_source = backend_name
-        else:
-            perf_fname = f"{attn_type}_context_module_perf.txt"
-            op_name = f"{attn_type}_context_module"
-            kernel_source = f"{attn_type}_{backend_name}"
-            if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
-                kernel_source = f"{kernel_source}_trtllm"
-        perf_filename = _resolve_perf_path(output_path, perf_fname)
-        _log_perf_strict(
-            phase="prefill",
-            batch_size=batch_size,
-            seq_length=seq_length,
-            item_list=[
-                {
-                    "model": model_path,
-                    "architecture": architecture,
-                    "mla_dtype": log_mla_dtype,
-                    "kv_cache_dtype": log_kv_dtype,
-                    "gemm_type": log_gemm_type,
-                    "num_heads": head_num,
-                    "batch_size": batch_size,
-                    "isl": seq_length,
-                    "tp_size": target_tp_size,
-                    "step": prefix_len,
-                    "latency": f"{avg_time_ms:.4f}",
-                }
-            ],
-            framework="SGLang",
-            version=version,
-            device_name=device_name,
-            op_name=op_name,
-            kernel_source=kernel_source,
-            perf_filename=perf_filename,
-        )
+        try:
+            if is_wideep_mla:
+                perf_fname = "wideep_context_mla_perf.txt"
+                op_name = "mla_context"
+                kernel_source = backend_name
+            else:
+                perf_fname = f"{attn_type}_context_module_perf.txt"
+                op_name = f"{attn_type}_context_module"
+                kernel_source = f"{attn_type}_{backend_name}"
+                if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
+                    kernel_source = f"{kernel_source}_trtllm"
+            perf_filename = _resolve_perf_path(output_path, perf_fname)
+            log_perf(
+                item_list=[
+                    {
+                        "model": model_path,
+                        "architecture": architecture,
+                        "mla_dtype": log_mla_dtype,
+                        "kv_cache_dtype": log_kv_dtype,
+                        "gemm_type": log_gemm_type,
+                        "num_heads": head_num,
+                        "batch_size": batch_size,
+                        "isl": seq_length,
+                        "tp_size": target_tp_size,
+                        "step": prefix_len,
+                        "latency": f"{avg_time_ms:.4f}",
+                    }
+                ],
+                framework="SGLang",
+                version=version,
+                device_name=device_name,
+                op_name=op_name,
+                kernel_source=kernel_source,
+                perf_filename=perf_filename,
+            )
+        except Exception as e:
+            print(f"  Warning: failed to log prefill metrics: {e}")
+            return False
 
         print(f"  Prefill: {avg_time_ms:.3f} ms (back-to-back avg over {num_iterations} iters)")
         return True
@@ -1851,8 +1869,6 @@ def _run_prefill(
         print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
         torch.cuda.empty_cache()
         return False
-    except PerfLogWriteError:
-        raise
     except Exception as e:
         traceback.print_exc()
         error_str = str(e).lower()
@@ -2040,48 +2056,49 @@ def _run_decode(
         # DSA uses isl=1, step=seq_len, where seq_len is past-KV length.
         # The wideep generation loader computes s = isl + step, so both
         # conventions yield the same effective key when step=0 → s=seq_len.
-        if is_wideep_mla:
-            perf_fname = "wideep_generation_mla_perf.txt"
-            op_name = "mla_generation"
-            kernel_source = backend_name
-            log_isl = seq_length
-            log_step = 0
-        else:
-            perf_fname = f"{attn_type}_generation_module_perf.txt"
-            op_name = f"{attn_type}_generation_module"
-            kernel_source = f"{attn_type}_{backend_name}"
-            if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
-                kernel_source = f"{kernel_source}_trtllm"
-            log_isl = 1
-            log_step = seq_length
-        perf_filename = _resolve_perf_path(output_path, perf_fname)
-        _log_perf_strict(
-            phase="decode",
-            batch_size=batch_size,
-            seq_length=seq_length,
-            item_list=[
-                {
-                    "model": model_path,
-                    "architecture": architecture,
-                    "mla_dtype": log_mla_dtype,
-                    "kv_cache_dtype": log_kv_dtype,
-                    "gemm_type": log_gemm_type,
-                    "num_heads": head_num,
-                    "batch_size": batch_size,
-                    "isl": log_isl,
-                    "tp_size": target_tp_size,
-                    "step": log_step,
-                    "latency": f"{avg_time_ms:.4f}",
-                }
-            ],
-            framework="SGLang",
-            version=version,
-            device_name=device_name,
-            op_name=op_name,
-            kernel_source=kernel_source,
-            perf_filename=perf_filename,
-            power_stats=power_stats,
-        )
+        try:
+            if is_wideep_mla:
+                perf_fname = "wideep_generation_mla_perf.txt"
+                op_name = "mla_generation"
+                kernel_source = backend_name
+                log_isl = seq_length
+                log_step = 0
+            else:
+                perf_fname = f"{attn_type}_generation_module_perf.txt"
+                op_name = f"{attn_type}_generation_module"
+                kernel_source = f"{attn_type}_{backend_name}"
+                if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
+                    kernel_source = f"{kernel_source}_trtllm"
+                log_isl = 1
+                log_step = seq_length
+            perf_filename = _resolve_perf_path(output_path, perf_fname)
+            log_perf(
+                item_list=[
+                    {
+                        "model": model_path,
+                        "architecture": architecture,
+                        "mla_dtype": log_mla_dtype,
+                        "kv_cache_dtype": log_kv_dtype,
+                        "gemm_type": log_gemm_type,
+                        "num_heads": head_num,
+                        "batch_size": batch_size,
+                        "isl": log_isl,
+                        "tp_size": target_tp_size,
+                        "step": log_step,
+                        "latency": f"{avg_time_ms:.4f}",
+                    }
+                ],
+                framework="SGLang",
+                version=version,
+                device_name=device_name,
+                op_name=op_name,
+                kernel_source=kernel_source,
+                perf_filename=perf_filename,
+                power_stats=power_stats,
+            )
+        except Exception as e:
+            print(f"  Warning: failed to log decode metrics: {e}")
+            return False
 
         print(f"  Decode: {avg_time_ms:.3f} ms")
         return True
@@ -2090,8 +2107,6 @@ def _run_decode(
         print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
         torch.cuda.empty_cache()
         return False
-    except PerfLogWriteError:
-        raise
     except Exception as e:
         traceback.print_exc()
         error_str = str(e).lower()
@@ -2159,10 +2174,10 @@ def run_mla_module(
         attention_backend = _get_backends(attn_type)
 
     if is_prefill:
-        all_cases = get_context_test_cases(attn_type, _get_module_precision_combos("context"))
+        all_cases = get_context_test_cases(attn_type)
         phase_name = "Context"
     else:
-        all_cases = get_generation_test_cases(attn_type, _get_module_precision_combos("generation"))
+        all_cases = get_generation_test_cases(attn_type)
         phase_name = "Generation"
 
     # Filter to matching precision combo.

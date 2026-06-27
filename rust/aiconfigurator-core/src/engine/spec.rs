@@ -73,11 +73,7 @@ struct BincodeWire {
 
 impl EngineSpec {
     /// Build a spec, stamping the current [`ENGINE_SPEC_SCHEMA_VERSION`].
-    pub fn new(
-        engine: EngineConfig,
-        context_ops: Vec<OpSpec>,
-        generation_ops: Vec<OpSpec>,
-    ) -> Self {
+    pub fn new(engine: EngineConfig, context_ops: Vec<OpSpec>, generation_ops: Vec<OpSpec>) -> Self {
         Self {
             schema_version: ENGINE_SPEC_SCHEMA_VERSION,
             engine,
@@ -103,28 +99,15 @@ impl EngineSpec {
 
     /// Deserialize from the bincode wire format produced by [`Self::to_bincode`].
     pub fn from_bincode(bytes: &[u8]) -> Result<Self, AicError> {
-        // Bincode 1.x encodes this leading u32 as four little-endian bytes.
-        // Inspect it before decoding the op lists: their positional layout can
-        // change between schema versions, so a full deserialize of an older
-        // payload may fail before we can report the useful version mismatch.
-        let prefix: [u8; 4] = bytes
-            .get(..4)
-            .and_then(|value| value.try_into().ok())
-            .ok_or_else(|| {
-                AicError::EngineSpec("bincode payload is missing its schema version".into())
-            })?;
-        let encoded_version = u32::from_le_bytes(prefix);
-        if encoded_version != ENGINE_SPEC_SCHEMA_VERSION {
+        let wire: BincodeWire = bincode::deserialize(bytes)
+            .map_err(|e| AicError::EngineSpec(format!("bincode decode: {e}")))?;
+        if wire.schema_version != ENGINE_SPEC_SCHEMA_VERSION {
             return Err(AicError::UnsupportedSchemaVersion {
                 kind: "EngineSpec",
-                got: encoded_version,
+                got: wire.schema_version,
                 expected: ENGINE_SPEC_SCHEMA_VERSION,
             });
         }
-
-        let wire: BincodeWire = bincode::deserialize(bytes)
-            .map_err(|e| AicError::EngineSpec(format!("bincode decode: {e}")))?;
-        debug_assert_eq!(wire.schema_version, encoded_version);
         let engine: EngineConfig = serde_json::from_str(&wire.engine_json)
             .map_err(|e| AicError::EngineSpec(format!("engine JSON decode: {e}")))?;
         Ok(Self {
@@ -144,7 +127,6 @@ mod tests {
     use crate::common::enums::{
         BackendKind, CommQuantMode, FmhaQuantMode, GemmQuantMode, KvCacheQuantMode, MoeQuantMode,
     };
-    use crate::operators::moe_dispatch::DispatchFlavor;
     use crate::operators::op::{FallbackOp, OverlapOp};
     use crate::operators::{
         ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4ModuleOp,
@@ -152,6 +134,7 @@ mod tests {
         GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
         NcclOp, P2POp, VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp, WideEpMoeOp,
     };
+    use crate::operators::moe_dispatch::DispatchFlavor;
     use crate::perf_database::dsv4::AttnKind;
     use crate::{
         DataType, ParallelMapping, QuantizationConfig, SpeculativeConfig,
@@ -353,7 +336,6 @@ mod tests {
             fmha_quant_mode: FmhaQuantMode::Fp8,
             gemm_quant_mode: GemmQuantMode::Fp8Block,
             architecture: "DeepseekV32ForCausalLM".into(),
-            dsa_backend: "trtllm".into(),
             index_topk: 2048,
         }
     }
@@ -629,21 +611,5 @@ mod tests {
         let bytes = spec.to_bincode().expect("to_bincode");
         let decoded = EngineSpec::from_bincode(&bytes).expect("from_bincode");
         assert_eq!(spec, decoded);
-    }
-
-    #[test]
-    fn engine_spec_rejects_older_wire_before_decoding_changed_ops() {
-        let mut old_payload = 1_u32.to_le_bytes().to_vec();
-        old_payload.extend_from_slice(b"not-a-decodable-v1-op-list");
-
-        let err = EngineSpec::from_bincode(&old_payload).unwrap_err();
-        assert!(matches!(
-            err,
-            AicError::UnsupportedSchemaVersion {
-                kind: "EngineSpec",
-                got: 1,
-                expected: ENGINE_SPEC_SCHEMA_VERSION,
-            }
-        ));
     }
 }

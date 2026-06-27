@@ -22,8 +22,6 @@ from typing import Any
 
 import yaml
 
-from collector.planner import PopulationRule, RuleSource
-
 try:
     from helper import create_test_case_id
 except ModuleNotFoundError:
@@ -73,49 +71,7 @@ class OpCasePlan:
     include: CaseSelector = field(default_factory=lambda: CaseSelector(all_cases=True))
     exclude: CaseSelector = field(default_factory=CaseSelector)
     expected_failures: CaseSelector = field(default_factory=CaseSelector)
-    population_rules: list[PopulationRule] = field(default_factory=list)
     drop: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class CaseDocument:
-    """One parsed collector-v2 YAML document with stable source identity."""
-
-    path: Path
-    data: dict[str, Any]
-
-    @property
-    def schema_version(self) -> int:
-        return int(self.data.get("schema_version", 1))
-
-
-@dataclass(frozen=True, slots=True)
-class CaseCatalog:
-    """All YAML inputs selected for one collection plan.
-
-    Keeping parsed documents on the plan lets generators consume the exact
-    catalog used for op selection instead of scanning the repository again.
-    """
-
-    backend: str
-    requested_model_path: str | None
-    model_path: str | None
-    model_architecture: str | None
-    gpu_type: str | None
-    sm_version: int | None
-    full: bool
-    base_cases_path: Path
-    base_documents: tuple[CaseDocument, ...]
-    model_documents: tuple[CaseDocument, ...]
-    sm_exceptions_document: CaseDocument | None = None
-
-    @property
-    def model_cases_paths(self) -> list[Path]:
-        return [document.path for document in self.model_documents]
-
-    @property
-    def sm_exceptions_path(self) -> Path | None:
-        return self.sm_exceptions_document.path if self.sm_exceptions_document else None
 
 
 @dataclass(slots=True)
@@ -127,14 +83,11 @@ class CollectionCasePlan:
     model_architecture: str | None
     gpu_type: str | None
     sm_version: int | None
-    full: bool
     op_cases: dict[str, OpCasePlan]
     base_cases_path: Path
     model_cases_paths: list[Path] = field(default_factory=list)
     sm_exceptions_path: Path | None = None
     requested_model_path: str | None = None
-    catalog: CaseCatalog | None = None
-    population_reports: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def ops(self) -> list[str]:
@@ -148,13 +101,10 @@ class CollectionCasePlan:
             "requested_model_path": self.requested_model_path,
             "gpu_type": self.gpu_type,
             "sm_version": self.sm_version,
-            "full": self.full,
             "ops": self.ops,
             "base_cases_path": str(self.base_cases_path),
             "model_cases_paths": [str(path) for path in self.model_cases_paths],
             "sm_exceptions_path": str(self.sm_exceptions_path) if self.sm_exceptions_path else None,
-            "case_catalog_loaded_once": self.catalog is not None,
-            "population_reports": self.population_reports,
         }
 
 
@@ -203,21 +153,19 @@ def _base_ops_dir(base_data: dict[str, Any], base_path: Path) -> Path:
     return base_path.parent / path
 
 
-def _load_base_case_documents(base_path: Path) -> list[CaseDocument]:
+def _load_base_case_files(base_path: Path) -> list[dict[str, Any]]:
     """Load per-op base case YAML files from a directory or legacy catalog."""
     if base_path.is_dir():
-        return [
-            CaseDocument(path=path.resolve(), data=load_yaml_file(path)) for path in sorted(base_path.glob("*.yaml"))
-        ]
+        return [load_yaml_file(path) for path in sorted(base_path.glob("*.yaml"))]
 
     base_data = load_yaml_file(base_path)
     if "base_ops" not in base_data and "base_ops_dir" not in base_data:
-        return [CaseDocument(path=base_path.resolve(), data=base_data)]
+        return [base_data]
 
-    documents = [CaseDocument(path=base_path.resolve(), data=base_data)]
+    data = [base_data]
     base_ops_dir = _base_ops_dir(base_data, base_path)
     if not base_ops_dir.exists():
-        return documents
+        return data
 
     configured_files = base_data.get("base_ops")
     if configured_files is None:
@@ -225,14 +173,8 @@ def _load_base_case_documents(base_path: Path) -> list[CaseDocument]:
     else:
         paths = [base_ops_dir / str(filename) for filename in _as_list(configured_files, field_name="base_ops")]
 
-    documents.extend(CaseDocument(path=path.resolve(), data=load_yaml_file(path)) for path in paths)
-    return documents
-
-
-def _load_base_case_files(base_path: Path) -> list[dict[str, Any]]:
-    """Compatibility wrapper returning only parsed base mappings."""
-
-    return [document.data for document in _load_base_case_documents(base_path)]
+    data.extend(load_yaml_file(path) for path in paths)
+    return data
 
 
 def resolve_sm_version(*, gpu_type: str | None = None, sm_version: int | str | None = None) -> int | None:
@@ -517,183 +459,6 @@ def _merge_case_file(
     )
 
 
-_POPULATION_WHEN_FIELDS = {
-    "backends",
-    "model_paths",
-    "model_architectures",
-    "sm_versions",
-    "min_sm",
-    "max_sm",
-}
-
-
-def _population_rule_applies(
-    when: dict[str, Any],
-    *,
-    backend: str,
-    model_paths: tuple[str, ...],
-    model_architectures: tuple[str, ...],
-    sm_version: int | None,
-) -> bool:
-    unknown = set(when) - _POPULATION_WHEN_FIELDS
-    if unknown:
-        raise ValueError(f"Unknown population rule when fields: {sorted(unknown)}")
-    if when.get("backends") is not None and backend not in _as_list(when["backends"], field_name="when.backends"):
-        return False
-    if when.get("model_paths") is not None:
-        expected_paths = {str(value) for value in _as_list(when["model_paths"], field_name="when.model_paths")}
-        if not expected_paths.intersection(model_paths):
-            return False
-    if when.get("model_architectures") is not None:
-        expected_architectures = {
-            str(value) for value in _as_list(when["model_architectures"], field_name="when.model_architectures")
-        }
-        if not expected_architectures.intersection(model_architectures):
-            return False
-    if when.get("sm_versions") is not None and (
-        sm_version is None
-        or sm_version not in {int(value) for value in _as_list(when["sm_versions"], field_name="when.sm_versions")}
-    ):
-        return False
-    if when.get("min_sm") is not None and (sm_version is None or sm_version < int(when["min_sm"])):
-        return False
-    return not (when.get("max_sm") is not None and (sm_version is None or sm_version > int(when["max_sm"])))
-
-
-def _parse_population_rule(
-    raw_rule: Any,
-    *,
-    source_path: Path,
-    source_data: dict[str, Any],
-    op: str,
-    backend: str,
-    model_paths: tuple[str, ...],
-    model_architectures: tuple[str, ...],
-    sm_version: int | None,
-) -> PopulationRule | None:
-    if not isinstance(raw_rule, dict):
-        raise TypeError(f"population_rules.{op} entries must be mappings")
-    rule_id = raw_rule.get("id")
-    if not rule_id:
-        raise ValueError(f"{source_path}: population_rules.{op} entries require an id")
-    when = raw_rule.get("when") or {}
-    if not isinstance(when, dict):
-        raise TypeError(f"{source_path}: population rule {rule_id!r} when must be a mapping")
-    if not _population_rule_applies(
-        when,
-        backend=backend,
-        model_paths=model_paths,
-        model_architectures=model_architectures,
-        sm_version=sm_version,
-    ):
-        return None
-    if "cases" not in raw_rule:
-        raise ValueError(
-            f"{source_path}: population rule {rule_id!r} must define exact cases; "
-            "profile expansion requires a registered op schema adapter"
-        )
-    cases = _as_list(raw_rule["cases"], field_name=f"population_rules.{op}.{rule_id}.cases")
-    source = RuleSource(
-        rule_id=str(rule_id),
-        path=source_path,
-        model_path=str(source_data.get("model_path")) if source_data.get("model_path") else None,
-        model_architecture=_model_case_architecture(source_data),
-        backend=backend,
-        sm_version=sm_version,
-        attributes={"op": op, "when": when},
-    )
-    return PopulationRule(source=source, candidates=tuple(cases))
-
-
-def _merge_population_rule_section(
-    op_cases: dict[str, OpCasePlan],
-    section: Any,
-    *,
-    source_path: Path,
-    source_data: dict[str, Any],
-    backend: str,
-    model_paths: tuple[str, ...],
-    model_architectures: tuple[str, ...],
-    sm_version: int | None,
-    allowed_ops: set[str] | None = None,
-) -> None:
-    if section is None:
-        return
-    if not isinstance(section, dict):
-        raise TypeError("population_rules must be a mapping keyed by op")
-    for raw_op, raw_rules in section.items():
-        op = str(raw_op)
-        if allowed_ops is not None and op not in allowed_ops:
-            continue
-        plan = op_cases.get(op)
-        if plan is None:
-            raise ValueError(f"{source_path}: population rules cannot activate unplanned op {op!r}")
-        seen_rule_ids = {
-            rule.source.rule_id
-            for rule in plan.population_rules
-            if rule.source.path == source_path and rule.source.attributes.get("op") == op
-        }
-        for raw_rule in _as_list(raw_rules, field_name=f"population_rules.{op}"):
-            parsed = _parse_population_rule(
-                raw_rule,
-                source_path=source_path,
-                source_data=source_data,
-                op=op,
-                backend=backend,
-                model_paths=model_paths,
-                model_architectures=model_architectures,
-                sm_version=sm_version,
-            )
-            if parsed is None:
-                continue
-            if parsed.source.rule_id in seen_rule_ids:
-                raise ValueError(f"{source_path}: duplicate population rule id {parsed.source.rule_id!r} for op {op!r}")
-            seen_rule_ids.add(parsed.source.rule_id)
-            plan.population_rules.append(parsed)
-
-
-def _merge_population_rules(
-    op_cases: dict[str, OpCasePlan],
-    document: CaseDocument,
-    *,
-    backend: str,
-    model_paths: tuple[str, ...],
-    model_architectures: tuple[str, ...],
-    sm_version: int | None,
-    allowed_ops: set[str] | None = None,
-) -> None:
-    data = document.data
-    if "population_rules" not in data and "framework_specific_population_rules" not in data:
-        return
-    if document.schema_version < 2:
-        raise ValueError(f"{document.path}: population_rules require schema_version: 2")
-    _merge_population_rule_section(
-        op_cases,
-        data.get("population_rules"),
-        source_path=document.path,
-        source_data=data,
-        backend=backend,
-        model_paths=model_paths,
-        model_architectures=model_architectures,
-        sm_version=sm_version,
-        allowed_ops=allowed_ops,
-    )
-    framework_rules = data.get("framework_specific_population_rules") or {}
-    if not isinstance(framework_rules, dict):
-        raise TypeError("framework_specific_population_rules must be a mapping")
-    _merge_population_rule_section(
-        op_cases,
-        framework_rules.get(backend),
-        source_path=document.path,
-        source_data=data,
-        backend=backend,
-        model_paths=model_paths,
-        model_architectures=model_architectures,
-        sm_version=sm_version,
-        allowed_ops=allowed_ops,
-    )
-
-
 def _merge_exception_file(op_cases: dict[str, OpCasePlan], data: dict[str, Any], backend: str) -> None:
     _merge_exception_section(op_cases, _section(data, "all_frameworks_op_exceptions"))
     framework_exceptions = _section(data, "framework_specific_op_exceptions")
@@ -782,49 +547,6 @@ def _load_model_case_files(
     if model_path:
         path = default_model_cases_path(model_path)
         return [path] if path.exists() else []
-    return []
-
-
-def _load_model_case_documents(
-    model_path: str | None,
-    model_architecture: str | None,
-    model_cases_path: str | None,
-    full: bool,
-) -> list[CaseDocument]:
-    """Load and select model documents without reopening matched files."""
-
-    if model_cases_path:
-        path = Path(model_cases_path).expanduser().resolve()
-        return [CaseDocument(path=path, data=load_yaml_file(path))]
-
-    documents = [
-        CaseDocument(path=path.resolve(), data=load_yaml_file(path))
-        for path in sorted(MODEL_CASES_DIR.glob("*_cases.yaml"))
-    ]
-    if full:
-        return documents
-
-    matches = []
-    for document in documents:
-        if model_architecture and _model_case_architecture(document.data) == model_architecture:
-            matches.append(document)
-            continue
-        if model_path and model_path in _model_case_paths(document.data):
-            matches.append(document)
-    if matches:
-        return matches
-
-    fallback_path = None
-    if model_architecture:
-        fallback_path = default_architecture_cases_path(model_architecture)
-    elif model_path:
-        fallback_path = default_model_cases_path(model_path)
-    if fallback_path and fallback_path.exists():
-        resolved = fallback_path.resolve()
-        for document in documents:
-            if document.path == resolved:
-                return [document]
-        return [CaseDocument(path=resolved, data=load_yaml_file(resolved))]
     return []
 
 
@@ -920,63 +642,6 @@ def _selected_base_ops(
     return selected
 
 
-def load_case_catalog(
-    *,
-    backend: str,
-    model_path: str | None = None,
-    model_architecture: str | None = None,
-    gpu_type: str | None = None,
-    sm_version: int | str | None = None,
-    base_cases_path: str | None = None,
-    model_cases_path: str | None = None,
-    sm_exceptions_path: str | None = None,
-    gpu_exceptions_path: str | None = None,
-    full: bool = False,
-) -> CaseCatalog:
-    """Parse every YAML input for one plan exactly once."""
-
-    base_path = Path(base_cases_path).expanduser().resolve() if base_cases_path else BASE_OP_CASES_DIR
-    base_documents = tuple(_load_base_case_documents(base_path))
-    requested_model_path = model_path
-    model_documents = tuple(_load_model_case_documents(model_path, model_architecture, model_cases_path, full))
-    model_data = [document.data for document in model_documents]
-    if model_path is None and len(model_data) == 1:
-        model_path = _primary_model_path(model_data[0])
-    if model_architecture is None and len(model_data) == 1:
-        model_architecture = _model_case_architecture(model_data[0])
-
-    resolved_sm_version = resolve_sm_version(gpu_type=gpu_type, sm_version=sm_version)
-    resolved_sm_exceptions_path = None
-    explicit_exceptions_path = sm_exceptions_path or gpu_exceptions_path
-    if explicit_exceptions_path:
-        resolved_sm_exceptions_path = Path(explicit_exceptions_path).expanduser().resolve()
-    elif resolved_sm_version is not None:
-        default_path = default_sm_exceptions_path(resolved_sm_version)
-        if default_path.exists():
-            resolved_sm_exceptions_path = default_path
-
-    sm_document = None
-    if resolved_sm_exceptions_path:
-        sm_document = CaseDocument(
-            path=resolved_sm_exceptions_path.resolve(),
-            data=load_yaml_file(resolved_sm_exceptions_path),
-        )
-
-    return CaseCatalog(
-        backend=backend,
-        requested_model_path=requested_model_path,
-        model_path=model_path,
-        model_architecture=model_architecture,
-        gpu_type=gpu_type,
-        sm_version=resolved_sm_version,
-        full=full,
-        base_cases_path=base_path,
-        base_documents=base_documents,
-        model_documents=model_documents,
-        sm_exceptions_document=sm_document,
-    )
-
-
 def build_collection_case_plan(
     *,
     backend: str,
@@ -989,106 +654,53 @@ def build_collection_case_plan(
     sm_exceptions_path: str | None = None,
     gpu_exceptions_path: str | None = None,
     full: bool = False,
-    catalog: CaseCatalog | None = None,
 ) -> CollectionCasePlan:
     """Build a model/SM-aware op and case plan for one backend."""
-    if catalog is None:
-        catalog = load_case_catalog(
-            backend=backend,
-            model_path=model_path,
-            model_architecture=model_architecture,
-            gpu_type=gpu_type,
-            sm_version=sm_version,
-            base_cases_path=base_cases_path,
-            model_cases_path=model_cases_path,
-            sm_exceptions_path=sm_exceptions_path,
-            gpu_exceptions_path=gpu_exceptions_path,
-            full=full,
-        )
-    elif catalog.backend != backend:
-        raise ValueError(f"Case catalog backend {catalog.backend!r} does not match requested backend {backend!r}")
-
-    base_path = catalog.base_cases_path
-    base_data_files = [document.data for document in catalog.base_documents]
-    model_data = [document.data for document in catalog.model_documents]
-    model_path = catalog.model_path
-    model_architecture = catalog.model_architecture
-    requested_model_path = catalog.requested_model_path
+    base_path = Path(base_cases_path).expanduser().resolve() if base_cases_path else BASE_OP_CASES_DIR
+    base_data_files = _load_base_case_files(base_path)
+    requested_model_path = model_path
+    model_paths = _load_model_case_files(model_path, model_architecture, model_cases_path, full)
+    model_data = [load_yaml_file(path) for path in model_paths]
+    if model_path is None and len(model_data) == 1:
+        model_path = _primary_model_path(model_data[0])
+    if model_architecture is None and len(model_data) == 1:
+        model_architecture = _model_case_architecture(model_data[0])
 
     op_cases: dict[str, OpCasePlan] = {}
     selected_base_ops = _selected_base_ops(base_data_files, model_data, backend, model_path)
-    for document in catalog.base_documents:
-        _merge_case_file(op_cases, document.data, backend, allowed_ops=selected_base_ops)
-    for document in catalog.model_documents:
+    for base_data in base_data_files:
+        _merge_case_file(op_cases, base_data, backend, allowed_ops=selected_base_ops)
+    for data in model_data:
         # A targeted model may intentionally narrow a broad base recipe. Full
-        # mode is different: every model document is an additive contributor,
-        # so a later concrete selector must never replace an earlier model's
-        # ``cases: all`` (or another model's concrete selector).
-        _merge_case_file(
-            op_cases,
-            document.data,
-            backend,
-            override_specific_selectors=not catalog.full,
-        )
+        # mode is additive: a later model selector must not replace cases
+        # selected by an earlier model document.
+        _merge_case_file(op_cases, data, backend, override_specific_selectors=not full)
 
-    population_model_path = catalog.requested_model_path or catalog.model_path
-    if catalog.full:
-        base_population_model_paths = tuple(
-            dict.fromkeys(path for document in catalog.model_documents for path in _model_case_paths(document.data))
-        )
-        base_population_architectures = tuple(
-            dict.fromkeys(
-                architecture
-                for document in catalog.model_documents
-                if (architecture := _model_case_architecture(document.data)) is not None
-            )
-        )
-    else:
-        base_population_model_paths = (population_model_path,) if population_model_path is not None else ()
-        base_population_architectures = (catalog.model_architecture,) if catalog.model_architecture is not None else ()
-    for document in catalog.base_documents:
-        _merge_population_rules(
-            op_cases,
-            document,
-            backend=backend,
-            model_paths=base_population_model_paths,
-            model_architectures=base_population_architectures,
-            sm_version=catalog.sm_version,
-            allowed_ops=selected_base_ops,
-        )
-    for document in catalog.model_documents:
-        document_model_paths = (
-            tuple(_model_case_paths(document.data))
-            if catalog.full
-            else ((population_model_path,) if population_model_path is not None else ())
-        )
-        document_architecture = _model_case_architecture(document.data) if catalog.full else catalog.model_architecture
-        _merge_population_rules(
-            op_cases,
-            document,
-            backend=backend,
-            model_paths=document_model_paths,
-            model_architectures=(document_architecture,) if document_architecture is not None else (),
-            sm_version=catalog.sm_version,
-        )
+    resolved_sm_version = resolve_sm_version(gpu_type=gpu_type, sm_version=sm_version)
+    resolved_sm_exceptions_path = None
+    explicit_exceptions_path = sm_exceptions_path or gpu_exceptions_path
+    if explicit_exceptions_path:
+        resolved_sm_exceptions_path = Path(explicit_exceptions_path).expanduser().resolve()
+    elif resolved_sm_version is not None:
+        default_path = default_sm_exceptions_path(resolved_sm_version)
+        if default_path.exists():
+            resolved_sm_exceptions_path = default_path
 
-    if catalog.sm_exceptions_document:
-        _merge_exception_file(op_cases, catalog.sm_exceptions_document.data, backend)
+    if resolved_sm_exceptions_path:
+        _merge_exception_file(op_cases, load_yaml_file(resolved_sm_exceptions_path), backend)
 
     op_cases = {op: plan for op, plan in op_cases.items() if not plan.drop}
     return CollectionCasePlan(
         backend=backend,
         model_path=model_path,
         model_architecture=model_architecture,
-        gpu_type=catalog.gpu_type,
-        sm_version=catalog.sm_version,
-        full=catalog.full,
+        gpu_type=gpu_type,
+        sm_version=resolved_sm_version,
         op_cases=op_cases,
         base_cases_path=base_path,
-        model_cases_paths=catalog.model_cases_paths,
-        sm_exceptions_path=catalog.sm_exceptions_path,
+        model_cases_paths=model_paths,
+        sm_exceptions_path=resolved_sm_exceptions_path,
         requested_model_path=requested_model_path,
-        catalog=catalog,
     )
 
 
@@ -1367,29 +979,9 @@ def filter_test_cases_with_report(
     runtime_version: str | None = None,
 ) -> tuple[list[Any], list[dict[str, Any]]]:
     """Apply an op case plan and return cases skipped by expected SM exceptions."""
-    indices, skipped = select_test_case_indices_with_report(
-        test_cases,
-        plan=plan,
-        full_module_name=full_module_name,
-        run_func_name=run_func_name,
-        runtime_version=runtime_version,
-    )
-    return [test_cases[index] for index in indices], skipped
-
-
-def select_test_case_indices_with_report(
-    test_cases: list[Any],
-    *,
-    plan: OpCasePlan | None,
-    full_module_name: str,
-    run_func_name: str,
-    runtime_version: str | None = None,
-) -> tuple[list[int], list[dict[str, Any]]]:
-    """Return selected indices so planner identities and metadata stay attached."""
-
     if plan is None:
-        return list(range(len(test_cases))), []
-    selected_indices = []
+        return test_cases, []
+    filtered = []
     skipped = []
     include = plan.include
     exclude = plan.exclude
@@ -1410,8 +1002,8 @@ def select_test_case_indices_with_report(
         if exclude_details is not None:
             skipped.append({"case_id": case_id, "index": index, "source": "sm_exception", **exclude_details})
             continue
-        selected_indices.append(index)
+        filtered.append(test_case)
 
     if include.limit is not None:
-        selected_indices = selected_indices[: include.limit]
-    return selected_indices, skipped
+        filtered = filtered[: include.limit]
+    return filtered, skipped

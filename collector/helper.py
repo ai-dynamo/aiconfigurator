@@ -26,7 +26,6 @@ import threading
 import time
 from collections.abc import Iterable
 from contextlib import contextmanager
-from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -39,34 +38,6 @@ EXIT_CODE_RESTART = 10  # Exit code to indicate restart is needed
 # Global NVML state per worker process
 _NVML_INITIALIZED = False
 _NVML_LOCK = threading.Lock()
-
-COLLECTOR_INVOCATION_FIELD = "__collector_invocation_id"
-COLLECTOR_INVOCATION_ENV = "AIC_COLLECTOR_INVOCATION_ID"
-_CURRENT_INVOCATION_ID: ContextVar[str] = ContextVar("collector_invocation_id", default="")
-
-
-@contextmanager
-def collector_invocation(invocation_id: str):
-    """Attach one planner invocation id to rows emitted in this context.
-
-    The environment bridge is intentional: several module collectors launch a
-    short-lived Python subprocess that owns the actual ``log_perf`` call.
-    Context variables do not cross that boundary, while an inherited, scoped
-    environment value does.
-    """
-
-    resolved_id = str(invocation_id)
-    token = _CURRENT_INVOCATION_ID.set(resolved_id)
-    previous_env = os.environ.get(COLLECTOR_INVOCATION_ENV)
-    os.environ[COLLECTOR_INVOCATION_ENV] = resolved_id
-    try:
-        yield
-    finally:
-        if previous_env is None:
-            os.environ.pop(COLLECTOR_INVOCATION_ENV, None)
-        else:
-            os.environ[COLLECTOR_INVOCATION_ENV] = previous_env
-        _CURRENT_INVOCATION_ID.reset(token)
 
 
 def _parse_bool_env(env_var: str, default: bool = False) -> bool:
@@ -680,67 +651,6 @@ def create_test_case_id(test_case, test_type, module_name):
     return f"{module_name}:{test_type}:{test_case}"
 
 
-def delta_latency_power_stats(
-    dynamic_latency: float,
-    static_latency: float,
-    dynamic_power_stats: dict | None,
-    static_power_stats: dict | None,
-) -> tuple[float, dict]:
-    """Return a non-negative latency/energy delta encoded as power stats.
-
-    ``log_perf`` stores power and the SDK loader derives energy as
-    ``power * latency``.  For a delta measurement, reusing dynamic power would
-    therefore produce ``P_dynamic * (t_dynamic - t_static)`` instead of the
-    physically meaningful ``E_dynamic - E_static``.  Convert that energy delta
-    to an equivalent power over the latency delta so the existing CSV schema
-    and legacy loader retain the correct energy semantics.
-    """
-
-    latency = max(0.0, float(dynamic_latency) - float(static_latency))
-    dynamic_stats = dict(dynamic_power_stats or {})
-    static_stats = dict(static_power_stats or {})
-    dynamic_power = float(dynamic_stats.get("power") or 0.0)
-    static_power = float(static_stats.get("power") or 0.0)
-    energy = max(0.0, dynamic_power * float(dynamic_latency) - static_power * float(static_latency))
-    equivalent_power = energy / latency if latency > 0.0 else 0.0
-
-    result = dynamic_stats
-    result["power"] = equivalent_power
-    return latency, result
-
-
-def _ensure_perf_csv_invocation_column(perf_filename: str) -> list[str] | None:
-    """Add the staging invocation column to an existing CSV atomically."""
-
-    path = Path(perf_filename)
-    if not path.exists() or path.stat().st_size == 0:
-        return None
-    with open(path, newline="", encoding="utf-8") as source:
-        reader = csv.DictReader(source)
-        if reader.fieldnames is None:
-            raise ValueError(f"Perf CSV has no header: {path}")
-        fieldnames = list(reader.fieldnames)
-        if COLLECTOR_INVOCATION_FIELD in fieldnames:
-            return fieldnames
-        rows = list(reader)
-
-    fieldnames.append(COLLECTOR_INVOCATION_FIELD)
-    tmp_path = path.with_name(f".{path.name}.invocation.tmp")
-    try:
-        with open(tmp_path, "w", newline="", encoding="utf-8") as destination:
-            writer = csv.DictWriter(destination, fieldnames=fieldnames)
-            writer.writeheader()
-            for row in rows:
-                writer.writerow({**row, COLLECTOR_INVOCATION_FIELD: ""})
-            destination.flush()
-            os.fsync(destination.fileno())
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
-    return fieldnames
-
-
 def log_perf(
     item_list: list[dict],
     framework: str,
@@ -765,10 +675,10 @@ def log_perf(
             time.sleep(0.1)
 
     if not got_lock:
-        raise TimeoutError(f"cannot acquire perf log lock for {perf_filename}")
+        print(f"Skipping log: can not get lock for {perf_filename}")
+        return
 
     try:
-        existing_fieldnames = _ensure_perf_csv_invocation_column(perf_filename)
         with open(perf_filename, "a", newline="") as f:
             # Add header only if file is empty
             is_empty = os.fstat(f.fileno()).st_size == 0
@@ -779,9 +689,6 @@ def log_perf(
                 "device": device_name,
                 "op_name": op_name,
                 "kernel_source": kernel_source,
-                COLLECTOR_INVOCATION_FIELD: (
-                    _CURRENT_INVOCATION_ID.get() or os.environ.get(COLLECTOR_INVOCATION_ENV, "")
-                ),
             }
 
             # Get headers from first item if exists
@@ -793,15 +700,6 @@ def log_perf(
                 for key in ["power", "power_limit"]:
                     if key not in fieldnames:
                         fieldnames.append(key)
-
-            if existing_fieldnames is not None:
-                missing_fields = set(fieldnames) - set(existing_fieldnames)
-                if missing_fields:
-                    raise ValueError(
-                        f"Existing perf CSV {perf_filename} is missing fields required by new rows: "
-                        f"{sorted(missing_fields)}"
-                    )
-                fieldnames = existing_fieldnames
 
             writer = csv.DictWriter(f, fieldnames=fieldnames)
 
@@ -821,155 +719,10 @@ def log_perf(
             os.fsync(f.fileno())
     except Exception as e:
         print(f"Error writing log: {e}")
-        raise
     finally:
         # Delete the lock file, even if writing crashed
         if got_lock and os.path.exists(lock_file):
             os.unlink(lock_file)
-
-
-class PhysicalRowConflictError(RuntimeError):
-    """Different planner invocations produced one consumer-visible row key."""
-
-
-_PERF_MEASUREMENT_FIELDS = frozenset(
-    {
-        "latency",
-        "latency_ms",
-        "mean_ms",
-        "min_ms",
-        "max_ms",
-        "std_ms",
-        "power",
-        "power_limit",
-    }
-)
-
-
-def _row_identity_metadata(row: dict[str, str]) -> tuple[tuple[str, str], ...]:
-    return tuple(
-        sorted(
-            (key, value)
-            for key, value in row.items()
-            if key not in _PERF_MEASUREMENT_FIELDS and key != COLLECTOR_INVOCATION_FIELD
-        )
-    )
-
-
-def validate_perf_csv_rows(
-    csv_file: str | os.PathLike,
-    *,
-    output_file: str | os.PathLike | None = None,
-) -> dict[str, int]:
-    """Validate migrated physical row keys and remove staging invocation ids.
-
-    Retries from the same invocation use an explicit last-successful-row policy.
-    Different invocations mapping to the same consumer key are rejected before
-    parquet conversion. Unknown tables retain legacy row behavior while still
-    dropping the staging-only invocation column.
-    """
-
-    from collector.planner.physical_keys import physical_row_key
-
-    csv_path = Path(csv_file)
-    destination_path = Path(output_file) if output_file is not None else csv_path
-    with open(csv_path, newline="", encoding="utf-8") as source:
-        reader = csv.DictReader(source)
-        if reader.fieldnames is None:
-            raise ValueError(f"Perf CSV has no header: {csv_path}")
-        fieldnames = list(reader.fieldnames)
-        rows = list(reader)
-
-    if COLLECTOR_INVOCATION_FIELD not in fieldnames:
-        if destination_path != csv_path:
-            shutil.copyfile(csv_path, destination_path)
-        return {"rows": len(rows), "deduplicated_retries": 0, "validated_physical_keys": 0}
-
-    output_fields = [field for field in fieldnames if field != COLLECTOR_INVOCATION_FIELD]
-    output_rows: list[dict[str, str]] = []
-    seen: dict[object, tuple[int, str, tuple[tuple[str, str], ...]]] = {}
-    deduplicated_retries = 0
-    validated_physical_keys = 0
-
-    for row in rows:
-        invocation_id = str(row.get(COLLECTOR_INVOCATION_FIELD) or "")
-        clean_row = {field: row.get(field, "") for field in output_fields}
-        key = physical_row_key(csv_path, clean_row)
-        if key is None:
-            output_rows.append(clean_row)
-            continue
-        validated_physical_keys += 1
-        metadata = _row_identity_metadata(clean_row)
-        previous = seen.get(key)
-        if previous is None:
-            seen[key] = (len(output_rows), invocation_id, metadata)
-            output_rows.append(clean_row)
-            continue
-
-        previous_index, previous_invocation_id, previous_metadata = previous
-        if not invocation_id or not previous_invocation_id:
-            if not invocation_id and not previous_invocation_id:
-                # Header migration labels pre-planner rows with an empty id.
-                # They are not proven retries, so preserve their historical
-                # ordering instead of silently changing first-win semantics.
-                output_rows.append(clean_row)
-                continue
-            raise PhysicalRowConflictError(
-                f"{csv_path}: physical row key {key} collides with an unattributed legacy row; "
-                "use a fresh staging file so retry identity is unambiguous"
-            )
-        different_known_invocations = (
-            invocation_id and previous_invocation_id and invocation_id != previous_invocation_id
-        )
-        if different_known_invocations or metadata != previous_metadata:
-            raise PhysicalRowConflictError(
-                f"{csv_path}: physical row key {key} was emitted by conflicting invocations "
-                f"{previous_invocation_id or '<legacy>'!r} and {invocation_id or '<legacy>'!r}"
-            )
-
-        output_rows[previous_index] = clean_row
-        seen[key] = (previous_index, invocation_id or previous_invocation_id, metadata)
-        deduplicated_retries += 1
-
-    tmp_path = destination_path.with_name(f".{destination_path.name}.validated.tmp")
-    try:
-        with open(tmp_path, "w", newline="", encoding="utf-8") as destination:
-            writer = csv.DictWriter(destination, fieldnames=output_fields)
-            writer.writeheader()
-            writer.writerows(output_rows)
-            destination.flush()
-            os.fsync(destination.fileno())
-        os.replace(tmp_path, destination_path)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
-
-    return {
-        "rows": len(output_rows),
-        "deduplicated_retries": deduplicated_retries,
-        "validated_physical_keys": validated_physical_keys,
-    }
-
-
-_OPTIONAL_NUMERIC_COLUMN_DEFAULTS = {
-    "power": 0.0,
-    "power_limit": 0.0,
-    "window_size": 0,
-}
-
-
-def _normalize_optional_numeric_columns(table, *, pa, compute):
-    """Keep optional numeric columns compatible across incremental table schemas."""
-
-    for column_name, default in _OPTIONAL_NUMERIC_COLUMN_DEFAULTS.items():
-        column_index = table.schema.get_field_index(column_name)
-        if column_index < 0:
-            continue
-        column_type = pa.float64() if isinstance(default, float) else pa.int64()
-        column = compute.cast(table.column(column_name), column_type, safe=True)
-        column = compute.fill_null(column, pa.scalar(default, type=column_type))
-        table = table.set_column(column_index, pa.field(column_name, column_type), column)
-    return table
 
 
 def convert_perf_csv_to_parquet(
@@ -989,53 +742,24 @@ def convert_perf_csv_to_parquet(
     if lock_path.exists():
         raise RuntimeError(f"Cannot convert {csv_path} while lock file exists: {lock_path}")
 
+    try:
+        import pyarrow.csv as pc
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise RuntimeError(
+            "Finalizing collector perf data as parquet requires pyarrow. "
+            "Install the project runtime dependencies before collecting perf data."
+        ) from exc
+
     parquet_path = csv_path.with_suffix(".parquet")
-    validated_csv_path = csv_path.with_name(f".{csv_path.name}.validated.csv.tmp")
     tmp_path = parquet_path.with_name(f".{parquet_path.name}.tmp")
     try:
-        validate_perf_csv_rows(csv_path, output_file=validated_csv_path)
-        try:
-            import pyarrow as pa
-            import pyarrow.compute as compute
-            import pyarrow.csv as pc
-            import pyarrow.parquet as pq
-        except ImportError as exc:
-            raise RuntimeError(
-                "Finalizing collector perf data as parquet requires pyarrow. "
-                "Install the project runtime dependencies before collecting perf data."
-            ) from exc
-
-        table = _normalize_optional_numeric_columns(pc.read_csv(validated_csv_path), pa=pa, compute=compute)
-        if parquet_path.exists():
-            existing_table = _normalize_optional_numeric_columns(
-                pq.read_table(parquet_path),
-                pa=pa,
-                compute=compute,
-            )
-            table = pa.concat_tables([existing_table, table], promote_options="default")
-            table = _normalize_optional_numeric_columns(table, pa=pa, compute=compute)
-            from collector.planner.physical_keys import physical_row_key
-
-            retained_indices = []
-            seen_keys = set()
-            for index, row in enumerate(table.to_pylist()):
-                key = physical_row_key(parquet_path, row)
-                if key is not None and key in seen_keys:
-                    continue
-                if key is not None:
-                    seen_keys.add(key)
-                retained_indices.append(index)
-            if len(retained_indices) != table.num_rows:
-                table = table.take(pa.array(retained_indices, type=pa.int64()))
+        table = pc.read_csv(csv_path)
         pq.write_table(table, tmp_path, compression=compression)
         os.replace(tmp_path, parquet_path)
         if delete_source:
             csv_path.unlink()
-        else:
-            os.replace(validated_csv_path, csv_path)
     finally:
-        if validated_csv_path.exists():
-            validated_csv_path.unlink()
         if tmp_path.exists():
             tmp_path.unlink()
     return parquet_path

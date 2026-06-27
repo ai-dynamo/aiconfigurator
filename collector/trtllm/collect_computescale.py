@@ -13,7 +13,7 @@ import tensorrt_llm
 import torch
 from case_generator import get_compute_scale_case_specs
 
-from helper import benchmark_with_power, delta_latency_power_stats, get_sm_version, log_perf
+from helper import benchmark_with_power, get_sm_version, log_perf
 
 
 def get_computescale_test_cases():
@@ -74,14 +74,9 @@ def run_computescale(m, k, *, perf_filename, device="cuda:0"):
 
     static_latency = static_results["latency_ms"] / outside_loop_count
 
-    # Encode the incremental energy (dynamic - static), not dynamic power
-    # multiplied by the latency delta.
-    compute_scale_latency, compute_scale_power_stats = delta_latency_power_stats(
-        dynamic_latency,
-        static_latency,
-        dynamic_results["power_stats"],
-        static_results["power_stats"],
-    )
+    # compute_scale latency = dynamic - static
+    compute_scale_latency = dynamic_latency - static_latency
+    compute_scale_latency = max(0.0, compute_scale_latency)
 
     # Log compute_scale performance
     log_perf(
@@ -99,7 +94,7 @@ def run_computescale(m, k, *, perf_filename, device="cuda:0"):
         op_name="compute_scale",
         kernel_source="torch_ops",
         perf_filename=perf_filename,
-        power_stats=compute_scale_power_stats,
+        power_stats=dynamic_results["power_stats"],
     )
 
     # Log scale_matrix performance

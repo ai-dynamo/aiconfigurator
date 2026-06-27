@@ -10,7 +10,7 @@ import torch
 from sgl_kernel import sgl_per_token_quant_fp8
 
 from collector.case_generator import get_compute_scale_case_specs
-from collector.helper import benchmark_with_power, delta_latency_power_stats, get_sm_version, log_perf
+from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
 
 def get_computescale_test_cases():
@@ -54,12 +54,7 @@ def run_computescale(m, k, *, perf_filename, device="cuda:0"):
         pass
 
     static_latency = static_results["latency_ms"] / outside_loop_count
-    compute_scale_latency, compute_scale_power_stats = delta_latency_power_stats(
-        dynamic_latency,
-        static_latency,
-        dynamic_results["power_stats"],
-        static_results["power_stats"],
-    )
+    compute_scale_latency = max(0.0, dynamic_latency - static_latency)
     version = pkg_resources.get_distribution("sglang").version
 
     log_perf(
@@ -70,7 +65,7 @@ def run_computescale(m, k, *, perf_filename, device="cuda:0"):
         op_name="compute_scale",
         kernel_source="sglang",
         perf_filename=perf_filename,
-        power_stats=compute_scale_power_stats,
+        power_stats=dynamic_results["power_stats"],
     )
     log_perf(
         item_list=[{"m": m, "k": k, "quant_dtype": "fp8", "latency": static_latency}],
