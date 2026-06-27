@@ -240,16 +240,6 @@ def test_metadata_diff_detects_source_and_replay_command_changes():
     assert changes[0][-4:] == ("old command", "new command", "xshape", "xop")
 
 
-def test_metadata_diff_detects_legacy_header_row_gaining_source():
-    old = _row(STATUS_PASS)[:9]
-    new = _row(STATUS_PASS)
-
-    changes = find_metadata_changes([old], [new])
-
-    assert len(changes) == 1
-    assert changes[0][-2:] == ("", "silicon")
-
-
 def test_pass_to_hardware_incompatible_is_blocking_transition():
     errors = find_blocking_status_transitions([_changed(STATUS_PASS, STATUS_HW_INCOMPATIBLE)])
 

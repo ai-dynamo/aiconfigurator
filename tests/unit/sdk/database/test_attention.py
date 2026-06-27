@@ -321,8 +321,8 @@ class TestGenerationAttention:
     def test_exact_head_empirical_uses_ragged_bracketed_util(self, comprehensive_perf_db, monkeypatch):
         """An interior b=3/s~=15k query must not inherit the b=4 utilization.
 
-        These are the real B200/SGLang FP8 neighbours behind the expanded
-        fidelity matrix's former 33.34% generation-attention error.
+        The synthetic slice reproduces a ragged B200/SGLang FP8 neighbourhood
+        where selecting the upper batch directly produces a large error.
         """
         from aiconfigurator.sdk.operations import util_empirical
         from aiconfigurator.sdk.perf_database import LoadedOpData

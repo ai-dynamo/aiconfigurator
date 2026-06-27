@@ -147,9 +147,9 @@ per-op `get_sol`.
 
 ## Validation
 
-`tools/accuracy_regression_testing/validate_empirical_fidelity.py` runs the same model and
-workload independently in explicit SILICON and EMPIRICAL modes. Results below use strict
-own-data EMPIRICAL (`--transfer-policy off`), so no HYBRID or transfer fallback is included.
+The following offline study ran the same model and workload independently in explicit
+SILICON and EMPIRICAL modes. Results use strict own-data EMPIRICAL
+(`--transfer-policy off`), so no HYBRID or transfer fallback is included.
 SILICON follows its production policy and includes manifest-declared shared collected rows;
 formula-only EMPIRICAL loads only the active version.
 APE is `abs(empirical - silicon) / silicon`; each cell is **mean / p90 / max APE (%)** with

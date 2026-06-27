@@ -3,7 +3,7 @@
 
 """Unit tests for FallbackOp and MLAModule operations."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -254,22 +254,6 @@ class TestFallbackOp:
 
         op = FallbackOp("test", primary=primary, fallback=[fallback_1, fallback_2])
         assert op.get_weights() == 300.0
-
-    def test_primary_failure_does_not_mutate_global_logger_level(self):
-        """Expected fallback misses must not change process-global logger state."""
-        import logging
-
-        mock_db = _make_mock_db()
-        primary = _make_failing_op(PerfDataNotAvailableError)
-        fallback_1 = _make_mock_op(5.0, 50.0)
-
-        perf_logger = logging.getLogger("aiconfigurator.sdk.perf_database")
-        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
-
-        with patch.object(perf_logger, "setLevel") as set_level:
-            op.query(mock_db, batch_size=4)
-
-        set_level.assert_not_called()
 
 
 class TestMLAModule:

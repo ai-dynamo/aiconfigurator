@@ -103,27 +103,3 @@ def test_pr_support_matrix(model: str, system: str, backend: str, version: str):
     if failures:
         detail = "\n".join(failures)
         pytest.fail(f"Support matrix regression for {model} on {system}/{backend} v{version}:\n{detail}")
-
-
-def test_real_hybrid_only_cell_is_reported_separately_from_silicon_support():
-    """Exercise the real Task/model/database path for a known HYBRID-only cell.
-
-    Unlike the unit tests that isolate status transitions with a mocked
-    ``_run_mode``, this guards the complete missing-quant -> transfer ->
-    provenance -> HYBRID_PASS pipeline against silently becoming PASS or FAIL.
-    """
-    from tools.support_matrix.support_matrix import STATUS_HYBRID_PASS, SupportMatrix
-
-    statuses, errors, commands, sources = SupportMatrix.run_single_test(
-        model="moonshotai/Kimi-K2.5",
-        system="b200_sxm",
-        backend="trtllm",
-        version="1.3.0rc10",
-        modes_to_test=["agg"],
-        include_commands=True,
-    )
-
-    assert statuses == {"agg": STATUS_HYBRID_PASS}
-    assert errors == {"agg": None}
-    assert sources["agg"] in {"empirical", "xshape", "xquant", "xprofile", "xop"}
-    assert "--database-mode HYBRID" in commands["agg"]

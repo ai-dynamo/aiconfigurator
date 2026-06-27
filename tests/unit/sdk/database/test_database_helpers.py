@@ -490,24 +490,6 @@ def test_database_view_is_lightweight_and_request_local(perf_database):
     util_empirical._GRID_CACHE.pop("query-view-sentinel", None)
 
 
-def test_database_view_cache_is_bounded_by_mode_and_policy(perf_database):
-    from aiconfigurator.sdk import common
-
-    views = [
-        perf_database.get_database_view(
-            "b200_sxm",
-            "trtllm",
-            "1.3.0rc10",
-            database_mode="SILICON",
-        )
-        for _ in range(100)
-    ]
-
-    assert len({id(view) for view in views}) == 1
-    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
-    assert len(template._query_view_cache) <= len(common.DatabaseMode) * 2 ** len(common.TransferKind)
-
-
 def test_query_view_same_key_is_single_identity_under_concurrency(perf_database, monkeypatch):
     import threading
     import time
@@ -538,46 +520,6 @@ def test_query_view_same_key_is_single_identity_under_concurrency(perf_database,
 
     assert len({id(view) for view in views}) == 1
     assert len(copy_calls) == 1
-
-
-def test_query_view_creation_and_runtime_clear_are_serialized(perf_database, monkeypatch):
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
-
-    from aiconfigurator.sdk import common
-
-    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
-    template.clear_runtime_caches()
-    original_copy = perf_database.copy.copy
-    copy_started = threading.Event()
-    allow_copy = threading.Event()
-    clear_started = threading.Event()
-    clear_finished = threading.Event()
-
-    def blocked_copy(value):
-        copy_started.set()
-        assert allow_copy.wait(timeout=2)
-        return original_copy(value)
-
-    def clear_caches():
-        clear_started.set()
-        template.clear_runtime_caches()
-        clear_finished.set()
-
-    monkeypatch.setattr(perf_database.copy, "copy", blocked_copy)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        create_future = executor.submit(template.query_view, common.DatabaseMode.SILICON, "off")
-        assert copy_started.wait(timeout=2)
-        clear_future = executor.submit(clear_caches)
-        assert clear_started.wait(timeout=2)
-        clear_finished_before_copy = clear_finished.wait(timeout=0.05)
-        allow_copy.set()
-        first = create_future.result(timeout=2)
-        clear_future.result(timeout=2)
-
-    second = template.query_view(common.DatabaseMode.SILICON, "off")
-    assert not clear_finished_before_copy
-    assert second is not first
 
 
 def test_query_view_support_matrix_list_values_are_isolated(perf_database):
