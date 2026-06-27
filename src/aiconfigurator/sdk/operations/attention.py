@@ -180,7 +180,8 @@ class ContextAttention(Operation):
             scale_factor = 0.6
             return latency / scale_factor
 
-        assert n_kv <= n, "n_kv must be less than or equal to n"
+        if n_kv > n:
+            raise ValueError("n_kv must be less than or equal to n")
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -466,7 +467,8 @@ class GenerationAttention(Operation):
             scale_factor = 0.8
             return latency / scale_factor
 
-        assert n_kv <= n, "n_kv must be less than or equal to n"
+        if n_kv > n:
+            raise ValueError("n_kv must be less than or equal to n")
 
         if database_mode is None:
             database_mode = database._default_database_mode

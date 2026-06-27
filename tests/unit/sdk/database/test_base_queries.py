@@ -98,6 +98,22 @@ def test_query_gemm_fast_paths_support_legacy_scalar_leaves(mutable_comprehensiv
     assert interp.source == "silicon"
 
 
+def test_query_gemm_exact_power_only_leaf_preserves_energy(mutable_comprehensive_perf_db):
+    db = mutable_comprehensive_perf_db
+    quant_mode = common.GEMMQuantMode.bfloat16
+    db._gemm_data = LoadedOpData(
+        {quant_mode: {7: {11: {13: {"latency": 2.0, "power": 6.0}}}}},
+        common.PerfDataFilename.gemm,
+        "power-only",
+    )
+    db.query_gemm.cache_clear()
+
+    result = db.query_gemm(7, 11, 13, quant_mode, database_mode=common.DatabaseMode.SILICON)
+
+    assert float(result) == 2.0
+    assert result.energy == 12.0
+
+
 def test_query_trtllm_alltoall_normalizes_fp8_block_lookup(stub_perf_db):
     """
     fp8_block reuses the fp8 TRT-LLM alltoall perf tables.

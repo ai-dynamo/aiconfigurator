@@ -3,9 +3,17 @@
 
 from __future__ import annotations
 
+import pytest
+
 import aiconfigurator.sdk.operations.mla as mla_module
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.operations.mla import ContextMLA, GenerationMLA, MLABmm, WideEPGenerationMLA
+from aiconfigurator.sdk.operations.mla import (
+    ContextMLA,
+    GenerationMLA,
+    MLABmm,
+    WideEPContextMLA,
+    WideEPGenerationMLA,
+)
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 
@@ -127,8 +135,8 @@ def test_wideep_backend_categories_do_not_share_exact_values(monkeypatch) -> Non
     fmha = common.FMHAQuantMode.bfloat16
     db._wideep_generation_mla_data = _Data(
         {
-            "flashinfer": {kv: {4: {1: {16: _metric(2, 2)}}}},
-            "fa3": {kv: {4: {1: {16: _metric(9, 3)}}}},
+            "flashinfer": {kv: {fmha: {4: {1: {16: _metric(2, 2)}}}}},
+            "fa3": {kv: {fmha: {4: {1: {16: _metric(9, 3)}}}}},
         }
     )
 
@@ -139,3 +147,100 @@ def test_wideep_backend_categories_do_not_share_exact_values(monkeypatch) -> Non
 
     assert float(query("flashinfer")) == 2
     assert float(query("fa3")) == 9
+
+
+def test_mla_module_multisource_loaders_keep_active_rows(tmp_path) -> None:
+    headers = (
+        "framework,version,device,op_name,kernel_source,model,architecture,"
+        "mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,step,latency\n"
+    )
+    context_active = tmp_path / "context_active.txt"
+    context_sibling = tmp_path / "context_sibling.txt"
+    context_row = "TRTLLM,1,NVIDIA,mla_context_module,default,m,A,bfloat16,bfloat16,bfloat16,4,1,16,1,0,{latency}\n"
+    context_active.write_text(headers + context_row.format(latency=2.0))
+    context_sibling.write_text(headers + context_row.format(latency=9.0))
+
+    generation_active = tmp_path / "generation_active.txt"
+    generation_sibling = tmp_path / "generation_sibling.txt"
+    generation_row = (
+        "TRTLLM,1,NVIDIA,mla_generation_module,default,m,A,bfloat16,bfloat16,bfloat16,4,1,8,1,8,{latency}\n"
+    )
+    generation_active.write_text(headers + generation_row.format(latency=3.0))
+    generation_sibling.write_text(headers + generation_row.format(latency=10.0))
+
+    def sources(active, sibling):
+        return [(str(active), None), (str(sibling), {"default"})]
+
+    context = mla_module.load_context_mla_module_data(sources(context_active, context_sibling))
+    generation = mla_module.load_generation_mla_module_data(sources(generation_active, generation_sibling))
+    fmha = common.FMHAQuantMode.bfloat16
+    kv = common.KVCacheQuantMode.bfloat16
+    gemm = common.GEMMQuantMode.bfloat16
+
+    assert context[fmha][kv][gemm][4][16][1]["latency"] == 2
+    assert generation[fmha][kv][gemm][4][1][16]["latency"] == 3
+
+
+def test_wideep_generation_loader_and_query_isolate_fmha_dtype(tmp_path, monkeypatch) -> None:
+    perf_file = tmp_path / "wideep_generation_mla_perf.txt"
+    headers = (
+        "framework,version,device,op_name,kernel_source,model,architecture,"
+        "mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,step,latency\n"
+    )
+    rows = (
+        "SGLANG,1,NVIDIA,wideep_generation_mla,flashinfer,m,A,"
+        "bfloat16,fp8,bfloat16,4,1,8,32,8,2.0\n"
+        "SGLANG,1,NVIDIA,wideep_generation_mla,flashinfer,m,A,"
+        "fp8_block,fp8,bfloat16,4,1,8,32,8,9.0\n"
+    )
+    perf_file.write_text(headers + rows)
+    data = mla_module.load_wideep_generation_mla_data(str(perf_file))
+    kv = common.KVCacheQuantMode.fp8
+    assert set(data["flashinfer"]) == {kv}
+    assert set(data["flashinfer"][kv]) == {
+        common.FMHAQuantMode.bfloat16,
+        common.FMHAQuantMode.fp8_block,
+    }
+
+    monkeypatch.setattr(WideEPGenerationMLA, "load_data", classmethod(lambda _cls, _db: None))
+    db = _Database("sglang")
+    db._wideep_generation_mla_data = _Data(data)
+
+    def query(fmha: common.FMHAQuantMode) -> PerformanceResult:
+        return WideEPGenerationMLA._query_wideep_generation_mla_table(
+            db, 1, 16, 32, kv, fmha, attention_backend="flashinfer", database_mode=common.DatabaseMode.SILICON
+        )
+
+    assert float(query(common.FMHAQuantMode.bfloat16)) == 2
+    assert float(query(common.FMHAQuantMode.fp8_block)) == 9
+    caller_keys = {key[0] for key in db._sparse_surrogate_cache}
+    assert ("wideep-generation-mla", "flashinfer", common.FMHAQuantMode.bfloat16, kv) in caller_keys
+    assert ("wideep-generation-mla", "flashinfer", common.FMHAQuantMode.fp8_block, kv) in caller_keys
+
+
+def test_wideep_flashinfer_explicitly_maps_to_trtllm_mla(monkeypatch) -> None:
+    monkeypatch.setattr(WideEPContextMLA, "load_data", classmethod(lambda _cls, _db: None))
+    monkeypatch.setattr(WideEPGenerationMLA, "load_data", classmethod(lambda _cls, _db: None))
+    db = _Database("sglang")
+    fmha = common.FMHAQuantMode.fp8_block
+    kv = common.KVCacheQuantMode.fp8
+    db._wideep_context_mla_data = _Data({"trtllm_mla": {fmha: {kv: {4: {16: {1: _metric(6, 2)}}}}}})
+    db._wideep_generation_mla_data = _Data({"trtllm_mla": {kv: {fmha: {4: {1: {16: _metric(7, 3)}}}}}})
+
+    context = WideEPContextMLA._query_wideep_context_mla_table(
+        db, 1, 16, 0, 32, kv, fmha, attention_backend="flashinfer", database_mode=common.DatabaseMode.SILICON
+    )
+    generation = WideEPGenerationMLA._query_wideep_generation_mla_table(
+        db, 1, 16, 32, kv, fmha, attention_backend=None, database_mode=common.DatabaseMode.SILICON
+    )
+    explicit = WideEPGenerationMLA._query_wideep_generation_mla_table(
+        db, 1, 16, 32, kv, fmha, attention_backend="trtllm_mla", database_mode=common.DatabaseMode.SILICON
+    )
+
+    assert float(context) == 6
+    assert float(generation) == 7
+    assert float(explicit) == 7
+    with pytest.raises(KeyError, match="fa3"):
+        WideEPGenerationMLA._query_wideep_generation_mla_table(
+            db, 1, 16, 32, kv, fmha, attention_backend="fa3", database_mode=common.DatabaseMode.SILICON
+        )

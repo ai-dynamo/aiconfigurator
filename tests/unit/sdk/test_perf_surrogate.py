@@ -65,6 +65,16 @@ def test_fixed_line_mesh_interpolates_real_curves() -> None:
     assert result == pytest.approx((5, 10))
 
 
+def test_singleton_curve_does_not_block_neighboring_curve_mesh() -> None:
+    table = {
+        0: {10: _m(10), 20: _m(20)},
+        1: {10: _m(100)},
+        2: {10: _m(30), 20: _m(40)},
+    }
+    result = _estimate(table, {"batch": 1.5, "tokens": 15}, (Axis("batch"), Axis("tokens")), "tokens")
+    assert result == pytest.approx((30, 60))
+
+
 def _triangle_table():
     return {
         0: {0: {10: _m(2), 20: _m(3)}, 2: {10: _m(6), 40: _m(9)}},
@@ -80,6 +90,23 @@ def test_ragged_triangle_fills_interior_without_cartesian_product() -> None:
         "tokens",
     )
     assert result == pytest.approx((4, 8))
+
+
+def test_zero_weight_ragged_curve_is_not_evaluated() -> None:
+    table = {
+        0: {
+            0: {10: _m(10), 20: _m(20)},
+            2: {30: _m(100), 40: _m(110)},
+        },
+        2: {0: {10: _m(30), 20: _m(40)}},
+    }
+    result = _estimate(
+        table,
+        {"x": 1, "y": 0, "tokens": 15},
+        (Axis("x"), Axis("y"), Axis("tokens")),
+        "tokens",
+    )
+    assert result == pytest.approx((25, 50))
 
 
 def test_triangle_bounding_box_requires_authorized_extrapolation() -> None:

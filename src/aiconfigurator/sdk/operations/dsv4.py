@@ -70,6 +70,8 @@ _DSV4_GENERATION_AXES = (
     Axis("batch", extrapolate="both"),
     Axis("sequence", extrapolate="both"),
 )
+_MHC_SILICON_SINKHORN_ITERS = 20
+_MHC_SILICON_QUANT_MODE = common.GEMMQuantMode.bfloat16
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -576,6 +578,16 @@ class DeepSeekV4MHCModule(Operation):
                 )
 
             def _lookup_single(op_name: str) -> PerformanceResult:
+                if quant_mode is not _MHC_SILICON_QUANT_MODE:
+                    raise PerfDataNotAvailableError(
+                        f"mHC silicon data was collected for quant_mode={_MHC_SILICON_QUANT_MODE.name}, "
+                        f"not {quant_mode.name}."
+                    )
+                if op_name == "pre" and sinkhorn_iters != _MHC_SILICON_SINKHORN_ITERS:
+                    raise PerfDataNotAvailableError(
+                        "mHC pre silicon data was collected with "
+                        f"sinkhorn_iters={_MHC_SILICON_SINKHORN_ITERS}, not {sinkhorn_iters}."
+                    )
                 # Validate bucket presence before chained indexing; mhc_data is
                 # a nested defaultdict, so `mhc_data[op][hc_mult][hidden_size]`
                 # would silently materialize an empty table and lose the
@@ -592,7 +604,7 @@ class DeepSeekV4MHCModule(Operation):
                 mhc_dict = mhc_data[op_name][hc_mult][hidden_size]
                 latency, energy = estimate_sparse(
                     database,
-                    ("dsv4-mhc", op_name, hc_mult, hidden_size),
+                    ("dsv4-mhc", op_name, hc_mult, hidden_size, quant_mode, sinkhorn_iters),
                     mhc_dict,
                     {"tokens": num_tokens},
                     axes=(Axis("tokens", extrapolate="both"),),
@@ -621,7 +633,7 @@ class DeepSeekV4MHCModule(Operation):
             database_mode=database_mode,
             error_msg=(
                 f"Failed to query DeepSeek-V4 mHC module for {num_tokens=}, {hidden_size=}, "
-                f"{hc_mult=}, {sinkhorn_iters=}, {op=}"
+                f"{hc_mult=}, {sinkhorn_iters=}, {op=}, {quant_mode=}"
             ),
         )
 
@@ -1657,6 +1669,19 @@ def load_mhc_module_data(mhc_file: str):
 
     for row in rows:
         op = row["op_name"]
+        row_sinkhorn_iters = row.get("sinkhorn_iters")
+        if (
+            op == "pre"
+            and row_sinkhorn_iters is not None
+            and str(row_sinkhorn_iters).strip()
+            and float(row_sinkhorn_iters) != _MHC_SILICON_SINKHORN_ITERS
+        ):
+            logger.debug(
+                "Skipping mHC pre row collected with sinkhorn_iters=%s; expected %s",
+                row_sinkhorn_iters,
+                _MHC_SILICON_SINKHORN_ITERS,
+            )
+            continue
         hc_mult = int(row["hc_mult"])
         hidden_size = int(row["hidden_size"])
         num_tokens = int(row["num_tokens"])
@@ -1664,11 +1689,8 @@ def load_mhc_module_data(mhc_file: str):
         power = float(row.get("power", 0.0)) if has_power else 0.0
         energy = power * latency
 
-        mhc_data[op][hc_mult][hidden_size][num_tokens] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
+        token_data = mhc_data[op][hc_mult][hidden_size]
+        token_data.setdefault(num_tokens, {"latency": latency, "power": power, "energy": energy})
 
     return mhc_data
 
@@ -1839,7 +1861,8 @@ def load_context_dsv4_kind_module_data(file_path: str):
 
     ``prefix`` is the past-KV length, ``int(float(row["step"]))``; ``s`` is the
     context chunk length (``isl``).  Multiple files (csa/hca) merge cleanly
-    because compress_ratio is a key dimension.
+    because compress_ratio is a key dimension. ``model`` and ``op_name`` are
+    provenance only; duplicate physical keys keep the first measurement.
     """
     rows = _read_filtered_rows(file_path)
     if rows is None:
@@ -1877,11 +1900,8 @@ def load_context_dsv4_kind_module_data(file_path: str):
         # NOTE: the topK DELTA correction (degenerate -> representative) is
         # applied ONCE at query time for compress_ratio==4 (CSA). Do NOT
         # subtract it here, or the CSA module latency would be double-corrected.
-        data[fmha_mode][kv_dtype][gemm_mode][head_key][tp_size][cr][prefix][s][b] = {
-            "latency": latency,
-            "power": power,
-            "energy": power * latency,
-        }
+        batch_data = data[fmha_mode][kv_dtype][gemm_mode][head_key][tp_size][cr][prefix][s]
+        batch_data.setdefault(b, {"latency": latency, "power": power, "energy": power * latency})
     return data
 
 
@@ -1892,6 +1912,8 @@ def load_generation_dsv4_kind_module_data(file_path: str):
     is q_len=1 with past_kv = step). Dict shape:
         data[kv_quant][gemm_quant][fmha_quant][native_heads][tp_size]
             [compress_ratio][b][s_total]
+    ``model`` and ``op_name`` are provenance only; duplicate physical keys keep
+    the first measurement.
     """
     rows = _read_filtered_rows(file_path)
     if rows is None:
@@ -1926,11 +1948,8 @@ def load_generation_dsv4_kind_module_data(file_path: str):
         fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
 
-        data[kv_dtype][gemm_mode][fmha_mode][head_key][tp_size][cr][b][s_total] = {
-            "latency": latency,
-            "power": power,
-            "energy": power * latency,
-        }
+        sequence_data = data[kv_dtype][gemm_mode][fmha_mode][head_key][tp_size][cr][b]
+        sequence_data.setdefault(s_total, {"latency": latency, "power": power, "energy": power * latency})
     return data
 
 
@@ -2129,7 +2148,7 @@ def load_dsv4_sparse_op_data(file_or_sources, key_columns):
         node = root
         for k in keys[:-1]:
             node = node.setdefault(k, {})
-        node[keys[-1]] = {"latency": latency}
+        node.setdefault(keys[-1], {"latency": latency})
     return root or None
 
 

@@ -244,6 +244,8 @@ class _SparseModel:
         self.names = names
         self.varying_index = names.index(varying)
         self.fixed_indices = tuple(index for index in range(len(axes)) if index != self.varying_index)
+        if len(self.fixed_indices) > 2:
+            raise ValueError("sparse surrogate supports at most two fixed axes")
         self.points, self.latencies, self.energies = _flatten(table, axes)
         self.exact = {point: index for index, point in enumerate(self.points)}
         self.powers = np.divide(
@@ -266,8 +268,20 @@ class _SparseModel:
             for key, indices in sorted(grouped.items())
         )
         self.curve_by_key = {curve.fixed_key: curve for curve in self.curves}
-        self.mesh = _FixedMesh(
-            tuple(axes[i] for i in self.fixed_indices), tuple(curve.fixed_key for curve in self.curves)
+        complete_curves = tuple(curve for curve in self.curves if len(curve.sample_indices) >= 2)
+        singleton_values = {
+            self.points[curve.sample_indices[0]][self.varying_index]
+            for curve in self.curves
+            if len(curve.sample_indices) == 1
+        }
+        self.mesh_curves = complete_curves or (self.curves if len(singleton_values) == 1 else ())
+        self.mesh = (
+            _FixedMesh(
+                tuple(axes[i] for i in self.fixed_indices),
+                tuple(curve.fixed_key for curve in self.mesh_curves),
+            )
+            if self.mesh_curves
+            else None
         )
 
     def _baseline(self, baseline: Baseline | None, point: tuple[float, ...]) -> float:
@@ -373,8 +387,8 @@ class _SparseModel:
             latency, energy, _ = self._curve_estimate(exact_curve, point, curve, exterior, baseline)
             return latency, energy
 
-        support = self.mesh.locate(fixed_key)
-        if support is None:
+        support = self.mesh.locate(fixed_key) if self.mesh is not None else None
+        if support is None and self.mesh is not None:
             support = self.mesh.project(fixed_key)
         if support is None:
             raise InterpolationDataNotAvailableError(
@@ -385,8 +399,15 @@ class _SparseModel:
         component_latency: list[float] = []
         component_power: list[float] = []
         component_exterior = False
-        for curve_index in support.indices:
-            selected_curve = self.curves[curve_index]
+        components = tuple(
+            (curve_index, weight)
+            for curve_index, weight in zip(support.indices, support.weights, strict=True)
+            if weight > 1e-12
+        )
+        total_weight = sum(weight for _, weight in components)
+        component_weights = tuple(weight / total_weight for _, weight in components)
+        for curve_index, _ in components:
+            selected_curve = self.mesh_curves[curve_index]
             component_query = list(point)
             for axis_index, value in zip(self.fixed_indices, selected_curve.fixed_key, strict=True):
                 component_query[axis_index] = value
@@ -404,7 +425,7 @@ class _SparseModel:
             tuple(component_points),
             np.asarray(component_latency),
             np.asarray(component_power),
-            support.weights,
+            component_weights,
             response,
             baseline,
         )

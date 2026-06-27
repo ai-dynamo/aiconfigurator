@@ -2310,7 +2310,7 @@ class PerfDatabase:
         index_n_heads: int | None = None,
         index_head_dim: int | None = None,
         index_topk: int | None = None,
-        dsa_backend: str = "trtllm",
+        dsa_backend: str | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Query context DSA module latency. Delegates to
         ``ContextDSAModule._query_context_dsa_module_table``."""
@@ -2347,7 +2347,7 @@ class PerfDatabase:
         index_n_heads: int | None = None,
         index_head_dim: int | None = None,
         index_topk: int | None = None,
-        dsa_backend: str = "trtllm",
+        dsa_backend: str | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Query generation DSA module latency. Delegates to
         GenerationDSAModule._query_generation_dsa_module_table."""

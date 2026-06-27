@@ -451,12 +451,17 @@ accuracy advantage justifies a second backend and its interface.
 
 ## Verification status
 
-The current implementation has:
+Local validation of the current implementation has:
 
-- focused surrogate/MLA/DSV4/loader/model tests: 302 passed;
-- broader Python unit selection: 1,471 passed and 8 skipped;
-- passing Ruff, formatting, unit, e2e, DCO, and build checks; and
+- focused surrogate and migrated-operation tests: 291 passed;
+- the complete unit selection: 1,524 passed and 39 skipped, with only the four
+  documented non-TTY `test_plain_output.py` failures;
+- the complete real-database sanity suite: 27 passed and 1 expected failure;
+- passing Ruff, formatting, and `git diff --check`; and
 - real-table smoke coverage for the DeepSeek-V4 head/TP loader variants.
+
+The pushed head is DCO-signed; hosted checks rerun for each updated head and
+remain separate from these local results.
 
 The end-to-end accuracy job is not an acceptance signal yet. Its GitHub job is
 green because the regression step is allowed to fail, but the regression test

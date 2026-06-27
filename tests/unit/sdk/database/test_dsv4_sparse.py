@@ -136,6 +136,23 @@ def test_load_dsv4_sparse_kernel_data_basic(tmp_path):
     assert data[_FLASH_NATIVE_HEADS][1][0][8192][1]["latency"] == pytest.approx(0.55)
 
 
+def test_load_dsv4_sparse_kernel_data_keeps_primary_source(tmp_path):
+    primary = _write_csv(
+        tmp_path / "primary.txt",
+        _SPARSE_HEADER,
+        [_sparse_row(kernel="paged_mqa_logits", bs=1, isl=1024, past_kv=0, tp=1, cr=4, lat=0.1)],
+    )
+    sibling = _write_csv(
+        tmp_path / "sibling.txt",
+        _SPARSE_HEADER,
+        [_sparse_row(kernel="paged_mqa_logits", bs=1, isl=1024, past_kv=0, tp=1, cr=4, lat=0.9)],
+    )
+
+    data = load_dsv4_sparse_kernel_data([(primary, None), (sibling, {"paged_mqa_logits"})])
+
+    assert data[_FLASH_NATIVE_HEADS][1][0][1024][1]["latency"] == pytest.approx(0.1)
+
+
 def test_load_dsv4_sparse_kernel_data_skips_dup_headers(tmp_path):
     """Loader must skip CSV header lines mistakenly appended on re-runs."""
     rows = [
@@ -204,6 +221,38 @@ def test_load_generation_dsv4_kind_module_data_b_before_s(tmp_path):
     assert sub[1][s_total_short]["latency"] == pytest.approx(0.1)
     assert sub[4][s_total_short]["latency"] == pytest.approx(0.4)
     assert sub[4][s_total_long]["latency"] == pytest.approx(1.0)
+
+
+def test_dsv4_module_loaders_keep_first_duplicate_measurement(tmp_path):
+    flash_fp8_model = "sgl-project/DeepSeek-V4-Flash-FP8"
+    context_path = _write_csv(
+        tmp_path / "csa_ctx_duplicates.txt",
+        _CTX_HEADER,
+        [
+            _ctx_row(attn_kind="csa", cr=4, bs=1, isl=128, tp=8, lat=0.12, model=_FLASH_MODEL),
+            _ctx_row(attn_kind="csa", cr=4, bs=1, isl=128, tp=8, lat=0.99, model=flash_fp8_model),
+        ],
+    )
+    generation_path = _write_csv(
+        tmp_path / "csa_gen_duplicates.txt",
+        _CTX_HEADER,
+        [
+            _gen_row(attn_kind="csa", cr=4, bs=2, isl=1, step=256, tp=8, lat=0.10, model=_FLASH_MODEL),
+            _gen_row(attn_kind="csa", cr=4, bs=2, isl=1, step=256, tp=8, lat=0.90, model=flash_fp8_model),
+        ],
+    )
+
+    context = load_context_dsv4_kind_module_data(context_path)
+    context_leaf = context[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][
+        _FLASH_NATIVE_HEADS
+    ][8][4][0][128][1]
+    assert context_leaf["latency"] == pytest.approx(0.12)
+
+    generation = load_generation_dsv4_kind_module_data(generation_path)
+    generation_leaf = generation[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][
+        common.FMHAQuantMode.bfloat16
+    ][_FLASH_NATIVE_HEADS][8][4][2][257]
+    assert generation_leaf["latency"] == pytest.approx(0.10)
 
 
 def test_load_context_dsv4_kind_module_data_keeps_native_heads_separate(tmp_path):

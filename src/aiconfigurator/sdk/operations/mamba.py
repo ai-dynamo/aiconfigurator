@@ -417,7 +417,7 @@ class GDNKernel(Operation):
                 # (no dtype override), so matches input dtype: FP16/BF16 → 2 bytes.
                 chunk_size = 64  # flash-linear-attention default for chunk_gated_delta_rule
                 state_size = num_v_heads * head_k_dim * head_v_dim
-                num_chunks = (seq_value // chunk_size) if seq_value else 0
+                num_chunks = int((seq_value + chunk_size - 1) // chunk_size) if seq_value else 0
                 h_chunks_bytes = num_chunks * state_size * 2 * batch_value
                 read_bytes = (
                     x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2
@@ -726,20 +726,18 @@ def load_mamba2_data(mamba2_file: str):
         model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
         entry = {"latency": latency, "power": power, "energy": energy}
 
-        try:
-            if phase == "context":
-                data[kernel_source][phase][model_key][batch_size][seq_len]
+        by_model = data[kernel_source][phase][model_key]
+        if phase == "context":
+            if batch_size in by_model and seq_len in by_model[batch_size]:
                 logger.debug(
                     f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size} {seq_len}"
                 )
             else:
-                data[kernel_source][phase][model_key][batch_size]
-                logger.debug(f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size}")
-        except KeyError:
-            if phase == "context":
-                data[kernel_source][phase][model_key][batch_size][seq_len] = entry
-            else:
-                data[kernel_source][phase][model_key][batch_size] = entry
+                by_model.setdefault(batch_size, {})[seq_len] = entry
+        elif batch_size in by_model:
+            logger.debug(f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size}")
+        else:
+            by_model[batch_size] = entry
 
     # Convert default dicts to regular dicts for predictable behavior; keep generation as 1D
     result = {}

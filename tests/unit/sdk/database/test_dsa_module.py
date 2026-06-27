@@ -47,6 +47,141 @@ def _generation_dsa_data(dsa_dict: dict) -> dict:
     }
 
 
+def test_dsa_loaders_keep_primary_row_on_shared_source_conflict(tmp_path):
+    header = "kernel_source,architecture,gemm_type,mla_dtype,kv_cache_dtype,num_heads,batch_size,isl,step,latency\n"
+    row = "default,DeepseekV32ForCausalLM,bfloat16,bfloat16,bfloat16,32,1,256,0,{latency}\n"
+    primary = tmp_path / "primary.txt"
+    sibling = tmp_path / "sibling.txt"
+    primary.write_text(header + row.format(latency=10.0))
+    sibling.write_text(header + row.format(latency=99.0))
+    sources = [(str(primary), None), (str(sibling), {"default"})]
+
+    context = load_context_dsa_module_data(sources)
+    context_leaf = context[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][
+        common.GEMMQuantMode.bfloat16
+    ][DEFAULT_DSA_ARCHITECTURE]["flashmla_kv"][32][0][256][1]
+    assert context_leaf["latency"] == pytest.approx(10.0)
+
+    generation = load_generation_dsa_module_data(sources)
+    generation_leaf = generation[common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][
+        DEFAULT_DSA_ARCHITECTURE
+    ]["flashmla_kv"][32][1][256]
+    assert generation_leaf["latency"] == pytest.approx(10.0)
+
+
+def test_dsa_loaders_keep_legacy_default_rows_separate_by_framework(tmp_path):
+    data_path = tmp_path / "dsa_module_perf.txt"
+    data_path.write_text(
+        "framework,kernel_source,architecture,gemm_type,mla_dtype,kv_cache_dtype,"
+        "num_heads,batch_size,isl,step,latency\n"
+        "TRTLLM,default,DeepseekV32ForCausalLM,bfloat16,bfloat16,bfloat16,32,1,256,0,10.0\n"
+        "VLLM,default,DeepseekV32ForCausalLM,bfloat16,bfloat16,bfloat16,32,1,256,0,20.0\n"
+    )
+
+    context = load_context_dsa_module_data(str(data_path))
+    architecture_data = context[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][
+        common.GEMMQuantMode.bfloat16
+    ][DEFAULT_DSA_ARCHITECTURE]
+    assert architecture_data["trtllm"][32][0][256][1]["latency"] == pytest.approx(10.0)
+    assert architecture_data["flashmla_kv"][32][0][256][1]["latency"] == pytest.approx(20.0)
+
+    generation = load_generation_dsa_module_data(str(data_path))
+    architecture_data = generation[common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][
+        DEFAULT_DSA_ARCHITECTURE
+    ]
+    assert architecture_data["trtllm"][32][1][256]["latency"] == pytest.approx(10.0)
+    assert architecture_data["flashmla_kv"][32][1][256]["latency"] == pytest.approx(20.0)
+
+
+def test_dsa_queries_default_to_active_backend(stub_perf_db):
+    stub_perf_db.backend = common.BackendName.vllm.value
+    stub_perf_db._context_dsa_module_data = LoadedOpData(
+        _context_dsa_data(
+            {
+                "trtllm": {32: {0: {256: {1: _dsa_value(10.0)}}}},
+                "flashmla_kv": {32: {0: {256: {1: _dsa_value(20.0)}}}},
+            }
+        ),
+        common.PerfDataFilename.dsa_context_module,
+        "backends",
+    )
+    stub_perf_db._generation_dsa_module_data = LoadedOpData(
+        _generation_dsa_data(
+            {
+                "trtllm": {32: {1: {256: _dsa_value(11.0)}}},
+                "flashmla_kv": {32: {1: {256: _dsa_value(21.0)}}},
+            }
+        ),
+        common.PerfDataFilename.dsa_generation_module,
+        "backends",
+    )
+
+    context = stub_perf_db.query_context_dsa_module(
+        b=1,
+        s=256,
+        prefix=0,
+        num_heads=32,
+        kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        database_mode=common.DatabaseMode.SILICON,
+    )
+    generation = stub_perf_db.query_generation_dsa_module(
+        b=1,
+        s=256,
+        num_heads=32,
+        kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+        database_mode=common.DatabaseMode.SILICON,
+    )
+
+    assert float(context) == pytest.approx(20.0)
+    assert float(generation) == pytest.approx(21.0)
+
+
+def test_dsa_queries_do_not_fallback_to_another_backend(stub_perf_db):
+    stub_perf_db._context_dsa_module_data = LoadedOpData(
+        _context_dsa_data({"flashmla_kv": {32: {0: {256: {1: _dsa_value(20.0)}}}}}),
+        common.PerfDataFilename.dsa_context_module,
+        "flash-only",
+    )
+    stub_perf_db._generation_dsa_module_data = LoadedOpData(
+        _generation_dsa_data({"flashmla_kv": {32: {1: {256: _dsa_value(21.0)}}}}),
+        common.PerfDataFilename.dsa_generation_module,
+        "flash-only",
+    )
+
+    with pytest.raises(PerfDataNotAvailableError, match="Context DSA module data not available"):
+        stub_perf_db.query_context_dsa_module(
+            b=1,
+            s=256,
+            prefix=0,
+            num_heads=32,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            dsa_backend="trtllm",
+            database_mode=common.DatabaseMode.SILICON,
+        )
+    with pytest.raises(PerfDataNotAvailableError, match="Generation DSA module data not available"):
+        stub_perf_db.query_generation_dsa_module(
+            b=1,
+            s=256,
+            num_heads=32,
+            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+            dsa_backend="trtllm",
+            database_mode=common.DatabaseMode.SILICON,
+        )
+    hybrid = stub_perf_db.query_context_dsa_module(
+        b=1,
+        s=256,
+        prefix=0,
+        num_heads=32,
+        kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        dsa_backend="trtllm",
+        database_mode=common.DatabaseMode.HYBRID,
+    )
+    assert hybrid.source == "empirical"
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Context DSA Module
 # ═══════════════════════════════════════════════════════════════════════

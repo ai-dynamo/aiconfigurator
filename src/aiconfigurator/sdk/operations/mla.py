@@ -71,6 +71,18 @@ _GENERATION_AXES = (
     Axis("tokens", extrapolate="both"),
 )
 _MLA_BMM_AXES = (Axis("tokens", extrapolate="both"),)
+_WIDEEP_MLA_KERNEL_SOURCES = {"flashinfer", "fa3", "trtllm_mla"}
+
+
+def _resolve_wideep_mla_kernel_source(data, attention_backend: str | None) -> str:
+    requested = attention_backend or "flashinfer"
+    if requested not in _WIDEEP_MLA_KERNEL_SOURCES:
+        raise ValueError(f"Unsupported attention backend: {requested}")
+    if requested in data:
+        return requested
+    if requested == "flashinfer" and "trtllm_mla" in data:
+        return "trtllm_mla"
+    raise KeyError(f"No WideEP MLA data for attention backend {requested!r}")
 
 
 def _estimate_context(database, key, table, heads, tokens, batch, baseline, *, sqrt_curve=False):
@@ -1063,19 +1075,16 @@ class WideEPGenerationMLA(Operation):
 
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
-            attn_backend = attention_backend or "flashinfer"
-            if attn_backend == "flashinfer":
-                attn_data = data_wrapper["flashinfer"]
-            elif attn_backend == "fa3":
-                attn_data = data_wrapper["fa3"]
-            else:
-                raise ValueError(f"Unsupported attention backend: {attn_backend}")
+            kernel_source = _resolve_wideep_mla_kernel_source(data_wrapper, attention_backend)
+            attn_data = data_wrapper[kernel_source]
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
-            mla_dict = attn_data[kvcache_quant_mode]
+            # Keep KV before FMHA so the existing support-matrix API continues
+            # to expose generation KV-cache modes at this level.
+            mla_dict = attn_data[kvcache_quant_mode][fmha_quant_mode]
             latency, energy = _estimate_generation(
                 database,
-                ("wideep-generation-mla", attn_backend, kvcache_quant_mode),
+                ("wideep-generation-mla", kernel_source, fmha_quant_mode, kvcache_quant_mode),
                 mla_dict,
                 num_heads,
                 b,
@@ -1308,13 +1317,8 @@ class WideEPContextMLA(Operation):
 
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
-            attn_backend = attention_backend or "flashinfer"
-            if attn_backend == "flashinfer":
-                attn_data = data_wrapper["flashinfer"]
-            elif attn_backend == "fa3":
-                attn_data = data_wrapper["fa3"]
-            else:
-                raise ValueError(f"Unsupported attention backend: {attn_backend}")
+            kernel_source = _resolve_wideep_mla_kernel_source(data_wrapper, attention_backend)
+            attn_data = data_wrapper[kernel_source]
 
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
@@ -1323,7 +1327,7 @@ class WideEPContextMLA(Operation):
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             latency, energy = _estimate_context(
                 database,
-                ("wideep-context-mla", attn_backend, fmha_quant_mode, kvcache_quant_mode),
+                ("wideep-context-mla", kernel_source, fmha_quant_mode, kvcache_quant_mode),
                 mla_dict,
                 num_heads,
                 full_s,
@@ -1637,6 +1641,9 @@ def load_wideep_generation_mla_data(wideep_generation_mla_file):
     Load the SGLang wideep generation mla data from wideep_generation_mla_perf.txt
     with power support (backward compatible).
 
+    Keeps KV-cache dtype before FMHA dtype in the nested mapping because the
+    public generation support matrix reports KV-cache modes.
+
     Returns:
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
@@ -1645,7 +1652,7 @@ def load_wideep_generation_mla_data(wideep_generation_mla_file):
         logger.debug(f"SGLang wideep generation mla data file {wideep_generation_mla_file} not found.")
         return None
     wideep_generation_mla_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
     )
 
     # Check if power columns exist (backward compatibility)
@@ -1654,7 +1661,8 @@ def load_wideep_generation_mla_data(wideep_generation_mla_file):
         logger.debug("Legacy database format detected (wideep_generation_mla) - power will default to 0.0")
 
     for row in rows:
-        kv_cache_dtype, b, s, step, latency = (
+        quant_mode, kv_cache_dtype, b, s, step, latency = (
+            row["mla_dtype"],
             row["kv_cache_dtype"],
             row["batch_size"],
             row["isl"],
@@ -1683,17 +1691,19 @@ def load_wideep_generation_mla_data(wideep_generation_mla_file):
 
         s = s + step
 
+        quant_mode = common.FMHAQuantMode[quant_mode]
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
             # Check for conflict
-            wideep_generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s]
+            wideep_generation_mla_data[kernel_source][kv_cache_dtype][quant_mode][num_heads][b][s]
             logger.debug(
-                f"value conflict in generation mla data: {kernel_source} {kv_cache_dtype} {num_heads} {b} {s} "
+                f"value conflict in generation mla data: "
+                f"{kernel_source} {quant_mode} {kv_cache_dtype} {num_heads} {b} {s} "
             )
         except KeyError:
             # Store all three values
-            wideep_generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s] = {
+            wideep_generation_mla_data[kernel_source][kv_cache_dtype][quant_mode][num_heads][b][s] = {
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
@@ -1736,11 +1746,14 @@ def load_context_mla_module_data(mla_module_file: str):
         kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
 
-        mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
+        try:
+            mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b]
+        except KeyError:
+            mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
 
     return mla_data
 
@@ -1779,10 +1792,13 @@ def load_generation_mla_module_data(mla_module_file: str):
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
-        mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][b][s] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
+        try:
+            mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][b][s]
+        except KeyError:
+            mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][b][s] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
 
     return mla_data

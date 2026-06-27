@@ -223,7 +223,7 @@ class GEMM(Operation):
 
         Mirrors the legacy ``_correct_data`` block — for each table entry,
         if SOL latency exceeds the measured latency, the measured value is
-        raised to SOL (preserving power/energy fields unchanged).
+        raised to SOL while preserving the sample's average power.
 
         ``gemm_data`` defaults to ``database._gemm_data`` (the instance
         attribute) so the backward-compat call from ``PerfDatabase._correct_data``
@@ -252,7 +252,13 @@ class GEMM(Operation):
                                 f"gemm quant {quant_mode} m{m} n{n} k{k}: sol {sol} > perf_db {current_latency}"
                             )
                             if isinstance(data, dict):
-                                gemm_data[quant_mode][m][n][k]["latency"] = float(max(sol, current_latency))
+                                corrected_latency = float(max(sol, current_latency))
+                                if "energy" in data:
+                                    if "power" in data:
+                                        data["energy"] = float(data["power"]) * corrected_latency
+                                    elif current_latency > 0:
+                                        data["energy"] = float(data["energy"]) * corrected_latency / current_latency
+                                data["latency"] = corrected_latency
                             else:
                                 gemm_data[quant_mode][m][n][k] = float(max(sol, current_latency))
 
@@ -320,7 +326,11 @@ class GEMM(Operation):
                 if isinstance(result, PerformanceResult):
                     return result
                 if isinstance(result, dict):
-                    return PerformanceResult(result["latency"], energy=result.get("energy", 0.0), source=source)
+                    latency = float(result["latency"])
+                    energy = result.get("energy")
+                    if energy is None:
+                        energy = float(result.get("power", 0.0)) * latency
+                    return PerformanceResult(latency, energy=energy, source=source)
                 return PerformanceResult(result, energy=0.0, source=source)
 
             gemm_data_wrapper.raise_if_not_loaded()
@@ -409,6 +419,8 @@ class GEMM(Operation):
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(m, k), energy=0.0, source="empirical")
 
+        if m == 0:
+            return database._interp_pr(0.0)
         cls.load_data(database)
         compute_scale_wrapper = database._compute_scale_data
 
@@ -425,8 +437,6 @@ class GEMM(Operation):
                     f"Supported modes: {supported}"
                 )
             table = compute_scale_wrapper[table_quant_mode]
-            if m == 0:
-                return database._interp_pr(0.0)
             latency, energy = estimate_sparse(
                 database,
                 ("compute_scale", table_quant_mode),
@@ -481,6 +491,8 @@ class GEMM(Operation):
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(m, k), energy=0.0, source="empirical")
 
+        if m == 0:
+            return database._interp_pr(0.0)
         cls.load_data(database)
         scale_matrix_wrapper = database._scale_matrix_data
 
@@ -497,8 +509,6 @@ class GEMM(Operation):
                     f"Supported modes: {supported}"
                 )
             table = scale_matrix_wrapper[table_quant_mode]
-            if m == 0:
-                return database._interp_pr(0.0)
             latency, energy = estimate_sparse(
                 database,
                 ("scale_matrix", table_quant_mode),

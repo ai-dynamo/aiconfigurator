@@ -106,9 +106,8 @@ class TestContextAttention:
         )
         assert result > 0
 
-    def test_query_context_attention_assertion_error(self, comprehensive_perf_db):
-        """Test that n_kv > n raises assertion error."""
-        with pytest.raises(AssertionError):
+    def test_query_context_attention_rejects_too_many_kv_heads(self, comprehensive_perf_db):
+        with pytest.raises(ValueError, match="n_kv must be less than or equal to n"):
             comprehensive_perf_db.query_context_attention(
                 1,
                 32,
@@ -205,6 +204,16 @@ class TestGenerationAttention:
             1, 1, 8, 4, common.KVCacheQuantMode.bfloat16, database_mode=common.DatabaseMode.SOL
         )
         assert result > 0
+
+    def test_query_generation_attention_rejects_too_many_kv_heads(self, comprehensive_perf_db):
+        with pytest.raises(ValueError, match="n_kv must be less than or equal to n"):
+            comprehensive_perf_db.query_generation_attention(
+                1,
+                32,
+                8,
+                16,
+                common.KVCacheQuantMode.bfloat16,
+            )
 
 
 class TestContextMLA:

@@ -17,6 +17,7 @@ from aiconfigurator.sdk.operations.dsv4 import (
 )
 from aiconfigurator.sdk.perf_database import (
     LoadedOpData,
+    PerfDataNotAvailableError,
     load_mhc_module_data,
 )
 
@@ -150,6 +151,34 @@ def test_mhc_module_loader_returns_none_for_missing_file(tmp_path):
 
 
 class TestDeepSeekV4MHCModule:
+    def test_mhc_loader_keeps_primary_row_on_shared_source_conflict(self, tmp_path):
+        primary = _write_mhc_perf(
+            tmp_path / "primary.txt",
+            ["SGLang,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,1.5"],
+        )
+        sibling = _write_mhc_perf(
+            tmp_path / "sibling.txt",
+            ["SGLang,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,9.5"],
+        )
+
+        data = load_mhc_module_data([(primary, None), (sibling, {"mhc"})])
+
+        assert data["pre"][4][7168][512]["latency"] == pytest.approx(1.5)
+
+    def test_mhc_loader_skips_pre_rows_with_other_sinkhorn_iterations(self, tmp_path):
+        header = (
+            "framework,version,device,op_name,kernel_source,architecture,num_tokens,"
+            "hc_mult,hidden_size,sinkhorn_iters,latency\n"
+        )
+        primary = tmp_path / "primary.txt"
+        sibling = tmp_path / "sibling.txt"
+        primary.write_text(header + "SGLang,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,8,1.5\n")
+        sibling.write_text(header + "SGLang,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,20,2.5\n")
+
+        data = load_mhc_module_data([(str(primary), None), (str(sibling), {"mhc"})])
+
+        assert data["pre"][4][7168][512]["latency"] == pytest.approx(2.5)
+
     def test_mhc_sol_and_hybrid_return_positive(self, comprehensive_perf_db):
         for mode in (common.DatabaseMode.SOL, common.DatabaseMode.HYBRID):
             result = comprehensive_perf_db.query_mhc_module(
@@ -240,6 +269,39 @@ class TestDeepSeekV4MHCModule:
         )
 
         assert float(result) == pytest.approx(2.5)
+
+    @pytest.mark.parametrize(
+        ("sinkhorn_iters", "quant_mode", "message"),
+        [
+            (8, common.GEMMQuantMode.bfloat16, "sinkhorn_iters=20"),
+            (20, common.GEMMQuantMode.fp8_block, "quant_mode=bfloat16"),
+        ],
+    )
+    def test_mhc_silicon_rejects_unmeasured_categories(
+        self,
+        mutable_comprehensive_perf_db,
+        tmp_path,
+        sinkhorn_iters,
+        quant_mode,
+        message,
+    ):
+        path = _write_mhc_perf(
+            tmp_path / "mhc_module_perf.txt",
+            ["SGLang,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,2.5"],
+        )
+        db = mutable_comprehensive_perf_db
+        db._mhc_module_data = load_mhc_module_data(path)
+
+        with pytest.raises(PerfDataNotAvailableError, match=message):
+            db.query_mhc_module(
+                num_tokens=512,
+                hidden_size=7168,
+                hc_mult=4,
+                sinkhorn_iters=sinkhorn_iters,
+                op="pre",
+                quant_mode=quant_mode,
+                database_mode=common.DatabaseMode.SILICON,
+            )
 
     def test_mhc_sparse_token_curve_uses_sol_ratio_at_upper_boundary(self, mutable_comprehensive_perf_db, tmp_path):
         path = _write_mhc_perf(

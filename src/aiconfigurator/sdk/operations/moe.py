@@ -58,6 +58,32 @@ logger = logging.getLogger(__name__)
 
 _TOKEN_AXES = (Axis("tokens", extrapolate="both"),)
 _SMS_TOKEN_AXES = (Axis("sms"), *_TOKEN_AXES)
+_NONGATED_MOE_KEY = False
+
+
+def _store_first(root: dict, keys: tuple, value: dict) -> bool:
+    """Store one measured leaf without overriding an earlier source."""
+    node = root
+    for key in keys[:-1]:
+        node = node.setdefault(key, {})
+    if keys[-1] in node:
+        return False
+    node[keys[-1]] = value
+    return True
+
+
+def _select_gating_category(distribution_data: dict, is_gated: bool, table_name: str) -> dict:
+    """Select gating below the workload-distribution axis."""
+    if not is_gated:
+        category = distribution_data.get(_NONGATED_MOE_KEY)
+        if category:
+            return category
+        raise KeyError(f"No non-gated {table_name} data; legacy rows are gated-only")
+
+    category = {key: value for key, value in distribution_data.items() if key != _NONGATED_MOE_KEY}
+    if not category:
+        raise KeyError(f"No gated {table_name} data")
+    return category
 
 
 def _estimate_token_table(database, key, table, tokens, baseline=None) -> tuple[float, float]:
@@ -462,6 +488,7 @@ class MoE(Operation):
                 (
                     "moe",
                     curve_source,
+                    is_gated,
                     quant_mode,
                     used_workload_distribution,
                     topk,
@@ -524,6 +551,22 @@ class MoE(Operation):
             def get_silicon():
                 query_tokens = num_tokens
                 curve_source = "regular"
+
+                def select_distribution_data(table, table_name):
+                    table.raise_if_not_loaded()
+                    try:
+                        quant_data = table[quant_mode]
+                        used_distribution = workload_distribution if workload_distribution in quant_data else "uniform"
+                        return (
+                            _select_gating_category(quant_data[used_distribution], is_gated, table_name),
+                            used_distribution,
+                        )
+                    except KeyError as exc:
+                        gating = "gated" if is_gated else "non-gated"
+                        raise PerfDataNotAvailableError(
+                            f"No {gating} {table_name} silicon data for quant_mode={quant_mode.name}"
+                        ) from exc
+
                 if database.backend == common.BackendName.sglang.value:
                     # deepep_moe is for sglang wideep only
                     # Apply num_tokens correction when eplb is enabled (only during prefill)
@@ -538,14 +581,8 @@ class MoE(Operation):
                     else:
                         moe_data = database._moe_data
 
-                    moe_data.raise_if_not_loaded()
-
-                    used_workload_distribution = (
-                        workload_distribution if workload_distribution in moe_data[quant_mode] else "uniform"
-                    )
-                    moe_dict = moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
-                        inter_size
-                    ][moe_tp_size][moe_ep_size]
+                    distribution_data, used_workload_distribution = select_distribution_data(moe_data, curve_source)
+                    moe_dict = distribution_data[topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
                 elif database.backend == common.BackendName.trtllm.value:
                     if database._moe_data is None and database._moe_low_latency_data is None:
                         raise PerfDataNotAvailableError(
@@ -562,14 +599,12 @@ class MoE(Operation):
                         and is_gated
                     ):
                         try:
-                            used_workload_distribution = (
-                                workload_distribution
-                                if workload_distribution in database._moe_low_latency_data[quant_mode]
-                                else "uniform"
+                            distribution_data, used_workload_distribution = select_distribution_data(
+                                database._moe_low_latency_data, "low-latency MoE"
                             )
-                            moe_dict = database._moe_low_latency_data[quant_mode][used_workload_distribution][topk][
-                                num_experts
-                            ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                            moe_dict = distribution_data[topk][num_experts][hidden_size][inter_size][moe_tp_size][
+                                moe_ep_size
+                            ]
                             if not moe_dict:
                                 # Shape not present in low-latency table (nested defaultdict returned
                                 # an empty dict instead of raising KeyError). Fall back to regular data.
@@ -583,32 +618,25 @@ class MoE(Operation):
                                 f"{inter_size} {moe_tp_size} {moe_ep_size}."
                             )
                             curve_source = "low_latency"
-                        except:
-                            used_workload_distribution = (
-                                workload_distribution
-                                if workload_distribution in database._moe_data[quant_mode]
-                                else "uniform"
+                        except (KeyError, PerfDataNotAvailableError):
+                            distribution_data, used_workload_distribution = select_distribution_data(
+                                database._moe_data, "regular MoE"
                             )
-                            moe_dict = database._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
-                                hidden_size
-                            ][inter_size][moe_tp_size][moe_ep_size]
+                            moe_dict = distribution_data[topk][num_experts][hidden_size][inter_size][moe_tp_size][
+                                moe_ep_size
+                            ]
                     else:
-                        used_workload_distribution = (
-                            workload_distribution
-                            if workload_distribution in database._moe_data[quant_mode]
-                            else "uniform"
+                        distribution_data, used_workload_distribution = select_distribution_data(
+                            database._moe_data, "regular MoE"
                         )
-                        moe_dict = database._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
-                            hidden_size
-                        ][inter_size][moe_tp_size][moe_ep_size]
+                        moe_dict = distribution_data[topk][num_experts][hidden_size][inter_size][moe_tp_size][
+                            moe_ep_size
+                        ]
                 elif database.backend == common.BackendName.vllm.value:
-                    database._moe_data.raise_if_not_loaded()
-                    used_workload_distribution = (
-                        workload_distribution if workload_distribution in database._moe_data[quant_mode] else "uniform"
+                    distribution_data, used_workload_distribution = select_distribution_data(
+                        database._moe_data, "regular MoE"
                     )
-                    moe_dict = database._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
-                        hidden_size
-                    ][inter_size][moe_tp_size][moe_ep_size]
+                    moe_dict = distribution_data[topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
                 else:
                     raise NotImplementedError(f"backend {database.backend} not supported for moe")
 
@@ -1375,6 +1403,8 @@ class TrtLLMWideEPMoE(Operation):
         is_gated: bool = True,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_wideep_moe_compute``."""
+        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
         cls.load_data(database)
 
         num_gemms = 3 if is_gated else 2
@@ -1491,10 +1521,15 @@ class TrtLLMWideEPMoE(Operation):
 
         # SILICON or HYBRID mode - use database
         def get_silicon():
+            if not is_gated:
+                raise PerfDataNotAvailableError(
+                    "TRT-LLM WideEP compute data does not distinguish gated and non-gated kernels"
+                )
             database._wideep_moe_compute_data.raise_if_not_loaded()
             # Find the best matching distribution
             kernel_data = database._wideep_moe_compute_data[kernel_source]
-            available_distributions = list(kernel_data[quant_mode].keys())
+            quant_data = kernel_data[quant_mode]
+            available_distributions = list(quant_data)
             if workload_distribution in available_distributions:
                 used_distribution = workload_distribution
             else:
@@ -1504,9 +1539,9 @@ class TrtLLMWideEPMoE(Operation):
                     raise KeyError(f"No distribution available for kernel={kernel_source}, quant_mode={quant_mode}")
                 logger.debug(f"Distribution '{workload_distribution}' not found, using '{used_distribution}' instead")
 
-            moe_dict = kernel_data[quant_mode][used_distribution][topk][num_experts][hidden_size][inter_size][
-                num_slots
-            ][moe_tp_size][moe_ep_size]
+            moe_dict = quant_data[used_distribution][topk][num_experts][hidden_size][inter_size][num_slots][
+                moe_tp_size
+            ][moe_ep_size]
 
             def baseline(point):
                 return max(
@@ -1550,7 +1585,7 @@ class TrtLLMWideEPMoE(Operation):
         def get_empirical() -> float:
             # Simple empirical fallback based on SOL
             total_tokens = num_tokens * topk
-            ops = total_tokens * hidden_size * inter_size * 3 * 2 // moe_ep_size // moe_tp_size
+            ops = total_tokens * hidden_size * inter_size * num_gemms * 2 // moe_ep_size // moe_tp_size
             sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
             return sol_math / 0.4  # Empirical scale factor
 
@@ -1589,6 +1624,7 @@ class TrtLLMWideEPMoE(Operation):
             moe_ep_size=self._moe_ep_size,
             quant_mode=quant_mode,
             workload_distribution=self._workload_distribution,
+            is_gated=self._is_gated,
         )
 
         return PerformanceResult(
@@ -2148,7 +2184,7 @@ def load_moe_data(moe_file):
             row["distribution"],
             row["latency"],
         )
-        kernel_source = row["kernel_source"]  # moe_torch_flow, moe_torch_flow_min_latency, moe_torch_flow
+        kernel_source = row.get("kernel_source", "")
         num_tokens = int(num_tokens)
         hidden_size = int(hidden_size)
         inter_size = int(inter_size)
@@ -2184,26 +2220,33 @@ def load_moe_data(moe_file):
             quant_mode = common.MoEQuantMode.w4a16_mxfp4_cutlass
 
         moe_data = moe_low_latency_data if kernel_source == "moe_torch_flow_min_latency" else moe_default_data
-
-        try:
-            # Check for conflict
-            moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
-                moe_ep_size
-            ][num_tokens]
+        gating_keys = (_NONGATED_MOE_KEY,) if "nongated" in kernel_source.lower() else ()
+        keys = (
+            quant_mode,
+            workload_distribution,
+            *gating_keys,
+            topk,
+            num_experts,
+            hidden_size,
+            inter_size,
+            moe_tp_size,
+            moe_ep_size,
+            num_tokens,
+        )
+        if not _store_first(
+            moe_data,
+            keys,
+            {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            },
+        ):
             logger.debug(
                 f"value conflict in moe data: {workload_distribution} {quant_mode} {topk} "
                 f"{num_experts} {hidden_size} {inter_size} {moe_tp_size} {moe_ep_size} "
                 f"{num_tokens}"
             )
-        except KeyError:
-            # Store all three values
-            moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
-                moe_ep_size
-            ][num_tokens] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
 
     return moe_default_data, moe_low_latency_data
 
@@ -2259,14 +2302,21 @@ def load_wideep_context_moe_data(wideep_context_moe_file):
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
 
-        # Store all three values
-        wideep_context_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
-            moe_ep_size
-        ][num_tokens] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,  # NEW: precomputed energy
-        }
+        _store_first(
+            wideep_context_moe_data,
+            (
+                quant_mode,
+                distribution,
+                topk,
+                num_experts,
+                hidden_size,
+                inter_size,
+                moe_tp_size,
+                moe_ep_size,
+                num_tokens,
+            ),
+            {"latency": latency, "power": power, "energy": energy},
+        )
         logger.debug(
             f"Loaded SGLang wideep context MoE data: {quant_mode}, {distribution}, {topk}, "
             f"{num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, "
@@ -2327,14 +2377,21 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
 
-        # Store all three values
-        wideep_generation_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
-            moe_ep_size
-        ][num_tokens] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,  # NEW: precomputed energy
-        }
+        _store_first(
+            wideep_generation_moe_data,
+            (
+                quant_mode,
+                distribution,
+                topk,
+                num_experts,
+                hidden_size,
+                inter_size,
+                moe_tp_size,
+                moe_ep_size,
+                num_tokens,
+            ),
+            {"latency": latency, "power": power, "energy": energy},
+        )
         logger.debug(
             f"Loaded SGLang wideep generation MoE data: {quant_mode}, {distribution}, {topk}, "
             f"{num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, "
@@ -2525,14 +2582,23 @@ def load_wideep_moe_compute_data(wideep_moe_compute_file):
         power = float(row.get("power", 0.0))
         energy = power * latency  # watt-milliseconds
 
-        # Store all three values with kernel_source dimension
-        wideep_moe_compute_data[kernel_source][quant_mode][distribution][topk][num_experts][hidden_size][inter_size][
-            num_slots
-        ][moe_tp_size][moe_ep_size][num_tokens] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
+        _store_first(
+            wideep_moe_compute_data,
+            (
+                kernel_source,
+                quant_mode,
+                distribution,
+                topk,
+                num_experts,
+                hidden_size,
+                inter_size,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+                num_tokens,
+            ),
+            {"latency": latency, "power": power, "energy": energy},
+        )
         # logger.debug(
         #     f"Loaded TensorRT-LLM wideep MoE compute data: kernel={kernel_source}, {quant_mode}, "
         #     f"{distribution}, {topk}, {num_experts}, {hidden_size}, {inter_size}, {num_slots}, "
@@ -2627,14 +2693,11 @@ def load_trtllm_alltoall_data(trtllm_alltoall_file):
         power = float(row.get("power", 0.0))
         energy = power * latency  # watt-milliseconds
 
-        # Store all three values with kernel_source and num_nodes dimensions
-        trtllm_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
-            moe_ep_size
-        ][num_tokens] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
+        _store_first(
+            trtllm_alltoall_data,
+            (kernel_source, op_name, quant_mode, num_nodes, hidden_size, topk, num_experts, moe_ep_size, num_tokens),
+            {"latency": latency, "power": power, "energy": energy},
+        )
         # logger.debug(
         #     f"Loaded TensorRT-LLM wideep All2All data: kernel={kernel_source}, {op_name}, {quant_mode}, "
         #     f"num_nodes={num_nodes}, {hidden_size}, {topk}, {num_experts}, {moe_ep_size}, "
