@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import math
 
 import pytest
@@ -253,6 +254,157 @@ class TestGenerationAttention:
             1, 1, 8, 4, common.KVCacheQuantMode.bfloat16, database_mode=common.DatabaseMode.SOL
         )
         assert result > 0
+
+    def test_raw_cache_is_preserved_before_working_grid_extrapolation(self, comprehensive_perf_db):
+        from aiconfigurator.sdk.operations.attention import GenerationAttention
+
+        GenerationAttention.load_data(comprehensive_perf_db)
+        key = GenerationAttention._cache_key(comprehensive_perf_db)
+        raw = GenerationAttention._raw_data_cache[key]
+        working = GenerationAttention._data_cache[key]
+        path = (common.KVCacheQuantMode.bfloat16, 1, 128, 0, 8)
+
+        raw_curve = raw[path[0]][path[1]][path[2]][path[3]][path[4]]
+        working_curve = working[path[0]][path[1]][path[2]][path[3]][path[4]]
+        assert 8192 not in raw_curve
+        assert 8192 in working_curve
+
+    def test_exact_head_empirical_uses_ragged_bracketed_util(self, comprehensive_perf_db, monkeypatch):
+        """An interior b=3/s~=15k query must not inherit the b=4 utilization.
+
+        These are the real B200/SGLang FP8 neighbours behind the expanded
+        fidelity matrix's former 33.34% generation-attention error.
+        """
+        from aiconfigurator.sdk.operations import util_empirical
+        from aiconfigurator.sdk.perf_database import LoadedOpData
+
+        quant = common.KVCacheQuantMode.fp8
+
+        def leaf(latency):
+            return {"latency": latency, "power": 0.0, "energy": 0.0}
+
+        exact_head = {
+            2: {
+                8192: leaf(0.012430399656295776),
+                16384: leaf(0.016531200706958772),
+                32768: leaf(0.01656000018119812),
+            },
+            4: {
+                8192: leaf(0.012478400021791458),
+                16384: leaf(0.014590400457382201),
+                32768: leaf(0.016420799493789672),
+            },
+        }
+        # SILICON's generic 3-D interpolation validates that all axes vary,
+        # even though n=8 is an exact hit.  A second head slice supplies that
+        # variation but is deliberately not consulted by the exact-head path.
+        table = {quant: {1: {128: {0: {8: exact_head, 16: copy.deepcopy(exact_head)}}}}}
+        working = LoadedOpData(copy.deepcopy(table), common.PerfDataFilename.generation_attention, "unused")
+        raw = LoadedOpData(copy.deepcopy(table), common.PerfDataFilename.generation_attention, "unused")
+
+        monkeypatch.setattr(comprehensive_perf_db, "_generation_attention_data", working)
+        monkeypatch.setattr(comprehensive_perf_db, "_raw_generation_attention_data", raw, raising=False)
+        util_empirical.clear_grid_cache()
+        comprehensive_perf_db.query_generation_attention.cache_clear()
+        try:
+            args = (3, 14996, 8, 1, quant)
+            silicon = float(
+                comprehensive_perf_db.query_generation_attention(
+                    *args, database_mode=common.DatabaseMode.SILICON, head_size=128
+                )
+            )
+            empirical = float(
+                comprehensive_perf_db.query_generation_attention(
+                    *args, database_mode=common.DatabaseMode.EMPIRICAL, head_size=128
+                )
+            )
+
+            sol_query = float(
+                comprehensive_perf_db.query_generation_attention(
+                    *args, database_mode=common.DatabaseMode.SOL, head_size=128
+                )
+            )
+            sol_nearest = float(
+                comprehensive_perf_db.query_generation_attention(
+                    4, 16384, 8, 1, quant, database_mode=common.DatabaseMode.SOL, head_size=128
+                )
+            )
+            old_nearest = sol_query / (sol_nearest / exact_head[4][16384]["latency"])
+
+            assert abs(old_nearest / silicon - 1.0) > 0.30
+            assert abs(empirical / silicon - 1.0) < 0.04
+        finally:
+            util_empirical.clear_grid_cache()
+            comprehensive_perf_db.query_generation_attention.cache_clear()
+
+    def test_exact_head_util_cache_tracks_raw_data_identity(self, comprehensive_perf_db, monkeypatch):
+        from aiconfigurator.sdk.operations import util_empirical
+        from aiconfigurator.sdk.perf_database import LoadedOpData
+
+        quant = common.KVCacheQuantMode.bfloat16
+
+        def wrapper(latency):
+            table = {
+                quant: {
+                    1: {
+                        128: {
+                            0: {
+                                8: {
+                                    2: {
+                                        8192: {"latency": latency, "power": 0.0, "energy": 0.0},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return LoadedOpData(table, common.PerfDataFilename.generation_attention, "unused")
+
+        first_raw = wrapper(0.02)
+        replacement_raw = wrapper(0.04)
+        util_empirical.clear_grid_cache()
+        try:
+            monkeypatch.setattr(
+                comprehensive_perf_db,
+                "_raw_generation_attention_data",
+                first_raw,
+                raising=False,
+            )
+            comprehensive_perf_db.query_generation_attention.cache_clear()
+            first = float(
+                comprehensive_perf_db.query_generation_attention(
+                    2,
+                    8192,
+                    8,
+                    1,
+                    quant,
+                    database_mode=common.DatabaseMode.EMPIRICAL,
+                    head_size=128,
+                )
+            )
+
+            # Do not clear the process-global util cache: the raw data identity
+            # in the cache key must select a newly calibrated grid.
+            monkeypatch.setattr(comprehensive_perf_db, "_raw_generation_attention_data", replacement_raw)
+            comprehensive_perf_db.query_generation_attention.cache_clear()
+            replacement = float(
+                comprehensive_perf_db.query_generation_attention(
+                    2,
+                    8192,
+                    8,
+                    1,
+                    quant,
+                    database_mode=common.DatabaseMode.EMPIRICAL,
+                    head_size=128,
+                )
+            )
+
+            assert first == pytest.approx(0.02)
+            assert replacement == pytest.approx(0.04)
+        finally:
+            util_empirical.clear_grid_cache()
+            comprehensive_perf_db.query_generation_attention.cache_clear()
 
 
 class TestContextMLA:

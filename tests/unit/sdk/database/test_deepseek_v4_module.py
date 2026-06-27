@@ -268,6 +268,22 @@ class TestDeepSeekV4AttentionModule:
         assert math.isclose(result["latency"], expected, rel_tol=1e-6)
         assert math.isclose(result["energy"], expected * 10.0, rel_tol=1e-6)
 
+    def test_generation_robust_lookup_interpolates_between_covering_batches(self, mutable_comprehensive_perf_db):
+        """b=7 interpolates b=4/b=8 instead of scaling the b=4 launch floor."""
+        db = mutable_comprehensive_perf_db
+        mock_grid = {
+            8: {
+                4: {2048: _deepseek_v4_value(4.0), 4096: _deepseek_v4_value(8.0)},
+                8: {2048: _deepseek_v4_value(10.0), 4096: _deepseek_v4_value(14.0)},
+            }
+        }
+
+        result = _dsv4_robust_3d_lookup(db, mock_grid, 8, 7, 3072, batch_axis="y")
+
+        # Sequence interpolation gives 6 at b=4 and 12 at b=8; b=7 gives 10.5.
+        assert result["latency"] == pytest.approx(10.5)
+        assert result["energy"] == pytest.approx(105.0)
+
     def test_generation_silicon_extrapolates_query_below_min_sampled_s_total(self, mutable_comprehensive_perf_db):
         """Full-query regression for generated query b=1, s_total=1, tp=8."""
         db = mutable_comprehensive_perf_db
@@ -524,7 +540,7 @@ class TestDeepSeekV4AttentionModule:
         assert fp8[2] < bf16[2]
 
     def test_robust_3d_lookup_uses_b2_when_b3_s2682_is_missing(self, mutable_comprehensive_perf_db):
-        """Regression: b=3, s=2682 uses b=2 because b=4 only reaches s=2048."""
+        """Keep lower-batch scaling when the upper batch does not cover query s."""
         db = mutable_comprehensive_perf_db
         mock_grid = _dsv4_sampled_batch_caps_grid()
 

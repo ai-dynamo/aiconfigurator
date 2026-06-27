@@ -610,6 +610,23 @@ class MoE(Operation):
         ) -> list[int]:
             token_points = sorted(moe_dict.keys())
             if token_points:
+                # A singleton above the query cannot define the low-token
+                # launch-overhead regime. Freezing its measured latency would
+                # silently present an unmeasured underflow as silicon (e.g. a
+                # decode query at 7 tokens backed only by a 1024-token row).
+                # Surface the coverage gap so HYBRID can use the explicitly
+                # empirical boundary-util fallback instead. Keep multi-point
+                # underflow and singleton overflow behavior unchanged.
+                if len(token_points) == 1 and query_tokens < token_points[0]:
+                    raise PerfDataNotAvailableError(
+                        "MoE silicon token underflow has only one measured point; "
+                        "cannot infer low-token latency from a singleton. "
+                        f"num_tokens={query_tokens}, measured_token={token_points[0]}, "
+                        f"hidden_size={hidden_size}, inter_size={inter_size}, topk={topk}, "
+                        f"num_experts={num_experts}, moe_tp_size={moe_tp_size}, "
+                        f"moe_ep_size={moe_ep_size}, quant_mode={quant_mode}, "
+                        f"workload_distribution='{used_workload_distribution}'."
+                    )
                 return token_points
 
             raise PerfDataNotAvailableError(

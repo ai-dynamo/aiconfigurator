@@ -197,6 +197,50 @@ class TestMoE:
         ]
         assert math.isclose(float(result), expected, rel_tol=1e-6)
 
+    def test_query_moe_empirical_interpolates_util_in_log_token_space(self, comprehensive_perf_db):
+        from aiconfigurator.sdk.operations import util_empirical
+
+        kwargs = dict(
+            hidden_size=2048,
+            inter_size=8192,
+            topk=2,
+            num_experts=8,
+            moe_tp_size=2,
+            moe_ep_size=2,
+            quant_mode=common.MoEQuantMode.bfloat16,
+            workload_distribution="uniform",
+        )
+        curve = comprehensive_perf_db._moe_data[common.MoEQuantMode.bfloat16]["uniform"][2][8][2048][8192][2][2]
+
+        def sol(tokens: int) -> float:
+            return float(
+                comprehensive_perf_db.query_moe(
+                    num_tokens=tokens,
+                    database_mode=common.DatabaseMode.SOL,
+                    **kwargs,
+                )
+            )
+
+        left, query, right = 8, 11, 16
+        left_util = sol(left) / float(curve[left])
+        right_util = sol(right) / float(curve[right])
+        alpha = (math.log(query) - math.log(left)) / (math.log(right) - math.log(left))
+        expected_util = left_util + alpha * (right_util - left_util)
+        expected_latency = sol(query) / expected_util
+
+        util_empirical.clear_grid_cache()
+        try:
+            result = comprehensive_perf_db.query_moe(
+                num_tokens=query,
+                database_mode=common.DatabaseMode.EMPIRICAL,
+                **kwargs,
+            )
+        finally:
+            util_empirical.clear_grid_cache()
+
+        assert float(result) == pytest.approx(expected_latency)
+        assert result.source == "empirical"
+
     def test_query_moe_silicon_overflow_uses_util_extrapolation(self, comprehensive_perf_db):
         """When num_tokens > max(moe_dict), result comes from _estimate_overflow_with_last_token_util."""
         # Fixture max token point is 32; query beyond it to trigger overflow path.
@@ -242,6 +286,86 @@ class TestMoE:
             max_stored
         ]
         assert math.isclose(float(result), expected, rel_tol=1e-6)
+
+    def test_query_moe_singleton_underflow_silicon_misses_hybrid_empirical_take_over(
+        self, mutable_comprehensive_perf_db
+    ):
+        """A lone high-token row is empirical coverage, not measured low-token silicon."""
+        from aiconfigurator.sdk.operations import util_empirical
+
+        db = mutable_comprehensive_perf_db
+        kwargs = dict(
+            hidden_size=2048,
+            inter_size=8192,
+            topk=2,
+            num_experts=8,
+            moe_tp_size=2,
+            moe_ep_size=2,
+            quant_mode=common.MoEQuantMode.bfloat16,
+            workload_distribution="uniform",
+        )
+        curve = db._moe_data[common.MoEQuantMode.bfloat16]["uniform"][2][8][2048][8192][2]
+        curve[2] = {32: 3.2}
+
+        util_empirical.clear_grid_cache()
+        try:
+            with pytest.raises(PerfDataNotAvailableError, match="only one measured point"):
+                db.query_moe(num_tokens=8, database_mode=common.DatabaseMode.SILICON, **kwargs)
+
+            empirical = db.query_moe(num_tokens=8, database_mode=common.DatabaseMode.EMPIRICAL, **kwargs)
+            hybrid = db.query_moe(num_tokens=8, database_mode=common.DatabaseMode.HYBRID, **kwargs)
+        finally:
+            util_empirical.clear_grid_cache()
+
+        sol_query = float(db.query_moe(num_tokens=8, database_mode=common.DatabaseMode.SOL, **kwargs))
+        sol_anchor = float(db.query_moe(num_tokens=32, database_mode=common.DatabaseMode.SOL, **kwargs))
+        expected = sol_query / (sol_anchor / 3.2)
+        assert float(empirical) == pytest.approx(expected)
+        assert float(hybrid) == pytest.approx(expected)
+        assert empirical.source == "empirical"
+        assert hybrid.source == "empirical"
+
+    def test_query_moe_multi_point_underflow_keeps_existing_extrapolation(self, mutable_comprehensive_perf_db):
+        db = mutable_comprehensive_perf_db
+        curve = db._moe_data[common.MoEQuantMode.bfloat16]["uniform"][2][8][2048][8192][2]
+        curve[2] = {8: 0.8, 16: 1.6}
+
+        result = db.query_moe(
+            4,
+            2048,
+            8192,
+            2,
+            8,
+            2,
+            2,
+            common.MoEQuantMode.bfloat16,
+            "uniform",
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        assert float(result) == pytest.approx(0.4)
+
+    def test_query_moe_singleton_overflow_keeps_util_extrapolation(self, mutable_comprehensive_perf_db):
+        db = mutable_comprehensive_perf_db
+        kwargs = dict(
+            hidden_size=2048,
+            inter_size=8192,
+            topk=2,
+            num_experts=8,
+            moe_tp_size=2,
+            moe_ep_size=2,
+            quant_mode=common.MoEQuantMode.bfloat16,
+            workload_distribution="uniform",
+        )
+        curve = db._moe_data[common.MoEQuantMode.bfloat16]["uniform"][2][8][2048][8192][2]
+        curve[2] = {32: 3.2}
+
+        result = db.query_moe(num_tokens=64, database_mode=common.DatabaseMode.SILICON, **kwargs)
+
+        sol_query = float(db.query_moe(num_tokens=64, database_mode=common.DatabaseMode.SOL, **kwargs))
+        sol_anchor = float(db.query_moe(num_tokens=32, database_mode=common.DatabaseMode.SOL, **kwargs))
+        assert float(result) == pytest.approx(sol_query / (sol_anchor / 3.2))
+        assert result.source == "silicon"
 
     def test_query_moe_vllm_missing_bucket_raises_structured_error(self, mutable_comprehensive_perf_db):
         """Missing MoE token buckets must not leak raw IndexError/KeyError in SILICON mode."""

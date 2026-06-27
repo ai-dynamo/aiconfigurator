@@ -205,7 +205,10 @@ def clear_all_op_caches() -> None:
       fixture clears only the counter, not data caches — clearing the
       caches would force a fresh-disk reload mid-suite)
 
-    Also clears the shared instrumentation counter.
+    Also clears empirical utilization grids and the shared instrumentation
+    counter. Util grids are derived from per-op data, so retaining them after
+    their source caches are evicted can mix an old custom ``systems_root`` or
+    shared-layer view into newly loaded data.
 
     Note: this does NOT clear the ``@functools.lru_cache`` on the
     ``PerfDatabase.query_*`` wrappers — those caches live on each database
@@ -214,6 +217,11 @@ def clear_all_op_caches() -> None:
     interpolated/extrapolated query results."""
     for cls in _all_operation_subclasses():
         cls.clear_cache()
+    # Import lazily to avoid a base <-> util_empirical module cycle at import
+    # time. This is part of the same eviction contract as the per-op caches.
+    from aiconfigurator.sdk.operations import util_empirical
+
+    util_empirical.clear_grid_cache()
     Operation._load_data_call_count.clear()
 
 

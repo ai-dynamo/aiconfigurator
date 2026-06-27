@@ -1,0 +1,347 @@
+{
+  "defaults": {
+    "system": "b200_sxm",
+    "backend": "sglang",
+    "version": "0.5.10",
+    "phases": [
+      "prefill",
+      "decode"
+    ],
+    "stride": 32,
+    "points": [
+      {
+        "id": "exact-1024-b1",
+        "sample_kind": "grid_anchor_control",
+        "batch_size": 1,
+        "isl": 1024,
+        "osl": 129
+      },
+      {
+        "id": "exact-4096-b8",
+        "sample_kind": "grid_anchor_control",
+        "batch_size": 8,
+        "isl": 4096,
+        "osl": 257
+      },
+      {
+        "id": "boundary-2047",
+        "sample_kind": "boundary",
+        "batch_size": 7,
+        "isl": 2047,
+        "osl": 8
+      },
+      {
+        "id": "boundary-2049",
+        "sample_kind": "boundary",
+        "batch_size": 9,
+        "isl": 2049,
+        "osl": 8
+      }
+    ],
+    "point_generation": {
+      "count": 10,
+      "seed": 12345,
+      "distribution": "log_uniform",
+      "sample_kind": "offgrid",
+      "max_batch_tokens": 65536,
+      "max_sequence": 16384,
+      "ranges": {
+        "batch_size": [2, 64],
+        "isl": [768, 16000],
+        "osl": [2, 1024]
+      },
+      "avoid": {
+        "batch_size": [2, 4, 8, 16, 32, 64],
+        "isl": [1024, 2048, 4096, 8192, 16384],
+        "osl": [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+      },
+      "constants": {
+        "prefix": 0,
+        "beam_width": 1
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "qwen3-32b-bf16",
+      "family": "dense",
+      "quant": "BF16",
+      "model": "Qwen/Qwen3-32B",
+      "model_config": {
+        "tp_size": 8
+      }
+    },
+    {
+      "id": "qwen3-32b-fp8",
+      "family": "dense",
+      "quant": "FP8",
+      "model": "Qwen/Qwen3-32B-FP8",
+      "model_config": {
+        "tp_size": 8
+      }
+    },
+    {
+      "id": "qwen3-32b-fp8-static",
+      "family": "dense",
+      "quant": "FP8-static",
+      "model": "Qwen/Qwen3-32B-FP8-Static-PerTensor",
+      "model_config": {
+        "tp_size": 8
+      }
+    },
+    {
+      "id": "llama3.1-70b-fp8-static",
+      "family": "dense",
+      "quant": "FP8-static",
+      "model": "nvidia/Llama-3.1-70B-Instruct-FP8",
+      "model_config": {
+        "tp_size": 8
+      }
+    },
+    {
+      "id": "qwen3.5-27b-bf16",
+      "family": "dense/GDN",
+      "quant": "BF16",
+      "model": "Qwen/Qwen3.5-27B",
+      "model_config": {
+        "tp_size": 8
+      }
+    },
+    {
+      "id": "qwen3-235b-bf16",
+      "family": "MoE",
+      "quant": "BF16",
+      "model": "Qwen/Qwen3-235B-A22B",
+      "model_config": {
+        "tp_size": 8,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      }
+    },
+    {
+      "id": "qwen3-235b-fp8",
+      "family": "MoE",
+      "quant": "FP8",
+      "model": "Qwen/Qwen3-235B-A22B-FP8",
+      "model_config": {
+        "tp_size": 8,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      }
+    },
+    {
+      "id": "qwen3-235b-nvfp4",
+      "family": "MoE",
+      "quant": "NVFP4",
+      "model": "nvidia/Qwen3-235B-A22B-NVFP4",
+      "model_config": {
+        "tp_size": 8,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      }
+    },
+    {
+      "id": "minimax-m2.5-fp8",
+      "family": "MoE",
+      "quant": "FP8-block",
+      "model": "MiniMaxAI/MiniMax-M2.5",
+      "model_config": {
+        "tp_size": 8,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      }
+    },
+    {
+      "id": "minimax-m2.5-nvfp4",
+      "family": "MoE",
+      "quant": "NVFP4",
+      "model": "nvidia/MiniMax-M2.5-NVFP4",
+      "model_config": {
+        "tp_size": 8,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      }
+    },
+    {
+      "id": "nemotron-nano-bf16",
+      "family": "hybrid/MoE",
+      "quant": "BF16",
+      "model": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "model_config": {
+        "tp_size": 8,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      }
+    },
+    {
+      "id": "kimi-k2.5-int4-wo",
+      "family": "MLA/MoE",
+      "quant": "BF16+INT4-WO",
+      "model": "moonshotai/Kimi-K2.5",
+      "model_config": {
+        "tp_size": 8,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      }
+    },
+    {
+      "id": "deepseek-v3.2-tp2-pp2",
+      "family": "DSA",
+      "quant": "FP8-block",
+      "model": "deepseek-ai/DeepSeek-V3.2",
+      "model_config": {
+        "tp_size": 2,
+        "pp_size": 2,
+        "moe_tp_size": 1,
+        "moe_ep_size": 2
+      }
+    },
+    {
+      "id": "deepseek-v3.2-tp8",
+      "family": "DSA",
+      "quant": "FP8-block",
+      "model": "deepseek-ai/DeepSeek-V3.2",
+      "model_config": {
+        "tp_size": 8,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      },
+      "phase_sample_kinds": {
+        "decode": "boundary_util_extrapolation"
+      }
+    },
+    {
+      "id": "glm-5-bf16-pp2",
+      "family": "DSA",
+      "quant": "BF16",
+      "model": "zai-org/GLM-5",
+      "model_config": {
+        "tp_size": 8,
+        "pp_size": 2,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      }
+    },
+    {
+      "id": "glm-5-fp8",
+      "family": "DSA",
+      "quant": "FP8",
+      "model": "zai-org/GLM-5-FP8",
+      "model_config": {
+        "tp_size": 8,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      }
+    },
+    {
+      "id": "glm-5-nvfp4",
+      "family": "DSA",
+      "quant": "NVFP4",
+      "model": "nvidia/GLM-5-NVFP4",
+      "model_config": {
+        "tp_size": 8,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      }
+    },
+    {
+      "id": "deepseek-v4-flash-mxfp4",
+      "family": "DSV4",
+      "quant": "FP8+MXFP4/MXFP8",
+      "model": "deepseek-ai/DeepSeek-V4-Flash",
+      "model_config": {
+        "tp_size": 8,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      },
+      "point_generation": {
+        "max_batch_tokens": 8192
+      }
+    },
+    {
+      "id": "deepseek-v4-pro-mxfp4",
+      "family": "DSV4",
+      "quant": "FP8+MXFP4/MXFP8",
+      "model": "deepseek-ai/DeepSeek-V4-Pro",
+      "model_config": {
+        "tp_size": 8,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      },
+      "point_generation": {
+        "max_batch_tokens": 8192
+      }
+    },
+    {
+      "id": "deepseek-v4-pro-fp8-pp2",
+      "family": "DSV4",
+      "quant": "FP8-block",
+      "model": "sgl-project/DeepSeek-V4-Pro-FP8",
+      "model_config": {
+        "tp_size": 8,
+        "pp_size": 2,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      },
+      "point_generation": {
+        "max_batch_tokens": 8192
+      }
+    },
+    {
+      "id": "qwen3-vl-32b-image",
+      "family": "dense/VL",
+      "quant": "BF16",
+      "model": "Qwen/Qwen3-VL-32B-Instruct",
+      "model_config": {
+        "tp_size": 8
+      },
+      "point_generation": null,
+      "points": [
+        {
+          "id": "image-448",
+          "sample_kind": "image",
+          "batch_size": 3,
+          "isl": 1500,
+          "osl": 8,
+          "image_height": 448,
+          "image_width": 448,
+          "num_images_per_request": 1,
+          "phases": [
+            "prefill",
+            "decode",
+            "encoder"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qwen3-vl-30b-moe-image",
+      "family": "MoE/VL",
+      "quant": "BF16",
+      "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+      "model_config": {
+        "tp_size": 8,
+        "moe_tp_size": 1,
+        "moe_ep_size": 8
+      },
+      "point_generation": null,
+      "points": [
+        {
+          "id": "image-448",
+          "sample_kind": "image",
+          "batch_size": 3,
+          "isl": 1500,
+          "osl": 8,
+          "image_height": 448,
+          "image_width": 448,
+          "num_images_per_request": 1,
+          "phases": [
+            "prefill",
+            "decode",
+            "encoder"
+          ]
+        }
+      ]
+    }
+  ]
+}

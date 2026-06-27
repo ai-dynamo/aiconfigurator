@@ -20,6 +20,7 @@ enable_shared_layer)``, same as GEMM (and every other migrated op).
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 from collections import defaultdict
@@ -555,12 +556,13 @@ class GenerationAttention(Operation):
     """
     Generation (decode) attention operation.
 
-    Owns ``_data_cache: {key: LoadedOpData}`` for the generation attention
-    CSV. ``load_data`` applies both SOL clamping AND grid extrapolation
-    (legacy ``_correct_data`` clamped, then ``__init__`` extrapolated).
+    Owns an extrapolated SILICON working cache plus a raw measured cache for
+    EMPIRICAL utilization calibration. ``load_data`` applies SOL clamping,
+    snapshots the raw rows, then expands the working grid.
     """
 
     _data_cache: ClassVar[dict] = {}
+    _raw_data_cache: ClassVar[dict] = {}
 
     def __init__(
         self,
@@ -593,8 +595,8 @@ class GenerationAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads generation_attention CSV, clamps to SOL, applies
-        grid extrapolation, binds ``database._generation_attention_data``.
+        """Idempotent. Loads generation_attention CSV, clamps to SOL, preserves
+        measured rows, extrapolates the working grid, and binds both views.
 
         Mirrors ``GEMM.load_data``: correction/extrapolation operate on the
         canonical class-cache value (passed explicitly), then the instance
@@ -614,6 +616,10 @@ class GenerationAttention(Operation):
             )
 
             cls._correct_sol(database, cls._data_cache[key])
+            # EMPIRICAL calibration must use collected rows, not latency-space
+            # points synthesized by the SILICON extrapolator below.  Preserve
+            # the SOL-clamped measured table before expanding the working grid.
+            cls._raw_data_cache[key] = copy.deepcopy(cls._data_cache[key])
             cls._extrapolate(cls._data_cache[key])
             # Re-clamp after extrapolation: interpolated/extrapolated grid
             # points can land below the SOL bound. The legacy init path ran
@@ -626,10 +632,12 @@ class GenerationAttention(Operation):
         # Bind instance attr (respect intentional test pre-overrides).
         if "_generation_attention_data" not in database.__dict__:
             database._generation_attention_data = cls._data_cache[key]
+            database._raw_generation_attention_data = cls._raw_data_cache[key]
 
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
+        cls._raw_data_cache.clear()
 
     @classmethod
     def _correct_sol(cls, database: PerfDatabase, data_wrapper=None) -> None:
@@ -759,6 +767,43 @@ class GenerationAttention(Operation):
             sol_time = get_sol(b, s, n, n_kv, h, w, kvcache_quant_mode)[0]
             n_kv_lookup = n_kv if n_kv != n else 0
 
+            def _exact_raw_n_grid(slice_window):
+                """Measured exact-head slice for safe ragged (batch, seq) interpolation."""
+                try:
+                    cls.load_data(database)
+                    raw_wrapper = getattr(database, "_raw_generation_attention_data", None)
+                    if raw_wrapper is None or not getattr(raw_wrapper, "loaded", True):
+                        return None
+                    raw_slice = raw_wrapper[kvcache_quant_mode][n_kv_lookup][h][slice_window]
+                    if n not in raw_slice:
+                        return None
+                except Exception:
+                    return None
+
+                def _sol(c):  # c = (b, s), n is an exact shape identity
+                    nkv = n if n_kv_lookup == 0 else n_kv_lookup
+                    return get_sol(c[0], c[1], n, nkv, h, slice_window, kvcache_quant_mode)[0]
+
+                return util_empirical.grid_for(
+                    (
+                        "gen_attn_raw_exact_n",
+                        database.systems_root,
+                        database.system,
+                        database.backend,
+                        database.version,
+                        bool(database.enable_shared_layer),
+                        id(raw_wrapper),
+                        kvcache_quant_mode.name,
+                        n_kv_lookup,
+                        h,
+                        slice_window,
+                        n,
+                    ),
+                    lambda: raw_slice[n],
+                    _sol,
+                    depth=2,
+                )
+
             def _own_grid(slice_window):
                 def _slice():
                     cls.load_data(database)
@@ -787,6 +832,13 @@ class GenerationAttention(Operation):
                 )
 
             for slice_window in [w, 0] if w > 0 else [w]:
+                exact_grid = _exact_raw_n_grid(slice_window)
+                bracketed = util_empirical.estimate_bracketed_2d(sol_time, (b, s), exact_grid)
+                if bracketed is not None:
+                    return bracketed[0]
+
+                # Preserve the prior multidimensional nearest-neighbour path for
+                # non-exact heads and malformed/sparse exact-head slices.
                 grid = _own_grid(slice_window)
                 if grid is not None and grid.samples:
                     latency, _ = util_empirical.estimate(sol_time, (n, b, s), grid)

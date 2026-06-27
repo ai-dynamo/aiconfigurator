@@ -7,11 +7,10 @@ Both ContextDSAModule and GenerationDSAModule own their CSV-backed perf
 tables and grid extrapolation. ``PerfDatabase.query_context_dsa_module``
 and ``query_generation_dsa_module`` delegate here.
 
-ContextDSAModule additionally maintains a ``_raw_data_cache`` — a
-``copy.deepcopy`` of the loaded table BEFORE extrapolation runs — because
-``interpolation.interp_dsa_context_topk_piecewise_from_raw`` needs the
-un-extrapolated rows for the topk-boundary regime-aware piecewise lookup
-(PR #903).
+Both classes additionally maintain a ``_raw_data_cache`` — a
+``copy.deepcopy`` of the loaded table BEFORE extrapolation runs. Context uses
+it for the topk-boundary regime-aware piecewise lookup (PR #903); generation
+uses it to anchor sequence overflow to measured boundary utilization.
 
 No SOL clamping in the legacy ``_correct_data`` for either DSA op —
 extrapolation only. The legacy ``__init__`` loaded DSA twice (once near
@@ -473,9 +472,7 @@ class ContextDSAModule(Operation):
             # per-arch: both DeepseekV32 and GlmMoeDsa carry it on every framework.
             sol_time = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
 
-            def _slice():
-                cls.load_data(database)
-                wrapper = database._context_dsa_module_data
+            def _select_slice(wrapper):
                 if wrapper is None:
                     raise KeyError("context dsa module data not loaded")
                 arch_node = wrapper[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
@@ -483,6 +480,81 @@ class ContextDSAModule(Operation):
                 # the backend axis exactly like the silicon path. Without this the grid sees
                 # dsa_backend strings where it expects the num_heads axis and never resolves.
                 return _select_dsa_backend(arch_node, dsa_backend)
+
+            def _slice():
+                cls.load_data(database)
+                return _select_slice(database._context_dsa_module_data)
+
+            def _raw_slice():
+                cls.load_data(database)
+                raw_wrapper = getattr(database, "_raw_context_dsa_module_data", None)
+                if raw_wrapper is None or not getattr(raw_wrapper, "loaded", True):
+                    raise KeyError("raw context dsa module data not loaded")
+                return _select_slice(raw_wrapper)
+
+            # Context DSA's measured grid is ragged in batch: larger batches
+            # often stop at shorter sequences.  When the exact categorical
+            # slice exists, interpolate utilization only among measured batch
+            # curves whose original sequence range covers the query.  The
+            # generic multi-D NN below remains the fallback for a missing head,
+            # prefix, or safe bracket.
+            try:
+                raw_slc = _raw_slice()
+                raw_has_prefix = _dsa_module_has_prefix_axis(raw_slc)
+                raw_head_data = raw_slc.get(num_heads) if isinstance(raw_slc, dict) else None
+                raw_sequence_data = None
+                raw_prefix = 0
+                if isinstance(raw_head_data, dict):
+                    if raw_has_prefix and prefix in raw_head_data:
+                        raw_sequence_data = raw_head_data[prefix]
+                        raw_prefix = prefix
+                    elif not raw_has_prefix and prefix == 0:
+                        raw_sequence_data = raw_head_data
+
+                batch_curves: dict = {}
+                if isinstance(raw_sequence_data, dict):
+                    for sequence, batch_data in raw_sequence_data.items():
+                        if not isinstance(batch_data, dict):
+                            continue
+                        for batch, leaf in batch_data.items():
+                            batch_curves.setdefault(batch, {})[sequence] = leaf
+                if not batch_curves:
+                    raise KeyError("exact raw context DSA slice is empty")
+
+                raw_grid = util_empirical.grid_for(
+                    (
+                        "ctx_dsa_exact_raw_2d",
+                        database.systems_root,
+                        database.system,
+                        database.backend,
+                        database.version,
+                        fmha_quant_mode.name,
+                        kvcache_quant_mode.name,
+                        gemm_quant_mode.name,
+                        architecture,
+                        dsa_backend,
+                        num_heads,
+                        raw_prefix,
+                        id(raw_sequence_data),
+                    ),
+                    lambda: batch_curves,
+                    lambda c: get_sol(c[0], c[1], raw_prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0],
+                    depth=2,
+                )
+                bracketed = util_empirical.estimate_bracketed_2d(
+                    sol_time,
+                    (b, s),
+                    raw_grid,
+                    log_space=True,
+                    require_y_coverage=True,
+                )
+                if bracketed is not None:
+                    return bracketed[0]
+            except Exception:
+                # Exact raw data is an optimization of the own-shape path, not
+                # a new failure mode. Preserve the established NN / transfer
+                # fallback for malformed, absent, or non-exact slices.
+                pass
 
             try:
                 slc = _slice()
@@ -936,9 +1008,9 @@ class GenerationDSAModule(Operation):
     """
     Generation phase DSA (DeepSeek Sparse Attention) module-level operation.
 
-    Owns ``_data_cache`` (extrapolated generation_dsa_module CSV). No
-    ``_raw_data_cache`` because the generation path doesn't use the
-    topk-boundary piecewise interpolation — straight 3D cubic.
+    Owns both an extrapolated working cache and the original measured rows.
+    The raw view supplies trustworthy boundary utilization when a sequence
+    query falls outside a collected curve.
 
     Models the full DSA attention block during decode:
     - Same components as ContextDSAModule
@@ -947,6 +1019,7 @@ class GenerationDSAModule(Operation):
     """
 
     _data_cache: ClassVar[dict] = {}
+    _raw_data_cache: ClassVar[dict] = {}
 
     def __init__(
         self,
@@ -974,8 +1047,9 @@ class GenerationDSAModule(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads generation_dsa_module CSV, applies grid
-        extrapolation, binds ``database._generation_dsa_module_data``."""
+        """Idempotent. Loads generation_dsa_module data, preserves the raw
+        measured rows, applies the legacy grid extrapolation to a working copy,
+        and binds both views on ``database``."""
         import os
 
         from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
@@ -989,15 +1063,20 @@ class GenerationDSAModule(Operation):
             cls._data_cache[key] = LoadedOpData(
                 load_generation_dsa_module_data(sources), PerfDataFilename.dsa_generation_module, primary_path
             )
+            # Boundary-util extrapolation must be anchored to a measured row,
+            # never to a latency-space point synthesized by ``_extrapolate``.
+            cls._raw_data_cache[key] = copy.deepcopy(cls._data_cache[key])
             cls._extrapolate(cls._data_cache[key])
             cls._record_load()
 
         if "_generation_dsa_module_data" not in database.__dict__:
             database._generation_dsa_module_data = cls._data_cache[key]
+            database._raw_generation_dsa_module_data = cls._raw_data_cache[key]
 
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
+        cls._raw_data_cache.clear()
 
     @classmethod
     def _extrapolate(cls, data_wrapper) -> None:
@@ -1124,7 +1203,15 @@ class GenerationDSAModule(Operation):
 
             def _slice():
                 cls.load_data(database)
-                wrapper = database._generation_dsa_module_data
+                # EMPIRICAL utilization is calibrated from measured rows only.
+                # Using the extrapolated working table here would make a
+                # synthesized SILICON latency masquerade as calibration data.
+                raw_wrapper = getattr(database, "_raw_generation_dsa_module_data", None)
+                wrapper = (
+                    raw_wrapper
+                    if raw_wrapper is not None and getattr(raw_wrapper, "loaded", True)
+                    else database._generation_dsa_module_data
+                )
                 if wrapper is None:
                     raise KeyError("generation dsa module data not loaded")
                 arch_node = wrapper[kv_cache_dtype][gemm_quant_mode][architecture]
@@ -1132,22 +1219,54 @@ class GenerationDSAModule(Operation):
                 # axis like the silicon path so the grid resolves the num_heads axis.
                 return _select_dsa_backend(arch_node, dsa_backend)
 
-            grid = util_empirical.grid_for(
-                (
-                    "gen_dsa",
-                    database.system,
-                    database.backend,
-                    database.version,
-                    kv_cache_dtype.name,
-                    gemm_quant_mode.name,
-                    architecture,
-                    dsa_backend,
-                ),
-                _slice,
-                lambda c: get_sol(c[1], c[2], c[0], kv_cache_dtype)[0],  # c = (num_heads, b, s)
-                depth=3,
-            )
-            latency, _ = util_empirical.estimate(sol_time, (num_heads, b, s), grid)
+            try:
+                data_slice = _slice()
+            except Exception:
+                # Match ``grid_for``'s best-effort contract: unavailable table
+                # data is reported by ``estimate`` as an empirical coverage
+                # miss, not leaked as a SILICON file-loading exception.
+                data_slice = None
+
+            if data_slice is not None and num_heads in data_slice:
+                # ``num_heads`` is a TP/model-shape identity, not an axis that
+                # should drift merely because another TP has longer sequence
+                # coverage.  Stay on the exact head slice whenever it exists;
+                # only use cross-head nearest-neighbour when the slice is absent.
+                grid = util_empirical.grid_for(
+                    (
+                        "gen_dsa_exact_heads",
+                        database.system,
+                        database.backend,
+                        database.version,
+                        kv_cache_dtype.name,
+                        gemm_quant_mode.name,
+                        architecture,
+                        dsa_backend,
+                        num_heads,
+                    ),
+                    lambda: data_slice[num_heads],
+                    lambda c: get_sol(c[0], c[1], num_heads, kv_cache_dtype)[0],  # c = (b, s)
+                    depth=2,
+                )
+                query = (b, s)
+            else:
+                grid = util_empirical.grid_for(
+                    (
+                        "gen_dsa",
+                        database.system,
+                        database.backend,
+                        database.version,
+                        kv_cache_dtype.name,
+                        gemm_quant_mode.name,
+                        architecture,
+                        dsa_backend,
+                    ),
+                    lambda: data_slice,
+                    lambda c: get_sol(c[1], c[2], c[0], kv_cache_dtype)[0],  # c = (num_heads, b, s)
+                    depth=3,
+                )
+                query = (num_heads, b, s)
+            latency, _ = util_empirical.estimate(sol_time, query, grid)
             return latency
 
         if database_mode is None:
@@ -1183,7 +1302,54 @@ class GenerationDSAModule(Operation):
                 dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
                 dsa_dict = _select_dsa_backend(dsa_dict, dsa_backend)
 
-                def sequence_value(seq_dict):
+                raw_dsa_dict = None
+                raw_dsa_module_data = getattr(database, "_raw_generation_dsa_module_data", None)
+                if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
+                    try:
+                        raw_dsa_dict = raw_dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
+                        raw_dsa_dict = _select_dsa_backend(raw_dsa_dict, dsa_backend)
+                    except (KeyError, TypeError):
+                        raw_dsa_dict = None
+
+                def boundary_util_value(raw_seq_dict, batch_key):
+                    """Extrapolate outside a measured sequence curve by
+                    freezing the boundary row's SOL utilization."""
+                    if not isinstance(raw_seq_dict, dict) or not raw_seq_dict:
+                        return None
+                    seq_keys = sorted(raw_seq_dict)
+                    if seq_keys[0] <= s <= seq_keys[-1]:
+                        return None
+
+                    boundary_s = seq_keys[0] if s < seq_keys[0] else seq_keys[-1]
+                    boundary = raw_seq_dict[boundary_s]
+                    boundary_latency = interpolation.get_value(boundary, "latency")
+                    if boundary_latency <= 0:
+                        return None
+
+                    sol_boundary = get_sol(batch_key, boundary_s, num_heads, kv_cache_dtype)[0]
+                    sol_query = get_sol(batch_key, s, num_heads, kv_cache_dtype)[0]
+                    if sol_boundary <= 0 or sol_query <= 0:
+                        return None
+
+                    latency = boundary_latency * sol_query / sol_boundary
+                    boundary_power = interpolation.get_value(boundary, "power")
+                    boundary_energy = interpolation.get_value(boundary, "energy")
+                    energy = (
+                        boundary_power * latency
+                        if boundary_power > 0
+                        else boundary_energy * latency / boundary_latency
+                        if boundary_energy > 0
+                        else 0.0
+                    )
+                    return {"latency": latency, "power": boundary_power, "energy": energy}
+
+                def sequence_value(seq_dict, batch_key, raw_seq_dict=None):
+                    # Check raw coverage before consulting the working table: an
+                    # exact key in the latter may be a latency-space point added
+                    # by load-time extrapolation rather than a measurement.
+                    boundary_result = boundary_util_value(raw_seq_dict, batch_key)
+                    if boundary_result is not None:
+                        return boundary_result
                     if s in seq_dict:
                         return seq_dict[s]
                     seq_keys = sorted(seq_dict)
@@ -1208,12 +1374,21 @@ class GenerationDSAModule(Operation):
                     }
 
                 result = None
-                if num_heads in dsa_dict and b in dsa_dict[num_heads]:
-                    result = sequence_value(dsa_dict[num_heads][b])
+                raw_head_dict = raw_dsa_dict.get(num_heads, {}) if isinstance(raw_dsa_dict, dict) else {}
+                # An exact batch in the working table may itself be a
+                # load-time extrapolation target.  If raw rows exist for this
+                # head, only take the fast path for a genuinely measured batch.
+                if num_heads in dsa_dict and b in dsa_dict[num_heads] and (not raw_head_dict or b in raw_head_dict):
+                    raw_seq_dict = raw_head_dict.get(b)
+                    result = sequence_value(dsa_dict[num_heads][b], b, raw_seq_dict)
                 if result is None and num_heads in dsa_dict:
                     batch_dict = {}
-                    for batch_key, seq_dict in dsa_dict[num_heads].items():
-                        value = sequence_value(seq_dict)
+                    # Prefer measured batch curves. This keeps empty/pseudo keys
+                    # from the legacy load-time extrapolator out of the lookup.
+                    batch_source = raw_head_dict or dsa_dict[num_heads]
+                    for batch_key in batch_source:
+                        seq_dict = dsa_dict[num_heads].get(batch_key, batch_source[batch_key])
+                        value = sequence_value(seq_dict, batch_key, raw_head_dict.get(batch_key))
                         if value is not None:
                             batch_dict[batch_key] = value
                     batch_keys = sorted(batch_dict)
@@ -1312,6 +1487,30 @@ class GenerationDSAModule(Operation):
 # ─────────────────────────────────────────────────────────
 
 
+def _read_dsa_row_sources(file_or_sources):
+    """Read rows while retaining priority-source boundaries.
+
+    DSA files historically used last-row-wins for duplicates within one file.
+    Shared-layer inputs add a second requirement: an earlier source (the active
+    stack) must outrank every later sibling source. ``_read_filtered_rows``
+    intentionally flattens sources, so DSA keeps the groups here and applies
+    those two rules independently.
+    """
+    if isinstance(file_or_sources, str):
+        rows = _read_filtered_rows(file_or_sources)
+        return None if rows is None else [rows]
+
+    row_sources = []
+    any_source_exists = False
+    for source in file_or_sources:
+        rows = _read_filtered_rows([source])
+        if rows is None:
+            continue
+        any_source_exists = True
+        row_sources.append(rows)
+    return row_sources if any_source_exists else None
+
+
 def load_context_dsa_module_data(dsa_file: str):
     """
     Load context DSA data.
@@ -1327,8 +1526,8 @@ def load_context_dsa_module_data(dsa_file: str):
     Legacy CSV rows without an ``architecture`` column default to
     "DeepseekV32ForCausalLM".
     """
-    rows = _read_filtered_rows(dsa_file)
-    if rows is None:
+    row_sources = _read_dsa_row_sources(dsa_file)
+    if row_sources is None:
         logger.debug(f"DSA context data file {dsa_file} not found.")
         return None
 
@@ -1344,33 +1543,49 @@ def load_context_dsa_module_data(dsa_file: str):
         )
     )
 
-    has_power = len(rows) > 0 and "power" in rows[0]
+    first_row = next((row for source_rows in row_sources for row in source_rows), None)
+    has_power = first_row is not None and "power" in first_row
+    seen_coordinates = set()
 
-    for row in rows:
-        num_heads = int(row["num_heads"])
-        b = int(row["batch_size"])
-        s = int(row["isl"])
-        latency = float(row["latency"])
-        power = float(row.get("power", 0.0)) if has_power else 0.0
-        energy = power * latency
+    for source_rows in row_sources:
+        # Preserve legacy last-row-wins behavior within each source.
+        source_values = {}
+        for row in source_rows:
+            num_heads = int(row["num_heads"])
+            b = int(row["batch_size"])
+            s = int(row["isl"])
+            latency = float(row["latency"])
+            power = float(row.get("power", 0.0)) if has_power else 0.0
+            energy = power * latency
 
-        arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
-        step = row.get("step")
-        step_missing = step is None or (isinstance(step, str) and step.strip() == "")
-        if arch == "GlmMoeDsaForCausalLM" and step_missing:
-            raise ValueError("GLM-5 context DSA module data requires a non-empty step column for prefix/past_kv length")
-        prefix = 0 if step_missing else int(step)
-        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
-        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
-        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
+            arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
+            step = row.get("step")
+            step_missing = step is None or (isinstance(step, str) and step.strip() == "")
+            if arch == "GlmMoeDsaForCausalLM" and step_missing:
+                raise ValueError(
+                    "GLM-5 context DSA module data requires a non-empty step column for prefix/past_kv length"
+                )
+            prefix = 0 if step_missing else int(step)
+            gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+            fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
+            kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
-        ks = row.get("kernel_source") or ""
-        dsa_backend = "trtllm" if "trtllm" in ks else "flashmla_kv"
-        dsa_data[fmha_mode][kv_dtype][gemm_mode][arch][dsa_backend][num_heads][prefix][s][b] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
+            ks = row.get("kernel_source") or ""
+            dsa_backend = "trtllm" if "trtllm" in ks else "flashmla_kv"
+            coordinate = (fmha_mode, kv_dtype, gemm_mode, arch, dsa_backend, num_heads, prefix, s, b)
+            source_values[coordinate] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
+
+        # Sources are priority-ordered: active first, shared fallbacks later.
+        for coordinate, value in source_values.items():
+            if coordinate in seen_coordinates:
+                continue
+            seen_coordinates.add(coordinate)
+            fmha_mode, kv_dtype, gemm_mode, arch, dsa_backend, num_heads, prefix, s, b = coordinate
+            dsa_data[fmha_mode][kv_dtype][gemm_mode][arch][dsa_backend][num_heads][prefix][s][b] = value
 
     return dsa_data
 
@@ -1389,8 +1604,8 @@ def load_generation_dsa_module_data(dsa_file: str):
     Legacy CSV rows without an ``architecture`` column default to
     "DeepseekV32ForCausalLM".
     """
-    rows = _read_filtered_rows(dsa_file)
-    if rows is None:
+    row_sources = _read_dsa_row_sources(dsa_file)
+    if row_sources is None:
         logger.debug(f"DSA generation data file {dsa_file} not found.")
         return None
 
@@ -1400,26 +1615,42 @@ def load_generation_dsa_module_data(dsa_file: str):
         )
     )
 
-    has_power = len(rows) > 0 and "power" in rows[0]
+    first_row = next((row for source_rows in row_sources for row in source_rows), None)
+    has_power = first_row is not None and "power" in first_row
+    seen_coordinates = set()
 
-    for row in rows:
-        num_heads = int(row["num_heads"])
-        b = int(row["batch_size"])
-        s = int(row["isl"]) + int(row["step"])
-        latency = float(row["latency"])
-        power = float(row.get("power", 0.0)) if has_power else 0.0
-        energy = power * latency
+    for source_rows in row_sources:
+        # Preserve legacy last-row-wins behavior within each source.
+        source_values = {}
+        for row in source_rows:
+            num_heads = int(row["num_heads"])
+            b = int(row["batch_size"])
+            s = int(row["isl"]) + int(row["step"])
+            latency = float(row["latency"])
+            power = float(row.get("power", 0.0)) if has_power else 0.0
+            energy = power * latency
 
-        arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
-        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
-        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
+            arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
+            gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+            kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
-        ks = row.get("kernel_source") or ""
-        dsa_backend = "trtllm" if "trtllm" in ks else "flashmla_kv"
-        dsa_data[kv_dtype][gemm_mode][arch][dsa_backend][num_heads][b][s] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
+            ks = row.get("kernel_source") or ""
+            dsa_backend = "trtllm" if "trtllm" in ks else "flashmla_kv"
+            # Total decode length is the canonical coordinate even if two rows
+            # decompose it into different isl/step pairs.
+            coordinate = (kv_dtype, gemm_mode, arch, dsa_backend, num_heads, b, s)
+            source_values[coordinate] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
+
+        # Sources are priority-ordered: active first, shared fallbacks later.
+        for coordinate, value in source_values.items():
+            if coordinate in seen_coordinates:
+                continue
+            seen_coordinates.add(coordinate)
+            kv_dtype, gemm_mode, arch, dsa_backend, num_heads, b, s = coordinate
+            dsa_data[kv_dtype][gemm_mode][arch][dsa_backend][num_heads][b][s] = value
 
     return dsa_data

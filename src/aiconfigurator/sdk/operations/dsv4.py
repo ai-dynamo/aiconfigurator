@@ -94,10 +94,13 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
       1. Try an exact ``dict[x][y][z]`` lookup — handles the common case
          of querying at a measured bench point.
       2. Try the existing cubic interpolation path.
-      3. If interpolation fails, use the largest sampled batch no larger than
-         the query batch, interpolate/extrapolate along sequence length, and
-         scale by batch. ``batch_axis`` selects whether fallback treats ``y``
-         or ``z`` as the batch axis.
+      3. If interpolation fails and batches on both sides of the query cover
+         its sequence length, interpolate along sequence within each batch and
+         then across batch.
+      4. Otherwise, use the largest sampled batch no larger than the query
+         batch, interpolate/extrapolate along sequence length, and scale by
+         batch. ``batch_axis`` selects whether fallback treats ``y`` or ``z``
+         as the batch axis.
 
     First positional arg is named ``self`` to match the legacy signature so
     existing test stubs (``PerfDatabase._lookup_dsv4_sparse_kernel`` style)
@@ -129,22 +132,20 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
         pass
 
     # Fallback: real DeepSeek-V4 data is sampled at batches like 1/2/4/8.
-    # Prefer the largest batch <= query batch that covers the sequence length
-    # (interpolation along s). Only extrapolate along s if none covers it.
+    # First interpolate between lower/upper batches when both batch curves
+    # cover the query sequence. This preserves launch-overhead plateaus; simply
+    # scaling the lower batch can nearly double latency between b=4 and b=8.
+    # When no upper batch covers the sequence, retain the legacy behavior:
+    # prefer the largest batch <= query batch and scale it by batch, only
+    # extrapolating along sequence if no lower batch covers it.
     sub = dict_.get(x) if isinstance(dict_, dict) else None
     if isinstance(sub, dict):
         query_s, query_b = (z, y) if batch_axis == "y" else (y, z)
 
-        def _batch_points():
+        def _all_batch_points():
             if batch_axis == "y":
-                return sorted(
-                    (bp for bp, sd in sub.items() if isinstance(sd, dict) and bp <= query_b),
-                    reverse=True,
-                )
-            return sorted(
-                {bp for sd in sub.values() if isinstance(sd, dict) for bp in sd if bp <= query_b},
-                reverse=True,
-            )
+                return sorted(bp for bp, sd in sub.items() if isinstance(sd, dict))
+            return sorted({bp for sd in sub.values() if isinstance(sd, dict) for bp in sd})
 
         def _leaf_at(s, b):
             first_key, second_key = (b, s) if batch_axis == "y" else (s, b)
@@ -176,9 +177,39 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
                 for field in ("latency", "power", "energy")
             }
 
-        batch_points = _batch_points()
+        batch_points = _all_batch_points()
+        covered = {}
+        for bp in batch_points:
+            try:
+                leaf = _lookup_at_batch(bp, allow_extrapolate=False)
+                if _finite_result(leaf):
+                    covered[bp] = leaf
+            except Exception:
+                continue
+
+        lower_batches = [bp for bp in covered if bp <= query_b]
+        upper_batches = [bp for bp in covered if bp >= query_b]
+        if lower_batches and upper_batches:
+            lower_b = max(lower_batches)
+            upper_b = min(upper_batches)
+            if lower_b == upper_b:
+                return covered[lower_b]
+            lower = covered[lower_b]
+            upper = covered[upper_b]
+            result = {
+                field: interpolation.interp_1d(
+                    [lower_b, upper_b],
+                    [lower.get(field, 0.0), upper.get(field, 0.0)],
+                    query_b,
+                )
+                for field in ("latency", "power", "energy")
+            }
+            if _finite_result(result):
+                return result
+
+        lower_batch_points = sorted((bp for bp in batch_points if bp <= query_b), reverse=True)
         for allow_extrapolate in (False, True):
-            for bp in batch_points:
+            for bp in lower_batch_points:
                 try:
                     leaf = _lookup_at_batch(bp, allow_extrapolate=allow_extrapolate)
                     if leaf is None:

@@ -9,8 +9,10 @@ collected data::
     empirical_latency = SOL(query) / util
 
 where ``util = SOL / measured`` (in ``(0, 1]`` after SOL clamping) is taken
-best-effort from collected samples by nearest-neighbour lookup in per-axis
-normalised log space.
+best-effort from collected samples in per-axis normalised log space. One-
+dimensional curves use bracketed two-neighbour inverse-distance weighting;
+ragged multi-dimensional grids retain nearest-neighbour lookup until their
+operation-specific regime boundaries can be represented safely.
 
 Like util-space silicon interpolation, this clamps to the nearest known util on
 extrapolation. But when *no* samples exist for the requested slice (no own-shape,
@@ -37,6 +39,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+from bisect import bisect_left
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -127,11 +130,14 @@ def build_samples(node, depth: int, sol_fn: Callable[[Coords], float]) -> list[U
 
 
 class UtilGrid:
-    """Nearest-neighbour util lookup in per-axis normalised log space.
+    """Util lookup in per-axis normalised log space.
 
-    Nearest-neighbour clamps naturally on extrapolation (a query past the grid
-    edge resolves to the boundary sample's util), which is the conservative
-    behaviour we want -- collected boundary utilization is already flat.
+    One-dimensional curves use the two bracketing samples with inverse-distance
+    weights (``k=2``, ``p=1``). Queries outside the measured interval are
+    clamped to its boundary, so extrapolation still freezes the boundary util.
+    Multi-dimensional grids remain nearest-neighbour: their ragged topology can
+    cross categorical or kernel-regime boundaries that this generic grid does
+    not know how to constrain.
     """
 
     def __init__(self, samples: list[UtilSample]):
@@ -141,17 +147,187 @@ class UtilGrid:
         coords = np.asarray([s.coords for s in samples], dtype=float)
         logc = np.log(np.maximum(coords, 1e-9))
         self._mins = logc.min(axis=0)
-        spans = logc.max(axis=0) - self._mins
+        self._maxs = logc.max(axis=0)
+        spans = self._maxs - self._mins
         self._spans = np.where(spans > 0, spans, 1.0)
         self._norm = (logc - self._mins) / self._spans
         self._utils = np.asarray([s.util for s in samples], dtype=float)
+        if self._norm.shape[1] == 1:
+            order = np.argsort(self._norm[:, 0], kind="stable")
+            sorted_1d = self._norm[order, 0]
+            # Nested grids normally make duplicate coordinates impossible, but
+            # the log floor can collapse non-positive inputs. Keep the first
+            # sample deterministically, matching the legacy ``argmin`` tie.
+            self._sorted_1d, first = np.unique(sorted_1d, return_index=True)
+            self._sorted_utils_1d = self._utils[order][first]
 
     def util(self, query: Coords) -> float | None:
         if not self.samples:
             return None
-        q = (np.log(np.maximum(np.asarray(query, dtype=float), 1e-9)) - self._mins) / self._spans
+        query_log = np.log(np.maximum(np.asarray(query, dtype=float), 1e-9))
+
+        if self._norm.shape[1] == 1:
+            # Clamp in the true log-coordinate range. ``_spans`` cannot supply
+            # the upper bound because zero spans are replaced by 1 for safe
+            # normalization.
+            query_log = np.clip(query_log, self._mins, self._maxs)
+            q = float(((query_log - self._mins) / self._spans)[0])
+            # Linear interpolation between the two brackets is exactly k=2,
+            # p=1 inverse-distance weighting in one dimension. ``np.interp``
+            # also preserves exact hits, singletons, and boundary values.
+            return float(np.interp(q, self._sorted_1d, self._sorted_utils_1d))
+
+        q = (query_log - self._mins) / self._spans
         dist2 = ((self._norm - q) ** 2).sum(axis=1)
         return float(self._utils[int(dist2.argmin())])
+
+
+def bracketed_2d_util(
+    samples: list[UtilSample],
+    query: Coords,
+    *,
+    log_space: bool = False,
+    require_y_coverage: bool = False,
+) -> float | None:
+    """Interpolate an opt-in ragged two-dimensional utilization grid.
+
+    The first coordinate identifies a curve (for example batch size) and the
+    second is that curve's inner coordinate (for example sequence length).
+    By default, the two first-axis brackets are selected first and each inner
+    curve freezes its nearest boundary utilization.  That is the established
+    GenerationAttention behavior.
+
+    With ``require_y_coverage=True``, a curve participates only when its
+    *original* inner-coordinate range covers the query.  Eligible curves are
+    selected before first-axis bracketing, which prevents a truncated nominal
+    upper curve from contaminating a ragged interpolation.  If no eligible
+    upper curve exists, the largest eligible lower curve's utilization is
+    frozen so the query SOL carries further scaling.  The lower edge behaves
+    symmetrically.
+
+    Coordinates are physical by default for backward compatibility. Set
+    ``log_space=True`` to interpolate linearly in their logarithms while
+    keeping utilization itself linear.
+
+    ``None`` means that no safe bracket exists and lets callers retain their
+    established nearest-neighbour or transfer fallback.  This helper is
+    deliberately opt-in: generic multidimensional grids may contain
+    categorical axes that must not be interpolated.
+    """
+    if len(query) != 2:
+        return None
+    query_x, query_y = (float(query[0]), float(query[1]))
+    if not np.isfinite(query_x) or not np.isfinite(query_y):
+        return None
+
+    if log_space and (query_x <= 0 or query_y <= 0):
+        return None
+
+    # Preserve the legacy nearest-neighbour tie contract for duplicate sample
+    # coordinates: the first collected point wins deterministically.
+    curves: dict[float, dict[float, float]] = {}
+    for sample in samples:
+        if len(sample.coords) != 2:
+            return None
+        x, y = (float(sample.coords[0]), float(sample.coords[1]))
+        util = float(sample.util)
+        if (
+            not np.isfinite(x)
+            or not np.isfinite(y)
+            or not np.isfinite(util)
+            or util <= 0
+            or (log_space and (x <= 0 or y <= 0))
+        ):
+            continue
+        curves.setdefault(x, {}).setdefault(y, util)
+    if not curves:
+        return None
+
+    def _bracket(values: list[float], target: float) -> tuple[float, float]:
+        """Bracket in-range targets and clamp out-of-range targets."""
+        position = bisect_left(values, target)
+        if position == 0:
+            return values[0], values[0]
+        if position == len(values):
+            return values[-1], values[-1]
+        if values[position] == target:
+            return target, target
+        return values[position - 1], values[position]
+
+    def _linear(target: float, left: float, right: float, left_value: float, right_value: float) -> float:
+        if left == right:
+            return left_value
+        if log_space:
+            target, left, right = np.log((target, left, right))
+        alpha = (target - left) / (right - left)
+        return left_value + alpha * (right_value - left_value)
+
+    def _curve_util(curve: dict[float, float]) -> float | None:
+        sequence_values = sorted(curve)
+        if not sequence_values:
+            return None
+        if require_y_coverage and not (sequence_values[0] <= query_y <= sequence_values[-1]):
+            return None
+        left_y, right_y = _bracket(sequence_values, query_y)
+        clamped_y = min(max(query_y, left_y), right_y)
+        return _linear(clamped_y, left_y, right_y, curve[left_y], curve[right_y])
+
+    if not require_y_coverage:
+        curve_values = sorted(curves)
+        left_x, right_x = _bracket(curve_values, query_x)
+        left_util = _curve_util(curves[left_x])
+        right_util = _curve_util(curves[right_x])
+        if left_util is None or right_util is None:
+            return None
+        clamped_x = min(max(query_x, left_x), right_x)
+        util = _linear(clamped_x, left_x, right_x, left_util, right_util)
+        return float(util) if np.isfinite(util) and util > 0 else None
+
+    eligible = {curve_x: util for curve_x, curve in curves.items() if (util := _curve_util(curve)) is not None}
+    if not eligible:
+        return None
+
+    lower = [curve_x for curve_x in eligible if curve_x <= query_x]
+    upper = [curve_x for curve_x in eligible if curve_x >= query_x]
+    if lower and upper:
+        left_x, right_x = max(lower), min(upper)
+        util = _linear(query_x, left_x, right_x, eligible[left_x], eligible[right_x])
+    elif lower:
+        util = eligible[max(lower)]
+    else:
+        util = eligible[min(upper)]
+    return float(util) if np.isfinite(util) and util > 0 else None
+
+
+def estimate_bracketed_2d(
+    sol_query: float,
+    query: Coords,
+    grid: UtilGrid | None,
+    util_scale: float = 1.0,
+    provenance: str = "empirical",
+    log_space: bool = False,
+    require_y_coverage: bool = False,
+) -> tuple[float, float] | None:
+    """Estimate from :func:`bracketed_2d_util`, or return ``None`` on a miss.
+
+    Unlike :func:`estimate`, this opt-in lookup does not raise when a safe
+    bracket cannot be formed; its caller is expected to continue through the
+    established nearest-neighbour or transfer fallback chain.
+    """
+    util = (
+        bracketed_2d_util(
+            grid.samples,
+            query,
+            log_space=log_space,
+            require_y_coverage=require_y_coverage,
+        )
+        if grid is not None
+        else None
+    )
+    if util is None:
+        return None
+    note_provenance(provenance)
+    return sol_query / (util * util_scale), util
 
 
 # Process-lifetime cache of built grids. Collected data is itself cached for the
