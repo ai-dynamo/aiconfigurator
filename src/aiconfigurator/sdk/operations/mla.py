@@ -1233,7 +1233,7 @@ class WideEPGenerationMLA(Operation):
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
             # SOL / util from own (num_heads, b, s) grid; num_heads = 128 // tp_size
-            # (mirrors get_silicon). Falls back to 0.7 if no data.
+            # (mirrors get_silicon).
             sol_time = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
             attn_backend = attention_backend or "flashinfer"
 
@@ -1506,7 +1506,7 @@ class WideEPContextMLA(Operation):
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
             # SOL / util from own (num_heads, full_s, b) grid; num_heads = 128 // tp_size.
-            # Samples are prefix=0; SOL(query) carries prefix natively. Falls back to 0.6.
+            # Samples are prefix=0; SOL(query) carries prefix natively.
             sol_time = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
             attn_backend = attention_backend or "flashinfer"
 

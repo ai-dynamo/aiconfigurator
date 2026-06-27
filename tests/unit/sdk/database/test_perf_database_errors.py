@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
+
 import pytest
 
 from aiconfigurator.sdk import common
@@ -90,13 +92,20 @@ def test_hybrid_propagates_programming_and_schema_errors(programming_error) -> N
     assert not empirical_called
 
 
-def test_silicon_wraps_typed_interpolation_miss_as_perf_data_unavailable() -> None:
+@pytest.mark.parametrize(
+    "coverage_error",
+    [
+        PerfDataNotAvailableError("table is not loaded"),
+        InterpolationDataNotAvailableError("axis has only 1 value"),
+    ],
+)
+def test_silicon_propagates_typed_miss_without_logging_warning(coverage_error, caplog) -> None:
     database = object.__new__(PerfDatabase)
-    coverage_error = InterpolationDataNotAvailableError("axis has only 1 value")
 
     def unavailable_silicon():
         raise coverage_error
 
+    caplog.set_level(logging.WARNING, logger="aiconfigurator.sdk.perf_database")
     with pytest.raises(PerfDataNotAvailableError) as exc_info:
         database._query_silicon_or_hybrid(
             get_silicon=unavailable_silicon,
@@ -105,4 +114,13 @@ def test_silicon_wraps_typed_interpolation_miss_as_perf_data_unavailable() -> No
             error_msg="missing test data",
         )
 
-    assert exc_info.value.__cause__ is coverage_error
+    if isinstance(coverage_error, PerfDataNotAvailableError):
+        assert exc_info.value is coverage_error
+    else:
+        assert exc_info.value.__cause__ is coverage_error
+    assert "Consider using HYBRID mode" in str(exc_info.value)
+    assert not [
+        record
+        for record in caplog.records
+        if record.name == "aiconfigurator.sdk.perf_database" and record.levelno >= logging.WARNING
+    ]

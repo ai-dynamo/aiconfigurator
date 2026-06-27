@@ -1815,17 +1815,13 @@ class PerfDatabase:
                 return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
 
             exception_msg = error_msg + " Consider using HYBRID mode."
-            # PerfDataNotAvailableError is a structured signal that callers (e.g.
-            # FallbackOp, Pareto search) are expected to handle. Log it without a
-            # stack trace so successful searches that merely skip a candidate do
-            # not spam internal tracebacks.
-            if isinstance(e, PerfDataNotAvailableError):
-                logger.warning(exception_msg)
-            else:
+            # Missing-data exceptions are control-flow signals. The terminal
+            # caller decides whether the miss is user-visible; logging here would
+            # warn during expected probes such as FallbackOp's SILICON attempt.
+            if not isinstance(e, PerfDataNotAvailableError):
                 missing_data_error = PerfDataNotAvailableError(
                     f"{exception_msg} Missing silicon data for the requested lookup."
                 )
-                logger.warning(str(missing_data_error))
                 raise missing_data_error from e
             # Modify the original exception message
             if e.args:
