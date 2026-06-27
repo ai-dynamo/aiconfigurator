@@ -46,6 +46,10 @@ Consumer problems found during the audit belong in separate changes.
 The comparison uses consumer-visible physical lookup keys, not model aliases,
 scheduler task IDs, latency, or power measurements.
 
+Historical snapshots are immutable audit inputs. This PR does not add, move,
+regenerate, or update them. The exact counts below were produced by a read-only
+comparison against those historical keys.
+
 ## Three identities
 
 Collector population must keep three different identities separate:
@@ -206,9 +210,7 @@ ruff check collector tests/unit/collector
 ruff format --check collector tests/unit/collector
 ```
 
-The unit coverage loads test-only V1 physical-key fixtures and executes the
-current backend getter bodies, so batch, sequence, precision, head topology,
-window, and phase keys are all checked for zero removal. It also freezes encoder
-anchors, per-operation recipe counts, selector narrowing, alias handling, and
-operation-local physical deduplication. No coverage fixture is loaded by the
-Collector runtime.
+The unit coverage freezes V1 structural keys, encoder anchors, per-operation
+recipe counts, selector narrowing, alias handling, and operation-local physical
+deduplication. Exact historical key-set comparison remains a read-only audit;
+the baseline snapshots themselves are not part of this change.
