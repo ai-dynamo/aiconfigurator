@@ -241,6 +241,93 @@ class TestMoE:
         assert float(result) == pytest.approx(expected_latency)
         assert result.source == "empirical"
 
+    def test_query_moe_empirical_grid_isolated_by_gating_semantics(self, comprehensive_perf_db):
+        """A gated/non-gated query must not reuse a grid built with the other SOL."""
+        from aiconfigurator.sdk.operations import util_empirical
+
+        kwargs = dict(
+            num_tokens=16,
+            hidden_size=2048,
+            inter_size=8192,
+            topk=2,
+            num_experts=8,
+            moe_tp_size=2,
+            moe_ep_size=2,
+            quant_mode=common.MoEQuantMode.bfloat16,
+            workload_distribution="uniform",
+            database_mode=common.DatabaseMode.EMPIRICAL,
+        )
+
+        def reset_caches():
+            util_empirical.clear_grid_cache()
+            comprehensive_perf_db.query_moe.cache_clear()
+
+        try:
+            for order in ((True, False), (False, True)):
+                reset_caches()
+                results = [float(comprehensive_perf_db.query_moe(is_gated=is_gated, **kwargs)) for is_gated in order]
+                assert results == pytest.approx([1.6, 1.6])
+        finally:
+            reset_caches()
+
+    def test_query_moe_reference_selection_isolated_by_workload(self, mutable_comprehensive_perf_db):
+        """Cross-shape selection must remain stable under interleaved workloads."""
+        from aiconfigurator.sdk.operations import util_empirical
+
+        db = mutable_comprehensive_perf_db
+        imbalanced = db._moe_data[common.MoEQuantMode.bfloat16]["imbalanced"]
+        # Make every eligible imbalanced reference curve observably different,
+        # independent of which categorical shape nearest-neighbour selects.
+        for topk_data in imbalanced.values():
+            for expert_data in topk_data.values():
+                for hidden_data in expert_data.values():
+                    for inter_data in hidden_data.values():
+                        ep_data = inter_data.get(2, {})
+                        curve = ep_data.get(2)
+                        if not curve:
+                            continue
+                        for tokens, leaf in list(curve.items()):
+                            if isinstance(leaf, dict):
+                                scaled = dict(leaf)
+                                scaled["latency"] = 2.0 * leaf["latency"]
+                                curve[tokens] = scaled
+                            else:
+                                curve[tokens] = 2.0 * leaf
+
+        kwargs = dict(
+            num_tokens=16,
+            hidden_size=9999,  # absent shape: force reference selection
+            inter_size=8192,
+            topk=2,
+            num_experts=8,
+            moe_tp_size=2,
+            moe_ep_size=2,
+            quant_mode=common.MoEQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.EMPIRICAL,
+        )
+
+        def reset_caches():
+            util_empirical.clear_grid_cache()
+            db.query_moe.cache_clear()
+
+        def query(workload):
+            return float(db.query_moe(workload_distribution=workload, **kwargs))
+
+        try:
+            reset_caches()
+            expected_uniform = query("uniform")
+            reset_caches()
+            expected_imbalanced = query("imbalanced")
+            assert expected_imbalanced == pytest.approx(2.0 * expected_uniform)
+
+            for order in (("uniform", "imbalanced"), ("imbalanced", "uniform")):
+                reset_caches()
+                results = {workload: query(workload) for workload in order}
+                assert results["uniform"] == pytest.approx(expected_uniform)
+                assert results["imbalanced"] == pytest.approx(expected_imbalanced)
+        finally:
+            reset_caches()
+
     def test_query_moe_silicon_overflow_uses_util_extrapolation(self, comprehensive_perf_db):
         """When num_tokens > max(moe_dict), result comes from _estimate_overflow_with_last_token_util."""
         # Fixture max token point is 32; query beyond it to trigger overflow path.
@@ -358,14 +445,60 @@ class TestMoE:
             workload_distribution="uniform",
         )
         curve = db._moe_data[common.MoEQuantMode.bfloat16]["uniform"][2][8][2048][8192][2]
-        curve[2] = {32: 3.2}
+        sol_anchor = float(db.query_moe(num_tokens=32, database_mode=common.DatabaseMode.SOL, **kwargs))
+        sol_query = float(db.query_moe(num_tokens=64, database_mode=common.DatabaseMode.SOL, **kwargs))
+        curve[2] = {32: sol_anchor / 2.0}
 
         result = db.query_moe(num_tokens=64, database_mode=common.DatabaseMode.SILICON, **kwargs)
 
-        sol_query = float(db.query_moe(num_tokens=64, database_mode=common.DatabaseMode.SOL, **kwargs))
-        sol_anchor = float(db.query_moe(num_tokens=32, database_mode=common.DatabaseMode.SOL, **kwargs))
-        assert float(result) == pytest.approx(sol_query / (sol_anchor / 3.2))
+        # The boundary calibration factor is 2 (>1). It must remain 2 rather
+        # than being clamped to one.
+        assert float(result) == pytest.approx(sol_query / 2.0)
         assert result.source == "silicon"
+
+    def test_query_moe_empirical_does_not_hide_malformed_low_latency_schema(self, mutable_comprehensive_perf_db):
+        db = mutable_comprehensive_perf_db
+        db.backend = common.BackendName.trtllm.value
+        db._moe_low_latency_data = {common.MoEQuantMode.nvfp4: []}
+        db.query_moe.cache_clear()
+
+        with pytest.raises(TypeError, match="Malformed performance data"):
+            db.query_moe(
+                num_tokens=8,
+                hidden_size=2048,
+                inter_size=8192,
+                topk=2,
+                num_experts=8,
+                moe_tp_size=2,
+                moe_ep_size=2,
+                quant_mode=common.MoEQuantMode.nvfp4,
+                workload_distribution="uniform",
+                is_gated=True,
+                database_mode=common.DatabaseMode.EMPIRICAL,
+            )
+
+    def test_query_moe_silicon_does_not_hide_malformed_low_latency_terminal_slice(self, mutable_comprehensive_perf_db):
+        db = mutable_comprehensive_perf_db
+        db.backend = common.BackendName.trtllm.value
+        quant = common.MoEQuantMode.nvfp4
+        db._moe_data[quant] = {"uniform": {2: {8: {2048: {8192: {2: {2: {8: 0.8}}}}}}}}
+        db._moe_low_latency_data = {quant: {"uniform": {2: {8: {2048: {8192: {2: {2: []}}}}}}}}
+        db.query_moe.cache_clear()
+
+        with pytest.raises(TypeError, match="Malformed low-latency MoE"):
+            db.query_moe(
+                num_tokens=8,
+                hidden_size=2048,
+                inter_size=8192,
+                topk=2,
+                num_experts=8,
+                moe_tp_size=2,
+                moe_ep_size=2,
+                quant_mode=quant,
+                workload_distribution="uniform",
+                is_gated=True,
+                database_mode=common.DatabaseMode.SILICON,
+            )
 
     def test_query_moe_vllm_missing_bucket_raises_structured_error(self, mutable_comprehensive_perf_db):
         """Missing MoE token buckets must not leak raw IndexError/KeyError in SILICON mode."""
@@ -388,7 +521,7 @@ class TestMoE:
             )
 
         message = str(exc_info.value)
-        assert "No MoE silicon data points" in message
+        assert "Missing silicon data for the requested lookup" in message
         assert "Consider using HYBRID mode" in message
         assert "IndexError" not in message
         assert "KeyError" not in message

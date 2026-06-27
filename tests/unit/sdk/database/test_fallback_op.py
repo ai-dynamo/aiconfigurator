@@ -3,7 +3,7 @@
 
 """Unit tests for FallbackOp and MLAModule operations."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -72,28 +72,23 @@ class TestFallbackOp:
         assert float(result) == 8.0  # 5 + 3
         assert result.energy == 80.0  # 50 + 30
 
-    def test_primary_fails_with_key_error(self):
-        """FallbackOp catches KeyError from missing quant mode combinations."""
+    @pytest.mark.parametrize(
+        ("error_cls", "message"),
+        ((KeyError, "fp8_block"), (AssertionError, "values is None or empty")),
+    )
+    def test_raw_primary_errors_propagate(self, error_cls, message):
+        """Untyped schema/programming errors must never be converted to fallback."""
         mock_db = _make_mock_db()
-        primary = _make_failing_op(KeyError, "fp8_block")
-        fallback_1 = _make_mock_op(7.0, 70.0)
+        primary = _make_failing_op(error_cls, message)
+        fallback_1 = _make_mock_op(5.0, 50.0)
 
         op = FallbackOp("test", primary=primary, fallback=[fallback_1])
-        result = op.query(mock_db, batch_size=4)
+        for batch_size in (4, 8):
+            with pytest.raises(error_cls):
+                op.query(mock_db, batch_size=batch_size)
 
-        assert float(result) == 7.0
-        assert result.energy == 70.0
-
-    def test_primary_fails_with_assertion_error(self):
-        """FallbackOp catches AssertionError from empty interpolation data."""
-        mock_db = _make_mock_db()
-        primary = _make_failing_op(AssertionError, "values is None or empty")
-        fallback_1 = _make_mock_op(7.0, 70.0)
-
-        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
-        result = op.query(mock_db, batch_size=4)
-
-        assert float(result) == 7.0
+        assert primary.query.call_count == 2
+        fallback_1.query.assert_not_called()
 
     def test_both_fail_raises(self):
         """When primary fails and fallback also fails, the fallback error propagates."""
@@ -131,29 +126,28 @@ class TestFallbackOp:
         # Fallback should be called for all three queries
         assert fallback_1.query.call_count == 3
 
-    def test_primary_retried_after_key_error(self):
-        """KeyError doesn't permanently disable primary — it may work for other params."""
-        mock_db = _make_mock_db()
-        primary = _make_failing_op(KeyError, "fp8_block")
-        fallback_1 = _make_mock_op(5.0, 50.0)
-
-        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
-        op.query(mock_db, batch_size=4)
-        op.query(mock_db, batch_size=8)
-
-        # Primary should be retried on each call
-        assert primary.query.call_count == 2
-
     def test_primary_forces_silicon_mode(self):
-        """Primary is queried with SILICON mode even when database uses HYBRID."""
-        mock_db = _make_mock_db()
-        mock_db._default_database_mode = common.DatabaseMode.HYBRID
+        """A legacy child is deep-copied: SILICON mode and caches stay isolated."""
+
+        class LegacyDatabase:
+            def __init__(self):
+                self._default_database_mode = common.DatabaseMode.HYBRID
+                self._extracted_metrics_cache = {"table": {"hits": []}}
+
+        mock_db = LegacyDatabase()
 
         primary = _make_mock_op(10.0, 100.0)
         seen_modes = []
+        original_modes = []
+        seen_databases = []
+        seen_caches = []
 
         def _query(database, **kwargs):
             seen_modes.append(database._default_database_mode)
+            original_modes.append(mock_db._default_database_mode)
+            seen_databases.append(database)
+            seen_caches.append(database._extracted_metrics_cache)
+            database._extracted_metrics_cache["table"]["hits"].append("primary")
             return PerformanceResult(10.0, energy=100.0)
 
         primary.query.side_effect = _query
@@ -162,10 +156,50 @@ class TestFallbackOp:
         op = FallbackOp("test", primary=primary, fallback=[fallback_1])
         op.query(mock_db, batch_size=4)
 
-        # During primary query, database mode should have been SILICON
-        # After query, it should be restored to HYBRID
         assert seen_modes == [common.DatabaseMode.SILICON]
+        assert original_modes == [common.DatabaseMode.HYBRID]
+        assert seen_databases[0] is not mock_db
+        assert seen_caches[0] is not mock_db._extracted_metrics_cache
+        assert seen_caches[0]["table"] is not mock_db._extracted_metrics_cache["table"]
+        assert mock_db._extracted_metrics_cache == {"table": {"hits": []}}
         assert mock_db._default_database_mode == common.DatabaseMode.HYBRID
+
+    def test_primary_reuses_cached_silicon_query_view(self):
+        """Repeated HYBRID fallback attempts reuse one immutable SILICON child."""
+
+        class FakeDatabase:
+            def __init__(self, mode):
+                self._default_database_mode = mode
+                self.transfer_policy = common.ALL_TRANSFERS
+                self.views = {}
+
+            def query_view(self, mode, transfer_policy=None):
+                key = (mode, common.resolve_transfer_policy(transfer_policy))
+                if key not in self.views:
+                    child = FakeDatabase(mode)
+                    child.transfer_policy = key[1]
+                    self.views[key] = child
+                return self.views[key]
+
+        hybrid_db = FakeDatabase(common.DatabaseMode.HYBRID)
+        primary = _make_mock_op(10.0, 100.0)
+        seen = []
+
+        def _query(database, **kwargs):
+            seen.append((database, database._default_database_mode, hybrid_db._default_database_mode))
+            return PerformanceResult(10.0, energy=100.0)
+
+        primary.query.side_effect = _query
+        op = FallbackOp("test", primary=primary, fallback=[_make_mock_op(5.0, 50.0)])
+
+        op.query(hybrid_db, batch_size=4)
+        op.query(hybrid_db, batch_size=8)
+
+        assert len({id(database) for database, _, _ in seen}) == 1
+        assert all(database is not hybrid_db for database, _, _ in seen)
+        assert all(mode is common.DatabaseMode.SILICON for _, mode, _ in seen)
+        assert all(original_mode is common.DatabaseMode.HYBRID for _, _, original_mode in seen)
+        assert hybrid_db._default_database_mode is common.DatabaseMode.HYBRID
 
     def test_primary_respects_explicit_sol_mode(self):
         """Primary uses SOL mode directly when the caller explicitly requests SOL."""
@@ -221,8 +255,8 @@ class TestFallbackOp:
         op = FallbackOp("test", primary=primary, fallback=[fallback_1, fallback_2])
         assert op.get_weights() == 300.0
 
-    def test_primary_error_logs_not_leaked(self):
-        """The perf_database logger level is restored after primary failure."""
+    def test_primary_failure_does_not_mutate_global_logger_level(self):
+        """Expected fallback misses must not change process-global logger state."""
         import logging
 
         mock_db = _make_mock_db()
@@ -230,12 +264,12 @@ class TestFallbackOp:
         fallback_1 = _make_mock_op(5.0, 50.0)
 
         perf_logger = logging.getLogger("aiconfigurator.sdk.perf_database")
-        original_level = perf_logger.level
-
         op = FallbackOp("test", primary=primary, fallback=[fallback_1])
-        op.query(mock_db, batch_size=4)
 
-        assert perf_logger.level == original_level
+        with patch.object(perf_logger, "setLevel") as set_level:
+            op.query(mock_db, batch_size=4)
+
+        set_level.assert_not_called()
 
 
 class TestMLAModule:

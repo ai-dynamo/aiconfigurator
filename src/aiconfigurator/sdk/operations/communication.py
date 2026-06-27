@@ -28,10 +28,11 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+from aiconfigurator.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -149,10 +150,7 @@ class CustomAllReduce(Operation):
                 cls.load_data(database)
                 dw = database._custom_allreduce_data
                 dw.raise_if_not_loaded()
-                comm_dict = dw.get(quant_mode, {}).get(eff, {}).get("AUTO", {})
-                if not comm_dict:
-                    raise KeyError("no custom_allreduce rows for this slice")
-                return comm_dict
+                return util_empirical.require_data_slice(dw, quant_mode, eff, "AUTO")
 
             grid = util_empirical.grid_for(
                 ("custom_allreduce", database.system, database.backend, database.version, quant_mode.value.name, eff),
@@ -366,6 +364,15 @@ class NCCL(Operation):
     ):
         """Query NCCL table. Verbatim port of the legacy body."""
 
+        def require_nccl_bucket(node: object, description: str) -> Mapping:
+            if not isinstance(node, Mapping):
+                raise TypeError(
+                    f"Malformed NCCL performance data for {description}: expected a mapping, got {type(node).__name__}."
+                )
+            if not node:
+                raise PerfDataNotAvailableError(f"No NCCL performance data for {description}.")
+            return node
+
         def get_sol(
             dtype: common.CommQuantMode, num_gpus: int, operation: str, message_size: int
         ) -> tuple[float, float, float]:
@@ -397,18 +404,18 @@ class NCCL(Operation):
                     f"No NCCL data to estimate {operation} ({dtype.value.name}, num_gpus={num_gpus})."
                 )
             try:
-                by_op = src[dtype][operation]
+                by_op = require_nccl_bucket(
+                    util_empirical.require_data_slice(src, dtype, operation),
+                    f"dtype={dtype.value.name}, operation={operation!r}",
+                )
                 eff = min(num_gpus, max(by_op.keys()))
-            except (KeyError, ValueError) as exc:
+            except PerfDataNotAvailableError as exc:
                 raise EmpiricalNotImplementedError(
                     f"No NCCL data for operation {operation!r} ({dtype.value.name}, num_gpus={num_gpus})."
                 ) from exc
 
             def _slice():
-                nccl_dict = by_op[eff]
-                if not nccl_dict:
-                    raise KeyError("no nccl rows for this slice")
-                return nccl_dict
+                return util_empirical.require_data_slice(by_op, eff)
 
             grid = util_empirical.grid_for(
                 ("nccl", database.system, database.backend, database.version, dtype.value.name, operation, eff),
@@ -444,8 +451,16 @@ class NCCL(Operation):
                 nccl_source = database._oneccl_data
             nccl_source.raise_if_not_loaded()
 
-            max_num_gpus = max(nccl_source[dtype][operation].keys())
-            nccl_dict = nccl_source[dtype][operation][min(num_gpus, max_num_gpus)]
+            by_num_gpus = require_nccl_bucket(
+                util_empirical.require_data_slice(nccl_source, dtype, operation),
+                f"dtype={dtype.value.name}, operation={operation!r}",
+            )
+            max_num_gpus = max(by_num_gpus.keys())
+            effective_num_gpus = min(num_gpus, max_num_gpus)
+            nccl_dict = require_nccl_bucket(
+                util_empirical.require_data_slice(by_num_gpus, effective_num_gpus),
+                f"dtype={dtype.value.name}, operation={operation!r}, num_gpus={effective_num_gpus}",
+            )
             size_left, size_right = interpolation.nearest_1d_point_helper(
                 message_size,
                 list(nccl_dict.keys()),

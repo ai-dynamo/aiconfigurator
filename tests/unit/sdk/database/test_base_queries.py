@@ -111,6 +111,25 @@ def test_query_gemm_interpolates_only_on_m_when_nk_match(comprehensive_perf_db, 
     assert observed.source == "silicon"
 
 
+def test_query_gemm_hybrid_propagates_plain_interpolation_value_error(comprehensive_perf_db, monkeypatch):
+    """Only the typed interpolation coverage signal may trigger HYBRID fallback."""
+
+    def _broken_interp_3d(*args, **kwargs):
+        raise ValueError("malformed GEMM interpolation input")
+
+    monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", _broken_interp_3d)
+    comprehensive_perf_db.query_gemm.cache_clear()
+
+    with pytest.raises(ValueError, match="malformed GEMM interpolation input"):
+        comprehensive_perf_db.query_gemm(
+            13,
+            257,
+            513,
+            common.GEMMQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.HYBRID,
+        )
+
+
 def test_query_gemm_fast_paths_support_legacy_scalar_leaves(mutable_comprehensive_perf_db):
     """Fast GEMM paths should support legacy scalar-leaf tables."""
     db = mutable_comprehensive_perf_db

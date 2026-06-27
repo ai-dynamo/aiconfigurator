@@ -1400,31 +1400,19 @@ class Task:
 
     def _load_database(self, system: str, backend: str, version: str):
         """Load the perf DB honoring database_mode (SILICON/HYBRID/EMPIRICAL). Non-SILICON
-        modes allow missing measured data; the db's DEFAULT mode is also switched so
-        predictions actually use SOL/empirical (the get_database arg only drives shared-layer
-        loading -- the prediction behaviour is set via set_default_database_mode). Mirrors
-        v1 _get_database."""
-        from aiconfigurator.sdk.perf_database import get_database
+        modes allow missing measured data. Returns a request-local lightweight view so
+        mode and transfer policy cannot mutate the process-cached data template."""
+        from aiconfigurator.sdk.perf_database import get_database_view
 
         allow_missing = self.database_mode is not None and self.database_mode != common.DatabaseMode.SILICON.name
-        db = get_database(system, backend, version, allow_missing_data=allow_missing, database_mode=self.database_mode)
-        if db is not None:
-            mode_changes = (
-                self.database_mode is not None
-                and common.DatabaseMode[self.database_mode] != db.get_default_database_mode()
-            )
-            want_policy = (
-                common.resolve_transfer_policy(self.transfer_policy) if self.transfer_policy is not None else None
-            )
-            policy_changes = want_policy is not None and want_policy != db.transfer_policy
-            if mode_changes or policy_changes:
-                # the setters mutate; copy so the module-cached db isn't polluted.
-                db = copy.deepcopy(db)
-                if mode_changes:
-                    db.set_default_database_mode(common.DatabaseMode[self.database_mode])
-                if policy_changes:
-                    db.set_transfer_policy(want_policy)
-        return db
+        return get_database_view(
+            system,
+            backend,
+            version,
+            allow_missing_data=allow_missing,
+            database_mode=self.database_mode,
+            transfer_policy=self.transfer_policy,
+        )
 
     def run(self, *, autoscale: bool = False, validate: bool = True):
         """Run the sweep and return a feasible-candidate DataFrame.

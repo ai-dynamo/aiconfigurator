@@ -37,6 +37,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -235,7 +236,7 @@ class ContextMLA(Operation):
                 cls.load_data(database)
                 wrapper = database._context_mla_data
                 wrapper.raise_if_not_loaded()
-                return wrapper[fmha_quant_mode][kvcache_quant_mode]
+                return util_empirical.require_data_slice(wrapper, fmha_quant_mode, kvcache_quant_mode)
 
             grid = util_empirical.grid_for(
                 (
@@ -273,7 +274,7 @@ class ContextMLA(Operation):
             data_wrapper.raise_if_not_loaded()
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            mla_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode]
+            mla_dict = util_empirical.require_data_slice(data_wrapper, fmha_quant_mode, kvcache_quant_mode)
             result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"] * prefix_correction
             energy = result.get("energy", 0.0) * prefix_correction
@@ -429,7 +430,7 @@ class GenerationMLA(Operation):
                 cls.load_data(database)
                 wrapper = database._generation_mla_data
                 wrapper.raise_if_not_loaded()
-                return wrapper[kvcache_quant_mode]
+                return util_empirical.require_data_slice(wrapper, kvcache_quant_mode)
 
             grid = util_empirical.grid_for(
                 ("gen_mla", database.system, database.backend, database.version, kvcache_quant_mode.name),
@@ -456,7 +457,7 @@ class GenerationMLA(Operation):
 
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
-            mla_dict = data_wrapper[kvcache_quant_mode]
+            mla_dict = util_empirical.require_data_slice(data_wrapper, kvcache_quant_mode)
             result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
             latency = result["latency"]
             energy = result.get("energy", 0.0)
@@ -588,7 +589,7 @@ class MLABmm(Operation):
                 wrapper = database._mla_bmm_data
                 wrapper.raise_if_not_loaded()
                 qm = quant_mode if quant_mode in wrapper else common.GEMMQuantMode.bfloat16
-                return wrapper[qm][op_name][num_heads]
+                return util_empirical.require_data_slice(wrapper, qm, op_name, num_heads)
 
             grid = util_empirical.grid_for(
                 ("mla_bmm", database.system, database.backend, database.version, quant_mode.name, op_name, num_heads),
@@ -616,7 +617,12 @@ class MLABmm(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             quant_mode_lookup = quant_mode if quant_mode in data_wrapper else common.GEMMQuantMode.bfloat16
-            mla_bmm_dict = data_wrapper[quant_mode_lookup]["mla_gen_pre" if if_pre else "mla_gen_post"][num_heads]
+            mla_bmm_dict = util_empirical.require_data_slice(
+                data_wrapper,
+                quant_mode_lookup,
+                "mla_gen_pre" if if_pre else "mla_gen_post",
+                num_heads,
+            )
             num_left, num_right = interpolation.nearest_1d_point_helper(
                 num_tokens,
                 list(mla_bmm_dict.keys()),
@@ -836,7 +842,12 @@ class MLAModule(Operation):
                 cls.load_data(database)
                 wrapper = database._context_mla_module_data
                 wrapper.raise_if_not_loaded()
-                return wrapper[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
+                return util_empirical.require_data_slice(
+                    wrapper,
+                    fmha_quant_mode,
+                    kvcache_quant_mode,
+                    gemm_quant_mode,
+                )
 
             grid = util_empirical.grid_for(
                 (
@@ -875,7 +886,12 @@ class MLAModule(Operation):
             data_wrapper.raise_if_not_loaded()
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            mla_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
+            mla_dict = util_empirical.require_data_slice(
+                data_wrapper,
+                fmha_quant_mode,
+                kvcache_quant_mode,
+                gemm_quant_mode,
+            )
             result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"] * prefix_correction
             energy = result.get("energy", 0.0) * prefix_correction
@@ -941,7 +957,12 @@ class MLAModule(Operation):
                 cls.load_data(database)
                 wrapper = database._generation_mla_module_data
                 wrapper.raise_if_not_loaded()
-                return wrapper[fmha_quant_mode][kv_cache_dtype][gemm_quant_mode]
+                return util_empirical.require_data_slice(
+                    wrapper,
+                    fmha_quant_mode,
+                    kv_cache_dtype,
+                    gemm_quant_mode,
+                )
 
             grid = util_empirical.grid_for(
                 (
@@ -976,7 +997,12 @@ class MLAModule(Operation):
 
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
-            mla_dict = data_wrapper[fmha_quant_mode][kv_cache_dtype][gemm_quant_mode]
+            mla_dict = util_empirical.require_data_slice(
+                data_wrapper,
+                fmha_quant_mode,
+                kv_cache_dtype,
+                gemm_quant_mode,
+            )
             result = interpolation.interp_3d(num_heads, b, s, mla_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"]
             energy = result.get("energy", 0.0)
@@ -1215,9 +1241,9 @@ class WideEPGenerationMLA(Operation):
                 cls.load_data(database)
                 wrapper = database._wideep_generation_mla_data
                 if wrapper is None:
-                    raise KeyError("wideep generation mla is sglang-only")
+                    raise PerfDataNotAvailableError("WideEP generation MLA data is SGLang-only.")
                 wrapper.raise_if_not_loaded()
-                return wrapper[attn_backend][kvcache_quant_mode]
+                return util_empirical.require_data_slice(wrapper, attn_backend, kvcache_quant_mode)
 
             grid = util_empirical.grid_for(
                 (
@@ -1254,8 +1280,6 @@ class WideEPGenerationMLA(Operation):
             # ``None`` rather than a ``LoadedOpData(None)`` so that calling
             # ``raise_if_not_loaded()`` is not an option. Surface a structured
             # error here instead of an opaque ``NoneType`` attribute crash.
-            from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
-
             raise PerfDataNotAvailableError(
                 f"WideEP generation MLA perf data is SGLang-only; backend='{database.backend}' has no table."
             )
@@ -1263,15 +1287,12 @@ class WideEPGenerationMLA(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             attn_backend = attention_backend or "flashinfer"
-            if attn_backend == "flashinfer":
-                attn_data = data_wrapper["flashinfer"]
-            elif attn_backend == "fa3":
-                attn_data = data_wrapper["fa3"]
-            else:
+            if attn_backend not in {"flashinfer", "fa3"}:
                 raise ValueError(f"Unsupported attention backend: {attn_backend}")
+            attn_data = util_empirical.require_data_slice(data_wrapper, attn_backend)
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
-            mla_dict = attn_data[kvcache_quant_mode]
+            mla_dict = util_empirical.require_data_slice(attn_data, kvcache_quant_mode)
             result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
             latency = result["latency"]
             energy = result.get("energy", 0.0)
@@ -1493,9 +1514,14 @@ class WideEPContextMLA(Operation):
                 cls.load_data(database)
                 wrapper = database._wideep_context_mla_data
                 if wrapper is None:
-                    raise KeyError("wideep context mla is sglang-only")
+                    raise PerfDataNotAvailableError("WideEP context MLA data is SGLang-only.")
                 wrapper.raise_if_not_loaded()
-                return wrapper[attn_backend][fmha_quant_mode][kvcache_quant_mode]
+                return util_empirical.require_data_slice(
+                    wrapper,
+                    attn_backend,
+                    fmha_quant_mode,
+                    kvcache_quant_mode,
+                )
 
             grid = util_empirical.grid_for(
                 (
@@ -1532,8 +1558,6 @@ class WideEPContextMLA(Operation):
         data_wrapper = database._wideep_context_mla_data
         if data_wrapper is None:
             # See WideEPGenerationMLA above for rationale.
-            from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
-
             raise PerfDataNotAvailableError(
                 f"WideEP context MLA perf data is SGLang-only; backend='{database.backend}' has no table."
             )
@@ -1541,16 +1565,13 @@ class WideEPContextMLA(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             attn_backend = attention_backend or "flashinfer"
-            if attn_backend == "flashinfer":
-                attn_data = data_wrapper["flashinfer"]
-            elif attn_backend == "fa3":
-                attn_data = data_wrapper["fa3"]
-            else:
+            if attn_backend not in {"flashinfer", "fa3"}:
                 raise ValueError(f"Unsupported attention backend: {attn_backend}")
+            attn_data = util_empirical.require_data_slice(data_wrapper, attn_backend)
 
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
-            mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
+            mla_dict = util_empirical.require_data_slice(attn_data, fmha_quant_mode, kvcache_quant_mode)
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)

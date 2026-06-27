@@ -29,16 +29,20 @@ from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk import config as sdk_config
 from aiconfigurator.sdk.models import _get_model_info
 from aiconfigurator.sdk.models.helpers import _apply_model_quant_defaults
-from aiconfigurator.sdk.operations.util_empirical import capture_provenance, worst_provenance
+from aiconfigurator.sdk.operations.util_empirical import PROVENANCE_ORDER, capture_provenance, worst_provenance
 from aiconfigurator.sdk.task_v2 import Task
 
 logger = logging.getLogger(__name__)
 
 STATUS_PASS = "PASS"
+STATUS_HYBRID_PASS = "HYBRID_PASS"
 STATUS_FAIL = "FAIL"
 STATUS_HW_INCOMPATIBLE = "HW_INCOMPATIBLE"
 STATUS_FRAMEWORK_INCOMPATIBLE = "FRAMEWORK_INCOMPATIBLE"
-VALID_STATUSES = frozenset({STATUS_PASS, STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE})
+VALID_STATUSES = frozenset(
+    {STATUS_PASS, STATUS_HYBRID_PASS, STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+)
+VALID_PROVENANCE_SOURCES = frozenset(PROVENANCE_ORDER)
 SUPPORT_MATRIX_BASE_HEADER = [
     "HuggingFaceID",
     "Architecture",
@@ -49,8 +53,8 @@ SUPPORT_MATRIX_BASE_HEADER = [
     "Status",
     "ErrMsg",
 ]
-# "Source" = data provenance of a PASS (silicon, or the worst empirical transfer tier
-# that fired: empirical/xshape/xquant/xprofile/xop). Empty for non-PASS rows.
+# "Source" = data provenance of PASS/HYBRID_PASS (silicon, or the worst empirical
+# transfer tier that fired: empirical/xshape/xquant/xprofile/xop). Empty otherwise.
 SUPPORT_MATRIX_HEADER = SUPPORT_MATRIX_BASE_HEADER + ["Command", "Source"]
 _BYTES_PER_PARAM = 2
 DEFAULT_ENGINE_STEP_COMPARISON_RTOL = 0.05
@@ -118,6 +122,8 @@ def _support_matrix_row_command(
     backend: str,
     version: str,
     mode: str,
+    database_mode: str = "SILICON",
+    transfer_policy: str | None = None,
     constraints: TestConstraints | None = None,
     compare_engine_step_backends: bool = False,
     engine_step_comparison_rtol: float = DEFAULT_ENGINE_STEP_COMPARISON_RTOL,
@@ -145,7 +151,7 @@ def _support_matrix_row_command(
         "--backend-version",
         version,
         "--database-mode",
-        "SILICON",
+        database_mode,
         "--isl",
         str(constraints.isl),
         "--osl",
@@ -160,6 +166,8 @@ def _support_matrix_row_command(
         "1",
         "--no-color",
     ]
+    if transfer_policy:
+        parts.extend(["--transfer-policy", transfer_policy])
     if compare_engine_step_backends:
         # ``cli default`` does not expose the support-matrix Python/Rust
         # comparator; use the default Python engine-step path for the public
@@ -232,6 +240,14 @@ def _is_known_framework_incompatible_gap(
         model == "XiaomiMiMo/MiMo-V2-Flash"
         and backend == common.BackendName.trtllm.value
         and system not in {"l40s", "a100_sxm"}
+        and (
+            "failed to query context attention data" in normalized
+            or "illegal memory access" in normalized
+            or "illegal-memory-access" in normalized
+            or "cublas" in normalized
+            or "out of memory" in normalized
+            or "cuda oom" in normalized
+        )
     ):
         return True
 
@@ -811,7 +827,9 @@ class SupportMatrix:
 
         Returns:
             Tuple of (dict with statuses, dict with error messages).
-            Status values are PASS, FAIL, or HW_INCOMPATIBLE.
+            Status values are PASS, HYBRID_PASS, FAIL, HW_INCOMPATIBLE, or
+            FRAMEWORK_INCOMPATIBLE. PASS is reserved for a SILICON success;
+            HYBRID_PASS means SILICON failed but the HYBRID retry succeeded.
             Both dicts have keys "agg" and "disagg".
         """
         if modes_to_test is None:
@@ -825,6 +843,7 @@ class SupportMatrix:
         statuses: dict[str, str] = {}
         error_messages = {}
         provenance: dict[str, str] = dict.fromkeys(modes_to_test, "")
+        transfer_policy = os.environ.get("AIC_SM_TRANSFERS") or None
         commands = {
             mode: _support_matrix_row_command(
                 model=model,
@@ -832,6 +851,8 @@ class SupportMatrix:
                 backend=backend,
                 version=version,
                 mode=mode,
+                database_mode="SILICON",
+                transfer_policy=transfer_policy,
                 constraints=constraints,
                 compare_engine_step_backends=compare_engine_step_backends,
                 engine_step_comparison_rtol=engine_step_comparison_rtol,
@@ -866,14 +887,15 @@ class SupportMatrix:
                 return statuses, error_messages
 
         # By default the matrix runs SILICON first (including declared shared-layer
-        # collected rows) and re-runs only genuine FAILs in HYBRID. A FAIL->PASS rescue is
-        # therefore unambiguously empirical: use the worst transfer tier that fired, or
-        # the generic "empirical" source when an analytic path emitted no provenance.
+        # collected rows) and re-runs only structured data gaps (plus explicitly known
+        # framework/data gaps) in HYBRID. A successful rescue is recorded as
+        # HYBRID_PASS, never PASS, so SDK consumers cannot mistake estimability for
+        # measured-silicon support.
         # Set AIC_SM_ALLOW_HYBRID to a falsey value (0/false/no/off) for a pure-silicon matrix.
         allow_hybrid = os.environ.get("AIC_SM_ALLOW_HYBRID", "1").strip().lower() not in ("0", "false", "no", "off")
 
-        def _attempt(mode: str, db_mode: str | None) -> tuple[str, str | None, str]:
-            """One (mode, database_mode) attempt -> (status, raw_error_or_None, source_tier)."""
+        def _attempt(mode: str, db_mode: str | None) -> tuple[str, str | None, str, bool]:
+            """Return status, error, source tier, and whether HYBRID may rescue it."""
             try:
                 # capture_provenance spans task.run() (the contextvar propagates down the
                 # call stack), so we learn the worst empirical transfer tier that fired.
@@ -917,7 +939,13 @@ class SupportMatrix:
                     if mismatch:
                         raise RuntimeError(mismatch)
 
-                return STATUS_PASS, None, worst_provenance(prov_tags)
+                tier = worst_provenance(prov_tags)
+                if db_mode == "SILICON" and tier != "silicon":
+                    raise RuntimeError(
+                        "SILICON support run emitted empirical provenance "
+                        f"{tier!r}; PASS is reserved for collected silicon data."
+                    )
+                return STATUS_PASS, None, tier, False
             except Exception as e:
                 raw_error = traceback.format_exc()
                 logger.warning(
@@ -930,31 +958,46 @@ class SupportMatrix:
                     str(e),
                 )
                 if _is_known_hw_incompatible_gap(system=system, error_message=raw_error):
-                    return STATUS_HW_INCOMPATIBLE, raw_error, ""
-                if _is_known_framework_incompatible_gap(
+                    return STATUS_HW_INCOMPATIBLE, raw_error, "", False
+                framework_gap = _is_known_framework_incompatible_gap(
                     model=model, system=system, backend=backend, version=version, error_message=raw_error
-                ):
-                    return STATUS_FRAMEWORK_INCOMPATIBLE, raw_error, ""
-                return STATUS_FAIL, raw_error, ""
+                )
+                if framework_gap:
+                    # Some known framework gaps (for example Kimi INT4_WO on TRT-LLM)
+                    # are not SILICON-capable but are still estimable in HYBRID.
+                    return STATUS_FRAMEWORK_INCOMPATIBLE, raw_error, "", True
+                return STATUS_FAIL, raw_error, "", perf_database.has_perf_data_not_available_cause(e)
             finally:
                 perf_database.clear_database_runtime_caches(system, backend, version)
 
         for mode in modes_to_test:
-            status, raw_error, tier = _attempt(mode, "SILICON")
-            # Only a genuine data gap (FAIL) can be rescued by HYBRID; HW/FRAMEWORK
-            # incompatibilities can't, so leave those as-is. Rescue is on by default and
-            # disabled by AIC_SM_ALLOW_HYBRID=0 (pure-silicon matrix).
-            if allow_hybrid and status == STATUS_FAIL:
-                h_status, h_error, h_tier = _attempt(mode, "HYBRID")
+            status, raw_error, tier, rescuable = _attempt(mode, "SILICON")
+            # Programming errors and hardware incompatibilities must fail loudly instead
+            # of being hidden by a successful second implementation path.
+            if allow_hybrid and rescuable:
+                h_status, _h_error, h_tier, _ = _attempt(mode, "HYBRID")
                 if h_status == STATUS_PASS:
-                    status, raw_error = STATUS_PASS, None
+                    status, raw_error = STATUS_HYBRID_PASS, None
                     tier = h_tier if h_tier and h_tier != "silicon" else "empirical"
-                else:
-                    status, raw_error, tier = h_status, h_error, ""
+                    commands[mode] = _support_matrix_row_command(
+                        model=model,
+                        system=system,
+                        backend=backend,
+                        version=version,
+                        mode=mode,
+                        database_mode="HYBRID",
+                        transfer_policy=transfer_policy,
+                        constraints=constraints,
+                        compare_engine_step_backends=compare_engine_step_backends,
+                        engine_step_comparison_rtol=engine_step_comparison_rtol,
+                        engine_step_comparison_atol=engine_step_comparison_atol,
+                        engine_step_frontier_rtol=engine_step_frontier_rtol,
+                        engine_step_frontier_atol=engine_step_frontier_atol,
+                    )
 
             statuses[mode] = status
             error_messages[mode] = _format_exception_for_csv(raw_error)
-            provenance[mode] = tier if status == STATUS_PASS else ""
+            provenance[mode] = tier if status in {STATUS_PASS, STATUS_HYBRID_PASS} else ""
 
         if include_commands:
             return statuses, error_messages, commands, provenance
@@ -1198,7 +1241,8 @@ class SupportMatrix:
     def _print_results_summary(self, results: list[tuple[str, str, str, str, str, str, str, str | None, str]]) -> None:
         """Print summary of test results."""
         total_tests = len(results)
-        passed = sum(1 for r in results if r[6] == STATUS_PASS)
+        silicon_passed = sum(1 for r in results if r[6] == STATUS_PASS)
+        hybrid_passed = sum(1 for r in results if r[6] == STATUS_HYBRID_PASS)
         failed = sum(1 for r in results if r[6] == STATUS_FAIL)
         hw_incompatible = sum(1 for r in results if r[6] == STATUS_HW_INCOMPATIBLE)
         framework_incompatible = sum(1 for r in results if r[6] == STATUS_FRAMEWORK_INCOMPATIBLE)
@@ -1207,7 +1251,8 @@ class SupportMatrix:
         print("Test Results Summary")
         print("=" * 80)
         print(f"Total configurations tested: {total_tests}")
-        print(f"✓ Passed: {passed} ({100 * passed / total_tests:.1f}%)")
+        print(f"✓ Silicon supported: {silicon_passed} ({100 * silicon_passed / total_tests:.1f}%)")
+        print(f"≈ Hybrid estimable: {hybrid_passed} ({100 * hybrid_passed / total_tests:.1f}%)")
         print(f"✗ Failed: {failed} ({100 * failed / total_tests:.1f}%)")
         print(f"⚪ Hardware incompatible: {hw_incompatible} ({100 * hw_incompatible / total_tests:.1f}%)")
         print(
@@ -1216,7 +1261,8 @@ class SupportMatrix:
         print("=" * 80)
 
         # Group results by status
-        passed_configs = []
+        silicon_passed_configs = []
+        hybrid_passed_configs = []
         failed_configs = []
         hw_incompatible_configs = []
         framework_incompatible_configs = []
@@ -1225,8 +1271,11 @@ class SupportMatrix:
         for huggingface_id, architecture, system, backend, version, mode, status, _err, _command, source in results:
             config = (huggingface_id, architecture, system, backend, version, mode)
             if status == STATUS_PASS:
-                passed_configs.append(config)
+                silicon_passed_configs.append(config)
                 source_by_config[config] = source or "silicon"
+            elif status == STATUS_HYBRID_PASS:
+                hybrid_passed_configs.append(config)
+                source_by_config[config] = source or "empirical"
             elif status == STATUS_FAIL:
                 failed_configs.append(config)
             elif status == STATUS_HW_INCOMPATIBLE:
@@ -1234,16 +1283,19 @@ class SupportMatrix:
             elif status == STATUS_FRAMEWORK_INCOMPATIBLE:
                 framework_incompatible_configs.append(config)
 
-        # Print passed configurations (with data source: silicon vs the empirical
-        # transfer tier that the prediction relied on)
-        if passed_configs:
-            silicon_passes = sum(1 for c in passed_configs if source_by_config.get(c, "silicon") == "silicon")
-            print(f"\n✓ Passed Configurations ({len(passed_configs)}; {silicon_passes} silicon, ", end="")
-            print(f"{len(passed_configs) - silicon_passes} hybrid):")
-            for huggingface_id, architecture, system, backend, version, mode in sorted(passed_configs):
-                src = source_by_config.get((huggingface_id, architecture, system, backend, version, mode), "silicon")
-                tag = "silicon" if src == "silicon" else f"hybrid:{src}"
-                print(f"  • {huggingface_id} ({architecture}) on {system} with {backend} v{version} ({mode}) [{tag}]")
+        if silicon_passed_configs:
+            print(f"\n✓ Silicon-Supported Configurations ({len(silicon_passed_configs)}):")
+            for huggingface_id, architecture, system, backend, version, mode in sorted(silicon_passed_configs):
+                print(f"  • {huggingface_id} ({architecture}) on {system} with {backend} v{version} ({mode})")
+
+        if hybrid_passed_configs:
+            print(f"\n≈ Hybrid-Estimable Configurations ({len(hybrid_passed_configs)}):")
+            for huggingface_id, architecture, system, backend, version, mode in sorted(hybrid_passed_configs):
+                src = source_by_config.get((huggingface_id, architecture, system, backend, version, mode), "empirical")
+                print(
+                    f"  • {huggingface_id} ({architecture}) on {system} with {backend} "
+                    f"v{version} ({mode}) [hybrid:{src}]"
+                )
 
         # Print failed configurations
         if failed_configs:
@@ -1277,6 +1329,7 @@ class SupportMatrix:
 
         def _row_values(row: tuple[str, ...]) -> tuple[str, str, str, str, str, str, str, str, str, str]:
             source = ""
+            legacy_row = len(row) in {8, 9}
             if len(row) == 10:
                 huggingface_id, architecture, system, backend, version, mode, status, err_msg, command, source = row
             elif len(row) == 9:
@@ -1306,6 +1359,27 @@ class SupportMatrix:
                 )
             else:
                 raise ValueError(f"Invalid support-matrix result row length: {len(row)}")
+
+            if legacy_row:
+                if status == STATUS_PASS:
+                    # Legacy 8/9-column matrices predate Source. PASS meant a
+                    # successful SILICON run, so preserve that meaning when
+                    # upgrading the row to the current 10-column schema.
+                    source = "silicon"
+                elif status == STATUS_HYBRID_PASS:
+                    raise ValueError(
+                        "Legacy HYBRID_PASS rows cannot be upgraded without an explicit empirical Source; "
+                        "provide a 10-column row."
+                    )
+                else:
+                    source = ""
+            elif status == STATUS_PASS and source != "silicon":
+                raise ValueError("PASS support-matrix rows must use Source='silicon'")
+            elif status == STATUS_HYBRID_PASS and source not in VALID_PROVENANCE_SOURCES - {"silicon"}:
+                raise ValueError("HYBRID_PASS support-matrix rows require an empirical transfer Source")
+            elif status not in {STATUS_PASS, STATUS_HYBRID_PASS} and source:
+                raise ValueError(f"Non-pass support-matrix status {status} must not include Source={source!r}")
+
             return (
                 huggingface_id,
                 architecture,

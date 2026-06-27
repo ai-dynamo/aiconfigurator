@@ -35,11 +35,13 @@ import copy
 import logging
 import os
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar, Optional
 
 import numpy as np
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 
@@ -128,7 +130,7 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
         result = interpolation.interp_3d(x, y, z, dict_, "cubic", self._extracted_metrics_cache)
         if _finite_result(result):
             return result
-    except Exception:
+    except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError):
         pass
 
     # Fallback: real DeepSeek-V4 data is sampled at batches like 1/2/4/8.
@@ -184,7 +186,7 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
                 leaf = _lookup_at_batch(bp, allow_extrapolate=False)
                 if _finite_result(leaf):
                     covered[bp] = leaf
-            except Exception:
+            except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError):
                 continue
 
         lower_batches = [bp for bp in covered if bp <= query_b]
@@ -217,12 +219,14 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
                     result = {f: leaf.get(f, 0.0) * query_b / bp for f in ("latency", "power", "energy")}
                     if _finite_result(result):
                         return result
-                except Exception:
+                except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError):
                     continue
 
     if batch_axis == "y":
-        raise ValueError(f"DeepSeek-V4 robust lookup failed (tp={x}, b={y}, s={z})")
-    raise ValueError(f"DeepSeek-V4 robust lookup failed (tp={x}, s={y}, b={z})")
+        raise interpolation.InterpolationDataNotAvailableError(
+            f"DeepSeek-V4 robust lookup failed (tp={x}, b={y}, s={z})"
+        )
+    raise interpolation.InterpolationDataNotAvailableError(f"DeepSeek-V4 robust lookup failed (tp={x}, s={y}, b={z})")
 
 
 def _dsv4_resolve_head_key(quant_data, num_heads):
@@ -259,8 +263,18 @@ def _dsv4_lookup_prefix_resolved(database, cr_dict, prefix, s, b):
     prefixes are linearly interpolated between the two nearest prefix anchors
     that can answer the (s, b) query.  Returns a leaf dict or ``None``.
     """
-    if not isinstance(cr_dict, dict) or not cr_dict:
+    if cr_dict is None:
         return None
+    if not isinstance(cr_dict, Mapping):
+        raise TypeError(f"Malformed DeepSeek-V4 prefix table: expected a mapping, got {type(cr_dict).__name__}.")
+    if not cr_dict:
+        return None
+    for prefix_value, sb_slice in cr_dict.items():
+        if sb_slice is not None and not isinstance(sb_slice, Mapping):
+            raise TypeError(
+                "Malformed DeepSeek-V4 prefix slice: expected a mapping at "
+                f"prefix={prefix_value}, got {type(sb_slice).__name__}."
+            )
 
     def _finite(result):
         if not isinstance(result, dict):
@@ -270,12 +284,12 @@ def _dsv4_lookup_prefix_resolved(database, cr_dict, prefix, s, b):
 
     def _lookup_at_prefix(prefix_value):
         sb_slice = cr_dict.get(prefix_value)
-        if not isinstance(sb_slice, dict):
+        if sb_slice is None:
             return None
         wrapped = {prefix_value: sb_slice}
         try:
             result = _dsv4_robust_3d_lookup(database, wrapped, prefix_value, s, b)
-        except Exception:
+        except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError):
             return None
         return result if _finite(result) else None
 
@@ -556,7 +570,6 @@ class DeepSeekV4MHCModule(Operation):
         inside one decoder layer, matching the collector's module boundary.
         """
         from aiconfigurator.sdk.operations.gemm import GEMM
-        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
         cls.load_data(database)
 
@@ -597,15 +610,9 @@ class DeepSeekV4MHCModule(Operation):
                 sol_q = get_sol(num_tokens, op_name)[0]
 
                 def _slice():
-                    if (
-                        not mhc_data
-                        or op_name not in mhc_data
-                        or hc_mult not in mhc_data[op_name]
-                        or hidden_size not in mhc_data[op_name][hc_mult]
-                        or not mhc_data[op_name][hc_mult][hidden_size]
-                    ):
-                        raise KeyError("no mHC data")
-                    return mhc_data[op_name][hc_mult][hidden_size]
+                    if not mhc_data:
+                        raise PerfDataNotAvailableError("No DeepSeek-V4 mHC data is loaded.")
+                    return util_empirical.require_data_slice(mhc_data, op_name, hc_mult, hidden_size)
 
                 grid = util_empirical.grid_for(
                     (
@@ -1068,8 +1075,6 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         prefix: int = 0,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_context_deepseek_v4_attention_module``."""
-        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
-
         cls.load_data(database)
 
         def get_sol(b_: int = b, s_: int = s, prefix_: int = prefix) -> tuple[float, float, float]:
@@ -1103,19 +1108,25 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             def _slice():
                 data = getattr(database, "_context_deepseek_v4_attention_module_data", None)
                 if not data:
-                    raise KeyError("no context dsv4 attention data")
-                quant_data = data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
+                    raise PerfDataNotAvailableError("No context DeepSeek-V4 attention data is loaded.")
+                quant_data = util_empirical.require_data_slice(
+                    data,
+                    fmha_quant_mode,
+                    kvcache_quant_mode,
+                    gemm_quant_mode,
+                )
                 head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
                 if head_axis is None:
-                    raise KeyError("no head axis")
-                cr_dict = quant_data[head_axis].get(compress_ratio)
-                if cr_dict is None:
-                    raise KeyError("no compress_ratio")
-                return cr_dict  # {prefix: {s: {b: leaf}}}
+                    raise PerfDataNotAvailableError("No context DeepSeek-V4 attention head slice is available.")
+                return util_empirical.require_data_slice(
+                    quant_data,
+                    head_axis,
+                    compress_ratio,
+                )  # {prefix: {s: {b: leaf}}}
 
             try:
                 prefix_keys = tuple(sorted(_slice().keys()))
-            except Exception:
+            except PerfDataNotAvailableError:
                 prefix_keys = ()
             # Genuine prefix interpolation needs >=2 collected prefix points bracketing the
             # query. A degenerate axis (e.g. prefix=0 only, as collected on sglang) or an
@@ -1135,7 +1146,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 depth, query, key_tag = 2, (s + prefix, b), "dsv4_ctx_attn_p0anchor"
 
                 def slice_fn():
-                    return _slice()[0]  # prefix=0 sub-slice -> {s: {b: leaf}}
+                    return util_empirical.require_data_slice(_slice(), 0)  # {s: {b: leaf}}
 
                 def _sol(c):
                     return get_sol(c[1], c[0], 0)[0]  # c=(s, b); anchor prefix=0
@@ -1177,7 +1188,12 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     f"backend='{database.backend}', version='{database.version}'."
                 )
             # SCHEME A: head axis is the rank-local head count the model passes.
-            quant_data = data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
+            quant_data = util_empirical.require_data_slice(
+                data,
+                fmha_quant_mode,
+                kvcache_quant_mode,
+                gemm_quant_mode,
+            )
             head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
             if head_axis is None:
                 raise PerfDataNotAvailableError(
@@ -1346,8 +1362,6 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_generation_deepseek_v4_attention_module``."""
-        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
-
         cls.load_data(database)
 
         def get_sol(b_: int = b, s_: int = s) -> tuple[float, float, float]:
@@ -1381,15 +1395,16 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             def _slice():
                 data = getattr(database, "_generation_deepseek_v4_attention_module_data", None)
                 if not data:
-                    raise KeyError("no generation dsv4 attention data")
-                quant_data = data[kvcache_quant_mode][gemm_quant_mode]
+                    raise PerfDataNotAvailableError("No generation DeepSeek-V4 attention data is loaded.")
+                quant_data = util_empirical.require_data_slice(data, kvcache_quant_mode, gemm_quant_mode)
                 head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
                 if head_axis is None:
-                    raise KeyError("no head axis")
-                dv4_dict = quant_data[head_axis].get(compress_ratio)
-                if dv4_dict is None:
-                    raise KeyError("no compress_ratio")
-                return dv4_dict  # {b: {s_total: leaf}}
+                    raise PerfDataNotAvailableError("No generation DeepSeek-V4 attention head slice is available.")
+                return util_empirical.require_data_slice(
+                    quant_data,
+                    head_axis,
+                    compress_ratio,
+                )  # {b: {s_total: leaf}}
 
             grid = util_empirical.grid_for(
                 (
@@ -1426,7 +1441,7 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     f"backend='{database.backend}', version='{database.version}'."
                 )
             # SCHEME A: head axis is the rank-local head count the model passes.
-            quant_data = data[kvcache_quant_mode][gemm_quant_mode]
+            quant_data = util_empirical.require_data_slice(data, kvcache_quant_mode, gemm_quant_mode)
             head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
             if head_axis is None:
                 raise PerfDataNotAvailableError(
@@ -1623,8 +1638,6 @@ class DeepSeekV4MegaMoEModule(Operation):
         unified ``dsv4_megamoe_module`` file for both context and generation;
         ``is_context`` selects the phase stored inside that table.
         """
-        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
-
         cls.load_data(database)
 
         if database_mode is None:

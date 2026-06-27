@@ -27,6 +27,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -97,15 +98,22 @@ def _ctx_headsize_ref_grid(database, fmha_quant_mode, kvcache_quant_mode, n_kv_l
         ContextAttention.load_data(database)
         wrapper = database._context_attention_data
         wrapper.raise_if_not_loaded()
-        by_hs = wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup]
+        by_hs = util_empirical.require_data_slice(wrapper, fmha_quant_mode, kvcache_quant_mode, n_kv_lookup)
         ref_hs = _ref_head_size(list(by_hs.keys()), target_hs)
-    except Exception:
+    except PerfDataNotAvailableError:
         return None, None
     if ref_hs is None:
         return None, None
 
     def _ref_slice():
-        return database._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][ref_hs][window_size]
+        return util_empirical.require_data_slice(
+            database._context_attention_data,
+            fmha_quant_mode,
+            kvcache_quant_mode,
+            n_kv_lookup,
+            ref_hs,
+            window_size,
+        )
 
     def _ref_sol(c):  # c = (n, full_s, b)
         nkv = c[0] if n_kv_lookup == 0 else n_kv_lookup
@@ -141,15 +149,21 @@ def _gen_headsize_ref_grid(database, kvcache_quant_mode, n_kv_lookup, target_hs,
         GenerationAttention.load_data(database)
         wrapper = database._generation_attention_data
         wrapper.raise_if_not_loaded()
-        by_hs = wrapper[kvcache_quant_mode][n_kv_lookup]
+        by_hs = util_empirical.require_data_slice(wrapper, kvcache_quant_mode, n_kv_lookup)
         ref_hs = _ref_head_size(list(by_hs.keys()), target_hs)
-    except Exception:
+    except PerfDataNotAvailableError:
         return None, None
     if ref_hs is None:
         return None, None
 
     def _ref_slice():
-        return database._generation_attention_data[kvcache_quant_mode][n_kv_lookup][ref_hs][window_size]
+        return util_empirical.require_data_slice(
+            database._generation_attention_data,
+            kvcache_quant_mode,
+            n_kv_lookup,
+            ref_hs,
+            window_size,
+        )
 
     def _ref_sol(c):  # c = (n, b, s)
         nkv = c[0] if n_kv_lookup == 0 else n_kv_lookup
@@ -394,7 +408,14 @@ class ContextAttention(Operation):
                     cls.load_data(database)
                     wrapper = database._context_attention_data
                     wrapper.raise_if_not_loaded()
-                    return wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][slice_window]
+                    return util_empirical.require_data_slice(
+                        wrapper,
+                        fmha_quant_mode,
+                        kvcache_quant_mode,
+                        n_kv_lookup,
+                        head_size,
+                        slice_window,
+                    )
 
                 def _sol(c):  # c = (n, full_s, b); samples are full attention (prefix=0)
                     nkv = c[0] if n_kv_lookup == 0 else n_kv_lookup
@@ -477,7 +498,14 @@ class ContextAttention(Operation):
             # windowed data). When the windowed slice is absent or too sparse to
             # interpolate, interp_3d fails accurately (raises) and HYBRID/EMPIRICAL fall
             # back to get_empirical's window=0 + SOL derivation.
-            attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
+            attention_dict = util_empirical.require_data_slice(
+                data_wrapper,
+                fmha_quant_mode,
+                kvcache_quant_mode,
+                n_kv_lookup,
+                head_size,
+                window_size,
+            )
             result = interpolation.interp_3d(
                 n,
                 full_s,
@@ -769,15 +797,21 @@ class GenerationAttention(Operation):
 
             def _exact_raw_n_grid(slice_window):
                 """Measured exact-head slice for safe ragged (batch, seq) interpolation."""
+                cls.load_data(database)
+                raw_wrapper = getattr(database, "_raw_generation_attention_data", None)
+                if raw_wrapper is None or not getattr(raw_wrapper, "loaded", True):
+                    return None
                 try:
-                    cls.load_data(database)
-                    raw_wrapper = getattr(database, "_raw_generation_attention_data", None)
-                    if raw_wrapper is None or not getattr(raw_wrapper, "loaded", True):
-                        return None
-                    raw_slice = raw_wrapper[kvcache_quant_mode][n_kv_lookup][h][slice_window]
-                    if n not in raw_slice:
-                        return None
-                except Exception:
+                    raw_slice = util_empirical.require_data_slice(
+                        raw_wrapper,
+                        kvcache_quant_mode,
+                        n_kv_lookup,
+                        h,
+                        slice_window,
+                    )
+                except PerfDataNotAvailableError:
+                    return None
+                if n not in raw_slice:
                     return None
 
                 def _sol(c):  # c = (b, s), n is an exact shape identity
@@ -809,7 +843,13 @@ class GenerationAttention(Operation):
                     cls.load_data(database)
                     wrapper = database._generation_attention_data
                     wrapper.raise_if_not_loaded()
-                    return wrapper[kvcache_quant_mode][n_kv_lookup][h][slice_window]
+                    return util_empirical.require_data_slice(
+                        wrapper,
+                        kvcache_quant_mode,
+                        n_kv_lookup,
+                        h,
+                        slice_window,
+                    )
 
                 def _sol(c):  # c = (n, b, s)
                     nkv = c[0] if n_kv_lookup == 0 else n_kv_lookup
@@ -881,7 +921,13 @@ class GenerationAttention(Operation):
             # Use the real windowed slice when present (more accurate than a window=0 +
             # SOL reconstruction); when absent/too sparse, interp_3d raises and
             # HYBRID/EMPIRICAL fall back to get_empirical's window=0 + SOL derivation.
-            attention_dict = data_wrapper[kvcache_quant_mode][n_kv_lookup][head_size][window_size]
+            attention_dict = util_empirical.require_data_slice(
+                data_wrapper,
+                kvcache_quant_mode,
+                n_kv_lookup,
+                head_size,
+                window_size,
+            )
             s_min = max(1, int(s * 0.9))
             s_max = max(s_min, int(s * 1.1))
             sample_cnt = 5
@@ -1083,7 +1129,7 @@ class EncoderAttention(Operation):
                 cls.load_data(database)
                 wrapper = database._encoder_attention_data
                 wrapper.raise_if_not_loaded()
-                return wrapper[fmha_quant_mode][h]
+                return util_empirical.require_data_slice(wrapper, fmha_quant_mode, h)
 
             def _sol(c):  # c = (n, s, b)
                 return get_sol(c[2], c[1], c[0], h, fmha_quant_mode)[0]
@@ -1113,7 +1159,7 @@ class EncoderAttention(Operation):
 
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
-            attention_dict = data_wrapper[fmha_quant_mode][head_size]
+            attention_dict = util_empirical.require_data_slice(data_wrapper, fmha_quant_mode, head_size)
             result = interpolation.interp_3d(n, s, b, attention_dict, "cubic", database._extracted_metrics_cache)
             return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
 

@@ -786,7 +786,7 @@ def cli_estimate(
     from aiconfigurator.sdk.backends.factory import get_backend
     from aiconfigurator.sdk.models import get_model
     from aiconfigurator.sdk.perf_database import (
-        get_database,
+        get_database_view,
         get_latest_database_version,
         get_systems_paths,
         set_systems_paths,
@@ -828,10 +828,11 @@ def cli_estimate(
         database_kwargs = {
             "allow_missing_data": database_mode != "SILICON",
             "database_mode": database_mode,
+            "transfer_policy": transfer_policy,
         }
         if active_systems_paths is not None:
             database_kwargs["systems_paths"] = active_systems_paths
-        db = get_database(
+        db = get_database_view(
             sys_name,
             backend_name,
             resolved_version,
@@ -842,12 +843,6 @@ def cli_estimate(
                 f"Failed to load perf database for system={sys_name}, "
                 f"backend={backend_name}, version={resolved_version}."
             )
-        if database_mode != "SILICON":
-            from aiconfigurator.sdk.common import DatabaseMode
-
-            db.set_default_database_mode(DatabaseMode[database_mode])
-        if transfer_policy is not None:
-            db.set_transfer_policy(transfer_policy)
         return db
 
     if mode in ("static", "static_ctx", "static_gen"):

@@ -441,11 +441,246 @@ def test_empirical_and_silicon_databases_do_not_alias(perf_database):
     assert sil._shared_layer_mode is True
 
 
+def test_database_view_is_lightweight_and_request_local(perf_database):
+    from aiconfigurator.sdk import common
+    from aiconfigurator.sdk.operations import util_empirical
+
+    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    shared_table = {"large": object()}
+    template._test_loaded_table = shared_table
+    template_cache = template._extracted_metrics_cache
+    sentinel_grid = object()
+    util_empirical._GRID_CACHE["query-view-sentinel"] = sentinel_grid
+
+    view = perf_database.get_database_view(
+        "b200_sxm",
+        "trtllm",
+        "1.3.0rc10",
+        database_mode="HYBRID",
+        transfer_policy="off",
+    )
+
+    assert view is not template
+    assert view._test_loaded_table is shared_table
+    assert view._extracted_metrics_cache is not template_cache
+    assert view.get_default_database_mode() is common.DatabaseMode.HYBRID
+    assert view.transfer_policy == frozenset()
+    assert template.transfer_policy == common.ALL_TRANSFERS
+    assert view.supported_quant_mode._database is view
+    assert util_empirical._GRID_CACHE["query-view-sentinel"] is sentinel_grid
+
+    same_view = perf_database.get_database_view(
+        "b200_sxm",
+        "trtllm",
+        "1.3.0rc10",
+        database_mode="HYBRID",
+        transfer_policy="off",
+    )
+    assert same_view is view
+    assert len(template._query_view_cache) == 1
+
+    with pytest.raises(RuntimeError, match="immutable mode/policy"):
+        view.set_transfer_policy(None)
+    with pytest.raises(RuntimeError, match="immutable mode/policy"):
+        view.set_default_database_mode(common.DatabaseMode.SILICON)
+
+    empirical_view = perf_database.get_database_view("b200_sxm", "trtllm", "1.3.0rc10", database_mode="EMPIRICAL")
+    assert empirical_view.enable_shared_layer is False
+    assert empirical_view.get_default_database_mode() is common.DatabaseMode.EMPIRICAL
+    util_empirical._GRID_CACHE.pop("query-view-sentinel", None)
+
+
+def test_database_view_cache_is_bounded_by_mode_and_policy(perf_database):
+    from aiconfigurator.sdk import common
+
+    views = [
+        perf_database.get_database_view(
+            "b200_sxm",
+            "trtllm",
+            "1.3.0rc10",
+            database_mode="SILICON",
+        )
+        for _ in range(100)
+    ]
+
+    assert len({id(view) for view in views}) == 1
+    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    assert len(template._query_view_cache) <= len(common.DatabaseMode) * 2 ** len(common.TransferKind)
+
+
+def test_query_view_same_key_is_single_identity_under_concurrency(perf_database, monkeypatch):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from aiconfigurator.sdk import common
+
+    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    template.clear_runtime_caches()
+    original_copy = perf_database.copy.copy
+    copy_calls = []
+
+    def slow_copy(value):
+        copy_calls.append(value)
+        time.sleep(0.02)  # release the GIL so racing callers reach query_view
+        return original_copy(value)
+
+    monkeypatch.setattr(perf_database.copy, "copy", slow_copy)
+    workers = 8
+    start = threading.Barrier(workers)
+
+    def get_view():
+        start.wait()
+        return template.query_view(common.DatabaseMode.SILICON, "off")
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        views = list(executor.map(lambda _: get_view(), range(workers)))
+
+    assert len({id(view) for view in views}) == 1
+    assert len(copy_calls) == 1
+
+
+def test_query_view_creation_and_runtime_clear_are_serialized(perf_database, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from aiconfigurator.sdk import common
+
+    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    template.clear_runtime_caches()
+    original_copy = perf_database.copy.copy
+    copy_started = threading.Event()
+    allow_copy = threading.Event()
+    clear_started = threading.Event()
+    clear_finished = threading.Event()
+
+    def blocked_copy(value):
+        copy_started.set()
+        assert allow_copy.wait(timeout=2)
+        return original_copy(value)
+
+    def clear_caches():
+        clear_started.set()
+        template.clear_runtime_caches()
+        clear_finished.set()
+
+    monkeypatch.setattr(perf_database.copy, "copy", blocked_copy)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        create_future = executor.submit(template.query_view, common.DatabaseMode.SILICON, "off")
+        assert copy_started.wait(timeout=2)
+        clear_future = executor.submit(clear_caches)
+        assert clear_started.wait(timeout=2)
+        clear_finished_before_copy = clear_finished.wait(timeout=0.05)
+        allow_copy.set()
+        first = create_future.result(timeout=2)
+        clear_future.result(timeout=2)
+
+    second = template.query_view(common.DatabaseMode.SILICON, "off")
+    assert not clear_finished_before_copy
+    assert second is not first
+
+
+def test_query_view_support_matrix_list_values_are_isolated(perf_database):
+    from aiconfigurator.sdk import common
+
+    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    original_support = template.supported_quant_mode
+    marker = "__query_view_isolation__"
+    previous = original_support._resolved.get(marker)
+
+    try:
+        original_support._resolved[marker] = ["fp8"]
+        template.clear_runtime_caches()
+        lazy_view = template.query_view(common.DatabaseMode.SILICON, "off")
+        lazy_view.supported_quant_mode._resolved[marker].append("nvfp4")
+        original_support._resolved[marker].append("bfloat16")
+
+        assert lazy_view.supported_quant_mode._resolved[marker] == ["fp8", "nvfp4"]
+        assert original_support._resolved[marker] == ["fp8", "bfloat16"]
+
+        template.clear_runtime_caches()
+        template.supported_quant_mode = {"moe": ["fp8"]}
+        dict_view = template.query_view(common.DatabaseMode.SILICON, "off")
+        dict_view.supported_quant_mode["moe"].append("nvfp4")
+        template.supported_quant_mode["moe"].append("bfloat16")
+
+        assert dict_view.supported_quant_mode["moe"] == ["fp8", "nvfp4"]
+        assert template.supported_quant_mode["moe"] == ["fp8", "bfloat16"]
+    finally:
+        template.supported_quant_mode = original_support
+        if previous is None:
+            original_support._resolved.pop(marker, None)
+        else:
+            original_support._resolved[marker] = previous
+        template.clear_runtime_caches()
+
+
+def test_clearing_template_runtime_caches_invalidates_query_views(perf_database):
+    first = perf_database.get_database_view(
+        "b200_sxm",
+        "trtllm",
+        "1.3.0rc10",
+        database_mode="HYBRID",
+    )
+    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="HYBRID")
+
+    template.clear_runtime_caches()
+    second = perf_database.get_database_view(
+        "b200_sxm",
+        "trtllm",
+        "1.3.0rc10",
+        database_mode="HYBRID",
+    )
+
+    assert second is not first
+
+
+def test_query_view_rejects_mode_with_incompatible_shared_layer_template(perf_database):
+    from aiconfigurator.sdk import common
+
+    silicon_template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+
+    with pytest.raises(ValueError, match="use get_database_view"):
+        silicon_template.query_view(common.DatabaseMode.EMPIRICAL)
+
+
+def test_database_view_legacy_fallback_deep_copies_and_resets_default_policy(perf_database, monkeypatch):
+    from aiconfigurator.sdk import common
+
+    class LegacyDatabase:
+        def __init__(self):
+            self.mode = common.DatabaseMode.HYBRID
+            self.policy = frozenset()
+            self.nested = {"history": []}
+
+        def get_default_database_mode(self):
+            return self.mode
+
+        def set_default_database_mode(self, mode):
+            self.mode = mode
+            self.nested["history"].append(("mode", mode))
+
+        def set_transfer_policy(self, policy):
+            self.policy = common.resolve_transfer_policy(policy)
+            self.nested["history"].append(("policy", policy))
+
+    cached = LegacyDatabase()
+    monkeypatch.setattr(perf_database, "get_database", lambda **kwargs: cached)
+
+    view = perf_database.get_database_view("test", "backend", "version", database_mode="SILICON")
+
+    assert view is not cached
+    assert view.nested is not cached.nested
+    assert view.policy == common.ALL_TRANSFERS
+    assert view.mode is common.DatabaseMode.SILICON
+    assert cached.policy == frozenset()
+    assert cached.mode is common.DatabaseMode.HYBRID
+    assert cached.nested["history"] == []
+
+
 def test_transfer_policy_and_mode_change_clear_global_grid_cache(perf_database):
-    """The util grid cache key doesn't encode policy/mode (MoE xshape/xquant share a key),
-    so a stale grid would silently bypass a new transfer policy. set_transfer_policy and
-    set_default_database_mode must drop the global grid cache -- but only on an actual
-    change (the guards avoid thrashing it in hot paths)."""
+    """In-place mode/policy mutation eagerly drops stale/unreachable grids,
+    while no-op setter calls preserve the cache."""
     from aiconfigurator.sdk import common
     from aiconfigurator.sdk.operations import util_empirical
 

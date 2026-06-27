@@ -3,12 +3,61 @@
 
 import copy
 import math
+from types import SimpleNamespace
 
 import pytest
 
 from aiconfigurator.sdk import common, interpolation
 
 pytestmark = pytest.mark.unit
+
+
+class _LoadedMapping(dict):
+    def raise_if_not_loaded(self):
+        return None
+
+
+@pytest.mark.parametrize("phase", ["context", "generation"])
+def test_headsize_reference_grid_only_swallows_typed_coverage_misses(monkeypatch, phase):
+    from aiconfigurator.sdk.operations.attention import (
+        ContextAttention,
+        GenerationAttention,
+        _ctx_headsize_ref_grid,
+        _gen_headsize_ref_grid,
+    )
+
+    if phase == "context":
+        monkeypatch.setattr(ContextAttention, "load_data", classmethod(lambda cls, database: None))
+        helper = lambda database: _ctx_headsize_ref_grid(
+            database,
+            common.FMHAQuantMode.bfloat16,
+            common.KVCacheQuantMode.bfloat16,
+            0,
+            256,
+            0,
+            lambda *args: (1.0, 1.0, 1.0),
+        )
+        attr_name = "_context_attention_data"
+        malformed = {common.FMHAQuantMode.bfloat16: []}
+    else:
+        monkeypatch.setattr(GenerationAttention, "load_data", classmethod(lambda cls, database: None))
+        helper = lambda database: _gen_headsize_ref_grid(
+            database,
+            common.KVCacheQuantMode.bfloat16,
+            0,
+            256,
+            0,
+            lambda *args: (1.0, 1.0, 1.0),
+        )
+        attr_name = "_generation_attention_data"
+        malformed = {common.KVCacheQuantMode.bfloat16: []}
+
+    missing_database = SimpleNamespace(**{attr_name: _LoadedMapping()})
+    assert helper(missing_database) == (None, None)
+
+    malformed_database = SimpleNamespace(**{attr_name: _LoadedMapping(malformed)})
+    with pytest.raises(TypeError, match="Malformed performance data"):
+        helper(malformed_database)
 
 
 class TestContextAttention:

@@ -15,6 +15,10 @@ class UnsupportedWideepConfigError(ValueError):
     """
 
 
+class PerfDataNotAvailableError(RuntimeError):
+    """Raised when required performance data is missing for a requested mode."""
+
+
 class EmpiricalNotImplementedError(RuntimeError):
     """Raised when the empirical (SOL/util) path has no basis to estimate an op.
 

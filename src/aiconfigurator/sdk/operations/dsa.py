@@ -33,6 +33,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -474,12 +475,21 @@ class ContextDSAModule(Operation):
 
             def _select_slice(wrapper):
                 if wrapper is None:
-                    raise KeyError("context dsa module data not loaded")
-                arch_node = wrapper[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
+                    raise PerfDataNotAvailableError("Context DSA module data is not loaded.")
+                arch_node = util_empirical.require_data_slice(
+                    wrapper,
+                    fmha_quant_mode,
+                    kvcache_quant_mode,
+                    gemm_quant_mode,
+                    architecture,
+                )
                 # Loader stores ...[architecture][dsa_backend][num_heads]...; descend past
                 # the backend axis exactly like the silicon path. Without this the grid sees
                 # dsa_backend strings where it expects the num_heads axis and never resolves.
-                return _select_dsa_backend(arch_node, dsa_backend)
+                selected = _select_dsa_backend(arch_node, dsa_backend)
+                if selected is None:
+                    raise PerfDataNotAvailableError(f"No context DSA data for backend {dsa_backend!r}.")
+                return selected
 
             def _slice():
                 cls.load_data(database)
@@ -489,7 +499,7 @@ class ContextDSAModule(Operation):
                 cls.load_data(database)
                 raw_wrapper = getattr(database, "_raw_context_dsa_module_data", None)
                 if raw_wrapper is None or not getattr(raw_wrapper, "loaded", True):
-                    raise KeyError("raw context dsa module data not loaded")
+                    raise PerfDataNotAvailableError("Raw context DSA module data is not loaded.")
                 return _select_slice(raw_wrapper)
 
             # Context DSA's measured grid is ragged in batch: larger batches
@@ -519,7 +529,7 @@ class ContextDSAModule(Operation):
                         for batch, leaf in batch_data.items():
                             batch_curves.setdefault(batch, {})[sequence] = leaf
                 if not batch_curves:
-                    raise KeyError("exact raw context DSA slice is empty")
+                    raise PerfDataNotAvailableError("The exact raw context DSA slice is empty.")
 
                 raw_grid = util_empirical.grid_for(
                     (
@@ -550,16 +560,16 @@ class ContextDSAModule(Operation):
                 )
                 if bracketed is not None:
                     return bracketed[0]
-            except Exception:
+            except PerfDataNotAvailableError:
                 # Exact raw data is an optimization of the own-shape path, not
                 # a new failure mode. Preserve the established NN / transfer
-                # fallback for malformed, absent, or non-exact slices.
+                # fallback for absent or non-exact slices.
                 pass
 
             try:
                 slc = _slice()
                 has_prefix = _dsa_module_has_prefix_axis(slc)
-            except Exception:
+            except PerfDataNotAvailableError:
                 slc = None
                 has_prefix = architecture == "GlmMoeDsaForCausalLM"  # data unavailable: prior heuristic
 
@@ -655,19 +665,29 @@ class ContextDSAModule(Operation):
                     f"backend='{database.backend}', version='{database.version}'."
                 )
             try:
-                dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
-                dsa_dict = _select_dsa_backend(dsa_dict, dsa_backend)
-            except (KeyError, TypeError) as exc:
+                dsa_dict = util_empirical.require_data_slice(
+                    dsa_module_data,
+                    fmha_quant_mode,
+                    kvcache_quant_mode,
+                    gemm_quant_mode,
+                    architecture,
+                )
+            except PerfDataNotAvailableError as exc:
                 raise missing_context_dsa_error() from exc
+            dsa_dict = _select_dsa_backend(dsa_dict, dsa_backend)
             raw_dsa_dict = None
             raw_dsa_module_data = database._raw_context_dsa_module_data
             if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
                 try:
-                    raw_dsa_dict = raw_dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][
-                        architecture
-                    ]
+                    raw_dsa_dict = util_empirical.require_data_slice(
+                        raw_dsa_module_data,
+                        fmha_quant_mode,
+                        kvcache_quant_mode,
+                        gemm_quant_mode,
+                        architecture,
+                    )
                     raw_dsa_dict = _select_dsa_backend(raw_dsa_dict, dsa_backend)
-                except (KeyError, TypeError):
+                except PerfDataNotAvailableError:
                     raw_dsa_dict = None
 
             def _finite_result(result):
@@ -735,12 +755,9 @@ class ContextDSAModule(Operation):
                     if not _finite_result(result):
                         result = None
                 if result is None:
-                    try:
-                        from aiconfigurator.sdk.operations.dsv4 import _dsv4_robust_3d_lookup
+                    from aiconfigurator.sdk.operations.dsv4 import _dsv4_robust_3d_lookup
 
-                        result = _dsv4_robust_3d_lookup(database, prefix_slice, num_heads, s, b)
-                    except Exception:
-                        return None
+                    result = _dsv4_robust_3d_lookup(database, prefix_slice, num_heads, s, b)
                 return result if _finite_result(result) else None
 
             def _interp_results_1d(x0, x1, r0, r1, x):
@@ -778,10 +795,10 @@ class ContextDSAModule(Operation):
                     )
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
-            except (KeyError, TypeError, ValueError, AssertionError) as exc:
+            except interpolation.InterpolationDataNotAvailableError as exc:
                 raise missing_context_dsa_error() from exc
             return database._interp_pr(latency, energy=energy)
-        except Exception as e:
+        except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError) as e:
             if database_mode == common.DatabaseMode.HYBRID:
                 logger.debug(
                     f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
@@ -792,28 +809,27 @@ class ContextDSAModule(Operation):
             if isinstance(e, PerfDataNotAvailableError):
                 logger.warning(str(e))
                 raise
-            if _is_dsa_interpolation_miss(e):
-                message = _format_dsa_unavailable_message(
-                    "Context",
-                    e,
-                    b=b,
-                    s=s,
-                    prefix=prefix,
-                    num_heads=num_heads,
-                    architecture=architecture,
-                    index_n_heads=index_n_heads,
-                    index_head_dim=index_head_dim,
-                    index_topk=index_topk,
-                )
-                logger.warning(message)
-                raise PerfDataNotAvailableError(message) from None
-            else:
-                logger.exception(
-                    f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
-                    f"{index_n_heads=}, {index_head_dim=}, {index_topk=}, "
-                    f"{kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}."
-                )
-                raise
+            message = _format_dsa_unavailable_message(
+                "Context",
+                e,
+                b=b,
+                s=s,
+                prefix=prefix,
+                num_heads=num_heads,
+                architecture=architecture,
+                index_n_heads=index_n_heads,
+                index_head_dim=index_head_dim,
+                index_topk=index_topk,
+            )
+            logger.warning(message)
+            raise PerfDataNotAvailableError(message) from None
+        except Exception:
+            logger.exception(
+                f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
+                f"{index_n_heads=}, {index_head_dim=}, {index_topk=}, "
+                f"{kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}."
+            )
+            raise
 
     # ------------------------------------------------------------------
     # Op contract
@@ -1213,15 +1229,23 @@ class GenerationDSAModule(Operation):
                     else database._generation_dsa_module_data
                 )
                 if wrapper is None:
-                    raise KeyError("generation dsa module data not loaded")
-                arch_node = wrapper[kv_cache_dtype][gemm_quant_mode][architecture]
+                    raise PerfDataNotAvailableError("Generation DSA module data is not loaded.")
+                arch_node = util_empirical.require_data_slice(
+                    wrapper,
+                    kv_cache_dtype,
+                    gemm_quant_mode,
+                    architecture,
+                )
                 # ...[architecture][dsa_backend][num_heads]...; descend past the backend
                 # axis like the silicon path so the grid resolves the num_heads axis.
-                return _select_dsa_backend(arch_node, dsa_backend)
+                selected = _select_dsa_backend(arch_node, dsa_backend)
+                if selected is None:
+                    raise PerfDataNotAvailableError(f"No generation DSA data for backend {dsa_backend!r}.")
+                return selected
 
             try:
                 data_slice = _slice()
-            except Exception:
+            except PerfDataNotAvailableError:
                 # Match ``grid_for``'s best-effort contract: unavailable table
                 # data is reported by ``estimate`` as an empirical coverage
                 # miss, not leaked as a SILICON file-loading exception.
@@ -1249,7 +1273,7 @@ class GenerationDSAModule(Operation):
                     depth=2,
                 )
                 query = (b, s)
-            else:
+            elif data_slice is not None:
                 grid = util_empirical.grid_for(
                     (
                         "gen_dsa",
@@ -1265,6 +1289,9 @@ class GenerationDSAModule(Operation):
                     lambda c: get_sol(c[1], c[2], c[0], kv_cache_dtype)[0],  # c = (num_heads, b, s)
                     depth=3,
                 )
+                query = (num_heads, b, s)
+            else:
+                grid = None
                 query = (num_heads, b, s)
             latency, _ = util_empirical.estimate(sol_time, query, grid)
             return latency
@@ -1299,16 +1326,29 @@ class GenerationDSAModule(Operation):
                     f"backend='{database.backend}', version='{database.version}'."
                 )
             try:
-                dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
+                try:
+                    dsa_dict = util_empirical.require_data_slice(
+                        dsa_module_data,
+                        kv_cache_dtype,
+                        gemm_quant_mode,
+                        architecture,
+                    )
+                except PerfDataNotAvailableError as exc:
+                    raise missing_generation_dsa_error() from exc
                 dsa_dict = _select_dsa_backend(dsa_dict, dsa_backend)
 
                 raw_dsa_dict = None
                 raw_dsa_module_data = getattr(database, "_raw_generation_dsa_module_data", None)
                 if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
                     try:
-                        raw_dsa_dict = raw_dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
+                        raw_dsa_dict = util_empirical.require_data_slice(
+                            raw_dsa_module_data,
+                            kv_cache_dtype,
+                            gemm_quant_mode,
+                            architecture,
+                        )
                         raw_dsa_dict = _select_dsa_backend(raw_dsa_dict, dsa_backend)
-                    except (KeyError, TypeError):
+                    except PerfDataNotAvailableError:
                         raw_dsa_dict = None
 
                 def boundary_util_value(raw_seq_dict, batch_key):
@@ -1416,10 +1456,10 @@ class GenerationDSAModule(Operation):
                     )
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
-            except (KeyError, TypeError, ValueError, AssertionError) as exc:
+            except interpolation.InterpolationDataNotAvailableError as exc:
                 raise missing_generation_dsa_error() from exc
             return database._interp_pr(latency, energy=energy)
-        except Exception as e:
+        except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError) as e:
             if database_mode == common.DatabaseMode.HYBRID:
                 logger.debug(
                     f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "
@@ -1430,27 +1470,26 @@ class GenerationDSAModule(Operation):
             if isinstance(e, PerfDataNotAvailableError):
                 logger.warning(str(e))
                 raise
-            if _is_dsa_interpolation_miss(e):
-                message = _format_dsa_unavailable_message(
-                    "Generation",
-                    e,
-                    b=b,
-                    s=s,
-                    num_heads=num_heads,
-                    architecture=architecture,
-                    index_n_heads=index_n_heads,
-                    index_head_dim=index_head_dim,
-                    index_topk=index_topk,
-                )
-                logger.warning(message)
-                raise PerfDataNotAvailableError(message) from None
-            else:
-                logger.exception(
-                    f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "
-                    f"{index_n_heads=}, {index_head_dim=}, {index_topk=}, "
-                    f"{kv_cache_dtype=}, {database_mode=}."
-                )
-                raise
+            message = _format_dsa_unavailable_message(
+                "Generation",
+                e,
+                b=b,
+                s=s,
+                num_heads=num_heads,
+                architecture=architecture,
+                index_n_heads=index_n_heads,
+                index_head_dim=index_head_dim,
+                index_topk=index_topk,
+            )
+            logger.warning(message)
+            raise PerfDataNotAvailableError(message) from None
+        except Exception:
+            logger.exception(
+                f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "
+                f"{index_n_heads=}, {index_head_dim=}, {index_topk=}, "
+                f"{kv_cache_dtype=}, {database_mode=}."
+            )
+            raise
 
     # ------------------------------------------------------------------
     # Op contract

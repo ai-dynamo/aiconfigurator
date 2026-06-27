@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, ClassVar
 import numpy as np
 
 from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+from aiconfigurator.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -479,7 +479,7 @@ class GEMM(Operation):
                 cls.load_data(database)
                 wrapper = database._gemm_data
                 wrapper.raise_if_not_loaded()
-                return wrapper[tqm]  # m -> n -> k -> leaf
+                return util_empirical.require_data_slice(wrapper, tqm)  # m -> n -> k -> leaf
 
             grid = util_empirical.grid_for(
                 ("gemm", database.system, database.backend, database.version, tqm.name),
@@ -530,8 +530,6 @@ class GEMM(Operation):
             gemm_data_wrapper.raise_if_not_loaded()
             if table_quant_mode not in gemm_data_wrapper:
                 supported = sorted([q.name for q in gemm_data_wrapper])
-                from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
-
                 raise PerfDataNotAvailableError(
                     "GEMM perf data not available for requested quant mode. "
                     f"system='{database.system}', backend='{database.backend}', version='{database.version}', "
@@ -555,9 +553,7 @@ class GEMM(Operation):
 
             try:
                 result = interpolation.interp_3d(m, n, k, gemm_data, "cubic", database._extracted_metrics_cache)
-            except ValueError as exc:
-                from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
-
+            except interpolation.InterpolationDataNotAvailableError as exc:
                 raise PerfDataNotAvailableError(
                     "GEMM perf data not available for requested shape. "
                     f"system='{database.system}', backend='{database.backend}', version='{database.version}', "
@@ -598,10 +594,8 @@ class GEMM(Operation):
                 cls.load_data(database)
                 wrapper = database._compute_scale_data
                 wrapper.raise_if_not_loaded()
-                if table_quant_mode not in wrapper:
-                    raise KeyError("compute_scale quant not collected")
-                table = wrapper[table_quant_mode]
-            except Exception as exc:
+                table = util_empirical.require_data_slice(wrapper, table_quant_mode)
+            except PerfDataNotAvailableError as exc:
                 raise EmpiricalNotImplementedError(
                     f"No empirical compute_scale data is available for m={m_v}, k={k_v}."
                 ) from exc
@@ -695,9 +689,7 @@ class GEMM(Operation):
                 cls.load_data(database)
                 wrapper = database._scale_matrix_data
                 wrapper.raise_if_not_loaded()
-                if table_quant_mode not in wrapper:
-                    raise KeyError("scale_matrix quant not collected")
-                return wrapper[table_quant_mode]
+                return util_empirical.require_data_slice(wrapper, table_quant_mode)
 
             grid = util_empirical.grid_for(
                 ("scale_matrix", database.system, database.backend, database.version, table_quant_mode.name),

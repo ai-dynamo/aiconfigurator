@@ -226,6 +226,32 @@ class TestNcclOnecclFallback:
                 database_mode=common.DatabaseMode.HYBRID,
             )
 
+    def test_empty_nccl_operation_bucket_is_typed_coverage_miss(self, _db_factory):
+        nccl = {common.CommQuantMode.half: {"all_reduce": {}}}
+        db = _db_factory(nccl_data=nccl, oneccl_data=None)
+
+        with pytest.raises(PerfDataNotAvailableError):
+            db.query_nccl(
+                common.CommQuantMode.half,
+                4,
+                "all_reduce",
+                1024,
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
+    def test_hybrid_does_not_hide_malformed_nccl_bucket(self, _db_factory):
+        nccl = {common.CommQuantMode.half: {"all_reduce": []}}
+        db = _db_factory(nccl_data=nccl, oneccl_data=None)
+
+        with pytest.raises(TypeError, match="Malformed NCCL performance data"):
+            db.query_nccl(
+                common.CommQuantMode.half,
+                4,
+                "all_reduce",
+                1024,
+                database_mode=common.DatabaseMode.HYBRID,
+            )
+
     def test_single_gpu_returns_zero(self, _db_factory):
         """num_gpus=1 is a fast-path returning zero latency regardless of data."""
         db = _db_factory(nccl_data=None, oneccl_data=None)

@@ -16,11 +16,13 @@ tail.
 Every op's empirical estimate is
 
 ```
-latency = SOL(query) / util ,   util = SOL / measured ∈ (0, 1]
+latency = SOL(query) / util ,   util = SOL / measured > 0
 ```
 
-`util` (the achieved kernel efficiency) is read best-effort from collected data in
-per-axis normalised log space. One-dimensional curves use the two bracketing samples
+`util` is an effective calibration factor, not a bounded physical efficiency. It can
+exceed 1 when hardware/kernel effects are not represented by the analytic SOL baseline;
+large values are data/model sanity signals and are not silently clamped. It is read
+best-effort from collected data in per-axis normalised log space. One-dimensional curves use the two bracketing samples
 (`k=2`, `p=1` inverse-distance weighting), with exact hits preserved and out-of-range
 queries clamped to boundary util. Generic multi-dimensional grids retain nearest-
 neighbour lookup because their axes may mix numeric coordinates with categorical/kernel
@@ -96,27 +98,28 @@ time, so a cached DB can be retuned. External surfaces:
 
 The transfer kind that produced a value is captured (`capture_provenance()` wraps a run;
 `estimate()` notes its tier at the single chokepoint, ops tag the specific kind). The worst
-(least-confident) tier per PASS is recorded in a `Source` column. Predictions are unchanged —
-this is purely observability.
+(least-confident) tier per successful run is recorded in a `Source` column.
 
 ### Support matrix: silicon-first with hybrid rescue (default)
 
 The support matrix runs each cell in **SILICON first** (including declared shared-layer
-collected rows) and re-runs **only the genuine FAILs** in HYBRID. A `FAIL → PASS`
-transition is therefore unambiguously a hybrid rescue:
+collected rows). It retries only structured performance-data misses, plus explicitly
+classified framework/data gaps, in HYBRID. Arbitrary programming errors are not retried.
+`PASS` is reserved for measured-silicon support; a successful rescue is reported separately
+as `HYBRID_PASS`:
 
-| silicon | hybrid | `Source` |
-|---|---|---|
-| PASS | — | `silicon` |
-| FAIL | PASS, an empirical tier fired | that tier (`xshape` / `xquant` / `xprofile` / `xop`) |
-| FAIL | PASS, no empirical tier | `empirical` |
-| FAIL | FAIL | FAIL |
-| HW / FRAMEWORK incompatible | — | unchanged (not rescuable, not retried) |
+| silicon | hybrid | `Status` | `Source` |
+|---|---|---|---|
+| PASS | — | `PASS` | `silicon` |
+| structured/known data gap | PASS, an empirical tier fired | `HYBRID_PASS` | that tier (`xshape` / `xquant` / `xprofile` / `xop`) |
+| structured/known data gap | PASS, no empirical tier | `HYBRID_PASS` | `empirical` |
+| structured/known data gap | FAIL | original silicon status | empty |
+| programming error or HW incompatible | — | original status | empty |
 
 Shared-layer hits remain `silicon`: they are real collected rows merged before lookup, and
-the loader does not retain per-row source provenance after the merge. Runtime is ~unchanged
-since only the minority of FAILs get a second pass. Set `AIC_SM_ALLOW_HYBRID=0` for a
-SILICON-only matrix (no rescue).
+the loader does not retain per-row source provenance after the merge. Replay commands use
+the database mode that produced the row. Set `AIC_SM_ALLOW_HYBRID=0` for a SILICON-only
+matrix (no rescue).
 
 ## Scope
 
@@ -196,3 +199,15 @@ The primary off-grid coverage is 185/195 (94.9%) for prefill and 170/180 (94.4%)
 decode. Five DeepSeek-V3.2 TP2/PP2 prefill probes are OOM. Kimi-K2.5 is a strict
 EMPIRICAL own-data gap, while DeepSeek-V4-Flash decode has no SILICON reference; neither
 is included in MAPE.
+
+### Data-quality diagnostic: very large util
+
+An observed util of 14.58 is not treated as a valid efficiency ceiling or silently
+clamped. It comes from the B200/SGLang 0.5.10 context-attention row at
+`b=8, s=16384, n=64, n_kv=1, head_dim=256, window_size=0`: SOL is 31.275 ms while the
+stored latency is 2.145 ms. The same table reports the supposedly full-attention
+`window_size=0` case faster than windows 128 and 1024. The collector writes the database
+value `0` directly into SGLang's runtime field, whose full-attention sentinel is `-1`, so
+this row measured a near-zero left window rather than full attention. This is a bad-data
+signal requiring recollection, not a reason to cap util; the collector/data repair is
+kept outside this modeling PR.

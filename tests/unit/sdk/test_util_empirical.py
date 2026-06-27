@@ -5,11 +5,18 @@ import math
 
 import pytest
 
+from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
 from aiconfigurator.sdk.operations.util_empirical import (
+    ReferenceCandidate,
     UtilGrid,
     UtilSample,
     bracketed_2d_util,
+    clear_grid_cache,
     estimate_bracketed_2d,
+    grid_for,
+    grid_from_reference,
+    require_data_slice,
 )
 
 pytestmark = pytest.mark.unit
@@ -188,3 +195,182 @@ def test_estimate_bracketed_2d_records_provenance_only_on_success():
 
     assert result == pytest.approx((2.0, 0.45))
     assert tags == {"empirical"}
+
+
+@pytest.mark.parametrize(
+    "coverage_error",
+    [
+        PerfDataNotAvailableError("table is not loaded"),
+        InterpolationDataNotAvailableError("slice cannot be interpolated"),
+    ],
+)
+def test_grid_for_returns_none_for_typed_coverage_failures(coverage_error):
+    clear_grid_cache()
+
+    def unavailable_slice():
+        raise coverage_error
+
+    assert grid_for(("typed-coverage", type(coverage_error)), unavailable_slice, lambda _: 1.0, depth=1) is None
+
+
+def test_grid_cache_isolated_by_loaded_slice_identity():
+    clear_grid_cache()
+    first_data = {1: 2.0}
+    second_data = {1: 4.0}
+
+    first = grid_for(("same-logical-view",), lambda: first_data, lambda _: 1.0, depth=1)
+    second = grid_for(("same-logical-view",), lambda: second_data, lambda _: 1.0, depth=1)
+    first_again = grid_for(("same-logical-view",), lambda: first_data, lambda _: 1.0, depth=1)
+
+    assert first.util((1.0,)) == pytest.approx(0.5)
+    assert second.util((1.0,)) == pytest.approx(0.25)
+    assert first_again is first
+
+
+def test_reference_grid_cache_isolated_by_selected_candidate_identity():
+    clear_grid_cache()
+    first_data = {1: 2.0}
+    second_data = {1: 4.0}
+
+    def candidate(node):
+        return [ReferenceCandidate(features=(1.0,), node=node, sol_fn=lambda _: 1.0)]
+
+    first = grid_from_reference(("same-reference-view",), (1.0,), lambda: candidate(first_data), depth=1)
+    second = grid_from_reference(("same-reference-view",), (1.0,), lambda: candidate(second_data), depth=1)
+    first_again = grid_from_reference(("same-reference-view",), (1.0,), lambda: candidate(first_data), depth=1)
+
+    assert first.util((1.0,)) == pytest.approx(0.5)
+    assert second.util((1.0,)) == pytest.approx(0.25)
+    assert first_again is first
+
+
+def test_reference_selection_cache_avoids_reenumerating_candidates_and_keeps_provenance():
+    clear_grid_cache()
+    data = {1: 2.0}
+    calls = 0
+
+    def candidates():
+        nonlocal calls
+        calls += 1
+        return [
+            ReferenceCandidate(
+                features=(1.0,),
+                node=data,
+                sol_fn=lambda _: 1.0,
+                provenance="xshape",
+            )
+        ]
+
+    first = grid_from_reference(
+        ("stable-selection",),
+        (1.0,),
+        candidates,
+        depth=1,
+        selection_key=(id(data), "policy"),
+    )
+    second = grid_from_reference(
+        ("stable-selection",),
+        (1.0,),
+        candidates,
+        depth=1,
+        selection_key=(id(data), "policy"),
+    )
+
+    assert second is first
+    assert calls == 1
+    assert first.reference_provenance == "xshape"
+
+
+def test_reference_grid_cache_isolated_by_selection_and_provenance():
+    clear_grid_cache()
+    data = {1: 2.0}
+
+    def candidate(provenance):
+        return [
+            ReferenceCandidate(
+                features=(1.0,),
+                node=data,
+                sol_fn=lambda _: 1.0,
+                provenance=provenance,
+            )
+        ]
+
+    first = grid_from_reference(
+        ("same-reference-node",),
+        (1.0,),
+        lambda: candidate("xshape"),
+        depth=1,
+        selection_key=(id(data), "xshape-policy"),
+    )
+    second = grid_from_reference(
+        ("same-reference-node",),
+        (1.0,),
+        lambda: candidate("xquant"),
+        depth=1,
+        selection_key=(id(data), "xquant-policy"),
+    )
+
+    assert second is not first
+    assert first.reference_provenance == "xshape"
+    assert second.reference_provenance == "xquant"
+
+
+def test_require_data_slice_types_only_explicit_missing_keys():
+    assert require_data_slice({"quant": {"shape": {1: 2.0}}}, "quant", "shape") == {1: 2.0}
+
+    with pytest.raises(PerfDataNotAvailableError, match="not loaded"):
+        require_data_slice(None, "quant")
+
+    with pytest.raises(PerfDataNotAvailableError, match="requested slice"):
+        require_data_slice({"quant": {}}, "quant", "shape")
+
+    with pytest.raises(PerfDataNotAvailableError, match="requested slice"):
+        require_data_slice({"quant": {}}, "quant")
+
+    with pytest.raises(TypeError, match="Malformed performance data"):
+        require_data_slice({"quant": []}, "quant", "shape")
+
+
+@pytest.mark.parametrize(
+    "programming_error",
+    [
+        KeyError("unexpected schema key"),
+        IndexError("unexpected schema position"),
+        ValueError("invalid latency value"),
+        RuntimeError("grid builder bug"),
+    ],
+)
+def test_grid_for_propagates_programming_and_schema_errors(programming_error):
+    clear_grid_cache()
+
+    def broken_slice():
+        raise programming_error
+
+    with pytest.raises(type(programming_error)) as exc_info:
+        grid_for(("programming-error", type(programming_error)), broken_slice, lambda _: 1.0, depth=1)
+
+    assert exc_info.value is programming_error
+
+
+def test_grid_from_reference_returns_none_for_typed_coverage_failure():
+    clear_grid_cache()
+
+    def unavailable_candidates():
+        raise PerfDataNotAvailableError("reference slice is unavailable")
+
+    assert grid_from_reference(("typed-reference-miss",), (1.0,), unavailable_candidates, depth=1) is None
+
+
+def test_grid_from_reference_propagates_builder_errors():
+    clear_grid_cache()
+    candidate = ReferenceCandidate(features=(1.0,), node={1: 1.0}, sol_fn=lambda _: 1.0)
+
+    def broken_candidates():
+        raise TypeError("malformed reference table")
+
+    with pytest.raises(TypeError, match="malformed reference table"):
+        grid_from_reference(("broken-reference",), (1.0,), broken_candidates, depth=1)
+
+    # A valid reference still constructs the expected grid after the failed build.
+    grid = grid_from_reference(("valid-reference",), (1.0,), lambda: [candidate], depth=1)
+    assert grid.util((1.0,)) == pytest.approx(1.0)

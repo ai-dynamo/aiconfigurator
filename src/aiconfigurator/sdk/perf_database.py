@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import copy
 import functools
 import importlib.resources as pkg_resources
 import logging
 import os
+import threading
 import traceback
 from collections import UserDict, defaultdict
 from collections.abc import Callable, Iterable
@@ -17,6 +19,7 @@ import yaml
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.common import PerfDataFilename, parse_support_matrix_version
+from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
 from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.system_spec import SystemSpec
@@ -25,9 +28,28 @@ databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
-_MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError, InterpolationDataNotAvailableError)
+_MISSING_SILICON_DATA_EXCEPTIONS = (PerfDataNotAvailableError, InterpolationDataNotAvailableError)
 SHARED_LAYER_REUSE_MARKER = "SHARED_LAYER_REUSE.txt"
 _DATABASE_VERSION_METADATA_FILES = {SHARED_LAYER_REUSE_MARKER, "INCOMPLETE.txt"}
+
+
+class _QueryViewLock:
+    """Small pickle/deepcopy-safe wrapper around a re-entrant thread lock."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+
+    def __enter__(self):
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self._lock.release()
+
+    def __reduce__(self):
+        # Runtime locks have no serializable state. A copied/unpickled database
+        # must coordinate its own view cache with a fresh lock.
+        return (type(self), ())
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
@@ -133,10 +155,6 @@ def build_no_databases_message() -> str:
     else:
         lines.append("Tip: try adding `default` to --systems-paths and run again.")
     return "\n".join(lines)
-
-
-class PerfDataNotAvailableError(RuntimeError):
-    """Raised when required performance data is missing or unsupported for a requested mode."""
 
 
 def has_perf_data_not_available_cause(error: BaseException) -> bool:
@@ -536,6 +554,69 @@ def get_database(
     return None
 
 
+def get_database_view(
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
+    allow_missing_data: bool = False,
+    database_mode: str | common.DatabaseMode | None = None,
+    transfer_policy=None,
+) -> PerfDatabase | None:
+    """Return an isolated, lightweight query view over a cached database.
+
+    The cached :class:`PerfDatabase` is a data template. Query mode and transfer
+    policy are request-local state and must never be mutated on that template.
+    The view shares loaded, read-only perf tables while owning its interpolation
+    cache and lazy support-matrix binding. ``database_mode`` is also forwarded to
+    :func:`get_database` so EMPIRICAL/SOL views do not accidentally inherit the
+    shared SILICON data layer.
+    """
+    mode = (
+        common.DatabaseMode.SILICON
+        if database_mode is None
+        else (
+            database_mode
+            if isinstance(database_mode, common.DatabaseMode)
+            else common.DatabaseMode[database_mode.upper()]
+        )
+    )
+    database_kwargs = {
+        "system": system,
+        "backend": backend,
+        "version": version,
+        "allow_missing_data": allow_missing_data,
+        "database_mode": mode.name,
+    }
+    if systems_paths is not None:
+        database_kwargs["systems_paths"] = systems_paths
+    database = get_database(**database_kwargs)
+    if database is None:
+        return None
+
+    query_view = getattr(database, "query_view", None)
+    if callable(query_view):
+        return query_view(mode, transfer_policy)
+
+    # Keep custom/injected database implementations working. Production
+    # PerfDatabase instances always take the query_view path above; the rare
+    # duck-typed fallback uses a deep copy because custom setters may mutate
+    # nested state we cannot safely classify as read-only.
+    view = copy.deepcopy(database)
+    set_transfer_policy = getattr(view, "set_transfer_policy", None)
+    if callable(set_transfer_policy):
+        # ``None`` resolves to the default/all policy; it must not inherit a
+        # narrowed policy from the cached legacy object.
+        set_transfer_policy(transfer_policy)
+    set_mode = getattr(view, "set_default_database_mode", None)
+    if callable(set_mode):
+        get_mode = getattr(view, "get_default_database_mode", None)
+        current_mode = get_mode() if callable(get_mode) else None
+        if current_mode != mode:
+            set_mode(mode)
+    return view
+
+
 DatabaseRef = tuple[str, str, str, str]
 LoadedDatabaseResult = tuple[DatabaseRef, object | None, str | None]
 
@@ -672,7 +753,11 @@ def _store_loaded_database(
 ) -> None:
     system, backend, version, systems_root = ref
     database_dict[system][backend][version] = database
-    databases_cache[(systems_root, system, False)][backend][version] = database
+    # get_all_databases() constructs the default (shared-enabled) view. Preserve
+    # that identity when importing a database from a worker; putting it in the
+    # formula-only slot would make a later EMPIRICAL lookup reuse shared rows.
+    shared_flag = database.enable_shared_layer
+    databases_cache[(systems_root, system, shared_flag)][backend][version] = database
 
 
 def clear_database_runtime_caches(system: str, backend: str, version: str) -> None:
@@ -1332,6 +1417,13 @@ class PerfDatabase:
         # matrix below) needs it. ``PerfDatabase()`` opens zero CSVs.
         self.supported_quant_mode = _LazySupportMatrix(self)
         self._finalize_loaded_data()
+        # A template owns at most one immutable lightweight view per
+        # (mode, transfer-policy) pair. Reusing those views keeps function-level
+        # query LRUs effective and prevents them from retaining an unbounded
+        # sequence of one-shot ``self`` objects.
+        self._query_view_cache: dict[tuple[common.DatabaseMode, frozenset[common.TransferKind]], PerfDatabase] = {}
+        self._query_view_lock = _QueryViewLock()
+        self._is_query_view = False
 
     def _finalize_loaded_data(self) -> None:
         """Stop loader-time defaultdicts from mutating database state after construction."""
@@ -1605,12 +1697,68 @@ class PerfDatabase:
         """
         Set the default database mode
         """
+        if getattr(self, "_is_query_view", False) and mode != self._default_database_mode:
+            raise RuntimeError(
+                "A cached query view has immutable mode/policy state; request a different view with "
+                "get_database_view()."
+            )
         if mode != self._default_database_mode:
             self.clear_runtime_caches()
             from aiconfigurator.sdk.operations import util_empirical
 
             util_empirical.clear_grid_cache()  # mode change alters which data/transfers feed grids
             self._default_database_mode = mode
+
+    def query_view(self, mode: common.DatabaseMode, transfer_policy=None) -> PerfDatabase:
+        """Return an immutable mode/policy view without copying loaded tables."""
+        expected_shared_layer = _shared_layer_enabled(mode.name)
+        if self.enable_shared_layer != expected_shared_layer:
+            raise ValueError(
+                f"Cannot create a {mode.name} query view from a database template with "
+                f"enable_shared_layer={self.enable_shared_layer}; use get_database_view() "
+                "so the correct data template is selected."
+            )
+
+        policy = common.resolve_transfer_policy(transfer_policy)
+        with self._get_query_view_lock():
+            cache = getattr(self, "_query_view_cache", None)
+            if cache is None:
+                cache = self._query_view_cache = {}
+            cache_key = (mode, policy)
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+            view = copy.copy(self)
+            view._extracted_metrics_cache = {}
+            view._query_view_cache = {}
+            view._query_view_lock = _QueryViewLock()
+            view._is_query_view = True
+
+            if isinstance(self.supported_quant_mode, _LazySupportMatrix):
+                lazy_support = _LazySupportMatrix(view)
+                lazy_support._resolved = {
+                    key: list(value) for key, value in self.supported_quant_mode._resolved.items()
+                }
+                view.supported_quant_mode = lazy_support
+            elif isinstance(self.supported_quant_mode, dict):
+                view.supported_quant_mode = copy.deepcopy(self.supported_quant_mode)
+
+            # A fresh view has no per-self query entries and owns an empty metric
+            # cache, so assign request-local state directly. Calling the public
+            # setters here would unnecessarily clear function-level LRU caches and
+            # util grids belonging to other live views.
+            view._default_database_mode = mode
+            view._transfer_policy = policy
+            cache[cache_key] = view
+            return view
+
+    def _get_query_view_lock(self) -> _QueryViewLock:
+        """Return this database's lock, lazily supporting bare test doubles."""
+        lock = getattr(self, "_query_view_lock", None)
+        if lock is None:
+            lock = self._query_view_lock = _QueryViewLock()
+        return lock
 
     def get_default_database_mode(self) -> common.DatabaseMode:
         """
@@ -1626,6 +1774,11 @@ class PerfDatabase:
         Clears runtime caches so already-cached query results don't mask the new policy.
         """
         policy = common.resolve_transfer_policy(spec)
+        if getattr(self, "_is_query_view", False) and policy != self._transfer_policy:
+            raise RuntimeError(
+                "A cached query view has immutable mode/policy state; request a different view with "
+                "get_database_view()."
+            )
         if policy != self._transfer_policy:
             self.clear_runtime_caches()
             from aiconfigurator.sdk.operations import util_empirical
@@ -1653,12 +1806,14 @@ class PerfDatabase:
 
     def clear_runtime_caches(self) -> None:
         """Clear cached query/interpolation state while preserving loaded op data."""
-        self._extracted_metrics_cache.clear()
-        for attr_name in dir(self):
-            attr = getattr(self, attr_name)
-            cache_clear = getattr(attr, "cache_clear", None)
-            if callable(cache_clear):
-                cache_clear()
+        with self._get_query_view_lock():
+            self._extracted_metrics_cache.clear()
+            getattr(self, "_query_view_cache", {}).clear()
+            for attr_name in dir(self):
+                attr = getattr(self, attr_name)
+                cache_clear = getattr(attr, "cache_clear", None)
+                if callable(cache_clear):
+                    cache_clear()
 
     @staticmethod
     def _interp_pr(latency: float, energy: float = 0.0) -> PerformanceResult:
@@ -1683,7 +1838,8 @@ class PerfDatabase:
             get_silicon: Callable that performs the database query and returns PerformanceResult
             get_empirical: Callable that returns empirical latency (float) - should be a lambda or function
                           that captures the necessary arguments
-            database_mode: Database mode (SILICON or HYBRID) - HYBRID mode will fall back to empirical on exception
+            database_mode: Database mode (SILICON or HYBRID) - HYBRID mode falls back to empirical only when
+                           silicon data is explicitly reported unavailable
             error_msg: Error message for logging when query fails
 
         Returns:
@@ -1695,7 +1851,7 @@ class PerfDatabase:
         try:
             return get_silicon()
 
-        except Exception as e:
+        except _MISSING_SILICON_DATA_EXCEPTIONS as e:
             if database_mode == common.DatabaseMode.HYBRID:
                 debug_msg = error_msg + " Will try empirical mode."
                 logger.debug(debug_msg)
@@ -1705,18 +1861,15 @@ class PerfDatabase:
             # PerfDataNotAvailableError is a structured signal that callers (e.g.
             # FallbackOp, Pareto search) are expected to handle. Log it without a
             # stack trace so successful searches that merely skip a candidate do
-            # not spam internal tracebacks. Genuinely unexpected exceptions still
-            # get the full traceback via logger.exception.
+            # not spam internal tracebacks.
             if isinstance(e, PerfDataNotAvailableError):
                 logger.warning(exception_msg)
-            elif isinstance(e, _MISSING_SILICON_DATA_EXCEPTIONS):
+            else:
                 missing_data_error = PerfDataNotAvailableError(
                     f"{exception_msg} Missing silicon data for the requested lookup."
                 )
                 logger.warning(str(missing_data_error))
                 raise missing_data_error from e
-            else:
-                logger.exception(exception_msg)
             # Modify the original exception message
             if e.args:
                 e.args = (str(e.args[0]) + " " + exception_msg,) + e.args[1:]

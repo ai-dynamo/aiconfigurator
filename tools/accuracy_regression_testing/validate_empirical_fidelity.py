@@ -509,7 +509,7 @@ class _SdkModeRunner:
         from aiconfigurator.sdk.inference_session import InferenceSession
         from aiconfigurator.sdk.models import get_model
         from aiconfigurator.sdk.operations import util_empirical
-        from aiconfigurator.sdk.perf_database import get_database
+        from aiconfigurator.sdk.perf_database import get_database_view
 
         enum_fields = {
             "gemm_quant_mode": common.GEMMQuantMode,
@@ -522,20 +522,17 @@ class _SdkModeRunner:
         for field, enum_type in enum_fields.items():
             if field in model_config_values:
                 model_config_values[field] = _enum_value(enum_type, model_config_values[field])
-        database = get_database(
+        database = get_database_view(
             system=case["system"],
             backend=case["backend"],
             version=case["version"],
             systems_paths=case.get("systems_paths"),
             allow_missing_data=bool(case.get("allow_missing_data", False)),
             database_mode=mode,
+            transfer_policy=transfer_policy,
         )
         if database is None:
             raise RuntimeError(f"No database for {case['system']}/{case['backend']}/{case['version']} in {mode} mode")
-        # Policy must be fixed before get_model/session execution triggers any
-        # operation's lazy data load or process-global utilization-grid build.
-        database.set_transfer_policy(transfer_policy)
-        database.set_default_database_mode(common.DatabaseMode[mode])
         self._case = case
         self._config = config
         self._get_model = get_model

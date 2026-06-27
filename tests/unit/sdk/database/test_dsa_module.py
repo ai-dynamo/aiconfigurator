@@ -504,6 +504,26 @@ class TestContextDSAModule:
                 database_mode=common.DatabaseMode.HYBRID,
             )
 
+    def test_hybrid_does_not_hide_malformed_context_schema(self, mutable_comprehensive_perf_db):
+        db = mutable_comprehensive_perf_db
+        db._context_dsa_module_data = LoadedOpData(
+            {common.FMHAQuantMode.bfloat16: []},
+            common.PerfDataFilename.dsa_context_module,
+            "malformed",
+        )
+
+        with pytest.raises(TypeError, match="Malformed performance data"):
+            db.query_context_dsa_module(
+                b=2,
+                s=256,
+                prefix=0,
+                num_heads=32,
+                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+                fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.HYBRID,
+            )
+
     def test_empirical_resolves_loader_shaped_backend_axis_data(self, mutable_comprehensive_perf_db):
         """Regression: the loader nests ...[architecture][dsa_backend][num_heads]...; the
         empirical slice must descend past the backend axis (like silicon's
@@ -997,6 +1017,24 @@ class TestGenerationDSAModule:
 
         with pytest.raises(EmpiricalNotImplementedError):
             comprehensive_perf_db.query_generation_dsa_module(
+                b=4,
+                s=1024,
+                num_heads=32,
+                kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.HYBRID,
+            )
+
+    def test_hybrid_does_not_hide_malformed_generation_schema(self, mutable_comprehensive_perf_db):
+        db = mutable_comprehensive_perf_db
+        db._generation_dsa_module_data = LoadedOpData(
+            {common.KVCacheQuantMode.bfloat16: []},
+            common.PerfDataFilename.dsa_generation_module,
+            "malformed",
+        )
+
+        with pytest.raises(TypeError, match="Malformed performance data"):
+            db.query_generation_dsa_module(
                 b=4,
                 s=1024,
                 num_heads=32,

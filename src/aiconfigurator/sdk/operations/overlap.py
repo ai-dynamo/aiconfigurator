@@ -6,10 +6,9 @@
 Two op classes migrated from ``_legacy.py``:
 
 - ``FallbackOp`` — try a primary op, fall back to a sequence of ops on
-  ``PerfDataNotAvailableError``. Mutates
-  ``database._default_database_mode`` during the primary attempt (forces
-  SILICON inside HYBRID so HYBRID doesn't silently swallow a miss with an
-  empirical estimate); restores via ``finally``.
+  ``PerfDataNotAvailableError``. In HYBRID mode the primary runs against a
+  reusable SILICON query view, so HYBRID does not silently swallow a miss with
+  an empirical estimate and the caller's shared view is never mutated.
 - ``OverlapOp`` — model two op groups that execute in parallel (TRT-LLM
   ``maybe_execute_in_parallel`` behavior on different CUDA streams during
   generation with CUDA Graph enabled). ``latency = max(sum_a, sum_b)``,
@@ -23,6 +22,7 @@ empty defaults that suffice.
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import TYPE_CHECKING
 
@@ -35,6 +35,23 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _silicon_query_view(database: PerfDatabase) -> PerfDatabase:
+    """Return a SILICON child view without mutating ``database``.
+
+    Production ``PerfDatabase`` instances cache ``query_view`` by mode/policy,
+    preserving their query LRUs across repeated fallback attempts. Lightweight
+    legacy/fake databases may not implement that API; deep-copying them keeps
+    nested runtime caches isolated while the scalar default mode is overridden.
+    """
+    query_view = getattr(database, "query_view", None)
+    if callable(getattr(type(database), "query_view", None)) and callable(query_view):
+        return query_view(common.DatabaseMode.SILICON, getattr(database, "transfer_policy", None))
+
+    view = copy.deepcopy(database)
+    view._default_database_mode = common.DatabaseMode.SILICON
+    return view
 
 
 class FallbackOp(Operation):
@@ -51,8 +68,9 @@ class FallbackOp(Operation):
     (which have real data) should be preferred over an empirical guess. In
     explicit EMPIRICAL/SOL modes, the primary respects the requested mode.
 
-    Once the primary fails on the first call, it is skipped on all subsequent
-    calls to avoid redundant work.
+    Once the primary reports ``PerfDataNotAvailableError``, it is skipped on
+    subsequent calls to avoid redundant work. Raw schema/programming errors
+    propagate and never activate fallback.
 
     Latency = primary.query()  OR  sum(fallback[i].query())
     Energy  = same source as whichever succeeds
@@ -72,28 +90,19 @@ class FallbackOp(Operation):
         self._primary_unavailable = False
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        import logging as _logging
-
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
         if not self._primary_unavailable:
-            prev_mode = database._default_database_mode
-            force_primary_silicon = prev_mode == common.DatabaseMode.HYBRID
-            if force_primary_silicon:
-                # Force SILICON mode on the primary so HYBRID does not silently
-                # return an empirical estimate when module data is missing.
-                database._default_database_mode = common.DatabaseMode.SILICON
+            primary_database = (
+                _silicon_query_view(database)
+                if database._default_database_mode == common.DatabaseMode.HYBRID
+                else database
+            )
 
-            # Suppress ERROR-level logs from perf_database during the primary
-            # attempt, since a failure here is expected and handled by fallback.
-            perf_db_logger = _logging.getLogger("aiconfigurator.sdk.perf_database")
-            prev_log_level = perf_db_logger.level
-            perf_db_logger.setLevel(_logging.CRITICAL)
             try:
-                return self._primary.query(database, **kwargs)
-            except (PerfDataNotAvailableError, KeyError, AssertionError) as e:
-                if isinstance(e, PerfDataNotAvailableError):
-                    self._primary_unavailable = True
+                return self._primary.query(primary_database, **kwargs)
+            except PerfDataNotAvailableError as e:
+                self._primary_unavailable = True
                 logger.debug(
                     "FallbackOp '%s': primary op '%s' failed (%s: %s), using fallback ops",
                     self._name,
@@ -101,10 +110,6 @@ class FallbackOp(Operation):
                     type(e).__name__,
                     e,
                 )
-            finally:
-                if force_primary_silicon:
-                    database._default_database_mode = prev_mode
-                perf_db_logger.setLevel(prev_log_level)
 
         total = PerformanceResult(0.0, energy=0.0, source="empirical")
         for op in self._fallback:

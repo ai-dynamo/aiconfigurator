@@ -43,9 +43,11 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -360,10 +362,20 @@ class MoE(Operation):
                 if _use_low_latency():
                     ll = database._moe_low_latency_data
                     try:
-                        ll_wl = workload_distribution if workload_distribution in ll[quant_mode] else "uniform"
-                        if ll[quant_mode][ll_wl][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]:
-                            return ll
-                    except (KeyError, TypeError):
+                        quant_data = util_empirical.require_data_slice(ll, quant_mode)
+                        ll_wl = workload_distribution if workload_distribution in quant_data else "uniform"
+                        util_empirical.require_data_slice(
+                            quant_data,
+                            ll_wl,
+                            topk,
+                            num_experts,
+                            hidden_size,
+                            inter_size,
+                            moe_tp_size,
+                            moe_ep_size,
+                        )
+                        return ll
+                    except PerfDataNotAvailableError:
                         pass
                 return database._moe_data
 
@@ -380,8 +392,18 @@ class MoE(Operation):
 
             def _slice():
                 moe_table.raise_if_not_loaded()
-                wl = workload_distribution if workload_distribution in moe_table[quant_mode] else "uniform"
-                return moe_table[quant_mode][wl][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                quant_data = util_empirical.require_data_slice(moe_table, quant_mode)
+                wl = workload_distribution if workload_distribution in quant_data else "uniform"
+                return util_empirical.require_data_slice(
+                    quant_data,
+                    wl,
+                    topk,
+                    num_experts,
+                    hidden_size,
+                    inter_size,
+                    moe_tp_size,
+                    moe_ep_size,
+                )
 
             grid = util_empirical.grid_for(
                 (
@@ -397,6 +419,8 @@ class MoE(Operation):
                     inter_size,
                     moe_tp_size,
                     moe_ep_size,
+                    workload_distribution,
+                    num_gemms,
                 ),
                 _slice,
                 lambda c: get_sol(
@@ -415,14 +439,13 @@ class MoE(Operation):
 
             util_scale = 1.0
             prov = "empirical"  # own-shape util; tiers below override with their transfer kind
-            tier_hint = {"kind": None}
             if grid is None or not grid.samples:
                 # Transfer tiers (all borrow a collected MoE config's util curve and
                 # reconstruct with SOL). `sol_quant` is the quant whose SOL builds the
                 # borrowed util: the QUERY quant for same-profile tiers (coefficients
                 # match), the REFERENCE quant for cross-profile (so util = its own
                 # SOL/measured = that kernel's true efficiency, then rescaled below).
-                def _collect(q, sol_quant):
+                def _collect(q, sol_quant, provenance):
                     moe_table.raise_if_not_loaded()
                     wl = workload_distribution if workload_distribution in moe_table[q] else "uniform"
                     wl_data = moe_table[q].get(wl, {})
@@ -451,6 +474,7 @@ class MoE(Operation):
                                                     workload_distribution,
                                                 )[0]
                                             ),
+                                            provenance=provenance,
                                         )
                                     )
                     return out
@@ -460,12 +484,11 @@ class MoE(Operation):
                 def _moe_candidates():
                     # Tier 1 (XSHAPE): cross-shape within the query quant (closest measurement).
                     cands = (
-                        _collect(quant_mode, quant_mode)
+                        _collect(quant_mode, quant_mode, "xshape")
                         if (common.TransferKind.XSHAPE in policy and quant_mode in moe_table)
                         else []
                     )
                     if cands:
-                        tier_hint["kind"] = "xshape"
                         return cands
                     # Tier 2 (XQUANT): cross-quant within the same (memory, compute) profile.
                     # Same profile => same SOL coefficients and binding regime, so util
@@ -476,9 +499,7 @@ class MoE(Operation):
                         for q in moe_table:
                             if q is quant_mode or (q.value.memory, q.value.compute) != qp:
                                 continue
-                            cands.extend(_collect(q, quant_mode))
-                        if cands:
-                            tier_hint["kind"] = "xquant"
+                            cands.extend(_collect(q, quant_mode, "xquant"))
                     return cands
 
                 grid = util_empirical.grid_from_reference(
@@ -495,13 +516,16 @@ class MoE(Operation):
                         inter_size,
                         moe_tp_size,
                         moe_ep_size,
+                        workload_distribution,
+                        num_gemms,
                     ),
                     (topk, num_experts, hidden_size, inter_size),
                     _moe_candidates,
                     depth=1,
+                    selection_key=(id(moe_table), policy, workload_distribution, num_gemms),
                 )
-                if grid is not None and grid.samples and tier_hint["kind"]:
-                    prov = tier_hint["kind"]
+                if grid is not None and grid.samples and grid.reference_provenance:
+                    prov = grid.reference_provenance
 
                 # Tier 3: cross-PROFILE. No own- or same-profile data at all -> borrow the
                 # nearest collected quant's util curve, built with the REFERENCE quant's own
@@ -525,10 +549,13 @@ class MoE(Operation):
                                 inter_size,
                                 moe_tp_size,
                                 moe_ep_size,
+                                workload_distribution,
+                                num_gemms,
                             ),
                             (topk, num_experts, hidden_size, inter_size),
-                            (lambda _rq=ref_q: _collect(_rq, _rq)),
+                            (lambda _rq=ref_q: _collect(_rq, _rq, "xprofile")),
                             depth=1,
+                            selection_key=(id(moe_table), policy, workload_distribution, num_gemms),
                         )
                         if g is not None and g.samples:
                             grid = g
@@ -588,8 +615,10 @@ class MoE(Operation):
                 workload_distribution,
             )[0]
 
-            util = min(1.0, sol_last / last_latency)  # clamp MFU ≤ 1.0
-            util = max(util, 1e-8)  # guard against near-zero sol_last
+            # This is an effective SOL/measured calibration factor, not a
+            # bounded physical efficiency. Preserve values above one; they can
+            # reflect hardware/kernel effects absent from the analytic SOL.
+            util = max(sol_last / last_latency, 1e-8)
             est_latency = sol_query / util
 
             est_energy = 0.0
@@ -695,12 +724,20 @@ class MoE(Operation):
 
                     moe_data.raise_if_not_loaded()
 
+                    quant_data = util_empirical.require_data_slice(moe_data, quant_mode)
                     used_workload_distribution = (
-                        workload_distribution if workload_distribution in moe_data[quant_mode] else "uniform"
+                        workload_distribution if workload_distribution in quant_data else "uniform"
                     )
-                    moe_dict = moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
-                        inter_size
-                    ][moe_tp_size][moe_ep_size]
+                    moe_dict = util_empirical.require_data_slice(
+                        quant_data,
+                        used_workload_distribution,
+                        topk,
+                        num_experts,
+                        hidden_size,
+                        inter_size,
+                        moe_tp_size,
+                        moe_ep_size,
+                    )
                     token_points = _require_moe_token_points(
                         moe_dict,
                         num_tokens_corrected,
@@ -752,44 +789,60 @@ class MoE(Operation):
                         and is_gated
                     ):
                         try:
+                            quant_data = util_empirical.require_data_slice(database._moe_low_latency_data, quant_mode)
                             used_workload_distribution = (
-                                workload_distribution
-                                if workload_distribution in database._moe_low_latency_data[quant_mode]
-                                else "uniform"
+                                workload_distribution if workload_distribution in quant_data else "uniform"
                             )
-                            moe_dict = database._moe_low_latency_data[quant_mode][used_workload_distribution][topk][
-                                num_experts
-                            ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-                            if not moe_dict:
-                                # Shape not present in low-latency table (nested defaultdict returned
-                                # an empty dict instead of raising KeyError). Fall back to regular data.
-                                raise KeyError(
-                                    f"No low-latency data for nvfp4 shape "
-                                    f"[{hidden_size}, {inter_size}, {topk}, {num_experts}]"
+                            moe_dict = util_empirical.require_data_slice(
+                                quant_data,
+                                used_workload_distribution,
+                                topk,
+                                num_experts,
+                                hidden_size,
+                                inter_size,
+                                moe_tp_size,
+                                moe_ep_size,
+                            )
+                            if not isinstance(moe_dict, Mapping):
+                                raise TypeError(
+                                    "Malformed low-latency MoE performance data: expected a token mapping, "
+                                    f"got {type(moe_dict).__name__}."
                                 )
                             logger.debug(
                                 f"Using low-latency kernel for nvfp4 moe "
                                 f"{workload_distribution} {topk} {num_experts} {hidden_size} "
                                 f"{inter_size} {moe_tp_size} {moe_ep_size}."
                             )
-                        except:
+                        except PerfDataNotAvailableError:
+                            quant_data = util_empirical.require_data_slice(database._moe_data, quant_mode)
                             used_workload_distribution = (
-                                workload_distribution
-                                if workload_distribution in database._moe_data[quant_mode]
-                                else "uniform"
+                                workload_distribution if workload_distribution in quant_data else "uniform"
                             )
-                            moe_dict = database._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
-                                hidden_size
-                            ][inter_size][moe_tp_size][moe_ep_size]
+                            moe_dict = util_empirical.require_data_slice(
+                                quant_data,
+                                used_workload_distribution,
+                                topk,
+                                num_experts,
+                                hidden_size,
+                                inter_size,
+                                moe_tp_size,
+                                moe_ep_size,
+                            )
                     else:
+                        quant_data = util_empirical.require_data_slice(database._moe_data, quant_mode)
                         used_workload_distribution = (
-                            workload_distribution
-                            if workload_distribution in database._moe_data[quant_mode]
-                            else "uniform"
+                            workload_distribution if workload_distribution in quant_data else "uniform"
                         )
-                        moe_dict = database._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
-                            hidden_size
-                        ][inter_size][moe_tp_size][moe_ep_size]
+                        moe_dict = util_empirical.require_data_slice(
+                            quant_data,
+                            used_workload_distribution,
+                            topk,
+                            num_experts,
+                            hidden_size,
+                            inter_size,
+                            moe_tp_size,
+                            moe_ep_size,
+                        )
                     token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
                     if num_tokens > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
@@ -823,12 +876,20 @@ class MoE(Operation):
                     return database._interp_pr(lat, energy=energy)
                 elif database.backend == common.BackendName.vllm.value:
                     database._moe_data.raise_if_not_loaded()
+                    quant_data = util_empirical.require_data_slice(database._moe_data, quant_mode)
                     used_workload_distribution = (
-                        workload_distribution if workload_distribution in database._moe_data[quant_mode] else "uniform"
+                        workload_distribution if workload_distribution in quant_data else "uniform"
                     )
-                    moe_dict = database._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
-                        hidden_size
-                    ][inter_size][moe_tp_size][moe_ep_size]
+                    moe_dict = util_empirical.require_data_slice(
+                        quant_data,
+                        used_workload_distribution,
+                        topk,
+                        num_experts,
+                        hidden_size,
+                        inter_size,
+                        moe_tp_size,
+                        moe_ep_size,
+                    )
                     token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
                     if num_tokens > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
@@ -1674,14 +1735,23 @@ class TrtLLMWideEPMoE(Operation):
                 cls.load_data(database)
                 wrapper = database._wideep_moe_compute_data
                 wrapper.raise_if_not_loaded()
-                kd = wrapper[kernel_source]
-                dists = list(kd[quant_mode].keys())
+                kd = util_empirical.require_data_slice(wrapper, kernel_source)
+                quant_data = util_empirical.require_data_slice(kd, quant_mode)
+                dists = list(quant_data.keys())
                 dist = workload_distribution if workload_distribution in dists else (dists[0] if dists else None)
                 if dist is None:
-                    raise KeyError("no distribution")
-                return kd[quant_mode][dist][topk][num_experts][hidden_size][inter_size][num_slots][moe_tp_size][
-                    moe_ep_size
-                ]
+                    raise PerfDataNotAvailableError("No WideEP MoE workload distribution is available.")
+                return util_empirical.require_data_slice(
+                    quant_data,
+                    dist,
+                    topk,
+                    num_experts,
+                    hidden_size,
+                    inter_size,
+                    num_slots,
+                    moe_tp_size,
+                    moe_ep_size,
+                )
 
             grid = util_empirical.grid_for(
                 (
@@ -1770,20 +1840,31 @@ class TrtLLMWideEPMoE(Operation):
         def get_silicon():
             database._wideep_moe_compute_data.raise_if_not_loaded()
             # Find the best matching distribution
-            kernel_data = database._wideep_moe_compute_data[kernel_source]
-            available_distributions = list(kernel_data[quant_mode].keys())
+            kernel_data = util_empirical.require_data_slice(database._wideep_moe_compute_data, kernel_source)
+            quant_data = util_empirical.require_data_slice(kernel_data, quant_mode)
+            available_distributions = list(quant_data.keys())
             if workload_distribution in available_distributions:
                 used_distribution = workload_distribution
             else:
                 # Fallback: try to find a similar distribution or use the first available
                 used_distribution = available_distributions[0] if available_distributions else None
                 if used_distribution is None:
-                    raise KeyError(f"No distribution available for kernel={kernel_source}, quant_mode={quant_mode}")
+                    raise PerfDataNotAvailableError(
+                        f"No distribution available for kernel={kernel_source}, quant_mode={quant_mode}"
+                    )
                 logger.debug(f"Distribution '{workload_distribution}' not found, using '{used_distribution}' instead")
 
-            moe_dict = kernel_data[quant_mode][used_distribution][topk][num_experts][hidden_size][inter_size][
-                num_slots
-            ][moe_tp_size][moe_ep_size]
+            moe_dict = util_empirical.require_data_slice(
+                quant_data,
+                used_distribution,
+                topk,
+                num_experts,
+                hidden_size,
+                inter_size,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+            )
 
             num_left, num_right = interpolation.nearest_1d_point_helper(
                 num_tokens,
@@ -2134,13 +2215,23 @@ class TrtLLMWideEPMoEDispatch(Operation):
 
             def _slice():
                 if ks == "NotEnabled":
-                    raise KeyError("alltoall not enabled")
+                    raise PerfDataNotAvailableError("TRT-LLM alltoall is not enabled.")
                 cls.load_data(database)
                 wrapper = database._trtllm_alltoall_data
                 if not wrapper:
-                    raise KeyError("no alltoall data")
+                    raise PerfDataNotAvailableError("No TRT-LLM alltoall data is loaded.")
                 wrapper.raise_if_not_loaded()
-                return wrapper[ks][op_name][tqm][node_num][hidden_size][topk][num_experts][moe_ep_size]
+                return util_empirical.require_data_slice(
+                    wrapper,
+                    ks,
+                    op_name,
+                    tqm,
+                    node_num,
+                    hidden_size,
+                    topk,
+                    num_experts,
+                    moe_ep_size,
+                )
 
             grid = util_empirical.grid_for(
                 (
@@ -2232,10 +2323,17 @@ class TrtLLMWideEPMoEDispatch(Operation):
                     "Use HYBRID or EMPIRICAL database mode."
                 )
             database._trtllm_alltoall_data.raise_if_not_loaded()
-            kernel_data = database._trtllm_alltoall_data[kernel_source]
-            alltoall_dict = kernel_data[op_name][table_quant_mode][node_num][hidden_size][topk][num_experts][
-                moe_ep_size
-            ]
+            alltoall_dict = util_empirical.require_data_slice(
+                database._trtllm_alltoall_data,
+                kernel_source,
+                op_name,
+                table_quant_mode,
+                node_num,
+                hidden_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+            )
 
             num_left, num_right = interpolation.nearest_1d_point_helper(
                 num_tokens,

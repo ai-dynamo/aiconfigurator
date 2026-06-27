@@ -337,6 +337,20 @@ class SupportResult:
         return iter((self.agg_supported, self.disagg_supported))
 
 
+def _is_silicon_support_row(row: dict[str, str]) -> bool:
+    """Return whether a matrix row proves support from collected SILICON data.
+
+    ``Source`` is optional for compatibility with legacy matrices.  During the
+    transition to the explicit ``HYBRID_PASS`` status, reject old rows that used
+    ``PASS`` together with an empirical/transfer source.
+    """
+    if row.get("Status") != "PASS":
+        return False
+    # Legacy 8/9-column matrices have no Source key. Current 10-column rows do,
+    # and must identify collected silicon explicitly rather than with an empty cell.
+    return "Source" not in row or row.get("Source") == "silicon"
+
+
 def check_support(
     model: str,
     system: str,
@@ -383,8 +397,8 @@ def check_support(
 
     if exact_matches:
         return SupportResult(
-            agg_supported=any(row["Status"] == "PASS" for row in exact_matches if row["Mode"] == "agg"),
-            disagg_supported=any(row["Status"] == "PASS" for row in exact_matches if row["Mode"] == "disagg"),
+            agg_supported=any(_is_silicon_support_row(row) for row in exact_matches if row["Mode"] == "agg"),
+            disagg_supported=any(_is_silicon_support_row(row) for row in exact_matches if row["Mode"] == "disagg"),
             exact_match=True,
         )
 
@@ -403,8 +417,8 @@ def check_support(
         and row["Status"] != "HW_INCOMPATIBLE"
     ]
 
-    agg_results = [row["Status"] == "PASS" for row in arch_matches if row["Mode"] == "agg"]
-    disagg_results = [row["Status"] == "PASS" for row in arch_matches if row["Mode"] == "disagg"]
+    agg_results = [_is_silicon_support_row(row) for row in arch_matches if row["Mode"] == "agg"]
+    disagg_results = [_is_silicon_support_row(row) for row in arch_matches if row["Mode"] == "disagg"]
 
     def is_majority_pass(results: list[bool]) -> bool:
         # We use majority vote to infer support for an untested model of a known architecture.
@@ -432,7 +446,7 @@ def get_supported_architectures() -> set[str]:
         set[str]: Set of architecture names that have at least one PASSing configuration.
     """
     matrix = get_support_matrix()
-    return {row["Architecture"] for row in matrix if row["Status"] == "PASS"}
+    return {row["Architecture"] for row in matrix if _is_silicon_support_row(row)}
 
 
 @cache

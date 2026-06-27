@@ -8,8 +8,11 @@ collected data::
 
     empirical_latency = SOL(query) / util
 
-where ``util = SOL / measured`` (in ``(0, 1]`` after SOL clamping) is taken
-best-effort from collected samples in per-axis normalised log space. One-
+where ``util = SOL / measured`` is a positive effective calibration factor
+taken best-effort from collected samples in per-axis normalised log space. It
+is not constrained to one: hardware/kernel effects omitted by the analytic SOL
+may legitimately produce ``util > 1``. Very large values should be treated as
+data/model sanity signals rather than silently clamped. One-
 dimensional curves use bracketed two-neighbour inverse-distance weighting;
 ragged multi-dimensional grids retain nearest-neighbour lookup until their
 operation-specific regime boundaries can be represented safely.
@@ -40,12 +43,13 @@ from __future__ import annotations
 import contextlib
 import contextvars
 from bisect import bisect_left
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 import numpy as np
 
-from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+from aiconfigurator.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
+from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
 
 Coords = tuple[float, ...]
 
@@ -97,7 +101,7 @@ def worst_provenance(tags) -> str:
 @dataclass(frozen=True)
 class UtilSample:
     coords: Coords  # continuous-axis coordinates of a collected point
-    util: float  # SOL / measured at that point, in (0, 1]
+    util: float  # positive effective calibration factor: SOL / measured
 
 
 def leaf_latency(leaf) -> float | None:
@@ -141,6 +145,7 @@ class UtilGrid:
 
     def __init__(self, samples: list[UtilSample]):
         self.samples = samples
+        self.reference_provenance: str | None = None
         if not samples:
             return
         coords = np.asarray([s.coords for s in samples], dtype=float)
@@ -332,6 +337,7 @@ def estimate_bracketed_2d(
 # Process-lifetime cache of built grids. Collected data is itself cached for the
 # process lifetime, so a plain dict keyed by an op/slice identifier is enough.
 _GRID_CACHE: dict = {}
+_REFERENCE_SELECTION_CACHE: dict = {}
 
 
 def get_grid(cache_key, builder: Callable[[], UtilGrid]) -> UtilGrid:
@@ -345,27 +351,65 @@ def get_grid(cache_key, builder: Callable[[], UtilGrid]) -> UtilGrid:
 def clear_grid_cache() -> None:
     """Drop all built util grids.
 
-    The cache key identifies an op/slice but deliberately does NOT encode the
-    transfer policy or default database mode (e.g. MoE's xshape and xquant tiers
-    share one ``"moe_xshape"`` key). So when a database's transfer policy or mode
-    changes, a previously cached grid -- built under the old policy's candidate set
-    -- would otherwise be returned unchanged, silently bypassing the new policy.
-    PerfDatabase calls this whenever either changes.
+    Grid keys include the concrete selected data identity, which isolates live
+    database views. PerfDatabase still clears eagerly when a caller mutates one
+    instance's mode or transfer policy in place, both for backward compatibility
+    and to discard grids that are no longer reachable under that policy.
     """
     _GRID_CACHE.clear()
+    _REFERENCE_SELECTION_CACHE.clear()
+
+
+def require_data_slice(root: object, *keys: object) -> object:
+    """Return a requested nested perf-data slice or raise the typed coverage signal.
+
+    Missing keys and an absent final node mean the requested measured slice is
+    not covered. A non-mapping intermediate node is malformed data and raises
+    ``TypeError`` so schema problems are not converted into fallback.
+    """
+    if root is None:
+        raise PerfDataNotAvailableError("The requested silicon performance table is not loaded.")
+
+    node = root
+    traversed: list[object] = []
+    for key in keys:
+        if not isinstance(node, Mapping):
+            raise TypeError(
+                f"Malformed performance data at path {tuple(traversed)!r}: "
+                f"expected a mapping, got {type(node).__name__}."
+            )
+        if key not in node:
+            raise PerfDataNotAvailableError(
+                "Missing silicon data for the requested lookup; "
+                f"requested slice {(*traversed, key)!r} is not available."
+            )
+        node = node[key]
+        traversed.append(key)
+
+    if node is None or (isinstance(node, Mapping) and not node):
+        raise PerfDataNotAvailableError(
+            f"Missing silicon data for the requested lookup; requested slice {tuple(traversed)!r} is not available."
+        )
+    return node
 
 
 def grid_for(cache_key, slice_fn: Callable[[], object], sol_fn: Callable[[Coords], float], depth: int):
     """Best-effort build/fetch of a :class:`UtilGrid`.
 
     ``slice_fn()`` returns the nested data sub-grid for the requested slice
-    (and may load data lazily). Any failure -- missing data files, an absent
-    slice (``KeyError``) -- returns ``None``; :func:`estimate` then raises
-    :class:`EmpiricalNotImplementedError` (no fabricated constant).
+    (and may load data lazily). Typed data-coverage failures return ``None``;
+    :func:`estimate` then raises :class:`EmpiricalNotImplementedError` (no
+    fabricated constant). Programming and schema errors propagate to the
+    caller instead of being misreported as missing empirical coverage.
     """
     try:
-        return get_grid(cache_key, lambda: UtilGrid(build_samples(slice_fn(), depth, sol_fn)))
-    except Exception:
+        node = slice_fn()
+        # The logical key names an op/shape; the node identity names the
+        # concrete loaded table behind this database view. Two live views with
+        # different roots/shared-layer data therefore cannot alias one grid.
+        identity_key = (cache_key, id(node))
+        return get_grid(identity_key, lambda: UtilGrid(build_samples(node, depth, sol_fn)))
+    except (PerfDataNotAvailableError, InterpolationDataNotAvailableError):
         return None
 
 
@@ -412,6 +456,7 @@ class ReferenceCandidate:
     features: Coords  # categorical shape features for the nearest-neighbour match
     node: object  # the reference slice's nested data sub-grid
     sol_fn: Callable[[Coords], float]  # SOL bound to THIS reference's shape
+    provenance: str | None = None
 
 
 def _nearest_candidate(query_features: Coords, candidates: list[ReferenceCandidate]) -> ReferenceCandidate:
@@ -423,24 +468,47 @@ def _nearest_candidate(query_features: Coords, candidates: list[ReferenceCandida
     return candidates[int(dist2.sum(axis=1).argmin())]
 
 
-def grid_from_reference(cache_key, query_features: Coords, candidates_fn: Callable[[], list], depth: int):
-    """Best-effort util grid borrowed from the nearest sibling slice.
+def grid_from_reference(
+    cache_key,
+    query_features: Coords,
+    candidates_fn: Callable[[], list],
+    depth: int,
+    *,
+    selection_key=None,
+):
+    """Util grid borrowed from the nearest sibling slice.
 
     ``candidates_fn()`` returns a list of :class:`ReferenceCandidate` (the op
     enumerates its sibling slices). Picks the nearest by ``features`` in per-dim
     normalised log space and builds the grid from that sibling's data using the
-    sibling's own ``sol_fn``. Returns ``None`` on any failure / no candidates so
-    the caller still falls back to its constant.
+    sibling's own ``sol_fn``. Typed coverage misses and an empty candidate list
+    return no usable samples; programming/schema failures propagate.
     """
 
-    def build() -> UtilGrid:
+    def select_reference():
+        selected_cache_key = (cache_key, tuple(query_features), selection_key) if selection_key is not None else None
+        if selected_cache_key is not None and selected_cache_key in _REFERENCE_SELECTION_CACHE:
+            return _REFERENCE_SELECTION_CACHE[selected_cache_key]
         candidates = candidates_fn()
-        if not candidates:
-            return UtilGrid([])
-        ref = _nearest_candidate(query_features, candidates)
-        return UtilGrid(build_samples(ref.node, depth, ref.sol_fn))
+        ref = _nearest_candidate(query_features, candidates) if candidates else None
+        if selected_cache_key is not None:
+            _REFERENCE_SELECTION_CACHE[selected_cache_key] = ref
+        return ref
 
     try:
-        return get_grid(cache_key, build)
-    except Exception:
+        ref = select_reference()
+        if ref is None:
+            return UtilGrid([])
+        # Reference selection is policy-dependent. Select first, then key by
+        # the chosen table identity so interleaved policies cannot reuse one
+        # another's calibration grid.
+        identity_key = (cache_key, id(ref.node), selection_key, ref.provenance)
+
+        def build_reference_grid():
+            grid = UtilGrid(build_samples(ref.node, depth, ref.sol_fn))
+            grid.reference_provenance = ref.provenance
+            return grid
+
+        return get_grid(identity_key, build_reference_grid)
+    except (PerfDataNotAvailableError, InterpolationDataNotAvailableError):
         return None
