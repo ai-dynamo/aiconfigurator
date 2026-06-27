@@ -70,7 +70,9 @@ def setup_mock_filesystem(systems_dir: Path, layout: dict) -> None:
                 if version.startswith("."):
                     (backend_dir / version).mkdir(exist_ok=True)
                 else:
-                    (backend_dir / version).mkdir(exist_ok=True)
+                    version_dir = backend_dir / version
+                    version_dir.mkdir(exist_ok=True)
+                    (version_dir / "gemm_perf.parquet").write_text("placeholder\n", encoding="utf-8")
 
 
 # ----------------------------- get_supported_databases -----------------------------
@@ -102,6 +104,60 @@ def test_get_supported_databases_skips_incomplete_versions(temp_systems_dir: Pat
 
     assert result["h100"]["vllm"] == ["0.14.0"]
     assert perf_database.get_latest_database_version("h100", "vllm", systems_paths=str(temp_systems_dir)) == "0.14.0"
+
+
+def test_get_supported_databases_includes_shared_layer_marker_versions(temp_systems_dir: Path, perf_database):
+    setup_mock_filesystem(temp_systems_dir, {"h100": {"vllm": ["0.19.0"]}})
+    marker_path = temp_systems_dir / "data_h100" / "vllm" / "0.22.0" / perf_database.SHARED_LAYER_REUSE_MARKER
+    marker_path.parent.mkdir(parents=True)
+    marker_path.write_text("declared shared-layer reuse\n", encoding="utf-8")
+    (temp_systems_dir / "data_h100" / "vllm" / "0.23.0").mkdir(parents=True)
+
+    result = perf_database.get_supported_databases(str(temp_systems_dir))
+
+    assert result["h100"]["vllm"] == ["0.19.0", "0.22.0"]
+
+
+def test_get_supported_databases_skips_incomplete_shared_layer_marker_versions(temp_systems_dir: Path, perf_database):
+    setup_mock_filesystem(temp_systems_dir, {"h100": {"vllm": ["0.19.0"]}})
+    marker_path = temp_systems_dir / "data_h100" / "vllm" / "0.22.0" / perf_database.SHARED_LAYER_REUSE_MARKER
+    marker_path.parent.mkdir(parents=True)
+    marker_path.write_text("declared shared-layer reuse\n", encoding="utf-8")
+    (marker_path.parent / "INCOMPLETE.txt").write_text("not enough profiling coverage\n", encoding="utf-8")
+
+    result = perf_database.get_supported_databases(str(temp_systems_dir))
+
+    assert result["h100"]["vllm"] == ["0.19.0"]
+
+
+def test_get_latest_database_version_skips_marker_only_versions_by_default(temp_systems_dir: Path, perf_database):
+    setup_mock_filesystem(temp_systems_dir, {"h100": {"vllm": ["0.19.0"]}})
+    marker_path = temp_systems_dir / "data_h100" / "vllm" / "0.22.0" / perf_database.SHARED_LAYER_REUSE_MARKER
+    marker_path.parent.mkdir(parents=True)
+    marker_path.write_text("declared shared-layer reuse\n", encoding="utf-8")
+
+    assert perf_database.get_latest_database_version("h100", "vllm", systems_paths=str(temp_systems_dir)) == "0.19.0"
+    assert (
+        perf_database.get_latest_database_version(
+            "h100",
+            "vllm",
+            systems_paths=str(temp_systems_dir),
+            include_shared_layer_marker_versions=True,
+        )
+        == "0.22.0"
+    )
+
+
+def test_get_latest_database_version_uses_marked_versions_with_perf_data_by_default(
+    temp_systems_dir: Path, perf_database
+):
+    setup_mock_filesystem(temp_systems_dir, {"h100": {"vllm": ["0.19.0"]}})
+    marker_path = temp_systems_dir / "data_h100" / "vllm" / "0.22.0" / perf_database.SHARED_LAYER_REUSE_MARKER
+    marker_path.parent.mkdir(parents=True)
+    marker_path.write_text("declared shared-layer reuse\n", encoding="utf-8")
+    (marker_path.parent / "generation_attention_perf.parquet").write_text("placeholder\n", encoding="utf-8")
+
+    assert perf_database.get_latest_database_version("h100", "vllm", systems_paths=str(temp_systems_dir)) == "0.22.0"
 
 
 def test_get_supported_databases_empty_dir(temp_systems_dir: Path, perf_database):
@@ -360,35 +416,29 @@ def test_perf_database_clear_runtime_caches_clears_interpolation_and_lru_state(p
     assert cache_clear_calls == ["cleared"]
 
 
-def test_enable_shared_layer_gated_by_xversion_policy(perf_database):
-    """The sibling-version shared layer is the HYBRID/EMPIRICAL mode AND XVERSION being
-    permitted -- so the transfer policy switches it off like any other transfer kind. A
-    bare instance (no mode set) is False so dir()-introspection never trips."""
+def test_enable_shared_layer_is_independent_of_transfer_policy(perf_database):
+    """Shared rows are collected silicon data, not an empirical transfer kind."""
     from aiconfigurator.sdk import common
 
     db = object.__new__(perf_database.PerfDatabase)
     db._shared_layer_mode = True
     db._transfer_policy = common.ALL_TRANSFERS
     assert db.enable_shared_layer is True
-    db._transfer_policy = frozenset({common.TransferKind.XSHAPE, common.TransferKind.XQUANT})  # no XVERSION
-    assert db.enable_shared_layer is False
-    db._shared_layer_mode = False  # SILICON mode: off regardless of policy
+    db._transfer_policy = frozenset()
+    assert db.enable_shared_layer is True
+    db._shared_layer_mode = False
     db._transfer_policy = common.ALL_TRANSFERS
     assert db.enable_shared_layer is False
     assert object.__new__(perf_database.PerfDatabase).enable_shared_layer is False  # bare, no crash
 
 
 def test_empirical_and_silicon_databases_do_not_alias(perf_database):
-    """EMPIRICAL enables the sibling shared layer just like HYBRID, so it must NOT share
-    a cache entry with SILICON/default. If get_database's shared_flag only matched HYBRID,
-    EMPIRICAL would alias SILICON and (depending on load order) either leak sibling rows
-    into SILICON or strip them from EMPIRICAL. Loading both must yield distinct objects
-    with the correct shared-layer state regardless of order."""
+    """SILICON loads sibling collected rows while formula-only EMPIRICAL does not."""
     emp = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="EMPIRICAL")
     sil = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
     assert emp is not sil
-    assert emp._shared_layer_mode is True  # EMPIRICAL keeps the sibling shared layer
-    assert sil._shared_layer_mode is False  # SILICON stays pure
+    assert emp._shared_layer_mode is False
+    assert sil._shared_layer_mode is True
 
 
 def test_transfer_policy_and_mode_change_clear_global_grid_cache(perf_database):

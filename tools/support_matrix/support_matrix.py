@@ -50,7 +50,7 @@ SUPPORT_MATRIX_BASE_HEADER = [
     "ErrMsg",
 ]
 # "Source" = data provenance of a PASS (silicon, or the worst empirical transfer tier
-# that fired: empirical/xversion/xshape/xquant/xprofile/xop). Empty for non-PASS rows.
+# that fired: empirical/xshape/xquant/xprofile/xop). Empty for non-PASS rows.
 SUPPORT_MATRIX_HEADER = SUPPORT_MATRIX_BASE_HEADER + ["Command", "Source"]
 _BYTES_PER_PARAM = 2
 DEFAULT_ENGINE_STEP_COMPARISON_RTOL = 0.05
@@ -773,7 +773,10 @@ class SupportMatrix:
             engine_step_backend=engine_step_backend,
             database_mode=database_mode,
         )
-        return task.run()
+        pareto_df = task.run()
+        if pareto_df is None:
+            raise RuntimeError("Task returned no result")
+        return pareto_df
 
     @staticmethod
     def run_single_test(
@@ -862,11 +865,10 @@ class SupportMatrix:
                     return statuses, error_messages, commands, provenance
                 return statuses, error_messages
 
-        # By default the matrix runs pure SILICON first (shared layer OFF) and re-runs only
-        # the genuine FAILs in HYBRID. A FAIL->PASS rescue is therefore unambiguously hybrid,
-        # and the source is derived without per-row provenance plumbing: the worst empirical
-        # tier that fired, or "xversion" when none did (the rescue came from the sibling-
-        # version shared layer, which resolves via the silicon path and notes no tier).
+        # By default the matrix runs SILICON first (including declared shared-layer
+        # collected rows) and re-runs only genuine FAILs in HYBRID. A FAIL->PASS rescue is
+        # therefore unambiguously empirical: use the worst transfer tier that fired, or
+        # the generic "empirical" source when an analytic path emitted no provenance.
         # Set AIC_SM_ALLOW_HYBRID to a falsey value (0/false/no/off) for a pure-silicon matrix.
         allow_hybrid = os.environ.get("AIC_SM_ALLOW_HYBRID", "1").strip().lower() not in ("0", "false", "no", "off")
 
@@ -946,8 +948,7 @@ class SupportMatrix:
                 h_status, h_error, h_tier = _attempt(mode, "HYBRID")
                 if h_status == STATUS_PASS:
                     status, raw_error = STATUS_PASS, None
-                    # No empirical tier fired -> the shared layer (XVERSION) rescued it.
-                    tier = h_tier if h_tier and h_tier != "silicon" else "xversion"
+                    tier = h_tier if h_tier and h_tier != "silicon" else "empirical"
                 else:
                     status, raw_error, tier = h_status, h_error, ""
 

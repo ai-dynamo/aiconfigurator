@@ -807,7 +807,7 @@ class TestMoECrossProfileTransfer:
             database_mode=common.DatabaseMode.EMPIRICAL,
         )
         try:
-            comprehensive_perf_db.set_transfer_policy("balanced")  # xshape+xquant+xversion, no xprofile
+            comprehensive_perf_db.set_transfer_policy("balanced")  # xshape+xquant, no xprofile
             with pytest.raises(EmpiricalNotImplementedError):
                 comprehensive_perf_db.query_moe(**kwargs)
             comprehensive_perf_db.set_transfer_policy(None)  # all on -> fills again

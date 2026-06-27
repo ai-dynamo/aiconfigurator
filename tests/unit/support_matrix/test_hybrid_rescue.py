@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Support-matrix default: run pure SILICON first, re-run only the genuine FAILs in HYBRID,
-and derive the source from the two-pass outcome (silicon / empirical tier / xversion) without
-per-row provenance plumbing. AIC_SM_ALLOW_HYBRID=0 disables the rescue (pure-silicon matrix)."""
+"""Support-matrix default: run SILICON first, re-run only genuine FAILs in HYBRID,
+and derive the source from the two-pass outcome (silicon / empirical transfer tier).
+AIC_SM_ALLOW_HYBRID=0 disables the rescue (pure-silicon matrix)."""
 
 import pandas as pd
 import pytest
@@ -68,12 +68,11 @@ def test_silicon_fail_hybrid_transfer_tagged_with_tier(monkeypatch):
     assert calls == ["SILICON", "HYBRID"]
 
 
-def test_silicon_fail_hybrid_pass_no_tier_is_xversion(monkeypatch):
-    # shared-layer (sibling-version) rescue resolves via the silicon path -> no empirical
-    # tier noted -> derived as xversion (the #4 fix, accurate because silicon ran with the
-    # shared layer OFF).
+def test_silicon_fail_hybrid_pass_no_tier_is_empirical(monkeypatch):
+    # Shared-layer rows are already visible to SILICON. A no-tier HYBRID rescue is an
+    # analytic empirical path that did not emit finer-grained provenance.
     status, src, calls = _run_rescue(monkeypatch, silicon_ok=False, hybrid_tier=None)
-    assert status == STATUS_PASS and src == "xversion"
+    assert status == STATUS_PASS and src == "empirical"
 
 
 def test_silicon_fail_hybrid_fail_stays_fail(monkeypatch):

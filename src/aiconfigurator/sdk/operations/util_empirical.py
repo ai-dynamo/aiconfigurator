@@ -61,7 +61,6 @@ Coords = tuple[float, ...]
 PROVENANCE_ORDER: tuple[str, ...] = (
     "silicon",  # pure silicon table data (never recorded here; the default when nothing fired)
     "empirical",  # own-shape util (no transfer)
-    "xversion",  # sibling-version shared layer
     "xshape",  # cross-shape, same quant
     "xquant",  # cross-quant, same profile
     "xprofile",  # cross-quant, cross profile

@@ -59,7 +59,6 @@ confidence:
 | `xquant` | a sibling quant in the **same** `(memory, compute)` profile | same SOL coefficients → util transfers directly |
 | `xprofile` | a quant in a **different** profile | borrow + rescale util by the per-quant level ratio `e(query)/e(ref)` |
 | `xop` | a **related op's** util (e.g. MSA ← DSA) | `util_scale` level-alignment hook, manual `k` |
-| `xversion` | a **sibling backend version's** measured data (the shared layer) | load-time data sourcing (`enable_shared_layer`) |
 
 A query falls through the ladder (own data → `xshape` → `xquant` → `xprofile`), using the
 first that has data; a disabled kind is skipped → next, or raise.
@@ -102,90 +101,86 @@ this is purely observability.
 
 ### Support matrix: silicon-first with hybrid rescue (default)
 
-The support matrix runs each cell in **pure SILICON first** (shared layer off) and re-runs
-**only the genuine FAILs** in HYBRID. A `FAIL → PASS` transition is therefore unambiguously a
-hybrid rescue, which lets the `Source` be derived from the two-pass outcome **without any
-per-row provenance plumbing**:
+The support matrix runs each cell in **SILICON first** (including declared shared-layer
+collected rows) and re-runs **only the genuine FAILs** in HYBRID. A `FAIL → PASS`
+transition is therefore unambiguously a hybrid rescue:
 
 | silicon | hybrid | `Source` |
 |---|---|---|
 | PASS | — | `silicon` |
 | FAIL | PASS, an empirical tier fired | that tier (`xshape` / `xquant` / `xprofile` / `xop`) |
-| FAIL | PASS, no empirical tier | `xversion` (sibling-version shared layer) |
+| FAIL | PASS, no empirical tier | `empirical` |
 | FAIL | FAIL | FAIL |
 | HW / FRAMEWORK incompatible | — | unchanged (not rescuable, not retried) |
 
-The `xversion` derivation is the key win: because the silicon pass runs with the shared layer
-**off**, a silicon-fail / hybrid-pass with no empirical tier can only be the shared layer, so
-shared-layer rescues are attributed correctly (a single all-HYBRID pass cannot distinguish a
-sibling-row hit from a primary-row hit and mislabels them `silicon`). Runtime is ~unchanged
+Shared-layer hits remain `silicon`: they are real collected rows merged before lookup, and
+the loader does not retain per-row source provenance after the merge. Runtime is ~unchanged
 since only the minority of FAILs get a second pass. Set `AIC_SM_ALLOW_HYBRID=0` for a
-pure-silicon matrix (no rescue).
+SILICON-only matrix (no rescue).
 
 ## Scope
 
 util-space empirical is wired for GEMM; context / generation attention (+ cross-head_size,
 windowed); MoE (regular, WideEP, low-latency kernel selection); MLA; DSA; DSV4
-(MHC / context / generation); MSA; NCCL + custom_allreduce. Sibling-version shared layer
-is enabled for EMPIRICAL as well as HYBRID.
+(MHC / context / generation); MSA; NCCL + custom_allreduce.
 
-## Boundary with SILICON (and the silicon interpolation refactor)
+## Boundary with SILICON
 
 The split of responsibility is by **coverage**, not by axis type:
 
-- **SILICON stays pure.** It uses collected rows for same-slice interpolation and any
-  explicitly supported numeric boundary handling. A missing shape / window / quant /
-  op is a failed silicon lookup handed to HYBRID; SILICON does not borrow another slice.
+- **SILICON stays collected-data-only.** It uses active-version rows plus manifest-declared
+  shared rows from sibling versions/frameworks, then applies same-slice interpolation and
+  explicitly supported numeric boundary handling. It never uses SOL/util transfer.
 - **HYBRID / `util_empirical` owns all gap-filling.** Every transfer — `xshape`,
-  windowed, `xquant`, `xprofile`, `xop`, `xversion` — lives here and stays here. None of
-  it migrates into SILICON. The request raises only after these permitted fallback tiers
+  windowed, `xquant`, `xprofile`, `xop` — lives here and stays here. The request raises
+  only after the collected-data lookup and these permitted fallback tiers
   also fail to find calibration data.
 
-A parallel refactor makes the silicon interpolation engine able to interpolate in
-*latency-space or util-space* and pick the better per point. That improves **in-grid
-accuracy**; it does **not** absorb the HYBRID transfers into the silicon lookup. The
-only thing the two share is the util definition: `util = SOL /
-measured` with `SOL = max(sol_math, sol_mem)` (single scalar — a compute/mem split was
-tried and rejected) and the same per-op `get_sol`. Keeping that definition consistent on
-both sides is the entire contract; no code coupling is required.
+Individual SILICON operations may use latency-space interpolation or explicit
+util-preserving boundary handling inside their collected numeric slice. That does not
+absorb the HYBRID transfers into SILICON. Where util is used, both paths share the same
+definition: `util = SOL / measured`, with `SOL = max(sol_math, sol_mem)` and the same
+per-op `get_sol`.
 
 ## Validation
 
 `tools/accuracy_regression_testing/validate_empirical_fidelity.py` runs the same model and
 workload independently in explicit SILICON and EMPIRICAL modes. Results below use strict
 own-data EMPIRICAL (`--transfer-policy off`), so no HYBRID or transfer fallback is included.
+SILICON follows its production policy and includes manifest-declared shared collected rows;
+formula-only EMPIRICAL loads only the active version.
 APE is `abs(empirical - silicon) / silicon`; each cell is **mean / p90 / max APE (%)** with
 the number of comparable points in parentheses. Unless marked, a row contains ten
 deterministic irregular off-grid points per phase on B200/SGLang 0.5.10.
 
 Across every phase and sample kind in the primary matrix, 518/546 silicon-eligible pairs
-are comparable: **1.47% mean, 0.85% median, 3.67% p90, 8.68% max, and 1.04% WAPE**.
+are comparable: **1.69% mean, 0.98% median, 4.69% p90, 8.68% max, and 1.13% WAPE**.
 
 | model / configuration | type | quantization | prefill | decode | encoder |
 |---|---|---|---:|---:|---:|
-| **Primary off-grid aggregate** | mixed | mixed | **0.92 / 1.98 / 7.05 (n=185)** | **2.37 / 4.88 / 8.68 (n=170)** | — |
-| Qwen3-32B | dense | BF16 | 0.73 / 1.34 / 1.53 (n=10) | 1.03 / 1.52 / 3.59 (n=10) | — |
-| Qwen3-32B | dense | FP8 | 0.99 / 1.30 / 4.30 (n=10) | 2.28 / 4.69 / 6.82 (n=10) | — |
-| Qwen3-32B | dense | FP8-static | 0.56 / 1.18 / 1.37 (n=10) | 2.23 / 2.63 / 3.37 (n=10) | — |
-| Llama-3.1-70B | dense | FP8-static | 0.71 / 1.02 / 1.10 (n=10) | 3.39 / 3.74 / 3.86 (n=10) | — |
-| Qwen3.5-27B | dense/GDN | BF16 | 0.39 / 0.53 / 1.70 (n=10) | 1.79 / 2.89 / 3.02 (n=10) | — |
-| Qwen3-235B-A22B | MoE | BF16 | 0.68 / 0.40 / 4.19 (n=10) | 2.42 / 3.38 / 3.47 (n=10) | — |
-| Qwen3-235B-A22B | MoE | FP8 | 0.73 / 0.82 / 3.59 (n=10) | 2.90 / 3.82 / 3.85 (n=10) | — |
-| Qwen3-235B-A22B | MoE | NVFP4 | 0.26 / 0.52 / 0.67 (n=10) | 4.15 / 5.89 / 5.96 (n=10) | — |
+| **Primary off-grid aggregate** | mixed | mixed | **1.16 / 2.73 / 7.04 (n=185)** | **2.58 / 5.87 / 8.68 (n=170)** | — |
+| Qwen3-32B | dense | BF16 | 0.72 / 1.34 / 1.53 (n=10) | 1.03 / 1.52 / 3.59 (n=10) | — |
+| Qwen3-32B | dense | FP8 | 0.98 / 1.30 / 4.29 (n=10) | 2.28 / 4.70 / 6.82 (n=10) | — |
+| Qwen3-32B | dense | FP8-static | 0.56 / 1.19 / 1.37 (n=10) | 2.23 / 2.65 / 3.38 (n=10) | — |
+| Llama-3.1-70B | dense | FP8-static | 0.71 / 1.01 / 1.10 (n=10) | 3.38 / 3.73 / 3.87 (n=10) | — |
+| Qwen3.5-27B⁴ | dense/GDN | BF16 | 4.68 / 5.33 / 5.46 (n=10) | 6.25 / 7.75 / 7.91 (n=10) | — |
+| Qwen3-235B-A22B | MoE | BF16 | 0.53 / 0.40 / 2.71 (n=10) | 2.42 / 3.38 / 3.47 (n=10) | — |
+| Qwen3-235B-A22B | MoE | FP8 | 0.59 / 0.83 / 2.25 (n=10) | 2.90 / 3.82 / 3.85 (n=10) | — |
+| Qwen3-235B-A22B | MoE | NVFP4 | 0.26 / 0.57 / 0.67 (n=10) | 4.15 / 5.91 / 5.96 (n=10) | — |
 | MiniMax-M2.5 | MoE | FP8-block | 0.24 / 0.30 / 1.07 (n=10) | 2.60 / 3.93 / 4.24 (n=10) | — |
-| MiniMax-M2.5 | MoE | NVFP4 | 0.48 / 1.46 / 1.79 (n=10) | 3.67 / 6.52 / 7.04 (n=10) | — |
-| Nemotron-Nano | hybrid/MoE | BF16 | 0.15 / 0.34 / 0.34 (n=10) | 3.43 / 5.53 / 7.28 (n=10) | — |
+| MiniMax-M2.5 | MoE | NVFP4 | 0.53 / 1.43 / 2.34 (n=10) | 3.67 / 6.52 / 7.04 (n=10) | — |
+| Nemotron-Nano | hybrid/MoE | BF16 | 0.17 / 0.34 / 0.34 (n=10) | 3.43 / 5.53 / 7.28 (n=10) | — |
 | Kimi-K2.5 | MLA/MoE | BF16 + INT4-WO | — | — | — |
 | DeepSeek-V3.2 (TP2/PP2) | DSA | FP8-block | 2.62 / 5.91 / 5.91 (n=5) | 0.51 / 0.82 / 0.98 (n=10) | — |
-| DeepSeek-V3.2 (TP8) | DSA | FP8-block | 2.00 / 6.41 / 7.05 (n=10) | 0.74 / 1.36 / 2.33 (n=14)¹ | — |
-| GLM-5 (PP2) | DSA | BF16 | 1.30 / 2.21 / 2.25 (n=10) | 0.69 / 1.59 / 1.69 (n=10) | — |
-| GLM-5 | DSA | FP8 | 1.35 / 2.10 / 3.40 (n=10) | 2.01 / 3.26 / 3.74 (n=10) | — |
-| GLM-5 | DSA | NVFP4 | 2.07 / 2.81 / 3.64 (n=10) | 1.31 / 2.29 / 2.66 (n=10) | — |
-| DeepSeek-V4-Pro (PP2) | DSV4 | FP8-block | 0.89 / 1.30 / 1.42 (n=10) | 3.74 / 6.26 / 8.68 (n=10) | — |
+| DeepSeek-V3.2 (TP8) | DSA | FP8-block | 2.00 / 6.40 / 7.04 (n=10) | 0.74 / 1.36 / 2.33 (n=14)¹ | — |
+| GLM-5 (PP2) | DSA | BF16 | 1.30 / 2.20 / 2.25 (n=10) | 0.68 / 1.59 / 1.69 (n=10) | — |
+| GLM-5 | DSA | FP8 | 1.34 / 2.00 / 2.23 (n=10) | 1.12 / 1.93 / 2.52 (n=10) | — |
+| GLM-5 | DSA | NVFP4 | 2.10 / 3.05 / 3.63 (n=10) | 1.31 / 2.29 / 2.66 (n=10) | — |
+| DeepSeek-V4-Pro (PP2) | DSV4 | FP8-block | 0.89 / 1.30 / 1.42 (n=10) | 3.73 / 6.26 / 8.68 (n=10) | — |
 | DeepSeek-V4-Pro | DSV4 | FP8 + MXFP4/MXFP8 | 1.12 / 1.32 / 1.98 (n=10) | 2.20 / 4.93 / 5.36 (n=10) | — |
-| DeepSeek-V4-Flash | DSV4 | FP8 + MXFP4/MXFP8 | 1.12 / 1.54 / 1.81 (n=10) | — | — |
-| Qwen3-VL-32B image | dense/VL | BF16 | 0.58 (n=1)² | 0.29 (n=1)² | 5.17 (n=1)² |
-| Qwen3-VL-30B-A3B image | MoE/VL | BF16 | 0.34 (n=1)² | 2.45 (n=1)² | 5.32 (n=1)² |
+| DeepSeek-V4-Flash | DSV4 | FP8 + MXFP4/MXFP8 | 1.45 / 2.49 / 2.73 (n=10) | — | — |
+| Qwen3-VL-32B image | dense/VL | BF16 | 0.58 (n=1)² | 0.29 (n=1)² | 5.06 (n=1)² |
+| Qwen3-VL-30B-A3B image | MoE/VL | BF16 | 0.34 (n=1)² | 2.45 (n=1)² | 5.23 (n=1)² |
 | **Cross-stack off-grid aggregate**³ | mixed | mixed | **0.89 / 1.50 / 9.87 (n=64)** | **1.07 / 1.83 / 3.25 (n=64)** | — |
 
 1. The TP8 decode row uses all 14 boundary-util extrapolation probes; its ten irregular
@@ -194,6 +189,8 @@ are comparable: **1.47% mean, 0.85% median, 3.67% p90, 8.68% max, and 1.04% WAPE
 3. The separate stack sweep covers B200/H100/B300 and SGLang/TRT-LLM/vLLM. Its 9.87%
    maximum is the DSA `index_topk` transition; the B300/TRT-LLM MoE case has no SILICON
    reference and is excluded.
+4. Qwen3.5's SILICON path reuses sibling-version collected GDN kernels; strict EMPIRICAL
+   has no active-version GDN table and uses its analytic fallback.
 
 The primary off-grid coverage is 185/195 (94.9%) for prefill and 170/180 (94.4%) for
 decode. Five DeepSeek-V3.2 TP2/PP2 prefill probes are OOM. Kimi-K2.5 is a strict

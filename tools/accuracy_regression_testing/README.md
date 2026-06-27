@@ -64,7 +64,7 @@ fresh model/session so a failed `FallbackOp` lookup at one random point cannot
 change later points. Transfer policy is a global run option, never a per-case
 matrix field. The default `--transfer-policy off` is the primary methodology:
 it isolates own-data empirical fidelity from cross-shape, cross-quant,
-cross-profile, cross-op, and sibling-version transfer.
+cross-profile, and cross-op transfer.
 
 The default matrix covers dense, MoE, DSA, DSV4, and VL models across BF16,
 FP8-block, FP8-static, NVFP4, INT4-WO, and MXFP4/MXFP8 profiles:
@@ -81,7 +81,14 @@ fidelity score. Every observation and pair records provenance tags and the
 worst tier used. If a transfer tag nevertheless appears under strict `off`, the
 pair is retained as `transfer_excluded`, counted in summary diagnostics, and
 excluded from APE/WAPE aggregates. Own-data `empirical` provenance and
-table-less analytic operations remain valid under strict mode.
+analytic operation fallbacks remain valid under strict mode and stay visible in
+the per-op source/attribution output.
+
+SILICON follows the production shared-layer policy: it loads active-version
+measurements plus manifest-declared sibling-version/framework rows. Formula-only
+EMPIRICAL loads only the active version. Consequently this is a direct comparison
+of the two real modes, not an active-row-only matched-source experiment; shared-row
+effects should be interpreted from the per-model and per-op breakdowns.
 
 Keep cross-stack diagnostics separate from that primary, fixed-stack fidelity
 population. The supplemental matrix compares representative SGLang, TRT-LLM,

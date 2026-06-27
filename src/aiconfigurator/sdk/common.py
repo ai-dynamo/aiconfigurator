@@ -885,7 +885,6 @@ class TransferKind(Enum):
     XQUANT = "xquant"  # cross-quant within the SAME (memory, compute) profile
     XPROFILE = "xprofile"  # cross-quant across profiles (rescaled by a util-level ratio)
     XOP = "xop"  # cross-op (borrow a related op's util, e.g. MSA<-DSA, via util_scale)
-    XVERSION = "xversion"  # sibling-version shared-layer inheritance (enable_shared_layer)
 
 
 # All transfer kinds enabled — the default HYBRID/EMPIRICAL behaviour (backward compatible).
@@ -894,8 +893,8 @@ ALL_TRANSFERS: frozenset[TransferKind] = frozenset(TransferKind)
 # Named presets along the confidence ladder, for a simple external surface.
 TRANSFER_PRESETS: dict[str, frozenset[TransferKind]] = {
     "off": frozenset(),
-    "conservative": frozenset({TransferKind.XSHAPE, TransferKind.XVERSION}),
-    "balanced": frozenset({TransferKind.XSHAPE, TransferKind.XQUANT, TransferKind.XVERSION}),
+    "conservative": frozenset({TransferKind.XSHAPE}),
+    "balanced": frozenset({TransferKind.XSHAPE, TransferKind.XQUANT}),
     "aggressive": ALL_TRANSFERS,
 }
 

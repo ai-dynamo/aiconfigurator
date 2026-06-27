@@ -121,10 +121,11 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
     common_parser.add_argument(
         "--deployment-target",
         type=str,
-        choices=["dynamo-j2", "dynamo-python", "llm-d"],
+        choices=["dynamo-j2", "dynamo-python", "llm-d-helm", "llm-d-kustomize"],
         default="dynamo-j2",
         help="Deployment target platform. Options: dynamo-j2 (default, Jinja2 templates), "
-        "dynamo-python (Dynamo Python config modifiers), llm-d (llm-d Helm values).",
+        "dynamo-python (Dynamo Python config modifiers), llm-d-helm (llm-d Helm values), "
+        "llm-d-kustomize (llm-d Kustomize overlays).",
     )
     common_parser.add_argument(
         "--engine-step-backend",
@@ -213,7 +214,8 @@ def _add_default_mode_arguments(parser):
         type=str,
         default=None,
         help="[expert] Performance-database version used for the simulation/search "
-        "(search fidelity). Default: latest. Alias: --backend-version.",
+        "(search fidelity). Default: latest measured version; marker-only shared-layer versions "
+        "require an explicit value. Alias: --backend-version.",
     )
     parser.add_argument(
         "--database-mode",
@@ -233,7 +235,7 @@ def _add_default_mode_arguments(parser):
         default=None,
         help="Fine-grained HYBRID/EMPIRICAL transfer control: which empirical transfer kinds "
         "may fill missing data. A preset (off|conservative|balanced|aggressive) or a "
-        "comma-separated list of kinds (xshape,xquant,xprofile,xop,xversion). "
+        "comma-separated list of kinds (xshape,xquant,xprofile,xop). "
         "Default: all kinds enabled. Ignored in SILICON mode.",
     )
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length. Default: 4000.")
@@ -421,7 +423,7 @@ def _add_estimate_mode_arguments(parser):
         help="Estimation mode: 'agg' (default, IFB), 'disagg' (separate prefill/decode workers), "
         "'afd' (attention-FFN disaggregated), or one of the static modes "
         "'static' / 'static_ctx' / 'static_gen' for a single-pass, no-IFB latency/memory "
-        "breakdown (mirrors the webapp Static Tab).",
+        "breakdown.",
     )
     parser.add_argument(
         "--system",
@@ -452,7 +454,8 @@ def _add_estimate_mode_arguments(parser):
         type=str,
         default=None,
         help="[expert] Performance-database version used for the simulation/search "
-        "(search fidelity). Default: latest. Alias: --backend-version.",
+        "(search fidelity). Default: latest measured version; marker-only shared-layer versions "
+        "require an explicit value. Alias: --backend-version.",
     )
     parser.add_argument("--isl", type=int, default=1024, help="Input sequence length. Default: 1024.")
     parser.add_argument("--osl", type=int, default=1024, help="Output sequence length. Default: 1024.")
@@ -776,7 +779,7 @@ def _add_estimate_mode_arguments(parser):
         default=None,
         help="Fine-grained HYBRID/EMPIRICAL transfer control: which empirical transfer kinds "
         "may fill missing data. A preset (off|conservative|balanced|aggressive) or a "
-        "comma-separated list of kinds (xshape,xquant,xprofile,xop,xversion). "
+        "comma-separated list of kinds (xshape,xquant,xprofile,xop). "
         "Default: all kinds enabled. Ignored in SILICON mode.",
     )
     parser.add_argument(
@@ -985,6 +988,13 @@ _SGLANG_DEEPEP_REQUIRED_FILES = (
 )
 
 
+def _database_mode_requires_declared_perf_database(database_mode: str | None) -> bool:
+    return (database_mode or "").upper() in {
+        common.DatabaseMode.SILICON.name,
+        common.DatabaseMode.HYBRID.name,
+    }
+
+
 def _sglang_deepep_perf_data_skip_reason(
     system_name: str,
     decode_system_name: str | None,
@@ -1028,7 +1038,11 @@ def _sglang_deepep_perf_data_skip_reason(
     return None
 
 
-def _ensure_backend_version_available(system_name: str, backend_name: str, backend_version: str | None = None) -> None:
+def _ensure_backend_version_available(
+    system_name: str,
+    backend_name: str,
+    backend_version: str | None = None,
+) -> None:
     """
     Validate that the backend is supported for the given system and version.
 
@@ -1036,7 +1050,6 @@ def _ensure_backend_version_available(system_name: str, backend_name: str, backe
         system_name: System name (e.g., 'gb200_sxm')
         backend_name: Backend name (e.g., 'vllm')
         backend_version: Backend database version. Default is None, which means latest version.
-
     Raises:
         SystemExit: If the backend is not supported for the given system and version.
     """
@@ -1071,7 +1084,10 @@ def _ensure_backend_version_available(system_name: str, backend_name: str, backe
     if versions:
         logger.error("Available versions: %s", ", ".join(versions))
         logger.error(
-            "Fix: switch --backend-version to one of the available versions, or remove --backend-version to use latest."
+            "Fix: switch --backend-version to one of the available versions, "
+            "remove --backend-version to use latest, "
+            "or add a declared version directory with %s when this version intentionally reuses shared-layer data.",
+            perf_database.SHARED_LAYER_REUSE_MARKER,
         )
     else:
         logger.error("Available versions: none")
@@ -1153,10 +1169,11 @@ def build_default_tasks(
     if backend == "auto":
         supported = perf_database.get_supported_databases()
         available = []
+        requires_declared_perf_database = _database_mode_requires_declared_perf_database(database_mode)
         for backend_name in backends_to_sweep:
             sys_backends = supported.get(system, {})
             decode_backends = supported.get(decode_system, {}) if decode_system != system else sys_backends
-            if database_mode != common.DatabaseMode.SILICON.name:
+            if not requires_declared_perf_database:
                 sys_versions = sys_backends.get(backend_name, [])
                 decode_versions = decode_backends.get(backend_name, [])
                 if not sys_versions or (decode_system != system and not decode_versions):
@@ -1213,7 +1230,7 @@ def build_default_tasks(
             )
             raise SystemExit(1)
         backends_to_sweep = available
-    elif database_mode == common.DatabaseMode.SILICON.name:
+    elif _database_mode_requires_declared_perf_database(database_mode):
         _ensure_backend_version_available(system, backend, backend_version)
         if decode_system != system:
             _ensure_backend_version_available(decode_system, backend, backend_version)
@@ -1268,8 +1285,7 @@ def build_default_tasks(
     def _sglang_moe_backend_override(backend_name: str) -> str | None:
         if backend_name != common.BackendName.sglang.value:
             return None
-        # Auto-set moe_backend for SGLang wideep, matching webapp behavior
-        # (webapp/events/event_fn.py sets moe_backend="deepep_moe" when enable_wideep + sglang)
+        # Auto-set moe_backend for SGLang wideep to preserve existing UI parity.
         return moe_backend or ("deepep_moe" if enable_wideep else None)
 
     def _make_agg(backend_name: str, moe_backend_value: str | None) -> Task:
@@ -1421,35 +1437,38 @@ def build_experiment_tasks(
             logger.warning("Skipping experiment '%s': no system_name provided.", exp_name)
             continue
 
+        database_mode = exp_config.get("database_mode", common.DatabaseMode.SILICON.name)
+
         if exp_config.get("total_gpus") is None:
             logger.warning("Skipping experiment '%s': total_gpus not provided.", exp_name)
             continue
 
-        # Early-fail on an unavailable backend version (clearer than failing deep in the sweep).
-        # Role-aware: agg and legacy-v1 disagg carry backend/version/system at the top level;
-        # flat-v2 disagg carries them per role (prefill_*/decode_*), falling back to top-level so
-        # v1 configs still validate.
-        if serving_mode == "disagg":
-            role_checks = [
-                (
-                    exp_config.get("prefill_system_name") or system_name,
-                    exp_config.get("prefill_backend_name") or exp_config.get("backend_name"),
-                    exp_config.get("prefill_backend_version") or exp_config.get("backend_version"),
-                ),
-                (
-                    exp_config.get("decode_system_name") or system_name,
-                    exp_config.get("decode_backend_name") or exp_config.get("backend_name"),
-                    exp_config.get("decode_backend_version") or exp_config.get("backend_version"),
-                ),
-            ]
-        else:
-            role_checks = [(system_name, exp_config.get("backend_name"), exp_config.get("backend_version"))]
-        seen_combos: set[tuple[str, str, str]] = set()
-        for sys_name, bname, bver in role_checks:
-            bname = bname or common.BackendName.trtllm.value
-            if bver is not None and sys_name and (sys_name, bname, bver) not in seen_combos:
-                seen_combos.add((sys_name, bname, bver))
-                _ensure_backend_version_available(sys_name, bname, bver)
+        if _database_mode_requires_declared_perf_database(database_mode):
+            # Early-fail on an unavailable backend version (clearer than failing deep in the sweep).
+            # Role-aware: agg and legacy-v1 disagg carry backend/version/system at the top level;
+            # flat-v2 disagg carries them per role (prefill_*/decode_*), falling back to top-level so
+            # v1 configs still validate.
+            if serving_mode == "disagg":
+                role_checks = [
+                    (
+                        exp_config.get("prefill_system_name") or system_name,
+                        exp_config.get("prefill_backend_name") or exp_config.get("backend_name"),
+                        exp_config.get("prefill_backend_version") or exp_config.get("backend_version"),
+                    ),
+                    (
+                        exp_config.get("decode_system_name") or system_name,
+                        exp_config.get("decode_backend_name") or exp_config.get("backend_name"),
+                        exp_config.get("decode_backend_version") or exp_config.get("backend_version"),
+                    ),
+                ]
+            else:
+                role_checks = [(system_name, exp_config.get("backend_name"), exp_config.get("backend_version"))]
+            seen_combos: set[tuple[str, str, str]] = set()
+            for sys_name, bname, bver in role_checks:
+                bname = bname or common.BackendName.trtllm.value
+                if bver is not None and sys_name and (sys_name, bname, bver) not in seen_combos:
+                    seen_combos.add((sys_name, bname, bver))
+                    _ensure_backend_version_available(sys_name, bname, bver)
 
         # Per-experiment engine_step_backend wins over the global default.
         overrides: dict[str, Any] = {}
@@ -1460,7 +1479,8 @@ def build_experiment_tasks(
         # mode / profiles).  Task.from_yaml auto-detects and converts it to the flat V2
         # schema (emitting a DeprecationWarning); a native V2 flat dict also works.
         try:
-            tasks[exp_name] = Task.from_yaml(exp_config, **overrides)
+            task_config = {**exp_config, "database_mode": database_mode}
+            tasks[exp_name] = Task.from_yaml(task_config, **overrides)
         except Exception:
             logger.exception("Failed to build Task for experiment '%s'", exp_name)
 

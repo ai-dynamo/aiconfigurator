@@ -16,10 +16,11 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV MPLCONFIGDIR=/tmp/matplotlib
 
 FROM base AS build
-# The `aiconfigurator_core` extension is compiled into the wheel by maturin
-# during `uv build`. maturin needs the Rust crate sources, a C linker (gcc),
-# and ca-certificates so cargo can fetch crates from crates.io over TLS. Rust
-# itself is bootstrapped by maturin's build backend.
+# The lower `aiconfigurator-core` wheel owns the `aiconfigurator_core`
+# extension and SDK/data payload, so build it before the upper CLI/generator
+# wheel. maturin needs the Rust crate sources, a C linker (gcc), and
+# ca-certificates so cargo can fetch crates from crates.io over TLS. Rust itself
+# is bootstrapped by maturin's build backend.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
     rm -rf /var/lib/apt/lists/*
@@ -36,21 +37,22 @@ RUN set -e; \
         echo "Run 'git lfs install && git lfs pull' in the source tree before building." >&2; \
         exit 1; \
     fi
-RUN uv build --wheel --out-dir /workspace/dist
+RUN cd src/aiconfigurator-core && uv build --wheel --out-dir /workspace/dist && \
+    cd /workspace && uv build --wheel --out-dir /workspace/dist
 
 FROM base AS runtime
 COPY --from=build /workspace/dist /wheelhouse
-RUN WHL=$(ls -d /wheelhouse/*) && \
-    uv pip install $WHL && \
+RUN uv pip install /wheelhouse/*.whl && \
     rm -rf /wheelhouse
 
 FROM runtime AS test
 
-# The `aiconfigurator_core` extension ships inside the wheel built in the
-# `build` stage, so the test stage only needs the dev extras and test sources.
+# The `aiconfigurator_core` extension ships inside the lower wheel built in the
+# `build` stage, so the test stage only adds the upper wheel's dev extras and
+# test sources.
 COPY --from=build /workspace/dist /wheelhouse
-RUN WHL=$(ls -d /wheelhouse/*) && \
-    uv pip install "$WHL[dev]" && \
+RUN AIC_WHL=$(ls /wheelhouse/aiconfigurator-*.whl) && \
+    uv pip install /wheelhouse/aiconfigurator_core-*.whl "${AIC_WHL}[dev]" && \
     rm -rf /wheelhouse
 
 COPY pytest.ini /workspace/

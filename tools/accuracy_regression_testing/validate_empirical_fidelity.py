@@ -33,8 +33,8 @@ DEFAULT_MATRIX = Path(__file__).with_name("empirical_fidelity_matrix.json")
 MODES = ("SILICON", "EMPIRICAL")
 DEFAULT_PHASES = ("prefill", "decode")
 TRANSFER_POLICY_CHOICES = ("off", "conservative", "balanced", "aggressive")
-TRANSFER_PROVENANCE_TAGS = frozenset({"xshape", "xquant", "xprofile", "xop", "xversion"})
-PROVENANCE_ORDER = ("silicon", "empirical", "xversion", "xshape", "xquant", "xprofile", "xop")
+TRANSFER_PROVENANCE_TAGS = frozenset({"xshape", "xquant", "xprofile", "xop"})
+PROVENANCE_ORDER = ("silicon", "empirical", "xshape", "xquant", "xprofile", "xop")
 PHASE_TO_STATIC_MODE = {"prefill": "static_ctx", "decode": "static_gen", "encoder": "static_ctx"}
 POINT_FIELDS = (
     "batch_size",

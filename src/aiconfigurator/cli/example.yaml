@@ -48,7 +48,7 @@ agg_full:
   database_mode: SILICON
   # Fine-grained HYBRID/EMPIRICAL transfer control (ignored in SILICON). Preset
   # off|conservative|balanced|aggressive, or comma-separated kinds
-  # (xshape,xquant,xprofile,xop,xversion). Default: all kinds on.
+  # (xshape,xquant,xprofile,xop). Default: all kinds on.
   transfer_policy: aggressive
 
   # Worker spec

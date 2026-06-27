@@ -1,0 +1,34 @@
+{%- set llmd_config = LlmdConfig | default({}) -%}
+{%- set node_config = NodeConfig | default({}) -%}
+{%- set dyn_config = DynConfig | default({}) -%}
+{%- set is_agg = dyn_config.mode | default('disagg') == 'agg' -%}
+{%- set default_accelerator_type = 'xpu' if node_config.system_name | default('') == 'b60' else 'nvidia' -%}
+{%- set accelerator_type = llmd_config.accelerator_type | default(default_accelerator_type, true) -%}
+{%- set is_xpu = accelerator_type in ['xpu', 'intel'] -%}
+{%- set xpu_rdma_enabled = llmd_config.xpu_rdma_enabled | default(false) -%}
+{%- if is_agg and is_xpu -%}
+{%- set default_base_path = 'guides/optimized-baseline/modelserver/xpu/vllm' -%}
+{%- elif is_agg -%}
+{%- set default_base_path = 'guides/optimized-baseline/modelserver/gpu/vllm/base' -%}
+{%- elif is_xpu and xpu_rdma_enabled -%}
+{%- set default_base_path = 'guides/pd-disaggregation/modelserver/xpu/vllm-rdma' -%}
+{%- elif is_xpu -%}
+{%- set default_base_path = 'guides/pd-disaggregation/modelserver/xpu/vllm' -%}
+{%- else -%}
+{%- set default_base_path = 'guides/pd-disaggregation/modelserver/gpu/vllm/base' -%}
+{%- endif -%}
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - {{ llmd_config.kustomize_base_path | default(default_base_path, true) }}
+
+{% if llmd_config.kustomize_name_prefix | default('', true) %}
+namePrefix: {{ llmd_config.kustomize_name_prefix }}
+
+{% endif %}
+patches:
+  - path: {{ 'patch-vllm.yaml' if is_agg else 'patch-decode.yaml' }}
+{% if not is_agg %}
+  - path: patch-prefill.yaml
+{% endif %}

@@ -26,17 +26,15 @@ def _dsa_attention_modules_excluded_from_quant(raw_config: dict) -> bool:
     patterns = [
         *list(quant_config.get("modules_to_not_convert") or []),
         *list(quant_config.get("exclude_modules") or []),
+        *list(quant_config.get("ignore") or []),
         *list(hf_quant.get("exclude_modules") or []),
+        *list(hf_quant.get("ignore") or []),
     ]
-    dsa_projection_markers = (
-        "self_attn.q_a_proj",
-        "self_attn.q_b_proj",
-        "self_attn.kv_a_proj",
-        "self_attn.kv_a_proj_with_mqa",
-        "self_attn.kv_b_proj",
-        "self_attn.o_proj",
-    )
-    return any(any(marker in str(pattern) for marker in dsa_projection_markers) for pattern in patterns)
+    # Match either a full projection name (e.g. "self_attn.q_a_proj") or a
+    # layer-prefixed glob the ModelOpt exporter emits (e.g.
+    # "model.layers.10.self_attn*"). The latter is how nvidia/GLM-5-NVFP4
+    # excludes DSA attention from NVFP4; the full-name-only check missed it.
+    return any("self_attn" in str(pattern) for pattern in patterns)
 
 
 def _dsa_gemm_quant_mode(extra_params: object, fallback: common.GEMMQuantMode) -> common.GEMMQuantMode:

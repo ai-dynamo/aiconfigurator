@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
 _MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError, InterpolationDataNotAvailableError)
+SHARED_LAYER_REUSE_MARKER = "SHARED_LAYER_REUSE.txt"
+_DATABASE_VERSION_METADATA_FILES = {SHARED_LAYER_REUSE_MARKER, "INCOMPLETE.txt"}
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
@@ -231,9 +233,7 @@ def get_supported_databases(
                     versions = [
                         v
                         for v in os.listdir(backend_path)
-                        if not v.startswith(".")
-                        and os.path.isdir(os.path.join(backend_path, v))
-                        and not os.path.isfile(os.path.join(backend_path, v, "INCOMPLETE.txt"))
+                        if not v.startswith(".") and _database_version_dir_is_declared(os.path.join(backend_path, v))
                     ]
                     if versions:
                         supported_sets[system][backend.value].update(versions)
@@ -248,10 +248,82 @@ def get_supported_databases(
     return supported_dict
 
 
+def _iter_database_version_paths(
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
+):
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
+
+    for systems_root in systems_paths:
+        system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
+        if not os.path.isfile(system_yaml_path):
+            continue
+        try:
+            with open(system_yaml_path) as f:
+                system_spec = yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.warning("Could not process system config %s: %s", os.path.basename(system_yaml_path), e)
+            continue
+        data_dir = os.path.join(systems_root, system_spec.get("data_dir", ""))
+        version_path = os.path.join(data_dir, backend, version)
+        if os.path.isdir(version_path):
+            yield version_path
+
+
+def _database_version_dir_has_perf_files(version_path: str) -> bool:
+    try:
+        entries = os.listdir(version_path)
+    except Exception:
+        return False
+    for entry in entries:
+        if entry.startswith(".") or entry in _DATABASE_VERSION_METADATA_FILES:
+            continue
+        if os.path.isfile(os.path.join(version_path, entry)):
+            return True
+    return False
+
+
+def _database_version_dir_has_shared_layer_marker(version_path: str) -> bool:
+    return os.path.isfile(os.path.join(version_path, SHARED_LAYER_REUSE_MARKER))
+
+
+def _database_version_dir_is_declared(version_path: str) -> bool:
+    if not os.path.isdir(version_path):
+        return False
+    if os.path.isfile(os.path.join(version_path, "INCOMPLETE.txt")):
+        return False
+    return _database_version_dir_has_perf_files(version_path) or _database_version_dir_has_shared_layer_marker(
+        version_path
+    )
+
+
+def is_shared_layer_marker_only_version(
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
+) -> bool:
+    """True when a declared version has only the shared-layer marker and no measured files."""
+    saw_marker = False
+    for version_path in _iter_database_version_paths(system, backend, version, systems_paths=systems_paths):
+        if os.path.isfile(os.path.join(version_path, "INCOMPLETE.txt")):
+            continue
+        if _database_version_dir_has_perf_files(version_path):
+            return False
+        saw_marker = saw_marker or os.path.isfile(os.path.join(version_path, SHARED_LAYER_REUSE_MARKER))
+    return saw_marker
+
+
 def get_latest_database_version(
     system: str,
     backend: str,
     systems_paths: str | list[str] | None = None,
+    include_shared_layer_marker_versions: bool = False,
 ) -> str | None:
     """
     Get the latest database version for a given system and backend
@@ -263,6 +335,12 @@ def get_latest_database_version(
     else:
         supported_databases = get_supported_databases(systems_paths=systems_paths)
     database_versions = supported_databases.get(system, {}).get(backend, [])
+    if not include_shared_layer_marker_versions:
+        database_versions = [
+            version
+            for version in database_versions
+            if not is_shared_layer_marker_only_version(system, backend, version, systems_paths=systems_paths)
+        ]
     if not database_versions:
         logger.info("database not found for %s, %s", system, backend)
         return None
@@ -340,6 +418,17 @@ def get_latest_database_version(
     return latest_version[1]
 
 
+def _shared_layer_enabled(database_mode: str | None) -> bool:
+    """Whether the shared layer (sibling/cross-version row inheritance) loads.
+
+    Enabled for the default database mode, SILICON, and HYBRID: all consult the
+    silicon tables, so they benefit from reusing older collected data points when
+    the active backend/version lacks a shape. Explicit formula-only modes
+    compute without sibling silicon rows.
+    """
+    return database_mode is None or database_mode.upper() in ("SILICON", "HYBRID")
+
+
 def get_database(
     system: str,
     backend: str,
@@ -358,11 +447,14 @@ def get_database(
         systems_paths: the systems search paths
         allow_missing_data: instantiate a database from system specs even when
             backend/version data files are absent. This is intended for SOL/EMPIRICAL
-            estimate-only modes, not SILICON mode.
+            formula-only modes. Silicon shared-layer reuse still requires
+            an explicit backend/version directory; marker-only directories can
+            declare new framework versions whose rows come from siblings.
         database_mode: the mode the caller will query under (`SILICON` / `HYBRID` /
-            `EMPIRICAL` / `SOL`). HYBRID auto-enables the shared layer (sibling-row
-            inheritance, including `kernel_source=default` fallback rows); other
-            modes keep it off so predictions stay bit-identical to main.
+            `EMPIRICAL` / `SOL`). The default mode, SILICON, and HYBRID enable
+            the shared layer (sibling-row inheritance, including
+            `kernel_source=default` fallback rows) so missing shapes are filled
+            from older collected data; explicit formula-only modes keep it off.
 
     Returns:
         PerfDatabase for the given system, backend, version.
@@ -376,12 +468,7 @@ def get_database(
         logger.error(f"No database version available for {system=}, {backend=}")
         return None
 
-    # Must match PerfDatabase.__init__'s _shared_layer_mode (HYBRID *and* EMPIRICAL
-    # enable the sibling shared layer). If this only matched HYBRID, an EMPIRICAL DB
-    # would land on the same (systems_root, system, shared_flag=False) cache entry as
-    # SILICON/default and the two would alias -- leaking sibling rows into SILICON
-    # (breaking its purity) or stripping XVERSION from EMPIRICAL, depending on load order.
-    shared_flag = (database_mode or "").upper() in ("HYBRID", "EMPIRICAL")
+    shared_flag = _shared_layer_enabled(database_mode)
     missing_data_candidate = None
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
@@ -1210,20 +1297,18 @@ class PerfDatabase:
         Initialize the perf database.
 
         Args:
-            database_mode: drives the shared-layer load behavior. `"HYBRID"` and
-                `"EMPIRICAL"` enable sibling-row inheritance (other versions of the
-                same framework newest-first, then other frameworks; including
-                `kernel_source=default` fallback rows) so a missing op/shape can be
-                filled from the nearest sibling instead of dropping straight to the
-                empirical constant. `"SILICON"` / `"SOL"` keep it off so predictions
-                stay bit-identical to main. Doesn't change which rows are
-                interpolated at query time; that's `set_default_database_mode`.
+            database_mode: drives the shared-layer load behavior. The default
+                mode, `"SILICON"`, and `"HYBRID"` enable sibling-row inheritance
+                (including `kernel_source=default` fallback rows); explicit
+                formula-only modes keep it off. Doesn't change which rows are
+                interpolated at query time; that's controlled by
+                `set_default_database_mode`.
         """
         self.system = system
         self.backend = backend
         self.version = version
         self.systems_root = systems_root
-        self._shared_layer_mode = (database_mode or "").upper() in ("HYBRID", "EMPIRICAL")
+        self._shared_layer_mode = _shared_layer_enabled(database_mode)
         # Which empirical transfer kinds are permitted (HYBRID/EMPIRICAL only). All on by
         # default = current behaviour; set_transfer_policy() narrows it for fine-grained
         # HYBRID control. Read at query time by op get_empirical, so it can be retuned on
@@ -1440,8 +1525,9 @@ class PerfDatabase:
 
         # `framework -> set of kernel_sources` that the active backend may inherit
         # from sibling dirs of that framework. Both `shared` and `shared_fallback`
-        # rows are admitted in HYBRID mode; the fallback set is tracked separately
-        # only so we can emit a single warning per fallback source.
+        # rows are admitted whenever the shared layer is enabled (SILICON/HYBRID);
+        # the fallback set is tracked separately only so we can emit a single
+        # warning per fallback source.
         per_framework_filter: dict[str, set[str]] = defaultdict(set)
         per_framework_fallback: dict[str, set[str]] = defaultdict(set)
         for entry in self._op_kernel_source_manifest_entries.get(op_file_basename, ()):
@@ -1560,15 +1646,10 @@ class PerfDatabase:
     @property
     def enable_shared_layer(self) -> bool:
         """Whether sibling-version shared-layer sourcing is active (read at op load time
-        and in op cache keys). It is the HYBRID/EMPIRICAL mode AND the XVERSION transfer
-        kind being permitted -- so the transfer policy can switch the shared layer off
-        like any other transfer.
-
-        PLUGGABLE: the shared layer is a load-time data-sourcing mode (it reuses a sibling
-        version's measured kernel data, not a SOL-reconstruction transfer), so it is
-        expected to migrate into util-based SILICON interpolation later. To retire this
-        gate then, revert this property to ``return self._shared_layer_mode``."""
-        return getattr(self, "_shared_layer_mode", False) and (common.TransferKind.XVERSION in self.transfer_policy)
+        and in op cache keys). Shared rows are collected silicon data, so the default,
+        SILICON, and HYBRID modes enable them independently of empirical transfer policy;
+        EMPIRICAL and SOL modes keep them disabled."""
+        return getattr(self, "_shared_layer_mode", False)
 
     def clear_runtime_caches(self) -> None:
         """Clear cached query/interpolation state while preserving loaded op data."""
