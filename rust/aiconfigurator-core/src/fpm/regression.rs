@@ -1,16 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Workload-specific linear regression fallback for the forward-pass perf model.
+//! Workload-specific regression fallback for the forward-pass perf model.
 //!
-//! Used when native AIC support is unavailable: fits a linear model from
-//! bucketed `(feature vector, observed_ms)` samples once an inferred workload
-//! kind has enough observations, and predicts from that fit.
+//! Used when native AIC support is unavailable: fits a workload-specific model
+//! from bucketed `(feature vector, observed_ms)` samples once an inferred
+//! workload kind has enough observations, and predicts from that fit.
 
 use super::options::ForwardPassPerfOptions;
 use super::samples::{AxisRange, BucketedSamples, StoreStats, WithOptions};
 
 const RELAXABLE_NEG_TOLERANCE: f64 = 1e-6;
+const PREFILL_HINGE_MIN_OBSERVATIONS: usize = 6;
+const RELATIVE_WEIGHT_FLOOR_MS: f64 = 25.0;
+const HINGE_LOGSPACE_CANDIDATES: usize = 8;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BucketedRegression {
@@ -18,7 +21,7 @@ pub(crate) struct BucketedRegression {
     ndim: usize,
     min_observations: usize,
     relaxable: Vec<usize>,
-    fit: Option<LinearFit>,
+    fit: Option<RegressionFit>,
 }
 
 impl WithOptions for BucketedRegression {
@@ -51,8 +54,9 @@ impl StoreStats for BucketedRegression {
 impl BucketedRegression {
     pub(crate) fn add_observation(&mut self, x: Vec<f64>, y: f64) {
         if self.samples.add(x, y) {
-            self.fit = fit_linear(
-                self.samples.observations(),
+            let observations = self.samples.observations();
+            self.fit = fit_regression(
+                &observations,
                 self.ndim,
                 self.min_observations,
                 &self.relaxable,
@@ -62,6 +66,21 @@ impl BucketedRegression {
 
     pub(crate) fn predict(&self, x: &[f64]) -> Option<f64> {
         self.fit.as_ref().map(|fit| fit.predict(x).max(1e-6))
+    }
+}
+
+#[derive(Clone, Debug)]
+enum RegressionFit {
+    Linear(LinearFit),
+    WeightedHinge(WeightedHingeFit),
+}
+
+impl RegressionFit {
+    fn predict(&self, x: &[f64]) -> f64 {
+        match self {
+            Self::Linear(fit) => fit.predict(x),
+            Self::WeightedHinge(fit) => fit.predict(x),
+        }
     }
 }
 
@@ -83,8 +102,52 @@ impl LinearFit {
     }
 }
 
+#[derive(Clone, Debug)]
+struct WeightedHingeFit {
+    intercept: f64,
+    left_slope: f64,
+    right_slope_delta: f64,
+    knot: f64,
+}
+
+impl WeightedHingeFit {
+    fn predict(&self, x: &[f64]) -> f64 {
+        let value = x.first().copied().unwrap_or_default();
+        self.intercept
+            + self.left_slope * value
+            + self.right_slope_delta * (value - self.knot).max(0.0)
+    }
+
+    fn is_monotonic_nonnegative(&self) -> bool {
+        self.intercept >= -RELAXABLE_NEG_TOLERANCE
+            && self.left_slope >= -RELAXABLE_NEG_TOLERANCE
+            && self.left_slope + self.right_slope_delta >= -RELAXABLE_NEG_TOLERANCE
+    }
+}
+
+fn fit_regression(
+    observations: &[(Vec<f64>, f64)],
+    ndim: usize,
+    min_observations: usize,
+    relaxable: &[usize],
+) -> Option<RegressionFit> {
+    // Prefill is the only one-dimensional workload kind today. Its latency is
+    // overhead-heavy at low token counts and slope-heavy at high token counts,
+    // so a weighted hinge avoids the negative intercepts a global line can fit.
+    if ndim == 1
+        && relaxable.is_empty()
+        && observations.len() >= min_observations.max(PREFILL_HINGE_MIN_OBSERVATIONS)
+    {
+        if let Some(fit) = fit_weighted_hinge(observations) {
+            return Some(RegressionFit::WeightedHinge(fit));
+        }
+    }
+
+    fit_linear(observations, ndim, min_observations, relaxable).map(RegressionFit::Linear)
+}
+
 fn fit_linear(
-    observations: Vec<(Vec<f64>, f64)>,
+    observations: &[(Vec<f64>, f64)],
     ndim: usize,
     min_observations: usize,
     relaxable: &[usize],
@@ -99,9 +162,9 @@ fn fit_linear(
     for (x, y) in observations {
         let mut row = Vec::with_capacity(size);
         row.push(1.0);
-        row.extend(x.into_iter().take(ndim));
+        row.extend(x.iter().copied().take(ndim));
         for i in 0..size {
-            rhs[i] += row[i] * y;
+            rhs[i] += row[i] * *y;
             for j in 0..size {
                 lhs[i][j] += row[i] * row[j];
             }
@@ -130,6 +193,104 @@ fn fit_linear(
         intercept: solution[0],
         coefficients,
     })
+}
+
+fn fit_weighted_hinge(observations: &[(Vec<f64>, f64)]) -> Option<WeightedHingeFit> {
+    hinge_candidates(observations)
+        .into_iter()
+        .filter_map(|knot| {
+            let fit = fit_weighted_hinge_at(observations, knot)?;
+            let score = weighted_hinge_rmse(observations, &fit);
+            Some((score, fit))
+        })
+        .min_by(|(left_score, _), (right_score, _)| {
+            left_score
+                .partial_cmp(right_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(_, fit)| fit)
+}
+
+fn fit_weighted_hinge_at(observations: &[(Vec<f64>, f64)], knot: f64) -> Option<WeightedHingeFit> {
+    let size = 3;
+    let mut lhs = vec![vec![0.0_f64; size]; size];
+    let mut rhs = vec![0.0_f64; size];
+
+    for (x, y) in observations {
+        let value = *x.first()?;
+        let row = [1.0, value, (value - knot).max(0.0)];
+        let weight = relative_error_weight(*y);
+        for i in 0..size {
+            let weighted_i = row[i] * weight;
+            rhs[i] += weighted_i * *y * weight;
+            for j in 0..size {
+                lhs[i][j] += weighted_i * row[j] * weight;
+            }
+        }
+    }
+
+    let solution = solve_linear_system(lhs.clone(), rhs.clone())
+        .or_else(|| solve_regularized_linear_system(lhs, rhs))?;
+    let fit = WeightedHingeFit {
+        intercept: solution[0],
+        left_slope: solution[1],
+        right_slope_delta: solution[2],
+        knot,
+    };
+    fit.is_monotonic_nonnegative().then_some(fit)
+}
+
+fn weighted_hinge_rmse(observations: &[(Vec<f64>, f64)], fit: &WeightedHingeFit) -> f64 {
+    let mse = observations
+        .iter()
+        .map(|(x, y)| {
+            let residual = (fit.predict(x) - *y) * relative_error_weight(*y);
+            residual * residual
+        })
+        .sum::<f64>()
+        / observations.len().max(1) as f64;
+    mse.sqrt()
+}
+
+fn hinge_candidates(observations: &[(Vec<f64>, f64)]) -> Vec<f64> {
+    let mut xs = observations
+        .iter()
+        .filter_map(|(x, _)| x.first().copied())
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    xs.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    xs.dedup_by(|left, right| (*left - *right).abs() <= f64::EPSILON);
+    if xs.len() < 3 {
+        return Vec::new();
+    }
+
+    let min = xs[0];
+    let max = xs[xs.len() - 1];
+    let mut candidates = Vec::new();
+    for numerator in [1usize, 2, 3, 4] {
+        let idx = numerator * (xs.len() - 1) / 5;
+        candidates.push(xs[idx]);
+    }
+    if min > 0.0 && max > min {
+        let log_min = min.ln();
+        let log_max = max.ln();
+        for idx in 1..=HINGE_LOGSPACE_CANDIDATES {
+            let t = idx as f64 / (HINGE_LOGSPACE_CANDIDATES + 1) as f64;
+            candidates.push((log_min + t * (log_max - log_min)).exp());
+        }
+    }
+
+    candidates.retain(|candidate| candidate.is_finite() && *candidate > min && *candidate < max);
+    candidates.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.dedup_by(|left, right| {
+        let scale = left.abs().max(right.abs()).max(1.0);
+        (*left - *right).abs() <= scale * 1e-9
+    });
+    candidates
+}
+
+fn relative_error_weight(observed_ms: f64) -> f64 {
+    1.0 / observed_ms.max(RELATIVE_WEIGHT_FLOOR_MS)
 }
 
 fn solve_regularized_linear_system(mut lhs: Vec<Vec<f64>>, rhs: Vec<f64>) -> Option<Vec<f64>> {
