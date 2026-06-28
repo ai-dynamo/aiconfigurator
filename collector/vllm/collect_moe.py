@@ -86,11 +86,19 @@ except Exception:
 # This lets vLLM handle backend selection (FlashInfer/Triton/Marlin) and
 # weight swizzle internally, so one code path works on all GPUs.
 _mxfp4_available = False
+_dsv4_mxfp4_available = False
 try:
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
 
     _mxfp4_available = True
+except Exception:
+    pass
+
+try:
+    from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
+
+    _dsv4_mxfp4_available = True
 except Exception:
     pass
 
@@ -134,6 +142,7 @@ def get_moe_test_cases():
             "per_block_fp8": per_block_cast_to_fp8 is not None,
             "nvfp4": _nvfp4_available,
             "mxfp4": _mxfp4_available,
+            "dsv4_mxfp4": _dsv4_mxfp4_available,
         },
     )
 
@@ -229,10 +238,11 @@ def run_moe_torch(
 
     # INT4_WO path: W4A16 via vLLM's Marlin kernel using int4_w4a16_moe_quant_config.
     # Weights are packed uint8 (2 int4 per byte, shape K//2). Scales are per-group
-    # along K (group_size=128). Zero-points are None (symmetric quantization).
+    # along K (Kimi-K2.5 uses group_size=32). Zero-points are None.
     use_int4_wo = moe_type == "int4_wo"
     if use_int4_wo:
-        int4_group_size = 128
+        int4_config = get_moe_quantization_module_config("vllm", moe_type, model_name=model_name)
+        int4_group_size = int(int4_config.get("group_size", 128))
         # w1: (E, 2*local_inter, hidden) packed → (E, 2*local_inter, hidden//2) uint8
         w1 = torch.randint(
             0, 127, (local_num_experts, 2 * local_inter_size, hidden_size // 2), dtype=torch.uint8, device=device
@@ -269,7 +279,7 @@ def run_moe_torch(
     # looks up the module in static_forward_context.  FusedMoE registers
     # itself there during __init__, so we must pass the *same* config to
     # set_forward_context() at benchmark time.
-    use_mxfp4 = moe_type == "w4a16_mxfp4"
+    use_mxfp4 = moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
     moe_module = None
     mxfp4_vllm_cfg = None
 
@@ -279,7 +289,16 @@ def run_moe_torch(
 
         _ensure_workspace_manager(device)
 
-        mxfp4_quant_config = Mxfp4Config()
+        if moe_type == "w4a8_mxfp4_mxfp8":
+            if not _dsv4_mxfp4_available:
+                raise ImportError("DeepSeek-V4 MXFP4/MXFP8 MoE requires vLLM >= 0.22.0.")
+            mxfp4_quant_config = DeepseekV4FP8Config(
+                is_checkpoint_fp8_serialized=True,
+                activation_scheme="dynamic",
+                weight_block_size=[128, 128],
+            )
+        else:
+            mxfp4_quant_config = Mxfp4Config()
         mxfp4_module_config = get_moe_quantization_module_config("vllm", moe_type, model_name=model_name)
 
         # pcp_size=1: vLLM 0.17.0 added prefill context parallel to FusedMoE
@@ -646,7 +665,7 @@ def run_moe_torch(
         print(f"moe latency: {latency}")
 
         if use_mxfp4:
-            source = "vllm_mxfp4_moe"
+            source = "vllm_deepseek_v4_mxfp4_mxfp8_moe" if moe_type == "w4a8_mxfp4_mxfp8" else "vllm_mxfp4_moe"
         elif use_nvfp4:
             source = "vllm_flashinfer_trtllm_moe_fp4"
         elif use_int4_wo:

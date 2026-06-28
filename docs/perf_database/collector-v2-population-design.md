@@ -121,7 +121,8 @@ and resume behavior remain deterministic.
 | Situation | Population behavior | Reason |
 |---|---|---|
 | Head/KV-head/head-dim/window values from different models | Keep correlated model profiles; do not cross them | Cross-model tuples are not deployable shapes |
-| Shape-only collector with base/FP8/NVFP4 names and an independent quant axis | Canonicalize artifact aliases, then expand only their declared quant union | Artifact name does not change the invocation or persisted key, but unrelated quant modes are not deployable cases |
+| Shape-only collector with base/FP8/NVFP4 names and no checkpoint-native behavior | Canonicalize artifact aliases | Artifact name does not change the invocation or persisted key |
+| Quant-sensitive MoE collector | Keep one row per artifact and allow only the artifact's declared quant mode | A shared geometry does not make INT4, FP8, MXFP4, and NVFP4 checkpoints interchangeable |
 | Module collector that reads checkpoint-native quantization | Retain each path until native quantization is explicit | The path can change the executed kernel |
 | Different total-head/TP pairs with the same standalone-MLA local-head key | Deduplicate in the getter | Both invocation and current loader key are equivalent |
 | Experimental op with no production consumer | Keep the registry entry, omit it from default model plans | Explicit research runs remain possible without default collection cost |
@@ -161,7 +162,7 @@ may multiply a recipe by dtype, TP/EP, or token lists.
 |---|---:|---:|---:|---|
 | GEMM | 35,742 | 35,742 | 35,742 | unchanged |
 | ComputeScale | 1,628 | 1,628 | 1,628 | shared recipe unchanged; V2 also activates SGLang/vLLM |
-| MoE common | 1,797 | 4,548 | 3,048 | artifact duplicates removed; V2 physical additions retained |
+| MoE common | 1,797 | 4,548 | 3,507 | model-qualified recipes retain quant-sensitive artifacts; backend policy removes invalid products before execution |
 | MLA context specs | 220 | 550 | 220 | getter emits 1,760 unique loader keys |
 | MLA generation specs | 362 | 885 | 362 | getter emits 2,896 unique loader keys |
 | Mamba | 8 | 8 | 12 | four V1-compatible interpolation anchors added |
@@ -169,14 +170,22 @@ may multiply a recipe by dtype, TP/EP, or token lists.
 | mHC | 8 | 8 | 4 | four unique shape/phase profiles; token expansion is unchanged |
 | MLA BMM pre/post | 400 / 448 | 400 / 448 | 400 / 448 | unchanged |
 
-For MoE on B200, the cleaned schedules remove repeated artifact tasks without
-removing any expanded physical tuple. New model profiles are then additive;
-for example, Qwen3.5-122B-A10B adds its previously missing physical MoE shape
-without restoring artifact-only duplication. Model/backend quantization policy
-is applied before scheduling: DeepSeek V4 keeps only its native
-`w4a8_mxfp4_mxfp8` and converted `fp8_block` paths where the backend supports
-them, instead of multiplying its shapes by unrelated BF16, INT4-WO, or NVFP4
-modes.
+For MoE, geometry and checkpoint quantization are separate identities. New
+model profiles remain additive, but a backend schedules only the declared
+artifact mode rather than taking the Cartesian product of every shape and
+every backend quant mode. DeepSeek V4 native artifacts schedule
+`w4a8_mxfp4_mxfp8`; the `sgl-project/*-FP8` artifacts schedule `fp8_block`.
+Kimi-K2-Instruct schedules `fp8_block`, native Kimi-K2.5 schedules
+`int4_wo` with group size 32, and NVIDIA Kimi-K2.5 schedules `nvfp4`.
+
+GPT-OSS is also backend- and hardware-specific. SGLang and vLLM collect
+`w4a16_mxfp4`. TRT-LLM collects `w4a16_mxfp4` on Hopper and
+`w4a8_mxfp4_mxfp8` on Blackwell, matching the current AIC lookup contract.
+SGLang explicitly selects BF16 activation precision for the W4A16 label; its
+runtime `default` would otherwise quantize activation to MXFP8 on Blackwell.
+For DeepSeek V4, SGLang keeps only the production TRTLLM-gen MXFP4 x MXFP8
+path instead of also recording an NVFP4 CuteDSL run under the same logical
+quant label.
 
 DSA module population removes artifact-only repetition only where quantization
 and architecture are already explicit. SGLang keeps its checkpoint tasks
@@ -222,10 +231,16 @@ DeepSeek V4 has two additional population constraints:
    the declared runtime compatibility floor and prefix-aware context contract
    are both satisfied. TRT-LLM continues to schedule only the operations its
    registry implements.
-3. MoE artifact aliases share a shape only after their real quantization union
-   is explicit. SGLang and TRT-LLM retain native `w4a8_mxfp4_mxfp8` and
-   converted `fp8_block`; vLLM currently retains only `fp8_block`. Global backend
-   quant lists cannot introduce unrelated V4 cases such as `int4_wo`.
+3. MoE artifact aliases are not merged across quantization formats. Native
+   DeepSeek V4 artifacts retain only `w4a8_mxfp4_mxfp8`, while the converted
+   `sgl-project/*-FP8` artifacts retain only `fp8_block`. vLLM enables the
+   native W4A8 path only when its DeepSeek-V4 quantization implementation is
+   importable; global backend quant lists cannot introduce unrelated modes.
+
+The NVIDIA DeepSeek-V4 NVFP4 checkpoints are intentionally not advertised by
+this Collector-only change. The current AIC model catalog and the DSV4 module
+collector do not yet define an end-to-end NVFP4 artifact contract; adding only
+a standalone MoE shape would create a plan that AIC cannot consume correctly.
 
 mHC keeps native and converted artifacts separate until its model-loading
 path has resolved checkpoint-native expert precision. Its getter may still

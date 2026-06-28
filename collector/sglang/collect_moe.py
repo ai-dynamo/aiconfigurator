@@ -111,7 +111,11 @@ except ImportError:
     pass
 
 try:
-    from case_generator import get_common_moe_test_cases, moe_model_allows_quantization
+    from case_generator import (
+        get_common_moe_test_cases,
+        get_moe_quantization_module_config,
+        moe_model_allows_quantization,
+    )
 
     from helper import (
         balanced_logits,
@@ -126,7 +130,11 @@ except ModuleNotFoundError:
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from case_generator import get_common_moe_test_cases, moe_model_allows_quantization
+    from case_generator import (
+        get_common_moe_test_cases,
+        get_moe_quantization_module_config,
+        moe_model_allows_quantization,
+    )
 
     from helper import (
         balanced_logits,
@@ -158,6 +166,12 @@ def _make_moe_runner_config(swiglu_limit: float | None = None) -> MoeRunnerConfi
 
 def _uses_relu2_moe_activation(model_name: str) -> bool:
     return any(pattern in model_name for pattern in _NON_GATED_MOE_MODEL_PATTERNS)
+
+
+def _mxfp4_activation_precision(moe_type: str) -> str:
+    """Map the persisted quant label to SGLang's explicit activation mode."""
+
+    return "bf16" if moe_type == "w4a16_mxfp4" else "default"
 
 
 def get_moe_test_cases():
@@ -213,14 +227,8 @@ def get_moe_test_cases():
             is_native_dsv4 = common_moe_testcase.architecture == "DeepseekV4ForCausalLM"
             if is_native_dsv4 and moe_type == "w4a8_mxfp4_mxfp8" and num_tokens > 8192:
                 # DeepSeek-V4 FP4 experts are only exercised up to the SGLang
-                # prefill chunk size. Larger synthetic masked-CuteDSL cases
-                # allocate per-expert temporary buffers that exceed GB300 memory.
-                continue
-            if moe_type == "nvfp4" and is_native_dsv4:
-                # Native DeepSeek-V4 experts are queried by AIC as
-                # w4a8_mxfp4_mxfp8.  The SGLang kernel path is the same FP4
-                # FlashInfer/CuteDSL path, but the perf row must use the AIC
-                # quant-mode name so silicon lookup can find it.
+                # prefill chunk size. Larger synthetic TRTLLM-gen cases exceed
+                # the validated collection envelope.
                 continue
             if (
                 sm_version >= 120
@@ -575,14 +583,15 @@ def get_moe_test_cases():
                 if shard_k % 32 != 0:
                     continue
 
-            # int4_wo (W4A16): packed K dims must be divisible by group_size (128).
-            # w1 packed K = hidden_size // 2  → need hidden_size % 256 == 0
-            # w2 packed K = shard_inter // 4 = inter_size // (2*tp) → need (inter_size // tp) % 256 == 0
-            if moe_type == "int4_wo" and (
-                common_moe_testcase.hidden_size % 256 != 0
-                or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 256 != 0
-            ):
-                continue
+            if moe_type == "int4_wo":
+                int4_group_size = int(
+                    get_moe_quantization_module_config("sglang", moe_type, model_name=model_name).get("group_size", 128)
+                )
+                if (
+                    common_moe_testcase.hidden_size % int4_group_size != 0
+                    or (common_moe_testcase.inter_size // common_moe_testcase.tp) % int4_group_size != 0
+                ):
+                    continue
             if moe_type == "int4_wo" and common_moe_testcase.topk > (
                 common_moe_testcase.num_experts // common_moe_testcase.ep
             ):
@@ -597,6 +606,14 @@ def get_moe_test_cases():
             if "DeepSeek-V4" in common_moe_testcase.model_name:
                 swiglu_limit = 10
 
+            moe_backend = ""
+            if is_native_dsv4 and moe_type == "w4a8_mxfp4_mxfp8":
+                # Keep only the production MXFP4 x MXFP8 path. The old default
+                # case ran NVFP4 CuteDSL under the same logical dtype.
+                if common_moe_testcase.ep != 1 or common_moe_testcase.tp > 8:
+                    continue
+                moe_backend = "trtllm_mxfp4"
+
             base_case = [
                 moe_type,
                 num_tokens,
@@ -610,26 +627,9 @@ def get_moe_test_cases():
                 common_moe_testcase.token_expert_distribution,
                 common_moe_testcase.power_law_alpha,
                 swiglu_limit,
-                "",  # moe_backend: "" = default (CuteDSL for w4a8_mxfp4_mxfp8)
+                moe_backend,
             ]
             test_cases.append(base_case)
-
-            # DeepSeek-V4 production runs the trtllm-gen MXFP4xMXFP8 MoE kernel,
-            # NOT CuteDSL. Collect that kernel too (same w4a8_mxfp4_mxfp8 dtype,
-            # kernel_source=sglang_mxfp4_flashinfer_trtllm_moe). Single-rank
-            # (ep==1) synthetic case, matching the trtllm routed-moe bench path.
-            # Restrict to tp<=8: the trtllm-gen kernel asserts on the tiny
-            # per-rank intermediate sizes produced at tp16/32 (and the reference
-            # trtllm grid only covers tp 1/2/4/8 too).
-            if (
-                is_native_dsv4
-                and moe_type == "w4a8_mxfp4_mxfp8"
-                and common_moe_testcase.ep == 1
-                and common_moe_testcase.tp <= 8
-            ):
-                trtllm_case = list(base_case)
-                trtllm_case[-1] = "trtllm_mxfp4"
-                test_cases.append(trtllm_case)
 
     return test_cases
 
@@ -924,8 +924,8 @@ def benchmark_config(
         # (mxfp4_flashinfer_trtllm_moe.py): weights are int8 (hidden//2 packed),
         # scales are block-32 cast to e8m0 then shuffled with shuffle_matrix_a /
         # shuffle_matrix_sf_a (epilogue_tile_m=128), activations quantized with
-        # mxfp8_quantize. This is a DIFFERENT kernel from CuteDSL
-        # (sglang_flashinfer_cutedsl_moe) which the plain w4a8_mxfp4_mxfp8 uses.
+        # mxfp8_quantize. This is deliberately distinct from the NVFP4
+        # CuteDSL path and is the only DSV4 W4A8 case emitted by the planner.
         from flashinfer import mxfp8_quantize, shuffle_matrix_a, shuffle_matrix_sf_a
         from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe
         from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
@@ -1121,26 +1121,34 @@ def benchmark_config(
             raise ValueError("MXFP4 benchmarking uses full-router logits, not rank-local workloads")
 
         previous_backend = _moe_utils.MOE_RUNNER_BACKEND
+        server_args = _server_args_module._global_server_args
+        previous_precision = server_args.flashinfer_mxfp4_moe_precision
         _moe_utils.MOE_RUNNER_BACKEND = MoeRunnerBackend.FLASHINFER_MXFP4
+        server_args.flashinfer_mxfp4_moe_precision = _mxfp4_activation_precision(
+            "w4a16_mxfp4" if use_mxfp4_w4a16 else "w4a8_mxfp4_mxfp8"
+        )
         _patch_mxfp4_single_process_parallel(moe_tp_size=moe_tp_size, moe_ep_size=moe_ep_size)
 
-        intermediate_size = shard_intermediate_size // 2 * moe_tp_size
-        mxfp4_config_kwargs = {}
-        if "is_checkpoint_mxfp4_serialized" in inspect.signature(Mxfp4Config).parameters:
-            mxfp4_config_kwargs["is_checkpoint_mxfp4_serialized"] = True
-        quant_config = Mxfp4Config(**mxfp4_config_kwargs)
-        moe_layer = FusedMoE(
-            num_experts=num_experts,
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            layer_id=0,
-            top_k=topk,
-            params_dtype=dtype,
-            reduce_results=False,
-            quant_config=quant_config,
-            prefix="aic_sglang_mxfp4_moe",
-        ).to(device)
-        _moe_utils.MOE_RUNNER_BACKEND = previous_backend
+        try:
+            intermediate_size = shard_intermediate_size // 2 * moe_tp_size
+            mxfp4_config_kwargs = {}
+            if "is_checkpoint_mxfp4_serialized" in inspect.signature(Mxfp4Config).parameters:
+                mxfp4_config_kwargs["is_checkpoint_mxfp4_serialized"] = True
+            quant_config = Mxfp4Config(**mxfp4_config_kwargs)
+            moe_layer = FusedMoE(
+                num_experts=num_experts,
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                layer_id=0,
+                top_k=topk,
+                params_dtype=dtype,
+                reduce_results=False,
+                quant_config=quant_config,
+                prefix="aic_sglang_mxfp4_moe",
+            ).to(device)
+        finally:
+            _moe_utils.MOE_RUNNER_BACKEND = previous_backend
+            server_args.flashinfer_mxfp4_moe_precision = previous_precision
 
         with torch.no_grad():
             moe_layer.w13_weight.zero_()
@@ -1563,14 +1571,13 @@ def run_moe_torch(
     use_mxfp4_w4a16 = moe_type == "w4a16_mxfp4"
     use_mxfp4_w4a8 = moe_type == "w4a8_mxfp4_mxfp8"
     use_mxfp4_moe = use_mxfp4_w4a16 or use_mxfp4_w4a8
-    # DeepSeek-V4 production runs the trtllm-gen MXFP4xMXFP8 MoE kernel
-    # (moe_backend="trtllm_mxfp4"); the plain w4a8_mxfp4_mxfp8 stays on CuteDSL.
+    # DeepSeek-V4 production runs the trtllm-gen MXFP4xMXFP8 MoE kernel.
     use_trtllm_mxfp4 = moe_backend == "trtllm_mxfp4"
-    use_nvfp4_kernel = moe_type in ("nvfp4", "w4a8_mxfp4_mxfp8") and not use_trtllm_mxfp4
+    use_nvfp4_kernel = moe_type == "nvfp4"
     use_trtllm_bf16_fp4 = moe_type == "nvfp4" and moe_ep_size == 1
-    # int4_wo uses block_shape=[0, group_size] for grouped scales (group_size=128)
     if use_int4_w4a16:
-        block_shape = [0, 128]
+        int4_config = get_moe_quantization_module_config("sglang", moe_type, model_name=model_name)
+        block_shape = [0, int(int4_config.get("group_size", 128))]
     elif moe_type == "fp8_block" and (inter_size // moe_tp_size) % 128 == 0 and hidden_size % 128 == 0:
         block_shape = [128, 128]
     else:

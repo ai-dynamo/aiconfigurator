@@ -854,6 +854,7 @@ class MoeQuantizationSpec:
     name: str
     min_sm: Optional[int]
     min_sm_exclusive: Optional[int]
+    max_sm_exclusive: Optional[int]
     requires_runtime_feature: Optional[str]
     requires_model_quantization_config: bool
     allowed_model_paths: tuple[str, ...]
@@ -903,6 +904,9 @@ def get_moe_quantization_specs(backend: str) -> list[MoeQuantizationSpec]:
                 min_sm_exclusive=(
                     None if raw_mode.get("min_sm_exclusive") is None else int(raw_mode["min_sm_exclusive"])
                 ),
+                max_sm_exclusive=(
+                    None if raw_mode.get("max_sm_exclusive") is None else int(raw_mode["max_sm_exclusive"])
+                ),
                 requires_runtime_feature=(
                     None
                     if raw_mode.get("requires_runtime_feature") is None
@@ -936,6 +940,8 @@ def get_moe_quantization_modes(
         if spec.min_sm is not None and sm_version < spec.min_sm:
             continue
         if spec.min_sm_exclusive is not None and sm_version <= spec.min_sm_exclusive:
+            continue
+        if spec.max_sm_exclusive is not None and sm_version >= spec.max_sm_exclusive:
             continue
         if spec.requires_runtime_feature and not features.get(spec.requires_runtime_feature, False):
             continue

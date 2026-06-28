@@ -78,6 +78,10 @@ common_case_values:
     quantization_modes:
     - name: bfloat16
     - name: int4_wo
+      allowed_model_paths:
+      - moonshotai/Kimi-K2.5
+      module_config:
+        group_size: 32
     - name: fp8_block
       min_sm: 90
     - name: nvfp4
@@ -92,14 +96,6 @@ common_case_values:
       allowed_model_paths:
       - deepseek-ai/DeepSeek-V4-Flash
       - deepseek-ai/DeepSeek-V4-Pro
-      - sgl-project/DeepSeek-V4-Flash-FP8
-      - sgl-project/DeepSeek-V4-Pro-FP8
-    model_quantization_policies:
-    - model_paths:
-      - openai/gpt-oss-20b
-      - openai/gpt-oss-120b
-      allowed_modes:
-      - w4a16_mxfp4
   moe_trtllm:
     quantization_modes:
     - name: bfloat16
@@ -109,14 +105,16 @@ common_case_values:
       min_sm: 90
     - name: int4_wo
       min_sm: 100
+      allowed_model_paths:
+      - moonshotai/Kimi-K2.5
+      module_config:
+        group_size: 32
     - name: nvfp4
       min_sm: 100
     - name: w4a16_mxfp4
       min_sm_exclusive: 86
+      max_sm_exclusive: 100
       allowed_model_paths:
-      - moonshotai/Kimi-K2-Instruct
-      - moonshotai/Kimi-K2.5
-      - nvidia/Kimi-K2.5-NVFP4
       - openai/gpt-oss-20b
       - openai/gpt-oss-120b
     - name: w4a8_mxfp4_mxfp8
@@ -124,24 +122,16 @@ common_case_values:
       allowed_model_paths:
       - deepseek-ai/DeepSeek-V4-Flash
       - deepseek-ai/DeepSeek-V4-Pro
-      - sgl-project/DeepSeek-V4-Flash-FP8
-      - sgl-project/DeepSeek-V4-Pro-FP8
-      - moonshotai/Kimi-K2-Instruct
-      - moonshotai/Kimi-K2.5
-      - nvidia/Kimi-K2.5-NVFP4
       - openai/gpt-oss-20b
       - openai/gpt-oss-120b
-    model_quantization_policies:
-    - model_paths:
-      - openai/gpt-oss-20b
-      - openai/gpt-oss-120b
-      allowed_modes:
-      - w4a16_mxfp4
-      - w4a8_mxfp4_mxfp8
   moe_vllm:
     quantization_modes:
     - name: bfloat16
     - name: int4_wo
+      allowed_model_paths:
+      - moonshotai/Kimi-K2.5
+      module_config:
+        group_size: 32
     - name: fp8
       min_sm_exclusive: 86
     - name: fp8_block
@@ -153,6 +143,12 @@ common_case_values:
     - name: w4a16_mxfp4
       requires_runtime_feature: mxfp4
       requires_model_quantization_config: true
+    - name: w4a8_mxfp4_mxfp8
+      min_sm: 100
+      requires_runtime_feature: dsv4_mxfp4
+      allowed_model_paths:
+      - deepseek-ai/DeepSeek-V4-Flash
+      - deepseek-ai/DeepSeek-V4-Pro
     shape_constraints:
     - mode: fp8_block
       divisible_by:
@@ -167,10 +163,14 @@ common_case_values:
       divisible_by:
         hidden_size: 32
         local_inter_size: 32
+    - mode: w4a8_mxfp4_mxfp8
+      divisible_by:
+        hidden_size: 32
+        local_inter_size: 32
     - mode: int4_wo
       divisible_by:
-        hidden_size: 128
-        local_inter_size: 128
+        hidden_size: 32
+        local_inter_size: 32
   moe_vllm_xpu:
     token_counts:
     - 1

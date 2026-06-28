@@ -31,15 +31,45 @@ model_case_values:
       window_size: 0
       tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
   moe:
-    - model_path: moonshotai/Kimi-K2.5
-      model_aliases:
-        - moonshotai/Kimi-K2-Instruct
-        - nvidia/Kimi-K2.5-NVFP4
+    - model_path: moonshotai/Kimi-K2-Instruct
       hidden_size: 7168
       inter_size: 2048
       topk: 8
       num_experts: 384
       wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [fp8_block]
+        trtllm:
+          allowed_modes: [fp8_block]
+        vllm:
+          allowed_modes: [fp8_block]
+    - model_path: moonshotai/Kimi-K2.5
+      hidden_size: 7168
+      inter_size: 2048
+      topk: 8
+      num_experts: 384
+      wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [int4_wo]
+        trtllm:
+          allowed_modes: [int4_wo]
+        vllm:
+          allowed_modes: [int4_wo]
+    - model_path: nvidia/Kimi-K2.5-NVFP4
+      hidden_size: 7168
+      inter_size: 2048
+      topk: 8
+      num_experts: 384
+      wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [nvfp4]
+        trtllm:
+          allowed_modes: [nvfp4]
+        vllm:
+          allowed_modes: [nvfp4]
   mla:
     - model_path: moonshotai/Kimi-K2.5
       model_aliases:

@@ -467,30 +467,67 @@ def test_moe_model_quantization_policy_is_yaml_backed():
     assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a16_mxfp4")
     assert not moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "bfloat16")
 
-    assert moe_model_allows_quantization("trtllm", "moonshotai/Kimi-K2.5", "w4a16_mxfp4")
-    assert moe_model_allows_quantization("trtllm", "moonshotai/Kimi-K2.5", "bfloat16")
+    assert moe_model_allows_quantization("trtllm", "moonshotai/Kimi-K2.5", "int4_wo")
+    assert not moe_model_allows_quantization("trtllm", "moonshotai/Kimi-K2.5", "w4a16_mxfp4")
+    assert not moe_model_allows_quantization("trtllm", "moonshotai/Kimi-K2.5", "bfloat16")
     assert not moe_model_allows_quantization("trtllm", "Qwen/Qwen3-235B-A22B", "w4a16_mxfp4")
     assert not moe_model_allows_quantization("trtllm", "openai/gpt-oss-20b", "fp8")
 
 
 def test_dsv4_moe_quantization_policy_prunes_unrelated_modes():
-    expected_modes = {
-        "sglang": {"fp8_block", "w4a8_mxfp4_mxfp8"},
-        "trtllm": {"fp8_block", "w4a8_mxfp4_mxfp8"},
-        "vllm": {"fp8_block"},
+    expected_by_artifact = {
+        "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
+        "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
+        "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
+        "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
     }
-    model_paths = [
-        "deepseek-ai/DeepSeek-V4-Flash",
-        "deepseek-ai/DeepSeek-V4-Pro",
-        "sgl-project/DeepSeek-V4-Flash-FP8",
-        "sgl-project/DeepSeek-V4-Pro-FP8",
-    ]
 
-    for backend, expected in expected_modes.items():
+    for backend in ("sglang", "trtllm", "vllm"):
         available_modes = {spec.name for spec in get_moe_quantization_specs(backend)}
-        for model_path in model_paths:
+        for model_path, expected in expected_by_artifact.items():
             allowed = {mode for mode in available_modes if moe_model_allows_quantization(backend, model_path, mode)}
             assert allowed == expected, (backend, model_path)
+
+
+def test_kimi_moe_quantization_is_artifact_specific():
+    expected_by_artifact = {
+        "moonshotai/Kimi-K2-Instruct": {"fp8_block"},
+        "moonshotai/Kimi-K2.5": {"int4_wo"},
+        "nvidia/Kimi-K2.5-NVFP4": {"nvfp4"},
+    }
+
+    for backend in ("sglang", "trtllm", "vllm"):
+        available_modes = {spec.name for spec in get_moe_quantization_specs(backend)}
+        for model_path, expected in expected_by_artifact.items():
+            allowed = {mode for mode in available_modes if moe_model_allows_quantization(backend, model_path, mode)}
+            assert allowed == expected, (backend, model_path)
+
+
+def test_trtllm_gptoss_uses_w4a16_on_hopper_and_w4a8_on_blackwell():
+    from collector.case_generator import get_moe_quantization_modes
+
+    def selected_modes(sm_version):
+        return {
+            mode
+            for mode in get_moe_quantization_modes("trtllm", sm_version=sm_version)
+            if moe_model_allows_quantization("trtllm", "openai/gpt-oss-120b", mode)
+        }
+
+    assert selected_modes(90) == {"w4a16_mxfp4"}
+    assert selected_modes(100) == {"w4a8_mxfp4_mxfp8"}
+
+
+def test_sglang_mxfp4_quant_labels_select_explicit_activation_precision():
+    source_path = REPO_ROOT / "collector/sglang/collect_moe.py"
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    helper = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_mxfp4_activation_precision"
+    )
+    namespace = {}
+    exec(compile(ast.Module(body=[helper], type_ignores=[]), str(source_path), "exec"), namespace)
+
+    assert namespace["_mxfp4_activation_precision"]("w4a16_mxfp4") == "bf16"
+    assert namespace["_mxfp4_activation_precision"]("w4a8_mxfp4_mxfp8") == "default"
 
 
 def test_attention_shape_specs_are_yaml_backed_with_backend_overrides():
@@ -556,7 +593,7 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     moe_cases = get_common_moe_test_cases()
-    assert len(moe_cases) == 3048
+    assert len(moe_cases) == 3507
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -922,6 +959,19 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
     ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "nvfp4", "w4a16_mxfp4"]
     assert get_moe_quantization_modes(
         "vllm",
+        sm_version=100,
+        runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True, "dsv4_mxfp4": True},
+    ) == [
+        "bfloat16",
+        "int4_wo",
+        "fp8",
+        "fp8_block",
+        "nvfp4",
+        "w4a16_mxfp4",
+        "w4a8_mxfp4_mxfp8",
+    ]
+    assert get_moe_quantization_modes(
+        "vllm",
         sm_version=120,
         runtime_version="0.19.0",
         runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
@@ -936,6 +986,9 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
         "activation": "swigluoai",
     }
     assert get_moe_quantization_module_config("vllm", "w4a16_mxfp4", model_name="Qwen/Qwen3-235B-A22B") == {}
+    assert get_moe_quantization_module_config("vllm", "int4_wo", model_name="moonshotai/Kimi-K2.5") == {
+        "group_size": 32
+    }
 
     assert moe_shape_satisfies_constraints(
         "vllm",

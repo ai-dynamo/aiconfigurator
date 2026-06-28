@@ -85,8 +85,8 @@ so support-matrix healing can request cases for one model without editing
 Python. There are two deliberately different multi-name forms:
 
 - `model_aliases` resolves multiple artifact names to one canonical physical
-  case. Use it for base/FP8/NVFP4 checkpoints when quantization is already an
-  independent collector dimension and the kernel shape is identical.
+  case. Use it only for shape-only ops where the artifact does not affect the
+  invoked kernel or persisted key.
 - `model_paths` expands one physical case per path. Use it only when the model
   name changes runtime behavior, quantization policy, activation, or module
   loading (for example a collector that actually loads each checkpoint).
@@ -168,6 +168,15 @@ The MoE Python generator only combines those shared sweep values with each
 model's `hidden_size`, `inter_size`, `topk`, and `num_experts`. The same pattern
 applies to MLA, Mamba2, GDN, and MHC: model YAML stores model dimensions, while
 base op YAML stores the reusable sweep policy.
+
+MoE quantization is resolved before a case is queued. Base `quantization_modes`
+may declare `min_sm`, `min_sm_exclusive`, `max_sm_exclusive`, runtime features,
+an `allowed_model_paths` allowlist, and optional `module_config` such as an
+INT4 group size. A model row narrows that list with
+`framework_quantization.<backend>.allowed_modes`. Quant-sensitive checkpoint
+artifacts therefore use separate model rows even when all geometry fields are
+identical; this prevents an FP8, INT4, MXFP4, or NVFP4 suffix from being crossed
+with unrelated backend modes.
 
 `include_base: true` means "include the small universal base set" declared by
 base-file `model_ops` (currently dense attention and GEMM). It does not opt a

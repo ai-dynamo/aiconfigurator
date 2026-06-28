@@ -41,7 +41,11 @@ except ImportError:
 NON_GATED_MOE_MODELS = ["Nemotron-3"]
 _MXFP4_MOE_TYPES = {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
 
-from collector.case_generator import get_common_moe_test_cases, moe_model_allows_quantization
+from collector.case_generator import (
+    get_common_moe_test_cases,
+    get_moe_quantization_module_config,
+    moe_model_allows_quantization,
+)
 from collector.helper import (
     EXIT_CODE_RESTART,
     balanced_logits,
@@ -318,6 +322,8 @@ def run_moe_torch(
         dtype = torch.float8_e4m3fn
     elif moe_type == "int4_wo":
         quant_algo = QuantAlgo.W4A16
+        int4_config = get_moe_quantization_module_config("trtllm", moe_type, model_name=model_name)
+        quant_group_size = int(int4_config.get("group_size", 128))
     elif moe_type == "nvfp4":
         quant_algo = QuantAlgo.NVFP4
         quant_group_size = 16

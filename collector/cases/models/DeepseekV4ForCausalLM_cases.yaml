@@ -20,8 +20,22 @@ description: >
 model_case_values:
   moe:
     - model_path: deepseek-ai/DeepSeek-V4-Flash
-      model_aliases:
-        - sgl-project/DeepSeek-V4-Flash-FP8
+      hidden_size: 4096
+      inter_size: 2048
+      topk: 6
+      num_experts: 256
+      wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes:
+            - w4a8_mxfp4_mxfp8
+        trtllm:
+          allowed_modes:
+            - w4a8_mxfp4_mxfp8
+        vllm:
+          allowed_modes:
+            - w4a8_mxfp4_mxfp8
+    - model_path: sgl-project/DeepSeek-V4-Flash-FP8
       hidden_size: 4096
       inter_size: 2048
       topk: 6
@@ -31,17 +45,29 @@ model_case_values:
         sglang:
           allowed_modes:
             - fp8_block
-            - w4a8_mxfp4_mxfp8
         trtllm:
           allowed_modes:
             - fp8_block
-            - w4a8_mxfp4_mxfp8
         vllm:
           allowed_modes:
             - fp8_block
     - model_path: deepseek-ai/DeepSeek-V4-Pro
-      model_aliases:
-        - sgl-project/DeepSeek-V4-Pro-FP8
+      hidden_size: 7168
+      inter_size: 3072
+      topk: 6
+      num_experts: 384
+      wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes:
+            - w4a8_mxfp4_mxfp8
+        trtllm:
+          allowed_modes:
+            - w4a8_mxfp4_mxfp8
+        vllm:
+          allowed_modes:
+            - w4a8_mxfp4_mxfp8
+    - model_path: sgl-project/DeepSeek-V4-Pro-FP8
       hidden_size: 7168
       inter_size: 3072
       topk: 6
@@ -51,11 +77,9 @@ model_case_values:
         sglang:
           allowed_modes:
             - fp8_block
-            - w4a8_mxfp4_mxfp8
         trtllm:
           allowed_modes:
             - fp8_block
-            - w4a8_mxfp4_mxfp8
         vllm:
           allowed_modes:
             - fp8_block

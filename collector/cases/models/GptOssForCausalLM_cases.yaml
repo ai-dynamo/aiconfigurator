@@ -29,6 +29,13 @@ model_case_values:
       topk: 4
       num_experts: 128
       framework_quantization:
+        sglang:
+          allowed_modes:
+            - w4a16_mxfp4
+        trtllm:
+          allowed_modes:
+            - w4a16_mxfp4
+            - w4a8_mxfp4_mxfp8
         vllm:
           allowed_modes:
             - w4a16_mxfp4
@@ -49,6 +56,13 @@ model_case_values:
       topk: 4
       num_experts: 32
       framework_quantization:
+        sglang:
+          allowed_modes:
+            - w4a16_mxfp4
+        trtllm:
+          allowed_modes:
+            - w4a16_mxfp4
+            - w4a8_mxfp4_mxfp8
         vllm:
           allowed_modes:
             - w4a16_mxfp4
