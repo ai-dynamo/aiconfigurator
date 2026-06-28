@@ -27,6 +27,18 @@ model_case_values:
       topk: 6
       num_experts: 256
       wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes:
+            - fp8_block
+            - w4a8_mxfp4_mxfp8
+        trtllm:
+          allowed_modes:
+            - fp8_block
+            - w4a8_mxfp4_mxfp8
+        vllm:
+          allowed_modes:
+            - fp8_block
     - model_path: deepseek-ai/DeepSeek-V4-Pro
       model_aliases:
         - sgl-project/DeepSeek-V4-Pro-FP8
@@ -35,6 +47,18 @@ model_case_values:
       topk: 6
       num_experts: 384
       wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes:
+            - fp8_block
+            - w4a8_mxfp4_mxfp8
+        trtllm:
+          allowed_modes:
+            - fp8_block
+            - w4a8_mxfp4_mxfp8
+        vllm:
+          allowed_modes:
+            - fp8_block
   mhc:
     - model_paths:
         - deepseek-ai/DeepSeek-V4-Flash

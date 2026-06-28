@@ -122,6 +122,10 @@ common_case_values:
     - name: w4a8_mxfp4_mxfp8
       min_sm: 100
       allowed_model_paths:
+      - deepseek-ai/DeepSeek-V4-Flash
+      - deepseek-ai/DeepSeek-V4-Pro
+      - sgl-project/DeepSeek-V4-Flash-FP8
+      - sgl-project/DeepSeek-V4-Pro-FP8
       - moonshotai/Kimi-K2-Instruct
       - moonshotai/Kimi-K2.5
       - nvidia/Kimi-K2.5-NVFP4

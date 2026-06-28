@@ -9,7 +9,11 @@ import sys
 from itertools import pairwise
 from pathlib import Path
 
-from collector.case_generator import get_attention_head_configs, moe_model_allows_quantization
+from collector.case_generator import (
+    get_attention_head_configs,
+    get_moe_quantization_specs,
+    moe_model_allows_quantization,
+)
 from collector.helper import create_test_case_id
 from collector.model_cases import (
     CaseSelector,
@@ -457,7 +461,7 @@ def test_base_gemm_cases_are_readable_shape_specs():
 
 def test_moe_model_quantization_policy_is_yaml_backed():
     assert moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "w4a8_mxfp4_mxfp8")
-    assert moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "bfloat16")
+    assert not moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "bfloat16")
     assert not moe_model_allows_quantization("sglang", "Qwen/Qwen3-235B-A22B", "w4a8_mxfp4_mxfp8")
 
     assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a16_mxfp4")
@@ -467,6 +471,26 @@ def test_moe_model_quantization_policy_is_yaml_backed():
     assert moe_model_allows_quantization("trtllm", "moonshotai/Kimi-K2.5", "bfloat16")
     assert not moe_model_allows_quantization("trtllm", "Qwen/Qwen3-235B-A22B", "w4a16_mxfp4")
     assert not moe_model_allows_quantization("trtllm", "openai/gpt-oss-20b", "fp8")
+
+
+def test_dsv4_moe_quantization_policy_prunes_unrelated_modes():
+    expected_modes = {
+        "sglang": {"fp8_block", "w4a8_mxfp4_mxfp8"},
+        "trtllm": {"fp8_block", "w4a8_mxfp4_mxfp8"},
+        "vllm": {"fp8_block"},
+    }
+    model_paths = [
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "deepseek-ai/DeepSeek-V4-Pro",
+        "sgl-project/DeepSeek-V4-Flash-FP8",
+        "sgl-project/DeepSeek-V4-Pro-FP8",
+    ]
+
+    for backend, expected in expected_modes.items():
+        available_modes = {spec.name for spec in get_moe_quantization_specs(backend)}
+        for model_path in model_paths:
+            allowed = {mode for mode in available_modes if moe_model_allows_quantization(backend, model_path, mode)}
+            assert allowed == expected, (backend, model_path)
 
 
 def test_attention_shape_specs_are_yaml_backed_with_backend_overrides():

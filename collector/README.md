@@ -174,7 +174,10 @@ YAML as `legacy_model_cases`.
 
 Within `model_case_values`, use `model_aliases` when artifact names share one
 physical kernel case (for example base and FP8 checkpoints whose quantization is
-already swept independently). Keep `model_paths` only for path-sensitive cases
+already swept independently). When those artifacts use different real
+quantization modes, declare their allowed union in
+`framework_quantization.<backend>.allowed_modes` so unrelated backend modes are
+not multiplied into that shape. Keep `model_paths` only for path-sensitive cases
 that must be instantiated separately.
 
 For targeted support-matrix healing, a case selector can run a subset using

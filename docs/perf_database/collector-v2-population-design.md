@@ -81,6 +81,7 @@ native quantization becomes explicit.
 additive YAML profiles
     -> select the model/backend operations
     -> expand correlated structural tuples
+    -> resolve model/backend quantization policy
     -> reject unreachable/backend-unsupported tuples
     -> derive operation-local invocation identity
     -> stable deduplication of proven-equivalent invocations
@@ -120,7 +121,7 @@ and resume behavior remain deterministic.
 | Situation | Population behavior | Reason |
 |---|---|---|
 | Head/KV-head/head-dim/window values from different models | Keep correlated model profiles; do not cross them | Cross-model tuples are not deployable shapes |
-| Shape-only collector with base/FP8/NVFP4 names and an independent quant axis | Canonicalize artifact aliases | Artifact name does not change the invocation or persisted key |
+| Shape-only collector with base/FP8/NVFP4 names and an independent quant axis | Canonicalize artifact aliases, then expand only their declared quant union | Artifact name does not change the invocation or persisted key, but unrelated quant modes are not deployable cases |
 | Module collector that reads checkpoint-native quantization | Retain each path until native quantization is explicit | The path can change the executed kernel |
 | Different total-head/TP pairs with the same standalone-MLA local-head key | Deduplicate in the getter | Both invocation and current loader key are equivalent |
 | Experimental op with no production consumer | Keep the registry entry, omit it from default model plans | Explicit research runs remain possible without default collection cost |
@@ -171,7 +172,11 @@ may multiply a recipe by dtype, TP/EP, or token lists.
 For MoE on B200, the cleaned schedules remove repeated artifact tasks without
 removing any expanded physical tuple. New model profiles are then additive;
 for example, Qwen3.5-122B-A10B adds its previously missing physical MoE shape
-without restoring artifact-only duplication.
+without restoring artifact-only duplication. Model/backend quantization policy
+is applied before scheduling: DeepSeek V4 keeps only its native
+`w4a8_mxfp4_mxfp8` and converted `fp8_block` paths where the backend supports
+them, instead of multiplying its shapes by unrelated BF16, INT4-WO, or NVFP4
+modes.
 
 DSA module population removes artifact-only repetition only where quantization
 and architecture are already explicit. SGLang keeps its checkpoint tasks
@@ -217,6 +222,10 @@ DeepSeek V4 has two additional population constraints:
    the declared runtime compatibility floor and prefix-aware context contract
    are both satisfied. TRT-LLM continues to schedule only the operations its
    registry implements.
+3. MoE artifact aliases share a shape only after their real quantization union
+   is explicit. SGLang and TRT-LLM retain native `w4a8_mxfp4_mxfp8` and
+   converted `fp8_block`; vLLM currently retains only `fp8_block`. Global backend
+   quant lists cannot introduce unrelated V4 cases such as `int4_wo`.
 
 mHC keeps native and converted artifacts separate until its model-loading
 path has resolved checkpoint-native expert precision. Its getter may still
