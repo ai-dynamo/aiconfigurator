@@ -1613,6 +1613,9 @@ class PerfDatabase:
     def clear_runtime_caches(self) -> None:
         """Clear cached query/interpolation state while preserving loaded op data."""
         self._extracted_metrics_cache.clear()
+        sparse_cache = getattr(self, "_sparse_surrogate_cache", None)
+        if sparse_cache is not None:
+            sparse_cache.clear()
         for attr_name in dir(self):
             attr = getattr(self, attr_name)
             cache_clear = getattr(attr, "cache_clear", None)
@@ -2307,7 +2310,7 @@ class PerfDatabase:
         index_n_heads: int | None = None,
         index_head_dim: int | None = None,
         index_topk: int | None = None,
-        dsa_backend: str = "trtllm",
+        dsa_backend: str | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Query context DSA module latency. Delegates to
         ``ContextDSAModule._query_context_dsa_module_table``."""
@@ -2344,7 +2347,7 @@ class PerfDatabase:
         index_n_heads: int | None = None,
         index_head_dim: int | None = None,
         index_topk: int | None = None,
-        dsa_backend: str = "trtllm",
+        dsa_backend: str | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Query generation DSA module latency. Delegates to
         GenerationDSAModule._query_generation_dsa_module_table."""

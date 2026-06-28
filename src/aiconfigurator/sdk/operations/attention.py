@@ -3,9 +3,9 @@
 
 """Context + Generation attention ops (ISSUE-06 / AIC-543).
 
-Both classes own their CSV-backed perf tables, SOL correction (generation
-only — context attention has no SOL clamp in the legacy
-``_correct_data``), and grid extrapolation.
+Both classes own their CSV-backed perf tables and query-time sparse
+interpolation. Generation attention also retains its existing SOL correction;
+context attention has no SOL clamp in the legacy ``_correct_data``.
 ``PerfDatabase.query_context_attention`` / ``query_generation_attention``
 delegate here.
 
@@ -24,47 +24,15 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.perf_surrogate import Axis, estimate_sparse
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
     from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
-
-
-# Extrapolation target grids — lifted verbatim from the legacy blocks in
-# ``PerfDatabase.__init__`` so behavior stays bit-identical.
-
-# fmt: off
-_CONTEXT_ATTENTION_TARGET_X: list[int] = [
-    1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48,
-    56, 72, 96, 128,
-]  # n
-_CONTEXT_ATTENTION_TARGET_Y: list[int] = (
-    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-    + [4096 + i * 2048 for i in range(14)]
-    + [32768 + 16384 * i for i in range(6)]
-    + [131072 + 32768 * i for i in range(12)]
-    + [524288 + 65536 * i for i in range(9)]
-)  # s
-_CONTEXT_ATTENTION_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 384, 1024, 2048,
-]  # b
-
-_GENERATION_ATTENTION_TARGET_X: list[int] = [
-    1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48,
-    56, 72, 96, 128,
-]  # n
-_GENERATION_ATTENTION_TARGET_Y: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192,
-]  # b
-_GENERATION_ATTENTION_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
-    32768, 65536, 131072, 262144, 2097152 * 8,
-]  # s
-# fmt: on
 
 
 def _cache_key(database: PerfDatabase) -> tuple:
@@ -88,8 +56,8 @@ class ContextAttention(Operation):
     Context (prefill) attention operation.
 
     Owns ``_data_cache: {key: LoadedOpData}`` for the context attention CSV.
-    No SOL clamp on the loaded table (legacy ``_correct_data`` did not
-    correct context attention) — only grid extrapolation runs in ``load_data``.
+    No SOL clamp is applied to the loaded table (legacy ``_correct_data`` did
+    not correct context attention).
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -127,12 +95,7 @@ class ContextAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads context_attention CSV into the class cache,
-        applies grid extrapolation, binds ``database._context_attention_data``.
-
-        Mirrors ``GEMM.load_data``: correction/extrapolation operate on the
-        canonical class-cache value (passed explicitly), then the instance
-        attr is bound, respecting any pre-set test override."""
+        """Load the raw context-attention samples and bind the instance view."""
         import os
 
         from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
@@ -147,7 +110,6 @@ class ContextAttention(Operation):
                 load_context_attention_data(sources), PerfDataFilename.context_attention, primary_path
             )
 
-            cls._extrapolate(cls._data_cache[key])
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -157,29 +119,6 @@ class ContextAttention(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the legacy 4-level (quant_mode → kv_cache_dtype → num_kv_heads
-        → head_size → window_size → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-
-        for quant_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[quant_mode]:
-                for num_kv_heads in data_wrapper[quant_mode][kv_cache_dtype]:
-                    for head_size in data_wrapper[quant_mode][kv_cache_dtype][num_kv_heads]:
-                        for window_size in data_wrapper[quant_mode][kv_cache_dtype][num_kv_heads][head_size]:
-                            data_dict = data_wrapper[quant_mode][kv_cache_dtype][num_kv_heads][head_size][window_size]
-                            min_x = min(data_dict.keys())
-                            filtered_x = [i for i in _CONTEXT_ATTENTION_TARGET_X if i >= min_x]
-                            interpolation.extrapolate_data_grid(
-                                data_dict=data_dict,
-                                target_x_list=filtered_x,
-                                target_y_list=_CONTEXT_ATTENTION_TARGET_Y,
-                                target_z_list=_CONTEXT_ATTENTION_TARGET_Z,
-                                sqrt_y_value=True,
-                            )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_context_attention)
@@ -241,7 +180,8 @@ class ContextAttention(Operation):
             scale_factor = 0.6
             return latency / scale_factor
 
-        assert n_kv <= n, "n_kv must be less than or equal to n"
+        if n_kv > n:
+            raise ValueError("n_kv must be less than or equal to n")
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -265,16 +205,34 @@ class ContextAttention(Operation):
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             n_kv_lookup = 0 if n == n_kv else n_kv
             attention_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][head_size][window_size]
-            result = interpolation.interp_3d(
-                n,
-                full_s,
-                b,
+            latency, energy = estimate_sparse(
+                database,
+                ("context_attention", fmha_quant_mode, kvcache_quant_mode, n_kv_lookup, head_size, window_size),
                 attention_dict,
-                "cubic",
-                database._extracted_metrics_cache,
+                {"heads": n, "full_sequence": full_s, "batch": b},
+                axes=(
+                    Axis("heads", extrapolate="both"),
+                    Axis("full_sequence", extrapolate="both"),
+                    Axis("batch", extrapolate="both"),
+                ),
+                varying="full_sequence",
+                curve="sqrt",
+                mesh="raw",
+                exterior="baseline_ratio",
+                baseline=lambda point: get_sol(
+                    point["batch"],
+                    point["full_sequence"],
+                    0,
+                    point["heads"],
+                    point["heads"] if n_kv_lookup == 0 else n_kv_lookup,
+                    head_size,
+                    window_size,
+                    kvcache_quant_mode,
+                    fmha_quant_mode,
+                )[0],
             )
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            latency *= prefix_correction
+            energy *= prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -344,8 +302,7 @@ class GenerationAttention(Operation):
     Generation (decode) attention operation.
 
     Owns ``_data_cache: {key: LoadedOpData}`` for the generation attention
-    CSV. ``load_data`` applies both SOL clamping AND grid extrapolation
-    (legacy ``_correct_data`` clamped, then ``__init__`` extrapolated).
+    CSV. ``load_data`` retains the legacy SOL clamp on measured samples.
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -381,12 +338,7 @@ class GenerationAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads generation_attention CSV, clamps to SOL, applies
-        grid extrapolation, binds ``database._generation_attention_data``.
-
-        Mirrors ``GEMM.load_data``: correction/extrapolation operate on the
-        canonical class-cache value (passed explicitly), then the instance
-        attr is bound, respecting any pre-set test override."""
+        """Load generation-attention samples, clamp them to SOL, and bind them."""
         import os
 
         from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
@@ -401,13 +353,6 @@ class GenerationAttention(Operation):
                 load_generation_attention_data(sources), PerfDataFilename.generation_attention, primary_path
             )
 
-            cls._correct_sol(database, cls._data_cache[key])
-            cls._extrapolate(cls._data_cache[key])
-            # Re-clamp after extrapolation: interpolated/extrapolated grid
-            # points can land below the SOL bound. The legacy init path ran
-            # ``_correct_data()`` a second time which caught these; replicate
-            # that here so standalone ``load_data`` callers get the same
-            # physically-consistent floor.
             cls._correct_sol(database, cls._data_cache[key])
             cls._record_load()
 
@@ -464,26 +409,6 @@ class GenerationAttention(Operation):
                                             ] = float(sol)
                                         else:
                                             data_wrapper[quant_mode][n_kv][head_size][window_size][n][b][s] = float(sol)
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the legacy 4-level extrapolation grid."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-
-        for kv_cache_dtype in data_wrapper:
-            for num_kv_heads in data_wrapper[kv_cache_dtype]:
-                for head_size in data_wrapper[kv_cache_dtype][num_kv_heads]:
-                    for window_size in data_wrapper[kv_cache_dtype][num_kv_heads][head_size]:
-                        data_dict = data_wrapper[kv_cache_dtype][num_kv_heads][head_size][window_size]
-                        min_x = min(data_dict.keys())
-                        filtered_x = [i for i in _GENERATION_ATTENTION_TARGET_X if i >= min_x]
-                        interpolation.extrapolate_data_grid(
-                            data_dict=data_dict,
-                            target_x_list=filtered_x,
-                            target_y_list=_GENERATION_ATTENTION_TARGET_Y,
-                            target_z_list=_GENERATION_ATTENTION_TARGET_Z,
-                        )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_generation_attention)
@@ -542,7 +467,8 @@ class GenerationAttention(Operation):
             scale_factor = 0.8
             return latency / scale_factor
 
-        assert n_kv <= n, "n_kv must be less than or equal to n"
+        if n_kv > n:
+            raise ValueError("n_kv must be less than or equal to n")
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -571,9 +497,37 @@ class GenerationAttention(Operation):
             latency_sum = 0.0
             energy_sum = 0.0
             for s_i in s_samples:
-                r = interpolation.interp_3d(n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache)
-                latency_sum += float(r["latency"])
-                energy_sum += float(r.get("energy", 0.0))
+                latency, energy = estimate_sparse(
+                    database,
+                    ("generation_attention", kvcache_quant_mode, n_kv_lookup, head_size, window_size),
+                    attention_dict,
+                    {"heads": n, "batch": b, "sequence": s_i},
+                    axes=(
+                        Axis("heads", extrapolate="both"),
+                        Axis("batch", extrapolate="both"),
+                        Axis("sequence", extrapolate="both"),
+                    ),
+                    varying="sequence",
+                    curve="raw",
+                    mesh="raw",
+                    exterior="baseline_ratio",
+                    baseline=lambda point: get_sol(
+                        point["batch"],
+                        point["sequence"],
+                        point["heads"],
+                        point["heads"] if n_kv_lookup == 0 else n_kv_lookup,
+                        head_size,
+                        window_size,
+                        kvcache_quant_mode,
+                    )[0],
+                )
+                latency_sum += max(
+                    latency,
+                    get_sol(
+                        b, s_i, n, n if n_kv_lookup == 0 else n_kv_lookup, head_size, window_size, kvcache_quant_mode
+                    )[0],
+                )
+                energy_sum += energy
 
             latency = latency_sum / sample_cnt
             energy = energy_sum / sample_cnt
@@ -641,8 +595,7 @@ class EncoderAttention(Operation):
 
     Owns ``_data_cache: {key: LoadedOpData}`` for the encoder attention CSV.
     Schema is simpler than context attention: MHA only (no n_kv), no KV cache
-    (no kvcache_quant_mode), no sliding window. No SOL clamp. Grid extrapolation
-    reuses ``_CONTEXT_ATTENTION_TARGET_*``.
+    (no kvcache_quant_mode), no sliding window, and no SOL clamp.
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -678,9 +631,7 @@ class EncoderAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads encoder_attention CSV into the class cache,
-        applies grid extrapolation, binds ``database._encoder_attention_data``.
-        """
+        """Load the raw encoder-attention samples and bind the instance view."""
         import os
 
         from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
@@ -695,7 +646,6 @@ class EncoderAttention(Operation):
                 load_encoder_attention_data(sources), PerfDataFilename.encoder_attention, primary_path
             )
 
-            cls._extrapolate(cls._data_cache[key])
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -705,26 +655,6 @@ class EncoderAttention(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Densify the (n, s, b) grid. Reuses ``_CONTEXT_ATTENTION_TARGET_*``
-        since the encoder query shape matches context attention exactly."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-
-        for quant_mode in data_wrapper:
-            for head_size in data_wrapper[quant_mode]:
-                data_dict = data_wrapper[quant_mode][head_size]
-                min_x = min(data_dict.keys())
-                filtered_x = [i for i in _CONTEXT_ATTENTION_TARGET_X if i >= min_x]
-                interpolation.extrapolate_data_grid(
-                    data_dict=data_dict,
-                    target_x_list=filtered_x,
-                    target_y_list=_CONTEXT_ATTENTION_TARGET_Y,
-                    target_z_list=_CONTEXT_ATTENTION_TARGET_Z,
-                    sqrt_y_value=True,
-                )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_encoder_attention)
@@ -777,8 +707,25 @@ class EncoderAttention(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             attention_dict = data_wrapper[fmha_quant_mode][head_size]
-            result = interpolation.interp_3d(n, s, b, attention_dict, "cubic", database._extracted_metrics_cache)
-            return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
+            latency, energy = estimate_sparse(
+                database,
+                ("encoder_attention", fmha_quant_mode, head_size),
+                attention_dict,
+                {"heads": n, "sequence": s, "batch": b},
+                axes=(
+                    Axis("heads", extrapolate="both"),
+                    Axis("sequence", extrapolate="both"),
+                    Axis("batch", extrapolate="both"),
+                ),
+                varying="sequence",
+                curve="sqrt",
+                mesh="raw",
+                exterior="baseline_ratio",
+                baseline=lambda point: get_sol(
+                    point["batch"], point["sequence"], point["heads"], head_size, fmha_quant_mode
+                )[0],
+            )
+            return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,

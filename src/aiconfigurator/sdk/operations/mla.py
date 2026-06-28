@@ -19,10 +19,8 @@ Six op classes migrate from ``_legacy.py`` into ``operations/mla.py``:
   the legacy conditional ``if backend == "sglang"`` block in
   ``PerfDatabase.__init__``).
 
-No SOL clamping for any MLA variant in the legacy ``_correct_data``.
-Extrapolation present for all 4 regular + 2 module variants + 2 WideEP
-variants (the WideEP variants extrapolate only when their data was
-loaded — SGLang-only).
+No SOL clamping is added. Sparse context, generation, module, and WideEP
+tables are estimated at query time without expanding them into dense grids.
 
 Cache key matches every other migrated op:
 ``(systems_root, system, backend, version, enable_shared_layer)``. For
@@ -36,8 +34,9 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.perf_surrogate import Axis, estimate_sparse
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -61,51 +60,54 @@ def _cache_key(database: PerfDatabase) -> tuple:
     )
 
 
-# Shared extrapolation target lists — lifted verbatim from the legacy
-# ``PerfDatabase.__init__`` blocks (lines 2984-3206 pre-migration).
-#
-# fmt: off
-_REGULAR_CONTEXT_MLA_TARGET_Y: list[int] = (
-    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-    + [4096 + i * 2048 for i in range(14)]
-    + [32768 + 16384 * i for i in range(6)]
-    + [131072 + 32768 * i for i in range(12)]
-    + [524288 + 65536 * i for i in range(9)]
-)  # s
-_REGULAR_CONTEXT_MLA_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048,
-]  # b
+_CONTEXT_AXES = (
+    Axis("heads"),
+    Axis("tokens", extrapolate="both"),
+    Axis("batch", extrapolate="both"),
+)
+_GENERATION_AXES = (
+    Axis("heads"),
+    Axis("batch", extrapolate="both"),
+    Axis("tokens", extrapolate="both"),
+)
+_MLA_BMM_AXES = (Axis("tokens", extrapolate="both"),)
+_WIDEEP_MLA_KERNEL_SOURCES = {"flashinfer", "fa3", "trtllm_mla"}
 
-_WIDEEP_CONTEXT_MLA_TARGET_Y: list[int] = (
-    [16, 32, 64, 128, 256, 512, 1024, 2048]
-    + [4096 + i * 2048 for i in range(14)]
-    + [32768 + 16384 * i for i in range(6)]
-    + [131072 + 32768 * i for i in range(12)]
-    + [524288 + 65536 * i for i in range(9)]
-)  # s — note: starts at 16, not 1
-_WIDEEP_CONTEXT_MLA_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048,
-]  # b
 
-_GENERATION_MLA_TARGET_Y: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192,
-]  # b
-_GENERATION_MLA_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
-    16384, 32768, 65536, 131072, 262144, 2097152 * 8,
-]  # s
+def _resolve_wideep_mla_kernel_source(data, attention_backend: str | None) -> str:
+    requested = attention_backend or "flashinfer"
+    if requested not in _WIDEEP_MLA_KERNEL_SOURCES:
+        raise ValueError(f"Unsupported attention backend: {requested}")
+    if requested in data:
+        return requested
+    if requested == "flashinfer" and "trtllm_mla" in data:
+        return "trtllm_mla"
+    raise KeyError(f"No WideEP MLA data for attention backend {requested!r}")
 
-_CONTEXT_MLA_MODULE_TARGET_Y: list[int] = (
-    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-    + [4096 + i * 2048 for i in range(14)]
-    + [32768 + 16384 * i for i in range(6)]
-    + [131072 + 32768 * i for i in range(12)]
-    + [524288 + 65536 * i for i in range(9)]
-)  # s — same as regular context MLA
-_CONTEXT_MLA_MODULE_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048,
-]  # b — same as regular context MLA
-# fmt: on
+
+def _estimate_context(database, key, table, heads, tokens, batch, baseline, *, sqrt_curve=False):
+    return estimate_sparse(
+        database,
+        key,
+        table,
+        {"heads": heads, "tokens": tokens, "batch": batch},
+        axes=_CONTEXT_AXES,
+        varying="tokens",
+        curve="sqrt" if sqrt_curve else "raw",
+        baseline=baseline,
+    )
+
+
+def _estimate_generation(database, key, table, heads, batch, tokens, baseline):
+    return estimate_sparse(
+        database,
+        key,
+        table,
+        {"heads": heads, "batch": batch, "tokens": tokens},
+        axes=_GENERATION_AXES,
+        varying="tokens",
+        baseline=baseline,
+    )
 
 
 class ContextMLA(Operation):
@@ -139,8 +141,7 @@ class ContextMLA(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads context_mla CSV, applies extrapolation, binds
-        ``database._context_mla_data``."""
+        """Idempotently load the raw context MLA samples."""
         import os
 
         from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
@@ -154,7 +155,6 @@ class ContextMLA(Operation):
             cls._data_cache[key] = LoadedOpData(
                 load_context_mla_data(sources), PerfDataFilename.context_mla, primary_path
             )
-            cls._extrapolate(cls._data_cache[key])
             cls._record_load()
 
         if "_context_mla_data" not in database.__dict__:
@@ -163,23 +163,6 @@ class ContextMLA(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 2-level (quant_mode → kv_cache_dtype → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for quant_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[quant_mode]:
-                num_heads_list = list(data_wrapper[quant_mode][kv_cache_dtype].keys())
-                data_dict = data_wrapper[quant_mode][kv_cache_dtype]
-                interpolation.extrapolate_data_grid(
-                    data_dict=data_dict,
-                    target_x_list=num_heads_list,
-                    target_y_list=_REGULAR_CONTEXT_MLA_TARGET_Y,
-                    target_z_list=_REGULAR_CONTEXT_MLA_TARGET_Z,
-                    sqrt_y_value=True,
-                )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_context_mla)
@@ -250,9 +233,20 @@ class ContextMLA(Operation):
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             mla_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode]
-            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            latency, energy = _estimate_context(
+                database,
+                ("context-mla", fmha_quant_mode, kvcache_quant_mode),
+                mla_dict,
+                num_heads,
+                full_s,
+                b,
+                lambda point: get_sol(
+                    point["batch"], point["tokens"], 0, point["heads"], kvcache_quant_mode, fmha_quant_mode
+                )[0],
+                sqrt_curve=True,
+            )
+            latency *= prefix_correction
+            energy *= prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -322,8 +316,7 @@ class GenerationMLA(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads generation_mla CSV, applies extrapolation, binds
-        ``database._generation_mla_data``."""
+        """Idempotently load the raw generation MLA samples."""
         import os
 
         from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
@@ -337,7 +330,6 @@ class GenerationMLA(Operation):
             cls._data_cache[key] = LoadedOpData(
                 load_generation_mla_data(sources), PerfDataFilename.generation_mla, primary_path
             )
-            cls._extrapolate(cls._data_cache[key])
             cls._record_load()
 
         if "_generation_mla_data" not in database.__dict__:
@@ -346,21 +338,6 @@ class GenerationMLA(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 1-level (kv_cache_dtype → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for kv_cache_dtype in data_wrapper:
-            tp_list = list(data_wrapper[kv_cache_dtype].keys())
-            data_dict = data_wrapper[kv_cache_dtype]
-            interpolation.extrapolate_data_grid(
-                data_dict=data_dict,
-                target_x_list=tp_list,
-                target_y_list=_GENERATION_MLA_TARGET_Y,
-                target_z_list=_GENERATION_MLA_TARGET_Z,
-            )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_generation_mla)
@@ -419,9 +396,15 @@ class GenerationMLA(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             mla_dict = data_wrapper[kvcache_quant_mode]
-            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
+            latency, energy = _estimate_generation(
+                database,
+                ("generation-mla", kvcache_quant_mode),
+                mla_dict,
+                num_heads,
+                b,
+                s,
+                lambda point: get_sol(point["batch"], point["tokens"], point["heads"], kvcache_quant_mode)[0],
+            )
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -457,8 +440,8 @@ class GenerationMLA(Operation):
 class MLABmm(Operation):
     """
     MLABmm operation — pre/post BMM for MLA decoding. Owns ``_mla_bmm_data``.
-    No extrapolation in the legacy ``__init__`` path; data is 1D-keyed by
-    num_tokens within each (quant_mode, op_name, num_heads) bucket.
+    Data is 1D-keyed by num_tokens within each
+    (quant_mode, op_name, num_heads) bucket.
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -487,8 +470,7 @@ class MLABmm(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads mla_bmm CSV, binds ``database._mla_bmm_data``.
-        No extrapolation (1D table)."""
+        """Idempotent. Loads mla_bmm CSV and binds ``database._mla_bmm_data``."""
         import os
 
         from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
@@ -562,24 +544,18 @@ class MLABmm(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             quant_mode_lookup = quant_mode if quant_mode in data_wrapper else common.GEMMQuantMode.bfloat16
-            mla_bmm_dict = data_wrapper[quant_mode_lookup]["mla_gen_pre" if if_pre else "mla_gen_post"][num_heads]
-            num_left, num_right = interpolation.nearest_1d_point_helper(
-                num_tokens,
-                list(mla_bmm_dict.keys()),
-                inner_only=False,
+            op_name = "mla_gen_pre" if if_pre else "mla_gen_post"
+            mla_bmm_dict = data_wrapper[quant_mode_lookup][op_name][num_heads]
+            latency, energy = estimate_sparse(
+                database,
+                ("mla_bmm", quant_mode_lookup, op_name, num_heads),
+                mla_bmm_dict,
+                {"tokens": num_tokens},
+                axes=_MLA_BMM_AXES,
+                varying="tokens",
+                baseline=lambda point: get_sol(point["tokens"], num_heads, quant_mode, if_pre)[0],
             )
-            result = interpolation.interp_1d(
-                [num_left, num_right],
-                [mla_bmm_dict[num_left], mla_bmm_dict[num_right]],
-                num_tokens,
-            )
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
-            return database._interp_pr(lat, energy=energy)
+            return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,
@@ -655,8 +631,7 @@ class MLAModule(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads BOTH context and generation module CSVs,
-        applies extrapolation to each, binds
+        """Idempotently load both raw module tables and bind
         ``database._context_mla_module_data`` and
         ``database._generation_mla_module_data``."""
         import os
@@ -682,8 +657,6 @@ class MLAModule(Operation):
                 load_generation_mla_module_data(gen_sources), PerfDataFilename.mla_generation_module, gen_path
             )
 
-            cls._extrapolate_context(cls._context_data_cache[key])
-            cls._extrapolate_generation(cls._generation_data_cache[key])
             cls._record_load()
 
         if "_context_mla_module_data" not in database.__dict__:
@@ -695,40 +668,6 @@ class MLAModule(Operation):
     def clear_cache(cls) -> None:
         cls._context_data_cache.clear()
         cls._generation_data_cache.clear()
-
-    @classmethod
-    def _extrapolate_context(cls, data_wrapper) -> None:
-        """3-level (fmha_mode → kv_dtype → gemm_mode → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for fmha_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[fmha_mode]:
-                for gemm_mode in data_wrapper[fmha_mode][kv_cache_dtype]:
-                    data_dict = data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode]
-                    num_heads_list = list(data_dict.keys())
-                    interpolation.extrapolate_data_grid(
-                        data_dict=data_dict,
-                        target_x_list=num_heads_list,
-                        target_y_list=_CONTEXT_MLA_MODULE_TARGET_Y,
-                        target_z_list=_CONTEXT_MLA_MODULE_TARGET_Z,
-                    )
-
-    @classmethod
-    def _extrapolate_generation(cls, data_wrapper) -> None:
-        """3-level (fmha_mode → kv_dtype → gemm_mode → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for fmha_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[fmha_mode]:
-                for gemm_mode in data_wrapper[fmha_mode][kv_cache_dtype]:
-                    data_dict = data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode]
-                    num_heads_list = list(data_dict.keys())
-                    interpolation.extrapolate_data_grid(
-                        data_dict=data_dict,
-                        target_x_list=num_heads_list,
-                        target_y_list=_GENERATION_MLA_TARGET_Y,
-                        target_z_list=_GENERATION_MLA_TARGET_Z,
-                    )
 
     # ------------------------------------------------------------------
     # Query tables (formerly PerfDatabase.query_context_mla_module /
@@ -798,9 +737,19 @@ class MLAModule(Operation):
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             mla_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
-            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            latency, energy = _estimate_context(
+                database,
+                ("context-mla-module", fmha_quant_mode, kvcache_quant_mode, gemm_quant_mode),
+                mla_dict,
+                num_heads,
+                full_s,
+                b,
+                lambda point: get_sol(
+                    point["batch"], point["tokens"], 0, point["heads"], kvcache_quant_mode, fmha_quant_mode
+                )[0],
+            )
+            latency *= prefix_correction
+            energy *= prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -877,9 +826,15 @@ class MLAModule(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             mla_dict = data_wrapper[fmha_quant_mode][kv_cache_dtype][gemm_quant_mode]
-            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
+            latency, energy = _estimate_generation(
+                database,
+                ("generation-mla-module", fmha_quant_mode, kv_cache_dtype, gemm_quant_mode),
+                mla_dict,
+                num_heads,
+                b,
+                s,
+                lambda point: get_sol(point["batch"], point["tokens"], point["heads"], kv_cache_dtype)[0],
+            )
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -970,7 +925,7 @@ class WideEPGenerationMLA(Operation):
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
         """Idempotent. Loads wideep_generation_mla CSV (SGLang only),
-        applies extrapolation, binds ``database._wideep_generation_mla_data``.
+        binds ``database._wideep_generation_mla_data``.
 
         Non-SGLang backends get ``None`` (matching the legacy
         ``if backend == "sglang"`` guard in ``__init__``)."""
@@ -994,7 +949,6 @@ class WideEPGenerationMLA(Operation):
                     PerfDataFilename.wideep_generation_mla,
                     primary_path,
                 )
-                cls._extrapolate(cls._data_cache[key])
             cls._record_load()
 
         if "_wideep_generation_mla_data" not in database.__dict__:
@@ -1003,22 +957,6 @@ class WideEPGenerationMLA(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 2-level (kernel_source → kv_cache_dtype → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for kernel_source in data_wrapper:
-            for kv_cache_dtype in data_wrapper[kernel_source]:
-                tp_list = list(data_wrapper[kernel_source][kv_cache_dtype].keys())
-                data_dict = data_wrapper[kernel_source][kv_cache_dtype]
-                interpolation.extrapolate_data_grid(
-                    data_dict=data_dict,
-                    target_x_list=tp_list,
-                    target_y_list=_GENERATION_MLA_TARGET_Y,
-                    target_z_list=_GENERATION_MLA_TARGET_Z,
-                )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_wideep_generation_mla)
@@ -1137,19 +1075,28 @@ class WideEPGenerationMLA(Operation):
 
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
-            attn_backend = attention_backend or "flashinfer"
-            if attn_backend == "flashinfer":
-                attn_data = data_wrapper["flashinfer"]
-            elif attn_backend == "fa3":
-                attn_data = data_wrapper["fa3"]
-            else:
-                raise ValueError(f"Unsupported attention backend: {attn_backend}")
+            kernel_source = _resolve_wideep_mla_kernel_source(data_wrapper, attention_backend)
+            attn_data = data_wrapper[kernel_source]
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
-            mla_dict = attn_data[kvcache_quant_mode]
-            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
+            # Keep KV before FMHA so the existing support-matrix API continues
+            # to expose generation KV-cache modes at this level.
+            mla_dict = attn_data[kvcache_quant_mode][fmha_quant_mode]
+            latency, energy = _estimate_generation(
+                database,
+                ("wideep-generation-mla", kernel_source, fmha_quant_mode, kvcache_quant_mode),
+                mla_dict,
+                num_heads,
+                b,
+                s,
+                lambda point: get_sol(
+                    point["batch"],
+                    point["tokens"],
+                    round(128 / point["heads"]),
+                    kvcache_quant_mode,
+                    fmha_quant_mode,
+                )[0],
+            )
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -1224,7 +1171,7 @@ class WideEPContextMLA(Operation):
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
         """Idempotent. Loads wideep_context_mla CSV (SGLang only),
-        applies extrapolation, binds ``database._wideep_context_mla_data``."""
+        binds ``database._wideep_context_mla_data``."""
         import os
 
         from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
@@ -1245,7 +1192,6 @@ class WideEPContextMLA(Operation):
                     PerfDataFilename.wideep_context_mla,
                     primary_path,
                 )
-                cls._extrapolate(cls._data_cache[key])
             cls._record_load()
 
         if "_wideep_context_mla_data" not in database.__dict__:
@@ -1254,24 +1200,6 @@ class WideEPContextMLA(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 3-level (kernel_source → quant_mode → kv_cache_dtype → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for kernel_source in data_wrapper:
-            for quant_mode in data_wrapper[kernel_source]:
-                for kv_cache_dtype in data_wrapper[kernel_source][quant_mode]:
-                    num_heads_list = list(data_wrapper[kernel_source][quant_mode][kv_cache_dtype].keys())
-                    data_dict = data_wrapper[kernel_source][quant_mode][kv_cache_dtype]
-                    interpolation.extrapolate_data_grid(
-                        data_dict=data_dict,
-                        target_x_list=num_heads_list,
-                        target_y_list=_WIDEEP_CONTEXT_MLA_TARGET_Y,
-                        target_z_list=_WIDEEP_CONTEXT_MLA_TARGET_Z,
-                        sqrt_y_value=True,
-                    )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_wideep_context_mla)
@@ -1389,22 +1317,33 @@ class WideEPContextMLA(Operation):
 
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
-            attn_backend = attention_backend or "flashinfer"
-            if attn_backend == "flashinfer":
-                attn_data = data_wrapper["flashinfer"]
-            elif attn_backend == "fa3":
-                attn_data = data_wrapper["fa3"]
-            else:
-                raise ValueError(f"Unsupported attention backend: {attn_backend}")
+            kernel_source = _resolve_wideep_mla_kernel_source(data_wrapper, attention_backend)
+            attn_data = data_wrapper[kernel_source]
 
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
             mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            latency, energy = _estimate_context(
+                database,
+                ("wideep-context-mla", kernel_source, fmha_quant_mode, kvcache_quant_mode),
+                mla_dict,
+                num_heads,
+                full_s,
+                b,
+                lambda point: get_sol(
+                    point["batch"],
+                    point["tokens"],
+                    0,
+                    round(128 / point["heads"]),
+                    kvcache_quant_mode,
+                    fmha_quant_mode,
+                )[0],
+                sqrt_curve=True,
+            )
+            latency *= prefix_correction
+            energy *= prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -1702,6 +1641,9 @@ def load_wideep_generation_mla_data(wideep_generation_mla_file):
     Load the SGLang wideep generation mla data from wideep_generation_mla_perf.txt
     with power support (backward compatible).
 
+    Keeps KV-cache dtype before FMHA dtype in the nested mapping because the
+    public generation support matrix reports KV-cache modes.
+
     Returns:
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
@@ -1710,7 +1652,7 @@ def load_wideep_generation_mla_data(wideep_generation_mla_file):
         logger.debug(f"SGLang wideep generation mla data file {wideep_generation_mla_file} not found.")
         return None
     wideep_generation_mla_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
     )
 
     # Check if power columns exist (backward compatibility)
@@ -1719,7 +1661,8 @@ def load_wideep_generation_mla_data(wideep_generation_mla_file):
         logger.debug("Legacy database format detected (wideep_generation_mla) - power will default to 0.0")
 
     for row in rows:
-        kv_cache_dtype, b, s, step, latency = (
+        quant_mode, kv_cache_dtype, b, s, step, latency = (
+            row["mla_dtype"],
             row["kv_cache_dtype"],
             row["batch_size"],
             row["isl"],
@@ -1748,17 +1691,19 @@ def load_wideep_generation_mla_data(wideep_generation_mla_file):
 
         s = s + step
 
+        quant_mode = common.FMHAQuantMode[quant_mode]
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
             # Check for conflict
-            wideep_generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s]
+            wideep_generation_mla_data[kernel_source][kv_cache_dtype][quant_mode][num_heads][b][s]
             logger.debug(
-                f"value conflict in generation mla data: {kernel_source} {kv_cache_dtype} {num_heads} {b} {s} "
+                f"value conflict in generation mla data: "
+                f"{kernel_source} {quant_mode} {kv_cache_dtype} {num_heads} {b} {s} "
             )
         except KeyError:
             # Store all three values
-            wideep_generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s] = {
+            wideep_generation_mla_data[kernel_source][kv_cache_dtype][quant_mode][num_heads][b][s] = {
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
@@ -1801,11 +1746,14 @@ def load_context_mla_module_data(mla_module_file: str):
         kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
 
-        mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
+        try:
+            mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b]
+        except KeyError:
+            mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
 
     return mla_data
 
@@ -1844,10 +1792,13 @@ def load_generation_mla_module_data(mla_module_file: str):
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
-        mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][b][s] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
+        try:
+            mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][b][s]
+        except KeyError:
+            mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][b][s] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
 
     return mla_data

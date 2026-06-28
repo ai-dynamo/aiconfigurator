@@ -151,12 +151,33 @@ class TestTrtLLMWideEPMoE:
             moe_ep_size=2,
             quant_mode=common.MoEQuantMode.bfloat16,
             workload_distribution="power_law_1.01_eplb",
+            is_gated=True,
         )
 
         # Verify result
         assert isinstance(result, PerformanceResult)
         assert float(result) == 10.5  # PerformanceResult IS the latency value
         assert result.energy == 2.5  # mock energy value
+
+    def test_query_propagates_non_gated_category(self, mock_database):
+        moe = TrtLLMWideEPMoE(
+            name="test_moe",
+            scale_factor=1.0,
+            hidden_size=2048,
+            inter_size=8192,
+            topk=2,
+            num_experts=8,
+            moe_tp_size=1,
+            moe_ep_size=1,
+            quant_mode=common.MoEQuantMode.bfloat16,
+            workload_distribution="uniform",
+            attention_dp_size=1,
+            is_gated=False,
+        )
+
+        moe.query(mock_database, x=16)
+
+        assert mock_database.query_wideep_moe_compute.call_args.kwargs["is_gated"] is False
 
     def test_query_with_attention_dp_scaling(self, mock_database):
         """Test query with attention_dp_size scaling."""

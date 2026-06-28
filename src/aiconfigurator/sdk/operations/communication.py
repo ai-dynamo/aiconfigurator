@@ -30,8 +30,9 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.perf_surrogate import Axis, estimate_sparse
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -176,19 +177,18 @@ class CustomAllReduce(Operation):
                     "Consider using HYBRID mode, or supply custom_allreduce_perf.txt rows "
                     "covering this tp_size."
                 )
-            size_left, size_right = interpolation.nearest_1d_point_helper(
-                size, list(comm_dict.keys()), inner_only=False
+            lat, energy = estimate_sparse(
+                database,
+                ("custom_allreduce", quant_mode, effective_tp, "AUTO"),
+                comm_dict,
+                {"message_size": size},
+                axes=(Axis("message_size", extrapolate="both"),),
+                varying="message_size",
+                curve="raw",
+                mesh="raw",
+                exterior="baseline_ratio",
+                baseline=lambda point: get_sol(quant_mode, effective_tp, point["message_size"])[0],
             )
-            result = interpolation.interp_1d(
-                [size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size
-            )
-
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
 
             if tp_size > database.system_spec["node"]["num_gpus_per_node"]:
                 base_bw = database._get_p2p_bandwidth(database.system_spec["node"]["num_gpus_per_node"])
@@ -378,24 +378,20 @@ class NCCL(Operation):
             nccl_source.raise_if_not_loaded()
 
             max_num_gpus = max(nccl_source[dtype][operation].keys())
-            nccl_dict = nccl_source[dtype][operation][min(num_gpus, max_num_gpus)]
-            size_left, size_right = interpolation.nearest_1d_point_helper(
-                message_size,
-                list(nccl_dict.keys()),
-                inner_only=False,
+            effective_num_gpus = min(num_gpus, max_num_gpus)
+            nccl_dict = nccl_source[dtype][operation][effective_num_gpus]
+            lat, energy = estimate_sparse(
+                database,
+                ("collective", dtype, operation, effective_num_gpus),
+                nccl_dict,
+                {"message_size": message_size},
+                axes=(Axis("message_size", extrapolate="both"),),
+                varying="message_size",
+                curve="raw",
+                mesh="raw",
+                exterior="baseline_ratio",
+                baseline=lambda point: get_sol(dtype, effective_num_gpus, operation, point["message_size"])[0],
             )
-            result = interpolation.interp_1d(
-                [size_left, size_right],
-                [nccl_dict[size_left], nccl_dict[size_right]],
-                message_size,
-            )
-
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
 
             if num_gpus > max_num_gpus:  # need to do some correction
                 logger.debug(f"nccl num_gpus {num_gpus} > max_num_gpus {max_num_gpus}, need to do some correction")

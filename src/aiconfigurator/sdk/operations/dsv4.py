@@ -41,6 +41,7 @@ import numpy as np
 
 from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator.sdk.perf_surrogate import Axis, estimate_sparse
 
 logger = logging.getLogger(__name__)
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -58,6 +59,19 @@ def _cache_key(database: PerfDatabase) -> tuple:
         database.version,
         database.enable_shared_layer,
     )
+
+
+_DSV4_CONTEXT_AXES = (
+    Axis("prefix", extrapolate="both"),
+    Axis("sequence", extrapolate="both"),
+    Axis("batch", extrapolate="both"),
+)
+_DSV4_GENERATION_AXES = (
+    Axis("batch", extrapolate="both"),
+    Axis("sequence", extrapolate="both"),
+)
+_MHC_SILICON_SINKHORN_ITERS = 20
+_MHC_SILICON_QUANT_MODE = common.GEMMQuantMode.bfloat16
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -193,28 +207,14 @@ def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
     raise ValueError(f"DeepSeek-V4 robust lookup failed (tp={x}, s={y}, b={z})")
 
 
-def _dsv4_resolve_head_key(quant_data, num_heads):
-    """SCHEME A head-key resolution.
-
-    The head axis is the rank-local head count (``native // tp``).  Prefer an
-    exact match on the value the model passes.  The b300 module data is a
-    universal sweep collected with a single local-head value; if the model's
-    local head count is not an exact bench point, fall back to the single
-    available head key so the universal data still resolves.  Returns the head
-    key to index ``quant_data`` with, or ``None`` if no head data is loaded.
-    """
+def _dsv4_resolve_head_key(quant_data, native_heads, tp_size):
+    """Resolve native-head rows and older collector rows that stored local heads."""
     if not isinstance(quant_data, dict) or not quant_data:
         return None
-    if num_heads in quant_data:
-        return num_heads
-    head_keys = [k for k in quant_data if isinstance(k, int)]
-    if len(head_keys) == 1:
-        return head_keys[0]
-    if head_keys:
-        # Multiple head keys but no exact match: pick the nearest <= request,
-        # else the smallest available.
-        le = [k for k in head_keys if k <= num_heads]
-        return max(le) if le else min(head_keys)
+    candidates = (native_heads, max(1, native_heads // tp_size))
+    for head_key in candidates:
+        if head_key in quant_data and tp_size in quant_data[head_key]:
+            return head_key
     return None
 
 
@@ -532,29 +532,27 @@ class DeepSeekV4MHCModule(Operation):
         hc_dim = hc_mult * hidden_size
         mix_hc = (2 + hc_mult) * hc_mult
 
-        def get_sol() -> tuple[float, float, float]:
+        def get_sol(tokens: float = num_tokens, op_value: str = op) -> tuple[float, float, float]:
             pre_ops = sites * (
-                2 * num_tokens * hc_dim * mix_hc
-                + num_tokens * hc_dim * 3
-                + num_tokens * (hc_mult * hc_mult + 2 * hc_mult) * sinkhorn_iters
-                + 2 * num_tokens * hc_mult * hidden_size
+                2 * tokens * hc_dim * mix_hc
+                + tokens * hc_dim * 3
+                + tokens * (hc_mult * hc_mult + 2 * hc_mult) * sinkhorn_iters
+                + 2 * tokens * hc_mult * hidden_size
             )
-            post_ops = sites * (
-                2 * num_tokens * hc_mult * hc_mult * hidden_size + 2 * num_tokens * hc_mult * hidden_size
-            )
-            if op == "pre":
+            post_ops = sites * (2 * tokens * hc_mult * hc_mult * hidden_size + 2 * tokens * hc_mult * hidden_size)
+            if op_value == "pre":
                 ops = pre_ops
-            elif op == "post":
+            elif op_value == "post":
                 ops = post_ops
-            elif op == "both":
+            elif op_value == "both":
                 ops = pre_ops + post_ops
             else:
-                raise ValueError(f"Unsupported DeepSeek-V4 mHC op: {op}")
+                raise ValueError(f"Unsupported DeepSeek-V4 mHC op: {op_value}")
 
             param_bytes = sites * (mix_hc * hc_dim + mix_hc + 3) * quant_mode.value.memory
-            activation_bytes = sites * num_tokens * hc_dim * quant_mode.value.memory * (3 if op == "both" else 2)
-            if op in {"pre", "both"}:
-                activation_bytes += sites * num_tokens * (2 * hc_mult + hc_mult * hc_mult) * 4
+            activation_bytes = sites * tokens * hc_dim * quant_mode.value.memory * (3 if op_value == "both" else 2)
+            if op_value in {"pre", "both"}:
+                activation_bytes += sites * tokens * (2 * hc_mult + hc_mult * hc_mult) * 4
             sol_math = ops / GEMM._get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = (param_bytes + activation_bytes) / database.system_spec["gpu"]["mem_bw"] * 1000
             return max(sol_math, sol_mem), sol_math, sol_mem
@@ -580,12 +578,20 @@ class DeepSeekV4MHCModule(Operation):
                 )
 
             def _lookup_single(op_name: str) -> PerformanceResult:
+                if quant_mode is not _MHC_SILICON_QUANT_MODE:
+                    raise PerfDataNotAvailableError(
+                        f"mHC silicon data was collected for quant_mode={_MHC_SILICON_QUANT_MODE.name}, "
+                        f"not {quant_mode.name}."
+                    )
+                if op_name == "pre" and sinkhorn_iters != _MHC_SILICON_SINKHORN_ITERS:
+                    raise PerfDataNotAvailableError(
+                        "mHC pre silicon data was collected with "
+                        f"sinkhorn_iters={_MHC_SILICON_SINKHORN_ITERS}, not {sinkhorn_iters}."
+                    )
                 # Validate bucket presence before chained indexing; mhc_data is
                 # a nested defaultdict, so `mhc_data[op][hc_mult][hidden_size]`
-                # would silently materialize empty dicts and then fall through
-                # to _nearest_1d_point_helper with an empty key list, surfacing
-                # as an opaque AssertionError instead of a structured
-                # PerfDataNotAvailableError.
+                # would silently materialize an empty table and lose the
+                # category context before the sparse estimator reports a miss.
                 if (
                     op_name not in mhc_data
                     or hc_mult not in mhc_data[op_name]
@@ -596,10 +602,15 @@ class DeepSeekV4MHCModule(Operation):
                         f"No mHC silicon data for op='{op_name}', hc_mult={hc_mult}, hidden_size={hidden_size}."
                     )
                 mhc_dict = mhc_data[op_name][hc_mult][hidden_size]
-                left, right = interpolation.nearest_1d_point_helper(num_tokens, list(mhc_dict.keys()), inner_only=False)
-                result = interpolation.interp_1d([left, right], [mhc_dict[left], mhc_dict[right]], num_tokens)
-                latency = result["latency"] if isinstance(result, dict) else result
-                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+                latency, energy = estimate_sparse(
+                    database,
+                    ("dsv4-mhc", op_name, hc_mult, hidden_size, quant_mode, sinkhorn_iters),
+                    mhc_dict,
+                    {"tokens": num_tokens},
+                    axes=(Axis("tokens", extrapolate="both"),),
+                    varying="tokens",
+                    baseline=lambda point: get_sol(point["tokens"], op_name)[0],
+                )
                 return database._interp_pr(latency, energy=energy)
 
             # Silicon tables only store "pre" and "post" rows. For op=="both"
@@ -622,7 +633,7 @@ class DeepSeekV4MHCModule(Operation):
             database_mode=database_mode,
             error_msg=(
                 f"Failed to query DeepSeek-V4 mHC module for {num_tokens=}, {hidden_size=}, "
-                f"{hc_mult=}, {sinkhorn_iters=}, {op=}"
+                f"{hc_mult=}, {sinkhorn_iters=}, {op=}, {quant_mode=}"
             ),
         )
 
@@ -1005,13 +1016,13 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
         cls.load_data(database)
 
-        def get_sol() -> tuple[float, float, float]:
+        def get_sol(query_b=b, query_s=s, query_prefix=prefix) -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(
                 database,
                 is_context=True,
-                b=b,
-                s=s,
-                prefix=prefix,
+                b=query_b,
+                s=query_s,
+                prefix=query_prefix,
                 num_heads=num_heads,
                 hidden_size=hidden_size,
                 q_lora_rank=q_lora_rank,
@@ -1048,33 +1059,45 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     f"DeepSeek-V4 context attention module data not loaded for system='{database.system}', "
                     f"backend='{database.backend}', version='{database.version}'."
                 )
-            # SCHEME A: head axis is the rank-local head count the model passes.
+            # Native-head and TP are independent exact physical categories.
             quant_data = data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
-            head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
+            head_axis = _dsv4_resolve_head_key(quant_data, native_heads, tp_size)
             if head_axis is None:
                 raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 context attention silicon data for num_heads={num_heads}, "
+                    f"No DeepSeek-V4 context attention silicon data for native_heads={native_heads}, "
                     f"loaded head keys={list(quant_data.keys())}."
                 )
-            cr_dict = quant_data[head_axis].get(compress_ratio)
+            tp_data = quant_data[head_axis].get(tp_size)
+            if tp_data is None:
+                raise PerfDataNotAvailableError(
+                    f"No DeepSeek-V4 context attention silicon data for native_heads={native_heads}, "
+                    f"tp_size={tp_size}, loaded TP keys={list(quant_data[head_axis].keys())}."
+                )
+            cr_dict = tp_data.get(compress_ratio)
             if cr_dict is None:
                 raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 context attention silicon data for num_heads={num_heads}, "
+                    f"No DeepSeek-V4 context attention silicon data for native_heads={native_heads}, "
                     f"compress_ratio={compress_ratio}, loaded cr keys="
-                    f"{list(quant_data[head_axis].keys())}."
+                    f"{list(tp_data.keys())}."
                 )
 
-            # SCHEME A: cr_dict is prefix-resolved -> {prefix: {s: {b: leaf}}}.
-            # Look the measured silicon up at the requested prefix (interpolating
-            # over the prefix axis when the exact prefix was not benched).
-            result = _dsv4_lookup_prefix_resolved(database, cr_dict, prefix, s, b)
-            if result is None:
-                raise PerfDataNotAvailableError(
-                    f"DeepSeek-V4 prefix-resolved context attention module data not available for "
-                    f"{b=}, {s=}, {prefix=}, {num_heads=}, {compress_ratio=}."
-                )
-            latency = float(result["latency"])
-            energy = float(result.get("energy", 0.0))
+            latency, energy = estimate_sparse(
+                database,
+                (
+                    "dsv4-context",
+                    fmha_quant_mode,
+                    kvcache_quant_mode,
+                    gemm_quant_mode,
+                    head_axis,
+                    tp_size,
+                    compress_ratio,
+                ),
+                cr_dict,
+                {"prefix": prefix, "sequence": s, "batch": b},
+                axes=_DSV4_CONTEXT_AXES,
+                varying="sequence",
+                baseline=lambda point: get_sol(point["batch"], point["sequence"], point["prefix"])[0],
+            )
 
             # SCHEME A: for CSA (compress_ratio==4) ONLY, subtract the measured
             # topK DELTA = flat_ms - top_last_ms (degenerate collector topK vs
@@ -1222,12 +1245,12 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
         cls.load_data(database)
 
-        def get_sol() -> tuple[float, float, float]:
+        def get_sol(query_b=b, query_s=s) -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(
                 database,
                 is_context=False,
-                b=b,
-                s=s,
+                b=query_b,
+                s=query_s,
                 prefix=0,
                 num_heads=num_heads,
                 hidden_size=hidden_size,
@@ -1265,26 +1288,43 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     f"DeepSeek-V4 generation attention module data not loaded for system='{database.system}', "
                     f"backend='{database.backend}', version='{database.version}'."
                 )
-            # SCHEME A: head axis is the rank-local head count the model passes.
-            quant_data = data[kvcache_quant_mode][gemm_quant_mode]
-            head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
+            # Keep native-head, TP, and FMHA categories exact.
+            quant_data = data[kvcache_quant_mode][gemm_quant_mode][fmha_quant_mode]
+            head_axis = _dsv4_resolve_head_key(quant_data, native_heads, tp_size)
             if head_axis is None:
                 raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 generation attention silicon data for num_heads={num_heads}, "
+                    f"No DeepSeek-V4 generation attention silicon data for native_heads={native_heads}, "
                     f"loaded head keys={list(quant_data.keys())}."
                 )
-            deepseek_v4_dict = quant_data[head_axis].get(compress_ratio)
+            tp_data = quant_data[head_axis].get(tp_size)
+            if tp_data is None:
+                raise PerfDataNotAvailableError(
+                    f"No DeepSeek-V4 generation attention silicon data for native_heads={native_heads}, "
+                    f"tp_size={tp_size}, loaded TP keys={list(quant_data[head_axis].keys())}."
+                )
+            deepseek_v4_dict = tp_data.get(compress_ratio)
             if deepseek_v4_dict is None:
                 raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 generation attention silicon data for num_heads={num_heads}, "
-                    f"compress_ratio={compress_ratio}, loaded cr keys={list(quant_data[head_axis].keys())}."
+                    f"No DeepSeek-V4 generation attention silicon data for native_heads={native_heads}, "
+                    f"compress_ratio={compress_ratio}, loaded cr keys={list(tp_data.keys())}."
                 )
-            # SCHEME A generation dict is {head}{cr}{b}{s_total}; wrap with the
-            # head key and let the robust lookup walk (head -> b -> s_total).
-            wrapped = {head_axis: deepseek_v4_dict}
-            result = _dsv4_robust_3d_lookup(database, wrapped, head_axis, b, s, batch_axis="y")
-            latency = float(result["latency"])
-            energy = float(result.get("energy", 0.0))
+            latency, energy = estimate_sparse(
+                database,
+                (
+                    "dsv4-generation",
+                    kvcache_quant_mode,
+                    gemm_quant_mode,
+                    fmha_quant_mode,
+                    head_axis,
+                    tp_size,
+                    compress_ratio,
+                ),
+                deepseek_v4_dict,
+                {"batch": b, "sequence": s},
+                axes=_DSV4_GENERATION_AXES,
+                varying="sequence",
+                baseline=lambda point: get_sol(point["batch"], point["sequence"])[0],
+            )
 
             # SCHEME A: subtract the topK DELTA for CSA (cr==4) only. Decode is
             # q_len=1 with past_kv = s_total - 1.
@@ -1498,18 +1538,32 @@ class DeepSeekV4MegaMoEModule(Operation):
                 f"{moe_tp_size=}, {moe_ep_size=}."
             ) from exc
 
-        num_left, num_right = interpolation.nearest_1d_point_helper(
-            num_tokens, list(token_dict.keys()), inner_only=False
+        minimum_tokens = float(min(token_dict))
+        latency, energy = estimate_sparse(
+            database,
+            (
+                "dsv4-megamoe",
+                phase,
+                kernel_source,
+                kernel_dtype,
+                quant_mode,
+                pre_dispatch,
+                source_policy,
+                workload_distribution,
+                topk,
+                num_experts,
+                num_fused_shared_experts,
+                hidden_size,
+                inter_size,
+                moe_tp_size,
+                moe_ep_size,
+            ),
+            token_dict,
+            {"tokens": num_tokens},
+            axes=(Axis("tokens", extrapolate="both"),),
+            varying="tokens",
+            baseline=lambda point: max(point["tokens"], minimum_tokens),
         )
-        result = interpolation.interp_1d(
-            [num_left, num_right], [token_dict[num_left], token_dict[num_right]], num_tokens
-        )
-        if isinstance(result, dict):
-            latency = float(result["latency"])
-            energy = float(result["energy"])
-        else:
-            latency = float(result)
-            energy = 0.0
         return PerformanceResult(latency, energy=energy)
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
@@ -1615,6 +1669,19 @@ def load_mhc_module_data(mhc_file: str):
 
     for row in rows:
         op = row["op_name"]
+        row_sinkhorn_iters = row.get("sinkhorn_iters")
+        if (
+            op == "pre"
+            and row_sinkhorn_iters is not None
+            and str(row_sinkhorn_iters).strip()
+            and float(row_sinkhorn_iters) != _MHC_SILICON_SINKHORN_ITERS
+        ):
+            logger.debug(
+                "Skipping mHC pre row collected with sinkhorn_iters=%s; expected %s",
+                row_sinkhorn_iters,
+                _MHC_SILICON_SINKHORN_ITERS,
+            )
+            continue
         hc_mult = int(row["hc_mult"])
         hidden_size = int(row["hidden_size"])
         num_tokens = int(row["num_tokens"])
@@ -1622,11 +1689,8 @@ def load_mhc_module_data(mhc_file: str):
         power = float(row.get("power", 0.0)) if has_power else 0.0
         energy = power * latency
 
-        mhc_data[op][hc_mult][hidden_size][num_tokens] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
+        token_data = mhc_data[op][hc_mult][hidden_size]
+        token_data.setdefault(num_tokens, {"latency": latency, "power": power, "energy": energy})
 
     return mhc_data
 
@@ -1787,30 +1851,31 @@ _MISSING = object()
 def load_context_dsv4_kind_module_data(file_path: str):
     """Load ONE DeepSeek-V4 context CSV (single attn_kind / compress_ratio).
 
-    SCHEME A.  Returns a 7-level prefix-resolved nested dict:
-        data[fmha_quant][kv_quant][gemm_quant][num_heads_local][compress_ratio]
-            [prefix][s][b] = {"latency": ms, "power": W, "energy": J}
+    Returns a TP- and prefix-resolved nested dict:
+        data[fmha_quant][kv_quant][gemm_quant][native_heads][tp_size]
+            [compress_ratio][prefix][s][b] = metrics
 
-    The head axis is the rank-LOCAL head count = ``int(row["num_heads"])``
-    (the collector writes ``local_attention_heads = native // tp``).  There is
-    NO separate ``tp_size`` key and NO reconstructed native-head key.
+    Existing databases store native heads while some collector revisions wrote
+    rank-local heads. The query adapter accepts either representation; TP stays
+    a separate physical category in both cases.
 
     ``prefix`` is the past-KV length, ``int(float(row["step"]))``; ``s`` is the
     context chunk length (``isl``).  Multiple files (csa/hca) merge cleanly
-    because compress_ratio is a key dimension.
+    because compress_ratio is a key dimension. ``model`` and ``op_name`` are
+    provenance only; duplicate physical keys keep the first measurement.
     """
     rows = _read_filtered_rows(file_path)
     if rows is None:
         logger.debug(f"DSV4 module data file {file_path} not found.")
         return None
 
-    # 7-level nesting: fmha → kv → gemm → num_heads_local → cr → prefix → s → b
+    # fmha → kv → gemm → stored head key → TP → cr → prefix → s → b
     def _make_nested(depth: int):
         if depth == 0:
             return defaultdict()
         return defaultdict(lambda d=depth: _make_nested(d - 1))
 
-    data = _make_nested(7)
+    data = _make_nested(8)
     has_power = bool(rows) and "power" in rows[0]
 
     for row in rows:
@@ -1821,13 +1886,13 @@ def load_context_dsv4_kind_module_data(file_path: str):
             s = int(row["isl"])
             prefix = int(float(row.get("step", 0) or 0))
             cr = int(row["compress_ratio"])
+            tp_size = int(row["tp_size"])
             latency = float(row["latency"])
         except (TypeError, ValueError, KeyError):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        # SCHEME A: head key is the rank-local head count straight from the CSV.
-        num_heads_local = int(row["num_heads"])
+        head_key = int(row["num_heads"])
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
@@ -1835,11 +1900,8 @@ def load_context_dsv4_kind_module_data(file_path: str):
         # NOTE: the topK DELTA correction (degenerate -> representative) is
         # applied ONCE at query time for compress_ratio==4 (CSA). Do NOT
         # subtract it here, or the CSA module latency would be double-corrected.
-        data[fmha_mode][kv_dtype][gemm_mode][num_heads_local][cr][prefix][s][b] = {
-            "latency": latency,
-            "power": power,
-            "energy": power * latency,
-        }
+        batch_data = data[fmha_mode][kv_dtype][gemm_mode][head_key][tp_size][cr][prefix][s]
+        batch_data.setdefault(b, {"latency": latency, "power": power, "energy": power * latency})
     return data
 
 
@@ -1847,22 +1909,24 @@ def load_generation_dsv4_kind_module_data(file_path: str):
     """Load ONE DeepSeek-V4 generation CSV.
 
     Generation lookup uses absolute KV length ``s_total = isl + step`` (decode
-    is q_len=1 with past_kv = step).  SCHEME A dict shape:
-        data[kv_quant][gemm_quant][num_heads_local][compress_ratio]
-            [b][s_total]
+    is q_len=1 with past_kv = step). Dict shape:
+        data[kv_quant][gemm_quant][fmha_quant][native_heads][tp_size]
+            [compress_ratio][b][s_total]
+    ``model`` and ``op_name`` are provenance only; duplicate physical keys keep
+    the first measurement.
     """
     rows = _read_filtered_rows(file_path)
     if rows is None:
         logger.debug(f"DSV4 module data file {file_path} not found.")
         return None
 
-    # SCHEME A: 5-level nesting kv → gemm → num_heads_local → cr → b → s_total
+    # kv → gemm → fmha → stored head key → TP → cr → b → s_total
     def _make_nested(depth: int):
         if depth == 0:
             return defaultdict()
         return defaultdict(lambda d=depth: _make_nested(d - 1))
 
-    data = _make_nested(5)
+    data = _make_nested(7)
     has_power = bool(rows) and "power" in rows[0]
 
     for row in rows:
@@ -1872,23 +1936,20 @@ def load_generation_dsv4_kind_module_data(file_path: str):
             b = int(row["batch_size"])
             s_total = int(row["isl"]) + int(row["step"])
             cr = int(row["compress_ratio"])
+            tp_size = int(row["tp_size"])
             latency = float(row["latency"])
         except (TypeError, ValueError, KeyError):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        # SCHEME A: head key is the rank-local head count straight from the CSV;
-        # no tp_size key, no native reconstruction.  Generation convention puts
-        # ``b`` before ``s_total`` (matches the (head, b, s) lookup order).
-        num_heads_local = int(row["num_heads"])
+        # Generation convention puts ``b`` before ``s_total``.
+        head_key = int(row["num_heads"])
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
 
-        data[kv_dtype][gemm_mode][num_heads_local][cr][b][s_total] = {
-            "latency": latency,
-            "power": power,
-            "energy": power * latency,
-        }
+        sequence_data = data[kv_dtype][gemm_mode][fmha_mode][head_key][tp_size][cr][b]
+        sequence_data.setdefault(s_total, {"latency": latency, "power": power, "energy": power * latency})
     return data
 
 
@@ -2087,7 +2148,7 @@ def load_dsv4_sparse_op_data(file_or_sources, key_columns):
         node = root
         for k in keys[:-1]:
             node = node.setdefault(k, {})
-        node[keys[-1]] = {"latency": latency}
+        node.setdefault(keys[-1], {"latency": latency})
     return root or None
 
 

@@ -402,6 +402,7 @@ def test_get_database_skips_incomplete_version_directory(tmp_path: Path, perf_da
 def test_perf_database_clear_runtime_caches_clears_interpolation_and_lru_state(perf_database):
     db = object.__new__(perf_database.PerfDatabase)
     db._extracted_metrics_cache = {"table": object()}
+    db._sparse_surrogate_cache = {"table": object()}
     cache_clear_calls = []
 
     def fake_cached_method():
@@ -413,6 +414,7 @@ def test_perf_database_clear_runtime_caches_clears_interpolation_and_lru_state(p
     db.clear_runtime_caches()
 
     assert db._extracted_metrics_cache == {}
+    assert db._sparse_surrogate_cache == {}
     assert cache_clear_calls == ["cleared"]
 
 

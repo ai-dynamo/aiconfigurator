@@ -17,6 +17,7 @@ from aiconfigurator.sdk.operations.dsv4 import (
 )
 from aiconfigurator.sdk.perf_database import (
     LoadedOpData,
+    PerfDataNotAvailableError,
     load_mhc_module_data,
 )
 
@@ -58,13 +59,13 @@ def _write_mhc_perf(path, rows: list[str]) -> str:
     return str(path)
 
 
-def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict, native_heads: int = 128) -> dict:
+def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict, native_heads: int = 128, tp_size: int = 8) -> dict:
     return {
         common.FMHAQuantMode.bfloat16: {
             common.KVCacheQuantMode.fp8: {
                 common.GEMMQuantMode.fp8_block: {
                     native_heads: {
-                        compress_ratio: attn_dict,
+                        tp_size: {compress_ratio: attn_dict},
                     },
                 },
             },
@@ -72,12 +73,16 @@ def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict, native_heads
     }
 
 
-def _generation_deepseek_v4_data(compress_ratio: int, attn_dict: dict, native_heads: int = 128) -> dict:
+def _generation_deepseek_v4_data(
+    compress_ratio: int, attn_dict: dict, native_heads: int = 128, tp_size: int = 8
+) -> dict:
     return {
         common.KVCacheQuantMode.fp8: {
             common.GEMMQuantMode.fp8_block: {
-                native_heads: {
-                    compress_ratio: attn_dict,
+                common.FMHAQuantMode.bfloat16: {
+                    native_heads: {
+                        tp_size: {compress_ratio: attn_dict},
+                    },
                 },
             },
         },
@@ -146,6 +151,34 @@ def test_mhc_module_loader_returns_none_for_missing_file(tmp_path):
 
 
 class TestDeepSeekV4MHCModule:
+    def test_mhc_loader_keeps_primary_row_on_shared_source_conflict(self, tmp_path):
+        primary = _write_mhc_perf(
+            tmp_path / "primary.txt",
+            ["SGLang,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,1.5"],
+        )
+        sibling = _write_mhc_perf(
+            tmp_path / "sibling.txt",
+            ["SGLang,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,9.5"],
+        )
+
+        data = load_mhc_module_data([(primary, None), (sibling, {"mhc"})])
+
+        assert data["pre"][4][7168][512]["latency"] == pytest.approx(1.5)
+
+    def test_mhc_loader_skips_pre_rows_with_other_sinkhorn_iterations(self, tmp_path):
+        header = (
+            "framework,version,device,op_name,kernel_source,architecture,num_tokens,"
+            "hc_mult,hidden_size,sinkhorn_iters,latency\n"
+        )
+        primary = tmp_path / "primary.txt"
+        sibling = tmp_path / "sibling.txt"
+        primary.write_text(header + "SGLang,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,8,1.5\n")
+        sibling.write_text(header + "SGLang,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,20,2.5\n")
+
+        data = load_mhc_module_data([(str(primary), None), (str(sibling), {"mhc"})])
+
+        assert data["pre"][4][7168][512]["latency"] == pytest.approx(2.5)
+
     def test_mhc_sol_and_hybrid_return_positive(self, comprehensive_perf_db):
         for mode in (common.DatabaseMode.SOL, common.DatabaseMode.HYBRID):
             result = comprehensive_perf_db.query_mhc_module(
@@ -237,6 +270,81 @@ class TestDeepSeekV4MHCModule:
 
         assert float(result) == pytest.approx(2.5)
 
+    @pytest.mark.parametrize(
+        ("sinkhorn_iters", "quant_mode", "message"),
+        [
+            (8, common.GEMMQuantMode.bfloat16, "sinkhorn_iters=20"),
+            (20, common.GEMMQuantMode.fp8_block, "quant_mode=bfloat16"),
+        ],
+    )
+    def test_mhc_silicon_rejects_unmeasured_categories(
+        self,
+        mutable_comprehensive_perf_db,
+        tmp_path,
+        sinkhorn_iters,
+        quant_mode,
+        message,
+    ):
+        path = _write_mhc_perf(
+            tmp_path / "mhc_module_perf.txt",
+            ["SGLang,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,2.5"],
+        )
+        db = mutable_comprehensive_perf_db
+        db._mhc_module_data = load_mhc_module_data(path)
+
+        with pytest.raises(PerfDataNotAvailableError, match=message):
+            db.query_mhc_module(
+                num_tokens=512,
+                hidden_size=7168,
+                hc_mult=4,
+                sinkhorn_iters=sinkhorn_iters,
+                op="pre",
+                quant_mode=quant_mode,
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
+    def test_mhc_sparse_token_curve_uses_sol_ratio_at_upper_boundary(self, mutable_comprehensive_perf_db, tmp_path):
+        path = _write_mhc_perf(
+            tmp_path / "mhc_module_perf.txt",
+            [
+                "VLLM,test,H20,pre,mhc,DeepseekV4ForCausalLM,256,4,7168,1.0",
+                "VLLM,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,3.0",
+            ],
+        )
+        db = mutable_comprehensive_perf_db
+        db._mhc_module_data = load_mhc_module_data(path)
+
+        kwargs = {
+            "hidden_size": 7168,
+            "hc_mult": 4,
+            "sinkhorn_iters": 20,
+            "op": "pre",
+            "quant_mode": common.GEMMQuantMode.bfloat16,
+        }
+        interior = db.query_mhc_module(
+            num_tokens=384,
+            **kwargs,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+        endpoint_sol = db.query_mhc_module(
+            num_tokens=512,
+            **kwargs,
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )[0]
+        query_sol = db.query_mhc_module(
+            num_tokens=1024,
+            **kwargs,
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )[0]
+        exterior = db.query_mhc_module(
+            num_tokens=1024,
+            **kwargs,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+        assert float(interior) == pytest.approx(2.0)
+        assert float(exterior) == pytest.approx(3.0 * query_sol / endpoint_sol)
+
 
 class TestDeepSeekV4AttentionModule:
     def test_generation_uses_pre_decode_kv_length(self, comprehensive_perf_db):
@@ -264,13 +372,12 @@ class TestDeepSeekV4AttentionModule:
         assert math.isclose(result["latency"], expected, rel_tol=1e-6)
         assert math.isclose(result["energy"], expected * 10.0, rel_tol=1e-6)
 
-    def test_generation_silicon_extrapolates_query_below_min_sampled_s_total(self, mutable_comprehensive_perf_db):
-        """Full-query regression for generated query b=1, s_total=1, tp=8."""
+    def test_generation_silicon_extrapolates_below_sampled_batch_and_sequence(self, mutable_comprehensive_perf_db):
+        """Lower exterior estimates stay positive and anchored to measured data."""
         db = mutable_comprehensive_perf_db
-        # SCHEME A silicon data is {head}{cr}{b}{s_total} — no tp level. The shared
-        # grid is {tp}{b}{s_total} (for the direct _dsv4_robust_3d_lookup test);
-        # strip the tp wrapper so it lands as {b}{s_total} under {head}{cr}.
-        mock_grid = _dsv4_generation_sampled_grid()[8]
+        # The shared fixture is {tp}{b}{s_total}; select the TP=8 slice before
+        # placing it under the loader's exact head/TP/category hierarchy.
+        mock_grid = {2: _dsv4_generation_sampled_grid()[8][2]}
         db._generation_deepseek_v4_attention_module_data = LoadedOpData(
             _generation_deepseek_v4_data(4, mock_grid),
             common.PerfDataFilename.dsv4_csa_generation_module,
@@ -289,9 +396,8 @@ class TestDeepSeekV4AttentionModule:
             database_mode=common.DatabaseMode.SILICON,
         )
 
-        expected = 0.20 + (0.50 - 0.20) * (1 - 2) / (5 - 2)
-        assert float(result) == pytest.approx(expected)
-        assert result.energy == pytest.approx(expected * 10.0)
+        assert 0 < float(result) <= 0.40
+        assert result.energy == pytest.approx(float(result) * 10.0)
 
     def test_csa_topk_changes_attention_workload(self, comprehensive_perf_db):
         base = _deepseek_v4_attn_kwargs(4)
@@ -382,7 +488,7 @@ class TestDeepSeekV4AttentionModule:
         }
         db = mutable_comprehensive_perf_db
         db._context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(4, attn_dict, native_heads=16),
+            _context_deepseek_v4_data(4, attn_dict),
             common.PerfDataFilename.dsv4_csa_context_module,
             "models",
         )
@@ -449,23 +555,21 @@ class TestDeepSeekV4AttentionModule:
             f"num_heads."
         )
 
-    def test_context_silicon_resolves_rank_local_head_bucket(self, mutable_comprehensive_perf_db):
-        # SCHEME A: the head axis is the rank-local head count (native // tp), in
-        # line with the universal attention convention (per-rank heads, no tp
-        # axis). A Pro query at tp=8 (native 128 -> num_heads=16) must resolve the
-        # 16-head bucket, not a smaller local-head bucket. cr=4 / prefix=0 ->
+    def test_context_silicon_resolves_native_head_bucket(self, mutable_comprehensive_perf_db):
+        # A Pro query at tp=8 (native 128, local 16) must resolve the 128-head
+        # model bucket, not the 64-head Flash bucket. cr=4 / prefix=0 ->
         # c4_len=64 <= index_topk, so the topK DELTA is 0 and the raw latency is
-        # returned unchanged. Data is prefix-resolved: {head}{cr}{prefix}{s}{b}.
+        # returned unchanged.
         db = mutable_comprehensive_perf_db
         data = _context_deepseek_v4_data(
             4,
             {0: {256: {2: _deepseek_v4_value(11.0)}}},
-            native_heads=8,
+            native_heads=64,
         )
         pro_data = _context_deepseek_v4_data(
             4,
             {0: {256: {2: _deepseek_v4_value(22.0)}}},
-            native_heads=16,
+            native_heads=128,
         )
         _deep_merge_dsv4_dicts(data, pro_data)
         db._context_deepseek_v4_attention_module_data = LoadedOpData(
@@ -614,7 +718,7 @@ class TestDeepSeekV4AttentionModule:
         # prefix-resolved {head}{cr}{prefix}{s}{b}; prefix=8192/s=54 -> c4_len=2061
         # > index_topk, so a correction WOULD apply if a calib were loaded.
         db._context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(4, {8192: {54: {1: _deepseek_v4_value(5.0)}}}, native_heads=16),
+            _context_deepseek_v4_data(4, {8192: {54: {1: _deepseek_v4_value(5.0)}}}),
             common.PerfDataFilename.dsv4_csa_context_module,
             "models",
         )

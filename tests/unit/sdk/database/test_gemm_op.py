@@ -129,6 +129,21 @@ class TestQueryDelegation:
         )
         assert float(result) > 0
 
+    @pytest.mark.parametrize("method_name", ["_query_compute_scale_table", "_query_scale_matrix_table"])
+    def test_zero_overhead_does_not_load_tables(self, stub_perf_db, monkeypatch, method_name):
+        def fail_load(_cls, _database):
+            raise AssertionError("zero-work query must not load a table")
+
+        monkeypatch.setattr(GEMM, "load_data", classmethod(fail_load))
+        result = getattr(GEMM, method_name)(
+            stub_perf_db,
+            0,
+            512,
+            common.GEMMQuantMode.fp8,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+        assert float(result) == 0
+
 
 class TestSolCorrection:
     """``GEMM._correct_sol`` clamps mutated GEMM data back to >= SOL."""
@@ -141,13 +156,14 @@ class TestSolCorrection:
         sol_value = float(db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL))
 
         # Set an artificially low value (lower than SOL)
-        db._gemm_data[quant_mode][m][n][k] = {"latency": sol_value * 0.5, "power": 0.0, "energy": 0.0}
+        db._gemm_data[quant_mode][m][n][k] = {"latency": sol_value * 0.5, "power": 4.0, "energy": sol_value * 2}
 
         GEMM._correct_sol(db)
 
         clamped = db._gemm_data[quant_mode][m][n][k]
         clamped_latency = clamped["latency"] if isinstance(clamped, dict) else clamped
         assert clamped_latency >= sol_value
+        assert clamped["energy"] == pytest.approx(clamped_latency * 4)
 
 
 @pytest.mark.parametrize("quant_mode", [common.GEMMQuantMode.bfloat16, common.GEMMQuantMode.fp8])
