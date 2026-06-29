@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+interface:
+  display_name: "AIC Collector OP Development"
+  short_description: "Add Collector ops with consumer-aligned cases"
+  default_prompt: "Use $aic-collector-op-development to add an AIC Collector op with consumer-aligned cases and validation."

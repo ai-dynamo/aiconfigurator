@@ -9,25 +9,47 @@ model_paths:
   - deepseek-ai/DeepSeek-V3
   - nvidia/DeepSeek-V3.1-NVFP4
 include_base: true
+base_ops:
+  - gemm
 description: >
   DeepSeek-V3-family model-centric collection plan. Includes shared base op cases
   plus MoE, MLA, and DeepSeek-V3 WideEP cases.
 
 model_case_values:
   moe:
-    - model_paths:
+    - model_path: deepseek-ai/DeepSeek-V3
+      model_aliases:
         - deepseek-ai/DeepSeek-R1
-        - deepseek-ai/DeepSeek-V3
-        - nvidia/DeepSeek-V3.1-NVFP4
+        - deepseek-ai/DeepSeek-V3.2
       hidden_size: 7168
       inter_size: 2048
       topk: 8
       num_experts: 256
       wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [fp8_block]
+        trtllm:
+          allowed_modes: [fp8_block]
+        vllm:
+          allowed_modes: [fp8_block]
+    - model_path: nvidia/DeepSeek-V3.1-NVFP4
+      hidden_size: 7168
+      inter_size: 2048
+      topk: 8
+      num_experts: 256
+      wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [nvfp4]
+        trtllm:
+          allowed_modes: [nvfp4]
+        vllm:
+          allowed_modes: [nvfp4]
   mla:
-    - model_paths:
+    - model_path: deepseek-ai/DeepSeek-V3
+      model_aliases:
         - deepseek-ai/DeepSeek-R1
-        - deepseek-ai/DeepSeek-V3
         - nvidia/DeepSeek-V3.1-NVFP4
       num_heads: 128
       q_lora_rank: 1536
@@ -36,9 +58,12 @@ model_case_values:
       qk_rope_head_dim: 64
       v_head_dim: 128
   mla_module:
+    # Module collectors load checkpoint-specific quantization metadata. Keep
+    # every native-precision artifact available; operation-local deduplication
+    # may collapse only cases whose explicit precision key is already equal.
     - model_paths:
-        - deepseek-ai/DeepSeek-R1
         - deepseek-ai/DeepSeek-V3
+        - deepseek-ai/DeepSeek-R1
         - nvidia/DeepSeek-V3.1-NVFP4
       attention_type: mla
       native_num_heads: 128
@@ -47,17 +72,17 @@ model_case_values:
 all_frameworks_op_cases:
   moe:
     cases: all
-  mla_context:
-    cases: all
-  mla_generation:
-    cases: all
-  mla_bmm_gen_pre:
-    cases: all
-  mla_bmm_gen_post:
-    cases: all
 
 framework_specific_op_cases:
   trtllm:
+    mla_context:
+      cases: all
+    mla_generation:
+      cases: all
+    mla_bmm_gen_pre:
+      cases: all
+    mla_bmm_gen_post:
+      cases: all
     mla_context_module:
       cases: all
     mla_generation_module:
@@ -70,6 +95,14 @@ framework_specific_op_cases:
     mla_generation_module:
       cases: all
   sglang:
+    mla_context:
+      cases: all
+    mla_generation:
+      cases: all
+    mla_bmm_gen_pre:
+      cases: all
+    mla_bmm_gen_post:
+      cases: all
     wideep_mla_context:
       cases: all
     wideep_mla_generation:
