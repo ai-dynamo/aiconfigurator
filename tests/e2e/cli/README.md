@@ -26,9 +26,9 @@ python3 -m pytest tests/e2e/cli -m sweep
 ### Real Spica Thorough Sweep
 
 `test_cli_default_thorough_sweep_real.py` is skipped by default because it requires
-Spica's optional smart-sweep dependencies and Dynamo replay bindings. It runs a small static `default --thorough-sweep` case with
+Spica's optional thorough-sweep dependencies and Dynamo replay bindings. It runs a small static `default --thorough-sweep` case with
 environment-limited Spica sweep settings so it finishes quickly while still
-exercising the real smart sweeper, final report, and saved deployment artifacts.
+exercising the real thorough sweeper, final report, and saved deployment artifacts.
 
 ```bash
 AIC_RUN_SPICA_THOROUGH_E2E=true \

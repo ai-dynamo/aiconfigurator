@@ -74,7 +74,7 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 ```
 - We have four modes: `default`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
-- Use `default --thorough-sweep` to run Spica's smart sweeper. Without `--thorough-config`, AIC converts the normal default CLI inputs into a legacy-compatible Spica `SmartSearchConfig` that keeps routing round-robin and planner scaling disabled.
+- Use `default --thorough-sweep` to run Spica's replay-backed thorough sweeper. Without `--thorough-config`, AIC converts the normal default CLI inputs into a legacy-compatible Spica `SmartSearchConfig` that keeps routing round-robin and planner scaling disabled.
 - Install the optional `spica` extra when using thorough mode from a packaged wheel, for example `pip install 'aiconfigurator[spica]'`.
 - Use `default --thorough-config spica_smart_sweep.yaml` to pass a native Spica `SmartSearchConfig` YAML that owns the search space, workload, goal, and sweep controls.
 - For replay-backed Spica sweeps, put `workload.trace_path` and `workload.trace_format` in the `--thorough-config` YAML. Today Spica supports `trace_format: mooncake`; example trace: [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl).

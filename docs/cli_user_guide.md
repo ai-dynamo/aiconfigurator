@@ -365,7 +365,7 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--backend-version`: Backend database version. Default: latest.
 - `--free-gpu-memory-fraction`: Fraction of free GPU memory TRT-LLM allocates for KV cache (default: `1.0`). Filters batch sizes that would exceed KV cache capacity.
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls how many KV blocks are pre-allocated per sequence; set to match your deployment for accurate KV-capacity filtering.
-- `--thorough-sweep`: Use Spica's smart sweeper instead of the legacy AIC Pareto sweep. Without `--thorough-config`, CLI inputs are converted to a legacy-compatible Spica `SmartSearchConfig` that keeps routing round-robin and planner scaling disabled.
+- `--thorough-sweep`: Use Spica's replay-backed thorough sweeper instead of the legacy AIC Pareto sweep. Without `--thorough-config`, CLI inputs are converted to a legacy-compatible Spica `SmartSearchConfig` that keeps routing round-robin and planner scaling disabled.
 - `--thorough-config`: Path to a native Spica `SmartSearchConfig` YAML file. The file defines the search space, workload, goal, and sweep controls. For replay-backed sweeps, put `workload.trace_path` and `workload.trace_format` in this file.
 - `--enable-chunked-prefill`: Enable chunked prefill for a finer-grained context-token sweep. When off (default), the context-token stride is aligned to ISL for faster sweeping.
 - `--enable-wideep`: Enable Wide Expert Parallelism (WideEP) for MoE models — EP-only parallelism via the `deepep_moe` backend. Applies to DeepSeek and Qwen3-235B on SGLang.
@@ -401,7 +401,9 @@ The command will create two experiments for the given problem, one is `agg` and 
 
 #### Spica Thorough Sweep
 
-Pass `--thorough-sweep` to run Spica's smart sweeper instead of the legacy AIC Pareto estimator. Without `--thorough-config`, the CLI converts the normal default inputs into a legacy-compatible Spica config: synthetic workload from `--isl` / `--osl`, closed-loop concurrency derived from GPU budget, the CLI `--ttft` / `--tpot` goodput SLA, round-robin routing, and planner scaling disabled:
+Pass `--thorough-sweep` to run Spica's replay-backed thorough sweeper instead of the legacy AIC Pareto estimator. Spica is more thorough because it evaluates complete deployment candidates through Dynamo's end-to-end simulator and, with a native `--thorough-config`, can jointly explore deployment topology and parallelism, engine batching limits, router policy, multi-tier KV-cache offload, and planner scaling. This broader search captures interactions among Dynamo components, but replaying candidates takes substantially longer than the legacy estimator's narrower performance sweep.
+
+Without `--thorough-config`, the CLI converts the normal default inputs into a legacy-compatible Spica config: synthetic workload from `--isl` / `--osl`, closed-loop concurrency derived from GPU budget, the CLI `--ttft` / `--tpot` goodput SLA, round-robin routing, and planner scaling disabled:
 
 ```bash
 aiconfigurator cli default \

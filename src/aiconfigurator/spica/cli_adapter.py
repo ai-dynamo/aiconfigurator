@@ -1383,7 +1383,7 @@ class _SpicaReplayEvaluatorCompat:
 
 
 def run_spica_thorough_default(args) -> list[Any]:
-    """Run the Spica smart sweeper for ``default --thorough-sweep`` / ``--thorough-config``."""
+    """Run the Spica thorough sweeper for ``default --thorough-sweep`` / ``--thorough-config``."""
     from aiconfigurator.cli.report_and_save import log_final_summary
 
     if (

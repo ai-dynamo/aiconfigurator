@@ -297,7 +297,7 @@ def _add_default_mode_arguments(parser):
         action="store_true",
         default=False,
         help=(
-            "Use Spica's smart sweeper instead of the legacy AIC Pareto sweep. "
+            "Use Spica's replay-backed thorough sweeper instead of the legacy AIC Pareto sweep. "
             "Without --thorough-config, CLI inputs are converted to a Spica SmartSearchConfig."
         ),
     )
@@ -921,15 +921,15 @@ aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --perf-db-version 1.2.0rc5 \\
     --config-template-version 1.2.0rc6 \\
     --save-dir results
-# Install Spica smart sweeper with pip install 'aiconfigurator[spica]'
-# Run Spica smart sweep from normal default CLI inputs
+# Install the Spica thorough sweeper with pip install 'aiconfigurator[spica]'
+# Run a Spica thorough sweep from normal default CLI inputs
 aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --backend trtllm \\
     --total-gpus 32 --system h200_sxm \\
     --isl 4000 --osl 1000 \\
     --thorough-sweep
 
-# Run Spica smart sweep from a native SmartSearchConfig YAML
+# Run a Spica thorough sweep from a native SmartSearchConfig YAML
 aiconfigurator cli default --thorough-config spica_smart_sweep.yaml
 """
 
