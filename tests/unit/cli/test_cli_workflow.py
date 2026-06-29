@@ -28,7 +28,7 @@ from aiconfigurator.cli.main import (
 )
 from aiconfigurator.cli.main import main as cli_main
 from aiconfigurator.cli.report_and_save import _apply_inclusive_tpot
-from aiconfigurator.cli.spica.cli_adapter import (
+from aiconfigurator.cli.spica.helper import (
     _build_spica_thorough_config_data,
     _build_spica_trace_result_bundle,
     _build_spica_trace_search_space,
