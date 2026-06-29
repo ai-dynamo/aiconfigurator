@@ -33,13 +33,33 @@ model_case_values:
       model_aliases:
         - MiniMaxAI/MiniMax-M2
         - MiniMaxAI/MiniMax-M2.7
-        - nvidia/MiniMax-M2.5-NVFP4
+      hidden_size: 3072
+      inter_size: 1536
+      topk: 8
+      num_experts: 256
+      wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [fp8_block]
+        trtllm:
+          allowed_modes: [fp8_block]
+        vllm:
+          allowed_modes: [fp8_block]
+    - model_path: nvidia/MiniMax-M2.5-NVFP4
+      model_aliases:
         - nvidia/MiniMax-M2.7-NVFP4
       hidden_size: 3072
       inter_size: 1536
       topk: 8
       num_experts: 256
       wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [nvfp4]
+        trtllm:
+          allowed_modes: [nvfp4]
+        vllm:
+          allowed_modes: [nvfp4]
 
 all_frameworks_op_cases:
   moe:

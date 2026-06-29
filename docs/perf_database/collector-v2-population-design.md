@@ -6,15 +6,24 @@ Collector V2 should retain useful measurement coverage and intentional model
 additions while avoiding cases created only by unrelated Cartesian-product axes
 or execution-equivalent artifact aliases.
 
-This PR used the following comparison as a one-time migration check:
+The attention migration used the following comparison as a one-time check:
 
 ```text
 V1 physical cases ⊆ cleaned V2 physical cases
 ```
 
-`removed_v1_cases` was required to be zero for this pruning pass. That audit is
-not part of the runtime schema: production YAML contains ordinary default and
-model profiles, and the generator has no Collector-V1 compatibility mode.
+`removed_v1_cases` was required to be zero for attention. That audit is not
+part of the runtime schema: production YAML contains ordinary default and model
+profiles, and the generator has no Collector-V1 compatibility mode.
+
+For the quant-sensitive MoE families migrated in this PR, a physical point must
+have a verified checkpoint artifact whose quantization can request it.
+Collector V1 crossed each geometry with most backend quant modes, so preserving
+every V1 MoE key would preserve measurements that no reviewed artifact can
+consume. Those historical cross-products are reported separately below instead
+of being reintroduced as synthetic or `legacy_*` profiles. Existing model
+families without verified artifact policy retain their broad synthetic sweep;
+this document does not claim that every MoE family has been migrated.
 
 Targeted structural population is model-exact. It does not inherit unrelated
 default topology profiles when the selected model has an explicit structural
@@ -122,6 +131,10 @@ selectable; standalone MLA uses the smallest TP for this reason.
    a case has already run.
 7. Unknown or unproved equivalence is retained. It is better to prune less than
    to silently remove a useful physical point.
+8. If distinct benchmark invocations map to one persisted consumer key, fail
+   population with both owners and the conflicting key. Do not silently pick a
+   representative unless the invocations are already proven equivalent, and do
+   not widen the consumer schema inside a Collector-only change.
 
 ## Pruning decisions
 
@@ -129,7 +142,7 @@ selectable; standalone MLA uses the smallest TP for this reason.
 |---|---|---|
 | Head/KV-head/head-dim/window values from different models | Keep correlated model profiles; do not cross them | Cross-model tuples are not deployable shapes |
 | Shape-only collector with base/FP8/NVFP4 names and no checkpoint-native behavior | Canonicalize artifact aliases | Artifact name does not change the invocation or persisted key |
-| Quant-sensitive MoE collector | Keep one row per artifact and allow only the artifact's declared quant mode | A shared geometry does not make INT4, FP8, MXFP4, and NVFP4 checkpoints interchangeable |
+| Quant-sensitive MoE family with verified artifact metadata | Keep one row per artifact and allow only the artifact's declared quant mode | A shared geometry does not make INT4, FP8, MXFP4, and NVFP4 checkpoints interchangeable |
 | Module collector that reads checkpoint-native quantization | Retain each path until native quantization is explicit | The path can change the executed kernel |
 | Different total-head/TP pairs with the same standalone-MLA local-head key | Deduplicate in the getter | Both invocation and current loader key are equivalent |
 | Experimental op with no production consumer | Keep the registry entry, omit it from default model plans | Explicit research runs remain possible without default collection cost |
@@ -173,7 +186,7 @@ may multiply a recipe by dtype, TP/EP, or token lists.
 |---|---:|---:|---:|---|
 | GEMM | 35,742 | 35,742 | 35,742 | unchanged |
 | ComputeScale | 1,628 | 1,628 | 1,628 | shared recipe unchanged; V2 also activates SGLang/vLLM |
-| MoE common | 1,797 | 4,548 | 3,507 | model-qualified recipes retain quant-sensitive artifacts; backend policy removes invalid products before execution |
+| MoE common | 1,797 | 4,548 | 4,209 | quant-sensitive artifacts have separate recipe identity; backend policy removes invalid products before execution |
 | MLA context specs | 220 | 550 | 220 | SGLang/TRT-LLM getters each emit 1,760 unique loader keys |
 | MLA generation specs | 362 | 885 | 362 | SGLang emits 2,656 keys after its int32 KV guard; TRT-LLM emits 2,896 |
 | Mamba | 8 | 8 | 12 | four default synthetic interpolation profiles added |
@@ -182,17 +195,50 @@ may multiply a recipe by dtype, TP/EP, or token lists.
 | MLA BMM pre/post | 400 / 448 | 400 / 448 | 400 / 448 | unchanged |
 
 With `COLLECTOR_MODEL_PATH` unset, the SM100 raw public-getter audit separates
-getter tasks from actual invocation identity. These counts are measured before
-model/SM/version plan selectors and before expanding each task's token list:
+candidate getter tasks from actual invocation identity. These counts are
+measured after artifact quantization policy, before model/SM/version plan
+selectors, and before expanding each task's token list:
 
 | Backend | Raw getter tasks before dedupe | Raw getter tasks now | Duplicate tasks removed | Unique invocation/key loss |
 |---|---:|---:|---:|---:|
-| TRT-LLM | 10,524 | 9,054 | 1,470 | 0 |
-| vLLM | 3,300 | 2,853 | 447 | 0 |
+| TRT-LLM | 9,414 | 7,944 | 1,470 | 0 |
+| vLLM | 2,799 | 2,352 | 447 | 0 |
 
 The vLLM audit enables the `per_block_fp8`, `nvfp4`, and `mxfp4` runtime
 features. Full model plans may filter these raw tasks later, so the table is not
 a post-selector or token-expanded queue count.
+
+Artifact-exact policy is a separate pruning stage, not part of the dedupe row
+above. Relative to the pre-review population, the reviewed DeepSeek V3,
+MiniMax M2, and Nemotron 3 families remove 1,110 TRT-LLM getter tasks / 29,970
+token-expanded rows and 501 vLLM getter tasks / 13,527 rows. Every removed row
+in this subset combines a model geometry with a quant mode that none of that
+geometry's verified checkpoints use. DeepSeek V3/R1/V3.2 and MiniMax M2 use
+FP8-block artifacts; their NVIDIA variants use NVFP4. Nemotron Nano is BF16,
+Super is NVFP4, and Ultra keeps distinct BF16, FP8, and NVFP4 recipe rows.
+Pinned SGLang has no plain per-tensor FP8 MoE path, so the Ultra FP8 artifact
+intentionally schedules no SGLang MoE case rather than being relabeled as
+FP8-block. Pinned vLLM limits its NVFP4 path to top-k <= 10, so Nemotron
+Super/Ultra top-k-22 NVFP4 is likewise an explicit gap rather than a mislabeled
+fallback case.
+
+`nvidia/nemotron-ultra-rl-050826` remains available to the shape-only Mamba
+profile, but it has no MoE profile: the repository has no checkpoint quant
+config proving whether its required FP4 format is NVFP4 or MXFP4. It can be
+enabled after that artifact contract and an exact-version runtime smoke exist.
+
+The same distinction makes the V1 comparison explicit. The following SM100
+counts are token-expanded consumer keys, with vLLM runtime features enabled:
+
+| Backend | V1 keys | Current keys | V1 keys retained | New keys | V1 cross-products removed |
+|---|---:|---:|---:|---:|---:|
+| TRT-LLM | 157,869 | 214,488 | 110,160 | 104,328 | 47,709 |
+| vLLM | 63,342 | 63,504 | 35,964 | 27,540 | 27,378 |
+
+The removed V1 keys are historical geometry-by-quant products, not modes
+requested by the migrated artifact families. Attention retains its stricter
+zero-V1-key-loss guarantee; MoE deliberately does not manufacture a legacy
+artifact to keep an unreachable physical point alive.
 
 These dedupe paths remain because current repository YAML produces real
 duplicates. The analogous MLA-module `seen` guards were removed: current model
@@ -215,10 +261,11 @@ cases and TRT-LLM emits 1,100 / 1,810. Both retain local heads
 targeted bucket and for `local_heads=1` in full collection; overlap with the
 128-head profile is removed only in the backend getter.
 
-For MoE, geometry and checkpoint quantization are separate identities. New
-model profiles remain additive, but a backend schedules only the declared
-artifact mode rather than taking the Cartesian product of every shape and
-every backend quant mode. DeepSeek V4 native artifacts schedule
+For migrated quant-sensitive MoE families, geometry and checkpoint
+quantization are separate identities. New model profiles remain additive, but
+a backend schedules only the declared artifact mode rather than taking the
+Cartesian product of every shape and every backend quant mode. DeepSeek V4
+native artifacts schedule
 `w4a8_mxfp4_mxfp8` in TRT-LLM. Pinned SGLang 0.5.10 predates the DSV4-specific
 MXFP4 method, and pinned vLLM 0.19.0 has no DSV4 MXFP4/MXFP8 implementation,
 so neither schedules a native V4 MoE case. The `sgl-project/*-FP8` artifacts
@@ -342,7 +389,7 @@ ruff format --check collector tests/unit/collector
 git diff --check
 ```
 
-The final Collector suite reports 287 passed and 2 skipped. The unit coverage
+The final Collector suite reports 299 passed and 2 skipped. The unit coverage
 checks final profile expansion, per-operation recipe counts, selector narrowing,
 alias handling, hardware/precision boundaries, and operation-local physical
 deduplication. The historical key-set comparison above was a one-time read-only

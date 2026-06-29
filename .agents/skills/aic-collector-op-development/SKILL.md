@@ -92,6 +92,9 @@ Keep these separate:
 
 Deduplicate only when both invocation identity and persisted key are equivalent.
 A persisted-key collision is a bug unless the invocations are proven identical.
+If repository-owned cases map distinct invocation identities to one consumer
+key, fail population with the conflicting owners and key. Do not silently use
+first-wins or widen the SDK/Rust schema inside a Collector-only change.
 
 Examples:
 

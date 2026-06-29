@@ -12,6 +12,7 @@ rank-local workload construction, quantized weight setup, and perf logging.
 import inspect
 import itertools
 import os
+from contextlib import contextmanager, nullcontext
 from typing import TypedDict
 from unittest.mock import MagicMock
 
@@ -986,8 +987,6 @@ def benchmark_config(
         server_args.flashinfer_mxfp4_moe_precision = _mxfp4_activation_precision(
             "w4a16_mxfp4" if use_mxfp4_w4a16 else "w4a8_mxfp4_mxfp8"
         )
-        _patch_mxfp4_single_process_parallel(moe_tp_size=moe_tp_size, moe_ep_size=moe_ep_size)
-
         try:
             intermediate_size = shard_intermediate_size // 2 * moe_tp_size
             mxfp4_config_kwargs = {}
@@ -1189,21 +1188,37 @@ def benchmark_config(
     return results["latency_ms"] / outside_loop_count, results["power_stats"]
 
 
-def _patch_mxfp4_single_process_parallel(*, moe_tp_size: int, moe_ep_size: int) -> None:
-    """Patch SGLang distributed helpers so a collector process can time rank-0 MoE."""
+@contextmanager
+def _patch_mxfp4_single_process_parallel(*, moe_tp_size: int, moe_ep_size: int):
+    """Temporarily patch SGLang distributed helpers for a rank-0 MoE benchmark."""
 
-    for module in (_moe_layer_mod, _std_dispatch_mod, _mxfp4_mod):
-        if hasattr(module, "get_tp_group"):
-            module.get_tp_group = lambda: None
-        if hasattr(module, "is_allocation_symmetric"):
-            module.is_allocation_symmetric = lambda: False
-    _moe_layer_mod.get_moe_expert_parallel_world_size = lambda: moe_ep_size
-    _moe_layer_mod.get_moe_expert_parallel_rank = lambda: 0
-    _moe_layer_mod.get_moe_tensor_parallel_world_size = lambda: moe_tp_size
-    _moe_layer_mod.get_moe_tensor_parallel_rank = lambda: 0
-    _moe_layer_mod.create_kt_config_from_server_args = lambda server_args, layer_id: None
-    _std_dispatch_mod.get_moe_expert_parallel_world_size = lambda: moe_ep_size
-    _std_dispatch_mod.get_moe_expert_parallel_rank = lambda: 0
+    missing = object()
+    originals = []
+
+    def replace(module, name, value):
+        originals.append((module, name, getattr(module, name, missing)))
+        setattr(module, name, value)
+
+    try:
+        for module in (_moe_layer_mod, _std_dispatch_mod, _mxfp4_mod):
+            if hasattr(module, "get_tp_group"):
+                replace(module, "get_tp_group", lambda: None)
+            if hasattr(module, "is_allocation_symmetric"):
+                replace(module, "is_allocation_symmetric", lambda: False)
+        replace(_moe_layer_mod, "get_moe_expert_parallel_world_size", lambda: moe_ep_size)
+        replace(_moe_layer_mod, "get_moe_expert_parallel_rank", lambda: 0)
+        replace(_moe_layer_mod, "get_moe_tensor_parallel_world_size", lambda: moe_tp_size)
+        replace(_moe_layer_mod, "get_moe_tensor_parallel_rank", lambda: 0)
+        replace(_moe_layer_mod, "create_kt_config_from_server_args", lambda _server_args, _layer_id: None)
+        replace(_std_dispatch_mod, "get_moe_expert_parallel_world_size", lambda: moe_ep_size)
+        replace(_std_dispatch_mod, "get_moe_expert_parallel_rank", lambda: 0)
+        yield
+    finally:
+        for module, name, original in reversed(originals):
+            if original is missing:
+                delattr(module, name)
+            else:
+                setattr(module, name, original)
 
 
 def benchmark(
@@ -1239,31 +1254,39 @@ def benchmark(
     if use_nvfp4 or use_mxfp4_moe or (use_int4_w4a16 and _HAS_MARLIN_MOE):
         # NVFP4 uses FlashInfer CuteDSL; MXFP4 uses SGLang's high-level
         # FlashInfer runner; INT4_W4A16 uses Marlin. None need Triton tuning.
-        kernel_time, power_stats = benchmark_config(
-            None,
-            benchmark_num_tokens,
-            num_experts,
-            shard_intermediate_size,
-            hidden_size,
-            topk,
-            dtype,
-            use_fp8_w8a8,
-            use_int8_w8a8,
-            use_int8_w8a16,
-            use_nvfp4,
-            use_trtllm_bf16_fp4,
-            use_int4_w4a16,
-            use_mxfp4_w4a16,
-            use_mxfp4_w4a8,
-            block_shape,
-            distributed=distributed,
-            power_law_alpha=power_law_alpha,
-            workloads=workloads,
-            swiglu_limit=swiglu_limit,
-            moe_tp_size=moe_tp_size,
-            moe_ep_size=moe_ep_size,
-            model_name=model_name,
+        # MXFP4 reads the patched helpers during forward, so keep them scoped
+        # through setup, warmup, and timing rather than only layer construction.
+        parallel_context = (
+            _patch_mxfp4_single_process_parallel(moe_tp_size=moe_tp_size, moe_ep_size=moe_ep_size)
+            if use_mxfp4_moe and _HAS_SGLANG_MXFP4
+            else nullcontext()
         )
+        with parallel_context:
+            kernel_time, power_stats = benchmark_config(
+                None,
+                benchmark_num_tokens,
+                num_experts,
+                shard_intermediate_size,
+                hidden_size,
+                topk,
+                dtype,
+                use_fp8_w8a8,
+                use_int8_w8a8,
+                use_int8_w8a16,
+                use_nvfp4,
+                use_trtllm_bf16_fp4,
+                use_int4_w4a16,
+                use_mxfp4_w4a16,
+                use_mxfp4_w4a8,
+                block_shape,
+                distributed=distributed,
+                power_law_alpha=power_law_alpha,
+                workloads=workloads,
+                swiglu_limit=swiglu_limit,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
+                model_name=model_name,
+            )
         return kernel_time, power_stats
 
     dtype_str = get_config_dtype_str(

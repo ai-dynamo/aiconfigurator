@@ -131,6 +131,29 @@ def _moe_execution_key(common_moe_testcase, moe_type: str):
     )
 
 
+def _moe_consumer_keys(common_moe_testcase, moe_type: str):
+    """Return every consumer-visible key emitted by one getter task."""
+    distribution = (
+        f"power_law_{common_moe_testcase.power_law_alpha}"
+        if common_moe_testcase.token_expert_distribution == "power_law"
+        else common_moe_testcase.token_expert_distribution
+    )
+    return tuple(
+        (
+            moe_type,
+            distribution,
+            common_moe_testcase.topk,
+            common_moe_testcase.num_experts,
+            common_moe_testcase.hidden_size,
+            common_moe_testcase.inter_size,
+            common_moe_testcase.tp,
+            common_moe_testcase.ep,
+            num_tokens,
+        )
+        for num_tokens in common_moe_testcase.num_tokens_list
+    )
+
+
 def _ensure_workspace_manager(device: str) -> None:
     if init_workspace_manager is None:
         return
@@ -161,6 +184,7 @@ def get_moe_test_cases():
 
     test_cases = []
     seen = set()
+    consumer_key_owners = {}
 
     for common_moe_testcase in get_common_moe_test_cases():
         model_name = common_moe_testcase.model_name
@@ -185,6 +209,19 @@ def get_moe_test_cases():
             execution_key = _moe_execution_key(common_moe_testcase, moe_type)
             if execution_key in seen:
                 continue
+            consumer_keys = _moe_consumer_keys(common_moe_testcase, moe_type)
+            for consumer_key in consumer_keys:
+                previous_owner = consumer_key_owners.get(consumer_key)
+                if previous_owner is not None and previous_owner[0] != execution_key:
+                    previous_model = previous_owner[1]
+                    raise ValueError(
+                        "vLLM MoE population collision: "
+                        f"models {previous_model!r} and {model_name!r} map distinct benchmark "
+                        f"invocations to consumer key {consumer_key!r}; "
+                        "the current moe_perf consumer cannot represent both"
+                    )
+            for consumer_key in consumer_keys:
+                consumer_key_owners[consumer_key] = (execution_key, model_name)
             seen.add(execution_key)
 
             test_cases.append(

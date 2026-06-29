@@ -354,6 +354,37 @@ def test_kimi_moe_quantization_is_artifact_specific():
             assert allowed == expected, (backend, model_path)
 
 
+def test_deepseek_minimax_and_nemotron_moe_quantization_is_artifact_specific():
+    shared_expected = {
+        "deepseek-ai/DeepSeek-V3": {"fp8_block"},
+        "deepseek-ai/DeepSeek-R1": {"fp8_block"},
+        "deepseek-ai/DeepSeek-V3.2": {"fp8_block"},
+        "nvidia/DeepSeek-V3.1-NVFP4": {"nvfp4"},
+        "MiniMaxAI/MiniMax-M2": {"fp8_block"},
+        "MiniMaxAI/MiniMax-M2.5": {"fp8_block"},
+        "MiniMaxAI/MiniMax-M2.7": {"fp8_block"},
+        "nvidia/MiniMax-M2.5-NVFP4": {"nvfp4"},
+        "nvidia/MiniMax-M2.7-NVFP4": {"nvfp4"},
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": {"bfloat16"},
+        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4": {"nvfp4"},
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": {"bfloat16"},
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4": {"nvfp4"},
+    }
+
+    for backend in ("sglang", "trtllm", "vllm"):
+        available_modes = {spec.name for spec in get_moe_quantization_specs(backend)}
+        expected_by_artifact = {
+            **shared_expected,
+            "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": set() if backend == "sglang" else {"fp8"},
+        }
+        if backend == "vllm":
+            expected_by_artifact["nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"] = set()
+            expected_by_artifact["nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"] = set()
+        for model_path, expected in expected_by_artifact.items():
+            allowed = {mode for mode in available_modes if moe_model_allows_quantization(backend, model_path, mode)}
+            assert allowed == expected, (backend, model_path)
+
+
 def test_gptoss_mxfp4_modes_are_additive_on_blackwell():
     from collector.case_generator import get_moe_quantization_modes
 
@@ -445,7 +476,7 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     moe_cases = get_common_moe_test_cases()
-    assert len(moe_cases) == 3507
+    assert len(moe_cases) == 4209
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -1030,7 +1061,25 @@ def test_qwen3_30b_fp8_alias_reuses_canonical_case_and_tp_constraints(monkeypatc
     assert all(case.tp < 8 for case in cases)
 
 
-def test_nemotron_ultra_quant_alias_reuses_physical_moe_and_mamba_profiles(monkeypatch):
+def test_quant_sensitive_moe_artifacts_use_quant_equivalent_representatives(monkeypatch):
+    from collector.case_generator import get_common_moe_test_cases
+
+    expected_representatives = {
+        "nvidia/DeepSeek-V3.1-NVFP4": "nvidia/DeepSeek-V3.1-NVFP4",
+        "nvidia/MiniMax-M2.5-NVFP4": "nvidia/MiniMax-M2.5-NVFP4",
+        "nvidia/MiniMax-M2.7-NVFP4": "nvidia/MiniMax-M2.5-NVFP4",
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+    }
+
+    for model_path, expected_representative in expected_representatives.items():
+        monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+        cases = get_common_moe_test_cases()
+        assert cases and {case.model_name for case in cases} == {expected_representative}
+
+
+def test_nemotron_ultra_quant_artifact_keeps_moe_path_but_reuses_mamba_profile(monkeypatch):
     from collector.case_generator import get_common_mamba2_test_cases, get_common_moe_test_cases
 
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8")
@@ -1038,9 +1087,19 @@ def test_nemotron_ultra_quant_alias_reuses_physical_moe_and_mamba_profiles(monke
     moe_cases = get_common_moe_test_cases()
     mamba_cases = get_common_mamba2_test_cases()
 
-    canonical = "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
-    assert moe_cases and {case.model_name for case in moe_cases} == {canonical}
-    assert mamba_cases and {case.model_name for case in mamba_cases} == {canonical}
+    assert moe_cases and {case.model_name for case in moe_cases} == {"nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8"}
+    assert mamba_cases and {case.model_name for case in mamba_cases} == {
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+    }
+
+
+def test_unverified_nemotron_rl_artifact_has_no_moe_profile(monkeypatch):
+    from collector.case_generator import get_common_mamba2_test_cases, get_common_moe_test_cases
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/nemotron-ultra-rl-050826")
+
+    assert get_common_moe_test_cases() == []
+    assert get_common_mamba2_test_cases()
 
 
 def test_support_matrix_mamba_alias_generates_targeted_cases(monkeypatch):

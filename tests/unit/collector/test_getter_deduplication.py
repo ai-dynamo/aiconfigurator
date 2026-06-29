@@ -152,21 +152,21 @@ def _moe_case(model_name: str, *, distribution: str = "balanced", alpha: float =
     )
 
 
-def test_trtllm_moe_getter_dedupes_only_equal_resolved_invocations(monkeypatch):
+def _persisted_distribution(distribution: str, alpha: float | None) -> str:
+    return f"power_law_{alpha}" if distribution == "power_law" else distribution
+
+
+def test_trtllm_moe_getter_dedupes_equal_resolved_invocations(monkeypatch):
     _install_trtllm_stubs(monkeypatch)
     module = _load_collector(monkeypatch, "collector.trtllm.collect_moe", "collector/trtllm/collect_moe.py")
     common_cases = [
         _moe_case("model-a"),
         _moe_case("model-b"),
-        _moe_case("model-c"),
-        _moe_case("vendor/Nemotron-3-test"),
         _moe_case("model-a", distribution="power_law", alpha=1.2),
     ]
     module_configs = {
         "model-a": {"group_size": 32},
         "model-b": {"group_size": 32},
-        "model-c": {"group_size": 128},
-        "vendor/Nemotron-3-test": {"group_size": 32},
     }
     monkeypatch.setattr(module, "get_common_moe_test_cases", lambda: common_cases)
     monkeypatch.setattr(module, "moe_model_allows_quantization", lambda _backend, _model, mode: mode == "int4_wo")
@@ -177,13 +177,48 @@ def test_trtllm_moe_getter_dedupes_only_equal_resolved_invocations(monkeypatch):
     )
 
     cases = module.get_moe_test_cases()
-    model_names = [case[9] for case in cases]
 
-    assert len(cases) == 4
-    assert model_names.count("model-a") == 2
-    assert "model-b" not in model_names
-    assert "model-c" in model_names
-    assert "vendor/Nemotron-3-test" in model_names
+    assert {(case[9], case[10], case[11]) for case in cases} == {
+        ("model-a", "balanced", 0.0),
+        ("model-a", "power_law", 1.2),
+    }
+
+
+@pytest.mark.parametrize(
+    ("conflicting_model", "conflicting_config"),
+    [
+        ("model-c", {"group_size": 128}),
+        ("vendor/Nemotron-3-test", {"group_size": 32}),
+    ],
+)
+def test_trtllm_moe_getter_rejects_consumer_key_collision(
+    monkeypatch,
+    conflicting_model,
+    conflicting_config,
+):
+    _install_trtllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.trtllm.collect_moe", "collector/trtllm/collect_moe.py")
+    common_cases = [
+        _moe_case("model-a"),
+        replace(_moe_case(conflicting_model), num_tokens_list=[8, 16]),
+    ]
+    module_configs = {
+        "model-a": {"group_size": 32},
+        conflicting_model: conflicting_config,
+    }
+    monkeypatch.setattr(module, "get_common_moe_test_cases", lambda: common_cases)
+    monkeypatch.setattr(module, "moe_model_allows_quantization", lambda _backend, _model, mode: mode == "int4_wo")
+    monkeypatch.setattr(
+        module,
+        "get_moe_quantization_module_config",
+        lambda _backend, _mode, *, model_name: module_configs[model_name],
+    )
+
+    with pytest.raises(ValueError, match="TRT-LLM MoE population collision") as exc_info:
+        module.get_moe_test_cases()
+
+    assert "model-a" in str(exc_info.value)
+    assert conflicting_model in str(exc_info.value)
 
 
 def test_trtllm_dsv4_moe_getter_retains_tp_and_ep_buckets(monkeypatch):
@@ -221,20 +256,18 @@ def test_trtllm_dsv4_moe_getter_retains_tp_and_ep_buckets(monkeypatch):
     assert {case[0] for case in cases} == {"w4a8_mxfp4_mxfp8"}
 
 
-def test_vllm_moe_getter_dedupes_only_equal_resolved_invocations(monkeypatch):
+def test_vllm_moe_getter_dedupes_equal_resolved_invocations(monkeypatch):
     _install_vllm_stubs(monkeypatch)
     module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
     common_cases = [
         _moe_case("model-a"),
         _moe_case("model-b"),
-        _moe_case("model-c"),
         _moe_case("model-a", distribution="power_law", alpha=1.2),
         _moe_case("model-b", ep=2),
     ]
     module_configs = {
         "model-a": {"activation": "silu", "has_bias": False},
         "model-b": {"activation": "silu", "has_bias": False},
-        "model-c": {"activation": "swigluoai", "has_bias": True},
     }
     monkeypatch.setattr(module, "get_common_moe_test_cases", lambda: common_cases)
     monkeypatch.setattr(module, "get_moe_quantization_modes", lambda *_args, **_kwargs: ["w4a16_mxfp4"])
@@ -249,7 +282,93 @@ def test_vllm_moe_getter_dedupes_only_equal_resolved_invocations(monkeypatch):
     cases = module.get_moe_test_cases()
     model_names = [case[8] for case in cases]
 
-    assert len(cases) == 4
+    assert len(cases) == 3
     assert model_names.count("model-a") == 2
     assert model_names.count("model-b") == 1
-    assert model_names.count("model-c") == 1
+
+
+def test_vllm_moe_getter_rejects_consumer_key_collision(monkeypatch):
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    common_cases = [
+        _moe_case("model-a"),
+        replace(_moe_case("model-c"), num_tokens_list=[8, 16]),
+    ]
+    module_configs = {
+        "model-a": {"activation": "silu", "has_bias": False},
+        "model-c": {"activation": "swigluoai", "has_bias": True},
+    }
+    monkeypatch.setattr(module, "get_common_moe_test_cases", lambda: common_cases)
+    monkeypatch.setattr(module, "get_moe_quantization_modes", lambda *_args, **_kwargs: ["w4a16_mxfp4"])
+    monkeypatch.setattr(module, "moe_model_allows_quantization", lambda *_args: True)
+    monkeypatch.setattr(module, "moe_shape_satisfies_constraints", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        module,
+        "get_moe_quantization_module_config",
+        lambda _backend, _mode, *, model_name: module_configs[model_name],
+    )
+
+    with pytest.raises(ValueError, match="vLLM MoE population collision") as exc_info:
+        module.get_moe_test_cases()
+
+    assert "model-a" in str(exc_info.value)
+    assert "model-c" in str(exc_info.value)
+
+
+def test_trtllm_repository_moe_getter_has_unique_consumer_keys(monkeypatch):
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    _install_trtllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.trtllm.collect_moe", "collector/trtllm/collect_moe.py")
+
+    consumer_keys = []
+    for case in module.get_moe_test_cases():
+        moe_type, num_tokens_list, hidden_size, inter_size, topk, num_experts, tp, ep = case[:8]
+        min_latency_mode, _, distribution, alpha = case[8:]
+        table = "low_latency" if min_latency_mode else "default"
+        distribution = _persisted_distribution(distribution, alpha)
+        consumer_keys.extend(
+            (table, moe_type, distribution, topk, num_experts, hidden_size, inter_size, tp, ep, num_tokens)
+            for num_tokens in num_tokens_list
+        )
+
+    assert consumer_keys
+    assert len(consumer_keys) == len(set(consumer_keys))
+
+
+def test_vllm_repository_moe_getter_has_unique_consumer_keys(monkeypatch):
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    monkeypatch.setattr(module, "per_block_cast_to_fp8", _noop)
+    monkeypatch.setattr(module, "_nvfp4_available", True)
+    monkeypatch.setattr(module, "_mxfp4_available", True)
+
+    consumer_keys = []
+    for case in module.get_moe_test_cases():
+        moe_type, num_tokens_list, hidden_size, inter_size, topk, num_experts, tp, ep = case[:8]
+        _, distribution, alpha = case[8:]
+        distribution = _persisted_distribution(distribution, alpha)
+        consumer_keys.extend(
+            (moe_type, distribution, topk, num_experts, hidden_size, inter_size, tp, ep, num_tokens)
+            for num_tokens in num_tokens_list
+        )
+
+    assert consumer_keys
+    assert len(consumer_keys) == len(set(consumer_keys))
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+    ],
+)
+def test_vllm_nemotron_topk22_nvfp4_artifacts_are_not_scheduled(monkeypatch, model_path):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    monkeypatch.setattr(module, "per_block_cast_to_fp8", _noop)
+    monkeypatch.setattr(module, "_nvfp4_available", True)
+
+    assert module.get_moe_test_cases() == []

@@ -21,12 +21,31 @@ model_case_values:
       model_aliases:
         - deepseek-ai/DeepSeek-R1
         - deepseek-ai/DeepSeek-V3.2
-        - nvidia/DeepSeek-V3.1-NVFP4
       hidden_size: 7168
       inter_size: 2048
       topk: 8
       num_experts: 256
       wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [fp8_block]
+        trtllm:
+          allowed_modes: [fp8_block]
+        vllm:
+          allowed_modes: [fp8_block]
+    - model_path: nvidia/DeepSeek-V3.1-NVFP4
+      hidden_size: 7168
+      inter_size: 2048
+      topk: 8
+      num_experts: 256
+      wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [nvfp4]
+        trtllm:
+          allowed_modes: [nvfp4]
+        vllm:
+          allowed_modes: [nvfp4]
   mla:
     - model_path: deepseek-ai/DeepSeek-V3
       model_aliases:
