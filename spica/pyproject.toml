@@ -29,10 +29,11 @@ dev = [
 ]
 # Planner load-predictor sweep + Replay evaluator.
 #
-# Pinned to the #10964 merge commit (c7378f8e). main now carries the unified
+# Pinned to cb7dc1a3. This includes the unified
 # run_trace_replay that takes planner_config / benchmark_granularity / goodput SLA on the
 # trace-replay path (so the evaluator drives static + planner trace replays through one
-# entrypoint), plus #10964 scaling AIC num_gpu_blocks by attention_dp_size for DP-attention.
+# entrypoint), #10964 scaling AIC num_gpu_blocks by attention_dp_size for DP-attention,
+# and #11002 converting aggregate offline-replay batches to per-rank AIC batches.
 # Builds on #10888 planner-replay load modes (closed-loop concurrency + synthetic workloads),
 # #10849 goodput SLA on the plain trace-replay binding, #10739 replay goodput + provisioned
 # GPU-hours, and the #10670 warmup empty-window densify fix.
@@ -53,8 +54,8 @@ dev = [
 # Pinned here to the same versions (same commit) so spica's predictors behave
 # identically to the planner's. Keep in sync with that file on dynamo bumps.
 dynamo = [
-    "ai-dynamo @ git+https://github.com/ai-dynamo/dynamo@c7378f8e082cb5d2923edb0f8f57bb8d28e722aa",
-    "ai-dynamo-runtime @ git+https://github.com/ai-dynamo/dynamo@c7378f8e082cb5d2923edb0f8f57bb8d28e722aa#subdirectory=lib/bindings/python",
+    "ai-dynamo @ git+https://github.com/ai-dynamo/dynamo@cb7dc1a3a74018b7824ab7ef9d0191b80946758b",
+    "ai-dynamo-runtime @ git+https://github.com/ai-dynamo/dynamo@cb7dc1a3a74018b7824ab7ef9d0191b80946758b#subdirectory=lib/bindings/python",
     "filterpy==1.4.5",
     "pmdarima==2.1.1",
     "prophet==1.2.1",
