@@ -28,8 +28,7 @@ from aiconfigurator.cli.main import (
 )
 from aiconfigurator.cli.main import main as cli_main
 from aiconfigurator.cli.report_and_save import _apply_inclusive_tpot
-from aiconfigurator.sdk.errors import NoFeasibleConfigError
-from aiconfigurator.spica.cli_adapter import (
+from aiconfigurator.cli.spica.cli_adapter import (
     _build_spica_thorough_config_data,
     _build_spica_trace_result_bundle,
     _build_spica_trace_search_space,
@@ -40,6 +39,7 @@ from aiconfigurator.spica.cli_adapter import (
     _spica_router_enabled,
     _SpicaReplayEvaluatorCompat,
 )
+from aiconfigurator.sdk.errors import NoFeasibleConfigError
 
 pytestmark = pytest.mark.unit
 

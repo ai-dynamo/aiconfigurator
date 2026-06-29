@@ -113,7 +113,6 @@ include = [
     "aiconfigurator",
     "aiconfigurator.cli*",
     "aiconfigurator.generator*",
-    "aiconfigurator.spica*",
     "aiconfigurator.webapp*",
     "spica*",
 ]
