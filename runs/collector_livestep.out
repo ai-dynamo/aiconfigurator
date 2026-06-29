@@ -1,0 +1,6 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[scheduler] GPU slots: 4,5,6,7
+[scheduler] launch gpu=4 attempt=1 wu_b7d45bf38bf6328c_ctx pending=4
+[scheduler] finish gpu=4 attempt=1 rc=0 wu_b7d45bf38bf6328c_ctx
+[scheduler] Done. Results written to /workspace/repo/aiconfigurator/runs/collector_livestep/layerwise.csv
+[scheduler] Status written to /workspace/repo/aiconfigurator/runs/collector_livestep/profiles/status.jsonl
