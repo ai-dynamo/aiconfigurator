@@ -19,6 +19,14 @@ class DeepSeekV4Model(BaseModel):
     _SUPPORTED_COMPRESS_RATIOS: ClassVar[set[int]] = {0, 4, 128}
 
     @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # DeepSeek-V4 CSA/HCA prefill CP: SGLang AllGather only. CP is modeled
+        # INSIDE ContextDeepSeekV4AttentionModule._query_cp (GLM-5-style mqa
+        # full/cp + topk full/cp deltas; HCA adds a windowed-KV all-gather),
+        # NOT via the dense _cp_attn_comm_ops / seq_split-only skeleton.
+        return backend_name == "sglang"
+
+    @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
         return cls(
             model_info["topk"],
@@ -57,11 +65,12 @@ class DeepSeekV4Model(BaseModel):
             raise ValueError(f"Unsupported DeepSeek-V4 compress_ratios: {sorted(unknown_ratios)}")
 
         assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
+            self.config.tp_size * self.config.attention_dp_size * self.config.cp_size
+            == self.config.moe_tp_size * self.config.moe_ep_size
         ), (
             f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+            f"({self.config.attention_dp_size}) * cp_size ({self.config.cp_size}) should be equal to "
+            f"moe_tp_size ({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
 
@@ -82,6 +91,13 @@ class DeepSeekV4Model(BaseModel):
         moe_ep_size = self.config.moe_ep_size
         attention_dp_size = self.config.attention_dp_size
         pp_size = self.config.pp_size
+        # Context parallelism (sglang AllGather, prefill-only):
+        #  - attention modules: cp_size -> _query_cp (GLM-5-style mqa/topk full/cp
+        #    deltas + CSA/HCA all-gathers);
+        #  - token-major context ops (Embedding/MHC/norm/GEMM): seq_split=cp;
+        #  - context MoEDispatch: attn_cp_size=cp (AG_hidden+RS comm), MoE compute
+        #    cp-invariant. Generation/decode is NOT CP'd.
+        cp = self.config.cp_size
         moe_backend = self.config.moe_backend
         use_megamoe = moe_backend == "megamoe"
         if use_megamoe:
@@ -136,12 +152,16 @@ class DeepSeekV4Model(BaseModel):
                     kvcache_quant_mode,
                     fmha_quant_mode,
                     gemm_quant_mode,
+                    cp_size=(cp if is_context else 1),
                 )
                 for ratio, count in ratio_counts.items()
                 if count > 0
             ]
 
-        def _moe_ops(phase: str, num_layers: float, is_context: bool):
+        def _moe_ops(phase: str, num_layers: float, is_context: bool, attn_cp: int = 1):
+            # attn_cp>1 (context under CP) makes MoEDispatch use the attn-CP+moe-TP
+            # comm pattern (pre=all_gather, post=reduce_scatter) instead of all_reduce.
+            # MoE expert compute is cp-invariant (A2A globalises tokens) -> no change.
             if use_megamoe:
                 return [
                     ops.DeepSeekV4MegaMoEModule(
@@ -170,6 +190,7 @@ class DeepSeekV4Model(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
+                    attn_cp_size=attn_cp,
                 ),
                 ops.MoE(
                     f"{phase}_moe",
@@ -195,13 +216,14 @@ class DeepSeekV4Model(BaseModel):
                     attention_dp_size,
                     False,
                     quant_mode=moe_quant_mode,
+                    attn_cp_size=attn_cp,
                 ),
             ]
 
-        context_moe_ops = _moe_ops("context", self._num_layers, is_context=True)
+        context_moe_ops = _moe_ops("context", self._num_layers, is_context=True, attn_cp=cp)
         self.context_ops.extend(
             [
-                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
+                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3, seq_split=cp),
                 ops.DeepSeekV4MHCModule(
                     "context_mhc_pre",
                     self._num_layers,
@@ -210,8 +232,9 @@ class DeepSeekV4Model(BaseModel):
                     deepseek_v4_cfg.hc_mult,
                     deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
                 ),
-                ops.ElementWise("context_attn_norm", self._num_layers, h, h, 0.8),
+                ops.ElementWise("context_attn_norm", self._num_layers, h, h, 0.8, seq_split=cp),
                 *_attention_ops(is_context=True, scale_factor=1.0),
                 ops.DeepSeekV4MHCModule(
                     "context_mhc_post",
@@ -221,14 +244,16 @@ class DeepSeekV4Model(BaseModel):
                     deepseek_v4_cfg.hc_mult,
                     deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
                 ),
-                ops.ElementWise("context_ffn_norm", self._num_layers, h, h, 0.8),
+                ops.ElementWise("context_ffn_norm", self._num_layers, h, h, 0.8, seq_split=cp),
                 ops.GEMM(
                     "context_shared_gate_up_gemm",
                     self._num_layers,
                     2 * local_moe_inter_size,
                     h,
                     gemm_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.ElementWise(
                     "context_shared_act_gate",
@@ -236,11 +261,28 @@ class DeepSeekV4Model(BaseModel):
                     2 * local_moe_inter_size,
                     local_moe_inter_size,
                     0.8,
+                    seq_split=cp,
                 ),
-                ops.GEMM("context_shared_ffn2_gemm", self._num_layers, h, local_moe_inter_size, gemm_quant_mode),
-                ops.GEMM("context_router_gemm", self._num_layers, self._num_experts, h, common.GEMMQuantMode.bfloat16),
+                ops.GEMM(
+                    "context_shared_ffn2_gemm", self._num_layers, h, local_moe_inter_size, gemm_quant_mode, seq_split=cp
+                ),
+                ops.GEMM(
+                    "context_router_gemm",
+                    self._num_layers,
+                    self._num_experts,
+                    h,
+                    common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
+                ),
                 *context_moe_ops,
-                ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp_size, h, common.GEMMQuantMode.bfloat16),
+                ops.GEMM(
+                    "context_logits_gemm",
+                    1,
+                    self._vocab_size // tp_size,
+                    h,
+                    common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
+                ),
             ]
         )
 
@@ -298,6 +340,7 @@ class DeepSeekV4Model(BaseModel):
             "generation",
             self._num_layers * self._mtp_scale_factor,
             is_context=False,
+            attn_cp=cp,
         )
         gen_routed_ops = [
             ops.GEMM(

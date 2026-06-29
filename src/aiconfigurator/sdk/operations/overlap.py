@@ -24,7 +24,7 @@ empty defaults that suffice.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.base import Operation
@@ -59,14 +59,19 @@ class FallbackOp(Operation):
     Weights = sum of whichever group is used (primary or fallback)
     """
 
-    def __init__(self, name: str, primary: Operation, fallback: list[Operation]) -> None:
+    _CP_AWARE: ClassVar[bool] = True  # wrapper: inner ops carry their own seq_split
+
+    def __init__(self, name: str, primary: Operation, fallback: list[Operation], *, seq_split: int = 1) -> None:
         """
         Args:
             name: Operation name for latency breakdown reporting.
             primary: Single operation to try first.
             fallback: List of operations to sum if primary fails.
+            seq_split: Carried for API uniformity. The wrapper delegates to
+                inner ops which carry their own ``seq_split``; this one is
+                stored on the base class for completeness but not used here.
         """
-        super().__init__(name, 1.0)  # scale_factor handled by inner ops
+        super().__init__(name, 1.0, seq_split=seq_split)  # scale_factor handled by inner ops
         self._primary = primary
         self._fallback = fallback
         self._primary_unavailable = False
@@ -134,7 +139,9 @@ class OverlapOp(Operation):
     Weights = sum(all ops in both groups)
     """
 
-    def __init__(self, name: str, group_a: list, group_b: list) -> None:
+    _CP_AWARE: ClassVar[bool] = True  # wrapper: inner ops carry their own seq_split
+
+    def __init__(self, name: str, group_a: list, group_b: list, *, seq_split: int = 1) -> None:
         """
         Args:
             name: Operation name for latency breakdown reporting.
@@ -142,8 +149,9 @@ class OverlapOp(Operation):
                      (e.g., routed expert path on main stream).
             group_b: List of Operation objects for the second parallel group
                      (e.g., shared expert path on aux stream).
+            seq_split: Carried for API uniformity. Inner ops carry their own.
         """
-        super().__init__(name, 1.0)  # scale_factor handled by inner ops
+        super().__init__(name, 1.0, seq_split=seq_split)  # scale_factor handled by inner ops
         self._group_a = group_a
         self._group_b = group_b
 

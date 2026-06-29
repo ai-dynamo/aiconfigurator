@@ -126,6 +126,7 @@ def _build_disagg_summary_dict(
         "(p)dp": prefill_summary_dict["dp"],
         "(p)moe_tp": prefill_summary_dict["moe_tp"],
         "(p)moe_ep": prefill_summary_dict["moe_ep"],
+        "(p)cp": prefill_summary_dict.get("cp", 1),
         "(p)parallel": prefill_summary_dict["parallel"],
         "(p)gemm": prefill_summary_dict["gemm"],
         "(p)kvcache": prefill_summary_dict["kvcache"],

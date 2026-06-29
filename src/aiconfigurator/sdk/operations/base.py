@@ -127,9 +127,26 @@ class Operation:
     # Operation._record_load(cls) after a successful parse (NOT on cache hit).
     _load_data_call_count: ClassVar[dict[type, int]] = defaultdict(int)
 
-    def __init__(self, name: str, scale_factor: float) -> None:
+    # Context-parallel opt-in. Subclasses set True after auditing how they
+    # respond to ``seq_split``. Constructing an op with ``seq_split > 1`` on a
+    # class that has NOT opted in raises -- protects against a new op silently
+    # mis-modeling CP. Token-major ops (GEMM/Embedding/ElementWise/NCCL/AR/P2P)
+    # divide their per-rank token count ``x`` by ``self._seq_split`` in query().
+    _CP_AWARE: ClassVar[bool] = False
+
+    def __init__(self, name: str, scale_factor: float, *, seq_split: int = 1) -> None:
+        if seq_split > 1 and not self._CP_AWARE:
+            raise NotImplementedError(
+                f"{type(self).__name__} has not been audited for context parallelism "
+                f"(seq_split={seq_split}). Set ``_CP_AWARE = True`` on the class after "
+                f"verifying query() divides its token-count input by self._seq_split "
+                f"(or is handled CP-style-specifically at the model construction site)."
+            )
         self._name = name
         self._scale_factor = scale_factor
+        # Sequence-axis shard factor (= cp_size under context parallelism). Token-
+        # major ops divide ``x`` by this in query(); default 1 means no shard.
+        self._seq_split: int = seq_split
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Return latency (scaled by ``scale_factor``) plus energy/source data."""

@@ -57,10 +57,11 @@ class Qwen35Model(BaseModel):
 
         if cfg.num_experts > 0:
             assert (
-                self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
+                self.config.tp_size * self.config.attention_dp_size * self.config.cp_size
+                == self.config.moe_tp_size * self.config.moe_ep_size
             ), (
                 f"tp_size ({self.config.tp_size}) * attention_dp_size "
-                f"({self.config.attention_dp_size}) should equal moe_tp_size "
+                f"({self.config.attention_dp_size}) * cp_size ({self.config.cp_size}) should equal moe_tp_size "
                 f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
             )
             assert cfg.num_experts >= self.config.moe_ep_size
