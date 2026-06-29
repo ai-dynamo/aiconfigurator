@@ -7,10 +7,10 @@ A *branch* is one **deployment_mode** (agg / disagg) — one Vizier study each, 
 agg and disagg have structurally different parallel configs. ``backend`` is NOT a
 branch: it is a searched categorical knob within the study. For each mode we take the
 **union** of every configured backend's KV-feasible parallel configs
-(:func:`spica.model_hw.parallel_configs_for`) as the categorical domain, recording per
-config which backends support it; a sampled ``(backend, parallel_config)`` pair outside
-that set is marked infeasible (no replay) so the optimizer learns to avoid it. Backends
-with no perf DB / no viable config for a mode are dropped from the backend knob.
+(:func:`spica.model_hw.parallel_configs_for`) as the valid projection pool, recording per
+config which backends support it. The sampler can either use the legacy categorical index
+or structured latent features projected onto this pool. Backends with no perf DB / no
+viable config for a mode are dropped from the backend knob.
 
 ``load_predictor_candidates`` is resolved separately by the load-predictor sub-sweep
 and is not a sampler dimension.
@@ -59,14 +59,15 @@ class BranchSpace:
     """One ``deployment_mode`` branch of the search (backend is a searched knob)."""
 
     deployment_mode: str
-    # Union of every searched backend's KV-feasible parallel configs — the categorical
-    # domain (pick an index).
+    # Union of every searched backend's KV-feasible parallel configs.
     parallel_configs: tuple[_ParallelConfig, ...]
-    # parallel config -> the backends for which it is legal+KV-feasible. A sampled
-    # (backend, config) pair whose backend isn't here is marked infeasible (no replay).
+    # parallel config -> the backends for which it is legal+KV-feasible. Structured
+    # projection hard-filters on this map; the legacy index path keeps a defensive gate.
     supported_backends: dict[_ParallelConfig, frozenset[str]]
     # Searchable atomic knob -> its configured choice list (incl. "backend").
     knob_choices: dict[str, list[Any]]
+    # Pinned branch budget; optional only for lightweight unit-test fixtures.
+    gpu_budget: int | None = None
 
 
 def _engine_knobs(deployment_mode: str) -> tuple[str, ...]:
@@ -181,7 +182,8 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
                 )
 
         knob_choices = branch_knob_choices(ss, deployment_mode)
-        knob_choices["backend"] = sorted(set().union(*support.values()))  # only viable backends
+        viable_backends = set().union(*support.values())
+        knob_choices["backend"] = [backend for backend in dict.fromkeys(ss.backend) if backend in viable_backends]
         # A list-valued workload.concurrency (pareto sweep) becomes a per-trial discrete
         # dimension; the evaluator reads selection["concurrency"] as the in-flight cap.
         concurrency_choices = config.workload.concurrency_choices
@@ -193,6 +195,7 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
                 parallel_configs=tuple(support),
                 supported_backends={cfg: frozenset(bs) for cfg, bs in support.items()},
                 knob_choices=knob_choices,
+                gpu_budget=ss.gpu_budget,
             )
         )
 

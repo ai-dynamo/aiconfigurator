@@ -73,6 +73,12 @@ SA's decode layout is per-concurrency: **`TP8 ×8`** for C≤512 (TP-attn + MoE-
 `run_smart_search`, `goal.target = pareto`. Deployment shapes are searched; concurrency is the
 swept Pareto dimension.
 
+Run this unpinned experiment with the structured parallel encoding:
+
+```bash
+SPICA_PARALLEL_ENCODING=structured spica --config <config.yaml>
+```
+
 ```yaml
 search_space:
   deployment_mode: [disagg]
@@ -96,7 +102,7 @@ sweep:
   max_eval_seconds: 600          # 10-min replay cap per candidate; timeouts -> infeasible
 ```
 
-## Result — the front reaches/exceeds green by round 6
+## Legacy opaque-index result — the front reaches/exceeds green by round 6
 
 ![GLM-5-FP8 / B200 disagg Pareto frontier: SA-measured (gray dashed, peak 3448), the green replay baseline (peak 738), and the round-6 spica sweep frontier (blue, peak 532) which sits above green over interactivity 20-30 but spans only 20-55 tok/s/user.](glm5-disagg-pareto-frontier-sweep.png)
 

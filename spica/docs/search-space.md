@@ -153,9 +153,9 @@ workload it short-circuits to `constant_last` for every interval.
 The sweep runs **one Vizier study per `deployment_mode`**. **`backend` is a searched knob,
 not a branch**: listing multiple backends searches them *together* within each mode's study,
 and the cross-branch merge picks the global best — `rank()` for a single-objective goal, or
-`pareto_front()` (the non-dominated set) under a `pareto` goal. The parallel-config menu is the **union** of every
-backend's KV-feasible configs; a sampled `(backend, parallel_config)` pair the backend can't
-run is marked infeasible (no replay), so the optimizer learns to avoid it. A backend with no
+`pareto_front()` (the non-dominated set) under a `pareto` goal. The parallel-config pool is the **union** of every
+backend's KV-feasible configs. Under structured parallel search, backend is selected first and
+the latent shape request is projected only onto configs that backend supports. A backend with no
 perf DB / no viable config for a mode is dropped; a **mode** for which no backend is viable
 is **skipped with a warning** (a viable mode still runs); only if *no* mode is viable does
 the run error. A *pinned* config legal for no backend is a hard error (fail fast).
@@ -290,10 +290,31 @@ gpu_budget, backend)`:
    replica count) and pairs them so `prefill.total_gpus + decode.total_gpus` fits the budget;
    prefill/decode throughput rate-matching is applied downstream at replay.
 
-**Derived, not settable:** `strategy` (`tp` / `tep` / `dep`, computed from the shape's
-`ParallelShape.strategy` — it also has a `mixed` fallback for shapes outside those patterns,
-but enumeration never produces one) and `used_gpus` (`gpus_per_worker × replicas`, summed
-across roles for disagg).
+### Structured parallel search
+
+Set `SPICA_PARALLEL_ENCODING=structured` to replace the legacy opaque
+`parallel_config_index` with model-visible latent dimensions. The current rollout default is
+`opaque` so the two encodings can be A/B tested.
+
+| branch | Vizier dimensions | default |
+|---|---|---|
+| agg | `used_gpu_ratio`, `agg_num_gpus_per_engine_target`, attention mode, MoE FFN mode | max GPU ratio, log-center engine size, attention TP, FFN EP |
+| disagg | `used_gpu_ratio`, `prefill_gpu_share`, per-role engine-size target, attention mode, MoE FFN mode | max GPU ratio, 0.5 prefill share, log-center engine size, attention TP, FFN EP |
+
+Engine-size targets are numeric discrete parameters with log scale. The sampler hard-filters
+the valid pool by backend, prefers exact attention/FFN modes, then chooses the config with the
+smallest normalized distance in GPU ratio, prefill share, and log2 engine size. The actual
+replica counts and parallel fields remain derived from that valid config. Requested and actual
+features are recorded in Vizier trial metadata as `spica_projection`.
+
+Different latent requests may project to the same full sample. Spica reuses the successful
+replay measurement, tells every Vizier trial, and requests replacements so
+`candidates_per_round` counts unique successful replay configurations. It never changes the
+projection to the nearest *untested* config, which would make the objective history-dependent.
+
+**Derived, not settable:** `strategy` (`tp` / `tep` / `dep` / `dtp`, computed by
+`ParallelShape.strategy`; it also has a `mixed` fallback that enumeration never emits) and
+`used_gpus` (`gpus_per_worker × replicas`, summed across roles for disagg).
 
 ### Pinning `parallel_configs`
 
@@ -301,6 +322,10 @@ Provide a list of dicts to **pin** (one entry) or search a **custom menu** (seve
 A pinned config is kept for whichever backends it is legal + feasible on (errors if none).
 `_validate_parallel_configs` requires `deployment_mode` to list **exactly one mode** when
 `parallel_configs` is non-empty.
+
+With structured encoding, one entry bypasses all parallel Vizier dimensions and projection;
+several entries form the complete projection pool, so the sampler can never leave the user's
+menu. The YAML schema is unchanged.
 
 - **agg** entry — a flat shape dict: `tp` (required), `attention_dp`, `moe_tp`, `moe_ep`,
   `pp`, `replicas`. Omitted dims default to `1`; `replicas` defaults to `1`. Dense models can

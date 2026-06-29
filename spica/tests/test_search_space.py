@@ -152,6 +152,15 @@ def test_backend_without_perf_db_is_dropped_from_knob(monkeypatch):
     assert branch.supported_backends[_AGG_CFG] == frozenset({"trtllm"})  # only trtllm supports it
 
 
+def test_viable_backend_knob_preserves_user_order(monkeypatch):
+    monkeypatch.setattr("spica.search_space.parallel_configs_for", lambda *args, **kwargs: [_AGG_CFG])
+    cfg = _config(deployment_mode=["agg"], backend=["trtllm", "vllm"], gpu_budget=8)
+
+    (branch,) = enumerate_branches(cfg)
+
+    assert branch.knob_choices["backend"] == ["trtllm", "vllm"]
+
+
 def test_partial_illegal_pinned_config_raises(monkeypatch):
     # Two pinned configs, only one of which any backend can run -> the pin is wrong, so
     # enumerate_branches fails fast (NoViableParallelConfig). _AGG_CFG is the tp=1 shape.

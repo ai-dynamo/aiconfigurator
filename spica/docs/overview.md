@@ -82,10 +82,9 @@ main Vizier loop, and its single winner is injected into every unrolled sample.
 `enumerate_branches` (`src/spica/search_space.py`) builds **one `BranchSpace` per
 `deployment_mode`** (agg / disagg) — one Vizier study each, because agg and disagg have
 structurally different parallel configs. **`backend` is a searched knob, not a branch**: for
-each mode the parallel-config domain is the **union** of every configured backend's
+each mode the valid projection pool is the **union** of every configured backend's
 KV-feasible per-worker shapes × replica counts (`parallel_configs_for`), tagged with which
-backends support each. A sampled `(backend, parallel_config)` pair the backend can't run is
-gated later (step 5). `context_length` is threaded into KV feasibility.
+backends support each. `context_length` is threaded into KV feasibility.
 
 - A backend with no perf DB / no viable config for a mode is dropped from that mode's backend
   knob. A **mode** for which *no* backend is viable is **skipped with a warning** (a viable
@@ -99,10 +98,14 @@ gated later (step 5). `context_length` is threaded into KV feasibility.
 For each branch, a `BranchSampler` (`make_branch_sampler`, study id
 `spica_{mode}_{run_nonce}`) runs `sweep.max_rounds` rounds. Each round is a **barrier**:
 
-1. **ask** — `sampler.suggest(per_round)` returns `per_round` suggestions
-   (`candidates_per_round`, defaulting to `parallel_evals`). Runs on the main process.
-2. **gate unsupported** — a suggestion whose `(backend, parallel_config)` pair the backend
-   can't run is `observe_infeasible`'d immediately and tallied `unsupported` (never evaluated).
+1. **ask + project** — `sampler.suggest(per_round)` returns suggestions on the main process.
+   With `SPICA_PARALLEL_ENCODING=structured`, Vizier sees resource ratios, per-engine GPU
+   targets, and attention/FFN modes; each request is deterministically projected onto the
+   nearest backend-compatible config in the valid pool. The default `opaque` mode retains
+   the categorical index for A/B comparison.
+2. **deduplicate** — exact duplicate full samples reuse their cached measurement and are
+   immediately told back to Vizier. They do not run replay or consume the unique replay
+   budget; replacement suggestions are requested up to the per-round 11x safety cap.
 3. **evaluate** — the rest fan out across worker processes: a single **spawned**
    `ProcessPoolExecutor` created once for the whole run (amortizing the per-worker dynamo
    import) with `min(parallel_evals, per_round)` workers. The pool is used only when **both**
@@ -112,12 +115,12 @@ For each branch, a `BranchSampler` (`make_branch_sampler`, study id
    the Vizier study; a dead pool re-raises a friendly error pointing at the `if __name__ ==
    "__main__":` guard that spawned workers require.
 4. **tell** — back on the main process: a **feasible** trial is `observe`'d with its metrics;
-   a **gated** trial — over `gpu_budget`, backend-unsupported, or replay-failed — is
-   `observe_infeasible`'d (so a high score never steers the sampler into an infeasible region).
+   replay/build failures are `observe_infeasible`'d. Backend and GPU-budget gates remain as
+   defensive checks, but structured projection should make them unreachable.
 
 `is_feasible` gates on `used_gpus <= gpu_budget` only; SLA is **not** re-gated here (goodput
 targets already bake the SLA into the metric). Each trial's outcome is tallied as one of
-`feasible` / `infeasible` / `failed` / `unsupported`.
+`feasible` / `infeasible` / `failed` / `unsupported`; cache hits are tallied separately.
 
 ### 6. Merge by the goal
 

@@ -558,9 +558,11 @@ class SweepConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_rounds: int = Field(default=20, ge=1)  # total Vizier suggestion/evaluation rounds
-    parallel_evals: int = Field(default=16, ge=1)  # default candidates-per-round fan-out (v1 evaluates sequentially)
-    candidates_per_round: int | None = Field(default=None, ge=1)  # suggestions per round; defaults to parallel_evals
+    max_rounds: int = Field(default=20, ge=1)  # total Vizier/replay barrier rounds
+    parallel_evals: int = Field(default=16, ge=1)  # replay worker fan-out and default candidates per round
+    # Successful unique replay configs per round; duplicate projections are told from
+    # cache and replaced. Defaults to parallel_evals.
+    candidates_per_round: int | None = Field(default=None, ge=1)
     random_seed: int = 1
     # Per-candidate wall-clock cap for the replay. A candidate whose replay exceeds this is
     # killed and reported as infeasible ("exceed runtime") so the optimizer avoids that region

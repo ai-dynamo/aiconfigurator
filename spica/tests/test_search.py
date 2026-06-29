@@ -114,7 +114,9 @@ def test_over_budget_candidates_dropped(monkeypatch):
     # never fed back as a high objective score (which would steer it into the infeasible
     # region). _FakeSampler records observe_infeasible as ("infeasible", reason) tuples.
     scored = sampler_seen["s"].scored
-    assert len(scored) == 3  # still reported so the optimizer learns to avoid the region
+    # Failed candidates do not consume the unique-success budget, so the loop asks for
+    # replacements until the fixed 11x safety cap is reached.
+    assert len(scored) == 33
     assert all(isinstance(x, tuple) and x[0] == "infeasible" for x in scored)
     assert all("over gpu_budget" in x[1] for x in scored)  # reason carries the budget breach
 
@@ -163,7 +165,7 @@ def test_unsupported_backend_config_pair_marked_unsupported(monkeypatch):
     cands = run_smart_search(_config(), evaluator=_NeverCalled(), sampler_factory=factory)
     assert cands == []  # nothing evaluated -> no feasible candidate
     scored = sampler_seen["s"].scored
-    assert len(scored) == 3  # all three suggestions told infeasible (none evaluated)
+    assert len(scored) == 33  # replacement asks stop at the fixed 11x safety cap
     assert all(isinstance(x, tuple) and x[0] == "infeasible" for x in scored)
     assert all("does not support" in x[1] for x in scored)
 
@@ -281,9 +283,85 @@ def test_candidate_build_error_is_reported_not_raised(monkeypatch):
 
     assert cands == []
     scored = sampler_seen["s"].scored
-    assert len(scored) == 1
+    assert len(scored) == 33  # one bad suggestion per replacement ask, up to the safety cap
     assert scored[0][0] == "infeasible"
     assert "candidate build failed" in scored[0][1]
+
+
+def test_duplicate_full_samples_use_cache_and_are_replaced(monkeypatch):
+    branch = _branch(ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2))
+    _stub(monkeypatch, branch)
+    seen = {}
+
+    class DuplicateThenUniqueSampler(_FakeSampler):
+        def __init__(self, branch, study_id, objectives=None):
+            super().__init__(branch, study_id, objectives)
+            self.ask_no = 0
+
+        def suggest(self, count):
+            self.ask_no += 1
+            seqs = [256] * count if self.ask_no == 1 else [512, 768][:count]
+            out = []
+            for seqs_value in seqs:
+                selection = {
+                    "deployment_mode": "agg",
+                    "backend": "trtllm",
+                    "router_mode": "round_robin",
+                    "planner_scaling_policy": "disabled",
+                    "planner_fpm_sampling": "default",
+                    "planner_load_sensitivity": "default",
+                    "agg_max_num_batched_tokens": 8192,
+                    "agg_max_num_seqs": seqs_value,
+                }
+                out.append(
+                    Suggestion(selection=selection, parallel_config=self.branch.parallel_configs[0], handle=selection)
+                )
+            return out
+
+    def factory(b, study_id, objectives=None):
+        sampler = DuplicateThenUniqueSampler(b, study_id, objectives)
+        seen["sampler"] = sampler
+        return sampler
+
+    evaluator = _FakeEvaluator()
+    candidates = run_smart_search(_config(), evaluator=evaluator, sampler_factory=factory, show_progress=False)
+
+    assert evaluator.calls == 3
+    assert {candidate.config["agg_max_num_seqs"] for candidate in candidates} == {256, 512, 768}
+    assert len(seen["sampler"].scored) == 5  # every Vizier trial, including duplicates, was told
+
+
+def test_projection_stall_only_stops_current_branch(monkeypatch):
+    parallel = ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2)
+    agg = _branch(parallel)
+    disagg = BranchSpace(
+        deployment_mode="disagg",
+        parallel_configs=(parallel,),
+        supported_backends={parallel: frozenset({"trtllm"})},
+        knob_choices={"backend": ["trtllm"]},
+    )
+    monkeypatch.setattr(search_mod, "enumerate_branches", lambda config, *, max_seq_len=None: [agg, disagg])
+    monkeypatch.setattr(search_mod, "sweep_load_predictor", lambda config: LoadPredictorResult(reason="static"))
+    monkeypatch.setattr(search_mod, "resolve_backend_version", lambda hw, be: "1.3.0rc10")
+    seen = []
+
+    class RepeatingSampler(_FakeSampler):
+        def suggest(self, count):
+            suggestions = super().suggest(1)
+            return suggestions * count
+
+    class EmptySampler(_FakeSampler):
+        def suggest(self, count):
+            return []
+
+    def factory(branch, study_id, objectives=None):
+        seen.append(branch.deployment_mode)
+        sampler_type = RepeatingSampler if branch.deployment_mode == "agg" else EmptySampler
+        return sampler_type(branch, study_id, objectives)
+
+    run_smart_search(_config(), evaluator=_FakeEvaluator(), sampler_factory=factory, show_progress=False)
+
+    assert seen == ["agg", "disagg"]
 
 
 # --- pareto (multi-objective) sweep over a swept concurrency ---

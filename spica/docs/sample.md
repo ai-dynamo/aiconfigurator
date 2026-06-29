@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 The [search space](search-space.md) defines what gets explored. A single *trial* picks
 one concrete point in it: a **selection** (one value per searched knob, chosen by the
-sampler), the one **`parallel_config`** the sampler indexed out of the branch's menu, and
+sampler), the one **`parallel_config`** the sampler selected or projected from the branch's valid pool, and
 the **load-predictor winner** from the independent forecast sub-sweep.
 `unroll_sample` (`src/spica/sample.py`) expands those into a **flat, self-contained
 deployment-config dict** — the `config` of a `Candidate` (`src/spica/config.py`). It
@@ -53,7 +53,7 @@ Unrolled from the chosen `parallel_config` via `_shape_fields`. The keys differ 
   `prefill_tp` … `prefill_strategy`, `prefill_replicas`, `decode_tp` … `decode_strategy`,
   `decode_replicas`, and a single top-level `used_gpus`.
 
-`strategy` (`tp` / `tep` / `dep`, with a `mixed` fallback the enumerator never emits) and
+`strategy` (`tp` / `tep` / `dep` / `dtp`, with a `mixed` fallback the enumerator never emits) and
 `used_gpus` (`gpus_per_worker × replicas`, summed across roles for disagg) are **derived
 from the shape**, not settable — see [search-space.md](search-space.md).
 
