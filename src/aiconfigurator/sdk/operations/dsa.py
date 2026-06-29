@@ -895,7 +895,7 @@ class ContextDSAModule(Operation):
         # collected) -- degrading silently to dsa_base would hide that.
         missing = [k for k in ("mqa", "topk_last", "topk_flat") if not g.get(k)]
         if missing:
-            raise ValueError(
+            raise PerfDataNotAvailableError(
                 f"DSA CP modeling needs sparse tables {missing} for "
                 f"{self._architecture} (num_heads={self._num_heads}); "
                 f"collect {file_prefix}_mqa_logits/{file_prefix}_topk first."
@@ -951,7 +951,7 @@ class ContextDSAModule(Operation):
         ag_kv = float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", b * isl * index_head_dim))
         ag_lse = float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", b * isl * (kv_lora + rope)))
         latency += ag_kv + ag_lse
-        return PerformanceResult(latency * self._scale_factor, energy=0.0, source="cp_model")
+        return PerformanceResult(latency * self._scale_factor, energy=0.0, source="estimated")
 
     @classmethod
     def _load_glm5_sparse(cls, database: PerfDatabase, architecture: str, num_heads: int) -> dict:
@@ -1025,7 +1025,7 @@ class ContextDSAModule(Operation):
             return None
         isls = sorted({i for (i, _s) in table})
         if isl > isls[-1]:
-            raise ValueError(
+            raise PerfDataNotAvailableError(
                 f"DSA CP: isl={isl} exceeds the collected sparse-kernel grid "
                 f"(max isl={isls[-1]}); mqa/topk scale super-linearly with isl, so "
                 f"clamping the isl axis would silently under-estimate. Re-collect with "

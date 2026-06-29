@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations.dsa import ContextDSAModule
 
 pytestmark = pytest.mark.unit
@@ -31,7 +32,7 @@ def test_lookup_2d_fails_loud_on_out_of_grid_isl():
     # isl beyond the collected grid must RAISE, not silently clamp -- mqa is
     # quadratic in isl, so clamping 16384->8192 would halve... quarter it.
     t = {(4096, 0): 100.0, (8192, 0): 400.0}
-    with pytest.raises(ValueError, match="exceeds the collected"):
+    with pytest.raises(PerfDataNotAvailableError, match="exceeds the collected"):
         ContextDSAModule._lookup_2d(t, 16384, 0)
 
 
@@ -69,7 +70,7 @@ def test_query_cp_composition(monkeypatch):
     # delta_topk = tl_full/cp  - tf_perc   = 800/8  - 100 = 0
     # latency    = base 4300 + 175 + 0 + ag_kv 50 + ag_lse 50 = 4575
     assert float(res) == pytest.approx(4575.0)
-    assert res.source == "cp_model"
+    assert res.source == "estimated"
 
     # AG volumes (4th positional arg of query_nccl): indexer key isl*128,
     # compressed latent isl*(kv_lora 512 + rope 64 = 576). Both bf16.
@@ -101,5 +102,5 @@ def test_query_cp_raises_when_isl_beyond_grid(monkeypatch):
     m._architecture = "GlmMoeDsaForCausalLM"
     m._scale_factor = 1.0
 
-    with pytest.raises(ValueError, match="exceeds the collected"):
+    with pytest.raises(PerfDataNotAvailableError, match="exceeds the collected"):
         m._query_cp(db, b=1, isl=isl, prefix=prefix)  # isl=32768 > grid 16384

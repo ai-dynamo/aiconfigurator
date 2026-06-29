@@ -1335,7 +1335,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             # REQUIRE the sparse tables -- silently dropping them would hide a
             # missing/uncollected parquet behind a too-small base-only estimate.
             if None in (mqa_full, mqa_perc, tl_full, tl_perc):
-                raise ValueError(
+                raise PerfDataNotAvailableError(
                     "DeepSeek-V4 CSA CP modeling needs sparse tables (paged_mqa_logits + "
                     f"csa_topk_calib top_last) at num_heads={self._native_heads}, b={b}; "
                     "collect dsv4_paged_mqa_logits_module / dsv4_csa_topk_calib first."
@@ -1352,7 +1352,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         if ratio:
             latency += ag((isl // ratio) * head_dim)
 
-        return PerformanceResult(latency * self._scale_factor, energy=0.0, source="cp_model")
+        return PerformanceResult(latency * self._scale_factor, energy=0.0, source="estimated")
 
     @classmethod
     def _csa_topk_top_last(cls, database: PerfDatabase, isl: int, step: int, native_heads: int, b: int):
