@@ -49,6 +49,48 @@ def test_host_disk_cache_weights_gated_on_offload():
     assert "host_cache_hit_weight" in on and "disk_cache_hit_weight" in on
 
 
+def test_round_robin_only_prunes_router_dependent_knobs():
+    choices = branch_knob_choices(_config(router_mode=["round_robin"]).search_space, "agg")
+
+    assert "router_mode" in choices
+    assert (
+        not {
+            "overlap_score_credit",
+            "prefill_load_scale",
+            "host_cache_hit_weight",
+            "disk_cache_hit_weight",
+            "router_temperature",
+        }
+        & choices.keys()
+    )
+
+
+def test_mixed_router_modes_keep_live_router_knobs():
+    choices = branch_knob_choices(_config(router_mode=["round_robin", "kv_router"]).search_space, "agg")
+
+    assert "overlap_score_credit" in choices
+    assert "prefill_load_scale" in choices
+    assert "router_temperature" in choices
+
+
+def test_disabled_planner_prunes_dependent_knobs():
+    choices = branch_knob_choices(_config(planner_scaling_policy=["disabled"]).search_space, "agg")
+
+    assert "planner_scaling_policy" in choices
+    assert "planner_fpm_sampling" not in choices
+    assert "planner_load_sensitivity" not in choices
+
+
+def test_mixed_planner_policies_keep_dependent_knobs():
+    choices = branch_knob_choices(
+        _config(planner_scaling_policy=["disabled", "load_180_5"]).search_space,
+        "agg",
+    )
+
+    assert "planner_fpm_sampling" in choices
+    assert "planner_load_sensitivity" in choices
+
+
 def test_enumerate_branches_deepseek_gb200():
     cfg = _config(deployment_mode=["agg", "disagg"], backend=["trtllm"], gpu_budget=16)
     try:

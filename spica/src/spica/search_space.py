@@ -26,6 +26,7 @@ from .config import SmartSearchConfig
 from .kv_estimate import NoPerfDatabase
 from .model_hw import NoViableParallelConfig, parallel_configs_for
 from .parallel_enum import DisaggParallelConfig, ParallelShape, ReplicaParallelConfig
+from .planner import scaling_fields
 
 _ParallelConfig = ReplicaParallelConfig | DisaggParallelConfig
 
@@ -108,12 +109,24 @@ def branch_knob_choices(search_space, deployment_mode: str) -> dict[str, list[An
     engine batching), each mapped to its configured choice list. ``backend`` is added
     by :func:`enumerate_branches` (only the backends viable for the mode).
 
+    Dependent knobs are removed when their component is statically disabled: a
+    round-robin-only router has no KV-router weights, and planner policies that all
+    disable scaling have no FPM or load-sensitivity knobs.
+
     The host/disk cache-hit weights are dropped unless multi-tier KV offload is enabled
     (``num_g2_blocks > 0``) — see :data:`_OFFLOAD_ONLY_ROUTER_KNOBS`."""
-    router = _ROUTER_KNOBS
-    if search_space.num_g2_blocks == 0:
+    router_is_round_robin_only = set(search_space.router_mode) == {"round_robin"}
+    router = ("router_mode",) if router_is_round_robin_only else _ROUTER_KNOBS
+    if not router_is_round_robin_only and search_space.num_g2_blocks == 0:
         router = tuple(k for k in router if k not in _OFFLOAD_ONLY_ROUTER_KNOBS)
-    names = (*router, *_PLANNER_KNOBS, *_engine_knobs(deployment_mode))
+
+    planner_scaling_is_disabled = not any(
+        fields["enable_throughput_scaling"] or fields["enable_load_scaling"]
+        for fields in (scaling_fields(policy) for policy in search_space.planner_scaling_policy)
+    )
+    planner = ("planner_scaling_policy",) if planner_scaling_is_disabled else _PLANNER_KNOBS
+
+    names = (*router, *planner, *_engine_knobs(deployment_mode))
     return {name: list(getattr(search_space, name)) for name in names}
 
 

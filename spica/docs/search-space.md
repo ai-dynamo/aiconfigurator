@@ -98,7 +98,10 @@ All pinned. G3/G4 extend G2; offload is **off by default** (`num_g2_blocks = 0`)
 
 ## Router
 
-KV-router weights are ignored under `round_robin`.
+KV-router weights are ignored under `round_robin`. When `router_mode` is pinned to
+`["round_robin"]`, the search-space builder removes all dependent router knobs from the
+Vizier study. A mixed `["kv_router", "round_robin"]` study retains them because they are
+active for its KV-router trials.
 
 | knob | type | default | searched / pinned | allowed choices |
 |---|---|---|---|---|
@@ -134,6 +137,11 @@ preset → field expansions are in [Composite presets](#composite-presets).
 | `planner_scaling_policy` | list[str\|dict] | `["disabled", "throughput_180_5", "throughput_600_5", "load_180_5", "load_180_10", "hybrid_180_5", "hybrid_600_5"]` | searched | `disabled`, `throughput_180_5`, `throughput_600_5`, `load_180_5`, `load_180_10`, `hybrid_180_5`, `hybrid_600_5` |
 | `planner_fpm_sampling` | list[str\|dict] | `["small", "default", "large", "fine"]` | searched | `small`, `default`, `large`, `fine` |
 | `planner_load_sensitivity` | list[str\|dict] | `["aggressive", "default", "conservative"]` | searched | `aggressive`, `default`, `conservative` |
+
+When every configured `planner_scaling_policy` disables both throughput and load scaling
+(for example `["disabled"]`), the search-space builder removes `planner_fpm_sampling` and
+`planner_load_sensitivity` from the Vizier study. Mixed studies retain them for policies that
+enable the planner.
 
 ## Load predictor
 

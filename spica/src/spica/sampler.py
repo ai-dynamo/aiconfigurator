@@ -17,9 +17,9 @@ One Vizier study per branch (per the design). The study's parameters are:
 object; ``observe`` reports the (higher-is-better) score back to Vizier.
 
 The sampler is swappable behind the :class:`BranchSampler` Protocol so a lighter
-backend can replace Vizier without touching the orchestration. kv-router weight
-knobs are always offered as params; ``unroll_sample`` ignores them under
-``round_robin`` (no Vizier conditional params in v1).
+backend can replace Vizier without touching the orchestration. The branch-space
+builder removes dependent router/planner knobs when those components are pinned
+off; mixed-mode studies retain them because Vizier has no conditional params here.
 """
 
 from __future__ import annotations
