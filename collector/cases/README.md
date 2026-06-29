@@ -98,6 +98,64 @@ framework_specific_model_case_values:
         activation: silu
 ```
 
+### Model Dimensions for GEMM and Attention
+
+`gemm`, `attention_context`, `attention_generation`, and `attention_encoder`
+also accept `model_case_values` blocks. Unlike MoE/MLA, these ops have a large
+shared model-agnostic grid in `base_ops/`; a model entry simply *adds* its own
+shape points on top of that grid. Entries are filtered by `COLLECTOR_MODEL_PATH`
+when set, so a single-model run only adds that model's shapes. The shared generic
+grid is still generated.
+
+GEMM entries are GEMM shape-sweep dicts. `token_counts` (the M dimension) is
+inherited from the base GEMM sweep when omitted, so a model only needs its
+projection feature shapes (`feature_sizes` shorthand, or explicit
+`input_feature_sizes` = K and `output_feature_sizes` = N):
+
+```yaml
+model_case_values:
+  gemm:
+    - model_paths: [org/MyModel]
+      output_feature_sizes: [4096, 12288]
+      input_feature_sizes: [7168]
+      # token_counts: [...]   # optional; omit to inherit base
+```
+
+Attention entries overlay onto the per-backend merged base sweep, so caps,
+`precision_cases` (trtllm/sglang) and `window_sizes` (vllm) are inherited unless
+the entry overrides them. A generic `query_head_counts` is mapped to the field
+each phase actually reads (uniform across phases in model YAML): context keeps
+`query_head_counts`; generation fans it out to both `mha_query_head_counts` and
+`xqa_query_head_counts` (explicit `mha_*`/`xqa_*` win); encoder maps it to
+`head_counts`.
+
+```yaml
+model_case_values:
+  attention_context:
+    - model_path: org/MyModel
+      query_head_counts: [64]
+      kv_head_options: [8]        # `self`/`0` means num_kv_heads == query heads
+      head_dims: [192]
+      window_sizes: [0, 4096]
+      sequence_lengths: [1024, 8192]
+      precision_cases:            # optional; omit to inherit base
+        - {id: bf16, fp8_kv_cache: false, fp8_context_fmha: false}
+  attention_generation:
+    - model_path: org/MyModel
+      query_head_counts: [64]     # -> both mha and xqa head counts
+      kv_head_counts: [8]
+      head_dims: [192]
+```
+
+Caps behavior: a model entry may override token-budget caps in its own block
+(`max_tokens_self_attention`, `max_tokens_grouped_query_attention`,
+`max_mha_tokens_per_step`, `max_xqa_tokens_per_step`, `max_kv_elements`,
+`max_batch_size_self_attention`, `drop_largest_sequence_for_batch_at_least`,
+`min_batch_options_per_sequence`). The hardware `m_num_heads_q_per_kv`
+CTA-divisibility check and the SM/version `_skip_*` guards live in the backend
+collectors and always apply; they cannot be relaxed from YAML because they are
+correctness guards, not budget heuristics.
+
 ## Base Op Files
 
 Shared sweep recipes live in per-op files under `base_ops/<op>.yaml`. For
