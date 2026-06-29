@@ -30,6 +30,7 @@ def test_defaults_fill_in():
     # search-space defaults
     assert cfg.search_space.gpu_budget == 32
     assert cfg.search_space.prefill_block_size == 64
+    assert cfg.search_space.prefill_max_num_seqs == [1, 2, 4, 8, 16, 32, 64, 128, 256]
     assert len(cfg.search_space.load_predictor_candidates) == 11
     # goal/sweep default factories
     assert cfg.goal.target is OptimizationTarget.THROUGHPUT

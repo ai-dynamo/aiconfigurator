@@ -293,7 +293,7 @@ SEARCH_CHOICES: dict[str, tuple] = {
     "deployment_mode": ("disagg", "agg"),
     "backend": ("vllm", "sglang", "trtllm"),
     "prefill_max_num_batched_tokens": (8192, 16384, 32768),
-    "prefill_max_num_seqs": (1, 2, 4, 8),
+    "prefill_max_num_seqs": (1, 2, 4, 8, 16, 32, 64, 128, 256),
     "decode_max_num_batched_tokens": (8192,),
     "decode_max_num_seqs": (256, 512, 1024),
     "agg_max_num_batched_tokens": (8192, 16384, 32768),
@@ -402,7 +402,7 @@ class SearchSpace(BaseModel):
 
     # prefill engine (disagg branch): scheduler batching capacity
     prefill_max_num_batched_tokens: list[int] = [8192, 16384, 32768]
-    prefill_max_num_seqs: list[int] = [1, 2, 4, 8]
+    prefill_max_num_seqs: list[int] = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     # pinned
     prefill_block_size: int = 64
     prefill_gpu_memory_utilization: float = 0.9

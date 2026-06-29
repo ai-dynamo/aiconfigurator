@@ -60,7 +60,7 @@ separate study. `min_gpu_budget` is validated against `gpu_budget` by `_validate
 | knob | type | default | searched / pinned | allowed choices |
 |---|---|---|---|---|
 | `prefill_max_num_batched_tokens` | list[int] | `[8192, 16384, 32768]` | searched | `8192`, `16384`, `32768` |
-| `prefill_max_num_seqs` | list[int] | `[1, 2, 4, 8]` | searched | `1`, `2`, `4`, `8` |
+| `prefill_max_num_seqs` | list[int] | `[1, 2, 4, 8, 16, 32, 64, 128, 256]` | searched | `1`, `2`, `4`, `8`, `16`, `32`, `64`, `128`, `256` |
 | `prefill_block_size` | int | `64` | pinned | — |
 | `prefill_gpu_memory_utilization` | float | `0.9` | pinned | — |
 | `prefill_enable_prefix_caching` | bool | `True` | pinned | — |
