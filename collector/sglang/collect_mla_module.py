@@ -408,22 +408,6 @@ def get_generation_test_cases(attn_type: str):
     return cases
 
 
-def _get_module_precision_combos():
-    """Return a single baseline precision combo for module-level benchmarks.
-
-    Module benchmarks spawn a subprocess per (model, precision, heads) group.
-    Each subprocess loads a full ModelRunner (~15-20 s), so fewer groups means
-    faster overall collection.  Use a single bfloat16 baseline — matching the
-    wideep MLA pattern — so the total subprocess count stays manageable.
-
-    Precision-specific kernel performance is already captured by kernel-level
-    collectors (collect_mla.py, collect_attn.py).  The module benchmark
-    captures module-level overhead (scheduling, memory management, attention
-    dispatch) which is largely precision-independent with dummy weights.
-    """
-    return get_mla_module_sweep_spec("sglang").module_precision_combos
-
-
 def _model_max_position_embeddings(model_id: str) -> int | None:
     """Return the model's max context length (RoPE table size) from its config.
 
@@ -571,6 +555,7 @@ def _build_module_test_cases(attn_type: str, mode: str):
         return []
     model_specs = get_mla_module_model_specs(attention_type=attn_type)
     sweep = get_mla_module_sweep_spec("sglang")
+    precision_combos = _get_precision_combos(mode)
     cases = []
     for model_spec in model_specs:
         # Each checkpoint ships at one native precision; only enumerate the
@@ -578,7 +563,7 @@ def _build_module_test_cases(attn_type: str, mode: str):
         # Prevents e.g. gemm_type=fp8_block being applied to the NVFP4 checkpoint
         # (a different model), which dies at model load with "Cannot find quant_algo".
         native_quant = _model_native_gemm_quant(model_spec.model_path)
-        for compute_dtype, kv_dtype, gemm_type in _get_module_precision_combos():
+        for compute_dtype, kv_dtype, gemm_type in precision_combos:
             if not _gemm_type_supported_by_model(gemm_type, native_quant):
                 continue
             target_tps = sweep.module_tp_sizes if attn_type == "dsa" else [1]

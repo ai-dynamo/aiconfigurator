@@ -37,6 +37,19 @@ If the task proceeds to GPU collection, also use `$aic-auto-collect`.
 - Do not add permanent `legacy_*` runtime concepts for a one-time migration.
   Put production defaults in normal base-op YAML and keep migration comparisons
   outside the runtime schema.
+- Do not ship a deduplication path unless current repository-owned YAML produces
+  at least one duplicate invocation. Record that stage's before/after counts
+  and prove that the unique invocation and persisted-key sets are unchanged.
+  Remove no-op deduplication instead of manufacturing duplicate-only fixtures
+  for it.
+- Treat the public getter and any subprocess or inner re-expansion as one
+  population contract. Full/raw and targeted entry paths must consume the same
+  resolved YAML quantization and SM gates; do not reconstruct the policy with a
+  second hard-coded hardware heuristic.
+- A case-population change may touch `collector/collect.py` only for model/op
+  plan selection required by the resolved case plan. Generic resume, retry,
+  checkpoint, logging, and output-finalization behavior require separate
+  explicit scope.
 - Anchor collector behavior to the requested framework version. Prefer one
   verified `__compat__`/version route over speculative multi-version branches.
 
@@ -98,8 +111,9 @@ Examples:
 - Put shared production defaults in `collector/cases/base_ops/<op>.yaml`.
 - Put model-native topology and artifact policy in
   `collector/cases/models/*_cases.yaml`.
-- Make targeted model collection exact when a model profile exists. Full/raw
-  collection may union defaults and model profiles, then stably deduplicate.
+- Make targeted structural population exact when a model profile exists; it
+  may still reuse shared workload sweeps. Full/raw collection may union
+  defaults and model profiles, then stably deduplicate.
 - Use stable first-wins deduplication by default. If a later selector can
   distinguish equivalent recipe representations, choose and document a
   canonical representative that remains selectable (for example the smallest
@@ -110,7 +124,9 @@ Examples:
 For an existing op, compare current and candidate physical key sets during the
 change. This is change-specific evidence, not a permanent compatibility mode.
 Report `kept`, `added`, `removed`, and `deduplicated` separately; totals alone
-cannot reveal coverage loss.
+cannot reveal coverage loss. Migration baselines, exact V1 totals, and
+historical snapshots are review evidence, not permanent unit-test contracts
+unless an unchanged consumer explicitly depends on that exact inventory.
 
 ## Step 4: Implement one vertical slice
 
@@ -123,9 +139,11 @@ Touch only the layers the op needs:
 5. Persisted schema/logging
 6. Focused tests for generated cases and consumer-visible keys
 
-Before adding a helper or schema field, verify that repository-owned cases use
-it. Do not retain speculative aliases, phase selectors, compatibility modes, or
-one-time audit scaffolding.
+Before adding a helper, schema field, or filter—and again before finalizing—find
+its producer in current repository-owned YAML and its reader on a production
+population path. If a later design decision removes either side, delete the
+orphan. Do not retain speculative aliases, phase selectors, compatibility
+modes, or one-time audit scaffolding.
 
 ## Step 5: Prune and skip only with evidence
 
@@ -157,8 +175,21 @@ unsupported input.
 
 ### Static population
 
-- Generate full/raw and representative targeted plans.
-- Count recipes, benchmark invocations, and unique persisted keys separately.
+- Generate full/raw and representative targeted plans through each changed
+  op's registry/public getter; testing only a shared case generator is not
+  sufficient.
+- Count generator recipes, raw getter tasks, post-selector scheduled tasks,
+  token-expanded benchmark invocations, and unique persisted keys separately.
+- For every deduplication, record stage-local before/after, unique invocation,
+  and unique persisted-key counts using repository-owned inputs. Name the
+  stage being counted (generator recipes, raw getter tasks, post-selector tasks,
+  or token-expanded invocations). If the count at the dedupe stage does not
+  decrease, remove the deduplication path.
+- When a runtime or subprocess expands an inner sweep, compare its quantization
+  and SM policy with the outer getter. Test both sides of every changed hardware
+  gate and assert that unsupported precision labels are absent.
+- Apply model, SM, and framework-version selectors before reporting a count as
+  the final scheduled queue; raw getter counts are not final plan counts.
 - Assert invocation IDs and persisted keys have no unexplained duplicates.
 - Assert required consumer query keys are covered.
 - Assert unrelated model dimensions never cross.
@@ -214,3 +245,6 @@ Do not call the op complete until the handoff states:
 - Remaining gaps, especially required EP/TP/quant/window buckets
 - Whether the change touched Collector only; if not, why broader scope was
   explicitly authorized
+- A final changed-file and changed-symbol audit that accounts for every
+  production Python change and finds no orphan schema/helper, no no-op
+  deduplication, and no unrelated orchestration behavior

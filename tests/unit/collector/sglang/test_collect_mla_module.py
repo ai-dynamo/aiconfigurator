@@ -206,12 +206,35 @@ class TestDsaPiecewiseCudaGraph:
 
 
 class TestBuildModuleTestCases:
-    def test_module_precision_includes_fp8_kv_for_sglang(self):
+    def test_module_precision_respects_outer_sm_gate(self):
         mod = _import_module()
-        with patch.object(mod, "get_sm_version", return_value=90):
-            combos = mod._get_module_precision_combos()
-        assert ("bfloat16", "bfloat16", "bfloat16") in combos
-        assert ("bfloat16", "fp8", "bfloat16") in combos
+        with patch.object(mod, "get_sm_version", return_value=89):
+            cases = mod._build_module_test_cases("dsa", "context")
+        assert cases
+        assert {case[3] for case in cases} == {"bfloat16"}
+
+    def test_module_precision_passes_phase_and_sm_to_yaml(self):
+        mod = _import_module()
+        calls = []
+
+        def precision_specs(backend, *, phase, sm_version):
+            calls.append((backend, phase, sm_version))
+            return [
+                types.SimpleNamespace(
+                    compute_dtype="bfloat16",
+                    kv_cache_dtype="bfloat16",
+                    gemm_type="bfloat16",
+                )
+            ]
+
+        with (
+            patch.object(mod, "get_sm_version", return_value=89),
+            patch.object(mod, "get_mla_module_precision_specs", side_effect=precision_specs),
+        ):
+            cases = mod._build_module_test_cases("dsa", "generation")
+
+        assert cases
+        assert calls == [("sglang", "generation", 89)]
 
     def test_dsa_keeps_path_sensitive_checkpoints_after_precision_filtering(self):
         mod = _import_module()

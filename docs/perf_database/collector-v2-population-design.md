@@ -4,7 +4,7 @@
 
 Collector V2 should retain useful measurement coverage and intentional model
 additions while avoiding cases created only by unrelated Cartesian-product axes
-or repeated model artifact names.
+or execution-equivalent artifact aliases.
 
 This PR used the following comparison as a one-time migration check:
 
@@ -16,18 +16,20 @@ V1 physical cases ⊆ cleaned V2 physical cases
 not part of the runtime schema: production YAML contains ordinary default and
 model profiles, and the generator has no Collector-V1 compatibility mode.
 
-Targeted model collection is model-exact. It does not inherit unrelated default
-profiles when the selected model has an explicit structural profile.
+Targeted structural population is model-exact. It does not inherit unrelated
+default topology profiles when the selected model has an explicit structural
+profile; shared workload sweeps remain reusable.
 
 ## Scope
 
-This work changes Collector population only:
+This work changes Collector-only population and the operation-local execution
+plumbing required to keep generated quantization labels truthful:
 
 - `collector/cases/**/*.yaml`
 - `collector/case_generator.py`
 - `collector/model_cases.py`
 - operation-local case getters and the minimal runtime parameters required by
-  newly retained cases
+  declared quantization/precision cases
 - the model-specific op selection path in `collector/collect.py`
 - Collector tests and documentation
 
@@ -37,6 +39,12 @@ resume, checkpoint, and output-finalization behavior is unchanged. This work
 does not change AIC SDK or Rust lookup behavior, EngineSpec, or Dynamo Planner.
 Collector output continues to satisfy the existing consumers; consumer changes
 are outside this PR.
+
+The final implementation intentionally contains no Collector-V1 runtime mode,
+historical snapshot rewrite, generic resume/checkpoint/finalization change, or
+defensive deduplication that has no effect on repository-owned YAML. Schema
+fields and filters that lost their only producer during the design were removed
+instead of being kept as speculative compatibility surface.
 
 ## Baselines
 
@@ -144,6 +152,9 @@ cases. `Removed` is always measured against the V1 baseline.
 | vLLM XPU | generation | 26,322 | 26,322 | 30,728 | 4,406 | 0 |
 | **Total** | | **275,820** | **671,377** | **376,326** | **100,506** | **0** |
 
+Relative to upstream Collector V2, this removes 295,051 accidental attention
+keys while retaining 100,506 intentional additions over V1.
+
 The unpruned V2 vLLM grids also removed 10,098 context and 8,774 generation
 V1 cases, all from the historical `(head_dim=128, window=128)` region. The
 final default profiles retain those points, while model-native profiles add
@@ -169,6 +180,24 @@ may multiply a recipe by dtype, TP/EP, or token lists.
 | GDN | 16 | 16 | 16 | unchanged |
 | mHC | 8 | 8 | 8 | artifact recipes remain distinct; backend getters collapse them to four phase/shape groups before the unchanged token sweep |
 | MLA BMM pre/post | 400 / 448 | 400 / 448 | 400 / 448 | unchanged |
+
+With `COLLECTOR_MODEL_PATH` unset, the SM100 raw public-getter audit separates
+getter tasks from actual invocation identity. These counts are measured before
+model/SM/version plan selectors and before expanding each task's token list:
+
+| Backend | Raw getter tasks before dedupe | Raw getter tasks now | Duplicate tasks removed | Unique invocation/key loss |
+|---|---:|---:|---:|---:|
+| TRT-LLM | 10,524 | 9,054 | 1,470 | 0 |
+| vLLM | 3,300 | 2,853 | 447 | 0 |
+
+The vLLM audit enables the `per_block_fp8`, `nvfp4`, and `mxfp4` runtime
+features. Full model plans may filter these raw tasks later, so the table is not
+a post-selector or token-expanded queue count.
+
+These dedupe paths remain because current repository YAML produces real
+duplicates. The analogous MLA-module `seen` guards were removed: current model
+specs and sweeps are already unique, so those guards changed no scheduled work
+and obscured the path-sensitive checkpoint contract.
 
 The MLA spec rows above are recipes, not final getter queues. With two dtypes on
 SM90/SM100, the standalone getters compare as follows:
@@ -197,9 +226,12 @@ schedule `fp8_block`.
 Kimi-K2-Instruct schedules `fp8_block`, native Kimi-K2.5 schedules
 `int4_wo` with group size 32, and NVIDIA Kimi-K2.5 schedules `nvfp4`.
 
-GPT-OSS is also backend- and hardware-specific. SGLang and TRT-LLM retain
-`w4a16_mxfp4` and add `w4a8_mxfp4_mxfp8` on SM100/SM103 Blackwell because the
-two labels select distinct activation precisions. TRT-LLM retains only
+GPT-OSS is also backend- and hardware-specific. On SM100, SGLang and TRT-LLM
+retain `w4a16_mxfp4` and add `w4a8_mxfp4_mxfp8` because the two labels select
+distinct activation precisions. On SM103, TRT-LLM retains both modes while the
+pinned SGLang 0.5.10 path is skipped by a version exception. On SM120, pinned
+SGLang 0.5.10 is likewise skipped, and pinned TRT-LLM 1.3.0rc10 skips both
+GPT-OSS modes because its fused MoE path rejects them. TRT-LLM retains only
 `w4a16_mxfp4` on Hopper, while vLLM collects `w4a16_mxfp4`. SGLang explicitly
 selects BF16 activation precision for the W4A16 label and its runtime `default`
 selects MXFP8 activation for the W4A8 label.
@@ -223,7 +255,13 @@ gates as the population layer. In particular, Ada/Hopper expand `fp8_block`,
 not `nvfp4`; any future NVFP4 module precision must be declared with a
 Blackwell `min_sm` gate in YAML.
 
-| Backend | Operation | Scheduled before | Scheduled now | Unique projected now | Removed projected keys |
+The following SM100 counts are raw tasks returned by each public getter with
+`COLLECTOR_MODEL_PATH` unset, before model/SM/version plan selectors. For
+SGLang, each raw task is a subprocess group whose batch, sequence, prefix, and
+precision inner sweep is expanded later; these are not token-expanded
+invocation counts.
+
+| Backend | Operation | Upstream V2 raw getter tasks | Current raw getter tasks | Current unique task projections | Removed upstream task projections |
 |---|---|---:|---:|---:|---:|
 | SGLang | context | 792 | 792 | 528 | 0 |
 | SGLang | generation | 48 | 48 | 32 | 0 |
@@ -301,9 +339,11 @@ When adding or changing a model profile:
 pytest -q tests/unit/collector
 ruff check collector tests/unit/collector
 ruff format --check collector tests/unit/collector
+git diff --check
 ```
 
-The unit coverage checks final profile expansion, per-operation recipe counts,
-selector narrowing, alias handling, and operation-local physical deduplication.
-The historical key-set comparison above was a one-time read-only audit, not an
-ongoing Collector behavior or unit-test dependency.
+The final Collector suite reports 287 passed and 2 skipped. The unit coverage
+checks final profile expansion, per-operation recipe counts, selector narrowing,
+alias handling, hardware/precision boundaries, and operation-local physical
+deduplication. The historical key-set comparison above was a one-time read-only
+audit, not an ongoing Collector behavior or exact-count unit-test dependency.
