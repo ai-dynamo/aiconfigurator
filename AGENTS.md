@@ -10,6 +10,26 @@ Before making any change under:
 MUST read:
 - `.claude/rules/generator-development.md`
 
+## Required Collector First Step
+
+Before adding a Collector operation or changing Collector case population under:
+- `collector/cases/**`
+- `collector/case_generator.py`
+- `collector/model_cases.py`
+- `collector/collect.py`
+- `collector/registry_types.py`
+- `collector/framework_manifest.yaml`
+- `collector/*/registry.py`
+- `collector/*/collect_*.py`
+- `collector/wideep/*/registry.py`
+- `collector/wideep/*/collect_*.py`
+
+MUST read and follow:
+- `.agents/skills/aic-collector-op-development/SKILL.md`
+
+New operations MUST complete that skill's consumer-contract, case-identity,
+deduplication, and validation gates before they are treated as supported.
+
 ## Cursor Cloud specific instructions
 
 ### Project overview

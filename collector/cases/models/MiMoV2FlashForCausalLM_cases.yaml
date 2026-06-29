@@ -12,6 +12,21 @@ description: >
   cases and includes the hybrid MoE shape used by the support matrix.
 
 model_case_values:
+  attention:
+    - id: mimo_v2_global_attention
+      model_path: XiaomiMiMo/MiMo-V2-Flash
+      num_attention_heads: 64
+      num_key_value_heads: 4
+      head_dim: 192
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
+    - id: mimo_v2_swa_attention
+      model_path: XiaomiMiMo/MiMo-V2-Flash
+      num_attention_heads: 64
+      num_key_value_heads: 8
+      head_dim: 192
+      window_size: 128
+      tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
   moe:
     - model_path: XiaomiMiMo/MiMo-V2-Flash
       hidden_size: 4096

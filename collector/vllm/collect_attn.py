@@ -47,7 +47,7 @@ from vllm.config import set_current_vllm_config
 from collector.case_generator import (
     get_attention_context_shape_sweeps,
     get_attention_generation_shape_sweeps,
-    windows_for_head_dim,
+    get_attention_head_configs,
 )
 from collector.helper import EXIT_CODE_RESTART, benchmark_with_power, get_sm_version, log_perf
 from collector.vllm.utils import (
@@ -457,55 +457,41 @@ def get_context_attention_test_cases(if_unit_test=False):
     for shape_sweep in shape_sweeps:
         batch_sizes = [int(value) for value in shape_sweep["batch_sizes"]]
         sequence_lengths = [int(value) for value in shape_sweep["sequence_lengths"]]
-        query_head_counts = [int(value) for value in shape_sweep["query_head_counts"]]
-        kv_head_options = shape_sweep["kv_head_options"]
-        head_dims = [int(value) for value in shape_sweep["head_dims"]]
-        window_sizes = [int(value) for value in shape_sweep["window_sizes"]]
         max_tokens_self_attention = int(shape_sweep["max_tokens_self_attention"])
         max_tokens_grouped_query_attention = int(shape_sweep["max_tokens_grouped_query_attention"])
         max_kv_elements = int(shape_sweep["max_kv_elements"])
 
-        for head_dim in head_dims:
-            for n in sorted(query_head_counts, reverse=True):
-                for s in sorted(sequence_lengths, reverse=True):
-                    for b in sorted(batch_sizes, reverse=True):
-                        for kv_head_option in kv_head_options:
-                            is_self_kv = kv_head_option in ("self", 0, "0", None)
-                            num_kv_heads = n if is_self_kv else int(kv_head_option)
-                            if num_kv_heads <= 0:
-                                continue
-                            if num_kv_heads != n and (num_kv_heads > n or n % num_kv_heads != 0):
-                                continue
-                            # Only keep self-attention case
-                            # if n != num_kv_heads:
-                            #    continue
-                            if num_kv_heads == n:
-                                if b * s > max_tokens_self_attention or b > 128:
-                                    continue
-                            else:
-                                if b * s > max_tokens_grouped_query_attention:
-                                    continue
-                            if b * s * num_kv_heads * head_dim * 2 >= max_kv_elements:
-                                continue
-
-                            for window_size in windows_for_head_dim(window_sizes, head_dim):
-                                if _skip_vllm_sm89_022_flashinfer_head_dim(head_dim):
-                                    continue
-                                for is_fp8_kv_cache in kv_cache_dtype_list:
-                                    if _skip_vllm_sm89_022_fp8_kv_cache(is_fp8_kv_cache):
-                                        continue
-                                    test_cases.append(
-                                        [
-                                            b,
-                                            s,
-                                            n,
-                                            num_kv_heads,
-                                            head_dim,
-                                            is_fp8_kv_cache,
-                                            True,
-                                            window_size,
-                                        ]
-                                    )
+        for head_config in get_attention_head_configs(shape_sweep, phase="context"):
+            n = head_config.num_heads
+            num_kv_heads = head_config.num_kv_heads
+            head_dim = head_config.head_dim
+            window_size = head_config.window_size
+            if _skip_vllm_sm89_022_flashinfer_head_dim(head_dim):
+                continue
+            for s in sorted(sequence_lengths, reverse=True):
+                for b in sorted(batch_sizes, reverse=True):
+                    if num_kv_heads == n:
+                        if b * s > max_tokens_self_attention or b > 128:
+                            continue
+                    elif b * s > max_tokens_grouped_query_attention:
+                        continue
+                    if b * s * num_kv_heads * head_dim * 2 >= max_kv_elements:
+                        continue
+                    for is_fp8_kv_cache in kv_cache_dtype_list:
+                        if _skip_vllm_sm89_022_fp8_kv_cache(is_fp8_kv_cache):
+                            continue
+                        test_cases.append(
+                            [
+                                b,
+                                s,
+                                n,
+                                num_kv_heads,
+                                head_dim,
+                                is_fp8_kv_cache,
+                                True,
+                                window_size,
+                            ]
+                        )
 
     return test_cases
 
@@ -542,51 +528,52 @@ def get_generation_attention_test_cases():
     for shape_sweep in get_attention_generation_shape_sweeps("vllm"):
         batch_sizes = [int(value) for value in shape_sweep["batch_sizes"]]
         sequence_lengths = [int(value) for value in shape_sweep["sequence_lengths"]]
-        head_dims = [int(value) for value in shape_sweep["head_dims"]]
-        window_sizes = [int(value) for value in shape_sweep["window_sizes"]]
         min_drop_batch = int(shape_sweep["drop_largest_sequence_for_batch_at_least"])
 
-        for head_dim in head_dims:
-            for n in sorted([int(value) for value in shape_sweep["xqa_query_head_counts"]], reverse=True):
-                b_s_dict = _generation_target_sequence_lengths(
-                    batch_sizes,
-                    sequence_lengths,
-                    n,
-                    head_dim,
-                    int(shape_sweep["max_mha_tokens_per_step"]),
-                    shape_sweep,
-                )
-                for b, s_list_limited in b_s_dict.items():
-                    target_s_list = sorted(s_list_limited)
-                    if b >= min_drop_batch:
-                        target_s_list = target_s_list[:-1]
-                    for n_kv in [int(value) for value in shape_sweep["kv_head_counts"]]:
-                        if n_kv > n or n % n_kv != 0:
+        for head_config in get_attention_head_configs(shape_sweep, phase="generation"):
+            n = head_config.num_heads
+            n_kv = head_config.num_kv_heads
+            head_dim = head_config.head_dim
+            window_size = head_config.window_size
+            if _skip_vllm_sm89_022_flashinfer_head_dim(head_dim):
+                continue
+            # The generation schema has separate caps because MHA and GQA have
+            # different memory/throughput limits. The old loop used the MHA cap
+            # for every case even though it enumerated GQA shapes as well.
+            max_tokens_key = "max_mha_tokens_per_step" if n == n_kv else "max_xqa_tokens_per_step"
+            b_s_dict = _generation_target_sequence_lengths(
+                batch_sizes,
+                sequence_lengths,
+                n,
+                head_dim,
+                int(shape_sweep[max_tokens_key]),
+                shape_sweep,
+            )
+            for b, s_list_limited in b_s_dict.items():
+                target_s_list = sorted(s_list_limited)
+                if b >= min_drop_batch:
+                    target_s_list = target_s_list[:-1]
+                # On SM100 (Blackwell), vLLM uses FlashInfer which routes
+                # decode to trtllm_batch_decode_with_kv_cache. That kernel
+                # only supports GQA ratios up to 16.
+                if get_sm_version() >= 100 and n // n_kv > 16:
+                    continue
+                for s in target_s_list:
+                    for is_fp8_kv_cache in kv_cache_dtype_list:
+                        if _skip_vllm_sm89_022_fp8_kv_cache(is_fp8_kv_cache):
                             continue
-                        if _skip_vllm_sm89_022_flashinfer_head_dim(head_dim):
-                            continue
-                        # On SM100 (Blackwell), vLLM uses FlashInfer which routes
-                        # decode to trtllm_batch_decode_with_kv_cache. That kernel
-                        # only supports GQA ratios up to 16.
-                        if get_sm_version() >= 100 and n // n_kv > 16:
-                            continue
-                        for s in target_s_list:
-                            for window_size in windows_for_head_dim(window_sizes, head_dim):
-                                for is_fp8_kv_cache in kv_cache_dtype_list:
-                                    if _skip_vllm_sm89_022_fp8_kv_cache(is_fp8_kv_cache):
-                                        continue
-                                    test_cases.append(
-                                        [
-                                            b,
-                                            s,
-                                            n,
-                                            n_kv,
-                                            head_dim,
-                                            is_fp8_kv_cache,
-                                            False,
-                                            window_size,
-                                        ]
-                                    )
+                        test_cases.append(
+                            [
+                                b,
+                                s,
+                                n,
+                                n_kv,
+                                head_dim,
+                                is_fp8_kv_cache,
+                                False,
+                                window_size,
+                            ]
+                        )
     return test_cases
 
 
