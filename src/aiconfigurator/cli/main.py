@@ -921,7 +921,7 @@ aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --perf-db-version 1.2.0rc5 \\
     --config-template-version 1.2.0rc6 \\
     --save-dir results
-
+# Install Spica smart sweeper with pip install 'aiconfigurator[spica]'
 # Run Spica smart sweep from normal default CLI inputs
 aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --backend trtllm \\

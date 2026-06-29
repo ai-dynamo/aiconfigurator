@@ -369,8 +369,7 @@ def log_final_summary(
             if agg_value == disagg_value:
                 comparison = "agg and disagg tied"
             else:
-                winner = "disagg" if disagg_value > agg_value else "agg"
-                loser = "agg" if winner == "disagg" else "disagg"
+                winner, loser = ("agg", "disagg") if agg_value >= disagg_value else ("disagg", "agg")
                 loser_value = best_throughputs[loser]
                 benefit_ratio = float("inf") if loser_value == 0 else best_throughputs[winner] / loser_value
                 comparison = f"{winner} {benefit_ratio:.2f}x better than {loser}"
