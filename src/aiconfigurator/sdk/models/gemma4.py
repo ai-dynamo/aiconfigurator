@@ -36,6 +36,11 @@ class Gemma4MixModel(BaseModel):
     """
 
     @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # Dense SWA/global GQA prefill CP: SGLang AllGather (zigzag FMHA).
+        return backend_name == "sglang"
+
+    @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
         model = cls(
             model_info["topk"],
@@ -67,11 +72,12 @@ class Gemma4MixModel(BaseModel):
         self._is_dense = not topk or not num_experts
         if not self._is_dense:
             assert (
-                self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
+                self.config.tp_size * self.config.attention_dp_size * self.config.cp_size
+                == self.config.moe_tp_size * self.config.moe_ep_size
             ), (
                 f"tp_size ({self.config.tp_size}) * attention_dp_size "
-                f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-                f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+                f"({self.config.attention_dp_size}) * cp_size ({self.config.cp_size}) should be equal to "
+                f"moe_tp_size ({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
             )
             assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
         else:
@@ -113,6 +119,16 @@ class Gemma4MixModel(BaseModel):
         self._gemma4_config = cfg
         self._build_context_ops()
         self._build_generation_ops()
+        if self.config.cp_size > 1:
+            # decode never runs CP. Route the generation MoEDispatch ops to their
+            # decode-CP comm path (pre=0 / post=all_reduce) rather than prefill's
+            # all_gather/reduce_scatter -- attn_cp_size>1 + is_context=False. The
+            # context loop in _build_context_ops handles the prefill side.
+            cp = self.config.cp_size
+            for op in self.generation_ops:
+                if isinstance(op, ops.MoEDispatch):
+                    op._attn_cp_size = cp
+                    op._is_context = False
 
     def _count_layer_types(self) -> dict[str, int]:
         cfg = self._gemma4_config
@@ -301,6 +317,65 @@ class Gemma4MixModel(BaseModel):
                 ops.P2P("context_p2p", pp - 1, h, pp),
             ]
         )
+
+        # cp (SGLang prefill AllGather CP). Gemma4 has heterogeneous KV per
+        # layer-type (SWA vs global) -> emit one NCCL all_gather per type,
+        # weighted by its layer count, so total comm matches the runtime.
+        # Dense FMHA uses zigzag (``cp_size`` on the attention op, balanced
+        # full/cp work); token-major ops shrink the M-axis via ``seq_split``
+        # (DB lookup at per-rank M). This bypasses the BaseModel CP helper,
+        # which assumes one uniform per-token KV size.
+        # NOTE: the SWA all_gather is sized by the full new-token count (not the
+        # window) on purpose -- this matches sglang v0.5.13
+        # ``cp_allgather_and_save_kv_cache`` / ``cp_all_gather_rerange_kv_cache``,
+        # which gather the FULL per-layer new-token KV across CP ranks; the
+        # sliding window only caps the SWA write target / stored KV (handled in
+        # get_kvcache_bytes_per_sequence), not this per-layer comm volume.
+        if self.config.cp_size > 1:
+            cp = self.config.cp_size
+            kvcache_bytes = self.config.kvcache_quant_mode.value.memory
+            comm_bytes = self.config.comm_quant_mode.value.memory
+            # Post-construction CP wiring (not the __init__ _CP_AWARE gate): this
+            # family has heterogeneous layer types (SWA vs global / dense vs MoE)
+            # built across separate passes, so CP is applied here once every op
+            # exists. The per-op _CP_AWARE opt-in is re-asserted in the loop so an
+            # un-audited op still fails loud instead of silently skipping CP.
+            for op in self.context_ops:
+                if isinstance(op, ops.ContextAttention):
+                    op._cp_size = cp
+                elif isinstance(op, ops.MoEDispatch):
+                    # MoEDispatch keys CP off attn_cp_size (AG pre / RS post),
+                    # NOT seq_split; with moe_ep=cp its attention_tp_size>1 would
+                    # otherwise wrongly take the TP all-reduce path.
+                    op._attn_cp_size = cp
+                elif op._CP_AWARE:
+                    # Token-major op: shrink the M-axis. This post-construction
+                    # mutation bypasses the constructor's _CP_AWARE gate, so
+                    # re-assert the opt-in here -- an un-audited op in a
+                    # CP-enabled pipeline must fail loud, not silently skip CP.
+                    op._seq_split = cp
+                else:
+                    raise NotImplementedError(
+                        f"{type(op).__name__} ('{op._name}') has not been audited for "
+                        f"context parallelism but appears in a CP-enabled context pipeline."
+                    )
+            for ctx_key, n_kv_per_gpu, head_dim in (
+                ("swa", d["swa_n_kv_per_gpu"], d["swa_hd"]),
+                ("global", d["global_n_kv_per_gpu"], d["global_hd"]),
+            ):
+                if counts[ctx_key] <= 0:
+                    continue
+                kv_bytes_per_token = n_kv_per_gpu * head_dim * 2 * kvcache_bytes
+                self.context_ops.append(
+                    ops.NCCL(
+                        f"context_cp_all_gather_{ctx_key}",
+                        counts[ctx_key],
+                        "all_gather",
+                        num_elements_per_token=kv_bytes_per_token / comm_bytes,
+                        num_gpus=cp,
+                        comm_quant_mode=self.config.comm_quant_mode,
+                    )
+                )
 
     def _build_generation_ops(self) -> None:
         if not self._gemma4_config:

@@ -1323,7 +1323,7 @@ class TestEnumerateParallelConfigVLLMMoE:
         )
         assert len(configs) > 0, "Should generate at least one config"
         for c in configs:
-            tp, pp, dp, moe_tp, moe_ep = c
+            tp, pp, dp, moe_tp, moe_ep, cp = c
             assert not (moe_tp > 1 and moe_ep > 1), f"vLLM should not have both moe_tp > 1 and moe_ep > 1, got {c}"
 
     def test_vllm_allows_pure_moe_tp(self):

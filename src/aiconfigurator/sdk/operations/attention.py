@@ -260,6 +260,7 @@ class ContextAttention(Operation):
         window_size: int = 0,
         head_size: int = 128,
         use_qk_norm: bool = False,
+        cp_size: int = 1,
     ) -> None:
         """Initialize context attention query parameters."""
         super().__init__(name, scale_factor)
@@ -271,6 +272,13 @@ class ContextAttention(Operation):
         self._window_size = window_size
         self._head_size = head_size
         self._use_qk_norm = use_qk_norm
+        # Context parallelism (sglang AllGather, zigzag in-seq split). When
+        # cp_size > 1, query() models ONE representative CP rank (rank 0): the
+        # sequence is split into 2*cp contiguous chunks, rank 0 owns chunk 0
+        # (prefix=0) and chunk 2*cp-1 (prefix=isl-c). Its two halves' work sums
+        # to the balanced per-rank total isl^2/(2*cp). See
+        # docs/CONTEXT_PARALLEL_DSA_MODELING.md (dense analog).
+        self._cp_size = cp_size
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -540,17 +548,28 @@ class ContextAttention(Operation):
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix")
 
-        result = database.query_context_attention(
-            batch_size,
-            isl,
-            prefix,
-            self._n,
-            self._n_kv,
-            self._kvcache_quant_mode,
-            self._fmha_quant_mode,
-            window_size=self._window_size,
-            head_size=self._head_size,
-        )
+        def _ctx(s, pfx):
+            return database.query_context_attention(
+                batch_size,
+                s,
+                pfx,
+                self._n,
+                self._n_kv,
+                self._kvcache_quant_mode,
+                self._fmha_quant_mode,
+                window_size=self._window_size,
+                head_size=self._head_size,
+            )
+
+        if self._cp_size and self._cp_size > 1:
+            # Context-parallel (zigzag) prefill: model rank 0's two halves.
+            # c = ceil(isl / (2*cp)); prev chunk attends [0, prefix+c), next
+            # chunk attends [0, prefix+isl). Sum = balanced per-rank work.
+            cp = self._cp_size
+            c = max(1, -(-isl // (2 * cp)))
+            result = _ctx(c, prefix) + _ctx(c, prefix + isl - c)
+        else:
+            result = _ctx(isl, prefix)
         q_num = self._n * self._head_size
         k_num = self._n_kv * self._head_size
         v_num = self._n_kv * self._head_size

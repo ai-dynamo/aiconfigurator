@@ -92,6 +92,19 @@ DSA_MODEL_DIMS: dict[str, dict] = {
 
 DEFAULT_DSA_ARCHITECTURE = "DeepseekV32ForCausalLM"
 
+# DSA sparse sub-kernel (mqa / topk / dsa_attn) data-file prefix per architecture.
+# GLM-5 and DeepSeek-V3.2 share the same DSA kernels (only shapes/heads differ),
+# so the CP delta strategy in ContextDSAModule._query_cp is identical -- only the
+# collected data files differ: glm5_* vs dsv32_*. Defaults to glm5 for back-compat.
+_DSA_SPARSE_FILE_PREFIX = {
+    "GlmMoeDsaForCausalLM": "glm5",
+    "DeepseekV32ForCausalLM": "dsv32",
+}
+
+
+def _dsa_sparse_file_prefix(architecture: str) -> str:
+    return _DSA_SPARSE_FILE_PREFIX.get(architecture, "glm5")
+
 
 # Extrapolation grids — lifted verbatim from the legacy blocks in
 # ``PerfDatabase.__init__``.
@@ -873,8 +886,9 @@ class ContextDSAModule(Operation):
         """
         cp = self._cp_size
         per_card = max(1, -(-isl // cp))  # ceil: critical path = busiest CP rank
-        sp = self._load_glm5_sparse(database)
+        sp = self._load_glm5_sparse(database, self._architecture, self._num_heads)
         g = sp.get("_2d", {})
+        file_prefix = _dsa_sparse_file_prefix(self._architecture)
         # Fail fast: CP DSA modeling REQUIRES the sparse mqa/topk tables for
         # the mqa/topk_last deltas. _lookup_2d clamps isl + interp/extrapolates
         # step, so a None below means the table is absent entirely (parquet not
@@ -882,8 +896,9 @@ class ContextDSAModule(Operation):
         missing = [k for k in ("mqa", "topk_last", "topk_flat") if not g.get(k)]
         if missing:
             raise ValueError(
-                f"GLM5 CP DSA modeling needs sparse tables {missing} for "
-                f"{self._architecture}; collect glm5_mqa_logits/glm5_topk first."
+                f"DSA CP modeling needs sparse tables {missing} for "
+                f"{self._architecture} (num_heads={self._num_heads}); "
+                f"collect {file_prefix}_mqa_logits/{file_prefix}_topk first."
             )
         # Base: per-card monolithic dsa_module at (per_card, prefix), follows the
         # run's kv_cache_dtype like the non-CP path.
@@ -900,10 +915,16 @@ class ContextDSAModule(Operation):
                 dsa_backend="flashmla_kv",
             )
         )
-        mqa_full = self._lookup_2d(g.get("mqa"), isl, prefix)
-        mqa_perc = self._lookup_2d(g.get("mqa"), per_card, prefix)
-        tl_full = self._lookup_2d(g.get("topk_last"), isl, prefix)
-        tf_perc = self._lookup_2d(g.get("topk_flat"), per_card, prefix)
+        # Look the sparse sub-kernels up at the REAL batch b (the bs slice carries
+        # the measured bs=b latency), so the delta matches dsa_base (queried at b)
+        # WITHOUT an external x b linearity assumption.
+        mqa_tab = self._bs_slice(g.get("mqa", {}), b)
+        tl_tab = self._bs_slice(g.get("topk_last", {}), b)
+        tf_tab = self._bs_slice(g.get("topk_flat", {}), b)
+        mqa_full = self._lookup_2d(mqa_tab, isl, prefix)
+        mqa_perc = self._lookup_2d(mqa_tab, per_card, prefix)
+        tl_full = self._lookup_2d(tl_tab, isl, prefix)
+        tf_perc = self._lookup_2d(tf_tab, per_card, prefix)
         latency = dsa_base
         if None not in (mqa_full, mqa_perc, tl_full, tf_perc):
             delta_mqa = mqa_full / cp - mqa_perc
@@ -926,14 +947,21 @@ class ContextDSAModule(Operation):
         # qk_rope_head_dim), bf16. Both over the current chunk (isl), verified by
         # instrumenting sglang (dsa_indexer index_key 128; deepseek_v2
         # rebuild_cp_kv_cache latent 576).
-        ag_kv = float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", isl * index_head_dim))
-        ag_lse = float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", isl * (kv_lora + rope)))
+        # x b: the all-gather moves b sequences' worth of current-chunk KV.
+        ag_kv = float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", b * isl * index_head_dim))
+        ag_lse = float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", b * isl * (kv_lora + rope)))
         latency += ag_kv + ag_lse
         return PerformanceResult(latency * self._scale_factor, energy=0.0, source="cp_model")
 
     @classmethod
-    def _load_glm5_sparse(cls, database: PerfDatabase) -> dict:
-        key = cls._cache_key(database)
+    def _load_glm5_sparse(cls, database: PerfDatabase, architecture: str, num_heads: int) -> dict:
+        """Load DSA sparse sub-kernel tables (mqa / topk / dsa_attn) for the CP
+        composition path. Architecture-keyed: GLM-5 reads ``glm5_*`` filtered to
+        its native num_heads (64); DeepSeek-V3.2 reads ``dsv32_*`` filtered to
+        128. Same kernels, different shapes -- the delta strategy in _query_cp is
+        identical (full/cp mqa + flat->top_last topk). dsa_attn is optional (not
+        used by the delta; DSV3.2 only collects mqa + topk)."""
+        key = (cls._cache_key(database), architecture, num_heads)
         if key in cls._glm5_sparse_cache:
             return cls._glm5_sparse_cache[key]
         import os
@@ -943,7 +971,11 @@ class ContextDSAModule(Operation):
         data_dir = os.path.join(
             database.systems_root, database.system_spec["data_dir"], database.backend, database.version
         )
-        # 2D grids keyed by (isl, step) for the CP composition path.
+        fp = _dsa_sparse_file_prefix(architecture)
+        # Grids keyed by batch_size -> {(isl, step): latency}. Keeping every
+        # collected bs lets _query_cp look up the sparse deltas at the REAL
+        # batch (real measured bs=b latency), instead of scaling a bs=1 value
+        # by b (which would over-count: launch overhead amortises with batch).
         out = {}
         out2d = {"mqa": {}, "topk_last": {}, "topk_flat": {}, "dsa_attn": {}}
 
@@ -951,25 +983,39 @@ class ContextDSAModule(Operation):
             p = os.path.join(data_dir, fn)
             return pd.read_parquet(p) if os.path.exists(p) else None
 
-        mdf = _read("glm5_mqa_logits_module_perf.parquet")
+        def _heads(df):
+            return df[df["num_heads"] == num_heads] if "num_heads" in df else df
+
+        def _put(tab, r):
+            tab.setdefault(int(r["batch_size"]), {})[(int(r["isl"]), int(r["step"]))] = float(r["latency"])
+
+        mdf = _read(f"{fp}_mqa_logits_module_perf.parquet")
         if mdf is not None:
-            mh = mdf[mdf["num_heads"] == 64] if "num_heads" in mdf else mdf
-            for _, r in mh[mh["batch_size"] == 1].iterrows():
-                out2d["mqa"][(int(r["isl"]), int(r["step"]))] = float(r["latency"])
-        tdf = _read("glm5_topk_module_perf.parquet")
+            for _, r in _heads(mdf).iterrows():
+                _put(out2d["mqa"], r)
+        tdf = _read(f"{fp}_topk_module_perf.parquet")
         if tdf is not None:
-            th = tdf[tdf["num_heads"] == 64] if "num_heads" in tdf else tdf
-            for _, r in th[th["batch_size"] == 1].iterrows():
+            for _, r in _heads(tdf).iterrows():
                 mode = "topk_flat" if str(r.get("score_mode", "")) == "flat" else "topk_last"
-                out2d[mode][(int(r["isl"]), int(r["step"]))] = float(r["latency"])
-        adf = _read("glm5_dsa_attn_module_perf.parquet")
+                _put(out2d[mode], r)
+        adf = _read(f"{fp}_dsa_attn_module_perf.parquet")
         if adf is not None:
-            ah = adf[adf["num_heads"] == 64] if "num_heads" in adf else adf
-            for _, r in ah[ah["batch_size"] == 1].iterrows():
-                out2d["dsa_attn"][(int(r["isl"]), int(r["step"]))] = float(r["latency"])
+            for _, r in _heads(adf).iterrows():
+                _put(out2d["dsa_attn"], r)
         out["_2d"] = out2d
         cls._glm5_sparse_cache[key] = out
         return out
+
+    @staticmethod
+    def _bs_slice(by_bs: dict, b: int) -> dict:
+        """Pick the collected-batch slice nearest to ``b`` from a {bs: {(isl,step):lat}}
+        table. Exact match when ``b`` was collected (the common case); otherwise the
+        nearest collected batch."""
+        if not by_bs:
+            return {}
+        if b in by_bs:
+            return by_bs[b]
+        return by_bs[min(by_bs, key=lambda x: abs(x - b))]
 
     @staticmethod
     def _lookup_2d(table, isl, step):
@@ -980,7 +1026,7 @@ class ContextDSAModule(Operation):
         isls = sorted({i for (i, _s) in table})
         if isl > isls[-1]:
             raise ValueError(
-                f"GLM5 CP DSA: isl={isl} exceeds the collected sparse-kernel grid "
+                f"DSA CP: isl={isl} exceeds the collected sparse-kernel grid "
                 f"(max isl={isls[-1]}); mqa/topk scale super-linearly with isl, so "
                 f"clamping the isl axis would silently under-estimate. Re-collect with "
                 f"AIC_CHUNKED_PREFILL_SIZE >= {isl} "

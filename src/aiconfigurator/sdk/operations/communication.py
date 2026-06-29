@@ -68,9 +68,10 @@ class CustomAllReduce(Operation):
     """
 
     _data_cache: ClassVar[dict] = {}
+    _CP_AWARE: ClassVar[bool] = True  # query divides x by self._seq_split (smaller per-rank AR payload)
 
-    def __init__(self, name: str, scale_factor: float, h: int, tp_size: int) -> None:
-        super().__init__(name, scale_factor)
+    def __init__(self, name: str, scale_factor: float, h: int, tp_size: int, *, seq_split: int = 1) -> None:
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._h = h
         self._tp_size = tp_size
         self._weights = 0.0
@@ -257,7 +258,7 @@ class CustomAllReduce(Operation):
             # silicon leakage in the breakdown report.
             return PerformanceResult(0.0, 0.0, source="empirical")
         # count, not size in bytes
-        size = kwargs.get("x") * self._h
+        size = (-(-kwargs.get("x") // self._seq_split)) * self._h  # CP: ceil = busiest rank
 
         result = database.query_custom_allreduce(common.CommQuantMode.half, self._tp_size, size)
         return PerformanceResult(
@@ -282,6 +283,7 @@ class NCCL(Operation):
 
     _data_cache: ClassVar[dict] = {}
     _oneccl_data_cache: ClassVar[dict] = {}
+    _CP_AWARE: ClassVar[bool] = True  # query divides x by self._seq_split (smaller per-rank payload)
 
     def __init__(
         self,
@@ -291,8 +293,10 @@ class NCCL(Operation):
         num_elements_per_token: int,
         num_gpus: int,
         comm_quant_mode: common.CommQuantMode,
+        *,
+        seq_split: int = 1,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._nccl_op = nccl_op
         self._num_elements_per_token = num_elements_per_token
         self._num_gpus = num_gpus
@@ -511,7 +515,8 @@ class NCCL(Operation):
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query NCCL latency with power data."""
-        message_size = kwargs.get("x") * self._num_elements_per_token
+        # CP: ceil = busiest rank
+        message_size = (-(-kwargs.get("x") // self._seq_split)) * self._num_elements_per_token
 
         result = database.query_nccl(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size)
         return PerformanceResult(
@@ -533,8 +538,10 @@ class P2P(Operation):
     out only for parity with the other migrated ops.
     """
 
-    def __init__(self, name: str, scale_factor: float, h: int, pp_size: int) -> None:
-        super().__init__(name, scale_factor)
+    _CP_AWARE: ClassVar[bool] = True  # query divides x by self._seq_split (smaller per-rank payload)
+
+    def __init__(self, name: str, scale_factor: float, h: int, pp_size: int, *, seq_split: int = 1) -> None:
+        super().__init__(name, scale_factor, seq_split=seq_split)
         self._h = h
         self._pp_size = pp_size
         self._bytes_per_element = 2
@@ -587,7 +594,7 @@ class P2P(Operation):
             # CustomAllReduce.query for source-tag rationale.
             return PerformanceResult(0.0, 0.0, source="empirical")
 
-        size = kwargs.get("x") * self._h
+        size = (-(-kwargs.get("x") // self._seq_split)) * self._h  # CP: ceil = busiest rank
         p2p_bytes = size * 2
 
         result = database.query_p2p(p2p_bytes)

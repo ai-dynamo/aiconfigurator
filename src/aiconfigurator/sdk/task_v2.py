@@ -51,7 +51,7 @@ from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config
 
 logger = logging.getLogger(__name__)
 
-ParallelChoice = tuple[int, int, int, int, int]  # (tp, pp, dp, moe_tp, moe_ep)
+ParallelChoice = tuple[int, int, int, int, int, int]  # (tp, pp, dp, moe_tp, moe_ep, cp)
 
 
 _DEFAULT_NEXTN_ACCEPT_RATES: list[float] = [0.85, 0.8, 0.6, 0.0, 0.0]
@@ -60,6 +60,23 @@ _DEFAULT_NEXTN_ACCEPT_RATES: list[float] = [0.85, 0.8, 0.6, 0.0, 0.0]
 # checkpoint's HF config does NOT declare ``num_nextn_predict_layers`` at all.
 # A config that explicitly states the field (including 0, e.g. Kimi-K2.5) wins.
 _MTP_DEFAULT_FAMILIES = {"DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25", "QWEN35"}
+
+
+def _default_cp_list_for(model_family: str, backend_name: str) -> list[int]:
+    """Default prefill/agg ``cp_list`` for the CP auto-sweep; ``[1]`` otherwise.
+
+    Capability-derived: any model whose class declares ``supports_cp`` on this
+    backend is auto-swept over cp ∈ {1,2,4,8}. Keying off the registry (not a
+    hardcoded family list) means the sweep policy never drifts from
+    ``BaseModel.supports_cp``. Decode is always forced to cp=1 by iter_parallel.
+    """
+    from aiconfigurator.sdk.models.base import _MODEL_REGISTRY
+
+    cls = _MODEL_REGISTRY.get(model_family)
+    if cls is not None and cls.supports_cp(backend_name):
+        return [1, 2, 4, 8]
+    return [1]
+
 
 # Legacy V1 TaskRunner swept TPOT over this fixed grid to build the latency/throughput
 # Pareto frontier. Used when ``pareto_sweep=True`` (the default) so v2 matches v1.
@@ -360,6 +377,7 @@ class Task:
     agg_dp_candidates: list[int] | None = None
     agg_moe_tp_candidates: list[int] | None = None
     agg_moe_ep_candidates: list[int] | None = None
+    agg_cp_candidates: list[int] | None = None
 
     # ====== 4. Disagg prefill worker spec ======
     prefill_model_path: str = ""
@@ -382,6 +400,7 @@ class Task:
     prefill_dp_candidates: list[int] | None = None
     prefill_moe_tp_candidates: list[int] | None = None
     prefill_moe_ep_candidates: list[int] | None = None
+    prefill_cp_candidates: list[int] | None = None
 
     # ====== 6. Disagg decode worker spec ======
     decode_model_path: str = ""
@@ -403,6 +422,7 @@ class Task:
     decode_dp_candidates: list[int] | None = None
     decode_moe_tp_candidates: list[int] | None = None
     decode_moe_ep_candidates: list[int] | None = None
+    decode_cp_candidates: list[int] | None = None
 
     # ====== 8. Disagg orchestration ======
     num_gpu_per_replica: list[int] | None = None
@@ -842,6 +862,10 @@ class Task:
             if getattr(self, name) is None:
                 setattr(self, name, values)
 
+        # CP auto-sweep for validated families (sglang); [1] otherwise. agg runs
+        # prefill in-worker, so cp applies; decode-cp=1 is enforced in iter_parallel.
+        _set("agg_cp_candidates", _default_cp_list_for(self._model_family, self.backend_name))
+
         if not self._is_moe:
             blackwell = self.system_name in ("gb200", "gb300")
             wide = [1, 2, 4, 8, 16] if blackwell else [1, 2, 4, 8]
@@ -934,10 +958,23 @@ class Task:
             "dp_list": f"{role}_dp_candidates",
             "moe_tp_list": f"{role}_moe_tp_candidates",
             "moe_ep_list": f"{role}_moe_ep_candidates",
+            "cp_list": f"{role}_cp_candidates",
         }
         for k_src, k_attr in map_to_attr.items():
             if getattr(self, k_attr) is None:
-                setattr(self, k_attr, src[k_src])
+                if k_src == "cp_list":
+                    # Decode is always cp=1 (CP is prefill-only). prefill/agg
+                    # auto-sweep cp for CP-validated families (else [1]); an
+                    # explicit worker-config cp_list still wins. A user-supplied
+                    # non-1 decode cp is rejected in iter_parallel.
+                    if role == "decode":
+                        value = [1]
+                    else:
+                        backend = self._role_attr(role, "backend_name")
+                        value = src.get(k_src, _default_cp_list_for(self._model_family, backend))
+                else:
+                    value = src[k_src]
+                setattr(self, k_attr, value)
 
     # =====================================================================
     # Role attribute access (no fallback across prefixes — strict discipline)
@@ -999,7 +1036,7 @@ class Task:
         )
 
     def iter_parallel(self, role: Literal["agg", "prefill", "decode"]) -> Iterator[ParallelChoice]:
-        """Yield (tp, pp, dp, moe_tp, moe_ep) tuples for the role.
+        """Yield (tp, pp, dp, moe_tp, moe_ep, cp) tuples for the role.
 
         Uses sdk.utils.enumerate_parallel_config so MoE constraints match
         the legacy path exactly.
@@ -1009,6 +1046,15 @@ class Task:
         def _cands(dim: str) -> list[int]:
             return getattr(self, f"{prefix}{dim}_candidates")
 
+        # CP is modeled for context/prefill only; decode must be cp=1. Fail loud
+        # rather than silently coercing a user-supplied decode cp>1.
+        cp_list = _cands("cp") or [1]
+        if role == "decode" and any(c != 1 for c in cp_list):
+            raise ValueError(
+                f"decode CP must be 1 (CP is modeled for prefill only); got "
+                f"decode_cp_candidates={cp_list}. Enable CP via prefill/agg instead."
+            )
+
         return iter(
             enumerate_parallel_config(
                 num_gpu_list=_cands("num_gpu"),
@@ -1017,6 +1063,7 @@ class Task:
                 dp_list=_cands("dp"),
                 moe_tp_list=_cands("moe_tp"),
                 moe_ep_list=_cands("moe_ep"),
+                cp_list=cp_list,
                 is_moe=self._is_moe,
                 backend=common.BackendName[self._role_attr(role, "backend_name")],
                 enable_wideep=self._role_attr(role, "enable_wideep"),

@@ -19,6 +19,11 @@ class GPTModel(BaseModel):
     """
 
     @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # Dense GQA prefill CP: SGLang AllGather (zigzag), same as LLAMAModel.
+        return backend_name == "sglang"
+
+    @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
         return cls(
             model_info["model_path"],
@@ -47,17 +52,20 @@ class GPTModel(BaseModel):
         gemm_quant_mode = self.config.gemm_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
+        # Context parallelism (sglang AllGather, prefill-only); see LLAMAModel.
+        cp = self.config.cp_size
 
         self.context_ops.extend(
             [
-                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
-                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3, seq_split=cp),
+                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
                 ops.GEMM(
                     "context_qkv_gemm",
                     self._num_layers,
                     self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.ContextAttention(
                     "context_attention",
@@ -66,7 +74,9 @@ class GPTModel(BaseModel):
                     num_kv_heads_per_gpu,
                     kvcache_quant_mode,
                     fmha_quant_mode,
+                    cp_size=cp,
                 ),
+                *self._cp_attn_comm_ops(),
                 ops.GEMM(
                     "context_proj_gemm",
                     self._num_layers,
@@ -74,14 +84,16 @@ class GPTModel(BaseModel):
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
                     low_precision_input=True,
+                    seq_split=cp,
                 ),
-                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
                 ops.GEMM(
                     "context_ffn1_gemm",
                     self._num_layers,
                     self._inter_size // tp_size,
                     h,
                     gemm_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.ElementWise(
                     "context_act",
@@ -89,6 +101,7 @@ class GPTModel(BaseModel):
                     self._inter_size // tp_size,
                     self._inter_size // tp_size,
                     0.8,
+                    seq_split=cp,
                 ),
                 ops.GEMM(
                     "context_ffn2_gemm",
@@ -97,6 +110,7 @@ class GPTModel(BaseModel):
                     self._inter_size // tp_size,
                     gemm_quant_mode,
                     low_precision_input=True,
+                    seq_split=cp,
                 ),
                 ops.GEMM(
                     "context_logits_gemm",
@@ -104,6 +118,7 @@ class GPTModel(BaseModel):
                     self._vocab_size // tp_size,
                     h,
                     common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
                 ),
             ]
         )
@@ -168,12 +183,12 @@ class GPTModel(BaseModel):
         )
 
         # when tp_size=0, the comm part will be 0
-        self.context_ops.append(ops.CustomAllReduce("context_ar_1", self._num_layers, h, tp_size))
-        self.context_ops.append(ops.CustomAllReduce("context_ar_2", self._num_layers, h, tp_size))
+        self.context_ops.append(ops.CustomAllReduce("context_ar_1", self._num_layers, h, tp_size, seq_split=cp))
+        self.context_ops.append(ops.CustomAllReduce("context_ar_2", self._num_layers, h, tp_size, seq_split=cp))
         self.generation_ops.append(ops.CustomAllReduce("generation_ar_1", self._num_layers, h, tp_size))
         self.generation_ops.append(ops.CustomAllReduce("generation_ar_2", self._num_layers, h, tp_size))
 
         # pp
         pp_scale_factor = pp_size - 1
-        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
+        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size, seq_split=cp))
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor, h, pp_size))

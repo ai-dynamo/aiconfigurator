@@ -124,12 +124,17 @@ class ContextMLA(Operation):
         num_heads: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
+        cp_size: int = 1,
     ) -> None:
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
         self._weights = 0.0
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
+        # Context parallelism (sglang AllGather zigzag in-seq split). When cp>1,
+        # query() models CP rank 0's two zigzag chunks (prev: prefix..+c; next:
+        # prefix+isl-c..isl), same as ContextAttention. c = ceil(isl/(2*cp)).
+        self._cp_size = cp_size
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -300,14 +305,22 @@ class ContextMLA(Operation):
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix")
 
-        result = database.query_context_mla(
-            b=batch_size,
-            s=isl,
-            prefix=prefix,
-            num_heads=self._num_heads,
-            kvcache_quant_mode=self._kvcache_quant_mode,
-            fmha_quant_mode=self._fmha_quant_mode,
-        )
+        def _q(s, pfx):
+            return database.query_context_mla(
+                b=batch_size,
+                s=s,
+                prefix=pfx,
+                num_heads=self._num_heads,
+                kvcache_quant_mode=self._kvcache_quant_mode,
+                fmha_quant_mode=self._fmha_quant_mode,
+            )
+
+        if self._cp_size and self._cp_size > 1:
+            cp = self._cp_size
+            c = max(1, -(-isl // (2 * cp)))  # ceil(isl/(2*cp)) — rank-0 zigzag halves
+            result = _q(c, prefix) + _q(c, prefix + isl - c)
+        else:
+            result = _q(isl, prefix)
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
@@ -1351,6 +1364,7 @@ class WideEPContextMLA(Operation):
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         attn_backend: str = "flashinfer",
+        cp_size: int = 1,
     ) -> None:
         super().__init__(name, scale_factor)
         self._tp_size = tp_size
@@ -1358,6 +1372,8 @@ class WideEPContextMLA(Operation):
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
         self._attn_backend = attn_backend
+        # CP (sglang AllGather zigzag); see ContextMLA. cp>1 -> rank-0 two-chunk.
+        self._cp_size = cp_size
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -1599,15 +1615,23 @@ class WideEPContextMLA(Operation):
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix")
 
-        result = database.query_wideep_context_mla(
-            b=batch_size,
-            s=isl,
-            prefix=prefix,
-            tp_size=self._tp_size,
-            kvcache_quant_mode=self._kvcache_quant_mode,
-            fmha_quant_mode=self._fmha_quant_mode,
-            attention_backend=self._attn_backend,
-        )
+        def _q(s, pfx):
+            return database.query_wideep_context_mla(
+                b=batch_size,
+                s=s,
+                prefix=pfx,
+                tp_size=self._tp_size,
+                kvcache_quant_mode=self._kvcache_quant_mode,
+                fmha_quant_mode=self._fmha_quant_mode,
+                attention_backend=self._attn_backend,
+            )
+
+        if self._cp_size and self._cp_size > 1:
+            cp = self._cp_size
+            c = max(1, -(-isl // (2 * cp)))  # ceil(isl/(2*cp)) — rank-0 zigzag halves
+            result = _q(c, prefix) + _q(c, prefix + isl - c)
+        else:
+            result = _q(isl, prefix)
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
