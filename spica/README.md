@@ -27,9 +27,6 @@ Design proposal: `docs/proposals/dgdr-profiler-smart-search-plan.md` in
   choices), the composite presets, and how `parallel_configs` are derived.
 - [sample.md](docs/sample.md) — the flat *unrolled sample* and the three ways to
   pin/override what it emits.
-- [structured-parallel-search-plan.md](docs/structured-parallel-search-plan.md) — the
-  structured Vizier encoding, valid-point projection, defaults, pin compatibility, and
-  unique-replay budget behavior.
 
 It is an **independent project** living inside the aiconfigurator repo. It
 depends on `aiconfigurator` (lower-layer forward-pass / memory provider) and
