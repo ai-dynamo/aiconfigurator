@@ -158,7 +158,11 @@ class CustomAllReduce(Operation):
                 lambda c: get_sol(quant_mode, eff, int(c[0]))[0],
                 depth=1,
             )
-            # eff < tp_size means the tp slice was node-capped -> a cross-shape borrow.
+            # Compatibility exception: rank-count overflow still borrows the
+            # node-boundary utilization even when XSHAPE is disabled, because
+            # rejecting it would remove support for common multi-node configs.
+            # TODO(#1260): define a strict policy where an unmeasured TP count
+            # fails accurately without regressing default model coverage.
             prov = "xshape" if eff != tp_size else "empirical"
             latency, _ = util_empirical.estimate(sol_q, (float(size),), grid, provenance=prov)
             return latency
@@ -423,7 +427,11 @@ class NCCL(Operation):
                 lambda c: get_sol(dtype, eff, operation, int(c[0]))[0],
                 depth=1,
             )
-            # eff < num_gpus means the gpu-count slice was capped -> a cross-shape borrow.
+            # Compatibility exception: rank-count overflow still borrows the
+            # largest collected utilization even when XSHAPE is disabled,
+            # preserving the existing NCCL boundary-correction coverage.
+            # TODO(#1260): define a strict policy where an unmeasured GPU count
+            # fails accurately without regressing default model coverage.
             prov = "xshape" if eff != num_gpus else "empirical"
             latency, _ = util_empirical.estimate(sol_q, (float(message_size),), grid, provenance=prov)
             return latency

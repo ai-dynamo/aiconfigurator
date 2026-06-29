@@ -2199,6 +2199,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
             moe_ep_size: int,
             quant_mode: common.MoEQuantMode,
             node_num: int,
+            kernel_source: str,
         ) -> float:
             """Empirical via SOL / util (util best-effort from own data; raises if no data)."""
             sol_time = get_sol(
@@ -2210,12 +2211,9 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 quant_mode,
                 node_num,
             )[0]
-            ks = cls._select_alltoall_kernel(database, quant_mode, moe_ep_size, topk, moe_backend=moe_backend)
             tqm = cls._normalize_quant_mode_for_table(quant_mode)
 
             def _slice():
-                if ks == "NotEnabled":
-                    raise PerfDataNotAvailableError("TRT-LLM alltoall is not enabled.")
                 cls.load_data(database)
                 wrapper = database._trtllm_alltoall_data
                 if not wrapper:
@@ -2223,7 +2221,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 wrapper.raise_if_not_loaded()
                 return util_empirical.require_data_slice(
                     wrapper,
-                    ks,
+                    kernel_source,
                     op_name,
                     tqm,
                     node_num,
@@ -2239,7 +2237,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
                     database.system,
                     database.backend,
                     database.version,
-                    ks,
+                    kernel_source,
                     op_name,
                     tqm.name,
                     node_num,
@@ -2272,6 +2270,17 @@ class TrtLLMWideEPMoEDispatch(Operation):
         if op_name not in valid_op_names:
             raise ValueError(f"Invalid op_name '{op_name}'. Must be one of {valid_op_names}")
 
+        kernel_source = cls._select_alltoall_kernel(database, quant_mode, moe_ep_size, topk, moe_backend=moe_backend)
+        logger.debug(
+            f"query_trtllm_alltoall: auto-selected kernel_source='{kernel_source}' (moe_backend={moe_backend})"
+        )
+
+        if kernel_source == "NotEnabled":
+            if database_mode == common.DatabaseMode.SOL_FULL:
+                return (0.0, 0.0, 0.0)
+            source = "sol" if database_mode == common.DatabaseMode.SOL else "empirical"
+            return PerformanceResult(0.0, energy=0.0, source=source)
+
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(
                 num_tokens,
@@ -2302,18 +2311,9 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 moe_ep_size,
                 quant_mode,
                 node_num,
+                kernel_source,
             )
             return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-
-        kernel_source = cls._select_alltoall_kernel(database, quant_mode, moe_ep_size, topk, moe_backend=moe_backend)
-        logger.debug(
-            f"query_trtllm_alltoall: auto-selected kernel_source='{kernel_source}' (moe_backend={moe_backend})"
-        )
-
-        if kernel_source == "NotEnabled":
-            if database_mode == common.DatabaseMode.SOL_FULL:
-                return (0.0, 0.0, 0.0)
-            return PerformanceResult(0.0, energy=0.0, source="empirical")
 
         # SILICON or HYBRID mode - use database
         def get_silicon():

@@ -189,6 +189,36 @@ def test_query_trtllm_alltoall_normalizes_fp8_block_lookup(stub_perf_db):
     assert math.isclose(float(result), 3.0)
 
 
+@pytest.mark.parametrize("moe_backend", ["DEEPGEMM", "CUTE_DSL"])
+@pytest.mark.parametrize("database_mode", list(common.DatabaseMode))
+def test_query_trtllm_alltoall_not_enabled_is_zero_in_every_mode(stub_perf_db, monkeypatch, moe_backend, database_mode):
+    """Kernel eligibility is a no-op decision, not a missing calibration."""
+
+    def fail_estimate(*args, **kwargs):
+        raise AssertionError("disabled alltoall must not enter empirical estimation")
+
+    monkeypatch.setattr("aiconfigurator.sdk.operations.util_empirical.estimate", fail_estimate)
+    result = stub_perf_db.query_trtllm_alltoall(
+        op_name="alltoall_dispatch",
+        num_tokens=16,
+        hidden_size=1024,
+        topk=8,
+        num_experts=256,
+        moe_ep_size=8,
+        quant_mode=common.MoEQuantMode.fp8,
+        node_num=1,
+        database_mode=database_mode,
+        moe_backend=moe_backend,
+    )
+
+    if database_mode == common.DatabaseMode.SOL_FULL:
+        assert result == (0.0, 0.0, 0.0)
+    else:
+        assert float(result) == 0.0
+        expected_source = "sol" if database_mode == common.DatabaseMode.SOL else "empirical"
+        assert result.source == expected_source
+
+
 def test_query_custom_allreduce_database_mode_calculation(stub_perf_db):
     """
     When database_mode == SOL, query_custom_allreduce uses get_sol:
