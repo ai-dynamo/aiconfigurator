@@ -55,7 +55,7 @@ def test_run_single_test_reports_plain_large_moe_replay_command(monkeypatch):
         lambda _model: TestConstraints(total_gpus=128, isl=256, osl=256, prefix=128, ttft=2_000_000, tpot=50_000),
     )
 
-    statuses, errors, commands = SupportMatrix.run_single_test(
+    statuses, errors, commands, _provenance = SupportMatrix.run_single_test(
         model="zai-org/GLM-5",
         system="b200_sxm",
         backend="sglang",
@@ -85,7 +85,7 @@ def test_run_single_test_can_return_row_replay_commands(monkeypatch):
         lambda _model: TestConstraints(total_gpus=32, isl=256, osl=256, prefix=128, ttft=2000.0, tpot=50.0),
     )
 
-    statuses, errors, commands = SupportMatrix.run_single_test(
+    statuses, errors, commands, _provenance = SupportMatrix.run_single_test(
         model="zai-org/GLM-5",
         system="b200_sxm",
         backend="sglang",

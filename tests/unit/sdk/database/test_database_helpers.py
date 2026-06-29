@@ -416,6 +416,159 @@ def test_perf_database_clear_runtime_caches_clears_interpolation_and_lru_state(p
     assert cache_clear_calls == ["cleared"]
 
 
+def test_empirical_and_silicon_views_use_distinct_shared_layer_templates(perf_database):
+    """Formula-only views must not inherit sibling SILICON rows."""
+    empirical = perf_database.get_database_view("b200_sxm", "trtllm", "1.3.0rc10", database_mode="EMPIRICAL")
+    silicon = perf_database.get_database_view("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+
+    assert empirical._root_database_template is not silicon._root_database_template
+    assert empirical.enable_shared_layer is False
+    assert silicon.enable_shared_layer is True
+
+
+def test_database_view_configuration_is_isolated_and_same_key_is_reused(perf_database):
+    from aiconfigurator.sdk import common
+
+    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    template.set_default_database_mode(common.DatabaseMode.SILICON)
+    template.set_transfer_policy(None)
+    template.clear_runtime_caches()
+    shared_table = {"large": object()}
+    template._test_loaded_table = shared_table
+
+    try:
+        view = perf_database.get_database_view(
+            "b200_sxm",
+            "trtllm",
+            "1.3.0rc10",
+            database_mode="HYBRID",
+            transfer_policy="off",
+        )
+        same_view = perf_database.get_database_view(
+            "b200_sxm",
+            "trtllm",
+            "1.3.0rc10",
+            database_mode="HYBRID",
+            transfer_policy="off",
+        )
+        aggressive = perf_database.get_database_view(
+            "b200_sxm",
+            "trtllm",
+            "1.3.0rc10",
+            database_mode="HYBRID",
+            transfer_policy="aggressive",
+        )
+
+        assert view is same_view
+        assert aggressive is not view
+        assert view is not template
+        assert view._root_database_template is template
+        assert view._test_loaded_table is shared_table
+        assert view._extracted_metrics_cache is not template._extracted_metrics_cache
+        assert view.supported_quant_mode._database is view
+        assert view.get_default_database_mode() is common.DatabaseMode.HYBRID
+        assert view.transfer_policy == frozenset()
+        assert aggressive.transfer_policy == common.ALL_TRANSFERS
+        assert template.get_default_database_mode() is common.DatabaseMode.SILICON
+        assert template.transfer_policy == common.ALL_TRANSFERS
+
+        with pytest.raises(RuntimeError, match="immutable mode/policy"):
+            view.set_transfer_policy(None)
+        with pytest.raises(RuntimeError, match="immutable mode/policy"):
+            view.set_default_database_mode(common.DatabaseMode.SILICON)
+    finally:
+        del template._test_loaded_table
+        template.clear_runtime_caches()
+
+
+def test_configured_view_cache_normalizes_keys_and_separates_roots(perf_database):
+    import copy
+
+    from aiconfigurator.sdk import common
+
+    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    template.clear_runtime_caches()
+    other_template = copy.copy(template)
+    other_template._is_query_view = False
+
+    view = perf_database._get_configured_database_view(template, "hybrid", None)
+    enum_view = perf_database._get_configured_database_view(
+        template,
+        common.DatabaseMode.HYBRID,
+        common.ALL_TRANSFERS,
+    )
+    list_view = perf_database._get_configured_database_view(
+        template,
+        common.DatabaseMode.HYBRID,
+        list(common.TransferKind),
+    )
+    other_view = perf_database._get_configured_database_view(other_template, "HYBRID", "aggressive")
+
+    assert view is enum_view is list_view
+    assert other_view is not view
+    assert view._root_database_template is template
+    assert other_view._root_database_template is other_template
+    template.clear_runtime_caches()
+
+
+def test_clearing_template_runtime_caches_refreshes_configured_copy(perf_database):
+    from aiconfigurator.sdk import common
+
+    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    template.clear_runtime_caches()
+    old_marker = object()
+    new_marker = object()
+    template._configured_view_marker = old_marker
+
+    try:
+        first = perf_database._get_configured_database_view(template, common.DatabaseMode.HYBRID, "off")
+        template._configured_view_marker = new_marker
+        cached = perf_database._get_configured_database_view(template, common.DatabaseMode.HYBRID, "off")
+
+        assert cached is first
+        assert cached._configured_view_marker is old_marker
+
+        template.clear_runtime_caches()
+        refreshed = perf_database._get_configured_database_view(template, common.DatabaseMode.HYBRID, "off")
+
+        assert refreshed is not first
+        assert refreshed._configured_view_marker is new_marker
+    finally:
+        del template._configured_view_marker
+        template.clear_runtime_caches()
+
+
+def test_configured_view_rejects_incompatible_shared_layer_template(perf_database):
+    from aiconfigurator.sdk import common
+
+    silicon_template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+
+    with pytest.raises(ValueError, match="use get_database_view"):
+        perf_database._get_configured_database_view(silicon_template, common.DatabaseMode.EMPIRICAL)
+
+
+def test_transfer_policy_and_mode_change_clear_global_grid_cache(perf_database):
+    """In-place mode/policy mutation eagerly drops stale/unreachable grids,
+    while no-op setter calls preserve the cache."""
+    from aiconfigurator.sdk import common
+    from aiconfigurator.sdk.operations import util_empirical
+
+    db = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="HYBRID")
+
+    util_empirical._GRID_CACHE["__s1__"] = object()
+    db.set_transfer_policy("conservative")  # != default ALL -> clears
+    assert "__s1__" not in util_empirical._GRID_CACHE
+
+    util_empirical._GRID_CACHE["__s2__"] = object()
+    db.set_transfer_policy("conservative")  # no-op -> preserved
+    assert "__s2__" in util_empirical._GRID_CACHE
+
+    util_empirical._GRID_CACHE["__s3__"] = object()
+    db.set_default_database_mode(common.DatabaseMode.EMPIRICAL)  # != HYBRID -> clears
+    assert "__s3__" not in util_empirical._GRID_CACHE
+    util_empirical._GRID_CACHE.clear()
+
+
 def test_clear_database_runtime_caches_clears_matching_cached_database_once(perf_database):
     class FakeDatabase:
         def __init__(self):

@@ -22,7 +22,11 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
+import numpy as np
+
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
+from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -30,6 +34,80 @@ if TYPE_CHECKING:
     from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+
+
+class _ZeroAwareDeltaLookup:
+    """Preprocessed nearest-neighbour lookup for one immutable delta table.
+
+    The table is retained by strong reference.  Besides keeping its normalized
+    arrays alive, this makes an ``id(table)`` cache key safe from object-id
+    reuse; callers still verify identity before accepting a cached lookup.
+    """
+
+    def __init__(self, table) -> None:
+        self.table = table
+        observations: list[tuple[tuple[float, float], float]] = []
+        for coords, leaf in util_empirical.iter_grid(table, depth=2):
+            latency = util_empirical.leaf_latency(leaf)
+            if latency is not None and latency >= 0:
+                observations.append(((float(coords[0]), float(coords[1])), float(latency)))
+
+        self._coords = np.asarray([coords for coords, _latency in observations], dtype=float)
+        self._latencies = np.asarray([latency for _coords, latency in observations], dtype=float)
+        if not observations:
+            return
+
+        log_coords = np.log(np.maximum(self._coords, 1e-9))
+        self._mins = log_coords.min(axis=0)
+        spans = log_coords.max(axis=0) - self._mins
+        self._spans = np.where(spans > 0, spans, 1.0)
+        self._norm_coords = (log_coords - self._mins) / self._spans
+
+    def estimate(self, query: tuple[float, float], sol_fn) -> float:
+        if not self._latencies.size:
+            raise EmpiricalNotImplementedError(f"No empirical compute_scale delta data is available at query={query}.")
+
+        norm_query = (np.log(np.maximum(np.asarray(query, dtype=float), 1e-9)) - self._mins) / self._spans
+        nearest = int(np.square(self._norm_coords - norm_query).sum(axis=1).argmin())
+        reference_coords = self._coords[nearest]
+        reference_latency = float(self._latencies[nearest])
+
+        util_empirical.note_provenance("empirical")
+        if reference_latency == 0:
+            return 0.0
+
+        reference_sol = sol_fn(*reference_coords)
+        query_sol = sol_fn(*query)
+        if reference_sol <= 0 or query_sol <= 0:
+            raise EmpiricalNotImplementedError(
+                f"No positive SOL reference is available for compute_scale at query={query}."
+            )
+        return query_sol / (reference_sol / reference_latency)
+
+
+def _estimate_zero_aware_delta(
+    table,
+    query: tuple[float, float],
+    sol_fn,
+    cache: dict[int, _ZeroAwareDeltaLookup],
+) -> float:
+    """Estimate a non-negative latency *delta* without discarding zeroes.
+
+    ``compute_scale`` stores ``max(dynamic_quant - static_quant, 0)``.  Zero is
+    therefore a measured, meaningful delta, not a missing/invalid latency.  A
+    normal util grid cannot represent it (``SOL / 0``), and dropping zeroes can
+    make one positive noise sample become the reference for the entire table.
+
+    Select the nearest point on the complete 2-D grid first.  A selected zero
+    stays zero; a positive point still uses frozen utilization so extrapolation
+    scales with the query's amount of work.
+    """
+    key = id(table)
+    lookup = cache.get(key)
+    if lookup is None or lookup.table is not table:
+        lookup = _ZeroAwareDeltaLookup(table)
+        cache[key] = lookup
+    return lookup.estimate(query, sol_fn)
 
 
 class GEMM(Operation):
@@ -50,6 +128,7 @@ class GEMM(Operation):
     _data_cache: ClassVar[dict] = {}
     _compute_scale_cache: ClassVar[dict] = {}
     _scale_matrix_cache: ClassVar[dict] = {}
+    _compute_scale_delta_lookup_cache: ClassVar[dict[int, _ZeroAwareDeltaLookup]] = {}
     _CP_AWARE: ClassVar[bool] = True  # query divides x (token count) by self._seq_split
 
     def __init__(
@@ -172,6 +251,7 @@ class GEMM(Operation):
         cls._data_cache.clear()
         cls._compute_scale_cache.clear()
         cls._scale_matrix_cache.clear()
+        cls._compute_scale_delta_lookup_cache.clear()
         query = cls.__dict__.get("query")
         if query is not None and hasattr(query, "cache_clear"):
             query.cache_clear()
@@ -391,9 +471,25 @@ class GEMM(Operation):
             return sol_time, sol_math, sol_mem
 
         def get_empirical(m_v: int, n_v: int, k_v: int, qm: common.GEMMQuantMode) -> float:
+            # SOL / util, where util is read best-effort from this op's own
+            # collected data; raises EmpiricalNotImplementedError when no data.
             sol_time = get_sol(m_v, n_v, k_v, qm)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
+            tqm = cls._normalize_gemm_quant_mode_for_table(qm)
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._gemm_data
+                wrapper.raise_if_not_loaded()
+                return util_empirical.require_data_slice(wrapper, tqm)  # m -> n -> k -> leaf
+
+            grid = util_empirical.grid_for(
+                ("gemm", database.system, database.backend, database.version, tqm.name),
+                _slice,
+                lambda c: get_sol(c[0], c[1], c[2], qm)[0],
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (m_v, n_v, k_v), grid)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -435,8 +531,6 @@ class GEMM(Operation):
             gemm_data_wrapper.raise_if_not_loaded()
             if table_quant_mode not in gemm_data_wrapper:
                 supported = sorted([q.name for q in gemm_data_wrapper])
-                from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
-
                 raise PerfDataNotAvailableError(
                     "GEMM perf data not available for requested quant mode. "
                     f"system='{database.system}', backend='{database.backend}', version='{database.version}', "
@@ -460,9 +554,7 @@ class GEMM(Operation):
 
             try:
                 result = interpolation.interp_3d(m, n, k, gemm_data, "cubic", database._extracted_metrics_cache)
-            except ValueError as exc:
-                from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
-
+            except interpolation.InterpolationDataNotAvailableError as exc:
                 raise PerfDataNotAvailableError(
                     "GEMM perf data not available for requested shape. "
                     f"system='{database.system}', backend='{database.backend}', version='{database.version}', "
@@ -493,15 +585,31 @@ class GEMM(Operation):
             sol_time = sol_mem
             return sol_time, 0, sol_mem
 
+        table_quant_mode = cls._normalize_gemm_quant_mode_for_table(quant_mode)
+
         def get_empirical(m_v: int, k_v: int) -> float:
-            sol_time = get_sol(m_v, k_v)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
+            # compute_scale is a non-negative latency delta.  Unlike an actual
+            # kernel latency, zero is meaningful and must participate in the
+            # nearest-point decision (see _estimate_zero_aware_delta).
+            try:
+                cls.load_data(database)
+                wrapper = database._compute_scale_data
+                wrapper.raise_if_not_loaded()
+                table = util_empirical.require_data_slice(wrapper, table_quant_mode)
+            except PerfDataNotAvailableError as exc:
+                raise EmpiricalNotImplementedError(
+                    f"No empirical compute_scale data is available for m={m_v}, k={k_v}."
+                ) from exc
+
+            return _estimate_zero_aware_delta(
+                table,
+                (float(m_v), float(k_v)),
+                lambda m_ref, k_ref: get_sol(m_ref, k_ref)[0],
+                cls._compute_scale_delta_lookup_cache,
+            )
 
         if database_mode is None:
             database_mode = database._default_database_mode
-
-        table_quant_mode = cls._normalize_gemm_quant_mode_for_table(quant_mode)
 
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
@@ -571,15 +679,30 @@ class GEMM(Operation):
             sol_time = sol_mem
             return sol_time, 0, sol_mem
 
+        table_quant_mode = cls._normalize_gemm_quant_mode_for_table(quant_mode)
+
         def get_empirical(m_v: int, k_v: int) -> float:
+            # SOL / util, util read best-effort from collected scale_matrix data
+            # (the (m, k) grid for this quant); raises EmpiricalNotImplementedError if none.
             sol_time = get_sol(m_v, k_v)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._scale_matrix_data
+                wrapper.raise_if_not_loaded()
+                return util_empirical.require_data_slice(wrapper, table_quant_mode)
+
+            grid = util_empirical.grid_for(
+                ("scale_matrix", database.system, database.backend, database.version, table_quant_mode.name),
+                _slice,
+                lambda c: get_sol(c[0], c[1])[0],
+                depth=2,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (float(m_v), float(k_v)), grid)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
-
-        table_quant_mode = cls._normalize_gemm_quant_mode_for_table(quant_mode)
 
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
@@ -604,8 +727,10 @@ class GEMM(Operation):
                     f"Supported modes: {supported}"
                 )
             table = scale_matrix_wrapper[table_quant_mode]
-            m_i = int(m)
-            k_i = int(k)
+            m_query = int(m)
+            k_query = int(k)
+            m_i = m_query
+            k_i = k_query
 
             m_keys = sorted(table.keys())
             m_i = max(m_keys[0], min(m_i, m_keys[-1]))
@@ -624,7 +749,21 @@ class GEMM(Operation):
                 k_i = max(k_min, min(k_i, k_max))
 
             result = interpolation.interp_2d_linear(m_i, k_i, table, database._extracted_metrics_cache)
-            return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
+            interpolated = database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
+            if m_i == m_query and k_i == k_query:
+                return interpolated
+
+            # The table is finite, but scale_matrix is a real memory kernel.
+            # Outside its grid, freeze utilization at the clamped boundary
+            # rather than freezing latency: L(q) = L(boundary) * SOL(q)/SOL(boundary).
+            boundary_sol = get_sol(m_i, k_i)[0]
+            query_sol = get_sol(m_query, k_query)[0]
+            ratio = query_sol / boundary_sol
+            return PerformanceResult(
+                latency=float(interpolated) * ratio,
+                energy=interpolated.energy * ratio,
+                source=getattr(interpolated, "source", "silicon"),
+            )
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,
@@ -655,6 +794,7 @@ class GEMM(Operation):
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
         is_fp8_static = quant_mode == common.GEMMQuantMode.fp8_static
+        latency_floor = 0.0
 
         # Query with energy
         result = database.query_gemm(x, self._n, self._k, quant_mode)
@@ -683,13 +823,30 @@ class GEMM(Operation):
             # expose source="estimated" instead of measured silicon.
             source = "estimated"
 
-        # Ensure non-negative latency and energy
-        latency_clamped = max(0.0, latency)
+            # The subtraction leaves a path that still contains the GEMM
+            # (GEMM-only for low-precision input, static-quant + GEMM otherwise).
+            # Independently interpolated component tables can cross, but that
+            # path cannot be faster than the GEMM's own roofline bound. Keep the
+            # physical SOL floor instead of turning a negative residual into 0.
+            latency_floor = float(
+                database.query_gemm(
+                    x,
+                    self._n,
+                    self._k,
+                    quant_mode,
+                    database_mode=common.DatabaseMode.SOL,
+                )
+            )
+
+        # Latency has a physical roofline floor. Energy has no analogous SOL
+        # model here, so retain the existing conservative non-negative clamp
+        # rather than inventing energy when the latency floor fires.
+        latency_clamped = max(latency_floor, latency)
         energy_clamped = max(0.0, energy)
         if latency_clamped != latency or energy_clamped != energy:
             logger.warning(
-                "GEMM.query clamped latency/energy to 0.0. "
-                "op=%s m=%s n=%s k=%s quant_mode=%s post_sub(lat=%.6f, eng=%.6f)",
+                "GEMM.query applied latency SOL floor / non-negative energy clamp. "
+                "op=%s m=%s n=%s k=%s quant_mode=%s post_sub(lat=%.6f, eng=%.6f) floor=%.6f",
                 self._name,
                 x,
                 self._n,
@@ -697,6 +854,7 @@ class GEMM(Operation):
                 quant_mode.name,
                 latency,
                 energy,
+                latency_floor,
             )
 
         latency = latency_clamped

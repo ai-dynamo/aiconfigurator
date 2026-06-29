@@ -93,6 +93,7 @@ def test_clear_all_op_caches_resets_counter_and_class_cache():
     op-class ``_query_*_table`` method invokes ``cls.load_data(database)``
     at the top, so EVERY op class's class cache must be preserved here
     (not just GEMM's)."""
+    from aiconfigurator.sdk.operations import util_empirical
     from aiconfigurator.sdk.operations.base import Operation as _OpBase
     from aiconfigurator.sdk.operations.base import _all_operation_subclasses, clear_all_op_caches
 
@@ -104,6 +105,7 @@ def test_clear_all_op_caches_resets_counter_and_class_cache():
         for attr_name in list(cls.__dict__):
             if attr_name.endswith("_cache") and isinstance(cls.__dict__[attr_name], dict):
                 saved.append((cls, attr_name, dict(cls.__dict__[attr_name])))
+    saved_util_grids = dict(util_empirical._GRID_CACHE)
 
     try:
         sentinel_key = ("/dev/null", "test", "test", "test", False)
@@ -114,13 +116,16 @@ def test_clear_all_op_caches_resets_counter_and_class_cache():
         # clears all three per-class caches, not just ``_data_cache``.
         GEMM._compute_scale_cache[sentinel_key] = "compute-scale-sentinel"
         GEMM._scale_matrix_cache[sentinel_key] = "scale-matrix-sentinel"
+        util_empirical.get_grid("sentinel-util-grid", lambda: util_empirical.UtilGrid([]))
 
         clear_all_op_caches()
 
         assert sentinel_key not in GEMM._data_cache
         assert sentinel_key not in GEMM._compute_scale_cache
         assert sentinel_key not in GEMM._scale_matrix_cache
+        assert "sentinel-util-grid" not in util_empirical._GRID_CACHE
         assert Operation._load_data_call_count.get(GEMM, 0) == 0
     finally:
         for cls, attr_name, contents in saved:
             getattr(cls, attr_name).update(contents)
+        util_empirical._GRID_CACHE.update(saved_util_grids)

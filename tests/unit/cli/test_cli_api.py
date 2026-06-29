@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from aiconfigurator.cli import CLIResult, cli_exp, cli_generate
+from aiconfigurator.sdk import common
 
 pytestmark = pytest.mark.unit
 
@@ -28,31 +29,28 @@ class TestCLIEstimateUnit:
         latest_calls = []
         database_calls = []
 
-        class FakeDatabase:
-            def set_default_database_mode(self, mode):
-                self.mode = mode
-
         def fake_latest_version(system, backend, systems_paths=None):
             latest_calls.append((system, backend, systems_paths))
             return "estimate"
 
-        def fake_get_database(
+        def fake_get_database_view(
             system,
             backend,
             version,
             systems_paths=None,
             allow_missing_data=False,
             database_mode=None,
+            transfer_policy=None,
         ):
             database_calls.append((system, backend, version, systems_paths, allow_missing_data, database_mode))
-            return FakeDatabase()
+            return object()
 
         def fake_run_agg_estimate(**kwargs):
             kwargs["load_database"](kwargs["system_name"])
             return kwargs["resolved_version"]
 
         monkeypatch.setattr(perf_database, "get_latest_database_version", fake_latest_version)
-        monkeypatch.setattr(perf_database, "get_database", fake_get_database)
+        monkeypatch.setattr(perf_database, "get_database_view", fake_get_database_view)
         monkeypatch.setattr(api, "_run_agg_estimate", fake_run_agg_estimate)
 
         result = api.cli_estimate(
@@ -78,16 +76,19 @@ class TestCLIEstimateUnit:
 
         database_calls = []
 
-        class FakeDatabase:
-            def set_default_database_mode(self, mode):
-                self.mode = mode
-
         def fake_latest_version(system, backend):
             return {"h200_sxm": "prefill-version", "h100_pcie": None}[system]
 
-        def fake_get_database(system, backend, version, allow_missing_data=False, database_mode=None):
+        def fake_get_database_view(
+            system,
+            backend,
+            version,
+            allow_missing_data=False,
+            database_mode=None,
+            transfer_policy=None,
+        ):
             database_calls.append((system, backend, version, allow_missing_data, database_mode))
-            return FakeDatabase()
+            return object()
 
         def fake_run_disagg_estimate(**kwargs):
             kwargs["load_database"](kwargs["system_name"])
@@ -95,7 +96,7 @@ class TestCLIEstimateUnit:
             return kwargs["resolved_version"]
 
         monkeypatch.setattr(perf_database, "get_latest_database_version", fake_latest_version)
-        monkeypatch.setattr(perf_database, "get_database", fake_get_database)
+        monkeypatch.setattr(perf_database, "get_database_view", fake_get_database_view)
         monkeypatch.setattr(api, "_run_disagg_estimate", fake_run_disagg_estimate)
 
         result = api.cli_estimate(
@@ -113,6 +114,54 @@ class TestCLIEstimateUnit:
         assert result == "prefill-version-estimate"
         assert ("h200_sxm", "trtllm", "prefill-version", True, "SOL") in database_calls
         assert ("h100_pcie", "trtllm", "estimate", True, "SOL") in database_calls
+
+    def test_database_mode_and_transfer_policy_do_not_leak_between_calls(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+        import aiconfigurator.sdk.perf_database as perf_database
+
+        class FakeDatabase:
+            def __init__(self, mode, transfer_policy):
+                self.mode = mode
+                self.transfer_policy = common.resolve_transfer_policy(transfer_policy)
+
+        def fake_get_database_view(*args, database_mode=None, transfer_policy=None, **kwargs):
+            mode = (
+                database_mode if isinstance(database_mode, common.DatabaseMode) else common.DatabaseMode[database_mode]
+            )
+            return FakeDatabase(mode, transfer_policy)
+
+        monkeypatch.setattr(perf_database, "get_database_view", fake_get_database_view)
+        monkeypatch.setattr(api, "_run_agg_estimate", lambda **kwargs: kwargs["load_database"]("h200_sxm"))
+
+        hybrid_off = api.cli_estimate(
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            mode="agg",
+            backend_version="test",
+            database_mode="HYBRID",
+            transfer_policy="off",
+        )
+        silicon_default = api.cli_estimate(
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            mode="agg",
+            backend_version="test",
+            database_mode="SILICON",
+        )
+        hybrid_default = api.cli_estimate(
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            mode="agg",
+            backend_version="test",
+            database_mode="HYBRID",
+        )
+
+        assert hybrid_off.mode is common.DatabaseMode.HYBRID
+        assert hybrid_off.transfer_policy == frozenset()
+        assert silicon_default.mode is common.DatabaseMode.SILICON
+        assert silicon_default.transfer_policy == common.ALL_TRANSFERS
+        assert hybrid_default.mode is common.DatabaseMode.HYBRID
+        assert hybrid_default.transfer_policy == common.ALL_TRANSFERS
 
 
 class TestCLIExpUnit:

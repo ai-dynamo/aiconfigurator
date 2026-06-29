@@ -296,7 +296,12 @@ Data Source Breakdown (per-op)
 ```
 
 ### Support mode (optional)
-This is an optional pre-flight check to verify if AIConfigurator supports a specific model and hardware combination for both aggregated and disaggregated serving modes. You can skip this and run `cli default` directly. Support is determined by a majority-vote of tests in the support matrix for models sharing the same architecture.
+This is an optional pre-flight check to verify whether collected SILICON data supports a
+specific model and hardware combination for both aggregated and disaggregated serving
+modes. You can skip this and run `cli default` directly. `PASS` rows count as support;
+`HYBRID_PASS` rows are reported separately as empirical estimability and do not make the
+default SILICON support check pass. For unlisted models, support is determined by a
+majority vote of SILICON results for models sharing the same architecture.
 
 ```bash
 aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm

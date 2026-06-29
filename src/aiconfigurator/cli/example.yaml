@@ -46,6 +46,10 @@ agg_full:
   tpot: 40.0
   total_gpus: 8
   database_mode: SILICON
+  # Fine-grained HYBRID/EMPIRICAL transfer control (ignored in SILICON). Preset
+  # off|conservative|balanced|aggressive, or comma-separated kinds
+  # (xshape,xquant,xprofile,xop). Default: all kinds on.
+  transfer_policy: aggressive
 
   # Worker spec
   model_path: deepseek-ai/DeepSeek-V3

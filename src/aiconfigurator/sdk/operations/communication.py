@@ -28,9 +28,12 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
+from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -133,9 +136,37 @@ class CustomAllReduce(Operation):
             return sol_time * 1000, 0, 0
 
         def get_empirical(quant_mode: common.CommQuantMode, tp_size: int, size: int) -> float:
-            latency = get_sol(quant_mode, tp_size, size)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
+            # Data-calibrated: util = SOL/measured read from the collected
+            # custom_allreduce curve (smooth in message size), reconstructed with
+            # this query's SOL. Falls back to the legacy 1/0.8 constant when the
+            # slice has no data. SOL uses the real tp_size; the util grid is built
+            # from the effective (node-capped) tp slice, so SOL ratio carries any
+            # multi-node bandwidth scaling.
+            sol_q = get_sol(quant_mode, tp_size, size)[0]
+            if tp_size <= 1 or sol_q <= 0:
+                return sol_q
+            eff = min(tp_size, database.system_spec["node"]["num_gpus_per_node"])
+
+            def _slice():
+                cls.load_data(database)
+                dw = database._custom_allreduce_data
+                dw.raise_if_not_loaded()
+                return util_empirical.require_data_slice(dw, quant_mode, eff, "AUTO")
+
+            grid = util_empirical.grid_for(
+                ("custom_allreduce", database.system, database.backend, database.version, quant_mode.value.name, eff),
+                _slice,
+                lambda c: get_sol(quant_mode, eff, int(c[0]))[0],
+                depth=1,
+            )
+            # Compatibility exception: rank-count overflow still borrows the
+            # node-boundary utilization even when XSHAPE is disabled, because
+            # rejecting it would remove support for common multi-node configs.
+            # TODO(#1260): define a strict policy where an unmeasured TP count
+            # fails accurately without regressing default model coverage.
+            prov = "xshape" if eff != tp_size else "empirical"
+            latency, _ = util_empirical.estimate(sol_q, (float(size),), grid, provenance=prov)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -341,6 +372,15 @@ class NCCL(Operation):
     ):
         """Query NCCL table. Verbatim port of the legacy body."""
 
+        def require_nccl_bucket(node: object, description: str) -> Mapping:
+            if not isinstance(node, Mapping):
+                raise TypeError(
+                    f"Malformed NCCL performance data for {description}: expected a mapping, got {type(node).__name__}."
+                )
+            if not node:
+                raise PerfDataNotAvailableError(f"No NCCL performance data for {description}.")
+            return node
+
         def get_sol(
             dtype: common.CommQuantMode, num_gpus: int, operation: str, message_size: int
         ) -> tuple[float, float, float]:
@@ -354,9 +394,51 @@ class NCCL(Operation):
             return sol_time, 0, sol_time
 
         def get_empirical(dtype: common.CommQuantMode, num_gpus: int, operation: str, message_size: int) -> float:
-            latency = get_sol(dtype, num_gpus, operation, message_size)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
+            # Data-calibrated: util = SOL/measured read from the collected NCCL
+            # curve for this (dtype, operation, num_gpus) slice, reconstructed with
+            # this query's SOL. Falls back to the legacy 1/0.8 constant when no
+            # data. The grid is built from the available (capped) num_gpus slice;
+            # SOL uses the real num_gpus so the SOL ratio carries scaling beyond
+            # the largest collected num_gpus.
+            sol_q = get_sol(dtype, num_gpus, operation, message_size)[0]
+            if num_gpus <= 1 or sol_q <= 0:
+                return sol_q  # no communication for a single rank -> 0, not a data gap
+            cls.load_data(database)
+            src = database._nccl_data
+            if not src.loaded and database._oneccl_data is not None and database._oneccl_data.loaded:
+                src = database._oneccl_data
+            if not src.loaded:
+                raise EmpiricalNotImplementedError(
+                    f"No NCCL data to estimate {operation} ({dtype.value.name}, num_gpus={num_gpus})."
+                )
+            try:
+                by_op = require_nccl_bucket(
+                    util_empirical.require_data_slice(src, dtype, operation),
+                    f"dtype={dtype.value.name}, operation={operation!r}",
+                )
+                eff = min(num_gpus, max(by_op.keys()))
+            except PerfDataNotAvailableError as exc:
+                raise EmpiricalNotImplementedError(
+                    f"No NCCL data for operation {operation!r} ({dtype.value.name}, num_gpus={num_gpus})."
+                ) from exc
+
+            def _slice():
+                return util_empirical.require_data_slice(by_op, eff)
+
+            grid = util_empirical.grid_for(
+                ("nccl", database.system, database.backend, database.version, dtype.value.name, operation, eff),
+                _slice,
+                lambda c: get_sol(dtype, eff, operation, int(c[0]))[0],
+                depth=1,
+            )
+            # Compatibility exception: rank-count overflow still borrows the
+            # largest collected utilization even when XSHAPE is disabled,
+            # preserving the existing NCCL boundary-correction coverage.
+            # TODO(#1260): define a strict policy where an unmeasured GPU count
+            # fails accurately without regressing default model coverage.
+            prov = "xshape" if eff != num_gpus else "empirical"
+            latency, _ = util_empirical.estimate(sol_q, (float(message_size),), grid, provenance=prov)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -381,8 +463,16 @@ class NCCL(Operation):
                 nccl_source = database._oneccl_data
             nccl_source.raise_if_not_loaded()
 
-            max_num_gpus = max(nccl_source[dtype][operation].keys())
-            nccl_dict = nccl_source[dtype][operation][min(num_gpus, max_num_gpus)]
+            by_num_gpus = require_nccl_bucket(
+                util_empirical.require_data_slice(nccl_source, dtype, operation),
+                f"dtype={dtype.value.name}, operation={operation!r}",
+            )
+            max_num_gpus = max(by_num_gpus.keys())
+            effective_num_gpus = min(num_gpus, max_num_gpus)
+            nccl_dict = require_nccl_bucket(
+                util_empirical.require_data_slice(by_num_gpus, effective_num_gpus),
+                f"dtype={dtype.value.name}, operation={operation!r}, num_gpus={effective_num_gpus}",
+            )
             size_left, size_right = interpolation.nearest_1d_point_helper(
                 message_size,
                 list(nccl_dict.keys()),

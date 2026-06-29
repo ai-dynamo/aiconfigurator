@@ -235,6 +235,15 @@ def _add_default_mode_arguments(parser):
         "for models released after the last silicon data collection. "
         "EMPIRICAL: SOL+empirical factor only. SOL: theoretical Speed-of-Light only.",
     )
+    parser.add_argument(
+        "--transfer-policy",
+        type=str,
+        default=None,
+        help="Fine-grained HYBRID/EMPIRICAL transfer control: which empirical transfer kinds "
+        "may fill missing data. A preset (off|conservative|balanced|aggressive) or a "
+        "comma-separated list of kinds (xshape,xquant,xprofile,xop). "
+        "Default: all kinds enabled. Ignored in SILICON mode.",
+    )
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length. Default: 4000.")
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length. Default: 1000.")
     parser.add_argument(
@@ -771,6 +780,15 @@ def _add_estimate_mode_arguments(parser):
         "EMPIRICAL: SOL+empirical factor only. SOL: theoretical Speed-of-Light only.",
     )
     parser.add_argument(
+        "--transfer-policy",
+        type=str,
+        default=None,
+        help="Fine-grained HYBRID/EMPIRICAL transfer control: which empirical transfer kinds "
+        "may fill missing data. A preset (off|conservative|balanced|aggressive) or a "
+        "comma-separated list of kinds (xshape,xquant,xprofile,xop). "
+        "Default: all kinds enabled. Ignored in SILICON mode.",
+    )
+    parser.add_argument(
         "--detail",
         type=str,
         default=None,
@@ -1099,6 +1117,7 @@ def build_default_tasks(
     backend: str = "trtllm",
     backend_version: str | None = None,
     database_mode: str = "SILICON",
+    transfer_policy: str | list | None = None,
     isl: int = 4000,
     osl: int = 1000,
     image_height: int = 0,
@@ -1255,6 +1274,7 @@ def build_default_tasks(
         "request_latency": request_latency,
         "total_gpus": total_gpus,
         "database_mode": database_mode,
+        "transfer_policy": transfer_policy,
         "free_gpu_memory_fraction": free_gpu_memory_fraction,
         "max_seq_len": max_seq_len,
         "engine_step_backend": engine_step_backend,
@@ -1960,6 +1980,7 @@ def _run_estimate_mode(args):
         backend_name=args.backend,
         backend_version=args.backend_version,
         database_mode=args.database_mode,
+        transfer_policy=args.transfer_policy,
         isl=args.isl,
         osl=args.osl,
         image_height=args.image_height,
@@ -2271,6 +2292,7 @@ def main(args):
             backend=args.backend,
             backend_version=args.backend_version,
             database_mode=args.database_mode,
+            transfer_policy=args.transfer_policy,
             isl=args.isl,
             osl=args.osl,
             image_height=args.image_height,

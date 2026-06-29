@@ -7,7 +7,14 @@ import pytest
 
 from aiconfigurator.sdk import common
 from tools.support_matrix import support_matrix as support_matrix_module
-from tools.support_matrix.support_matrix import STATUS_PASS, SupportMatrix, TestConstraints
+from tools.support_matrix.compare_support_matrix import check_csv_sanity, read_csv
+from tools.support_matrix.support_matrix import (
+    STATUS_FAIL,
+    STATUS_HYBRID_PASS,
+    STATUS_PASS,
+    SupportMatrix,
+    TestConstraints,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -50,6 +57,69 @@ def test_save_results_to_csv_writes_manifest_in_display_order(tmp_path):
         "a100_sxm.csv",
         "b60.csv",
     ]
+
+
+def test_save_results_to_csv_upgrades_legacy_rows_to_valid_current_schema(tmp_path):
+    silicon_command = (
+        "uv run aiconfigurator cli default --model-path test/model-9col --total-gpus 8 "
+        "--system b200_sxm --backend trtllm --backend-version 1.0.0 "
+        "--database-mode SILICON --isl 256 --osl 256 --prefix 0 --ttft 2000 --tpot 50 --top-n 1 --no-color"
+    )
+    results = [
+        # Legacy 8-column PASS: command and Source are both upgraded.
+        ("test/model-8col", "TestArchitecture", "b200_sxm", "trtllm", "1.0.0", "agg", STATUS_PASS, None),
+        # Legacy 9-column PASS: preserve its command and infer Source=silicon.
+        (
+            "test/model-9col",
+            "TestArchitecture",
+            "b200_sxm",
+            "trtllm",
+            "1.0.0",
+            "agg",
+            STATUS_PASS,
+            None,
+            silicon_command,
+        ),
+        # Non-pass legacy rows remain source-less in the current schema.
+        (
+            "test/model-fail",
+            "TestArchitecture",
+            "b200_sxm",
+            "trtllm",
+            "1.0.0",
+            "agg",
+            STATUS_FAIL,
+            "expected failure",
+            silicon_command.replace("test/model-9col", "test/model-fail"),
+        ),
+    ]
+    output_file = tmp_path / "support.csv"
+    support_matrix = SupportMatrix.__new__(SupportMatrix)
+
+    support_matrix.save_results_to_csv(results, str(output_file))
+    header, rows = read_csv(str(output_file))
+
+    assert [row[9] for row in rows] == ["silicon", "silicon", ""]
+    assert rows[1][8] == silicon_command
+    assert check_csv_sanity(header, rows) == []
+
+
+def test_save_results_to_csv_rejects_legacy_hybrid_pass_without_source(tmp_path):
+    row = (
+        "test/hybrid",
+        "TestArchitecture",
+        "b200_sxm",
+        "trtllm",
+        "1.0.0",
+        "agg",
+        STATUS_HYBRID_PASS,
+        None,
+        "uv run aiconfigurator cli default --database-mode HYBRID",
+    )
+    support_matrix = SupportMatrix.__new__(SupportMatrix)
+
+    with pytest.raises(ValueError, match="cannot be upgraded without an explicit empirical Source"):
+        support_matrix.save_results_to_csv([row], str(tmp_path / "support.csv"))
 
 
 def test_task_uses_silicon_database_mode(monkeypatch):

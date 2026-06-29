@@ -32,6 +32,7 @@ _MOE_MODEL_FAMILIES = {
     "HYBRIDMOE",
     "QWEN3VL_MOE",
     "GEMMA4MIX",
+    "MINIMAXM3",
 }
 
 

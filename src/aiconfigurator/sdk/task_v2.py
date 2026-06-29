@@ -343,6 +343,10 @@ class Task:
     request_latency: float | None = None
     total_gpus: int | None = None
     database_mode: str | None = None
+    # Fine-grained HYBRID/EMPIRICAL transfer control: which empirical transfer kinds are
+    # permitted (see common.TransferKind). None = all (default). Accepts a preset name
+    # ("conservative"/"balanced"/"aggressive"/"off"), a kind ("xshape"), or a list thereof.
+    transfer_policy: str | list | None = None
     free_gpu_memory_fraction: float | None = None
     max_seq_len: int | None = None
     engine_step_backend: str | None = None
@@ -1234,7 +1238,36 @@ class Task:
         else:
             ctx_op, gen_op = "context_attention", "generation_attention"
 
-        def _check(op: str, mode: Any) -> None:
+        # supported_quant_mode is a DATA-PRESENCE list (which quants the DB carries
+        # tables for), not a backend-capability list. In SILICON that equals what we
+        # can model. In HYBRID/EMPIRICAL the MoE util-empirical path can synthesize a
+        # quant from a collected quant that shares its (memory, compute) profile
+        # (XQUANT cross-quant transfer, see operations/moe.py) -- only MoE implements
+        # this, so only MoE relaxes. Truly-unreachable quants (no same-profile data)
+        # still fail early here rather than crashing late in the sweep.
+        # Admission via the XQUANT cross-quant transfer only holds if (a) we're in a
+        # non-SILICON mode AND (b) the resolved transfer policy actually enables XQUANT.
+        # Otherwise operations/moe.py rejects the quant at query time by policy, so
+        # validate must not pre-admit it (e.g. transfer_policy="off"/"conservative").
+        xquant_enabled = self.database_mode not in (
+            None,
+            common.DatabaseMode.SILICON.name,
+        ) and common.TransferKind.XQUANT in common.resolve_transfer_policy(self.transfer_policy)
+
+        def _profile_reachable(mode: Any, supported_names: list) -> bool:
+            enum_cls = type(mode)
+            val = getattr(mode, "value", None)
+            qp = (getattr(val, "memory", None), getattr(val, "compute", None))
+            for nm in supported_names:
+                try:
+                    other = enum_cls[nm].value
+                except (KeyError, AttributeError):
+                    continue
+                if (getattr(other, "memory", None), getattr(other, "compute", None)) == qp:
+                    return True
+            return False
+
+        def _check(op: str, mode: Any, *, profile_transfer: bool = False) -> None:
             if mode is None:
                 return
             modes = supported.get(op, []) or []
@@ -1243,6 +1276,8 @@ class Task:
             name = mode.name if hasattr(mode, "name") else str(mode)
             if name in modes:
                 return
+            if profile_transfer and xquant_enabled and _profile_reachable(mode, modes):
+                return  # transfer-reachable in HYBRID/EMPIRICAL with XQUANT enabled
             exc_type = UnsupportedWideepConfigError if op.startswith("wideep_") else ValueError
             raise exc_type(
                 f"Unsupported {op} quant mode {name!r} for system={system!r}, "
@@ -1259,11 +1294,11 @@ class Task:
             if backend == "sglang" and moe_backend == "deepep_moe":
                 # WideEP MoE: per-phase op keys (raises UnsupportedWideepConfigError).
                 if validate_context:
-                    _check("wideep_context_moe", moe_mode)
+                    _check("wideep_context_moe", moe_mode, profile_transfer=True)
                 if validate_generation:
-                    _check("wideep_generation_moe", moe_mode)
+                    _check("wideep_generation_moe", moe_mode, profile_transfer=True)
             else:
-                _check("moe", moe_mode)
+                _check("moe", moe_mode, profile_transfer=True)
 
         # FMHA: only meaningful for context-using workers (agg, prefill).
         if validate_context:
@@ -1412,21 +1447,20 @@ class Task:
 
     def _load_database(self, system: str, backend: str, version: str):
         """Load the perf DB honoring database_mode (SILICON/HYBRID/EMPIRICAL). Non-SILICON
-        modes allow missing measured data; the db's DEFAULT mode is also switched so
-        predictions actually use SOL/empirical (the get_database arg only drives shared-layer
-        loading -- the prediction behaviour is set via set_default_database_mode). Mirrors
-        v1 _get_database."""
-        from aiconfigurator.sdk.perf_database import get_database
+        modes allow missing measured data. Returns an immutable, configuration-scoped
+        lightweight view so mode and transfer policy cannot mutate the process-cached
+        data template."""
+        from aiconfigurator.sdk.perf_database import get_database_view
 
         allow_missing = self.database_mode is not None and self.database_mode != common.DatabaseMode.SILICON.name
-        db = get_database(system, backend, version, allow_missing_data=allow_missing, database_mode=self.database_mode)
-        if db is not None and self.database_mode is not None:
-            mode = common.DatabaseMode[self.database_mode]
-            if mode != db.get_default_database_mode():
-                # set_default_database_mode mutates; copy so the module-cached db isn't polluted.
-                db = copy.deepcopy(db)
-                db.set_default_database_mode(mode)
-        return db
+        return get_database_view(
+            system,
+            backend,
+            version,
+            allow_missing_data=allow_missing,
+            database_mode=self.database_mode,
+            transfer_policy=self.transfer_policy,
+        )
 
     def run(self, *, autoscale: bool = False, validate: bool = True):
         """Run the sweep and return a feasible-candidate DataFrame.

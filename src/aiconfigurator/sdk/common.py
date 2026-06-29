@@ -337,6 +337,20 @@ class SupportResult:
         return iter((self.agg_supported, self.disagg_supported))
 
 
+def _is_silicon_support_row(row: dict[str, str]) -> bool:
+    """Return whether a matrix row proves support from collected SILICON data.
+
+    ``Source`` is optional for compatibility with legacy matrices.  During the
+    transition to the explicit ``HYBRID_PASS`` status, reject old rows that used
+    ``PASS`` together with an empirical/transfer source.
+    """
+    if row.get("Status") != "PASS":
+        return False
+    # Legacy 8/9-column matrices have no Source key. Current 10-column rows do,
+    # and must identify collected silicon explicitly rather than with an empty cell.
+    return "Source" not in row or row.get("Source") == "silicon"
+
+
 def check_support(
     model: str,
     system: str,
@@ -383,8 +397,8 @@ def check_support(
 
     if exact_matches:
         return SupportResult(
-            agg_supported=any(row["Status"] == "PASS" for row in exact_matches if row["Mode"] == "agg"),
-            disagg_supported=any(row["Status"] == "PASS" for row in exact_matches if row["Mode"] == "disagg"),
+            agg_supported=any(_is_silicon_support_row(row) for row in exact_matches if row["Mode"] == "agg"),
+            disagg_supported=any(_is_silicon_support_row(row) for row in exact_matches if row["Mode"] == "disagg"),
             exact_match=True,
         )
 
@@ -403,8 +417,8 @@ def check_support(
         and row["Status"] != "HW_INCOMPATIBLE"
     ]
 
-    agg_results = [row["Status"] == "PASS" for row in arch_matches if row["Mode"] == "agg"]
-    disagg_results = [row["Status"] == "PASS" for row in arch_matches if row["Mode"] == "disagg"]
+    agg_results = [_is_silicon_support_row(row) for row in arch_matches if row["Mode"] == "agg"]
+    disagg_results = [_is_silicon_support_row(row) for row in arch_matches if row["Mode"] == "disagg"]
 
     def is_majority_pass(results: list[bool]) -> bool:
         # We use majority vote to infer support for an untested model of a known architecture.
@@ -432,7 +446,7 @@ def get_supported_architectures() -> set[str]:
         set[str]: Set of architecture names that have at least one PASSing configuration.
     """
     matrix = get_support_matrix()
-    return {row["Architecture"] for row in matrix if row["Status"] == "PASS"}
+    return {row["Architecture"] for row in matrix if _is_silicon_support_row(row)}
 
 
 @cache
@@ -501,6 +515,7 @@ DefaultHFModels = {
     "nvidia/MiniMax-M2.5-NVFP4",
     "MiniMaxAI/MiniMax-M2.7",
     "nvidia/MiniMax-M2.7-NVFP4",
+    "MiniMaxAI/MiniMax-M3",
     # GPT-OSS Models
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
@@ -564,6 +579,7 @@ ModelFamily = {
     "QWEN3VL",
     "QWEN3VL_MOE",
     "GEMMA4MIX",
+    "MINIMAXM3",
 }
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
@@ -586,6 +602,8 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Qwen2MoeForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
     "MiniMaxM2ForCausalLM": "MOE",
+    "MiniMaxM3ForCausalLM": "MINIMAXM3",
+    "MiniMaxM3SparseForConditionalGeneration": "MINIMAXM3",
     "MiMoV2FlashForCausalLM": "HYBRIDMOE",
     "Llama4ForConditionalGeneration": "HYBRIDMOE",
     "Qwen3_5ForConditionalGeneration": "QWEN35",
@@ -603,6 +621,7 @@ MULTIMODAL_TEXT_CONFIG_KEY = {
     "Gemma4ForConditionalGeneration": "text_config",
     "Qwen3VLForConditionalGeneration": "text_config",
     "Qwen3VLMoeForConditionalGeneration": "text_config",
+    "MiniMaxM3SparseForConditionalGeneration": "text_config",
 }
 
 """
@@ -871,6 +890,68 @@ class DatabaseMode(Enum):
     EMPIRICAL = 2  # SOL+empirical factor
     SOL = 3  # Provide SOL time only
     SOL_FULL = 4  # Provide SOL time and details
+
+
+class TransferKind(Enum):
+    """A way the empirical path may borrow utilisation when an op's own slice has no
+    data. Each kind is independently enabled/disabled by a transfer policy, so HYBRID/
+    EMPIRICAL coverage can be tuned (and the kind that fired is the result's provenance).
+    Roughly ordered by decreasing confidence."""
+
+    XSHAPE = "xshape"  # cross-shape within the SAME quant (nearest collected config)
+    XQUANT = "xquant"  # cross-quant within the SAME (memory, compute) profile
+    XPROFILE = "xprofile"  # cross-quant across profiles (rescaled by a util-level ratio)
+    XOP = "xop"  # cross-op (borrow a related op's util, e.g. MSA<-DSA, via util_scale)
+
+
+# All transfer kinds enabled — the default HYBRID/EMPIRICAL behaviour (backward compatible).
+ALL_TRANSFERS: frozenset[TransferKind] = frozenset(TransferKind)
+
+# Named presets along the confidence ladder, for a simple external surface.
+TRANSFER_PRESETS: dict[str, frozenset[TransferKind]] = {
+    "off": frozenset(),
+    "conservative": frozenset({TransferKind.XSHAPE}),
+    "balanced": frozenset({TransferKind.XSHAPE, TransferKind.XQUANT}),
+    "aggressive": ALL_TRANSFERS,
+}
+
+
+def resolve_transfer_policy(spec) -> frozenset[TransferKind]:
+    """Normalise an external transfer-policy spec into a frozenset of TransferKind.
+
+    Accepts: None (-> ALL_TRANSFERS), a preset name, a TransferKind, or any iterable of
+    those (names or TransferKind). Unknown names raise ValueError so a typo surfaces."""
+    if spec is None:
+        return ALL_TRANSFERS
+    if isinstance(spec, TransferKind):
+        return frozenset({spec})
+    if isinstance(spec, str):
+        key = spec.strip().lower()
+        if key in TRANSFER_PRESETS:
+            return TRANSFER_PRESETS[key]
+        if "," in key:  # comma-separated kinds/presets from CLI/YAML, e.g. "xshape,xquant"
+            return resolve_transfer_policy([t for t in (p.strip() for p in key.split(",")) if t])
+        return frozenset({_transfer_kind_from_token(key)})
+    out: set[TransferKind] = set()
+    for item in spec:
+        if isinstance(item, TransferKind):
+            out.add(item)
+        else:
+            token = str(item).strip().lower()
+            if token in TRANSFER_PRESETS:
+                out |= TRANSFER_PRESETS[token]
+            else:
+                out.add(_transfer_kind_from_token(token))
+    return frozenset(out)
+
+
+def _transfer_kind_from_token(token: str) -> TransferKind:
+    for kind in TransferKind:
+        if kind.value == token:
+            return kind
+    valid = ", ".join(sorted(k.value for k in TransferKind))
+    presets = ", ".join(sorted(TRANSFER_PRESETS))
+    raise ValueError(f"unknown transfer kind/preset {token!r}; valid kinds: {valid}; presets: {presets}")
 
 
 class BackendName(Enum):

@@ -6,6 +6,7 @@ from __future__ import annotations
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.models.base import BaseModel, register_model
+from aiconfigurator.sdk.models.helpers import calc_expectation
 
 
 @register_model("NEMOTRONH")
@@ -47,13 +48,32 @@ class NemotronHModel(BaseModel):
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
-        assert self._nextn == 0, "NemotronH does not support mtp"
-
         self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
         self._hybrid_config: common.NemotronHConfig | None = None
         self._power_law_alpha = 1.01  # follow DeepSeek MoE
+        # MTP (num_nextn_predict_layers > 0): scale generation by the accepted-token
+        # speedup 1/(1+E[accept]) and the small extra-layer factor (nextn+L)/L, the
+        # same first-order model as DeepSeek. nextn == 0 -> factor 1.0 (exact no-op, so
+        # non-MTP NemotronH is unchanged).
+        #
+        # APPROXIMATION (intentional, hybrid architecture). NemotronH is a mixed
+        # Mamba / attention / MoE stack (e.g. Ultra-550B = 48 mamba + 48 moe + 12
+        # attention over 108 layers) and its MTP block is attention+moe -- NOT the
+        # dominant Mamba layer type. DeepSeek's uniform (nextn+L)/L is exact there only
+        # because every layer is homogeneous (attn+MoE). Here we still spread that term
+        # uniformly over all layer-type groups, so the extra MTP-block cost is slightly
+        # mis-attributed: we add a little fake Mamba and under-count the real attn+moe
+        # MTP block. This is bounded by ~1/L of one layer's cost (<1% of TPOT for these
+        # deep models), and the dominant, exactly-correct term is the 1/(1+E[accept])
+        # speedup. Not worth modeling an explicit attn+moe MTP block for sub-1% gain.
+        self._mtp_scale_factor = (
+            1.0
+            / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
+            * (self._nextn + self._num_layers)
+            / self._num_layers
+        )
 
     def set_hybrid_config(self, hybrid_config: common.NemotronHConfig) -> None:
         """
@@ -396,11 +416,12 @@ class NemotronHModel(BaseModel):
         self.generation_ops = []
 
         # Embedding
-        self.generation_ops.append(ops.Embedding("generation_embedding", 1, self._vocab_size, h, 0.3))
+        mtp = self._mtp_scale_factor
+        self.generation_ops.append(ops.Embedding("generation_embedding", 1 * mtp, self._vocab_size, h, 0.3))
 
         # Mamba layers (M): norm, in_proj GEMM, conv1d, ssm, out_proj GEMM, ar
         if layer_counts["M"] > 0:
-            count = layer_counts["M"]
+            count = layer_counts["M"] * mtp
             nheads_per_gpu = cfg.mamba_num_heads // tp_size
             d_inner_per_gpu = nheads_per_gpu * cfg.mamba_head_dim
             n_groups_per_gpu = cfg.n_groups // tp_size
@@ -454,7 +475,7 @@ class NemotronHModel(BaseModel):
 
         # Transformer layers (*)
         if layer_counts["*"] > 0:
-            count = layer_counts["*"]
+            count = layer_counts["*"] * mtp
             self.generation_ops.extend(
                 [
                     ops.ElementWise("generation_attn_norm", count, 2 * h, 2 * h, 0.8),
@@ -487,7 +508,7 @@ class NemotronHModel(BaseModel):
 
         # MoE layers (E)
         if layer_counts["E"] > 0:
-            count = layer_counts["E"]
+            count = layer_counts["E"] * mtp
             # Latent-MoE (e.g. Nemotron-3-Super): experts run on a compressed
             # `moe_latent_size` projection of hidden_states. Shared expert and the
             # router still operate on hidden_size.
@@ -610,7 +631,7 @@ class NemotronHModel(BaseModel):
 
         # MLP layers (-)
         if layer_counts["-"] > 0:
-            count = layer_counts["-"]
+            count = layer_counts["-"] * mtp
             # NemotronH MLP is non-gated: up_proj -> relu2 -> down_proj
             # See TensorRT-LLM modeling_nemotron_h.py NemotronHMLP class
             self.generation_ops.extend(
@@ -643,13 +664,13 @@ class NemotronHModel(BaseModel):
 
         # P2P communication for PP
         pp_scale_factor = pp_size - 1
-        self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor, h, pp_size))
+        self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * mtp, h, pp_size))
 
         # Logits GEMM
         self.generation_ops.append(
             ops.GEMM(
                 "generation_logits_gemm",
-                1,
+                1 * mtp,
                 self._vocab_size // tp_size,
                 h,
                 common.GEMMQuantMode.bfloat16,

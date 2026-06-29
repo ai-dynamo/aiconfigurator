@@ -2,12 +2,61 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from types import SimpleNamespace
 
 import pytest
 
 from aiconfigurator.sdk import common, interpolation
 
 pytestmark = pytest.mark.unit
+
+
+class _LoadedMapping(dict):
+    def raise_if_not_loaded(self):
+        return None
+
+
+@pytest.mark.parametrize("phase", ["context", "generation"])
+def test_headsize_reference_grid_only_swallows_typed_coverage_misses(monkeypatch, phase):
+    from aiconfigurator.sdk.operations.attention import (
+        ContextAttention,
+        GenerationAttention,
+        _ctx_headsize_ref_grid,
+        _gen_headsize_ref_grid,
+    )
+
+    if phase == "context":
+        monkeypatch.setattr(ContextAttention, "load_data", classmethod(lambda cls, database: None))
+        helper = lambda database: _ctx_headsize_ref_grid(
+            database,
+            common.FMHAQuantMode.bfloat16,
+            common.KVCacheQuantMode.bfloat16,
+            0,
+            256,
+            0,
+            lambda *args: (1.0, 1.0, 1.0),
+        )
+        attr_name = "_context_attention_data"
+        malformed = {common.FMHAQuantMode.bfloat16: []}
+    else:
+        monkeypatch.setattr(GenerationAttention, "load_data", classmethod(lambda cls, database: None))
+        helper = lambda database: _gen_headsize_ref_grid(
+            database,
+            common.KVCacheQuantMode.bfloat16,
+            0,
+            256,
+            0,
+            lambda *args: (1.0, 1.0, 1.0),
+        )
+        attr_name = "_generation_attention_data"
+        malformed = {common.KVCacheQuantMode.bfloat16: []}
+
+    missing_database = SimpleNamespace(**{attr_name: _LoadedMapping()})
+    assert helper(missing_database) == (None, None)
+
+    malformed_database = SimpleNamespace(**{attr_name: _LoadedMapping(malformed)})
+    with pytest.raises(TypeError, match="Malformed performance data"):
+        helper(malformed_database)
 
 
 class TestContextAttention:
@@ -37,6 +86,43 @@ class TestContextAttention:
         expected = max(sol_math, sol_mem)
 
         assert math.isclose(result, expected, rel_tol=1e-6)
+
+    def test_missing_window_slice_uses_full_attention_empirical(self, mutable_comprehensive_perf_db):
+        """HYBRID preserves SWA coverage by borrowing full-attention utilization."""
+        db = mutable_comprehensive_perf_db
+        del db._context_attention_data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][8][128][128]
+        db.clear_runtime_caches()
+
+        args = (2, 256, 0, 16, 8, common.KVCacheQuantMode.bfloat16, common.FMHAQuantMode.bfloat16)
+        result = db.query_context_attention(
+            *args,
+            database_mode=common.DatabaseMode.HYBRID,
+            head_size=128,
+            window_size=128,
+        )
+
+        assert float(result) > 0
+        assert result.source == "empirical"
+
+    def test_cross_head_transfer_gated_by_xshape_policy(self, comprehensive_perf_db):
+        """Cross-head_size transfer is an XSHAPE transfer. A head_size with no own data
+        (stub collects 64/128) borrows from the nearest collected head_size when XSHAPE
+        is permitted, and raises when the transfer policy excludes XSHAPE."""
+        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+        from aiconfigurator.sdk.operations import util_empirical
+
+        args = (8, 256, 0, 16, 8, common.KVCacheQuantMode.bfloat16, common.FMHAQuantMode.bfloat16)
+        kw = dict(database_mode=common.DatabaseMode.EMPIRICAL, head_size=256, window_size=0)
+        try:
+            comprehensive_perf_db.set_transfer_policy("aggressive")  # XSHAPE on
+            with util_empirical.capture_provenance() as tags:
+                assert float(comprehensive_perf_db.query_context_attention(*args, **kw)) > 0
+            assert util_empirical.worst_provenance(tags) == "xshape"
+            comprehensive_perf_db.set_transfer_policy(["xquant"])  # no XSHAPE
+            with pytest.raises(EmpiricalNotImplementedError):
+                comprehensive_perf_db.query_context_attention(*args, **kw)
+        finally:
+            comprehensive_perf_db.set_transfer_policy(None)
 
     def test_query_context_attention_sol_full_mode(self, comprehensive_perf_db):
         """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
@@ -205,6 +291,60 @@ class TestGenerationAttention:
             1, 1, 8, 4, common.KVCacheQuantMode.bfloat16, database_mode=common.DatabaseMode.SOL
         )
         assert result > 0
+
+    def test_generation_empirical_calibrates_from_raw_rows(self, comprehensive_perf_db, monkeypatch):
+        """Synthesized working-grid points must not become empirical calibration data."""
+        from aiconfigurator.sdk.operations import util_empirical
+        from aiconfigurator.sdk.perf_database import LoadedOpData
+
+        quant = common.KVCacheQuantMode.bfloat16
+        args = dict(n=8, n_kv=1, kvcache_quant_mode=quant, head_size=128)
+        b, s = 3, 200
+
+        def sol(sequence):
+            return float(
+                comprehensive_perf_db.query_generation_attention(
+                    b,
+                    sequence,
+                    database_mode=common.DatabaseMode.SOL,
+                    **args,
+                )
+            )
+
+        def wrapper(points, name):
+            return LoadedOpData(
+                {quant: {1: {128: {0: {8: {b: points}}}}}},
+                common.PerfDataFilename.generation_attention,
+                name,
+            )
+
+        # Grid coordinates are (n, batch, sequence). 100 and 400 bracket the
+        # off-grid query at their log midpoint, so generic k=2 IDW averages
+        # the two measured utilizations: (0.2 + 0.6) / 2 = 0.4.
+        raw_points = {
+            100: {"latency": sol(100) / 0.2},
+            400: {"latency": sol(400) / 0.6},
+        }
+        monkeypatch.setattr(comprehensive_perf_db, "_raw_generation_attention_data", wrapper(raw_points, "raw"))
+        monkeypatch.setattr(
+            comprehensive_perf_db,
+            "_generation_attention_data",
+            wrapper({s: {"latency": 999.0}}, "working"),
+        )
+        util_empirical.clear_grid_cache()
+        comprehensive_perf_db.query_generation_attention.cache_clear()
+        try:
+            result = comprehensive_perf_db.query_generation_attention(
+                b,
+                s,
+                database_mode=common.DatabaseMode.EMPIRICAL,
+                **args,
+            )
+            assert float(result) == pytest.approx(sol(s) / 0.4)
+            assert float(result) != pytest.approx(999.0)
+        finally:
+            util_empirical.clear_grid_cache()
+            comprehensive_perf_db.query_generation_attention.cache_clear()
 
 
 class TestContextMLA:

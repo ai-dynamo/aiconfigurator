@@ -22,6 +22,7 @@ import argparse
 import csv
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -34,14 +35,25 @@ from tools.support_matrix.support_matrix import (
     STATUS_FAIL,
     STATUS_FRAMEWORK_INCOMPATIBLE,
     STATUS_HW_INCOMPATIBLE,
+    STATUS_HYBRID_PASS,
     STATUS_PASS,
     SUPPORT_MATRIX_BASE_HEADER,
     SUPPORT_MATRIX_HEADER,
+    VALID_PROVENANCE_SOURCES,
     VALID_STATUSES,
     SupportMatrix,
 )
 
-SUPPORTED_HEADERS = (SUPPORT_MATRIX_HEADER, SUPPORT_MATRIX_BASE_HEADER)
+# Accept the transitional 9-col header (base + Command, pre-Source) alongside the
+# current 10-col (base + Command + Source) and the legacy 8-col base. Some committed
+# per-system CSVs were generated at the 9-col stage; rejecting them breaks compare.
+# Mirrors support_matrix.py:_row_values, which already reads 8/9/10-col rows.
+_SUPPORT_MATRIX_HEADER_WITH_COMMAND = SUPPORT_MATRIX_BASE_HEADER + ["Command"]
+SUPPORTED_HEADERS = (
+    SUPPORT_MATRIX_HEADER,
+    _SUPPORT_MATRIX_HEADER_WITH_COMMAND,
+    SUPPORT_MATRIX_BASE_HEADER,
+)
 
 
 def _read_single_csv(csv_path: Path) -> tuple[list[str], list[list[str]]]:
@@ -127,10 +139,17 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
         errors.append("CSV file has header but no data rows")
         return errors
 
+    seen_keys: dict[tuple[str, ...], int] = {}
     for i, row in enumerate(data_rows, start=2):
         if len(row) != len(header):
             errors.append(f"Row {i} has {len(row)} columns, expected {len(header)}")
             continue
+
+        key = tuple(row[:6])
+        if key in seen_keys:
+            errors.append(f"Row {i}: duplicate support-matrix key; first seen on row {seen_keys[key]}: {key}")
+        else:
+            seen_keys[key] = i
 
         mode = row[5]
         if mode not in ["agg", "disagg"]:
@@ -147,8 +166,49 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
             errors.append(
                 f"Row {i}: {STATUS_FRAMEWORK_INCOMPATIBLE} rows must include a framework incompatibility reason"
             )
+        if status == STATUS_HYBRID_PASS and header != SUPPORT_MATRIX_HEADER:
+            errors.append(f"Row {i}: HYBRID_PASS requires the current header with Command and Source columns")
         if header == SUPPORT_MATRIX_HEADER and not row[8].strip():
             errors.append(f"Row {i}: Command column must include the support-matrix rerun command")
+        if header == SUPPORT_MATRIX_HEADER:
+            command = row[8]
+            source = row[9].strip()
+            if source and source not in VALID_PROVENANCE_SOURCES:
+                errors.append(
+                    f"Row {i}: Invalid Source={source!r}, expected one of {sorted(VALID_PROVENANCE_SOURCES)} or empty"
+                )
+            if status == STATUS_PASS and source != "silicon":
+                errors.append(f"Row {i}: PASS is reserved for SILICON support; found Source={source!r}")
+            if status == STATUS_HYBRID_PASS and source not in VALID_PROVENANCE_SOURCES - {"silicon"}:
+                errors.append(f"Row {i}: HYBRID_PASS must include an empirical transfer Source")
+            if status not in {STATUS_PASS, STATUS_HYBRID_PASS} and source:
+                errors.append(f"Row {i}: non-pass status {status} must not include Source={source!r}")
+
+            expected_database_mode = "HYBRID" if status == STATUS_HYBRID_PASS else "SILICON"
+            try:
+                command_parts = shlex.split(command)
+            except ValueError as exc:
+                errors.append(f"Row {i}: Command is not valid shell syntax: {exc}")
+            else:
+                database_modes: list[str] = []
+                missing_database_mode_value = False
+                for part_index, part in enumerate(command_parts):
+                    if part == "--database-mode":
+                        if part_index + 1 >= len(command_parts) or command_parts[part_index + 1].startswith("-"):
+                            missing_database_mode_value = True
+                        else:
+                            database_modes.append(command_parts[part_index + 1].upper())
+                    elif part.startswith("--database-mode="):
+                        value = part.partition("=")[2]
+                        if value:
+                            database_modes.append(value.upper())
+                        else:
+                            missing_database_mode_value = True
+                if missing_database_mode_value or database_modes != [expected_database_mode]:
+                    errors.append(
+                        f"Row {i}: replay command must include exactly one effective "
+                        f"--database-mode {expected_database_mode}; found {database_modes or 'none'}"
+                    )
 
     return errors
 
@@ -250,20 +310,47 @@ def compare_csv_files(
     return added_rows, removed_rows, changed_rows
 
 
+def find_metadata_changes(old_data_rows: list[list[str]], new_data_rows: list[list[str]]) -> list[tuple]:
+    """Return Command/Source changes for rows present in both matrices."""
+
+    def _metadata(row: list[str]) -> tuple[str, str]:
+        return (row[8] if len(row) > 8 else "", row[9] if len(row) > 9 else "")
+
+    old_rows = {tuple(row[:6]): row for row in old_data_rows}
+    new_rows = {tuple(row[:6]): row for row in new_data_rows}
+    changes = []
+    for key in sorted(old_rows.keys() & new_rows.keys()):
+        old_command, old_source = _metadata(old_rows[key])
+        new_command, new_source = _metadata(new_rows[key])
+        if (old_command, old_source) != (new_command, new_source):
+            changes.append((*key, old_command, new_command, old_source, new_source))
+    return changes
+
+
 def find_blocking_status_transitions(changed_rows: list[tuple]) -> list[str]:
     """
     Return status transitions that should block an automated support-matrix PR.
 
     Hardware-incompatible rows are produced by deterministic preflight, and
     framework-incompatible rows are produced by deterministic runtime/data gap
-    classification. A previous PASS becoming either terminal incompatibility, or
-    an incompatibility becoming a normal FAIL, should be investigated explicitly.
+    classification. Losing SILICON support (including PASS -> HYBRID_PASS), losing
+    HYBRID estimability, or turning an incompatibility into a normal FAIL should be
+    investigated explicitly.
     """
     errors = []
     for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in changed_rows:
-        if old_status == STATUS_PASS and new_status in {STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}:
+        if old_status == STATUS_PASS and new_status != STATUS_PASS:
             errors.append(
                 f"Unexpected PASS -> {new_status} transition: "
+                f"{huggingface_id} ({architecture}) {system}/{backend} v{version} {mode}"
+            )
+        elif old_status == STATUS_HYBRID_PASS and new_status in {
+            STATUS_FAIL,
+            STATUS_HW_INCOMPATIBLE,
+            STATUS_FRAMEWORK_INCOMPATIBLE,
+        }:
+            errors.append(
+                f"Unexpected {STATUS_HYBRID_PASS} -> {new_status} transition: "
                 f"{huggingface_id} ({architecture}) {system}/{backend} v{version} {mode}"
             )
         elif old_status in {STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE} and new_status == STATUS_FAIL:
@@ -274,7 +361,14 @@ def find_blocking_status_transitions(changed_rows: list[tuple]) -> list[str]:
     return errors
 
 
-def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], changed_rows: list[tuple]) -> str:
+def generate_pr_description(
+    added_rows: list[tuple],
+    removed_rows: list[tuple],
+    changed_rows: list[tuple],
+    *,
+    metadata_changes: list[tuple] | None = None,
+    header_changed: bool = False,
+) -> str:
     """
     Generate PR description markdown with tables of changes.
 
@@ -289,11 +383,23 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     Returns:
         Markdown formatted PR description
     """
-    regressions = [r for r in changed_rows if r[6] == STATUS_PASS and r[7] == STATUS_FAIL]
+    metadata_changes = metadata_changes or []
+    regressions = [r for r in changed_rows if r[6] == STATUS_PASS and r[7] != STATUS_PASS]
+    hybrid_regressions = [
+        r
+        for r in changed_rows
+        if r[6] == STATUS_HYBRID_PASS and r[7] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+    ]
     fixed = [
         r
         for r in changed_rows
-        if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+        if r[7] == STATUS_PASS
+        and r[6] in {STATUS_HYBRID_PASS, STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+    ]
+    hybrid_coverage = [
+        r
+        for r in changed_rows
+        if r[7] == STATUS_HYBRID_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
     ]
     reclassified_hw = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_HW_INCOMPATIBLE]
     reclassified_framework = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_FRAMEWORK_INCOMPATIBLE]
@@ -305,21 +411,25 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
         "",
         "| Category | Count |",
         "|----------|-------|",
-        f"| Regressions (PASS -> FAIL) | {len(regressions)} |",
-        f"| Fixed ({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE}/{STATUS_FRAMEWORK_INCOMPATIBLE} -> PASS) | {len(fixed)} |",
+        f"| Silicon regressions (PASS -> non-PASS) | {len(regressions)} |",
+        f"| Hybrid regressions ({STATUS_HYBRID_PASS} -> non-pass) | {len(hybrid_regressions)} |",
+        f"| Silicon fixes (non-PASS -> PASS) | {len(fixed)} |",
+        f"| New hybrid coverage (non-pass -> {STATUS_HYBRID_PASS}) | {len(hybrid_coverage)} |",
         f"| Reclassified as hardware-incompatible ({STATUS_FAIL} -> {STATUS_HW_INCOMPATIBLE}) "
         f"| {len(reclassified_hw)} |",
         f"| Reclassified as framework-incompatible ({STATUS_FAIL} -> {STATUS_FRAMEWORK_INCOMPATIBLE}) "
         f"| {len(reclassified_framework)} |",
         f"| Removed rows | {len(removed_rows)} |",
         f"| Added rows | {len(added_rows)} |",
+        f"| Command/Source metadata changes | {len(metadata_changes)} |",
+        f"| Header changed | {'yes' if header_changed else 'no'} |",
         "",
     ]
 
     section = 1
 
-    # Regressions (PASS -> FAIL)
-    lines.append(f"### {section}. Regressions (PASS -> FAIL): {len(regressions)} rows")
+    # Regressions from measured-silicon support.
+    lines.append(f"### {section}. Silicon regressions (PASS -> non-PASS): {len(regressions)} rows")
     section += 1
     if regressions:
         lines.append("")
@@ -340,11 +450,29 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
         lines.append("*No regressions*")
     lines.append("")
 
-    # Fixed (FAIL -> PASS)
     lines.append(
-        f"### {section}. Fixed "
-        f"({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE}/{STATUS_FRAMEWORK_INCOMPATIBLE} -> PASS): {len(fixed)} rows"
+        f"### {section}. Hybrid regressions ({STATUS_HYBRID_PASS} -> non-pass): {len(hybrid_regressions)} rows"
     )
+    section += 1
+    if hybrid_regressions:
+        lines.append("")
+        lines.append(
+            "| HuggingFaceID | Architecture | System | Backend | Version | Mode | Previous Status | New Status |"
+        )
+        lines.append(
+            "|---------------|--------------|--------|---------|---------|------|-----------------|------------|"
+        )
+        for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in hybrid_regressions:
+            lines.append(
+                f"| {huggingface_id} | {architecture} | {system} | {backend} "
+                f"| {version} | {mode} | {old_status} | {new_status} |"
+            )
+    else:
+        lines.extend(["", "*No hybrid regressions*"])
+    lines.append("")
+
+    # Fixed to measured-silicon support.
+    lines.append(f"### {section}. Silicon fixes (non-PASS -> PASS): {len(fixed)} rows")
     section += 1
     if fixed:
         lines.append("")
@@ -363,6 +491,25 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     else:
         lines.append("")
         lines.append("*No fixes*")
+    lines.append("")
+
+    lines.append(f"### {section}. New hybrid coverage (non-pass -> {STATUS_HYBRID_PASS}): {len(hybrid_coverage)} rows")
+    section += 1
+    if hybrid_coverage:
+        lines.append("")
+        lines.append(
+            "| HuggingFaceID | Architecture | System | Backend | Version | Mode | Previous Status | New Status |"
+        )
+        lines.append(
+            "|---------------|--------------|--------|---------|---------|------|-----------------|------------|"
+        )
+        for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in hybrid_coverage:
+            lines.append(
+                f"| {huggingface_id} | {architecture} | {system} | {backend} "
+                f"| {version} | {mode} | {old_status} | {new_status} |"
+            )
+    else:
+        lines.extend(["", "*No new hybrid coverage*"])
     lines.append("")
 
     # Reclassified hardware incompatibilities
@@ -533,15 +680,34 @@ def main():
     print("-" * 40)
 
     added_rows, removed_rows, changed_rows = compare_csv_files(old_data_rows, new_data_rows)
+    metadata_changes = find_metadata_changes(old_data_rows, new_data_rows)
+    header_changed = old_header != new_header
     transition_errors = find_blocking_status_transitions(changed_rows)
     validation_errors.extend(transition_errors)
 
-    regression_count = len([r for r in changed_rows if r[6] == STATUS_PASS and r[7] == STATUS_FAIL])
+    regression_count = len([r for r in changed_rows if r[6] == STATUS_PASS and r[7] != STATUS_PASS])
+    hybrid_regression_count = len(
+        [
+            r
+            for r in changed_rows
+            if r[6] == STATUS_HYBRID_PASS
+            and r[7] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+        ]
+    )
     fixed_count = len(
         [
             r
             for r in changed_rows
-            if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+            if r[7] == STATUS_PASS
+            and r[6] in {STATUS_HYBRID_PASS, STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+        ]
+    )
+    hybrid_coverage_count = len(
+        [
+            r
+            for r in changed_rows
+            if r[7] == STATUS_HYBRID_PASS
+            and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
         ]
     )
     reclassified_hw_count = len([r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_HW_INCOMPATIBLE])
@@ -552,8 +718,12 @@ def main():
     print(f"Added rows: {len(added_rows)}")
     print(f"Removed rows: {len(removed_rows)}")
     print(f"Changed rows: {len(changed_rows)}")
-    print(f"  - Regressions (PASS -> FAIL): {regression_count}")
-    print(f"  - Fixed ({STATUS_FAIL}/{STATUS_HW_INCOMPATIBLE}/{STATUS_FRAMEWORK_INCOMPATIBLE} -> PASS): {fixed_count}")
+    print(f"Command/Source metadata changes: {len(metadata_changes)}")
+    print(f"Header changed: {header_changed}")
+    print(f"  - Silicon regressions (PASS -> non-PASS): {regression_count}")
+    print(f"  - Hybrid regressions ({STATUS_HYBRID_PASS} -> non-pass): {hybrid_regression_count}")
+    print(f"  - Silicon fixes (non-PASS -> PASS): {fixed_count}")
+    print(f"  - New hybrid coverage (non-pass -> {STATUS_HYBRID_PASS}): {hybrid_coverage_count}")
     print(
         f"  - Reclassified as hardware-incompatible ({STATUS_FAIL} -> {STATUS_HW_INCOMPATIBLE}): "
         f"{reclassified_hw_count}"
@@ -567,13 +737,24 @@ def main():
         for err in transition_errors:
             print(f"  - {err}")
 
-    has_changes = len(added_rows) > 0 or len(removed_rows) > 0 or len(changed_rows) > 0
+    has_changes = bool(added_rows or removed_rows or changed_rows or metadata_changes or header_changed)
 
-    regressions = [r for r in changed_rows if r[6] == STATUS_PASS and r[7] == STATUS_FAIL]
+    regressions = [r for r in changed_rows if r[6] == STATUS_PASS and r[7] != STATUS_PASS]
+    hybrid_regressions = [
+        r
+        for r in changed_rows
+        if r[6] == STATUS_HYBRID_PASS and r[7] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+    ]
     fixed = [
         r
         for r in changed_rows
-        if r[7] == STATUS_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+        if r[7] == STATUS_PASS
+        and r[6] in {STATUS_HYBRID_PASS, STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
+    ]
+    hybrid_coverage = [
+        r
+        for r in changed_rows
+        if r[7] == STATUS_HYBRID_PASS and r[6] in {STATUS_FAIL, STATUS_HW_INCOMPATIBLE, STATUS_FRAMEWORK_INCOMPATIBLE}
     ]
     reclassified_hw = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_HW_INCOMPATIBLE]
     reclassified_framework = [r for r in changed_rows if r[6] == STATUS_FAIL and r[7] == STATUS_FRAMEWORK_INCOMPATIBLE]
@@ -586,15 +767,26 @@ def main():
             "added_count": len(added_rows),
             "removed_count": len(removed_rows),
             "changed_count": len(changed_rows),
+            "metadata_changed_count": len(metadata_changes),
+            "header_changed": header_changed,
             "regression_count": len(regressions),
+            "hybrid_regression_count": len(hybrid_regressions),
             "fixed_count": len(fixed),
+            "hybrid_coverage_count": len(hybrid_coverage),
             "reclassified_hw_incompatible_count": len(reclassified_hw),
             "reclassified_framework_incompatible_count": len(reclassified_framework),
             "added_rows": added_rows,
             "removed_rows": removed_rows,
             "changed_rows": changed_rows,
+            "metadata_changes": metadata_changes,
             "blocking_status_transition_errors": transition_errors,
-            "pr_description": generate_pr_description(added_rows, removed_rows, changed_rows),
+            "pr_description": generate_pr_description(
+                added_rows,
+                removed_rows,
+                changed_rows,
+                metadata_changes=metadata_changes,
+                header_changed=header_changed,
+            ),
         }
         with open(args.output_diff, "w") as f:
             json.dump(diff_data, f, indent=2)
@@ -613,7 +805,15 @@ def main():
         print()
         print("PR Description Preview:")
         print("-" * 40)
-        print(generate_pr_description(added_rows, removed_rows, changed_rows))
+        print(
+            generate_pr_description(
+                added_rows,
+                removed_rows,
+                changed_rows,
+                metadata_changes=metadata_changes,
+                header_changed=header_changed,
+            )
+        )
         sys.exit(1)
     else:
         print("RESULT: No changes detected - support matrix is up to date")
