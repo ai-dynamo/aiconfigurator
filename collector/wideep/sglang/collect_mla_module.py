@@ -21,5 +21,4 @@ def get_wideep_mla_generation_test_cases(*args, **kwargs):
 
 
 def run_mla_module_worker(*args, **kwargs):
-    kwargs["is_wideep_mla"] = True
     return _run_mla_module_worker(*args, **kwargs)

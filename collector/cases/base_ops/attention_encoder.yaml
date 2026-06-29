@@ -20,9 +20,8 @@ all_frameworks_op_cases:
       - 32
       - 64
       sequence_lengths:
-      # Keep the original PR #1092 hardcoded collector grid (13/26/52/104)
-      # as protected physical coverage. Sequence 1 remains a useful V2
-      # addition rather than replacing those historical anchors.
+      # Keep the encoder collector's established image-token sizes and add the
+      # current model-specific lengths used by targeted collection.
       - 1
       - 13
       - 16
@@ -78,10 +77,3 @@ all_frameworks_op_cases:
       - 64
       - 72
       - 80
-      # Preserve the initial hardcoded encoder collector's physical grid for
-      # full/raw collection. A targeted model with an encoder profile replaces
-      # this broad grid with its native ViT topology.
-      legacy_head_profiles:
-      - id: encoder_initial_baseline
-        head_counts: [2, 4, 5, 8, 10, 12, 14, 16, 20, 24, 32]
-        head_dims: [64, 72, 80]

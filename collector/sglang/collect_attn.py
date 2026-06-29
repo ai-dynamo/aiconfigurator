@@ -364,8 +364,6 @@ def run_attention_torch(
     model_runner.token_to_kv_pool = kv_pool
 
     sm_version = get_sm_version()
-    # TODO(#1257): Route MiMo-V2 head_dim=192 on Blackwell through FA4 or
-    # TRT-LLM MHA instead of Triton.
     use_triton_attention = sm_version >= 110 or (sm_version >= 100 and head_dim == 192)
     if use_triton_attention:
         # SM120+ (workstation Blackwell): TRTLLM prefill (TllmGenFmhaRunner) is unsupported;

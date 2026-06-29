@@ -12,6 +12,7 @@ logits, and perf logging.
 __compat__ = "vllm>=0.17.0"
 
 import inspect
+import json
 import os
 
 import torch
@@ -86,19 +87,11 @@ except Exception:
 # This lets vLLM handle backend selection (FlashInfer/Triton/Marlin) and
 # weight swizzle internally, so one code path works on all GPUs.
 _mxfp4_available = False
-_dsv4_mxfp4_available = False
 try:
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
 
     _mxfp4_available = True
-except Exception:
-    pass
-
-try:
-    from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
-
-    _dsv4_mxfp4_available = True
 except Exception:
     pass
 
@@ -115,6 +108,27 @@ from collector.helper import balanced_logits, benchmark_with_power, get_sm_versi
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 _WORKSPACE_MANAGER_DEVICES: set[str] = set()
+
+
+def _moe_execution_key(common_moe_testcase, moe_type: str):
+    module_config = get_moe_quantization_module_config(
+        "vllm",
+        moe_type,
+        model_name=common_moe_testcase.model_name,
+    )
+    return (
+        moe_type,
+        tuple(common_moe_testcase.num_tokens_list),
+        common_moe_testcase.hidden_size,
+        common_moe_testcase.inter_size,
+        common_moe_testcase.topk,
+        common_moe_testcase.num_experts,
+        common_moe_testcase.tp,
+        common_moe_testcase.ep,
+        common_moe_testcase.token_expert_distribution,
+        common_moe_testcase.power_law_alpha,
+        json.dumps(module_config, sort_keys=True, separators=(",", ":")),
+    )
 
 
 def _ensure_workspace_manager(device: str) -> None:
@@ -142,11 +156,11 @@ def get_moe_test_cases():
             "per_block_fp8": per_block_cast_to_fp8 is not None,
             "nvfp4": _nvfp4_available,
             "mxfp4": _mxfp4_available,
-            "dsv4_mxfp4": _dsv4_mxfp4_available,
         },
     )
 
     test_cases = []
+    seen = set()
 
     for common_moe_testcase in get_common_moe_test_cases():
         model_name = common_moe_testcase.model_name
@@ -167,6 +181,11 @@ def get_moe_test_cases():
                 topk=common_moe_testcase.topk,
             ):
                 continue
+
+            execution_key = _moe_execution_key(common_moe_testcase, moe_type)
+            if execution_key in seen:
+                continue
+            seen.add(execution_key)
 
             test_cases.append(
                 [
@@ -279,7 +298,7 @@ def run_moe_torch(
     # looks up the module in static_forward_context.  FusedMoE registers
     # itself there during __init__, so we must pass the *same* config to
     # set_forward_context() at benchmark time.
-    use_mxfp4 = moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
+    use_mxfp4 = moe_type == "w4a16_mxfp4"
     moe_module = None
     mxfp4_vllm_cfg = None
 
@@ -289,16 +308,7 @@ def run_moe_torch(
 
         _ensure_workspace_manager(device)
 
-        if moe_type == "w4a8_mxfp4_mxfp8":
-            if not _dsv4_mxfp4_available:
-                raise ImportError("DeepSeek-V4 MXFP4/MXFP8 MoE requires vLLM >= 0.22.0.")
-            mxfp4_quant_config = DeepseekV4FP8Config(
-                is_checkpoint_fp8_serialized=True,
-                activation_scheme="dynamic",
-                weight_block_size=[128, 128],
-            )
-        else:
-            mxfp4_quant_config = Mxfp4Config()
+        mxfp4_quant_config = Mxfp4Config()
         mxfp4_module_config = get_moe_quantization_module_config("vllm", moe_type, model_name=model_name)
 
         # pcp_size=1: vLLM 0.17.0 added prefill context parallel to FusedMoE
@@ -665,7 +675,7 @@ def run_moe_torch(
         print(f"moe latency: {latency}")
 
         if use_mxfp4:
-            source = "vllm_deepseek_v4_mxfp4_mxfp8_moe" if moe_type == "w4a8_mxfp4_mxfp8" else "vllm_mxfp4_moe"
+            source = "vllm_mxfp4_moe"
         elif use_nvfp4:
             source = "vllm_flashinfer_trtllm_moe_fp4"
         elif use_int4_wo:

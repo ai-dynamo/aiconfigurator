@@ -143,50 +143,22 @@ def _profile_int_values(
     return [int(item) for item in value]
 
 
-def _attention_profiles(
+def _head_profiles(
     shape_sweep: dict[str, object],
-    *,
-    phase: str,
+    op_name: str,
 ) -> list[dict[str, object]]:
-    legacy_profiles = []
-    inline_model_profiles = []
-    for field_name, destination in (
-        ("legacy_head_profiles", legacy_profiles),
-        ("model_head_profiles", inline_model_profiles),
-    ):
-        raw_profiles = shape_sweep.get(field_name, [])
-        if not isinstance(raw_profiles, list):
-            raise TypeError(f"attention.{field_name} must be a list")
-        for profile in raw_profiles:
-            if not isinstance(profile, dict):
-                raise TypeError(f"attention.{field_name} entries must be mappings")
-            destination.append(profile)
+    raw_profiles = shape_sweep.get("head_profiles")
+    if raw_profiles is None:
+        base_profiles = [shape_sweep]
+    else:
+        if not isinstance(raw_profiles, list) or not all(isinstance(profile, dict) for profile in raw_profiles):
+            raise TypeError(f"{op_name}.head_profiles must be a list of mappings")
+        base_profiles = raw_profiles
 
-    # Model-only structural deltas live with their architecture instead of in
-    # the global base sweep.  ``_model_case_values`` honors
-    # COLLECTOR_MODEL_PATH, so a targeted healing run adds only that model's
-    # native topology while full/raw collection still sees the union.
-    selected_model_profiles = []
-    for profile in _model_case_values("attention"):
-        phases = profile.get("phases")
-        if phases is not None:
-            if not isinstance(phases, list):
-                raise TypeError("model_case_values.attention.phases must be a list")
-            if phase not in {str(value) for value in phases}:
-                continue
-        selected_model_profiles.append(profile)
-
-    # A targeted model with an explicit topology should collect that topology,
-    # not the broad collector-v1 compatibility grid.  Models not migrated to a
-    # structural profile retain the legacy fallback; full/raw runs retain both
-    # the v1 grid and every model delta.
-    if _get_model_path_filter() and selected_model_profiles:
-        return [*inline_model_profiles, *selected_model_profiles]
-
-    # Backwards-compatible fallback for custom case files that still describe
-    # independent axes.  Repository-owned cases use structural profiles.
-    profiles = [*legacy_profiles, *inline_model_profiles, *selected_model_profiles]
-    return profiles or [shape_sweep]
+    model_profiles = _model_case_values(op_name)
+    if _get_model_path_filter() and model_profiles:
+        return model_profiles
+    return [*base_profiles, *model_profiles]
 
 
 def get_attention_head_configs(
@@ -196,10 +168,9 @@ def get_attention_head_configs(
 ) -> list[AttentionHeadConfig]:
     """Expand only valid ``(q, kv, head_dim, window)`` structural tuples.
 
-    Profiles may either describe a legacy rectangular sub-grid or one native
-    model topology plus its valid tensor-parallel sizes.  The latter preserves
-    correlations between query heads, KV heads, head dimension, and window
-    instead of forming a global Cartesian product across unrelated models.
+    Profiles may either describe a default rectangular sub-grid or one native
+    model topology plus its valid tensor-parallel sizes. The latter preserves
+    correlations between query heads, KV heads, head dimension, and window.
     """
 
     if phase not in {"context", "generation"}:
@@ -218,7 +189,7 @@ def get_attention_head_configs(
             seen.add(config)
             configs.append(config)
 
-    for profile in _attention_profiles(shape_sweep, phase=phase):
+    for profile in _head_profiles(shape_sweep, "attention"):
         head_dims = _profile_int_values(
             profile,
             "head_dims",
@@ -311,43 +282,12 @@ def get_attention_head_configs(
     return configs
 
 
-def _encoder_attention_profiles(shape_sweep: dict[str, object]) -> list[dict[str, object]]:
-    """Return legacy and model-native encoder head profiles for one run.
-
-    Full/raw collection retains the collector-v1 rectangular grid and adds the
-    current model deltas. A model-targeted healing run uses only that model's
-    native ViT topology when one is declared.
-    """
-
-    legacy_profiles = []
-    inline_model_profiles = []
-    for field_name, destination in (
-        ("legacy_head_profiles", legacy_profiles),
-        ("model_head_profiles", inline_model_profiles),
-    ):
-        raw_profiles = shape_sweep.get(field_name, [])
-        if not isinstance(raw_profiles, list):
-            raise TypeError(f"encoder_attention.{field_name} must be a list")
-        for profile in raw_profiles:
-            if not isinstance(profile, dict):
-                raise TypeError(f"encoder_attention.{field_name} entries must be mappings")
-            destination.append(profile)
-
-    selected_model_profiles = _model_case_values("encoder_attention")
-    if _get_model_path_filter() and selected_model_profiles:
-        return [*inline_model_profiles, *selected_model_profiles]
-
-    profiles = [*legacy_profiles, *inline_model_profiles, *selected_model_profiles]
-    return profiles or [shape_sweep]
-
-
 def get_attention_encoder_head_configs(shape_sweep: dict[str, object]) -> list[EncoderAttentionHeadConfig]:
     """Expand valid ``(num_heads, head_dim)`` encoder-attention structures.
 
     Native profiles describe a ViT's unsharded head count and valid tensor
-    parallel sizes. Legacy profiles describe the collector-v1 rectangular
-    head-count/head-dimension grid. Duplicate physical keys are removed while
-    preserving their first-seen order.
+    parallel sizes. Duplicate physical keys are removed while preserving their
+    first-seen order.
     """
 
     configs: list[EncoderAttentionHeadConfig] = []
@@ -361,7 +301,7 @@ def get_attention_encoder_head_configs(shape_sweep: dict[str, object]) -> list[E
             seen.add(config)
             configs.append(config)
 
-    for profile in _encoder_attention_profiles(shape_sweep):
+    for profile in _head_profiles(shape_sweep, "encoder_attention"):
         head_dims = _profile_int_values(
             profile,
             "head_dims",
@@ -854,7 +794,6 @@ class MoeQuantizationSpec:
     name: str
     min_sm: Optional[int]
     min_sm_exclusive: Optional[int]
-    max_sm_exclusive: Optional[int]
     requires_runtime_feature: Optional[str]
     requires_model_quantization_config: bool
     allowed_model_paths: tuple[str, ...]
@@ -904,9 +843,6 @@ def get_moe_quantization_specs(backend: str) -> list[MoeQuantizationSpec]:
                 min_sm_exclusive=(
                     None if raw_mode.get("min_sm_exclusive") is None else int(raw_mode["min_sm_exclusive"])
                 ),
-                max_sm_exclusive=(
-                    None if raw_mode.get("max_sm_exclusive") is None else int(raw_mode["max_sm_exclusive"])
-                ),
                 requires_runtime_feature=(
                     None
                     if raw_mode.get("requires_runtime_feature") is None
@@ -940,8 +876,6 @@ def get_moe_quantization_modes(
         if spec.min_sm is not None and sm_version < spec.min_sm:
             continue
         if spec.min_sm_exclusive is not None and sm_version <= spec.min_sm_exclusive:
-            continue
-        if spec.max_sm_exclusive is not None and sm_version >= spec.max_sm_exclusive:
             continue
         if spec.requires_runtime_feature and not features.get(spec.requires_runtime_feature, False):
             continue
@@ -1580,25 +1514,22 @@ def get_common_mamba2_test_cases() -> list[Mamba2CommonTestCase]:
         field_name="mamba2.generation_batch_sizes",
     )
 
-    raw_legacy_model_cases = mamba2_sweep.get("legacy_model_cases", [])
-    if not isinstance(raw_legacy_model_cases, list):
-        raise TypeError("common_case_values.mamba2.legacy_model_cases must be a list")
-    legacy_model_cases = []
-    for index, raw_case in enumerate(raw_legacy_model_cases):
-        legacy_model_cases.extend(
+    raw_default_model_cases = mamba2_sweep.get("default_model_cases", [])
+    if not isinstance(raw_default_model_cases, list):
+        raise TypeError("common_case_values.mamba2.default_model_cases must be a list")
+    default_model_cases = []
+    for index, raw_case in enumerate(raw_default_model_cases):
+        default_model_cases.extend(
             _expand_model_case_entry(
                 raw_case,
-                field_name=f"common_case_values.mamba2.legacy_model_cases[{index}]",
+                field_name=f"common_case_values.mamba2.default_model_cases[{index}]",
             )
         )
     model_path = _get_model_path_filter()
     if model_path:
-        legacy_model_cases = [case for case in legacy_model_cases if _model_case_matches_path(case, model_path)]
+        default_model_cases = [case for case in default_model_cases if _model_case_matches_path(case, model_path)]
 
-    # Full/raw collection is a strict collector-v1 physical-shape superset.
-    # Targeted collection remains model-exact and therefore does not inherit
-    # unrelated synthetic interpolation anchors.
-    model_config_list = [*legacy_model_cases, *_model_case_values("mamba2")]
+    model_config_list = [*default_model_cases, *_model_case_values("mamba2")]
 
     for model_config in model_config_list:
         d_model = int(model_config["d_model"])
@@ -1694,16 +1625,11 @@ def get_common_mhc_test_cases() -> list[MhcCommonTestCase]:
     model_config_list = _model_case_values("mhc")
 
     test_cases: list[MhcCommonTestCase] = []
-    seen: set[tuple[str, int, int]] = set()
     for model_config in model_config_list:
         hidden_size = int(model_config["hidden_size"])
         hc_mult = int(model_config["hc_mult"])
         model_name = str(model_config["model_path"])
         for phase in ("pre", "post"):
-            key = (phase, hidden_size, hc_mult)
-            if key in seen:
-                continue
-            seen.add(key)
             test_cases.append(
                 MhcCommonTestCase(
                     phase=phase,

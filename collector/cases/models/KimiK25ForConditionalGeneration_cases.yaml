@@ -84,8 +84,8 @@ model_case_values:
       qk_nope_head_dim: 128
       qk_rope_head_dim: 64
       v_head_dim: 128
-    # Preserve the V1 n=64 sweep. Populate-time local-head dedup keeps only
-    # the one extra physical anchor not already produced by n=128.
+    # n=64 contributes local-head=1 in full collection and local-head=8 in the
+    # targeted TP<=8 plan. The getters deduplicate the overlap with n=128.
     - model_path: moonshotai/Kimi-K2.5
       model_aliases:
         - moonshotai/Kimi-K2-Instruct

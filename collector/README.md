@@ -161,21 +161,16 @@ N use the same explicit size list. Base attention specs use `batch_sizes`,
 Native attention tuples live in `model_case_values.attention`. They keep query
 heads, KV heads, head dimension, window, and valid TP sizes correlated. A
 targeted model run uses its exact structural profiles instead of crossing global
-head/window axes; full/raw runs retain the collector-v1 compatibility grid plus
-all model-specific deltas.
+head/window axes. Full/raw runs combine the base operation's `head_profiles`
+with all model-specific profiles, then remove duplicate physical tuples before
+the batch and sequence sweeps. Mamba's synthetic full/raw shapes live under
+`common_case_values.mamba2.default_model_cases`.
 
-The compatibility contract is defined on physical lookup keys: full/raw case
-generation must be a superset of collector v1, and v2 may only add new physical
-points. Scheduler identities may still shrink when multiple checkpoint names
-map to the same shape and quantization is swept independently. Targeted model
-runs are intentionally model-exact rather than v1-wide. Synthetic v1
-interpolation anchors that do not belong to a real model stay in the base-op
-YAML as `legacy_model_cases`.
-
-Within `model_case_values`, use `model_aliases` when artifact names share one
-physical kernel case (for example base and FP8 checkpoints whose quantization is
-already swept independently). When those artifacts use different real
-quantization modes, declare their allowed union in
+Within `model_case_values`, use `model_aliases` only for a shape-only synthetic
+op where the artifact cannot change either the benchmark invocation or the
+persisted key. Do not merge base/FP8/NVFP4 checkpoints merely because another
+axis also sweeps quantization. When artifacts use different real quantization
+modes, declare their allowed union in
 `framework_quantization.<backend>.allowed_modes` so unrelated backend modes are
 not multiplied into that shape. Keep `model_paths` only for path-sensitive cases
 that must be instantiated separately.
@@ -184,7 +179,7 @@ For targeted support-matrix healing, a case selector can run a subset using
 exact `case_ids`, string `contains` matches, `indices`, `ranges`, or `limit`.
 These filters are applied after the op collector generates cases for the
 selected model, so every op collector gets subset support through the central
-planner. Collectors that accept `model_path` receive it directly; legacy
+model-case filter/resolver. Collectors that accept `model_path` receive it directly; legacy
 collectors use the same value through `COLLECTOR_MODEL_PATH` while they are
 being migrated.
 
@@ -207,7 +202,7 @@ Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps
 ```text
 framework_manifest.yaml — current collector framework versions and images
 framework_manifest.py   — manifest loader/validator
-model_cases.py       — collector v2 model/SM case planner
+model_cases.py       — collector v2 model/SM case-plan resolver
 registry.py          — declares which module handles which version range
 version_resolver.py  — routes runtime version → module (packaging.version)
 collect.py/collect_ops — validates __compat__ and fails incompatible ops
@@ -465,18 +460,9 @@ python3 collect.py --backend trtllm --resume
 python3 collect.py --backend trtllm --resume --checkpoint-dir /path/to/checkpoints
 ```
 
-A task is tracked as passed, failed, or expected-failed. Plain `--resume`
-skips all previously attempted tasks; add `--resume-retry-failed` to retry the
-failed set while retaining successful checkpoints. A checkpoint with unresolved
-failures still exits nonzero even when plain resume skips those tasks. Unexpected
-errors preserve CSV staging files and prevent parquet finalization until a clean
-retry; the clean resume finalizes requested staging files from every chunk.
+A task is marked **done** once it is attempted (success or failure).
+Only tasks that never finished are re-queued on `--resume`.
 Running without `--resume` always starts fresh (overwrites old checkpoint).
-
-```bash
-python3 collect.py --backend trtllm --resume \
-  --resume-retry-failed --checkpoint-dir /path/to/checkpoints
-```
 
 ## For SGLang
 

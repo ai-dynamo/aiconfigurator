@@ -69,6 +69,38 @@ def _is_trtllm_130rc5_or_rc10_runtime():
     return _TRTLLM_VERSION.startswith(("1.3.0rc5", "1.3.0rc10"))
 
 
+def _moe_model_behavior(model_name: str) -> str:
+    """Resolve model-name branches that change the synthetic invocation."""
+    if any(pattern in model_name for pattern in NON_GATED_MOE_MODELS):
+        return "relu2"
+    if model_name in {"openai/gpt-oss-120b", "openai/gpt-oss-20b"}:
+        return "swigluoai"
+    return "swiglu"
+
+
+def _moe_execution_key(common_moe_testcase, moe_type: str, min_latency_mode: bool):
+    module_config = get_moe_quantization_module_config(
+        "trtllm",
+        moe_type,
+        model_name=common_moe_testcase.model_name,
+    )
+    return (
+        moe_type,
+        tuple(common_moe_testcase.num_tokens_list),
+        common_moe_testcase.hidden_size,
+        common_moe_testcase.inter_size,
+        common_moe_testcase.topk,
+        common_moe_testcase.num_experts,
+        common_moe_testcase.tp,
+        common_moe_testcase.ep,
+        min_latency_mode,
+        common_moe_testcase.token_expert_distribution,
+        common_moe_testcase.power_law_alpha,
+        _moe_model_behavior(common_moe_testcase.model_name),
+        json.dumps(module_config, sort_keys=True, separators=(",", ":")),
+    )
+
+
 def _patch_moe_runners_for_tuple_tactics():
     """Monkey-patch MoE runners whose forward() asserts isinstance(tactic, list).
 
@@ -187,6 +219,7 @@ def get_moe_test_cases():
         moe_list += ["int4_wo", "nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"]
 
     test_cases = []
+    seen = set()
 
     for common_moe_testcase in get_common_moe_test_cases():
         model_name = common_moe_testcase.model_name
@@ -255,6 +288,10 @@ def get_moe_test_cases():
                 num_tokens_list = common_moe_testcase.num_tokens_list
                 if not num_tokens_list:
                     continue
+                execution_key = _moe_execution_key(common_moe_testcase, moe_type, min_latency_mode)
+                if execution_key in seen:
+                    continue
+                seen.add(execution_key)
                 test_cases.append(
                     [
                         moe_type,

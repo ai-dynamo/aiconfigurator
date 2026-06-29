@@ -267,8 +267,7 @@ def _build_mla_test_cases(case_specs, *, dtype_list, tp_sizes, backend=None, sm_
     silently collecting it under the wrong DB key.
     """
 
-    test_cases = []
-    seen = set()
+    cases_by_physical_key = {}
     expected_geometry = (KV_LORA_RANK, QK_NOPE_HEAD_DIM, QK_ROPE_HEAD_DIM, 128)
     for spec in case_specs:
         geometry = (spec.kv_lora_rank, spec.qk_nope_head_dim, spec.qk_rope_head_dim, spec.v_head_dim)
@@ -321,11 +320,14 @@ def _build_mla_test_cases(case_specs, *, dtype_list, tp_sizes, backend=None, sm_
                     spec.batch_size,
                     spec.input_len,
                 )
-                if physical_key in seen:
-                    continue
-                seen.add(physical_key)
-                test_cases.append(list(case))
-    return test_cases
+                # Selectors run after getter population and commonly cap TP.
+                # Keep the equivalent representation with the smallest TP so
+                # deduplication cannot hide a local-head point from a targeted
+                # TP<=N plan.
+                existing = cases_by_physical_key.get(physical_key)
+                if existing is None or tp_size < existing[6]:
+                    cases_by_physical_key[physical_key] = list(case)
+    return list(cases_by_physical_key.values())
 
 
 def run_mla(

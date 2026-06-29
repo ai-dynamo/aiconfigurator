@@ -572,7 +572,7 @@ def _selected_base_ops(
 ) -> set[str]:
     """Resolve the shared recipe ops required by the selected model plans.
 
-    ``base_ops`` is an explicit allowlist.  Legacy model files that only set
+    ``base_ops`` is an explicit allowlist.  Model files that only set
     ``include_base: true`` receive the small universal set declared through
     base-file ``model_ops``; they no longer activate every auxiliary recipe
     merely because another base YAML was added to the repository.
@@ -583,10 +583,6 @@ def _selected_base_ops(
     for data in base_data_files:
         available_ops.update(_base_case_file_ops(data, backend))
         default_ops.update(str(op) for op in _as_list(data.get("model_ops"), field_name="model_ops"))
-    # Preserve compatibility with a legacy monolithic base catalog that did not
-    # distinguish universal model ops from auxiliary recipes.
-    if not default_ops:
-        default_ops = set(available_ops)
 
     if not model_data:
         return default_ops

@@ -2,45 +2,41 @@
 
 ## Goal
 
-Collector V2 should keep Collector V1's useful measurement coverage, retain
-intentional V2 additions, and avoid scheduling cases created only by unrelated
-Cartesian-product axes or repeated model artifact names.
+Collector V2 should retain useful measurement coverage and intentional model
+additions while avoiding cases created only by unrelated Cartesian-product axes
+or repeated model artifact names.
 
-For full/raw collection, the compatibility invariant is:
+This PR used the following comparison as a one-time migration check:
 
 ```text
 V1 physical cases ⊆ cleaned V2 physical cases
 ```
 
-For every migrated operation with a frozen historical baseline,
-`removed_v1_cases` must be zero. A lower total case count is not sufficient
-evidence because a plan can add many new cases while still deleting old
-interpolation anchors.
+`removed_v1_cases` was required to be zero for this pruning pass. That audit is
+not part of the runtime schema: production YAML contains ordinary default and
+model profiles, and the generator has no Collector-V1 compatibility mode.
 
-Targeted model collection has a different contract: it is model-exact. It does
-not inherit unrelated synthetic V1 interpolation anchors when the selected
-model has an explicit structural profile.
+Targeted model collection is model-exact. It does not inherit unrelated default
+profiles when the selected model has an explicit structural profile.
 
 ## Scope
 
-This work changes Collector population and collection-integrity behavior only:
+This work changes Collector population only:
 
 - `collector/cases/**/*.yaml`
 - `collector/case_generator.py`
 - `collector/model_cases.py`
-- operation-local case getters
-- Collector-only output/error guards needed to keep resumable runs honest
+- operation-local case getters and the minimal runtime parameters required by
+  newly retained cases
+- the model-specific op selection path in `collector/collect.py`
 - Collector tests and documentation
 
-It does not change AIC SDK or Rust lookup behavior, EngineSpec, or Dynamo
-Planner. Collector output must continue to satisfy the existing consumers.
-Consumer problems found during the audit belong in separate changes.
-
-An unexpected worker failure, or an SGLang MLA persistence failure, leaves CSV
-staging files untouched, returns a failed collector run, and requires
-resume/retry before parquet finalization. Unresolved checkpoint failures remain
-failed under plain resume, and a clean retry finalizes requested staging files
-from all chunks. This prevents a partial 4-hour batch from looking complete.
+The `collector/collect.py` change removes only the DeepSeek V4 hard-coded op
+override so that the resolved YAML case plan remains authoritative. Generic
+resume, checkpoint, and output-finalization behavior is unchanged. This work
+does not change AIC SDK or Rust lookup behavior, EngineSpec, or Dynamo Planner.
+Collector output continues to satisfy the existing consumers; consumer changes
+are outside this PR.
 
 ## Baselines
 
@@ -53,9 +49,8 @@ from all chunks. This prevents a partial 4-hour batch from looking complete.
 The comparison uses consumer-visible physical lookup keys, not model aliases,
 scheduler task IDs, latency, or power measurements.
 
-Historical snapshots are immutable audit inputs. This PR does not add, move,
-regenerate, or update them. The exact counts below were produced by a read-only
-comparison against those historical keys.
+Historical data was used only for the read-only comparison recorded below. This
+PR does not add, move, regenerate, or update snapshots.
 
 ## Three identities
 
@@ -96,8 +91,10 @@ no model uses. Batch and sequence axes can still be swept after the structural
 tuple is selected.
 
 YAML remains additive. Deduplication happens after enough information is known
-to identify the actual benchmark point. The first occurrence wins so ordering
-and resume behavior remain deterministic.
+to identify the actual benchmark point. Stable first-wins is the default. When
+a later selector can distinguish two equivalent recipe representations, the
+getter must choose a documented canonical representative that remains
+selectable; standalone MLA uses the smallest TP for this reason.
 
 ## Safe deduplication rules
 
@@ -110,11 +107,13 @@ and resume behavior remain deterministic.
    resolved path-dependent native quantization. Once quantization is explicit,
    an operation-local key may collapse only truly identical benchmark inputs.
 5. For standalone MLA, total heads and TP may produce the same local-head
-   kernel. The getter deduplicates on `(dtype, local heads, batch, sequence)`.
+   kernel. The getter deduplicates on `(dtype, local heads, batch, sequence)`
+   and retains the smallest-TP representation so a later TP selector cannot
+   hide that physical point.
 6. SM exclusions are pre-execution skips. They are not expected failures after
    a case has already run.
 7. Unknown or unproved equivalence is retained. It is better to prune less than
-   to silently remove a V1 interpolation anchor.
+   to silently remove a useful physical point.
 
 ## Pruning decisions
 
@@ -147,8 +146,9 @@ cases. `Removed` is always measured against the V1 baseline.
 
 The unpruned V2 vLLM grids also removed 10,098 context and 8,774 generation
 V1 cases, all from the historical `(head_dim=128, window=128)` region. The
-legacy profile restores those points, while model-native profiles add valid
-new window/head combinations without recreating the global Cartesian product.
+final default profiles retain those points, while model-native profiles add
+valid new window/head combinations without recreating the global Cartesian
+product.
 
 Encoder attention retains all 7,008 original hardcoded cases and adds 671
 model-native cases, for 7,679 total.
@@ -163,44 +163,74 @@ may multiply a recipe by dtype, TP/EP, or token lists.
 | GEMM | 35,742 | 35,742 | 35,742 | unchanged |
 | ComputeScale | 1,628 | 1,628 | 1,628 | shared recipe unchanged; V2 also activates SGLang/vLLM |
 | MoE common | 1,797 | 4,548 | 3,507 | model-qualified recipes retain quant-sensitive artifacts; backend policy removes invalid products before execution |
-| MLA context specs | 220 | 550 | 220 | getter emits 1,760 unique loader keys |
-| MLA generation specs | 362 | 885 | 362 | getter emits 2,896 unique loader keys |
-| Mamba | 8 | 8 | 12 | four V1-compatible interpolation anchors added |
+| MLA context specs | 220 | 550 | 220 | SGLang/TRT-LLM getters each emit 1,760 unique loader keys |
+| MLA generation specs | 362 | 885 | 362 | SGLang emits 2,656 keys after its int32 KV guard; TRT-LLM emits 2,896 |
+| Mamba | 8 | 8 | 12 | four default synthetic interpolation profiles added |
 | GDN | 16 | 16 | 16 | unchanged |
-| mHC | 8 | 8 | 4 | four unique shape/phase profiles; token expansion is unchanged |
+| mHC | 8 | 8 | 8 | artifact recipes remain distinct; backend getters collapse them to four phase/shape groups before the unchanged token sweep |
 | MLA BMM pre/post | 400 / 448 | 400 / 448 | 400 / 448 | unchanged |
+
+The MLA spec rows above are recipes, not final getter queues. With two dtypes on
+SM90/SM100, the standalone getters compare as follows:
+
+| Backend | Operation | V1 scheduled | V1 unique physical | Current scheduled | Current unique physical | Removed physical |
+|---|---|---:|---:|---:|---:|---:|
+| SGLang | context | 3,080 | 1,760 | 1,760 | 1,760 | 0 |
+| SGLang | generation | 4,648 | 2,656 | 2,656 | 2,656 | 0 |
+| TRT-LLM | context | 1,760 | 1,760 | 1,760 | 1,760 | 0 |
+| TRT-LLM | generation | 2,896 | 2,896 | 2,896 | 2,896 | 0 |
+
+For a targeted Kimi TP<=8 plan, SGLang emits 1,100 context / 1,660 generation
+cases and TRT-LLM emits 1,100 / 1,810. Both retain local heads
+`{128, 64, 32, 16, 8}`. The 64-head YAML profile is required for the last
+targeted bucket and for `local_heads=1` in full collection; overlap with the
+128-head profile is removed only in the backend getter.
 
 For MoE, geometry and checkpoint quantization are separate identities. New
 model profiles remain additive, but a backend schedules only the declared
 artifact mode rather than taking the Cartesian product of every shape and
 every backend quant mode. DeepSeek V4 native artifacts schedule
-`w4a8_mxfp4_mxfp8`; the `sgl-project/*-FP8` artifacts schedule `fp8_block`.
+`w4a8_mxfp4_mxfp8` in TRT-LLM. Pinned SGLang 0.5.10 predates the DSV4-specific
+MXFP4 method, and pinned vLLM 0.19.0 has no DSV4 MXFP4/MXFP8 implementation,
+so neither schedules a native V4 MoE case. The `sgl-project/*-FP8` artifacts
+schedule `fp8_block`.
 Kimi-K2-Instruct schedules `fp8_block`, native Kimi-K2.5 schedules
 `int4_wo` with group size 32, and NVIDIA Kimi-K2.5 schedules `nvfp4`.
 
-GPT-OSS is also backend- and hardware-specific. SGLang and vLLM collect
-`w4a16_mxfp4`. TRT-LLM collects `w4a16_mxfp4` on Hopper and
-`w4a8_mxfp4_mxfp8` on Blackwell, matching the current AIC lookup contract.
-SGLang explicitly selects BF16 activation precision for the W4A16 label; its
-runtime `default` would otherwise quantize activation to MXFP8 on Blackwell.
-For DeepSeek V4, SGLang keeps only the production TRTLLM-gen MXFP4 x MXFP8
-path instead of also recording an NVFP4 CuteDSL run under the same logical
-quant label.
+GPT-OSS is also backend- and hardware-specific. SGLang and TRT-LLM retain
+`w4a16_mxfp4` and add `w4a8_mxfp4_mxfp8` on SM100/SM103 Blackwell because the
+two labels select distinct activation precisions. TRT-LLM retains only
+`w4a16_mxfp4` on Hopper, while vLLM collects `w4a16_mxfp4`. SGLang explicitly
+selects BF16 activation precision for the W4A16 label and its runtime `default`
+selects MXFP8 activation for the W4A8 label.
+SGLang 0.5.10's generic MXFP4 method is retained for GPT-OSS W4A16/W4A8, where
+its high-level `FusedMoE + Mxfp4Config` path owns the FlashInfer API, TP
+padding, and EP-local expert layout. It is not reused for DeepSeek V4: the
+DSV4-specific method was added later and has a different top-k/clamp contract.
+A future SGLang 0.5.14 collector upgrade can enable native DSV4 W4A8 after an
+exact-version smoke instead of carrying a newer-version kernel shim here.
 
-DSA module population removes artifact-only repetition only where quantization
-and architecture are already explicit. SGLang keeps its checkpoint tasks
-because native quantization is path-dependent; TRT-LLM and vLLM can safely
-deduplicate after their explicit module inputs are known. Every projected key
-set is unchanged:
+DSA module population retains checkpoint paths because all three backends load
+model-path-specific config. SGLang resolves native checkpoint quantization to
+reject impossible explicit GEMM combinations, but `quantization=None` may still
+auto-detect the artifact's config for a BF16-labelled module case. The getters
+therefore retain distinct paths even when those rows later project to the same
+consumer key. A physical-key collision by itself is not permission to drop a
+path-sensitive invocation.
 
-| Backend | Operation | Scheduled before | Scheduled cleaned | Removed projected keys |
-|---|---|---:|---:|---:|
-| SGLang | context | 792 | 792 | 0 |
-| SGLang | generation | 48 | 48 | 0 |
-| TRT-LLM | context | 46,848 | 23,424 | 0 |
-| TRT-LLM | generation | 35,328 | 17,664 | 0 |
-| vLLM | context | 70,272 | 35,136 | 0 |
-| vLLM | generation | 35,328 | 17,664 | 0 |
+SGLang's inner MLA/DSA module sweep reads the same YAML precision specs and SM
+gates as the population layer. In particular, Ada/Hopper expand `fp8_block`,
+not `nvfp4`; any future NVFP4 module precision must be declared with a
+Blackwell `min_sm` gate in YAML.
+
+| Backend | Operation | Scheduled before | Scheduled now | Unique projected now | Removed projected keys |
+|---|---|---:|---:|---:|---:|
+| SGLang | context | 792 | 792 | 528 | 0 |
+| SGLang | generation | 48 | 48 | 32 | 0 |
+| TRT-LLM | context | 46,848 | 46,848 | 23,424 | 0 |
+| TRT-LLM | generation | 35,328 | 35,328 | 17,664 | 0 |
+| vLLM | context | 70,272 | 70,272 | 35,136 | 0 |
+| vLLM | generation | 35,328 | 35,328 | 17,664 | 0 |
 
 The analogous GLM MoE artifacts are deliberately not merged: SGLang selects
 native FP8/NVFP4 MoE quantization by artifact path, so those paths represent
@@ -209,7 +239,7 @@ real additional measurements rather than scheduler duplicates.
 ## Current-model completeness and DeepSeek V4 safety
 
 The correlated-profile audit also covers model paths that were advertised by
-Collector V2 but previously fell back to the broad legacy grid or produced no
+Collector V2 but previously fell back to the broad default grid or produced no
 model-specific cases:
 
 - Qwen3.5 dense 0.8B/2B and 4B/9B share their exact attention topologies.
@@ -218,7 +248,7 @@ model-specific cases:
 - Qwen3-30B-A3B includes its valid TP8 attention point, and the Qwen3
   235B-2507 artifact resolves to the existing 235B MoE shape.
 
-DeepSeek V4 has two additional population constraints:
+DeepSeek V4 has three additional population constraints:
 
 1. The persisted module and top-k calibration keys do not contain enough
    model geometry to distinguish Flash from Pro. Full/raw collection therefore
@@ -232,20 +262,21 @@ DeepSeek V4 has two additional population constraints:
    are both satisfied. TRT-LLM continues to schedule only the operations its
    registry implements.
 3. MoE artifact aliases are not merged across quantization formats. Native
-   DeepSeek V4 artifacts retain only `w4a8_mxfp4_mxfp8`, while the converted
-   `sgl-project/*-FP8` artifacts retain only `fp8_block`. vLLM enables the
-   native W4A8 path only when its DeepSeek-V4 quantization implementation is
-   importable; global backend quant lists cannot introduce unrelated modes.
+   DeepSeek V4 artifacts retain only `w4a8_mxfp4_mxfp8` for TRT-LLM, while the
+   converted `sgl-project/*-FP8` artifacts retain only `fp8_block`. Pinned
+   SGLang 0.5.10 and vLLM 0.19.0 native mode lists are explicitly empty instead
+   of advertising unverified future-version paths.
 
 The NVIDIA DeepSeek-V4 NVFP4 checkpoints are intentionally not advertised by
 this Collector-only change. The current AIC model catalog and the DSV4 module
 collector do not yet define an end-to-end NVFP4 artifact contract; adding only
 a standalone MoE shape would create a plan that AIC cannot consume correctly.
 
-mHC keeps native and converted artifacts separate until its model-loading
-path has resolved checkpoint-native expert precision. Its getter may still
-deduplicate identical phase/hidden-size/hc-mult invocations in a non-targeted
-run, while a targeted run preserves the artifact the user requested.
+mHC keeps native and converted artifacts separate in the shared recipes.
+SGLang and vLLM collapse only identical phase/hidden-size/hc-mult groups in
+their operation-local getters before sweeping token counts; a targeted run
+first filters to the requested artifact, so that artifact remains the
+representative.
 
 ## Review checklist
 
@@ -259,10 +290,9 @@ When adding or changing a model profile:
 4. Compare physical key sets, not only totals.
 5. Derive benchmark invocation identity before deciding that artifact names or
    quantization variants are duplicates.
-6. Require `V1 - candidate == ∅` for full/raw collection.
-7. Verify targeted model plans do not activate unrelated base operations or
-   inherit unrelated synthetic V1 anchors.
-8. Keep an old synthetic anchor when an unchanged consumer still queries it,
+6. Verify targeted model plans do not activate unrelated base operations or
+   inherit unrelated default profiles.
+7. Keep a synthetic default point when an unchanged consumer still queries it,
    even if the current model metadata would choose a different value.
 
 ## Validation
@@ -273,7 +303,7 @@ ruff check collector tests/unit/collector
 ruff format --check collector tests/unit/collector
 ```
 
-The unit coverage freezes V1 structural keys, encoder anchors, per-operation
-recipe counts, selector narrowing, alias handling, and operation-local physical
-deduplication. Exact historical key-set comparison remains a read-only audit;
-the baseline snapshots themselves are not part of this change.
+The unit coverage checks final profile expansion, per-operation recipe counts,
+selector narrowing, alias handling, and operation-local physical deduplication.
+The historical key-set comparison above was a one-time read-only audit, not an
+ongoing Collector behavior or unit-test dependency.

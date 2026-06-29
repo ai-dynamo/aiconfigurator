@@ -57,8 +57,7 @@ def get_generation_mla_test_cases():
 def _build_mla_test_cases(case_specs, *, dtype_list):
     """Adapt the shared YAML MLA catalog to TRT-LLM's legacy run tuple."""
 
-    test_cases = []
-    seen = set()
+    cases_by_physical_key = {}
     scenario = Scenario()
     expected_geometry = (
         scenario.q_lora_rank,
@@ -96,20 +95,20 @@ def _build_mla_test_cases(case_specs, *, dtype_list):
                     spec.is_context_phase,
                 )
                 # The perf loader keys on local heads, not total heads or TP.
-                # In a full catalog Kimi-64 therefore reuses DeepSeek-128 rows
-                # whenever both map to the same local kernel shape.  A targeted
-                # Kimi run still emits its complete standalone grid.
+                # Equivalent total-head/TP pairs therefore share one row.
                 physical_key = (
                     dtype,
                     spec.num_heads // tp_size,
                     spec.batch_size,
                     spec.input_len,
                 )
-                if physical_key in seen:
-                    continue
-                seen.add(physical_key)
-                test_cases.append(list(case))
-    return test_cases
+                # Selectors run after getter population and commonly cap TP.
+                # Prefer the smallest-TP representation of an equivalent
+                # local-head key so targeted plans do not lose that key.
+                existing = cases_by_physical_key.get(physical_key)
+                if existing is None or tp_size < existing[6]:
+                    cases_by_physical_key[physical_key] = list(case)
+    return list(cases_by_physical_key.values())
 
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half
@@ -191,7 +190,7 @@ def run_mla(
     v_head_dim = scenario.v_head_dim
     rope_config = RopeConfig(
         hidden_size=scenario.hidden_size,
-        num_attention_heads=num_heads,
+        num_attention_heads=scenario.num_heads,
         rope_scaling={
             "beta_fast": scenario.rope_beta_fast,
             "beta_slow": scenario.rope_beta_slow,

@@ -113,16 +113,11 @@ model_case_values:
 
 The generator expands only valid TP shards of that tuple. It never crosses one
 model's query/KV heads with another model's head dimension or window. A targeted
-run with an explicit profile uses only that model profile; models not yet
-migrated fall back to the collector-v1 compatibility profiles. Full/raw runs
-combine the compatibility profiles with all model deltas.
-
-Treat that last rule as a physical-coverage invariant: the full/raw key set must
-contain every collector-v1 lookup key. Do not infer compatibility from total
-case counts alone. Alias canonicalization may remove duplicate scheduler cases,
-but it must not remove a distinct database key. Put synthetic v1 interpolation
-anchors under the base recipe's `legacy_model_cases`; targeted real-model runs
-will not inherit those unrelated anchors.
+run with an explicit profile uses only that model profile. Full/raw runs combine
+the base operation's `head_profiles` with all model profiles and deduplicate the
+resulting physical tuples. A model without a native profile uses the base
+profiles. Mamba's generic synthetic shapes needed only by full/raw collection
+live under `common_case_values.mamba2.default_model_cases`.
 
 ### Framework-Specific Model Dimensions
 
@@ -170,7 +165,7 @@ applies to MLA, Mamba2, GDN, and MHC: model YAML stores model dimensions, while
 base op YAML stores the reusable sweep policy.
 
 MoE quantization is resolved before a case is queued. Base `quantization_modes`
-may declare `min_sm`, `min_sm_exclusive`, `max_sm_exclusive`, runtime features,
+may declare `min_sm`, `min_sm_exclusive`, runtime features,
 an `allowed_model_paths` allowlist, and optional `module_config` such as an
 INT4 group size. A model row narrows that list with
 `framework_quantization.<backend>.allowed_modes`. Quant-sensitive checkpoint

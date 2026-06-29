@@ -321,39 +321,6 @@ class TestTaskExceptions:
         assert _load_expected_failed_ids(tmp_path, "expected_failures") == {"b", "d"}
 
 
-class TestResumeFailures:
-    def test_plain_resume_stays_failed_until_retry_succeeds(self, tmp_path):
-        module_name = "resume_failed"
-        checkpoint_dir = str(tmp_path / ".checkpoint")
-        initial_tasks = _tasks([("done", "normal"), ("retry_me", "error")])
-
-        first_errors = _run(initial_tasks, 1, tmp_path, module_name=module_name)
-        assert any(error["error_type"] == "ValueError" for error in first_errors)
-        assert _load_failed_ids(tmp_path, module_name) == {"retry_me"}
-
-        plain_resume_errors = parallel_run(
-            initial_tasks,
-            _task_fn,
-            num_processes=1,
-            module_name=module_name,
-            resume_options={"checkpoint_dir": checkpoint_dir, "resume": True, "retry_failed": False},
-        )
-        assert [error["error_type"] for error in plain_resume_errors] == ["UnresolvedCheckpointFailures"]
-        assert _load_failed_ids(tmp_path, module_name) == {"retry_me"}
-
-        retry_tasks = _tasks([("done", "normal"), ("retry_me", "normal")])
-        retry_errors = parallel_run(
-            retry_tasks,
-            _task_fn,
-            num_processes=1,
-            module_name=module_name,
-            resume_options={"checkpoint_dir": checkpoint_dir, "resume": True, "retry_failed": True},
-        )
-        assert retry_errors == []
-        assert _load_failed_ids(tmp_path, module_name) == set()
-        assert _load_done_ids(tmp_path, module_name) == {"done", "retry_me"}
-
-
 class TestMixedFailureModes:
     """Combine EXIT_CODE_RESTART, exceptions, and normal tasks."""
 

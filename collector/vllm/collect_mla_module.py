@@ -255,13 +255,8 @@ def _build_module_test_cases(attn_type: str, mode: str):
     """
     base_cases = get_context_test_cases(attn_type) if mode == "context" else get_generation_test_cases(attn_type)
     cases = []
-    seen = set()
     for model_spec in get_mla_module_model_specs(attention_type=attn_type):
         for base_case in base_cases:
-            physical_key = (model_spec.architecture, *base_case)
-            if physical_key in seen:
-                continue
-            seen.add(physical_key)
             s, b, h, kv_dtype, compute_dtype, gemm_type, *rest = base_case
             case = [s, b, h, kv_dtype, compute_dtype, gemm_type, model_spec.model_path, attn_type]
             if rest:

@@ -27,14 +27,17 @@ model_case_values:
       wideep: true
       framework_quantization:
         sglang:
-          allowed_modes:
-            - w4a8_mxfp4_mxfp8
+          # The pinned SGLang 0.5.10 predates the DeepSeek-V4-specific MXFP4
+          # method (added in 0.5.12). Do not run its GPT-OSS method under a
+          # DSV4 label; enable this only with a separately validated upgrade.
+          allowed_modes: []
         trtllm:
           allowed_modes:
             - w4a8_mxfp4_mxfp8
         vllm:
-          allowed_modes:
-            - w4a8_mxfp4_mxfp8
+          # The pinned vLLM 0.19.0 collector has no DeepSeek-V4 MXFP4/MXFP8
+          # implementation. Keep the native artifact out of its queue.
+          allowed_modes: []
     - model_path: sgl-project/DeepSeek-V4-Flash-FP8
       hidden_size: 4096
       inter_size: 2048
@@ -59,14 +62,12 @@ model_case_values:
       wideep: true
       framework_quantization:
         sglang:
-          allowed_modes:
-            - w4a8_mxfp4_mxfp8
+          allowed_modes: []
         trtllm:
           allowed_modes:
             - w4a8_mxfp4_mxfp8
         vllm:
-          allowed_modes:
-            - w4a8_mxfp4_mxfp8
+          allowed_modes: []
     - model_path: sgl-project/DeepSeek-V4-Pro-FP8
       hidden_size: 7168
       inter_size: 3072

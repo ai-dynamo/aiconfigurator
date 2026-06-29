@@ -50,10 +50,14 @@ except ModuleNotFoundError:
     from helper import benchmark_with_power, get_sm_version, log_perf
 
 try:
-    from collector.case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
+    from collector.case_generator import (
+        get_mla_module_model_specs,
+        get_mla_module_precision_specs,
+        get_mla_module_sweep_spec,
+    )
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
+    from case_generator import get_mla_module_model_specs, get_mla_module_precision_specs, get_mla_module_sweep_spec
 
 try:
     from collector.sglang.runtime_limits import (
@@ -280,43 +284,16 @@ def _resolve_local_model_path(model_id: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _get_precision_combos(phase: str, model_id: str | None = None):
-    """Return (compute_dtype, kv_cache_dtype, gemm_type) triples for a phase.
-
-    All strings are perf-database-compatible (not SGLang-native).
-
-    SGLang precision axes:
-      compute_dtype:  always "bfloat16" (DSA / NSA kernels run bf16 FMHA;
-                      on B200 decode with fp8 KV the trtllm path runs fp8
-                      FMHA internally, but the latency is captured under the
-                      fp8 KV row).
-      kv_cache_dtype: "bfloat16" always; "fp8" on SM >= 90 (Hopper+).
-      gemm_type:      "bfloat16" for bf16 weights; "fp8_block" on SM >= 89,
-                      in which case load_model_runner launches sglang with
-                      quantization="fp8" so the inner attention projections
-                      (q_b_proj, kv_b_proj, o_proj, wq_b, wk) and the fp8
-                      paged MQA scoring kernel fire on real fp8 weights.
-
-    fp4_e2m1 omitted — SGLang supports it on SM >= 100, but KVCacheQuantMode
-    enum has no fp4 entry, so perf_database cannot consume it yet.
-    """
-    sm = get_sm_version()
-    kv_dtypes = ["bfloat16"]
-    if sm >= 90:
-        kv_dtypes.append("fp8")
-    combos = [("bfloat16", kv, "bfloat16") for kv in kv_dtypes]
-    if sm >= 89:
-        # GLM5-NVFP4 / DSV4 are modelopt NVFP4 models -> use nvfp4 gemm
-        # (quantization=modelopt_fp4, native hf_quant_config) to MATCH serve
-        # (--quantization modelopt_fp4). attention proj are NVFP4-excluded
-        # (bf16) so the bf16 combo above still covers the proj path.
-        combos += [("bfloat16", kv, "nvfp4") for kv in kv_dtypes]
-    # GLM5-NVFP4 weights ARE nvfp4 -> the bf16-gemm combos are meaningless and
-    # just duplicate the case. Serve runs --quantization modelopt_fp4, so for
-    # GLM5 DSA collect ONLY the nvfp4 combos. Hardcoded (no env gate).
-    if model_id is not None and _is_glm5_dsa_model(model_id):
-        combos = [c for c in combos if c[2] == "nvfp4"]
-    return combos
+def _get_precision_combos(phase: str):
+    """Return YAML-backed operator precision triples for one phase and SM."""
+    return [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs(
+            "sglang",
+            phase=phase,
+            sm_version=get_sm_version(),
+        )
+    ]
 
 
 def _get_backends(attn_type: str):
@@ -595,7 +572,6 @@ def _build_module_test_cases(attn_type: str, mode: str):
     model_specs = get_mla_module_model_specs(attention_type=attn_type)
     sweep = get_mla_module_sweep_spec("sglang")
     cases = []
-    seen = set()
     for model_spec in model_specs:
         # Each checkpoint ships at one native precision; only enumerate the
         # precision combos it can actually load (bf16 always + its own quant).
@@ -626,21 +602,6 @@ def _build_module_test_cases(attn_type: str, mode: str):
                         else ["flashmla_kv"]
                     )
                     for _dsa_backend in _dsa_backends:
-                        physical_key = (
-                            model_spec.architecture,
-                            native_quant,
-                            mode,
-                            batch_size,
-                            num_heads,
-                            kv_dtype,
-                            compute_dtype,
-                            gemm_type,
-                            target_tp_size,
-                            _dsa_backend,
-                        )
-                        if physical_key in seen:
-                            continue
-                        seen.add(physical_key)
                         cases.append(
                             [
                                 0,
@@ -888,10 +849,6 @@ def _patch_nsa_indexer_compile_for_module_cuda_graph(attention_module) -> None:
 
 class CudaIllegalAccessError(RuntimeError):
     """Stop the current subprocess after a CUDA illegal access poisons context."""
-
-
-class PerfLogWriteError(RuntimeError):
-    """Stop the task when a measured row cannot be persisted."""
 
 
 def _expect_module_attr(module, attr_name: str, expected: int, module_name: str) -> None:
@@ -1154,36 +1111,6 @@ def load_model_runner(
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _mla_module_perf_fields(
-    *,
-    is_wideep_mla: bool,
-    is_prefill: bool,
-    attn_type: str,
-    backend_name: str,
-    seq_length: int,
-    prefix_len: int = 0,
-    dsa_prefill_backend: str = "flashmla_kv",
-) -> tuple[str, str, str, int, int]:
-    """Return filename, op, kernel source, ISL, and step for one MLA row."""
-    phase = "context" if is_prefill else "generation"
-    if is_wideep_mla:
-        perf_fname = f"wideep_{phase}_mla_perf.txt"
-        op_name = f"mla_{phase}"
-        kernel_source = backend_name
-    else:
-        perf_fname = f"{attn_type}_{phase}_module_perf.txt"
-        op_name = f"{attn_type}_{phase}_module"
-        kernel_source = f"{attn_type}_{backend_name}"
-        if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
-            kernel_source = f"{kernel_source}_trtllm"
-
-    if is_prefill:
-        return perf_fname, op_name, kernel_source, seq_length, prefix_len
-    if is_wideep_mla:
-        return perf_fname, op_name, kernel_source, seq_length, 0
-    return perf_fname, op_name, kernel_source, 1, seq_length
-
-
 def run_attention_torch(
     model_runner,
     test_cases,
@@ -1202,7 +1129,6 @@ def run_attention_torch(
     target_tp_size: int = 1,
     use_module_cuda_graph: bool = False,
     dsa_prefill_backend: str = "flashmla_kv",
-    is_wideep_mla: bool = False,
 ):
     """Run attention benchmark for both prefill and decode phases.
 
@@ -1222,12 +1148,15 @@ def run_attention_torch(
     # mla_dtype="fp8_block", kv_cache_dtype="fp8" for all runs, used the raw
     # backend name as kernel_source, and different op_name / filename patterns.
     # perf_database loaders (load_wideep_*_mla_data) expect these conventions.
+    is_wideep_mla = attn_type == "mla"
+
     if is_wideep_mla:
         log_mla_dtype = "fp8_block"
         log_kv_dtype = "fp8"
         log_gemm_type = "fp8_block"
     else:
-        # Regular MLA/DSA uses the precision that was actually benchmarked.
+        # DSA: log dtype strings that match the common.*QuantMode enum member
+        # names expected by perf_database loaders (e.g. "bfloat16", "fp8").
         log_mla_dtype = compute_dtype
         log_kv_dtype = kv_cache_dtype
         log_gemm_type = gemm_type
@@ -1278,7 +1207,6 @@ def run_attention_torch(
                     prefix_len=prefix_len,
                     use_module_cuda_graph=use_module_cuda_graph,
                     dsa_prefill_backend=dsa_prefill_backend,
-                    is_wideep_mla=is_wideep_mla,
                 )
             )
         else:
@@ -1306,7 +1234,6 @@ def run_attention_torch(
                     target_tp_size=target_tp_size,
                     use_module_cuda_graph=use_module_cuda_graph,
                     dsa_prefill_backend=dsa_prefill_backend,
-                    is_wideep_mla=is_wideep_mla,
                 )
             )
     return logged_count
@@ -1336,10 +1263,9 @@ def _run_prefill(
     prefix_len: int = 0,
     use_module_cuda_graph: bool = False,
     dsa_prefill_backend: str = "flashmla_kv",
-    *,
-    is_wideep_mla: bool = False,
 ):
     """Run prefill (context) benchmark for a single (batch_size, seq_length) point."""
+    is_wideep_mla = attn_type == "mla"
     from sglang.srt.layers.communicator import AttentionInputs, get_attn_tp_context
     from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
@@ -1859,17 +1785,18 @@ def _run_prefill(
 
         # Log perf — wideep MLA uses old filename/op_name/kernel_source conventions
         try:
-            perf_fname, op_name, kernel_source, log_isl, log_step = _mla_module_perf_fields(
-                is_wideep_mla=is_wideep_mla,
-                is_prefill=True,
-                attn_type=attn_type,
-                backend_name=backend_name,
-                seq_length=seq_length,
-                prefix_len=prefix_len,
-                dsa_prefill_backend=dsa_prefill_backend,
-            )
+            if is_wideep_mla:
+                perf_fname = "wideep_context_mla_perf.txt"
+                op_name = "mla_context"
+                kernel_source = backend_name
+            else:
+                perf_fname = f"{attn_type}_context_module_perf.txt"
+                op_name = f"{attn_type}_context_module"
+                kernel_source = f"{attn_type}_{backend_name}"
+                if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
+                    kernel_source = f"{kernel_source}_trtllm"
             perf_filename = _resolve_perf_path(output_path, perf_fname)
-            if not log_perf(
+            log_perf(
                 item_list=[
                     {
                         "model": model_path,
@@ -1879,9 +1806,9 @@ def _run_prefill(
                         "gemm_type": log_gemm_type,
                         "num_heads": head_num,
                         "batch_size": batch_size,
-                        "isl": log_isl,
+                        "isl": seq_length,
                         "tp_size": target_tp_size,
-                        "step": log_step,
+                        "step": prefix_len,
                         "latency": f"{avg_time_ms:.4f}",
                     }
                 ],
@@ -1891,10 +1818,7 @@ def _run_prefill(
                 op_name=op_name,
                 kernel_source=kernel_source,
                 perf_filename=perf_filename,
-            ):
-                raise PerfLogWriteError(f"failed to persist prefill row to {perf_filename}")
-        except PerfLogWriteError:
-            raise
+            )
         except Exception as e:
             print(f"  Warning: failed to log prefill metrics: {e}")
             return False
@@ -1902,8 +1826,6 @@ def _run_prefill(
         print(f"  Prefill: {avg_time_ms:.3f} ms (back-to-back avg over {num_iterations} iters)")
         return True
 
-    except PerfLogWriteError:
-        raise
     except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
         print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
         torch.cuda.empty_cache()
@@ -1958,10 +1880,9 @@ def _run_decode(
     target_tp_size: int,
     use_module_cuda_graph: bool = False,
     dsa_prefill_backend: str = "flashmla_kv",
-    *,
-    is_wideep_mla: bool = False,
 ):
     """Run decode (generation) benchmark for a single (batch_size, kv_cache_length) point."""
+    is_wideep_mla = attn_type == "mla"
     from sglang.srt.layers.communicator import AttentionInputs, get_attn_tp_context
     from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
@@ -2093,20 +2014,26 @@ def _run_decode(
         power_stats = results["power_stats"]
 
         # Log perf — wideep MLA uses isl=seq_len, step=0 (old convention).
-        # Regular MLA/DSA uses isl=1, step=seq_len, where seq_len is past-KV length.
+        # DSA uses isl=1, step=seq_len, where seq_len is past-KV length.
         # The wideep generation loader computes s = isl + step, so both
         # conventions yield the same effective key when step=0 → s=seq_len.
         try:
-            perf_fname, op_name, kernel_source, log_isl, log_step = _mla_module_perf_fields(
-                is_wideep_mla=is_wideep_mla,
-                is_prefill=False,
-                attn_type=attn_type,
-                backend_name=backend_name,
-                seq_length=seq_length,
-                dsa_prefill_backend=dsa_prefill_backend,
-            )
+            if is_wideep_mla:
+                perf_fname = "wideep_generation_mla_perf.txt"
+                op_name = "mla_generation"
+                kernel_source = backend_name
+                log_isl = seq_length
+                log_step = 0
+            else:
+                perf_fname = f"{attn_type}_generation_module_perf.txt"
+                op_name = f"{attn_type}_generation_module"
+                kernel_source = f"{attn_type}_{backend_name}"
+                if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
+                    kernel_source = f"{kernel_source}_trtllm"
+                log_isl = 1
+                log_step = seq_length
             perf_filename = _resolve_perf_path(output_path, perf_fname)
-            if not log_perf(
+            log_perf(
                 item_list=[
                     {
                         "model": model_path,
@@ -2129,10 +2056,7 @@ def _run_decode(
                 kernel_source=kernel_source,
                 perf_filename=perf_filename,
                 power_stats=power_stats,
-            ):
-                raise PerfLogWriteError(f"failed to persist decode row to {perf_filename}")
-        except PerfLogWriteError:
-            raise
+            )
         except Exception as e:
             print(f"  Warning: failed to log decode metrics: {e}")
             return False
@@ -2140,8 +2064,6 @@ def _run_decode(
         print(f"  Decode: {avg_time_ms:.3f} ms")
         return True
 
-    except PerfLogWriteError:
-        raise
     except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
         print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
         torch.cuda.empty_cache()
@@ -2200,8 +2122,6 @@ def run_mla_module(
     batch_size_filter: int | None = None,
     target_tp_size: int = 1,
     dsa_prefill_backend: str = "flashmla_kv",
-    *,
-    is_wideep_mla: bool = False,
 ):
     """Run MLA/DSA module benchmark — called inside a subprocess.
 
@@ -2447,7 +2367,6 @@ def run_mla_module(
             target_tp_size=target_tp_size,
             use_module_cuda_graph=use_module_cuda_graph,
             dsa_prefill_backend=dsa_prefill_backend,
-            is_wideep_mla=is_wideep_mla,
         )
         if cases and logged_count == 0:
             raise RuntimeError(
@@ -2474,8 +2393,6 @@ def _run_mla_subprocess(
     batch_size_filter: int | None = None,
     target_tp_size: int = 1,
     dsa_prefill_backend: str = "flashmla_kv",
-    *,
-    is_wideep_mla: bool = False,
 ):
     """Run MLA/DSA benchmark in a subprocess with CUDA_VISIBLE_DEVICES isolation."""
     env = os.environ.copy()
@@ -2491,7 +2408,7 @@ def _run_mla_subprocess(
         f'run_mla_module("{attn_type}", {head_num}, "{model_path}", '
         f'"{kv_cache_dtype}", "{compute_dtype}", "{gemm_type}", {is_prefill}, '
         f"0, {output_repr}, {backend_repr}, {batch_filter_repr}, {target_tp_size}, "
-        f'"{dsa_prefill_backend}", is_wideep_mla={is_wideep_mla!r})\n'
+        f'"{dsa_prefill_backend}")\n'
     )
 
     proc = subprocess.Popen(
@@ -2554,7 +2471,6 @@ def run_mla_module_worker(
     *,
     perf_filename: str,
     device: str = "cuda:0",
-    is_wideep_mla: bool = False,
 ):
     """Worker-compatible wrapper used by collector/collect.py.
 
@@ -2568,8 +2484,7 @@ def run_mla_module_worker(
     For DSA test cases, it defaults to None and _get_backends() is used.
 
     perf_filename and device are keyword-only arguments supplied by
-    collect.py via functools.partial and the worker dispatch loop. The WideEP
-    wrapper alone sets is_wideep_mla=True.
+    collect.py via functools.partial and the worker dispatch loop.
     """
     device_str = str(device) if not isinstance(device, str) else device
     gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
@@ -2607,7 +2522,6 @@ def run_mla_module_worker(
         batch_size_filter=batch_size_filter,
         target_tp_size=target_tp_size,
         dsa_prefill_backend=dsa_prefill_backend,
-        is_wideep_mla=is_wideep_mla,
     )
 
 
@@ -2660,7 +2574,7 @@ def main():
                 else [h for h in get_mla_module_sweep_spec("sglang").inner_sweep_head_counts if h <= native_heads]
             )
 
-            for compute_dtype, kv_dtype, gemm_type in _get_precision_combos(args.mode, model_path):
+            for compute_dtype, kv_dtype, gemm_type in _get_precision_combos(args.mode):
                 if args.kv_cache_dtype and kv_dtype != args.kv_cache_dtype:
                     continue
 

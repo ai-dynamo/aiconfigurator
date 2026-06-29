@@ -32,6 +32,7 @@ model_case_values:
         sglang:
           allowed_modes:
             - w4a16_mxfp4
+            - w4a8_mxfp4_mxfp8
         trtllm:
           allowed_modes:
             - w4a16_mxfp4
@@ -59,6 +60,7 @@ model_case_values:
         sglang:
           allowed_modes:
             - w4a16_mxfp4
+            - w4a8_mxfp4_mxfp8
         trtllm:
           allowed_modes:
             - w4a16_mxfp4

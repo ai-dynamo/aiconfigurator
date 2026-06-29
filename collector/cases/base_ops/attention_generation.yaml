@@ -97,8 +97,8 @@ framework_specific_op_cases:
         - 0
         - 128
         - 1024
-        legacy_head_profiles:
-        - id: collector_v1
+        head_profiles:
+        - id: default
           head_dims: [128, 256]
           window_size: 0
           mha_query_head_counts: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
@@ -154,14 +154,14 @@ framework_specific_op_cases:
         - 0
         - 128
         - 1024
-        legacy_head_profiles:
-        - id: collector_v1_default
+        head_profiles:
+        - id: default
           head_dims: [64, 128, 256]
           window_size: 0
           mha_query_head_counts: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
           xqa_query_head_counts: [1, 2, 4, 8, 16, 32, 64, 96, 128]
           kv_head_counts: [1, 2, 4, 8]
-        - id: collector_v1_head64_swa
+        - id: default_head64_swa
           head_dim: 64
           window_size: 128
           mha_query_head_counts: []
@@ -205,8 +205,8 @@ framework_specific_op_cases:
         - 128
         - 1024
         - 8192
-        legacy_head_profiles:
-        - id: collector_v1
+        head_profiles:
+        - id: default
           head_dims: [64, 128]
           window_sizes: [0, 128]
           mha_query_head_counts: []
@@ -248,8 +248,8 @@ framework_specific_op_cases:
         window_sizes:
         - 0
         - 128
-        legacy_head_profiles:
-        - id: collector_v1_head64
+        head_profiles:
+        - id: default_head64
           head_dim: 64
           window_sizes: [0, 128]
           mha_query_head_counts: []
@@ -257,7 +257,7 @@ framework_specific_op_cases:
           kv_head_counts: [1, 2, 4, 8]
           allow_xqa_mha: true
           require_divisible: true
-        - id: collector_v1_head128
+        - id: default_head128
           head_dim: 128
           window_size: 0
           mha_query_head_counts: []

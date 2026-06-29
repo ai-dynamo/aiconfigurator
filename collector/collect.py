@@ -224,11 +224,6 @@ class ResumeCheckpoint:
             logger.info(f"{self.module_name}: {', '.join(parts)}")
         return runnable
 
-    def unresolved_failed_ids(self, task_infos: list[dict]) -> list[str]:
-        """Return failed checkpoint IDs that still belong to this task set."""
-        current_ids = {task_info["id"] for task_info in task_infos}
-        return sorted(self._failed & current_ids)
-
     def mark_passed(self, task_id: str):
         """Mark a task as successfully completed. Skipped on resume."""
         self._done.add(task_id)
@@ -655,35 +650,16 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
         checkpoint_dir=checkpoint_dir,
     )
 
-    checkpoint_errors = []
     if resume_options and resume_options.get("resume"):
         resume_tracker.load_existing()
         retry_failed = resume_options.get("retry_failed", False)
         task_infos = resume_tracker.filter_done(raw_task_infos, retry_failed=retry_failed)
-        if not retry_failed:
-            unresolved_failed_ids = resume_tracker.unresolved_failed_ids(raw_task_infos)
-            if unresolved_failed_ids:
-                checkpoint_errors.append(
-                    {
-                        "module": module_name,
-                        "device_id": None,
-                        "task_id": unresolved_failed_ids[0],
-                        "task_params": None,
-                        "error_type": "UnresolvedCheckpointFailures",
-                        "error_message": (
-                            f"{len(unresolved_failed_ids)} failed task(s) remain in the checkpoint; "
-                            "rerun with --resume --resume-retry-failed"
-                        ),
-                        "traceback": "",
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                )
     else:
         task_infos = raw_task_infos
 
     if not task_infos:
         logger.info(f"{module_name}: no tasks to run")
-        return checkpoint_errors
+        return []
 
     queue = mp.Queue()
     error_queue = mp.Queue()
@@ -795,7 +771,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
         queue.put(None)
 
     # Monitor progress with error collection
-    errors = list(checkpoint_errors)
+    errors = []
 
     with tqdm(total=len(task_infos), desc=f"{module_name}", dynamic_ncols=True, leave=True) as pbar:
         last_progress = 0
@@ -1004,7 +980,6 @@ def collect_ops(
     resume_options: dict | None = None,
     model_path: str | None = None,
     case_plan=None,
-    planned_perf_outputs: set[str] | None = None,
 ) -> list[dict]:
     """Run collection for a list of resolved collection entries.
 
@@ -1054,8 +1029,6 @@ def collect_ops(
             if case_plan is not None and op_plan is None:
                 logger.info(f"Skipping {collection['name']}.{collection['type']} — not in collector v2 case plan")
                 continue
-            if planned_perf_outputs is not None:
-                planned_perf_outputs.add(str(collection["perf_filename"]))
             module_name = collection["module"]
             get_module = __import__(module_name, fromlist=[collection["get_func"]])
             run_module = __import__(module_name, fromlist=[collection["run_func"]])
@@ -1157,7 +1130,6 @@ def collect_sglang(
     resume_options: dict | None = None,
     model_path: str | None = None,
     case_plan=None,
-    planned_perf_outputs: set[str] | None = None,
 ):
     """Collect performance data for SGLang with enhanced error tracking"""
     from collector.sglang.registry import REGISTRY
@@ -1195,11 +1167,9 @@ def collect_sglang(
         resume_options=resume_options,
         model_path=model_path,
         case_plan=case_plan,
-        planned_perf_outputs=planned_perf_outputs,
     )
 
     generate_collection_summary(all_errors, "sglang", version)
-    return all_errors
 
 
 def collect_vllm(
@@ -1210,7 +1180,6 @@ def collect_vllm(
     resume_options: dict | None = None,
     model_path: str | None = None,
     case_plan=None,
-    planned_perf_outputs: set[str] | None = None,
 ):
     """Collect performance data for vLLM"""
     from collector.version_resolver import build_collections
@@ -1242,11 +1211,9 @@ def collect_vllm(
         resume_options=resume_options,
         model_path=model_path,
         case_plan=case_plan,
-        planned_perf_outputs=planned_perf_outputs,
     )
 
     generate_collection_summary(all_errors, "vllm", version)
-    return all_errors
 
 
 def collect_trtllm(
@@ -1257,7 +1224,6 @@ def collect_trtllm(
     resume_options: dict | None = None,
     model_path: str | None = None,
     case_plan=None,
-    planned_perf_outputs: set[str] | None = None,
 ):
     """Collect performance data for TensorRT LLM with enhanced error tracking"""
     from collector.trtllm.registry import REGISTRY
@@ -1292,11 +1258,9 @@ def collect_trtllm(
         resume_options=resume_options,
         model_path=model_path,
         case_plan=case_plan,
-        planned_perf_outputs=planned_perf_outputs,
     )
 
     generate_collection_summary(all_errors, "trtllm", version)
-    return all_errors
 
 
 def generate_collection_summary(all_errors, backend, version):
@@ -1341,49 +1305,6 @@ def generate_collection_summary(all_errors, backend, version):
             logger.info(f"  {error_type}: {count}")
 
     logger.info(f"\nDetailed error report saved to: {summary_file}")
-
-
-def _require_collection_success(collection_errors: list[dict] | None, backend: str) -> list[dict]:
-    """Reject missing/failed runs before any staging file is finalized."""
-    if collection_errors is None:
-        collection_errors = [
-            {
-                "module": backend,
-                "error_type": "CollectorDidNotRun",
-                "error_message": f"{backend} collector did not return a result; check earlier setup logs",
-                "traceback": "",
-                "timestamp": datetime.now().isoformat(),
-            }
-        ]
-    if collection_errors:
-        if logger is not None:
-            logger.error(
-                f"Preserving collector CSV staging files because {len(collection_errors)} error(s) remain; "
-                "resume/retry before finalization"
-            )
-        first_message = collection_errors[0].get("error_message", collection_errors[0].get("error_type", "unknown"))
-        raise RuntimeError(
-            f"{backend} collection completed with {len(collection_errors)} error(s); first error: {first_message}"
-        )
-    return collection_errors
-
-
-def _select_perf_outputs_for_finalization(
-    output_root: Path,
-    existing_perf_outputs: dict[Path, int],
-    planned_perf_outputs: set[str],
-    *,
-    resume: bool,
-) -> list[Path]:
-    """Select this run's staging files, including prior chunks on resume."""
-    planned_names = {Path(filename).name for filename in planned_perf_outputs}
-    selected = []
-    for path in find_perf_csv_outputs(output_root):
-        resolved = path.resolve()
-        touched = resolved not in existing_perf_outputs or path.stat().st_mtime_ns != existing_perf_outputs[resolved]
-        if touched or (resume and path.name in planned_names):
-            selected.append(path)
-    return selected
 
 
 def _all_op_names() -> list[str]:
@@ -1594,10 +1515,6 @@ def main():
     if logger is None:
         if args.model_cases_full:
             log_scope = ["model_cases_full"]
-        # A full DSV4 model plan contains several long op names; keep its log
-        # filename below the Linux component-length limit without changing ops.
-        elif case_plan is not None and args.ops is None and case_plan.model_architecture == "DeepseekV4ForCausalLM":
-            log_scope = ["dsv4"]
         else:
             log_scope = ops if ops else ["all"]
         logger = setup_logging(scope=log_scope, debug=args.debug)
@@ -1675,13 +1592,15 @@ def main():
 
     output_root = Path.cwd()
     existing_perf_outputs = {path.resolve(): path.stat().st_mtime_ns for path in find_perf_csv_outputs(output_root)}
-    planned_perf_outputs: set[str] = set()
+
+    def was_touched_by_run(path: Path) -> bool:
+        resolved = path.resolve()
+        return resolved not in existing_perf_outputs or path.stat().st_mtime_ns != existing_perf_outputs[resolved]
 
     # Use profiling context manager
-    collection_errors = None
     with ProfilerContext(args.backend, enabled=args.profile):
         if args.backend == "trtllm":
-            collection_errors = collect_trtllm(
+            collect_trtllm(
                 num_processes,
                 ops,
                 limit=limit,
@@ -1689,10 +1608,9 @@ def main():
                 resume_options=resume_options,
                 model_path=case_plan.model_path if case_plan is not None else None,
                 case_plan=case_plan,
-                planned_perf_outputs=planned_perf_outputs,
             )
         elif args.backend == "sglang":
-            collection_errors = collect_sglang(
+            collect_sglang(
                 num_processes,
                 ops,
                 limit=limit,
@@ -1700,10 +1618,9 @@ def main():
                 resume_options=resume_options,
                 model_path=case_plan.model_path if case_plan is not None else None,
                 case_plan=case_plan,
-                planned_perf_outputs=planned_perf_outputs,
             )
         elif args.backend == "vllm":
-            collection_errors = collect_vllm(
+            collect_vllm(
                 num_processes,
                 ops,
                 limit=limit,
@@ -1711,25 +1628,18 @@ def main():
                 resume_options=resume_options,
                 model_path=case_plan.model_path if case_plan is not None else None,
                 case_plan=case_plan,
-                planned_perf_outputs=planned_perf_outputs,
             )
 
-    collection_errors = _require_collection_success(collection_errors, args.backend)
     if args.keep_csv:
         logger.info("Keeping collector CSV staging files because --keep-csv was passed")
     else:
-        perf_outputs = _select_perf_outputs_for_finalization(
-            output_root,
-            existing_perf_outputs,
-            planned_perf_outputs,
-            resume=args.resume,
-        )
-        if perf_outputs:
+        touched_perf_outputs = [path for path in find_perf_csv_outputs(output_root) if was_touched_by_run(path)]
+        if touched_perf_outputs:
             logger.info(
                 "Finalizing collector CSV staging files as parquet:\n  "
-                + "\n  ".join(str(path) for path in perf_outputs)
+                + "\n  ".join(str(path) for path in touched_perf_outputs)
             )
-        converted = finalize_perf_files(perf_outputs)
+        converted = finalize_perf_files(touched_perf_outputs)
         if converted:
             logger.info(f"Finalized {len(converted)} collector perf files as parquet")
 
