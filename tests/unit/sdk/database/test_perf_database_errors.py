@@ -17,12 +17,43 @@ from aiconfigurator.sdk.performance_result import PerformanceResult
 pytestmark = pytest.mark.unit
 
 
-def test_perf_data_cause_detection_traverses_cause_and_context() -> None:
+def test_perf_data_cause_detection_accepts_direct_error() -> None:
+    error = PerfDataNotAvailableError("missing perf data")
+
+    assert has_perf_data_not_available_cause(error)
+
+
+def test_perf_data_cause_detection_accepts_explicit_cause() -> None:
+    error = RuntimeError("outer")
+    error.__cause__ = PerfDataNotAvailableError("missing perf data")
+
+    assert has_perf_data_not_available_cause(error)
+
+
+def test_perf_data_cause_detection_accepts_implicit_context() -> None:
+    error = RuntimeError("outer")
+    error.__context__ = PerfDataNotAvailableError("missing perf data")
+
+    assert has_perf_data_not_available_cause(error)
+
+
+def test_perf_data_cause_detection_prefers_explicit_cause() -> None:
     error = RuntimeError("outer")
     error.__cause__ = RuntimeError("explicit cause")
     error.__context__ = PerfDataNotAvailableError("missing perf data")
 
-    assert has_perf_data_not_available_cause(error)
+    assert not has_perf_data_not_available_cause(error)
+
+
+def test_perf_data_cause_detection_ignores_suppressed_context() -> None:
+    try:
+        try:
+            raise PerfDataNotAvailableError("missing perf data")
+        except PerfDataNotAvailableError:
+            raise KeyError("real bug while handling perf-data miss") from None
+    except KeyError as error:
+        assert error.__suppress_context__
+        assert not has_perf_data_not_available_cause(error)
 
 
 def test_perf_data_cause_detection_avoids_cycles() -> None:
