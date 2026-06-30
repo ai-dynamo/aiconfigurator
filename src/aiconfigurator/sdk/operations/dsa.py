@@ -131,6 +131,8 @@ _GENERATION_DSA_TARGET_Z: list[int] = [
 # fmt: on
 
 
+
+
 def _select_dsa_backend(arch_dict, dsa_backend):
     """Pick the per-backend sub-dict from a context-DSA architecture node.
 
@@ -221,6 +223,8 @@ class ContextDSAModule(Operation):
 
     _data_cache: ClassVar[dict] = {}
     _raw_data_cache: ClassVar[dict] = {}
+    _skip_data_cache: ClassVar[dict] = {}
+    _raw_skip_data_cache: ClassVar[dict] = {}
 
     def __init__(
         self,
@@ -232,6 +236,8 @@ class ContextDSAModule(Operation):
         gemm_quant_mode: common.GEMMQuantMode,
         architecture: str = "DeepseekV32ForCausalLM",
         cp_size: int = 1,
+        index_topk_freq: int = 1,
+        dsa_full_layer_fraction: float | None = None,
     ) -> None:
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
@@ -240,6 +246,17 @@ class ContextDSAModule(Operation):
         self._gemm_quant_mode = gemm_quant_mode
         self._architecture = architecture
         self._cp_size = cp_size
+        # GLM-5.2 shares one DSA topk index across a group of layers: some compute
+        # the indexer (full), the rest reuse it (skip). query() amortizes
+        # per_layer = full_frac*full + (1-full_frac)*skip, using the directly-
+        # collected skip data (no delta). full_frac is the EXACT fraction of
+        # indexer-computing layers (honors index_skip_topk_offset/pattern), passed
+        # by the model; fall back to 1/freq only if not provided. full_frac==1.0
+        # (DeepSeek-V3.2 / GLM-5) => pure full, skip path never taken.
+        self._index_topk_freq = max(1, int(index_topk_freq or 1))
+        self._full_frac = (
+            float(dsa_full_layer_fraction) if dsa_full_layer_fraction is not None else 1.0 / self._index_topk_freq
+        )
         self._weights = 0.0
 
     # ------------------------------------------------------------------
@@ -261,13 +278,13 @@ class ContextDSAModule(Operation):
         from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
+        system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+        data_dir = os.path.join(system_data_root, database.backend, database.version)
+        primary_path = os.path.join(data_dir, PerfDataFilename.dsa_context_module.value)
+        sources = database._build_op_sources(PerfDataFilename.dsa_context_module, primary_path, system_data_root)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.dsa_context_module.value)
-            sources = database._build_op_sources(PerfDataFilename.dsa_context_module, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(
-                load_context_dsa_module_data(sources), PerfDataFilename.dsa_context_module, primary_path
+                load_context_dsa_module_data(sources, op_kind="full"), PerfDataFilename.dsa_context_module, primary_path
             )
             # Deepcopy BEFORE extrapolation so the raw rows survive intact
             # for ``interp_dsa_context_topk_piecewise_from_raw``.
@@ -275,16 +292,36 @@ class ContextDSAModule(Operation):
             cls._extrapolate(cls._data_cache[key])
             cls._record_load()
 
+        # skip_indexer (GLM-5.2) rows live in the SAME file, tagged by op_name
+        # (dsa_context_module_skip_indexer). Load them from the same sources with
+        # op_kind="skip". Empty (no skip rows -> DeepSeek-V3.2 / GLM-5 freq==1) =>
+        # slot None and the skip query path is never taken.
+        if key not in cls._skip_data_cache:
+            skip_dict = load_context_dsa_module_data(sources, op_kind="skip")
+            if skip_dict:
+                cls._skip_data_cache[key] = LoadedOpData(skip_dict, PerfDataFilename.dsa_context_module, primary_path)
+                cls._raw_skip_data_cache[key] = copy.deepcopy(cls._skip_data_cache[key])
+                cls._extrapolate(cls._skip_data_cache[key])
+            else:
+                cls._skip_data_cache[key] = None
+                cls._raw_skip_data_cache[key] = None
+
         if "_context_dsa_module_data" not in database.__dict__:
             database._context_dsa_module_data = cls._data_cache[key]
         if "_raw_context_dsa_module_data" not in database.__dict__:
             database._raw_context_dsa_module_data = cls._raw_data_cache[key]
+        if "_context_dsa_module_skip_data" not in database.__dict__:
+            database._context_dsa_module_skip_data = cls._skip_data_cache[key]
+        if "_raw_context_dsa_module_skip_data" not in database.__dict__:
+            database._raw_context_dsa_module_skip_data = cls._raw_skip_data_cache[key]
 
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
         cls._raw_data_cache.clear()
         cls._glm5_sparse_cache.clear()
+        cls._skip_data_cache.clear()
+        cls._raw_skip_data_cache.clear()
 
     @classmethod
     def _extrapolate(cls, data_wrapper) -> None:
@@ -370,8 +407,13 @@ class ContextDSAModule(Operation):
         index_head_dim: int | None = None,
         index_topk: int | None = None,
         dsa_backend: str = "trtllm",
+        skip_indexer: bool = False,
     ):
-        """Query context DSA module table. Verbatim port of the legacy body."""
+        """Query context DSA module table. Verbatim port of the legacy body.
+
+        ``skip_indexer=True`` reads the GLM-5.2 reuse-layer table
+        (``_context_dsa_module_skip_data``) instead of the full table; all other
+        lookup logic is identical."""
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
         # ``DEFAULT_DSA_ARCHITECTURE`` and ``DSA_MODEL_DIMS`` live at module
@@ -659,11 +701,13 @@ class ContextDSAModule(Operation):
             )
 
         try:
-            dsa_module_data = database._context_dsa_module_data
+            dsa_module_data = (
+                database._context_dsa_module_skip_data if skip_indexer else database._context_dsa_module_data
+            )
             if dsa_module_data is None:
                 raise PerfDataNotAvailableError(
-                    f"Context DSA module perf data not loaded for system='{database.system}', "
-                    f"backend='{database.backend}', version='{database.version}'."
+                    f"Context DSA module {'skip_indexer ' if skip_indexer else ''}perf data not loaded for "
+                    f"system='{database.system}', backend='{database.backend}', version='{database.version}'."
                 )
             try:
                 dsa_dict = util_empirical.require_data_slice(
@@ -677,7 +721,9 @@ class ContextDSAModule(Operation):
                 raise missing_context_dsa_error() from exc
             dsa_dict = _select_dsa_backend(dsa_dict, dsa_backend)
             raw_dsa_dict = None
-            raw_dsa_module_data = database._raw_context_dsa_module_data
+            raw_dsa_module_data = (
+                database._raw_context_dsa_module_skip_data if skip_indexer else database._raw_context_dsa_module_data
+            )
             if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
                 try:
                     raw_dsa_dict = util_empirical.require_data_slice(
@@ -837,28 +883,62 @@ class ContextDSAModule(Operation):
     # ------------------------------------------------------------------
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """Query context DSA latency with energy data."""
+        """Query context DSA latency with energy data.
+
+        GLM-5.2: the shared-index group has some full layers (compute indexer)
+        and the rest skip (reuse it). Per-layer cost is amortized
+        full_frac*full + (1-full_frac)*skip, where full_frac is the EXACT
+        indexer-computing-layer fraction (honors index_skip_topk_offset/pattern;
+        GLM-5.2 = 21/78 = 0.2692, not 1/freq=0.25), using the directly-collected
+        skip_indexer table (no delta). full_frac==1.0 (DeepSeek-V3.2 / GLM-5) ->
+        pure full, unchanged. CP and non-CP share the same amortization (both full
+        and skip carry the same scale_factor, so the weighted sum is exact)."""
         batch_size = kwargs.get("batch_size")
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix", 0)
+        w = self._full_frac
 
         if self._cp_size and self._cp_size > 1:
-            return self._query_cp(database, batch_size, isl, prefix)
+            full = self._query_cp(database, batch_size, isl, prefix)
+            if w >= 1.0:
+                return full
+            skip = self._query_cp(database, batch_size, isl, prefix, skip_indexer=True)
+            return self._amortize(full, skip, w)
 
-        result = database.query_context_dsa_module(
-            b=batch_size,
-            s=isl,
-            prefix=prefix,
-            num_heads=self._num_heads,
-            kvcache_quant_mode=self._kvcache_quant_mode,
-            fmha_quant_mode=self._fmha_quant_mode,
-            gemm_quant_mode=self._gemm_quant_mode,
-            architecture=self._architecture,
-        )
+        def _q(skip_indexer):
+            return database.query_context_dsa_module(
+                b=batch_size,
+                s=isl,
+                prefix=prefix,
+                num_heads=self._num_heads,
+                kvcache_quant_mode=self._kvcache_quant_mode,
+                fmha_quant_mode=self._fmha_quant_mode,
+                gemm_quant_mode=self._gemm_quant_mode,
+                architecture=self._architecture,
+                skip_indexer=skip_indexer,
+            )
+
+        full = _q(False)
+        if w >= 1.0:
+            lat = float(full)
+            energy = full.energy
+        else:
+            skip = _q(True)
+            lat = w * float(full) + (1.0 - w) * float(skip)
+            energy = w * full.energy + (1.0 - w) * skip.energy
         return PerformanceResult(
-            float(result) * self._scale_factor,
-            energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            lat * self._scale_factor,
+            energy=energy * self._scale_factor,
+            source=getattr(full, "source", "silicon"),
+        )
+
+    @staticmethod
+    def _amortize(full: PerformanceResult, skip: PerformanceResult, w: float) -> PerformanceResult:
+        """w*full + (1-w)*skip on already-scaled PerformanceResults."""
+        return PerformanceResult(
+            w * float(full) + (1.0 - w) * float(skip),
+            energy=w * getattr(full, "energy", 0.0) + (1.0 - w) * getattr(skip, "energy", 0.0),
+            source=getattr(full, "source", "silicon"),
         )
 
     # ------------------------------------------------------------------
@@ -872,7 +952,9 @@ class ContextDSAModule(Operation):
     # ------------------------------------------------------------------
     _glm5_sparse_cache: ClassVar[dict] = {}
 
-    def _query_cp(self, database: PerfDatabase, b: int, isl: int, prefix: int) -> PerformanceResult:
+    def _query_cp(
+        self, database: PerfDatabase, b: int, isl: int, prefix: int, skip_indexer: bool = False
+    ) -> PerformanceResult:
         """CP (round-robin split) per-layer DSA, new strategy (2026-06-11):
 
             result = dsa(isl/cp, prefix)
@@ -897,7 +979,9 @@ class ContextDSAModule(Operation):
         # the mqa/topk_last deltas. _lookup_2d clamps isl + interp/extrapolates
         # step, so a None below means the table is absent entirely (parquet not
         # collected) -- degrading silently to dsa_base would hide that.
-        missing = [k for k in ("mqa", "topk_last", "topk_flat") if not g.get(k)]
+        # skip_indexer layers carry NO indexer -> no mqa/topk deltas needed, so
+        # don't require the sparse tables for them.
+        missing = [] if skip_indexer else [k for k in ("mqa", "topk_last", "topk_flat") if not g.get(k)]
         if missing:
             raise PerfDataNotAvailableError(
                 f"DSA CP modeling needs sparse tables {missing} for "
@@ -917,6 +1001,7 @@ class ContextDSAModule(Operation):
                 gemm_quant_mode=self._gemm_quant_mode,
                 architecture=self._architecture,
                 dsa_backend="flashmla_kv",
+                skip_indexer=skip_indexer,
             )
         )
         # Look the sparse sub-kernels up at the REAL batch b (the bs slice carries
@@ -930,7 +1015,9 @@ class ContextDSAModule(Operation):
         tl_full = self._lookup_2d(tl_tab, isl, prefix)
         tf_perc = self._lookup_2d(tf_tab, per_card, prefix)
         latency = dsa_base
-        if None not in (mqa_full, mqa_perc, tl_full, tf_perc):
+        # skip layers reuse a sibling's topk index: no per-layer mqa/topk, so no
+        # full/cp deltas — just the per-card skip base + the attention all-gathers.
+        if not skip_indexer and None not in (mqa_full, mqa_perc, tl_full, tf_perc):
             delta_mqa = mqa_full / cp - mqa_perc
             delta_topk = tl_full / cp - tf_perc
             latency += delta_mqa + delta_topk
@@ -1070,6 +1157,7 @@ class GenerationDSAModule(Operation):
 
     _data_cache: ClassVar[dict] = {}
     _raw_data_cache: ClassVar[dict] = {}
+    _skip_data_cache: ClassVar[dict] = {}
 
     def __init__(
         self,
@@ -1079,12 +1167,20 @@ class GenerationDSAModule(Operation):
         kv_cache_dtype: common.KVCacheQuantMode,
         gemm_quant_mode: common.GEMMQuantMode,
         architecture: str = "DeepseekV32ForCausalLM",
+        index_topk_freq: int = 1,
+        dsa_full_layer_fraction: float | None = None,
     ) -> None:
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
         self._kv_cache_dtype = kv_cache_dtype
         self._gemm_quant_mode = gemm_quant_mode
         self._architecture = architecture
+        # GLM-5.2 shared-index amortization (see ContextDSAModule): exact
+        # full-layer fraction; fall back to 1/freq. full_frac==1.0 => pure full.
+        self._index_topk_freq = max(1, int(index_topk_freq or 1))
+        self._full_frac = (
+            float(dsa_full_layer_fraction) if dsa_full_layer_fraction is not None else 1.0 / self._index_topk_freq
+        )
         self._weights = 0.0
 
     # ------------------------------------------------------------------
@@ -1105,13 +1201,15 @@ class GenerationDSAModule(Operation):
         from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
+        system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+        data_dir = os.path.join(system_data_root, database.backend, database.version)
+        primary_path = os.path.join(data_dir, PerfDataFilename.dsa_generation_module.value)
+        sources = database._build_op_sources(PerfDataFilename.dsa_generation_module, primary_path, system_data_root)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.dsa_generation_module.value)
-            sources = database._build_op_sources(PerfDataFilename.dsa_generation_module, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(
-                load_generation_dsa_module_data(sources), PerfDataFilename.dsa_generation_module, primary_path
+                load_generation_dsa_module_data(sources, op_kind="full"),
+                PerfDataFilename.dsa_generation_module,
+                primary_path,
             )
             # Boundary-util extrapolation must be anchored to a measured row,
             # never to a latency-space point synthesized by ``_extrapolate``.
@@ -1119,14 +1217,28 @@ class GenerationDSAModule(Operation):
             cls._extrapolate(cls._data_cache[key])
             cls._record_load()
 
+        # skip_indexer rows share the same file (op_name tag); load with op_kind="skip".
+        if key not in cls._skip_data_cache:
+            skip_dict = load_generation_dsa_module_data(sources, op_kind="skip")
+            if skip_dict:
+                cls._skip_data_cache[key] = LoadedOpData(
+                    skip_dict, PerfDataFilename.dsa_generation_module, primary_path
+                )
+                cls._extrapolate(cls._skip_data_cache[key])
+            else:
+                cls._skip_data_cache[key] = None
+
         if "_generation_dsa_module_data" not in database.__dict__:
             database._generation_dsa_module_data = cls._data_cache[key]
             database._raw_generation_dsa_module_data = cls._raw_data_cache[key]
+        if "_generation_dsa_module_skip_data" not in database.__dict__:
+            database._generation_dsa_module_skip_data = cls._skip_data_cache[key]
 
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
         cls._raw_data_cache.clear()
+        cls._skip_data_cache.clear()
 
     @classmethod
     def _extrapolate(cls, data_wrapper) -> None:
@@ -1169,8 +1281,10 @@ class GenerationDSAModule(Operation):
         index_head_dim: int | None = None,
         index_topk: int | None = None,
         dsa_backend: str = "trtllm",
+        skip_indexer: bool = False,
     ):
-        """Query generation DSA module table. Verbatim port of the legacy body."""
+        """Query generation DSA module table.
+        ``skip_indexer=True`` reads the GLM-5.2 reuse-layer table."""
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
         # ``DEFAULT_DSA_ARCHITECTURE`` and ``DSA_MODEL_DIMS`` live at module
@@ -1355,11 +1469,13 @@ class GenerationDSAModule(Operation):
             )
 
         try:
-            dsa_module_data = database._generation_dsa_module_data
+            dsa_module_data = (
+                database._generation_dsa_module_skip_data if skip_indexer else database._generation_dsa_module_data
+            )
             if dsa_module_data is None:
                 raise PerfDataNotAvailableError(
-                    f"Generation DSA module perf data not loaded for system='{database.system}', "
-                    f"backend='{database.backend}', version='{database.version}'."
+                    f"Generation DSA module {'skip_indexer ' if skip_indexer else ''}perf data not loaded for "
+                    f"system='{database.system}', backend='{database.backend}', version='{database.version}'."
                 )
             try:
                 try:
@@ -1538,19 +1654,32 @@ class GenerationDSAModule(Operation):
             raise ValueError(f"{self.__class__.__name__} only supports beam_width=1, got {beam_width}")
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
+        w = self._full_frac
 
-        result = database.query_generation_dsa_module(
-            b=batch_size,
-            s=s,
-            num_heads=self._num_heads,
-            kv_cache_dtype=self._kv_cache_dtype,
-            gemm_quant_mode=self._gemm_quant_mode,
-            architecture=self._architecture,
-        )
+        def _q(skip_indexer):
+            return database.query_generation_dsa_module(
+                b=batch_size,
+                s=s,
+                num_heads=self._num_heads,
+                kv_cache_dtype=self._kv_cache_dtype,
+                gemm_quant_mode=self._gemm_quant_mode,
+                architecture=self._architecture,
+                skip_indexer=skip_indexer,
+            )
+
+        full = _q(False)
+        if w >= 1.0:
+            lat = float(full)
+            energy = full.energy
+        else:
+            # GLM-5.2 shared-index amortization (see ContextDSAModule.query).
+            skip = _q(True)
+            lat = w * float(full) + (1.0 - w) * float(skip)
+            energy = w * full.energy + (1.0 - w) * skip.energy
         return PerformanceResult(
-            float(result) * self._scale_factor,
-            energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
+            lat * self._scale_factor,
+            energy=energy * self._scale_factor,
+            source=getattr(full, "source", "silicon"),
         )
 
     def get_weights(self, **kwargs):
@@ -1586,7 +1715,7 @@ def _read_dsa_row_sources(file_or_sources):
     return row_sources if any_source_exists else None
 
 
-def load_context_dsa_module_data(dsa_file: str):
+def load_context_dsa_module_data(dsa_file: str, op_kind: str = "full"):
     """
     Load context DSA data.
 
@@ -1600,23 +1729,21 @@ def load_context_dsa_module_data(dsa_file: str):
     model-specific structural dimensions from ``DSA_MODEL_DIMS``.
     Legacy CSV rows without an ``architecture`` column default to
     "DeepseekV32ForCausalLM".
+
+    Full and skip-indexer (GLM-5.2 reuse-layer) rows live in the SAME file,
+    distinguished by the ``op_name`` column (``dsa_context_module`` vs
+    ``dsa_context_module_skip_indexer``) — no extra column. ``op_kind`` selects
+    which to keep: ``"full"`` (op_name without ``skip_indexer``) or ``"skip"``.
     """
     row_sources = _read_dsa_row_sources(dsa_file)
     if row_sources is None:
         logger.debug(f"DSA context data file {dsa_file} not found.")
         return None
 
-    dsa_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(
-                    lambda: defaultdict(
-                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-                    )
-                )
-            )
-        )
-    )
+    def _nest():
+        return defaultdict(_nest)
+
+    dsa_data = _nest()
 
     first_row = next((row for source_rows in row_sources for row in source_rows), None)
     has_power = first_row is not None and "power" in first_row
@@ -1626,6 +1753,9 @@ def load_context_dsa_module_data(dsa_file: str):
         # Preserve legacy last-row-wins behavior within each source.
         source_values = {}
         for row in source_rows:
+            # full vs skip-indexer share one file, split by op_name.
+            if ("skip_indexer" in (row.get("op_name") or "")) != (op_kind == "skip"):
+                continue
             num_heads = int(row["num_heads"])
             b = int(row["batch_size"])
             s = int(row["isl"])
@@ -1665,7 +1795,7 @@ def load_context_dsa_module_data(dsa_file: str):
     return dsa_data
 
 
-def load_generation_dsa_module_data(dsa_file: str):
+def load_generation_dsa_module_data(dsa_file: str, op_kind: str = "full"):
     """
     Load generation DSA data.
 
@@ -1678,17 +1808,19 @@ def load_generation_dsa_module_data(dsa_file: str):
     model-specific structural dimensions from ``DSA_MODEL_DIMS``.
     Legacy CSV rows without an ``architecture`` column default to
     "DeepseekV32ForCausalLM".
+
+    Full and skip-indexer rows share one file, split by the ``op_name`` column;
+    ``op_kind`` ("full"/"skip") selects which to keep.
     """
     row_sources = _read_dsa_row_sources(dsa_file)
     if row_sources is None:
         logger.debug(f"DSA generation data file {dsa_file} not found.")
         return None
 
-    dsa_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
-        )
-    )
+    def _nest():
+        return defaultdict(_nest)
+
+    dsa_data = _nest()
 
     first_row = next((row for source_rows in row_sources for row in source_rows), None)
     has_power = first_row is not None and "power" in first_row
@@ -1698,6 +1830,8 @@ def load_generation_dsa_module_data(dsa_file: str):
         # Preserve legacy last-row-wins behavior within each source.
         source_values = {}
         for row in source_rows:
+            if ("skip_indexer" in (row.get("op_name") or "")) != (op_kind == "skip"):
+                continue
             num_heads = int(row["num_heads"])
             b = int(row["batch_size"])
             s = int(row["isl"]) + int(row["step"])

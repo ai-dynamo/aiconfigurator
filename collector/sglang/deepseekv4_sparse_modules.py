@@ -835,6 +835,20 @@ def _derive_context_shapes(bs_list, seq_list, prefix_list, is_valid, env_filter=
 _CHUNKED_PREFILL = None
 
 
+def _chunked_prefill_size_from_gpu_mem(gpu_mem):
+    """Replicate ``ServerArgs._handle_gpu_memory_settings`` chunked_prefill_size
+    tiering directly from device memory (MB). Thresholds are identical across the
+    old (cuda_graph_max_bs) and new (cuda_graph_config) sglang server_args, so
+    this is the same derivation sglang performs -- used as a forward-compatible
+    fallback when the bare ServerArgs instance can't run the method itself.
+    B200 (>=160GB) -> 16384, matching the GLM-5.2 model card launch command."""
+    if gpu_mem < 60 * 1024:
+        return 4096 if gpu_mem >= 35 * 1024 else 2048
+    if gpu_mem < 160 * 1024:
+        return 8192
+    return 16384
+
+
 def _sglang_chunked_prefill_size():
     # The csa/hca MODULE (collect_dsv4_attn) launches sglang with
     # chunked_prefill_size=None -> sglang DERIVES it from GPU memory. Mirror
@@ -848,6 +862,11 @@ def _sglang_chunked_prefill_size():
             from sglang.srt.server_args import ServerArgs, get_device_memory_capacity
         except ModuleNotFoundError:
             from srt.server_args import ServerArgs, get_device_memory_capacity
+        gpu_mem = None
+        try:
+            gpu_mem = get_device_memory_capacity("cuda")
+        except Exception:
+            pass
         sa = ServerArgs.__new__(ServerArgs)
         sa.chunked_prefill_size = None
         sa.cuda_graph_max_bs = None
@@ -855,19 +874,29 @@ def _sglang_chunked_prefill_size():
         sa.tp_size = 1
         sa.device = "cuda"
         try:
-            sa._handle_gpu_memory_settings(get_device_memory_capacity("cuda"))
+            sa._handle_gpu_memory_settings(gpu_mem)
         except Exception:
             pass  # chunked_prefill_size is set first, before any model-dependent step
-        if sa.chunked_prefill_size is None:
-            # The derivation set it first, so None means it failed before even that
-            # (e.g. get_device_memory_capacity threw). Fail loud rather than int(None)
-            # or guessing a value -- this module derives, never defaults.
+        chunked = sa.chunked_prefill_size
+        if chunked is None and gpu_mem is not None:
+            # Newer sglang (0.0.0.dev / >=0.5.x) refactored cuda_graph_max_bs/_bs
+            # into a cuda_graph_config object that _handle_gpu_memory_settings
+            # dereferences at entry (self.cuda_graph_config.decode), so it
+            # AttributeErrors on the bare __new__ instance before assigning
+            # chunked_prefill_size. Fall back to sglang's OWN tiering (same
+            # thresholds) computed directly from device memory -- still a
+            # derivation from GPU memory, not a guess. Backward compatible:
+            # on old sglang the method assigns it and this branch is skipped.
+            chunked = _chunked_prefill_size_from_gpu_mem(gpu_mem)
+        if chunked is None:
+            # gpu_mem itself unavailable -> nothing to derive from. Fail loud
+            # rather than int(None) or guessing a value.
             raise RuntimeError(
                 "Could not derive sglang chunked_prefill_size from GPU memory "
-                "(get_device_memory_capacity/_handle_gpu_memory_settings failed before "
-                "assigning it). Cannot derive DSV4 sparse-kernel context shapes."
+                "(get_device_memory_capacity failed). Cannot derive DSV4 "
+                "sparse-kernel context shapes."
             )
-        _CHUNKED_PREFILL = int(sa.chunked_prefill_size)
+        _CHUNKED_PREFILL = int(chunked)
     return _CHUNKED_PREFILL
 
 

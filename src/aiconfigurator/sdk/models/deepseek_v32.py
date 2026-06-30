@@ -13,6 +13,35 @@ from aiconfigurator.sdk.models.helpers import calc_expectation
 logger = logging.getLogger(__name__)
 
 
+def _dsa_full_layer_fraction(raw_config: dict, num_layers: int) -> float:
+    """Fraction of DSA layers that COMPUTE the indexer (full) vs reuse a shared
+    topk index (skip). Replicates sglang ``dsa_layer_skips_topk``: a layer skips
+    when ``index_topk_pattern[lid]=='S'``, else (with explicit offset)
+    ``max(lid - offset + 1, 0) % freq != 0`` or (no offset) ``max(lid-1,0)%freq``.
+    GLM-5.2:
+    freq=4, offset=3, 78 layers -> 21 full / 57 skip = 0.2692 (NOT 1/freq=0.25 —
+    layers 0..2 are full and the periodic pattern starts at the offset). Returns
+    1.0 when freq<=1 / no skipping (DeepSeek-V3.2 / GLM-5)."""
+    freq = int(raw_config.get("index_topk_freq", 1) or 1)
+    pattern = raw_config.get("index_topk_pattern")
+    offset = raw_config.get("index_skip_topk_offset")
+    if freq <= 1 and not pattern:
+        return 1.0
+
+    def _skips(lid: int) -> bool:
+        if pattern is not None:
+            return lid < len(pattern) and pattern[lid] == "S"
+        # Match sglang dsa_layer_skips_topk EXACTLY: with an explicit offset use
+        # max(lid-offset+1,0)%freq; with no offset the default is max(lid-1,0)%freq
+        # (NOT offset=1 — that would be max(lid,0)). GLM-5.2 sets offset=3.
+        if offset is not None:
+            return max(lid - offset + 1, 0) % freq != 0
+        return max(lid - 1, 0) % freq != 0
+
+    n_full = sum(1 for lid in range(int(num_layers)) if not _skips(lid))
+    return n_full / int(num_layers) if num_layers else 1.0
+
+
 def _dsa_attention_modules_excluded_from_quant(raw_config: dict) -> bool:
     """Return whether a GLM/DSA checkpoint keeps DSA attention projections unquantized."""
     quant_config = raw_config.get("quantization_config")
@@ -82,6 +111,18 @@ class DeepSeekV32Model(BaseModel):
             model_info.get("raw_config", {})
         ):
             extra_params.setdefault("dsa_gemm_quant_mode", common.GEMMQuantMode.bfloat16)
+        # GLM-5.2 shares one DSA topk index across ``index_topk_freq`` layers
+        # (GLM-5 / DeepSeek-V3.2 omit it => 1). The DSA modules amortize the
+        # per-layer indexer cost over the group using the collected skip data.
+        extra_params.setdefault("index_topk_freq", int(model_info.get("raw_config", {}).get("index_topk_freq", 1) or 1))
+        # EXACT full-layer fraction (honors index_skip_topk_offset / pattern) so
+        # the per-layer amortization weights real full vs skip counts, not the
+        # 1/freq approximation (GLM-5.2: 21/78=0.2692, not 0.25 — under-counting
+        # full made AIC predict too fast).
+        extra_params.setdefault(
+            "dsa_full_layer_fraction",
+            _dsa_full_layer_fraction(model_info.get("raw_config", {}), model_info["layers"]),
+        )
 
         if backend_name == "sglang" and model_config.enable_wideep:
             logger.debug(
@@ -153,6 +194,8 @@ class DeepSeekV32Model(BaseModel):
                     dsa_gemm_quant_mode,
                     architecture=self.architecture,
                     cp_size=self.config.cp_size,
+                    index_topk_freq=self.extra_params.get("index_topk_freq", 1),
+                    dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
                 ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8, scale_num_tokens=cp_size),
                 ops.GEMM(
@@ -249,6 +292,8 @@ class DeepSeekV32Model(BaseModel):
                     kvcache_quant_mode,
                     dsa_gemm_quant_mode,
                     architecture=self.architecture,
+                    index_topk_freq=self.extra_params.get("index_topk_freq", 1),
+                    dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
                 ),
                 ops.ElementWise(
                     "generation_add_norm_2",
@@ -462,6 +507,8 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                     dsa_gemm_quant_mode,
                     architecture=self.architecture,
                     cp_size=self.config.cp_size,
+                    index_topk_freq=self.extra_params.get("index_topk_freq", 1),
+                    dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
                 ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
                 ops.GEMM(
@@ -553,6 +600,8 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                     kvcache_quant_mode,
                     dsa_gemm_quant_mode,
                     architecture=self.architecture,
+                    index_topk_freq=self.extra_params.get("index_topk_freq", 1),
+                    dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
                 ),
                 ops.ElementWise("generation_add_norm_2", generation_scale, 2 * h, 2 * h, 0.8),
             ]
@@ -699,6 +748,8 @@ class WideEPDeepSeekV32Model(BaseModel):
                     dsa_gemm_quant_mode,
                     architecture=self.architecture,
                     cp_size=self.config.cp_size,
+                    index_topk_freq=self.extra_params.get("index_topk_freq", 1),
+                    dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
                 ),
                 *(
                     [
@@ -784,6 +835,8 @@ class WideEPDeepSeekV32Model(BaseModel):
                     kvcache_quant_mode,
                     dsa_gemm_quant_mode,
                     architecture=self.architecture,
+                    index_topk_freq=self.extra_params.get("index_topk_freq", 1),
+                    dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
                 ),
                 ops.GEMM(
                     "generation_gate_ffn1_gemm",

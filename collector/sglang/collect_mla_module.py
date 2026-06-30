@@ -192,6 +192,55 @@ def _enable_glm5_dsa_piecewise_graph(attn_type: str, model_id: str, dsa_prefill_
     return dsa_prefill_backend == "trtllm"
 
 
+# Set by run_mla_module() at the start of each benchmark subprocess from its
+# skip_indexer arg (threaded down from run_mla_module_worker, which derives it
+# from the op's perf_filename). Process-local: each subprocess runs exactly one
+# run_mla_module, so this is never shared across cases. Replaces the old
+# AIC_DSA_SKIP_INDEXER env that previously crossed the subprocess boundary.
+_SKIP_INDEXER_PASS = False
+
+
+def _dsa_skip_indexer_enabled(attn_type: str, model_path: str) -> bool:
+    """Whether THIS case collects the skip-indexer (reuse-layer) variant: a
+    skip-indexer pass (run_mla_module(skip_indexer=True), recorded in the
+    _SKIP_INDEXER_PASS process global) AND a GLM-5-family DSA model that actually
+    shares its topk index across layers (index_topk_freq>1). For such a 'skip'
+    layer the per-layer indexer (mqa logits + topk + index-K store) is patched
+    out (skip_topk=True, reuse prev layer's indices), so the captured cost is the
+    reuse-layer cost. Rows land in the MAIN dsa_*_module_perf.txt file, tagged
+    by an op_name "_skip_indexer" suffix (not a separate file)."""
+    return (
+        _SKIP_INDEXER_PASS
+        and attn_type == "dsa"
+        and _is_glm5_dsa_model(model_path)
+        and _model_shares_dsa_index(model_path)
+    )
+
+
+_MODULE_PIECEWISE_REPLAY_AVAILABLE = None
+
+
+def _module_piecewise_replay_available() -> bool:
+    """Whether the module-level piecewise CUDA graph replay path can run.
+
+    That path imports ``sglang.srt.model_executor.piecewise_cuda_graph_runner``
+    and monkey-patches ``PiecewiseCudaGraphRunner``. The refactored sglang
+    (glm52 dev image) moved piecewise into ``srt/compilation`` and removed that
+    model_executor module, so the replay path can't import -> the collector must
+    time the DSA module EAGERLY instead (which is what GLM-5 DSA flashmla_kv
+    prefill runs in serve anyway). Cached; returns False on the dev image so
+    callers fall back to the existing eager path. Backward compatible: returns
+    True on older sglang where the module exists."""
+    global _MODULE_PIECEWISE_REPLAY_AVAILABLE
+    if _MODULE_PIECEWISE_REPLAY_AVAILABLE is None:
+        import importlib.util
+
+        _MODULE_PIECEWISE_REPLAY_AVAILABLE = (
+            importlib.util.find_spec("sglang.srt.model_executor.piecewise_cuda_graph_runner") is not None
+        )
+    return _MODULE_PIECEWISE_REPLAY_AVAILABLE
+
+
 def _generation_cuda_graph_enabled_for_tokens(model_runner, num_tokens: int) -> bool:
     """Match SGLang decode CUDA graph coverage for the decode microbench.
 
@@ -243,6 +292,14 @@ def _resolve_local_model_path(model_id: str) -> str:
     # Strip auto_map to prevent transformers from attempting to download
     # custom config/model classes from HuggingFace when trust_remote_code=True.
     config.pop("auto_map", None)
+
+    # Strip layer_types: transformers >= 5.3 strictly validates layer_types
+    # against a per-architecture whitelist, and GLM-5.2's
+    # "deepseek_sparse_attention" entries are not in the DeepseekV3 whitelist we
+    # rewrote architectures to above -> AutoConfig load raises. The collector
+    # detects DSA via index_topk (is_deepseek_nsa), not layer_types, so dropping
+    # it is safe. Harmless no-op on configs/transformers without layer_types.
+    config.pop("layer_types", None)
 
     # Re-apply GLM-5 arch-specific overrides that sglang would normally
     # apply in server_args.py:1609-1612 based on
@@ -430,6 +487,31 @@ def _model_max_position_embeddings(model_id: str) -> int | None:
         return None
 
 
+def _model_dsa_index_topk_freq(model_id: str) -> int:
+    """Return the model's ``index_topk_freq`` (how many consecutive layers share
+    one DSA topk index), or 1 if absent.
+
+    GLM-5.2 sets ``index_topk_freq=4`` -> 1 layer computes the indexer, 3 reuse
+    it. GLM-5 / DSV3.2 omit it (==1, every layer computes its own index).
+    """
+    config_file = os.path.join(_MODEL_CONFIG_DIR, f"{model_id.replace('/', '--')}_config.json")
+    if not os.path.exists(config_file):
+        return 1
+    try:
+        with open(config_file) as f:
+            value = json.load(f).get("index_topk_freq")
+        return int(value) if value else 1
+    except Exception:
+        return 1
+
+
+def _model_shares_dsa_index(model_id: str) -> bool:
+    """Whether the model reuses a shared DSA topk index across layers
+    (``index_topk_freq > 1``). Only such models have a distinct skip-indexer
+    per-layer cost worth collecting separately."""
+    return _model_dsa_index_topk_freq(model_id) > 1
+
+
 def _model_native_gemm_quant(model_id: str) -> str | None:
     """Return the checkpoint's native weight-quantization gemm kind, or ``None``
     for an unquantized (bf16) checkpoint.
@@ -529,6 +611,71 @@ def _dsa_context_prefix_shape_is_valid(
     return not (max_position_embeddings is not None and prefix_len + seq_len > max_position_embeddings)
 
 
+def _dedup_same_precision_dsa_models(model_specs):
+    """Collapse DSA models that share an architecture AND a native quant to a
+    single representative (the longest-context one) so a batch collection of
+    several same-precision GLM checkpoints doesn't re-collect identical DSA data.
+
+    The DSA attention module is bf16 for every GLM checkpoint (self_attn is
+    excluded from quant), so checkpoints of the same (architecture, native_quant)
+    produce identical DSA module timings and differ only in context length. When
+    e.g. nvidia/GLM-5-NVFP4 and nvidia/GLM-5.2-NVFP4 are collected together (both
+    NVFP4 / GlmMoeDsaForCausalLM), keep only GLM-5.2-NVFP4 (max_position 1M ⊇
+    GLM-5) — the others reuse its rows via the model-agnostic DSA loader. Models
+    of a DIFFERENT precision (zai-org/GLM-5 bf16, GLM-5-FP8 fp8_block) or a
+    different architecture (DeepSeek-V3.2) are NOT merged. A single model, or one
+    model per (arch, quant) group, passes through unchanged.
+    """
+    groups: dict = {}
+    order: list = []
+    for spec in model_specs:
+        key = (spec.architecture, _model_native_gemm_quant(spec.model_path))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(spec)
+    out = []
+    for key in order:
+        specs = groups[key]
+        if len(specs) == 1:
+            out.append(specs[0])
+            continue
+        best = max(specs, key=lambda s: _model_max_position_embeddings(s.model_path) or 0)
+        out.append(best)
+        dropped = [s.model_path for s in specs if s is not best]
+        print(
+            f"[DSA dedup] {key[0]}/{key[1]}: collecting DSA module on {best.model_path}; "
+            f"reusing for same-precision {dropped}"
+        )
+    return out
+
+
+def _dsa_ceiling_max_positions(model_path):
+    """max_position_embeddings this model's DSA context collection should
+    CEILING-sample (one ``max_pos - seq_len`` point per value): its own plus
+    every same-(architecture, native_quant) sibling's.
+
+    Because the same-precision dedup makes one model (e.g. GLM-5.2-NVFP4,
+    max_position 1048576) represent the shorter ones it dropped (e.g.
+    GLM-5-NVFP4, 202752), the representative must also put a real data point at
+    the TOP of the shorter model's valid range. Otherwise a GLM-5 query near its
+    202752 max would interpolate across the representative's coarse grid gap
+    (131072 -> 262144) instead of hitting collected data. Returns just the own
+    max for models with no same-precision sibling."""
+    own_arch = _module_model_architecture(model_path)
+    own_quant = _model_native_gemm_quant(model_path)
+    positions = set()
+    for spec in get_mla_module_model_specs(apply_model_filter=False):
+        if spec.architecture == own_arch and _model_native_gemm_quant(spec.model_path) == own_quant:
+            mp = _model_max_position_embeddings(spec.model_path)
+            if mp:
+                positions.add(int(mp))
+    own = _model_max_position_embeddings(model_path)
+    if own:
+        positions.add(int(own))
+    return sorted(positions)
+
+
 def _build_module_test_cases(attn_type: str, mode: str):
     """Build one test case per unique (local heads, target TP, precision, model) group.
 
@@ -554,6 +701,11 @@ def _build_module_test_cases(attn_type: str, mode: str):
     if attn_type == "dsa" and _skip_sm120_deepgemm_attention_modules():
         return []
     model_specs = get_mla_module_model_specs(attention_type=attn_type)
+    # Same-precision DSA dedup (DSA module is bf16 for all GLM checkpoints; only
+    # context length differs). Skip-indexer collection is unaffected: its get_func
+    # already filters to index_topk_freq>1 (GLM-5.2 only), so this is a no-op there.
+    if attn_type == "dsa":
+        model_specs = _dedup_same_precision_dsa_models(model_specs)
     sweep = get_mla_module_sweep_spec("sglang")
     precision_combos = _get_precision_combos(mode)
     cases = []
@@ -563,6 +715,16 @@ def _build_module_test_cases(attn_type: str, mode: str):
         # Prevents e.g. gemm_type=fp8_block being applied to the NVFP4 checkpoint
         # (a different model), which dies at model load with "Cannot find quant_algo".
         native_quant = _model_native_gemm_quant(model_spec.model_path)
+        # NOTE: do NOT force the checkpoint's top-level gemm (e.g. nvfp4) onto the
+        # DSA/MLA attention module. GLM-5 / GLM-5.2 NVFP4 quantize ONLY the MoE
+        # expert linears; self_attn (q_a/kv_a/q_b/o_proj + indexer wq_b/wk) is in
+        # hf_quant_config.exclude_modules -> runs bf16. The attention module
+        # therefore has NO nvfp4 gemm, and AIC models it at gemm=bfloat16
+        # (sdk: _dsa_attention_modules_excluded_from_quant -> dsa_gemm_quant_mode
+        # = bfloat16). So the bf16-gemm combo from module_precision_combos is the
+        # CORRECT precision here (fp8_block is filtered out by
+        # _gemm_type_supported_by_model for an nvfp4 checkpoint). KV is fp8,
+        # carried by kv_dtype independently of gemm_type.
         for compute_dtype, kv_dtype, gemm_type in precision_combos:
             if not _gemm_type_supported_by_model(gemm_type, native_quant):
                 continue
@@ -691,6 +853,29 @@ def get_dsa_generation_module_test_cases():
     if get_sm_version() < 90:
         return []
     return _build_module_test_cases(attn_type="dsa", mode="generation")
+
+
+def get_dsa_context_module_skip_indexer_test_cases():
+    """collect.py entrypoint for DSA context module collection with the indexer
+    patched out (GLM-5.2 index_topk_freq>1 reuse layers).
+
+    Same shapes as the full context module — the skip behaviour is applied in
+    the subprocess (run_func detects the skip_indexer perf_filename). Only emit
+    cases for models that actually share the index across layers
+    (index_topk_freq > 1); for freq==1 models the skip layer == full layer, so
+    a separate file would just duplicate dsa_context_module.
+    """
+    if get_sm_version() < 90:
+        return []
+    return [c for c in _build_module_test_cases(attn_type="dsa", mode="context") if _model_shares_dsa_index(c[6])]
+
+
+def get_dsa_generation_module_skip_indexer_test_cases():
+    """collect.py entrypoint for DSA generation module collection with the
+    indexer patched out (see context variant)."""
+    if get_sm_version() < 90:
+        return []
+    return [c for c in _build_module_test_cases(attn_type="dsa", mode="generation") if _model_shares_dsa_index(c[6])]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1085,10 +1270,37 @@ def load_model_runner(
         server_args=server_args,
     )
 
+    _ensure_kv_pool_and_attn_backend(model_runner)
+
     _patch_nsa_rope_contiguity(model_runner)
     _validate_dsa_tp_module_shapes(model_runner, head_num, target_tp_size)
 
     return model_runner
+
+
+def _ensure_kv_pool_and_attn_backend(model_runner) -> None:
+    """Allocate the KV cache pool and attention backend when the runtime split
+    ModelRunner construction from pool/backend init (newer sglang).
+
+    Older sglang (<= 0.5.x release) allocated ``req_to_token_pool`` /
+    ``token_to_kv_pool_allocator`` and the attention backend inside
+    ``ModelRunner.__init__``, so a bare construction was fully usable. The
+    refactored sglang (0.0.0.dev / glm52 image) moves these out of ``__init__``
+    into ``alloc_memory_pool()`` + ``init_attention_backend()`` that the engine's
+    Scheduler/TpWorker drives after construction — steps the collector does not
+    run, leaving ``req_to_token_pool`` (and ``attn_backend``) as ``None`` and the
+    forward path crashing on ``None.clear()`` / ``None.init_forward_metadata``.
+
+    Detect the split by ``req_to_token_pool is None`` after construction and run
+    the two init steps ourselves. On older sglang the pool is already set, so
+    this is a no-op -> backward compatible.
+    """
+    if getattr(model_runner, "req_to_token_pool", None) is not None:
+        return  # old sglang: __init__ already allocated everything
+    if hasattr(model_runner, "alloc_memory_pool"):
+        model_runner.alloc_memory_pool()
+    if hasattr(model_runner, "init_attention_backend"):
+        model_runner.init_attention_backend()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1293,6 +1505,15 @@ def _run_prefill(
 
                 req.full_untruncated_fill_ids = _array("q", req.origin_input_ids)
                 req.fill_len = full_length
+            # sglang dev (glm52 image): get_fill_ids() returns
+            # full_untruncated_fill_ids[: extend_range.end] instead of reading
+            # fill_len, and extend_range defaults to None -> AttributeError
+            # ('NoneType' has no attribute 'end') in prepare_for_extend. Set the
+            # extend range [prefix_len, full_length) so get_fill_ids yields the
+            # full prefix+seq ids (prepare_for_extend then strips the prefix).
+            # Guarded: older sglang has no set_extend_range (uses fill_len).
+            if hasattr(req, "set_extend_range"):
+                req.set_extend_range(prefix_len, full_length)
             req.extend_input_len = seq_length if prefix_len else len(req.fill_ids)
             req.logprob_start_len = 0
             reqs.append(req)
@@ -1341,6 +1562,12 @@ def _run_prefill(
         attn_inputs = AttentionInputs(hidden_states, forward_batch, dummy_qkv_latent_func)
         get_attn_tp_context().set_attn_inputs(attn_inputs)
 
+        # Newer sglang (glm52 image) removed the model_executor piecewise runner
+        # module the replay path patches; time the module EAGERLY there (the
+        # existing fallback flag both disables replay below and selects the eager
+        # DSA context path at use_module_eager_dsa_context). No-op on old sglang.
+        if not _module_piecewise_replay_available():
+            model_runner._aic_module_piecewise_fallback_eager = True
         use_module_piecewise_replay = not getattr(model_runner, "_aic_module_piecewise_fallback_eager", False) and (
             _env_flag("AIC_ENABLE_MODULE_PIECEWISE_REPLAY") or (attn_type == "dsa" and _is_glm5_dsa_model(model_path))
         )
@@ -1384,10 +1611,14 @@ def _run_prefill(
             use_module_cuda_graph = False
             use_module_piecewise_context = False
             use_module_eager_dsa_context = True
+        # piecewise_cuda_graph_tokens was a top-level ServerArgs field on older
+        # sglang; the refactored sglang (glm52 image) moved piecewise config into
+        # cuda_graph_config, so the attribute is absent -> getattr-guard it
+        # (absent => 0 => the token gate below is inert, correct for the eager
+        # flashmla_kv path which runs no piecewise graph anyway).
+        _pw_tokens = getattr(model_runner.server_args, "piecewise_cuda_graph_tokens", None)
         max_piecewise_tokens = int(getattr(model_runner.server_args, "piecewise_cuda_graph_max_tokens", 0) or 0) or (
-            max(int(x) for x in model_runner.server_args.piecewise_cuda_graph_tokens)
-            if model_runner.server_args.piecewise_cuda_graph_tokens
-            else 0
+            max(int(x) for x in _pw_tokens) if _pw_tokens else 0
         )
         if use_module_piecewise_replay and max_piecewise_tokens and token_count > max_piecewise_tokens:
             # piecewise_cuda_graph_max_tokens is an sglang serving knob (2048 by
@@ -1657,6 +1888,37 @@ def _run_prefill(
             use_module_piecewise_replay = False
             use_module_eager_dsa_context = True
 
+        # skip_indexer collection: GLM-5.2 (index_topk_freq>1) reuse layers run
+        # proj GEMMs + DSA attention but NOT the per-layer indexer (mqa logits +
+        # topk + index-K store) — they reuse a sibling layer's topk indices via
+        # skip_topk. To time that reuse-layer cost: capture a real topk_indices
+        # from ONE forward (indexer fires), then force skip_topk=True and feed it
+        # back as prev_topk_indices so forward_absorb_prepare bypasses the indexer
+        # (`if not skip_topk: indexer(...)` else reuse prev_topk_indices). The
+        # captured forward happens in warmup[0] (discarded); warmup[1:] + all timed
+        # runs measure the skip path. No-op unless this is a skip_indexer pass.
+        _skip_indexer = _dsa_skip_indexer_enabled(attn_type, model_path)
+        _skip_state = {"prev_topk": None, "hook": None}
+        if _skip_indexer and getattr(attention_module, "indexer", None) is not None:
+            attention_module.skip_topk = False  # ensure the indexer fires for the capture forward
+
+            def _capture_topk(_m, _inp, _out):
+                if _skip_state["prev_topk"] is None and _out is not None:
+                    _skip_state["prev_topk"] = _out.detach()
+
+            _skip_state["hook"] = attention_module.indexer.register_forward_hook(_capture_topk)
+
+        def _skip_kwargs():
+            # Once a real topk index is captured, bypass the indexer for all
+            # subsequent (timed) forwards by forcing skip_topk + reusing it.
+            if _skip_indexer and _skip_state["prev_topk"] is not None:
+                attention_module.skip_topk = True
+                if _skip_state["hook"] is not None:
+                    _skip_state["hook"].remove()
+                    _skip_state["hook"] = None
+                return {"prev_topk_indices": _skip_state["prev_topk"]}
+            return {}
+
         def call_attention_module():
             with forward_context(forward_context_type(attn_backend=model_runner.attn_backend)):
                 if use_module_piecewise_context:
@@ -1680,6 +1942,7 @@ def _run_prefill(
                             hidden_states=hidden_states,
                             forward_batch=forward_batch,
                             zero_allocator=zero_allocator,
+                            **_skip_kwargs(),
                         )
                 elif use_module_eager_dsa_context:
                     # Prefill chunk exceeds the piecewise graph ceiling: time the
@@ -1696,6 +1959,7 @@ def _run_prefill(
                         hidden_states=hidden_states,
                         forward_batch=forward_batch,
                         zero_allocator=zero_allocator,
+                        **_skip_kwargs(),
                     )
                 else:
                     attention_module(
@@ -1703,6 +1967,7 @@ def _run_prefill(
                         hidden_states=hidden_states,
                         forward_batch=forward_batch,
                         zero_allocator=zero_allocator,
+                        **_skip_kwargs(),
                     )
 
         last_can_run_graph = None
@@ -1775,8 +2040,11 @@ def _run_prefill(
                 op_name = "mla_context"
                 kernel_source = backend_name
             else:
+                _skip_sfx = "_skip_indexer" if _dsa_skip_indexer_enabled(attn_type, model_path) else ""
+                # full and skip share ONE perf file; the op_name column (with the
+                # _skip_indexer suffix) is what distinguishes skip rows. No extra column.
                 perf_fname = f"{attn_type}_context_module_perf.txt"
-                op_name = f"{attn_type}_context_module"
+                op_name = f"{attn_type}_context_module{_skip_sfx}"
                 kernel_source = f"{attn_type}_{backend_name}"
                 if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
                     kernel_source = f"{kernel_source}_trtllm"
@@ -1907,6 +2175,12 @@ def _run_decode(
 
                 req.full_untruncated_fill_ids = _array("q", req.origin_input_ids)
                 req.fill_len = len(req.origin_input_ids)
+            # sglang dev (glm52 image): get_fill_ids() slices
+            # full_untruncated_fill_ids[: extend_range.end]; extend_range defaults
+            # to None -> AttributeError in prepare_for_extend. Decode has no prefix,
+            # so the extend range covers all tokens [0, len). hasattr-guarded.
+            if hasattr(req, "set_extend_range"):
+                req.set_extend_range(0, len(req.origin_input_ids))
             req.extend_input_len = len(req.fill_ids)
             req.logprob_start_len = 0
             req.cached_tokens = 0
@@ -1955,6 +2229,29 @@ def _run_decode(
         if use_module_cuda_graph or _env_flag("AIC_ENABLE_MODULE_CUDA_GRAPH"):
             _patch_nsa_indexer_compile_for_module_cuda_graph(attention_module)
 
+        # skip_indexer (see _run_prefill): capture a real decode topk index from
+        # the first eager warmup forward, then force skip_topk + reuse it so the
+        # timed runs (and any captured CUDA graph) exclude the per-layer indexer.
+        _skip_indexer = _dsa_skip_indexer_enabled(attn_type, model_path)
+        _skip_state = {"prev_topk": None, "hook": None}
+        if _skip_indexer and getattr(attention_module, "indexer", None) is not None:
+            attention_module.skip_topk = False
+
+            def _capture_topk(_m, _inp, _out):
+                if _skip_state["prev_topk"] is None and _out is not None:
+                    _skip_state["prev_topk"] = _out.detach()
+
+            _skip_state["hook"] = attention_module.indexer.register_forward_hook(_capture_topk)
+
+        def _skip_kwargs():
+            if _skip_indexer and _skip_state["prev_topk"] is not None:
+                attention_module.skip_topk = True
+                if _skip_state["hook"] is not None:
+                    _skip_state["hook"].remove()
+                    _skip_state["hook"] = None
+                return {"prev_topk_indices": _skip_state["prev_topk"]}
+            return {}
+
         def kernel_func():
             with forward_context(forward_context_type(attn_backend=model_runner.attn_backend)):
                 attention_module(
@@ -1962,6 +2259,7 @@ def _run_decode(
                     hidden_states=decode_hidden,
                     forward_batch=forward_batch_decode,
                     zero_allocator=zero_allocator,
+                    **_skip_kwargs(),
                 )
 
         # Pre-warm JIT / autotuning before CUDA graph capture.
@@ -2010,8 +2308,10 @@ def _run_decode(
                 log_isl = seq_length
                 log_step = 0
             else:
+                _skip_sfx = "_skip_indexer" if _dsa_skip_indexer_enabled(attn_type, model_path) else ""
+                # full + skip share ONE perf file; op_name (with _skip_indexer) tags skip.
                 perf_fname = f"{attn_type}_generation_module_perf.txt"
-                op_name = f"{attn_type}_generation_module"
+                op_name = f"{attn_type}_generation_module{_skip_sfx}"
                 kernel_source = f"{attn_type}_{backend_name}"
                 if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
                     kernel_source = f"{kernel_source}_trtllm"
@@ -2107,12 +2407,21 @@ def run_mla_module(
     batch_size_filter: int | None = None,
     target_tp_size: int = 1,
     dsa_prefill_backend: str = "flashmla_kv",
+    skip_indexer: bool = False,
 ):
     """Run MLA/DSA module benchmark — called inside a subprocess.
 
     Sets up the model runner for the given configuration and runs all
     (batch_size, seq_length) combos for the specified phase.
+
+    ``skip_indexer`` selects the GLM-5.2 reuse-layer variant (the per-layer
+    indexer is patched out and rows are tagged ``_skip_indexer``). It mirrors
+    ``is_prefill``: the worker derives it from the op's perf_filename and passes
+    it down. Recorded in the ``_SKIP_INDEXER_PASS`` process global so the
+    existing ``_dsa_skip_indexer_enabled`` call sites need no signature change.
     """
+    global _SKIP_INDEXER_PASS
+    _SKIP_INDEXER_PASS = skip_indexer
     device = f"cuda:{gpu_id}"
     torch.cuda.set_device(device)
 
@@ -2161,16 +2470,46 @@ def run_mla_module(
         # top of the valid prefix range is a real data point, never extrapolated.
         # The shape filter admits prefix + seq_len == max_position (last position
         # = max_pos - 1, still in the RoPE table), so max_position - seq_len is
-        # the largest valid prefix. Appended last; skipped if already a grid point.
+        # the largest valid prefix. Ceilings are sampled for the model's OWN
+        # max_position AND every same-precision sibling's (see
+        # _dsa_ceiling_max_positions): a same-precision dedup representative
+        # (e.g. GLM-5.2-NVFP4) thereby also lands a real point at the top of the
+        # shorter sibling's range (e.g. GLM-5-NVFP4's 202752), so the sibling's
+        # near-max queries interpolate within data instead of across the grid gap.
+        # Appended last; skipped if already a grid point or above the own cap.
         if _max_pos is not None:
-            for bs, seq_len, ip in base_cases:
-                _ceil = _max_pos - seq_len
-                if (
-                    _ceil >= 0
-                    and _ceil not in prefix_lens
-                    and _dsa_context_prefix_shape_is_valid(bs, seq_len, _ceil, max_position_embeddings=_max_pos)
-                ):
-                    cases.append((bs, seq_len, ip, _ceil))
+            for _cover_pos in _dsa_ceiling_max_positions(model_path):
+                for bs, seq_len, ip in base_cases:
+                    _ceil = _cover_pos - seq_len
+                    if (
+                        _ceil >= 0
+                        and _ceil not in prefix_lens
+                        and _dsa_context_prefix_shape_is_valid(bs, seq_len, _ceil, max_position_embeddings=_max_pos)
+                    ):
+                        cases.append((bs, seq_len, ip, _ceil))
+    elif attn_type == "dsa":
+        # Generation (decode): the perf "step" is the past-KV length (logged as
+        # seq_length here, prefix stays 0). The base generation sweep stops at
+        # 131072, so high-context decode (e.g. GLM-5 up to 202752, GLM-5.2 up to
+        # 1M) would EXTRAPOLATE. Mirror ctx's prefix coverage: extend the KV-length
+        # grid with ctx's context_prefix_lengths plus the max_position ceilings
+        # (own + same-precision siblings, capped at max_position-1 = last valid KV
+        # position). High-context decode is small-batch, so the extension runs at
+        # bs=1 (keeps bs*seq within the decode budget). Same-precision dedup means
+        # GLM-5.2 thereby also lands a real KV point at GLM-5's 202752 max.
+        _sweep = get_mla_module_sweep_spec("sglang")
+        _max_pos = _model_max_position_embeddings(model_path)
+        cases = [(bs, seq_len, ip, 0) for bs, seq_len, ip in base_cases]
+        _have = {(bs, sl) for bs, sl, _ in base_cases}
+        _extra_kv = set(_sweep.context_prefix_lengths)
+        for _cover_pos in _dsa_ceiling_max_positions(model_path):
+            _extra_kv.add(_cover_pos - 1)
+        for _sl in sorted(_extra_kv):
+            if _sl <= 0 or (_max_pos is not None and _sl > _max_pos - 1):
+                continue
+            if (1, _sl) not in _have:
+                cases.append((1, _sl, False, 0))
+                _have.add((1, _sl))
     else:
         cases = [(bs, seq_len, ip, 0) for bs, seq_len, ip in base_cases]
     cases = _filter_cases_from_env(cases, is_prefill=is_prefill, attn_type=attn_type)
@@ -2378,6 +2717,7 @@ def _run_mla_subprocess(
     batch_size_filter: int | None = None,
     target_tp_size: int = 1,
     dsa_prefill_backend: str = "flashmla_kv",
+    skip_indexer: bool = False,
 ):
     """Run MLA/DSA benchmark in a subprocess with CUDA_VISIBLE_DEVICES isolation."""
     env = os.environ.copy()
@@ -2393,7 +2733,7 @@ def _run_mla_subprocess(
         f'run_mla_module("{attn_type}", {head_num}, "{model_path}", '
         f'"{kv_cache_dtype}", "{compute_dtype}", "{gemm_type}", {is_prefill}, '
         f"0, {output_repr}, {backend_repr}, {batch_filter_repr}, {target_tp_size}, "
-        f'"{dsa_prefill_backend}")\n'
+        f'"{dsa_prefill_backend}", skip_indexer={skip_indexer})\n'
     )
 
     proc = subprocess.Popen(
@@ -2476,6 +2816,14 @@ def run_mla_module_worker(
     is_prefill = "context" in perf_filename
     batch_size_filter = batch_size if is_prefill and attn_type == "dsa" and batch_size > 0 else None
 
+    # skip_indexer ops route through the SAME worker/run path as the full DSA
+    # module; the only difference is (1) the per-layer indexer (mqa+topk) is
+    # patched out via skip_topk in _run_prefill/_run_generation and (2) the rows
+    # are tagged with an op_name "_skip_indexer" suffix in the same perf file.
+    # Derived from the op's perf_filename and threaded down as an explicit arg —
+    # exactly like is_prefill above; no env var crosses the subprocess boundary.
+    skip_indexer = "skip_indexer" in os.path.basename(perf_filename)
+
     print(f"\n{'=' * 60}")
     print(
         f"{attn_type.upper()} Module {'Context' if is_prefill else 'Generation'}: "
@@ -2507,6 +2855,7 @@ def run_mla_module_worker(
         batch_size_filter=batch_size_filter,
         target_tp_size=target_tp_size,
         dsa_prefill_backend=dsa_prefill_backend,
+        skip_indexer=skip_indexer,
     )
 
 

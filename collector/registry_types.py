@@ -43,6 +43,12 @@ class PerfFile(str, Enum):
     MLA_GENERATION_MODULE = "mla_generation_module_perf.txt"
     DSA_CONTEXT_MODULE = "dsa_context_module_perf.txt"
     DSA_GENERATION_MODULE = "dsa_generation_module_perf.txt"
+    # GLM-5.2 shares one topk index across `index_topk_freq` layers: only 1
+    # layer per group computes the indexer (mqa+topk+index-K store), the rest
+    # reuse it (skip_indexer). These files capture the skip-layer cost so the
+    # modeler can amortize: per_layer = (1/freq)*full + (1-1/freq)*skip.
+    DSA_CONTEXT_MODULE_SKIP_INDEXER = "dsa_context_module_skip_indexer_perf.txt"
+    DSA_GENERATION_MODULE_SKIP_INDEXER = "dsa_generation_module_skip_indexer_perf.txt"
     MHC_MODULE = "mhc_module_perf.txt"
     # DeepSeek-V4 module-level data — one OpEntry per (attn_kind, mode) pair,
     # mirroring the existing aic_dev "1 OpEntry = 1 file" convention.
