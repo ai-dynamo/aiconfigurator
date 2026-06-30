@@ -387,6 +387,16 @@ def run_gdn_generation_benchmark(
                 power_stats=results["power_stats"],
             )
 
+        # vLLM 0.24.0's packed recurrent kernel launches grid-y as
+        # batch_size * num_v_heads; CUDA limits grid-y to 65,535. Keep the
+        # valid convolution measurement above, but do not launch the invalid
+        # recurrent point.
+        if batch_size * num_v_heads > 65_535:
+            del conv_input, conv_state, mixed_qkv
+            gc.collect()
+            torch.cuda.empty_cache()
+            continue
+
         # The production non-spec decode fast path feeds packed convolution
         # output directly to this recurrent kernel.
         a = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
