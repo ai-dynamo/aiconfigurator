@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
+import shutil
 import subprocess as sp
 import sys
 from pathlib import Path
@@ -40,7 +42,11 @@ def test_cli_default_thorough_sweep_real_static_workload(tmp_path: Path):
     ):
         env.pop(key, None)
 
-    save_dir = tmp_path / "thorough-default"
+    artifact_dir = Path(os.environ.get("AIC_SPICA_THOROUGH_E2E_ARTIFACT_DIR", tmp_path))
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    save_dir = artifact_dir / "save_dir"
+    if save_dir.exists():
+        shutil.rmtree(save_dir)
     cmd = [
         sys.executable,
         "-m",
@@ -71,7 +77,10 @@ def test_cli_default_thorough_sweep_real_static_workload(tmp_path: Path):
         str(save_dir),
     ]
 
+    (artifact_dir / "command.txt").write_text(f"{shlex.join(cmd)}\n", encoding="utf-8")
     completed = sp.run(cmd, capture_output=True, text=True, timeout=300, env=env)
+    (artifact_dir / "stdout.txt").write_text(completed.stdout, encoding="utf-8")
+    (artifact_dir / "stderr.txt").write_text(completed.stderr, encoding="utf-8")
     combined = f"{completed.stdout}\n{completed.stderr}"
     assert completed.returncode == 0, combined
 

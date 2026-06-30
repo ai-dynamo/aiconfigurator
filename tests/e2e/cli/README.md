@@ -35,3 +35,8 @@ AIC_RUN_SPICA_THOROUGH_E2E=true \
 PYTHONPATH=/path/to/dynamo/components/src:/path/to/dynamo/lib/bindings/python/src \
 python3 -m pytest tests/e2e/cli/test_cli_default_thorough_sweep_real.py -q
 ```
+
+Set `AIC_SPICA_THOROUGH_E2E_ARTIFACT_DIR` to retain `command.txt`, `stdout.txt`,
+`stderr.txt`, and the complete generated `save_dir` tree. The dedicated GitHub
+Actions job sets this automatically and uploads the directory as the
+`spica-thorough-e2e-results` artifact.
