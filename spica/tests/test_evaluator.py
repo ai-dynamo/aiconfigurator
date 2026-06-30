@@ -5,6 +5,7 @@
 
 import dataclasses
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -150,6 +151,22 @@ def test_scaling_agg_threads_planner_config_when_supported(monkeypatch):
     assert rec["sla_ttft_ms"] == 2000.0 and rec["sla_itl_ms"] == 30.0
     assert rec["planner_config"]["optimization_target"] == "sla"
     assert rec["num_workers"] == 2
+
+
+def test_scaling_report_preserves_planner_tick_count(monkeypatch):
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
+    monkeypatch.setattr(
+        dynamo.replay.api,
+        "run_trace_replay",
+        lambda **kw: SimpleNamespace(
+            trace_report={"output_throughput_tok_s": 42.0},
+            total_ticks=3,
+        ),
+    )
+    goal = OptimizationGoal(target=OptimizationTarget.THROUGHPUT)
+    report = ReplayEvaluator(_wl(), goal).evaluate(_agg_plan(static=False))
+    assert report["output_throughput_tok_s"] == 42.0
+    assert report["planner_total_ticks"] == 3.0
 
 
 def test_kv_router_config_is_built_and_passed(monkeypatch):

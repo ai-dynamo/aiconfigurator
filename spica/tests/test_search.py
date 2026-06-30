@@ -254,7 +254,7 @@ def test_e2e_only_goodput_drops_planner_scaling_and_proceeds(monkeypatch):
     assert len(cands) == 1
 
 
-def test_candidate_build_error_is_reported_not_raised(monkeypatch):
+def test_candidate_build_error_is_reported_not_raised(monkeypatch, capsys):
     branch = _branch(ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2))
     _stub(monkeypatch, branch)
     sampler_seen = {}
@@ -278,13 +278,14 @@ def test_candidate_build_error_is_reported_not_raised(monkeypatch):
         sampler_seen["s"] = s
         return s
 
-    cands = run_smart_search(_config(), evaluator=_FakeEvaluator(), sampler_factory=factory, show_progress=False)
+    cands = run_smart_search(_config(), evaluator=_FakeEvaluator(), sampler_factory=factory, show_progress=True)
 
     assert cands == []
     scored = sampler_seen["s"].scored
     assert len(scored) == 1
     assert scored[0][0] == "infeasible"
     assert "candidate build failed" in scored[0][1]
+    assert "smart-sweep failure reason(s): candidate build failed" in capsys.readouterr().out
 
 
 # --- pareto (multi-objective) sweep over a swept concurrency ---

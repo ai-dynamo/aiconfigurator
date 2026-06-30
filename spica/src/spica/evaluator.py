@@ -54,8 +54,15 @@ def _build_kv_router_config(payload: dict | None):
 def _unwrap(report) -> dict[str, float]:
     """Normalize a replay result to the flat ``trace_report`` dict: a static replay
     returns that dict directly; planner-in-the-loop returns a ``ReplayPlannerReport``
-    whose ``.trace_report`` carries the identical shape."""
-    return report.trace_report if hasattr(report, "trace_report") else report
+    whose ``.trace_report`` carries the identical shape. Preserve the planner tick
+    count so callers and e2e coverage can distinguish bridge initialization from an
+    actual planner callback."""
+    if not hasattr(report, "trace_report"):
+        return report
+    trace_report = dict(report.trace_report)
+    if hasattr(report, "total_ticks"):
+        trace_report["planner_total_ticks"] = float(report.total_ticks)
+    return trace_report
 
 
 def _replay_accepts_kw(func, name: str) -> bool:

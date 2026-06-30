@@ -224,6 +224,7 @@ def run_smart_search(
     total = len(branches) * sweep.max_rounds * per_round
     candidates: list[Candidate] = []
     tally = {"feasible": 0, "infeasible": 0, "failed": 0, "unsupported": 0}
+    failure_reasons: dict[str, int] = {}
     # Unique per run: Vizier's datastore persists studies by id, so a fixed id would
     # make a later run inherit a stale study (and its old param space) -> decode crash.
     run_nonce = uuid.uuid4().hex[:8]
@@ -348,6 +349,8 @@ def run_smart_search(
                         sampler.observe_infeasible(s, reason)
                     else:
                         sampler.observe(s, observe_metrics)
+                    if outcome == "failed":
+                        failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
                     _record(outcome, candidate)
                 round_no += 1
                 if on_round is not None:
@@ -376,4 +379,11 @@ def run_smart_search(
         else:
             summary += f"; best {goal.target.value}={_best():.4g}"
         tqdm.write(summary)
+        if failure_reasons:
+            displayed = []
+            for reason, count in list(failure_reasons.items())[:3]:
+                displayed.append(f"{reason} (x{count})" if count > 1 else reason)
+            remaining = len(failure_reasons) - len(displayed)
+            suffix = f" | +{remaining} more distinct reason(s)" if remaining else ""
+            tqdm.write(f"smart-sweep failure reason(s): {' | '.join(displayed)}{suffix}")
     return result

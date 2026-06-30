@@ -148,7 +148,14 @@ jobs:
         run: |
           VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" \
             "${GITHUB_WORKSPACE}/.venv/bin/maturin" develop \
-            --uv --release --features aic-forward-pass
+            --uv --release --features aic-forward-pass,mocker-kvbm-offload
+      - name: Install Dynamo replay and planner dependencies
+        # maturin installs ai-dynamo-runtime only; the planner modules exposed
+        # through PYTHONPATH below also need Dynamo's root + planner dependencies.
+        run: |
+          uv pip install --python .venv/bin/python \
+            --editable ./dynamo-src \
+            --requirement ./dynamo-src/container/deps/requirements.planner.txt
       - name: Run real Spica thorough sweeps
         env:
           AIC_RUN_SPICA_THOROUGH_E2E: 'true'

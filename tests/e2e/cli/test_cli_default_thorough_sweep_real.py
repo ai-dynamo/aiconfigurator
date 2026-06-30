@@ -180,6 +180,7 @@ def test_cli_native_thorough_config_preserves_dynamo_features(tmp_path: Path):
     assert completed.returncode == 0, combined
 
     assert "sweep={'max_rounds': 1, 'parallel_evals': 1, 'candidates_per_round': 1}" in combined
+    assert "concurrency=None request_rate=1.0 num_request_ratio=3.0" in combined
     assert re.search(r"smart-sweep done: 1/1 feasible, 0 gated, 0 backend-unsupported, 0 replay-failed", combined)
 
     result_dirs = [path for path in save_dir.iterdir() if path.is_dir()]
@@ -194,11 +195,12 @@ def test_cli_native_thorough_config_preserves_dynamo_features(tmp_path: Path):
     assert exp_config["planner_optimization_target"] == "throughput"
     assert exp_config["primary_backend_version"] == "1.3.0rc10"
     assert exp_config["total_gpus"] == 2
-    assert exp_config["min_gpu_budget"] == 1
-    assert exp_config["min_endpoint"] == 1
+    assert exp_config["min_gpu_budget"] == 2
+    assert exp_config["min_endpoint"] == 2
 
     top_dir = result_dir / "agg" / "top1"
-    candidate_config = _yaml(top_dir / "spica_candidate.yaml")["config"]
+    candidate = _yaml(top_dir / "spica_candidate.yaml")
+    candidate_config = candidate["config"]
     assert candidate_config["objective_target"] == "throughput"
     assert candidate_config["planner_optimization_target"] == "throughput"
     assert candidate_config["backend_version"] == "1.3.0rc10"
@@ -206,14 +208,15 @@ def test_cli_native_thorough_config_preserves_dynamo_features(tmp_path: Path):
     assert candidate_config["planner_itl_ms"] is None
     assert candidate_config["context_length"] == 4096
     assert candidate_config["gpu_budget"] == 2
-    assert candidate_config["min_gpu_budget"] == 1
-    assert candidate_config["min_endpoint"] == 1
+    assert candidate_config["min_gpu_budget"] == 2
+    assert candidate_config["min_endpoint"] == 2
     assert candidate_config["replicas"] == 2
     assert candidate_config["router_mode"] == "kv_router"
     assert candidate_config["host_cache_hit_weight"] == pytest.approx(0.75)
     assert candidate_config["disk_cache_hit_weight"] == pytest.approx(0.25)
     assert candidate_config["num_g2_blocks"] == 128
     assert candidate_config["offload_batch_size"] == 4
+    assert candidate["metrics"]["planner_total_ticks"] >= 1
 
     generator_config = _yaml(top_dir / "generator_config.yaml")
     assert generator_config["ServiceConfig"]["port"] == 8123
@@ -229,10 +232,11 @@ def test_cli_native_thorough_config_preserves_dynamo_features(tmp_path: Path):
     planner_config = dyn_config["planner_config"]
     assert planner_config["optimization_target"] == "throughput"
     assert planner_config["max_gpu_budget"] == 2
-    assert planner_config["min_gpu_budget"] == 1
-    assert planner_config["min_endpoint"] == 1
+    assert planner_config["min_gpu_budget"] == 2
+    assert planner_config["min_endpoint"] == 2
     assert planner_config["enable_load_scaling"] is True
     assert planner_config["enable_throughput_scaling"] is False
+    assert planner_config["load_adjustment_interval_seconds"] == 1
     assert "ttft_ms" not in planner_config
     assert "itl_ms" not in planner_config
 
@@ -265,8 +269,8 @@ def test_cli_native_thorough_config_preserves_dynamo_features(tmp_path: Path):
     validated_planner = PlannerConfig.model_validate(planner_payload)
     assert validated_planner.optimization_target == "throughput"
     assert validated_planner.max_gpu_budget == 2
-    assert validated_planner.min_gpu_budget == 1
-    assert validated_planner.min_endpoint == 1
+    assert validated_planner.min_gpu_budget == 2
+    assert validated_planner.min_endpoint == 2
 
     worker = services["TRTLLMWorker"]
     worker_env = {item["name"]: item["value"] for item in worker["envs"]}
