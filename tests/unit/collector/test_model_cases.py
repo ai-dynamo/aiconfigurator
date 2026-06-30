@@ -1560,6 +1560,45 @@ def test_sm89_exception_excludes_sglang_head_dim_256_context_attention_before_ex
     assert skipped == []
 
 
+def test_sm90_vllm_024_excludes_sm100_only_fp8_head_dim_512_attention():
+    sm90_plan = build_collection_case_plan(backend="vllm", sm_version=90, full=True)
+    sm100_plan = build_collection_case_plan(backend="vllm", sm_version=100, full=True)
+    cases = {
+        "attention_context": [1, 1024, 8, 1, 512, True, True, 0],
+        "attention_generation": [128, 31, 8, 1, 512, True, False, 0],
+    }
+
+    for op, case in cases.items():
+        filtered, skipped = filter_test_cases_with_report(
+            [case],
+            plan=sm90_plan.op_cases[op],
+            full_module_name=f"vllm.{op}",
+            run_func_name="run_attention_torch",
+            runtime_version="0.24.0",
+        )
+        assert filtered == []
+        assert skipped[0]["reason_type"] == "framework_version_unsupported"
+        assert "SM100-only" in skipped[0]["reason"]
+
+        bf16_case = [*case]
+        bf16_case[5] = False
+        assert filter_test_cases(
+            [bf16_case],
+            plan=sm90_plan.op_cases[op],
+            full_module_name=f"vllm.{op}",
+            run_func_name="run_attention_torch",
+            runtime_version="0.24.0",
+        ) == [bf16_case]
+        for plan, version in ((sm90_plan, "0.23.0"), (sm100_plan, "0.24.0")):
+            assert filter_test_cases(
+                [case, bf16_case],
+                plan=plan.op_cases[op],
+                full_module_name=f"vllm.{op}",
+                run_func_name="run_attention_torch",
+                runtime_version=version,
+            ) == [case, bf16_case]
+
+
 def test_expected_failure_matching_does_not_consider_exclude_selector():
     case = ["remaining"]
     plan = OpCasePlan(exclude=CaseSelector(indices={1}))

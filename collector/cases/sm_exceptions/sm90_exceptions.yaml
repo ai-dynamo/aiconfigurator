@@ -88,6 +88,26 @@ framework_specific_op_exceptions:
           match:
             kv_cache_dtype: fp8
   vllm:
+    attention_context:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.24.0"]
+          reason: vLLM 0.24.0 FA4 CuTe FP8 KV-cache attention with head_dim=512 is SM100-only.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, is_context_phase, window_size]
+          match:
+            head_dim: 512
+            use_fp8_kv_cache: true
+            is_context_phase: true
+    attention_generation:
+      rules:
+        - reason_type: framework_version_unsupported
+          version_prefixes: ["0.24.0"]
+          reason: vLLM 0.24.0 FA4 CuTe FP8 KV-cache attention with head_dim=512 is SM100-only.
+          fields: [batch_size, sequence_length, num_heads, num_key_value_heads, head_dim, use_fp8_kv_cache, is_context_phase, window_size]
+          match:
+            head_dim: 512
+            use_fp8_kv_cache: true
+            is_context_phase: false
     moe:
       rules:
         - reason_type: hardware_unsupported
