@@ -62,6 +62,35 @@ def test_recognizer_accepts_generic_wrapper_chained_from_family_member() -> None
         assert is_expected_no_result_cause(exc)
 
 
+def test_recognizer_accepts_implicit_expected_context() -> None:
+    inner = InsufficientMemoryError("expected no-result")
+    outer = RuntimeError("wrapper")
+    outer.__context__ = inner
+
+    assert is_expected_no_result_cause(outer)
+
+
+def test_recognizer_prefers_explicit_cause_over_expected_context() -> None:
+    try:
+        try:
+            raise InsufficientMemoryError("expected no-result")
+        except InsufficientMemoryError:
+            raise RuntimeError("wrapper") from KeyError("real bug")
+    except RuntimeError as exc:
+        assert not is_expected_no_result_cause(exc)
+
+
+def test_recognizer_ignores_suppressed_expected_context() -> None:
+    try:
+        try:
+            raise InsufficientMemoryError("expected no-result")
+        except InsufficientMemoryError:
+            raise KeyError("real bug while handling expected result") from None
+    except KeyError as exc:
+        assert exc.__suppress_context__
+        assert not is_expected_no_result_cause(exc)
+
+
 def test_recognizer_rejects_wrapper_around_real_bug() -> None:
     # A genuine bug surfacing as the last exception must keep its traceback.
     try:

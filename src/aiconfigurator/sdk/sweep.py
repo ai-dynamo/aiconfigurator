@@ -264,7 +264,7 @@ def _sweep_one_parallel_agg(
     free_gpu_memory_fraction: float | None,
     max_seq_len: int | None,
     predictor: Any = None,
-) -> tuple[pd.DataFrame, bool]:
+) -> tuple[pd.DataFrame, bool, bool]:
     """Sweep batch_size x ctx_tokens for one fixed parallel choice.
 
     Caller is responsible for constructing ``model`` and ``backend`` and
@@ -273,9 +273,10 @@ def _sweep_one_parallel_agg(
     a full recomputation per tpot, ~80x slowdown for an 80-element tpot
     sweep.
 
-    Returns ``(rows_df, all_oom)``.  Logic faithfully reproduces the
-    body of the legacy ``backend.find_best_agg_result_under_constraints``;
-    parity is enforced by the integration test.
+    Returns ``(rows_df, saw_model_fit, saw_memory_fit)``.  Logic faithfully
+    reproduces the body of the legacy
+    ``backend.find_best_agg_result_under_constraints``; parity is enforced by
+    the integration test.
     """
     isl = runtime_config.isl
     osl = runtime_config.osl
@@ -289,7 +290,8 @@ def _sweep_one_parallel_agg(
     results_dict_list: list[dict] = []
     results_per_ops_source: list[dict | None] = []
     capped_b: list[int] = []
-    all_oom = True
+    saw_model_fit = False
+    saw_memory_fit = False
 
     for b in b_list:
         for ctx_tokens in ctx_tokens_list:
@@ -332,23 +334,26 @@ def _sweep_one_parallel_agg(
                 **backend_kwargs,
             )
 
-            if summary.check_oom() or summary.check_kv_cache_oom():
+            model_oom = summary.check_oom()
+            kv_cache_oom = summary.check_kv_cache_oom()
+            saw_model_fit |= not model_oom
+            saw_memory_fit |= not model_oom and not kv_cache_oom
+            if model_oom or kv_cache_oom:
                 break  # ctx_tokens monotonic → larger will also OOM
-            all_oom = False
             result_dict = summary.get_result_dict()
             if result_dict and result_dict["tpot"] <= tpot_target and result_dict["ttft"] <= ttft_target:
                 results_dict_list.append(result_dict)
                 results_per_ops_source.append(summary.get_per_ops_source())
 
     if not results_dict_list:
-        return pd.DataFrame(columns=common.ColumnsAgg), all_oom
+        return pd.DataFrame(columns=common.ColumnsAgg), saw_model_fit, saw_memory_fit
 
     df = pd.DataFrame(results_dict_list, columns=common.ColumnsAgg).round(3)
     df["_per_ops_source"] = results_per_ops_source
     df = df.sort_values(by="seq/s", ascending=False).round(3)
     if top_k > 0:
         df = df.head(top_k)
-    return df, all_oom
+    return df, saw_model_fit, saw_memory_fit
 
 
 def sweep_agg(
@@ -402,13 +407,15 @@ def sweep_agg(
         Deduped, sorted feasible-candidate DataFrame with schema ``common.ColumnsAgg``.
 
     Raises:
-        RuntimeError: When all configs OOM or no point meets SLA.
+        InsufficientMemoryError: When the model does not fit in any config.
+        KVCacheCapacityError: When the model fits but the KV cache does not.
         NoFeasibleConfigError: When SLA cannot be satisfied at any point.
+        RuntimeError: When no results are produced and a configuration raises.
     """
     results_df = pd.DataFrame(columns=common.ColumnsAgg)
     exceptions: list[Exception] = []
-    all_configs_oom = True
-    all_kv_cache_oom = True
+    saw_model_fit = False
+    saw_memory_fit = False
 
     for parallel_config in parallel_config_list:
         tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
@@ -466,7 +473,7 @@ def sweep_agg(
                 continue
 
             for point_rt in runtime_configs_to_evaluate:
-                point_df, all_oom = _sweep_one_parallel_agg(
+                point_df, point_saw_model_fit, point_saw_memory_fit = _sweep_one_parallel_agg(
                     model=model,
                     backend=backend,
                     database=database,
@@ -479,12 +486,8 @@ def sweep_agg(
                     max_seq_len=max_seq_len,
                     predictor=predictor,
                 )
-                if not all_oom:
-                    all_configs_oom = False
-                # KV cache OOM is detected per-summary inside; we conservatively
-                # mark "not all KV cache OOM" whenever we produced any row.
-                if len(point_df) > 0:
-                    all_kv_cache_oom = False
+                saw_model_fit |= point_saw_model_fit
+                saw_memory_fit |= point_saw_memory_fit
                 if len(point_df) == 0:
                     continue
                 if len(results_df) == 0:
@@ -513,12 +516,12 @@ def sweep_agg(
         raise RuntimeError(
             f"sweep_agg: no results for any parallel configuration. Last exception: {exceptions[-1]}"
         ) from exceptions[-1]
-    if all_configs_oom:
+    if not saw_model_fit:
         raise InsufficientMemoryError(
             "sweep_agg: no results — model does not fit in GPU memory for any parallel config. "
             "Try increasing --total-gpus, using a quantized model, or a system with more VRAM per GPU."
         )
-    if all_kv_cache_oom:
+    if not saw_memory_fit:
         raise KVCacheCapacityError(
             "sweep_agg: no results — requested batch_size exceeds KV cache capacity for all configs. "
             "Try reducing batch_size, increasing free_gpu_memory_fraction, or a system with more VRAM."

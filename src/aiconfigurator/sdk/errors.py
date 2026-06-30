@@ -44,9 +44,10 @@ class UnsupportedWideepConfigError(ValueError):
 
 
 def is_expected_no_result_cause(error: BaseException) -> bool:
-    """Return True when ``error`` (or any chained cause/context) is a NoResultsError.
+    """Return True when ``error`` or its effective chain has a NoResultsError.
 
-    Walks ``__cause__`` / ``__context__`` so a generic wrapper such as
+    Follows an explicit ``__cause__`` or an unsuppressed ``__context__`` so a
+    generic wrapper such as
     ``RuntimeError(...) from InsufficientMemoryError(...)`` is recognized as an
     expected no-result outcome, while a wrapper around a genuine bug (e.g. an
     unexpected ``KeyError``) returns False and keeps its traceback.
@@ -62,6 +63,6 @@ def is_expected_no_result_cause(error: BaseException) -> bool:
         seen.add(id(current))
         if current.__cause__ is not None:
             stack.append(current.__cause__)
-        if current.__context__ is not None:
+        elif not current.__suppress_context__ and current.__context__ is not None:
             stack.append(current.__context__)
     return False
