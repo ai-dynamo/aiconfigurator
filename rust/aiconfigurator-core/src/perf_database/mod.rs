@@ -124,7 +124,7 @@ impl PerfDatabase {
             wideep: WideEpTable::new(data_root.clone()),
             wideep_mla: WideEpMlaTable::new(data_root.clone()),
             wideep_moe: WideEpMoeTable::new(data_root.clone()),
-            state_space: StateSpaceTable::new(data_root.clone()),
+            state_space: StateSpaceTable::new(data_root.clone(), backend, version),
             data_root,
         })
     }

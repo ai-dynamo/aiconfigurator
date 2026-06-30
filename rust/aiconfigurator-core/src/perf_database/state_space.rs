@@ -15,12 +15,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::common::error::AicError;
 use super::interpolation::{interp_1d, nearest_neighbors};
+use crate::common::error::AicError;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct StateSpaceTable {
     data_root: PathBuf,
+    vllm_024_gdn_aliases: bool,
     mamba2: OnceLock<Result<Mamba2Grids, AicError>>,
     gdn: OnceLock<Result<GdnGrids, AicError>>,
 }
@@ -67,9 +68,10 @@ struct GdnKey {
 }
 
 impl StateSpaceTable {
-    pub fn new(data_root: PathBuf) -> Self {
+    pub fn new(data_root: PathBuf, backend: &str, version: &str) -> Self {
         Self {
             data_root,
+            vllm_024_gdn_aliases: backend == "vllm" && version == "0.24.0",
             mamba2: OnceLock::new(),
             gdn: OnceLock::new(),
         }
@@ -176,14 +178,54 @@ impl StateSpaceTable {
             num_v_heads,
             head_v_dim,
         };
-        // Mirror Python `_query_gdn_table`: on exact-shape miss, fall back to
-        // any same-d_model entry, breaking ties by minimum `|num_v_heads -
-        // query.num_v_heads|`. (Mamba2 uses "first by d_model"; GDN uses
-        // "nearest by num_v_heads" — keep them distinct.) Surface as
-        // `PerfDatabase` if no d_model match exists.
+        // vLLM 0.24 persists the selected physical recurrence implementation,
+        // while model operators retain stable logical kernel names. Resolve a
+        // physical source only for an exact model shape. Exact logical data
+        // always wins, and ambiguous physical data fails closed.
         let by_bs_seq = match grids.by_keys.get(&key) {
             Some(table) => table,
             None => {
+                let aliases: &[&str] = if self.vllm_024_gdn_aliases {
+                    match (key.kernel_source.as_str(), key.phase.as_str()) {
+                        ("chunk_gated_delta_rule", "context") => &[
+                            "chunk_gated_delta_rule_flashinfer",
+                            "chunk_gated_delta_rule_triton",
+                            "chunk_gated_delta_rule_cutedsl",
+                        ],
+                        ("fused_sigmoid_gating_delta_rule_update", "generation") => {
+                            &["fused_recurrent_gated_delta_rule_packed_decode"]
+                        }
+                        _ => &[],
+                    }
+                } else {
+                    &[]
+                };
+                let alias_matches: Vec<_> = aliases
+                    .iter()
+                    .filter_map(|alias| {
+                        let mut alias_key = key.clone();
+                        alias_key.kernel_source = (*alias).to_string();
+                        grids.by_keys.get_key_value(&alias_key)
+                    })
+                    .collect();
+                if alias_matches.len() > 1 {
+                    let sources: Vec<_> = alias_matches
+                        .iter()
+                        .map(|(alias_key, _)| alias_key.kernel_source.as_str())
+                        .collect();
+                    return Err(AicError::PerfDatabase(format!(
+                        "ambiguous vLLM 0.24.0 GDN physical kernels for {key:?}: {}",
+                        sources.join(", ")
+                    )));
+                }
+                if let Some((_, table)) = alias_matches.first() {
+                    return bs_seq_interp(table, batch_size, seq_len);
+                }
+
+                // Mirror Python `_query_gdn_table`: when neither the exact
+                // logical key nor an exact physical alias exists, fall back
+                // within the logical source to the same d_model, breaking
+                // ties by minimum `|num_v_heads - query.num_v_heads|`.
                 let nearest = grids
                     .by_keys
                     .iter()
@@ -261,8 +303,7 @@ fn bs_seq_interp(
     // `list(table.keys())`. Mirror that: when no row matches `seq_len`,
     // pick the unique seq_len present in the table and interpolate by
     // batch_size at that slice.
-    let unique_seqs: std::collections::BTreeSet<u32> =
-        by_bs_seq.keys().map(|&(_, s)| s).collect();
+    let unique_seqs: std::collections::BTreeSet<u32> = by_bs_seq.keys().map(|&(_, s)| s).collect();
     if let Some(&only_seq) = unique_seqs.iter().next().filter(|_| unique_seqs.len() == 1) {
         let bs_keys: Vec<u32> = by_bs_seq
             .keys()
@@ -378,7 +419,10 @@ fn load_gdn_parquet(path: &Path) -> Result<GdnGrids, AicError> {
 }
 
 fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
-    AicError::PerfDatabase(format!("{table} data missing for {descriptor} at {}", data_root.display()))
+    AicError::PerfDatabase(format!(
+        "{table} data missing for {descriptor} at {}",
+        data_root.display()
+    ))
 }
 
 fn clone_err(err: &AicError) -> AicError {
@@ -389,12 +433,169 @@ fn clone_err(err: &AicError) -> AicError {
 mod tests {
     use super::*;
 
+    fn in_memory_gdn_table(
+        backend: &str,
+        version: &str,
+        rows: &[(&str, &str, u32, f64)],
+    ) -> StateSpaceTable {
+        let mut by_keys = BTreeMap::new();
+        for &(kernel_source, phase, num_v_heads, latency) in rows {
+            by_keys.insert(
+                GdnKey {
+                    kernel_source: kernel_source.to_string(),
+                    phase: phase.to_string(),
+                    d_model: 5120,
+                    d_conv: 4,
+                    num_k_heads: 16,
+                    head_k_dim: 128,
+                    num_v_heads,
+                    head_v_dim: 128,
+                },
+                BTreeMap::from([((1, 1024), latency)]),
+            );
+        }
+        let table = StateSpaceTable::new(PathBuf::from("test-data"), backend, version);
+        assert!(table.gdn.set(Ok(GdnGrids { by_keys })).is_ok());
+        table
+    }
+
+    fn query_gdn_test_shape(
+        table: &StateSpaceTable,
+        kernel_source: &str,
+        phase: &str,
+        num_v_heads: u32,
+    ) -> Result<f64, AicError> {
+        table.query_gdn(
+            kernel_source,
+            phase,
+            1,
+            1024,
+            5120,
+            4,
+            16,
+            128,
+            num_v_heads,
+            128,
+        )
+    }
+
+    #[test]
+    fn vllm_024_gdn_resolves_context_and_generation_physical_aliases() {
+        for source in [
+            "chunk_gated_delta_rule_flashinfer",
+            "chunk_gated_delta_rule_triton",
+            "chunk_gated_delta_rule_cutedsl",
+        ] {
+            let table = in_memory_gdn_table("vllm", "0.24.0", &[(source, "context", 48, 2.0)]);
+            assert_eq!(
+                query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).unwrap(),
+                2.0
+            );
+        }
+
+        let table = in_memory_gdn_table(
+            "vllm",
+            "0.24.0",
+            &[(
+                "fused_recurrent_gated_delta_rule_packed_decode",
+                "generation",
+                48,
+                3.0,
+            )],
+        );
+        assert_eq!(
+            query_gdn_test_shape(
+                &table,
+                "fused_sigmoid_gating_delta_rule_update",
+                "generation",
+                48,
+            )
+            .unwrap(),
+            3.0
+        );
+    }
+
+    #[test]
+    fn vllm_024_gdn_exact_logical_key_wins_over_alias() {
+        let table = in_memory_gdn_table(
+            "vllm",
+            "0.24.0",
+            &[
+                ("chunk_gated_delta_rule", "context", 48, 1.0),
+                ("chunk_gated_delta_rule_flashinfer", "context", 48, 2.0),
+            ],
+        );
+        assert_eq!(
+            query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).unwrap(),
+            1.0
+        );
+    }
+
+    #[test]
+    fn gdn_physical_aliases_are_vllm_024_only() {
+        for (backend, version) in [("vllm", "0.23.0"), ("sglang", "0.24.0")] {
+            let table = in_memory_gdn_table(
+                backend,
+                version,
+                &[("chunk_gated_delta_rule_flashinfer", "context", 48, 2.0)],
+            );
+            assert!(query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).is_err());
+        }
+    }
+
+    #[test]
+    fn vllm_024_gdn_ambiguous_exact_aliases_error() {
+        let table = in_memory_gdn_table(
+            "vllm",
+            "0.24.0",
+            &[
+                ("chunk_gated_delta_rule_flashinfer", "context", 48, 2.0),
+                ("chunk_gated_delta_rule_triton", "context", 48, 3.0),
+            ],
+        );
+        match query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48) {
+            Err(AicError::PerfDatabase(message)) => {
+                assert!(message.contains("ambiguous vLLM 0.24.0 GDN physical kernels"));
+                assert!(message.contains("chunk_gated_delta_rule_flashinfer"));
+                assert!(message.contains("chunk_gated_delta_rule_triton"));
+            }
+            other => panic!("expected an explicit ambiguity error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vllm_024_gdn_alias_has_no_nearest_shape_fallback() {
+        let table = in_memory_gdn_table(
+            "vllm",
+            "0.24.0",
+            &[("chunk_gated_delta_rule_flashinfer", "context", 32, 2.0)],
+        );
+        assert!(query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).is_err());
+    }
+
+    #[test]
+    fn vllm_024_gdn_preserves_logical_source_nearest_fallback() {
+        let table = in_memory_gdn_table(
+            "vllm",
+            "0.24.0",
+            &[
+                ("chunk_gated_delta_rule_flashinfer", "context", 32, 2.0),
+                ("chunk_gated_delta_rule", "context", 16, 4.0),
+                ("chunk_gated_delta_rule", "context", 64, 5.0),
+            ],
+        );
+        assert_eq!(
+            query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).unwrap(),
+            5.0
+        );
+    }
+
     #[test]
     fn state_space_loaders_smoke() {
         // GDN data exists on vLLM b200 (Nemotron-H slice); Mamba2 may not.
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../src/aiconfigurator/systems/data/b200_sxm/vllm/0.19.0");
-        let table = StateSpaceTable::new(root);
+        let table = StateSpaceTable::new(root, "vllm", "0.19.0");
         // Just verify loader doesn't panic on missing-key path; we don't
         // assert a specific value here.
         let _ = table
@@ -417,7 +618,7 @@ mod tests {
     fn gdn_table_finds_qwen35_27b_conv1d_update() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../src/aiconfigurator/systems/data/b200_sxm/vllm/0.19.0");
-        let table = StateSpaceTable::new(root);
+        let table = StateSpaceTable::new(root, "vllm", "0.19.0");
         let r = table.query_gdn(
             "causal_conv1d_update",
             "generation",
