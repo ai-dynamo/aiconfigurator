@@ -132,9 +132,9 @@ _GENERATION_DSA_TARGET_Z: list[int] = [
 
 
 def _select_dsa_backend(arch_dict, dsa_backend):
-    """Pick the per-backend sub-dict from a context-DSA architecture node.
+    """Pick the per-backend sub-dict from a DSA architecture node.
 
-    Context data is keyed ...[architecture][backend][num_heads]...; backend is
+    DSA data is keyed ...[architecture][backend][num_heads]...; backend is
     "trtllm" (faster kernel, non-CP default) or "flashmla_kv" (used under CP).
     Falls back to whichever backend is present so single-backend parquets still
     resolve. Legacy nodes without a backend axis (int head keys) pass through."""
@@ -288,8 +288,12 @@ class ContextDSAModule(Operation):
 
     @classmethod
     def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the legacy 4-level (fmha_mode → kv_cache_dtype → gemm_mode
-        → arch → grid) extrapolation."""
+        """Extrapolate each context DSA architecture/backend grid.
+
+        Loader data is keyed ``fmha_mode → kv_cache_dtype → gemm_mode →
+        architecture → dsa_backend → num_heads → prefix → s → b``.
+        Legacy architecture nodes without a backend axis remain supported.
+        """
         if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
             return
 
@@ -297,7 +301,7 @@ class ContextDSAModule(Operation):
             for kv_cache_dtype in data_wrapper[fmha_mode]:
                 for gemm_mode in data_wrapper[fmha_mode][kv_cache_dtype]:
                     for arch in data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode]:
-                        data_dict = data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode][arch]
+                        architecture_data = data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode][arch]
 
                         def _is_latency_leaf(value):
                             return isinstance(value, dict) and "latency" in value
@@ -313,36 +317,42 @@ class ContextDSAModule(Operation):
                                     return not any(_is_latency_leaf(v) for v in first_slice.values())
                             return False
 
-                        if _has_prefix_axis(data_dict):
-                            prefix_values = sorted(
-                                {
-                                    prefix
-                                    for head_data in data_dict.values()
-                                    if isinstance(head_data, dict)
-                                    for prefix in head_data
-                                }
-                            )
-                            for prefix in prefix_values:
-                                prefix_slice = {
-                                    head: head_data[prefix]
-                                    for head, head_data in data_dict.items()
-                                    if isinstance(head_data, dict) and prefix in head_data
-                                }
+                        backend_slices = (
+                            architecture_data.values()
+                            if any(isinstance(key, str) for key in architecture_data)
+                            else (architecture_data,)
+                        )
+                        for data_dict in backend_slices:
+                            if _has_prefix_axis(data_dict):
+                                prefix_values = sorted(
+                                    {
+                                        prefix
+                                        for head_data in data_dict.values()
+                                        if isinstance(head_data, dict)
+                                        for prefix in head_data
+                                    }
+                                )
+                                for prefix in prefix_values:
+                                    prefix_slice = {
+                                        head: head_data[prefix]
+                                        for head, head_data in data_dict.items()
+                                        if isinstance(head_data, dict) and prefix in head_data
+                                    }
+                                    interpolation.extrapolate_data_grid(
+                                        data_dict=prefix_slice,
+                                        target_x_list=list(prefix_slice.keys()),
+                                        target_y_list=_CONTEXT_DSA_TARGET_Y,
+                                        target_z_list=_CONTEXT_DSA_TARGET_Z,
+                                    )
+                                    for head, head_slice in prefix_slice.items():
+                                        data_dict[head][prefix] = head_slice
+                            else:
                                 interpolation.extrapolate_data_grid(
-                                    data_dict=prefix_slice,
-                                    target_x_list=list(prefix_slice.keys()),
+                                    data_dict=data_dict,
+                                    target_x_list=list(data_dict.keys()),
                                     target_y_list=_CONTEXT_DSA_TARGET_Y,
                                     target_z_list=_CONTEXT_DSA_TARGET_Z,
                                 )
-                                for head, head_slice in prefix_slice.items():
-                                    data_dict[head][prefix] = head_slice
-                        else:
-                            interpolation.extrapolate_data_grid(
-                                data_dict=data_dict,
-                                target_x_list=list(data_dict.keys()),
-                                target_y_list=_CONTEXT_DSA_TARGET_Y,
-                                target_z_list=_CONTEXT_DSA_TARGET_Z,
-                            )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_context_dsa_module)
@@ -1126,22 +1136,32 @@ class GenerationDSAModule(Operation):
 
     @classmethod
     def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the legacy 3-level (kv_cache_dtype → gemm_mode → arch
-        → grid) extrapolation."""
+        """Extrapolate each generation DSA architecture/backend grid.
+
+        Loader data is keyed ``kv_cache_dtype → gemm_mode → architecture →
+        dsa_backend → num_heads → b → s``. Legacy architecture nodes
+        without a backend axis remain supported.
+        """
         if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
             return
 
         for kv_cache_dtype in data_wrapper:
             for gemm_mode in data_wrapper[kv_cache_dtype]:
                 for arch in data_wrapper[kv_cache_dtype][gemm_mode]:
-                    data_dict = data_wrapper[kv_cache_dtype][gemm_mode][arch]
-                    tp_list = list(data_dict.keys())
-                    interpolation.extrapolate_data_grid(
-                        data_dict=data_dict,
-                        target_x_list=tp_list,
-                        target_y_list=_GENERATION_DSA_TARGET_Y,
-                        target_z_list=_GENERATION_DSA_TARGET_Z,
+                    architecture_data = data_wrapper[kv_cache_dtype][gemm_mode][arch]
+                    backend_slices = (
+                        architecture_data.values()
+                        if any(isinstance(key, str) for key in architecture_data)
+                        else (architecture_data,)
                     )
+                    for data_dict in backend_slices:
+                        tp_list = list(data_dict.keys())
+                        interpolation.extrapolate_data_grid(
+                            data_dict=data_dict,
+                            target_x_list=tp_list,
+                            target_y_list=_GENERATION_DSA_TARGET_Y,
+                            target_z_list=_GENERATION_DSA_TARGET_Z,
+                        )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_generation_dsa_module)
@@ -1585,7 +1605,7 @@ def load_context_dsa_module_data(dsa_file: str):
     Load context DSA data.
 
     Dict structure:
-        data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][architecture][num_heads][prefix][s][b]
+        data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][architecture][dsa_backend][num_heads][prefix][s][b]
 
     Quant modes are the outermost keys so that ``_enum_key_names`` can
     directly extract supported FMHAQuantMode names (aligned with
@@ -1664,7 +1684,7 @@ def load_generation_dsa_module_data(dsa_file: str):
     Load generation DSA data.
 
     Dict structure:
-        data[kv_cache_quant_mode][gemm_quant_mode][architecture][num_heads][b][s]
+        data[kv_cache_quant_mode][gemm_quant_mode][architecture][dsa_backend][num_heads][b][s]
 
     Quant modes are the outermost keys so that ``_enum_key_names`` can
     directly extract supported KVCacheQuantMode names (aligned with

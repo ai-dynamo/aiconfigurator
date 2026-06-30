@@ -10,6 +10,8 @@ import pytest
 from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.operations.dsa import (
     DEFAULT_DSA_ARCHITECTURE,
+    ContextDSAModule,
+    GenerationDSAModule,
     load_context_dsa_module_data,
     load_generation_dsa_module_data,
 )
@@ -163,6 +165,57 @@ class TestContextDSAModule:
 
         assert head_data[256][1] == _dsa_value(10.0)
         assert head_data[512][2] == _dsa_value(20.0)
+
+    def test_context_loader_backend_axis_extrapolates_within_backend(self, tmp_path, mutable_comprehensive_perf_db):
+        data_path = tmp_path / "dsa_context_module_perf.txt"
+        header = (
+            "architecture,kernel_source,gemm_type,mla_dtype,kv_cache_dtype,"
+            "num_heads,batch_size,isl,step,latency,power\n"
+        )
+        rows = [
+            f"{DEFAULT_DSA_ARCHITECTURE},{kernel_source},bfloat16,bfloat16,bfloat16,"
+            f"32,{batch},{sequence},{prefix},{10.0 + prefix / 12.8 + batch + sequence / 256.0},10.0\n"
+            for kernel_source in ("FLASHMLA_SPARSE", "trtllm")
+            for prefix in (0, 128)
+            for sequence in (256, 512)
+            for batch in (1, 2)
+        ]
+        data_path.write_text(header + "".join(rows))
+
+        raw = LoadedOpData(
+            load_context_dsa_module_data(str(data_path)), common.PerfDataFilename.dsa_context_module, "raw"
+        )
+        working = LoadedOpData(
+            load_context_dsa_module_data(str(data_path)), common.PerfDataFilename.dsa_context_module, "working"
+        )
+        ContextDSAModule._extrapolate(working)
+
+        db = mutable_comprehensive_perf_db
+        db._raw_context_dsa_module_data = raw
+        db._context_dsa_module_data = working
+        db.clear_runtime_caches()
+        result = db.query_context_dsa_module(
+            b=1,
+            s=256,
+            prefix=64,
+            num_heads=32,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SILICON,
+            architecture=DEFAULT_DSA_ARCHITECTURE,
+            dsa_backend="flashmla_kv",
+        )
+
+        architecture_data = working[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][
+            common.GEMMQuantMode.bfloat16
+        ][DEFAULT_DSA_ARCHITECTURE]
+        assert set(architecture_data) == {"flashmla_kv", "trtllm"}
+        for backend_data in architecture_data.values():
+            assert set(backend_data) == {32}
+            assert set(backend_data[32]) == {0, 128}
+        assert math.isfinite(float(result)) and float(result) > 0
+        assert result.source == "silicon"
 
     def test_glm5_context_rejects_legacy_shape_without_prefix_axis(self, stub_perf_db):
         legacy_dsa_dict = {32: {256: {1: _dsa_value(10.0)}}}
@@ -739,6 +792,57 @@ class TestGenerationDSAModule:
 
         assert head_data[1][150] == _dsa_value(10.0)
         assert head_data[2][151] == _dsa_value(20.0)
+
+    def test_generation_loader_backend_axis_extrapolates_within_backend(self, tmp_path, mutable_comprehensive_perf_db):
+        data_path = tmp_path / "dsa_generation_module_perf.txt"
+        header = (
+            "architecture,kernel_source,gemm_type,mla_dtype,kv_cache_dtype,"
+            "num_heads,batch_size,isl,step,latency,power\n"
+        )
+        rows = [
+            f"{DEFAULT_DSA_ARCHITECTURE},{kernel_source},bfloat16,bfloat16,bfloat16,"
+            f"{heads},{batch},1,{sequence - 1},{1.0 + heads / 100.0 + batch / 10.0 + sequence / 1000.0},10.0\n"
+            for kernel_source in ("FLASHMLA_SPARSE", "trtllm")
+            for heads in (16, 32)
+            for batch in (2, 4)
+            for sequence in (64, 128)
+        ]
+        data_path.write_text(header + "".join(rows))
+
+        raw = LoadedOpData(
+            load_generation_dsa_module_data(str(data_path)), common.PerfDataFilename.dsa_generation_module, "raw"
+        )
+        working = LoadedOpData(
+            load_generation_dsa_module_data(str(data_path)),
+            common.PerfDataFilename.dsa_generation_module,
+            "working",
+        )
+        GenerationDSAModule._extrapolate(working)
+
+        db = mutable_comprehensive_perf_db
+        db._raw_generation_dsa_module_data = raw
+        db._generation_dsa_module_data = working
+        db.clear_runtime_caches()
+        result = db.query_generation_dsa_module(
+            b=3,
+            s=96,
+            num_heads=24,
+            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SILICON,
+            architecture=DEFAULT_DSA_ARCHITECTURE,
+            dsa_backend="flashmla_kv",
+        )
+
+        architecture_data = working[common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][
+            DEFAULT_DSA_ARCHITECTURE
+        ]
+        assert set(architecture_data) == {"flashmla_kv", "trtllm"}
+        for backend_data in architecture_data.values():
+            assert set(backend_data) == {16, 32}
+            assert all(sequence_data for head_data in backend_data.values() for sequence_data in head_data.values())
+        assert math.isfinite(float(result)) and float(result) > 0
+        assert result.source == "silicon"
 
     def test_sol_returns_positive(self, comprehensive_perf_db):
         result = comprehensive_perf_db.query_generation_dsa_module(
