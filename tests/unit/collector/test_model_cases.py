@@ -1058,7 +1058,8 @@ def test_vllm_024_model_plans_only_schedule_representable_attention_paths():
     legacy_plan = ["attention_context", "attention_generation", "gemm", "moe"]
     for model_path in models_with_unrepresentable_vllm_attention:
         assert build_collection_case_plan(backend="vllm", model_path=model_path).ops == ["gemm", "moe"]
-        for backend in ("sglang", "trtllm", "vllm_xpu"):
+        assert build_collection_case_plan(backend="vllm_xpu", model_path=model_path).ops == ["gemm", "moe"]
+        for backend in ("sglang", "trtllm"):
             assert build_collection_case_plan(backend=backend, model_path=model_path).ops == legacy_plan
 
 

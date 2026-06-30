@@ -18,9 +18,6 @@ framework_specific_base_ops:
   trtllm:
     - attention_context
     - attention_generation
-  vllm_xpu:
-    - attention_context
-    - attention_generation
 description: >
   Gemma 4 hybrid SWA/global attention plus routed-MoE collection plan.
 
