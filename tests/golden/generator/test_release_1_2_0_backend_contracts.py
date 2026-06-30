@@ -193,6 +193,45 @@ def _render(backend: str) -> dict[str, str]:
     )
 
 
+def _render_router_kvbm_candidate(backend: str) -> dict[str, str]:
+    params = copy.deepcopy(_GOLDEN_PARAMS)
+    role_params = params["params"].pop("agg")
+    params["params"].update(
+        {
+            "prefill": role_params,
+            "decode": copy.deepcopy(role_params),
+        }
+    )
+    params["ServiceConfig"]["port"] = 9123
+    params["WorkerConfig"] = {
+        "agg_workers": 0,
+        "prefill_workers": 1,
+        "decode_workers": 1,
+        "prefill_gpus_per_worker": 1,
+        "decode_gpus_per_worker": 1,
+    }
+    params["DynConfig"] = {
+        "mode": "disagg",
+        "enable_router": True,
+        "router_mode": "kv_router",
+        "router_config": {
+            "host_cache_hit_weight": 0.75,
+            "disk_cache_hit_weight": 0.25,
+        },
+        "kvbm_config": {
+            "cpu_cache_override_num_blocks": 4096,
+            "max_transfer_batch_size": 32,
+            "max_concurrent_transfers": 4,
+        },
+    }
+    return generate_backend_artifacts(
+        params,
+        backend,
+        backend_version=_BACKEND_VERSIONS[backend],
+        deployment_target="dynamo-j2",
+    )
+
+
 def _split_cli(cli: str) -> list[str]:
     return shlex.split(cli)
 
@@ -296,6 +335,18 @@ def test_vllm_0_20_1_k8s_router_contract():
     }
 
 
+def test_routed_vllm_run_preserves_frontend_port_and_cache_weights():
+    artifacts = _render_router_kvbm_candidate("vllm")
+    run_sh = next(
+        content for name, content in artifacts.items() if name.startswith("run_") and "dynamo.frontend" in content
+    )
+    frontend_line = next(line for line in run_sh.splitlines() if "python3 -m dynamo.frontend" in line)
+
+    assert "--router-host-cache-hit-weight 0.75" in frontend_line
+    assert "--router-disk-cache-hit-weight 0.25" in frontend_line
+    assert '--http-port "9123"' in frontend_line
+
+
 def test_sglang_0_5_11_cli_args_golden_contract():
     tokens = _split_cli(_render("sglang")["cli_args_agg"])
     flags = _flag_set(tokens)
@@ -336,6 +387,14 @@ def test_sglang_0_5_11_run_router_contract():
     assert "python3 -m dynamo.frontend --router-mode kv --http-port" in run_sh
     assert "--kv-events-config" in run_sh
     assert "tcp://*:${EVENT_PORT}" in run_sh
+
+
+def test_sglang_rejects_unsupported_kvbm_config():
+    with pytest.raises(
+        ValueError,
+        match=r"DynConfig\.kvbm_config is not supported for backend 'sglang'; supported backends: trtllm, vllm",
+    ):
+        _render_router_kvbm_candidate("sglang")
 
 
 def test_sglang_0_5_11_optional_cli_args_golden_contract():
@@ -407,6 +466,40 @@ def test_trtllm_1_3_0rc14_extra_engine_args_golden_contract():
         "decoding_type": "MTP",
         "num_nextn_predict_layers": 2,
     }
+
+
+def test_trtllm_dynamo_j2_router_and_kvbm_artifact_fidelity():
+    artifacts = _render_router_kvbm_candidate("trtllm")
+    k8s = yaml.safe_load(artifacts["k8s_deploy.yaml"])
+    services = k8s["spec"]["services"]
+
+    frontend_args = services["Frontend"]["extraPodSpec"]["mainContainer"]["args"]
+    assert _value_after(frontend_args, "--http-port") == "9123"
+    assert _value_after(frontend_args, "--router-mode") == "kv"
+    assert _value_after(frontend_args, "--router-host-cache-hit-weight") == "0.75"
+    assert _value_after(frontend_args, "--router-disk-cache-hit-weight") == "0.25"
+
+    prefill = services["TRTLLMPrefillWorker"]
+    prefill_env = {entry["name"]: entry["value"] for entry in prefill["envs"]}
+    assert prefill_env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] == "4096"
+    assert prefill_env["DYN_KVBM_MAX_TRANSFER_BATCH_SIZE"] == "32"
+    assert prefill_env["DYN_KVBM_MAX_CONCURRENT_TRANSFERS"] == "4"
+    prefill_script = prefill["extraPodSpec"]["mainContainer"]["args"][0]
+    assert "args+=(--connector kvbm)" in prefill_script
+
+    decode = services["TRTLLMDecodeWorker"]
+    assert decode.get("envs") is None
+    decode_script = decode["extraPodSpec"]["mainContainer"]["args"][0]
+    assert "--connector kvbm" not in decode_script
+
+    run_scripts = [content for name, content in artifacts.items() if name.startswith("run_")]
+    prefill_run = next(content for content in run_scripts if "--disaggregation-mode prefill" in content)
+    decode_run = next(content for content in run_scripts if "--disaggregation-mode decode" in content)
+    assert "export DYN_KVBM_MAX_TRANSFER_BATCH_SIZE=32" in prefill_run
+    assert "export DYN_KVBM_MAX_CONCURRENT_TRANSFERS=4" in prefill_run
+    assert "--connector kvbm" in prefill_run
+    assert "DYN_KVBM_" not in decode_run
+    assert "--connector kvbm" not in decode_run
 
 
 def test_benchmark_prefix_defaults_from_model_config():

@@ -66,6 +66,7 @@ dev = [
     "pytest-split>=0.10.0",
     "pytest-timeout>=2.3.1",
     "pytest-xdist==3.8.0",
+    "prometheus-api-client==0.6.0",
     "import-ipynb==0.2",
 ]
 webapp = [
@@ -75,6 +76,16 @@ service = [
     "fastapi>=0.115.12",
     "orjson>=3.10.16",
     "uvicorn>=0.34.2"
+]
+spica = [
+    "pydantic>=2.5; python_version < '3.13'",
+    "google-vizier[jax]==0.1.21; python_version < '3.13'",
+    "jax==0.4.38; python_version < '3.13'",
+    "jaxlib==0.4.38; python_version < '3.13'",
+    "flax==0.10.0; python_version < '3.13'",
+    "optax==0.2.4; python_version < '3.13'",
+    "chex==0.1.87; python_version < '3.13'",
+    "tensorflow-probability[jax]==0.25.0; python_version < '3.13'",
 ]
 
 [project.urls]
@@ -97,8 +108,14 @@ include-package-data = false
 "aiconfigurator.webapp.components.profiling" = ["styles.css", "js/*.js"]
 
 [tool.setuptools.packages.find]
-where = ["src"]
-include = ["aiconfigurator", "aiconfigurator.cli*", "aiconfigurator.generator*", "aiconfigurator.webapp*"]
+where = ["src", "spica/src"]
+include = [
+    "aiconfigurator",
+    "aiconfigurator.cli*",
+    "aiconfigurator.generator*",
+    "aiconfigurator.webapp*",
+    "spica*",
+]
 exclude = ["aiconfigurator.sdk*", "aiconfigurator.systems*", "aiconfigurator.model_configs*", "aiconfigurator_core*"]
 
 [tool.uv.sources]
