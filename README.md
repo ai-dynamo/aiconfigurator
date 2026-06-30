@@ -78,8 +78,10 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 - Use `default --thorough-sweep` to run Spica's replay-backed thorough sweeper. Without `--thorough-config`, AIC converts the normal default CLI inputs into a legacy-compatible Spica `SmartSearchConfig` that keeps routing round-robin and planner scaling disabled.
 - Install the optional `spica` extra when using thorough mode from a packaged wheel, for example `pip install 'aiconfigurator[spica]'`.
 - Use `default --thorough-config spica_smart_sweep.yaml` to pass a native Spica `SmartSearchConfig` YAML that owns the search space, workload, goal, and sweep controls.
+- A native config's `goal` owns ranking and SLA semantics; CLI `--ttft` / `--tpot` defaults are not applied. Scalar targets and custom Pareto objectives are reported in their own units and directions.
 - For replay-backed Spica sweeps, put `workload.trace_path` and `workload.trace_format` in the `--thorough-config` YAML. Today Spica supports `trace_format: mooncake`; example trace: [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl).
 - In Spica thorough mode, `--save-dir DIR` writes sweep result artifacts and generated Dynamo configs: `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, per-mode `pareto.csv` / `best_config_topn.csv`, and per-rank `topN` deployment artifacts.
+- Spica candidates using router, planner, or KVBM features currently require `--deployment-target dynamo-j2` for faithful deployment artifacts; other targets fail closed instead of silently dropping those features. KVBM artifact activation is supported for vLLM and TensorRT-LLM, not SGLang.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
@@ -322,7 +324,7 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_9
 └── spica_candidates.yaml
 ```
 
-Spica candidate knobs that map to Dynamo/TRT-LLM runtime fields, such as batch/token limits, cache-transfer buffer sizing, block size, GPU memory fraction, prefix caching, attention-DP, max sequence length, and NextN, are copied into `generator_config.yaml` and the generated engine/K8s/SFlow artifacts. Spica-only planner and scaling-policy metadata without a Dynamo generator field stays in `spica_candidate.yaml`.
+Spica candidate knobs that map to Dynamo runtime fields are copied into `generator_config.yaml` and the generated engine/K8s/SFlow artifacts. This includes the resolved backend version, engine batching and context limits, router weights, planner objective/SLA and GPU limits, KVBM host-offload controls, prefix caching, attention-DP, and NextN. Active router/planner/KVBM candidates currently require `--deployment-target dynamo-j2`; unsupported targets fail closed rather than producing a deployment that differs from the evaluated candidate. KV-router admission-control pins are also rejected until Dynamo replay can score them.
 
 **For Dynamo deployments** (`--deployment-target dynamo-j2` or `dynamo-python`):
 

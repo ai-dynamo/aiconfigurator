@@ -81,6 +81,10 @@ def _evaluate_one(
         if concurrency is not None:
             sample["concurrency"] = concurrency
         backend_version = resolve_backend_version(config.search_space.hardware_sku, selection["backend"])
+        # The resolved perf-model version is part of the evaluated contract. Keep it
+        # on the candidate so downstream artifact generation cannot independently
+        # select a different backend version.
+        sample["backend_version"] = backend_version
         plan = build_deployment(
             sample,
             backend_version=backend_version,

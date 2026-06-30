@@ -110,14 +110,17 @@ def _engine_args_payload(sample: dict, role: str, *, backend_version: str) -> di
     #   test/polish items from the PR review are deferred until then.
     if sample.get("aic_nextn") is not None:
         payload["aic_nextn"] = int(sample["aic_nextn"])
-    # KV-manager multi-tier offload knobs (host/disk G2..G4). The sample carries the
-    # pinned subset that is set; copy every num_g*/bandwidth_* plus offload_batch_size
-    # through to the mocker so the simulated offload matches the swept policy.
-    for key, value in sample.items():
-        if value is None:
-            continue
-        if key == "offload_batch_size" or key.startswith("num_g") or key.startswith("bandwidth_g"):
-            payload[key] = value
+    if sample.get("startup_time") is not None:
+        payload["startup_time"] = float(sample["startup_time"])
+    # KVBM is disabled when G2 has no blocks. When enabled it runs on aggregate or
+    # prefill workers only; disaggregated decode workers use the transfer connector
+    # and must not be scored with a second local offload tier.
+    if role != "decode" and int(sample.get("num_g2_blocks") or 0) > 0:
+        for key, value in sample.items():
+            if value is None:
+                continue
+            if key == "offload_batch_size" or key.startswith("num_g") or key.startswith("bandwidth_g"):
+                payload[key] = value
     return payload
 
 
@@ -157,6 +160,14 @@ def _planner_config_payload(
     for key in _PLANNER_PASSTHROUGH:
         if key in sample:
             payload[key] = sample[key]
+    # Search-space limits become runtime policy once the planner is active. Keep
+    # them explicit rather than broadly passing arbitrary sample fields through.
+    if sample.get("gpu_budget") is not None:
+        payload["max_gpu_budget"] = int(sample["gpu_budget"])
+    if sample.get("min_gpu_budget") is not None:
+        payload["min_gpu_budget"] = int(sample["min_gpu_budget"])
+    if sample.get("min_endpoint") is not None:
+        payload["min_endpoint"] = int(sample["min_endpoint"])
     # Per-engine GPU counts for the planner's cost logic (gpu_hours itself is
     # derived by the mocker from aic_tp x aic_attention_dp, not from these).
     if sample["deployment_mode"] == "disagg":

@@ -11,6 +11,7 @@ export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
 
 {% set enable_router = DynConfig.enable_router | default(false) %}
 {% set frontend_args = frontend_extra_args | default('') %}
+{% set kvbm_enabled = (kvbm_env_exports | default([]) | length) > 0 %}
 
 {% if ServiceConfig.include_frontend %}
 python3 -m dynamo.frontend {% if frontend_args %}{{ frontend_args }} {% elif enable_router %}--router-mode kv {% endif %}--http-port "{{ ServiceConfig.port }}" 2>&1 | sed "s/^/[Frontend] /" &
@@ -31,6 +32,7 @@ for ((w=0; w<AGG_WORKERS; w++)); do
     --model-path "$MODEL_PATH" \
     --served-model-name "$SERVED_MODEL_NAME" \
     --extra-engine-args "{{ agg_engine_args }}" \
+    {% if kvbm_enabled %}--connector kvbm {% endif %}\
     {% if enable_router %}--publish-events-and-metrics {% endif %} 2>&1 | sed "s/^/[Worker $w] /" ) &
 done
 wait
@@ -50,6 +52,7 @@ for ((w=0; w<PREFILL_WORKERS; w++)); do
     --served-model-name "$SERVED_MODEL_NAME" \
     --extra-engine-args "{{ prefill_engine_args }}" \
     --disaggregation-mode prefill \
+    {% if kvbm_enabled %}--connector kvbm {% endif %}\
     {% if enable_router %}--publish-events-and-metrics{% endif %} 2>&1 | sed "s/^/[Prefill $w] /" ) &
 done
 {% endif %}

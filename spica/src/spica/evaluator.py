@@ -90,25 +90,24 @@ def _run_synthetic_trace_replay_compat(func, kwargs: dict):
     return func(**_replay_kwargs(func, kwargs))
 
 
-def _with_goodput_fallback(report: dict[str, float], goal: OptimizationGoal) -> dict[str, float]:
+def _require_goodput_metric(report: dict[str, float], goal: OptimizationGoal) -> dict[str, float]:
+    """Fail closed when a goodput objective cannot be measured per request.
+
+    Aggregate mean latency cannot recover goodput: a mixed population may have the
+    same means while a very different fraction of requests satisfies the SLA. Older
+    replay APIs that omit the metric are therefore incompatible with goodput goals.
+    """
     if "goodput_output_throughput_tok_s" in report:
         return report
-    sla = goal.sla
-    throughput = report.get("output_throughput_tok_s")
-    if sla is None or throughput is None:
+    target = goal.target.value
+    objectives = {item.value for item in goal.resolved_pareto_objectives} if goal.is_pareto else {target}
+    if not objectives.intersection({"goodput", "goodput_per_gpu"}):
         return report
-
-    ok = True
-    if sla.ttft_ms is not None:
-        ok = ok and float(report.get("mean_ttft_ms", float("inf"))) <= sla.ttft_ms
-    if sla.itl_ms is not None:
-        ok = ok and float(report.get("mean_tpot_ms", float("inf"))) <= sla.itl_ms
-    if sla.e2e_ms is not None:
-        ok = ok and float(report.get("mean_e2e_latency_ms", float("inf"))) <= sla.e2e_ms
-
-    patched = dict(report)
-    patched["goodput_output_throughput_tok_s"] = float(throughput) if ok else 0.0
-    return patched
+    raise RuntimeError(
+        "Dynamo replay did not emit goodput_output_throughput_tok_s for a goodput objective; "
+        "install a replay version with per-request SLA accounting (aggregate mean latency "
+        "cannot be used as a goodput fallback)"
+    )
 
 
 class ReplayEvaluator:
@@ -163,8 +162,8 @@ class ReplayEvaluator:
         closed-loop cap and the ``num_request_ratio``-derived request count. Trace
         workloads ignore it (they cap via ``replay_concurrency``)."""
         if self.workload.is_trace_based:
-            return _with_goodput_fallback(self._evaluate_trace(plan), self.goal)
-        return _with_goodput_fallback(
+            return _require_goodput_metric(self._evaluate_trace(plan), self.goal)
+        return _require_goodput_metric(
             self._evaluate_synthetic(plan, concurrency_override=concurrency_override), self.goal
         )
 

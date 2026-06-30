@@ -366,7 +366,7 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--free-gpu-memory-fraction`: Fraction of free GPU memory TRT-LLM allocates for KV cache (default: `1.0`). Filters batch sizes that would exceed KV cache capacity.
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls how many KV blocks are pre-allocated per sequence; set to match your deployment for accurate KV-capacity filtering.
 - `--thorough-sweep`: Use Spica's replay-backed thorough sweeper instead of the legacy AIC Pareto sweep. Without `--thorough-config`, CLI inputs are converted to a legacy-compatible Spica `SmartSearchConfig` that keeps routing round-robin and planner scaling disabled.
-- `--thorough-config`: Path to a native Spica `SmartSearchConfig` YAML file. The file defines the search space, workload, goal, and sweep controls. For replay-backed sweeps, put `workload.trace_path` and `workload.trace_format` in this file.
+- `--thorough-config`: Path to a native Spica `SmartSearchConfig` YAML file. The file defines the search space, workload, goal, and sweep controls. Its goal owns ranking and SLA semantics; CLI SLA defaults are not inherited. For replay-backed sweeps, put `workload.trace_path` and `workload.trace_format` in this file.
 - `--enable-chunked-prefill`: Enable chunked prefill for a finer-grained context-token sweep. When off (default), the context-token stride is aligned to ISL for faster sweeping.
 - `--enable-wideep`: Enable Wide Expert Parallelism (WideEP) for MoE models — EP-only parallelism via the `deepep_moe` backend. Applies to DeepSeek and Qwen3-235B on SGLang.
 - `--moe-backend`: Explicit SGLang MoE backend — `deepep_moe` or `megamoe` (use `megamoe` to model DeepSeek-V4 MegaMoE on Blackwell).
@@ -475,7 +475,9 @@ aiconfigurator cli default --thorough-config spica_mooncake_trace.yaml
 
 For Mooncake, each JSONL row describes one request with fields such as `timestamp`, `input_length`, `output_length`, and `hash_ids`; see [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl) for a concrete example.
 
-In trace mode, traffic shape and request lengths come from the trace, so the workload must not also set synthetic `isl` / `osl` fields. For synthetic workloads, `num_request_ratio` controls the generated request count relative to load (`round(num_request_ratio * concurrency)` for closed-loop concurrency). The printed summary uses the same default-mode result layout and Pareto axes (`tokens/s/user` vs `tokens/s/gpu_cluster`), with Spica replay goodput normalized into the standard throughput columns. If `--save-dir` is set, the CLI writes `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, per-mode `pareto.csv` / `best_config_topn.csv`, and per-rank `topN` deployment artifacts.
+In trace mode, traffic shape and request lengths come from the trace, so the workload must not also set synthetic `isl` / `osl` fields. For synthetic workloads, `num_request_ratio` controls the generated request count relative to load (`round(num_request_ratio * concurrency)` for closed-loop concurrency). The printed summary and top-N selection use the native goal: scalar targets retain their physical units and direction, while Pareto goals use the configured objective axes. Physical throughput remains a separate deployment metric rather than an alias for `Candidate.score`. If `--save-dir` is set, the CLI writes `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, an objective diagnostic plot when two distinct axes are available, per-mode `pareto.csv` / `best_config_topn.csv`, and per-rank `topN` deployment artifacts.
+
+Generated Spica artifacts preserve the replay's resolved backend version, context length, router weights, planner objective/SLA and GPU limits, and KVBM transfer controls. Candidates using router, planner, or KVBM features currently require `--deployment-target dynamo-j2`; `dynamo-python` and llm-d targets fail closed because their deployment manifests cannot yet encode the full evaluated contract. KV-router admission-control pins are rejected until Dynamo replay can score them. KVBM activation is supported for vLLM and TensorRT-LLM, not SGLang.
 
 #### Systems Paths
 
@@ -642,7 +644,7 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_9
 └── spica_candidates.yaml
 ```
 
-Spica candidate knobs that map to Dynamo/TRT-LLM runtime fields, such as batch/token limits, cache-transfer buffer sizing, block size, GPU memory fraction, prefix caching, attention-DP, max sequence length, and NextN, are copied into `generator_config.yaml` and the generated engine/K8s/SFlow artifacts. Spica-only planner and scaling-policy metadata without a Dynamo generator field stays in `spica_candidate.yaml`.
+Spica candidate knobs that map to Dynamo runtime fields, including batch/context limits, router policy, planner target and budgets, KVBM transfer controls, prefix caching, attention-DP, and NextN, are copied into `generator_config.yaml` and the generated engine/K8s/SFlow artifacts. Active router/planner/KVBM candidates require `--deployment-target dynamo-j2` until the alternate deployment targets can encode the same contract.
 
 For the legacy estimator, here's a structure of the output folder,
 ```text

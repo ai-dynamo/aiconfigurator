@@ -1054,7 +1054,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
             service_config,
             include_http_port=False,
         )
-        context["kvbm_env_exports"] = kvbm_shell_exports_from_dyn_config(dyn_config)
+        context["kvbm_env_exports"] = kvbm_shell_exports_from_dyn_config(dyn_config, backend=backend)
     mode_value = dyn_config.get("mode") if isinstance(dyn_config, dict) else None
     mode_value = mode_value or "disagg"
     enable_router = bool(dyn_config.get("enable_router")) if isinstance(dyn_config, dict) else False

@@ -11,7 +11,7 @@ export PYTHONHASHSEED=0
 {% endif %}
 export MODEL_PATH=${MODEL_PATH:-"{{ ServiceConfig.model_path }}"}
 export HF_TOKEN=${HF_TOKEN:-"{{ ServiceConfig.hf_token }}"}
-python3 -m dynamo.frontend {% if frontend_args %}{{ frontend_args }} {% else %}{% if enable_router %}--router-mode kv --router-reset-states {% endif %}--http-port "{{ ServiceConfig.port }}" {% endif %}2>&1 | sed "s/^/[Frontend] /" &
+python3 -m dynamo.frontend {% if frontend_args %}{{ frontend_args }} {% elif enable_router %}--router-mode kv --router-reset-states {% endif %}--http-port "{{ ServiceConfig.port }}" 2>&1 | sed "s/^/[Frontend] /" &
 
 {% if DynConfig.mode | default('disagg') == 'agg' %}
 AGG_GPU={{ agg_gpu }}

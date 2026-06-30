@@ -34,10 +34,13 @@ from aiconfigurator.cli.spica.helper import (
     _build_spica_trace_search_space,
     _save_spica_trace_artifacts,
     _spica_candidates_to_result_df,
+    _spica_generated_backend_version,
     _spica_generator_overrides,
+    _spica_kvbm_config,
     _spica_role_worker_overrides,
     _spica_router_enabled,
     _SpicaReplayEvaluatorCompat,
+    _validate_spica_artifact_target,
 )
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 
@@ -424,7 +427,10 @@ class TestCLIIntegration:
                 backend=["trtllm", "vllm"],
             ),
             workload=argparse.Namespace(isl=128, osl=16),
-            goal=argparse.Namespace(sla=argparse.Namespace(ttft_ms=8000.0, itl_ms=200.0, e2e_ms=None)),
+            goal=argparse.Namespace(
+                target="goodput_per_gpu",
+                sla=argparse.Namespace(ttft_ms=8000.0, itl_ms=200.0, e2e_ms=None),
+            ),
         )
         args = argparse.Namespace(
             backend="auto",
@@ -480,6 +486,157 @@ class TestCLIIntegration:
         assert task.tpot == 200.0
         assert result_bundle.workload_label == "config"
 
+    def test_native_throughput_goal_owns_ranking_and_does_not_inherit_cli_sla(self):
+        config = argparse.Namespace(
+            search_space=argparse.Namespace(
+                model_name="model",
+                hardware_sku="h200_sxm",
+                gpu_budget=8,
+                min_gpu_budget=4,
+                min_endpoint=2,
+                context_length=32768,
+            ),
+            workload=argparse.Namespace(isl=128, osl=32),
+            goal=argparse.Namespace(target="throughput", sla=None),
+        )
+        args = argparse.Namespace(
+            backend="trtllm",
+            model_path="wrong",
+            system="wrong",
+            total_gpus=99,
+            top_n=1,
+            strict_sla=True,
+            ttft=2000.0,
+            tpot=30.0,
+        )
+        candidates = [
+            {
+                "config": {"deployment_mode": "agg", "backend": "trtllm", "used_gpus": 1},
+                "used_gpus": 1,
+                "score": 500.0,
+                "metrics": {
+                    "output_throughput_tok_s": 500.0,
+                    "mean_tpot_ms": 20.0,
+                    "mean_e2e_latency_ms": 100.0,
+                },
+            },
+            {
+                "config": {"deployment_mode": "agg", "backend": "trtllm", "used_gpus": 4},
+                "used_gpus": 4,
+                "score": 1000.0,
+                "metrics": {
+                    "output_throughput_tok_s": 1000.0,
+                    "mean_tpot_ms": 40.0,
+                    "mean_e2e_latency_ms": 200.0,
+                },
+            },
+        ]
+
+        bundle = _build_spica_trace_result_bundle(candidates, args, config=config, config_path="/tmp/native.yaml")
+
+        best = bundle.best_configs["agg"].iloc[0]
+        assert best["spica_candidate_id"] == 1
+        assert best["objective_target"] == "throughput"
+        assert best["objective_score"] == pytest.approx(1000.0)
+        assert best["objective_value"] == pytest.approx(1000.0)
+        assert best["tokens/s/gpu"] == pytest.approx(250.0)  # physical throughput/GPU, not score
+        assert bundle.best_throughputs["agg"] == pytest.approx(250.0)
+        assert bundle.best_objective_scores["agg"] == pytest.approx(1000.0)
+        assert bundle.tasks["agg"].ttft == 0.0
+        assert bundle.tasks["agg"].tpot == 0.0
+        assert bundle.pareto_x_axis["agg"] == "tokens/s/user"
+        assert bundle.pareto_y_axis["agg"] == "objective_value"
+        saved_config = bundle.candidates[1]["config"]
+        assert saved_config["context_length"] == 32768
+        assert saved_config["gpu_budget"] == 8
+        assert saved_config["min_gpu_budget"] == 4
+        assert saved_config["min_endpoint"] == 2
+        assert saved_config["planner_optimization_target"] == "throughput"
+        assert saved_config["planner_ttft_ms"] is None
+        assert saved_config["planner_itl_ms"] is None
+
+    def test_native_latency_and_custom_pareto_use_raw_objectives(self):
+        latency_goal = argparse.Namespace(target="e2e_latency", sla=None)
+        latency_df = _spica_candidates_to_result_df(
+            [
+                {
+                    "config": {"deployment_mode": "agg"},
+                    "used_gpus": 2,
+                    "score": -125.0,
+                    "metrics": {"output_throughput_tok_s": 400.0, "mean_e2e_latency_ms": 125.0},
+                }
+            ],
+            goal=latency_goal,
+        )
+        assert latency_df.loc[0, "objective_score"] == pytest.approx(-125.0)
+        assert latency_df.loc[0, "objective_value"] == pytest.approx(125.0)
+        assert latency_df.loc[0, "tokens/s/gpu"] == pytest.approx(200.0)
+
+        per_user_df = _spica_candidates_to_result_df(
+            [
+                {
+                    "config": {"deployment_mode": "agg"},
+                    "used_gpus": 1,
+                    "score": 0.0,
+                    "metrics": {"mean_tpot_ms": 10.0},
+                }
+            ],
+            goal=argparse.Namespace(target="throughput_per_user", sla=None),
+        )
+        assert per_user_df.loc[0, "tokens/s/user"] == pytest.approx(100.0)
+        assert per_user_df.loc[0, "objective_value"] == pytest.approx(0.0)
+
+        pareto_goal = argparse.Namespace(
+            target="pareto",
+            sla=None,
+            resolved_pareto_objectives=["throughput", "e2e_latency"],
+        )
+        config = argparse.Namespace(
+            search_space=argparse.Namespace(model_name="model", hardware_sku="h200_sxm", gpu_budget=8),
+            workload=argparse.Namespace(isl=128, osl=32),
+            goal=pareto_goal,
+        )
+        args = argparse.Namespace(
+            backend="trtllm",
+            model_path="wrong",
+            system="wrong",
+            total_gpus=99,
+            top_n=2,
+            strict_sla=False,
+            ttft=2000.0,
+            tpot=30.0,
+        )
+        candidates = [
+            {
+                "config": {"deployment_mode": "agg"},
+                "used_gpus": 1,
+                "score": 100.0,
+                "objectives": {"throughput": 100.0, "e2e_latency": 100.0},
+                "metrics": {"output_throughput_tok_s": 100.0, "mean_e2e_latency_ms": 100.0},
+            },
+            {
+                "config": {"deployment_mode": "agg"},
+                "used_gpus": 1,
+                "score": 90.0,
+                "objectives": {"throughput": 90.0, "e2e_latency": 90.0},
+                "metrics": {"output_throughput_tok_s": 90.0, "mean_e2e_latency_ms": 90.0},
+            },
+            {
+                "config": {"deployment_mode": "agg"},
+                "used_gpus": 1,
+                "score": 80.0,
+                "objectives": {"throughput": 80.0, "e2e_latency": 120.0},
+                "metrics": {"output_throughput_tok_s": 80.0, "mean_e2e_latency_ms": 120.0},
+            },
+        ]
+
+        bundle = _build_spica_trace_result_bundle(candidates, args, config=config, config_path="/tmp/pareto.yaml")
+        assert bundle.pareto_x_axis["agg"] == "e2e_latency"
+        assert bundle.pareto_y_axis["agg"] == "throughput"
+        assert bundle.pareto_fronts["agg"]["spica_candidate_id"].tolist() == [1, 0]
+        assert bundle.best_configs["agg"]["spica_candidate_id"].tolist() == [0, 1]
+        assert bundle.best_objective_scores["agg"] == pytest.approx(100.0)
+
     def test_spica_generator_overrides_prefer_task_over_cli_for_planner(self):
         """Generated planner config should use evaluated Spica config values, not stale default CLI args."""
         args = argparse.Namespace(
@@ -520,6 +677,105 @@ class TestCLIIntegration:
         assert planner_config["itl_ms"] == pytest.approx(200.0)
         assert planner_config["prefill_engine_num_gpu"] == 1
         assert planner_config["decode_engine_num_gpu"] == 2
+
+    @pytest.mark.parametrize("deployment_target", ["dynamo-python", "llm-d-helm", "llm-d-kustomize"])
+    def test_spica_artifacts_fail_closed_when_target_drops_native_features(self, deployment_target):
+        generator_config = {
+            "DynConfig": {
+                "enable_router": True,
+                "router_mode": "kv",
+                "router_config": {"host_cache_hit_weight": 0.75},
+                "planner_config": {"optimization_target": "throughput"},
+                "kvbm_config": {"cpu_cache_override_num_blocks": 128},
+            }
+        }
+
+        with pytest.raises(
+            RuntimeError,
+            match=rf"cannot faithfully emit router, planner, KVBM.*'{deployment_target}'",
+        ):
+            _validate_spica_artifact_target(generator_config, deployment_target)
+
+        _validate_spica_artifact_target(generator_config, "dynamo-j2")
+
+    def test_native_generator_overrides_preserve_planner_router_and_kvbm_contract(self):
+        args = argparse.Namespace(
+            model_path="Wrong/CLI-Model",
+            backend="trtllm",
+            ttft=2000.0,
+            tpot=30.0,
+            max_seq_len=None,
+            generator_config=None,
+            generator_set=None,
+            generator_dynamo_version=None,
+            namespace=None,
+            transport=None,
+            image_pull_secret=None,
+            model_cache=None,
+        )
+        task = argparse.Namespace(
+            primary_model_path="model",
+            planner_optimization_target="throughput",
+            ttft=0.0,
+            tpot=0.0,
+            min_gpu_budget=4,
+            min_endpoint=2,
+        )
+        row = pd.Series(
+            {
+                "deployment_mode": "disagg",
+                "backend": "trtllm",
+                "model_name": "model",
+                "planner_optimization_target": "throughput",
+                "planner_ttft_ms": None,
+                "planner_itl_ms": None,
+                "enable_throughput_scaling": False,
+                "enable_load_scaling": True,
+                "gpu_budget": 16,
+                "min_gpu_budget": 4,
+                "min_endpoint": 2,
+                "prefill_tp": 1,
+                "prefill_pp": 1,
+                "prefill_attention_dp": 1,
+                "decode_tp": 2,
+                "decode_pp": 1,
+                "decode_attention_dp": 1,
+                "decode_block_size": 64,
+                "router_mode": "kv_router",
+                "host_cache_hit_weight": 0.75,
+                "disk_cache_hit_weight": 0.25,
+                "active_prefill_tokens_threshold": 10000.0,
+                "num_g2_blocks": 4096,
+                "offload_batch_size": 4,
+            }
+        )
+
+        dyn_config = _spica_generator_overrides(args, row, task)["DynConfig"]
+        planner = dyn_config["planner_config"]
+        assert planner["optimization_target"] == "throughput"
+        assert planner["max_gpu_budget"] == 16
+        assert planner["min_gpu_budget"] == 4
+        assert planner["min_endpoint"] == 2
+        assert "ttft_ms" not in planner and "itl_ms" not in planner
+        router = dyn_config["router_config"]
+        assert router["host_cache_hit_weight"] == pytest.approx(0.75)
+        assert router["disk_cache_hit_weight"] == pytest.approx(0.25)
+        assert router["active_prefill_tokens_threshold"] == 10000
+        assert isinstance(router["active_prefill_tokens_threshold"], int)
+        assert dyn_config["kvbm_config"] == {
+            "cpu_cache_override_num_blocks": 4096,
+            "max_transfer_batch_size": 4,
+            "max_concurrent_transfers": 4,
+        }
+
+    def test_kvbm_batch_size_cannot_enable_offload_without_g2_blocks(self):
+        assert _spica_kvbm_config(pd.Series({"num_g2_blocks": 0, "offload_batch_size": 4})) is None
+        assert _spica_kvbm_config(pd.Series({"offload_batch_size": 4})) is None
+
+    def test_spica_artifacts_prefer_the_backend_version_used_by_replay(self):
+        args = argparse.Namespace(generated_config_version="1.3.0rc14")
+
+        assert _spica_generated_backend_version(args, "trtllm", "1.3.0rc10") == "1.3.0rc10"
 
     def test_spica_round_robin_router_mode_still_enables_router(self):
         row = pd.Series(

@@ -89,10 +89,10 @@ def test_static_path_threads_goodput_sla(monkeypatch):
     assert rec["sla_ttft_ms"] == 2000.0 and rec["sla_itl_ms"] == 30.0  # SLA threaded to the plain path
 
 
-def test_current_trace_api_filters_legacy_kwargs_and_falls_back_goodput(monkeypatch):
+def test_current_trace_api_filters_legacy_kwargs_and_fails_closed_without_goodput(monkeypatch):
     # Current Dynamo replay wrappers do not accept planner_config, benchmark_granularity,
-    # or SLA kwargs on static replay. The evaluator filters unsupported kwargs and derives
-    # a compatibility goodput from throughput when mean latency satisfies the SLA.
+    # or SLA kwargs on static replay. Aggregate means cannot reconstruct per-request
+    # goodput, so an incompatible wrapper must fail instead of fabricating a score.
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
 
@@ -115,10 +115,10 @@ def test_current_trace_api_filters_legacy_kwargs_and_falls_back_goodput(monkeypa
 
     monkeypatch.setattr(dynamo.replay.api, "run_trace_replay", run_trace_replay)
     goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
-    report = ReplayEvaluator(_wl(), goal).evaluate(_agg_plan(static=True))
+    with pytest.raises(RuntimeError, match="per-request SLA accounting"):
+        ReplayEvaluator(_wl(), goal).evaluate(_agg_plan(static=True))
     assert rec["trace_file"] == "/tmp/t.jsonl"
     assert set(rec) == {"trace_file", "extra_engine_args", "num_workers", "replay_concurrency", "router_mode"}
-    assert report["goodput_output_throughput_tok_s"] == 77.0
 
 
 def test_current_trace_api_rejects_planner_config(monkeypatch):
@@ -200,7 +200,7 @@ def test_scaling_trace_threads_replay_concurrency_when_supported(monkeypatch):
     monkeypatch.setattr(
         dynamo.replay.api,
         "run_trace_replay",
-        lambda **kw: rec.update(kw) or {"gpu_hours": 1.0},
+        lambda **kw: rec.update(kw) or {"gpu_hours": 1.0, "goodput_output_throughput_tok_s": 1.0},
     )
     wl = Workload(trace_path="/tmp/t.jsonl", replay_concurrency=32)
     goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
@@ -261,7 +261,7 @@ def test_synthetic_planner_threads_planner_config_when_supported(monkeypatch):
     monkeypatch.setattr(
         dynamo.replay.api,
         "run_synthetic_trace_replay",
-        lambda **kw: rec.update(kw) or {"gpu_hours": 2.0},
+        lambda **kw: rec.update(kw) or {"gpu_hours": 2.0, "goodput_output_throughput_tok_s": 1.0},
     )
     goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=1500.0, itl_ms=50.0))
     # request-rate workload -> open-loop (no cap); arrival_interval derived from the rate
@@ -342,7 +342,7 @@ def test_synthetic_planner_disagg_threads_planner_config_when_supported(monkeypa
     monkeypatch.setattr(
         dynamo.replay.api,
         "run_synthetic_trace_replay",
-        lambda **kw: rec.update(kw) or {"gpu_hours": 2.0},
+        lambda **kw: rec.update(kw) or {"gpu_hours": 2.0, "goodput_output_throughput_tok_s": 1.0},
     )
     goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=1500.0, itl_ms=50.0))
     # request-rate workload -> open-loop (no cap); arrival_interval derived from the rate

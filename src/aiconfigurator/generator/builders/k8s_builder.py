@@ -129,10 +129,15 @@ def _append_envs(base: list[dict[str, str]] | None, extra: list[dict[str, str]])
     return merged or None
 
 
-def _kvbm_env_for_role(dyn: dict[str, Any], role: str | None) -> list[dict[str, str]]:
+def _kvbm_env_for_role(
+    dyn: dict[str, Any],
+    role: str | None,
+    *,
+    backend: str,
+) -> list[dict[str, str]]:
     if role not in (None, "prefill"):
         return []
-    return kvbm_env_from_dyn_config(dyn)
+    return kvbm_env_from_dyn_config(dyn, backend=backend)
 
 
 def _frontend_main_container(
@@ -288,7 +293,7 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
                 envs.append({"name": "ETCD_ENDPOINTS", "value": etcd_endpoints})
             if hf_home:
                 envs.append({"name": "HF_HOME", "value": hf_home})
-        envs = _append_envs(envs, _kvbm_env_for_role(dyn, role))
+        envs = _append_envs(envs, _kvbm_env_for_role(dyn, role, backend="vllm"))
 
         volumes = None
         if use_model_cache:
@@ -316,7 +321,7 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
             args.append(
                 f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{port}","enable_kv_cache_events":true}}'
             )
-        kvbm_enabled = bool(kvbm_env_from_dyn_config(dyn))
+        kvbm_enabled = bool(kvbm_env_from_dyn_config(dyn, backend="vllm"))
         if role == "prefill":
             if kvbm_enabled:
                 transfer_config = (
@@ -595,7 +600,7 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
                 envs.append({"name": "ETCD_ENDPOINTS", "value": etcd_endpoints})
             if hf_home:
                 envs.append({"name": "HF_HOME", "value": hf_home})
-        envs = _append_envs(envs, _kvbm_env_for_role(dyn, role))
+        envs = _append_envs(envs, _kvbm_env_for_role(dyn, role, backend="sglang"))
 
         volumes = None
         if use_model_cache:
@@ -978,7 +983,7 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
                 envs.append({"name": "ETCD_ENDPOINTS", "value": etcd_endpoints})
             if hf_home:
                 envs.append({"name": "HF_HOME", "value": hf_home})
-        envs = _append_envs(envs, _kvbm_env_for_role(dyn, sub_component_type))
+        envs = _append_envs(envs, _kvbm_env_for_role(dyn, sub_component_type, backend="trtllm"))
 
         image_pull_secrets = None
         if image_pull_secret:
@@ -1015,6 +1020,8 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
             lines.append(f"args+=(--disaggregation-mode {disagg_mode})")
         if publish_metrics:
             lines.append("args+=(--publish-events-and-metrics)")
+        if sub_component_type in (None, "prefill") and kvbm_env_from_dyn_config(dyn, backend="trtllm"):
+            lines.append("args+=(--connector kvbm)")
         for _flag in extra_flags or []:
             lines.append(f"args+=({_flag})")
         lines.append('exec python3 -m dynamo.trtllm "${args[@]}"')

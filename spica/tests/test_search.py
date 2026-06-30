@@ -95,6 +95,7 @@ def test_ranks_feasible_best_first(monkeypatch):
     cands = run_smart_search(_config(), evaluator=_FakeEvaluator(), sampler_factory=_FakeSampler)
     assert [c.score for c in cands] == [768.0, 512.0, 256.0]  # throughput, best first
     assert all(c.used_gpus == 8 for c in cands)
+    assert all(c.config["backend_version"] == "1.3.0rc10" for c in cands)
     assert cands[0].metrics["gpu_hours"] == 1.0
 
 

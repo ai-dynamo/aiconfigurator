@@ -88,7 +88,7 @@ def enrich_context_for_sflow(
     )
     user_frontend_args = sflow_cfg.get("extra_frontend_args") or ""
     ctx["sflow_extra_frontend_args"] = " ".join(part for part in [generated_frontend_args, user_frontend_args] if part)
-    ctx["sflow_kvbm_env_exports"] = kvbm_shell_exports_from_dyn_config(dyn)
+    ctx["sflow_kvbm_env_exports"] = kvbm_shell_exports_from_dyn_config(dyn, backend=backend)
     ctx["sflow_variable_profile"] = variable_profile
 
     total_gpus = _total_gpus(wp, worker_cfg, mode)
@@ -314,6 +314,8 @@ def _trtllm_server_script(
     ]
     if disagg_mode:
         cmd_parts.append(f"  --disaggregation-mode {disagg_mode} \\")
+    if role in {"agg", "prefill"} and context.get("sflow_kvbm_env_exports"):
+        cmd_parts.append("  --connector kvbm \\")
     cmd_parts.append(f"  --extra-engine-args $[[ artifacts.{config_name}.path ]] ${{{extra_var}}}")
 
     lines.append("- |-")

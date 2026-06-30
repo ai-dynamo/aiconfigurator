@@ -10,6 +10,8 @@ import json
 import shlex
 from typing import Any
 
+KVBM_SUPPORTED_BACKENDS = frozenset({"trtllm", "vllm"})
+
 
 def _present(value: Any) -> bool:
     return value is not None and value != ""
@@ -55,6 +57,8 @@ def frontend_cli_args_from_dyn_config(
         ("kv_cache_block_size", "--kv-cache-block-size"),
         ("overlap_score_credit", "--router-kv-overlap-score-credit"),
         ("prefill_load_scale", "--router-prefill-load-scale"),
+        ("host_cache_hit_weight", "--router-host-cache-hit-weight"),
+        ("disk_cache_hit_weight", "--router-disk-cache-hit-weight"),
         ("router_temperature", "--router-temperature"),
         ("active_decode_blocks_threshold", "--active-decode-blocks-threshold"),
         ("active_prefill_tokens_threshold", "--active-prefill-tokens-threshold"),
@@ -152,11 +156,29 @@ def planner_config_json(config: dict[str, Any]) -> str:
     return json.dumps(config, separators=(",", ":"))
 
 
-def kvbm_env_from_dyn_config(dyn: dict[str, Any] | None) -> list[dict[str, str]]:
+def kvbm_env_from_dyn_config(
+    dyn: dict[str, Any] | None,
+    *,
+    backend: str | None = None,
+) -> list[dict[str, str]]:
+    """Return KVBM environment variables for a supported Dynamo backend.
+
+    Dynamo's vLLM and TensorRT-LLM runtimes expose KVBM connectors. SGLang
+    uses its own hierarchical-cache integration, so a nonempty KVBM config is
+    rejected instead of producing an artifact that cannot activate it.
+    ``backend=None`` preserves the helper's backend-agnostic use in callers
+    that separately enforce support.
+    """
+
     dyn = dyn or {}
     cfg = dyn.get("kvbm_config") or {}
     if not isinstance(cfg, dict) or not cfg:
         return []
+    if backend is not None and backend not in KVBM_SUPPORTED_BACKENDS:
+        supported = ", ".join(sorted(KVBM_SUPPORTED_BACKENDS))
+        raise ValueError(
+            f"DynConfig.kvbm_config is not supported for backend '{backend}'; supported backends: {supported}"
+        )
 
     env: list[dict[str, str]] = []
     mappings = (
@@ -174,5 +196,12 @@ def kvbm_env_from_dyn_config(dyn: dict[str, Any] | None) -> list[dict[str, str]]
     return env
 
 
-def kvbm_shell_exports_from_dyn_config(dyn: dict[str, Any] | None) -> list[str]:
-    return [f"export {entry['name']}={shlex.quote(entry['value'])}" for entry in kvbm_env_from_dyn_config(dyn)]
+def kvbm_shell_exports_from_dyn_config(
+    dyn: dict[str, Any] | None,
+    *,
+    backend: str | None = None,
+) -> list[str]:
+    return [
+        f"export {entry['name']}={shlex.quote(entry['value'])}"
+        for entry in kvbm_env_from_dyn_config(dyn, backend=backend)
+    ]

@@ -42,6 +42,10 @@ class _SpicaTraceTask:
     tpot: float
     request_latency: float | None
     is_moe: bool
+    objective_target: str
+    planner_optimization_target: str
+    min_gpu_budget: int | None = None
+    min_endpoint: int | None = None
     isl: int = 0
     osl: int = 0
 
@@ -61,8 +65,12 @@ class _SpicaTraceResultBundle:
     best_configs: dict[str, pd.DataFrame]
     pareto_fronts: dict[str, pd.DataFrame | None]
     best_throughputs: dict[str, float]
+    best_objective_scores: dict[str, float]
     best_latencies: dict[str, dict[str, float]]
     pareto_x_axis: dict[str, str]
+    pareto_y_axis: dict[str, str]
+    objective_target: str
+    objective_directions: dict[str, bool]
 
 
 def _positive_int_env(name: str, default: int, *, aliases: tuple[str, ...] = ()) -> int:
@@ -145,6 +153,7 @@ def _spica_candidate_to_dict(candidate: Any) -> dict[str, Any]:
         "used_gpus": getattr(candidate, "used_gpus", None),
         "score": getattr(candidate, "score", None),
         "metrics": getattr(candidate, "metrics", {}),
+        "objectives": getattr(candidate, "objectives", None),
     }
 
 
@@ -268,8 +277,100 @@ def _spica_load_shape(metrics: dict[str, Any], metric_summary: dict[str, Any]) -
     return request_rate or 0.0, concurrency or 0.0
 
 
-def _spica_candidates_to_result_df(candidates: list[Any]) -> pd.DataFrame:
+def _spica_enum_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(getattr(value, "value", value))
+
+
+def _spica_goal_target(goal: Any | None) -> str | None:
+    return _spica_enum_value(getattr(goal, "target", None))
+
+
+def _spica_planner_target(goal: Any | None) -> str:
+    target = getattr(goal, "target", None)
+    planner_target = getattr(target, "planner_optimization_target", None)
+    if planner_target:
+        return str(planner_target)
+    return {
+        "throughput": "throughput",
+        "throughput_per_gpu": "throughput",
+        "throughput_per_user": "throughput",
+        "e2e_latency": "latency",
+        "goodput": "sla",
+        "goodput_per_gpu": "sla",
+        "pareto": "throughput",
+    }.get(_spica_goal_target(goal) or "", "sla")
+
+
+def _spica_pareto_objectives(goal: Any | None) -> list[str]:
+    if _spica_goal_target(goal) != "pareto":
+        return []
+    objectives = getattr(goal, "resolved_pareto_objectives", None)
+    if callable(objectives):
+        objectives = objectives()
+    if objectives is None:
+        objectives = getattr(goal, "pareto_objectives", None)
+    if objectives is None:
+        return ["throughput_per_gpu", "throughput_per_user"]
+    return [value for item in objectives if (value := _spica_enum_value(item)) is not None]
+
+
+def _spica_target_maximize(target: str) -> bool:
+    return target != "e2e_latency"
+
+
+def _spica_average_gpus(metrics: dict[str, Any], used_gpus: int | None) -> float | None:
+    gpu_hours = _spica_float(metrics.get("gpu_hours"))
+    duration_ms = _spica_float(metrics.get("duration_ms"))
+    if gpu_hours is not None and gpu_hours > 0 and duration_ms is not None and duration_ms > 0:
+        return gpu_hours / (duration_ms / 3_600_000.0)
+    if used_gpus is not None and used_gpus > 0:
+        return float(used_gpus)
+    return None
+
+
+def _spica_scalar_objective_value(
+    target: str | None,
+    *,
+    score: float | None,
+    throughput: float | None,
+    throughput_per_gpu: float | None,
+    tokens_per_user: float | None,
+    goodput: float | None,
+    goodput_per_gpu: float | None,
+    request_latency: float | None,
+) -> float | None:
+    # Candidate.score is Spica's authoritative scalar objective, signed so higher
+    # is always better. Recover natural units from it before consulting physical
+    # display metrics; legacy display fallbacks (for example 1000 / mean TPOT for
+    # tokens/s/user) must never redefine the configured objective.
+    if score is not None and target != "pareto":
+        return -score if target == "e2e_latency" else score
+
+    values = {
+        "throughput": throughput,
+        "throughput_per_gpu": throughput_per_gpu,
+        "throughput_per_user": tokens_per_user,
+        "goodput": goodput,
+        "goodput_per_gpu": goodput_per_gpu,
+        "e2e_latency": request_latency,
+    }
+    return values.get(target or "")
+
+
+def _spica_candidates_to_result_df(candidates: list[Any], goal: Any | None = None) -> pd.DataFrame:
+    """Convert Spica candidates without changing the meaning of their objective.
+
+    ``goal=None`` retains the pre-native-config compatibility layout, where callers
+    supplied goodput-per-GPU scores and expected the legacy token/GPU columns to mirror
+    ``Candidate.score``. With a Spica goal, physical throughput columns are computed from
+    replay metrics while ``objective_score``/``objective_value`` carry the actual scalar
+    target; Pareto candidates expose their raw ``Candidate.objectives`` vector.
+    """
     rows: list[dict[str, Any]] = []
+    target = _spica_goal_target(goal)
+    legacy_score_layout = target is None
     for candidate_index, candidate in enumerate(candidates):
         payload = _spica_candidate_to_dict(candidate)
         config = payload.get("config") or {}
@@ -278,33 +379,69 @@ def _spica_candidates_to_result_df(candidates: list[Any]) -> pd.DataFrame:
         used_gpus = _spica_int(payload.get("used_gpus")) or _spica_int(config.get("used_gpus"))
         goodput = _spica_float(metrics["goodput"])
         score = _spica_float(metrics["score"])
-        if score is None and goodput is not None and used_gpus and used_gpus > 0:
+        if legacy_score_layout and score is None and goodput is not None and used_gpus and used_gpus > 0:
             score = goodput / used_gpus
-        score = score or 0.0
-        tokens_per_user = _spica_tokens_per_user(raw_metrics, metrics) or 0.0
+        tokens_per_user = _spica_tokens_per_user(raw_metrics, metrics)
         request_rate, concurrency = _spica_load_shape(raw_metrics, metrics)
         mode = _spica_deployment_mode(payload)
+        throughput = _spica_float(metrics["throughput"])
+        request_latency = _spica_float(metrics["request_latency"])
+        average_gpus = _spica_average_gpus(raw_metrics, used_gpus)
+        throughput_per_gpu = throughput / average_gpus if throughput is not None and average_gpus else None
+        goodput_per_gpu = goodput / average_gpus if goodput is not None and average_gpus else None
+
+        if legacy_score_layout:
+            objective_target = "goodput_per_gpu"
+            objective_score = score or 0.0
+            objective_value = objective_score
+            throughput_per_gpu = objective_score
+            goodput_per_gpu = objective_score
+            tokens_per_user = tokens_per_user or 0.0
+        elif target == "pareto":
+            objective_target = target
+            objective_score = None
+            objective_value = None
+        else:
+            objective_target = target
+            objective_score = score
+            objective_value = _spica_scalar_objective_value(
+                target,
+                score=score,
+                throughput=throughput,
+                throughput_per_gpu=throughput_per_gpu,
+                tokens_per_user=tokens_per_user,
+                goodput=goodput,
+                goodput_per_gpu=goodput_per_gpu,
+                request_latency=request_latency,
+            )
 
         row = {
             "spica_candidate_id": candidate_index,
             "deployment_mode": mode,
             "backend": config.get("backend", "n/a"),
+            "objective_target": objective_target,
+            "objective_score": objective_score,
+            "objective_value": objective_value,
             "tokens/s/user": tokens_per_user,
-            "tokens/s/gpu": score,
-            "tokens/s/gpu_cluster": score,
-            "goodput/s/gpu": score,
+            "tokens/s/gpu": throughput_per_gpu,
+            "tokens/s/gpu_cluster": throughput_per_gpu,
+            "goodput/s/gpu": goodput_per_gpu,
             "goodput": goodput,
-            "throughput": _spica_float(metrics["throughput"]),
+            "throughput": throughput,
             "ttft": _spica_float(metrics["ttft"]),
             "tpot": _spica_float(metrics["tpot"]),
-            "request_latency": _spica_float(metrics["request_latency"]),
+            "request_latency": request_latency,
             "request_rate": request_rate,
             "concurrency": round(concurrency, 2),
             "num_total_gpus": used_gpus,
             "total_gpus": used_gpus,
+            "average_gpus": average_gpus,
             "router": _spica_router(config),
             "planner": _spica_planner(config),
         }
+        objectives = payload.get("objectives") or {}
+        for name, value in objectives.items():
+            row[str(name)] = _spica_float(value)
         if mode == "disagg":
             row.update(
                 {
@@ -349,6 +486,8 @@ def _spica_candidates_to_result_df(candidates: list[Any]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     metric_cols = [
         "tokens/s/user",
+        "objective_score",
+        "objective_value",
         "tokens/s/gpu",
         "tokens/s/gpu_cluster",
         "goodput/s/gpu",
@@ -361,7 +500,9 @@ def _spica_candidates_to_result_df(candidates: list[Any]) -> pd.DataFrame:
         "concurrency",
         "num_total_gpus",
         "total_gpus",
+        "average_gpus",
     ]
+    metric_cols.extend(name for name in _spica_pareto_objectives(goal) if name not in metric_cols)
     for col in metric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -424,6 +565,36 @@ def _spica_sla_value(config: Any, name: str, default: Any = None) -> Any:
     return getattr(sla, name, default)
 
 
+def _spica_enrich_candidate_payload(payload: dict[str, Any], config: Any | None) -> dict[str, Any]:
+    """Make a saved candidate self-describing without mutating Spica's Candidate.
+
+    Native goal metadata is passed separately during replay, so copy it alongside the
+    selected sample before artifact generation. This lets a generated deployment retain
+    the same planner target/SLA and search-space runtime limits as the evaluated candidate.
+    """
+    enriched = dict(payload)
+    candidate_config = dict(payload.get("config") or {})
+    enriched["config"] = candidate_config
+    if config is None:
+        return enriched
+
+    for name in ("context_length", "gpu_budget", "min_gpu_budget", "min_endpoint", "startup_time"):
+        candidate_config.setdefault(name, _spica_search_space_value(config, name))
+
+    goal = getattr(config, "goal", None)
+    target = _spica_goal_target(goal)
+    if target is not None:
+        candidate_config["objective_target"] = target
+        candidate_config["planner_optimization_target"] = _spica_planner_target(goal)
+    for source_name, artifact_name in (
+        ("ttft_ms", "planner_ttft_ms"),
+        ("itl_ms", "planner_itl_ms"),
+        ("e2e_ms", "planner_e2e_ms"),
+    ):
+        candidate_config[artifact_name] = _spica_sla_value(config, source_name, None)
+    return enriched
+
+
 def _spica_scalar_value(value: Any) -> Any:
     if value is None:
         return None
@@ -470,6 +641,11 @@ def _spica_trace_task(args, mode: str, candidate_df: pd.DataFrame, config: Any |
     mode_backends = sorted(str(backend_name) for backend_name in backend_series.dropna().unique())
     if mode_backends and (backend == "auto" or config is not None):
         backend = ",".join(mode_backends)
+    backend_version_series = (
+        candidate_df["backend_version"] if "backend_version" in candidate_df else pd.Series(dtype=object)
+    )
+    mode_backend_versions = sorted(str(version) for version in backend_version_series.dropna().unique())
+    backend_version = ",".join(mode_backend_versions) if mode_backend_versions else "spica"
 
     model_path = _spica_first_scalar(
         first_row.get("model_name"),
@@ -490,23 +666,36 @@ def _spica_trace_task(args, mode: str, candidate_df: pd.DataFrame, config: Any |
         getattr(args, "total_gpus", None),
         default=0,
     )
-    ttft = _spica_sla_value(config, "ttft_ms", getattr(args, "ttft", 0.0) or 0.0) or 0.0
-    tpot = _spica_sla_value(config, "itl_ms", getattr(args, "tpot", 0.0) or 0.0) or 0.0
-    request_latency = _spica_sla_value(config, "e2e_ms", None)
+    goal = getattr(config, "goal", None)
+    if goal is not None:
+        # A native Spica config owns its goal. In particular, a throughput/latency
+        # config with no SLA must not inherit the CLI parser's legacy SLA defaults.
+        ttft = _spica_sla_value(config, "ttft_ms", None) or 0.0
+        tpot = _spica_sla_value(config, "itl_ms", None) or 0.0
+        request_latency = _spica_sla_value(config, "e2e_ms", None)
+    else:
+        ttft = getattr(args, "ttft", 0.0) or 0.0
+        tpot = getattr(args, "tpot", 0.0) or 0.0
+        request_latency = getattr(args, "request_latency", None)
     workload_isl = _spica_first_scalar(_spica_workload_value(config, "isl"), getattr(args, "isl", None), default=0)
     workload_osl = _spica_first_scalar(_spica_workload_value(config, "osl"), getattr(args, "osl", None), default=0)
+    objective_target = _spica_goal_target(goal) or "goodput_per_gpu"
 
     return _SpicaTraceTask(
         primary_model_path=str(model_path),
         primary_system_name=str(system),
         primary_backend_name=backend,
-        primary_backend_version="spica",
+        primary_backend_version=backend_version,
         total_gpus=int(total_gpus),
         serving_mode=mode,
         ttft=float(ttft),
         tpot=float(tpot),
         request_latency=request_latency,
         is_moe=_spica_trace_is_moe(candidate_df),
+        objective_target=objective_target,
+        planner_optimization_target=_spica_planner_target(goal),
+        min_gpu_budget=_spica_int(_spica_search_space_value(config, "min_gpu_budget")),
+        min_endpoint=_spica_int(_spica_search_space_value(config, "min_endpoint")),
         isl=int(workload_isl),
         osl=int(workload_osl),
     )
@@ -525,6 +714,88 @@ def _spica_workload_label(config: Any | None, args, config_path: str | None) -> 
     return "synthetic"
 
 
+def _spica_row_latencies(row: pd.Series) -> dict[str, float]:
+    return {
+        "ttft": _spica_float(row.get("ttft")) or 0.0,
+        "tpot": _spica_float(row.get("tpot")) or 0.0,
+        "request_latency": _spica_float(row.get("request_latency")) or 0.0,
+    }
+
+
+def _spica_pareto_front_df(
+    candidate_df: pd.DataFrame,
+    objectives: list[str],
+    directions: dict[str, bool],
+) -> pd.DataFrame:
+    """Compute dominance from Candidate.objectives in their natural directions."""
+    if candidate_df.empty or not objectives or any(name not in candidate_df.columns for name in objectives):
+        return candidate_df.iloc[0:0].copy()
+    pool = candidate_df.dropna(subset=objectives).copy()
+    if pool.empty:
+        return pool
+
+    records = list(pool[objectives].to_dict(orient="index").items())
+
+    def dominates(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        strictly_better = False
+        for name in objectives:
+            left_value = float(left[name])
+            right_value = float(right[name])
+            better = left_value > right_value if directions[name] else left_value < right_value
+            worse = left_value < right_value if directions[name] else left_value > right_value
+            if worse:
+                return False
+            strictly_better = strictly_better or better
+        return strictly_better
+
+    retained = [
+        index
+        for index, values in records
+        if not any(other_index != index and dominates(other, values) for other_index, other in records)
+    ]
+    # Match Spica's public Pareto contract: trace the frontier left-to-right by
+    # the final configured objective, regardless of whether that axis is min/max.
+    return pool.loc[retained].sort_values(objectives[-1], ascending=True).reset_index(drop=True)
+
+
+def _spica_native_mode_result(
+    mode_df: pd.DataFrame,
+    goal: Any,
+    top_n: int,
+) -> tuple[pd.DataFrame, float, float, pd.DataFrame, str, str, dict[str, float], dict[str, bool]]:
+    target = _spica_goal_target(goal) or "throughput"
+    if target == "pareto":
+        objectives = _spica_pareto_objectives(goal)
+        directions = {name: _spica_target_maximize(name) for name in objectives}
+        frontier = _spica_pareto_front_df(mode_df, objectives, directions)
+        primary = objectives[0]
+        ranked = frontier.sort_values(primary, ascending=not directions[primary], kind="stable")
+        best = ranked.head(top_n).copy()
+        best_objective_score = 0.0
+        if not best.empty:
+            raw = _spica_float(best.iloc[0].get(primary)) or 0.0
+            best_objective_score = raw if directions[primary] else -raw
+        x_axis, y_axis = objectives[-1], objectives[0]
+    else:
+        target_maximize = _spica_target_maximize(target)
+        directions = {target: target_maximize, "objective_value": target_maximize, "tokens/s/user": True}
+        ranked = mode_df.sort_values("objective_score", ascending=False, kind="stable", na_position="last")
+        best = ranked.head(top_n).copy()
+        frontier = _spica_pareto_front_df(
+            mode_df,
+            ["objective_value", "tokens/s/user"],
+            directions,
+        )
+        best_objective_score = _spica_float(best.iloc[0].get("objective_score")) if not best.empty else 0.0
+        best_objective_score = best_objective_score or 0.0
+        x_axis, y_axis = "tokens/s/user", "objective_value"
+
+    best_throughput = _spica_float(best.iloc[0].get("tokens/s/gpu")) if not best.empty else 0.0
+    best_throughput = best_throughput or 0.0
+    latencies = _spica_row_latencies(best.iloc[0]) if not best.empty else _spica_row_latencies(pd.Series(dtype=object))
+    return best, best_throughput, best_objective_score, frontier, x_axis, y_axis, latencies, directions
+
+
 def _build_spica_trace_result_bundle(
     candidates: list[Any],
     args,
@@ -533,14 +804,20 @@ def _build_spica_trace_result_bundle(
 ) -> _SpicaTraceResultBundle:
     from aiconfigurator.cli.utils import process_experiment_result
 
-    payloads = [_spica_candidate_to_dict(candidate) for candidate in candidates]
-    candidate_df = _spica_candidates_to_result_df(payloads)
+    payloads = [
+        _spica_enrich_candidate_payload(_spica_candidate_to_dict(candidate), config) for candidate in candidates
+    ]
+    goal = getattr(config, "goal", None)
+    candidate_df = _spica_candidates_to_result_df(payloads, goal=goal)
     tasks: dict[str, _SpicaTraceTask] = {}
     best_configs: dict[str, pd.DataFrame] = {}
     best_throughputs: dict[str, float] = {}
+    best_objective_scores: dict[str, float] = {}
     best_latencies: dict[str, dict[str, float]] = {}
     pareto_fronts: dict[str, pd.DataFrame | None] = {}
     pareto_x_axis: dict[str, str] = {}
+    pareto_y_axis: dict[str, str] = {}
+    objective_directions: dict[str, bool] = {}
 
     for mode, mode_df in candidate_df.groupby("deployment_mode", sort=False):
         mode = str(mode)
@@ -548,19 +825,37 @@ def _build_spica_trace_result_bundle(
         mode_df = _normalize_spica_result_dtypes(mode_df)
         task = _spica_trace_task(args, mode, mode_df, config)
         tasks[mode] = task
-        best_config_df, best_throughput, pareto_frontier_df, x_axis_col, latencies = process_experiment_result(
-            task,
-            {"pareto_df": mode_df},
-            top_n=args.top_n,
-            strict_sla=getattr(args, "strict_sla", False),
-        )
+        if goal is not None:
+            (
+                best_config_df,
+                best_throughput,
+                best_objective_score,
+                pareto_frontier_df,
+                x_axis_col,
+                y_axis_col,
+                latencies,
+                mode_directions,
+            ) = _spica_native_mode_result(mode_df, goal, args.top_n)
+            objective_directions.update(mode_directions)
+        else:
+            best_config_df, best_throughput, pareto_frontier_df, x_axis_col, latencies = process_experiment_result(
+                task,
+                {"pareto_df": mode_df},
+                top_n=args.top_n,
+                strict_sla=getattr(args, "strict_sla", False),
+            )
+            best_objective_score = best_throughput
+            y_axis_col = "tokens/s/gpu"
+            objective_directions["goodput_per_gpu"] = True
         best_configs[mode] = best_config_df
         best_throughputs[mode] = best_throughput
+        best_objective_scores[mode] = best_objective_score
         best_latencies[mode] = latencies
         pareto_fronts[mode] = pareto_frontier_df
         pareto_x_axis[mode] = x_axis_col
+        pareto_y_axis[mode] = y_axis_col
 
-    chosen_exp = max(best_throughputs, key=best_throughputs.get) if best_throughputs else "none"
+    chosen_exp = max(best_objective_scores, key=best_objective_scores.get) if best_objective_scores else "none"
     return _SpicaTraceResultBundle(
         candidates=payloads,
         candidate_df=candidate_df,
@@ -572,8 +867,12 @@ def _build_spica_trace_result_bundle(
         best_configs=best_configs,
         pareto_fronts=pareto_fronts,
         best_throughputs=best_throughputs,
+        best_objective_scores=best_objective_scores,
         best_latencies=best_latencies,
         pareto_x_axis=pareto_x_axis,
+        pareto_y_axis=pareto_y_axis,
+        objective_target=_spica_goal_target(goal) or "goodput_per_gpu",
+        objective_directions=objective_directions,
     )
 
 
@@ -777,6 +1076,8 @@ def _spica_router_config(row: pd.Series) -> dict[str, Any] | None:
     for key in (
         "overlap_score_credit",
         "prefill_load_scale",
+        "host_cache_hit_weight",
+        "disk_cache_hit_weight",
         "router_temperature",
     ):
         _spica_set_if_present(router, key, row.get(key))
@@ -785,14 +1086,18 @@ def _spica_router_config(row: pd.Series) -> dict[str, Any] | None:
     if no_admission_control is True:
         router["admission_control"] = "none"
     else:
-        threshold_keys = (
-            "active_decode_blocks_threshold",
-            "active_prefill_tokens_threshold",
-            "active_prefill_tokens_threshold_frac",
-        )
+        threshold_keys = ("active_decode_blocks_threshold", "active_prefill_tokens_threshold_frac")
         for key in threshold_keys:
             _spica_set_if_present(router, key, row.get(key))
-        if any(_spica_value_present(row.get(key)) for key in threshold_keys):
+        # pandas promotes sparse integer columns to float (e.g. 10000 -> 10000.0),
+        # but Dynamo's router schema requires an actual integer for this threshold.
+        _spica_set_if_present(
+            router,
+            "active_prefill_tokens_threshold",
+            _spica_int(row.get("active_prefill_tokens_threshold")),
+        )
+        all_threshold_keys = (*threshold_keys, "active_prefill_tokens_threshold")
+        if any(_spica_value_present(row.get(key)) for key in all_threshold_keys):
             router["admission_control"] = "token-capacity"
 
     return router or None
@@ -835,7 +1140,9 @@ def _spica_planner_config(
         "environment": "kubernetes",
         "backend": backend,
         "mode": mode,
-        "optimization_target": "sla",
+        "optimization_target": str(
+            row.get("planner_optimization_target") or getattr(task, "planner_optimization_target", None) or "sla"
+        ),
         "enable_throughput_scaling": enable_throughput,
         "enable_load_scaling": enable_load,
     }
@@ -856,15 +1163,22 @@ def _spica_planner_config(
         "kalman_q_trend",
         "kalman_r",
         "kalman_min_points",
-        "max_gpu_budget",
-        "min_gpu_budget",
-        "min_endpoint",
     ):
         _spica_set_if_present(planner, key, row.get(key))
 
-    gpu_budget = _spica_int(row.get("gpu_budget"))
-    if gpu_budget is not None and "max_gpu_budget" not in planner:
-        planner["max_gpu_budget"] = gpu_budget
+    max_gpu_budget = _spica_first_int(row.get("max_gpu_budget"), row.get("gpu_budget"), default=0)
+    if max_gpu_budget > 0:
+        planner["max_gpu_budget"] = max_gpu_budget
+    min_gpu_budget = _spica_int(row.get("min_gpu_budget"))
+    if min_gpu_budget is None and task is not None:
+        min_gpu_budget = _spica_int(getattr(task, "min_gpu_budget", None))
+    if min_gpu_budget is not None:
+        planner["min_gpu_budget"] = min_gpu_budget
+    min_endpoint = _spica_int(row.get("min_endpoint"))
+    if min_endpoint is None and task is not None:
+        min_endpoint = _spica_int(getattr(task, "min_endpoint", None))
+    if min_endpoint is not None:
+        planner["min_endpoint"] = min_endpoint
 
     if mode == "agg":
         planner["decode_engine_num_gpu"] = _spica_engine_num_gpu(row, "agg")
@@ -872,14 +1186,19 @@ def _spica_planner_config(
         planner["prefill_engine_num_gpu"] = _spica_engine_num_gpu(row, "prefill")
         planner["decode_engine_num_gpu"] = _spica_engine_num_gpu(row, "decode")
 
-    ttft = getattr(task, "ttft", None) if task is not None else None
-    tpot = getattr(task, "tpot", None) if task is not None else None
-    if not _spica_value_present(ttft) and args is not None:
-        ttft = getattr(args, "ttft", None)
-    if not _spica_value_present(tpot) and args is not None:
-        tpot = getattr(args, "tpot", None)
-    _spica_set_if_present(planner, "ttft_ms", ttft)
-    _spica_set_if_present(planner, "itl_ms", tpot)
+    if planner["optimization_target"] == "sla":
+        ttft = row.get("planner_ttft_ms")
+        tpot = row.get("planner_itl_ms")
+        if not _spica_value_present(ttft) and task is not None:
+            ttft = getattr(task, "ttft", None)
+        if not _spica_value_present(tpot) and task is not None:
+            tpot = getattr(task, "tpot", None)
+        if not _spica_value_present(ttft) and args is not None:
+            ttft = getattr(args, "ttft", None)
+        if not _spica_value_present(tpot) and args is not None:
+            tpot = getattr(args, "tpot", None)
+        _spica_set_if_present(planner, "ttft_ms", ttft)
+        _spica_set_if_present(planner, "itl_ms", tpot)
 
     # Spica replay suppresses large periodic planner reports; keep live deploy
     # artifacts similarly quiet unless the user overrides this later.
@@ -889,13 +1208,17 @@ def _spica_planner_config(
 
 
 def _spica_kvbm_config(row: pd.Series) -> dict[str, Any] | None:
-    kvbm: dict[str, Any] = {}
     num_g2_blocks = _spica_int(row.get("num_g2_blocks"))
-    if num_g2_blocks is not None and num_g2_blocks > 0:
-        kvbm["cpu_cache_override_num_blocks"] = num_g2_blocks
+    # SearchSpace defines zero G2 blocks as disabling host offload. Do not let an
+    # independently pinned batch size accidentally turn KVBM back on in artifacts.
+    if num_g2_blocks is None or num_g2_blocks <= 0:
+        return None
+
+    kvbm: dict[str, Any] = {"cpu_cache_override_num_blocks": num_g2_blocks}
     offload_batch_size = _spica_int(row.get("offload_batch_size"))
     if offload_batch_size is not None and offload_batch_size > 0:
         kvbm["max_transfer_batch_size"] = offload_batch_size
+        kvbm["max_concurrent_transfers"] = offload_batch_size
     return kvbm or None
 
 
@@ -968,10 +1291,15 @@ def _spica_generator_result_row(row: pd.Series) -> pd.Series:
 
 def _spica_generator_task(task: _SpicaTraceTask, row: pd.Series) -> argparse.Namespace:
     nextn = _spica_int(row.get("aic_nextn")) or 0
+    backend_version = _spica_first_scalar(
+        row.get("backend_version"),
+        task.primary_backend_version,
+        default="spica",
+    )
     return argparse.Namespace(
         primary_backend_name=str(row.get("backend") or task.primary_backend_name),
         primary_system_name=task.primary_system_name,
-        primary_backend_version=task.primary_backend_version,
+        primary_backend_version=str(backend_version),
         primary_model_path=task.primary_model_path,
         prefix=0,
         is_moe=task.is_moe,
@@ -995,13 +1323,22 @@ def _spica_num_gpus_per_node(system_name: str) -> int:
         return 8
 
 
-def _spica_generated_backend_version(args: argparse.Namespace | None, backend_name: str) -> str | None:
+def _spica_generated_backend_version(
+    args: argparse.Namespace | None,
+    backend_name: str,
+    evaluated_backend_version: str | None = None,
+) -> str | None:
     from aiconfigurator.generator.api import (
         get_default_dynamo_version_mapping,
         load_generator_overrides_from_args,
         resolve_backend_version_for_dynamo,
     )
 
+    # A selected Spica row must render against the same backend version that its
+    # replay used. CLI/default generator mappings are only a fallback for legacy
+    # candidate payloads that predate this field.
+    if evaluated_backend_version and evaluated_backend_version != "spica":
+        return evaluated_backend_version
     if args is None:
         return None
     if generated_config_version := getattr(args, "generated_config_version", None):
@@ -1034,6 +1371,29 @@ def _spica_generated_artifact_paths(top_config_dir: str, known_paths: set[str]) 
     return sorted(paths)
 
 
+def _validate_spica_artifact_target(generator_config: dict[str, Any], deployment_target: str) -> None:
+    """Reject deployment targets that would silently drop evaluated Spica features."""
+    if deployment_target == "dynamo-j2":
+        return
+    dyn_config = generator_config.get("DynConfig") or {}
+    if not isinstance(dyn_config, dict):
+        return
+
+    unsupported: list[str] = []
+    if dyn_config.get("enable_router") or dyn_config.get("router_mode") or dyn_config.get("router_config"):
+        unsupported.append("router")
+    if dyn_config.get("planner_config"):
+        unsupported.append("planner")
+    if dyn_config.get("kvbm_config"):
+        unsupported.append("KVBM")
+    if unsupported:
+        features = ", ".join(unsupported)
+        raise RuntimeError(
+            f"Spica artifact generation cannot faithfully emit {features} for deployment target "
+            f"'{deployment_target}'. Use --deployment-target dynamo-j2 or disable those Spica features."
+        )
+
+
 def _generate_spica_backend_artifacts(
     args: argparse.Namespace | None,
     generator_config: dict[str, Any],
@@ -1044,8 +1404,13 @@ def _generate_spica_backend_artifacts(
     from aiconfigurator.generator.api import generate_from_request
     from aiconfigurator.generator.request import from_legacy_params
 
-    backend_version = _spica_generated_backend_version(args, generator_task.primary_backend_name)
+    backend_version = _spica_generated_backend_version(
+        args,
+        generator_task.primary_backend_name,
+        getattr(generator_task, "primary_backend_version", None),
+    )
     deployment_target = getattr(args, "deployment_target", "dynamo-j2") if args is not None else "dynamo-j2"
+    _validate_spica_artifact_target(generator_config, deployment_target)
     req = from_legacy_params(generator_config, backend=generator_task.primary_backend_name)
     req = dataclasses.replace(
         req,
@@ -1112,19 +1477,33 @@ def _save_spica_pareto_plot(result_bundle: _SpicaTraceResultBundle, save_dir: st
     if not pareto_fronts:
         return None
 
-    axes = {result_bundle.pareto_x_axis.get(name, "tokens/s/user") for name in pareto_fronts}
+    axes = {
+        (
+            result_bundle.pareto_x_axis.get(name, "tokens/s/user"),
+            result_bundle.pareto_y_axis.get(name, "tokens/s/gpu"),
+        )
+        for name in pareto_fronts
+    }
     if len(axes) > 1:
-        logger.warning("Skipping combined Spica Pareto plot because modes use different X axes: %s", sorted(axes))
+        logger.warning("Skipping combined Spica Pareto plot because modes use different axes: %s", sorted(axes))
         return None
-    x_axis = axes.pop()
-    if any(x_axis not in df.columns for df in pareto_fronts.values()):
-        logger.warning("Skipping Spica Pareto plot because X axis %s is missing from one or more frontiers", x_axis)
+    x_axis, y_axis = axes.pop()
+    if x_axis == y_axis:
+        # Scalar searches have a ranking, not a two-dimensional Pareto tradeoff.
+        return None
+    if any(x_axis not in df.columns or y_axis not in df.columns for df in pareto_fronts.values()):
+        logger.warning(
+            "Skipping Spica Pareto plot because axes (%s, %s) are missing from one or more frontiers",
+            x_axis,
+            y_axis,
+        )
         return None
 
     path = os.path.join(save_dir, "pareto_frontier.png")
     fig, ax = plt.subplots(1, 1, figsize=(8, 5))
     colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b", "#17becf"]
-    maximize_x = x_axis != "request_latency"
+    maximize_x = result_bundle.objective_directions.get(x_axis, x_axis != "request_latency")
+    maximize_y = result_bundle.objective_directions.get(y_axis, y_axis != "request_latency")
 
     preferred_modes = [mode for mode in ("agg", "disagg") if mode in pareto_fronts]
     other_modes = sorted(mode for mode in pareto_fronts if mode not in {"agg", "disagg"})
@@ -1133,21 +1512,21 @@ def _save_spica_pareto_plot(result_bundle: _SpicaTraceResultBundle, save_dir: st
         pareto_analysis.draw_pareto(
             df,
             x_axis,
-            "tokens/s/gpu",
+            y_axis,
             ax,
             colors[idx % len(colors)],
             mode,
             maximize_x=maximize_x,
+            maximize_y=maximize_y,
         )
 
-    combined = pd.concat(pareto_fronts.values(), ignore_index=True)
-    if not combined.empty:
-        best = combined.sort_values(by="tokens/s/gpu_cluster", ascending=False).head(1)
-        ax.scatter(best[x_axis], best["tokens/s/gpu"], color="black", marker="x", label="best")
+    best = result_bundle.best_configs.get(result_bundle.chosen_exp, pd.DataFrame()).head(1)
+    if not best.empty and x_axis in best and y_axis in best:
+        ax.scatter(best[x_axis], best[y_axis], color="black", marker="x", label="best")
 
     ax.set_title("Spica Pareto Frontier")
     ax.set_xlabel(x_axis)
-    ax.set_ylabel("tokens/s/gpu")
+    ax.set_ylabel(y_axis)
     ax.legend()
     plt.savefig(path)
     plt.close(fig)
@@ -1453,9 +1832,13 @@ def run_spica_thorough_default(args) -> list[Any]:
         tasks=result_bundle.tasks,
         mode="default",
         pareto_x_axis=result_bundle.pareto_x_axis,
+        pareto_y_axis=result_bundle.pareto_y_axis,
         top_n=args.top_n,
         inclusive_tpot=args.inclusive_tpot,
         extra_input_lines=_spica_extra_input_lines(config, config_path),
+        objective_target=result_bundle.objective_target,
+        best_objective_scores=result_bundle.best_objective_scores,
+        objective_directions=result_bundle.objective_directions,
     )
 
     if args.save_dir:

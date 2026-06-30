@@ -120,6 +120,32 @@ def test_empty_choice_list_rejected():
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("active_decode_blocks_threshold", 64),
+        ("active_prefill_tokens_threshold", 4096),
+        ("active_prefill_tokens_threshold_frac", 0.5),
+        ("no_admission_control", True),
+    ],
+)
+def test_kv_router_admission_controls_fail_closed_until_replay_supports_them(field, value):
+    with pytest.raises(ValidationError, match="not supported by the Dynamo replay API"):
+        SearchSpace(**_search_space(router_mode=["kv_router"], **{field: value}))
+
+
+def test_round_robin_ignores_router_admission_controls():
+    cfg = SearchSpace(
+        **_search_space(
+            router_mode=["round_robin"],
+            active_prefill_tokens_threshold=4096,
+            no_admission_control=True,
+        )
+    )
+    assert cfg.active_prefill_tokens_threshold == 4096
+    assert cfg.no_admission_control is True
+
+
 # --- composite knobs accept raw dicts (preset OR pinned-dict per entry) ---
 
 

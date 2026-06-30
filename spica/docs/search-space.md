@@ -123,6 +123,11 @@ dimensions. They are only swept when multi-tier KV offload is enabled (`num_g2_b
 | `active_prefill_tokens_threshold_frac` | float? | `None` | pinned | — |
 | `no_admission_control` | bool | `False` | pinned | — |
 
+For a search that includes `kv_router`, these fields are reserved but currently rejected
+when set: Dynamo's replay API does not accept admission-control configuration, so scoring
+them would diverge from the generated frontend. Leave them at their defaults until replay
+support is available. They remain inert under a round-robin-only search.
+
 ## Planner composites
 
 Composite knobs. Each list entry is a preset id (string) **or** a dict; one entry pins,
