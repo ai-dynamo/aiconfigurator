@@ -33,8 +33,6 @@ _MODEL_CONFIG_ALIASES = {
     # These use the same vLLM model class and MoE routing fields as the local
     # packaged config named on the right.
     "Qwen/Qwen3.5-122B-A10B": "Qwen/Qwen3.5-397B-A17B",
-    "sgl-project/DeepSeek-V4-Flash-FP8": "deepseek-ai/DeepSeek-V4-Flash",
-    "sgl-project/DeepSeek-V4-Pro-FP8": "deepseek-ai/DeepSeek-V4-Pro",
 }
 
 

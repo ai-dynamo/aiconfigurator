@@ -364,6 +364,25 @@ def test_vllm_repository_moe_getter_has_unique_consumer_keys(monkeypatch):
     assert len(consumer_keys) == len(set(consumer_keys))
 
 
+def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkeypatch):
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    monkeypatch.setattr(module, "get_sm_version", lambda: 90)
+
+    cases = module.get_moe_test_cases()
+    dsv4_models = {
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "deepseek-ai/DeepSeek-V4-Pro",
+        "sgl-project/DeepSeek-V4-Flash-FP8",
+        "sgl-project/DeepSeek-V4-Pro-FP8",
+    }
+
+    assert len(cases) == 1752
+    assert sum(len(case[1]) for case in cases) == 47304
+    assert not any(case[8] in dsv4_models for case in cases)
+
+
 @pytest.mark.parametrize(
     "model_path",
     [
