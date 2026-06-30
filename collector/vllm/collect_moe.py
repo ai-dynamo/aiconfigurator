@@ -1,101 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""vLLM MoE collector for current fused-experts APIs.
+"""vLLM 0.24.0 production-path MoE collector.
 
-Benchmarks vLLM fused MoE kernels across BF16, FP8, FP8 block, NVFP4, MXFP4,
-and INT4 paths when supported. Shared MoE cases come from YAML; this file owns
-vLLM API compatibility, quant config creation, kernel filters, synthetic routing
-logits, and perf logging.
+Shared MoE cases come from YAML. Every quantization mode is built through
+``FusedMoE`` so vLLM owns routing, TP/EP sharding, weight post-processing, and
+backend selection exactly as it does for model execution.
 """
 
-__compat__ = "vllm>=0.17.0"
+__compat__ = "vllm==0.24.0"
 
-import inspect
 import json
 import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import torch
-import torch.nn.functional as F
-from vllm.model_executor.layers.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config, int4_w4a16_moe_quant_config
-
-try:
-    from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
-except ImportError:
-    from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
 from vllm.version import __version__ as vllm_version
-
-# Compatibility: block FP8 helpers may differ by version.
-# Priority: vllm.utils.deep_gemm -> deep_gemm extension -> None.
-try:
-    from vllm.utils.deep_gemm import per_block_cast_to_fp8
-except Exception:
-    try:
-        import deep_gemm  # type: ignore
-
-        per_block_cast_to_fp8 = getattr(deep_gemm, "per_block_cast_to_fp8", None)
-    except Exception:
-        per_block_cast_to_fp8 = None  # type: ignore[assignment]
-
-# vLLM >= 0.14.0 raises AssertionError in get_current_vllm_config() when called
-# outside a set_current_vllm_config() context (https://github.com/vllm-project/vllm/pull/31747).
-# vLLM's custom ops (e.g. _vllm_ops.scaled_fp4_quant) requires vllm config to decide how to dispatch.
-from vllm.config import VllmConfig, set_current_vllm_config
-
-try:
-    from vllm.v1.worker.workspace import init_workspace_manager
-except Exception:
-    init_workspace_manager = None  # type: ignore[assignment]
-
-# NVFP4 support: requires Blackwell (SM>=100) and FlashInfer TRTLLM FP4 kernel.
-trtllm_fp4_block_scale_routed_moe = None
-_vllm_ops = None
-prepare_static_weights_for_trtllm_fp4_moe = None
-_flashinfer_fp4_quantize = None
-_nvfp4_available = False
-# scaled_fp4_quant dropped is_sf_swizzled_layout in some vLLM builds.
-# Probe the signature once at import time so _run_nvfp4_once doesn't branch per call.
-_scaled_fp4_quant_accepts_swizzled: bool = False
-# trtllm_fp4_block_scale_routed_moe dropped tile_tokens_dim in some flashinfer builds.
-# Probe once at import time to avoid TypeError at call time.
-_trtllm_moe_accepts_tile_tokens_dim: bool = False
-try:
-    import inspect
-
-    from flashinfer import fp4_quantize as _flashinfer_fp4_quantize  # type: ignore[assignment]
-    from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe  # type: ignore[assignment]
-    from vllm import _custom_ops as _vllm_ops  # type: ignore[assignment]
-    from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-        prepare_static_weights_for_trtllm_fp4_moe,  # type: ignore[assignment]
-    )
-
-    _scaled_fp4_quant_accepts_swizzled = (
-        "is_sf_swizzled_layout" in inspect.signature(_vllm_ops.scaled_fp4_quant).parameters
-    )
-    _trtllm_moe_accepts_tile_tokens_dim = (
-        "tile_tokens_dim" in inspect.signature(trtllm_fp4_block_scale_routed_moe).parameters
-    )
-    _nvfp4_available = True
-except Exception:
-    trtllm_fp4_block_scale_routed_moe = None
-    _vllm_ops = None
-    prepare_static_weights_for_trtllm_fp4_moe = None
-    _flashinfer_fp4_quantize = None
-
-# MXFP4 support: uses vLLM's high-level FusedMoE module with Mxfp4Config.
-# This lets vLLM handle backend selection (FlashInfer/Triton/Marlin) and
-# weight swizzle internally, so one code path works on all GPUs.
-_mxfp4_available = False
-try:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
-
-    _mxfp4_available = True
-except Exception:
-    pass
-
-from vllm.forward_context import get_forward_context, set_forward_context
 
 from collector.case_generator import (
     get_common_moe_test_cases,
@@ -107,7 +28,97 @@ from collector.case_generator import (
 from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
-_WORKSPACE_MANAGER_DEVICES: set[str] = set()
+_MODEL_CONFIG_ROOT = Path(__file__).resolve().parents[2] / "src/aiconfigurator/model_configs"
+_MODEL_CONFIG_ALIASES = {
+    # These use the same vLLM model class and MoE routing fields as the local
+    # packaged config named on the right.
+    "Qwen/Qwen3.5-122B-A10B": "Qwen/Qwen3.5-397B-A17B",
+    "sgl-project/DeepSeek-V4-Flash-FP8": "deepseek-ai/DeepSeek-V4-Flash",
+    "sgl-project/DeepSeek-V4-Pro-FP8": "deepseek-ai/DeepSeek-V4-Pro",
+}
+
+
+def _load_model_moe_config(model_name: str) -> dict:
+    """Load the checked-in HF config used to derive vLLM's FusedMoE args."""
+    if model_name.startswith("mistralai/Mixtral-"):
+        # vLLM's MixtralSparseMoeBlock is the standard renormalized softmax,
+        # gated-SiLU FusedMoE path and the repository has no packaged config.
+        return {
+            "model_type": "mixtral",
+            "hidden_act": "silu",
+            "norm_topk_prob": True,
+        }
+
+    resolved_name = _MODEL_CONFIG_ALIASES.get(model_name, model_name)
+    config_path = _MODEL_CONFIG_ROOT / f"{resolved_name.replace('/', '--')}_config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"missing packaged model config for vLLM MoE case {model_name!r}: {config_path}")
+
+    with config_path.open() as config_file:
+        config = json.load(config_file)
+    return config.get("text_config", config)
+
+
+def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
+    """Resolve the FusedMoE arguments used by vLLM 0.24 model code."""
+    model_config = _load_model_moe_config(model_name)
+    model_type = str(model_config.get("model_type", ""))
+    activation = str(
+        module_config.get("activation")
+        or model_config.get("hidden_act")
+        or model_config.get("hidden_activation")
+        or "silu"
+    )
+
+    use_grouped_topk = model_type in {
+        "deepseek_v3",
+        "kimi_k2",
+        "mimo_v2_flash",
+        "glm_moe_dsa",
+        "nemotron_h",
+    }
+    use_routing_bias = (
+        model_config.get("topk_method") == "noaux_tc"
+        or bool(model_config.get("use_routing_bias", False))
+        or model_type in {"mimo_v2_flash", "glm_moe_dsa", "nemotron_h"}
+    )
+    scoring_func = str(model_config.get("scoring_func") or "softmax")
+    if model_type == "nemotron_h":
+        scoring_func = "sigmoid"
+
+    custom_routing = None
+    apply_router_weight_on_input = False
+    renormalize = bool(model_config.get("norm_topk_prob", True))
+    if model_type == "llama4_text":
+        custom_routing = "llama4"
+        apply_router_weight_on_input = True
+        renormalize = False
+    elif model_type == "gemma4_text":
+        custom_routing = "gemma4"
+        activation = "gelu_tanh"
+    elif model_type == "nemotron_h":
+        activation = str(model_config["mlp_hidden_act"])
+        activation = {
+            "gelu_pytorch_tanh": "gelu_tanh",
+        }.get(activation, activation)
+        activation = f"{activation}_no_mul"
+
+    return {
+        "renormalize": renormalize,
+        "scoring_func": scoring_func,
+        "activation": activation,
+        "routed_scaling_factor": float(model_config.get("routed_scaling_factor") or 1.0),
+        "swiglu_limit": model_config.get("swiglu_limit") if model_type == "deepseek_v4" else None,
+        "use_grouped_topk": use_grouped_topk,
+        "num_expert_group": int(model_config.get("n_group", 1)) if use_grouped_topk else None,
+        "topk_group": int(model_config.get("topk_group", 1)) if use_grouped_topk else None,
+        "apply_routed_scale_to_output": model_type in {"deepseek_v3", "kimi_k2", "glm_moe_dsa", "nemotron_h"},
+        "use_routing_bias": use_routing_bias,
+        "router_logits_float32": use_routing_bias or scoring_func in {"sigmoid", "sqrtsoftplus"},
+        "custom_routing": custom_routing,
+        "apply_router_weight_on_input": apply_router_weight_on_input,
+        "has_bias": bool(module_config.get("has_bias", False)),
+    }
 
 
 def _moe_execution_key(common_moe_testcase, moe_type: str):
@@ -116,6 +127,7 @@ def _moe_execution_key(common_moe_testcase, moe_type: str):
         moe_type,
         model_name=common_moe_testcase.model_name,
     )
+    routing_config = _resolve_moe_runtime_config(common_moe_testcase.model_name, module_config)
     return (
         moe_type,
         tuple(common_moe_testcase.num_tokens_list),
@@ -128,6 +140,7 @@ def _moe_execution_key(common_moe_testcase, moe_type: str):
         common_moe_testcase.token_expert_distribution,
         common_moe_testcase.power_law_alpha,
         json.dumps(module_config, sort_keys=True, separators=(",", ":")),
+        json.dumps(routing_config, sort_keys=True, separators=(",", ":")),
     )
 
 
@@ -154,19 +167,6 @@ def _moe_consumer_keys(common_moe_testcase, moe_type: str):
     )
 
 
-def _ensure_workspace_manager(device: str) -> None:
-    if init_workspace_manager is None:
-        return
-
-    torch_device = torch.device(device)
-    device_key = str(torch_device)
-    if device_key in _WORKSPACE_MANAGER_DEVICES:
-        return
-
-    init_workspace_manager(torch_device)
-    _WORKSPACE_MANAGER_DEVICES.add(device_key)
-
-
 def get_moe_test_cases():
     """Generate MoE test cases"""
 
@@ -176,9 +176,9 @@ def get_moe_test_cases():
         sm_version=sm,
         runtime_version=vllm_version,
         runtime_features={
-            "per_block_fp8": per_block_cast_to_fp8 is not None,
-            "nvfp4": _nvfp4_available,
-            "mxfp4": _mxfp4_available,
+            "per_block_fp8": True,
+            "nvfp4": True,
+            "mxfp4": True,
         },
     )
 
@@ -259,490 +259,286 @@ def run_moe_torch(
     perf_filename,
     device="cuda:0",
 ):
-    """Run vLLM MoE performance benchmarking"""
+    """Benchmark the vLLM 0.24.0 model-execution MoE path."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.forward_context import get_forward_context, set_forward_context
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+        CompressedTensorsConfig,
+    )
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    from collector.vllm.utils import setup_distributed
+
+    if moe_tp_size > 1 and moe_ep_size > 1:
+        raise ValueError("vLLM MoE collector does not combine logical TP and EP")
+
+    setup_distributed(device)
     torch.cuda.set_device(device)
+    init_workspace_manager(torch.device(device))
+    torch.set_default_dtype(torch.bfloat16)
     torch.set_default_device(device)
 
-    # Configure quantization parameters
-    dtype = torch.bfloat16
-    quant_config = None
-    block_shape: list[int] | None = None
-    a1_scale = None
-    a2_scale = None
-
-    # Calculate local number of experts
-    local_inter_size = inter_size // moe_tp_size
-    local_num_experts, expert_map, _ = determine_expert_map(moe_ep_size, 0, num_experts)
-
-    # Create weight tensors
-    # w1: gate + up projection weights [num_experts, 2 * inter_size, hidden_size]
-    # w2: down projection weights [num_experts, hidden_size, inter_size]
-    w1 = torch.randn(
-        local_num_experts,
-        2 * local_inter_size,
-        hidden_size,
-        dtype=torch.bfloat16,
-        device=device,
+    module_config = get_moe_quantization_module_config("vllm", moe_type, model_name=model_name)
+    runtime_config = _resolve_moe_runtime_config(model_name, module_config)
+    e_score_correction_bias = (
+        torch.zeros(num_experts, dtype=torch.float32, device=device) if runtime_config["use_routing_bias"] else None
     )
-    w2 = torch.randn(
-        local_num_experts,
-        hidden_size,
-        local_inter_size,
-        dtype=torch.bfloat16,
-        device=device,
-    )
+    router_logits_dtype = torch.float32 if runtime_config["router_logits_float32"] else None
+    custom_routing_function = None
+    if runtime_config["custom_routing"] == "llama4":
+        from vllm.model_executor.models.llama4 import Llama4MoE
 
-    # INT4_WO path: W4A16 via vLLM's Marlin kernel using int4_w4a16_moe_quant_config.
-    # Weights are packed uint8 (2 int4 per byte, shape K//2). Scales are per-group
-    # along K (Kimi-K2.5 uses group_size=32). Zero-points are None.
-    use_int4_wo = moe_type == "int4_wo"
-    if use_int4_wo:
-        int4_config = get_moe_quantization_module_config("vllm", moe_type, model_name=model_name)
-        int4_group_size = int(int4_config.get("group_size", 128))
-        # w1: (E, 2*local_inter, hidden) packed → (E, 2*local_inter, hidden//2) uint8
-        w1 = torch.randint(
-            0, 127, (local_num_experts, 2 * local_inter_size, hidden_size // 2), dtype=torch.uint8, device=device
+        custom_routing_function = Llama4MoE.custom_routing_function
+    elif runtime_config["custom_routing"] == "gemma4":
+        from vllm.model_executor.models.gemma4 import gemma4_fused_routing_kernel_triton
+
+        per_expert_scale = torch.ones(num_experts, device=device)
+
+        def gemma4_routing_function(hidden_states, gating_output, topk, renormalize):
+            return gemma4_fused_routing_kernel_triton(gating_output, topk, per_expert_scale)
+
+        custom_routing_function = gemma4_routing_function
+
+    if moe_type == "bfloat16":
+        quant_config = None
+    elif moe_type in ("fp8", "fp8_block"):
+        quant_config = Fp8Config(
+            is_checkpoint_fp8_serialized=True,
+            activation_scheme="dynamic",
+            weight_block_size=[128, 128] if moe_type == "fp8_block" else None,
         )
-        # w2: (E, hidden, local_inter) packed → (E, hidden, local_inter//2) uint8
-        w2 = torch.randint(
-            0, 127, (local_num_experts, hidden_size, local_inter_size // 2), dtype=torch.uint8, device=device
-        )
-        # Per-group scales: (E, N, K//group_size)
-        w1_scale = torch.randn(
-            (local_num_experts, 2 * local_inter_size, hidden_size // int4_group_size),
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        w2_scale = torch.randn(
-            (local_num_experts, hidden_size, local_inter_size // int4_group_size),
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        quant_config = int4_w4a16_moe_quant_config(
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            w1_zp=None,
-            w2_zp=None,
-            block_shape=[0, int4_group_size],
-        )
-
-    # MXFP4 path: uses vLLM's high-level FusedMoE module with Mxfp4Config.
-    # vLLM handles backend selection (FlashInfer/Triton/Marlin) and weight swizzle.
-    #
-    # We keep a reference to the VllmConfig used during construction because
-    # vLLM 0.17.0's MoERunner (vllm-project/vllm#32344) calls
-    # get_forward_context() → get_layer_from_name() during forward, which
-    # looks up the module in static_forward_context.  FusedMoE registers
-    # itself there during __init__, so we must pass the *same* config to
-    # set_forward_context() at benchmark time.
-    use_mxfp4 = moe_type == "w4a16_mxfp4"
-    moe_module = None
-    mxfp4_vllm_cfg = None
-
-    if use_mxfp4:
-        if not _mxfp4_available:
-            raise ImportError("MXFP4 MoE requires vllm >= 0.17.0 with Mxfp4Config support.")
-
-        _ensure_workspace_manager(device)
-
-        mxfp4_quant_config = Mxfp4Config()
-        mxfp4_module_config = get_moe_quantization_module_config("vllm", moe_type, model_name=model_name)
-
-        # pcp_size=1: vLLM 0.17.0 added prefill context parallel to FusedMoE
-        # (vllm-project/vllm#32344); without it, __init__ calls get_pcp_group()
-        # which requires distributed init.
-        # The collector benchmarks the already-sharded local expert weights on
-        # one process, so keep FusedMoE's runtime parallel config single-process.
-        mxfp4_vllm_cfg = VllmConfig()
-        with set_current_vllm_config(mxfp4_vllm_cfg):
-            fused_moe_kwargs = {
-                "num_experts": num_experts,
-                "top_k": topk,
-                "hidden_size": hidden_size,
-                "intermediate_size": local_inter_size,
-                "renormalize": True,
-                "quant_config": mxfp4_quant_config,
-                "tp_size": 1,
-                "dp_size": 1,
-                "ep_size": moe_ep_size,
-                "prefix": "",
-                "has_bias": bool(mxfp4_module_config.get("has_bias", False)),
-                "activation": str(mxfp4_module_config.get("activation", "silu")),
-                "pcp_size": 1,
+    elif moe_type == "w4a16_mxfp4":
+        quant_config = Mxfp4Config()
+    elif moe_type == "nvfp4":
+        nvfp4_args = {
+            "num_bits": 4,
+            "type": "float",
+            "strategy": "tensor_group",
+            "group_size": 16,
+            "symmetric": True,
+            "dynamic": False,
+        }
+        quant_config = CompressedTensorsConfig.from_config(
+            {
+                "quant_method": "compressed-tensors",
+                "format": "nvfp4-pack-quantized",
+                "config_groups": {
+                    "group_0": {
+                        "format": "nvfp4-pack-quantized",
+                        "weights": nvfp4_args,
+                        "input_activations": nvfp4_args,
+                        "output_activations": None,
+                        "targets": ["Linear"],
+                    }
+                },
             }
-            if "reduce_results" in inspect.signature(FusedMoE.__init__).parameters:
-                fused_moe_kwargs["reduce_results"] = False
-            moe_module = FusedMoE(**fused_moe_kwargs)
-            moe_module.to(device)
-            moe_module.eval()
-            moe_module.requires_grad_(False)
-
-            # Fill synthetic mxfp4 weights (uint8 packed, E2M1 format)
-            with torch.no_grad():
-                moe_module.w13_weight.data.random_(0, 255)
-                moe_module.w2_weight.data.random_(0, 255)
-                moe_module.w13_weight_scale.data.random_(0, 255)
-                moe_module.w2_weight_scale.data.random_(0, 255)
-                if hasattr(moe_module, "w13_bias"):
-                    moe_module.w13_bias.data.normal_()
-                if hasattr(moe_module, "w2_bias"):
-                    moe_module.w2_bias.data.normal_()
-
-            # vLLM 0.19.0 consults get_current_vllm_config() while building
-            # the TRTLLM MXFP4 MoE kernel, so keep the construction context open.
-            moe_module.quant_method.process_weights_after_loading(moe_module)
-
-        # Free bfloat16 weights; not used for mxfp4.
-        del w1, w2
-
-    # NVFP4 path: uses FlashInfer TRTLLM FP4 monolithic kernel (not fused_experts).
-    use_nvfp4 = moe_type == "nvfp4"
-    nvfp4_data: dict | None = None
-
-    if use_nvfp4:
-        _missing = [
-            name
-            for name, obj in [
-                ("trtllm_fp4_block_scale_routed_moe", trtllm_fp4_block_scale_routed_moe),
-                ("_vllm_ops", _vllm_ops),
-                ("prepare_static_weights_for_trtllm_fp4_moe", prepare_static_weights_for_trtllm_fp4_moe),
-            ]
-            if obj is None
-        ]
-        if _missing:
-            raise ImportError(
-                f"NVFP4 MoE requires flashinfer and vllm >= 0.14.0 with FP4 support, but the following "
-                f"could not be imported: {', '.join(_missing)}. "
-                f"Install a compatible flashinfer build and ensure vllm >= 0.14.0 with FP4 support."
-            )
-
-        # Raw packed FP4 weights and block scales
-        w1_raw = torch.randint(
-            0, 255, (local_num_experts, 2 * local_inter_size, hidden_size // 2), dtype=torch.uint8, device=device
         )
-        w2_raw = torch.randint(
-            0, 255, (local_num_experts, hidden_size, local_inter_size // 2), dtype=torch.uint8, device=device
+    elif moe_type == "int4_wo":
+        group_size = int(module_config.get("group_size", 128))
+        quant_config = CompressedTensorsConfig.from_config(
+            {
+                "quant_method": "compressed-tensors",
+                "format": "pack-quantized",
+                "config_groups": {
+                    "group_0": {
+                        "format": "pack-quantized",
+                        "weights": {
+                            "num_bits": 4,
+                            "type": "int",
+                            "strategy": "group",
+                            "group_size": group_size,
+                            "symmetric": True,
+                            "dynamic": False,
+                        },
+                        "input_activations": None,
+                        "output_activations": None,
+                        "targets": ["Linear"],
+                    }
+                },
+            }
         )
-        w1_scale_raw = torch.ones(
-            local_num_experts, 2 * local_inter_size, hidden_size // 16, dtype=torch.float8_e4m3fn, device=device
-        )
-        w2_scale_raw = torch.ones(
-            local_num_experts, hidden_size, local_inter_size // 16, dtype=torch.float8_e4m3fn, device=device
-        )
+    else:
+        raise ValueError(f"Unsupported vLLM MoE quantization mode: {moe_type}")
 
-        # Shuffle weights and scales for TRTLLM kernel layout
-        w1_shuf, w1_scale_shuf, w2_shuf, w2_scale_shuf = prepare_static_weights_for_trtllm_fp4_moe(
-            w1_raw,
-            w2_raw,
-            w1_scale_raw,
-            w2_scale_raw,
+    vllm_config = VllmConfig()
+    vllm_config.model_config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        hf_text_config=SimpleNamespace(model_type=""),
+        model="collector_dummy",
+        quantization_config=None,
+    )
+    vllm_config.scheduler_config.max_num_batched_tokens = max(num_tokens_lists)
+    vllm_config.parallel_config.enable_expert_parallel = moe_ep_size > 1
+
+    # vLLM represents EP by flattening the requested TP world and then
+    # converting it to EP when enable_expert_parallel is set. The collector is
+    # one physical rank, but requested logical sizes determine local weights
+    # and the rank-0 expert map exactly as in a multi-rank model.
+    logical_parallel_size = moe_ep_size if moe_ep_size > 1 else moe_tp_size
+    with set_current_vllm_config(vllm_config):
+        moe_module = FusedMoE(
+            num_experts=num_experts,
+            top_k=topk,
             hidden_size=hidden_size,
-            intermediate_size=local_inter_size,
-            num_experts=local_num_experts,
-            is_gated_activation=True,
+            intermediate_size=inter_size,
+            params_dtype=torch.bfloat16,
+            renormalize=runtime_config["renormalize"],
+            use_grouped_topk=runtime_config["use_grouped_topk"],
+            num_expert_group=runtime_config["num_expert_group"],
+            topk_group=runtime_config["topk_group"],
+            quant_config=quant_config,
+            tp_size=logical_parallel_size,
+            dp_size=1,
+            pcp_size=1,
+            prefix="collector_moe",
+            custom_routing_function=custom_routing_function,
+            scoring_func=runtime_config["scoring_func"],
+            routed_scaling_factor=runtime_config["routed_scaling_factor"],
+            swiglu_limit=runtime_config["swiglu_limit"],
+            e_score_correction_bias=e_score_correction_bias,
+            apply_router_weight_on_input=runtime_config["apply_router_weight_on_input"],
+            has_bias=runtime_config["has_bias"],
+            activation=runtime_config["activation"],
+            router_logits_dtype=router_logits_dtype,
+            apply_routed_scale_to_output=runtime_config["apply_routed_scale_to_output"],
         )
-        del w1_raw, w2_raw, w1_scale_raw, w2_scale_raw
+        moe_module.to(device)
+        moe_module.eval()
+        moe_module.requires_grad_(False)
 
-        # Per-expert scales
-        a13_scale = torch.ones(local_num_experts, dtype=torch.float32, device=device)
-        a2_scale_nvfp4 = torch.ones(local_num_experts, dtype=torch.float32, device=device)
-        w13_scale_2 = torch.ones(local_num_experts, dtype=torch.float32, device=device)
-        w2_scale_2 = torch.ones(local_num_experts, dtype=torch.float32, device=device)
+        # Populate the checkpoint-native tensors created by the selected
+        # quantization method, then let that method convert them to the exact
+        # runtime layout and construct the production kernel.
+        routed_experts = moe_module.routed_experts
+        with torch.no_grad():
+            for name, parameter in routed_experts.named_parameters(recurse=False):
+                if parameter.dtype == torch.uint8:
+                    if "scale" in name:
+                        parameter.fill_(127)
+                    else:
+                        parameter.random_(0, 256)
+                elif parameter.dtype == torch.int32:
+                    parameter.random_(0, 16)
+                elif parameter.is_floating_point():
+                    parameter.fill_(1.0 if "scale" in name else 0.01)
+                else:
+                    parameter.zero_()
 
-        nvfp4_data = dict(
-            w1=w1_shuf,
-            w1_scale=w1_scale_shuf,
-            w2=w2_shuf,
-            w2_scale=w2_scale_shuf,
-            g1_scale_c=a13_scale * w13_scale_2 / a2_scale_nvfp4,
-            a1_gscale=1.0 / a13_scale,
-            g1_alphas=a13_scale * w13_scale_2,
-            g2_alphas=a2_scale_nvfp4 * w2_scale_2,
-        )
-        # Free the bfloat16 weights; they are not used for nvfp4.
-        del w1, w2
+        quant_method = routed_experts.quant_method
+        quant_method.process_weights_after_loading(routed_experts)
 
-    elif moe_type in ["fp8", "fp8_block"]:
-        dtype = torch.float8_e4m3fn
-        if moe_type == "fp8_block":
-            block_shape = [128, 128]
-
-            if per_block_cast_to_fp8 is None:
-                raise ImportError("per_block_cast_to_fp8 is unavailable; fp8_block requires a newer vLLM build.")
-
-            w1_scale_list = []
-            w2_scale_list = []
-            w1_q = torch.empty_like(w1, dtype=dtype)
-            w2_q = torch.empty_like(w2, dtype=dtype)
-            for i in range(local_num_experts):
-                w1_q[i], w1_scale_i = per_block_cast_to_fp8(w1[i], block_size=block_shape, use_ue8m0=True)
-                w2_q[i], w2_scale_i = per_block_cast_to_fp8(w2[i], block_size=block_shape, use_ue8m0=True)
-                w1_scale_list.append(w1_scale_i)
-                w2_scale_list.append(w2_scale_i)
-            w1 = w1_q
-            w2 = w2_q
-            w1_scale = torch.stack(w1_scale_list)
-            w2_scale = torch.stack(w2_scale_list)
-        else:
-            w1_scale = torch.randn(local_num_experts, dtype=torch.float32, device=device)
-            w2_scale = torch.randn(local_num_experts, dtype=torch.float32, device=device)
-            a1_scale = torch.randn(1, dtype=torch.float32, device=device)
-            a2_scale = torch.randn(1, dtype=torch.float32, device=device)
-
-        quant_config = fp8_w8a8_moe_quant_config(
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
-            block_shape=block_shape,
+        selected_backend = None
+        for backend_attr in (
+            "unquantized_backend",
+            "fp8_backend",
+            "nvfp4_backend",
+            "mxfp4_backend",
+            "wna16_backend",
+        ):
+            if hasattr(quant_method, backend_attr):
+                selected_backend = getattr(quant_method, backend_attr)
+                break
+        backend_name = getattr(selected_backend, "value", str(selected_backend))
+        moe_kernel = getattr(quant_method, "moe_kernel", None)
+        experts_impl = getattr(moe_kernel, "fused_experts", None)
+        experts_name = type(experts_impl).__name__ if experts_impl is not None else "direct"
+        print(
+            "vLLM MoE path:",
+            type(quant_method).__name__,
+            f"backend={backend_name}",
+            f"experts={experts_name}",
+            f"tp={moe_module.moe_config.tp_size}",
+            f"ep={moe_module.moe_config.ep_size}",
+            f"routing={moe_module.router.routing_method_type}",
+            f"activation={runtime_config['activation']}",
         )
 
-    if not use_mxfp4 and dtype == torch.float8_e4m3fn:
-        w1 = w1.to(dtype)
-        w2 = w2.to(dtype)
+        method_name = type(quant_method).__name__.removesuffix("Method")
+        source = f"vllm_{method_name}_{backend_name}_{experts_name}".lower()
+        source = source.replace(" ", "_").replace("-", "_")
 
-    # Performance testing for each token count
-    for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
-        print("num_tokens", num_tokens)
-        print("topk", topk)
-        hs_dtype = torch.bfloat16
-        hidden_states = torch.randn([num_tokens, hidden_size], dtype=hs_dtype, device=device)
+        # Performance testing for each token count.
+        for num_tokens in num_tokens_lists:
+            print("num_tokens", num_tokens)
+            print("topk", topk)
+            hidden_states = torch.randn([num_tokens, hidden_size], dtype=torch.bfloat16, device=device)
 
-        # Generate routing inputs.
-        # mxfp4 path uses FusedMoE.forward(hidden_states, router_logits) which does
-        # routing internally; other paths need pre-computed topk_weights/topk_ids.
-        num_iter = 5 if distributed == "power_law" else 1
-        if use_mxfp4:
-            # FusedMoE.forward() takes raw router logits (num_tokens, num_experts)
+            num_iter = 5 if distributed == "power_law" else 1
+            logits_dtype = router_logits_dtype or torch.bfloat16
             if distributed == "power_law":
-                actual_logits_list = [
-                    power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha)
-                    .to(torch.bfloat16)
-                    .to(device)
-                    for _ in range(num_iter)
-                ]
+                # The workload generator's smoothing Conv1d consumes FP32.
+                # Module construction uses a BF16 default dtype, so restore
+                # FP32 only while generating logits and then put the collector
+                # default back exactly as it was.
+                previous_dtype = torch.get_default_dtype()
+                torch.set_default_dtype(torch.float32)
+                try:
+                    router_logits_list = [
+                        power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha)
+                        .to(logits_dtype)
+                        .to(device)
+                        for _ in range(num_iter)
+                    ]
+                finally:
+                    torch.set_default_dtype(previous_dtype)
             elif distributed == "balanced":
-                actual_logits = balanced_logits(num_tokens, num_experts, topk).to(torch.bfloat16).to(device)
+                router_logits_list = [balanced_logits(num_tokens, num_experts, topk).to(logits_dtype).to(device)]
             else:
                 raise ValueError(f"Unsupported distributed mode: {distributed}")
-        elif distributed == "power_law":
-            topk_weights_list = []
-            topk_ids_list = []
+            num_warmups = 1 if distributed == "power_law" else 3
+            num_runs = 1 if distributed == "power_law" else 6
 
-            for _ in range(num_iter):
-                logits = (
-                    power_law_logits_v3(
-                        num_tokens,
-                        num_experts,
-                        topk,
-                        moe_ep_size,
-                        power_law_alpha,
-                    )
-                    .bfloat16()
-                    .to(device)
-                )
-                weights, ids = torch.topk(logits, topk, dim=-1)
-                topk_weights = F.softmax(weights, dim=-1)
-                if use_int4_wo:
-                    topk_weights = topk_weights.float()
-                topk_weights_list.append(topk_weights)
-                topk_ids_list.append(ids)
+            def run_single_iteration():
+                for router_logits in router_logits_list:
+                    forward_context = get_forward_context()
+                    forward_context.moe_layer_index = 0
+                    moe_module(hidden_states, router_logits)
 
-            print("actual num_tokens: ", [topk_ids.shape[0] for topk_ids in topk_ids_list])
-
-        elif distributed == "balanced":
-            actual_logits = balanced_logits(num_tokens, num_experts, topk).bfloat16().to(device)
-            topk_weights, topk_ids = torch.topk(actual_logits, topk, dim=-1)
-            topk_weights = F.softmax(topk_weights, dim=-1)
-            if use_int4_wo:
-                topk_weights = topk_weights.float()
-
-        else:
-            raise ValueError(f"Unsupported distributed mode: {distributed}")
-
-        num_warmups = 3
-        num_runs = 6
-        if distributed == "power_law":
-            num_warmups = 1
-            num_runs = 1
-
-        def _run_nvfp4_once(hs, tw, ti):
-            """Run a single nvfp4 MoE iteration via FlashInfer TRTLLM FP4 kernel."""
-            num_tok = hs.shape[0]
-            # Quantize input to FP4 with linear (non-swizzled) scale layout so that
-            # x_scale can be reshaped to [M, K//16] for trtllm_fp4_block_scale_routed_moe.
-            #
-            # vLLM < 0.16.0: scaled_fp4_quant accepts is_sf_swizzled_layout=False directly.
-            # vLLM >= 0.16.0: the parameter was removed and the op returns swizzled layout
-            #   by default (tile-padded, incompatible shape). Fall back to flashinfer's
-            #   fp4_quantize which still supports is_sf_swizzled_layout=False.
-            if _scaled_fp4_quant_accepts_swizzled:
-                x_fp4, x_scale = _vllm_ops.scaled_fp4_quant(
-                    hs.to(torch.bfloat16),
-                    nvfp4_data["a1_gscale"][0:1],
-                    is_sf_swizzled_layout=False,
-                )
-            else:
-                per_tok_scale = nvfp4_data["a1_gscale"][0:1].view(1, 1).expand(num_tok, 1).contiguous()
-                x_fp4, x_scale = _flashinfer_fp4_quantize(
-                    hs.to(torch.bfloat16),
-                    per_tok_scale,
-                    is_sf_swizzled_layout=False,
-                )
-            scale_cols = hs.shape[1] // 16
-            # Pack topk: (expert_id << 16) | bf16_weight_as_int16
-            packed = (ti.to(torch.int32) << 16) | tw.to(torch.bfloat16).view(torch.int16).to(torch.int32)
-            trtllm_fp4_block_scale_routed_moe(
-                topk_ids=packed,
-                routing_bias=None,
-                hidden_states=x_fp4,
-                hidden_states_scale=x_scale.view(num_tok, scale_cols).to(torch.float8_e4m3fn),
-                gemm1_weights=nvfp4_data["w1"],
-                gemm1_weights_scale=nvfp4_data["w1_scale"].view(torch.float8_e4m3fn),
-                gemm1_bias=None,
-                gemm1_alpha=None,
-                gemm1_beta=None,
-                gemm1_clamp_limit=None,
-                gemm2_weights=nvfp4_data["w2"],
-                gemm2_weights_scale=nvfp4_data["w2_scale"].view(torch.float8_e4m3fn),
-                gemm2_bias=None,
-                output1_scale_scalar=nvfp4_data["g1_scale_c"],
-                output1_scale_gate_scalar=nvfp4_data["g1_alphas"],
-                output2_scale_scalar=nvfp4_data["g2_alphas"],
-                num_experts=num_experts,
-                top_k=topk,
-                n_group=0,
-                topk_group=0,
-                intermediate_size=local_inter_size,
-                local_expert_offset=0,
-                local_num_experts=local_num_experts,
-                routed_scaling_factor=None,
-                routing_method_type=1,  # Renormalize
-                do_finalize=True,
-                # tile_tokens_dim: avg tokens per expert, rounded to next power-of-2,
-                # clamped to [8, 64]. Required by some flashinfer builds, rejected by others.
-                **(
-                    {
-                        "tile_tokens_dim": min(
-                            max(1 << (max(1, (num_tok * topk) // num_experts) - 1).bit_length(), 8), 64
-                        )
-                    }
-                    if _trtllm_moe_accepts_tile_tokens_dim
-                    else {}
-                ),
-            )
-
-        def _mxfp4_forward(hs, rl):
-            # vLLM's custom MoE op increments a per-context layer index on
-            # each forward call.  We only register one layer, so reset the
-            # counter before every call to avoid an index-out-of-range error.
-            fwd_ctx = get_forward_context()
-            if hasattr(fwd_ctx, "moe_layer_index"):
-                fwd_ctx.moe_layer_index = 0
-            moe_module.forward(hs, rl)
-
-        def run_single_iteration():
-            if use_mxfp4:
-                # FusedMoE.forward(hidden_states, router_logits) does routing internally.
-                if distributed == "power_law":
-                    for logits in actual_logits_list:
-                        _mxfp4_forward(hidden_states[: logits.shape[0]], logits[: logits.shape[0]])
-                else:
-                    _mxfp4_forward(hidden_states, actual_logits)
-            elif use_nvfp4:
-                if distributed == "power_law":
-                    for tw, ti in zip(topk_weights_list, topk_ids_list, strict=True):
-                        _run_nvfp4_once(hidden_states[: tw.shape[0]], tw, ti)
-                else:
-                    _run_nvfp4_once(hidden_states, topk_weights, topk_ids)
-            elif distributed == "power_law":
-                for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list, strict=True)):
-                    local_num_tokens = tw.shape[0]
-                    if use_int4_wo:
-                        tw = tw.float()
-                    _ = fused_experts(
-                        hidden_states[:local_num_tokens],
-                        w1,
-                        w2,
-                        tw,
-                        ti,
-                        inplace=False,
-                        quant_config=quant_config,
-                        global_num_experts=num_experts,
-                        expert_map=expert_map,
-                    )
-            else:
-                routed_weights = topk_weights.float() if use_int4_wo else topk_weights
-                _ = fused_experts(
-                    hidden_states,
-                    w1,
-                    w2,
-                    routed_weights,
-                    topk_ids,
-                    inplace=False,
-                    quant_config=quant_config,
-                    global_num_experts=num_experts,
-                    expert_map=expert_map,
-                )
-
-        def run_iterations():
-            # Use benchmark_with_power context manager
-            with benchmark_with_power(
-                device=device,
-                kernel_func=run_single_iteration,
-                num_warmups=num_warmups,
-                num_runs=num_runs,
-                repeat_n=1,
-                allow_graph_fail=True,
-            ) as results:
+            with (
+                set_forward_context({}, vllm_config),
+                benchmark_with_power(
+                    device=device,
+                    kernel_func=run_single_iteration,
+                    num_warmups=num_warmups,
+                    num_runs=num_runs,
+                    repeat_n=1,
+                    allow_graph_fail=True,
+                ) as results,
+            ):
                 pass
 
-            return results["latency_ms"] / num_iter, results["power_stats"]
+            latency = results["latency_ms"] / num_iter
+            power_stats = results["power_stats"]
+            print(f"moe latency: {latency}")
 
-        try:
-            vllm_cfg = mxfp4_vllm_cfg if use_mxfp4 else VllmConfig()
-            with set_current_vllm_config(vllm_cfg), set_forward_context({}, vllm_cfg):
-                latency, power_stats = run_iterations()
-        except torch.OutOfMemoryError:
-            # If OOM, check if we had at least one successful run.
-            if num_tokens_idx > 0:
-                break
-            raise
-
-        print(f"moe latency: {latency}")
-
-        if use_mxfp4:
-            source = "vllm_mxfp4_moe"
-        elif use_nvfp4:
-            source = "vllm_flashinfer_trtllm_moe_fp4"
-        elif use_int4_wo:
-            source = "vllm_marlin_int4_moe"
-        else:
-            source = "vllm_fused_moe"
-
-        log_perf(
-            item_list=[
-                {
-                    "moe_dtype": moe_type,
-                    "num_tokens": num_tokens,
-                    "hidden_size": hidden_size,
-                    "inter_size": inter_size,
-                    "topk": topk,
-                    "num_experts": num_experts,
-                    "moe_tp_size": moe_tp_size,
-                    "moe_ep_size": moe_ep_size,
-                    "distribution": "power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed,
-                    "latency": latency,
-                }
-            ],
-            framework="VLLM",
-            version=vllm_version,
-            device_name=torch.cuda.get_device_name(device),
-            op_name="moe",
-            kernel_source=source,
-            perf_filename=perf_filename,
-            power_stats=power_stats,
-        )
+            log_perf(
+                item_list=[
+                    {
+                        "moe_dtype": moe_type,
+                        "num_tokens": num_tokens,
+                        "hidden_size": hidden_size,
+                        "inter_size": inter_size,
+                        "topk": topk,
+                        "num_experts": num_experts,
+                        "moe_tp_size": moe_tp_size,
+                        "moe_ep_size": moe_ep_size,
+                        "distribution": (
+                            "power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed
+                        ),
+                        "latency": latency,
+                    }
+                ],
+                framework="VLLM",
+                version=vllm_version,
+                device_name=torch.cuda.get_device_name(device),
+                op_name="moe",
+                kernel_source=source,
+                perf_filename=perf_filename,
+                power_stats=power_stats,
+            )
 
 
 if __name__ == "__main__":
@@ -753,9 +549,4 @@ if __name__ == "__main__":
 
     for test_case in test_cases[:4]:
         print(f"Running test case: {test_case}")
-        try:
-            run_moe_torch(*test_case, perf_filename=PerfFile.MOE)
-        except Exception as e:
-            print(f"Test case failed: {test_case}")
-            print(f"Error: {e}")
-            continue
+        run_moe_torch(*test_case, perf_filename=PerfFile.MOE)

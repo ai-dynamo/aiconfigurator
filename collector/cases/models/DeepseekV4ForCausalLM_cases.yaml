@@ -35,8 +35,9 @@ model_case_values:
           allowed_modes:
             - w4a8_mxfp4_mxfp8
         vllm:
-          # The pinned vLLM 0.19.0 collector has no DeepSeek-V4 MXFP4/MXFP8
-          # implementation. Keep the native artifact out of its queue.
+          # vLLM 0.24.0's native DeepSeek-V4 path uses the model-level MegaMoE
+          # implementation; the standalone generic MoE collector does not
+          # represent that path. Collect only the converted FP8 artifact here.
           allowed_modes: []
     - model_path: sgl-project/DeepSeek-V4-Flash-FP8
       hidden_size: 4096
@@ -274,8 +275,16 @@ framework_specific_op_cases:
       cases: all
     wideep_moe:
       cases: all
-
-# vLLM DSV4 collectors remain available through the registry/direct module
-# entrypoints, but are not in the default model plan until the manifest runtime
-# satisfies their compatibility floor and prefix-aware context collection is
-# implemented.
+  vllm:
+    # These four full-module paths are consumed by the production DSV4 model.
+    # Standalone sparse kernels and mHC remain registry-only because their
+    # current consumer contract/schedule does not represent vLLM 0.24.0's
+    # fused TileLang post->pre+norm and boundary/head calls.
+    dsv4_csa_context_module:
+      cases: all
+    dsv4_hca_context_module:
+      cases: all
+    dsv4_csa_generation_module:
+      cases: all
+    dsv4_hca_generation_module:
+      cases: all

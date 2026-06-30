@@ -11,6 +11,7 @@ import pytest
 from collector.framework_manifest import get_collector_runtime, load_manifest, validate_manifest
 from collector.sglang.registry import REGISTRY as SGLANG_REGISTRY
 from collector.trtllm.registry import REGISTRY as TRTLLM_REGISTRY
+from collector.vllm.registry import REGISTRY as VLLM_REGISTRY
 from collector.wideep.sglang.registry import REGISTRY as WIDEEP_SGLANG_REGISTRY
 from collector.wideep.trtllm.registry import REGISTRY as WIDEEP_TRTLLM_REGISTRY
 
@@ -28,8 +29,22 @@ def test_manifest_exposes_current_framework_versions_and_images():
     assert sglang.image("cu130") == "lmsysorg/sglang:v0.5.10-cu130"
     assert trtllm.version == "1.3.0rc10"
     assert trtllm.image() == "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10"
-    assert vllm.version == "0.19.0"
-    assert vllm.image("cu130") == "vllm/vllm-openai:v0.19.0-cu130"
+    assert vllm.version == "0.24.0"
+    assert vllm.image() == "vllm/vllm-openai:v0.24.0"
+    assert vllm.image("cu129") == "vllm/vllm-openai:v0.24.0-cu129"
+    # vLLM 0.24.0 has no separately published cu130 tag. Unknown variants
+    # intentionally fall back to the pinned default image.
+    assert vllm.image("cu130") == "vllm/vllm-openai:v0.24.0"
+
+
+def test_active_cuda_vllm_collectors_are_exactly_pinned_to_manifest_version():
+    expected = f'__compat__ = "vllm=={get_collector_runtime("vllm").version}"'
+    assert all(not entry.versions for entry in VLLM_REGISTRY)
+
+    for module in sorted({entry.module for entry in VLLM_REGISTRY}):
+        source = (REPO_ROOT / f"{module.replace('.', '/')}.py").read_text(encoding="utf-8")
+        declarations = [line.strip() for line in source.splitlines() if line.startswith("__compat__")]
+        assert declarations == [expected], module
 
 
 def test_wideep_versions_stay_aligned_with_default_framework_versions():

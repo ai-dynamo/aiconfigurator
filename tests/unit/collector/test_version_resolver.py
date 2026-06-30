@@ -111,6 +111,9 @@ class TestCheckCompat:
             # vLLM
             ("vllm>=0.11.0", "0.14.0", True),
             ("vllm>=0.11.0", "0.10.0", False),
+            ("vllm==0.24.0", "0.24.0", True),
+            ("vllm==0.24.0", "0.24.0+cu129", True),
+            ("vllm==0.24.0", "0.23.0", False),
         ],
     )
     def test_compat_constraints(self, compat, runtime, expected):
