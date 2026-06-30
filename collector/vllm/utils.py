@@ -4,15 +4,9 @@
 
 # Modified from https://github.com/vllm-project/vllm/blob/v0.11.0/tests/v1/attention/utils.py
 
-"""Shared vLLM collector test harness utilities.
-
-Adapted from vLLM's attention test helpers, this module builds minimal vLLM
-configs, KV-cache specs, distributed setup contexts, cache-population helpers,
-and backend compatibility shims used by the vLLM collectors.
-"""
+"""Shared vLLM 0.24.0 collector test-harness utilities."""
 
 import functools
-import inspect
 import os
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -20,11 +14,6 @@ from functools import wraps
 from typing import Optional, Union
 
 import torch
-
-try:
-    from vllm.attention.backends.registry import AttentionBackendEnum
-except ImportError:
-    AttentionBackendEnum = None  # type: ignore
 from vllm import _custom_ops as ops
 from vllm.config import (
     CacheConfig,
@@ -37,34 +26,15 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-
-try:
-    from vllm.config.model import ModelDType
-except Exception:  # pragma: no cover - compatibility with older vLLM installs
-    from typing import Union as _Union
-
-    ModelDType = _Union[str, torch.dtype]  # type: ignore[misc]
-from vllm.platforms import current_platform
-
-try:
-    from vllm.platforms import _Backend  # type: ignore
-except Exception:
-    _Backend = None  # type: ignore
-
-try:
-    from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, resolve_obj_by_qualname
-except ImportError:
-    # Compatibility with newer vLLM where these live in submodules
-    from vllm.utils.import_utils import resolve_obj_by_qualname  # type: ignore
-    from vllm.utils.math_utils import cdiv  # type: ignore
-    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE  # type: ignore
-
+from vllm.config.model import ModelDType
 from vllm.distributed import init_distributed_environment
 from vllm.distributed.parallel_state import ensure_model_parallel_initialized
+from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
-
-_COMMON_ATTN_METADATA_PARAMS = set(inspect.signature(CommonAttentionMetadata).parameters)
 
 
 class MockAttentionLayer:
@@ -140,76 +110,27 @@ def create_common_attn_metadata(
     # Calculate max query length
     max_query_len = max(batch_spec.query_lens)
 
-    metadata_kwargs = {
-        "query_start_loc": query_start_loc,
-        "query_start_loc_cpu": query_start_loc_cpu,
-        "seq_lens": seq_lens,
-        "num_reqs": batch_spec.batch_size,
-        "num_actual_tokens": num_tokens,
-        "max_query_len": max_query_len,
-        "max_seq_len": max_seq_len,
-        "block_table_tensor": block_table_tensor,
-        "slot_mapping": slot_mapping,
-        "causal": True,
-    }
-    if "seq_lens_cpu_upper_bound" in _COMMON_ATTN_METADATA_PARAMS:
-        metadata_kwargs["seq_lens_cpu_upper_bound"] = seq_lens_cpu
-    if "_seq_lens_cpu" in _COMMON_ATTN_METADATA_PARAMS:
-        metadata_kwargs["_seq_lens_cpu"] = seq_lens_cpu
-    elif "seq_lens_cpu" in _COMMON_ATTN_METADATA_PARAMS:
-        metadata_kwargs["seq_lens_cpu"] = seq_lens_cpu
-    if "_num_computed_tokens_cpu" in _COMMON_ATTN_METADATA_PARAMS:
-        metadata_kwargs["_num_computed_tokens_cpu"] = num_computed_tokens_cpu
-    elif "num_computed_tokens_cpu" in _COMMON_ATTN_METADATA_PARAMS:
-        metadata_kwargs["num_computed_tokens_cpu"] = num_computed_tokens_cpu
-    if "seq_start_loc_cpu" in _COMMON_ATTN_METADATA_PARAMS:
-        metadata_kwargs["seq_start_loc_cpu"] = None
-    if "seq_start_loc" in _COMMON_ATTN_METADATA_PARAMS:
-        metadata_kwargs["seq_start_loc"] = None
-    return CommonAttentionMetadata(**metadata_kwargs)
+    return CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
+        _seq_lens_cpu=seq_lens_cpu,
+        _num_computed_tokens_cpu=num_computed_tokens_cpu,
+        num_reqs=batch_spec.batch_size,
+        num_actual_tokens=num_tokens,
+        max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
+        block_table_tensor=block_table_tensor,
+        slot_mapping=slot_mapping,
+        causal=True,
+    )
 
 
 def get_attention_backend(backend_name: AttentionBackendEnum):
-    """Set up attention backend classes for testing (new and legacy)."""
-    # Newer API: AttentionBackendEnum with get_class()
-    try:
-        backend_class = backend_name.get_class()
-        return backend_class.get_builder_cls(), backend_class.get_impl_cls()
-    except Exception:
-        pass
-
-    # Legacy API: _Backend enum with manual mapping
-    if _Backend is not None and isinstance(backend_name, _Backend):
-        if torch.xpu.is_available():
-            backend_map = {
-                _Backend.FLASH_ATTN_VLLM_V1: "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend",
-            }
-        else:
-            backend_map = {
-                _Backend.FLASH_ATTN: (
-                    "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
-                    if current_platform.is_cuda()
-                    else "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend"
-                ),
-                _Backend.FLASHINFER: "vllm.v1.attention.backends.flashinfer.FlashInferBackend",
-                _Backend.FLEX_ATTENTION: "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",
-                _Backend.TRITON_ATTN: "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
-                _Backend.TREE_ATTN: "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",
-                _Backend.XFORMERS: "vllm.v1.attention.backends.xformers.XFormersAttentionBackend",
-                _Backend.CUTLASS_MLA: "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",
-                _Backend.FLASHMLA: "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",
-                _Backend.FLASH_ATTN_MLA: "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",
-                _Backend.FLASHINFER_MLA: "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend",
-                _Backend.TRITON_MLA: "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
-            }
-
-        if backend_name not in backend_map:
-            raise ValueError(f"Unknown backend: {backend_name}")
-        backend_class_name = backend_map[backend_name]
-        backend_class = resolve_obj_by_qualname(backend_class_name)
-        return backend_class.get_builder_cls(), backend_class.get_impl_cls()
-
-    raise ValueError(f"Unsupported backend type: {backend_name}")
+    """Return vLLM 0.24.0 metadata-builder and implementation classes."""
+    backend_class = backend_name.get_class()
+    return backend_class.get_builder_cls(), backend_class.get_impl_cls()
 
 
 def create_standard_kv_cache_spec(vllm_config: VllmConfig, use_fp8_kv_cache: bool = False) -> FullAttentionSpec:
@@ -254,18 +175,10 @@ def create_vllm_config(
         max_model_len=max_model_len,
     )
 
-    try:
-        cache_config = CacheConfig(
-            block_size=block_size,
-            cache_dtype="fp8" if use_fp8_kv_cache else "auto",
-            swap_space=0,
-        )
-    except (TypeError, Exception):
-        # vLLM >=0.19.0 removed swap_space from CacheConfig
-        cache_config = CacheConfig(
-            block_size=block_size,
-            cache_dtype="fp8" if use_fp8_kv_cache else "auto",
-        )
+    cache_config = CacheConfig(
+        block_size=block_size,
+        cache_dtype="fp8" if use_fp8_kv_cache else "auto",
+    )
     # Set cache blocks for testing
     #   (these may be set during initialization normally)
     cache_config.num_gpu_blocks = num_gpu_blocks
@@ -311,25 +224,15 @@ def create_vllm_config(
     if head_dim is not None:
         model_config.hf_config.head_dim = head_dim
         model_config.model_arch_config.head_size = head_dim
-    # ModelConfig.model_arch_config is built once from hf_config in __init__,
-    # so mutating hf_config alone leaves the cached arch values stale. Backends
-    # such as the V1 FA3 builder read num_heads/kv_heads via
-    # ModelConfig.get_num_attention_heads / get_num_kv_heads, which look at
-    # model_arch_config — without these overrides the AOT scheduler builds
-    # scheduler_metadata for the fake model's defaults (16 q-heads / 8 kv-heads)
-    # while the kernel call runs with the test's actual head counts, and FA3's
-    # shape check rejects the mismatched scheduler_metadata. The hasattr guards
-    # let this degrade gracefully on older vLLM where the attribute names may
-    # differ (the FA3 bug only exists from vllm>=0.19 anyway).
-    arch_cfg = getattr(model_config, "model_arch_config", None)
+    # ModelConfig.model_arch_config is built once in __init__, so keep its
+    # cached head counts aligned with the fake HF config used by this harness.
+    arch_cfg = model_config.model_arch_config
     if num_heads is not None:
         model_config.hf_config.num_attention_heads = num_heads
-        if arch_cfg is not None and hasattr(arch_cfg, "total_num_attention_heads"):
-            arch_cfg.total_num_attention_heads = num_heads
+        arch_cfg.total_num_attention_heads = num_heads
     if num_kv_heads is not None:
         model_config.hf_config.num_key_value_heads = num_kv_heads
-        if arch_cfg is not None and hasattr(arch_cfg, "total_num_kv_heads"):
-            arch_cfg.total_num_kv_heads = num_kv_heads
+        arch_cfg.total_num_kv_heads = num_kv_heads
 
     return VllmConfig(
         model_config=model_config,
@@ -624,8 +527,6 @@ def setup_distributed(device):
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(port)
     init_distributed_environment()
-    # vLLM >= 0.14.0 requires set_current_vllm_config() context for
-    # initialize_model_parallel() (https://github.com/vllm-project/vllm/pull/31747).
     with set_current_vllm_config(VllmConfig()):
         ensure_model_parallel_initialized(1, 1)
 

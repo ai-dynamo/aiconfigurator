@@ -305,11 +305,6 @@ common_case_values:
         gemm_type: bfloat16
         min_sm: 90
         phases: [context, generation]
-      - compute_dtype: fp8
-        kv_cache_dtype: fp8
-        gemm_type: bfloat16
-        min_sm: 100
-        phases: [context]
       - compute_dtype: bfloat16
         kv_cache_dtype: bfloat16
         gemm_type: fp8_block
@@ -320,11 +315,6 @@ common_case_values:
         gemm_type: fp8_block
         min_sm: 90
         phases: [context, generation]
-      - compute_dtype: fp8
-        kv_cache_dtype: fp8
-        gemm_type: fp8_block
-        min_sm: 100
-        phases: [context]
       - compute_dtype: bfloat16
         kv_cache_dtype: bfloat16
         gemm_type: nvfp4
@@ -335,11 +325,6 @@ common_case_values:
         gemm_type: nvfp4
         min_sm: 100
         phases: [context, generation]
-      - compute_dtype: fp8
-        kv_cache_dtype: fp8
-        gemm_type: nvfp4
-        min_sm: 100
-        phases: [context]
     context:
       max_tokens: 131072
       prefix_lengths:

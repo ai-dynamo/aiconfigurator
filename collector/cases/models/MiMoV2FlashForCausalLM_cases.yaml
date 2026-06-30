@@ -7,6 +7,20 @@ model_path: XiaomiMiMo/MiMo-V2-Flash
 model_paths:
   - XiaomiMiMo/MiMo-V2-Flash
 include_base: true
+base_ops:
+  - gemm
+framework_specific_base_ops:
+  # vLLM 0.24 uses DiffKV (QK=192, V=128, plus sinks). The persisted generic
+  # attention schema cannot represent that path, so vLLM intentionally omits it.
+  sglang:
+    - attention_context
+    - attention_generation
+  trtllm:
+    - attention_context
+    - attention_generation
+  vllm_xpu:
+    - attention_context
+    - attention_generation
 description: >
   MiMo-V2-Flash hybrid model-centric collection plan. Starts with shared base
   cases and includes the hybrid MoE shape used by the support matrix.

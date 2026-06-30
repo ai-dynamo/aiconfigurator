@@ -1,55 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""vLLM dense attention collector for CUDA backends.
+"""vLLM 0.24.0 dense-attention collector for CUDA backends."""
 
-Creates minimal vLLM configs, KV-cache specs, attention metadata, and mock
-layers so context/generation attention kernels can be timed in isolation. The
-file adapts across vLLM backend-selector API changes while shared shape policy
-comes from collector case specs/YAML.
-"""
-
-__compat__ = "vllm>=0.11.0"
+__compat__ = "vllm==0.24.0"
 
 import os
 
 import torch
-import vllm
-
-try:
-    from vllm.attention.backends.registry import AttentionBackendEnum
-except ImportError:
-    try:
-        from vllm.v1.attention.backends.registry import AttentionBackendEnum
-    except ImportError:
-        AttentionBackendEnum = None  # type: ignore
-try:
-    from vllm.platforms import _Backend as LegacyBackendEnum  # type: ignore
-except Exception:
-    LegacyBackendEnum = None  # type: ignore
-from vllm.platforms import current_platform
-
-try:
-    from vllm.utils import is_torch_equal_or_newer
-except ImportError:
-    from vllm.utils.torch_utils import is_torch_equal_or_newer
-
-from vllm.v1.attention.backends.utils import set_kv_cache_layout
-from vllm.version import __version__ as vllm_version
-
-try:
-    from vllm.utils import resolve_obj_by_qualname
-except ImportError:
-    from vllm.utils.import_utils import resolve_obj_by_qualname  # type: ignore
-
 from vllm.config import set_current_vllm_config
+from vllm.platforms import current_platform
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.utils import set_kv_cache_layout
+from vllm.v1.attention.selector import AttentionSelectorConfig
+from vllm.version import __version__ as vllm_version
 
 from collector.case_generator import (
     get_attention_context_shape_sweeps,
     get_attention_generation_shape_sweeps,
     get_attention_head_configs,
 )
-from collector.helper import EXIT_CODE_RESTART, benchmark_with_power, get_sm_version, log_perf
+from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.vllm.utils import (
     BatchSpec,
     create_and_prepopulate_kv_cache,
@@ -76,23 +49,6 @@ class MockAttentionLayer:
 
 # https://github.com/vllm-project/vllm/tree/main/vllm/v1/attention/backends
 # support MHA GQA MQA bfloat16 tensor and bfloat16/fp8 kv cache
-
-
-def _skip_vllm_sm89_022_fp8_kv_cache(use_fp8_kv_cache: bool) -> bool:
-    return use_fp8_kv_cache and vllm_version.startswith("0.22.0") and get_sm_version() == 89
-
-
-def _skip_vllm_sm89_022_flashinfer_head_dim(head_dim: int) -> bool:
-    return vllm_version.startswith("0.22.0") and get_sm_version() == 89 and head_dim >= 512
-
-
-def _restart_vllm_sm89_022_after_attention_case(head_dim: int) -> bool:
-    return (
-        os.environ.get("AIC_VLLM_ATTENTION_RESTART_AFTER_CASE") == "1"
-        and vllm_version.startswith("0.22.0")
-        and get_sm_version() == 89
-        and head_dim >= 192
-    )
 
 
 @with_exit_stack
@@ -127,10 +83,7 @@ def run_attention_torch(
             query_lens=[1] * batch_size,
         )
 
-    try:
-        vllm.utils.torch_utils.set_random_seed(42)
-    except AttributeError:
-        current_platform.seed_everything(42)
+    set_random_seed(42)
 
     vllm_config = create_vllm_config(
         model_name=model,
@@ -145,73 +98,26 @@ def run_attention_torch(
         num_kv_heads=num_kv_heads,
     )
 
-    # vLLM >=0.19.0 requires an active config context for backend selection
-    # (get_attn_backend_cls internally calls get_current_vllm_config).
     exit_stack.enter_context(set_current_vllm_config(vllm_config))
 
-    # Let vLLM choose the backend. Handle multiple historical signatures:
-    # newest: (... use_mm_prefix=..., use_v1=True/False defaulted to True)
-    # mid:    (... use_mm_prefix omitted)
-    # old:    (... use_v1 required, no use_mm_prefix)
-    try:
-        backend = current_platform.get_attn_backend_cls(
-            None,
-            head_dim,
-            dtype,
-            kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
-            block_size=block_size,
-            use_mla=False,
-            has_sink=False,
-            use_sparse=False,
-            use_mm_prefix=False,
-        )
-    except TypeError:
-        try:
-            backend = current_platform.get_attn_backend_cls(
-                None,
-                head_dim,
-                dtype,
-                kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
-                block_size=block_size,
-                use_mla=False,
-                has_sink=False,
-                use_sparse=False,
-            )
-        except TypeError:
-            try:
-                backend = current_platform.get_attn_backend_cls(
-                    None,
-                    head_dim,
-                    dtype,
-                    kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
-                    block_size=block_size,
-                    use_mla=False,
-                    has_sink=False,
-                    use_sparse=False,
-                    use_v1=True,
-                )
-            except TypeError:
-                from vllm.v1.attention.selector import AttentionSelectorConfig
-
-                attn_selector_config = AttentionSelectorConfig(
-                    head_size=head_dim,
-                    dtype=dtype,
-                    kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
-                    block_size=block_size,
-                    use_mla=False,
-                    has_sink=False,
-                    use_sparse=False,
-                )
-                backend = current_platform.get_attn_backend_cls(None, attn_selector_config)
-
-    backend_name_obj = resolve_obj_by_qualname(backend)
-    backend_name_str = backend_name_obj.get_name()
-    if AttentionBackendEnum is not None:
-        backend_name = AttentionBackendEnum[backend_name_str]
-    elif LegacyBackendEnum is not None:
-        backend_name = LegacyBackendEnum[backend_name_str]
-    else:
-        backend_name = backend_name_str
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=head_dim,
+        dtype=dtype,
+        kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+        block_size=block_size,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+    )
+    backend_path = current_platform.get_attn_backend_cls(
+        None,
+        attn_selector_config,
+        num_heads=num_heads,
+    )
+    backend_cls = resolve_obj_by_qualname(backend_path)
+    backend_name_str = backend_cls.get_name()
+    backend_name = AttentionBackendEnum[backend_name_str]
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config, use_fp8_kv_cache)
 
@@ -263,33 +169,17 @@ def run_attention_torch(
         randomize_blocks=True,
     )
 
-    # Fix backend-specific kv cache layout.
-    backend_name_str = backend_name if isinstance(backend_name, str) else backend_name.name
+    # The helper populates [2, num_blocks, ...]; vLLM 0.24 uses logical
+    # [num_blocks, 2, ...] and may impose a backend-specific physical stride.
+    kv_cache = kv_cache.transpose(0, 1).contiguous()
+    set_kv_cache_layout(backend_cls.get_required_kv_cache_layout())
+    exit_stack.callback(set_kv_cache_layout, None)
+    stride_order = backend_cls.get_kv_cache_stride_order()
+    if stride_order != tuple(range(kv_cache.ndim)):
+        inverse_order = [stride_order.index(i) for i in range(kv_cache.ndim)]
+        kv_cache = kv_cache.permute(*stride_order).contiguous().permute(*inverse_order)
 
-    if backend_name_str in {"FLASHINFER", "TRITON_ATTN"}:
-        # The collector helper populates cache as [2, num_blocks, ...] because
-        # that layout makes K/V insertion simple. vLLM V1 backends consume it as
-        # [num_blocks, 2, ...].
-        kv_cache = kv_cache.transpose(0, 1).contiguous()
-
-    if backend_name_str == "FLASHINFER":
-        # For FlashInfer default to HND layout
-        kv_cache = kv_cache.transpose(2, 3).contiguous().transpose(2, 3)
-        set_kv_cache_layout("HND")
-
-    # Handle special case for FLEX_ATTENTION_SLOW
-    actual_backend = backend_name
-    use_direct_block_mask = is_torch_equal_or_newer("2.9.0.dev0")
-    if backend_name_str == "FLEX_ATTENTION_SLOW":
-        if AttentionBackendEnum is not None:
-            actual_backend = AttentionBackendEnum.FLEX_ATTENTION
-        elif LegacyBackendEnum is not None:
-            actual_backend = LegacyBackendEnum.FLEX_ATTENTION
-        else:
-            actual_backend = backend_name
-        use_direct_block_mask = False
-
-    builder_cls, impl_cls = get_attention_backend(actual_backend)
+    builder_cls, impl_cls = get_attention_backend(backend_name)
     layer_names = ["placeholder"]
 
     # Mock flashinfer's get_per_layer_parameters if needed
@@ -321,7 +211,7 @@ def run_attention_torch(
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
         if backend_name_str == "FLEX_ATTENTION":
-            builder.direct_build = use_direct_block_mask
+            builder.direct_build = True
         # FA3's metadata builder auto-detects sliding_window by walking registered
         # Attention layers; the collector doesn't register any, so the auto-detect
         # finds nothing and aot_sliding_window stays at (-1, -1). Then FA3's
@@ -357,9 +247,7 @@ def run_attention_torch(
     test_ite = 6
     warm_up = 3
 
-    # vLLM >=0.11.0 sets supports_quant_query_input=True, expecting the caller
-    # to pass an FP8 query; older versions quantise internally and expect BF16.
-    needs_fp8_query = use_fp8_kv_cache and getattr(impl, "supports_quant_query_input", False)
+    needs_fp8_query = use_fp8_kv_cache and impl.supports_quant_query_input
     query_fwd = query_vllm.to(current_platform.fp8_dtype()) if needs_fp8_query else query_vllm
     # Output buffer is always BF16 — the impl dequantises internally.
     output = torch.empty_like(query_vllm)
@@ -426,9 +314,6 @@ def run_attention_torch(
         power_stats=results["power_stats"],
     )
 
-    if _restart_vllm_sm89_022_after_attention_case(head_dim):
-        raise SystemExit(EXIT_CODE_RESTART)
-
 
 def get_context_attention_test_cases(if_unit_test=False):
     test_cases = []
@@ -466,8 +351,6 @@ def get_context_attention_test_cases(if_unit_test=False):
             num_kv_heads = head_config.num_kv_heads
             head_dim = head_config.head_dim
             window_size = head_config.window_size
-            if _skip_vllm_sm89_022_flashinfer_head_dim(head_dim):
-                continue
             for s in sorted(sequence_lengths, reverse=True):
                 for b in sorted(batch_sizes, reverse=True):
                     if num_kv_heads == n:
@@ -478,8 +361,6 @@ def get_context_attention_test_cases(if_unit_test=False):
                     if b * s * num_kv_heads * head_dim * 2 >= max_kv_elements:
                         continue
                     for is_fp8_kv_cache in kv_cache_dtype_list:
-                        if _skip_vllm_sm89_022_fp8_kv_cache(is_fp8_kv_cache):
-                            continue
                         test_cases.append(
                             [
                                 b,
@@ -535,8 +416,6 @@ def get_generation_attention_test_cases():
             n_kv = head_config.num_kv_heads
             head_dim = head_config.head_dim
             window_size = head_config.window_size
-            if _skip_vllm_sm89_022_flashinfer_head_dim(head_dim):
-                continue
             # The generation schema has separate caps because MHA and GQA have
             # different memory/throughput limits. The old loop used the MHA cap
             # for every case even though it enumerated GQA shapes as well.
@@ -553,21 +432,17 @@ def get_generation_attention_test_cases():
                 target_s_list = sorted(s_list_limited)
                 if b >= min_drop_batch:
                     target_s_list = target_s_list[:-1]
-                # On SM100 (Blackwell), vLLM uses FlashInfer which routes
-                # decode to trtllm_batch_decode_with_kv_cache. That kernel
-                # only supports GQA ratios up to 16.
-                # FIXME(kernel-limit): pre-existing generation-time skip
-                # encoding a framework kernel limit (also mirrored by a
-                # retired sm_exceptions rule, PR #1302). Not verified against
-                # the vLLM backend-selector source. On the next version bump:
-                # verify, then convert to probe-and-raise per
-                # .claude/rules/collector/layer_permissions.md, or delete.
-                if get_sm_version() >= 100 and n // n_kv > 16:
+                # On datacenter Blackwell SM100/SM103, vLLM 0.24.0 uses
+                # FlashInfer and routes decode to
+                # trtllm_batch_decode_with_kv_cache, whose GQA ratio is capped
+                # at 16. SM120 takes the FlashAttention path, so applying this
+                # constraint to every SM >= 100 would incorrectly prune RTX
+                # Blackwell. These non-SM90 paths are source-derived and remain
+                # hardware-unvalidated here.
+                if get_sm_version() in (100, 103) and n // n_kv > 16:
                     continue
                 for s in target_s_list:
                     for is_fp8_kv_cache in kv_cache_dtype_list:
-                        if _skip_vllm_sm89_022_fp8_kv_cache(is_fp8_kv_cache):
-                            continue
                         test_cases.append(
                             [
                                 b,

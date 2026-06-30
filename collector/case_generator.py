@@ -522,42 +522,41 @@ class MLAModulePrecisionSpec:
 def get_mla_module_model_specs(
     attention_type: str | None = None,
     *,
+    backend: str | None = None,
     wideep_mla: bool | None = None,
     apply_model_filter: bool = True,
 ) -> list[MLAModuleModelSpec]:
     """Return YAML-backed model metadata for full MLA/DSA module collectors."""
 
-    values = []
-    model_path_filter = _get_model_path_filter() if apply_model_filter else None
-    for data in _load_model_cases_data():
-        raw_values = (data.get("model_case_values") or {}).get("mla_module", [])
-        if raw_values is None:
-            continue
-        if isinstance(raw_values, dict):
-            raw_values = [raw_values]
-        if not isinstance(raw_values, list):
-            raise TypeError("model_case_values.mla_module must be a list or mapping")
+    values = _model_case_values("mla_module", apply_model_filter=False)
+    if backend is not None:
+        values.extend(
+            _framework_specific_model_case_values(
+                "mla_module",
+                backend,
+                apply_model_filter=False,
+            )
+        )
 
-        architecture = data.get("architecture")
-        for index, raw_value in enumerate(raw_values):
-            for value in _expand_model_case_entry(raw_value, field_name=f"model_case_values.mla_module[{index}]"):
-                value.setdefault("architecture", architecture)
-                if model_path_filter and not _model_case_matches_path(value, model_path_filter):
-                    continue
-                if attention_type is not None and value.get("attention_type") != attention_type:
-                    continue
-                if wideep_mla is not None and bool(value.get("wideep_mla", False)) != wideep_mla:
-                    continue
-                values.append(
-                    MLAModuleModelSpec(
-                        model_path=str(value["model_path"]),
-                        attention_type=str(value["attention_type"]),
-                        architecture=str(value["architecture"]),
-                        native_num_heads=int(value["native_num_heads"]),
-                        wideep_mla=bool(value.get("wideep_mla", False)),
-                    )
-                )
-    return values
+    specs = []
+    model_path_filter = _get_model_path_filter() if apply_model_filter else None
+    for value in values:
+        if model_path_filter and not _model_case_matches_path(value, model_path_filter):
+            continue
+        if attention_type is not None and value.get("attention_type") != attention_type:
+            continue
+        if wideep_mla is not None and bool(value.get("wideep_mla", False)) != wideep_mla:
+            continue
+        specs.append(
+            MLAModuleModelSpec(
+                model_path=str(value["model_path"]),
+                attention_type=str(value["attention_type"]),
+                architecture=str(value["architecture"]),
+                native_num_heads=int(value["native_num_heads"]),
+                wideep_mla=bool(value.get("wideep_mla", False)),
+            )
+        )
+    return specs
 
 
 def _required_mapping(value: object, *, field_name: str) -> dict[str, object]:
