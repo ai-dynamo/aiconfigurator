@@ -3,13 +3,21 @@
 
 """Unit tests for sweep.py helpers and sweep_disagg placeholder.
 
-sweep_agg end-to-end correctness is validated by the integration
-parity test (tests/integration/test_task_v1_v2_parity.py) against the
-legacy CLI path; mocking it at unit level provides little signal.
+Sweep output correctness is validated by the integration parity test
+(``tests/integration/test_task_v1_v2_parity.py``) against the legacy CLI path;
+the unit coverage here targets local control flow and terminal classification.
 """
+
+from unittest.mock import MagicMock
 
 import pytest
 
+from aiconfigurator.sdk import config, sweep
+from aiconfigurator.sdk.errors import (
+    InsufficientMemoryError,
+    KVCacheCapacityError,
+    NoFeasibleConfigError,
+)
 from aiconfigurator.sdk.sweep import (
     _DEFAULT_AGG_BATCH_SCHEDULE,
     _agg_ctx_tokens_list,
@@ -57,6 +65,45 @@ def test_default_agg_batch_schedule_is_monotonic_and_capped():
     assert sorted(_DEFAULT_AGG_BATCH_SCHEDULE) == _DEFAULT_AGG_BATCH_SCHEDULE
     assert _DEFAULT_AGG_BATCH_SCHEDULE[0] == 1
     assert _DEFAULT_AGG_BATCH_SCHEDULE[-1] == 1024
+
+
+# ---------------------------------------------------------------------------
+# sweep_agg no-result classification
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("memory_states", "expected_error"),
+    [
+        ([(True, False), (True, False)], InsufficientMemoryError),
+        ([(False, True), (True, False)], KVCacheCapacityError),
+        ([(False, False), (True, False)], NoFeasibleConfigError),
+    ],
+)
+def test_sweep_agg_classifies_no_result_outcomes(monkeypatch, memory_states, expected_error):
+    summaries = []
+    for model_oom, kv_cache_oom in memory_states:
+        summary = MagicMock()
+        summary.check_oom.return_value = model_oom
+        summary.check_kv_cache_oom.return_value = kv_cache_oom
+        summary.get_result_dict.return_value = {"ttft": 2.0, "tpot": 2.0}
+        summaries.append(summary)
+
+    monkeypatch.setattr(sweep, "get_backend", lambda _backend_name: MagicMock())
+    monkeypatch.setattr(sweep, "get_model", lambda **_kwargs: MagicMock())
+    monkeypatch.setattr(sweep, "predict_agg_worker", MagicMock(side_effect=summaries))
+
+    with pytest.raises(expected_error):
+        sweep.sweep_agg(
+            model_path="test-model",
+            runtime_config=config.RuntimeConfig(isl=1024, osl=1, ttft=1.0, tpot=1.0),
+            database=MagicMock(),
+            backend_name="trtllm",
+            model_config=config.ModelConfig(),
+            parallel_config_list=[(1, 1, 1, 1, 1, 1), (2, 1, 1, 2, 1, 1)],
+            max_batch_size=1,
+            ctx_stride=1024,
+        )
 
 
 # ---------------------------------------------------------------------------
