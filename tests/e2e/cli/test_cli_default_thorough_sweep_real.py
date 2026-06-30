@@ -101,6 +101,10 @@ def test_cli_default_thorough_sweep_real_static_workload(tmp_path: Path):
     assert sweep_done, combined
     assert int(sweep_done.group("feasible")) == 4
     assert int(sweep_done.group("attempts")) == 4
+    assert int(sweep_done.group("gated")) == 0
+    assert int(sweep_done.group("unsupported")) == 0
+    assert int(sweep_done.group("replay_failed")) == 0
+    assert int(sweep_done.group("cache_hits")) == 0
     assert "AIConfigurator Final Results" in combined
     assert "Total GPUs: 4" in combined
     assert "Synthetic Workload: ISL=128, OSL=16, concurrency=1, num_request_ratio=4.0" in combined

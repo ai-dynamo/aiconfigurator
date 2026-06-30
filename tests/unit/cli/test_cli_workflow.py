@@ -664,10 +664,26 @@ class TestCLIIntegration:
         assert result.loc[0, "concurrency"] == 11940
         assert result.loc[0, "kv_load_ratio"] == pytest.approx(0.59)
 
+    def test_spica_result_falls_back_to_observed_concurrency(self):
+        candidate = {
+            "config": {"deployment_mode": "agg", "backend": "sglang"},
+            "used_gpus": 1,
+            "score": 0.0,
+            "metrics": {"concurrency": 7.5},
+        }
+
+        result = _spica_candidates_to_result_df(
+            [candidate],
+            goal=argparse.Namespace(target="throughput", sla=None),
+        )
+
+        assert result.loc[0, "concurrency"] == pytest.approx(7.5)
+
     @pytest.mark.parametrize(
         ("load", "expected"),
         [
             ({"concurrency": 16}, "concurrency=16"),
+            ({"concurrency": 16, "request_rate": 2.5}, "concurrency=16"),
             ({"request_rate": 2.5}, "request_rate=2.5"),
             ({"kv_load_ratio": [0.0, 1.0]}, "kv_load_ratio=[0.0, 1.0]"),
         ],
