@@ -279,8 +279,15 @@ a system-aware consumer contract, not a collector-only SM heuristic. The
 converted `sgl-project/*-FP8` artifacts still schedule `fp8_block` in SGLang
 and TRT-LLM, but not vLLM: their full-width FP8 expert tensors conflict with
 vLLM's FP4 default when `expert_dtype` is absent. Removing those 72 converted
-tasks / 1,944 token rows leaves the SM90 vLLM MoE getter at 1,752 tasks / 47,304
-rows and the full vLLM plan at 347,379 task IDs.
+tasks / 1,944 token rows is one vLLM-only pruning stage. vLLM 0.24 also builds
+Nemotron Ultra's routed `FusedMoE` at `moe_latent_size=2048`; the outer
+`hidden_size=8192` belongs to its projection layers. The shared 8192-wide
+profiles remain available to SGLang and TRT-LLM, while vLLM drops another 84
+tasks / 2,268 token rows. Together these stages leave the SM90 vLLM MoE getter
+at 1,668 tasks / 45,036 rows. The current centralized SM90 getters produce
+270,943 candidate tasks; SM90 exceptions remove 1,378 attention cases, leaving
+269,565 unique executable task IDs. Earlier 347k artifact-expanded probes
+predated getter deduplication and are not checkpoint-count totals.
 Kimi-K2-Instruct schedules `fp8_block`, native Kimi-K2.5 schedules
 `int4_wo` with group size 32, and NVIDIA Kimi-K2.5 schedules `nvfp4`.
 

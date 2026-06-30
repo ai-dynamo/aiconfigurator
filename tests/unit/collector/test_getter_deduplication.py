@@ -379,9 +379,30 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
         "sgl-project/DeepSeek-V4-Pro-FP8",
     }
 
-    assert len(cases) == 1752
-    assert sum(len(case[1]) for case in cases) == 47304
+    assert len(cases) == 1668
+    assert sum(len(case[1]) for case in cases) == 45036
     assert not any(case[8] in dsv4_models for case in cases)
+
+
+@pytest.mark.parametrize(
+    ("model_path", "moe_type"),
+    [
+        ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "bfloat16"),
+        ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", "fp8"),
+    ],
+)
+def test_vllm_nemotron_ultra_uses_latent_moe_width(monkeypatch, model_path, moe_type):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    monkeypatch.setattr(module, "get_sm_version", lambda: 90)
+
+    cases = module.get_moe_test_cases()
+
+    assert len(cases) == 42
+    assert sum(len(case[1]) for case in cases) == 1134
+    assert {case[0] for case in cases} == {moe_type}
+    assert {case[2] for case in cases} == {2048}
 
 
 @pytest.mark.parametrize(
