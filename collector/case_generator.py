@@ -556,6 +556,19 @@ def get_mla_module_model_specs(
                 wideep_mla=bool(value.get("wideep_mla", False)),
             )
         )
+
+    if backend == "vllm" and apply_model_filter and model_path_filter is None:
+        # vLLM 0.24 builds every module with the case's explicit precision and
+        # head count, so checkpoint aliases no longer change the invocation.
+        # MLA has one architecture-less consumer table; DSA is keyed by
+        # architecture. Stable first-wins keeps DeepSeek-V3 and each DSA
+        # architecture canonical while targeted artifact runs remain exact.
+        canonical_specs = {}
+        for spec in specs:
+            key = (spec.attention_type, spec.architecture if spec.attention_type == "dsa" else None)
+            canonical_specs.setdefault(key, spec)
+        specs = list(canonical_specs.values())
+
     return specs
 
 

@@ -739,6 +739,7 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         apply_model_filter=False,
     )
     wideep_specs = get_mla_module_model_specs(attention_type="mla", wideep_mla=True, apply_model_filter=False)
+    vllm_specs = get_mla_module_model_specs(backend="vllm")
 
     assert sweep.batch_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     assert sweep.sequence_lengths[-2:] == [8192, 16384]
@@ -808,6 +809,11 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         "deepseek-ai/DeepSeek-R1",
         "deepseek-ai/DeepSeek-V3",
         "nvidia/DeepSeek-V3.1-NVFP4",
+    }
+    assert {(spec.attention_type, spec.model_path, spec.architecture) for spec in vllm_specs} == {
+        ("mla", "deepseek-ai/DeepSeek-V3", "DeepseekV3ForCausalLM"),
+        ("dsa", "deepseek-ai/DeepSeek-V3.2", "DeepseekV32ForCausalLM"),
+        ("dsa", "zai-org/GLM-5", "GlmMoeDsaForCausalLM"),
     }
 
 
@@ -1057,18 +1063,13 @@ def test_full_mode_ops_are_a_union_of_model_plan_ops():
             assert model_plan.selected_ops <= full_plan.selected_ops, f"{backend}/{model_path}"
 
 
-def test_kimi_mla_metadata_preserves_legacy_backend_physical_case_sets():
+def test_mla_module_metadata_preserves_legacy_backends_and_canonicalizes_vllm():
     from collector.case_generator import get_mla_module_model_specs
 
     original_artifacts = {
         "deepseek-ai/DeepSeek-V3",
         "deepseek-ai/DeepSeek-R1",
         "nvidia/DeepSeek-V3.1-NVFP4",
-    }
-    kimi_artifacts = {
-        "moonshotai/Kimi-K2-Instruct",
-        "moonshotai/Kimi-K2.5",
-        "nvidia/Kimi-K2.5-NVFP4",
     }
 
     def paths(backend):
@@ -1077,11 +1078,11 @@ def test_kimi_mla_metadata_preserves_legacy_backend_physical_case_sets():
             for spec in get_mla_module_model_specs(
                 attention_type="mla",
                 backend=backend,
-                apply_model_filter=False,
+                apply_model_filter=backend == "vllm",
             )
         }
 
-    assert paths("vllm") == original_artifacts | kimi_artifacts
+    assert paths("vllm") == {"deepseek-ai/DeepSeek-V3"}
     assert paths("sglang") == original_artifacts
     assert paths("trtllm") == original_artifacts
 
