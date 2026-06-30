@@ -18,9 +18,6 @@ framework_specific_base_ops:
   trtllm:
     - attention_context
     - attention_generation
-  vllm_xpu:
-    - attention_context
-    - attention_generation
 description: >
   MiMo-V2-Flash hybrid model-centric collection plan. Starts with shared base
   cases and includes the hybrid MoE shape used by the support matrix.

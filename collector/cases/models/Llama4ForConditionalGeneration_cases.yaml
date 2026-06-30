@@ -20,9 +20,6 @@ framework_specific_base_ops:
   trtllm:
     - attention_context
     - attention_generation
-  vllm_xpu:
-    - attention_context
-    - attention_generation
 description: >
   Llama 4 hybrid model-centric collection plan. Starts with shared base op cases
   and includes the Scout/Maverick MoE shapes used by the support matrix.
