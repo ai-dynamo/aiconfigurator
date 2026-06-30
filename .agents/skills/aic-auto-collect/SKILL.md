@@ -66,8 +66,10 @@ PY
 export PYTHONPATH="$PWD"
 export COLLECTOR_LOG_DIR="$PWD/collector_logs"
 export COLLECTOR_CHECKPOINT_DIR="$PWD/collector_checkpoints"
+export VLLM_CACHE_HOST="${VLLM_CACHE_HOST:-$HOME/.cache/aic-vllm}"
 mkdir -p "$COLLECTOR_LOG_DIR"
 mkdir -p "$COLLECTOR_CHECKPOINT_DIR"
+mkdir -p "$VLLM_CACHE_HOST/tilelang/tmp"
 ```
 
 Local validation often works with the repo's pinned environment:
@@ -80,12 +82,19 @@ uv run --frozen pytest <tests> -q
 
 If the local `uv` environment lacks framework packages such as `torch`, run framework-dependent collector smoke tests in the runtime container instead of trying to mutate the host environment.
 
+For vLLM runtime images, preserve DeepGEMM, FlashInfer, TileLang, and torch
+compile artifacts with `VLLM_CACHE_HOST`, defaulting to `$HOME/.cache/aic-vllm`.
+
 Container pattern:
 
 ```bash
 docker run --rm -it --gpus all --ipc=host --network host \
   --ulimit memlock=-1 --ulimit stack=67108864 \
+  -v "$VLLM_CACHE_HOST:/home/dynamo/.cache/vllm" \
+  -v "$VLLM_CACHE_HOST:/root/.cache/vllm" \
   -v "$PWD:/workspace" -w /workspace \
+  -e TILELANG_CACHE_DIR=/home/dynamo/.cache/vllm/tilelang \
+  -e TILELANG_TMP_DIR=/home/dynamo/.cache/vllm/tilelang/tmp \
   <runtime-image> bash
 
 export PYTHONPATH=/workspace

@@ -122,6 +122,7 @@ class CustomAllReduce(Operation):
         tp_size: int,
         size: int,
         database_mode: common.DatabaseMode | None = None,
+        execution_mode: str | None = None,
     ):
         """Query custom_allreduce table. Verbatim port of the legacy body."""
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
@@ -199,7 +200,10 @@ class CustomAllReduce(Operation):
             effective_tp = min(tp_size, database.system_spec["node"]["num_gpus_per_node"])
             by_tp = data_wrapper.get(quant_mode, {})
             strategy_dict = by_tp.get(effective_tp, {})
-            comm_dict = strategy_dict.get("AUTO", {})
+            strategy = (execution_mode or "AUTO").upper()
+            comm_dict = strategy_dict.get(strategy, {})
+            if not comm_dict and strategy != "AUTO":
+                comm_dict = strategy_dict.get("AUTO", {})
             if not comm_dict:
                 raise PerfDataNotAvailableError(
                     f"No custom_allreduce silicon data for quant_mode={quant_mode.value.name}, "
@@ -269,6 +273,212 @@ class CustomAllReduce(Operation):
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
+
+
+class AllReduceRMS(Operation):
+    """
+    vLLM fused AllReduce + RMSNorm operation.
+
+    This owns ``allreduce_rms_perf`` data. Rows are keyed by dtype, TP size,
+    fusion pattern, hidden size, execution strategy, and message size. The
+    collector emits several hidden-size buckets; querying keeps ``num_tokens``
+    fixed and interpolates latency across hidden size before falling back to
+    standalone custom all-reduce.
+    """
+
+    _data_cache: ClassVar[dict] = {}
+
+    @classmethod
+    def _cache_key(cls, database: PerfDatabase) -> tuple:
+        return _cache_key(database)
+
+    @classmethod
+    def load_data(cls, database: PerfDatabase) -> None:
+        import os
+
+        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
+
+        key = cls._cache_key(database)
+        if key not in cls._data_cache:
+            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+            data_dir = os.path.join(system_data_root, database.backend, database.version)
+            primary_path = os.path.join(data_dir, PerfDataFilename.allreduce_rms.value)
+            sources = database._build_op_sources(PerfDataFilename.allreduce_rms, primary_path, system_data_root)
+            cls._data_cache[key] = LoadedOpData(
+                load_allreduce_rms_data(sources), PerfDataFilename.allreduce_rms, primary_path
+            )
+            cls._record_load()
+
+        if "_allreduce_rms_data" not in database.__dict__:
+            database._allreduce_rms_data = cls._data_cache[key]
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        cls._data_cache.clear()
+
+    @staticmethod
+    def _message_dict_for_strategy(by_hidden_bucket: dict, strategy: str) -> dict:
+        comm_dict = by_hidden_bucket.get(strategy, {})
+        if not comm_dict and strategy != "AUTO":
+            comm_dict = by_hidden_bucket.get("AUTO", {})
+        return comm_dict
+
+    @classmethod
+    def _metric_at_tokens(
+        cls,
+        by_hidden: dict[int, dict],
+        hidden_key: int,
+        num_tokens: int,
+        strategy: str,
+        *,
+        inner_only: bool = False,
+    ):
+        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        by_strategy = by_hidden.get(hidden_key, {})
+        comm_dict = cls._message_dict_for_strategy(by_strategy, strategy)
+        if not comm_dict:
+            raise PerfDataNotAvailableError(
+                f"No allreduce_rms message-size data for hidden_size={hidden_key}, execution_mode={strategy}."
+            )
+
+        message_size = num_tokens * hidden_key
+        size_left, size_right = interpolation.nearest_1d_point_helper(
+            message_size, list(comm_dict.keys()), inner_only=inner_only
+        )
+        return interpolation.interp_1d(
+            [size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], message_size
+        )
+
+    @classmethod
+    def _query_allreduce_rms_table(
+        cls,
+        database: PerfDatabase,
+        quant_mode: common.CommQuantMode,
+        tp_size: int,
+        size: int,
+        hidden_size: int,
+        fusion_pattern: str = "allreduce_residual_rms",
+        database_mode: common.DatabaseMode | None = None,
+        execution_mode: str | None = None,
+    ):
+        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        if database_mode is None:
+            database_mode = database._default_database_mode
+
+        def get_empirical() -> float:
+            # There is no shape-aware SOL model for fused allreduce+rms. Use
+            # standalone allreduce's empirical fallback as the least surprising
+            # lower-fidelity fallback.
+            return float(
+                database.query_custom_allreduce(
+                    quant_mode,
+                    tp_size,
+                    size,
+                    database_mode=common.DatabaseMode.EMPIRICAL,
+                )
+            )
+
+        if database_mode == common.DatabaseMode.SOL:
+            return database.query_custom_allreduce(quant_mode, tp_size, size, database_mode=common.DatabaseMode.SOL)
+        if database_mode == common.DatabaseMode.SOL_FULL:
+            return database.query_custom_allreduce(
+                quant_mode, tp_size, size, database_mode=common.DatabaseMode.SOL_FULL
+            )
+        if database_mode == common.DatabaseMode.EMPIRICAL:
+            return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
+
+        cls.load_data(database)
+        data_wrapper = database._allreduce_rms_data
+
+        def get_silicon():
+            if tp_size == 1:
+                return PerformanceResult(0.0, energy=0.0, source="empirical")
+
+            data_wrapper.raise_if_not_loaded()
+            effective_tp = min(tp_size, database.system_spec["node"]["num_gpus_per_node"])
+            by_tp = data_wrapper.get(quant_mode, {})
+            by_pattern = by_tp.get(effective_tp, {})
+            by_hidden = by_pattern.get(fusion_pattern, {})
+            if not by_hidden:
+                raise PerfDataNotAvailableError(
+                    f"No allreduce_rms silicon data for quant_mode={quant_mode.value.name}, "
+                    f"tp_size={effective_tp}, fusion_pattern={fusion_pattern}. "
+                    f"Available tp_sizes for this quant_mode: {sorted(by_tp.keys())}."
+                )
+
+            hidden_keys = sorted(by_hidden.keys())
+            strategy = (execution_mode or "AUTO").upper()
+            num_tokens = max(1, size // max(hidden_size, 1))
+            hidden_left, hidden_right = interpolation.nearest_1d_point_helper(
+                hidden_size, hidden_keys, inner_only=False
+            )
+
+            def metric_at_hidden(hidden_key: int):
+                return cls._metric_at_tokens(by_hidden, hidden_key, num_tokens, strategy, inner_only=False)
+
+            if hidden_left == hidden_right:
+                result = metric_at_hidden(hidden_left)
+            else:
+                result = interpolation.interp_1d(
+                    [hidden_left, hidden_right],
+                    [metric_at_hidden(hidden_left), metric_at_hidden(hidden_right)],
+                    hidden_size,
+                )
+
+            if isinstance(result, dict):
+                lat = result["latency"]
+                energy = result.get("energy", 0.0)
+            else:
+                lat = result
+                energy = 0.0
+
+            if tp_size > database.system_spec["node"]["num_gpus_per_node"]:
+                base_bw = database._get_p2p_bandwidth(database.system_spec["node"]["num_gpus_per_node"])
+                target_bw = database._get_p2p_bandwidth(tp_size)
+                scale_factor = (
+                    (tp_size - 1)
+                    / tp_size
+                    * database.system_spec["node"]["num_gpus_per_node"]
+                    / (database.system_spec["node"]["num_gpus_per_node"] - 1)
+                    * base_bw
+                    / target_bw
+                )
+                lat = lat * scale_factor
+                energy = energy * scale_factor
+
+            return database._interp_pr(lat, energy=energy)
+
+        return database._query_silicon_or_hybrid(
+            get_silicon=get_silicon,
+            get_empirical=get_empirical,
+            database_mode=database_mode,
+            error_msg=(
+                f"Failed to query allreduce_rms data for {quant_mode=}, {tp_size=}, "
+                f"{size=}, {hidden_size=}, {fusion_pattern=}"
+            ),
+        )
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        size = kwargs.get("x")
+        hidden_size = kwargs.get("hidden_size")
+        if size is None or hidden_size is None:
+            raise ValueError("AllReduceRMS.query requires x and hidden_size kwargs")
+        result = database.query_allreduce_rms(
+            common.CommQuantMode.half,
+            kwargs.get("tp_size"),
+            size,
+            hidden_size,
+        )
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
+
+    def get_weights(self, **kwargs):
+        return 0.0
 
 
 class NCCL(Operation):
@@ -621,8 +831,9 @@ def load_custom_allreduce_data(custom_allreduce_file):
     - TRTLLM: kernel_source="TRTLLM", last column="implementation"
     - vLLM/SGLang: kernel_source="*_graph" or "*_eager", last column="backend"
 
-    For vLLM/SGLang with both graph and eager modes, only graph mode data is kept
-    (better performance for decode phase).
+    For vLLM/SGLang with both graph and eager modes, graph mode remains the
+    default ``AUTO`` strategy for decode callers, while eager rows are retained
+    under the ``EAGER`` strategy for prefill/context callers.
 
     Returns:
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
@@ -648,11 +859,13 @@ def load_custom_allreduce_data(custom_allreduce_file):
         kernel_source = row.get("kernel_source", "")
         backend = row.get("backend", "")
 
-        # For vLLM/SGLang format: only keep graph mode data (skip eager mode)
-        # kernel_source patterns: "vLLM_custom_graph", "SGLang_CustomAllReduce_graph", etc.
-        # backend patterns: "vllm_graph", "sglang_graph", etc.
-        if (kernel_source.endswith("_eager") or backend.endswith("_eager")) and not is_b60:
-            continue  # Skip eager mode, use graph mode only
+        is_eager = kernel_source.endswith("_eager") or backend.endswith("_eager")
+        is_graph = kernel_source.endswith("_graph") or backend.endswith("_graph")
+        strategy = "AUTO"
+        if is_eager and not is_b60:
+            strategy = "EAGER"
+        elif is_graph:
+            strategy = "GRAPH"
 
         dtype, tp_size, message_size, latency = (
             row["allreduce_dtype"],
@@ -674,19 +887,100 @@ def load_custom_allreduce_data(custom_allreduce_file):
 
         try:
             # Check for conflict
-            custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size]
-            logger.debug(
-                f"value conflict in custom allreduce data: {dtype} {tp_size} {allreduce_strategy} {message_size}"
-            )
+            custom_allreduce_data[dtype][tp_size][strategy][message_size]
+            logger.debug(f"value conflict in custom allreduce data: {dtype} {tp_size} {strategy} {message_size}")
         except KeyError:
             # Store all three values
-            custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size] = {
+            custom_allreduce_data[dtype][tp_size][strategy][message_size] = {
                 "latency": latency,
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
             }
+        if strategy == "GRAPH" or (strategy == "AUTO" and allreduce_strategy == "AUTO"):
+            try:
+                custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size]
+            except KeyError:
+                custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size] = {
+                    "latency": latency,
+                    "power": power,
+                    "energy": energy,
+                }
 
     return custom_allreduce_data
+
+
+def load_allreduce_rms_data(allreduce_rms_file):
+    """
+    Load vLLM fused allreduce+rms data.
+
+    Expected columns include:
+    framework,version,device,op_name,kernel_source,allreduce_dtype,num_gpus,
+    hidden_size,message_size,num_tokens,latency,fusion_pattern,shape_policy,...
+    """
+    rows = _read_filtered_rows(allreduce_rms_file)
+    if rows is None:
+        logger.debug(f"AllReduce RMS data file {allreduce_rms_file} not found.")
+        return None
+    allreduce_rms_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    )
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug("Legacy database format detected (allreduce_rms) - power will default to 0.0")
+
+    for row in rows:
+        kernel_source = row.get("kernel_source", "")
+        backend = row.get("backend", "")
+        is_eager = kernel_source.endswith("_eager") or backend.endswith("_eager")
+        is_graph = kernel_source.endswith("_graph") or backend.endswith("_graph")
+        strategy = "AUTO"
+        if is_eager:
+            strategy = "EAGER"
+        elif is_graph:
+            strategy = "GRAPH"
+
+        tp_size = int(row["num_gpus"])
+        hidden_size = int(row["hidden_size"])
+        message_size = int(row["message_size"])
+        latency = float(row["latency"])
+        fusion_pattern = row.get("fusion_pattern", "allreduce_residual_rms") or "allreduce_residual_rms"
+        dtype = common.CommQuantMode.half
+        allreduce_strategy = "AUTO"
+
+        power = float(row.get("power", 0.0) or 0.0)
+        energy = power * latency
+
+        entry = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+            "num_tokens": int(row.get("num_tokens", 0) or 0),
+            "shape_policy": row.get("shape_policy", ""),
+        }
+
+        try:
+            allreduce_rms_data[dtype][tp_size][fusion_pattern][hidden_size][strategy][message_size]
+            logger.debug(
+                "value conflict in allreduce_rms data: %s %s %s %s %s %s",
+                dtype,
+                tp_size,
+                fusion_pattern,
+                hidden_size,
+                strategy,
+                message_size,
+            )
+        except KeyError:
+            allreduce_rms_data[dtype][tp_size][fusion_pattern][hidden_size][strategy][message_size] = entry
+        if strategy == "GRAPH" or (strategy == "AUTO" and allreduce_strategy == "AUTO"):
+            try:
+                allreduce_rms_data[dtype][tp_size][fusion_pattern][hidden_size][allreduce_strategy][message_size]
+            except KeyError:
+                allreduce_rms_data[dtype][tp_size][fusion_pattern][hidden_size][allreduce_strategy][message_size] = (
+                    entry
+                )
+
+    return allreduce_rms_data
 
 
 def load_nccl_data(nccl_file):
