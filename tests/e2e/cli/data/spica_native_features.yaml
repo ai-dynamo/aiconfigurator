@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# One fully pinned candidate keeps the real replay bounded while covering the
+# native SmartSearchConfig -> Spica -> generator feature bridge.
+search_space:
+  deployment_mode: [agg]
+  backend: [trtllm]
+  parallel_configs:
+    - tp: 1
+      replicas: 1
+  model_name: meta-llama/Meta-Llama-3.1-8B
+  hardware_sku: gb200
+  gpu_budget: 2
+  min_gpu_budget: 1
+  min_endpoint: 1
+  context_length: 4096
+
+  agg_max_num_batched_tokens: [8192]
+  agg_max_num_seqs: [256]
+  agg_block_size: 64
+  agg_gpu_memory_utilization: 0.9
+  agg_enable_prefix_caching: true
+
+  num_g2_blocks: 128
+  offload_batch_size: 4
+
+  router_mode: [kv_router]
+  overlap_score_credit: [0.5]
+  prefill_load_scale: [2.0]
+  host_cache_hit_weight: [0.75]
+  disk_cache_hit_weight: [0.25]
+  router_temperature: [0.2]
+
+  # Load-only scaling exercises the planner bridge without an FPM bootstrap.
+  planner_scaling_policy: [load_180_5]
+  planner_fpm_sampling: [default]
+  planner_load_sensitivity: [default]
+
+workload:
+  isl: 128
+  osl: 16
+  concurrency: 1
+  num_request_ratio: 2
+
+goal:
+  target: throughput
+
+sweep:
+  max_rounds: 1
+  parallel_evals: 1
+  candidates_per_round: 1
+  random_seed: 1
+  max_eval_seconds: 180
