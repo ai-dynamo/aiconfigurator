@@ -1535,6 +1535,7 @@ class BaseBackend:
         prefix: int = 0,
         max_seq_len: int | None = None,
         encoder_memory: dict[str, float] | None = None,
+        mtp_activation_scaling: bool = True,
     ) -> dict[str, float]:
         """
         Get the memory usage of the backend.
@@ -1545,6 +1546,13 @@ class BaseBackend:
             max_seq_len: per-slot KV cache pre-allocation budget. Defaults to
                 ``isl + beam_width * osl`` when not supplied.
             encoder_memory: optional colocated encoder component to add to this worker.
+            mtp_activation_scaling: whether to scale activation by ``(nextn + 1)`` for
+                speculative decoding (see the MTP correction below). True for the
+                latency sweep, where ``num_tokens`` is the per-step token count that the
+                multiplier turns into the verified ``nextn + 1`` tokens. False for the
+                KV-cache capacity path, where ``num_tokens`` is the engine's
+                ``max_num_tokens`` budget that already caps total per-forward tokens
+                (draft tokens included), so re-multiplying would double-count.
         """
         weights = 0.0
         for op in model.context_ops:
@@ -1579,8 +1587,13 @@ class BaseBackend:
 
         activations = max(activations, self.MIN_ACTIVATION_BYTES)
 
-        # MTP correction: additional activation memory for draft tokens (applies to all models)
-        if model.config.nextn > 0:
+        # MTP correction: speculative decoding verifies nextn+1 tokens per decode step,
+        # so the decode-phase activation scales with (nextn+1). Suppressed on the
+        # KV-cache capacity path (mtp_activation_scaling=False), where num_tokens is the
+        # engine's max_num_tokens budget that already caps total per-forward tokens
+        # (draft tokens included) -- re-multiplying there double-counts and can drive the
+        # prefill worker's KV budget negative.
+        if mtp_activation_scaling and model.config.nextn > 0:
             activations = activations * (model.config.nextn + 1)
 
         # Backend-level activation overhead (SGLang only by default).
