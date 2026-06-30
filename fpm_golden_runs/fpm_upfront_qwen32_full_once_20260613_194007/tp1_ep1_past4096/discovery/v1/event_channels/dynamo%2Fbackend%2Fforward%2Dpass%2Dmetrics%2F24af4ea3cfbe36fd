@@ -1,0 +1,1 @@
+{"type":"EventChannel","namespace":"dynamo","component":"backend","topic":"forward-pass-metrics","instance_id":2643417971761755901,"transport":{"kind":"Zmq","config":{"endpoint":"tcp://95.133.253.63:42485"}}}

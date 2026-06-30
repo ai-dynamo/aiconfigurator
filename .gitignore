@@ -6,6 +6,11 @@ __pycache__/
 .DS_Store
 dev/
 results/
+
+# Regenerable layerwise-chart debris (systems overlays + merge scratch)
+fpm_vs_aic_charts*/moe_overlay_*/
+fpm_vs_aic_charts*/overlay.csv
+.merged_layerwise/
 archived/
 *.egg-info/
 .VSCodeCounter/

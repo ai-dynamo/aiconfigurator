@@ -1,0 +1,1 @@
+{"type":"Endpoint","component":"backend","endpoint":"get_perf_metrics","namespace":"dynamo","instance_id":1531598463122823031,"transport":{"tcp":"95.133.253.63:42505/154154affcf85777/get_perf_metrics"},"device_type":"cpu"}

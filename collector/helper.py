@@ -822,6 +822,36 @@ def balanced_logits(num_tokens, num_experts, topk):
     return router_logits
 
 
+def sampled_zipf_logits(num_tokens, num_experts, topk, alpha, *, replacement=False, seed=20260612):
+    """Generate router logits from sampled Zipf expert popularity.
+
+    This is a weight-free proxy for trained-router expert popularity. Unlike
+    the deterministic power-law generator, each token samples its experts from
+    the popularity distribution, which avoids over-concentrating identical
+    routes across the whole batch.
+    """
+
+    import torch
+    import torch.nn.functional as F
+
+    # The vLLM collectors set CUDA as torch's default device before building
+    # routing inputs. Keep sampling on CPU so the generator and probabilities
+    # always live on the same device; callers move the logits afterward.
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(seed) + int(num_tokens) + int(float(alpha) * 100))
+    ranks = torch.arange(1, num_experts + 1, dtype=torch.float32, device="cpu")
+    probabilities = ranks.pow(-float(alpha))
+    probabilities = probabilities / probabilities.sum()
+    selected = torch.multinomial(
+        probabilities.expand(num_tokens, -1),
+        topk,
+        replacement=replacement,
+        generator=generator,
+    )
+    expert_map = F.one_hot(selected.long(), num_classes=num_experts).sum(1)
+    return F.softmax(expert_map.bfloat16(), dim=1)
+
+
 def sample_power_law(size, alpha, xmin, xmax):
     """Sample from a power law distribution using inverse CDF method.
 

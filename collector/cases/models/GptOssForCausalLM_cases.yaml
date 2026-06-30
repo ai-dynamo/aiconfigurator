@@ -40,8 +40,12 @@ model_case_values:
         vllm:
           allowed_modes:
             - w4a16_mxfp4
+            - w4a8_mxfp4_mxfp8
           module_config:
             w4a16_mxfp4:
+              has_bias: true
+              activation: swigluoai
+            w4a8_mxfp4_mxfp8:
               has_bias: true
               activation: swigluoai
         vllm_xpu:
@@ -68,8 +72,12 @@ model_case_values:
         vllm:
           allowed_modes:
             - w4a16_mxfp4
+            - w4a8_mxfp4_mxfp8
           module_config:
             w4a16_mxfp4:
+              has_bias: true
+              activation: swigluoai
+            w4a8_mxfp4_mxfp8:
               has_bias: true
               activation: swigluoai
         vllm_xpu:

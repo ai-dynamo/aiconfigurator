@@ -28,6 +28,7 @@ from aiconfigurator.sdk.perf_database import (
     get_all_databases,
     get_database,
     get_systems_paths,
+    load_allreduce_rms_data,
     load_context_attention_data,
     load_context_mla_data,
     load_context_mla_module_data,
@@ -328,6 +329,54 @@ def test_load_custom_allreduce_data_basic(tmp_path):
     assert data[key_dtype][2]["AUTO"][8192]["latency"] == pytest.approx(0.0045)
 
 
+def test_load_allreduce_rms_data_basic(tmp_path):
+    csv_file = tmp_path / "allreduce_rms.csv"
+    csv_file.write_text(
+        "\n".join(
+            [
+                "framework,version,device,op_name,kernel_source,allreduce_dtype,num_gpus,hidden_size,"
+                "message_size,num_tokens,latency,fusion_pattern,shape_policy,backend",
+                "vLLM,0.20.1,NVIDIA B300,allreduce_rms,vLLM_allreduce_rms_graph,bfloat16,8,4096,"
+                "327680,80,0.0125,allreduce_residual_rms,hidden_size_4096,vllm_graph",
+                "",
+            ]
+        )
+    )
+
+    data = load_allreduce_rms_data(str(csv_file))
+
+    row = data[CommQuantMode.half][8]["allreduce_residual_rms"][4096]["AUTO"][327680]
+    assert row["latency"] == pytest.approx(0.0125)
+    assert row["num_tokens"] == 80
+    assert row["shape_policy"] == "hidden_size_4096"
+
+
+def test_load_allreduce_rms_data_graph_and_eager(tmp_path):
+    csv_file = tmp_path / "allreduce_rms.csv"
+    csv_file.write_text(
+        "\n".join(
+            [
+                "framework,version,device,op_name,kernel_source,allreduce_dtype,num_gpus,hidden_size,"
+                "message_size,num_tokens,latency,fusion_pattern,shape_policy,backend",
+                "vLLM,0.20.1,NVIDIA B300,allreduce_rms,vLLM_allreduce_rms_graph,bfloat16,8,4096,"
+                "327680,80,0.0125,allreduce_residual_rms,hidden_size_4096,vllm_graph",
+                "vLLM,0.20.1,NVIDIA B300,allreduce_rms,vLLM_allreduce_rms_eager,bfloat16,8,4096,"
+                "327680,80,0.0200,allreduce_residual_rms,hidden_size_4096,vllm_eager",
+                "",
+            ]
+        )
+    )
+
+    data = load_allreduce_rms_data(str(csv_file))
+
+    graph_row = data[CommQuantMode.half][8]["allreduce_residual_rms"][4096]["GRAPH"][327680]
+    eager_row = data[CommQuantMode.half][8]["allreduce_residual_rms"][4096]["EAGER"][327680]
+    auto_row = data[CommQuantMode.half][8]["allreduce_residual_rms"][4096]["AUTO"][327680]
+    assert graph_row["latency"] == pytest.approx(0.0125)
+    assert eager_row["latency"] == pytest.approx(0.0200)
+    assert auto_row["latency"] == pytest.approx(0.0125)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 2) load_nccl_data
 # ─────────────────────────────────────────────────────────────────────────────
@@ -514,6 +563,31 @@ def test_load_moe_data_basic(tmp_path):
     assert 2 in data[qm]["uniform"][2][4][16][32][2]  # moe_ep_size
     assert 1 in data[qm]["uniform"][2][4][16][32][2][2]  # num_tokens
     assert data[qm]["uniform"][2][4][16][32][2][2][1]["latency"] == pytest.approx(1.23)
+    assert data[qm]["uniform"][2][4][16][32][2][2][1]["module_level"] == 0.0
+
+
+def test_load_moe_data_tags_vllm_module_level_rows(tmp_path):
+    csv_file = tmp_path / "moe.csv"
+    csv_file.write_text(
+        "\n".join(
+            [
+                "framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,"
+                "inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency",
+                "VLLM,0.20.1,b300,moe,vllm_mxfp4_moe,w4a8_mxfp4_mxfp8,128,4096,2048,6,256,1,4,power_law_1.2,0.25",
+                "VLLM,0.20.1,b300,moe,vllm_qwen_fused_moe_shared,bfloat16,128,2048,256,8,256,1,1,power_law_1.2,0.30",
+            ]
+        )
+        + "\n"
+    )
+
+    data, _ = load_moe_data(str(csv_file))
+
+    dsv4_row = data[MoEQuantMode.w4a8_mxfp4_mxfp8]["power_law_1.2"][6][256][4096][2048][1][4][128]
+    qwen_row = data[MoEQuantMode.bfloat16]["power_law_1.2"][8][256][2048][256][1][1][128]
+    assert dsv4_row["module_level"] == 1.0
+    assert dsv4_row["includes_shared_expert"] == 0.0
+    assert qwen_row["module_level"] == 1.0
+    assert qwen_row["includes_shared_expert"] == 1.0
 
 
 def _dsv4_megamoe_row(

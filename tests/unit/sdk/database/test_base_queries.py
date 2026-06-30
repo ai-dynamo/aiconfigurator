@@ -284,6 +284,54 @@ def test_query_custom_allreduce_non_database_mode_uses_custom_latency(stub_perf_
     assert math.isclose(custom_latency, 5.0), f"Expected custom-allreduce latency 5.0, got {custom_latency}"
 
 
+def test_query_allreduce_rms_interpolates_hidden_size(stub_perf_db, monkeypatch):
+    from aiconfigurator.sdk.operations.communication import AllReduceRMS
+
+    monkeypatch.setattr(AllReduceRMS, "load_data", classmethod(lambda cls, database: None))
+    stub_perf_db._allreduce_rms_data = LoadedOpData(
+        {
+            common.CommQuantMode.half: {
+                8: {
+                    "allreduce_residual_rms": {
+                        2048: {
+                            "AUTO": {
+                                163840: {"latency": 0.0100, "power": 0.0, "energy": 0.0},
+                                327680: {"latency": 0.0150, "power": 0.0, "energy": 0.0},
+                            }
+                        },
+                        4096: {
+                            "AUTO": {
+                                327680: {"latency": 0.0125, "power": 0.0, "energy": 0.0},
+                                655360: {"latency": 0.0200, "power": 0.0, "energy": 0.0},
+                            }
+                        },
+                    }
+                }
+            }
+        },
+        common.PerfDataFilename.allreduce_rms,
+        "dummy_allreduce_rms_perf.txt",
+    )
+
+    exact_2048 = stub_perf_db.query_allreduce_rms(
+        common.CommQuantMode.half,
+        tp_size=8,
+        size=163840,
+        hidden_size=2048,
+        database_mode=common.DatabaseMode.SILICON,
+    )
+    interpolated = stub_perf_db.query_allreduce_rms(
+        common.CommQuantMode.half,
+        tp_size=8,
+        size=245760,
+        hidden_size=3072,
+        database_mode=common.DatabaseMode.SILICON,
+    )
+
+    assert float(exact_2048) == pytest.approx(0.0100)
+    assert float(interpolated) == pytest.approx(0.01125)
+
+
 def test_query_nccl_database_mode_all_gather(stub_perf_db):
     """
     For query_nccl(..., database_mode=SOL) and operation='all_gather':
