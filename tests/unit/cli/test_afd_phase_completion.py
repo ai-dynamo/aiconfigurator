@@ -804,3 +804,32 @@ def test_cli_estimate_afd_phase_both_with_combined_with_pd_raises(monkeypatch):
         api.cli_estimate(
             **_afd_cli_estimate_kwargs(afd_phase="both", afd_combined_with_pd=True),
         )
+
+
+def test_cli_main_estimate_value_error_exits_without_traceback(monkeypatch):
+    """Estimate-mode validation errors surface as a concise CLI error.
+
+    Invalid AFD sizing (e.g. ``f_moe_ep_size`` not dividing ``f_tp_size``)
+    raises ``ValueError`` deep in the SDK. ``cli.main.main`` must convert it
+    to ``SystemExit`` so the user sees the actionable message instead of a
+    full Python traceback.
+    """
+    from types import SimpleNamespace
+
+    import aiconfigurator.cli.main as cli_main
+    import aiconfigurator.sdk.perf_database as perf_database
+
+    monkeypatch.setattr(perf_database, "set_systems_paths", lambda _paths: None)
+    monkeypatch.setattr(
+        cli_main,
+        "_run_estimate_mode",
+        lambda _args: (_ for _ in ()).throw(ValueError("f_moe_ep_size (7) must be a positive divisor")),
+    )
+
+    args = SimpleNamespace(mode="estimate", systems_paths=None, top_n=5, no_color=True)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_main.main(args)
+
+    # SystemExit carries the plain message (no traceback, exit code 1).
+    assert "f_moe_ep_size (7) must be a positive divisor" in str(exc_info.value)
