@@ -297,7 +297,7 @@ def _add_default_mode_arguments(parser):
         action="store_true",
         default=False,
         help=(
-            "Use Spica's replay-backed thorough sweeper instead of the legacy AIC Pareto sweep. "
+            "Experimental: use Spica's replay-backed thorough sweeper instead of the legacy AIC Pareto sweep. "
             "Without --thorough-config, CLI inputs are converted to a Spica SmartSearchConfig."
         ),
     )
@@ -306,8 +306,8 @@ def _add_default_mode_arguments(parser):
         type=str,
         default=None,
         help=(
-            "Path to a native Spica SmartSearchConfig YAML file. Implies --thorough-sweep and lets the file "
-            "define the Spica search space, workload, goal, and sweep controls."
+            "Experimental: path to a native Spica SmartSearchConfig YAML file. Implies --thorough-sweep and "
+            "lets the file define the Spica search space, workload, goal, and sweep controls."
         ),
     )
     parser.add_argument(

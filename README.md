@@ -74,6 +74,7 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 ```
 - We have four modes: `default`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
+- **Experimental:** Spica thorough mode is an early preview. Its CLI, config schema, search behavior, and generated artifacts may change in future releases, and sweeps can take substantially longer than the legacy estimator.
 - Use `default --thorough-sweep` to run Spica's replay-backed thorough sweeper. Without `--thorough-config`, AIC converts the normal default CLI inputs into a legacy-compatible Spica `SmartSearchConfig` that keeps routing round-robin and planner scaling disabled.
 - Install the optional `spica` extra when using thorough mode from a packaged wheel, for example `pip install 'aiconfigurator[spica]'`.
 - Use `default --thorough-config spica_smart_sweep.yaml` to pass a native Spica `SmartSearchConfig` YAML that owns the search space, workload, goal, and sweep controls.

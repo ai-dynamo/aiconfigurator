@@ -401,6 +401,9 @@ The command will create two experiments for the given problem, one is `agg` and 
 
 #### Spica Thorough Sweep
 
+> [!WARNING]
+> Spica thorough mode is experimental. Its CLI, config schema, search behavior, and generated artifacts may change in future releases. Thorough sweeps also take substantially longer than the legacy estimator.
+
 Pass `--thorough-sweep` to run Spica's replay-backed thorough sweeper instead of the legacy AIC Pareto estimator. Spica is more thorough because it evaluates complete deployment candidates through Dynamo's end-to-end simulator and, with a native `--thorough-config`, can jointly explore deployment topology and parallelism, engine batching limits, router policy, multi-tier KV-cache offload, and planner scaling. This broader search captures interactions among Dynamo components, but replaying candidates takes substantially longer than the legacy estimator's narrower performance sweep.
 
 Without `--thorough-config`, the CLI converts the normal default inputs into a legacy-compatible Spica config: synthetic workload from `--isl` / `--osl`, closed-loop concurrency derived from GPU budget, the CLI `--ttft` / `--tpot` goodput SLA, round-robin routing, and planner scaling disabled:
