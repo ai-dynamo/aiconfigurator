@@ -129,6 +129,7 @@ def _install_vllm_stubs(monkeypatch):
     _stub_module(
         monkeypatch,
         "collector.helper",
+        EXIT_CODE_RESTART=10,
         balanced_logits=_noop,
         benchmark_with_power=_noop,
         get_sm_version=lambda: 100,
