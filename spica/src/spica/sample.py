@@ -49,7 +49,13 @@ _DEPLOYMENT_PINNED = (
     "startup_time",
     "aic_nextn",
 )
-_KV_MANAGER = ("num_g2_blocks", "bandwidth_g1_to_g2_gbps", "bandwidth_g2_to_g1_gbps", "offload_batch_size")
+_KV_MANAGER = (
+    "num_g2_blocks",
+    "kv_bytes_per_token",
+    "bandwidth_g1_to_g2_gbps",
+    "bandwidth_g2_to_g1_gbps",
+    "offload_batch_size",
+)
 
 # engine knobs per branch: searched batching + pinned scalars.
 _AGG_SEARCHED = ("agg_max_num_batched_tokens", "agg_max_num_seqs")

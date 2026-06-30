@@ -39,7 +39,7 @@ Folded straight off the `SearchSpace` (`_DEPLOYMENT_PINNED` + `_KV_MANAGER`):
 - deployment/runtime context: `model_name`, `hardware_sku`, `context_length`,
   `startup_time`, `aic_nextn`
 - planner limits: `gpu_budget`, `min_gpu_budget`, `min_endpoint`
-- kv-manager offload: `num_g2_blocks`, `bandwidth_g1_to_g2_gbps`,
+- kv-manager offload: `num_g2_blocks`, `kv_bytes_per_token`, `bandwidth_g1_to_g2_gbps`,
   `bandwidth_g2_to_g1_gbps`, `offload_batch_size`
 
 The GPU bounds and endpoint floor constrain candidate enumeration, and they also become

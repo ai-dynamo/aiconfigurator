@@ -24,6 +24,9 @@ search_space:
   agg_enable_prefix_caching: true
 
   num_g2_blocks: 128
+  # Avoid an external model-config lookup and guarantee that replay attaches
+  # the KVBM offload engine (Llama 3.1 8B BF16 KV bytes per token).
+  kv_bytes_per_token: 131072
   offload_batch_size: 4
 
   router_mode: [kv_router]

@@ -192,6 +192,7 @@ def test_offload_knobs_thread_into_payload():
     # KV-manager offload knobs present in the sample must reach the engine-args payload.
     space = _space(
         num_g2_blocks=1024,
+        kv_bytes_per_token=131072,
         offload_batch_size=64,
         bandwidth_g1_to_g2_gbps=200.0,
         bandwidth_g2_to_g1_gbps=180.0,
@@ -199,6 +200,7 @@ def test_offload_knobs_thread_into_payload():
     sample = unroll_sample(search_space=space, selection=_agg_sel(), parallel_config=AGG_MOE)
     ea = build_deployment(sample, backend_version=BV).agg_engine_args
     assert ea["num_g2_blocks"] == 1024
+    assert ea["kv_bytes_per_token"] == 131072
     assert ea["offload_batch_size"] == 64
     assert ea["bandwidth_g1_to_g2_gbps"] == 200.0
     assert ea["bandwidth_g2_to_g1_gbps"] == 180.0
@@ -212,13 +214,14 @@ def test_offload_knobs_thread_into_payload():
     # A batch-size pin cannot independently enable KVBM when zero G2 blocks disables it.
     disabled = build_deployment(
         unroll_sample(
-            search_space=_space(num_g2_blocks=0, offload_batch_size=64),
+            search_space=_space(num_g2_blocks=0, kv_bytes_per_token=131072, offload_batch_size=64),
             selection=_agg_sel(),
             parallel_config=AGG_MOE,
         ),
         backend_version=BV,
     ).agg_engine_args
     assert "num_g2_blocks" not in disabled
+    assert "kv_bytes_per_token" not in disabled
     assert "offload_batch_size" not in disabled
 
 
@@ -228,7 +231,7 @@ def test_disagg_offload_is_scored_on_prefill_only():
         decode=ReplicaParallelConfig(ParallelShape(tp=1, dp=8, moe_tp=1, moe_ep=8), 2),
     )
     sample = unroll_sample(
-        search_space=_space(num_g2_blocks=1024, offload_batch_size=64),
+        search_space=_space(num_g2_blocks=1024, kv_bytes_per_token=131072, offload_batch_size=64),
         selection=_agg_sel(
             deployment_mode="disagg",
             prefill_max_num_batched_tokens=32768,
@@ -241,8 +244,10 @@ def test_disagg_offload_is_scored_on_prefill_only():
     plan = build_deployment(sample, backend_version=BV)
 
     assert plan.prefill_engine_args["num_g2_blocks"] == 1024
+    assert plan.prefill_engine_args["kv_bytes_per_token"] == 131072
     assert plan.prefill_engine_args["offload_batch_size"] == 64
     assert "num_g2_blocks" not in plan.decode_engine_args
+    assert "kv_bytes_per_token" not in plan.decode_engine_args
     assert "offload_batch_size" not in plan.decode_engine_args
 
 

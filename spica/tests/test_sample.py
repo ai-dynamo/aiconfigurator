@@ -187,6 +187,7 @@ def test_pinned_scalars_folded_in():
             context_length=4096,
             startup_time=300.0,
             aic_nextn=2,
+            kv_bytes_per_token=131072,
         ),
         selection=_agg_selection(),
         parallel_config=AGG_CFG,
@@ -194,6 +195,7 @@ def test_pinned_scalars_folded_in():
     assert s["model_name"] == "deepseek-ai/DeepSeek-V3" and s["hardware_sku"] == "gb200"
     assert s["aic_nextn"] == 2
     assert s["num_g2_blocks"] == 0  # kv-manager pinned
+    assert s["kv_bytes_per_token"] == 131072
     assert s["agg_block_size"] == 64 and s["agg_gpu_memory_utilization"] == 0.9
     assert s["gpu_budget"] == 16 and s["min_gpu_budget"] == 8 and s["min_endpoint"] == 2
     assert s["context_length"] == 4096 and s["startup_time"] == 300.0

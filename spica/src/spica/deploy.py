@@ -119,7 +119,11 @@ def _engine_args_payload(sample: dict, role: str, *, backend_version: str) -> di
         for key, value in sample.items():
             if value is None:
                 continue
-            if key == "offload_batch_size" or key.startswith("num_g") or key.startswith("bandwidth_g"):
+            if (
+                key in {"kv_bytes_per_token", "offload_batch_size"}
+                or key.startswith("num_g")
+                or key.startswith("bandwidth_g")
+            ):
                 payload[key] = value
     return payload
 

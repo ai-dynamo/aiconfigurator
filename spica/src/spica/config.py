@@ -425,7 +425,8 @@ class SearchSpace(BaseModel):
     agg_enable_prefix_caching: bool = True
 
     # kv manager: multi-tier offload policy (all pinned; G3/G4 extend G2)
-    num_g2_blocks: int = 0  # 0 disables host offload
+    num_g2_blocks: int = Field(default=0, ge=0)  # 0 disables host offload
+    kv_bytes_per_token: int | None = Field(default=None, gt=0)  # required replay transfer sizing when G2 is on
     bandwidth_g1_to_g2_gbps: float | None = None
     bandwidth_g2_to_g1_gbps: float | None = None
     offload_batch_size: int | None = None
@@ -517,6 +518,19 @@ class SearchSpace(BaseModel):
                 f"min_gpu_budget must satisfy 0 < min_gpu_budget <= gpu_budget "
                 f"(got min_gpu_budget={self.min_gpu_budget}, gpu_budget={self.gpu_budget})"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_kv_offload_replay_sizing(self) -> "SearchSpace":
+        """Require deterministic transfer sizing whenever G2 offload is enabled.
+
+        Dynamo can try to infer this value from model metadata, but inference may
+        fail for private, gated, or offline models and silently skip attaching the
+        offload engine. Requiring the pinned value keeps replay and deployment
+        artifacts on the same KVBM policy.
+        """
+        if self.num_g2_blocks > 0 and self.kv_bytes_per_token is None:
+            raise ValueError("kv_bytes_per_token is required when num_g2_blocks > 0 so replay can model KVBM offload")
         return self
 
     @model_validator(mode="after")

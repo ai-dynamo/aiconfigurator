@@ -148,6 +148,8 @@ def test_cli_native_thorough_config_preserves_dynamo_features(tmp_path: Path):
             "AIC_SPICA_THOROUGH_SWEEP_ROUNDS": "1",
             "AIC_SPICA_THOROUGH_PARALLEL_EVALS": "1",
             "AIC_SPICA_THOROUGH_CANDIDATES_PER_ROUND": "1",
+            # The runtime's definitive KVBM-attachment signal is debug-level.
+            "DYN_LOG": ("info,dynamo_mocker::scheduler=debug,dynamo_mocker::kvbm_offload::engine=debug"),
         }
     )
     artifact_dir = Path(os.environ.get("AIC_SPICA_THOROUGH_E2E_ARTIFACT_DIR", tmp_path))
@@ -182,6 +184,10 @@ def test_cli_native_thorough_config_preserves_dynamo_features(tmp_path: Path):
     assert "sweep={'max_rounds': 1, 'parallel_evals': 1, 'candidates_per_round': 1}" in combined
     assert "concurrency=None request_rate=1.0 num_request_ratio=3.0" in combined
     assert re.search(r"smart-sweep done: 1/1 feasible, 0 gated, 0 backend-unsupported, 0 replay-failed", combined)
+    assert combined.count("kvbm-offload: init_kvbm_offline attaching engine") == 2
+    assert combined.count("kvbm-offload: building mock offload engine") == 2
+    assert "kvbm-offload offline init failed" not in combined
+    assert "Could not compute kv_bytes_per_token" not in combined
 
     result_dirs = [path for path in save_dir.iterdir() if path.is_dir()]
     assert len(result_dirs) == 1
@@ -215,6 +221,7 @@ def test_cli_native_thorough_config_preserves_dynamo_features(tmp_path: Path):
     assert candidate_config["host_cache_hit_weight"] == pytest.approx(0.75)
     assert candidate_config["disk_cache_hit_weight"] == pytest.approx(0.25)
     assert candidate_config["num_g2_blocks"] == 128
+    assert candidate_config["kv_bytes_per_token"] == 131072
     assert candidate_config["offload_batch_size"] == 4
     assert candidate["metrics"]["planner_total_ticks"] >= 1
 
