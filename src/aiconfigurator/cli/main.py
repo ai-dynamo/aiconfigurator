@@ -23,7 +23,11 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
-from aiconfigurator.sdk.errors import NoFeasibleConfigError, UnsupportedWideepConfigError
+from aiconfigurator.sdk.errors import (
+    NoFeasibleConfigError,
+    UnsupportedWideepConfigError,
+    is_expected_no_result_cause,
+)
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
@@ -1564,7 +1568,9 @@ def _execute_tasks(
             logger.warning(msg)
             failure_messages.append(msg)
         except Exception as exc:
-            if perf_database.has_perf_data_not_available_cause(exc):
+            if is_expected_no_result_cause(exc) or perf_database.has_perf_data_not_available_cause(exc):
+                # Expected failure (no feasible config / OOM / KV-cache capacity, or
+                # a per-op perf-data miss): report cleanly without a scary traceback.
                 logger.log(logging.ERROR, "Error running experiment %s: %s", exp_name, exc)
             else:
                 logger.exception("Error running experiment %s", exp_name)
