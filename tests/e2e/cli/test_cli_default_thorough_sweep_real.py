@@ -208,6 +208,7 @@ def test_cli_native_thorough_config_preserves_dynamo_features(tmp_path: Path):
     assert candidate_config["gpu_budget"] == 2
     assert candidate_config["min_gpu_budget"] == 1
     assert candidate_config["min_endpoint"] == 1
+    assert candidate_config["replicas"] == 2
     assert candidate_config["router_mode"] == "kv_router"
     assert candidate_config["host_cache_hit_weight"] == pytest.approx(0.75)
     assert candidate_config["disk_cache_hit_weight"] == pytest.approx(0.25)
@@ -216,6 +217,7 @@ def test_cli_native_thorough_config_preserves_dynamo_features(tmp_path: Path):
 
     generator_config = _yaml(top_dir / "generator_config.yaml")
     assert generator_config["ServiceConfig"]["port"] == 8123
+    assert generator_config["WorkerConfig"]["agg_workers"] == 2
     assert generator_config["params"]["agg"]["max_seq_len"] == 4096
     assert _yaml(top_dir / "agg_config.yaml")["max_seq_len"] == 4096
     dyn_config = generator_config["DynConfig"]

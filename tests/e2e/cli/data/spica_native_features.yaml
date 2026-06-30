@@ -7,8 +7,9 @@ search_space:
   deployment_mode: [agg]
   backend: [trtllm]
   parallel_configs:
+    # Offline KV-router replay needs at least two workers to make a routing choice.
     - tp: 1
-      replicas: 1
+      replicas: 2
   model_name: meta-llama/Meta-Llama-3.1-8B
   hardware_sku: gb200
   gpu_budget: 2
