@@ -290,7 +290,9 @@ def _create_attention_module(
     local_model_path = _resolve_model_path(model_path)
 
     block_size = 64
-    max_model_len = max(max_seq_len + 1, 4096)
+    # seq_len includes the current token; generation caches only seq_len - 1.
+    # Keep exact-limit models such as Kimi-K2-Instruct at their declared limit.
+    max_model_len = max(max_seq_len, 4096)
     num_kv_cache_blocks = max(
         1 + math.ceil((max_seq_len + 1) / block_size) * max_batch_size,
         8192,
