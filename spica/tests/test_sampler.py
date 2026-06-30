@@ -53,7 +53,7 @@ from spica.parallel_projection import (  # noqa: E402
     AGG_GPUS_PER_ENGINE,
     USED_GPU_RATIO,
 )
-from spica.sampler import _PARALLEL_PARAM, Suggestion, make_branch_sampler  # noqa: E402
+from spica.sampler import Suggestion, make_branch_sampler  # noqa: E402
 from spica.search_space import BranchSpace  # noqa: E402
 
 
@@ -126,29 +126,7 @@ def test_dict_form_composite_decodes_via_index():
         assert isinstance(entry, (str, dict))
 
 
-def test_parallel_config_index_decodes_to_matching_config():
-    # N distinguishable parallel configs: the categorical index Vizier picks must
-    # decode back to exactly that element of branch.parallel_configs.
-    configs = tuple(
-        ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=r) for r in (1, 2, 4, 8)
-    )
-    assert len(set(configs)) == len(configs)  # all distinct
-    branch = BranchSpace(
-        deployment_mode="agg",
-        parallel_configs=configs,
-        supported_backends={c: frozenset({"trtllm"}) for c in configs},
-        knob_choices={"backend": ["trtllm"]},
-    )
-    sampler = make_branch_sampler(branch, study_id="test_pc_index")
-    suggestions = sampler.suggest(count=6)
-    assert suggestions
-    for s in suggestions:
-        decoded_index = int(s.handle.parameters[_PARALLEL_PARAM])
-        assert branch.parallel_configs[decoded_index] == s.parallel_config
-
-
-def test_structured_parallel_suggestions_project_to_valid_configs(monkeypatch):
-    monkeypatch.setenv("SPICA_PARALLEL_ENCODING", "structured")
+def test_parallel_suggestions_project_to_valid_configs(monkeypatch):
     monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
     branch = _branch()
     sampler = make_branch_sampler(branch, study_id="test_structured_parallel")
@@ -157,15 +135,13 @@ def test_structured_parallel_suggestions_project_to_valid_configs(monkeypatch):
 
     assert suggestions
     for suggestion in suggestions:
-        assert _PARALLEL_PARAM not in suggestion.handle.parameters
         assert USED_GPU_RATIO in suggestion.handle.parameters
         assert suggestion.projection is not None
         assert suggestion.parallel_config in branch.parallel_configs
         assert suggestion.selection["backend"] in branch.supported_backends[suggestion.parallel_config]
 
 
-def test_structured_parallel_exposes_ordered_size_and_mode_dimensions(monkeypatch):
-    monkeypatch.setenv("SPICA_PARALLEL_ENCODING", "structured")
+def test_parallel_search_exposes_ordered_size_and_mode_dimensions(monkeypatch):
     monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
     tep4 = ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=4)
     dtp8 = ReplicaParallelConfig(ParallelShape(tp=1, dp=8, moe_tp=8, moe_ep=1), replicas=2)
@@ -190,8 +166,7 @@ def test_structured_parallel_exposes_ordered_size_and_mode_dimensions(monkeypatc
         assert suggestion.parallel_config in configs
 
 
-def test_structured_single_parallel_config_is_pinned(monkeypatch):
-    monkeypatch.setenv("SPICA_PARALLEL_ENCODING", "structured")
+def test_single_parallel_config_is_pinned(monkeypatch):
     monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
     pinned = ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=8)
     branch = BranchSpace(
@@ -211,8 +186,7 @@ def test_structured_single_parallel_config_is_pinned(monkeypatch):
     assert all(USED_GPU_RATIO not in suggestion.handle.parameters for suggestion in suggestions)
 
 
-def test_structured_fully_pinned_study_uses_only_internal_constant(monkeypatch):
-    monkeypatch.setenv("SPICA_PARALLEL_ENCODING", "structured")
+def test_fully_pinned_study_uses_only_internal_constant(monkeypatch):
     monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
     pinned = ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=8)
     branch = BranchSpace(
@@ -231,8 +205,7 @@ def test_structured_fully_pinned_study_uses_only_internal_constant(monkeypatch):
     assert dict(suggestion.handle.parameters) == {"_spica_constant": "0"}
 
 
-def test_structured_projection_is_written_to_trial_metadata(monkeypatch):
-    monkeypatch.setenv("SPICA_PARALLEL_ENCODING", "structured")
+def test_projection_is_written_to_trial_metadata(monkeypatch):
     monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
     sampler = make_branch_sampler(_branch(), study_id="test_structured_metadata")
     suggestion = sampler.suggest(count=1)[0]

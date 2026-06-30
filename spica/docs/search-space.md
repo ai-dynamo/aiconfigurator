@@ -162,8 +162,8 @@ The sweep runs **one Vizier study per `deployment_mode`**. **`backend` is a sear
 not a branch**: listing multiple backends searches them *together* within each mode's study,
 and the cross-branch merge picks the global best — `rank()` for a single-objective goal, or
 `pareto_front()` (the non-dominated set) under a `pareto` goal. The parallel-config pool is the **union** of every
-backend's KV-feasible configs. Under structured parallel search, backend is selected first and
-the latent shape request is projected only onto configs that backend supports. A backend with no
+backend's KV-feasible configs. Backend is selected first and the latent shape request is
+projected only onto configs that backend supports. A backend with no
 perf DB / no viable config for a mode is dropped; a **mode** for which no backend is viable
 is **skipped with a warning** (a viable mode still runs); only if *no* mode is viable does
 the run error. A *pinned* config legal for no backend is a hard error (fail fast).
@@ -272,11 +272,13 @@ gpu_budget, backend)`:
 2. **Dense models** use plain TP only: `{tp: g, dp: 1, moe_tp: 1, moe_ep: 1}`.
 3. **MoE models** scan `tp / dp / moe_tp / moe_ep` over `{1, 2, 4, 8, …}` subject to the MoE
    width constraint `tp * attention_dp == moe_tp * moe_ep` (here `dp` = `attention_dp`), and
-   keep only these three pure patterns:
+   keep only these four pure patterns:
    - **TEP** — attention-TP + expert-EP: `tp > 1`, `dp == 1`, `moe_tp == 1`, `moe_ep > 1`.
    - **DEP** — attention-DP + expert-EP: `tp == 1`, `dp > 1`, `moe_tp == 1`, `moe_ep > 1`.
-   - **pure expert-TP** — `tp > 1`, `dp == 1`, `moe_tp > 1`, `moe_ep == 1`. It is scanned for
-     every MoE model; backend filters below can still remove unsupported combinations.
+   - **TP** — `tp > 1`, `dp == 1`, `moe_tp > 1`, `moe_ep == 1`.
+   - **DTP** — `tp == 1`, `dp > 1`, `moe_tp > 1`, `moe_ep == 1`.
+     MoE tensor parallelism is scanned for every MoE model; backend filters below can still
+     remove unsupported combinations.
 4. **Backend filters** (mirroring AIC's `enumerate_parallel_config`):
    - `trtllm` forbids `tp > 1 & attention_dp > 1`.
    - `sglang` EP-only MoE backends (wideep / `deepep_moe` / `megamoe`) force `moe_tp == 1`.
@@ -298,11 +300,10 @@ gpu_budget, backend)`:
    replica count) and pairs them so `prefill.total_gpus + decode.total_gpus` fits the budget;
    prefill/decode throughput rate-matching is applied downstream at replay.
 
-### Structured parallel search
+### Parallel search projection
 
-Set `SPICA_PARALLEL_ENCODING=structured` to replace the legacy opaque
-`parallel_config_index` with model-visible latent dimensions. The current rollout default is
-`opaque` so the two encodings can be A/B tested.
+Vizier searches model-visible latent dimensions and projects every suggestion onto the valid
+parallel-config pool. There is no opaque config-index path.
 
 | branch | Vizier dimensions | default |
 |---|---|---|
@@ -331,7 +332,7 @@ A pinned config is kept for whichever backends it is legal + feasible on (errors
 `_validate_parallel_configs` requires `deployment_mode` to list **exactly one mode** when
 `parallel_configs` is non-empty.
 
-With structured encoding, one entry bypasses all parallel Vizier dimensions and projection;
+With projection, one entry bypasses all parallel Vizier dimensions and projection;
 several entries form the complete projection pool, so the sampler can never leave the user's
 menu. The YAML schema is unchanged.
 

@@ -6,7 +6,7 @@
 One Vizier study per branch (per the design). The study's parameters are:
 
 - structured parallel features projected onto the branch's KV-feasible config
-  pool, or the legacy ``parallel_config_index`` when explicitly selected.
+  pool.
 - a continuous ``kv_load_ratio`` when a Pareto workload supplies a range.
 - one parameter per multi-choice searchable knob (categorical for string choices
   like ``planner_scaling_policy``/``router_mode``; discrete for the numeric
@@ -34,11 +34,8 @@ from .parallel_enum import DisaggParallelConfig, ReplicaParallelConfig
 from .parallel_projection import ParallelConfigProjector, ParallelProjection
 from .search_space import BranchSpace
 
-_PARALLEL_PARAM = "parallel_config_index"
 _CONSTANT_PARAM = "_spica_constant"
 _METRIC = "objective"
-_PARALLEL_ENCODING_ENV = "SPICA_PARALLEL_ENCODING"
-_PARALLEL_ENCODINGS = frozenset({"opaque", "structured"})
 
 
 @dataclass
@@ -104,20 +101,12 @@ class VizierBranchSampler:
         self._objectives = objectives or [(_METRIC, True)]
         self._decoders: dict[str, Callable[[Any], Any]] = {}
         self._constants: dict[str, Any] = {}
-        self._parallel_encoding = os.environ.get(_PARALLEL_ENCODING_ENV, "opaque").lower()
-        if self._parallel_encoding not in _PARALLEL_ENCODINGS:
-            raise ValueError(
-                f"{_PARALLEL_ENCODING_ENV} must be one of {sorted(_PARALLEL_ENCODINGS)}, "
-                f"got {self._parallel_encoding!r}"
-            )
-        self._parallel_projector = ParallelConfigProjector(branch) if self._parallel_encoding == "structured" else None
-        self._parallel_pinned = self._parallel_projector is not None and len(branch.parallel_configs) == 1
+        self._parallel_projector = ParallelConfigProjector(branch)
+        self._parallel_pinned = len(branch.parallel_configs) == 1
 
         problem = vz.ProblemStatement()
         root = problem.search_space.root
-        if self._parallel_projector is None:
-            root.add_categorical_param(_PARALLEL_PARAM, [str(i) for i in range(len(branch.parallel_configs))])
-        elif not self._parallel_pinned:
+        if not self._parallel_pinned:
             for parameter in self._parallel_projector.parameters:
                 if parameter.is_constant:
                     continue
@@ -199,10 +188,7 @@ class VizierBranchSampler:
             }
             for knob, decode in self._decoders.items():
                 selection[knob] = decode(params[knob])
-            if self._parallel_projector is None:
-                parallel_config = self.branch.parallel_configs[int(params[_PARALLEL_PARAM])]
-                projection = None
-            elif self._parallel_pinned:
+            if self._parallel_pinned:
                 parallel_config = self.branch.parallel_configs[0]
                 projection = None
             else:

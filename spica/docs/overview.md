@@ -99,10 +99,10 @@ For each branch, a `BranchSampler` (`make_branch_sampler`, study id
 `spica_{mode}_{run_nonce}`) runs `sweep.max_rounds` rounds. Each round is a **barrier**:
 
 1. **ask + project** — `sampler.suggest(per_round)` returns suggestions on the main process.
-   With `SPICA_PARALLEL_ENCODING=structured`, Vizier sees resource ratios, per-engine GPU
-   targets, and attention/FFN modes; each request is deterministically projected onto the
-   nearest backend-compatible config in the valid pool. The default `opaque` mode retains
-   the categorical index for A/B comparison.
+   Vizier sees resource ratios, per-engine GPU targets, and attention/FFN modes; each request
+   is deterministically projected onto the nearest backend-compatible config in the valid
+   pool. A single user-supplied `parallel_configs` entry remains a strict pin and bypasses
+   these dimensions.
 2. **deduplicate** — exact duplicate full samples reuse their cached measurement and are
    immediately told back to Vizier. They do not run replay or consume the unique replay
    budget; replacement suggestions are requested up to the per-round 11x safety cap.
@@ -151,9 +151,8 @@ flowchart TD
   E --> A
   subgraph L["5 · per branch — Vizier study (× max_rounds)"]
     direction TB
-    A["ask · suggest(per_round)"] --> G{"backend supported?"}
-    G -->|no| OI["observe_infeasible"]
-    G -->|yes| EV["eval ⇉ parallel workers<br/>unroll → build_deployment → replay → score"]
+    A["ask + project · suggest(per_round)<br/>structured features → valid config"] --> D["deduplicate<br/>reuse cached measurement"]
+    D --> EV["eval ⇉ parallel workers<br/>unroll → build_deployment → replay → score"]
     EV --> T["tell · feasible: observe / gated: observe_infeasible"]
   end
   T --> C(["candidates from all branches"]):::io
@@ -164,7 +163,7 @@ flowchart TD
   PF --> OUT
   classDef io fill:#dbeafe,stroke:#60a5fa,color:#1e3a8a;
   classDef decision fill:#fef3c7,stroke:#fbbf24,color:#78350f;
-  class G,M decision;
+  class M decision;
 ```
 
 ## See also

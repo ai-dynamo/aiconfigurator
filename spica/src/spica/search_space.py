@@ -8,9 +8,9 @@ agg and disagg have structurally different parallel configs. ``backend`` is NOT 
 branch: it is a searched categorical knob within the study. For each mode we take the
 **union** of every configured backend's KV-feasible parallel configs
 (:func:`spica.model_hw.parallel_configs_for`) as the valid projection pool, recording per
-config which backends support it. The sampler can either use the legacy categorical index
-or structured latent features projected onto this pool. Backends with no perf DB / no
-viable config for a mode are dropped from the backend knob.
+config which backends support it. The sampler projects structured latent features onto this
+pool. Backends with no perf DB / no viable config for a mode are dropped from the backend
+knob.
 
 ``load_predictor_candidates`` is resolved separately by the load-predictor sub-sweep
 and is not a sampler dimension.
@@ -62,8 +62,8 @@ class BranchSpace:
     deployment_mode: str
     # Union of every searched backend's KV-feasible parallel configs.
     parallel_configs: tuple[_ParallelConfig, ...]
-    # parallel config -> the backends for which it is legal+KV-feasible. Structured
-    # projection hard-filters on this map; the legacy index path keeps a defensive gate.
+    # parallel config -> the backends for which it is legal+KV-feasible. Projection
+    # hard-filters on this map; the search loop keeps a defensive gate.
     supported_backends: dict[_ParallelConfig, frozenset[str]]
     # Searchable atomic knob -> its configured choice list (incl. "backend").
     knob_choices: dict[str, list[Any]]
