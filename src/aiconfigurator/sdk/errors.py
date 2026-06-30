@@ -4,8 +4,36 @@
 """Shared SDK exception types."""
 
 
-class NoFeasibleConfigError(RuntimeError):
+class NoResultsError(RuntimeError):
+    """Base class for *expected* "the sweep produced no results" outcomes.
+
+    These are not bugs: they mean a sweep ran to completion but every parallel
+    configuration was ruled out for an understood reason (SLA infeasible, OOM,
+    KV-cache capacity). They carry an actionable message and should be reported
+    cleanly (no Python traceback), unlike a genuine crash.
+
+    A per-op data miss (``PerfDataNotAvailableError``) is deliberately NOT in
+    this family -- it can be skipped on one config while others still produce
+    results -- and has its own recognizer ``has_perf_data_not_available_cause``.
+
+    Subclasses ``RuntimeError`` so existing ``except RuntimeError`` / ``except
+    Exception`` callers (e.g. the per-config sweep catch, support-matrix) keep
+    catching them unchanged. Recognize the whole family via
+    :func:`is_expected_no_result_cause`, which walks the exception chain so a
+    generic wrapper raised ``from`` one of these is still classified correctly.
+    """
+
+
+class NoFeasibleConfigError(NoResultsError):
     """Raised when no configuration satisfies user-provided SLA constraints."""
+
+
+class InsufficientMemoryError(NoResultsError):
+    """Raised when the model does not fit in GPU memory for any parallel config."""
+
+
+class KVCacheCapacityError(NoResultsError):
+    """Raised when the requested batch size exceeds KV-cache capacity for all configs."""
 
 
 class UnsupportedWideepConfigError(ValueError):
@@ -16,7 +44,14 @@ class UnsupportedWideepConfigError(ValueError):
 
 
 class PerfDataNotAvailableError(RuntimeError):
-    """Raised when required performance data is missing for a requested mode."""
+    """Raised when required performance data is missing or unsupported for a requested mode.
+
+    This is a *per-op* data-miss raised deep inside a single config's evaluation
+    (and in non-sweep paths like validate / single-point estimate), so it is
+    deliberately NOT a :class:`NoResultsError`: a miss on one config can be
+    skipped while other configs still produce results. Recognize it via
+    ``has_perf_data_not_available_cause`` in ``perf_database``.
+    """
 
 
 class EmpiricalNotImplementedError(RuntimeError):
@@ -30,3 +65,28 @@ class EmpiricalNotImplementedError(RuntimeError):
     than as a fabricated number. Genuinely table-less ops (mem / p2p /
     element-wise) keep their own analytic formulas and never reach here.
     """
+
+
+def is_expected_no_result_cause(error: BaseException) -> bool:
+    """Return True when ``error`` or its effective chain has a NoResultsError.
+
+    Follows an explicit ``__cause__`` or an unsuppressed ``__context__`` so a
+    generic wrapper such as
+    ``RuntimeError(...) from InsufficientMemoryError(...)`` is recognized as an
+    expected no-result outcome, while a wrapper around a genuine bug (e.g. an
+    unexpected ``KeyError``) returns False and keeps its traceback.
+    """
+    seen: set[int] = set()
+    stack: list[BaseException] = [error]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        if isinstance(current, NoResultsError):
+            return True
+        seen.add(id(current))
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        elif not current.__suppress_context__ and current.__context__ is not None:
+            stack.append(current.__context__)
+    return False
