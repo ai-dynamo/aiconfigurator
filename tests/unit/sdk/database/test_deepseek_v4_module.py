@@ -146,18 +146,19 @@ def test_mhc_module_loader_returns_none_for_missing_file(tmp_path):
 
 
 class TestDeepSeekV4MHCModule:
-    def test_mhc_sol_and_hybrid_return_positive(self, comprehensive_perf_db):
-        for mode in (common.DatabaseMode.SOL, common.DatabaseMode.HYBRID):
-            result = comprehensive_perf_db.query_mhc_module(
+    def test_mhc_empirical_raises_without_data(self, comprehensive_perf_db):
+        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+
+        with pytest.raises(EmpiricalNotImplementedError):
+            comprehensive_perf_db.query_mhc_module(
                 num_tokens=512,
                 hidden_size=7168,
                 hc_mult=4,
                 sinkhorn_iters=20,
                 op="pre",
                 quant_mode=common.GEMMQuantMode.bfloat16,
-                database_mode=mode,
+                database_mode=common.DatabaseMode.EMPIRICAL,
             )
-            assert float(result) > 0
 
     def test_mhc_sol_full_shape(self, comprehensive_perf_db):
         result = comprehensive_perf_db.query_mhc_module(
@@ -171,6 +172,7 @@ class TestDeepSeekV4MHCModule:
         )
         assert len(result) == 3
         sol_time, sol_math, sol_mem = result
+        assert sol_time > 0
         assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
 
     def test_mhc_weight_memory_uses_quant_mode(self, comprehensive_perf_db):
@@ -263,6 +265,22 @@ class TestDeepSeekV4AttentionModule:
         expected = 0.20 + (0.50 - 0.20) * (1 - 2) / (5 - 2)
         assert math.isclose(result["latency"], expected, rel_tol=1e-6)
         assert math.isclose(result["energy"], expected * 10.0, rel_tol=1e-6)
+
+    def test_generation_robust_lookup_interpolates_between_covering_batches(self, mutable_comprehensive_perf_db):
+        """b=7 interpolates b=4/b=8 instead of scaling the b=4 launch floor."""
+        db = mutable_comprehensive_perf_db
+        mock_grid = {
+            8: {
+                4: {2048: _deepseek_v4_value(4.0), 4096: _deepseek_v4_value(8.0)},
+                8: {2048: _deepseek_v4_value(10.0), 4096: _deepseek_v4_value(14.0)},
+            }
+        }
+
+        result = _dsv4_robust_3d_lookup(db, mock_grid, 8, 7, 3072, batch_axis="y")
+
+        # Sequence interpolation gives 6 at b=4 and 12 at b=8; b=7 gives 10.5.
+        assert result["latency"] == pytest.approx(10.5)
+        assert result["energy"] == pytest.approx(105.0)
 
     def test_generation_silicon_extrapolates_query_below_min_sampled_s_total(self, mutable_comprehensive_perf_db):
         """Full-query regression for generated query b=1, s_total=1, tp=8."""
@@ -520,7 +538,7 @@ class TestDeepSeekV4AttentionModule:
         assert fp8[2] < bf16[2]
 
     def test_robust_3d_lookup_uses_b2_when_b3_s2682_is_missing(self, mutable_comprehensive_perf_db):
-        """Regression: b=3, s=2682 uses b=2 because b=4 only reaches s=2048."""
+        """Keep lower-batch scaling when the upper batch does not cover query s."""
         db = mutable_comprehensive_perf_db
         mock_grid = _dsv4_sampled_batch_caps_grid()
 
@@ -660,7 +678,7 @@ class TestDeepSeekV4AttentionModule:
         assert result.energy >= 0
 
 
-def test_deepseek_v4_static_sol_and_hybrid_run_end_to_end(mutable_comprehensive_perf_db):
+def test_deepseek_v4_static_sol_runs_end_to_end(mutable_comprehensive_perf_db):
     db = mutable_comprehensive_perf_db
     db.system_spec["gpu"]["mem_capacity"] = 288400343040
     db.system_spec["misc"]["nccl_mem"] = {1: 0, 2: 0, 4: 0, 8: 0}
@@ -677,11 +695,10 @@ def test_deepseek_v4_static_sol_and_hybrid_run_end_to_end(mutable_comprehensive_
     backend = TRTLLMBackend()
     runtime = RuntimeConfig(batch_size=1, beam_width=1, isl=128, osl=4, prefix=0)
 
-    for mode in (common.DatabaseMode.SOL, common.DatabaseMode.HYBRID):
-        db.set_default_database_mode(mode)
-        summary = backend.run_static(model, db, runtime, mode="static", stride=1)
-        assert sum(summary.get_context_latency_dict().values()) > 0
-        assert sum(summary.get_generation_latency_dict().values()) > 0
+    db.set_default_database_mode(common.DatabaseMode.SOL)
+    summary = backend.run_static(model, db, runtime, mode="static", stride=1)
+    assert sum(summary.get_context_latency_dict().values()) > 0
+    assert sum(summary.get_generation_latency_dict().values()) > 0
 
 
 def test_sglang_deepseek_v4_pro_moe_workspace_uses_residual_hidden_size(mutable_comprehensive_perf_db):

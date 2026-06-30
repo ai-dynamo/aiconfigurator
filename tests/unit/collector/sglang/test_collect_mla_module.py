@@ -55,11 +55,12 @@ class TestGetPrecisionCombos:
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             combos = mod._get_precision_combos("context")
-        assert ("bfloat16", "bfloat16", "bfloat16") in combos
-        assert ("bfloat16", "fp8", "bfloat16") in combos
-        assert ("bfloat16", "bfloat16", "fp8_block") in combos
-        assert ("bfloat16", "fp8", "fp8_block") in combos
-        assert len(combos) == 4
+        assert combos == [
+            ("bfloat16", "bfloat16", "bfloat16"),
+            ("bfloat16", "fp8", "bfloat16"),
+            ("bfloat16", "bfloat16", "fp8_block"),
+            ("bfloat16", "fp8", "fp8_block"),
+        ]
 
     def test_ada_sm89_no_fp8(self):
         mod = _import_module()
@@ -169,86 +170,80 @@ class TestDsaRuntimeLimits:
 
 
 class TestDsaPiecewiseCudaGraph:
-    def test_glm5_dsa_piecewise_graph_is_opt_in(self, monkeypatch):
+    def test_glm5_dsa_piecewise_graph_is_only_for_trtllm_prefill(self):
         mod = _import_module()
-        monkeypatch.delenv("AIC_ENABLE_PIECEWISE_CUDA_GRAPH", raising=False)
-        monkeypatch.delenv("AIC_DISABLE_PIECEWISE_CUDA_GRAPH", raising=False)
 
         assert not mod._enable_glm5_dsa_piecewise_graph("dsa", "nvidia/GLM-5-NVFP4")
-        assert not mod._enable_glm5_dsa_piecewise_graph("dsa", "zai-org/GLM-5")
-        assert not mod._enable_glm5_dsa_piecewise_graph("mla", "nvidia/GLM-5-NVFP4")
-        assert not mod._enable_glm5_dsa_piecewise_graph("dsa", "deepseek-ai/DeepSeek-V3.2")
+        assert mod._enable_glm5_dsa_piecewise_graph("dsa", "zai-org/GLM-5", "trtllm")
+        assert not mod._enable_glm5_dsa_piecewise_graph("mla", "zai-org/GLM-5", "trtllm")
+        assert not mod._enable_glm5_dsa_piecewise_graph("dsa", "deepseek-ai/DeepSeek-V3.2", "trtllm")
 
-    def test_glm5_dsa_piecewise_graph_can_be_enabled(self, monkeypatch):
+    def test_generation_cuda_graph_uses_max_batch_tokens(self):
         mod = _import_module()
-        monkeypatch.setenv("AIC_ENABLE_PIECEWISE_CUDA_GRAPH", "1")
-        monkeypatch.delenv("AIC_DISABLE_PIECEWISE_CUDA_GRAPH", raising=False)
+        runner = types.SimpleNamespace(
+            server_args=types.SimpleNamespace(disable_cuda_graph=False, cuda_graph_bs=None, cuda_graph_max_bs=256)
+        )
 
-        assert mod._enable_glm5_dsa_piecewise_graph("dsa", "nvidia/GLM-5-NVFP4")
-        assert mod._enable_glm5_dsa_piecewise_graph("dsa", "zai-org/GLM-5")
-        assert not mod._enable_glm5_dsa_piecewise_graph("mla", "nvidia/GLM-5-NVFP4")
+        assert mod._generation_cuda_graph_enabled_for_tokens(runner, 256)
+        assert not mod._generation_cuda_graph_enabled_for_tokens(runner, 257)
 
-    def test_piecewise_graph_can_be_disabled(self, monkeypatch):
+    def test_generation_cuda_graph_uses_explicit_batch_list(self):
         mod = _import_module()
-        monkeypatch.setenv("AIC_DISABLE_PIECEWISE_CUDA_GRAPH", "1")
-        monkeypatch.setenv("AIC_ENABLE_PIECEWISE_CUDA_GRAPH", "1")
+        runner = types.SimpleNamespace(
+            server_args=types.SimpleNamespace(disable_cuda_graph=False, cuda_graph_bs=[1, 4, 16])
+        )
 
-        assert not mod._enable_glm5_dsa_piecewise_graph("dsa", "nvidia/GLM-5-NVFP4")
+        assert mod._generation_cuda_graph_enabled_for_tokens(runner, 4)
+        assert not mod._generation_cuda_graph_enabled_for_tokens(runner, 8)
 
-    def test_piecewise_token_buckets_follow_case_shape(self, monkeypatch):
+    def test_generation_cuda_graph_can_be_disabled(self):
         mod = _import_module()
-        monkeypatch.delenv("AIC_PIECEWISE_CUDA_GRAPH_TOKENS", raising=False)
-        cases = [(2, 128, True, 0), (4, 64, True, 1024)]
+        runner = types.SimpleNamespace(
+            server_args=types.SimpleNamespace(disable_cuda_graph=True, cuda_graph_bs=[1, 4, 16])
+        )
 
-        assert mod._piecewise_cuda_graph_tokens_for_cases(cases, is_prefill=True) == [256]
-        assert mod._piecewise_cuda_graph_tokens_for_cases(cases, is_prefill=False) == [2, 4]
-
-    def test_piecewise_token_buckets_accept_env_override(self, monkeypatch):
-        mod = _import_module()
-        monkeypatch.setenv("AIC_PIECEWISE_CUDA_GRAPH_TOKENS", "256,512")
-
-        assert mod._piecewise_cuda_graph_tokens_for_cases([(2, 128, True, 0)], is_prefill=True) == [256, 512]
-
-    def test_generation_cuda_graph_uses_max_batch_tokens(self, monkeypatch):
-        mod = _import_module()
-        monkeypatch.delenv("AIC_CUDA_GRAPH_BS", raising=False)
-        monkeypatch.delenv("AIC_DISABLE_CUDA_GRAPH", raising=False)
-        monkeypatch.setenv("AIC_CUDA_GRAPH_MAX_BS", "256")
-
-        assert mod._generation_cuda_graph_enabled_for_tokens(256)
-        assert not mod._generation_cuda_graph_enabled_for_tokens(257)
-
-    def test_generation_cuda_graph_uses_explicit_batch_list(self, monkeypatch):
-        mod = _import_module()
-        monkeypatch.delenv("AIC_DISABLE_CUDA_GRAPH", raising=False)
-        monkeypatch.setenv("AIC_CUDA_GRAPH_BS", "1,4,16")
-
-        assert mod._generation_cuda_graph_enabled_for_tokens(4)
-        assert not mod._generation_cuda_graph_enabled_for_tokens(8)
-
-    def test_generation_cuda_graph_can_be_disabled(self, monkeypatch):
-        mod = _import_module()
-        monkeypatch.setenv("AIC_DISABLE_CUDA_GRAPH", "1")
-        monkeypatch.setenv("AIC_CUDA_GRAPH_BS", "1,4,16")
-
-        assert not mod._generation_cuda_graph_enabled_for_tokens(4)
+        assert not mod._generation_cuda_graph_enabled_for_tokens(runner, 4)
 
 
 class TestBuildModuleTestCases:
-    def test_module_precision_includes_fp8_kv_for_sglang(self):
+    def test_module_precision_respects_outer_sm_gate(self):
         mod = _import_module()
-        with patch.object(mod, "get_sm_version", return_value=90):
-            combos = mod._get_module_precision_combos()
-        assert ("bfloat16", "bfloat16", "bfloat16") in combos
-        assert ("bfloat16", "fp8", "bfloat16") in combos
-
-    def test_dsa_includes_both_models(self):
-        mod = _import_module()
-        with patch.object(mod, "get_sm_version", return_value=90):
+        with patch.object(mod, "get_sm_version", return_value=89):
             cases = mod._build_module_test_cases("dsa", "context")
-        model_paths = {c[6] for c in cases}
+        assert cases
+        assert {case[3] for case in cases} == {"bfloat16"}
+
+    def test_module_precision_passes_phase_and_sm_to_yaml(self):
+        mod = _import_module()
+        calls = []
+
+        def precision_specs(backend, *, phase, sm_version):
+            calls.append((backend, phase, sm_version))
+            return [
+                types.SimpleNamespace(
+                    compute_dtype="bfloat16",
+                    kv_cache_dtype="bfloat16",
+                    gemm_type="bfloat16",
+                )
+            ]
+
+        with (
+            patch.object(mod, "get_sm_version", return_value=89),
+            patch.object(mod, "get_mla_module_precision_specs", side_effect=precision_specs),
+        ):
+            cases = mod._build_module_test_cases("dsa", "generation")
+
+        assert cases
+        assert calls == [("sglang", "generation", 89)]
+
+    def test_dsa_keeps_path_sensitive_checkpoints_after_precision_filtering(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=100):
+            cases = mod._build_module_test_cases("dsa", "context")
+        model_paths = {case[6] for case in cases}
         assert "deepseek-ai/DeepSeek-V3.2" in model_paths
         assert "zai-org/GLM-5" in model_paths
+        assert "zai-org/GLM-5-FP8" in model_paths
         assert "nvidia/GLM-5-NVFP4" in model_paths
 
     def test_mla_includes_v3_family(self):
@@ -262,22 +257,43 @@ class TestBuildModuleTestCases:
             "nvidia/DeepSeek-V3.1-NVFP4",
         }
 
-    def test_format_length_10(self):
-        """Each DSA module test case includes a target TP size."""
+    def test_targeted_quantized_artifact_keeps_requested_checkpoint(self, monkeypatch):
+        mod = _import_module()
+        monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/GLM-5-NVFP4")
+        with patch.object(mod, "get_sm_version", return_value=100):
+            cases = mod._build_module_test_cases("dsa", "context")
+        assert cases
+        assert {case[6] for case in cases} == {"nvidia/GLM-5-NVFP4"}
+
+    def test_format_length_11(self):
+        """Each DSA module case includes target TP and prefill backend."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             for case in mod._build_module_test_cases("dsa", "generation"):
-                assert len(case) == 10
+                assert len(case) == 11
                 assert case[7] == "dsa"
                 assert case[8] is None  # DSA backend resolved at runtime
                 assert case[9] in {1, 2, 4, 8}
+                assert case[10] == "flashmla_kv"
 
     def test_deduplication(self):
         """One entry per top-level sweep tuple, not per inner (seq, batch) shape."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("dsa", "context")
-        keys = {(c[6], c[2], c[3], c[4], c[5], c[1]) for c in cases}
+        keys = {
+            (
+                c[6],
+                c[2],
+                c[3],
+                c[4],
+                c[5],
+                c[1],
+                c[9],
+                c[10],
+            )
+            for c in cases
+        }
         assert len(cases) == len(keys)
         assert all(c[0] == 0 for c in cases)
 

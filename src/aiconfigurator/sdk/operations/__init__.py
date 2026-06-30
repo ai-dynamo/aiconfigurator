@@ -47,6 +47,7 @@ from aiconfigurator.sdk.operations.mla import (
     WideEPGenerationMLA,
 )
 from aiconfigurator.sdk.operations.moe import MoE, MoEDispatch, TrtLLMWideEPMoE, TrtLLMWideEPMoEDispatch
+from aiconfigurator.sdk.operations.msa import ContextMSAModule, GenerationMSAModule
 from aiconfigurator.sdk.operations.overlap import FallbackOp, OverlapOp
 
 # Re-export commonly-imported names that the prior monolithic operations.py
@@ -66,6 +67,7 @@ __all__ = [
     "ContextDSAModule",
     "ContextDeepSeekV4AttentionModule",
     "ContextMLA",
+    "ContextMSAModule",
     "CustomAllReduce",
     "DeepSeekV4MHCModule",
     "DeepSeekV4MegaMoEModule",
@@ -78,6 +80,7 @@ __all__ = [
     "GenerationDSAModule",
     "GenerationDeepSeekV4AttentionModule",
     "GenerationMLA",
+    "GenerationMSAModule",
     "MLABmm",
     "MLAModule",
     "Mamba2",

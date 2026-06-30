@@ -209,19 +209,31 @@ class TestNcclOnecclFallback:
                 database_mode=common.DatabaseMode.SILICON,
             )
 
-    def test_hybrid_falls_back_to_empirical_when_neither_loaded(self, _db_factory):
-        """In HYBRID mode, when neither backend has data, fall back to empirical."""
-        db = _db_factory(nccl_data=None, oneccl_data=None)
+    def test_empty_nccl_operation_bucket_is_typed_coverage_miss(self, _db_factory):
+        nccl = {common.CommQuantMode.half: {"all_reduce": {}}}
+        db = _db_factory(nccl_data=nccl, oneccl_data=None)
 
-        # HYBRID mode should not raise — it falls back to empirical
-        result = db.query_nccl(
-            common.CommQuantMode.half,
-            4,
-            "all_gather",
-            1024,
-            database_mode=common.DatabaseMode.HYBRID,
-        )
-        assert float(result) > 0, "HYBRID empirical fallback should return positive latency"
+        with pytest.raises(PerfDataNotAvailableError):
+            db.query_nccl(
+                common.CommQuantMode.half,
+                4,
+                "all_reduce",
+                1024,
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
+    def test_hybrid_does_not_hide_malformed_nccl_bucket(self, _db_factory):
+        nccl = {common.CommQuantMode.half: {"all_reduce": []}}
+        db = _db_factory(nccl_data=nccl, oneccl_data=None)
+
+        with pytest.raises(TypeError, match="Malformed NCCL performance data"):
+            db.query_nccl(
+                common.CommQuantMode.half,
+                4,
+                "all_reduce",
+                1024,
+                database_mode=common.DatabaseMode.HYBRID,
+            )
 
     def test_single_gpu_returns_zero(self, _db_factory):
         """num_gpus=1 is a fast-path returning zero latency regardless of data."""

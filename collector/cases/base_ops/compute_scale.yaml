@@ -5,6 +5,9 @@ schema_version: 1
 op: compute_scale
 description: Base collector v2 cases for compute_scale.
 framework_specific_op_cases:
+  sglang:
+    compute_scale:
+      cases: all
   trtllm:
     compute_scale:
       cases:
@@ -110,3 +113,6 @@ framework_specific_op_cases:
         - 16384
         - 51200
         - 65536
+  vllm:
+    compute_scale:
+      cases: all

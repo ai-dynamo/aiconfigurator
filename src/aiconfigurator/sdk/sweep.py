@@ -162,6 +162,7 @@ def _rate_match_dict(
         "(p)dp": p["dp"],
         "(p)moe_tp": p["moe_tp"],
         "(p)moe_ep": p["moe_ep"],
+        "(p)cp": p.get("cp", 1),
         "(p)parallel": p["parallel"],
         "(p)gemm": p["gemm"],
         "(p)kvcache": p["kvcache"],
@@ -354,7 +355,7 @@ def sweep_agg(
     database: PerfDatabase,
     backend_name: str,
     model_config: config.ModelConfig,
-    parallel_config_list: list[list[int]] | list[tuple[int, int, int, int, int]],
+    parallel_config_list: list[list[int]] | list[tuple[int, int, int, int, int, int]],
     top_k: int = 10,
     max_batch_size: int = 512,
     ctx_stride: int = 512,
@@ -385,7 +386,7 @@ def sweep_agg(
         backend_name: Backend name ("trtllm", "vllm", "sglang").
         model_config: Base model config; tp/pp/dp/moe_tp/moe_ep are
             overwritten per parallel candidate during the sweep.
-        parallel_config_list: List of (tp, pp, dp, moe_tp, moe_ep) tuples
+        parallel_config_list: List of (tp, pp, dp, moe_tp, moe_ep, cp) tuples
             to enumerate.
         top_k: Per-(parallel, tpot) top-K rows to keep before concat.
         max_batch_size: Upper bound on batch size sweep.
@@ -407,14 +408,15 @@ def sweep_agg(
     all_kv_cache_oom = True
 
     for parallel_config in parallel_config_list:
-        tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
+        tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, cp_size = parallel_config
         logger.debug(
-            "sweep_agg: parallel tp=%s pp=%s dp=%s moe_tp=%s moe_ep=%s",
+            "sweep_agg: parallel tp=%s pp=%s dp=%s moe_tp=%s moe_ep=%s cp=%s",
             tp_size,
             pp_size,
             dp_size,
             moe_tp_size,
             moe_ep_size,
+            cp_size,
         )
         try:
             point_model_config = copy.deepcopy(model_config)
@@ -423,6 +425,7 @@ def sweep_agg(
             point_model_config.moe_tp_size = moe_tp_size
             point_model_config.moe_ep_size = moe_ep_size
             point_model_config.attention_dp_size = dp_size
+            point_model_config.cp_size = cp_size
 
             # Build backend + model ONCE per parallel choice so the backend's
             # internal _agg_cache survives across the tpot sweep below.
@@ -534,7 +537,7 @@ def _get_disagg_worker_candidates(
     *,
     model_path: str,
     model_config: config.ModelConfig,
-    parallel_config_list: list[tuple[int, int, int, int, int]] | list[list[int]],
+    parallel_config_list: list[tuple[int, int, int, int, int, int]] | list[list[int]],
     b_list: list[int] | range,
     runtime_config: config.RuntimeConfig,
     role: str,
@@ -555,15 +558,16 @@ def _get_disagg_worker_candidates(
     all_configs_oom = True
 
     for parallel_config in parallel_config_list:
-        tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
+        tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, cp_size = parallel_config
         logger.debug(
-            "sweep_disagg/%s: candidate parallel tp=%s pp=%s dp=%s moe_tp=%s moe_ep=%s",
+            "sweep_disagg/%s: candidate parallel tp=%s pp=%s dp=%s moe_tp=%s moe_ep=%s cp=%s",
             role,
             tp_size,
             pp_size,
             dp_size,
             moe_tp_size,
             moe_ep_size,
+            cp_size,
         )
         try:
             point_mc = copy.deepcopy(model_config)
@@ -572,6 +576,7 @@ def _get_disagg_worker_candidates(
             point_mc.moe_tp_size = moe_tp_size
             point_mc.moe_ep_size = moe_ep_size
             point_mc.attention_dp_size = dp_size
+            point_mc.cp_size = cp_size
 
             model = get_model(model_path=model_path, model_config=point_mc, backend_name=backend_name)
 
@@ -734,12 +739,12 @@ def sweep_disagg(
     prefill_database: PerfDatabase,
     prefill_backend_name: str,
     prefill_model_config: config.ModelConfig,
-    prefill_parallel_config_list: list[tuple[int, int, int, int, int]] | list[list[int]],
+    prefill_parallel_config_list: list[tuple[int, int, int, int, int, int]] | list[list[int]],
     prefill_latency_correction: float,
     decode_database: PerfDatabase,
     decode_backend_name: str,
     decode_model_config: config.ModelConfig,
-    decode_parallel_config_list: list[tuple[int, int, int, int, int]] | list[list[int]],
+    decode_parallel_config_list: list[tuple[int, int, int, int, int, int]] | list[list[int]],
     decode_latency_correction: float,
     prefill_max_num_tokens: int = 16384,
     decode_max_num_tokens: int = 512,

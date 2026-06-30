@@ -12,6 +12,7 @@ logits, and perf logging.
 __compat__ = "vllm>=0.17.0"
 
 import inspect
+import json
 import os
 
 import torch
@@ -109,6 +110,50 @@ aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 _WORKSPACE_MANAGER_DEVICES: set[str] = set()
 
 
+def _moe_execution_key(common_moe_testcase, moe_type: str):
+    module_config = get_moe_quantization_module_config(
+        "vllm",
+        moe_type,
+        model_name=common_moe_testcase.model_name,
+    )
+    return (
+        moe_type,
+        tuple(common_moe_testcase.num_tokens_list),
+        common_moe_testcase.hidden_size,
+        common_moe_testcase.inter_size,
+        common_moe_testcase.topk,
+        common_moe_testcase.num_experts,
+        common_moe_testcase.tp,
+        common_moe_testcase.ep,
+        common_moe_testcase.token_expert_distribution,
+        common_moe_testcase.power_law_alpha,
+        json.dumps(module_config, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _moe_consumer_keys(common_moe_testcase, moe_type: str):
+    """Return every consumer-visible key emitted by one getter task."""
+    distribution = (
+        f"power_law_{common_moe_testcase.power_law_alpha}"
+        if common_moe_testcase.token_expert_distribution == "power_law"
+        else common_moe_testcase.token_expert_distribution
+    )
+    return tuple(
+        (
+            moe_type,
+            distribution,
+            common_moe_testcase.topk,
+            common_moe_testcase.num_experts,
+            common_moe_testcase.hidden_size,
+            common_moe_testcase.inter_size,
+            common_moe_testcase.tp,
+            common_moe_testcase.ep,
+            num_tokens,
+        )
+        for num_tokens in common_moe_testcase.num_tokens_list
+    )
+
+
 def _ensure_workspace_manager(device: str) -> None:
     if init_workspace_manager is None:
         return
@@ -138,6 +183,8 @@ def get_moe_test_cases():
     )
 
     test_cases = []
+    seen = set()
+    consumer_key_owners = {}
 
     for common_moe_testcase in get_common_moe_test_cases():
         model_name = common_moe_testcase.model_name
@@ -158,6 +205,24 @@ def get_moe_test_cases():
                 topk=common_moe_testcase.topk,
             ):
                 continue
+
+            execution_key = _moe_execution_key(common_moe_testcase, moe_type)
+            if execution_key in seen:
+                continue
+            consumer_keys = _moe_consumer_keys(common_moe_testcase, moe_type)
+            for consumer_key in consumer_keys:
+                previous_owner = consumer_key_owners.get(consumer_key)
+                if previous_owner is not None and previous_owner[0] != execution_key:
+                    previous_model = previous_owner[1]
+                    raise ValueError(
+                        "vLLM MoE population collision: "
+                        f"models {previous_model!r} and {model_name!r} map distinct benchmark "
+                        f"invocations to consumer key {consumer_key!r}; "
+                        "the current moe_perf consumer cannot represent both"
+                    )
+            for consumer_key in consumer_keys:
+                consumer_key_owners[consumer_key] = (execution_key, model_name)
+            seen.add(execution_key)
 
             test_cases.append(
                 [
@@ -229,10 +294,11 @@ def run_moe_torch(
 
     # INT4_WO path: W4A16 via vLLM's Marlin kernel using int4_w4a16_moe_quant_config.
     # Weights are packed uint8 (2 int4 per byte, shape K//2). Scales are per-group
-    # along K (group_size=128). Zero-points are None (symmetric quantization).
+    # along K (Kimi-K2.5 uses group_size=32). Zero-points are None.
     use_int4_wo = moe_type == "int4_wo"
     if use_int4_wo:
-        int4_group_size = 128
+        int4_config = get_moe_quantization_module_config("vllm", moe_type, model_name=model_name)
+        int4_group_size = int(int4_config.get("group_size", 128))
         # w1: (E, 2*local_inter, hidden) packed → (E, 2*local_inter, hidden//2) uint8
         w1 = torch.randint(
             0, 127, (local_num_experts, 2 * local_inter_size, hidden_size // 2), dtype=torch.uint8, device=device

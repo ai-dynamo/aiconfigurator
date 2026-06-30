@@ -38,6 +38,21 @@ class TestGEMMCacheStructure:
         assert key[3] == stub_perf_db.version
         assert key[4] == stub_perf_db.enable_shared_layer
 
+    def test_clear_cache_clears_compute_scale_delta_lookup(self, monkeypatch):
+        # Patch every class cache to keep this test isolated from the warmed
+        # singleton caches used by the rest of the database suite.
+        monkeypatch.setattr(GEMM, "_data_cache", {"sentinel": object()})
+        monkeypatch.setattr(GEMM, "_compute_scale_cache", {"sentinel": object()})
+        monkeypatch.setattr(GEMM, "_scale_matrix_cache", {"sentinel": object()})
+        monkeypatch.setattr(GEMM, "_compute_scale_delta_lookup_cache", {1: object()})
+
+        GEMM.clear_cache()
+
+        assert GEMM._data_cache == {}
+        assert GEMM._compute_scale_cache == {}
+        assert GEMM._scale_matrix_cache == {}
+        assert GEMM._compute_scale_delta_lookup_cache == {}
+
 
 class TestStaticHelpers:
     """``_get_quant_tc_flops`` + ``_normalize_gemm_quant_mode_for_table``."""

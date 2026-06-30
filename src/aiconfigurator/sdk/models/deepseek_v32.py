@@ -26,17 +26,15 @@ def _dsa_attention_modules_excluded_from_quant(raw_config: dict) -> bool:
     patterns = [
         *list(quant_config.get("modules_to_not_convert") or []),
         *list(quant_config.get("exclude_modules") or []),
+        *list(quant_config.get("ignore") or []),
         *list(hf_quant.get("exclude_modules") or []),
+        *list(hf_quant.get("ignore") or []),
     ]
-    dsa_projection_markers = (
-        "self_attn.q_a_proj",
-        "self_attn.q_b_proj",
-        "self_attn.kv_a_proj",
-        "self_attn.kv_a_proj_with_mqa",
-        "self_attn.kv_b_proj",
-        "self_attn.o_proj",
-    )
-    return any(any(marker in str(pattern) for marker in dsa_projection_markers) for pattern in patterns)
+    # Match either a full projection name (e.g. "self_attn.q_a_proj") or a
+    # layer-prefixed glob the ModelOpt exporter emits (e.g.
+    # "model.layers.10.self_attn*"). The latter is how nvidia/GLM-5-NVFP4
+    # excludes DSA attention from NVFP4; the full-name-only check missed it.
+    return any("self_attn" in str(pattern) for pattern in patterns)
 
 
 def _dsa_gemm_quant_mode(extra_params: object, fallback: common.GEMMQuantMode) -> common.GEMMQuantMode:
@@ -54,6 +52,13 @@ class DeepSeekV32Model(BaseModel):
     distinguish architectures such as ``DeepseekV32ForCausalLM`` and
     ``GlmMoeDsaForCausalLM`` without reusing the old DeepSeek-V3 MLA model.
     """
+
+    @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # GLM-5 DSA prefill CP: SGLang AllGather only. CP is modeled INSIDE
+        # ContextDSAModule (_query_cp) + DSA-specific MoE comm, NOT via the
+        # dense _cp_attn_comm_ops / seq_split skeleton.
+        return backend_name == "sglang"
 
     @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
@@ -94,12 +99,12 @@ class DeepSeekV32Model(BaseModel):
         super().__init__(*args)
 
         assert (
-            self.config.tp_size * self.config.attention_dp_size * self.config.attention_cp_size
+            self.config.tp_size * self.config.attention_dp_size * self.config.cp_size
             == self.config.moe_tp_size * self.config.moe_ep_size
         ), (
             f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) * attention_cp_size "
-            f"({self.config.attention_cp_size}) should be equal to moe_tp_size "
+            f"({self.config.attention_dp_size}) * cp_size "
+            f"({self.config.cp_size}) should be equal to moe_tp_size "
             f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
@@ -120,7 +125,7 @@ class DeepSeekV32Model(BaseModel):
         moe_tp_size = self.config.moe_tp_size
         moe_ep_size = self.config.moe_ep_size
         attention_dp_size = self.config.attention_dp_size
-        cp_size = self.config.attention_cp_size  # context parallelism (token split, orthogonal to tp)
+        cp_size = self.config.cp_size  # context parallelism (token split, orthogonal to tp)
         pp_size = self.config.pp_size
 
         gemm_quant_mode = self.config.gemm_quant_mode
@@ -147,7 +152,7 @@ class DeepSeekV32Model(BaseModel):
                     fmha_quant_mode,
                     dsa_gemm_quant_mode,
                     architecture=self.architecture,
-                    cp_size=self.config.attention_cp_size,
+                    cp_size=self.config.cp_size,
                 ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8, scale_num_tokens=cp_size),
                 ops.GEMM(
@@ -189,7 +194,7 @@ class DeepSeekV32Model(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
-                    attn_cp_size=self.config.attention_cp_size,
+                    attn_cp_size=self.config.cp_size,
                 ),
                 ops.MoE(
                     "context_moe",
@@ -215,7 +220,7 @@ class DeepSeekV32Model(BaseModel):
                     attention_dp_size,
                     False,
                     quant_mode=moe_quant_mode,
-                    attn_cp_size=self.config.attention_cp_size,
+                    attn_cp_size=self.config.cp_size,
                 ),
                 ops.GEMM(
                     "context_logits_gemm",
@@ -298,7 +303,8 @@ class DeepSeekV32Model(BaseModel):
                 attention_dp_size,
                 True,
                 quant_mode=moe_quant_mode,
-                attn_cp_size=self.config.attention_cp_size,
+                attn_cp_size=self.config.cp_size,
+                is_context=False,  # decode: MoEDispatch picks the decode-CP comm path
             ),
             ops.MoE(
                 "generation_moe",
@@ -324,7 +330,8 @@ class DeepSeekV32Model(BaseModel):
                 attention_dp_size,
                 False,
                 quant_mode=moe_quant_mode,
-                attn_cp_size=self.config.attention_cp_size,
+                attn_cp_size=self.config.cp_size,
+                is_context=False,  # decode: MoEDispatch picks the decode-CP comm path
             ),
         ]
         self.generation_ops.append(
@@ -368,12 +375,12 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
         super().__init__(*args)
 
         assert (
-            self.config.tp_size * self.config.attention_dp_size * self.config.attention_cp_size
+            self.config.tp_size * self.config.attention_dp_size * self.config.cp_size
             == self.config.moe_tp_size * self.config.moe_ep_size
         ), (
             f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) * attention_cp_size "
-            f"({self.config.attention_cp_size}) should be equal to moe_tp_size "
+            f"({self.config.attention_dp_size}) * cp_size "
+            f"({self.config.cp_size}) should be equal to moe_tp_size "
             f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
@@ -454,7 +461,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                     fmha_quant_mode,
                     dsa_gemm_quant_mode,
                     architecture=self.architecture,
-                    cp_size=self.config.attention_cp_size,
+                    cp_size=self.config.cp_size,
                 ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
                 ops.GEMM(
@@ -691,7 +698,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     fmha_quant_mode,
                     dsa_gemm_quant_mode,
                     architecture=self.architecture,
-                    cp_size=self.config.attention_cp_size,
+                    cp_size=self.config.cp_size,
                 ),
                 *(
                     [
@@ -742,7 +749,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
-                    attn_cp_size=self.config.attention_cp_size,
+                    attn_cp_size=self.config.cp_size,
                     sms=sms,
                     moe_backend=moe_backend,
                     is_context=True,
@@ -810,7 +817,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
-                    attn_cp_size=self.config.attention_cp_size,
+                    attn_cp_size=self.config.cp_size,
                     sms=sms,
                     moe_backend=moe_backend,
                     is_context=False,

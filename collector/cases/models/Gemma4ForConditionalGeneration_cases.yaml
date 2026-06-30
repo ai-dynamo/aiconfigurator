@@ -7,10 +7,29 @@ model_path: google/gemma-4-26B-A4B
 model_paths:
   - google/gemma-4-26B-A4B
 include_base: true
+base_ops:
+  - attention_context
+  - attention_generation
+  - gemm
 description: >
   Gemma 4 hybrid SWA/global attention plus routed-MoE collection plan.
 
 model_case_values:
+  attention:
+    - id: gemma4_swa_attention
+      model_path: google/gemma-4-26B-A4B
+      num_attention_heads: 16
+      num_key_value_heads: 8
+      head_dim: 256
+      window_size: 1024
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
+    - id: gemma4_global_attention
+      model_path: google/gemma-4-26B-A4B
+      num_attention_heads: 16
+      num_key_value_heads: 2
+      head_dim: 512
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
   moe:
     - model_path: google/gemma-4-26B-A4B
       hidden_size: 2816

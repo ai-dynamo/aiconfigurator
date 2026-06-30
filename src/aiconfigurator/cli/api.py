@@ -24,6 +24,8 @@ from aiconfigurator.cli.main import (
 )
 from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.config import ModelConfig
+from aiconfigurator.sdk.config_builders import apply_nextn as _apply_nextn
+from aiconfigurator.sdk.config_builders import build_model_config as _build_model_config
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task_v2 import Task
 
@@ -137,6 +139,7 @@ def cli_default(
     backend: str = "trtllm",
     backend_version: str | None = None,
     database_mode: str = "SILICON",
+    transfer_policy: str | list | None = None,
     isl: int = 4000,
     osl: int = 1000,
     image_height: int = 0,
@@ -242,6 +245,7 @@ def cli_default(
         backend=backend,
         backend_version=backend_version,
         database_mode=database_mode,
+        transfer_policy=transfer_policy,
         isl=isl,
         osl=osl,
         image_height=image_height,
@@ -591,42 +595,6 @@ def _resolve_moe_parallelism(
     return cfg.resolve_moe_parallelism()
 
 
-def _build_model_config(
-    tp_size: int,
-    pp_size: int,
-    attention_dp_size: int,
-    moe_tp_size: int,
-    moe_ep_size: int,
-    gemm_quant_mode: str | None = None,
-    kvcache_quant_mode: str | None = None,
-    fmha_quant_mode: str | None = None,
-    moe_quant_mode: str | None = None,
-    comm_quant_mode: str | None = None,
-):
-    """Build a ModelConfig with optional quant mode overrides."""
-    from aiconfigurator.sdk.common import (
-        CommQuantMode,
-        FMHAQuantMode,
-        GEMMQuantMode,
-        KVCacheQuantMode,
-        MoEQuantMode,
-    )
-    from aiconfigurator.sdk.config import ModelConfig
-
-    return ModelConfig(
-        tp_size=tp_size,
-        pp_size=pp_size,
-        attention_dp_size=attention_dp_size,
-        moe_tp_size=moe_tp_size,
-        moe_ep_size=moe_ep_size,
-        gemm_quant_mode=GEMMQuantMode[gemm_quant_mode] if gemm_quant_mode else None,
-        kvcache_quant_mode=KVCacheQuantMode[kvcache_quant_mode] if kvcache_quant_mode else None,
-        fmha_quant_mode=FMHAQuantMode[fmha_quant_mode] if fmha_quant_mode else None,
-        moe_quant_mode=MoEQuantMode[moe_quant_mode] if moe_quant_mode else None,
-        comm_quant_mode=CommQuantMode[comm_quant_mode] if comm_quant_mode else None,
-    )
-
-
 def cli_estimate(
     model_path: str,
     system_name: str,
@@ -635,6 +603,7 @@ def cli_estimate(
     backend_name: str = "trtllm",
     backend_version: str | None = None,
     database_mode: str = "SILICON",
+    transfer_policy: str | list | None = None,
     isl: int = 1024,
     osl: int = 1024,
     image_height: int = 0,
@@ -817,7 +786,7 @@ def cli_estimate(
     from aiconfigurator.sdk.backends.factory import get_backend
     from aiconfigurator.sdk.models import get_model
     from aiconfigurator.sdk.perf_database import (
-        get_database,
+        get_database_view,
         get_latest_database_version,
         get_systems_paths,
         set_systems_paths,
@@ -854,10 +823,16 @@ def cli_estimate(
 
     def _load_database(sys_name: str):
         resolved_version = _resolve_version_for(sys_name)
-        database_kwargs = {"allow_missing_data": database_mode != "SILICON"}
+        # database_mode is needed at construction, not just at query time: SILICON and
+        # HYBRID load declared shared-layer silicon rows, while formula-only modes do not.
+        database_kwargs = {
+            "allow_missing_data": database_mode != "SILICON",
+            "database_mode": database_mode,
+            "transfer_policy": transfer_policy,
+        }
         if active_systems_paths is not None:
             database_kwargs["systems_paths"] = active_systems_paths
-        db = get_database(
+        db = get_database_view(
             sys_name,
             backend_name,
             resolved_version,
@@ -868,10 +843,6 @@ def cli_estimate(
                 f"Failed to load perf database for system={sys_name}, "
                 f"backend={backend_name}, version={resolved_version}."
             )
-        if database_mode != "SILICON":
-            from aiconfigurator.sdk.common import DatabaseMode
-
-            db.set_default_database_mode(DatabaseMode[database_mode])
         return db
 
     if mode in ("static", "static_ctx", "static_gen"):
@@ -1118,25 +1089,6 @@ def cli_estimate(
         raise ValueError(
             f"Unsupported estimate mode: {mode!r}. Use 'agg', 'disagg', 'afd', 'static', 'static_ctx', or 'static_gen'."
         )
-
-
-def _apply_nextn(
-    model_config,
-    nextn: int | None,
-    nextn_accept_rates: list[float] | None,
-) -> None:
-    """Apply common ``nextn`` / ``nextn_accept_rates`` overrides onto a ModelConfig.
-
-    Mirrors the static-mode path so agg / disagg / static all respond to the
-    same CLI flags. When ``nextn>0`` and no explicit accept rates are given,
-    fall back to the project-wide default ``[0.85, 0.3, 0, 0, 0]`` (matches
-    ``cli default``'s _base_common_layer).
-    """
-    model_config.nextn = int(nextn or 0)
-    if nextn_accept_rates is not None:
-        model_config.nextn_accept_rates = list(nextn_accept_rates)
-    elif model_config.nextn > 0:
-        model_config.nextn_accept_rates = [0.85, 0.3, 0.0, 0.0, 0.0]
 
 
 def _run_agg_estimate(

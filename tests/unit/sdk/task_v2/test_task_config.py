@@ -704,22 +704,16 @@ def test_explicit_fmha_fp8_not_downgraded():
     )  # explicit -> kept
 
 
-def test_database_mode_switches_db_default_mode(monkeypatch):
-    """database_mode != SILICON must switch the db's DEFAULT mode (so predictions use
-    SOL/empirical), not merely pass the loader flag -- mirrors v1 set_default_database_mode.
-    Without this, SILICON/HYBRID/EMPIRICAL all produced identical results."""
-    from aiconfigurator.sdk import common
+def test_database_mode_is_forwarded_to_view_loader(monkeypatch):
+    """Task delegates mode selection to the configured database-view boundary."""
+    calls = []
+    database = object()
 
-    captured = {}
+    def fake_get_database_view(*args, **kwargs):
+        calls.append((args, kwargs))
+        return database
 
-    class _FakeDB:
-        def get_default_database_mode(self):
-            return common.DatabaseMode.SILICON
-
-        def set_default_database_mode(self, mode):
-            captured["mode"] = mode
-
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", lambda *a, **k: _FakeDB())
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database_view", fake_get_database_view)
     t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
@@ -727,10 +721,10 @@ def test_database_mode_switches_db_default_mode(monkeypatch):
         backend_name="trtllm",
         database_mode="EMPIRICAL",
     )
-    t._load_database("h200_sxm", "trtllm", "1.3.0rc10")
-    assert captured.get("mode") == common.DatabaseMode.EMPIRICAL
-    # SILICON (the default) must NOT call set_default_database_mode (no-op / no copy churn)
-    captured.clear()
+    assert t._load_database("h200_sxm", "trtllm", "1.3.0rc10") is database
+    assert calls[-1][1]["database_mode"] == "EMPIRICAL"
+    assert calls[-1][1]["allow_missing_data"] is True
+
     t2 = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
@@ -738,8 +732,9 @@ def test_database_mode_switches_db_default_mode(monkeypatch):
         backend_name="trtllm",
         database_mode="SILICON",
     )
-    t2._load_database("h200_sxm", "trtllm", "1.3.0rc10")
-    assert "mode" not in captured
+    assert t2._load_database("h200_sxm", "trtllm", "1.3.0rc10") is database
+    assert calls[-1][1]["database_mode"] == "SILICON"
+    assert calls[-1][1]["allow_missing_data"] is False
 
 
 def test_no_orphan_fields():
@@ -864,7 +859,7 @@ def test_run_dispatches_to_sweep_agg(monkeypatch):
         captured["agg_kwargs"] = kwargs
         return "agg-result"
 
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database_view", fake_get_database)
     monkeypatch.setattr(sweep, "sweep_agg", fake_sweep_agg)
 
     t = Task(
@@ -894,7 +889,7 @@ def test_run_dispatches_to_sweep_disagg_with_two_dbs(monkeypatch):
         captured["disagg_kwargs"] = kwargs
         return "disagg-result"
 
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database_view", fake_get_database)
     monkeypatch.setattr(sweep, "sweep_disagg", fake_sweep_disagg)
 
     t = Task(
@@ -925,7 +920,7 @@ def test_run_passes_autoscale_flag(monkeypatch):
         captured["autoscale"] = kwargs.get("autoscale")
         return "result"
 
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database_view", fake_get_database)
     monkeypatch.setattr(sweep, "sweep_disagg", fake_sweep_disagg)
 
     t = Task(
@@ -958,7 +953,7 @@ def test_run_forwards_predictor_field_to_sweep_agg(monkeypatch):
         captured["predictor"] = kwargs.get("predictor")
         return "agg-result"
 
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database_view", fake_get_database)
     monkeypatch.setattr(sweep, "sweep_agg", fake_sweep_agg)
 
     from aiconfigurator.sdk.predictor import AnalyticPredictor
@@ -987,7 +982,7 @@ def test_run_forwards_predictor_field_to_sweep_disagg(monkeypatch):
         captured["predictor"] = kwargs.get("predictor")
         return "disagg-result"
 
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database_view", fake_get_database)
     monkeypatch.setattr(sweep, "sweep_disagg", fake_sweep_disagg)
 
     from aiconfigurator.sdk.predictor import AnalyticPredictor
@@ -1065,7 +1060,7 @@ def test_run_single_agg_calls_predict_agg_worker_with_fixed_point(monkeypatch):
         captured["predict_kwargs"] = kwargs
         return _build_fake_summary(result_dict={"tokens/s/gpu": 999.0, "ttft": 42.0, "tpot": 7.0})
 
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database_view", fake_get_database)
     monkeypatch.setattr("aiconfigurator.sdk.backends.factory.get_backend", fake_get_backend)
     monkeypatch.setattr("aiconfigurator.sdk.models.get_model", fake_get_model)
     monkeypatch.setattr(predict, "predict_agg_worker", fake_predict_agg_worker)
@@ -1115,7 +1110,7 @@ def test_run_single_agg_raises_on_oom(monkeypatch):
     def fake_predict_agg_worker(**kwargs):
         return _build_fake_summary(oom=True)
 
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database_view", fake_get_database)
     monkeypatch.setattr("aiconfigurator.sdk.backends.factory.get_backend", fake_get_backend)
     monkeypatch.setattr("aiconfigurator.sdk.models.get_model", fake_get_model)
     monkeypatch.setattr(predict, "predict_agg_worker", fake_predict_agg_worker)
@@ -1182,7 +1177,7 @@ def test_run_single_disagg_invokes_both_phases_and_rate_matches(monkeypatch):
         call_roles.append(kwargs["role"])
         return _phase_summary(kwargs["role"])
 
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database", fake_get_database)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database_view", fake_get_database)
     monkeypatch.setattr("aiconfigurator.sdk.backends.factory.get_backend", fake_get_backend)
     monkeypatch.setattr("aiconfigurator.sdk.models.get_model", fake_get_model)
     monkeypatch.setattr(predict, "predict_disagg_worker", fake_predict_disagg_worker)
@@ -1368,6 +1363,36 @@ def test_validate_database_check_rejects_unsupported_quant():
         t.validate()
     except ValueError as exc:
         assert "Unsupported gemm" in str(exc) or "Supported gemm" in str(exc)
+
+
+def test_validate_moe_quant_transfer_reachable_in_hybrid():
+    """supported_quant_mode is a data-presence list. A MoE quant absent from the DB
+    but sharing a (memory, compute) profile with a supported quant is XQUANT-reachable
+    in HYBRID (operations/moe.py), so HYBRID validate must admit it while SILICON stays
+    strict. Kimi-K2.5 infers int4_wo MoE (profile (0.5,1)) which b200/trtllm has no data
+    for, but w4a16_mxfp4 (same profile) is collected."""
+
+    def make(mode, policy=None):
+        return Task(
+            serving_mode="agg",
+            model_path="moonshotai/Kimi-K2.5",
+            system_name="b200_sxm",
+            backend_name="trtllm",
+            backend_version="1.3.0rc10",
+            database_mode=mode,
+            transfer_policy=policy,
+        )
+
+    with pytest.raises(ValueError, match="Unsupported moe quant mode 'int4_wo'"):
+        make("SILICON").validate()
+    make("HYBRID").validate()  # default policy (all on) -> XQUANT reachable -> no raise
+    make("HYBRID", "xquant").validate()  # XQUANT explicitly enabled -> no raise
+
+    # The admission must respect the transfer policy: if XQUANT is disabled, moe.py would
+    # reject the quant at query time, so validate must NOT pre-admit it.
+    for disabled in ("off", "conservative"):
+        with pytest.raises(ValueError, match="Unsupported moe quant mode 'int4_wo'"):
+            make("HYBRID", disabled).validate()
 
 
 def test_validate_skips_db_check_when_database_unavailable():

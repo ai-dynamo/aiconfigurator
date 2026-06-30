@@ -691,8 +691,11 @@ class BaseBackend:
         dp = model.config.attention_dp_size
         moe_tp = model.config.moe_tp_size
         moe_ep = model.config.moe_ep_size
-        num_total_gpus = tp * pp * dp
-        parallel = f"tp{tp}pp{pp}dp{dp}etp{moe_tp}ep{moe_ep}"
+        cp = model.config.cp_size
+        # CP is an independent sequence-sharding dim -> folds into the per-worker
+        # GPU count (tp*pp*dp*cp), so throughput-per-GPU normalizes correctly.
+        num_total_gpus = model.config.total_gpus_per_worker
+        parallel = f"tp{tp}pp{pp}dp{dp}etp{moe_tp}ep{moe_ep}" + (f"cp{cp}" if cp > 1 else "")
         gemm = model.config.gemm_quant_mode.name
         kvcache = model.config.kvcache_quant_mode.name
         fmha = model.config.fmha_quant_mode.name
@@ -728,6 +731,7 @@ class BaseBackend:
                 dp,
                 moe_tp,
                 moe_ep,
+                cp,
                 parallel,
                 gemm,
                 kvcache,
@@ -761,7 +765,8 @@ class BaseBackend:
         # KV-per-seq context for capacity probing in CLI detail reports.
         try:
             kv_seq_len_used = isl + img_ctx_tokens + beam_width * osl
-            kv_bytes_per_seq = model.get_kvcache_bytes_per_sequence(kv_seq_len_used)
+            # CP shards persistent KV across cp ranks (full/cp per rank).
+            kv_bytes_per_seq = model.get_kvcache_bytes_per_sequence(kv_seq_len_used) / model._cp_kv_memory_divisor()
             summary.set_kv_per_seq(kv_bytes_per_seq, kv_seq_len_used)
         except Exception:
             # Best-effort; downstream report degrades gracefully when unset.
@@ -1308,14 +1313,16 @@ class BaseBackend:
         dp = model.config.attention_dp_size
         moe_tp = model.config.moe_tp_size
         moe_ep = model.config.moe_ep_size
-        tokens_s_gpu = output_throughput / pp / tp / dp
-        tokens_s_user = 1000 / tpot
+        cp = model.config.cp_size
+        tokens_s_gpu = output_throughput / pp / tp / dp / cp
+        # tpot can be 0.0 for valid no-decode agg runs (osl<=1 / _tpot_steps==0).
+        tokens_s_user = 1000.0 / tpot if (osl > 1 and tpot > 0.0) else 0.0
         seq_s = request_rate
-        seq_s_gpu = seq_s / pp / tp / dp
+        seq_s_gpu = seq_s / pp / tp / dp / cp
         tokens_s = output_throughput
         request_latency = ttft + tpot * max(osl - 1, 0)
-        num_total_gpus = tp * pp * dp
-        parallel = f"tp{tp}pp{pp}dp{dp}etp{moe_tp}ep{moe_ep}"
+        num_total_gpus = model.config.total_gpus_per_worker
+        parallel = f"tp{tp}pp{pp}dp{dp}etp{moe_tp}ep{moe_ep}" + (f"cp{cp}" if cp > 1 else "")
         gemm = model.config.gemm_quant_mode.name
         kvcache = model.config.kvcache_quant_mode.name
         fmha = model.config.fmha_quant_mode.name
@@ -1348,6 +1355,7 @@ class BaseBackend:
             "dp": dp,
             "moe_tp": moe_tp,
             "moe_ep": moe_ep,
+            "cp": cp,
             "parallel": parallel,
             "gemm": gemm,
             "kvcache": kvcache,
@@ -1527,6 +1535,7 @@ class BaseBackend:
         prefix: int = 0,
         max_seq_len: int | None = None,
         encoder_memory: dict[str, float] | None = None,
+        mtp_activation_scaling: bool = True,
     ) -> dict[str, float]:
         """
         Get the memory usage of the backend.
@@ -1537,6 +1546,13 @@ class BaseBackend:
             max_seq_len: per-slot KV cache pre-allocation budget. Defaults to
                 ``isl + beam_width * osl`` when not supplied.
             encoder_memory: optional colocated encoder component to add to this worker.
+            mtp_activation_scaling: whether to scale activation by ``(nextn + 1)`` for
+                speculative decoding (see the MTP correction below). True for the
+                latency sweep, where ``num_tokens`` is the per-step token count that the
+                multiplier turns into the verified ``nextn + 1`` tokens. False for the
+                KV-cache capacity path, where ``num_tokens`` is the engine's
+                ``max_num_tokens`` budget that already caps total per-forward tokens
+                (draft tokens included), so re-multiplying would double-count.
         """
         weights = 0.0
         for op in model.context_ops:
@@ -1571,8 +1587,13 @@ class BaseBackend:
 
         activations = max(activations, self.MIN_ACTIVATION_BYTES)
 
-        # MTP correction: additional activation memory for draft tokens (applies to all models)
-        if model.config.nextn > 0:
+        # MTP correction: speculative decoding verifies nextn+1 tokens per decode step,
+        # so the decode-phase activation scales with (nextn+1). Suppressed on the
+        # KV-cache capacity path (mtp_activation_scaling=False), where num_tokens is the
+        # engine's max_num_tokens budget that already caps total per-forward tokens
+        # (draft tokens included) -- re-multiplying there double-counts and can drive the
+        # prefill worker's KV budget negative.
+        if mtp_activation_scaling and model.config.nextn > 0:
             activations = activations * (model.config.nextn + 1)
 
         # Backend-level activation overhead (SGLang only by default).
@@ -1580,7 +1601,9 @@ class BaseBackend:
             activations *= 1.0 + self.ACTIVATION_OVERHEAD_FRAC
 
         seq_tokens = max_seq_len if max_seq_len is not None else isl + beam_width * osl
-        kvcache = batch_size * model.get_kvcache_bytes_per_sequence(seq_tokens)
+        # CP shards persistent KV across cp ranks (full/cp per rank); the
+        # all-gather is a transient compute buffer, not steady-state footprint.
+        kvcache = batch_size * model.get_kvcache_bytes_per_sequence(seq_tokens) / model._cp_kv_memory_divisor()
         # should not be divided by pp_size as you need to hold all kvcache for stages.
 
         # starting from 2.22

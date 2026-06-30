@@ -6,10 +6,9 @@
 Two op classes migrated from ``_legacy.py``:
 
 - ``FallbackOp`` — try a primary op, fall back to a sequence of ops on
-  ``PerfDataNotAvailableError``. Mutates
-  ``database._default_database_mode`` during the primary attempt (forces
-  SILICON inside HYBRID so HYBRID doesn't silently swallow a miss with an
-  empirical estimate); restores via ``finally``.
+  ``PerfDataNotAvailableError``. In HYBRID mode the primary runs against a
+  SILICON-configured copy, so HYBRID does not silently swallow a miss with an
+  empirical estimate and the caller's database is never mutated.
 - ``OverlapOp`` — model two op groups that execute in parallel (TRT-LLM
   ``maybe_execute_in_parallel`` behavior on different CUDA streams during
   generation with CUDA Graph enabled). ``latency = max(sum_a, sum_b)``,
@@ -24,7 +23,7 @@ empty defaults that suffice.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.base import Operation
@@ -51,60 +50,54 @@ class FallbackOp(Operation):
     (which have real data) should be preferred over an empirical guess. In
     explicit EMPIRICAL/SOL modes, the primary respects the requested mode.
 
-    Once the primary fails on the first call, it is skipped on all subsequent
-    calls to avoid redundant work.
+    A data miss applies only to the current query. Later shapes try the primary
+    again because a missing interpolation bracket does not imply that the whole
+    module table is unavailable. Raw schema/programming errors propagate.
 
     Latency = primary.query()  OR  sum(fallback[i].query())
     Energy  = same source as whichever succeeds
-    Weights = sum of whichever group is used (primary or fallback)
+    Weights = primary weights when defined, otherwise the fallback sum
     """
 
-    def __init__(self, name: str, primary: Operation, fallback: list[Operation]) -> None:
+    _CP_AWARE: ClassVar[bool] = True  # wrapper: inner ops carry their own seq_split
+
+    def __init__(self, name: str, primary: Operation, fallback: list[Operation], *, seq_split: int = 1) -> None:
         """
         Args:
             name: Operation name for latency breakdown reporting.
             primary: Single operation to try first.
             fallback: List of operations to sum if primary fails.
+            seq_split: Carried for API uniformity. The wrapper delegates to
+                inner ops which carry their own ``seq_split``; this one is
+                stored on the base class for completeness but not used here.
         """
-        super().__init__(name, 1.0)  # scale_factor handled by inner ops
+        super().__init__(name, 1.0, seq_split=seq_split)  # scale_factor handled by inner ops
         self._primary = primary
         self._fallback = fallback
-        self._primary_unavailable = False
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        import logging as _logging
+        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError, _get_configured_database_view
 
-        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+        primary_database = (
+            _get_configured_database_view(
+                database,
+                common.DatabaseMode.SILICON,
+                getattr(database, "transfer_policy", None),
+            )
+            if database._default_database_mode == common.DatabaseMode.HYBRID
+            else database
+        )
 
-        if not self._primary_unavailable:
-            prev_mode = database._default_database_mode
-            force_primary_silicon = prev_mode == common.DatabaseMode.HYBRID
-            if force_primary_silicon:
-                # Force SILICON mode on the primary so HYBRID does not silently
-                # return an empirical estimate when module data is missing.
-                database._default_database_mode = common.DatabaseMode.SILICON
-
-            # Suppress ERROR-level logs from perf_database during the primary
-            # attempt, since a failure here is expected and handled by fallback.
-            perf_db_logger = _logging.getLogger("aiconfigurator.sdk.perf_database")
-            prev_log_level = perf_db_logger.level
-            perf_db_logger.setLevel(_logging.CRITICAL)
-            try:
-                return self._primary.query(database, **kwargs)
-            except (PerfDataNotAvailableError, KeyError, AssertionError) as e:
-                if isinstance(e, PerfDataNotAvailableError):
-                    self._primary_unavailable = True
-                logger.debug(
-                    "FallbackOp '%s': primary op '%s' failed (%s: %s), using fallback ops",
-                    self._name,
-                    self._primary._name,
-                    type(e).__name__,
-                    e,
-                )
-            finally:
-                if force_primary_silicon:
-                    database._default_database_mode = prev_mode
-                perf_db_logger.setLevel(prev_log_level)
+        try:
+            return self._primary.query(primary_database, **kwargs)
+        except PerfDataNotAvailableError as e:
+            logger.debug(
+                "FallbackOp '%s': primary op '%s' failed (%s: %s), using fallback ops",
+                self._name,
+                self._primary._name,
+                type(e).__name__,
+                e,
+            )
 
         total = PerformanceResult(0.0, energy=0.0, source="empirical")
         for op in self._fallback:
@@ -114,10 +107,9 @@ class FallbackOp(Operation):
     def get_weights(self, **kwargs):
         # Use primary weights if available, otherwise sum fallback weights.
         # In practice both should be equivalent since they model the same block.
-        if not self._primary_unavailable:
-            primary_w = self._primary.get_weights(**kwargs)
-            if primary_w > 0:
-                return primary_w
+        primary_w = self._primary.get_weights(**kwargs)
+        if primary_w > 0:
+            return primary_w
         return sum(op.get_weights(**kwargs) for op in self._fallback)
 
 
@@ -134,7 +126,9 @@ class OverlapOp(Operation):
     Weights = sum(all ops in both groups)
     """
 
-    def __init__(self, name: str, group_a: list, group_b: list) -> None:
+    _CP_AWARE: ClassVar[bool] = True  # wrapper: inner ops carry their own seq_split
+
+    def __init__(self, name: str, group_a: list, group_b: list, *, seq_split: int = 1) -> None:
         """
         Args:
             name: Operation name for latency breakdown reporting.
@@ -142,8 +136,9 @@ class OverlapOp(Operation):
                      (e.g., routed expert path on main stream).
             group_b: List of Operation objects for the second parallel group
                      (e.g., shared expert path on aux stream).
+            seq_split: Carried for API uniformity. Inner ops carry their own.
         """
-        super().__init__(name, 1.0)  # scale_factor handled by inner ops
+        super().__init__(name, 1.0, seq_split=seq_split)  # scale_factor handled by inner ops
         self._group_a = group_a
         self._group_b = group_b
 

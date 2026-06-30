@@ -14,7 +14,7 @@ workers to run, and the parallelism for each worker. Combined with SLA targets f
 TPOT (Time per Output Token), optimizing throughput at a given latency becomes even more complex.
 
 `aiconfigurator` helps you find a strong starting configuration for disaggregated serving. Given your model, GPU
-count, and GPU type, it searches the configuration space and generates configuration files you can use for deployment with Dynamo.
+count, and GPU type, it searches the configuration space and generates configuration files you can use for deployment with Dynamo or llm-d.
 
 For a technical deep dive into the design and methodology of AIConfigurator, please refer to our paper:  
 [**AIConfigurator: Lightning-Fast Configuration Optimization for Multi-Framework LLM Serving**](https://arxiv.org/abs/2601.06288).
@@ -47,14 +47,15 @@ git lfs pull
 # 3. Create and activate a virtual environment
 python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.9 or later)
 
-# 4. Install aiconfigurator
+# 4. Install aiconfigurator-core, then aiconfigurator
+pip3 install ./src/aiconfigurator-core
 pip3 install .
 ```
 
 ### Build with Docker
 
 ```bash
-# This will create a ./dist/ folder containing the wheel file
+# This will create a ./dist/ folder containing the core and upper wheel files
 docker build -f docker/Dockerfile --no-cache --target build -t aiconfigurator:latest .
 docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist dist/ && docker rm aic
 ```
@@ -238,7 +239,7 @@ For the full guide, refer to [CLI User Guide](docs/cli_user_guide.md).
 
 ### Deploying to llm-d Platform
 
-AIConfigurator supports deploying to the llm-d platform using Helm values. Use `--deployment-target llm-d` with vLLM or SGLang backends:
+AIConfigurator supports deploying to the llm-d platform using Helm values. Use `--deployment-target llm-d-helm` with vLLM or SGLang backends:
 
 ```bash
 # vLLM on llm-d
@@ -247,7 +248,7 @@ aiconfigurator cli default \
   --total-gpus 32 \
   --system h200_sxm \
   --backend vllm \
-  --deployment-target llm-d \
+  --deployment-target llm-d-helm \
   --save-dir ./output
 
 # SGLang on llm-d
@@ -256,7 +257,7 @@ aiconfigurator cli default \
   --total-gpus 32 \
   --system h200_sxm \
   --backend sglang \
-  --deployment-target llm-d \
+  --deployment-target llm-d-helm \
   --save-dir ./output
 ```
 
@@ -310,7 +311,7 @@ results/QWEN3_32B_FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 └── pareto_frontier.png
 ```
 
-**For llm-d deployments** (`--deployment-target llm-d`):
+**For llm-d Helm deployments** (`--deployment-target llm-d-helm`):
 
 ```text
 results/QWEN3_32B_h200_sxm_vllm_isl4000_osl1000_ttft1000_tpot20_904495
@@ -358,7 +359,7 @@ To estimate performance, we take the following steps:
 2. Collect operation execution times on the target hardware.
 3. Estimate end-to-end execution time for a configuration by composing operation times using interpolation and extrapolation.
 4. Model in-flight batching (aggregated) and disaggregated serving on top of that.
-5. Search thousands of combinations to find strong configurations and generate Dynamo configuration files based on the results.
+5. Search thousands of combinations to find strong configurations and generate Dynamo or llm-d configuration files based on the results.
 
 ### Supported Features
 

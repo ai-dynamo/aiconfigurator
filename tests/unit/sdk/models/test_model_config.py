@@ -125,6 +125,45 @@ class TestMOEParallelismResolution:
         assert model_config.moe_tp_size == 1
         assert model_config.moe_ep_size == 1
 
+    def test_minimax_m3_builds_with_msa_and_moe(self):
+        """MiniMax-M3 registers as its own family and wires the MSA attention op + MoE."""
+        from aiconfigurator.sdk.operations.msa import ContextMSAModule
+
+        model_config = config.ModelConfig(tp_size=1, attention_dp_size=1, moe_tp_size=1, moe_ep_size=1)
+        model = get_model("MiniMaxAI/MiniMax-M3", model_config, backend_name="trtllm")
+        assert model.model_family == "MINIMAXM3"
+        ctx = {op._name: op for op in model.context_ops}
+        assert "context_attention" in ctx and "context_moe" in ctx
+        assert isinstance(ctx["context_attention"], ContextMSAModule)  # MSA, not plain attention
+
+    def test_nemotron_h_mtp_scales_generation_only(self):
+        """Nemotron-3 ships num_nextn_predict_layers=1; MTP must build (no assert) and
+        scale only the generation path. nextn=0 must be an exact 1.0 no-op."""
+
+        def build(nextn):
+            mc = config.ModelConfig(
+                tp_size=8,
+                moe_tp_size=1,
+                moe_ep_size=8,
+                nextn=nextn,
+                nextn_accept_rates=[0.85, 0.7, 0.5, 0.3, 0.2],
+            )
+            return get_model("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", mc, backend_name="trtllm")
+
+        baseline = build(0)
+        mtp = build(1)
+        assert baseline._mtp_scale_factor == 1.0
+        assert 0.0 < mtp._mtp_scale_factor < 1.0
+
+        baseline_context = {op._name: op._scale_factor for op in baseline.context_ops}
+        mtp_context = {op._name: op._scale_factor for op in mtp.context_ops}
+        assert mtp_context["context_mamba_norm"] == baseline_context["context_mamba_norm"]
+
+        baseline_generation = {op._name: op._scale_factor for op in baseline.generation_ops}
+        mtp_generation = {op._name: op._scale_factor for op in mtp.generation_ops}
+        for name in ("generation_embedding", "generation_mamba_norm", "generation_logits_gemm"):
+            assert mtp_generation[name] == pytest.approx(baseline_generation[name] * mtp._mtp_scale_factor)
+
     def test_both_missing_moe_parallelism_raises_clear_error(self):
         model_config = config.ModelConfig(
             tp_size=4,
@@ -1304,3 +1343,58 @@ class TestQwen3VLModel:
     def test_both_vl_variants_return_qwen3vl_model(self, model_id, model_config):
         model = get_model(model_id, model_config, "trtllm")
         assert isinstance(model, Qwen3VLModel)
+
+
+class TestDSAAttentionQuantExclusion:
+    """GLM-5 DSA: detect ModelOpt keeping attention projections unquantized (bf16).
+
+    Regression for the nvidia/GLM-5-NVFP4 exclude format — layer-prefixed
+    ``model.layers.N.self_attn*`` globs and the ``ignore`` key — which the
+    earlier full-projection-name substring check missed, silently modeling DSA
+    attention at NVFP4 instead of bf16.
+    """
+
+    @staticmethod
+    def _excluded(raw):
+        from aiconfigurator.sdk.models.deepseek_v32 import (
+            _dsa_attention_modules_excluded_from_quant,
+        )
+
+        return _dsa_attention_modules_excluded_from_quant(raw)
+
+    def test_modelopt_layer_prefixed_self_attn_globs(self):
+        raw = {
+            "quantization_config": {
+                "quant_algo": "NVFP4",
+                "ignore": ["lm_head", "model.layers.10.self_attn*"],
+            },
+            "hf_quant_config": {
+                "quantization": {
+                    "exclude_modules": [
+                        "lm_head",
+                        "model.layers.10.self_attn*",
+                        "model.layers.10.mlp.shared_experts*",
+                    ]
+                }
+            },
+        }
+        assert self._excluded(raw) is True
+
+    def test_full_projection_names_backward_compatible(self):
+        raw = {"quantization_config": {"modules_to_not_convert": ["model.layers.0.self_attn.q_a_proj"]}}
+        assert self._excluded(raw) is True
+
+    def test_ignore_key_regex_pattern(self):
+        raw = {"quantization_config": {"ignore": ["re:.*self_attn.*"]}}
+        assert self._excluded(raw) is True
+
+    def test_hf_quant_ignore_key_pattern(self):
+        raw = {"hf_quant_config": {"quantization": {"ignore": ["model.layers.3.self_attn*"]}}}
+        assert self._excluded(raw) is True
+
+    def test_attention_quantized_returns_false(self):
+        raw = {"quantization_config": {"exclude_modules": ["lm_head", "model.layers.0.mlp.shared_experts.gate"]}}
+        assert self._excluded(raw) is False
+
+    def test_empty_config_returns_false(self):
+        assert self._excluded({}) is False

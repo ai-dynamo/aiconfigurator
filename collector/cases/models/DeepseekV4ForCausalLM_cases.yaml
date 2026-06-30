@@ -10,6 +10,8 @@ model_paths:
   - sgl-project/DeepSeek-V4-Flash-FP8
   - sgl-project/DeepSeek-V4-Pro-FP8
 include_base: true
+base_ops:
+  - gemm
 description: >
   DeepSeek-V4 model-centric collection plan. DSV4 attention and sparse kernel
   cases use the upstream DeepSeek-V4 op names and can target any listed V4
@@ -17,22 +19,71 @@ description: >
 
 model_case_values:
   moe:
-    - model_paths:
-        - deepseek-ai/DeepSeek-V4-Flash
-        - sgl-project/DeepSeek-V4-Flash-FP8
+    - model_path: deepseek-ai/DeepSeek-V4-Flash
       hidden_size: 4096
       inter_size: 2048
       topk: 6
       num_experts: 256
       wideep: true
-    - model_paths:
-        - deepseek-ai/DeepSeek-V4-Pro
-        - sgl-project/DeepSeek-V4-Pro-FP8
+      framework_quantization:
+        sglang:
+          # The pinned SGLang 0.5.10 predates the DeepSeek-V4-specific MXFP4
+          # method (added in 0.5.12). Do not run its GPT-OSS method under a
+          # DSV4 label; enable this only with a separately validated upgrade.
+          allowed_modes: []
+        trtllm:
+          allowed_modes:
+            - w4a8_mxfp4_mxfp8
+        vllm:
+          # The pinned vLLM 0.19.0 collector has no DeepSeek-V4 MXFP4/MXFP8
+          # implementation. Keep the native artifact out of its queue.
+          allowed_modes: []
+    - model_path: sgl-project/DeepSeek-V4-Flash-FP8
+      hidden_size: 4096
+      inter_size: 2048
+      topk: 6
+      num_experts: 256
+      wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes:
+            - fp8_block
+        trtllm:
+          allowed_modes:
+            - fp8_block
+        vllm:
+          allowed_modes:
+            - fp8_block
+    - model_path: deepseek-ai/DeepSeek-V4-Pro
       hidden_size: 7168
       inter_size: 3072
       topk: 6
       num_experts: 384
       wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: []
+        trtllm:
+          allowed_modes:
+            - w4a8_mxfp4_mxfp8
+        vllm:
+          allowed_modes: []
+    - model_path: sgl-project/DeepSeek-V4-Pro-FP8
+      hidden_size: 7168
+      inter_size: 3072
+      topk: 6
+      num_experts: 384
+      wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes:
+            - fp8_block
+        trtllm:
+          allowed_modes:
+            - fp8_block
+        vllm:
+          allowed_modes:
+            - fp8_block
   mhc:
     - model_paths:
         - deepseek-ai/DeepSeek-V4-Flash
@@ -45,9 +96,11 @@ model_case_values:
       hidden_size: 7168
       hc_mult: 4
   dsv4:
+    # Module and calibration output keys cannot distinguish Flash from Pro.
+    # Use one canonical full/raw profile instead of silently overwriting one
+    # model with the other. Targeted runs still preserve all supported paths.
     default_model_paths:
-      - deepseek-ai/DeepSeek-V4-Flash
-      - deepseek-ai/DeepSeek-V4-Pro
+      - sgl-project/DeepSeek-V4-Flash-FP8
     supported_model_paths:
       - deepseek-ai/DeepSeek-V4-Flash
       - deepseek-ai/DeepSeek-V4-Pro
@@ -213,37 +266,16 @@ framework_specific_op_cases:
     # after the csa module entries).
     dsv4_csa_topk_calib:
       cases: all
-    # These kernel-level cases are kept as auxiliary data for future
-    # prefix/past_kv correction.  Current DeepSeek-V4 SGLang modeling uses the
-    # full CSA/HCA attention-module rows above as the primary path.
-    dsv4_paged_mqa_logits_module:
-      cases: all
-    dsv4_hca_attn_module:
-      cases: all
-    # CSA sparse FMLA over the topk-selected c4 positions. Same source as
-    # paged_mqa_logits/topk_calib (reads dsv4_csa_*_module_perf.txt), so it must
-    # run AFTER the CSA module ops (guaranteed by registry order).
-    dsv4_csa_attn_module:
-      cases: all
+    # Standalone paged_mqa/hca_attn/csa_attn rows are experimental-only: the
+    # production SDK has no query call-site for them. Keep their registry
+    # entries available for explicit research runs, but do not schedule them in
+    # the default model plan.
     mhc_module:
       cases: all
     wideep_moe:
       cases: all
-  vllm:
-    dsv4_csa_context_module:
-      cases: all
-    dsv4_hca_context_module:
-      cases: all
-    dsv4_csa_generation_module:
-      cases: all
-    dsv4_hca_generation_module:
-      cases: all
-    # These kernel-level cases are kept as auxiliary data for future
-    # prefix/past_kv correction.  Current DeepSeek-V4 SGLang modeling uses the
-    # full CSA/HCA attention-module rows above as the primary path.
-    dsv4_paged_mqa_logits_module:
-      cases: all
-    dsv4_hca_attn_module:
-      cases: all
-    mhc_module:
-      cases: all
+
+# vLLM DSV4 collectors remain available through the registry/direct module
+# entrypoints, but are not in the default model plan until the manifest runtime
+# satisfies their compatibility floor and prefix-aware context collection is
+# implemented.

@@ -43,9 +43,12 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -67,6 +70,53 @@ def _cache_key(database: PerfDatabase) -> tuple:
     )
 
 
+# Per-quant achieved-util LEVEL e(q) for MoE, keyed by the (memory, compute) profile
+# (which encodes (weight, activation) precision: memory∈{2,1,0.5}↔w{16,8,4},
+# compute∈{1,2,4}↔a{16,8,4}). Used ONLY by the cross-PROFILE transfer tier: when the
+# query quant has no data of any profile, borrow the nearest collected quant's util
+# curve and rescale it by e(query)/e(ref). util is the achieved kernel efficiency
+# (SOL already absorbs the coefficients); its LEVEL differs systematically by quant —
+# 4-bit-weight kernels run far below their (higher) roofline, and efficiency rises mildly
+# as activation precision drops. The RATIO e(query)/e(ref) is what matters and is
+# ~stack-stable (≈10%; e.g. w4a16/fp8 = 0.17 on b200 vs 0.18 on h100). Levels are
+# data-derived on b200/trtllm where collected, inferred from the structure otherwise.
+# A SINGLE scalar per quant by design: the analytic SOL's compute/mem split is not
+# trustworthy enough to calibrate per-component (validated — splitting blows up because
+# the SOL attribution doesn't match the kernel's real bottleneck). Levels are relative
+# and tunable; only ratios are consumed.
+_MOE_QUANT_UTIL_LEVEL: dict[tuple[float, float], float] = {
+    (2, 1): 0.53,  # w16a16 / bfloat16              [data]
+    (1, 1): 0.45,  # w8a16                          [inferred]
+    (0.5, 1): 0.07,  # w4a16 (int4_wo, mxfp4)       [data]
+    (1, 2): 0.40,  # w8a8 / fp8(_block)             [data]
+    (0.5, 2): 0.15,  # w4a8 (w4afp8, mxfp4_mxfp8)   [data]
+    (1, 4): 0.30,  # w8a4                           [inferred]
+    (0.5, 4): 0.23,  # w4a4                         [data ≈ nvfp4]
+    (0.5625, 4): 0.23,  # w4a4 / nvfp4              [data]
+}
+_MOE_QUANT_UTIL_DEFAULT = 0.30  # unlisted profile: mid-range relative level
+
+
+def _moe_quant_util_level(quant_mode) -> float:
+    """Achieved-util level e(q) for a MoE quant, by (memory, compute) profile."""
+    return _MOE_QUANT_UTIL_LEVEL.get((quant_mode.value.memory, quant_mode.value.compute), _MOE_QUANT_UTIL_DEFAULT)
+
+
+def _xprofile_moe_quants(query_quant, table) -> list:
+    """Collected quants with a DIFFERENT (memory, compute) profile than the query,
+    nearest-profile first. Same-profile quants are handled by the same-profile tier;
+    these are the cross-profile transfer references, rescaled by the util-level ratio."""
+    qp = (query_quant.value.memory, query_quant.value.compute)
+
+    def dist(q):
+        return abs(q.value.memory - qp[0]) + abs(q.value.compute - qp[1])
+
+    return sorted(
+        (q for q in table if q is not query_quant and (q.value.memory, q.value.compute) != qp),
+        key=dist,
+    )
+
+
 # ───────────────────────────────────────────────────────────────────────
 # MoE
 # ───────────────────────────────────────────────────────────────────────
@@ -75,6 +125,12 @@ def _cache_key(database: PerfDatabase) -> tuple:
 class MoE(Operation):
     """MoE operation with power tracking."""
 
+    # CP-invariant: the A2A dispatch globalizes tokens across all (cp*ep) ranks,
+    # so expert compute sees the full token set regardless of CP and deliberately
+    # ignores ``seq_split`` (per-rank cp sharding does not reduce expert work).
+    # Marked audited so the post-construction CP wiring (gemma4/hybrid) does not
+    # trip the _CP_AWARE gate.
+    _CP_AWARE: ClassVar[bool] = True
     _data_cache: ClassVar[dict] = {}
     _low_latency_data_cache: ClassVar[dict] = {}
     _wideep_context_data_cache: ClassVar[dict] = {}
@@ -279,7 +335,9 @@ class MoE(Operation):
             quant_mode: common.MoEQuantMode,
             workload_distribution: str,
         ) -> float:
-            latency = get_sol(
+            # SOL / util, util read best-effort from own collected data (the
+            # num_tokens curve for this slice); raises EmpiricalNotImplementedError if no data.
+            sol_time = get_sol(
                 num_tokens,
                 hidden_size,
                 inter_size,
@@ -290,8 +348,228 @@ class MoE(Operation):
                 quant_mode,
                 workload_distribution,
             )[0]
-            scale_factor = 0.4
-            return latency / scale_factor
+
+            # Mirror get_silicon's kernel selection: nvfp4 + small tokens + gated
+            # uses the low-latency kernel table (~3x faster than the regular one).
+            # Building util from the wrong table over-estimates by that factor.
+            def _use_low_latency():
+                return (
+                    num_tokens <= 128
+                    and quant_mode == common.MoEQuantMode.nvfp4
+                    and is_gated
+                    and database._moe_low_latency_data is not None
+                    and not (database.backend == common.BackendName.sglang.value and moe_backend == "deepep_moe")
+                )
+
+            def _moe_table():
+                cls.load_data(database)
+                if database.backend == common.BackendName.sglang.value and moe_backend == "deepep_moe":
+                    return database._wideep_context_moe_data if is_context else database._wideep_generation_moe_data
+                if _use_low_latency():
+                    ll = database._moe_low_latency_data
+                    try:
+                        quant_data = util_empirical.require_data_slice(ll, quant_mode)
+                        ll_wl = workload_distribution if workload_distribution in quant_data else "uniform"
+                        util_empirical.require_data_slice(
+                            quant_data,
+                            ll_wl,
+                            topk,
+                            num_experts,
+                            hidden_size,
+                            inter_size,
+                            moe_tp_size,
+                            moe_ep_size,
+                        )
+                        return ll
+                    except PerfDataNotAvailableError:
+                        pass
+                return database._moe_data
+
+            moe_table = _moe_table()
+            # kernel_tag distinguishes the kernel/table the util grid is built from so the
+            # process-global grid cache can't serve a wideep grid to a regular query (or
+            # vice versa) for an otherwise-identical shape.
+            if moe_table is database._moe_low_latency_data:
+                kernel_tag = "ll"
+            elif moe_table is database._wideep_context_moe_data or moe_table is database._wideep_generation_moe_data:
+                kernel_tag = "wideep"
+            else:
+                kernel_tag = "std"
+
+            def _slice():
+                moe_table.raise_if_not_loaded()
+                quant_data = util_empirical.require_data_slice(moe_table, quant_mode)
+                wl = workload_distribution if workload_distribution in quant_data else "uniform"
+                return util_empirical.require_data_slice(
+                    quant_data,
+                    wl,
+                    topk,
+                    num_experts,
+                    hidden_size,
+                    inter_size,
+                    moe_tp_size,
+                    moe_ep_size,
+                )
+
+            grid = util_empirical.grid_for(
+                (
+                    "moe",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    quant_mode.name,
+                    kernel_tag,
+                    topk,
+                    num_experts,
+                    hidden_size,
+                    inter_size,
+                    moe_tp_size,
+                    moe_ep_size,
+                    workload_distribution,
+                    num_gemms,
+                ),
+                _slice,
+                lambda c: get_sol(
+                    c[0],
+                    hidden_size,
+                    inter_size,
+                    topk,
+                    num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    quant_mode,
+                    workload_distribution,
+                )[0],
+                depth=1,
+            )
+
+            util_scale = 1.0
+            prov = "empirical"  # own-shape util; tiers below override with their transfer kind
+            if grid is None or not grid.samples:
+                # Transfer tiers (all borrow a collected MoE config's util curve and
+                # reconstruct with SOL). `sol_quant` is the quant whose SOL builds the
+                # borrowed util: the QUERY quant for same-profile tiers (coefficients
+                # match), the REFERENCE quant for cross-profile (so util = its own
+                # SOL/measured = that kernel's true efficiency, then rescaled below).
+                def _collect(q, sol_quant, provenance):
+                    moe_table.raise_if_not_loaded()
+                    wl = workload_distribution if workload_distribution in moe_table[q] else "uniform"
+                    wl_data = moe_table[q].get(wl, {})
+                    out = []
+                    for tk in wl_data:
+                        for ne in wl_data[tk]:
+                            for hs in wl_data[tk][ne]:
+                                for isz in wl_data[tk][ne][hs]:
+                                    node = wl_data[tk][ne][hs][isz].get(moe_tp_size, {}).get(moe_ep_size)
+                                    if not node:
+                                        continue
+                                    out.append(
+                                        util_empirical.ReferenceCandidate(
+                                            features=(tk, ne, hs, isz),
+                                            node=node,
+                                            sol_fn=(
+                                                lambda c, _hs=hs, _isz=isz, _tk=tk, _ne=ne, _sq=sol_quant: get_sol(
+                                                    c[0],
+                                                    _hs,
+                                                    _isz,
+                                                    _tk,
+                                                    _ne,
+                                                    moe_tp_size,
+                                                    moe_ep_size,
+                                                    _sq,
+                                                    workload_distribution,
+                                                )[0]
+                                            ),
+                                            provenance=provenance,
+                                        )
+                                    )
+                    return out
+
+                policy = database.transfer_policy
+
+                def _moe_candidates():
+                    # Tier 1 (XSHAPE): cross-shape within the query quant (closest measurement).
+                    cands = (
+                        _collect(quant_mode, quant_mode, "xshape")
+                        if (common.TransferKind.XSHAPE in policy and quant_mode in moe_table)
+                        else []
+                    )
+                    if cands:
+                        return cands
+                    # Tier 2 (XQUANT): cross-quant within the same (memory, compute) profile.
+                    # Same profile => same SOL coefficients and binding regime, so util
+                    # transfers (measured ~13% MAPE for fp8_block <- fp8; the query quant's
+                    # SOL is used unchanged). Only when the query quant has no data of any shape.
+                    if common.TransferKind.XQUANT in policy:
+                        qp = (quant_mode.value.memory, quant_mode.value.compute)
+                        for q in moe_table:
+                            if q is quant_mode or (q.value.memory, q.value.compute) != qp:
+                                continue
+                            cands.extend(_collect(q, quant_mode, "xquant"))
+                    return cands
+
+                grid = util_empirical.grid_from_reference(
+                    (
+                        "moe_xshape",
+                        database.system,
+                        database.backend,
+                        database.version,
+                        quant_mode.name,
+                        kernel_tag,
+                        topk,
+                        num_experts,
+                        hidden_size,
+                        inter_size,
+                        moe_tp_size,
+                        moe_ep_size,
+                        workload_distribution,
+                        num_gemms,
+                    ),
+                    (topk, num_experts, hidden_size, inter_size),
+                    _moe_candidates,
+                    depth=1,
+                    selection_key=(id(moe_table), policy, workload_distribution, num_gemms),
+                )
+                if grid is not None and grid.samples and grid.reference_provenance:
+                    prov = grid.reference_provenance
+
+                # Tier 3: cross-PROFILE. No own- or same-profile data at all -> borrow the
+                # nearest collected quant's util curve, built with the REFERENCE quant's own
+                # SOL, and rescale by the per-quant util-LEVEL ratio e(query)/e(ref). The
+                # cross-profile error is ~pure systematic kernel-efficiency bias, which this
+                # ratio removes (raw ~58% -> ~24% MAPE LOO). Last resort, lowest confidence.
+                if (grid is None or not grid.samples) and common.TransferKind.XPROFILE in policy:
+                    for ref_q in _xprofile_moe_quants(quant_mode, moe_table):
+                        g = util_empirical.grid_from_reference(
+                            (
+                                "moe_xprofile",
+                                database.system,
+                                database.backend,
+                                database.version,
+                                quant_mode.name,
+                                ref_q.name,
+                                kernel_tag,
+                                topk,
+                                num_experts,
+                                hidden_size,
+                                inter_size,
+                                moe_tp_size,
+                                moe_ep_size,
+                                workload_distribution,
+                                num_gemms,
+                            ),
+                            (topk, num_experts, hidden_size, inter_size),
+                            (lambda _rq=ref_q: _collect(_rq, _rq, "xprofile")),
+                            depth=1,
+                            selection_key=(id(moe_table), policy, workload_distribution, num_gemms),
+                        )
+                        if g is not None and g.samples:
+                            grid = g
+                            util_scale = _moe_quant_util_level(quant_mode) / _moe_quant_util_level(ref_q)
+                            prov = "xprofile"
+                            break
+            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, util_scale=util_scale, provenance=prov)
+            return latency
 
         def _estimate_overflow_with_last_token_util(
             query_tokens: int,
@@ -343,8 +621,10 @@ class MoE(Operation):
                 workload_distribution,
             )[0]
 
-            util = min(1.0, sol_last / last_latency)  # clamp MFU ≤ 1.0
-            util = max(util, 1e-8)  # guard against near-zero sol_last
+            # This is an effective SOL/measured calibration factor, not a
+            # bounded physical efficiency. Preserve values above one; they can
+            # reflect hardware/kernel effects absent from the analytic SOL.
+            util = max(sol_last / last_latency, 1e-8)
             est_latency = sol_query / util
 
             est_energy = 0.0
@@ -365,6 +645,23 @@ class MoE(Operation):
         ) -> list[int]:
             token_points = sorted(moe_dict.keys())
             if token_points:
+                # A singleton above the query cannot define the low-token
+                # launch-overhead regime. Freezing its measured latency would
+                # silently present an unmeasured underflow as silicon (e.g. a
+                # decode query at 7 tokens backed only by a 1024-token row).
+                # Surface the coverage gap so HYBRID can use the explicitly
+                # empirical boundary-util fallback instead. Keep multi-point
+                # underflow and singleton overflow behavior unchanged.
+                if len(token_points) == 1 and query_tokens < token_points[0]:
+                    raise PerfDataNotAvailableError(
+                        "MoE silicon token underflow has only one measured point; "
+                        "cannot infer low-token latency from a singleton. "
+                        f"num_tokens={query_tokens}, measured_token={token_points[0]}, "
+                        f"hidden_size={hidden_size}, inter_size={inter_size}, topk={topk}, "
+                        f"num_experts={num_experts}, moe_tp_size={moe_tp_size}, "
+                        f"moe_ep_size={moe_ep_size}, quant_mode={quant_mode}, "
+                        f"workload_distribution='{used_workload_distribution}'."
+                    )
                 return token_points
 
             raise PerfDataNotAvailableError(
@@ -433,12 +730,20 @@ class MoE(Operation):
 
                     moe_data.raise_if_not_loaded()
 
+                    quant_data = util_empirical.require_data_slice(moe_data, quant_mode)
                     used_workload_distribution = (
-                        workload_distribution if workload_distribution in moe_data[quant_mode] else "uniform"
+                        workload_distribution if workload_distribution in quant_data else "uniform"
                     )
-                    moe_dict = moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
-                        inter_size
-                    ][moe_tp_size][moe_ep_size]
+                    moe_dict = util_empirical.require_data_slice(
+                        quant_data,
+                        used_workload_distribution,
+                        topk,
+                        num_experts,
+                        hidden_size,
+                        inter_size,
+                        moe_tp_size,
+                        moe_ep_size,
+                    )
                     token_points = _require_moe_token_points(
                         moe_dict,
                         num_tokens_corrected,
@@ -490,44 +795,60 @@ class MoE(Operation):
                         and is_gated
                     ):
                         try:
+                            quant_data = util_empirical.require_data_slice(database._moe_low_latency_data, quant_mode)
                             used_workload_distribution = (
-                                workload_distribution
-                                if workload_distribution in database._moe_low_latency_data[quant_mode]
-                                else "uniform"
+                                workload_distribution if workload_distribution in quant_data else "uniform"
                             )
-                            moe_dict = database._moe_low_latency_data[quant_mode][used_workload_distribution][topk][
-                                num_experts
-                            ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-                            if not moe_dict:
-                                # Shape not present in low-latency table (nested defaultdict returned
-                                # an empty dict instead of raising KeyError). Fall back to regular data.
-                                raise KeyError(
-                                    f"No low-latency data for nvfp4 shape "
-                                    f"[{hidden_size}, {inter_size}, {topk}, {num_experts}]"
+                            moe_dict = util_empirical.require_data_slice(
+                                quant_data,
+                                used_workload_distribution,
+                                topk,
+                                num_experts,
+                                hidden_size,
+                                inter_size,
+                                moe_tp_size,
+                                moe_ep_size,
+                            )
+                            if not isinstance(moe_dict, Mapping):
+                                raise TypeError(
+                                    "Malformed low-latency MoE performance data: expected a token mapping, "
+                                    f"got {type(moe_dict).__name__}."
                                 )
                             logger.debug(
                                 f"Using low-latency kernel for nvfp4 moe "
                                 f"{workload_distribution} {topk} {num_experts} {hidden_size} "
                                 f"{inter_size} {moe_tp_size} {moe_ep_size}."
                             )
-                        except:
+                        except PerfDataNotAvailableError:
+                            quant_data = util_empirical.require_data_slice(database._moe_data, quant_mode)
                             used_workload_distribution = (
-                                workload_distribution
-                                if workload_distribution in database._moe_data[quant_mode]
-                                else "uniform"
+                                workload_distribution if workload_distribution in quant_data else "uniform"
                             )
-                            moe_dict = database._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
-                                hidden_size
-                            ][inter_size][moe_tp_size][moe_ep_size]
+                            moe_dict = util_empirical.require_data_slice(
+                                quant_data,
+                                used_workload_distribution,
+                                topk,
+                                num_experts,
+                                hidden_size,
+                                inter_size,
+                                moe_tp_size,
+                                moe_ep_size,
+                            )
                     else:
+                        quant_data = util_empirical.require_data_slice(database._moe_data, quant_mode)
                         used_workload_distribution = (
-                            workload_distribution
-                            if workload_distribution in database._moe_data[quant_mode]
-                            else "uniform"
+                            workload_distribution if workload_distribution in quant_data else "uniform"
                         )
-                        moe_dict = database._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
-                            hidden_size
-                        ][inter_size][moe_tp_size][moe_ep_size]
+                        moe_dict = util_empirical.require_data_slice(
+                            quant_data,
+                            used_workload_distribution,
+                            topk,
+                            num_experts,
+                            hidden_size,
+                            inter_size,
+                            moe_tp_size,
+                            moe_ep_size,
+                        )
                     token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
                     if num_tokens > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
@@ -561,12 +882,20 @@ class MoE(Operation):
                     return database._interp_pr(lat, energy=energy)
                 elif database.backend == common.BackendName.vllm.value:
                     database._moe_data.raise_if_not_loaded()
+                    quant_data = util_empirical.require_data_slice(database._moe_data, quant_mode)
                     used_workload_distribution = (
-                        workload_distribution if workload_distribution in database._moe_data[quant_mode] else "uniform"
+                        workload_distribution if workload_distribution in quant_data else "uniform"
                     )
-                    moe_dict = database._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
-                        hidden_size
-                    ][inter_size][moe_tp_size][moe_ep_size]
+                    moe_dict = util_empirical.require_data_slice(
+                        quant_data,
+                        used_workload_distribution,
+                        topk,
+                        num_experts,
+                        hidden_size,
+                        inter_size,
+                        moe_tp_size,
+                        moe_ep_size,
+                    )
                     token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
                     if num_tokens > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
@@ -1059,10 +1388,17 @@ class MoEDispatch(Operation):
                             volume * self._attention_dp_size,
                         )
                     elif self._attn_cp_size > 1:
-                        # attn-CP + moe-TP: pre = all_gather (NOT all_reduce)
-                        comm_latency = database.query_nccl(
-                            common.CommQuantMode.half, self.num_gpus, "all_gather", volume
-                        )
+                        if self._is_context:
+                            # prefill: tokens are CP-sharded across ranks -> all_gather
+                            # to assemble the full token set for expert routing.
+                            comm_latency = database.query_nccl(
+                                common.CommQuantMode.half, self.num_gpus, "all_gather", volume
+                            )
+                        else:
+                            # decode: CP does not run; attention is replicated across the
+                            # CP ranks so every rank already holds all tokens -> the
+                            # pre-dispatch selection is local, no comm.
+                            comm_latency = 0
                     elif self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
                         comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
@@ -1091,10 +1427,18 @@ class MoEDispatch(Operation):
                             volume,
                         )
                     elif self._attn_cp_size > 1:
-                        # attn-CP + moe-TP: post = reduce_scatter (NOT all_reduce)
-                        comm_latency = database.query_nccl(
-                            common.CommQuantMode.half, self.num_gpus, "reduce_scatter", volume
-                        )
+                        if self._is_context:
+                            # prefill: scatter results back to the CP-sharded layout.
+                            comm_latency = database.query_nccl(
+                                common.CommQuantMode.half, self.num_gpus, "reduce_scatter", volume
+                            )
+                        else:
+                            # decode: each rank computed its owned experts' partial outputs
+                            # for all (replicated) tokens; combine into the full per-token
+                            # sum every rank needs (next layer re-replicates) -> all_reduce.
+                            comm_latency = database.query_custom_allreduce(
+                                common.CommQuantMode.half, self.num_gpus, volume
+                            )
                     elif self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
                         comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
@@ -1393,8 +1737,8 @@ class TrtLLMWideEPMoE(Operation):
             quant_mode: common.MoEQuantMode,
             workload_distribution: str,
         ) -> float:
-            """Get the empirical estimation: SOL / scale_factor."""
-            latency = get_sol(
+            """Empirical via SOL / util (util best-effort from own data; raises if no data)."""
+            sol_time = get_sol(
                 num_tokens,
                 hidden_size,
                 inter_size,
@@ -1406,8 +1750,63 @@ class TrtLLMWideEPMoE(Operation):
                 quant_mode,
                 workload_distribution,
             )[0]
-            scale_factor = 0.4
-            return latency / scale_factor
+            kernel_source = cls._select_kernel(database, quant_mode)
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._wideep_moe_compute_data
+                wrapper.raise_if_not_loaded()
+                kd = util_empirical.require_data_slice(wrapper, kernel_source)
+                quant_data = util_empirical.require_data_slice(kd, quant_mode)
+                dists = list(quant_data.keys())
+                dist = workload_distribution if workload_distribution in dists else (dists[0] if dists else None)
+                if dist is None:
+                    raise PerfDataNotAvailableError("No WideEP MoE workload distribution is available.")
+                return util_empirical.require_data_slice(
+                    quant_data,
+                    dist,
+                    topk,
+                    num_experts,
+                    hidden_size,
+                    inter_size,
+                    num_slots,
+                    moe_tp_size,
+                    moe_ep_size,
+                )
+
+            grid = util_empirical.grid_for(
+                (
+                    "wideep_moe",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    kernel_source,
+                    quant_mode.name,
+                    topk,
+                    num_experts,
+                    hidden_size,
+                    inter_size,
+                    num_slots,
+                    moe_tp_size,
+                    moe_ep_size,
+                ),
+                _slice,
+                lambda c: get_sol(
+                    c[0],
+                    hidden_size,
+                    inter_size,
+                    topk,
+                    num_experts,
+                    num_slots,
+                    moe_tp_size,
+                    moe_ep_size,
+                    quant_mode,
+                    workload_distribution,
+                )[0],
+                depth=1,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -1462,20 +1861,31 @@ class TrtLLMWideEPMoE(Operation):
         def get_silicon():
             database._wideep_moe_compute_data.raise_if_not_loaded()
             # Find the best matching distribution
-            kernel_data = database._wideep_moe_compute_data[kernel_source]
-            available_distributions = list(kernel_data[quant_mode].keys())
+            kernel_data = util_empirical.require_data_slice(database._wideep_moe_compute_data, kernel_source)
+            quant_data = util_empirical.require_data_slice(kernel_data, quant_mode)
+            available_distributions = list(quant_data.keys())
             if workload_distribution in available_distributions:
                 used_distribution = workload_distribution
             else:
                 # Fallback: try to find a similar distribution or use the first available
                 used_distribution = available_distributions[0] if available_distributions else None
                 if used_distribution is None:
-                    raise KeyError(f"No distribution available for kernel={kernel_source}, quant_mode={quant_mode}")
+                    raise PerfDataNotAvailableError(
+                        f"No distribution available for kernel={kernel_source}, quant_mode={quant_mode}"
+                    )
                 logger.debug(f"Distribution '{workload_distribution}' not found, using '{used_distribution}' instead")
 
-            moe_dict = kernel_data[quant_mode][used_distribution][topk][num_experts][hidden_size][inter_size][
-                num_slots
-            ][moe_tp_size][moe_ep_size]
+            moe_dict = util_empirical.require_data_slice(
+                quant_data,
+                used_distribution,
+                topk,
+                num_experts,
+                hidden_size,
+                inter_size,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+            )
 
             num_left, num_right = interpolation.nearest_1d_point_helper(
                 num_tokens,
@@ -1498,11 +1908,19 @@ class TrtLLMWideEPMoE(Operation):
             return database._interp_pr(lat, energy=energy)
 
         def get_empirical() -> float:
-            # Simple empirical fallback based on SOL
-            total_tokens = num_tokens * topk
-            ops = total_tokens * hidden_size * inter_size * 3 * 2 // moe_ep_size // moe_tp_size
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
-            return sol_math / 0.4  # Empirical scale factor
+            # Data-calibrated util; delegates to get_empirical_from_sol.
+            return get_empirical_from_sol(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,
@@ -1802,9 +2220,10 @@ class TrtLLMWideEPMoEDispatch(Operation):
             moe_ep_size: int,
             quant_mode: common.MoEQuantMode,
             node_num: int,
+            kernel_source: str,
         ) -> float:
-            """Get the empirical estimation: SOL / scale_factor."""
-            latency = get_sol(
+            """Empirical via SOL / util (util best-effort from own data; raises if no data)."""
+            sol_time = get_sol(
                 num_tokens,
                 hidden_size,
                 topk,
@@ -1813,8 +2232,47 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 quant_mode,
                 node_num,
             )[0]
-            scale_factor = 0.5
-            return latency / scale_factor
+            tqm = cls._normalize_quant_mode_for_table(quant_mode)
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._trtllm_alltoall_data
+                if not wrapper:
+                    raise PerfDataNotAvailableError("No TRT-LLM alltoall data is loaded.")
+                wrapper.raise_if_not_loaded()
+                return util_empirical.require_data_slice(
+                    wrapper,
+                    kernel_source,
+                    op_name,
+                    tqm,
+                    node_num,
+                    hidden_size,
+                    topk,
+                    num_experts,
+                    moe_ep_size,
+                )
+
+            grid = util_empirical.grid_for(
+                (
+                    "alltoall",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    kernel_source,
+                    op_name,
+                    tqm.name,
+                    node_num,
+                    hidden_size,
+                    topk,
+                    num_experts,
+                    moe_ep_size,
+                ),
+                _slice,
+                lambda c: get_sol(c[0], hidden_size, topk, num_experts, moe_ep_size, quant_mode, node_num)[0],
+                depth=1,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -1832,6 +2290,17 @@ class TrtLLMWideEPMoEDispatch(Operation):
         valid_op_names = ["alltoall_prepare", "alltoall_dispatch", "alltoall_combine", "alltoall_combine_low_precision"]
         if op_name not in valid_op_names:
             raise ValueError(f"Invalid op_name '{op_name}'. Must be one of {valid_op_names}")
+
+        kernel_source = cls._select_alltoall_kernel(database, quant_mode, moe_ep_size, topk, moe_backend=moe_backend)
+        logger.debug(
+            f"query_trtllm_alltoall: auto-selected kernel_source='{kernel_source}' (moe_backend={moe_backend})"
+        )
+
+        if kernel_source == "NotEnabled":
+            if database_mode == common.DatabaseMode.SOL_FULL:
+                return (0.0, 0.0, 0.0)
+            source = "sol" if database_mode == common.DatabaseMode.SOL else "empirical"
+            return PerformanceResult(0.0, energy=0.0, source=source)
 
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(
@@ -1863,18 +2332,9 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 moe_ep_size,
                 quant_mode,
                 node_num,
+                kernel_source,
             )
             return PerformanceResult(emp_latency, energy=0.0, source="empirical")
-
-        kernel_source = cls._select_alltoall_kernel(database, quant_mode, moe_ep_size, topk, moe_backend=moe_backend)
-        logger.debug(
-            f"query_trtllm_alltoall: auto-selected kernel_source='{kernel_source}' (moe_backend={moe_backend})"
-        )
-
-        if kernel_source == "NotEnabled":
-            if database_mode == common.DatabaseMode.SOL_FULL:
-                return (0.0, 0.0, 0.0)
-            return PerformanceResult(0.0, energy=0.0, source="empirical")
 
         # SILICON or HYBRID mode - use database
         def get_silicon():
@@ -1884,10 +2344,17 @@ class TrtLLMWideEPMoEDispatch(Operation):
                     "Use HYBRID or EMPIRICAL database mode."
                 )
             database._trtllm_alltoall_data.raise_if_not_loaded()
-            kernel_data = database._trtllm_alltoall_data[kernel_source]
-            alltoall_dict = kernel_data[op_name][table_quant_mode][node_num][hidden_size][topk][num_experts][
-                moe_ep_size
-            ]
+            alltoall_dict = util_empirical.require_data_slice(
+                database._trtllm_alltoall_data,
+                kernel_source,
+                op_name,
+                table_quant_mode,
+                node_num,
+                hidden_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+            )
 
             num_left, num_right = interpolation.nearest_1d_point_helper(
                 num_tokens,

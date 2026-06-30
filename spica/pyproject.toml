@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "spica"
+version = "0.0.1"
+description = "Spica: Replay-backed smart sweeper for Dynamo deployments (Profiler V2)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = [
+    "pydantic>=2.5",
+    "pyyaml>=6.0",
+    "tqdm>=4.0",
+    # Lower-layer provider: model/MoE detection, weight estimate, system spec,
+    # parallel enumeration + memory-fit floor. Spica lives in the aiconfigurator
+    # repo, so dev installs it editable from the parent (see [tool.uv.sources]).
+    "aiconfigurator>=0.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff",
+]
+# Planner load-predictor sweep + Replay evaluator.
+#
+# Pinned to cb7dc1a3. This includes the unified
+# run_trace_replay that takes planner_config / benchmark_granularity / goodput SLA on the
+# trace-replay path (so the evaluator drives static + planner trace replays through one
+# entrypoint), #10964 scaling AIC num_gpu_blocks by attention_dp_size for DP-attention,
+# and #11002 converting aggregate offline-replay batches to per-rank AIC batches.
+# Builds on #10888 planner-replay load modes (closed-loop concurrency + synthetic workloads),
+# #10849 goodput SLA on the plain trace-replay binding, #10739 replay goodput + provisioned
+# GPU-hours, and the #10670 warmup empty-window densify fix.
+# ai-dynamo is pure-Python (hatchling), but at this commit main is the
+# unreleased 1.3.0 and ai-dynamo-runtime==1.3.0 is NOT on PyPI, so the Rust
+# bindings must be built from source at the same commit (needs a Rust
+# toolchain). Once 1.3.0 ships, drop the runtime git source and use a released
+# "ai-dynamo==1.3.*" pin (prebuilt wheel, no Rust build). For fast local dev you
+# can instead editable-install the local dynamo checkout.
+#
+# Install needs GIT_LFS_SKIP_SMUDGE=1 — the dynamo repo carries LFS media that is
+# irrelevant to the build but otherwise fails the clone:
+#   GIT_LFS_SKIP_SMUDGE=1 uv pip install -e ".[dev,dynamo]"
+#
+# The planner load-predictor stack (filterpy/pmdarima/prophet + their
+# scikit-learn/scipy pins) is NOT declared by the ai-dynamo package; dynamo
+# installs it for the planner service via container/deps/requirements.planner.txt.
+# Pinned here to the same versions (same commit) so spica's predictors behave
+# identically to the planner's. Keep in sync with that file on dynamo bumps.
+dynamo = [
+    "ai-dynamo @ git+https://github.com/ai-dynamo/dynamo@cb7dc1a3a74018b7824ab7ef9d0191b80946758b",
+    "ai-dynamo-runtime @ git+https://github.com/ai-dynamo/dynamo@cb7dc1a3a74018b7824ab7ef9d0191b80946758b#subdirectory=lib/bindings/python",
+    "filterpy==1.4.5",
+    "pmdarima==2.1.1",
+    "prophet==1.2.1",
+    "scikit-learn==1.7.2",
+    "scipy>=1.14.0,<2.0",
+]
+# Black-box optimizer for the main smart sweep (Vizier ask/tell).
+#
+# google-vizier's [jax] extra is under-constrained: it hard-pins an old
+# equinox==0.11.7 (which needs jax with jax.core.Primitive) but leaves jax/flax
+# uncapped, so a fresh resolve grabs a too-new jax and the stack self-conflicts
+# (equinox wants old jax, flax wants new jax). See google/vizier#519, #1238.
+# Pin a mutually-consistent late-2024 jax snapshot so equinox/flax/optax/chex/tfp
+# all agree on jax 0.4.x; this coexists with the dynamo/prophet stack. Revisit
+# when google-vizier ships properly-bounded jax deps.
+search = [
+    "google-vizier[jax]==0.1.21",
+    "jax==0.4.38",
+    "jaxlib==0.4.38",
+    "flax==0.10.0",
+    "optax==0.2.4",
+    "chex==0.1.87",
+    "tensorflow-probability[jax]==0.25.0",
+]
+# GPU acceleration for the Vizier GP optimizer (XLA on CUDA). OPTIONAL / opt-in.
+# The jax CUDA wheels (jax-cuda12-plugin/-pjrt + nvidia-*-cu12) ship ONLY for
+# linux-x86_64, so this extra CANNOT resolve on macOS / Windows / linux-aarch64
+# — use [search] (CPU) there. On a linux-x86_64 box WITHOUT a GPU it still
+# installs (a few GB of CUDA wheels) but jax just warns and falls back to CPU at
+# import — same result as [search], only heavier. The multi-objective GP suggest
+# is slow on CPU (see sampler.py), so reach for [search-gpu] only when actually
+# running large sweeps on an NVIDIA GPU. Same jax 0.4.38 pin as [search].
+search-gpu = [
+    "spica[search]",
+    "jax[cuda12]==0.4.38",
+]
+
+[project.scripts]
+spica = "spica.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/spica"]
+
+# The [dynamo] extra pins ai-dynamo / ai-dynamo-runtime to a git commit (direct
+# references); hatchling requires this opt-in to allow them in the metadata.
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+src = ["src", "tests"]
+line-length = 120
+target-version = "py310"
+
+[tool.uv.sources]
+# Develop against the local aiconfigurator (this repo's root), editable.
+aiconfigurator = { path = "..", editable = true }

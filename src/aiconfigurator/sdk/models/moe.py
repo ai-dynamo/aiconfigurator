@@ -26,6 +26,12 @@ class MOEModel(BaseModel):
     """
 
     @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # Dense GQA attention + MoE prefill CP: SGLang AllGather (zigzag attn via
+        # ContextAttention cp_size, token-major seq_split, MoEDispatch attn_cp_size).
+        return backend_name == "sglang"
+
+    @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
         moe_args = (model_info["topk"], model_info["num_experts"], model_info["moe_inter_size"])
         base_args = (
@@ -65,13 +71,15 @@ class MOEModel(BaseModel):
             else 1.0
         )
 
-        # make sure the paralel width is same
+        # make sure the paralel width is same (cp is an independent attention
+        # dimension that also contributes to the width the MoE must match)
         assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
+            self.config.tp_size * self.config.attention_dp_size * self.config.cp_size
+            == self.config.moe_tp_size * self.config.moe_ep_size
         ), (
             f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+            f"({self.config.attention_dp_size}) * cp_size ({self.config.cp_size}) should be equal to "
+            f"moe_tp_size ({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
 
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
@@ -102,6 +110,10 @@ class MOEModel(BaseModel):
             if self.config.workload_distribution == "power_law"
             else self.config.workload_distribution
         )
+        # Context parallelism (sglang AllGather, prefill-only). Dense GQA attn
+        # uses ContextAttention zigzag (cp_size); token-major ops seq_split=cp;
+        # MoEDispatch attn_cp_size=cp (AG_hidden+RS). Generation not CP-modeled.
+        cp = self.config.cp_size
 
         if self.architecture == "GptOssForCausalLM":
             attn_scale_factor = 2
@@ -117,6 +129,7 @@ class MOEModel(BaseModel):
                     window_size=window_size,
                     head_size=self._head_size,
                     use_qk_norm=self._use_qk_norm,
+                    cp_size=cp,
                 )
             )
             self.generation_ops.append(
@@ -136,14 +149,15 @@ class MOEModel(BaseModel):
 
         self.context_ops.extend(
             [
-                ops.Embedding("context_embedding", 1, self._vocab_size // tp_size, h, 0.3),
-                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.Embedding("context_embedding", 1, self._vocab_size // tp_size, h, 0.3, seq_split=cp),
+                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
                 ops.GEMM(
                     "context_qkv_gemm",
                     self._num_layers,
                     self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.ContextAttention(
                     "context_attention",
@@ -154,7 +168,9 @@ class MOEModel(BaseModel):
                     fmha_quant_mode,
                     head_size=self._head_size,
                     use_qk_norm=self._use_qk_norm,
+                    cp_size=cp,
                 ),
+                *self._cp_attn_comm_ops(),
                 ops.GEMM(
                     "context_proj_gemm",
                     self._num_layers,
@@ -162,8 +178,9 @@ class MOEModel(BaseModel):
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
                     low_precision_input=True,
+                    seq_split=cp,
                 ),
-                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
             ]
         )
 
@@ -176,6 +193,7 @@ class MOEModel(BaseModel):
                     self._num_experts,
                     h,
                     common.GEMMQuantMode.bfloat16,
+                    seq_split=cp,
                 )
             ]
         )
@@ -194,6 +212,7 @@ class MOEModel(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
+                    attn_cp_size=cp,
                 ),
                 ops.MoE(
                     "context_moe",
@@ -219,6 +238,7 @@ class MOEModel(BaseModel):
                     attention_dp_size,
                     False,
                     quant_mode=moe_quant_mode,
+                    attn_cp_size=cp,
                 ),
             ]
         )
@@ -325,14 +345,14 @@ class MOEModel(BaseModel):
 
         # All-reduce after embedding: needed when tp > 1
         # Embedding shards vocab across TP ranks and all-reduces
-        self.context_ops.append(ops.CustomAllReduce("context_embedding_ar", 1, h, tp_size))
+        self.context_ops.append(ops.CustomAllReduce("context_embedding_ar", 1, h, tp_size, seq_split=cp))
         self.generation_ops.append(
             ops.CustomAllReduce("generation_embedding_ar", 1 * self._mtp_scale_factor, h, tp_size)
         )
 
         # pp
         pp_scale_factor = pp_size - 1
-        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
+        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size, seq_split=cp))
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
 
     def _validate_fp8_block_quantized_moe_config(self) -> None:
@@ -373,6 +393,11 @@ class SGLangEPMOEModel(BaseModel):
     Uses wideep/deepep perf tables for MoE kernel latency.
     """
 
+    @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        # Dense GQA attention + DeepEP MoE prefill CP: SGLang AllGather.
+        return backend_name == "sglang"
+
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
 
@@ -386,13 +411,15 @@ class SGLangEPMOEModel(BaseModel):
             else 1.0
         )
 
-        # make sure the parallel width is same
+        # make sure the parallel width is same (cp is an independent attention
+        # dimension that also contributes to the width the MoE must match)
         assert (
-            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
+            self.config.tp_size * self.config.attention_dp_size * self.config.cp_size
+            == self.config.moe_tp_size * self.config.moe_ep_size
         ), (
             f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
-            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+            f"({self.config.attention_dp_size}) * cp_size ({self.config.cp_size}) should be equal to "
+            f"moe_tp_size ({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
 
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
@@ -436,6 +463,8 @@ class SGLangEPMOEModel(BaseModel):
         )
 
         sms = self.config.sms
+        # Context parallelism (sglang AllGather, prefill-only); see MOEModel.
+        cp = self.config.cp_size
 
         if self.architecture == "GptOssForCausalLM":
             attn_scale_factor = 2
@@ -451,6 +480,7 @@ class SGLangEPMOEModel(BaseModel):
                     window_size=window_size,
                     head_size=self._head_size,
                     use_qk_norm=self._use_qk_norm,
+                    cp_size=cp,
                 )
             )
             self.generation_ops.append(
@@ -471,14 +501,15 @@ class SGLangEPMOEModel(BaseModel):
         # === CONTEXT OPS ===
         self.context_ops.extend(
             [
-                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
-                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3, seq_split=cp),
+                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
                 ops.GEMM(
                     "context_qkv_gemm",
                     self._num_layers,
                     self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
+                    seq_split=cp,
                 ),
                 ops.ContextAttention(
                     "context_attention",
@@ -489,7 +520,9 @@ class SGLangEPMOEModel(BaseModel):
                     fmha_quant_mode,
                     head_size=self._head_size,
                     use_qk_norm=self._use_qk_norm,
+                    cp_size=cp,
                 ),
+                *self._cp_attn_comm_ops(),
                 ops.GEMM(
                     "context_proj_gemm",
                     self._num_layers,
@@ -497,8 +530,9 @@ class SGLangEPMOEModel(BaseModel):
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
                     low_precision_input=True,
+                    seq_split=cp,
                 ),
-                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
             ]
         )
 
@@ -512,6 +546,7 @@ class SGLangEPMOEModel(BaseModel):
                         self._num_experts,
                         h,
                         common.GEMMQuantMode.bfloat16,
+                        seq_split=cp,
                     )
                 ]
             )
@@ -534,6 +569,7 @@ class SGLangEPMOEModel(BaseModel):
                     moe_backend=moe_backend,
                     is_context=True,
                     scale_num_tokens=tp_size,
+                    attn_cp_size=cp,
                 ),
             ]
         )
