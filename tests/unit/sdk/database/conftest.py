@@ -157,7 +157,9 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
 
     for name, (target_module, default_value) in _LOADER_STUBS.items():
         ret = overrides.get(name, default_value)
-        monkeypatch.setattr(f"{target_module}.{name}", lambda path, _r=ret: _r)
+        # Accept arbitrary extra args/kwargs so loaders with optional params
+        # (e.g. load_*_dsa_module_data(path, op_kind="full")) stub cleanly.
+        monkeypatch.setattr(f"{target_module}.{name}", lambda path, *args, _r=ret, **kwargs: _r)
 
 
 @pytest.fixture

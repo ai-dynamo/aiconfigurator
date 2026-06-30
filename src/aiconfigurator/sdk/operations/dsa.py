@@ -552,7 +552,11 @@ class ContextDSAModule(Operation):
 
             def _raw_slice():
                 cls.load_data(database)
-                raw_wrapper = getattr(database, "_raw_context_dsa_module_data", None)
+                raw_wrapper = getattr(
+                    database,
+                    "_raw_context_dsa_module_skip_data" if skip_indexer else "_raw_context_dsa_module_data",
+                    None,
+                )
                 if raw_wrapper is None or not getattr(raw_wrapper, "loaded", True):
                     raise PerfDataNotAvailableError("Raw context DSA module data is not loaded.")
                 return _select_slice(raw_wrapper)
@@ -1158,6 +1162,7 @@ class GenerationDSAModule(Operation):
     _data_cache: ClassVar[dict] = {}
     _raw_data_cache: ClassVar[dict] = {}
     _skip_data_cache: ClassVar[dict] = {}
+    _raw_skip_data_cache: ClassVar[dict] = {}
 
     def __init__(
         self,
@@ -1224,21 +1229,28 @@ class GenerationDSAModule(Operation):
                 cls._skip_data_cache[key] = LoadedOpData(
                     skip_dict, PerfDataFilename.dsa_generation_module, primary_path
                 )
+                # Raw (pre-extrapolation) SKIP copy: skip_indexer queries must
+                # anchor boundary-util extrapolation to a measured SKIP row, not
+                # the full-table raw (else skip values anchor to wrong data).
+                cls._raw_skip_data_cache[key] = copy.deepcopy(cls._skip_data_cache[key])
                 cls._extrapolate(cls._skip_data_cache[key])
             else:
                 cls._skip_data_cache[key] = None
+                cls._raw_skip_data_cache[key] = None
 
         if "_generation_dsa_module_data" not in database.__dict__:
             database._generation_dsa_module_data = cls._data_cache[key]
             database._raw_generation_dsa_module_data = cls._raw_data_cache[key]
         if "_generation_dsa_module_skip_data" not in database.__dict__:
             database._generation_dsa_module_skip_data = cls._skip_data_cache[key]
+            database._raw_generation_dsa_module_skip_data = cls._raw_skip_data_cache[key]
 
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
         cls._raw_data_cache.clear()
         cls._skip_data_cache.clear()
+        cls._raw_skip_data_cache.clear()
 
     @classmethod
     def _extrapolate(cls, data_wrapper) -> None:
@@ -1372,11 +1384,19 @@ class GenerationDSAModule(Operation):
                 # EMPIRICAL utilization is calibrated from measured rows only.
                 # Using the extrapolated working table here would make a
                 # synthesized SILICON latency masquerade as calibration data.
-                raw_wrapper = getattr(database, "_raw_generation_dsa_module_data", None)
+                raw_wrapper = getattr(
+                    database,
+                    "_raw_generation_dsa_module_skip_data" if skip_indexer else "_raw_generation_dsa_module_data",
+                    None,
+                )
                 wrapper = (
                     raw_wrapper
                     if raw_wrapper is not None and getattr(raw_wrapper, "loaded", True)
-                    else database._generation_dsa_module_data
+                    else (
+                        database._generation_dsa_module_skip_data
+                        if skip_indexer
+                        else database._generation_dsa_module_data
+                    )
                 )
                 if wrapper is None:
                     raise PerfDataNotAvailableError("Generation DSA module data is not loaded.")
@@ -1490,7 +1510,11 @@ class GenerationDSAModule(Operation):
                 dsa_dict = _select_dsa_backend(dsa_dict, dsa_backend)
 
                 raw_dsa_dict = None
-                raw_dsa_module_data = getattr(database, "_raw_generation_dsa_module_data", None)
+                raw_dsa_module_data = getattr(
+                    database,
+                    "_raw_generation_dsa_module_skip_data" if skip_indexer else "_raw_generation_dsa_module_data",
+                    None,
+                )
                 if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
                     try:
                         raw_dsa_dict = util_empirical.require_data_slice(
