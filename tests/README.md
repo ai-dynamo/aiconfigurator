@@ -17,6 +17,7 @@ The test runner is **just pytest** (no custom wrapper scripts).
 The E2E CLI tests execute the installed `aiconfigurator` console script, so make sure you have an editable install:
 
 ```bash
+python3 -m pip install -e src/aiconfigurator-core
 python3 -m pip install -e ".[dev]"
 ```
 

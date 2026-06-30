@@ -37,6 +37,8 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -122,12 +124,17 @@ class ContextMLA(Operation):
         num_heads: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
+        cp_size: int = 1,
     ) -> None:
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
         self._weights = 0.0
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
+        # Context parallelism (sglang AllGather zigzag in-seq split). When cp>1,
+        # query() models CP rank 0's two zigzag chunks (prev: prefix..+c; next:
+        # prefix+isl-c..isl), same as ContextAttention. c = ceil(isl/(2*cp)).
+        self._cp_size = cp_size
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -227,9 +234,32 @@ class ContextMLA(Operation):
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
-            latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.6
-            return latency / scale_factor
+            # SOL / util from own (num_heads, full_s, b) grid; raises if no data.
+            sol_time = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._context_mla_data
+                wrapper.raise_if_not_loaded()
+                return util_empirical.require_data_slice(wrapper, fmha_quant_mode, kvcache_quant_mode)
+
+            grid = util_empirical.grid_for(
+                (
+                    "ctx_mla",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    fmha_quant_mode.name,
+                    kvcache_quant_mode.name,
+                ),
+                _slice,
+                lambda c: get_sol(c[2], c[1], 0, c[0], kvcache_quant_mode, fmha_quant_mode)[
+                    0
+                ],  # c=(num_heads, full_s, b)
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_heads, s + prefix, b), grid)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -249,7 +279,7 @@ class ContextMLA(Operation):
             data_wrapper.raise_if_not_loaded()
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            mla_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode]
+            mla_dict = util_empirical.require_data_slice(data_wrapper, fmha_quant_mode, kvcache_quant_mode)
             result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"] * prefix_correction
             energy = result.get("energy", 0.0) * prefix_correction
@@ -275,14 +305,22 @@ class ContextMLA(Operation):
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix")
 
-        result = database.query_context_mla(
-            b=batch_size,
-            s=isl,
-            prefix=prefix,
-            num_heads=self._num_heads,
-            kvcache_quant_mode=self._kvcache_quant_mode,
-            fmha_quant_mode=self._fmha_quant_mode,
-        )
+        def _q(s, pfx):
+            return database.query_context_mla(
+                b=batch_size,
+                s=s,
+                prefix=pfx,
+                num_heads=self._num_heads,
+                kvcache_quant_mode=self._kvcache_quant_mode,
+                fmha_quant_mode=self._fmha_quant_mode,
+            )
+
+        if self._cp_size and self._cp_size > 1:
+            cp = self._cp_size
+            c = max(1, -(-isl // (2 * cp)))  # ceil(isl/(2*cp)) — rank-0 zigzag halves
+            result = _q(c, prefix) + _q(c, prefix + isl - c)
+        else:
+            result = _q(isl, prefix)
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
@@ -398,9 +436,23 @@ class GenerationMLA(Operation):
             num_heads: int,
             kvcache_quant_mode: common.KVCacheQuantMode,
         ) -> float:
-            latency = get_sol(b, s, num_heads, kvcache_quant_mode)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
+            # SOL / util from own (num_heads, b, s) grid; raises if no data.
+            sol_time = get_sol(b, s, num_heads, kvcache_quant_mode)[0]
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._generation_mla_data
+                wrapper.raise_if_not_loaded()
+                return util_empirical.require_data_slice(wrapper, kvcache_quant_mode)
+
+            grid = util_empirical.grid_for(
+                ("gen_mla", database.system, database.backend, database.version, kvcache_quant_mode.name),
+                _slice,
+                lambda c: get_sol(c[1], c[2], c[0], kvcache_quant_mode)[0],  # c=(num_heads, b, s)
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_heads, b, s), grid)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -418,7 +470,7 @@ class GenerationMLA(Operation):
 
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
-            mla_dict = data_wrapper[kvcache_quant_mode]
+            mla_dict = util_empirical.require_data_slice(data_wrapper, kvcache_quant_mode)
             result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
             latency = result["latency"]
             energy = result.get("energy", 0.0)
@@ -541,9 +593,25 @@ class MLABmm(Operation):
             quant_mode: common.GEMMQuantMode,
             if_pre: bool,
         ) -> float:
-            latency = get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
-            scale_factor = 0.8
-            return latency / scale_factor
+            # SOL / util from own num_tokens curve; raises if no data.
+            sol_time = get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
+            op_name = "mla_gen_pre" if if_pre else "mla_gen_post"
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._mla_bmm_data
+                wrapper.raise_if_not_loaded()
+                qm = quant_mode if quant_mode in wrapper else common.GEMMQuantMode.bfloat16
+                return util_empirical.require_data_slice(wrapper, qm, op_name, num_heads)
+
+            grid = util_empirical.grid_for(
+                ("mla_bmm", database.system, database.backend, database.version, quant_mode.name, op_name, num_heads),
+                _slice,
+                lambda c: get_sol(c[0], num_heads, quant_mode, if_pre)[0],  # c=(num_tokens,)
+                depth=1,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -562,7 +630,12 @@ class MLABmm(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             quant_mode_lookup = quant_mode if quant_mode in data_wrapper else common.GEMMQuantMode.bfloat16
-            mla_bmm_dict = data_wrapper[quant_mode_lookup]["mla_gen_pre" if if_pre else "mla_gen_post"][num_heads]
+            mla_bmm_dict = util_empirical.require_data_slice(
+                data_wrapper,
+                quant_mode_lookup,
+                "mla_gen_pre" if if_pre else "mla_gen_post",
+                num_heads,
+            )
             num_left, num_right = interpolation.nearest_1d_point_helper(
                 num_tokens,
                 list(mla_bmm_dict.keys()),
@@ -775,9 +848,38 @@ class MLAModule(Operation):
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
-            latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.6
-            return latency / scale_factor
+            # SOL / util from own (num_heads, full_s, b) grid; raises if no data.
+            sol_time = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._context_mla_module_data
+                wrapper.raise_if_not_loaded()
+                return util_empirical.require_data_slice(
+                    wrapper,
+                    fmha_quant_mode,
+                    kvcache_quant_mode,
+                    gemm_quant_mode,
+                )
+
+            grid = util_empirical.grid_for(
+                (
+                    "ctx_mla_mod",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    fmha_quant_mode.name,
+                    kvcache_quant_mode.name,
+                    gemm_quant_mode.name,
+                ),
+                _slice,
+                lambda c: get_sol(c[2], c[1], 0, c[0], kvcache_quant_mode, fmha_quant_mode)[
+                    0
+                ],  # c=(num_heads, full_s, b)
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_heads, s + prefix, b), grid)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -797,7 +899,12 @@ class MLAModule(Operation):
             data_wrapper.raise_if_not_loaded()
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            mla_dict = data_wrapper[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
+            mla_dict = util_empirical.require_data_slice(
+                data_wrapper,
+                fmha_quant_mode,
+                kvcache_quant_mode,
+                gemm_quant_mode,
+            )
             result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"] * prefix_correction
             energy = result.get("energy", 0.0) * prefix_correction
@@ -856,9 +963,36 @@ class MLAModule(Operation):
             return sol_time, sol_math, sol_mem
 
         def get_empirical(b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode) -> float:
-            latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
-            scale_factor = 0.5
-            return latency / scale_factor
+            # SOL / util from own (num_heads, b, s) grid; raises if no data.
+            sol_time = get_sol(b, s, num_heads, kv_cache_dtype)[0]
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._generation_mla_module_data
+                wrapper.raise_if_not_loaded()
+                return util_empirical.require_data_slice(
+                    wrapper,
+                    fmha_quant_mode,
+                    kv_cache_dtype,
+                    gemm_quant_mode,
+                )
+
+            grid = util_empirical.grid_for(
+                (
+                    "gen_mla_mod",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    fmha_quant_mode.name,
+                    kv_cache_dtype.name,
+                    gemm_quant_mode.name,
+                ),
+                _slice,
+                lambda c: get_sol(c[1], c[2], c[0], kv_cache_dtype)[0],  # c=(num_heads, b, s)
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (num_heads, b, s), grid)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -876,7 +1010,12 @@ class MLAModule(Operation):
 
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
-            mla_dict = data_wrapper[fmha_quant_mode][kv_cache_dtype][gemm_quant_mode]
+            mla_dict = util_empirical.require_data_slice(
+                data_wrapper,
+                fmha_quant_mode,
+                kv_cache_dtype,
+                gemm_quant_mode,
+            )
             result = interpolation.interp_3d(num_heads, b, s, mla_dict, "cubic", database._extracted_metrics_cache)
             latency = result["latency"]
             energy = result.get("energy", 0.0)
@@ -1106,9 +1245,34 @@ class WideEPGenerationMLA(Operation):
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
-            latency = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.7
-            return latency / scale_factor
+            # SOL / util from own (num_heads, b, s) grid; num_heads = 128 // tp_size
+            # (mirrors get_silicon).
+            sol_time = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            attn_backend = attention_backend or "flashinfer"
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._wideep_generation_mla_data
+                if wrapper is None:
+                    raise PerfDataNotAvailableError("WideEP generation MLA data is SGLang-only.")
+                wrapper.raise_if_not_loaded()
+                return util_empirical.require_data_slice(wrapper, attn_backend, kvcache_quant_mode)
+
+            grid = util_empirical.grid_for(
+                (
+                    "wideep_gen_mla",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    attn_backend,
+                    kvcache_quant_mode.name,
+                ),
+                _slice,
+                lambda c: get_sol(c[1], c[2], round(128 / c[0]), kvcache_quant_mode, fmha_quant_mode)[0],
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (128 // tp_size, b, s), grid)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -1129,8 +1293,6 @@ class WideEPGenerationMLA(Operation):
             # ``None`` rather than a ``LoadedOpData(None)`` so that calling
             # ``raise_if_not_loaded()`` is not an option. Surface a structured
             # error here instead of an opaque ``NoneType`` attribute crash.
-            from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
-
             raise PerfDataNotAvailableError(
                 f"WideEP generation MLA perf data is SGLang-only; backend='{database.backend}' has no table."
             )
@@ -1138,15 +1300,12 @@ class WideEPGenerationMLA(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             attn_backend = attention_backend or "flashinfer"
-            if attn_backend == "flashinfer":
-                attn_data = data_wrapper["flashinfer"]
-            elif attn_backend == "fa3":
-                attn_data = data_wrapper["fa3"]
-            else:
+            if attn_backend not in {"flashinfer", "fa3"}:
                 raise ValueError(f"Unsupported attention backend: {attn_backend}")
+            attn_data = util_empirical.require_data_slice(data_wrapper, attn_backend)
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
-            mla_dict = attn_data[kvcache_quant_mode]
+            mla_dict = util_empirical.require_data_slice(attn_data, kvcache_quant_mode)
             result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
             latency = result["latency"]
             energy = result.get("energy", 0.0)
@@ -1205,6 +1364,7 @@ class WideEPContextMLA(Operation):
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         attn_backend: str = "flashinfer",
+        cp_size: int = 1,
     ) -> None:
         super().__init__(name, scale_factor)
         self._tp_size = tp_size
@@ -1212,6 +1372,8 @@ class WideEPContextMLA(Operation):
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
         self._attn_backend = attn_backend
+        # CP (sglang AllGather zigzag); see ContextMLA. cp>1 -> rank-0 two-chunk.
+        self._cp_size = cp_size
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -1359,9 +1521,40 @@ class WideEPContextMLA(Operation):
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
-            latency = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.6
-            return latency / scale_factor
+            # SOL / util from own (num_heads, full_s, b) grid; num_heads = 128 // tp_size.
+            # Samples are prefix=0; SOL(query) carries prefix natively.
+            sol_time = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            attn_backend = attention_backend or "flashinfer"
+
+            def _slice():
+                cls.load_data(database)
+                wrapper = database._wideep_context_mla_data
+                if wrapper is None:
+                    raise PerfDataNotAvailableError("WideEP context MLA data is SGLang-only.")
+                wrapper.raise_if_not_loaded()
+                return util_empirical.require_data_slice(
+                    wrapper,
+                    attn_backend,
+                    fmha_quant_mode,
+                    kvcache_quant_mode,
+                )
+
+            grid = util_empirical.grid_for(
+                (
+                    "wideep_ctx_mla",
+                    database.system,
+                    database.backend,
+                    database.version,
+                    attn_backend,
+                    fmha_quant_mode.name,
+                    kvcache_quant_mode.name,
+                ),
+                _slice,
+                lambda c: get_sol(c[2], c[1], 0, round(128 / c[0]), kvcache_quant_mode, fmha_quant_mode)[0],
+                depth=3,
+            )
+            latency, _ = util_empirical.estimate(sol_time, (128 // tp_size, s + prefix, b), grid)
+            return latency
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -1381,8 +1574,6 @@ class WideEPContextMLA(Operation):
         data_wrapper = database._wideep_context_mla_data
         if data_wrapper is None:
             # See WideEPGenerationMLA above for rationale.
-            from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
-
             raise PerfDataNotAvailableError(
                 f"WideEP context MLA perf data is SGLang-only; backend='{database.backend}' has no table."
             )
@@ -1390,16 +1581,13 @@ class WideEPContextMLA(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             attn_backend = attention_backend or "flashinfer"
-            if attn_backend == "flashinfer":
-                attn_data = data_wrapper["flashinfer"]
-            elif attn_backend == "fa3":
-                attn_data = data_wrapper["fa3"]
-            else:
+            if attn_backend not in {"flashinfer", "fa3"}:
                 raise ValueError(f"Unsupported attention backend: {attn_backend}")
+            attn_data = util_empirical.require_data_slice(data_wrapper, attn_backend)
 
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
-            mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
+            mla_dict = util_empirical.require_data_slice(attn_data, fmha_quant_mode, kvcache_quant_mode)
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
@@ -1427,15 +1615,23 @@ class WideEPContextMLA(Operation):
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix")
 
-        result = database.query_wideep_context_mla(
-            b=batch_size,
-            s=isl,
-            prefix=prefix,
-            tp_size=self._tp_size,
-            kvcache_quant_mode=self._kvcache_quant_mode,
-            fmha_quant_mode=self._fmha_quant_mode,
-            attention_backend=self._attn_backend,
-        )
+        def _q(s, pfx):
+            return database.query_wideep_context_mla(
+                b=batch_size,
+                s=s,
+                prefix=pfx,
+                tp_size=self._tp_size,
+                kvcache_quant_mode=self._kvcache_quant_mode,
+                fmha_quant_mode=self._fmha_quant_mode,
+                attention_backend=self._attn_backend,
+            )
+
+        if self._cp_size and self._cp_size > 1:
+            cp = self._cp_size
+            c = max(1, -(-isl // (2 * cp)))  # ceil(isl/(2*cp)) — rank-0 zigzag halves
+            result = _q(c, prefix) + _q(c, prefix + isl - c)
+        else:
+            result = _q(isl, prefix)
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,

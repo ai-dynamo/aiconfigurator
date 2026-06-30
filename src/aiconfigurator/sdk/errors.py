@@ -43,6 +43,30 @@ class UnsupportedWideepConfigError(ValueError):
     """
 
 
+class PerfDataNotAvailableError(RuntimeError):
+    """Raised when required performance data is missing or unsupported for a requested mode.
+
+    This is a *per-op* data-miss raised deep inside a single config's evaluation
+    (and in non-sweep paths like validate / single-point estimate), so it is
+    deliberately NOT a :class:`NoResultsError`: a miss on one config can be
+    skipped while other configs still produce results. Recognize it via
+    ``has_perf_data_not_available_cause`` in ``perf_database``.
+    """
+
+
+class EmpiricalNotImplementedError(RuntimeError):
+    """Raised when the empirical (SOL/util) path has no basis to estimate an op.
+
+    Distinct from ``PerfDataNotAvailableError`` (SILICON has no exact bracket but
+    HYBRID may still estimate): this is the terminal signal that even the
+    empirical fallback found nothing to calibrate from — no own-shape util, no
+    cross-shape/sibling transfer reference. We raise instead of returning a
+    placeholder ``SOL / constant`` so missing coverage surfaces honestly rather
+    than as a fabricated number. Genuinely table-less ops (mem / p2p /
+    element-wise) keep their own analytic formulas and never reach here.
+    """
+
+
 def is_expected_no_result_cause(error: BaseException) -> bool:
     """Return True when ``error`` or its effective chain has a NoResultsError.
 

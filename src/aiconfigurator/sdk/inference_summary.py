@@ -45,7 +45,7 @@ class InferenceSummary:
         set_kv_per_seq: stash per-sequence KV cache footprint context (for capacity probing)
         get_kv_per_seq: get per-sequence KV cache footprint context
         get_mem_capacity_bytes: get the GPU memory capacity captured by set_memory_and_check_oom
-        get_static_info: legacy 4-tuple breakdown text used by webapp Static Tab
+        get_static_info: legacy static breakdown text (returns 5 values)
         set_summary_df: set summary dataframe
         get_summary_df: get summary dataframe
     """

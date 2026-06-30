@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
+
 data_dir: data/b200_sxm # relative to systems_dir
 gpu:
-  mem_bw: 8000000000000 # 8TB/s
+  mem_bw: 7700000000000 # 7.7TB/s
   mem_bw_empirical_scaling_factor: 0.8 # some nonofficial correction based on observations, you should try to modify based on your own observations
   mem_empirical_constant_latency: 0.000003 # 3us some nonofficial correction based on observations, you should try to modify based on your own observations
   mem_capacity: 193273528320 # 180GiB

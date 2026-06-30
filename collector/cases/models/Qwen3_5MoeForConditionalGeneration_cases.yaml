@@ -9,14 +9,45 @@ model_paths:
   - Qwen/Qwen3.5-122B-A10B
   - Qwen/Qwen3.5-397B-A17B
 include_base: true
+base_ops:
+  - attention_context
+  - attention_generation
+  - gemm
 description: >
   Qwen3.5 MoE/GDN model-centric collection plan.
 
 model_case_values:
+  attention:
+    - id: qwen35_35b_attention
+      model_path: Qwen/Qwen3.5-35B-A3B
+      num_attention_heads: 16
+      num_key_value_heads: 2
+      head_dim: 256
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
+    - id: qwen35_122b_attention
+      model_path: Qwen/Qwen3.5-122B-A10B
+      num_attention_heads: 32
+      num_key_value_heads: 2
+      head_dim: 256
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16, 32]
+    - id: qwen35_397b_attention
+      model_path: Qwen/Qwen3.5-397B-A17B
+      num_attention_heads: 32
+      num_key_value_heads: 2
+      head_dim: 256
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16, 32]
   moe:
     - model_path: Qwen/Qwen3.5-35B-A3B
       hidden_size: 2048
       inter_size: 512
+      topk: 8
+      num_experts: 256
+    - model_path: Qwen/Qwen3.5-122B-A10B
+      hidden_size: 3072
+      inter_size: 1024
       topk: 8
       num_experts: 256
     - model_path: Qwen/Qwen3.5-397B-A17B

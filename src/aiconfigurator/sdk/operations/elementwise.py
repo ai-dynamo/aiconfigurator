@@ -26,6 +26,8 @@ class ElementWise(Operation):
     Element-wise operation.
     """
 
+    _CP_AWARE = True  # query divides x (token count) by self._seq_split
+
     def __init__(
         self,
         name: str,
@@ -35,7 +37,7 @@ class ElementWise(Operation):
         empirical_bw_scaling_factor: float = 0.8,
         **kwargs,
     ) -> None:
-        super().__init__(name, scale_factor)
+        super().__init__(name, scale_factor, seq_split=kwargs.get("seq_split", 1))
         self._weights = 0.0
         self._empirical_bw_scaling_factor = empirical_bw_scaling_factor
         self._constant_latency = 5e-6  # 5us
@@ -52,6 +54,7 @@ class ElementWise(Operation):
         if self._scale_num_tokens <= 0:
             raise ValueError(f"ElementWise.query: scale_num_tokens must be > 0, got {self._scale_num_tokens}.")
         x //= self._scale_num_tokens
+        x = -(-x // self._seq_split)  # CP: per-rank token count (ceil = busiest rank)
         read_bytes = x * self._dim_in * 2  # bfloat16 for act
         write_bytes = x * self._dim_out * 2
 

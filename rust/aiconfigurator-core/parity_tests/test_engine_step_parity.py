@@ -574,14 +574,16 @@ def _static_metrics(
         "engine_step_backend": engine_step_backend,
     }
     context_ms = _safe_value(
-        lambda: _quiet_call(cli_estimate, mode="static_ctx", **kwargs)
-        .summary.get_summary_df()
-        .iloc[0]["context_latency"]
+        lambda: (
+            _quiet_call(cli_estimate, mode="static_ctx", **kwargs).summary.get_summary_df().iloc[0]["context_latency"]
+        )
     )
     generation_ms = _safe_value(
-        lambda: _quiet_call(cli_estimate, mode="static_gen", **kwargs)
-        .summary.get_summary_df()
-        .iloc[0]["generation_latency"]
+        lambda: (
+            _quiet_call(cli_estimate, mode="static_gen", **kwargs)
+            .summary.get_summary_df()
+            .iloc[0]["generation_latency"]
+        )
     )
     if isinstance(context_ms, _ErrorSentinel) or isinstance(generation_ms, _ErrorSentinel):
         total: float | _ErrorSentinel = context_ms if isinstance(context_ms, _ErrorSentinel) else generation_ms

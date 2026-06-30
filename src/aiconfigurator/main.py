@@ -12,35 +12,6 @@ from aiconfigurator.generator.api import generator_cli_helper
 from aiconfigurator.logging_utils import setup_logging
 
 
-def _is_gradio_importable() -> bool:
-    """Check that gradio is installed and actually importable (not just leftover files)."""
-    try:
-        import gradio
-
-        return hasattr(gradio, "__version__")
-    except Exception:
-        return False
-
-
-_GRADIO_AVAILABLE = _is_gradio_importable()
-
-
-def _run_webapp(extra_args: list[str]) -> None:
-    if not _GRADIO_AVAILABLE:
-        print(
-            "Error: The 'webapp' subcommand requires a working Gradio installation.\n"
-            "Install it with:  pip install aiconfigurator[webapp]"
-        )
-        sys.exit(1)
-    from aiconfigurator.webapp.main import configure_parser as configure_webapp_parser
-    from aiconfigurator.webapp.main import main as webapp_main
-
-    webapp_parser = argparse.ArgumentParser(description="AIConfigurator web interface")
-    configure_webapp_parser(webapp_parser)
-    webapp_args = webapp_parser.parse_args(extra_args)
-    webapp_main(webapp_args)
-
-
 def _run_cli(extra_args: list[str]) -> None:
     if generator_cli_helper(extra_args):
         return
@@ -61,13 +32,6 @@ def main(argv: list[str] | None = None) -> None:
     # CLI subcommand
     cli_parser = subparsers.add_parser("cli", help="Run CLI interface", add_help=False)
     cli_parser.set_defaults(handler=_run_cli)
-
-    # Webapp subcommand (always visible; prints install hint when Gradio is missing)
-    webapp_help = (
-        "Run Web interface" if _GRADIO_AVAILABLE else "Run Web interface (requires: pip install aiconfigurator[webapp])"
-    )
-    webapp_parser = subparsers.add_parser("webapp", help=webapp_help, add_help=False)
-    webapp_parser.set_defaults(handler=_run_webapp)
 
     # Version subcommand
     version_parser = subparsers.add_parser("version", help="Show version information", add_help=False)

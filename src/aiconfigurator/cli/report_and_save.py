@@ -751,7 +751,7 @@ def save_results(
                     )
 
                 # Set version source based on deployment target
-                if deployment_target == "llm-d":
+                if deployment_target == "llm-d-helm":
                     version_source = "template defaults"
                 else:
                     version_source = f"dynamo {default_dynamo_version}"

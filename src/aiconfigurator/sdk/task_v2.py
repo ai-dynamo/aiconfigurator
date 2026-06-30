@@ -51,7 +51,7 @@ from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config
 
 logger = logging.getLogger(__name__)
 
-ParallelChoice = tuple[int, int, int, int, int]  # (tp, pp, dp, moe_tp, moe_ep)
+ParallelChoice = tuple[int, int, int, int, int, int]  # (tp, pp, dp, moe_tp, moe_ep, cp)
 
 
 _DEFAULT_NEXTN_ACCEPT_RATES: list[float] = [0.85, 0.8, 0.6, 0.0, 0.0]
@@ -60,6 +60,23 @@ _DEFAULT_NEXTN_ACCEPT_RATES: list[float] = [0.85, 0.8, 0.6, 0.0, 0.0]
 # checkpoint's HF config does NOT declare ``num_nextn_predict_layers`` at all.
 # A config that explicitly states the field (including 0, e.g. Kimi-K2.5) wins.
 _MTP_DEFAULT_FAMILIES = {"DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25", "QWEN35"}
+
+
+def _default_cp_list_for(model_family: str, backend_name: str) -> list[int]:
+    """Default prefill/agg ``cp_list`` for the CP auto-sweep; ``[1]`` otherwise.
+
+    Capability-derived: any model whose class declares ``supports_cp`` on this
+    backend is auto-swept over cp ∈ {1,2,4,8}. Keying off the registry (not a
+    hardcoded family list) means the sweep policy never drifts from
+    ``BaseModel.supports_cp``. Decode is always forced to cp=1 by iter_parallel.
+    """
+    from aiconfigurator.sdk.models.base import _MODEL_REGISTRY
+
+    cls = _MODEL_REGISTRY.get(model_family)
+    if cls is not None and cls.supports_cp(backend_name):
+        return [1, 2, 4, 8]
+    return [1]
+
 
 # Legacy V1 TaskRunner swept TPOT over this fixed grid to build the latency/throughput
 # Pareto frontier. Used when ``pareto_sweep=True`` (the default) so v2 matches v1.
@@ -326,6 +343,10 @@ class Task:
     request_latency: float | None = None
     total_gpus: int | None = None
     database_mode: str | None = None
+    # Fine-grained HYBRID/EMPIRICAL transfer control: which empirical transfer kinds are
+    # permitted (see common.TransferKind). None = all (default). Accepts a preset name
+    # ("conservative"/"balanced"/"aggressive"/"off"), a kind ("xshape"), or a list thereof.
+    transfer_policy: str | list | None = None
     free_gpu_memory_fraction: float | None = None
     max_seq_len: int | None = None
     engine_step_backend: str | None = None
@@ -356,6 +377,7 @@ class Task:
     agg_dp_candidates: list[int] | None = None
     agg_moe_tp_candidates: list[int] | None = None
     agg_moe_ep_candidates: list[int] | None = None
+    agg_cp_candidates: list[int] | None = None
 
     # ====== 4. Disagg prefill worker spec ======
     prefill_model_path: str = ""
@@ -378,6 +400,7 @@ class Task:
     prefill_dp_candidates: list[int] | None = None
     prefill_moe_tp_candidates: list[int] | None = None
     prefill_moe_ep_candidates: list[int] | None = None
+    prefill_cp_candidates: list[int] | None = None
 
     # ====== 6. Disagg decode worker spec ======
     decode_model_path: str = ""
@@ -399,6 +422,7 @@ class Task:
     decode_dp_candidates: list[int] | None = None
     decode_moe_tp_candidates: list[int] | None = None
     decode_moe_ep_candidates: list[int] | None = None
+    decode_cp_candidates: list[int] | None = None
 
     # ====== 8. Disagg orchestration ======
     num_gpu_per_replica: list[int] | None = None
@@ -838,6 +862,10 @@ class Task:
             if getattr(self, name) is None:
                 setattr(self, name, values)
 
+        # CP auto-sweep for validated families (sglang); [1] otherwise. agg runs
+        # prefill in-worker, so cp applies; decode-cp=1 is enforced in iter_parallel.
+        _set("agg_cp_candidates", _default_cp_list_for(self._model_family, self.backend_name))
+
         if not self._is_moe:
             blackwell = self.system_name in ("gb200", "gb300")
             wide = [1, 2, 4, 8, 16] if blackwell else [1, 2, 4, 8]
@@ -930,10 +958,23 @@ class Task:
             "dp_list": f"{role}_dp_candidates",
             "moe_tp_list": f"{role}_moe_tp_candidates",
             "moe_ep_list": f"{role}_moe_ep_candidates",
+            "cp_list": f"{role}_cp_candidates",
         }
         for k_src, k_attr in map_to_attr.items():
             if getattr(self, k_attr) is None:
-                setattr(self, k_attr, src[k_src])
+                if k_src == "cp_list":
+                    # Decode is always cp=1 (CP is prefill-only). prefill/agg
+                    # auto-sweep cp for CP-validated families (else [1]); an
+                    # explicit worker-config cp_list still wins. A user-supplied
+                    # non-1 decode cp is rejected in iter_parallel.
+                    if role == "decode":
+                        value = [1]
+                    else:
+                        backend = self._role_attr(role, "backend_name")
+                        value = src.get(k_src, _default_cp_list_for(self._model_family, backend))
+                else:
+                    value = src[k_src]
+                setattr(self, k_attr, value)
 
     # =====================================================================
     # Role attribute access (no fallback across prefixes — strict discipline)
@@ -995,7 +1036,7 @@ class Task:
         )
 
     def iter_parallel(self, role: Literal["agg", "prefill", "decode"]) -> Iterator[ParallelChoice]:
-        """Yield (tp, pp, dp, moe_tp, moe_ep) tuples for the role.
+        """Yield (tp, pp, dp, moe_tp, moe_ep, cp) tuples for the role.
 
         Uses sdk.utils.enumerate_parallel_config so MoE constraints match
         the legacy path exactly.
@@ -1005,6 +1046,15 @@ class Task:
         def _cands(dim: str) -> list[int]:
             return getattr(self, f"{prefix}{dim}_candidates")
 
+        # CP is modeled for context/prefill only; decode must be cp=1. Fail loud
+        # rather than silently coercing a user-supplied decode cp>1.
+        cp_list = _cands("cp") or [1]
+        if role == "decode" and any(c != 1 for c in cp_list):
+            raise ValueError(
+                f"decode CP must be 1 (CP is modeled for prefill only); got "
+                f"decode_cp_candidates={cp_list}. Enable CP via prefill/agg instead."
+            )
+
         return iter(
             enumerate_parallel_config(
                 num_gpu_list=_cands("num_gpu"),
@@ -1013,6 +1063,7 @@ class Task:
                 dp_list=_cands("dp"),
                 moe_tp_list=_cands("moe_tp"),
                 moe_ep_list=_cands("moe_ep"),
+                cp_list=cp_list,
                 is_moe=self._is_moe,
                 backend=common.BackendName[self._role_attr(role, "backend_name")],
                 enable_wideep=self._role_attr(role, "enable_wideep"),
@@ -1187,7 +1238,36 @@ class Task:
         else:
             ctx_op, gen_op = "context_attention", "generation_attention"
 
-        def _check(op: str, mode: Any) -> None:
+        # supported_quant_mode is a DATA-PRESENCE list (which quants the DB carries
+        # tables for), not a backend-capability list. In SILICON that equals what we
+        # can model. In HYBRID/EMPIRICAL the MoE util-empirical path can synthesize a
+        # quant from a collected quant that shares its (memory, compute) profile
+        # (XQUANT cross-quant transfer, see operations/moe.py) -- only MoE implements
+        # this, so only MoE relaxes. Truly-unreachable quants (no same-profile data)
+        # still fail early here rather than crashing late in the sweep.
+        # Admission via the XQUANT cross-quant transfer only holds if (a) we're in a
+        # non-SILICON mode AND (b) the resolved transfer policy actually enables XQUANT.
+        # Otherwise operations/moe.py rejects the quant at query time by policy, so
+        # validate must not pre-admit it (e.g. transfer_policy="off"/"conservative").
+        xquant_enabled = self.database_mode not in (
+            None,
+            common.DatabaseMode.SILICON.name,
+        ) and common.TransferKind.XQUANT in common.resolve_transfer_policy(self.transfer_policy)
+
+        def _profile_reachable(mode: Any, supported_names: list) -> bool:
+            enum_cls = type(mode)
+            val = getattr(mode, "value", None)
+            qp = (getattr(val, "memory", None), getattr(val, "compute", None))
+            for nm in supported_names:
+                try:
+                    other = enum_cls[nm].value
+                except (KeyError, AttributeError):
+                    continue
+                if (getattr(other, "memory", None), getattr(other, "compute", None)) == qp:
+                    return True
+            return False
+
+        def _check(op: str, mode: Any, *, profile_transfer: bool = False) -> None:
             if mode is None:
                 return
             modes = supported.get(op, []) or []
@@ -1196,6 +1276,8 @@ class Task:
             name = mode.name if hasattr(mode, "name") else str(mode)
             if name in modes:
                 return
+            if profile_transfer and xquant_enabled and _profile_reachable(mode, modes):
+                return  # transfer-reachable in HYBRID/EMPIRICAL with XQUANT enabled
             exc_type = UnsupportedWideepConfigError if op.startswith("wideep_") else ValueError
             raise exc_type(
                 f"Unsupported {op} quant mode {name!r} for system={system!r}, "
@@ -1212,11 +1294,11 @@ class Task:
             if backend == "sglang" and moe_backend == "deepep_moe":
                 # WideEP MoE: per-phase op keys (raises UnsupportedWideepConfigError).
                 if validate_context:
-                    _check("wideep_context_moe", moe_mode)
+                    _check("wideep_context_moe", moe_mode, profile_transfer=True)
                 if validate_generation:
-                    _check("wideep_generation_moe", moe_mode)
+                    _check("wideep_generation_moe", moe_mode, profile_transfer=True)
             else:
-                _check("moe", moe_mode)
+                _check("moe", moe_mode, profile_transfer=True)
 
         # FMHA: only meaningful for context-using workers (agg, prefill).
         if validate_context:
@@ -1365,21 +1447,20 @@ class Task:
 
     def _load_database(self, system: str, backend: str, version: str):
         """Load the perf DB honoring database_mode (SILICON/HYBRID/EMPIRICAL). Non-SILICON
-        modes allow missing measured data; the db's DEFAULT mode is also switched so
-        predictions actually use SOL/empirical (the get_database arg only drives shared-layer
-        loading -- the prediction behaviour is set via set_default_database_mode). Mirrors
-        v1 _get_database."""
-        from aiconfigurator.sdk.perf_database import get_database
+        modes allow missing measured data. Returns an immutable, configuration-scoped
+        lightweight view so mode and transfer policy cannot mutate the process-cached
+        data template."""
+        from aiconfigurator.sdk.perf_database import get_database_view
 
         allow_missing = self.database_mode is not None and self.database_mode != common.DatabaseMode.SILICON.name
-        db = get_database(system, backend, version, allow_missing_data=allow_missing, database_mode=self.database_mode)
-        if db is not None and self.database_mode is not None:
-            mode = common.DatabaseMode[self.database_mode]
-            if mode != db.get_default_database_mode():
-                # set_default_database_mode mutates; copy so the module-cached db isn't polluted.
-                db = copy.deepcopy(db)
-                db.set_default_database_mode(mode)
-        return db
+        return get_database_view(
+            system,
+            backend,
+            version,
+            allow_missing_data=allow_missing,
+            database_mode=self.database_mode,
+            transfer_policy=self.transfer_policy,
+        )
 
     def run(self, *, autoscale: bool = False, validate: bool = True):
         """Run the sweep and return a feasible-candidate DataFrame.

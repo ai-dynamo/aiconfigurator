@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import pandas as pd
 import pytest
 
 from tools.support_matrix import support_matrix as support_matrix_module
@@ -8,6 +9,7 @@ from tools.support_matrix.support_matrix import (
     STATUS_FAIL,
     STATUS_FRAMEWORK_INCOMPATIBLE,
     STATUS_HW_INCOMPATIBLE,
+    STATUS_HYBRID_PASS,
     SupportMatrix,
     TestConstraints,
 )
@@ -236,6 +238,37 @@ def test_kimi_moonshot_trtllm_b200_int4_wo_is_framework_incompatible(monkeypatch
 
     assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
     assert "Unsupported moe quant mode 'int4_wo'" in errors["agg"]
+
+
+def test_kimi_framework_gap_can_be_hybrid_estimable_without_becoming_silicon_pass(monkeypatch):
+    calls: list[str] = []
+
+    def fake_run_mode(**kwargs):
+        calls.append(kwargs["database_mode"])
+        if kwargs["database_mode"] == "SILICON":
+            raise ValueError(
+                "Unsupported moe quant mode 'int4_wo' for system='b200_sxm', backend='trtllm', version='1.3.0rc10'."
+            )
+        return pd.DataFrame({"x": [1.0]})
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors, commands, sources = SupportMatrix.run_single_test(
+        model="moonshotai/Kimi-K2.5",
+        system="b200_sxm",
+        backend="trtllm",
+        version="1.3.0rc10",
+        system_spec=_b200_system_spec(),
+        modes_to_test=["agg"],
+        include_commands=True,
+    )
+
+    assert statuses == {"agg": STATUS_HYBRID_PASS}
+    assert errors == {"agg": None}
+    assert sources == {"agg": "empirical"}
+    assert "--database-mode HYBRID" in commands["agg"]
+    assert calls == ["SILICON", "HYBRID"]
 
 
 def test_kimi_moonshot_trtllm_int4_wo_other_system_remains_fail(monkeypatch):

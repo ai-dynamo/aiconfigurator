@@ -72,28 +72,27 @@ class TestFallbackOp:
         assert float(result) == 8.0  # 5 + 3
         assert result.energy == 80.0  # 50 + 30
 
-    def test_primary_fails_with_key_error(self):
-        """FallbackOp catches KeyError from missing quant mode combinations."""
+    @pytest.mark.parametrize(
+        ("error_cls", "message"),
+        (
+            (KeyError, "fp8_block"),
+            (AssertionError, "values is None or empty"),
+            (ValueError, "unexpected"),
+        ),
+    )
+    def test_raw_primary_errors_propagate(self, error_cls, message):
+        """Untyped schema/programming errors must never be converted to fallback."""
         mock_db = _make_mock_db()
-        primary = _make_failing_op(KeyError, "fp8_block")
-        fallback_1 = _make_mock_op(7.0, 70.0)
+        primary = _make_failing_op(error_cls, message)
+        fallback_1 = _make_mock_op(5.0, 50.0)
 
         op = FallbackOp("test", primary=primary, fallback=[fallback_1])
-        result = op.query(mock_db, batch_size=4)
+        for batch_size in (4, 8):
+            with pytest.raises(error_cls):
+                op.query(mock_db, batch_size=batch_size)
 
-        assert float(result) == 7.0
-        assert result.energy == 70.0
-
-    def test_primary_fails_with_assertion_error(self):
-        """FallbackOp catches AssertionError from empty interpolation data."""
-        mock_db = _make_mock_db()
-        primary = _make_failing_op(AssertionError, "values is None or empty")
-        fallback_1 = _make_mock_op(7.0, 70.0)
-
-        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
-        result = op.query(mock_db, batch_size=4)
-
-        assert float(result) == 7.0
+        assert primary.query.call_count == 2
+        fallback_1.query.assert_not_called()
 
     def test_both_fail_raises(self):
         """When primary fails and fallback also fails, the fallback error propagates."""
@@ -105,67 +104,41 @@ class TestFallbackOp:
         with pytest.raises(PerfDataNotAvailableError, match="no granular data"):
             op.query(mock_db, batch_size=4)
 
-    def test_unexpected_error_not_caught(self):
-        """Errors other than the expected types are not caught."""
+    def test_primary_is_retried_after_shape_specific_data_miss(self):
+        """A miss at one shape must not disable primary data at later shapes."""
         mock_db = _make_mock_db()
-        primary = _make_failing_op(ValueError, "unexpected")
-        fallback_1 = _make_mock_op(5.0, 50.0)
-
-        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
-        with pytest.raises(ValueError, match="unexpected"):
-            op.query(mock_db, batch_size=4)
-
-    def test_primary_skipped_after_perf_data_not_available(self):
-        """Once primary fails with PerfDataNotAvailableError, it is skipped on subsequent calls."""
-        mock_db = _make_mock_db()
-        primary = _make_failing_op(PerfDataNotAvailableError)
-        fallback_1 = _make_mock_op(5.0, 50.0)
-
-        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
-        op.query(mock_db, batch_size=4)
-        op.query(mock_db, batch_size=8)
-        op.query(mock_db, batch_size=16)
-
-        # Primary should only be called once (the first attempt)
-        assert primary.query.call_count == 1
-        # Fallback should be called for all three queries
-        assert fallback_1.query.call_count == 3
-
-    def test_primary_retried_after_key_error(self):
-        """KeyError doesn't permanently disable primary — it may work for other params."""
-        mock_db = _make_mock_db()
-        primary = _make_failing_op(KeyError, "fp8_block")
-        fallback_1 = _make_mock_op(5.0, 50.0)
-
-        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
-        op.query(mock_db, batch_size=4)
-        op.query(mock_db, batch_size=8)
-
-        # Primary should be retried on each call
-        assert primary.query.call_count == 2
-
-    def test_primary_forces_silicon_mode(self):
-        """Primary is queried with SILICON mode even when database uses HYBRID."""
-        mock_db = _make_mock_db()
-        mock_db._default_database_mode = common.DatabaseMode.HYBRID
-
         primary = _make_mock_op(10.0, 100.0)
-        seen_modes = []
-
-        def _query(database, **kwargs):
-            seen_modes.append(database._default_database_mode)
-            return PerformanceResult(10.0, energy=100.0)
-
-        primary.query.side_effect = _query
+        primary.query.side_effect = [
+            PerfDataNotAvailableError("shape not covered"),
+            PerformanceResult(10.0, energy=100.0),
+        ]
         fallback_1 = _make_mock_op(5.0, 50.0)
 
         op = FallbackOp("test", primary=primary, fallback=[fallback_1])
-        op.query(mock_db, batch_size=4)
+        first = op.query(mock_db, batch_size=4)
+        second = op.query(mock_db, batch_size=8)
 
-        # During primary query, database mode should have been SILICON
-        # After query, it should be restored to HYBRID
-        assert seen_modes == [common.DatabaseMode.SILICON]
-        assert mock_db._default_database_mode == common.DatabaseMode.HYBRID
+        assert float(first) == 5.0
+        assert float(second) == 10.0
+        assert primary.query.call_count == 2
+        fallback_1.query.assert_called_once()
+
+    def test_hybrid_primary_uses_silicon_copy_and_fallback_uses_original(self, stub_perf_db):
+        """Only the primary gets SILICON configuration; fallback keeps HYBRID."""
+        from aiconfigurator.sdk import perf_database
+
+        hybrid_db = perf_database._get_configured_database_view(stub_perf_db, common.DatabaseMode.HYBRID, "off")
+        silicon_db = perf_database._get_configured_database_view(stub_perf_db, common.DatabaseMode.SILICON, "off")
+        primary = _make_failing_op(PerfDataNotAvailableError)
+        fallback = _make_mock_op(5.0, 50.0)
+
+        result = FallbackOp("test", primary=primary, fallback=[fallback]).query(hybrid_db, batch_size=4)
+
+        assert float(result) == 5.0
+        assert primary.query.call_args.args[0] is silicon_db
+        assert fallback.query.call_args.args[0] is hybrid_db
+        assert hybrid_db._default_database_mode is common.DatabaseMode.HYBRID
+        assert silicon_db._root_database_template is hybrid_db._root_database_template is stub_perf_db
 
     def test_primary_respects_explicit_sol_mode(self):
         """Primary uses SOL mode directly when the caller explicitly requests SOL."""
@@ -190,19 +163,6 @@ class TestFallbackOp:
         assert result.source == "sol"
         assert mock_db._default_database_mode == common.DatabaseMode.SOL
 
-    def test_database_mode_restored_after_primary_failure(self):
-        """Database mode is restored to original even when primary fails."""
-        mock_db = _make_mock_db()
-        mock_db._default_database_mode = common.DatabaseMode.HYBRID
-
-        primary = _make_failing_op(PerfDataNotAvailableError)
-        fallback_1 = _make_mock_op(5.0, 50.0)
-
-        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
-        op.query(mock_db, batch_size=4)
-
-        assert mock_db._default_database_mode == common.DatabaseMode.HYBRID
-
     def test_get_weights_from_primary(self):
         """get_weights uses primary when it has nonzero weights."""
         primary = _make_mock_op(10.0, 100.0, weights=500.0)
@@ -220,22 +180,6 @@ class TestFallbackOp:
 
         op = FallbackOp("test", primary=primary, fallback=[fallback_1, fallback_2])
         assert op.get_weights() == 300.0
-
-    def test_primary_error_logs_not_leaked(self):
-        """The perf_database logger level is restored after primary failure."""
-        import logging
-
-        mock_db = _make_mock_db()
-        primary = _make_failing_op(PerfDataNotAvailableError)
-        fallback_1 = _make_mock_op(5.0, 50.0)
-
-        perf_logger = logging.getLogger("aiconfigurator.sdk.perf_database")
-        original_level = perf_logger.level
-
-        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
-        op.query(mock_db, batch_size=4)
-
-        assert perf_logger.level == original_level
 
 
 class TestMLAModule:

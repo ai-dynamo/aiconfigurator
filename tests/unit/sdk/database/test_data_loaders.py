@@ -54,6 +54,7 @@ class DummyPerfDatabase:
         self.version = version
         self.systems_root = systems_root_arg
         self.database_mode = database_mode
+        self.enable_shared_layer = database_mode is None or database_mode.upper() in ("SILICON", "HYBRID")
 
 
 def test_read_perf_rows_normalizes_missing_csv_fields(tmp_path):
@@ -150,6 +151,32 @@ def test_get_all_databases(tmp_path, monkeypatch):
     assert isinstance(database_dict["testsys_2"][BackendName.vllm.value]["v1"], DummyPerfDatabase)
     assert isinstance(database_dict["testsys_2"][BackendName.vllm.value]["v2"], DummyPerfDatabase)
     assert isinstance(database_dict["testsys_2"][BackendName.vllm.value]["v3"], DummyPerfDatabase)
+
+
+def test_get_all_databases_does_not_seed_formula_only_cache_with_shared_database(tmp_path, monkeypatch):
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.PerfDatabase", DummyPerfDatabase)
+    systems_dir = tmp_path / "systems_dir"
+    systems_dir.mkdir()
+    (systems_dir / "testsys.yaml").write_text("data_dir: data\n")
+    (systems_dir / "data" / "sglang" / "v1").mkdir(parents=True)
+    databases_cache.clear()
+
+    try:
+        all_databases = get_all_databases(systems_paths=str(systems_dir), max_workers=1)
+        shared_db = all_databases["testsys"]["sglang"]["v1"]
+        empirical_db = get_database(
+            "testsys",
+            "sglang",
+            "v1",
+            systems_paths=str(systems_dir),
+            database_mode="EMPIRICAL",
+        )
+
+        assert shared_db.enable_shared_layer is True
+        assert empirical_db.enable_shared_layer is False
+        assert empirical_db is not shared_db
+    finally:
+        databases_cache.clear()
 
 
 def test_get_database_uses_default_systems_paths(tmp_path, monkeypatch):

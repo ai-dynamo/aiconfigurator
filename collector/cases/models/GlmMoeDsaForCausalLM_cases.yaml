@@ -24,6 +24,9 @@ model_case_values:
       num_experts: 256
       wideep: true
   mla_module:
+    # Keep every supported path targetable. SGLang resolves checkpoint-native
+    # quantization to reject impossible explicit GEMM modes, but still loads
+    # path-specific config for the remaining module invocations.
     - model_paths:
         - zai-org/GLM-5
         - zai-org/GLM-5-FP8
@@ -54,4 +57,10 @@ framework_specific_op_cases:
     dsa_context_module:
       cases: all
     dsa_generation_module:
+      cases: all
+    glm5_mqa_logits_module:
+      cases: all
+    glm5_topk_module:
+      cases: all
+    glm5_dsa_attn_module:
       cases: all

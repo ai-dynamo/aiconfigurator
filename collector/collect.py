@@ -1459,13 +1459,11 @@ def main():
     )
     args = parser.parse_args()
     ops = args.ops
-    _dsv4_auto_expand = False
     case_plan = None
     logger_message = None
     if args.plan_only and not (args.model_path or args.model_architecture or args.model_cases or args.model_cases_full):
         parser.error("--plan-only requires --model-path, --model-architecture, --model-cases, or --model-cases-full")
     if args.model_path or args.model_architecture or args.model_cases or args.model_cases_full:
-        from collector.case_generator import is_dsv4_attention_model
         from collector.model_cases import build_collection_case_plan
 
         if args.model_path:
@@ -1505,21 +1503,6 @@ def main():
                 "using base op cases only plus legacy model filtering."
             )
 
-        # DeepSeek-V4 Flash/Pro special-case: when no explicit ``--ops`` is
-        # given, collect the full set of AIC data needed by the model. The
-        # attention path uses prefix-aware full modules, so the old sparse
-        # kernel correction files are intentionally not part of the default.
-        if args.ops is None and args.model_path and is_dsv4_attention_model(args.model_path):
-            ops = [
-                "gemm",
-                "moe",
-                "mhc_module",
-                "dsv4_csa_context_module",
-                "dsv4_hca_context_module",
-                "dsv4_csa_generation_module",
-                "dsv4_hca_generation_module",
-            ]
-            _dsv4_auto_expand = True
         if args.plan_only:
             log_dict = case_plan.to_log_dict()
             log_dict["ops"] = ops
@@ -1530,11 +1513,7 @@ def main():
 
     # Setup logging - debug flag is handled inside setup_logging
     if logger is None:
-        # Use short label when V4-Flash auto-expanded ops to several names
-        # (the joined scope may exceed Linux filename length limit).
-        if _dsv4_auto_expand:
-            log_scope = ["dsv4"]
-        elif args.model_cases_full:
+        if args.model_cases_full:
             log_scope = ["model_cases_full"]
         else:
             log_scope = ops if ops else ["all"]

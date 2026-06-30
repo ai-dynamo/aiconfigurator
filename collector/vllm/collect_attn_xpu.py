@@ -43,7 +43,11 @@ except ImportError:
 
 from vllm.config import set_current_vllm_config
 
-from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
+from collector.case_generator import (
+    get_attention_context_shape_sweeps,
+    get_attention_generation_shape_sweeps,
+    get_attention_head_configs,
+)
 from collector.helper import benchmark_with_power, get_device_module, log_perf
 from collector.vllm.utils import (
     BatchSpec,
@@ -436,54 +440,47 @@ def get_context_attention_test_cases(if_unit_test=False):
     for shape_sweep in shape_sweeps:
         batch_sizes = [int(value) for value in shape_sweep["batch_sizes"]]
         sequence_lengths = [int(value) for value in shape_sweep["sequence_lengths"]]
-        query_head_counts = [int(value) for value in shape_sweep["query_head_counts"]]
-        kv_head_options = shape_sweep["kv_head_options"]
-        head_dims = [int(value) for value in shape_sweep["head_dims"]]
-        window_sizes = [int(value) for value in shape_sweep["window_sizes"]]
+        supported_head_dims = {int(value) for value in shape_sweep["head_dims"]}
+        supported_window_sizes = {int(value) for value in shape_sweep["window_sizes"]}
         max_tokens_self_attention = int(shape_sweep["max_tokens_self_attention"])
         max_tokens_grouped_query_attention = int(shape_sweep["max_tokens_grouped_query_attention"])
         max_kv_elements = int(shape_sweep["max_kv_elements"])
 
-        for n in sorted(query_head_counts, reverse=True):
+        for head_config in get_attention_head_configs(shape_sweep, phase="context"):
+            n = head_config.num_heads
+            num_kv_heads = head_config.num_kv_heads
+            head_dim = head_config.head_dim
+            window_size = head_config.window_size
+            if head_dim not in supported_head_dims or window_size not in supported_window_sizes:
+                continue
+            # XPU paged flash attention only supports GQA ratio <= 16.
+            if n // num_kv_heads > max_gqa_ratio:
+                continue
+            # Keep the backend limitation from the previous enumerator.
+            if window_size > 0 and head_dim == 128:
+                continue
             for s in sorted(sequence_lengths, reverse=True):
                 for b in sorted(batch_sizes, reverse=True):
-                    for kv_head_option in kv_head_options:
-                        is_self_kv = kv_head_option in ("self", 0, "0", None)
-                        num_kv_heads = n if is_self_kv else int(kv_head_option)
-                        if num_kv_heads <= 0:
+                    if num_kv_heads == n:
+                        if b * s > max_tokens_self_attention or b > 128:
                             continue
-                        if num_kv_heads != n and (num_kv_heads > n or n % num_kv_heads != 0):
-                            continue
-                        # XPU paged flash attention only supports GQA ratio <= 16
-                        if n // num_kv_heads > max_gqa_ratio:
-                            continue
-                        if num_kv_heads == n:
-                            if b * s > max_tokens_self_attention or b > 128:
-                                continue
-                        else:
-                            if b * s > max_tokens_grouped_query_attention:
-                                continue
-                        for head_dim in head_dims:
-                            if b * s * num_kv_heads * head_dim * 2 >= max_kv_elements:
-                                continue
-
-                            for window_size in window_sizes:
-                                # Skip SWA for head_dim=128 (no models use it)
-                                if window_size > 0 and head_dim == 128:
-                                    continue
-                                for is_fp8_kv_cache in kv_cache_dtype_list:
-                                    test_cases.append(
-                                        [
-                                            b,
-                                            s,
-                                            n,
-                                            num_kv_heads,
-                                            head_dim,
-                                            is_fp8_kv_cache,
-                                            True,
-                                            window_size,
-                                        ]
-                                    )
+                    elif b * s > max_tokens_grouped_query_attention:
+                        continue
+                    if b * s * num_kv_heads * head_dim * 2 >= max_kv_elements:
+                        continue
+                    for is_fp8_kv_cache in kv_cache_dtype_list:
+                        test_cases.append(
+                            [
+                                b,
+                                s,
+                                n,
+                                num_kv_heads,
+                                head_dim,
+                                is_fp8_kv_cache,
+                                True,
+                                window_size,
+                            ]
+                        )
 
     return test_cases
 
@@ -521,47 +518,49 @@ def get_generation_attention_test_cases():
     for shape_sweep in get_attention_generation_shape_sweeps("vllm_xpu"):
         batch_sizes = [int(value) for value in shape_sweep["batch_sizes"]]
         sequence_lengths = [int(value) for value in shape_sweep["sequence_lengths"]]
-        head_dims = [int(value) for value in shape_sweep["head_dims"]]
-        window_sizes = [int(value) for value in shape_sweep["window_sizes"]]
+        supported_head_dims = {int(value) for value in shape_sweep["head_dims"]}
+        supported_window_sizes = {int(value) for value in shape_sweep["window_sizes"]}
         min_drop_batch = int(shape_sweep["drop_largest_sequence_for_batch_at_least"])
 
-        for n in sorted([int(value) for value in shape_sweep["xqa_query_head_counts"]], reverse=True):
+        for head_config in get_attention_head_configs(shape_sweep, phase="generation"):
+            n = head_config.num_heads
+            n_kv = head_config.num_kv_heads
+            head_dim = head_config.head_dim
+            window_size = head_config.window_size
+            if head_dim not in supported_head_dims or window_size not in supported_window_sizes:
+                continue
+            # XPU paged flash attention only supports GQA ratio <= 16.
+            if n // n_kv > max_gqa_ratio:
+                continue
+            # Keep the backend limitation from the previous enumerator.
+            if window_size > 0 and head_dim == 128:
+                continue
+            max_tokens_key = "max_mha_tokens_per_step" if n == n_kv else "max_xqa_tokens_per_step"
             b_s_dict = _generation_target_sequence_lengths(
                 batch_sizes,
                 sequence_lengths,
                 n,
-                int(shape_sweep["max_mha_tokens_per_step"]),
+                int(shape_sweep[max_tokens_key]),
                 shape_sweep,
             )
             for b, s_list_limited in b_s_dict.items():
                 target_s_list = sorted(s_list_limited)
                 if b >= min_drop_batch:
                     target_s_list = target_s_list[:-1]
-                for n_kv in [int(value) for value in shape_sweep["kv_head_counts"]]:
-                    if n_kv > n or n % n_kv != 0:
-                        continue
-                    # XPU paged flash attention only supports GQA ratio <= 16
-                    if n // n_kv > max_gqa_ratio:
-                        continue
-                    for s in target_s_list:
-                        for head_dim in head_dims:
-                            for window_size in window_sizes:
-                                # Skip SWA for head_dim=128 (no models use it)
-                                if window_size > 0 and head_dim == 128:
-                                    continue
-                                for is_fp8_kv_cache in kv_cache_dtype_list:
-                                    test_cases.append(
-                                        [
-                                            b,
-                                            s,
-                                            n,
-                                            n_kv,
-                                            head_dim,
-                                            is_fp8_kv_cache,
-                                            False,
-                                            window_size,
-                                        ]
-                                    )
+                for s in target_s_list:
+                    for is_fp8_kv_cache in kv_cache_dtype_list:
+                        test_cases.append(
+                            [
+                                b,
+                                s,
+                                n,
+                                n_kv,
+                                head_dim,
+                                is_fp8_kv_cache,
+                                False,
+                                window_size,
+                            ]
+                        )
     return test_cases
 
 

@@ -351,7 +351,11 @@ def create_charts(
             f"system: {system}, backend: {backend}, backend_version: {backend_version}\n"
         )
 
-    database = get_database(system=system, backend=backend, version=backend_version)
+    database = get_database(
+        system=system,
+        backend=backend,
+        version=backend_version,
+    )
     if database is None:
         with open(output_md_file, "a") as f:
             f.write("- Skipped ⚠️: no complete perf database is available for this system/backend/version\n")

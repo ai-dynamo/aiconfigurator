@@ -9,7 +9,13 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _MODULE = "collector.sglang.collect_dsv4_megamoe"
+# collect_dsv4_megamoe transitively imports dsv4_megamoe_workload at module level,
+# so that module also gets cached with mock torch. Evict it too so subsequent tests
+# that need real torch operations get a fresh import rather than the mock-polluted
+# cached version.
+_WORKLOAD_MODULE = "collector.sglang.dsv4_megamoe_workload"
 _saved_module = sys.modules.pop(_MODULE, None)
+_saved_workload_module = sys.modules.pop(_WORKLOAD_MODULE, None)
 _saved_torch = sys.modules.get("torch")
 _saved_torch_distributed = sys.modules.get("torch.distributed")
 sys.modules["torch"] = MagicMock()
@@ -23,8 +29,11 @@ try:
     )
 finally:
     sys.modules.pop(_MODULE, None)
+    sys.modules.pop(_WORKLOAD_MODULE, None)
     if _saved_module is not None:
         sys.modules[_MODULE] = _saved_module
+    if _saved_workload_module is not None:
+        sys.modules[_WORKLOAD_MODULE] = _saved_workload_module
     if _saved_torch is None:
         sys.modules.pop("torch", None)
     else:

@@ -155,3 +155,14 @@ profiles:
       # SGLang: deepep_moe for the wideep DeepEP path on GB200 NVLink fabric.
       # Source: webapp/events/event_fn.py, cli/exps/deepseek_wideep_trtllm.yaml
       sglang: deepep_moe
+
+  # ---------------------------------------------------------------------------
+  # Intel Arc Pro B60  —  XPU
+  # ---------------------------------------------------------------------------
+  b60:
+    node_selector:
+      gpu.intel.com/family: b60
+    arch: x86_64
+    shared_memory:
+      default: 16Gi
+    tolerations: []

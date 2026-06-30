@@ -100,7 +100,7 @@ def test_sweep_agg_classifies_no_result_outcomes(monkeypatch, memory_states, exp
             database=MagicMock(),
             backend_name="trtllm",
             model_config=config.ModelConfig(),
-            parallel_config_list=[(1, 1, 1, 1, 1), (2, 1, 1, 2, 1)],
+            parallel_config_list=[(1, 1, 1, 1, 1, 1), (2, 1, 1, 2, 1, 1)],
             max_batch_size=1,
             ctx_stride=1024,
         )

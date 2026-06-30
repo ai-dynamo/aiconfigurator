@@ -176,6 +176,110 @@ class TestSupportMatrix:
         assert disagg is expected_disagg
 
     @pytest.mark.parametrize(
+        "status,source",
+        [
+            ("HYBRID_PASS", "xshape"),
+            # Transitional rows generated before HYBRID_PASS existed must not
+            # masquerade as measured-silicon support either.
+            ("PASS", "empirical"),
+            # Current 10-column rows must name silicon explicitly.
+            ("PASS", ""),
+        ],
+    )
+    def test_check_support_does_not_count_hybrid_estimability_as_silicon_support(self, monkeypatch, status, source):
+        monkeypatch.setattr(
+            common,
+            "get_support_matrix",
+            lambda: [
+                {
+                    "HuggingFaceID": "test/hybrid-only",
+                    "Architecture": "TestForCausalLM",
+                    "System": "b200_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.3.0rc10",
+                    "Mode": mode,
+                    "Status": status,
+                    "Source": source,
+                }
+                for mode in ("agg", "disagg")
+            ],
+        )
+
+        result = common.check_support("test/hybrid-only", "b200_sxm", "trtllm", "1.3.0rc10")
+
+        assert result.agg_supported is False
+        assert result.disagg_supported is False
+        assert result.exact_match is True
+
+    def test_check_support_accepts_legacy_pass_without_source_column(self, monkeypatch):
+        monkeypatch.setattr(
+            common,
+            "get_support_matrix",
+            lambda: [
+                {
+                    "HuggingFaceID": "test/legacy-silicon",
+                    "Architecture": "TestForCausalLM",
+                    "System": "b200_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.3.0rc10",
+                    "Mode": mode,
+                    "Status": "PASS",
+                }
+                for mode in ("agg", "disagg")
+            ],
+        )
+
+        result = common.check_support("test/legacy-silicon", "b200_sxm", "trtllm", "1.3.0rc10")
+
+        assert result.agg_supported is True
+        assert result.disagg_supported is True
+        assert result.exact_match is True
+
+    def test_architecture_fallback_does_not_count_hybrid_pass(self, monkeypatch):
+        monkeypatch.setattr(
+            common,
+            "get_support_matrix",
+            lambda: [
+                {
+                    "HuggingFaceID": "test/hybrid-reference",
+                    "Architecture": "HybridOnlyForCausalLM",
+                    "System": "b200_sxm",
+                    "Backend": "trtllm",
+                    "Version": "1.3.0rc10",
+                    "Mode": mode,
+                    "Status": "HYBRID_PASS",
+                    "Source": "xshape",
+                }
+                for mode in ("agg", "disagg")
+            ],
+        )
+
+        result = common.check_support(
+            "test/unlisted-model",
+            "b200_sxm",
+            architecture="HybridOnlyForCausalLM",
+        )
+
+        assert result.exact_match is False
+        assert result.agg_supported is False
+        assert result.disagg_supported is False
+
+    def test_supported_architectures_excludes_hybrid_only_rows(self, monkeypatch):
+        monkeypatch.setattr(
+            common,
+            "get_support_matrix",
+            lambda: [
+                {"Architecture": "SiliconArch", "Status": "PASS", "Source": "silicon"},
+                {"Architecture": "HybridArch", "Status": "HYBRID_PASS", "Source": "xshape"},
+            ],
+        )
+        common.get_supported_architectures.cache_clear()
+        try:
+            assert common.get_supported_architectures() == {"SiliconArch"}
+        finally:
+            common.get_supported_architectures.cache_clear()
+
+    @pytest.mark.parametrize(
         "model,backend,version,expected_agg,expected_disagg",
         [
             ("zai-org/GLM-5-FP8", "sglang", "0.5.10", True, True),

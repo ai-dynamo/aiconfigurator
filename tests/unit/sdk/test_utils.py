@@ -1208,6 +1208,84 @@ class TestParseCompressedTensorsQuant:
         assert overrides.get("gemm_quant_mode") == common.GEMMQuantMode.int4_wo
         assert overrides.get("moe_quant_mode") == common.MoEQuantMode.int4_wo
 
+    def test_modelopt_mixed_precision_config_groups_map_sdk_modes(self):
+        """ModelOpt MIXED_PRECISION config groups map FP8 dense layers and NVFP4 routed experts."""
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.models import _infer_quant_modes_from_raw_config
+        from aiconfigurator.sdk.utils import _attach_inferred_quant_fields
+
+        raw_config = _attach_inferred_quant_fields(
+            {
+                "quantization_config": {
+                    "quant_algo": "MIXED_PRECISION",
+                    "kv_cache_scheme": {"type": "float", "num_bits": 8},
+                    "config_groups": {
+                        "group_0": {
+                            "weights": {"dynamic": False, "num_bits": 8, "type": "float"},
+                            "input_activations": {"dynamic": False, "num_bits": 8, "type": "float"},
+                            "targets": [
+                                "backbone.layers.0.mixer.in_proj",
+                                "backbone.layers.1.mixer.shared_experts.up_proj",
+                            ],
+                        },
+                        "group_1": {
+                            "weights": {
+                                "dynamic": False,
+                                "group_size": 16,
+                                "num_bits": 4,
+                                "type": "float",
+                            },
+                            "input_activations": {
+                                "dynamic": False,
+                                "group_size": 16,
+                                "num_bits": 4,
+                                "type": "float",
+                            },
+                            "targets": ["backbone.layers.1.mixer.experts.0.up_proj"],
+                        },
+                    },
+                },
+            }
+        )
+
+        overrides = _infer_quant_modes_from_raw_config(raw_config)
+
+        assert raw_config["quant_algo"] == "mixed_precision"
+        assert overrides["gemm_quant_mode"] == common.GEMMQuantMode.fp8_static
+        assert overrides["moe_quant_mode"] == common.MoEQuantMode.nvfp4
+        assert overrides["kvcache_quant_mode"] == common.KVCacheQuantMode.fp8
+        assert overrides["fmha_quant_mode"] == common.FMHAQuantMode.fp8
+
+    def test_modelopt_mixed_precision_hf_quant_layers_map_sdk_modes(self):
+        """Standalone hf_quant_config.json MIXED_PRECISION metadata no longer raises unsupported quant_algo."""
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.models import _infer_quant_modes_from_raw_config
+        from aiconfigurator.sdk.utils import _attach_inferred_quant_fields
+
+        raw_config = _attach_inferred_quant_fields(
+            {
+                "hf_quant_config": {
+                    "quantization": {
+                        "quant_algo": "MIXED_PRECISION",
+                        "kv_cache_quant_algo": "FP8",
+                        "quantized_layers": {
+                            "backbone.layers.0.mixer.in_proj": {"quant_algo": "FP8"},
+                            "backbone.layers.1.mixer.shared_experts.up_proj": {"quant_algo": "FP8"},
+                            "backbone.layers.1.mixer.experts.0.up_proj": {"quant_algo": "NVFP4"},
+                        },
+                    }
+                },
+            }
+        )
+
+        overrides = _infer_quant_modes_from_raw_config(raw_config)
+
+        assert raw_config["quant_algo"] == "mixed_precision"
+        assert overrides["gemm_quant_mode"] == common.GEMMQuantMode.fp8_static
+        assert overrides["moe_quant_mode"] == common.MoEQuantMode.nvfp4
+        assert overrides["kvcache_quant_mode"] == common.KVCacheQuantMode.fp8
+        assert overrides["fmha_quant_mode"] == common.FMHAQuantMode.fp8
+
     def test_expert_dtype_fp4_is_deepseek_v4_specific(self):
         from aiconfigurator.sdk import common
         from aiconfigurator.sdk.models import _infer_quant_modes_from_raw_config
@@ -1323,7 +1401,7 @@ class TestEnumerateParallelConfigVLLMMoE:
         )
         assert len(configs) > 0, "Should generate at least one config"
         for c in configs:
-            tp, pp, dp, moe_tp, moe_ep = c
+            tp, pp, dp, moe_tp, moe_ep, cp = c
             assert not (moe_tp > 1 and moe_ep > 1), f"vLLM should not have both moe_tp > 1 and moe_ep > 1, got {c}"
 
     def test_vllm_allows_pure_moe_tp(self):

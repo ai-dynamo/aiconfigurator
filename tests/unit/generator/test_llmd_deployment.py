@@ -4,6 +4,7 @@
 """Unit tests for llm-d deployment target support."""
 
 import pytest
+import yaml
 
 from aiconfigurator.generator.rendering.engine import render_backend_templates
 
@@ -19,6 +20,7 @@ def test_llmd_values_template_renders():
             "port": 8000,
         },
         "DynConfig": {"mode": "disagg"},
+        "SlaConfig": {"isl": 4000, "osl": 1000},
         "LlmdConfig": {
             "vllm_image": "vllm/vllm-openai:v0.6.0",
             "model_cache_size": "50Gi",
@@ -45,7 +47,7 @@ def test_llmd_values_template_renders():
         "decode_cli_args_list": ["--tensor-parallel-size", "4", "--max-num-seqs", "128"],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend="vllm", deployment_target="llm-d")
+    artifacts = render_backend_templates(param_values=params, backend="vllm", deployment_target="llm-d-helm")
 
     assert "llm-d-values.yaml" in artifacts
     assert "k8s_deploy.yaml" not in artifacts  # Should not render Dynamo manifest
@@ -98,7 +100,7 @@ def test_llmd_values_template_aggregated_mode():
         "agg_cli_args_list": ["--tensor-parallel-size", "2"],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend="vllm", deployment_target="llm-d")
+    artifacts = render_backend_templates(param_values=params, backend="vllm", deployment_target="llm-d-helm")
 
     values_content = artifacts["llm-d-values.yaml"]
 
@@ -110,6 +112,115 @@ def test_llmd_values_template_aggregated_mode():
     assert "create: false" in values_content  # prefill should be disabled in agg mode
     assert "replicas: 4" in values_content  # agg workers
     assert "tensor: 2" in values_content  # TP
+
+
+@pytest.mark.unit
+def test_llmd_kustomize_vllm_disagg_mode():
+    """Test that vLLM can render llm-d Kustomize overlay patches."""
+    params = {
+        "ServiceConfig": {
+            "model_path": "Qwen/Qwen3-32B",
+            "served_model_name": "qwen3-32b",
+            "port": 8000,
+        },
+        "DynConfig": {"mode": "disagg"},
+        "SlaConfig": {"isl": 4000, "osl": 1000},
+        "LlmdConfig": {
+            "vllm_image": "vllm/vllm-openai:v0.19.0",
+            "kustomize_base_path": "/repo/llm-d/guides/pd-disaggregation/modelserver/gpu/vllm/base",
+        },
+        "WorkerConfig": {
+            "prefill_workers": 14,
+            "decode_workers": 9,
+            "prefill_gpus_per_worker": 1,
+            "decode_gpus_per_worker": 2,
+        },
+        "params": {
+            "prefill": {"gpus_per_worker": 1},
+            "decode": {"gpus_per_worker": 2},
+        },
+        "prefill_tensor_parallel_size": 1,
+        "prefill_data_parallel_size": 1,
+        "decode_tensor_parallel_size": 2,
+        "decode_data_parallel_size": 1,
+        "prefill_gpu": 1,
+        "decode_gpu": 2,
+        "prefill_cli_args_list": ["--tensor-parallel-size", "1", "--max-num-batched-tokens", "5500"],
+        "decode_cli_args_list": ["--tensor-parallel-size", "2", "--max-num-seqs", "512"],
+    }
+
+    artifacts = render_backend_templates(param_values=params, backend="vllm", deployment_target="llm-d-kustomize")
+
+    assert set(artifacts) >= {"kustomization.yaml", "patch-decode.yaml", "patch-prefill.yaml"}
+    assert "llm-d-values.yaml" not in artifacts
+    assert "k8s_deploy.yaml" not in artifacts
+
+    kustomization = yaml.safe_load(artifacts["kustomization.yaml"])
+    assert kustomization["resources"] == ["/repo/llm-d/guides/pd-disaggregation/modelserver/gpu/vllm/base"]
+    assert kustomization["patches"] == [{"path": "patch-decode.yaml"}, {"path": "patch-prefill.yaml"}]
+
+    decode = yaml.safe_load(artifacts["patch-decode.yaml"])
+    decode_container = decode["spec"]["template"]["spec"]["containers"][0]
+    assert decode["spec"]["replicas"] == 9
+    assert decode_container["image"] == "vllm/vllm-openai:v0.19.0"
+    assert decode_container["command"] == ["vllm", "serve"]
+    assert decode_container["resources"]["limits"]["nvidia.com/gpu"] == "2"
+    assert "--kv-transfer-config" in decode_container["args"]
+    assert '{"kv_connector":"NixlConnector", "kv_role":"kv_both"}' in decode_container["args"]
+    assert "--port=8200" in decode_container["args"]
+
+    prefill = yaml.safe_load(artifacts["patch-prefill.yaml"])
+    prefill_container = prefill["spec"]["template"]["spec"]["containers"][0]
+    assert prefill["spec"]["replicas"] == 14
+    assert prefill_container["resources"]["limits"]["nvidia.com/gpu"] == "1"
+    assert "--max-num-batched-tokens" in prefill_container["args"]
+    assert "5500" in prefill_container["args"]
+
+
+@pytest.mark.unit
+def test_llmd_kustomize_vllm_agg_b60_mode():
+    """Test that agg mode renders a single llm-d Kustomize modelserver patch."""
+    params = {
+        "ServiceConfig": {
+            "model_path": "Qwen/Qwen3-8B",
+            "served_model_name": "Qwen/Qwen3-8B",
+            "port": 8000,
+        },
+        "DynConfig": {"mode": "agg"},
+        "SlaConfig": {"isl": 4500, "osl": 1000},
+        "NodeConfig": {"system_name": "b60"},
+        "LlmdConfig": {
+            "vllm_image": "vllm/vllm-openai:v0.20.0",
+        },
+        "WorkerConfig": {
+            "agg_workers": 1,
+            "agg_gpus_per_worker": 4,
+        },
+        "params": {
+            "agg": {"gpus_per_worker": 4},
+        },
+        "agg_tensor_parallel_size": 4,
+        "agg_pipeline_parallel_size": 1,
+        "agg_data_parallel_size": 1,
+        "agg_cli_args_list": ["--tensor-parallel-size", "4", "--max-model-len", "7000"],
+    }
+
+    artifacts = render_backend_templates(param_values=params, backend="vllm", deployment_target="llm-d-kustomize")
+
+    assert set(artifacts) >= {"kustomization.yaml", "patch-vllm.yaml"}
+    assert "patch-decode.yaml" not in artifacts
+    assert "patch-prefill.yaml" not in artifacts
+
+    kustomization = yaml.safe_load(artifacts["kustomization.yaml"])
+    assert kustomization["resources"] == ["guides/optimized-baseline/modelserver/xpu/vllm"]
+    assert kustomization["patches"] == [{"path": "patch-vllm.yaml"}]
+
+    decode = yaml.safe_load(artifacts["patch-vllm.yaml"])
+    decode_container = decode["spec"]["template"]["spec"]["containers"][0]
+    assert decode["spec"]["replicas"] == 1
+    assert decode_container["image"] == "vllm/vllm-openai:v0.20.0"
+    assert "resources" not in decode_container
+    assert any('"kv_buffer_device":"cpu"' in arg for arg in decode_container["args"])
 
 
 @pytest.mark.unit
@@ -146,7 +257,7 @@ def test_llmd_sglang_disagg_mode():
         "decode_cli_args_list": ["--tp-size", "8", "--mem-fraction-static", "0.9"],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend="sglang", deployment_target="llm-d")
+    artifacts = render_backend_templates(param_values=params, backend="sglang", deployment_target="llm-d-helm")
 
     assert "llm-d-values.yaml" in artifacts
     assert "k8s_deploy.yaml" not in artifacts  # Should not render Dynamo manifest
@@ -202,7 +313,7 @@ def test_llmd_sglang_agg_mode():
         "agg_cli_args_list": ["--tp-size", "8", "--context-length", "8192"],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend="sglang", deployment_target="llm-d")
+    artifacts = render_backend_templates(param_values=params, backend="sglang", deployment_target="llm-d-helm")
 
     assert "llm-d-values.yaml" in artifacts
     values_content = artifacts["llm-d-values.yaml"]
@@ -247,7 +358,7 @@ def test_llmd_sglang_default_image():
         "agg_cli_args_list": [],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend="sglang", deployment_target="llm-d")
+    artifacts = render_backend_templates(param_values=params, backend="sglang", deployment_target="llm-d-helm")
 
     values_content = artifacts["llm-d-values.yaml"]
     # Should use default sglang image
@@ -273,7 +384,7 @@ def test_llmd_hf_token_secret(backend):
         "agg_cli_args_list": [],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend=backend, deployment_target="llm-d")
+    artifacts = render_backend_templates(param_values=params, backend=backend, deployment_target="llm-d-helm")
     values_content = artifacts["llm-d-values.yaml"]
     assert "authSecretName: my-hf-secret" in values_content
 
@@ -296,7 +407,7 @@ def test_llmd_hf_token_secret_default_empty(backend):
         "agg_cli_args_list": [],
     }
 
-    artifacts = render_backend_templates(param_values=params, backend=backend, deployment_target="llm-d")
+    artifacts = render_backend_templates(param_values=params, backend=backend, deployment_target="llm-d-helm")
     values_content = artifacts["llm-d-values.yaml"]
     assert "authSecretName:" in values_content
     assert "authSecretName: my-hf-secret" not in values_content

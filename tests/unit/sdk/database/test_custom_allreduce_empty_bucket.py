@@ -127,19 +127,6 @@ class TestCustomAllreduceEmptyBucket:
                 database_mode=common.DatabaseMode.SILICON,
             )
 
-    def test_hybrid_falls_back_to_empirical_when_tp_bucket_missing(self, _db_factory):
-        """HYBRID mode must keep falling back cleanly on the same condition."""
-        data = _make_defaultdict_custom_allreduce(tp_sizes=[2, 4])
-        db = _db_factory(data)
-
-        result = db.query_custom_allreduce(
-            common.CommQuantMode.half,
-            tp_size=8,
-            size=6291456,
-            database_mode=common.DatabaseMode.HYBRID,
-        )
-        assert float(result) > 0, "HYBRID empirical fallback should yield positive latency"
-
     def test_silicon_available_bucket_still_works(self, _db_factory):
         """Sanity check: a tp_size that IS present still returns the interpolated value."""
         data = _make_defaultdict_custom_allreduce(tp_sizes=[2, 4])

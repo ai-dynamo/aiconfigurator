@@ -111,7 +111,7 @@ aiconfigurator cli estimate --model-path Qwen/Qwen3-32B --system h200_sxm --tp-s
 - `--system`: System name (`h200_sxm`, `h100_sxm`, `h100_pcie`, `b200_sxm`, `gb200`, `a100_sxm`, `a100_pcie`, `l40s`, `l4`, `a30`, `gb300`)
 
 **Optional arguments (shared):**
-- `--estimate-mode`: `agg` (default, IFB) or `disagg` (separate prefill/decode workers), or one of the single-pass static breakdown modes `static` / `static_ctx` / `static_gen` (mirrors the webapp Static tab)
+- `--estimate-mode`: `agg` (default, IFB) or `disagg` (separate prefill/decode workers), or one of the single-pass static breakdown modes `static` / `static_ctx` / `static_gen`
 - `--backend`: Backend name (`trtllm`, `vllm`, `sglang`). Default: `trtllm`
 - `--backend-version`: Backend database version. Default: latest
 - `--database-mode`: Database mode (`SILICON`, `HYBRID`, `EMPIRICAL`, `SOL`). Default: `SILICON`
@@ -213,7 +213,7 @@ result = cli_estimate(
 
 #### Static estimate modes (`static`, `static_ctx`, `static_gen`)
 
-`agg` and `disagg` model continuous (in-flight) batching. The three `static` modes instead run a **single forward pass** through the model — no IFB scheduling — and report the per-phase latency and memory layout for that one pass. They mirror the webapp's Static tab and are the quickest way to see where time and memory go for a given shape and parallelism.
+`agg` and `disagg` model continuous (in-flight) batching. The three `static` modes instead run a **single forward pass** through the model — no IFB scheduling — and report the per-phase latency and memory layout for that one pass. They are the quickest way to see where time and memory go for a given shape and parallelism.
 
 - `static` — one full pass over both phases; reports TTFT (context), TPOT (one decode step), and request latency.
 - `static_ctx` — context (prefill) phase only; reports TTFT.
@@ -296,7 +296,12 @@ Data Source Breakdown (per-op)
 ```
 
 ### Support mode (optional)
-This is an optional pre-flight check to verify if AIConfigurator supports a specific model and hardware combination for both aggregated and disaggregated serving modes. You can skip this and run `cli default` directly. Support is determined by a majority-vote of tests in the support matrix for models sharing the same architecture.
+This is an optional pre-flight check to verify whether collected SILICON data supports a
+specific model and hardware combination for both aggregated and disaggregated serving
+modes. You can skip this and run `cli default` directly. `PASS` rows count as support;
+`HYBRID_PASS` rows are reported separately as empirical estimability and do not make the
+default SILICON support check pass. For unlisted models, support is determined by a
+majority vote of SILICON results for models sharing the same architecture.
 
 ```bash
 aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm

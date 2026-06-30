@@ -14,45 +14,49 @@ pytestmark = pytest.mark.unit
 
 _FLASH = "deepseek-ai/DeepSeek-V4-Flash"
 _PRO = "deepseek-ai/DeepSeek-V4-Pro"
+_FLASH_FP8 = "sgl-project/DeepSeek-V4-Flash-FP8"
+_PRO_FP8 = "sgl-project/DeepSeek-V4-Pro-FP8"
+_SUPPORTED_MODELS = (_FLASH, _PRO, _FLASH_FP8, _PRO_FP8)
 
 
-def test_dsv4_attn_cases_cover_default_models(monkeypatch):
+def test_dsv4_no_filter_uses_one_canonical_model(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     monkeypatch.setattr(sys, "argv", ["pytest"])
 
-    cases = common_test_cases.get_dsv4_csa_context_test_cases()
+    module_cases = common_test_cases.get_dsv4_csa_context_test_cases()
+    assert module_cases
+    assert {case[6] for case in module_cases} == {_FLASH_FP8}
+    assert common_test_cases.get_dsv4_paged_mqa_logits_test_cases() == [[_FLASH_FP8, "paged_mqa_logits"]]
+    assert common_test_cases.get_dsv4_topk_calib_test_cases() == [[_FLASH_FP8, "topk"]]
 
-    assert {case[6] for case in cases} == {_FLASH, _PRO}
-    assert {case[7] for case in cases} == {"csa"}
 
-
-def test_dsv4_attn_cases_include_same_gemm_types_for_default_models(monkeypatch):
-    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+@pytest.mark.parametrize("model_path", _SUPPORTED_MODELS)
+def test_dsv4_attn_cases_include_same_gemm_types_for_supported_models(monkeypatch, model_path):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
     monkeypatch.setattr(sys, "argv", ["pytest"])
     monkeypatch.setattr(common_test_cases, "_has_native_fp4_experts", lambda: True)
 
     cases = common_test_cases.get_dsv4_csa_context_test_cases()
 
     assert cases
-    assert {model_path: {case[5] for case in cases if case[6] == model_path} for model_path in (_FLASH, _PRO)} == {
-        _FLASH: {"bfloat16", "fp8_block"},
-        _PRO: {"bfloat16", "fp8_block"},
-    }
+    assert {case[5] for case in cases} == {"bfloat16", "fp8_block"}
+    assert {case[6] for case in cases} == {model_path}
 
 
-def test_dsv4_attn_cases_honor_model_filter(monkeypatch):
-    monkeypatch.setenv("COLLECTOR_MODEL_PATH", _PRO)
+@pytest.mark.parametrize("model_path", _SUPPORTED_MODELS)
+def test_dsv4_attn_cases_honor_model_filter(monkeypatch, model_path):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
     monkeypatch.setattr(sys, "argv", ["pytest"])
 
     cases = common_test_cases.get_dsv4_hca_generation_test_cases()
 
     assert cases
-    assert {case[6] for case in cases} == {_PRO}
+    assert {case[6] for case in cases} == {model_path}
     assert {case[7] for case in cases} == {"hca"}
 
 
-def test_dsv4_sparse_smoke_cases_cover_default_models(monkeypatch):
-    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+def test_dsv4_sparse_smoke_cases_honor_model_filter(monkeypatch):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", _FLASH)
     monkeypatch.setattr(sys, "argv", ["collect.py", "--smoke"])
 
     cases = common_test_cases.get_dsv4_paged_mqa_logits_test_cases()
@@ -60,10 +64,17 @@ def test_dsv4_sparse_smoke_cases_cover_default_models(monkeypatch):
     # Sparse kernels are now one case per model ([model_path, kernel]); the worker
     # derives the (prefix, isl, bs) shapes 1:1 from the owning module CSV at
     # runtime instead of a separate smoke sweep grid.
-    assert cases == [
-        [_FLASH, "paged_mqa_logits"],
-        [_PRO, "paged_mqa_logits"],
-    ]
+    assert cases == [[_FLASH, "paged_mqa_logits"]]
+
+
+@pytest.mark.parametrize("model_path", (_FLASH_FP8, _PRO_FP8))
+def test_dsv4_mhc_preserves_requested_fp8_artifact(monkeypatch, model_path):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+
+    cases = common_test_cases.get_common_mhc_test_cases()
+
+    assert len(cases) == 2
+    assert {case.model_name for case in cases} == {model_path}
 
 
 def test_dsv4_cases_skip_unrelated_model_filter(monkeypatch):

@@ -30,6 +30,7 @@ Adding a new model:
 from __future__ import annotations
 
 import logging
+from typing import ClassVar
 
 from aiconfigurator.sdk import config
 
@@ -128,6 +129,81 @@ class BaseModel:
     @property
     def activation_hidden_size(self) -> int:
         return self._num_heads * self._head_size
+
+    # ------------------------------------------------------------------
+    # Context parallelism (CP) declaration + comm factory (1145-style).
+    # GLM-5 DSA does NOT use these -- it handles CP inside ContextDSAModule.
+    # Dense models opt in via supports_cp and splat _cp_attn_comm_ops at the
+    # attention site; their FMHA cost is modeled by ContextAttention(cp_size=).
+    # ------------------------------------------------------------------
+    _BACKEND_CP_STYLE: ClassVar[dict] = {
+        "sglang": "allgather",  # SGLang AllGather-of-KV variant
+        "trtllm": "ring",  # Ring Attention (not yet wired)
+    }
+
+    @classmethod
+    def supports_cp(cls, backend_name: str) -> bool:
+        """Whether this (model, backend) combo supports context parallelism.
+
+        Default False. CP-capable model classes override to declare which
+        backends they support. ``get_model`` checks this BEFORE construction
+        and raises a clear error rather than silently producing wrong numbers.
+        """
+        return False
+
+    @classmethod
+    def _resolve_cp_style(cls, backend_name: str) -> str:
+        """Pick the CP variant for this (model, backend). Called only when cp_size>1."""
+        return cls._BACKEND_CP_STYLE.get(backend_name, "none")
+
+    def _cp_attn_comm_ops(self) -> list:
+        """Per-layer CP cross-rank comm ops for this model's ``cp_style``.
+
+        AllGather (sglang): one NCCL all-gather of the full KV, sized from
+        ``get_kvcache_bytes_per_sequence(1) / num_layers`` (per-layer per-token
+        KV bytes). Models splat this into ``context_ops`` adjacent to the
+        attention op. Returns ``[]`` for cp_size<=1 or non-allgather styles.
+        """
+        import aiconfigurator.sdk.operations as ops
+
+        cp_size = self.config.cp_size
+        if cp_size <= 1:
+            return []
+        style = self.config.cp_style
+        comm_bytes = self.config.comm_quant_mode.value.memory
+        if style == "allgather":
+            kv_bytes_per_token = self.get_kvcache_bytes_per_sequence(1) / self._num_layers
+            return [
+                ops.NCCL(
+                    "context_cp_all_gather",
+                    self._num_layers,
+                    "all_gather",
+                    num_elements_per_token=kv_bytes_per_token / comm_bytes,
+                    num_gpus=cp_size,
+                    comm_quant_mode=self.config.comm_quant_mode,
+                )
+            ]
+        return []
+
+    def _cp_kv_memory_divisor(self) -> int:
+        """Per-rank persistent-KV divisor under CP (always 1: full KV per rank).
+
+        Verified against sglang v0.5.13 that CP gives **no** per-rank KV-memory
+        savings for any family -- each rank holds the FULL KV:
+
+        - **Dense GQA**: prefill CP gathers + writes the full KV to every rank's
+          pool (``cp_all_gather_rerange_kv_cache`` -> ``cp_allgather_and_save_kv_cache``,
+          "write the full result into each rank's local memory pool").
+        - **MLA / DSA** (DeepSeek V3/V3.2/V4, Kimi): the prefill gather is
+          transient, but **decode does not run CP** (``*_use_prefill_cp`` require
+          ``is_context_parallel_extend``) and reads the full KV resident in the
+          local pool (decode page_table / ``cache_seqlens`` span the full seq_len
+          with no gather) -- so the full KV must reside per rank.
+
+        CP therefore saves prefill *compute*, not KV memory. Kept as a method so
+        a future seq-sliced variant (e.g. Ring) can override.
+        """
+        return 1
 
     def get_kvcache_elements_per_token(self) -> int:
         """KV cache size per token (per GPU) summed over all layers, in elements.

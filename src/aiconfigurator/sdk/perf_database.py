@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import functools
 import importlib.resources as pkg_resources
 import logging
@@ -17,6 +18,8 @@ import yaml
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.common import PerfDataFilename, parse_support_matrix_version
+from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
 from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.system_spec import SystemSpec
 
@@ -24,7 +27,9 @@ databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
-_MISSING_SILICON_DATA_EXCEPTIONS = (KeyError, IndexError)
+_MISSING_SILICON_DATA_EXCEPTIONS = (PerfDataNotAvailableError, InterpolationDataNotAvailableError)
+SHARED_LAYER_REUSE_MARKER = "SHARED_LAYER_REUSE.txt"
+_DATABASE_VERSION_METADATA_FILES = {SHARED_LAYER_REUSE_MARKER, "INCOMPLETE.txt"}
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
@@ -66,6 +71,7 @@ def set_systems_paths(raw_paths: str | Iterable[str] | None) -> None:
         )
     _SYSTEMS_PATHS = resolved_paths
     _load_system_spec_from_paths.cache_clear()
+    _cached_configured_database_view.cache_clear()
     from aiconfigurator.sdk.operations.base import clear_all_op_caches
 
     clear_all_op_caches()
@@ -130,17 +136,6 @@ def build_no_databases_message() -> str:
     else:
         lines.append("Tip: try adding `default` to --systems-paths and run again.")
     return "\n".join(lines)
-
-
-class PerfDataNotAvailableError(RuntimeError):
-    """Raised when required performance data is missing or unsupported for a requested mode.
-
-    This is a *per-op* data-miss raised deep inside a single config's evaluation
-    (and in non-sweep paths like validate / single-point estimate), so it is
-    deliberately NOT a :class:`~aiconfigurator.sdk.errors.NoResultsError`: a miss
-    on one config can be skipped while other configs still produce results.
-    Recognize it via :func:`has_perf_data_not_available_cause`.
-    """
 
 
 def has_perf_data_not_available_cause(error: BaseException) -> bool:
@@ -237,9 +232,7 @@ def get_supported_databases(
                     versions = [
                         v
                         for v in os.listdir(backend_path)
-                        if not v.startswith(".")
-                        and os.path.isdir(os.path.join(backend_path, v))
-                        and not os.path.isfile(os.path.join(backend_path, v, "INCOMPLETE.txt"))
+                        if not v.startswith(".") and _database_version_dir_is_declared(os.path.join(backend_path, v))
                     ]
                     if versions:
                         supported_sets[system][backend.value].update(versions)
@@ -254,10 +247,82 @@ def get_supported_databases(
     return supported_dict
 
 
+def _iter_database_version_paths(
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
+):
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
+
+    for systems_root in systems_paths:
+        system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
+        if not os.path.isfile(system_yaml_path):
+            continue
+        try:
+            with open(system_yaml_path) as f:
+                system_spec = yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.warning("Could not process system config %s: %s", os.path.basename(system_yaml_path), e)
+            continue
+        data_dir = os.path.join(systems_root, system_spec.get("data_dir", ""))
+        version_path = os.path.join(data_dir, backend, version)
+        if os.path.isdir(version_path):
+            yield version_path
+
+
+def _database_version_dir_has_perf_files(version_path: str) -> bool:
+    try:
+        entries = os.listdir(version_path)
+    except Exception:
+        return False
+    for entry in entries:
+        if entry.startswith(".") or entry in _DATABASE_VERSION_METADATA_FILES:
+            continue
+        if os.path.isfile(os.path.join(version_path, entry)):
+            return True
+    return False
+
+
+def _database_version_dir_has_shared_layer_marker(version_path: str) -> bool:
+    return os.path.isfile(os.path.join(version_path, SHARED_LAYER_REUSE_MARKER))
+
+
+def _database_version_dir_is_declared(version_path: str) -> bool:
+    if not os.path.isdir(version_path):
+        return False
+    if os.path.isfile(os.path.join(version_path, "INCOMPLETE.txt")):
+        return False
+    return _database_version_dir_has_perf_files(version_path) or _database_version_dir_has_shared_layer_marker(
+        version_path
+    )
+
+
+def is_shared_layer_marker_only_version(
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
+) -> bool:
+    """True when a declared version has only the shared-layer marker and no measured files."""
+    saw_marker = False
+    for version_path in _iter_database_version_paths(system, backend, version, systems_paths=systems_paths):
+        if os.path.isfile(os.path.join(version_path, "INCOMPLETE.txt")):
+            continue
+        if _database_version_dir_has_perf_files(version_path):
+            return False
+        saw_marker = saw_marker or os.path.isfile(os.path.join(version_path, SHARED_LAYER_REUSE_MARKER))
+    return saw_marker
+
+
 def get_latest_database_version(
     system: str,
     backend: str,
     systems_paths: str | list[str] | None = None,
+    include_shared_layer_marker_versions: bool = False,
 ) -> str | None:
     """
     Get the latest database version for a given system and backend
@@ -269,6 +334,12 @@ def get_latest_database_version(
     else:
         supported_databases = get_supported_databases(systems_paths=systems_paths)
     database_versions = supported_databases.get(system, {}).get(backend, [])
+    if not include_shared_layer_marker_versions:
+        database_versions = [
+            version
+            for version in database_versions
+            if not is_shared_layer_marker_only_version(system, backend, version, systems_paths=systems_paths)
+        ]
     if not database_versions:
         logger.info("database not found for %s, %s", system, backend)
         return None
@@ -346,6 +417,17 @@ def get_latest_database_version(
     return latest_version[1]
 
 
+def _shared_layer_enabled(database_mode: str | None) -> bool:
+    """Whether the shared layer (sibling/cross-version row inheritance) loads.
+
+    Enabled for the default database mode, SILICON, and HYBRID: all consult the
+    silicon tables, so they benefit from reusing older collected data points when
+    the active backend/version lacks a shape. Explicit formula-only modes
+    compute without sibling silicon rows.
+    """
+    return database_mode is None or database_mode.upper() in ("SILICON", "HYBRID")
+
+
 def get_database(
     system: str,
     backend: str,
@@ -364,11 +446,14 @@ def get_database(
         systems_paths: the systems search paths
         allow_missing_data: instantiate a database from system specs even when
             backend/version data files are absent. This is intended for SOL/EMPIRICAL
-            estimate-only modes, not SILICON mode.
+            formula-only modes. Silicon shared-layer reuse still requires
+            an explicit backend/version directory; marker-only directories can
+            declare new framework versions whose rows come from siblings.
         database_mode: the mode the caller will query under (`SILICON` / `HYBRID` /
-            `EMPIRICAL` / `SOL`). HYBRID auto-enables the shared layer (sibling-row
-            inheritance, including `kernel_source=default` fallback rows); other
-            modes keep it off so predictions stay bit-identical to main.
+            `EMPIRICAL` / `SOL`). The default mode, SILICON, and HYBRID enable
+            the shared layer (sibling-row inheritance, including
+            `kernel_source=default` fallback rows) so missing shapes are filled
+            from older collected data; explicit formula-only modes keep it off.
 
     Returns:
         PerfDatabase for the given system, backend, version.
@@ -382,7 +467,7 @@ def get_database(
         logger.error(f"No database version available for {system=}, {backend=}")
         return None
 
-    shared_flag = (database_mode or "").upper() == "HYBRID"
+    shared_flag = _shared_layer_enabled(database_mode)
     missing_data_candidate = None
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
@@ -450,6 +535,98 @@ def get_database(
     return None
 
 
+def _normalize_database_mode(database_mode: str | common.DatabaseMode | None) -> common.DatabaseMode:
+    if database_mode is None:
+        return common.DatabaseMode.SILICON
+    if isinstance(database_mode, common.DatabaseMode):
+        return database_mode
+    return common.DatabaseMode[database_mode.upper()]
+
+
+@functools.cache
+def _cached_configured_database_view(
+    root_template: PerfDatabase,
+    mode: common.DatabaseMode,
+    policy: frozenset[common.TransferKind],
+) -> PerfDatabase:
+    """Build one lightweight immutable query view per normalized configuration."""
+    view = copy.copy(root_template)
+    view._root_database_template = root_template
+    view._default_database_mode = mode
+    view._transfer_policy = policy
+    view._extracted_metrics_cache = {}
+    view._is_query_view = True
+
+    # Lazy support resolution binds loaded op tables onto its database. Rebind
+    # it to the configured copy while preserving already-resolved values; the
+    # loaded table objects themselves remain shared and read-only.
+    supported = getattr(root_template, "supported_quant_mode", None)
+    if isinstance(supported, _LazySupportMatrix):
+        lazy_support = _LazySupportMatrix(view)
+        lazy_support._resolved = {key: list(value) for key, value in supported._resolved.items()}
+        view.supported_quant_mode = lazy_support
+    elif isinstance(supported, dict):
+        view.supported_quant_mode = copy.deepcopy(supported)
+
+    return view
+
+
+def _get_configured_database_view(
+    database: PerfDatabase,
+    mode: str | common.DatabaseMode | None,
+    transfer_policy=None,
+) -> PerfDatabase:
+    """Return a cached configured copy rooted at the original data template."""
+    normalized_mode = _normalize_database_mode(mode)
+    policy = common.resolve_transfer_policy(transfer_policy)
+    root_template = getattr(database, "_root_database_template", database)
+
+    expected_shared_layer = _shared_layer_enabled(normalized_mode.name)
+    if root_template.enable_shared_layer != expected_shared_layer:
+        raise ValueError(
+            f"Cannot create a {normalized_mode.name} query view from a database template with "
+            f"enable_shared_layer={root_template.enable_shared_layer}; use get_database_view() "
+            "so the correct data template is selected."
+        )
+
+    return _cached_configured_database_view(root_template, normalized_mode, policy)
+
+
+def get_database_view(
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
+    allow_missing_data: bool = False,
+    database_mode: str | common.DatabaseMode | None = None,
+    transfer_policy=None,
+) -> PerfDatabase | None:
+    """Return an isolated, lightweight query view over a cached database.
+
+    The cached :class:`PerfDatabase` is a data template. Query mode and transfer
+    policy are immutable, configuration-scoped state: callers requesting the
+    same normalized configuration reuse a cached copy. The copy shares loaded,
+    read-only perf tables while owning its interpolation cache and lazy
+    support-matrix binding. ``database_mode`` is also forwarded to
+    :func:`get_database` so EMPIRICAL/SOL views do not accidentally inherit the
+    shared SILICON data layer.
+    """
+    mode = _normalize_database_mode(database_mode)
+    database_kwargs = {
+        "system": system,
+        "backend": backend,
+        "version": version,
+        "allow_missing_data": allow_missing_data,
+        "database_mode": mode.name,
+    }
+    if systems_paths is not None:
+        database_kwargs["systems_paths"] = systems_paths
+    database = get_database(**database_kwargs)
+    if database is None:
+        return None
+    return _get_configured_database_view(database, mode, transfer_policy)
+
+
 DatabaseRef = tuple[str, str, str, str]
 LoadedDatabaseResult = tuple[DatabaseRef, object | None, str | None]
 
@@ -457,7 +634,7 @@ LoadedDatabaseResult = tuple[DatabaseRef, object | None, str | None]
 def _as_systems_path_list(systems_paths: str | os.PathLike | Iterable[str] | None) -> list[str]:
     if systems_paths is None:
         return get_systems_paths()
-    if isinstance(systems_paths, (str, os.PathLike)):
+    if isinstance(systems_paths, str | os.PathLike):
         return [os.fspath(systems_paths)]
     return [os.fspath(path) for path in systems_paths]
 
@@ -585,8 +762,15 @@ def _store_loaded_database(
     database: PerfDatabase,
 ) -> None:
     system, backend, version, systems_root = ref
+    # A worker result may replace an existing root object for this data key.
+    # Drop configured copies keyed by the old root so they cannot accumulate.
+    _cached_configured_database_view.cache_clear()
     database_dict[system][backend][version] = database
-    databases_cache[(systems_root, system, False)][backend][version] = database
+    # get_all_databases() constructs the default (shared-enabled) view. Preserve
+    # that identity when importing a database from a worker; putting it in the
+    # formula-only slot would make a later EMPIRICAL lookup reuse shared rows.
+    shared_flag = database.enable_shared_layer
+    databases_cache[(systems_root, system, shared_flag)][backend][version] = database
 
 
 def clear_database_runtime_caches(system: str, backend: str, version: str) -> None:
@@ -619,6 +803,7 @@ def clear_database_runtime_caches(system: str, backend: str, version: str) -> No
     from aiconfigurator.sdk.operations.base import clear_all_op_caches
 
     clear_all_op_caches()
+    _cached_configured_database_view.cache_clear()
 
 
 def unload_database(system: str, backend: str, version: str) -> None:
@@ -652,6 +837,7 @@ def unload_database(system: str, backend: str, version: str) -> None:
     from aiconfigurator.sdk.operations.base import clear_all_op_caches
 
     clear_all_op_caches()
+    _cached_configured_database_view.cache_clear()
 
 
 def _load_database_ref_in_parent(ref: DatabaseRef) -> PerfDatabase | None:
@@ -1211,17 +1397,23 @@ class PerfDatabase:
         Initialize the perf database.
 
         Args:
-            database_mode: drives the shared-layer load behavior. `"HYBRID"` enables
-                sibling-row inheritance (including `kernel_source=default` fallback
-                rows); other modes keep it off so predictions stay bit-identical to
-                main. Doesn't change which rows are interpolated at query time;
-                that's controlled by `set_default_database_mode`.
+            database_mode: drives the shared-layer load behavior. The default
+                mode, `"SILICON"`, and `"HYBRID"` enable sibling-row inheritance
+                (including `kernel_source=default` fallback rows); explicit
+                formula-only modes keep it off. Doesn't change which rows are
+                interpolated at query time; that's controlled by
+                `set_default_database_mode`.
         """
         self.system = system
         self.backend = backend
         self.version = version
         self.systems_root = systems_root
-        self.enable_shared_layer = (database_mode or "").upper() == "HYBRID"
+        self._shared_layer_mode = _shared_layer_enabled(database_mode)
+        # Which empirical transfer kinds are permitted (HYBRID/EMPIRICAL only). All on by
+        # default = current behaviour; set_transfer_policy() narrows it for fine-grained
+        # HYBRID control. Read at query time by op get_empirical, so it can be retuned on
+        # the (cached, shared) instance like the default database mode.
+        self._transfer_policy: frozenset[common.TransferKind] = common.ALL_TRANSFERS
         with open(os.path.join(systems_root, system + ".yaml")) as f:
             self.system_spec = SystemSpec(yaml.load(f, Loader=yaml.SafeLoader))
         self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
@@ -1240,6 +1432,7 @@ class PerfDatabase:
         # matrix below) needs it. ``PerfDatabase()`` opens zero CSVs.
         self.supported_quant_mode = _LazySupportMatrix(self)
         self._finalize_loaded_data()
+        self._is_query_view = False
 
     def _finalize_loaded_data(self) -> None:
         """Stop loader-time defaultdicts from mutating database state after construction."""
@@ -1433,8 +1626,9 @@ class PerfDatabase:
 
         # `framework -> set of kernel_sources` that the active backend may inherit
         # from sibling dirs of that framework. Both `shared` and `shared_fallback`
-        # rows are admitted in HYBRID mode; the fallback set is tracked separately
-        # only so we can emit a single warning per fallback source.
+        # rows are admitted whenever the shared layer is enabled (SILICON/HYBRID);
+        # the fallback set is tracked separately only so we can emit a single
+        # warning per fallback source.
         per_framework_filter: dict[str, set[str]] = defaultdict(set)
         per_framework_fallback: dict[str, set[str]] = defaultdict(set)
         for entry in self._op_kernel_source_manifest_entries.get(op_file_basename, ()):
@@ -1512,8 +1706,16 @@ class PerfDatabase:
         """
         Set the default database mode
         """
+        if getattr(self, "_is_query_view", False) and mode != self._default_database_mode:
+            raise RuntimeError(
+                "A cached query view has immutable mode/policy state; request a different view with "
+                "get_database_view()."
+            )
         if mode != self._default_database_mode:
             self.clear_runtime_caches()
+            from aiconfigurator.sdk.operations import util_empirical
+
+            util_empirical.clear_grid_cache()  # mode change alters which data/transfers feed grids
             self._default_database_mode = mode
 
     def get_default_database_mode(self) -> common.DatabaseMode:
@@ -1522,9 +1724,48 @@ class PerfDatabase:
         """
         return self._default_database_mode
 
+    def set_transfer_policy(self, spec) -> None:
+        """Set which empirical transfer kinds are permitted (fine-grained HYBRID control).
+
+        ``spec`` is anything :func:`common.resolve_transfer_policy` accepts: ``None``
+        (all), a preset name, a :class:`common.TransferKind`, or an iterable of those.
+        Clears runtime caches so already-cached query results don't mask the new policy.
+        """
+        policy = common.resolve_transfer_policy(spec)
+        if getattr(self, "_is_query_view", False) and policy != self._transfer_policy:
+            raise RuntimeError(
+                "A cached query view has immutable mode/policy state; request a different view with "
+                "get_database_view()."
+            )
+        if policy != self._transfer_policy:
+            self.clear_runtime_caches()
+            from aiconfigurator.sdk.operations import util_empirical
+
+            # The util grid cache key doesn't encode the policy (xshape/xquant share a
+            # key), so a stale grid would mask the new policy -- drop it.
+            util_empirical.clear_grid_cache()
+            self._transfer_policy = policy
+
+    @property
+    def transfer_policy(self) -> frozenset[common.TransferKind]:
+        """Empirical transfer kinds currently permitted (see :class:`common.TransferKind`).
+
+        Defaults to all kinds when unset (e.g. a bare instance), so attribute
+        introspection (``dir``/``clear_runtime_caches``) never trips on it."""
+        return getattr(self, "_transfer_policy", common.ALL_TRANSFERS)
+
+    @property
+    def enable_shared_layer(self) -> bool:
+        """Whether sibling-version shared-layer sourcing is active (read at op load time
+        and in op cache keys). Shared rows are collected silicon data, so the default,
+        SILICON, and HYBRID modes enable them independently of empirical transfer policy;
+        EMPIRICAL and SOL modes keep them disabled."""
+        return getattr(self, "_shared_layer_mode", False)
+
     def clear_runtime_caches(self) -> None:
         """Clear cached query/interpolation state while preserving loaded op data."""
         self._extracted_metrics_cache.clear()
+        _cached_configured_database_view.cache_clear()
         for attr_name in dir(self):
             attr = getattr(self, attr_name)
             cache_clear = getattr(attr, "cache_clear", None)
@@ -1554,7 +1795,8 @@ class PerfDatabase:
             get_silicon: Callable that performs the database query and returns PerformanceResult
             get_empirical: Callable that returns empirical latency (float) - should be a lambda or function
                           that captures the necessary arguments
-            database_mode: Database mode (SILICON or HYBRID) - HYBRID mode will fall back to empirical on exception
+            database_mode: Database mode (SILICON or HYBRID) - HYBRID mode falls back to empirical only when
+                           silicon data is explicitly reported unavailable
             error_msg: Error message for logging when query fails
 
         Returns:
@@ -1566,28 +1808,21 @@ class PerfDatabase:
         try:
             return get_silicon()
 
-        except Exception as e:
+        except _MISSING_SILICON_DATA_EXCEPTIONS as e:
             if database_mode == common.DatabaseMode.HYBRID:
                 debug_msg = error_msg + " Will try empirical mode."
                 logger.debug(debug_msg)
                 return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
 
             exception_msg = error_msg + " Consider using HYBRID mode."
-            # PerfDataNotAvailableError is a structured signal that callers (e.g.
-            # FallbackOp, Pareto search) are expected to handle. Log it without a
-            # stack trace so successful searches that merely skip a candidate do
-            # not spam internal tracebacks. Genuinely unexpected exceptions still
-            # get the full traceback via logger.exception.
-            if isinstance(e, PerfDataNotAvailableError):
-                logger.warning(exception_msg)
-            elif isinstance(e, _MISSING_SILICON_DATA_EXCEPTIONS):
+            # Missing-data exceptions are control-flow signals. The terminal
+            # caller decides whether the miss is user-visible; logging here would
+            # warn during expected probes such as FallbackOp's SILICON attempt.
+            if not isinstance(e, PerfDataNotAvailableError):
                 missing_data_error = PerfDataNotAvailableError(
                     f"{exception_msg} Missing silicon data for the requested lookup."
                 )
-                logger.warning(str(missing_data_error))
                 raise missing_data_error from e
-            else:
-                logger.exception(exception_msg)
             # Modify the original exception message
             if e.args:
                 e.args = (str(e.args[0]) + " " + exception_msg,) + e.args[1:]
@@ -2219,6 +2454,7 @@ class PerfDatabase:
         index_n_heads: int | None = None,
         index_head_dim: int | None = None,
         index_topk: int | None = None,
+        dsa_backend: str = "trtllm",
     ) -> PerformanceResult | tuple[float, float, float]:
         """Query context DSA module latency. Delegates to
         ``ContextDSAModule._query_context_dsa_module_table``."""
@@ -2238,6 +2474,7 @@ class PerfDatabase:
             index_n_heads=index_n_heads,
             index_head_dim=index_head_dim,
             index_topk=index_topk,
+            dsa_backend=dsa_backend,
         )
 
     @functools.lru_cache(maxsize=32768)
@@ -2254,6 +2491,7 @@ class PerfDatabase:
         index_n_heads: int | None = None,
         index_head_dim: int | None = None,
         index_topk: int | None = None,
+        dsa_backend: str = "trtllm",
     ) -> PerformanceResult | tuple[float, float, float]:
         """Query generation DSA module latency. Delegates to
         GenerationDSAModule._query_generation_dsa_module_table."""
@@ -2271,6 +2509,7 @@ class PerfDatabase:
             index_n_heads=index_n_heads,
             index_head_dim=index_head_dim,
             index_topk=index_topk,
+            dsa_backend=dsa_backend,
         )
 
     @staticmethod
