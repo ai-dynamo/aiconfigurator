@@ -139,7 +139,7 @@ def build_no_databases_message() -> str:
 
 
 def has_perf_data_not_available_cause(error: BaseException) -> bool:
-    """Return True when an exception or chained cause is a structured perf-data miss."""
+    """Return True when an exception's effective chain has a structured perf-data miss."""
     seen: set[int] = set()
     stack: list[BaseException] = [error]
     while stack:
@@ -151,7 +151,7 @@ def has_perf_data_not_available_cause(error: BaseException) -> bool:
         seen.add(id(current))
         if current.__cause__ is not None:
             stack.append(current.__cause__)
-        if current.__context__ is not None:
+        elif not current.__suppress_context__ and current.__context__ is not None:
             stack.append(current.__context__)
     return False
 
