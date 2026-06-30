@@ -8,23 +8,53 @@ model_paths:
   - Qwen/Qwen3-VL-30B-A3B-Instruct
   - Qwen/Qwen3-VL-235B-A22B-Instruct
 include_base: true
+base_ops:
+  - attention_context
+  - attention_generation
+  - gemm
+framework_specific_base_ops:
+  # XPU has no verified encoder-attention collector. Keep the op out of its
+  # plan instead of advertising an uncollectable workload.
+  sglang:
+    - encoder_attention
+  trtllm:
+    - encoder_attention
+  vllm:
+    - encoder_attention
 description: >
   Qwen3-VL MoE model-centric collection plan. Starts with shared base op cases
   and includes the Qwen3-VL MoE shapes used by the support matrix.
 
 model_case_values:
+  attention:
+    - id: qwen3_vl_moe_30b_attention
+      model_path: Qwen/Qwen3-VL-30B-A3B-Instruct
+      num_attention_heads: 32
+      num_key_value_heads: 4
+      head_dim: 128
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
+    - id: qwen3_vl_moe_235b_attention
+      model_path: Qwen/Qwen3-VL-235B-A22B-Instruct
+      num_attention_heads: 64
+      num_key_value_heads: 4
+      head_dim: 128
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
+  encoder_attention:
+    - id: qwen3_vl_moe_encoder_attention
+      model_path: Qwen/Qwen3-VL-30B-A3B-Instruct
+      model_aliases:
+        - Qwen/Qwen3-VL-235B-A22B-Instruct
+      num_attention_heads: 16
+      head_dim: 72
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
   moe:
     - model_path: Qwen/Qwen3-VL-30B-A3B-Instruct
       hidden_size: 2048
       inter_size: 768
       topk: 8
       num_experts: 128
-    - model_path: Qwen/Qwen3-VL-235B-A22B-Instruct
-      hidden_size: 4096
-      inter_size: 1536
-      topk: 8
-      num_experts: 128
-
 all_frameworks_op_cases:
   moe:
     cases: all

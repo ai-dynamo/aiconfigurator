@@ -9,23 +9,86 @@ model_paths:
   - moonshotai/Kimi-K2.5
   - nvidia/Kimi-K2.5-NVFP4
 include_base: true
+base_ops:
+  - gemm
+framework_specific_base_ops:
+  vllm:
+    - attention_context
+    - attention_generation
 description: >
   Kimi-K2.5 hybrid MLA/MoE model-centric collection plan.
 
 model_case_values:
-  moe:
-    - model_paths:
+  attention:
+    - id: kimi_k25_vllm_attention
+      model_path: moonshotai/Kimi-K2.5
+      model_aliases:
         - moonshotai/Kimi-K2-Instruct
-        - moonshotai/Kimi-K2.5
         - nvidia/Kimi-K2.5-NVFP4
+      num_attention_heads: 64
+      num_key_value_heads: 64
+      head_dim: 128
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
+  moe:
+    - model_path: moonshotai/Kimi-K2-Instruct
       hidden_size: 7168
       inter_size: 2048
       topk: 8
       num_experts: 384
       wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [fp8_block]
+        trtllm:
+          allowed_modes: [fp8_block]
+        vllm:
+          allowed_modes: [fp8_block]
+    - model_path: moonshotai/Kimi-K2.5
+      hidden_size: 7168
+      inter_size: 2048
+      topk: 8
+      num_experts: 384
+      wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [int4_wo]
+        trtllm:
+          allowed_modes: [int4_wo]
+        vllm:
+          allowed_modes: [int4_wo]
+    - model_path: nvidia/Kimi-K2.5-NVFP4
+      hidden_size: 7168
+      inter_size: 2048
+      topk: 8
+      num_experts: 384
+      wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [nvfp4]
+        trtllm:
+          allowed_modes: [nvfp4]
+        vllm:
+          allowed_modes: [nvfp4]
   mla:
-    - model_paths:
-        - moonshotai/Kimi-K2.5
+    - model_path: moonshotai/Kimi-K2.5
+      model_aliases:
+        - moonshotai/Kimi-K2-Instruct
+        - nvidia/Kimi-K2.5-NVFP4
+      # The current SGLang/TRT-LLM AIC MLA consumer queries the historical
+      # DeepSeek-compatible 128-head table. vLLM's native 64-head attention
+      # shape is represented separately by the attention profile above.
+      num_heads: 128
+      q_lora_rank: 1536
+      kv_lora_rank: 512
+      qk_nope_head_dim: 128
+      qk_rope_head_dim: 64
+      v_head_dim: 128
+    # n=64 contributes local-head=1 in full collection and local-head=8 in the
+    # targeted TP<=8 plan. The getters deduplicate the overlap with n=128.
+    - model_path: moonshotai/Kimi-K2.5
+      model_aliases:
+        - moonshotai/Kimi-K2-Instruct
         - nvidia/Kimi-K2.5-NVFP4
       num_heads: 64
       q_lora_rank: 1536
@@ -37,12 +100,57 @@ model_case_values:
 all_frameworks_op_cases:
   moe:
     cases: all
-  mla_context:
-    cases: all
-  mla_generation:
-    cases: all
 
 framework_specific_op_cases:
   trtllm:
+    mla_context:
+      rules:
+        - fields: [input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase]
+          match:
+            tp_size:
+              in: [1, 2, 4, 8]
+    mla_generation:
+      rules:
+        - fields: [input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase]
+          match:
+            tp_size:
+              in: [1, 2, 4, 8]
+    mla_bmm_gen_pre:
+      rules:
+        - fields: [num_tokens, num_heads, dtype, num_warmups, num_runs]
+          match:
+            num_heads:
+              in: [64, 32, 16, 8]
+    mla_bmm_gen_post:
+      rules:
+        - fields: [num_tokens, num_heads, dtype, num_warmups, num_runs]
+          match:
+            num_heads:
+              in: [64, 32, 16, 8]
     trtllm_moe_wideep:
       cases: all
+  sglang:
+    mla_context:
+      rules:
+        - fields: [input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase]
+          match:
+            tp_size:
+              in: [1, 2, 4, 8]
+    mla_generation:
+      rules:
+        - fields: [input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase]
+          match:
+            tp_size:
+              in: [1, 2, 4, 8]
+    mla_bmm_gen_pre:
+      rules:
+        - fields: [num_tokens, num_heads, dtype, num_warmups, num_runs]
+          match:
+            num_heads:
+              in: [64, 32, 16, 8]
+    mla_bmm_gen_post:
+      rules:
+        - fields: [num_tokens, num_heads, dtype, num_warmups, num_runs]
+          match:
+            num_heads:
+              in: [64, 32, 16, 8]

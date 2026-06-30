@@ -11,6 +11,63 @@ model_paths:
   - Qwen/Qwen3-VL-32B-Instruct
   - Qwen/Qwen3-VL-32B-Thinking
 include_base: true
+base_ops:
+  - attention_context
+  - attention_generation
+  - gemm
+framework_specific_base_ops:
+  # XPU has no verified encoder-attention collector. Keep the op out of its
+  # plan instead of advertising an uncollectable workload.
+  sglang:
+    - encoder_attention
+  trtllm:
+    - encoder_attention
+  vllm:
+    - encoder_attention
 description: >
   Qwen3-VL dense model-centric collection plan. Starts with shared base op
   cases and lists all dense Qwen3-VL aliases used by the support matrix.
+
+model_case_values:
+  attention:
+    - id: qwen3_vl_2b_attention
+      model_path: Qwen/Qwen3-VL-2B-Instruct
+      num_attention_heads: 16
+      num_key_value_heads: 8
+      head_dim: 128
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
+    - id: qwen3_vl_4b_8b_attention
+      model_path: Qwen/Qwen3-VL-4B-Instruct
+      model_aliases:
+        - Qwen/Qwen3-VL-8B-Instruct
+      num_attention_heads: 32
+      num_key_value_heads: 8
+      head_dim: 128
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
+    - id: qwen3_vl_32b_attention
+      model_path: Qwen/Qwen3-VL-32B-Instruct
+      model_aliases:
+        - Qwen/Qwen3-VL-32B-Thinking
+      num_attention_heads: 64
+      num_key_value_heads: 8
+      head_dim: 128
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
+  encoder_attention:
+    - id: qwen3_vl_2b_4b_encoder_attention
+      model_path: Qwen/Qwen3-VL-2B-Instruct
+      model_aliases:
+        - Qwen/Qwen3-VL-4B-Instruct
+      num_attention_heads: 16
+      head_dim: 64
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
+    - id: qwen3_vl_8b_32b_encoder_attention
+      model_path: Qwen/Qwen3-VL-8B-Instruct
+      model_aliases:
+        - Qwen/Qwen3-VL-32B-Instruct
+        - Qwen/Qwen3-VL-32B-Thinking
+      num_attention_heads: 16
+      head_dim: 72
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]

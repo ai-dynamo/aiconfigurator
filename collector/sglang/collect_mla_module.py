@@ -50,10 +50,14 @@ except ModuleNotFoundError:
     from helper import benchmark_with_power, get_sm_version, log_perf
 
 try:
-    from collector.case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
+    from collector.case_generator import (
+        get_mla_module_model_specs,
+        get_mla_module_precision_specs,
+        get_mla_module_sweep_spec,
+    )
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
+    from case_generator import get_mla_module_model_specs, get_mla_module_precision_specs, get_mla_module_sweep_spec
 
 try:
     from collector.sglang.runtime_limits import (
@@ -280,43 +284,16 @@ def _resolve_local_model_path(model_id: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _get_precision_combos(phase: str, model_id: str | None = None):
-    """Return (compute_dtype, kv_cache_dtype, gemm_type) triples for a phase.
-
-    All strings are perf-database-compatible (not SGLang-native).
-
-    SGLang precision axes:
-      compute_dtype:  always "bfloat16" (DSA / NSA kernels run bf16 FMHA;
-                      on B200 decode with fp8 KV the trtllm path runs fp8
-                      FMHA internally, but the latency is captured under the
-                      fp8 KV row).
-      kv_cache_dtype: "bfloat16" always; "fp8" on SM >= 90 (Hopper+).
-      gemm_type:      "bfloat16" for bf16 weights; "fp8_block" on SM >= 89,
-                      in which case load_model_runner launches sglang with
-                      quantization="fp8" so the inner attention projections
-                      (q_b_proj, kv_b_proj, o_proj, wq_b, wk) and the fp8
-                      paged MQA scoring kernel fire on real fp8 weights.
-
-    fp4_e2m1 omitted — SGLang supports it on SM >= 100, but KVCacheQuantMode
-    enum has no fp4 entry, so perf_database cannot consume it yet.
-    """
-    sm = get_sm_version()
-    kv_dtypes = ["bfloat16"]
-    if sm >= 90:
-        kv_dtypes.append("fp8")
-    combos = [("bfloat16", kv, "bfloat16") for kv in kv_dtypes]
-    if sm >= 89:
-        # GLM5-NVFP4 / DSV4 are modelopt NVFP4 models -> use nvfp4 gemm
-        # (quantization=modelopt_fp4, native hf_quant_config) to MATCH serve
-        # (--quantization modelopt_fp4). attention proj are NVFP4-excluded
-        # (bf16) so the bf16 combo above still covers the proj path.
-        combos += [("bfloat16", kv, "nvfp4") for kv in kv_dtypes]
-    # GLM5-NVFP4 weights ARE nvfp4 -> the bf16-gemm combos are meaningless and
-    # just duplicate the case. Serve runs --quantization modelopt_fp4, so for
-    # GLM5 DSA collect ONLY the nvfp4 combos. Hardcoded (no env gate).
-    if model_id is not None and _is_glm5_dsa_model(model_id):
-        combos = [c for c in combos if c[2] == "nvfp4"]
-    return combos
+def _get_precision_combos(phase: str):
+    """Return YAML-backed operator precision triples for one phase and SM."""
+    return [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs(
+            "sglang",
+            phase=phase,
+            sm_version=get_sm_version(),
+        )
+    ]
 
 
 def _get_backends(attn_type: str):
@@ -429,22 +406,6 @@ def get_generation_test_cases(attn_type: str):
                         continue
                     cases.append([seq_len, batch_size, num_heads, kv_dtype, compute_dtype, gemm_type])
     return cases
-
-
-def _get_module_precision_combos():
-    """Return a single baseline precision combo for module-level benchmarks.
-
-    Module benchmarks spawn a subprocess per (model, precision, heads) group.
-    Each subprocess loads a full ModelRunner (~15-20 s), so fewer groups means
-    faster overall collection.  Use a single bfloat16 baseline — matching the
-    wideep MLA pattern — so the total subprocess count stays manageable.
-
-    Precision-specific kernel performance is already captured by kernel-level
-    collectors (collect_mla.py, collect_attn.py).  The module benchmark
-    captures module-level overhead (scheduling, memory management, attention
-    dispatch) which is largely precision-independent with dummy weights.
-    """
-    return get_mla_module_sweep_spec("sglang").module_precision_combos
 
 
 def _model_max_position_embeddings(model_id: str) -> int | None:
@@ -594,6 +555,7 @@ def _build_module_test_cases(attn_type: str, mode: str):
         return []
     model_specs = get_mla_module_model_specs(attention_type=attn_type)
     sweep = get_mla_module_sweep_spec("sglang")
+    precision_combos = _get_precision_combos(mode)
     cases = []
     for model_spec in model_specs:
         # Each checkpoint ships at one native precision; only enumerate the
@@ -601,7 +563,7 @@ def _build_module_test_cases(attn_type: str, mode: str):
         # Prevents e.g. gemm_type=fp8_block being applied to the NVFP4 checkpoint
         # (a different model), which dies at model load with "Cannot find quant_algo".
         native_quant = _model_native_gemm_quant(model_spec.model_path)
-        for compute_dtype, kv_dtype, gemm_type in _get_module_precision_combos():
+        for compute_dtype, kv_dtype, gemm_type in precision_combos:
             if not _gemm_type_supported_by_model(gemm_type, native_quant):
                 continue
             target_tps = sweep.module_tp_sizes if attn_type == "dsa" else [1]
@@ -2597,7 +2559,7 @@ def main():
                 else [h for h in get_mla_module_sweep_spec("sglang").inner_sweep_head_counts if h <= native_heads]
             )
 
-            for compute_dtype, kv_dtype, gemm_type in _get_precision_combos(args.mode, model_path):
+            for compute_dtype, kv_dtype, gemm_type in _get_precision_combos(args.mode):
                 if args.kv_cache_dtype and kv_dtype != args.kv_cache_dtype:
                     continue
 

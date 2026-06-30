@@ -9,11 +9,26 @@ model_paths:
   - meta-llama/Llama-4-Scout-17B-16E-Instruct
   - meta-llama/Llama-4-Maverick-17B-128E-Instruct
 include_base: true
+base_ops:
+  - attention_context
+  - attention_generation
+  - gemm
 description: >
   Llama 4 hybrid model-centric collection plan. Starts with shared base op cases
   and includes the Scout/Maverick MoE shapes used by the support matrix.
 
 model_case_values:
+  attention:
+    - id: llama4_attention
+      model_path: meta-llama/Llama-4-Scout-17B-16E-Instruct
+      model_aliases:
+        - meta-llama/Llama-4-Scout-17B-16E
+        - meta-llama/Llama-4-Maverick-17B-128E-Instruct
+      num_attention_heads: 40
+      num_key_value_heads: 8
+      head_dim: 128
+      window_sizes: [0, 8192]
+      tensor_parallel_sizes: [1, 2, 4, 8]
   moe:
     - model_path: meta-llama/Llama-4-Scout-17B-16E-Instruct
       hidden_size: 5120

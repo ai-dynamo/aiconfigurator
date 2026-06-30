@@ -106,9 +106,15 @@ model_paths:
   - Qwen/Qwen3-30B-A3B
   - Qwen/Qwen3-235B-A22B
 include_base: true
+base_ops:
+  - attention_context
+  - attention_generation
+  - gemm
 ```
 
-It can include shared base op cases with `include_base: true`, then add:
+`include_base: true` selects only the universal recipes declared by base-file
+`model_ops`; it no longer means every file under `cases/base_ops/`. Use
+`base_ops` for model-required auxiliary recipes, then add model ops:
 
 ```yaml
 model_ops:
@@ -152,11 +158,28 @@ N use the same explicit size list. Base attention specs use `batch_sizes`,
 `sequence_lengths`, `query_head_counts`, `kv_head_options`, and `head_dims`;
 `kv_head_options: self` means the KV head count equals the query head count.
 
+Native attention tuples live in `model_case_values.attention`. They keep query
+heads, KV heads, head dimension, window, and valid TP sizes correlated. A
+targeted model run uses its exact structural profiles instead of crossing global
+head/window axes. Full/raw runs combine the base operation's `head_profiles`
+with all model-specific profiles, then remove duplicate physical tuples before
+the batch and sequence sweeps. Mamba's synthetic full/raw shapes live under
+`common_case_values.mamba2.default_model_cases`.
+
+Within `model_case_values`, use `model_aliases` only for a shape-only synthetic
+op where the artifact cannot change either the benchmark invocation or the
+persisted key. Do not merge base/FP8/NVFP4 checkpoints merely because another
+axis also sweeps quantization. When artifacts use different real quantization
+modes, declare their allowed union in
+`framework_quantization.<backend>.allowed_modes` so unrelated backend modes are
+not multiplied into that shape. Keep `model_paths` only for path-sensitive cases
+that must be instantiated separately.
+
 For targeted support-matrix healing, a case selector can run a subset using
 exact `case_ids`, string `contains` matches, `indices`, `ranges`, or `limit`.
 These filters are applied after the op collector generates cases for the
 selected model, so every op collector gets subset support through the central
-planner. Collectors that accept `model_path` receive it directly; legacy
+model-case filter/resolver. Collectors that accept `model_path` receive it directly; legacy
 collectors use the same value through `COLLECTOR_MODEL_PATH` while they are
 being migrated.
 
@@ -179,7 +202,7 @@ Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps
 ```text
 framework_manifest.yaml — current collector framework versions and images
 framework_manifest.py   — manifest loader/validator
-model_cases.py       — collector v2 model/SM case planner
+model_cases.py       — collector v2 model/SM case-plan resolver
 registry.py          — declares which module handles which version range
 version_resolver.py  — routes runtime version → module (packaging.version)
 collect.py/collect_ops — validates __compat__ and fails incompatible ops
