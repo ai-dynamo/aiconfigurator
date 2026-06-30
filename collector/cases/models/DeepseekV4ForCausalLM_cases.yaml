@@ -35,9 +35,10 @@ model_case_values:
           allowed_modes:
             - w4a8_mxfp4_mxfp8
         vllm:
-          # vLLM 0.24.0's native DeepSeek-V4 path uses the model-level MegaMoE
-          # implementation; the standalone generic MoE collector does not
-          # represent that path. Collect only the converted FP8 artifact here.
+          # vLLM 0.24.0 selects W4A16 on SM90 but W4A8 on Blackwell for this
+          # artifact. The SDK currently requests only W4A8 and its MoE key has
+          # no system/backend dimension, so neither label is consumable across
+          # platforms yet.
           allowed_modes: []
     - model_path: sgl-project/DeepSeek-V4-Flash-FP8
       hidden_size: 4096
@@ -53,8 +54,10 @@ model_case_values:
           allowed_modes:
             - fp8_block
         vllm:
-          allowed_modes:
-            - fp8_block
+          # This converted artifact stores full-width FP8 expert tensors but
+          # omits expert_dtype. vLLM defaults that field to FP4, so scheduling
+          # it would create incompatible packed parameters.
+          allowed_modes: []
     - model_path: deepseek-ai/DeepSeek-V4-Pro
       hidden_size: 7168
       inter_size: 3072
@@ -68,6 +71,7 @@ model_case_values:
           allowed_modes:
             - w4a8_mxfp4_mxfp8
         vllm:
+          # See the native Flash consumer-contract note above.
           allowed_modes: []
     - model_path: sgl-project/DeepSeek-V4-Pro-FP8
       hidden_size: 7168
@@ -83,8 +87,8 @@ model_case_values:
           allowed_modes:
             - fp8_block
         vllm:
-          allowed_modes:
-            - fp8_block
+          # See the Flash converted-artifact note above.
+          allowed_modes: []
   mhc:
     - model_paths:
         - deepseek-ai/DeepSeek-V4-Flash
