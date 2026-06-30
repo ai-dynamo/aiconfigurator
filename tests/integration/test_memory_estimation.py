@@ -201,3 +201,59 @@ def test_estimate_num_gpu_blocks_floor_conversion(case):
     assert blocks_tol == adj_tokens // _BLOCK_SIZE
     assert blocks_tol <= blocks_raw
     assert math.floor(adj_tokens / _BLOCK_SIZE) == blocks_tol
+
+
+# Regression: AIC-1110 — Kimi-K2.5 + GB200 DEP4 prefill worker with Eagle (nextn).
+# A prefill/context worker never verifies nextn+1 tokens, so the MTP draft only adds
+# its own ~nextn draft-layer activation (a few %), NOT a full (nextn+1)x of the whole
+# context activation. The blanket `activations *= (nextn+1)` in _get_memory_usage
+# inflated prefill non-KV memory past GPU capacity, so estimate_kv_cache raised
+# "no KV budget" once the draft length grew — the worker could not start.
+_EAGLE_PREFILL_CASE = dict(
+    model_path="moonshotai/Kimi-K2.5",
+    system="gb200",
+    backend="trtllm",
+    backend_version="1.3.0rc10",
+    # A realistic long-context prefill chunk (the reporter's agentic workload runs up
+    # to ~200k ISL); the over-count scales with the chunk, so it surfaces here at a
+    # modest draft length rather than only at nextn>=4 with an 8k chunk.
+    max_num_tokens=16384,
+    max_batch_size=1,
+    memory_fraction_kind="of_free",
+    memory_fraction_value=0.9,
+    tp_size=1,
+    pp_size=1,
+    attention_dp_size=4,
+    moe_tp_size=1,
+    moe_ep_size=4,
+    gemm_quant_mode="nvfp4",
+    moe_quant_mode="nvfp4",
+    kvcache_quant_mode="fp8",
+)
+
+
+@pytest.mark.parametrize("nextn", [1, 2, 3])
+def test_eagle_prefill_kv_budget_nonnegative_kimi_gb200(nextn):
+    """AIC-1110: a feasible Eagle draft length must not drive the prefill KV budget negative.
+
+    Also pins the post-fix invariant: because ``max_num_tokens`` already bounds the
+    per-forward tokens (draft tokens included), the capacity breakdown is independent
+    of ``nextn`` -- the activation must match the ``nextn=0`` baseline exactly, not be
+    scaled by ``(nextn+1)`` as the latency sweep does.
+    """
+    try:
+        baseline = memory.estimate_kv_cache(**_EAGLE_PREFILL_CASE, nextn=0)
+        est = memory.estimate_kv_cache(**_EAGLE_PREFILL_CASE, nextn=nextn)
+    except ValueError as exc:
+        # A genuinely-missing perf DB / model soft-skips; the "no KV budget" regression
+        # (any other ValueError) is re-raised by the helper and fails the test.
+        _skip_if_fixture_unavailable(exc)
+
+    # Non-negative budget for any feasible draft length (the reported failure).
+    assert est["total_kv_size_bytes"] > 0
+    assert est["total_kv_size_tokens"] > 0
+
+    # nextn-independence: activation (and hence the whole non-KV breakdown and budget)
+    # must not grow with the draft length on the capacity path.
+    assert est["memory_breakdown"]["activations_bytes"] == baseline["memory_breakdown"]["activations_bytes"]
+    assert est["total_kv_size_bytes"] == baseline["total_kv_size_bytes"]
