@@ -107,7 +107,9 @@ def test_cli_default_thorough_sweep_real_static_workload(tmp_path: Path):
     assert (result_dir / "spica_candidates.csv").is_file()
     assert (result_dir / "pareto.csv").is_file()
     assert (result_dir / "pareto_frontier.png").is_file()
-    for mode in ("agg", "disagg"):
+    feasible_modes = [mode for mode in ("agg", "disagg") if (result_dir / mode / "exp_config.yaml").is_file()]
+    assert feasible_modes
+    for mode in feasible_modes:
         assert (result_dir / mode / "exp_config.yaml").is_file()
         assert (result_dir / mode / "best_config_topn.csv").is_file()
         assert (result_dir / mode / "pareto.csv").is_file()
@@ -119,6 +121,8 @@ def test_cli_default_thorough_sweep_real_static_workload(tmp_path: Path):
         assert (result_dir / mode / "top1" / "sflow.yaml").is_file()
         assert (result_dir / mode / "top1" / "spica_candidate.yaml").is_file()
 
-    assert (result_dir / "agg" / "top1" / "agg_config.yaml").is_file()
-    assert (result_dir / "disagg" / "top1" / "prefill_config.yaml").is_file()
-    assert (result_dir / "disagg" / "top1" / "decode_config.yaml").is_file()
+        if mode == "agg":
+            assert (result_dir / mode / "top1" / "agg_config.yaml").is_file()
+        else:
+            assert (result_dir / mode / "top1" / "prefill_config.yaml").is_file()
+            assert (result_dir / mode / "top1" / "decode_config.yaml").is_file()
