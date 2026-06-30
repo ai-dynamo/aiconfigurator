@@ -63,6 +63,14 @@ inputs:
   - key: DynConfig.enable_router
     required: false
     default: false
+  - key: DynConfig.router_mode
+    required: false
+  - key: DynConfig.router_config
+    required: false
+  - key: DynConfig.planner_config
+    required: false
+  - key: DynConfig.kvbm_config
+    required: false
 
   # K8sConfig
   - key: K8sConfig.name_prefix
@@ -78,6 +86,9 @@ inputs:
       trtllm: *default_trtllm_image
       vllm: '"nvcr.io/nvidia/ai-dynamo/vllm-runtime:" ~ generator_dynamo_version'
       sglang: '"nvcr.io/nvidia/ai-dynamo/sglang-runtime:" ~ generator_dynamo_version'
+  - key: K8sConfig.k8s_planner_image
+    required: false
+    default: ""
   - key: K8sConfig.k8s_image_pull_secret
     required: false
     default: ""

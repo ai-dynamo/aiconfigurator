@@ -45,6 +45,7 @@ _METRIC_KEYS = (
     "goodput_output_throughput_tok_s",
     "gpu_hours",
     "duration_ms",
+    "planner_total_ticks",
 )
 
 
