@@ -2258,7 +2258,14 @@ def main(args):
 
     # Handle estimate mode separately (single-point estimation)
     if args.mode == "estimate":
-        _run_estimate_mode(args)
+        # Invalid sizing/parameters surface as ValueError from the SDK
+        # validation path (e.g. AFD f_moe_ep_size not dividing f_tp_size).
+        # Convert to a concise CLI error instead of a full traceback,
+        # matching the set_systems_paths convention above.
+        try:
+            _run_estimate_mode(args)
+        except ValueError as exc:
+            raise SystemExit("Error: " + str(exc)) from exc
         return
 
     if args.mode == "default":
