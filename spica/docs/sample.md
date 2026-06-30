@@ -114,11 +114,22 @@ prophet, `kalman_q_level` / `kalman_q_trend` / `kalman_r` / `kalman_min_points` 
 nothing extra for constant/arima. If the interval has no winner, no predictor fields are
 added.
 
-### Swept concurrency (pareto only)
+### Candidate-relative KV load
 
-When `workload.concurrency` is a list (a `pareto` goal), `enumerate_branches` adds a
-per-trial `concurrency` dimension; that swept value rides along in the `selection` and is
-the in-flight cap for the trial. It is not added by `unroll_sample` itself.
+When `workload.kv_load_ratio` is set, a scalar ratio is pinned or a Pareto `[min, max]`
+range becomes a continuous per-trial selection. After `unroll_sample`, the search evaluates
+the selected backend/shape/batching with AIC and appends these derived fields:
+
+- `kv_load_ratio` — the requested normalized load;
+- `concurrency` — the concrete closed-loop in-flight cap;
+- `kv_load_concurrency_capacity` — estimated concurrency at ratio `1`;
+- `kv_load_capacity_tokens` — aggregate decode (disagg) or agg KV tokens;
+- `prefill_kv_capacity_tokens` + `decode_kv_capacity_tokens` for disagg, or
+  `agg_kv_capacity_tokens` for agg.
+
+These fields are added by the search orchestration rather than `unroll_sample`, because
+capacity depends on the fully selected candidate's backend, batching, shape, and replicas.
+A fixed `workload.concurrency` is also copied into each candidate as `concurrency`.
 
 ## Overriding
 

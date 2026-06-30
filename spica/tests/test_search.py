@@ -10,6 +10,7 @@ import pytest
 
 import spica.search as search_mod
 from spica.config import SmartSearchConfig
+from spica.kv_load import KVLoadResolution
 from spica.load_predictor_sweep import LoadPredictorResult
 from spica.parallel_enum import ParallelShape, ReplicaParallelConfig
 from spica.sampler import Suggestion
@@ -364,11 +365,10 @@ def test_projection_stall_only_stops_current_branch(monkeypatch):
     assert seen == ["agg", "disagg"]
 
 
-# --- pareto (multi-objective) sweep over a swept concurrency ---
+# --- pareto (multi-objective) sweep over candidate-relative KV load ---
 
 
 def _pareto_config():
-    # synthetic concurrency sweep (list) under a pareto goal -> the InferenceX-style front
     return SmartSearchConfig(
         search_space={
             "model_name": "deepseek-ai/DeepSeek-V3",
@@ -377,7 +377,7 @@ def _pareto_config():
             "deployment_mode": ["agg"],
             "gpu_budget": 32,
         },
-        workload={"isl": 1024, "osl": 1024, "concurrency": [4, 8, 16], "num_request_ratio": 10},
+        workload={"isl": 1024, "osl": 1024, "kv_load_ratio": [0.0, 1.0], "num_request_ratio": 10},
         sweep={"max_rounds": 1, "candidates_per_round": 3, "parallel_evals": 1},
         goal={"target": "pareto"},
     )
@@ -389,7 +389,7 @@ _PARETO_POINTS = {4: (100.0, 40.0), 8: (150.0, 25.0), 16: (180.0, 12.0)}
 
 
 class _ParetoSampler:
-    """Suggests one candidate per swept concurrency (4/8/16), records observed metrics."""
+    """Suggests three KV-load points and records the observed objective vectors."""
 
     def __init__(self, branch, study_id, objectives=None):
         self.branch = branch
@@ -398,7 +398,7 @@ class _ParetoSampler:
 
     def suggest(self, count):
         out = []
-        for c in (4, 8, 16):
+        for ratio in (0.25, 0.5, 1.0):
             sel = {
                 "deployment_mode": "agg",
                 "backend": "trtllm",
@@ -408,7 +408,7 @@ class _ParetoSampler:
                 "planner_load_sensitivity": "default",
                 "agg_max_num_batched_tokens": 8192,
                 "agg_max_num_seqs": 256,
-                "concurrency": c,  # the swept Pareto dimension
+                "kv_load_ratio": ratio,
             }
             out.append(Suggestion(selection=sel, parallel_config=self.branch.parallel_configs[0], handle=sel))
         return out
@@ -435,6 +435,18 @@ class _ParetoEvaluator:
 def test_pareto_sweep_returns_non_dominated_front(monkeypatch):
     branch = _branch(ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2))  # 8 GPUs
     _stub(monkeypatch, branch)
+    concurrency_by_ratio = {0.25: 4, 0.5: 8, 1.0: 16}
+
+    def fake_resolve(sample, *, workload, parallel_config, ratio, backend_version):
+        concurrency = concurrency_by_ratio[ratio]
+        return KVLoadResolution(
+            ratio=ratio,
+            concurrency=concurrency,
+            concurrency_capacity=16,
+            role_capacity_tokens={"agg": 24_576},
+        )
+
+    monkeypatch.setattr(search_mod, "resolve_kv_load", fake_resolve)
     seen = {}
 
     def factory(b, study_id, objectives=None):
@@ -445,11 +457,12 @@ def test_pareto_sweep_returns_non_dominated_front(monkeypatch):
     front = run_smart_search(
         _pareto_config(), evaluator=_ParetoEvaluator(), sampler_factory=factory, show_progress=False
     )
-    # all three concurrency points are mutually non-dominated -> full front, sorted by the
+    # all three load points are mutually non-dominated -> full front, sorted by the
     # x-axis (per-user throughput) ascending.
     assert [c.objectives["throughput_per_user"] for c in front] == [12.0, 25.0, 40.0]
     assert [c.objectives["throughput_per_gpu"] for c in front] == [180.0, 150.0, 100.0]
     assert {c.config["concurrency"] for c in front} == {4, 8, 16}  # each point recorded its concurrency
+    assert {c.config["kv_load_ratio"] for c in front} == {0.25, 0.5, 1.0}
     # the sampler was built multi-objective (one (name, maximize) per objective) and fed raw vectors
     assert seen["s"].objectives == [("throughput_per_gpu", True), ("throughput_per_user", True)]
     assert all(set(m) == {"throughput_per_gpu", "throughput_per_user"} for m in seen["s"].observed)

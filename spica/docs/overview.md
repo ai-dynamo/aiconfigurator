@@ -11,7 +11,7 @@ YAML (`SmartSearchConfig`):
 | Block | Model | What it is |
 |---|---|---|
 | `search_space:` | `SearchSpace` | knobs to **explore** + pinned context (model, hardware, GPU budget) |
-| `workload:` | `Workload` | the **traffic** every candidate is replayed against (pinned) |
+| `workload:` | `Workload` | the **traffic** every candidate is replayed against (mostly pinned; Pareto may search KV load) |
 | `goal:` | `OptimizationGoal` | what **"better"** means (the target metric) + the SLA constraint |
 | `sweep:` | `SweepConfig` | run-control (`max_rounds`, `candidates_per_round`, `parallel_evals`, `random_seed`) |
 
@@ -33,9 +33,9 @@ first to keep the planner-scaling story together.
 `SmartSearchConfig.from_yaml` (`src/spica/config.py`) loads the YAML and runs every
 pydantic validator: the per-knob choice/dict-key checks (`SearchSpace._validate_search_choices`),
 GPU-budget bounds, single-mode-when-pinning-`parallel_configs`, the goal's SLA requirement
-(`goodput`/`goodput_per_gpu` need a `ttft_ms`+`itl_ms` or `e2e_ms` SLA), and the rule that a
-**list-valued `workload.concurrency` is only allowed under a `pareto` goal**
-(`SmartSearchConfig._validate_concurrency_sweep`). An invalid config never reaches the search.
+(`goodput`/`goodput_per_gpu` need a `ttft_ms`+`itl_ms` or `e2e_ms` SLA), and the rule that
+**`workload.concurrency` is always scalar while a ranged `workload.kv_load_ratio` is Pareto-only**.
+An invalid config never reaches the search.
 
 ### 2. Filter throughput-scaling policies (`filter_scaling_policies`)
 
@@ -90,8 +90,8 @@ backends support each. `context_length` is threaded into KV feasibility.
   knob. A **mode** for which *no* backend is viable is **skipped with a warning** (a viable
   mode still runs); only if *no* mode is viable does it raise `NoViableParallelConfig`.
 - A *pinned* `parallel_configs` that is legal for no backend is a **hard error** (fail fast).
-- A list-valued `workload.concurrency` (pareto) becomes a per-trial `concurrency` dimension on
-  the branch.
+- A ranged `workload.kv_load_ratio` (Pareto) becomes a continuous per-trial dimension on the
+  branch. A scalar ratio is injected as a constant.
 
 ### 5. Per-branch Vizier study loop
 
@@ -110,7 +110,8 @@ For each branch, a `BranchSampler` (`make_branch_sampler`, study id
    `ProcessPoolExecutor` created once for the whole run (amortizing the per-worker dynamo
    import) with `min(parallel_evals, per_round)` workers. The pool is used only when **both**
    `parallel_evals > 1` and `per_round > 1`; otherwise evaluation runs sequentially in-process.
-   Each worker runs the pure pipeline `_evaluate_one`: `unroll_sample` → `build_deployment` →
+   Each worker runs the pure pipeline `_evaluate_one`: `unroll_sample` → resolve candidate KV
+   capacity/derived concurrency (KV-load mode) → `build_deployment` →
    `ReplayEvaluator.evaluate` (**real replay**) → score (`make_candidate`). Workers never touch
    the Vizier study; a dead pool re-raises a friendly error pointing at the `if __name__ ==
    "__main__":` guard that spawned workers require.
@@ -170,8 +171,8 @@ flowchart TD
 
 - [optimization-goal.md](optimization-goal.md) — the `OptimizationGoal` targets, SLA, scoring,
   and how the goal maps to the planner's `optimization_target`.
-- [traffic.md](traffic.md) — the `Workload` load shapes (trace / request-rate / concurrency)
-  and the pareto concurrency sweep.
+- [traffic.md](traffic.md) — the `Workload` load shapes (trace / request-rate / fixed
+  concurrency / KV load) and candidate-relative Pareto load sweep.
 - [search-space.md](search-space.md) — every pinnable/searchable knob, the composite presets,
   and `parallel_configs`.
 - [sample.md](sample.md) — how a Vizier suggestion is unrolled into a concrete deployment.

@@ -7,6 +7,7 @@ One Vizier study per branch (per the design). The study's parameters are:
 
 - structured parallel features projected onto the branch's KV-feasible config
   pool, or the legacy ``parallel_config_index`` when explicitly selected.
+- a continuous ``kv_load_ratio`` when a Pareto workload supplies a range.
 - one parameter per multi-choice searchable knob (categorical for string choices
   like ``planner_scaling_policy``/``router_mode``; discrete for the numeric
   batching / router-weight choices). Single-choice knobs are injected as
@@ -140,6 +141,14 @@ class VizierBranchSampler:
                         feasible_values=parameter.values,
                         default_value=parameter.default,
                     )
+        for knob, (minimum, maximum) in branch.float_ranges.items():
+            root.add_float_param(
+                knob,
+                min_value=minimum,
+                max_value=maximum,
+                default_value=(minimum + maximum) / 2.0,
+            )
+            self._decoders[knob] = float
         for knob, choices in branch.knob_choices.items():
             if not any(isinstance(c, dict) for c in choices):
                 # defensively dedupe hashable choices (order-preserving); duplicates

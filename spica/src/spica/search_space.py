@@ -19,7 +19,7 @@ and is not a sampler dimension.
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .config import SmartSearchConfig
@@ -69,6 +69,9 @@ class BranchSpace:
     knob_choices: dict[str, list[Any]]
     # Pinned branch budget; optional only for lightweight unit-test fixtures.
     gpu_budget: int | None = None
+    # Continuous workload dimensions. Currently only Pareto ``kv_load_ratio`` uses
+    # this; list-valued component knobs remain discrete choices above.
+    float_ranges: dict[str, tuple[float, float]] = field(default_factory=dict)
 
 
 def _engine_knobs(deployment_mode: str) -> tuple[str, ...]:
@@ -197,11 +200,14 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
         knob_choices = branch_knob_choices(ss, deployment_mode)
         viable_backends = set().union(*support.values())
         knob_choices["backend"] = [backend for backend in dict.fromkeys(ss.backend) if backend in viable_backends]
-        # A list-valued workload.concurrency (pareto sweep) becomes a per-trial discrete
-        # dimension; the evaluator reads selection["concurrency"] as the in-flight cap.
-        concurrency_choices = config.workload.concurrency_choices
-        if concurrency_choices is not None:
-            knob_choices["concurrency"] = list(concurrency_choices)
+        float_ranges: dict[str, tuple[float, float]] = {}
+        kv_load_range = config.workload.kv_load_ratio_range
+        if kv_load_range is not None:
+            float_ranges["kv_load_ratio"] = kv_load_range
+        elif config.workload.kv_load_ratio is not None:
+            # A scalar KV load is pinned for both scalar and Pareto goals. Keep it in
+            # the constant path so every decoded selection carries the requested ratio.
+            knob_choices["kv_load_ratio"] = [float(config.workload.kv_load_ratio)]
         branches.append(
             BranchSpace(
                 deployment_mode=deployment_mode,
@@ -209,6 +215,7 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
                 supported_backends={cfg: frozenset(bs) for cfg, bs in support.items()},
                 knob_choices=knob_choices,
                 gpu_budget=ss.gpu_budget,
+                float_ranges=float_ranges,
             )
         )
 

@@ -38,6 +38,7 @@ from .config import Candidate, OptimizationGoal, SmartSearchConfig
 from .deploy import build_deployment
 from .evaluator import ReplayEvaluator
 from .kv_estimate import resolve_backend_version
+from .kv_load import InfeasibleKVCapacity, resolve_kv_load
 from .load_predictor_sweep import LoadPredictorResult, sweep_load_predictor
 from .planner import filter_scaling_policies, scaling_fields
 from .sample import unroll_sample
@@ -100,18 +101,36 @@ def _evaluate_one(
             parallel_config=parallel_config,
             load_predictor=load_predictor,
         )
-        # A pareto concurrency sweep carries the per-trial in-flight cap on the selection;
-        # record it on the sample (so each Pareto point knows its concurrency) and drive replay with it.
-        concurrency = selection.get("concurrency")
-        if concurrency is not None:
-            sample["concurrency"] = concurrency
         backend_version = resolve_backend_version(config.search_space.hardware_sku, selection["backend"])
+        concurrency = config.workload.concurrency
+        if "kv_load_ratio" in selection:
+            ratio = float(selection["kv_load_ratio"])
+            resolution = resolve_kv_load(
+                sample,
+                workload=config.workload,
+                parallel_config=parallel_config,
+                ratio=ratio,
+                backend_version=backend_version,
+            )
+            concurrency = resolution.concurrency
+            sample["kv_load_ratio"] = resolution.ratio
+            sample["kv_load_concurrency_capacity"] = resolution.concurrency_capacity
+            load_role = "decode" if sample["deployment_mode"] == "disagg" else "agg"
+            sample["kv_load_capacity_tokens"] = resolution.role_capacity_tokens[load_role]
+            for role, tokens in resolution.role_capacity_tokens.items():
+                sample[f"{role}_kv_capacity_tokens"] = tokens
+        if concurrency is not None:
+            # Preserve the concrete load on every candidate, including a fixed absolute
+            # concurrency and one derived from kv_load_ratio.
+            sample["concurrency"] = concurrency
         plan = build_deployment(
             sample,
             backend_version=backend_version,
             optimization_target=goal.target.planner_optimization_target,
             planner_sla=goal.sla,
         )
+    except InfeasibleKVCapacity as exc:
+        return None, None, "infeasible", f"candidate KV capacity infeasible: {exc}"
     except Exception as exc:
         return None, None, "failed", f"candidate build failed: {type(exc).__name__}: {exc}"
     try:

@@ -4,7 +4,7 @@
 """KV-cache feasibility for a parallel shape, via AIConfigurator's
 ``estimate_kv_cache`` (aiconfigurator#1159).
 
-A parallel shape is *feasible* for a workload iff its total KV-cache capacity
+A parallel shape is *feasible* for a workload iff its per-rank KV-cache capacity
 (in tokens, AFTER the quantized weights + the backend's activation reservations
 are subtracted from VRAM) can hold at least one longest sequence::
 
@@ -67,8 +67,9 @@ def estimate_kv_tokens(
     max_num_tokens: int = DEFAULT_MAX_NUM_TOKENS,
     max_batch_size: int = DEFAULT_MAX_BATCH_SIZE,
     memory_fraction: float = DEFAULT_MEMORY_FRACTION,
+    nextn: int = 0,
 ) -> int | None:
-    """Total KV-cache capacity (in tokens) for ``shape``, or ``None`` when the
+    """Per-rank KV-cache capacity (in tokens) for ``shape``, or ``None`` when the
     shape leaves no KV budget (weights + activations already fill VRAM -> OOM).
 
     Genuine estimation errors (bad inputs, unsupported model) propagate.
@@ -88,6 +89,7 @@ def estimate_kv_tokens(
             attention_dp_size=shape.dp,
             moe_tp_size=shape.moe_tp,
             moe_ep_size=shape.moe_ep,
+            nextn=nextn,
             allow_naive_fallback=False,
         )
     except ValueError as exc:

@@ -19,7 +19,7 @@ the same perf model. The deployment shapes are not pinned — Spica enumerates a
 | backend | dynamo-sglang (wide-EP) |
 | deployment | **disagg, static** fixed-fleet (no planner), `gpu_budget=72` (8 prefill + ≤64 decode — SA's largest layout) |
 | parallel configs | **not pinned** — Spica enumerates + searches TP / TEP / DEP / DTP shapes (MoE-TP and EP both allowed) |
-| workload | synthetic **1k in / 1k out**, closed-loop **concurrency sweep** `[16,32,64,128,256,512,576,800,1248,2576]` (SA's 10 points), `num_request_ratio=3` |
+| workload | synthetic **1k in / 1k out**, closed-loop continuous **KV-load sweep** `[0,1]`; absolute concurrency is derived per candidate, `num_request_ratio=10` |
 | router | `round_robin` |
 | goal | **pareto** — axes = `throughput_per_user` (interactivity, tok/s/user) × `throughput_per_gpu` (output tok/s/GPU), SA's axes |
 | dynamo | PR #10964 — the AIC dp-attention KV fix (per-rank → engine-pool ×dp) |
@@ -70,13 +70,15 @@ SA's decode layout is per-concurrency: **`TP8 ×8`** for C≤512 (TP-attn + MoE-
 
 ## Sweep config
 
-`run_smart_search`, `goal.target = pareto`. Deployment shapes are searched; concurrency is the
-swept Pareto dimension.
+`run_smart_search`, `goal.target = pareto`. Deployment shapes are searched;
+`kv_load_ratio` is the continuous Pareto load dimension. Ratio `1` is each candidate's estimated
+decode KV capacity divided by `isl + osl/2`; ratio `0` maps to concurrency `1`.
 
 Run this unpinned experiment with the structured parallel encoding:
 
 ```bash
-SPICA_PARALLEL_ENCODING=structured spica --config <config.yaml>
+SPICA_PARALLEL_ENCODING=structured spica \
+  --config examples/glm5-disagg-pareto-frontier-structured.yaml
 ```
 
 ```yaml
@@ -92,8 +94,8 @@ search_space:
 workload:
   isl: 1024
   osl: 1024
-  concurrency: [16, 32, 64, 128, 256, 512, 576, 800, 1248, 2576]   # swept Pareto dimension
-  num_request_ratio: 3           # num_requests = 3 * concurrency (uniform ramp, matches the AIC curve)
+  kv_load_ratio: [0.0, 1.0]      # continuous; actual concurrency is candidate-relative
+  num_request_ratio: 10          # num_requests = 10 * derived concurrency
 goal:
   target: pareto                 # objectives default = [throughput_per_gpu, throughput_per_user]
 sweep:
@@ -101,6 +103,10 @@ sweep:
   parallel_evals: 8
   max_eval_seconds: 600          # 10-min replay cap per candidate; timeouts -> infeasible
 ```
+
+The result below is retained as a **legacy opaque-index baseline**. It predates
+`kv_load_ratio` and used the explicit SA concurrency list with `num_request_ratio=3`; the current
+config above replaces that load encoding so Vizier sees comparable KV pressure across layouts.
 
 ## Legacy opaque-index result — the front reaches/exceeds green by round 6
 
@@ -167,12 +173,14 @@ search depth:
 
 ```bash
 cd aiconfigurator/spica
-python -m spica --config <this-config>.yaml      # static disagg, closed-loop concurrency Pareto sweep
+SPICA_PARALLEL_ENCODING=structured python -m spica \
+  --config examples/glm5-disagg-pareto-frontier-structured.yaml
 ```
 
 Notes: the AIC perf model needs the `aic-forward-pass` binding (see README), and **PR #10964**
 (the dp-attention KV fix) so DP-attn shapes are KV-provisioned `per_rank × dp`. The **green
 baseline** = SA's per-concurrency configs run via `dynamo.replay.run_synthetic_trace_replay`
-(static, `planner_config=None`) at `num_request_ratio=3`, `isl=osl=1024`. Axes:
+(static, `planner_config=None`) at the historical `num_request_ratio=3`, `isl=osl=1024`;
+the current search config uses ratio `10`. Axes:
 `throughput_per_user` (interactivity) × `throughput_per_gpu`; both higher-is-better, ref `(0,0)`
 for hypervolume.

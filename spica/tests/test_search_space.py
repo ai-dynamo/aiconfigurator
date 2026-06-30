@@ -203,6 +203,43 @@ def test_viable_backend_knob_preserves_user_order(monkeypatch):
     assert branch.knob_choices["backend"] == ["trtllm", "vllm"]
 
 
+def test_kv_load_range_becomes_continuous_branch_dimension(monkeypatch):
+    monkeypatch.setattr("spica.search_space.parallel_configs_for", lambda *args, **kwargs: [_AGG_CFG])
+    cfg = SmartSearchConfig(
+        search_space={
+            "model_name": "m",
+            "hardware_sku": "h200_sxm",
+            "backend": ["trtllm"],
+            "deployment_mode": ["agg"],
+        },
+        workload={"isl": 1024, "osl": 1024, "kv_load_ratio": [0.0, 1.0], "num_request_ratio": 10},
+        goal={"target": "pareto"},
+    )
+
+    (branch,) = enumerate_branches(cfg)
+
+    assert branch.float_ranges == {"kv_load_ratio": (0.0, 1.0)}
+    assert "kv_load_ratio" not in branch.knob_choices
+
+
+def test_scalar_kv_load_is_pinned_in_branch_selection(monkeypatch):
+    monkeypatch.setattr("spica.search_space.parallel_configs_for", lambda *args, **kwargs: [_AGG_CFG])
+    cfg = SmartSearchConfig(
+        search_space={
+            "model_name": "m",
+            "hardware_sku": "h200_sxm",
+            "backend": ["trtllm"],
+            "deployment_mode": ["agg"],
+        },
+        workload={"isl": 1024, "osl": 1024, "kv_load_ratio": 0.6, "num_request_ratio": 10},
+    )
+
+    (branch,) = enumerate_branches(cfg)
+
+    assert branch.float_ranges == {}
+    assert branch.knob_choices["kv_load_ratio"] == [0.6]
+
+
 def test_partial_illegal_pinned_config_raises(monkeypatch):
     # Two pinned configs, only one of which any backend can run -> the pin is wrong, so
     # enumerate_branches fails fast (NoViableParallelConfig). _AGG_CFG is the tp=1 shape.

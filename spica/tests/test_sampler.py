@@ -8,6 +8,7 @@ those tests run unconditionally; everything that builds a study is gated behind 
 ``importorskip`` below."""
 
 import json
+import uuid
 
 import pytest
 
@@ -262,31 +263,33 @@ def test_suggest_observe_round_trips():
     assert best.final_measurement.metrics["objective"].value == max(scores)
 
 
-def _branch_with_concurrency() -> BranchSpace:
+def _branch_with_kv_load() -> BranchSpace:
     b = _branch()
     return BranchSpace(
         deployment_mode=b.deployment_mode,
         parallel_configs=b.parallel_configs,
         supported_backends=b.supported_backends,
-        knob_choices={**b.knob_choices, "concurrency": [4, 8, 16]},  # swept pareto dimension
+        knob_choices=b.knob_choices,
+        float_ranges={"kv_load_ratio": (0.0, 1.0)},
     )
 
 
-def test_pareto_study_sweeps_concurrency_and_returns_front():
-    # A multi-objective study: a swept concurrency (discrete param) + two maximized metrics.
+def test_pareto_study_sweeps_kv_load_and_returns_front(monkeypatch):
+    # A multi-objective study: a continuous KV-load ratio + two maximized metrics.
     # Verifies the >=2-metric study builds, observe carries both, and optimal_trials() returns
     # a non-empty Pareto set whose trials carry both objectives.
-    branch = _branch_with_concurrency()
+    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    branch = _branch_with_kv_load()
     sampler = make_branch_sampler(
         branch,
-        study_id="test_pareto",
+        study_id=f"test_pareto_kv_load_{uuid.uuid4().hex}",
         objectives=[("throughput_per_gpu", True), ("throughput_per_user", True)],
     )
     for s in sampler.suggest(count=3):
-        c = s.selection["concurrency"]
-        assert c in (4, 8, 16)  # concurrency arrives as a decoded discrete int
-        # a tradeoff: throughput-per-gpu rises with concurrency, per-user falls
-        sampler.observe(s, {"throughput_per_gpu": float(c) * 10.0, "throughput_per_user": 100.0 / c})
+        ratio = s.selection["kv_load_ratio"]
+        assert 0.0 <= ratio <= 1.0
+        # a tradeoff: throughput-per-gpu rises with load, per-user falls
+        sampler.observe(s, {"throughput_per_gpu": ratio * 10.0, "throughput_per_user": 100.0 / (ratio + 1.0)})
     optimal = list(sampler._study.optimal_trials())
     assert optimal  # multi-objective study -> non-empty Pareto frontier
     for t in optimal:
