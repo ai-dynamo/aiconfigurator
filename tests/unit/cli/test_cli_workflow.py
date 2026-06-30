@@ -34,6 +34,7 @@ from aiconfigurator.cli.spica.helper import (
     _build_spica_trace_search_space,
     _save_spica_trace_artifacts,
     _spica_candidates_to_result_df,
+    _spica_extra_input_lines,
     _spica_generated_backend_version,
     _spica_generator_overrides,
     _spica_kvbm_config,
@@ -636,6 +637,56 @@ class TestCLIIntegration:
         assert bundle.pareto_fronts["agg"]["spica_candidate_id"].tolist() == [1, 0]
         assert bundle.best_configs["agg"]["spica_candidate_id"].tolist() == [0, 1]
         assert bundle.best_objective_scores["agg"] == pytest.approx(100.0)
+
+    def test_spica_result_uses_candidate_replay_concurrency(self):
+        goal = argparse.Namespace(
+            target="pareto",
+            resolved_pareto_objectives=["throughput_per_gpu", "throughput_per_user"],
+        )
+        candidate = {
+            "config": {
+                "deployment_mode": "agg",
+                "backend": "sglang",
+                "concurrency": 11940,
+                "kv_load_ratio": 0.59,
+            },
+            "used_gpus": 64,
+            "score": 0.0,
+            "objectives": {"throughput_per_gpu": 1788.4, "throughput_per_user": 23.56},
+            "metrics": {
+                "output_throughput_tok_s": 114457.6,
+                "mean_output_token_throughput_per_user": 23.56,
+            },
+        }
+
+        result = _spica_candidates_to_result_df([candidate], goal=goal)
+
+        assert result.loc[0, "concurrency"] == 11940
+        assert result.loc[0, "kv_load_ratio"] == pytest.approx(0.59)
+
+    @pytest.mark.parametrize(
+        ("load", "expected"),
+        [
+            ({"concurrency": 16}, "concurrency=16"),
+            ({"request_rate": 2.5}, "request_rate=2.5"),
+            ({"kv_load_ratio": [0.0, 1.0]}, "kv_load_ratio=[0.0, 1.0]"),
+        ],
+    )
+    def test_spica_input_summary_reports_active_load_mode(self, load, expected):
+        workload = argparse.Namespace(
+            trace_path=None,
+            isl=128,
+            osl=16,
+            num_request_ratio=10.0,
+            concurrency=load.get("concurrency"),
+            request_rate=load.get("request_rate"),
+            kv_load_ratio=load.get("kv_load_ratio"),
+        )
+        config = argparse.Namespace(workload=workload, goal=argparse.Namespace(sla=None))
+
+        lines = _spica_extra_input_lines(config, None)
+
+        assert lines == [f"Synthetic Workload: ISL=128, OSL=16, {expected}, num_request_ratio=10.0"]
 
     def test_spica_generator_overrides_prefer_task_over_cli_for_planner(self):
         """Generated planner config should use evaluated Spica config values, not stale default CLI args."""

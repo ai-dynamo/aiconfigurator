@@ -9,8 +9,8 @@ branch: it is a searched categorical knob within the study. For each mode we tak
 **union** of every configured backend's KV-feasible parallel configs
 (:func:`spica.model_hw.parallel_configs_for`) as the valid projection pool, recording per
 config which backends support it. The sampler projects structured latent features onto this
-pool. Backends with no perf DB / no viable config for a mode are dropped from the backend
-knob.
+pool. Backends with no perf DB, no viable config, or no replay support for a mode are dropped
+from the backend knob.
 
 ``load_predictor_candidates`` is resolved separately by the load-predictor sub-sweep
 and is not a sampler dimension.
@@ -53,6 +53,16 @@ _DISAGG_ENGINE = (
     "decode_max_num_batched_tokens",
     "decode_max_num_seqs",
 )
+
+
+def _backend_supports_replay_mode(backend: str, deployment_mode: str) -> bool:
+    """Whether Dynamo replay can evaluate this backend/topology pair.
+
+    TRT-LLM mock engines currently reject every disaggregated replay mode. Keep
+    that deterministic incompatibility out of Vizier instead of spending the
+    replacement budget repeatedly evaluating an unsupported branch.
+    """
+    return not (backend == "trtllm" and deployment_mode == "disagg")
 
 
 @dataclass(frozen=True)
@@ -157,7 +167,12 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
             [_parse_parallel_entry(e, deployment_mode) for e in ss.parallel_configs] if ss.parallel_configs else None
         )
         support: dict[_ParallelConfig, set[str]] = {}
+        replay_incompatible = [
+            backend for backend in ss.backend if not _backend_supports_replay_mode(backend, deployment_mode)
+        ]
         for backend in ss.backend:
+            if not _backend_supports_replay_mode(backend, deployment_mode):
+                continue
             try:
                 legal = parallel_configs_for(
                     ss.model_name,
@@ -180,12 +195,13 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
                 # an explicit pin that no backend can run is a user error -> fail fast
                 raise NoViableParallelConfig(
                     f"deployment_mode={deployment_mode!r}: no configured backend can run the pinned "
-                    f"parallel_configs (illegal shape, or backend has no perf DB)"
+                    f"parallel_configs (illegal shape, replay-incompatible backend, or no perf DB)"
                 )
             # natural infeasibility for this mode -> skip it, keep any viable modes
             warnings.warn(
                 f"smart-sweep: deployment_mode={deployment_mode!r} skipped — no configured backend "
-                f"has a viable parallel config within gpu_budget={ss.gpu_budget}",
+                f"has a viable parallel config within gpu_budget={ss.gpu_budget}"
+                + (f"; replay-incompatible backends={replay_incompatible}" if replay_incompatible else ""),
                 stacklevel=2,
             )
             skipped.append(deployment_mode)

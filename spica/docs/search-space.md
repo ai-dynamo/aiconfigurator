@@ -176,6 +176,10 @@ perf DB / no viable config for a mode is dropped; a **mode** for which no backen
 is **skipped with a warning** (a viable mode still runs); only if *no* mode is viable does
 the run error. A *pinned* config legal for no backend is a hard error (fail fast).
 
+Replay capability is part of viability: TRT-LLM is excluded from disaggregated branches
+because Dynamo replay currently rejects TRT-LLM disaggregation. It remains searchable in
+aggregate branches.
+
 The planner's `optimization_target` is derived from the sweep **goal**, not from
 `planner_scaling_policy` (see `OptimizationTarget.planner_optimization_target`):
 `throughput`/`throughput_per_gpu`/`throughput_per_user` → `"throughput"`, `e2e_latency` →

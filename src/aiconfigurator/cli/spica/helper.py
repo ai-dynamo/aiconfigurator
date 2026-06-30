@@ -382,7 +382,14 @@ def _spica_candidates_to_result_df(candidates: list[Any], goal: Any | None = Non
         if legacy_score_layout and score is None and goodput is not None and used_gpus and used_gpus > 0:
             score = goodput / used_gpus
         tokens_per_user = _spica_tokens_per_user(raw_metrics, metrics)
-        request_rate, concurrency = _spica_load_shape(raw_metrics, metrics)
+        request_rate, observed_concurrency = _spica_load_shape(raw_metrics, metrics)
+        # Spica records the concrete replay cap on every synthetic closed-loop
+        # candidate, including values derived from kv_load_ratio. That configured
+        # cap is authoritative; throughput / per-user throughput only estimates
+        # active decoding concurrency and can be substantially smaller.
+        concurrency = _spica_float(config.get("concurrency"))
+        if concurrency is None:
+            concurrency = observed_concurrency
         mode = _spica_deployment_mode(payload)
         throughput = _spica_float(metrics["throughput"])
         request_latency = _spica_float(metrics["request_latency"])
@@ -1705,11 +1712,20 @@ def _spica_extra_input_lines(config: Any, config_path: str | None) -> list[str]:
             lines.append(f"Trace Format: {trace_format}")
         lines.append("Trace workload: request lengths come from replay.")
     else:
+        load_fields = (
+            ("concurrency", getattr(workload, "concurrency", None)),
+            ("request_rate", getattr(workload, "request_rate", None)),
+            ("kv_load_ratio", getattr(workload, "kv_load_ratio", None)),
+        )
+        load_name, load_value = next(
+            ((name, value) for name, value in load_fields if value is not None),
+            ("load", "n/a"),
+        )
         lines.append(
             "Synthetic Workload: "
             f"ISL={getattr(workload, 'isl', 'n/a')}, "
             f"OSL={getattr(workload, 'osl', 'n/a')}, "
-            f"concurrency={getattr(workload, 'concurrency', 'n/a')}, "
+            f"{load_name}={load_value}, "
             f"num_request_ratio={getattr(workload, 'num_request_ratio', 'n/a')}"
         )
     if sla is not None:

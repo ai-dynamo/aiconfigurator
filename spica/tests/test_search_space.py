@@ -94,15 +94,16 @@ def test_mixed_planner_policies_keep_dependent_knobs():
 def test_enumerate_branches_deepseek_gb200():
     cfg = _config(deployment_mode=["agg", "disagg"], backend=["trtllm"], gpu_budget=16)
     try:
-        branches = enumerate_branches(cfg)
+        with pytest.warns(UserWarning, match="disagg.*replay-incompatible.*trtllm"):
+            branches = enumerate_branches(cfg)
     except (NoPerfDatabase, NoViableParallelConfig):
         pytest.skip("no gb200/trtllm perf DB")
     except ValueError as exc:
         if "unsupported model/backend/GPU" in str(exc):
             pytest.skip(f"native KV build unavailable: {exc}")
         raise
-    # one branch per deployment_mode (backend is a searched knob, not a branch)
-    assert {b.deployment_mode for b in branches} == {"agg", "disagg"}
+    # Dynamo replay rejects TRT-LLM disaggregation, so only agg is searchable.
+    assert {b.deployment_mode for b in branches} == {"agg"}
     for b in branches:
         assert b.knob_choices["backend"] == ["trtllm"]  # only the viable backend(s)
         assert len(b.parallel_configs) > 0  # KV-feasible configs exist
@@ -113,6 +114,23 @@ def test_enumerate_branches_deepseek_gb200():
         assert "planner_scaling_policy" in b.knob_choices
         key = "agg_max_num_seqs" if b.deployment_mode == "agg" else "decode_max_num_seqs"
         assert key in b.knob_choices
+
+
+def test_replay_incompatible_backend_is_removed_before_sampling(monkeypatch):
+    calls = []
+
+    def fake_pcf(model, hw, *, gpu_budget, deployment_mode, backend, min_gpu_budget=None, max_seq_len=None):
+        calls.append((deployment_mode, backend))
+        return [_AGG_CFG]
+
+    monkeypatch.setattr("spica.search_space.parallel_configs_for", fake_pcf)
+    cfg = _config(deployment_mode=["disagg"], backend=["trtllm", "vllm"], gpu_budget=8)
+
+    (branch,) = enumerate_branches(cfg)
+
+    assert calls == [("disagg", "vllm")]
+    assert branch.knob_choices["backend"] == ["vllm"]
+    assert branch.supported_backends[_AGG_CFG] == frozenset({"vllm"})
 
 
 def test_pinned_parallel_configs_replace_the_menu():
