@@ -44,7 +44,7 @@ _SECTIONS = (
     "ModelConfig",
     "LlmdConfig",
 )
-_TOP_LEVEL = ("backend", "generator_dynamo_version", "rule")
+_TOP_LEVEL = ("backend", "generator_dynamo_version", "rule", "preserve_engine_limits")
 
 
 def from_legacy_params(params: dict[str, Any], backend: Optional[str] = None) -> GeneratorRequest:
@@ -195,6 +195,8 @@ def to_legacy_params(req: GeneratorRequest) -> dict[str, Any]:
         params["backend"] = raw["backend"]
     if raw.get("rule"):
         params["rule"] = raw["rule"]
+    if "preserve_engine_limits" in raw:
+        params["preserve_engine_limits"] = bool(raw["preserve_engine_limits"])
     if node.get("system_name"):
         params.setdefault("NodeConfig", {})["system_name"] = node["system_name"]
     return params

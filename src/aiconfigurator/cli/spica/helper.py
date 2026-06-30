@@ -1238,7 +1238,12 @@ def _spica_generator_overrides(
 
     mode = str(row.get("deployment_mode") or "")
     roles = ["agg"] if mode == "agg" else ["prefill", "decode"]
-    spica_overrides: dict[str, Any] = {"Workers": {}}
+    spica_overrides: dict[str, Any] = {
+        "Workers": {},
+        # Replay already evaluated these engine limits. Backend generation rules
+        # may still derive runtime-only fields, but must not resize the candidate.
+        "preserve_engine_limits": True,
+    }
 
     for role in roles:
         worker = _spica_role_worker_overrides(row, role, args)

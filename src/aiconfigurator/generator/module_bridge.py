@@ -280,6 +280,8 @@ def task_config_to_generator_config(
     rule_name = overrides.get("rule")
     if rule_name:
         params["rule"] = rule_name
+    if "preserve_engine_limits" in overrides:
+        params["preserve_engine_limits"] = bool(overrides["preserve_engine_limits"])
     params["ModelConfig"] = model_cfg
     return params
 
