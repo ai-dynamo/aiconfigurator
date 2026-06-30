@@ -23,6 +23,15 @@ import json
 import math
 from typing import Any
 
+from aiconfigurator.generator.dynamo_features import (
+    frontend_cli_args_from_dyn_config,
+    kvbm_env_from_dyn_config,
+    normalize_router_mode,
+    planner_config_from_dyn_config,
+    planner_config_json,
+    planner_image_from_k8s_config,
+)
+
 from .dgd_model import DGD, ComputeDomainDoc, ConfigMapDoc, DGDService, ExtraPodSpec, MainContainer
 
 
@@ -106,6 +115,95 @@ def _apply_passthrough_to_service(svc: DGDService, eps_overlay: Any, extra_env: 
         mc.env = (mc.env or []) + copy.deepcopy(list(extra_env))
         eps.main_container = mc
     svc.extra_pod_spec = eps
+
+
+def _append_envs(base: list[dict[str, str]] | None, extra: list[dict[str, str]]) -> list[dict[str, str]] | None:
+    if not extra:
+        return base
+    merged = list(base or [])
+    names = {entry.get("name") for entry in merged if isinstance(entry, dict)}
+    for entry in extra:
+        if entry.get("name") in names:
+            continue
+        merged.append(copy.deepcopy(entry))
+    return merged or None
+
+
+def _kvbm_env_for_role(
+    dyn: dict[str, Any],
+    role: str | None,
+    *,
+    backend: str,
+) -> list[dict[str, str]]:
+    if role not in (None, "prefill"):
+        return []
+    return kvbm_env_from_dyn_config(dyn, backend=backend)
+
+
+def _frontend_main_container(
+    *,
+    image: str | None,
+    image_pull_policy: str | None,
+    volume_mounts: list[Any] | None,
+    dyn: dict[str, Any],
+    svc_cfg: dict[str, Any],
+) -> MainContainer:
+    # Keep the historical enable_router-only DGD shape unchanged; Spica/Dynamo
+    # feature mappings set router_mode/router_config when a frontend command is
+    # required to pass richer CLI flags.
+    frontend_dyn = dyn if dyn.get("router_mode") or dyn.get("router_config") else {}
+    frontend_args = frontend_cli_args_from_dyn_config(frontend_dyn, svc_cfg)
+    if frontend_args:
+        return MainContainer(
+            image=image,
+            image_pull_policy=image_pull_policy,
+            volume_mounts=volume_mounts,
+            command=["python3", "-m", "dynamo.frontend"],
+            args=frontend_args,
+        )
+    return MainContainer(
+        image=image,
+        image_pull_policy=image_pull_policy,
+        volume_mounts=volume_mounts,
+    )
+
+
+def _planner_service(
+    *,
+    k8s: dict[str, Any],
+    dyn: dict[str, Any],
+    backend: str,
+    mode: str,
+    svc_cfg: dict[str, Any],
+    node_selector: dict[str, Any] | None,
+    tolerations: list[Any] | None,
+    image_pull_secret: str | None,
+) -> DGDService | None:
+    planner_config = planner_config_from_dyn_config(dyn, backend=backend, mode=mode, service=svc_cfg)
+    if not planner_config:
+        return None
+    return DGDService(
+        env_from_secret="hf-token-secret",
+        component_type="planner",
+        replicas=1,
+        extra_pod_spec=ExtraPodSpec(
+            image_pull_secrets=[{"name": image_pull_secret}] if image_pull_secret else None,
+            node_selector=copy.deepcopy(node_selector),
+            tolerations=copy.deepcopy(tolerations),
+            main_container=MainContainer(
+                image=planner_image_from_k8s_config(k8s),
+                image_pull_policy="IfNotPresent",
+                command=["python3", "-m", "dynamo.planner"],
+                args=["--config", planner_config_json(planner_config)],
+            ),
+        ),
+    )
+
+
+def _frontend_router_env(enable_router: bool, dyn: dict[str, Any]) -> dict[str, str] | None:
+    if not enable_router and not dyn.get("router_mode"):
+        return None
+    return {"name": "DYN_ROUTER_MODE", "value": normalize_router_mode(dyn.get("router_mode") or "kv")}
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +293,7 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
                 envs.append({"name": "ETCD_ENDPOINTS", "value": etcd_endpoints})
             if hf_home:
                 envs.append({"name": "HF_HOME", "value": hf_home})
+        envs = _append_envs(envs, _kvbm_env_for_role(dyn, role, backend="vllm"))
 
         volumes = None
         if use_model_cache:
@@ -222,13 +321,28 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
             args.append(
                 f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{port}","enable_kv_cache_events":true}}'
             )
+        kvbm_enabled = bool(kvbm_env_from_dyn_config(dyn, backend="vllm"))
         if role == "prefill":
-            args.extend(
-                ["--is-prefill-worker", "--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both"}']
-            )
+            if kvbm_enabled:
+                transfer_config = (
+                    '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":'
+                    '{"connectors":[{"kv_connector":"DynamoConnector","kv_connector_module_path":'
+                    '"kvbm.vllm_integration.connector","kv_role":"kv_both"},{"kv_connector":"NixlConnector",'
+                    '"kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}'
+                )
+            else:
+                transfer_config = '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            args.extend(["--is-prefill-worker", "--kv-transfer-config", transfer_config])
         elif role == "decode":
             args.extend(
                 ["--is-decode-worker", "--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both"}']
+            )
+        elif role is None and kvbm_enabled:
+            args.extend(
+                [
+                    "--kv-transfer-config",
+                    '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
+                ]
             )
         elif role == "encode":
             # Multimodal EPD encode worker (vision encoder only).
@@ -319,10 +433,12 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
             image_pull_secrets=[{"name": image_pull_secret}] if image_pull_secret else None,
             node_selector=copy.deepcopy(node_selector_fact),
             tolerations=copy.deepcopy(tolerations_fact),
-            main_container=MainContainer(
+            main_container=_frontend_main_container(
                 image=k8s.get("k8s_image"),
                 image_pull_policy="IfNotPresent",
                 volume_mounts=fe_volume_mounts,
+                dyn=dyn,
+                svc_cfg=svc_cfg,
             ),
         ),
     )
@@ -331,13 +447,25 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
         if etcd_endpoints:
             fe_envs.append({"name": "ETCD_ENDPOINTS", "value": etcd_endpoints})
         if enable_router:
-            fe_envs.append({"name": "DYN_ROUTER_MODE", "value": "kv"})
+            fe_envs.append(_frontend_router_env(enable_router, dyn))
         if hf_home:
             fe_envs.append({"name": "HF_HOME", "value": hf_home})
         frontend.extra["envs"] = fe_envs
 
     services: dict[str, DGDService] = {"Frontend": frontend}
     mode = dyn.get("mode", "disagg") or "disagg"
+    planner = _planner_service(
+        k8s=k8s,
+        dyn=dyn,
+        backend="vllm",
+        mode=mode,
+        svc_cfg=svc_cfg,
+        node_selector=node_selector_fact,
+        tolerations=tolerations_fact,
+        image_pull_secret=image_pull_secret,
+    )
+    if planner is not None:
+        services["Planner"] = planner
     # Multimodal EPD: optional encode worker + mm flags on the PD workers
     # (the prefill/entry worker also routes to the encoder). Presence-guarded.
     is_epd = bool(context.get("encode_workers"))
@@ -472,6 +600,7 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
                 envs.append({"name": "ETCD_ENDPOINTS", "value": etcd_endpoints})
             if hf_home:
                 envs.append({"name": "HF_HOME", "value": hf_home})
+        envs = _append_envs(envs, _kvbm_env_for_role(dyn, role, backend="sglang"))
 
         volumes = None
         if use_model_cache:
@@ -597,10 +726,12 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
             image_pull_secrets=[{"name": image_pull_secret}] if image_pull_secret else None,
             node_selector=copy.deepcopy(node_selector_fact),
             tolerations=copy.deepcopy(tolerations_fact),
-            main_container=MainContainer(
+            main_container=_frontend_main_container(
                 image=k8s.get("k8s_image"),
                 image_pull_policy="IfNotPresent",
                 volume_mounts=fe_volume_mounts,
+                dyn=dyn,
+                svc_cfg=svc_cfg,
             ),
         ),
     )
@@ -609,12 +740,24 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
         if etcd_endpoints:
             fe_envs.append({"name": "ETCD_ENDPOINTS", "value": etcd_endpoints})
         if enable_router:
-            fe_envs.append({"name": "DYN_ROUTER_MODE", "value": "kv"})
+            fe_envs.append(_frontend_router_env(enable_router, dyn))
         if hf_home:
             fe_envs.append({"name": "HF_HOME", "value": hf_home})
         frontend.extra["envs"] = fe_envs
 
     services: dict[str, DGDService] = {"Frontend": frontend}
+    planner = _planner_service(
+        k8s=k8s,
+        dyn=dyn,
+        backend="sglang",
+        mode=mode,
+        svc_cfg=svc_cfg,
+        node_selector=node_selector_fact,
+        tolerations=tolerations_fact,
+        image_pull_secret=image_pull_secret,
+    )
+    if planner is not None:
+        services["Planner"] = planner
     # Multimodal EPD: optional encode worker + --multimodal-worker on the PD
     # worker(s) (sglang E/PD is typically 2-stage: encode + aggregated PD).
     is_epd = bool(context.get("encode_workers"))
@@ -840,6 +983,7 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
                 envs.append({"name": "ETCD_ENDPOINTS", "value": etcd_endpoints})
             if hf_home:
                 envs.append({"name": "HF_HOME", "value": hf_home})
+        envs = _append_envs(envs, _kvbm_env_for_role(dyn, sub_component_type, backend="trtllm"))
 
         image_pull_secrets = None
         if image_pull_secret:
@@ -876,6 +1020,8 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
             lines.append(f"args+=(--disaggregation-mode {disagg_mode})")
         if publish_metrics:
             lines.append("args+=(--publish-events-and-metrics)")
+        if sub_component_type in (None, "prefill") and kvbm_env_from_dyn_config(dyn, backend="trtllm"):
+            lines.append("args+=(--connector kvbm)")
         for _flag in extra_flags or []:
             lines.append(f"args+=({_flag})")
         lines.append('exec python3 -m dynamo.trtllm "${args[@]}"')
@@ -986,10 +1132,12 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
             image_pull_secrets=[{"name": image_pull_secret}] if image_pull_secret else None,
             node_selector=copy.deepcopy(node_selector_fact),
             tolerations=copy.deepcopy(tolerations_fact),
-            main_container=MainContainer(
+            main_container=_frontend_main_container(
                 image=k8s.get("k8s_image"),
                 image_pull_policy="IfNotPresent",
                 volume_mounts=fe_volume_mounts,
+                dyn=dyn,
+                svc_cfg=svc_cfg,
             ),
         ),
     )
@@ -998,12 +1146,24 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
         if etcd_endpoints:
             fe_envs.append({"name": "ETCD_ENDPOINTS", "value": etcd_endpoints})
         if enable_router:
-            fe_envs.append({"name": "DYN_ROUTER_MODE", "value": "kv"})
+            fe_envs.append(_frontend_router_env(enable_router, dyn))
         if hf_home:
             fe_envs.append({"name": "HF_HOME", "value": hf_home})
         frontend.extra["envs"] = fe_envs
 
     services: dict[str, DGDService] = {"Frontend": frontend}
+    planner = _planner_service(
+        k8s=k8s,
+        dyn=dyn,
+        backend="trtllm",
+        mode=mode,
+        svc_cfg=svc_cfg,
+        node_selector=node_selector_fact,
+        tolerations=tolerations_fact,
+        image_pull_secret=image_pull_secret,
+    )
+    if planner is not None:
+        services["Planner"] = planner
     if mode == "agg":
         services["TRTLLMWorker"] = render_worker(
             None,

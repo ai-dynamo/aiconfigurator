@@ -36,12 +36,16 @@ this order.
 
 Folded straight off the `SearchSpace` (`_DEPLOYMENT_PINNED` + `_KV_MANAGER`):
 
-- `model_name`, `hardware_sku`, `aic_nextn`
-- kv-manager offload: `num_g2_blocks`, `bandwidth_g1_to_g2_gbps`,
+- deployment/runtime context: `model_name`, `hardware_sku`, `context_length`,
+  `startup_time`, `aic_nextn`
+- planner limits: `gpu_budget`, `min_gpu_budget`, `min_endpoint`
+- kv-manager offload: `num_g2_blocks`, `kv_bytes_per_token`, `bandwidth_g1_to_g2_gbps`,
   `bandwidth_g2_to_g1_gbps`, `offload_batch_size`
 
-Search-only constraints (`gpu_budget`, `min_gpu_budget`, `min_endpoint`) are **excluded by
-design** — they bound the search, not a single deployment.
+The GPU bounds and endpoint floor constrain candidate enumeration, and they also become
+live runtime policy (`max_gpu_budget`, `min_gpu_budget`, `min_endpoint`) when the selected
+candidate enables the planner. Keeping them in the flat sample makes replay and generated
+deployment artifacts reproduce the search contract.
 
 ### Parallel fields (`_unroll_parallel`)
 
@@ -80,7 +84,8 @@ The inactive branch's engine keys are not emitted.
   `branch_knob_choices`), so the `if key in selection` guard simply skips them when absent.
 - `_ROUTER_ADMISSION` (pinned, from `search_space`): `active_decode_blocks_threshold`,
   `active_prefill_tokens_threshold`, `active_prefill_tokens_threshold_frac`,
-  `no_admission_control`.
+  `no_admission_control`. For searches including `kv_router`, these fields are currently
+  reserved and rejected when set because Dynamo replay cannot model them yet.
 
 Under `round_robin` none of these are emitted.
 

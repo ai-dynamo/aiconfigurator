@@ -79,6 +79,28 @@ def test_agg_scaling_builds_planner_config():
     assert pc["ttft_ms"] == 2000.0 and pc["itl_ms"] == 30.0  # ttft/itl seeded only under "sla"
 
 
+def test_scaling_preserves_search_space_runtime_limits():
+    sample = unroll_sample(
+        search_space=_space(
+            gpu_budget=24,
+            min_gpu_budget=8,
+            min_endpoint=2,
+            context_length=32768,
+            startup_time=45.0,
+        ),
+        selection=_agg_sel(planner_scaling_policy="load_180_5"),
+        parallel_config=AGG_MOE,
+    )
+    plan = build_deployment(sample, backend_version=BV, optimization_target="throughput")
+
+    assert sample["context_length"] == 32768
+    assert plan.agg_engine_args["startup_time"] == 45.0
+    assert plan.planner_config["optimization_target"] == "throughput"
+    assert plan.planner_config["max_gpu_budget"] == 24
+    assert plan.planner_config["min_gpu_budget"] == 8
+    assert plan.planner_config["min_endpoint"] == 2
+
+
 def test_disagg_builds_both_roles():
     cfg = DisaggParallelConfig(
         prefill=ReplicaParallelConfig(ParallelShape(tp=8, dp=1, moe_tp=1, moe_ep=8), 1),
@@ -170,6 +192,7 @@ def test_offload_knobs_thread_into_payload():
     # KV-manager offload knobs present in the sample must reach the engine-args payload.
     space = _space(
         num_g2_blocks=1024,
+        kv_bytes_per_token=131072,
         offload_batch_size=64,
         bandwidth_g1_to_g2_gbps=200.0,
         bandwidth_g2_to_g1_gbps=180.0,
@@ -177,6 +200,7 @@ def test_offload_knobs_thread_into_payload():
     sample = unroll_sample(search_space=space, selection=_agg_sel(), parallel_config=AGG_MOE)
     ea = build_deployment(sample, backend_version=BV).agg_engine_args
     assert ea["num_g2_blocks"] == 1024
+    assert ea["kv_bytes_per_token"] == 131072
     assert ea["offload_batch_size"] == 64
     assert ea["bandwidth_g1_to_g2_gbps"] == 200.0
     assert ea["bandwidth_g2_to_g1_gbps"] == 180.0
@@ -184,7 +208,47 @@ def test_offload_knobs_thread_into_payload():
     default = build_deployment(
         unroll_sample(search_space=_space(), selection=_agg_sel(), parallel_config=AGG_MOE), backend_version=BV
     ).agg_engine_args
-    assert "offload_batch_size" not in default  # unset -> not emitted
+    assert "num_g2_blocks" not in default
+    assert "offload_batch_size" not in default
+
+    # A batch-size pin cannot independently enable KVBM when zero G2 blocks disables it.
+    disabled = build_deployment(
+        unroll_sample(
+            search_space=_space(num_g2_blocks=0, kv_bytes_per_token=131072, offload_batch_size=64),
+            selection=_agg_sel(),
+            parallel_config=AGG_MOE,
+        ),
+        backend_version=BV,
+    ).agg_engine_args
+    assert "num_g2_blocks" not in disabled
+    assert "kv_bytes_per_token" not in disabled
+    assert "offload_batch_size" not in disabled
+
+
+def test_disagg_offload_is_scored_on_prefill_only():
+    cfg = DisaggParallelConfig(
+        prefill=ReplicaParallelConfig(ParallelShape(tp=8, dp=1, moe_tp=1, moe_ep=8), 1),
+        decode=ReplicaParallelConfig(ParallelShape(tp=1, dp=8, moe_tp=1, moe_ep=8), 2),
+    )
+    sample = unroll_sample(
+        search_space=_space(num_g2_blocks=1024, kv_bytes_per_token=131072, offload_batch_size=64),
+        selection=_agg_sel(
+            deployment_mode="disagg",
+            prefill_max_num_batched_tokens=32768,
+            prefill_max_num_seqs=4,
+            decode_max_num_batched_tokens=8192,
+            decode_max_num_seqs=1024,
+        ),
+        parallel_config=cfg,
+    )
+    plan = build_deployment(sample, backend_version=BV)
+
+    assert plan.prefill_engine_args["num_g2_blocks"] == 1024
+    assert plan.prefill_engine_args["kv_bytes_per_token"] == 131072
+    assert plan.prefill_engine_args["offload_batch_size"] == 64
+    assert "num_g2_blocks" not in plan.decode_engine_args
+    assert "kv_bytes_per_token" not in plan.decode_engine_args
+    assert "offload_batch_size" not in plan.decode_engine_args
 
 
 def test_e2e_only_sla_with_sla_target_raises():

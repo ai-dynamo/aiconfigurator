@@ -14,6 +14,7 @@ import yaml
 from aiconfigurator import __version__
 from aiconfigurator.cli.estimate_detail_report import detail_requests_time, format_estimate_detail_report
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
+from aiconfigurator.cli.spica.cli_adapter import run_spica_thorough_default
 from aiconfigurator.cli.utils import merge_experiment_results_by_mode, process_experiment_result
 from aiconfigurator.generator.api import (
     add_generator_override_arguments,
@@ -23,7 +24,11 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
-from aiconfigurator.sdk.errors import NoFeasibleConfigError, UnsupportedWideepConfigError
+from aiconfigurator.sdk.errors import (
+    NoFeasibleConfigError,
+    UnsupportedWideepConfigError,
+    is_expected_no_result_cause,
+)
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
@@ -183,15 +188,15 @@ def _add_default_mode_arguments(parser):
         "--model",
         dest="model_path",
         type=_validate_model_path,
-        required=True,
+        default=None,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
         "local path to directory containing config.json.",
     )
-    parser.add_argument("--total-gpus", type=int, required=True, help="Total GPUs for deployment.")
+    parser.add_argument("--total-gpus", type=int, default=None, help="Total GPUs for deployment.")
     parser.add_argument(
         "--system",
         type=str,
-        required=True,
+        default=None,
         help=(
             "System name (GPU type). Example: "
             "h200_sxm,h100_sxm,h100_pcie,b200_sxm,b300_sxm,gb200,a100_sxm,a100_pcie,l40s,l4,a30,gb300."
@@ -290,6 +295,24 @@ def _add_default_mode_arguments(parser):
         type=float,
         default=None,
         help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
+    )
+    parser.add_argument(
+        "--thorough-sweep",
+        action="store_true",
+        default=False,
+        help=(
+            "Experimental: use Spica's replay-backed thorough sweeper instead of the legacy AIC Pareto sweep. "
+            "Without --thorough-config, CLI inputs are converted to a Spica SmartSearchConfig."
+        ),
+    )
+    parser.add_argument(
+        "--thorough-config",
+        type=str,
+        default=None,
+        help=(
+            "Experimental: path to a native Spica SmartSearchConfig YAML file. Implies --thorough-sweep and "
+            "lets the file define the Spica search space, workload, goal, and sweep controls."
+        ),
     )
     parser.add_argument(
         "--inclusive-tpot",
@@ -902,6 +925,16 @@ aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --perf-db-version 1.2.0rc5 \\
     --config-template-version 1.2.0rc6 \\
     --save-dir results
+# Install the Spica thorough sweeper with pip install 'aiconfigurator[spica]'
+# Run a Spica thorough sweep from normal default CLI inputs
+aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
+    --backend trtllm \\
+    --total-gpus 32 --system h200_sxm \\
+    --isl 4000 --osl 1000 \\
+    --thorough-sweep
+
+# Run a Spica thorough sweep from a native SmartSearchConfig YAML
+aiconfigurator cli default --thorough-config spica_smart_sweep.yaml
 """
 
 
@@ -1564,7 +1597,9 @@ def _execute_tasks(
             logger.warning(msg)
             failure_messages.append(msg)
         except Exception as exc:
-            if perf_database.has_perf_data_not_available_cause(exc):
+            if is_expected_no_result_cause(exc) or perf_database.has_perf_data_not_available_cause(exc):
+                # Expected failure (no feasible config / OOM / KV-cache capacity, or
+                # a per-op perf-data miss): report cleanly without a scary traceback.
                 logger.log(logging.ERROR, "Error running experiment %s: %s", exp_name, exc)
             else:
                 logger.exception("Error running experiment %s", exp_name)
@@ -2232,6 +2267,27 @@ def _resolve_cli_log_level(args) -> int:
     return logging.INFO
 
 
+def _validate_default_mode_inputs(args) -> None:
+    """Validate default-mode args that are conditional on the selected sweeper."""
+    if args.mode != "default":
+        return
+    if getattr(args, "thorough_config", None):
+        return
+
+    required = {
+        "model_path": "--model-path/--model",
+        "total_gpus": "--total-gpus",
+        "system": "--system",
+    }
+    missing = [flag for attr, flag in required.items() if getattr(args, attr, None) is None]
+    if missing:
+        raise SystemExit(
+            "default mode requires "
+            + ", ".join(missing)
+            + " unless --thorough-config provides a native Spica SmartSearchConfig."
+        )
+
+
 def main(args):
     setup_logging(
         level=_resolve_cli_log_level(args),
@@ -2262,6 +2318,11 @@ def main(args):
         return
 
     if args.mode == "default":
+        _validate_default_mode_inputs(args)
+        if getattr(args, "thorough_sweep", False) or getattr(args, "thorough_config", None):
+            run_spica_thorough_default(args)
+            return
+
         # Warn when SLA/workload parameters are implicitly defaulted
         _default_params = {"isl": 4000, "osl": 1000, "ttft": 2000.0, "tpot": 30.0}
         _implicit = [

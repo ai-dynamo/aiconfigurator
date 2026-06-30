@@ -88,10 +88,13 @@ separate study. `min_gpu_budget` is validated against `gpu_budget` by `_validate
 ## KV manager (multi-tier offload)
 
 All pinned. G3/G4 extend G2; offload is **off by default** (`num_g2_blocks = 0`).
+When G2 is enabled, `kv_bytes_per_token` is required so replay cannot silently
+disable offload if model metadata is private or unavailable.
 
 | knob | type | default | searched / pinned | allowed choices |
 |---|---|---|---|---|
 | `num_g2_blocks` | int | `0` | pinned | `0` disables host offload |
+| `kv_bytes_per_token` | int? | `None` | pinned | required when `num_g2_blocks > 0` |
 | `bandwidth_g1_to_g2_gbps` | float? | `None` | pinned | — |
 | `bandwidth_g2_to_g1_gbps` | float? | `None` | pinned | — |
 | `offload_batch_size` | int? | `None` | pinned | — |
@@ -125,6 +128,11 @@ dimensions. They are only swept when multi-tier KV offload is enabled (`num_g2_b
 | `active_prefill_tokens_threshold` | int? | `None` | pinned | — |
 | `active_prefill_tokens_threshold_frac` | float? | `None` | pinned | — |
 | `no_admission_control` | bool | `False` | pinned | — |
+
+For a search that includes `kv_router`, these fields are reserved but currently rejected
+when set: Dynamo's replay API does not accept admission-control configuration, so scoring
+them would diverge from the generated frontend. Leave them at their defaults until replay
+support is available. They remain inert under a round-robin-only search.
 
 ## Planner composites
 

@@ -45,7 +45,7 @@ def test_host_disk_cache_weights_gated_on_offload():
     assert "host_cache_hit_weight" not in off and "disk_cache_hit_weight" not in off
     assert "overlap_score_credit" in off and "prefill_load_scale" in off  # live knobs kept
 
-    on = branch_knob_choices(_config(num_g2_blocks=4096).search_space, "agg")
+    on = branch_knob_choices(_config(num_g2_blocks=4096, kv_bytes_per_token=131072).search_space, "agg")
     assert "host_cache_hit_weight" in on and "disk_cache_hit_weight" in on
 
 

@@ -10,6 +10,8 @@ import pytest
 from aiconfigurator.sdk import common, interpolation
 from aiconfigurator.sdk.operations.dsa import (
     DEFAULT_DSA_ARCHITECTURE,
+    ContextDSAModule,
+    GenerationDSAModule,
     load_context_dsa_module_data,
     load_generation_dsa_module_data,
 )
@@ -662,6 +664,53 @@ class TestContextDSAModule:
         )
         assert r1 != r2
 
+    def test_extrapolate_descends_into_each_dsa_backend_independently(self):
+        """Regression: ``_extrapolate`` must descend through the ``dsa_backend``
+        level and extrapolate each backend's ``{num_heads: {prefix: {s: {b}}}}``
+        grid independently.  Before the fix the backend names ("flashmla_kv",
+        "trtllm") were treated as the num_heads x-axis, silently extrapolating
+        at the wrong nesting level."""
+        flashmla = {
+            32: {0: {1: {1: _dsa_value(10.0), 4: _dsa_value(40.0)}, 32: {1: _dsa_value(20.0), 4: _dsa_value(50.0)}}}
+        }
+        trtllm = {
+            32: {0: {1: {1: _dsa_value(100.0), 4: _dsa_value(400.0)}, 32: {1: _dsa_value(200.0), 4: _dsa_value(500.0)}}}
+        }
+        dsa_dict = {"flashmla_kv": flashmla, "trtllm": trtllm}
+        data_wrapper = LoadedOpData(
+            _context_dsa_data(dsa_dict, GLM5_ARCHITECTURE),
+            common.PerfDataFilename.dsa_context_module,
+            "test",
+        )
+
+        ContextDSAModule._extrapolate(data_wrapper)
+
+        arch_dict = data_wrapper[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][
+            common.GEMMQuantMode.bfloat16
+        ][GLM5_ARCHITECTURE]
+
+        # Backend names survive as backend-level keys (not consumed as grid keys).
+        assert set(arch_dict.keys()) == {"flashmla_kv", "trtllm"}
+
+        for backend in ("flashmla_kv", "trtllm"):
+            backend_grid = arch_dict[backend]
+            # num_heads level untouched: still plain int keys.
+            assert set(backend_grid.keys()) == {32}
+            # New b=2 interpolated within each (num_heads, prefix, s) slice.
+            assert 2 in backend_grid[32][0][1]
+            assert 2 in backend_grid[32][0][32]
+            # New s=16 interpolated within each (num_heads, prefix) slice.
+            assert 16 in backend_grid[32][0]
+            # All s-level keys are ints (no backend-name leakage into the grid).
+            assert all(isinstance(k, int) for k in backend_grid[32][0])
+
+        # Backends extrapolated independently: same grid point, different values.
+        flashmla_b2 = arch_dict["flashmla_kv"][32][0][1][2]["latency"]
+        trtllm_b2 = arch_dict["trtllm"][32][0][1][2]["latency"]
+        assert flashmla_b2 == pytest.approx(20.0)
+        assert trtllm_b2 == pytest.approx(200.0)
+        assert flashmla_b2 != trtllm_b2
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Generation DSA Module
@@ -964,3 +1013,53 @@ class TestGenerationDSAModule:
 
         assert float(result) == pytest.approx(11.0 * sol_query / sol_boundary)
         assert result.source == "empirical"
+
+    def test_extrapolate_descends_into_each_dsa_backend_independently(self):
+        """Regression: ``_extrapolate`` must descend through the ``dsa_backend``
+        level and extrapolate each backend's ``{num_heads: {b: {s}}}`` grid
+        independently.  Before the fix the backend names ("flashmla_kv",
+        "trtllm") were treated as the num_heads x-axis, silently extrapolating
+        at the wrong nesting level."""
+        flashmla = {
+            32: {1: {256: _dsa_value(10.0), 1024: _dsa_value(20.0)}, 8: {256: _dsa_value(30.0), 1024: _dsa_value(40.0)}}
+        }
+        trtllm = {
+            32: {
+                1: {256: _dsa_value(100.0), 1024: _dsa_value(200.0)},
+                8: {256: _dsa_value(300.0), 1024: _dsa_value(400.0)},
+            }
+        }
+        dsa_dict = {"flashmla_kv": flashmla, "trtllm": trtllm}
+        data_wrapper = LoadedOpData(
+            _generation_dsa_data(dsa_dict),
+            common.PerfDataFilename.dsa_generation_module,
+            "test",
+        )
+
+        GenerationDSAModule._extrapolate(data_wrapper)
+
+        arch_dict = data_wrapper[common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][
+            DEFAULT_DSA_ARCHITECTURE
+        ]
+
+        # Backend names survive as backend-level keys (not consumed as grid keys).
+        assert set(arch_dict.keys()) == {"flashmla_kv", "trtllm"}
+
+        for backend in ("flashmla_kv", "trtllm"):
+            backend_grid = arch_dict[backend]
+            # num_heads level untouched: still plain int keys.
+            assert set(backend_grid.keys()) == {32}
+            # New b=2 interpolated within each num_heads slice (between b=1 and b=8).
+            assert 2 in backend_grid[32]
+            # New s=512 interpolated within each (num_heads, b) slice (between s=256 and s=1024).
+            assert 512 in backend_grid[32][1]
+            assert 512 in backend_grid[32][8]
+            # All b-level keys are ints (no backend-name leakage into the grid).
+            assert all(isinstance(k, int) for k in backend_grid[32])
+
+        # Backends extrapolated independently: same grid point, different values.
+        flashmla_s512 = arch_dict["flashmla_kv"][32][1][512]["latency"]
+        trtllm_s512 = arch_dict["trtllm"][32][1][512]["latency"]
+        assert flashmla_s512 == pytest.approx(13.333333, rel=1e-4)
+        assert trtllm_s512 == pytest.approx(133.333333, rel=1e-4)
+        assert flashmla_s512 != trtllm_s512

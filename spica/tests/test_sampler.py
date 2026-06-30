@@ -224,7 +224,7 @@ def test_suggest_observe_round_trips():
     # tracks the best observed score. (Convergence quality isn't asserted —
     # Vizier GP-bandit is slow, ~seconds per suggest, so keep trial counts low.)
     branch = _branch()
-    sampler = make_branch_sampler(branch, study_id="test_round_trip")
+    sampler = make_branch_sampler(branch, study_id=f"test_round_trip_{uuid.uuid4().hex}")
     scores = []
     for _ in range(2):
         for s in sampler.suggest(count=2):

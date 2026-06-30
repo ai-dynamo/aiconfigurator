@@ -96,6 +96,7 @@ def test_ranks_feasible_best_first(monkeypatch):
     cands = run_smart_search(_config(), evaluator=_FakeEvaluator(), sampler_factory=_FakeSampler)
     assert [c.score for c in cands] == [768.0, 512.0, 256.0]  # throughput, best first
     assert all(c.used_gpus == 8 for c in cands)
+    assert all(c.config["backend_version"] == "1.3.0rc10" for c in cands)
     assert cands[0].metrics["gpu_hours"] == 1.0
 
 
@@ -256,7 +257,7 @@ def test_e2e_only_goodput_drops_planner_scaling_and_proceeds(monkeypatch):
     assert len(cands) == 1
 
 
-def test_candidate_build_error_is_reported_not_raised(monkeypatch):
+def test_candidate_build_error_is_reported_not_raised(monkeypatch, capsys):
     branch = _branch(ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=2))
     _stub(monkeypatch, branch)
     sampler_seen = {}
@@ -280,13 +281,14 @@ def test_candidate_build_error_is_reported_not_raised(monkeypatch):
         sampler_seen["s"] = s
         return s
 
-    cands = run_smart_search(_config(), evaluator=_FakeEvaluator(), sampler_factory=factory, show_progress=False)
+    cands = run_smart_search(_config(), evaluator=_FakeEvaluator(), sampler_factory=factory, show_progress=True)
 
     assert cands == []
     scored = sampler_seen["s"].scored
     assert len(scored) == 33  # one bad suggestion per replacement ask, up to the safety cap
     assert scored[0][0] == "infeasible"
     assert "candidate build failed" in scored[0][1]
+    assert "smart-sweep failure reason(s): candidate build failed" in capsys.readouterr().out
 
 
 def test_duplicate_full_samples_use_cache_and_are_replaced(monkeypatch):

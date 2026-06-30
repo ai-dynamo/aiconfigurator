@@ -431,7 +431,8 @@ class SearchSpace(BaseModel):
     agg_enable_prefix_caching: bool = True
 
     # kv manager: multi-tier offload policy (all pinned; G3/G4 extend G2)
-    num_g2_blocks: int = 0  # 0 disables host offload
+    num_g2_blocks: int = Field(default=0, ge=0)  # 0 disables host offload
+    kv_bytes_per_token: int | None = Field(default=None, gt=0)  # required replay transfer sizing when G2 is on
     bandwidth_g1_to_g2_gbps: float | None = None
     bandwidth_g2_to_g1_gbps: float | None = None
     offload_batch_size: int | None = None
@@ -516,11 +517,51 @@ class SearchSpace(BaseModel):
     @model_validator(mode="after")
     def _validate_gpu_budget(self) -> "SearchSpace":
         """When ``min_gpu_budget`` is set it must be a positive value not exceeding
-        ``gpu_budget`` (``min_endpoint`` is a declared-but-unused field; left as-is)."""
+        ``gpu_budget``. ``min_endpoint`` is carried into scaling candidates as a planner
+        runtime floor; its detailed feasibility is validated by the planner."""
         if self.min_gpu_budget is not None and not (0 < self.min_gpu_budget <= self.gpu_budget):
             raise ValueError(
                 f"min_gpu_budget must satisfy 0 < min_gpu_budget <= gpu_budget "
                 f"(got min_gpu_budget={self.min_gpu_budget}, gpu_budget={self.gpu_budget})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_kv_offload_replay_sizing(self) -> "SearchSpace":
+        """Require deterministic transfer sizing whenever G2 offload is enabled.
+
+        Dynamo can try to infer this value from model metadata, but inference may
+        fail for private, gated, or offline models and silently skip attaching the
+        offload engine. Requiring the pinned value keeps replay and deployment
+        artifacts on the same KVBM policy.
+        """
+        if self.num_g2_blocks > 0 and self.kv_bytes_per_token is None:
+            raise ValueError("kv_bytes_per_token is required when num_g2_blocks > 0 so replay can model KVBM offload")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_router_admission_replay_support(self) -> "SearchSpace":
+        """Reject admission-control pins until Dynamo replay can model them.
+
+        Generated deployments support these frontend flags, but the pinned replay
+        API accepts only ``KvRouterConfig`` and would silently score a different
+        router policy. Failing here keeps optimized and generated artifacts aligned.
+        """
+        if "kv_router" not in self.router_mode:
+            return self
+
+        admission_pins = {
+            "active_decode_blocks_threshold": self.active_decode_blocks_threshold,
+            "active_prefill_tokens_threshold": self.active_prefill_tokens_threshold,
+            "active_prefill_tokens_threshold_frac": self.active_prefill_tokens_threshold_frac,
+        }
+        enabled = [name for name, value in admission_pins.items() if value is not None]
+        if self.no_admission_control:
+            enabled.append("no_admission_control")
+        if enabled:
+            raise ValueError(
+                "router admission-control knobs are not supported by the Dynamo replay API; "
+                f"remove {', '.join(enabled)} so replay and generated artifacts stay equivalent"
             )
         return self
 

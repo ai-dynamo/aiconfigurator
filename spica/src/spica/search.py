@@ -102,6 +102,10 @@ def _evaluate_one(
             load_predictor=load_predictor,
         )
         backend_version = resolve_backend_version(config.search_space.hardware_sku, selection["backend"])
+        # The resolved perf-model version is part of the evaluated contract. Keep it
+        # on the candidate so downstream artifact generation cannot independently
+        # select a different backend version.
+        sample["backend_version"] = backend_version
         concurrency = config.workload.concurrency
         if "kv_load_ratio" in selection:
             ratio = float(selection["kv_load_ratio"])
@@ -264,6 +268,7 @@ def run_smart_search(
     total = len(branches) * sweep.max_rounds * per_round
     candidates: list[Candidate] = []
     tally = {"feasible": 0, "infeasible": 0, "failed": 0, "unsupported": 0, "cache_hit": 0}
+    failure_reasons: dict[str, int] = {}
     # Unique per run: Vizier's datastore persists studies by id, so a fixed id would
     # make a later run inherit a stale study (and its old param space) -> decode crash.
     run_nonce = uuid.uuid4().hex[:8]
@@ -424,6 +429,8 @@ def run_smart_search(
                             sampler.observe_infeasible(suggestion, reason)
                             for duplicate in duplicates:
                                 sampler.observe_infeasible(duplicate, reason)
+                            if outcome == "failed":
+                                failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
                             _record(outcome, None)
                             continue
 
@@ -435,7 +442,6 @@ def run_smart_search(
                             tally["cache_hit"] += 1
                         _record(outcome, candidate)
                         unique_this_round += 1
-
                 round_no += 1
                 if on_round is not None:
                     on_round(round_no, list(candidates))
@@ -474,4 +480,11 @@ def run_smart_search(
         else:
             summary += f"; best {goal.target.value}={_best():.4g}"
         tqdm.write(summary)
+        if failure_reasons:
+            displayed = []
+            for reason, count in list(failure_reasons.items())[:3]:
+                displayed.append(f"{reason} (x{count})" if count > 1 else reason)
+            remaining = len(failure_reasons) - len(displayed)
+            suffix = f" | +{remaining} more distinct reason(s)" if remaining else ""
+            tqdm.write(f"smart-sweep failure reason(s): {' | '.join(displayed)}{suffix}")
     return result
