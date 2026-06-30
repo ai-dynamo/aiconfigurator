@@ -68,6 +68,8 @@ def _task_fn(label, behavior, device):
         os.kill(os.getpid(), signal.SIGABRT)
     elif behavior == "error":
         raise ValueError(f"simulated: {label}")
+    elif behavior == "oom":
+        raise sys.modules["torch"].OutOfMemoryError(f"simulated: {label}")
     elif behavior == "expected_error":
         raise RuntimeError(f"expected simulated: {label}")
     # "normal": return silently
@@ -197,6 +199,12 @@ class TestCudaFatalExceptionDetection:
 
         assert _collect_mod._is_cuda_fatal_exception(torch_mod.AcceleratorError("boom"), torch_mod)
 
+    def test_torch_out_of_memory_error_is_fatal(self):
+        torch_mod = MagicMock()
+        torch_mod.OutOfMemoryError = type("OutOfMemoryError", (Exception,), {})
+
+        assert _collect_mod._is_cuda_fatal_exception(torch_mod.OutOfMemoryError("boom"), torch_mod)
+
     @pytest.mark.parametrize(
         "message",
         [
@@ -296,6 +304,18 @@ class TestTaskExceptions:
         assert len([e for e in errors if e.get("error_type") == "ValueError"]) == 2
         assert _load_done_ids(tmp_path, "mixed_success_fail") == {"a", "c", "e"}
         assert _load_failed_ids(tmp_path, "mixed_success_fail") == {"b", "d"}
+
+    def test_oom_records_once_and_restarts_worker(self, tmp_path, monkeypatch):
+        oom_error = type("OutOfMemoryError", (Exception,), {})
+        monkeypatch.setattr(sys.modules["torch"], "OutOfMemoryError", oom_error, raising=False)
+        tasks = _tasks([("oom", "oom"), ("after", "normal")])
+
+        errors = _run_and_assert_all_done(tasks, 1, tmp_path, module_name="oom_restart")
+
+        assert len([error for error in errors if error.get("error_type") == "OutOfMemoryError"]) == 1
+        assert _crash_errors(errors) == []
+        assert _load_done_ids(tmp_path, "oom_restart") == {"after"}
+        assert _load_failed_ids(tmp_path, "oom_restart") == {"oom"}
 
     def test_expected_failures_are_logged_but_not_reported_as_errors(self, tmp_path):
         tasks = _tasks(

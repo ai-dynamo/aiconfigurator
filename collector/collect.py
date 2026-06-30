@@ -381,8 +381,15 @@ def _expected_failure_label(details):
 
 
 def _is_cuda_fatal_exception(exc, torch_mod) -> bool:
-    accelerator_error = getattr(torch_mod, "AcceleratorError", ())
-    is_cuda_fatal = isinstance(exc, accelerator_error) if accelerator_error else False
+    fatal_error_types = tuple(
+        error_type
+        for error_type in (
+            getattr(torch_mod, "AcceleratorError", None),
+            getattr(torch_mod, "OutOfMemoryError", None),
+        )
+        if isinstance(error_type, type)
+    )
+    is_cuda_fatal = isinstance(exc, fatal_error_types)
     if not is_cuda_fatal:
         error_text = str(exc).lower()
         fatal_markers = (
