@@ -1156,6 +1156,7 @@ def test_nemotron_ultra_quant_artifact_keeps_moe_path_but_reuses_mamba_profile(m
     mamba_cases = get_common_mamba2_test_cases()
 
     assert moe_cases and {case.model_name for case in moe_cases} == {"nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8"}
+    assert {case.hidden_size for case in moe_cases} == {2048, 8192}
     assert mamba_cases and {case.model_name for case in mamba_cases} == {
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
     }
