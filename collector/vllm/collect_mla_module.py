@@ -792,7 +792,7 @@ def run_mla_module(
     hf_cfg = vllm_config.model_config.hf_config
     architecture = getattr(hf_cfg, "architectures", [getattr(hf_cfg, "model_type", "unknown")])[0]
     mla_layer = attn_module.mla_attn.mla_attn
-    if attn_type == "dsa" or not is_context:
+    if attn_type == "dsa" or not is_context or attn_metadata.num_prefills == 0:
         backend_name = mla_layer.attn_backend.get_name()
     else:
         backend_name = mla_layer.prefill_backend.get_name()
