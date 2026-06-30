@@ -93,12 +93,18 @@ def test_cli_default_thorough_sweep_real_static_workload(tmp_path: Path):
 
     assert "sweep={'max_rounds': 1, 'parallel_evals': 4, 'candidates_per_round': 4}" in combined
     sweep_done = re.search(
-        r"smart-sweep done: (?P<feasible>\d+)/8 feasible, 0 gated, 0 backend-unsupported, "
-        r"(?P<replay_failed>\d+) replay-failed",
+        r"smart-sweep done: (?P<feasible>\d+)/(?P<attempts>\d+) replay attempt\(s\) feasible, "
+        r"(?P<gated>\d+) gated, (?P<unsupported>\d+) backend-unsupported, "
+        r"(?P<replay_failed>\d+) replay-failed, (?P<cache_hits>\d+) cache hit\(s\)",
         combined,
     )
     assert sweep_done, combined
-    assert int(sweep_done.group("feasible")) > 0
+    assert int(sweep_done.group("feasible")) == 4
+    assert int(sweep_done.group("attempts")) == 4
+    assert int(sweep_done.group("gated")) == 0
+    assert int(sweep_done.group("unsupported")) == 0
+    assert int(sweep_done.group("replay_failed")) == 0
+    # Structured projection is many-to-one, so cache hits are valid and nondeterministic.
     assert "AIConfigurator Final Results" in combined
     assert "Total GPUs: 4" in combined
     assert "Synthetic Workload: ISL=128, OSL=16, concurrency=1, num_request_ratio=4.0" in combined
@@ -182,8 +188,12 @@ def test_cli_native_thorough_config_preserves_dynamo_features(tmp_path: Path):
     assert completed.returncode == 0, combined
 
     assert "sweep={'max_rounds': 1, 'parallel_evals': 1, 'candidates_per_round': 1}" in combined
-    assert "concurrency=None request_rate=1.0 num_request_ratio=3.0" in combined
-    assert re.search(r"smart-sweep done: 1/1 feasible, 0 gated, 0 backend-unsupported, 0 replay-failed", combined)
+    assert "Synthetic Workload: ISL=128, OSL=16, request_rate=1.0, num_request_ratio=3.0" in combined
+    assert re.search(
+        r"smart-sweep done: 1/1 replay attempt\(s\) feasible, 0 gated, "
+        r"0 backend-unsupported, 0 replay-failed, 0 cache hit\(s\)",
+        combined,
+    )
     assert combined.count("kvbm-offload: init_kvbm_offline attaching engine") == 2
     assert combined.count("kvbm-offload: building mock offload engine") == 2
     assert "kvbm-offload offline init failed" not in combined

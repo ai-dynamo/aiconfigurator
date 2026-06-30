@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 The [search space](search-space.md) defines what gets explored. A single *trial* picks
 one concrete point in it: a **selection** (one value per searched knob, chosen by the
-sampler), the one **`parallel_config`** the sampler indexed out of the branch's menu, and
+sampler), the one **`parallel_config`** the sampler selected or projected from the branch's valid pool, and
 the **load-predictor winner** from the independent forecast sub-sweep.
 `unroll_sample` (`src/spica/sample.py`) expands those into a **flat, self-contained
 deployment-config dict** — the `config` of a `Candidate` (`src/spica/config.py`). It
@@ -57,7 +57,7 @@ Unrolled from the chosen `parallel_config` via `_shape_fields`. The keys differ 
   `prefill_tp` … `prefill_strategy`, `prefill_replicas`, `decode_tp` … `decode_strategy`,
   `decode_replicas`, and a single top-level `used_gpus`.
 
-`strategy` (`tp` / `tep` / `dep`, with a `mixed` fallback the enumerator never emits) and
+`strategy` (`tp` / `tep` / `dep` / `dtp`, with a `mixed` fallback the enumerator never emits) and
 `used_gpus` (`gpus_per_worker × replicas`, summed across roles for disagg) are **derived
 from the shape**, not settable — see [search-space.md](search-space.md).
 
@@ -119,11 +119,22 @@ prophet, `kalman_q_level` / `kalman_q_trend` / `kalman_r` / `kalman_min_points` 
 nothing extra for constant/arima. If the interval has no winner, no predictor fields are
 added.
 
-### Swept concurrency (pareto only)
+### Candidate-relative KV load
 
-When `workload.concurrency` is a list (a `pareto` goal), `enumerate_branches` adds a
-per-trial `concurrency` dimension; that swept value rides along in the `selection` and is
-the in-flight cap for the trial. It is not added by `unroll_sample` itself.
+When `workload.kv_load_ratio` is set, a scalar ratio is pinned or a Pareto `[min, max]`
+range becomes a continuous per-trial selection. After `unroll_sample`, the search evaluates
+the selected backend/shape/batching with AIC and appends these derived fields:
+
+- `kv_load_ratio` — the requested normalized load;
+- `concurrency` — the concrete closed-loop in-flight cap;
+- `kv_load_concurrency_capacity` — estimated concurrency at ratio `1`;
+- `kv_load_capacity_tokens` — aggregate decode (disagg) or agg KV tokens;
+- `prefill_kv_capacity_tokens` + `decode_kv_capacity_tokens` for disagg, or
+  `agg_kv_capacity_tokens` for agg.
+
+These fields are added by the search orchestration rather than `unroll_sample`, because
+capacity depends on the fully selected candidate's backend, batching, shape, and replicas.
+A fixed `workload.concurrency` is also copied into each candidate as `concurrency`.
 
 ## Overriding
 

@@ -22,7 +22,7 @@ Design proposal: `docs/proposals/dgdr-profiler-smart-search-plan.md` in
 - [optimization-goal.md](docs/optimization-goal.md) — the `OptimizationGoal` targets,
   the per-GPU metric, the SLA rule, and how **`pareto`** (multi-objective) works.
 - [traffic.md](docs/traffic.md) — the `Workload` load shapes (trace / request-rate /
-  concurrency), `num_request_ratio`, and the pareto concurrency sweep.
+  fixed concurrency / KV load), candidate-relative `kv_load_ratio`, and request-count scaling.
 - [search-space.md](docs/search-space.md) — every knob (type, default, searched/pinned,
   choices), the composite presets, and how `parallel_configs` are derived.
 - [sample.md](docs/sample.md) — the flat *unrolled sample* and the three ways to
@@ -76,7 +76,9 @@ GIT_LFS_SKIP_SMUDGE=1 uv pip install --python .venv/bin/python -e ".[dev,dynamo,
 `search-gpu` pulls the jax CUDA wheels, which exist **only for linux-x86_64**
 (not macOS / Windows / aarch64 — those must use `[search]`). With no GPU present
 jax just warns and falls back to CPU, so there's no reason to use it without
-one — stay on `[search]`.
+one — stay on `[search]`. Spica detects the installed CUDA plugin and leaves JAX's
+platform selection enabled; an explicit `JAX_PLATFORMS=cpu` or `JAX_PLATFORMS=cuda`
+still overrides that behavior.
 
 ### Real replay (`aic-forward-pass`)
 

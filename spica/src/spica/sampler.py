@@ -5,8 +5,9 @@
 
 One Vizier study per branch (per the design). The study's parameters are:
 
-- ``parallel_config_index`` — a categorical index into the branch's KV-feasible
-  parallel-config list (configs are unordered, so categorical not discrete).
+- structured parallel features projected onto the branch's KV-feasible config
+  pool.
+- a continuous ``kv_load_ratio`` when a Pareto workload supplies a range.
 - one parameter per multi-choice searchable knob (categorical for string choices
   like ``planner_scaling_policy``/``router_mode``; discrete for the numeric
   batching / router-weight choices). Single-choice knobs are injected as
@@ -17,22 +18,23 @@ One Vizier study per branch (per the design). The study's parameters are:
 object; ``observe`` reports the (higher-is-better) score back to Vizier.
 
 The sampler is swappable behind the :class:`BranchSampler` Protocol so a lighter
-backend can replace Vizier without touching the orchestration. kv-router weight
-knobs are always offered as params; ``unroll_sample`` ignores them under
-``round_robin`` (no Vizier conditional params in v1).
+backend can replace Vizier without touching the orchestration. The branch-space
+builder removes dependent router/planner knobs when those components are pinned
+off; mixed-mode studies retain them because Vizier has no conditional params here.
 """
 
 from __future__ import annotations
 
+import json
 import os
-
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from .parallel_enum import DisaggParallelConfig, ReplicaParallelConfig
+from .parallel_projection import ParallelConfigProjector, ParallelProjection
 from .search_space import BranchSpace
 
-_PARALLEL_PARAM = "parallel_config_index"
+_CONSTANT_PARAM = "_spica_constant"
 _METRIC = "objective"
 
 
@@ -44,6 +46,7 @@ class Suggestion:
     selection: dict[str, Any]
     parallel_config: ReplicaParallelConfig | DisaggParallelConfig
     handle: Any = field(repr=False)
+    projection: ParallelProjection | None = field(default=None, repr=False)
 
 
 class BranchSampler(Protocol):
@@ -98,10 +101,43 @@ class VizierBranchSampler:
         self._objectives = objectives or [(_METRIC, True)]
         self._decoders: dict[str, Callable[[Any], Any]] = {}
         self._constants: dict[str, Any] = {}
+        self._parallel_projector = ParallelConfigProjector(branch)
+        self._parallel_pinned = len(branch.parallel_configs) == 1
 
         problem = vz.ProblemStatement()
         root = problem.search_space.root
-        root.add_categorical_param(_PARALLEL_PARAM, [str(i) for i in range(len(branch.parallel_configs))])
+        if not self._parallel_pinned:
+            for parameter in self._parallel_projector.parameters:
+                if parameter.is_constant:
+                    continue
+                if parameter.kind == "float":
+                    root.add_float_param(
+                        parameter.name,
+                        min_value=parameter.minimum,
+                        max_value=parameter.maximum,
+                        default_value=parameter.default,
+                    )
+                elif parameter.kind == "discrete":
+                    root.add_discrete_param(
+                        parameter.name,
+                        feasible_values=parameter.values,
+                        default_value=parameter.default,
+                        scale_type=vz.ScaleType.LOG if parameter.log_scale else vz.ScaleType.LINEAR,
+                    )
+                else:
+                    root.add_categorical_param(
+                        parameter.name,
+                        feasible_values=parameter.values,
+                        default_value=parameter.default,
+                    )
+        for knob, (minimum, maximum) in branch.float_ranges.items():
+            root.add_float_param(
+                knob,
+                min_value=minimum,
+                max_value=maximum,
+                default_value=(minimum + maximum) / 2.0,
+            )
+            self._decoders[knob] = float
         for knob, choices in branch.knob_choices.items():
             if not any(isinstance(c, dict) for c in choices):
                 # defensively dedupe hashable choices (order-preserving); duplicates
@@ -118,11 +154,17 @@ class VizierBranchSampler:
                 root.add_categorical_param(knob, [str(i) for i in range(len(choices))])
                 self._decoders[knob] = _index_decoder(choices)
             elif all(isinstance(c, str) for c in choices):
-                root.add_categorical_param(knob, list(choices))
+                kwargs = {"default_value": choices[0]} if knob == "backend" else {}
+                root.add_categorical_param(knob, list(choices), **kwargs)
                 self._decoders[knob] = _decoder_for(choices)
             else:
                 root.add_discrete_param(knob, sorted(float(c) for c in choices))
                 self._decoders[knob] = _decoder_for(choices)
+
+        # GP designers reject a zero-dimensional study. A fully pinned request still
+        # needs one internal constant so it can use the same ask/tell lifecycle.
+        if problem.search_space.num_parameters() == 0:
+            root.add_categorical_param(_CONSTANT_PARAM, ["0"], default_value="0")
 
         for name, maximize in self._objectives:
             goal = vz.ObjectiveMetricGoal.MAXIMIZE if maximize else vz.ObjectiveMetricGoal.MINIMIZE
@@ -146,13 +188,36 @@ class VizierBranchSampler:
             }
             for knob, decode in self._decoders.items():
                 selection[knob] = decode(params[knob])
-            parallel_config = self.branch.parallel_configs[int(params[_PARALLEL_PARAM])]
-            suggestions.append(Suggestion(selection=selection, parallel_config=parallel_config, handle=trial))
+            if self._parallel_pinned:
+                parallel_config = self.branch.parallel_configs[0]
+                projection = None
+            else:
+                projection = self._parallel_projector.project(params, selection["backend"])
+                parallel_config = projection.config
+            suggestions.append(
+                Suggestion(
+                    selection=selection,
+                    parallel_config=parallel_config,
+                    handle=trial,
+                    projection=projection,
+                )
+            )
         return suggestions
+
+    @staticmethod
+    def _update_projection_metadata(suggestion: Suggestion) -> None:
+        if suggestion.projection is None:
+            return
+        from vizier.service import pyvizier as vz
+
+        metadata = vz.Metadata()
+        metadata["spica_projection"] = json.dumps(suggestion.projection.metadata(), sort_keys=True)
+        suggestion.handle.update_metadata(metadata)
 
     def observe(self, suggestion: Suggestion, metrics: dict[str, float]) -> None:
         from vizier.service import pyvizier as vz
 
+        self._update_projection_metadata(suggestion)
         suggestion.handle.complete(vz.Measurement(metrics={k: float(v) for k, v in metrics.items()}))
 
     def observe_infeasible(self, suggestion: Suggestion, reason: str) -> None:
@@ -160,6 +225,7 @@ class VizierBranchSampler:
         study still closes the trial and the optimizer moves on."""
         from vizier.service import pyvizier as vz
 
+        self._update_projection_metadata(suggestion)
         suggestion.handle.complete(vz.Measurement(), infeasible_reason=reason)
 
 

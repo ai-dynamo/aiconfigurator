@@ -121,10 +121,12 @@ tradeoff between the scalar targets in `pareto_objectives`.
   returns this front for a Pareto goal, and `rank` (best score, ties → fewer GPUs) for
   every scalar goal.
 
-- **swept dimension** — under a `pareto` goal `workload.concurrency` may be a **list** of
-  ints (each value an in-flight cap); `SmartSearchConfig._validate_concurrency_sweep`
-  rejects a list `concurrency` for any non-Pareto goal. This is the dimension that traces
-  the front.
+- **swept load dimension** — `workload.concurrency` is always one fixed in-flight cap.
+  A Pareto workload may instead set `kv_load_ratio: [min, max]`, which Vizier models as a
+  continuous parameter. Each ratio is converted to an absolute concurrency from that
+  candidate's decode/agg KV capacity, so the model compares equivalent load pressure across
+  different replica and parallel configurations. If a synthetic Pareto workload omits all
+  load fields, the range defaults to `[0.0, 1.0]`; see [traffic.md](traffic.md).
 
 Per-objective raw values are stored on `Candidate.objectives` (keyed by
 `OptimizationTarget` value, e.g. `{"throughput_per_gpu": .., "throughput_per_user": ..}`)

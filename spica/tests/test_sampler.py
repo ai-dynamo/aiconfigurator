@@ -7,6 +7,9 @@ The ``_decoder_for`` / ``_index_decoder`` helpers are pure (no vizier import), s
 those tests run unconditionally; everything that builds a study is gated behind the
 ``importorskip`` below."""
 
+import json
+import uuid
+
 import pytest
 
 # Pure decode helpers — import eagerly so their tests run without the vizier stack.
@@ -44,7 +47,13 @@ def test_index_decoder_maps_index_back_to_entry():
 pytest.importorskip("vizier")
 
 from spica.parallel_enum import ParallelShape, ReplicaParallelConfig  # noqa: E402
-from spica.sampler import _PARALLEL_PARAM, Suggestion, make_branch_sampler  # noqa: E402
+from spica.parallel_projection import (  # noqa: E402
+    AGG_ATTENTION_MODE,
+    AGG_FFN_MODE,
+    AGG_GPUS_PER_ENGINE,
+    USED_GPU_RATIO,
+)
+from spica.sampler import Suggestion, make_branch_sampler  # noqa: E402
 from spica.search_space import BranchSpace  # noqa: E402
 
 
@@ -117,25 +126,97 @@ def test_dict_form_composite_decodes_via_index():
         assert isinstance(entry, (str, dict))
 
 
-def test_parallel_config_index_decodes_to_matching_config():
-    # N distinguishable parallel configs: the categorical index Vizier picks must
-    # decode back to exactly that element of branch.parallel_configs.
-    configs = tuple(
-        ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=r) for r in (1, 2, 4, 8)
-    )
-    assert len(set(configs)) == len(configs)  # all distinct
+def test_parallel_suggestions_project_to_valid_configs(monkeypatch):
+    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    branch = _branch()
+    sampler = make_branch_sampler(branch, study_id="test_structured_parallel")
+
+    suggestions = sampler.suggest(count=4)
+
+    assert suggestions
+    for suggestion in suggestions:
+        assert USED_GPU_RATIO in suggestion.handle.parameters
+        assert suggestion.projection is not None
+        assert suggestion.parallel_config in branch.parallel_configs
+        assert suggestion.selection["backend"] in branch.supported_backends[suggestion.parallel_config]
+
+
+def test_parallel_search_exposes_ordered_size_and_mode_dimensions(monkeypatch):
+    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    tep4 = ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=4)
+    dtp8 = ReplicaParallelConfig(ParallelShape(tp=1, dp=8, moe_tp=8, moe_ep=1), replicas=2)
+    configs = (tep4, dtp8)
     branch = BranchSpace(
         deployment_mode="agg",
         parallel_configs=configs,
-        supported_backends={c: frozenset({"trtllm"}) for c in configs},
-        knob_choices={"backend": ["trtllm"]},
+        supported_backends={config: frozenset({"vllm"}) for config in configs},
+        knob_choices={"backend": ["vllm"]},
+        gpu_budget=32,
     )
-    sampler = make_branch_sampler(branch, study_id="test_pc_index")
+    sampler = make_branch_sampler(branch, study_id="test_structured_dimensions")
+
     suggestions = sampler.suggest(count=6)
+
     assert suggestions
-    for s in suggestions:
-        decoded_index = int(s.handle.parameters[_PARALLEL_PARAM])
-        assert branch.parallel_configs[decoded_index] == s.parallel_config
+    for suggestion in suggestions:
+        params = suggestion.handle.parameters
+        assert params[AGG_GPUS_PER_ENGINE] in (4, 8)
+        assert params[AGG_ATTENTION_MODE] in ("tp", "dp")
+        assert params[AGG_FFN_MODE] in ("tp", "ep")
+        assert suggestion.parallel_config in configs
+
+
+def test_single_parallel_config_is_pinned(monkeypatch):
+    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    pinned = ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=8)
+    branch = BranchSpace(
+        deployment_mode="agg",
+        parallel_configs=(pinned,),
+        supported_backends={pinned: frozenset({"vllm"})},
+        knob_choices={"backend": ["vllm"], "agg_max_num_seqs": [256, 512]},
+        gpu_budget=32,
+    )
+    sampler = make_branch_sampler(branch, study_id="test_structured_pin")
+
+    suggestions = sampler.suggest(count=3)
+
+    assert suggestions
+    assert all(suggestion.parallel_config == pinned for suggestion in suggestions)
+    assert all(suggestion.projection is None for suggestion in suggestions)
+    assert all(USED_GPU_RATIO not in suggestion.handle.parameters for suggestion in suggestions)
+
+
+def test_fully_pinned_study_uses_only_internal_constant(monkeypatch):
+    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    pinned = ReplicaParallelConfig(ParallelShape(tp=4, dp=1, moe_tp=1, moe_ep=4), replicas=8)
+    branch = BranchSpace(
+        deployment_mode="agg",
+        parallel_configs=(pinned,),
+        supported_backends={pinned: frozenset({"vllm"})},
+        knob_choices={"backend": ["vllm"]},
+        gpu_budget=32,
+    )
+    sampler = make_branch_sampler(branch, study_id="test_structured_fully_pinned")
+
+    suggestion = sampler.suggest(count=1)[0]
+
+    assert suggestion.parallel_config == pinned
+    assert suggestion.projection is None
+    assert dict(suggestion.handle.parameters) == {"_spica_constant": "0"}
+
+
+def test_projection_is_written_to_trial_metadata(monkeypatch):
+    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    sampler = make_branch_sampler(_branch(), study_id="test_structured_metadata")
+    suggestion = sampler.suggest(count=1)[0]
+
+    sampler.observe(suggestion, {"objective": 1.0})
+
+    metadata = suggestion.handle.materialize().metadata
+    projection = json.loads(metadata["spica_projection"])
+    assert projection["actual_parallel_config"]
+    assert projection["requested_features"]
+    assert projection["actual_features"]
 
 
 def test_suggest_observe_round_trips():
@@ -143,7 +224,7 @@ def test_suggest_observe_round_trips():
     # tracks the best observed score. (Convergence quality isn't asserted —
     # Vizier GP-bandit is slow, ~seconds per suggest, so keep trial counts low.)
     branch = _branch()
-    sampler = make_branch_sampler(branch, study_id="test_round_trip")
+    sampler = make_branch_sampler(branch, study_id=f"test_round_trip_{uuid.uuid4().hex}")
     scores = []
     for _ in range(2):
         for s in sampler.suggest(count=2):
@@ -155,31 +236,33 @@ def test_suggest_observe_round_trips():
     assert best.final_measurement.metrics["objective"].value == max(scores)
 
 
-def _branch_with_concurrency() -> BranchSpace:
+def _branch_with_kv_load() -> BranchSpace:
     b = _branch()
     return BranchSpace(
         deployment_mode=b.deployment_mode,
         parallel_configs=b.parallel_configs,
         supported_backends=b.supported_backends,
-        knob_choices={**b.knob_choices, "concurrency": [4, 8, 16]},  # swept pareto dimension
+        knob_choices=b.knob_choices,
+        float_ranges={"kv_load_ratio": (0.0, 1.0)},
     )
 
 
-def test_pareto_study_sweeps_concurrency_and_returns_front():
-    # A multi-objective study: a swept concurrency (discrete param) + two maximized metrics.
+def test_pareto_study_sweeps_kv_load_and_returns_front(monkeypatch):
+    # A multi-objective study: a continuous KV-load ratio + two maximized metrics.
     # Verifies the >=2-metric study builds, observe carries both, and optimal_trials() returns
     # a non-empty Pareto set whose trials carry both objectives.
-    branch = _branch_with_concurrency()
+    monkeypatch.setenv("SPICA_VIZIER_ALGO", "RANDOM_SEARCH")
+    branch = _branch_with_kv_load()
     sampler = make_branch_sampler(
         branch,
-        study_id="test_pareto",
+        study_id=f"test_pareto_kv_load_{uuid.uuid4().hex}",
         objectives=[("throughput_per_gpu", True), ("throughput_per_user", True)],
     )
     for s in sampler.suggest(count=3):
-        c = s.selection["concurrency"]
-        assert c in (4, 8, 16)  # concurrency arrives as a decoded discrete int
-        # a tradeoff: throughput-per-gpu rises with concurrency, per-user falls
-        sampler.observe(s, {"throughput_per_gpu": float(c) * 10.0, "throughput_per_user": 100.0 / c})
+        ratio = s.selection["kv_load_ratio"]
+        assert 0.0 <= ratio <= 1.0
+        # a tradeoff: throughput-per-gpu rises with load, per-user falls
+        sampler.observe(s, {"throughput_per_gpu": ratio * 10.0, "throughput_per_user": 100.0 / (ratio + 1.0)})
     optimal = list(sampler._study.optimal_trials())
     assert optimal  # multi-objective study -> non-empty Pareto frontier
     for t in optimal:

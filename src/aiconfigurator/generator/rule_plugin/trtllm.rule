@@ -3,8 +3,9 @@ agg_decode cuda_graph_batch_sizes = ((range(1, 16 + 1, 1) | list) + (range(16, 3
 
 agg_decode cuda_graph_enable_padding = true
 
-prefill max_batch_size = (max_batch_size if max_batch_size else 1)
-agg_decode max_batch_size = (max_batch_size if max_batch_size else 128)
+when not (preserve_engine_limits or false):
+    prefill max_batch_size = (max_batch_size if max_batch_size else 1)
+    agg_decode max_batch_size = (max_batch_size if max_batch_size else 128)
 
 prefill disable_overlap_scheduler = true
 decode disable_overlap_scheduler = false
@@ -12,10 +13,11 @@ agg disable_overlap_scheduler = false
 
 # Ensure maxNumTokens.value() % tokensPerBlock == 0 
 agg_prefill_decode tokens_per_block = (tokens_per_block if tokens_per_block else 32)
-prefill max_num_tokens = (((SlaConfig.isl + 500) + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
-decode max_num_tokens = ((max_batch_size + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
-agg max_num_tokens = ((max_batch_size + SlaConfig.isl + 500 + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
-prefill_decode cache_transceiver_max_tokens_in_buffer = (((SlaConfig.isl + SlaConfig.osl + 500) + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
+when not (preserve_engine_limits or false):
+    prefill max_num_tokens = (((SlaConfig.isl + 500) + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
+    decode max_num_tokens = ((max_batch_size + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
+    agg max_num_tokens = ((max_batch_size + SlaConfig.isl + 500 + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
+    prefill_decode cache_transceiver_max_tokens_in_buffer = (((SlaConfig.isl + SlaConfig.osl + 500) + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
 
 # Multimodal EPD encode worker (vision encoder). The SDK sweep does not size it,
 # so give it small concrete batch/token budgets. Matches dynamo's qwen3-vl

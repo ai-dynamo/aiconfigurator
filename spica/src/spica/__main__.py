@@ -34,7 +34,7 @@ def main() -> None:
         print("no feasible candidate found (check backends / SLA / gpu_budget / replay errors)", file=sys.stderr)
         sys.exit(1)
     if config.goal.is_pareto:
-        # The result is a Pareto front: show every objective + the swept concurrency, since
+        # The result is a Pareto front: show every objective + the concrete concurrency, since
         # the single `score` (the first objective) hides the tradeoff the front is about.
         print(f"pareto front ({len(candidates)} non-dominated):")
         for i, candidate in enumerate(candidates):

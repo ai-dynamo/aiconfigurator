@@ -147,7 +147,7 @@ class ReplayEvaluator:
         (``arrival_interval_ms`` is ignored in closed-loop mode).
 
         ``request_count`` is derived from ``num_request_ratio`` and the effective load
-        (the per-trial ``concurrency_override`` under a pareto sweep, else the workload's
+        (the per-trial KV-load-derived ``concurrency_override``, else the workload's fixed
         concurrency / request_rate)."""
         wl = self.workload
         return dict(
@@ -164,10 +164,10 @@ class ReplayEvaluator:
     def evaluate(self, plan: DeploymentPlan, *, concurrency_override: int | None = None) -> dict[str, float]:
         """Run one replay and return its trace_report dict.
 
-        ``concurrency_override`` is the per-trial swept in-flight cap under a pareto
-        concurrency sweep; it overrides the workload's ``concurrency`` for both the
-        closed-loop cap and the ``num_request_ratio``-derived request count. Trace
-        workloads ignore it (they cap via ``replay_concurrency``)."""
+        ``concurrency_override`` is the per-trial in-flight cap derived from KV load; it
+        overrides a fixed workload ``concurrency`` for both the closed-loop cap and the
+        ``num_request_ratio``-derived request count. Trace workloads ignore it (they cap
+        via ``replay_concurrency``)."""
         if self.workload.is_trace_based:
             return _require_goodput_metric(self._evaluate_trace(plan), self.goal)
         return _require_goodput_metric(

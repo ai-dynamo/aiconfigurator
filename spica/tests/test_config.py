@@ -305,7 +305,7 @@ def test_non_positive_concurrency_rejected():
 def test_num_request_ratio_scales_with_concurrency():
     wl = Workload(isl=4000, osl=1000, concurrency=256, num_request_ratio=10)
     assert wl.resolved_request_count() == 2560  # 10 * 256
-    # the per-trial override (pareto sweep) wins over the workload's own concurrency
+    # the candidate-derived override wins over the workload's own concurrency
     assert wl.resolved_request_count(concurrency_override=8) == 80  # 10 * 8
 
 
@@ -319,7 +319,7 @@ def test_num_request_ratio_required_for_synthetic():
         Workload(isl=1, osl=1, concurrency=1)  # missing num_request_ratio
 
 
-# --- pareto goal + list-valued concurrency ---
+# --- pareto goal + candidate-relative KV load ---
 
 
 def test_pareto_goal_defaults_to_tput_per_gpu_and_per_user():
@@ -372,21 +372,58 @@ def test_pareto_objectives_explicit_empty_or_singleton_rejected():
         OptimizationGoal(target=OptimizationTarget.PARETO, pareto_objectives=[OptimizationTarget.THROUGHPUT_PER_GPU])
 
 
-def test_concurrency_list_only_under_pareto():
-    # a list concurrency is the swept Pareto dimension -> rejected under a non-pareto goal
-    with pytest.raises(ValidationError, match="only allowed when goal.target is 'pareto'"):
+def test_concurrency_is_always_scalar():
+    for target in ("throughput_per_gpu", "pareto"):
+        with pytest.raises(ValidationError):
+            SmartSearchConfig(
+                search_space=_search_space(),
+                workload={"isl": 1024, "osl": 1024, "concurrency": [8, 16, 32], "num_request_ratio": 10},
+                goal={"target": target},
+            )
+
+
+def test_kv_load_ratio_range_only_under_pareto():
+    with pytest.raises(ValidationError, match="ranged workload.kv_load_ratio"):
         SmartSearchConfig(
             search_space=_search_space(),
-            workload={"isl": 1024, "osl": 1024, "concurrency": [8, 16, 32], "num_request_ratio": 10},
+            workload={"isl": 1024, "osl": 1024, "kv_load_ratio": [0.0, 1.0], "num_request_ratio": 10},
             goal={"target": "throughput_per_gpu"},
         )
-    # under a pareto goal it is accepted and surfaced as the swept choices
     cfg = SmartSearchConfig(
         search_space=_search_space(),
-        workload={"isl": 1024, "osl": 1024, "concurrency": [8, 16, 32], "num_request_ratio": 10},
+        workload={"isl": 1024, "osl": 1024, "kv_load_ratio": [0.0, 1.0], "num_request_ratio": 10},
         goal={"target": "pareto"},
     )
-    assert cfg.workload.concurrency_choices == [8, 16, 32]
+    assert cfg.workload.kv_load_ratio_range == (0.0, 1.0)
+
+
+def test_scalar_kv_load_ratio_works_for_non_pareto():
+    cfg = SmartSearchConfig(
+        search_space=_search_space(),
+        workload={"isl": 1024, "osl": 1024, "kv_load_ratio": 0.75, "num_request_ratio": 10},
+        goal={"target": "throughput_per_gpu"},
+    )
+    assert cfg.workload.kv_load_ratio == 0.75
+    assert cfg.workload.kv_load_ratio_range is None
+
+
+def test_pareto_defaults_to_full_kv_load_range():
+    cfg = SmartSearchConfig(
+        search_space=_search_space(),
+        workload={"isl": 1024, "osl": 1024, "num_request_ratio": 10},
+        goal={"target": "pareto"},
+    )
+    assert cfg.workload.kv_load_ratio == [0.0, 1.0]
+
+
+@pytest.mark.parametrize("value", [[], [0.0], [0.0, 0.5, 1.0], [-0.1, 1.0], [1.0, 1.0], float("inf")])
+def test_invalid_kv_load_ratio_rejected(value):
+    with pytest.raises(ValidationError):
+        SmartSearchConfig(
+            search_space=_search_space(),
+            workload={"isl": 1024, "osl": 1024, "kv_load_ratio": value, "num_request_ratio": 10},
+            goal={"target": "pareto"},
+        )
 
 
 def test_pareto_target_has_no_scalar_direction():

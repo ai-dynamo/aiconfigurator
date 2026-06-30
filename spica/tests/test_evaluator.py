@@ -254,7 +254,7 @@ def test_synthetic_static_uses_run_synthetic_trace_replay(monkeypatch):
 
 
 def test_concurrency_override_drives_cap_and_request_count(monkeypatch):
-    # Pareto sweep: workload.concurrency is a LIST; the per-trial concurrency_override sets
+    # KV-load mode derives an absolute concurrency before evaluation; that override sets
     # BOTH the closed-loop in-flight cap and the num_request_ratio-scaled request count.
     monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
@@ -263,10 +263,10 @@ def test_concurrency_override_drives_cap_and_request_count(monkeypatch):
         "run_synthetic_trace_replay",
         lambda **kw: rec.update(kw) or {"output_throughput_tok_s": 50.0, "gpu_hours": 0.5},
     )
-    wl = Workload(isl=128, osl=64, concurrency=[4, 8, 16], num_request_ratio=25)  # swept dimension
+    wl = Workload(isl=128, osl=64, kv_load_ratio=[0.0, 1.0], num_request_ratio=25)
     goal = OptimizationGoal(target=OptimizationTarget.PARETO)  # no SLA needed
     ReplayEvaluator(wl, goal).evaluate(_agg_plan(static=True), concurrency_override=8)
-    assert rec["replay_concurrency"] == 8  # cap = the per-trial swept concurrency
+    assert rec["replay_concurrency"] == 8  # cap = the candidate-derived concurrency
     assert rec["request_count"] == 200  # num_request_ratio(25) * 8
     assert rec["planner_config"] is None
 
@@ -378,9 +378,9 @@ def test_workload_validation():
         Workload(trace_path="/tmp/t.jsonl", replay_concurrency=0)
     with pytest.raises(ValueError, match="for trace workloads"):  # synthetic can't use replay_concurrency
         _syn_wl(concurrency=1.0, replay_concurrency=8)
-    with pytest.raises(ValueError, match="exactly one of request_rate or concurrency"):
+    with pytest.raises(ValueError, match="exactly one of request_rate, concurrency, or kv_load_ratio"):
         _syn_wl()  # synthetic needs a load shape
-    with pytest.raises(ValueError, match="exactly one of request_rate or concurrency"):
+    with pytest.raises(ValueError, match="exactly one of request_rate, concurrency, or kv_load_ratio"):
         _syn_wl(request_rate=10.0, concurrency=4.0)  # not both
     with pytest.raises(ValueError, match="must not set synthetic fields"):
         Workload(trace_path="/tmp/t.jsonl", isl=128)

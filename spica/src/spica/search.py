@@ -8,12 +8,14 @@ space (backend is one of the knobs); each suggestion is unrolled, translated to 
 deployment, evaluated by replay, scored, and fed back to the optimizer; feasible
 candidates are ranked across branches.
 
-Each round is a **barrier**: the study suggests ``per_round`` trials (ask), they are
-evaluated **in parallel across worker processes** (``SweepConfig.parallel_evals``;
-``<= 1`` runs sequentially), then their scores are fed back (tell). Vizier ask/tell
-stay on the main process — workers run only the pure unroll->deploy->replay->score and
-never touch the study (the Vizier trial handle never crosses the process boundary). The
-load-predictor winner is resolved once and injected into every unroll.
+Each round is a **barrier**: the study suggests trials until ``per_round`` unique full
+samples complete successfully (ask), they are evaluated **in parallel across worker
+processes** (``SweepConfig.parallel_evals``; ``<= 1`` runs sequentially), then their
+scores are fed back (tell). Exact duplicates use a run-local result cache and trigger
+replacement asks. Vizier ask/tell stay on the main process — workers run only the pure
+unroll->deploy->replay->score and never touch the study (the Vizier trial handle never
+crosses the process boundary). The load-predictor winner is resolved once and injected
+into every unroll.
 
 ``evaluator`` and ``sampler_factory`` are injectable so the loop is unit-testable
 without real replay / Vizier (use ``parallel_evals=1`` to avoid spawning processes).
@@ -27,6 +29,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
+from dataclasses import asdict, is_dataclass
 from typing import Any, Protocol
 
 from tqdm import tqdm
@@ -35,6 +38,7 @@ from .config import Candidate, OptimizationGoal, SmartSearchConfig
 from .deploy import build_deployment
 from .evaluator import ReplayEvaluator
 from .kv_estimate import resolve_backend_version
+from .kv_load import InfeasibleKVCapacity, resolve_kv_load
 from .load_predictor_sweep import LoadPredictorResult, sweep_load_predictor
 from .planner import filter_scaling_policies, scaling_fields
 from .sample import unroll_sample
@@ -57,6 +61,28 @@ class _Evaluator(Protocol):
 _EvalResult = tuple[Candidate | None, dict[str, float] | None, str, str]
 
 
+def _freeze(value: Any) -> Any:
+    """Convert a nested suggestion/context value into a stable hashable key."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return _freeze(asdict(value))
+    if isinstance(value, dict):
+        return tuple((str(key), _freeze(item)) for key, item in sorted(value.items(), key=lambda pair: str(pair[0])))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return tuple(sorted((_freeze(item) for item in value), key=repr))
+    try:
+        hash(value)
+    except TypeError:
+        return repr(value)
+    return value
+
+
+def _suggestion_cache_key(suggestion: Suggestion, context: Any) -> Any:
+    """A run-local full-sample key; parallel equality alone is not a cache hit."""
+    return (context, _freeze(suggestion.selection), _freeze(suggestion.parallel_config))
+
+
 def _evaluate_one(
     selection: dict[str, Any],
     parallel_config: Any,
@@ -75,22 +101,40 @@ def _evaluate_one(
             parallel_config=parallel_config,
             load_predictor=load_predictor,
         )
-        # A pareto concurrency sweep carries the per-trial in-flight cap on the selection;
-        # record it on the sample (so each Pareto point knows its concurrency) and drive replay with it.
-        concurrency = selection.get("concurrency")
-        if concurrency is not None:
-            sample["concurrency"] = concurrency
         backend_version = resolve_backend_version(config.search_space.hardware_sku, selection["backend"])
         # The resolved perf-model version is part of the evaluated contract. Keep it
         # on the candidate so downstream artifact generation cannot independently
         # select a different backend version.
         sample["backend_version"] = backend_version
+        concurrency = config.workload.concurrency
+        if "kv_load_ratio" in selection:
+            ratio = float(selection["kv_load_ratio"])
+            resolution = resolve_kv_load(
+                sample,
+                workload=config.workload,
+                parallel_config=parallel_config,
+                ratio=ratio,
+                backend_version=backend_version,
+            )
+            concurrency = resolution.concurrency
+            sample["kv_load_ratio"] = resolution.ratio
+            sample["kv_load_concurrency_capacity"] = resolution.concurrency_capacity
+            load_role = "decode" if sample["deployment_mode"] == "disagg" else "agg"
+            sample["kv_load_capacity_tokens"] = resolution.role_capacity_tokens[load_role]
+            for role, tokens in resolution.role_capacity_tokens.items():
+                sample[f"{role}_kv_capacity_tokens"] = tokens
+        if concurrency is not None:
+            # Preserve the concrete load on every candidate, including a fixed absolute
+            # concurrency and one derived from kv_load_ratio.
+            sample["concurrency"] = concurrency
         plan = build_deployment(
             sample,
             backend_version=backend_version,
             optimization_target=goal.target.planner_optimization_target,
             planner_sla=goal.sla,
         )
+    except InfeasibleKVCapacity as exc:
+        return None, None, "infeasible", f"candidate KV capacity infeasible: {exc}"
     except Exception as exc:
         return None, None, "failed", f"candidate build failed: {type(exc).__name__}: {exc}"
     try:
@@ -220,10 +264,10 @@ def run_smart_search(
 
     sweep = config.sweep
     per_round = sweep.candidates_per_round or sweep.parallel_evals
-    # Upper bound on evaluations (a Vizier round may return fewer than per_round).
+    # Target number of successful unique replay configurations across all rounds.
     total = len(branches) * sweep.max_rounds * per_round
     candidates: list[Candidate] = []
-    tally = {"feasible": 0, "infeasible": 0, "failed": 0, "unsupported": 0}
+    tally = {"feasible": 0, "infeasible": 0, "failed": 0, "unsupported": 0, "cache_hit": 0}
     failure_reasons: dict[str, int] = {}
     # Unique per run: Vizier's datastore persists studies by id, so a fixed id would
     # make a later run inherit a stale study (and its old param space) -> decode crash.
@@ -231,6 +275,15 @@ def run_smart_search(
     # Multi-objective (pareto) -> one Vizier metric per objective (each with its own
     # direction); single-objective -> the sampler's default single maximized "objective".
     sampler_objectives = [(t.value, t.maximize) for t in goal.resolved_pareto_objectives] if goal.is_pareto else None
+    cache_context = _freeze(
+        {
+            "search_space": config.search_space.model_dump(mode="python"),
+            "workload": config.workload.model_dump(mode="python"),
+            "goal": goal.model_dump(mode="python"),
+            "load_predictor": load_predictor,
+        }
+    )
+    replay_cache: dict[Any, tuple[Candidate, dict[str, float]]] = {}
 
     def _best() -> float | None:
         return max((c.score for c in candidates), default=None)
@@ -316,45 +369,93 @@ def run_smart_search(
             tally[outcome] += 1
             if candidate is not None:
                 candidates.append(candidate)
+                bar.update(1)
             best = _best()
             bar.set_postfix(
                 feasible=tally["feasible"], failed=tally["failed"], best=("-" if best is None else f"{best:.4g}")
             )
-            bar.update(1)
 
         round_no = 0
         for branch in branches:
+            branch_stalled = False
             sampler = sampler_factory(
                 branch, study_id=f"spica_{branch.deployment_mode}_{run_nonce}", objectives=sampler_objectives
             )
             bar.set_description(f"smart-sweep {branch.deployment_mode}")
             for _ in range(sweep.max_rounds):
-                suggestions = sampler.suggest(per_round)  # ask (main, serial)
-                # Split off (backend, config) pairs the backend can't run: told here,
-                # never evaluated. The rest fan out.
-                todo: list[Suggestion] = []
-                for s in suggestions:
-                    if s.selection["backend"] in branch.supported_backends.get(s.parallel_config, frozenset()):
-                        todo.append(s)
-                    else:
-                        sampler.observe_infeasible(
-                            s, f"backend {s.selection['backend']!r} does not support this parallel config"
-                        )
-                        _record("unsupported", None)
-                for s, (candidate, observe_metrics, outcome, reason) in _eval_batch(todo):
-                    # "failed" (replay error) and "infeasible" (over gpu_budget) are both
-                    # gated: tell the sampler observe_infeasible so it learns to avoid that
-                    # region instead of being steered toward it by a high objective score.
-                    if outcome in ("failed", "infeasible"):  # tell (main, serial)
-                        sampler.observe_infeasible(s, reason)
-                    else:
-                        sampler.observe(s, observe_metrics)
-                    if outcome == "failed":
-                        failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
-                    _record(outcome, candidate)
+                unique_this_round = 0
+                trial_attempts = 0
+                max_trial_attempts = per_round * 11  # requested batch + at most 10x replacement trials
+                while unique_this_round < per_round and trial_attempts < max_trial_attempts:
+                    ask_count = min(per_round - unique_this_round, max_trial_attempts - trial_attempts)
+                    suggestions = sampler.suggest(ask_count)  # ask stays on the main process
+                    if not suggestions:
+                        break
+                    trial_attempts += len(suggestions)
+
+                    # Deduplicate against completed cache entries and within this ask batch.
+                    # A duplicate trial still receives the cached measurement so f(z) remains
+                    # deterministic, but only the first full sample reaches replay.
+                    todo: list[Suggestion] = []
+                    primary_by_key: dict[Any, Suggestion] = {}
+                    duplicates_by_key: dict[Any, list[Suggestion]] = {}
+                    for suggestion in suggestions:
+                        backend = suggestion.selection["backend"]
+                        if backend not in branch.supported_backends.get(suggestion.parallel_config, frozenset()):
+                            sampler.observe_infeasible(
+                                suggestion,
+                                f"backend {backend!r} does not support this parallel config",
+                            )
+                            _record("unsupported", None)
+                            continue
+
+                        key = _suggestion_cache_key(suggestion, cache_context)
+                        cached = replay_cache.get(key)
+                        if cached is not None:
+                            _, cached_metrics = cached
+                            sampler.observe(suggestion, cached_metrics)
+                            tally["cache_hit"] += 1
+                            continue
+                        if key in primary_by_key:
+                            duplicates_by_key.setdefault(key, []).append(suggestion)
+                            continue
+                        primary_by_key[key] = suggestion
+                        todo.append(suggestion)
+
+                    for suggestion, (candidate, observe_metrics, outcome, reason) in _eval_batch(todo):
+                        key = _suggestion_cache_key(suggestion, cache_context)
+                        duplicates = duplicates_by_key.get(key, [])
+                        if outcome in ("failed", "infeasible"):
+                            sampler.observe_infeasible(suggestion, reason)
+                            for duplicate in duplicates:
+                                sampler.observe_infeasible(duplicate, reason)
+                            if outcome == "failed":
+                                failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+                            _record(outcome, None)
+                            continue
+
+                        assert candidate is not None and observe_metrics is not None
+                        sampler.observe(suggestion, observe_metrics)
+                        replay_cache[key] = (candidate, dict(observe_metrics))
+                        for duplicate in duplicates:
+                            sampler.observe(duplicate, observe_metrics)
+                            tally["cache_hit"] += 1
+                        _record(outcome, candidate)
+                        unique_this_round += 1
                 round_no += 1
                 if on_round is not None:
                     on_round(round_no, list(candidates))
+                if unique_this_round < per_round:
+                    branch_stalled = True
+                    if show_progress:
+                        tqdm.write(
+                            f"smart-sweep {branch.deployment_mode} stopped early: projection stalled after "
+                            f"{trial_attempts} Vizier trial(s), with {unique_this_round}/{per_round} "
+                            "new replay configuration(s) in the round"
+                        )
+                    break
+            if branch_stalled:
+                continue
 
     # Tear down the (possibly recreated) worker pool; force-kill any lingering workers.
     final_pool = pool_box[0]
@@ -366,11 +467,11 @@ def run_smart_search(
     # Single-objective -> rank best-first by score; pareto -> the non-dominated front.
     result = pareto_front(candidates, goal.resolved_pareto_objectives) if goal.is_pareto else rank(candidates)
     if show_progress:
-        evaluated = sum(tally.values())
+        replay_attempts = tally["feasible"] + tally["infeasible"] + tally["failed"]
         summary = (
-            f"smart-sweep done: {tally['feasible']}/{evaluated} feasible, "
+            f"smart-sweep done: {tally['feasible']}/{replay_attempts} replay attempt(s) feasible, "
             f"{tally['infeasible']} gated, {tally['unsupported']} backend-unsupported, "
-            f"{tally['failed']} replay-failed"
+            f"{tally['failed']} replay-failed, {tally['cache_hit']} cache hit(s)"
         )
         if not candidates:
             summary += " — NO feasible candidate (check backends / SLA / gpu_budget / replay errors)"

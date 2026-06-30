@@ -7,10 +7,10 @@ A *branch* is one **deployment_mode** (agg / disagg) — one Vizier study each, 
 agg and disagg have structurally different parallel configs. ``backend`` is NOT a
 branch: it is a searched categorical knob within the study. For each mode we take the
 **union** of every configured backend's KV-feasible parallel configs
-(:func:`spica.model_hw.parallel_configs_for`) as the categorical domain, recording per
-config which backends support it; a sampled ``(backend, parallel_config)`` pair outside
-that set is marked infeasible (no replay) so the optimizer learns to avoid it. Backends
-with no perf DB / no viable config for a mode are dropped from the backend knob.
+(:func:`spica.model_hw.parallel_configs_for`) as the valid projection pool, recording per
+config which backends support it. The sampler projects structured latent features onto this
+pool. Backends with no perf DB, no viable config, or no replay support for a mode are dropped
+from the backend knob.
 
 ``load_predictor_candidates`` is resolved separately by the load-predictor sub-sweep
 and is not a sampler dimension.
@@ -19,13 +19,14 @@ and is not a sampler dimension.
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .config import SmartSearchConfig
 from .kv_estimate import NoPerfDatabase
 from .model_hw import NoViableParallelConfig, parallel_configs_for
 from .parallel_enum import DisaggParallelConfig, ParallelShape, ReplicaParallelConfig
+from .planner import scaling_fields
 
 _ParallelConfig = ReplicaParallelConfig | DisaggParallelConfig
 
@@ -54,19 +55,33 @@ _DISAGG_ENGINE = (
 )
 
 
+def _backend_supports_replay_mode(backend: str, deployment_mode: str) -> bool:
+    """Whether Dynamo replay can evaluate this backend/topology pair.
+
+    TRT-LLM mock engines currently reject every disaggregated replay mode. Keep
+    that deterministic incompatibility out of Vizier instead of spending the
+    replacement budget repeatedly evaluating an unsupported branch.
+    """
+    return not (backend == "trtllm" and deployment_mode == "disagg")
+
+
 @dataclass(frozen=True)
 class BranchSpace:
     """One ``deployment_mode`` branch of the search (backend is a searched knob)."""
 
     deployment_mode: str
-    # Union of every searched backend's KV-feasible parallel configs — the categorical
-    # domain (pick an index).
+    # Union of every searched backend's KV-feasible parallel configs.
     parallel_configs: tuple[_ParallelConfig, ...]
-    # parallel config -> the backends for which it is legal+KV-feasible. A sampled
-    # (backend, config) pair whose backend isn't here is marked infeasible (no replay).
+    # parallel config -> the backends for which it is legal+KV-feasible. Projection
+    # hard-filters on this map; the search loop keeps a defensive gate.
     supported_backends: dict[_ParallelConfig, frozenset[str]]
     # Searchable atomic knob -> its configured choice list (incl. "backend").
     knob_choices: dict[str, list[Any]]
+    # Pinned branch budget; optional only for lightweight unit-test fixtures.
+    gpu_budget: int | None = None
+    # Continuous workload dimensions. Currently only Pareto ``kv_load_ratio`` uses
+    # this; list-valued component knobs remain discrete choices above.
+    float_ranges: dict[str, tuple[float, float]] = field(default_factory=dict)
 
 
 def _engine_knobs(deployment_mode: str) -> tuple[str, ...]:
@@ -107,12 +122,24 @@ def branch_knob_choices(search_space, deployment_mode: str) -> dict[str, list[An
     engine batching), each mapped to its configured choice list. ``backend`` is added
     by :func:`enumerate_branches` (only the backends viable for the mode).
 
+    Dependent knobs are removed when their component is statically disabled: a
+    round-robin-only router has no KV-router weights, and planner policies that all
+    disable scaling have no FPM or load-sensitivity knobs.
+
     The host/disk cache-hit weights are dropped unless multi-tier KV offload is enabled
     (``num_g2_blocks > 0``) — see :data:`_OFFLOAD_ONLY_ROUTER_KNOBS`."""
-    router = _ROUTER_KNOBS
-    if search_space.num_g2_blocks == 0:
+    router_is_round_robin_only = set(search_space.router_mode) == {"round_robin"}
+    router = ("router_mode",) if router_is_round_robin_only else _ROUTER_KNOBS
+    if not router_is_round_robin_only and search_space.num_g2_blocks == 0:
         router = tuple(k for k in router if k not in _OFFLOAD_ONLY_ROUTER_KNOBS)
-    names = (*router, *_PLANNER_KNOBS, *_engine_knobs(deployment_mode))
+
+    planner_scaling_is_disabled = not any(
+        fields["enable_throughput_scaling"] or fields["enable_load_scaling"]
+        for fields in (scaling_fields(policy) for policy in search_space.planner_scaling_policy)
+    )
+    planner = ("planner_scaling_policy",) if planner_scaling_is_disabled else _PLANNER_KNOBS
+
+    names = (*router, *planner, *_engine_knobs(deployment_mode))
     return {name: list(getattr(search_space, name)) for name in names}
 
 
@@ -140,7 +167,12 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
             [_parse_parallel_entry(e, deployment_mode) for e in ss.parallel_configs] if ss.parallel_configs else None
         )
         support: dict[_ParallelConfig, set[str]] = {}
+        replay_incompatible = [
+            backend for backend in ss.backend if not _backend_supports_replay_mode(backend, deployment_mode)
+        ]
         for backend in ss.backend:
+            if not _backend_supports_replay_mode(backend, deployment_mode):
+                continue
             try:
                 legal = parallel_configs_for(
                     ss.model_name,
@@ -163,12 +195,13 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
                 # an explicit pin that no backend can run is a user error -> fail fast
                 raise NoViableParallelConfig(
                     f"deployment_mode={deployment_mode!r}: no configured backend can run the pinned "
-                    f"parallel_configs (illegal shape, or backend has no perf DB)"
+                    f"parallel_configs (illegal shape, replay-incompatible backend, or no perf DB)"
                 )
             # natural infeasibility for this mode -> skip it, keep any viable modes
             warnings.warn(
                 f"smart-sweep: deployment_mode={deployment_mode!r} skipped — no configured backend "
-                f"has a viable parallel config within gpu_budget={ss.gpu_budget}",
+                f"has a viable parallel config within gpu_budget={ss.gpu_budget}"
+                + (f"; replay-incompatible backends={replay_incompatible}" if replay_incompatible else ""),
                 stacklevel=2,
             )
             skipped.append(deployment_mode)
@@ -181,18 +214,24 @@ def enumerate_branches(config: SmartSearchConfig, *, max_seq_len: int | None = N
                 )
 
         knob_choices = branch_knob_choices(ss, deployment_mode)
-        knob_choices["backend"] = sorted(set().union(*support.values()))  # only viable backends
-        # A list-valued workload.concurrency (pareto sweep) becomes a per-trial discrete
-        # dimension; the evaluator reads selection["concurrency"] as the in-flight cap.
-        concurrency_choices = config.workload.concurrency_choices
-        if concurrency_choices is not None:
-            knob_choices["concurrency"] = list(concurrency_choices)
+        viable_backends = set().union(*support.values())
+        knob_choices["backend"] = [backend for backend in dict.fromkeys(ss.backend) if backend in viable_backends]
+        float_ranges: dict[str, tuple[float, float]] = {}
+        kv_load_range = config.workload.kv_load_ratio_range
+        if kv_load_range is not None:
+            float_ranges["kv_load_ratio"] = kv_load_range
+        elif config.workload.kv_load_ratio is not None:
+            # A scalar KV load is pinned for both scalar and Pareto goals. Keep it in
+            # the constant path so every decoded selection carries the requested ratio.
+            knob_choices["kv_load_ratio"] = [float(config.workload.kv_load_ratio)]
         branches.append(
             BranchSpace(
                 deployment_mode=deployment_mode,
                 parallel_configs=tuple(support),
                 supported_backends={cfg: frozenset(bs) for cfg, bs in support.items()},
                 knob_choices=knob_choices,
+                gpu_budget=ss.gpu_budget,
+                float_ranges=float_ranges,
             )
         )
 

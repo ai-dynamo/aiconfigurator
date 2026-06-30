@@ -20,6 +20,7 @@ eventual merge into an AIC sweep task is mechanical.
 
 from __future__ import annotations
 
+import math
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -148,9 +149,9 @@ class OptimizationGoal(BaseModel):
 
 
 class Workload(BaseModel):
-    """Traffic every candidate is evaluated against (pinned, never searched).
+    """Traffic every candidate is evaluated against (KV load may be searched for Pareto).
 
-    Exactly one of **three load shapes** (all replayable with or without the planner):
+    Exactly one of **four load shapes** (all replayable with or without the planner):
 
     1. **mooncake trace** — set ``trace_path``. Open-loop at the trace's arrival
        timestamps (scale with ``arrival_speedup_ratio``); set ``replay_concurrency``
@@ -159,28 +160,33 @@ class Workload(BaseModel):
        open-loop at a fixed QPS.
     3. **synthetic concurrency** — set ``concurrency`` (+ ``isl``/``osl``/``num_request_ratio``):
        closed-loop, cap N in flight.
+    4. **synthetic KV load** — set ``kv_load_ratio`` (+ ``isl``/``osl``/``num_request_ratio``):
+       closed-loop, with concurrency derived from each candidate's aggregate decode/agg KV
+       capacity. A two-value range is searchable only under a ``pareto`` goal.
 
     The mode is inferred from which field is set; see the validator.
 
-    ``concurrency`` may be a **list** of ints, but only under a ``pareto`` goal — then it
-    is the swept dimension that traces the Pareto front (each value is one in-flight cap;
-    enforced in :class:`SmartSearchConfig`). Every other goal needs a single value.
+    ``concurrency`` is always one fixed positive integer. Under a ``pareto`` goal,
+    ``kv_load_ratio`` may instead be a ``[min, max]`` continuous search range; when no
+    synthetic load is specified, :class:`SmartSearchConfig` defaults that range to ``[0, 1]``.
 
     ``num_request_ratio`` (synthetic only) sets the request count **relative to the load**:
     ``num_requests = round(num_request_ratio * load)`` where ``load`` is ``concurrency``
     (closed-loop) or ``request_rate`` (open-loop). So the synthetic trace length scales with
-    the swept concurrency automatically — e.g. ratio 10 at concurrency 256 -> 2560 requests.
+    the concrete concurrency automatically — e.g. ratio 10 at concurrency 256 -> 2560 requests.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     # synthetic workload (used when trace_path is unset): exactly one of
-    # request_rate (open-loop QPS) or concurrency (closed-loop in-flight cap).
+    # request_rate (open-loop QPS), concurrency (fixed closed-loop in-flight cap), or
+    # kv_load_ratio (candidate-relative closed-loop load).
     isl: int | None = None
     osl: int | None = None
-    concurrency: int | list[int] | None = None  # set concurrency OR request_rate (list only under a pareto goal)
+    concurrency: int | None = None
+    kv_load_ratio: float | list[float] | None = None
     request_rate: float | None = None
-    num_request_ratio: float | None = None  # num_requests = round(ratio * load); load = concurrency or request_rate
+    num_request_ratio: float | None = None  # request count multiplier for concrete concurrency or request_rate
     shared_prefix_ratio: float = 0.0  # cache-locality / prefix sharing
     num_prefix_groups: int = 0
     turns_per_session: int = 1  # multi-turn sessions
@@ -192,7 +198,7 @@ class Workload(BaseModel):
     arrival_speedup_ratio: float = 1.0  # scale trace inter-arrival times
     # Closed-loop replay over a *trace*: cap in-flight requests at this many (the
     # trace's timestamps are ignored; a new request starts as one finishes). For a
-    # *synthetic* closed-loop workload use ``concurrency`` instead.
+    # *synthetic* closed-loop workload use ``concurrency`` or ``kv_load_ratio`` instead.
     replay_concurrency: int | None = None
 
     @property
@@ -204,38 +210,37 @@ class Workload(BaseModel):
         return self.trace_path is None
 
     @property
-    def concurrency_choices(self) -> list[int] | None:
-        """The swept concurrency values when ``concurrency`` is a list (pareto sweep),
-        else ``None``. The sampler turns this into a per-trial discrete dimension."""
-        return list(self.concurrency) if isinstance(self.concurrency, list) else None
+    def kv_load_ratio_range(self) -> tuple[float, float] | None:
+        """The Pareto-only continuous KV-load range, or ``None`` for a scalar/other load."""
+        if isinstance(self.kv_load_ratio, list):
+            return float(self.kv_load_ratio[0]), float(self.kv_load_ratio[1])
+        return None
 
     def effective_in_flight_cap(self, concurrency_override: int | None = None) -> int | None:
         """Closed-loop in-flight cap (``None`` = open-loop). ``concurrency_override`` (the
-        per-trial swept value under a pareto sweep) wins; then ``replay_concurrency`` for a
-        trace, then a scalar ``concurrency`` for a synthetic workload. A list ``concurrency``
-        with no override yields ``None`` (the per-trial override is expected to supply it)."""
+        per-trial value derived from KV load) wins; then ``replay_concurrency`` for a
+        trace, then the fixed ``concurrency`` for a synthetic workload. KV-load mode always
+        supplies its candidate-derived concurrency as the override."""
         if self.trace_path is not None:
             return self.replay_concurrency
         if concurrency_override is not None:
             return concurrency_override
-        if isinstance(self.concurrency, int):
+        if self.concurrency is not None:
             return self.concurrency
         return None
 
     def resolved_request_count(self, concurrency_override: int | None = None) -> int:
         """Synthetic request count = ``round(num_request_ratio * load)`` (>= 1), where
         ``load`` is the in-flight concurrency (closed-loop) or the request rate (open-loop).
-        ``concurrency_override`` is the per-trial swept concurrency (pareto sweep)."""
+        ``concurrency_override`` is the candidate-specific concurrency in KV-load mode."""
         if concurrency_override is not None:
             load: float = concurrency_override
-        elif isinstance(self.concurrency, int):
+        elif self.concurrency is not None:
             load = self.concurrency
         elif self.request_rate is not None:
             load = self.request_rate
         else:
-            raise ValueError(
-                "resolved_request_count needs a concurrency_override when concurrency is a list (pareto sweep)"
-            )
+            raise ValueError("resolved_request_count needs a concurrency_override for a kv_load_ratio workload")
         return max(1, round((self.num_request_ratio or 0.0) * load))
 
     @property
@@ -248,7 +253,7 @@ class Workload(BaseModel):
 
     @model_validator(mode="after")
     def _validate_workload(self) -> "Workload":
-        synthetic_only = ("isl", "osl", "request_rate", "concurrency", "num_request_ratio")
+        synthetic_only = ("isl", "osl", "request_rate", "concurrency", "kv_load_ratio", "num_request_ratio")
         if self.trace_path is not None:
             set_syn = [n for n in synthetic_only if getattr(self, n) is not None]
             if set_syn:
@@ -256,11 +261,11 @@ class Workload(BaseModel):
             if self.replay_concurrency is not None and self.replay_concurrency <= 0:
                 raise ValueError(f"replay_concurrency must be a positive integer, got {self.replay_concurrency}")
             return self
-        # synthetic: exactly one of request_rate / concurrency, plus isl/osl/num_request_ratio
-        loads = [n for n in ("request_rate", "concurrency") if getattr(self, n) is not None]
+        # synthetic: exactly one load mode, plus isl/osl/num_request_ratio
+        loads = [n for n in ("request_rate", "concurrency", "kv_load_ratio") if getattr(self, n) is not None]
         if len(loads) != 1:
             raise ValueError(
-                "a synthetic workload needs exactly one of request_rate or concurrency "
+                "a synthetic workload needs exactly one of request_rate, concurrency, or kv_load_ratio "
                 "(or set trace_path for a trace workload)"
             )
         missing = [n for n in ("isl", "osl", "num_request_ratio") if getattr(self, n) is None]
@@ -268,15 +273,16 @@ class Workload(BaseModel):
             raise ValueError(f"a synthetic workload requires {missing}")
         if self.replay_concurrency is not None:
             raise ValueError("replay_concurrency is for trace workloads; use 'concurrency' for synthetic closed-loop")
-        # concurrency: a single positive int, or a non-empty list of positive ints (pareto sweep).
-        if self.concurrency is not None:
-            conc_list = self.concurrency if isinstance(self.concurrency, list) else [self.concurrency]
-            if isinstance(self.concurrency, list) and not conc_list:
-                raise ValueError("concurrency list must be non-empty")
-            if any((not isinstance(c, int)) or isinstance(c, bool) or c <= 0 for c in conc_list):
-                raise ValueError(
-                    f"concurrency must be a positive integer or list of positive integers, got {self.concurrency!r}"
-                )
+        if self.concurrency is not None and (isinstance(self.concurrency, bool) or self.concurrency <= 0):
+            raise ValueError(f"concurrency must be a positive integer, got {self.concurrency!r}")
+        if self.kv_load_ratio is not None:
+            ratios = self.kv_load_ratio if isinstance(self.kv_load_ratio, list) else [self.kv_load_ratio]
+            if isinstance(self.kv_load_ratio, list) and len(ratios) != 2:
+                raise ValueError("kv_load_ratio range must contain exactly [min, max]")
+            if any(not math.isfinite(float(value)) or float(value) < 0.0 for value in ratios):
+                raise ValueError(f"kv_load_ratio values must be finite and non-negative, got {self.kv_load_ratio!r}")
+            if isinstance(self.kv_load_ratio, list) and float(ratios[0]) >= float(ratios[1]):
+                raise ValueError(f"kv_load_ratio range needs min < max, got {self.kv_load_ratio!r}")
         for name in ("request_rate", "isl", "osl", "num_request_ratio"):
             v = getattr(self, name)
             if v is not None and v <= 0:
@@ -599,9 +605,11 @@ class SweepConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_rounds: int = Field(default=20, ge=1)  # total Vizier suggestion/evaluation rounds
-    parallel_evals: int = Field(default=16, ge=1)  # default candidates-per-round fan-out (v1 evaluates sequentially)
-    candidates_per_round: int | None = Field(default=None, ge=1)  # suggestions per round; defaults to parallel_evals
+    max_rounds: int = Field(default=20, ge=1)  # total Vizier/replay barrier rounds
+    parallel_evals: int = Field(default=16, ge=1)  # replay worker fan-out and default candidates per round
+    # Successful unique replay configs per round; duplicate projections are told from
+    # cache and replaced. Defaults to parallel_evals.
+    candidates_per_round: int | None = Field(default=None, ge=1)
     random_seed: int = 1
     # Per-candidate wall-clock cap for the replay. A candidate whose replay exceeds this is
     # killed and reported as infeasible ("exceed runtime") so the optimizer avoids that region
@@ -635,14 +643,40 @@ class SmartSearchConfig(BaseModel):
     goal: OptimizationGoal = Field(default_factory=OptimizationGoal)
     sweep: SweepConfig = Field(default_factory=SweepConfig)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _default_pareto_kv_load_ratio(cls, data: Any) -> Any:
+        """A synthetic Pareto workload with no explicit load searches KV load in [0, 1]."""
+        if not isinstance(data, dict):
+            return data
+        goal = data.get("goal")
+        if isinstance(goal, OptimizationGoal):
+            is_pareto = goal.is_pareto
+        elif isinstance(goal, dict):
+            is_pareto = goal.get("target", OptimizationTarget.THROUGHPUT) in {
+                OptimizationTarget.PARETO,
+                OptimizationTarget.PARETO.value,
+            }
+        else:
+            is_pareto = False
+        workload = data.get("workload")
+        if not is_pareto or not isinstance(workload, dict) or workload.get("trace_path") is not None:
+            return data
+        if any(workload.get(name) is not None for name in ("request_rate", "concurrency", "kv_load_ratio")):
+            return data
+        updated = dict(data)
+        updated_workload = dict(workload)
+        updated_workload["kv_load_ratio"] = [0.0, 1.0]
+        updated["workload"] = updated_workload
+        return updated
+
     @model_validator(mode="after")
-    def _validate_concurrency_sweep(self) -> "SmartSearchConfig":
-        """A list-valued ``workload.concurrency`` is the swept Pareto dimension, so it is
-        only allowed under a ``pareto`` goal; every other goal needs a single concurrency."""
-        if self.workload.concurrency_choices is not None and not self.goal.is_pareto:
+    def _validate_kv_load_ratio_range(self) -> "SmartSearchConfig":
+        """Only a Pareto study may search a KV-load range; scalar ratios work for any goal."""
+        if self.workload.kv_load_ratio_range is not None and not self.goal.is_pareto:
             raise ValueError(
-                "a list-valued workload.concurrency is only allowed when goal.target is 'pareto' "
-                f"(got target={self.goal.target.value}); use a single concurrency value"
+                "a ranged workload.kv_load_ratio is only allowed when goal.target is 'pareto' "
+                f"(got target={self.goal.target.value}); use one scalar kv_load_ratio"
             )
         return self
 

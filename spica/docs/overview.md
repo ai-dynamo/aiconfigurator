@@ -11,7 +11,7 @@ YAML (`SmartSearchConfig`):
 | Block | Model | What it is |
 |---|---|---|
 | `search_space:` | `SearchSpace` | knobs to **explore** + pinned context (model, hardware, GPU budget) |
-| `workload:` | `Workload` | the **traffic** every candidate is replayed against (pinned) |
+| `workload:` | `Workload` | the **traffic** every candidate is replayed against (mostly pinned; Pareto may search KV load) |
 | `goal:` | `OptimizationGoal` | what **"better"** means (the target metric) + the SLA constraint |
 | `sweep:` | `SweepConfig` | run-control (`max_rounds`, `candidates_per_round`, `parallel_evals`, `random_seed`) |
 
@@ -33,9 +33,9 @@ first to keep the planner-scaling story together.
 `SmartSearchConfig.from_yaml` (`src/spica/config.py`) loads the YAML and runs every
 pydantic validator: the per-knob choice/dict-key checks (`SearchSpace._validate_search_choices`),
 GPU-budget bounds, single-mode-when-pinning-`parallel_configs`, the goal's SLA requirement
-(`goodput`/`goodput_per_gpu` need a `ttft_ms`+`itl_ms` or `e2e_ms` SLA), and the rule that a
-**list-valued `workload.concurrency` is only allowed under a `pareto` goal**
-(`SmartSearchConfig._validate_concurrency_sweep`). An invalid config never reaches the search.
+(`goodput`/`goodput_per_gpu` need a `ttft_ms`+`itl_ms` or `e2e_ms` SLA), and the rule that
+**`workload.concurrency` is always scalar while a ranged `workload.kv_load_ratio` is Pareto-only**.
+An invalid config never reaches the search.
 
 ### 2. Filter throughput-scaling policies (`filter_scaling_policies`)
 
@@ -82,42 +82,46 @@ main Vizier loop, and its single winner is injected into every unrolled sample.
 `enumerate_branches` (`src/spica/search_space.py`) builds **one `BranchSpace` per
 `deployment_mode`** (agg / disagg) — one Vizier study each, because agg and disagg have
 structurally different parallel configs. **`backend` is a searched knob, not a branch**: for
-each mode the parallel-config domain is the **union** of every configured backend's
+each mode the valid projection pool is the **union** of every configured backend's
 KV-feasible per-worker shapes × replica counts (`parallel_configs_for`), tagged with which
-backends support each. A sampled `(backend, parallel_config)` pair the backend can't run is
-gated later (step 5). `context_length` is threaded into KV feasibility.
+backends support each. `context_length` is threaded into KV feasibility.
 
 - A backend with no perf DB / no viable config for a mode is dropped from that mode's backend
   knob. A **mode** for which *no* backend is viable is **skipped with a warning** (a viable
   mode still runs); only if *no* mode is viable does it raise `NoViableParallelConfig`.
 - A *pinned* `parallel_configs` that is legal for no backend is a **hard error** (fail fast).
-- A list-valued `workload.concurrency` (pareto) becomes a per-trial `concurrency` dimension on
-  the branch.
+- A ranged `workload.kv_load_ratio` (Pareto) becomes a continuous per-trial dimension on the
+  branch. A scalar ratio is injected as a constant.
 
 ### 5. Per-branch Vizier study loop
 
 For each branch, a `BranchSampler` (`make_branch_sampler`, study id
 `spica_{mode}_{run_nonce}`) runs `sweep.max_rounds` rounds. Each round is a **barrier**:
 
-1. **ask** — `sampler.suggest(per_round)` returns `per_round` suggestions
-   (`candidates_per_round`, defaulting to `parallel_evals`). Runs on the main process.
-2. **gate unsupported** — a suggestion whose `(backend, parallel_config)` pair the backend
-   can't run is `observe_infeasible`'d immediately and tallied `unsupported` (never evaluated).
+1. **ask + project** — `sampler.suggest(per_round)` returns suggestions on the main process.
+   Vizier sees resource ratios, per-engine GPU targets, and attention/FFN modes; each request
+   is deterministically projected onto the nearest backend-compatible config in the valid
+   pool. A single user-supplied `parallel_configs` entry remains a strict pin and bypasses
+   these dimensions.
+2. **deduplicate** — exact duplicate full samples reuse their cached measurement and are
+   immediately told back to Vizier. They do not run replay or consume the unique replay
+   budget; replacement suggestions are requested up to the per-round 11x safety cap.
 3. **evaluate** — the rest fan out across worker processes: a single **spawned**
    `ProcessPoolExecutor` created once for the whole run (amortizing the per-worker dynamo
    import) with `min(parallel_evals, per_round)` workers. The pool is used only when **both**
    `parallel_evals > 1` and `per_round > 1`; otherwise evaluation runs sequentially in-process.
-   Each worker runs the pure pipeline `_evaluate_one`: `unroll_sample` → `build_deployment` →
+   Each worker runs the pure pipeline `_evaluate_one`: `unroll_sample` → resolve candidate KV
+   capacity/derived concurrency (KV-load mode) → `build_deployment` →
    `ReplayEvaluator.evaluate` (**real replay**) → score (`make_candidate`). Workers never touch
    the Vizier study; a dead pool re-raises a friendly error pointing at the `if __name__ ==
    "__main__":` guard that spawned workers require.
 4. **tell** — back on the main process: a **feasible** trial is `observe`'d with its metrics;
-   a **gated** trial — over `gpu_budget`, backend-unsupported, or replay-failed — is
-   `observe_infeasible`'d (so a high score never steers the sampler into an infeasible region).
+   replay/build failures are `observe_infeasible`'d. Backend and GPU-budget gates remain as
+   defensive checks, but structured projection should make them unreachable.
 
 `is_feasible` gates on `used_gpus <= gpu_budget` only; SLA is **not** re-gated here (goodput
 targets already bake the SLA into the metric). Each trial's outcome is tallied as one of
-`feasible` / `infeasible` / `failed` / `unsupported`.
+`feasible` / `infeasible` / `failed` / `unsupported`; cache hits are tallied separately.
 
 ### 6. Merge by the goal
 
@@ -147,9 +151,8 @@ flowchart TD
   E --> A
   subgraph L["5 · per branch — Vizier study (× max_rounds)"]
     direction TB
-    A["ask · suggest(per_round)"] --> G{"backend supported?"}
-    G -->|no| OI["observe_infeasible"]
-    G -->|yes| EV["eval ⇉ parallel workers<br/>unroll → build_deployment → replay → score"]
+    A["ask + project · suggest(per_round)<br/>structured features → valid config"] --> D["deduplicate<br/>reuse cached measurement"]
+    D --> EV["eval ⇉ parallel workers<br/>unroll → build_deployment → replay → score"]
     EV --> T["tell · feasible: observe / gated: observe_infeasible"]
   end
   T --> C(["candidates from all branches"]):::io
@@ -160,15 +163,15 @@ flowchart TD
   PF --> OUT
   classDef io fill:#dbeafe,stroke:#60a5fa,color:#1e3a8a;
   classDef decision fill:#fef3c7,stroke:#fbbf24,color:#78350f;
-  class G,M decision;
+  class M decision;
 ```
 
 ## See also
 
 - [optimization-goal.md](optimization-goal.md) — the `OptimizationGoal` targets, SLA, scoring,
   and how the goal maps to the planner's `optimization_target`.
-- [traffic.md](traffic.md) — the `Workload` load shapes (trace / request-rate / concurrency)
-  and the pareto concurrency sweep.
+- [traffic.md](traffic.md) — the `Workload` load shapes (trace / request-rate / fixed
+  concurrency / KV load) and candidate-relative Pareto load sweep.
 - [search-space.md](search-space.md) — every pinnable/searchable knob, the composite presets,
   and `parallel_configs`.
 - [sample.md](sample.md) — how a Vizier suggestion is unrolled into a concrete deployment.

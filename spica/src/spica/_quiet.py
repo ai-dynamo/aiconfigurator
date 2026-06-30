@@ -3,19 +3,19 @@
 
 """Silence the jax / equinox / jaxopt import noise that Vizier's GP-bandit pulls in.
 
-Vizier (the smart-sweep optimizer) depends on jax, and spica only ever runs jax on **CPU** —
-the GP-bandit is a tiny CPU-side optimization; the actual replay compute lives in the Rust
-mocker, not jax. So we:
+Vizier's GP optimizer runs on JAX. The default ``search`` extra is CPU-only; the optional
+``search-gpu`` extra installs the CUDA plugin for large sweeps. So we:
 
-- pin ``JAX_PLATFORMS=cpu`` to skip jax's GPU probe and its noisy
+- pin ``JAX_PLATFORMS=cpu`` only when no CUDA plugin is installed, skipping jax's noisy
   *"An NVIDIA GPU may be present ... but a CUDA-enabled jaxlib is not installed. Falling back
-  to cpu."* warning (spica's venv ships CPU jax on purpose);
+  to cpu."* warning for the normal CPU install;
+- leave the platform unset when ``jax_cuda12_plugin`` is present, allowing JAX to select GPU;
 - quiet the ``jax`` / ``absl`` loggers (e.g. absl's *"Python 3.8+ is required"*);
 - drop the jax / jaxlib / equinox / jaxopt ``DeprecationWarning``s and the
   *"JAXopt is no longer maintained"* notice.
 
 Imported **first** from :mod:`spica` so it runs before anything (lazily) imports vizier/jax.
-Uses ``setdefault`` + module-scoped warning filters so a deliberate jax/GPU user is unaffected.
+An explicit ``JAX_PLATFORMS`` always wins.
 """
 
 from __future__ import annotations
@@ -23,9 +23,11 @@ from __future__ import annotations
 import logging
 import os
 import warnings
+from importlib.util import find_spec
 
 # Must precede the first ``import jax`` (Vizier imports it lazily during a sweep).
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
+if "JAX_PLATFORMS" not in os.environ and find_spec("jax_cuda12_plugin") is None:
+    os.environ["JAX_PLATFORMS"] = "cpu"
 
 for _logger in ("jax", "jax._src.xla_bridge", "absl"):
     logging.getLogger(_logger).setLevel(logging.ERROR)

@@ -1,6 +1,8 @@
 BenchConfig.estimated_concurrency = (BenchConfig.estimated_concurrency if BenchConfig.estimated_concurrency else ((WorkerConfig.agg_workers or 0) * (params.agg.max_batch_size or 0) if DynConfig.mode == 'agg' else (WorkerConfig.decode_workers or 0) * (params.decode.max_batch_size or 0)))
-agg_decode max_batch_size = (512 if (max_batch_size or 0) < 512 else (max_batch_size * 2))
-prefill max_batch_size = (max_batch_size if max_batch_size else 1)
+
+when not (preserve_engine_limits or false):
+    agg_decode max_batch_size = (512 if (max_batch_size or 0) < 512 else (max_batch_size * 2))
+    prefill max_batch_size = (max_batch_size if max_batch_size else 1)
 
 # Enforce vLLM MoE parallelism: vLLM uses unified TP for both attention and MoE,
 # so tensor_parallel_size must account for moe_tp × moe_ep.
@@ -12,10 +14,11 @@ when ModelConfig.is_moe and (moe_tensor_parallel_size and moe_expert_parallel_si
 agg_prefill_decode gpus_per_worker = (tensor_parallel_size or 1) * (pipeline_parallel_size or 1) * (data_parallel_size or 1)
 agg_prefill_decode enable_expert_parallel = ((moe_expert_parallel_size or 1) > 1)
 
-prefill max_num_tokens = (SlaConfig.isl or 0) + 1500
-decode max_num_tokens = max_batch_size
-agg max_num_tokens = (max_batch_size or 0) + (SlaConfig.isl or 0) + 1500
-agg max_seq_len = (SlaConfig.isl or 0) + (SlaConfig.osl or 0) + 1500
+when not (preserve_engine_limits or false):
+    prefill max_num_tokens = (SlaConfig.isl or 0) + 1500
+    decode max_num_tokens = max_batch_size
+    agg max_num_tokens = (max_batch_size or 0) + (SlaConfig.isl or 0) + 1500
+    agg max_seq_len = (SlaConfig.isl or 0) + (SlaConfig.osl or 0) + 1500
 
 when (ModelConfig.prefix or 0) > 0:
     disable_prefix_cache = false
