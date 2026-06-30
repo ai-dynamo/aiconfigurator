@@ -49,7 +49,7 @@ from collector.case_generator import (
     get_attention_head_configs,
 )
 from collector.helper import benchmark_with_power, get_device_module, log_perf
-from collector.vllm.utils import (
+from collector.vllm.utils_xpu import (
     BatchSpec,
     create_and_prepopulate_kv_cache,
     create_common_attn_metadata,
