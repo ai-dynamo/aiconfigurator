@@ -25,6 +25,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
     rm -rf /var/lib/apt/lists/*
 COPY src/ /workspace/src/
+COPY spica/ /workspace/spica/
 COPY rust/ /workspace/rust/
 COPY LICENSE pyproject.toml README.md /workspace/
 # Fail fast if Git LFS content wasn't materialized before the build — otherwise

@@ -13,7 +13,6 @@ pytest.importorskip("dynamo.mocker")
 
 import dynamo.mocker  # noqa: E402
 import dynamo.replay.api  # noqa: E402
-import dynamo.replay.main  # noqa: E402
 
 from spica.config import OptimizationGoal, OptimizationTarget, SLATarget, Workload  # noqa: E402
 from spica.deploy import DeploymentPlan  # noqa: E402
@@ -63,7 +62,7 @@ def _disagg_plan(static):
 
 
 def test_static_agg_uses_plain_path(monkeypatch):
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
         dynamo.replay.api, "run_trace_replay", lambda **kw: rec.update(kw) or {"output_throughput_tok_s": 42.0}
@@ -78,7 +77,7 @@ def test_static_agg_uses_plain_path(monkeypatch):
 def test_static_path_threads_goodput_sla(monkeypatch):
     # the mocker is SLA-aware on the plain path too, so a static/disabled candidate
     # still receives the goodput SLA and can emit goodput.
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
         dynamo.replay.api,
@@ -91,25 +90,83 @@ def test_static_path_threads_goodput_sla(monkeypatch):
     assert rec["sla_ttft_ms"] == 2000.0 and rec["sla_itl_ms"] == 30.0  # SLA threaded to the plain path
 
 
-def test_scaling_agg_uses_run_planner_replay(monkeypatch):
-    # planner -> run_trace_replay(planner_config=...) routes into _run_planner_replay
-    # (the Rust bridge owns the sim loop and calls back into the Python planner adapter).
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+def test_current_trace_api_filters_legacy_kwargs_and_fails_closed_without_goodput(monkeypatch):
+    # Current Dynamo replay wrappers do not accept planner_config, benchmark_granularity,
+    # or SLA kwargs on static replay. Aggregate means cannot reconstruct per-request
+    # goodput, so an incompatible wrapper must fail instead of fabricating a score.
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
+    rec = {}
+
+    def run_trace_replay(
+        trace_file, *, extra_engine_args=None, num_workers=1, replay_concurrency=None, router_mode=None
+    ):
+        rec.update(
+            trace_file=trace_file,
+            extra_engine_args=extra_engine_args,
+            num_workers=num_workers,
+            replay_concurrency=replay_concurrency,
+            router_mode=router_mode,
+        )
+        return {
+            "output_throughput_tok_s": 77.0,
+            "mean_ttft_ms": 10.0,
+            "mean_tpot_ms": 2.0,
+            "mean_e2e_latency_ms": 42.0,
+        }
+
+    monkeypatch.setattr(dynamo.replay.api, "run_trace_replay", run_trace_replay)
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
+    with pytest.raises(RuntimeError, match="per-request SLA accounting"):
+        ReplayEvaluator(_wl(), goal).evaluate(_agg_plan(static=True))
+    assert rec["trace_file"] == "/tmp/t.jsonl"
+    assert set(rec) == {"trace_file", "extra_engine_args", "num_workers", "replay_concurrency", "router_mode"}
+
+
+def test_current_trace_api_rejects_planner_config(monkeypatch):
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
+
+    def run_trace_replay(trace_file, *, extra_engine_args=None, num_workers=1):
+        return {"output_throughput_tok_s": 1.0}
+
+    monkeypatch.setattr(dynamo.replay.api, "run_trace_replay", run_trace_replay)
+    goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
+    with pytest.raises(RuntimeError, match="does not accept planner_config"):
+        ReplayEvaluator(_wl(), goal).evaluate(_agg_plan(static=False))
+
+
+def test_scaling_agg_threads_planner_config_when_supported(monkeypatch):
+    # Older Dynamo replay wrappers accept planner_config directly; keep threading it
+    # when the installed API advertises that kwarg.
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
-        dynamo.replay.main,
-        "_run_planner_replay",
-        lambda **kw: (
-            rec.update(kw) or SimpleNamespace(trace_report={"gpu_hours": 2.0, "goodput_output_throughput_tok_s": 100.0})
-        ),
+        dynamo.replay.api,
+        "run_trace_replay",
+        lambda **kw: rec.update(kw) or {"gpu_hours": 2.0, "goodput_output_throughput_tok_s": 100.0},
     )
     goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
     report = ReplayEvaluator(_wl(), goal).evaluate(_agg_plan(static=False))
     assert report["gpu_hours"] == 2.0
-    # goodput SLA threaded to the planner path; planner config carried as inline JSON
+    # goodput SLA threaded to the planner path; planner config carried as a dict
     assert rec["sla_ttft_ms"] == 2000.0 and rec["sla_itl_ms"] == 30.0
-    assert json.loads(rec["planner_config_arg"])["optimization_target"] == "sla"
+    assert rec["planner_config"]["optimization_target"] == "sla"
     assert rec["num_workers"] == 2
+
+
+def test_scaling_report_preserves_planner_tick_count(monkeypatch):
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
+    monkeypatch.setattr(
+        dynamo.replay.api,
+        "run_trace_replay",
+        lambda **kw: SimpleNamespace(
+            trace_report={"output_throughput_tok_s": 42.0},
+            total_ticks=3,
+        ),
+    )
+    goal = OptimizationGoal(target=OptimizationTarget.THROUGHPUT)
+    report = ReplayEvaluator(_wl(), goal).evaluate(_agg_plan(static=False))
+    assert report["output_throughput_tok_s"] == 42.0
+    assert report["planner_total_ticks"] == 3.0
 
 
 def test_kv_router_config_is_built_and_passed(monkeypatch):
@@ -117,7 +174,7 @@ def test_kv_router_config_is_built_and_passed(monkeypatch):
     # (round_robin -> None). Regression for the "router_config=None" stub.
     from dynamo._core import KvRouterConfig
 
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
         dynamo.replay.api, "run_trace_replay", lambda **kw: rec.update(kw) or {"output_throughput_tok_s": 1.0}
@@ -142,7 +199,7 @@ def test_kv_router_config_is_built_and_passed(monkeypatch):
 def test_static_trace_threads_replay_concurrency(monkeypatch):
     # a closed-loop concurrency cap on a trace reaches run_trace_replay as
     # replay_concurrency (run_trace_replay defaults replay_mode='offline').
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
         dynamo.replay.api, "run_trace_replay", lambda **kw: rec.update(kw) or {"output_throughput_tok_s": 1.0}
@@ -152,20 +209,20 @@ def test_static_trace_threads_replay_concurrency(monkeypatch):
     assert rec["replay_concurrency"] == 32
 
 
-def test_scaling_trace_threads_replay_concurrency(monkeypatch):
-    # closed-loop concurrency over a trace + planner now works (the bridge takes a cap):
-    # the evaluator threads replay_concurrency into _run_planner_replay.
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+def test_scaling_trace_threads_replay_concurrency_when_supported(monkeypatch):
+    # closed-loop concurrency over a trace + planner works when the replay wrapper
+    # accepts planner_config.
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
-        dynamo.replay.main,
-        "_run_planner_replay",
-        lambda **kw: rec.update(kw) or SimpleNamespace(trace_report={"gpu_hours": 1.0}),
+        dynamo.replay.api,
+        "run_trace_replay",
+        lambda **kw: rec.update(kw) or {"gpu_hours": 1.0, "goodput_output_throughput_tok_s": 1.0},
     )
     wl = Workload(trace_path="/tmp/t.jsonl", replay_concurrency=32)
     goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
     ReplayEvaluator(wl, goal).evaluate(_agg_plan(static=False))
-    assert rec["replay_concurrency"] == 32 and rec["trace_file"] == "/tmp/t.jsonl"
+    assert rec["replay_concurrency"] == 32 and rec["trace_files"] == "/tmp/t.jsonl"
 
 
 def _syn_wl(**kw):
@@ -179,7 +236,7 @@ def _syn_wl(**kw):
 def test_synthetic_static_uses_run_synthetic_trace_replay(monkeypatch):
     # synthetic + static -> a single run_synthetic_trace_replay call with planner_config=None
     # (fixed-fleet replay, no scaling); goodput SLA threaded; in-flight cap = concurrency.
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
         dynamo.replay.api,
@@ -199,7 +256,7 @@ def test_synthetic_static_uses_run_synthetic_trace_replay(monkeypatch):
 def test_concurrency_override_drives_cap_and_request_count(monkeypatch):
     # Pareto sweep: workload.concurrency is a LIST; the per-trial concurrency_override sets
     # BOTH the closed-loop in-flight cap and the num_request_ratio-scaled request count.
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
         dynamo.replay.api,
@@ -214,29 +271,29 @@ def test_concurrency_override_drives_cap_and_request_count(monkeypatch):
     assert rec["planner_config"] is None
 
 
-def test_synthetic_planner_uses_run_planner_replay(monkeypatch):
-    # synthetic + planner -> _run_planner_replay(synthetic=SyntheticWorkload(...), trace_file=None).
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
-    monkeypatch.setattr(dynamo.replay.main, "SyntheticWorkload", lambda **kw: ("SYN", kw), raising=False)
+def test_synthetic_planner_threads_planner_config_when_supported(monkeypatch):
+    # synthetic + planner -> run_synthetic_trace_replay with planner_config when supported.
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
-        dynamo.replay.main,
-        "_run_planner_replay",
-        lambda **kw: rec.update(kw) or SimpleNamespace(trace_report={"gpu_hours": 2.0}),
+        dynamo.replay.api,
+        "run_synthetic_trace_replay",
+        lambda **kw: rec.update(kw) or {"gpu_hours": 2.0, "goodput_output_throughput_tok_s": 1.0},
     )
     goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=1500.0, itl_ms=50.0))
     # request-rate workload -> open-loop (no cap); arrival_interval derived from the rate
     ReplayEvaluator(_syn_wl(request_rate=20.0), goal).evaluate(_agg_plan(static=False))
-    assert rec["trace_file"] is None and rec["replay_concurrency"] is None
-    assert rec["synthetic"][0] == "SYN"
-    assert rec["synthetic"][1]["arrival_interval_ms"] == 50.0  # 1000 / 20
+    assert rec["replay_concurrency"] is None
+    assert rec["input_tokens"] == 128 and rec["output_tokens"] == 64
+    assert rec["arrival_interval_ms"] == 50.0  # 1000 / 20
+    assert rec["planner_config"]["mode"] == "agg"
     assert rec["sla_ttft_ms"] == 1500.0
 
 
 def test_static_trace_disagg_uses_plain_path(monkeypatch):
     # disagg + trace + static -> run_trace_replay gets prefill/decode engine args
     # and the per-role worker counts (no agg num_workers/extra_engine_args).
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
         dynamo.replay.api, "run_trace_replay", lambda **kw: rec.update(kw) or {"output_throughput_tok_s": 7.0}
@@ -251,35 +308,30 @@ def test_static_trace_disagg_uses_plain_path(monkeypatch):
     assert "num_workers" not in rec and "extra_engine_args" not in rec
 
 
-def test_scaling_trace_disagg_uses_run_planner_replay(monkeypatch):
-    # disagg + trace + planner -> _run_planner_replay with disagg args (num_workers=0,
-    # per-role workers + engine args) and the disagg planner config carried as JSON.
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+def test_scaling_trace_disagg_threads_planner_config_when_supported(monkeypatch):
+    # disagg + trace + planner -> run_trace_replay with per-role workers and planner_config
+    # when supported.
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
-        dynamo.replay.main,
-        "_run_planner_replay",
-        lambda **kw: (
-            rec.update(kw) or SimpleNamespace(trace_report={"gpu_hours": 3.0, "goodput_output_throughput_tok_s": 90.0})
-        ),
+        dynamo.replay.api,
+        "run_trace_replay",
+        lambda **kw: rec.update(kw) or {"gpu_hours": 3.0, "goodput_output_throughput_tok_s": 90.0},
     )
     goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=2000.0, itl_ms=30.0))
     report = ReplayEvaluator(_wl(), goal).evaluate(_disagg_plan(static=False))
     assert report["gpu_hours"] == 3.0
-    # disagg -> the wrapper's default num_workers=1 flows through but the binding ignores it
-    # (it sizes the deployment from the per-role prefill/decode worker counts).
-    assert rec["extra_engine_args"] is None and rec["num_workers"] == 1
     assert rec["prefill_engine_args"][1] == {"aic_tp_size": 2, "max_num_seqs": 256}
     assert rec["decode_engine_args"][1] == {"aic_tp_size": 4, "max_num_seqs": 512}
     assert rec["num_prefill_workers"] == 3 and rec["num_decode_workers"] == 5
     assert rec["sla_ttft_ms"] == 2000.0 and rec["sla_itl_ms"] == 30.0
-    assert json.loads(rec["planner_config_arg"])["mode"] == "disagg"
+    assert rec["planner_config"]["mode"] == "disagg"
 
 
 def test_synthetic_static_disagg_uses_run_synthetic_trace_replay(monkeypatch):
     # disagg + synthetic + static -> run_synthetic_trace_replay with prefill/decode args and
     # planner_config=None; goodput SLA threaded; closed-loop in-flight cap = concurrency.
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
         dynamo.replay.api,
@@ -299,28 +351,25 @@ def test_synthetic_static_disagg_uses_run_synthetic_trace_replay(monkeypatch):
     assert "num_workers" not in rec and "extra_engine_args" not in rec
 
 
-def test_synthetic_planner_disagg_uses_run_planner_replay(monkeypatch):
-    # disagg + synthetic + planner -> _run_planner_replay(synthetic=…, prefill/decode).
-    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs)
-    monkeypatch.setattr(dynamo.replay.main, "SyntheticWorkload", lambda **kw: ("SYN", kw), raising=False)
+def test_synthetic_planner_disagg_threads_planner_config_when_supported(monkeypatch):
+    # disagg + synthetic + planner -> run_synthetic_trace_replay with per-role workers and
+    # planner_config when supported.
+    monkeypatch.setattr(dynamo.mocker, "MockEngineArgs", _FakeArgs, raising=False)
     rec = {}
     monkeypatch.setattr(
-        dynamo.replay.main,
-        "_run_planner_replay",
-        lambda **kw: rec.update(kw) or SimpleNamespace(trace_report={"gpu_hours": 2.0}),
+        dynamo.replay.api,
+        "run_synthetic_trace_replay",
+        lambda **kw: rec.update(kw) or {"gpu_hours": 2.0, "goodput_output_throughput_tok_s": 1.0},
     )
     goal = OptimizationGoal(target=OptimizationTarget.GOODPUT_PER_GPU, sla=SLATarget(ttft_ms=1500.0, itl_ms=50.0))
     # request-rate workload -> open-loop (no cap); arrival_interval derived from the rate
     ReplayEvaluator(_syn_wl(request_rate=20.0), goal).evaluate(_disagg_plan(static=False))
-    assert rec["trace_file"] is None and rec["replay_concurrency"] is None
-    # disagg -> the wrapper's default num_workers=1 flows through but the binding ignores it
-    # (it sizes the deployment from the per-role prefill/decode worker counts).
-    assert rec["extra_engine_args"] is None and rec["num_workers"] == 1
+    assert rec["replay_concurrency"] is None
     assert rec["prefill_engine_args"][1] == {"aic_tp_size": 2, "max_num_seqs": 256}
     assert rec["decode_engine_args"][1] == {"aic_tp_size": 4, "max_num_seqs": 512}
     assert rec["num_prefill_workers"] == 3 and rec["num_decode_workers"] == 5
-    assert rec["synthetic"][0] == "SYN"
-    assert rec["synthetic"][1]["arrival_interval_ms"] == 50.0  # 1000 / 20
+    assert rec["arrival_interval_ms"] == 50.0  # 1000 / 20
+    assert rec["planner_config"]["mode"] == "disagg"
     assert rec["sla_ttft_ms"] == 1500.0
 
 
