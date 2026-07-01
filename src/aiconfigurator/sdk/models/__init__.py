@@ -37,6 +37,7 @@ from aiconfigurator.sdk.models.helpers import (
     calc_expectation,
     check_is_moe,
     get_model_family,
+    resolve_context_fmha_compat,
 )
 
 # Auto-import every other module in this package so ``@register_model``
@@ -163,4 +164,5 @@ __all__ = [
     "check_is_moe",
     "get_model",
     "get_model_family",
+    "resolve_context_fmha_compat",
 ]
