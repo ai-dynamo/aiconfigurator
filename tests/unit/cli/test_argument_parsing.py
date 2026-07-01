@@ -209,6 +209,23 @@ class TestCLIArgumentParsing:
 
         assert args.log_level == "DEBUG"
 
+    def test_legacy_debug_flag(self, cli_parser):
+        """Legacy --debug is still accepted for backward compatibility."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--debug",
+            ]
+        )
+
+        assert args.debug is True
+
     def test_engine_step_backend_flag(self, cli_parser):
         """Test that the experimental engine step backend can be selected."""
         args = cli_parser.parse_args(
