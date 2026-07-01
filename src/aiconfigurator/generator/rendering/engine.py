@@ -31,6 +31,36 @@ _CONFIG_DIR = (_BASE_DIR.parent / "config").resolve()
 _TEMPLATE_ROOT = _CONFIG_DIR / "backend_templates"
 _BACKEND_MAPPING_FILE = str((_CONFIG_DIR / "backend_config_mapping.yaml").resolve())
 
+_VLLM_SAFE_K8S_FLAGS = frozenset(
+    {
+        "--data-parallel-size",
+        "--enable-expert-parallel",
+        "--kv-cache-dtype",
+        "--max-model-len",
+        "--max-num-batched-tokens",
+        "--no-enable-prefix-caching",
+        "--pipeline-parallel-size",
+        "--skip-tokenizer-init",
+        "--speculative-config",
+        "--tensor-parallel-size",
+        "--trust-remote-code",
+    }
+)
+
+
+def _filter_vllm_k8s_cli_args(cli_args: list[str]) -> list[str]:
+    """Keep only topology, safety, and explicitly requested vLLM arguments."""
+    filtered: list[str] = []
+    index = 0
+    while index < len(cli_args):
+        next_index = index + 1
+        while next_index < len(cli_args) and not cli_args[next_index].startswith("--"):
+            next_index += 1
+        if cli_args[index] in _VLLM_SAFE_K8S_FLAGS:
+            filtered.extend(cli_args[index:next_index])
+        index = next_index
+    return filtered
+
 
 def _parse_template_version(version: str | None) -> Version | None:
     if version is None:
@@ -505,6 +535,13 @@ def render_backend_templates(
     context["decode_gpu"] = decode_gpu
     context["agg_gpu"] = agg_gpu
 
+    k8s_context = context
+    if backend == "vllm" and deployment_target in ("dynamo-j2", "dynamo-python"):
+        k8s_context = dict(context)
+        for worker in worker_plan:
+            list_key = f"{worker}_cli_args_list"
+            k8s_context[list_key] = _filter_vllm_k8s_cli_args(list(context.get(list_key) or []))
+
     # Render auxiliary templates based on deployment target
     if deployment_target == "llm-d":
         # llm-d deployment: render Helm values for llm-d-modelservice chart
@@ -519,7 +556,7 @@ def render_backend_templates(
     elif deployment_target == "dynamo-python":
         # Dynamo deployment using Dynamo's Python config modifiers
         try:
-            rendered_templates["k8s_deploy.yaml"] = _generate_k8s_via_dynamo(param_values, backend, context)
+            rendered_templates["k8s_deploy.yaml"] = _generate_k8s_via_dynamo(param_values, backend, k8s_context)
         except Exception as e:
             logger.warning(f"Failed to generate k8s config via Dynamo: {e}")
     else:
@@ -527,7 +564,6 @@ def render_backend_templates(
         k8s_aux = template_path / "k8s_deploy.yaml.j2"
         if k8s_aux.exists():
             try:
-                k8s_context = context
                 # For backends with extra_engine_args templates (trtllm),
                 # suppress cli_args_list so the k8s template uses the
                 # --extra-engine-args file approach instead of inlining
