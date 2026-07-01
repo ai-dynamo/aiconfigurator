@@ -8,6 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/aiconfigurator)
 [![Discord](https://dcbadge.limes.pink/api/server/mRJ2KNzwYE?style=flat)](https://discord.gg/mRJ2KNzwYE)
 
+NVIDIA contributors can explore the [AIC Developer Universe](https://aic-dev-portal-2f93e8.gitlab-master-pages.nvidia.com/universe.html) (internal access required).
 
 In disaggregated serving, configuring an effective deployment is challenging: you need to decide how many prefill and decode
 workers to run, and the parallelism for each worker. Combined with SLA targets for TTFT (Time to First Token) and
