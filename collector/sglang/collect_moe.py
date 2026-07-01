@@ -198,17 +198,25 @@ def get_moe_test_cases():
         # NVFP4 model cases below instead of enabling the mode globally.
         moe_list = ["bfloat16", "fp8_block", "int4_wo"]
 
+    common_cases = get_common_moe_test_cases()
+    # When both GLM-5-NVFP4 and GLM-5.2-NVFP4 are present, collect only
+    # GLM-5.2-NVFP4 (identical MoE; GLM-5.2 is the longest-context one).
+    _present = {tc.model_name for tc in common_cases}
+    _drop_models = {"nvidia/GLM-5-NVFP4"} if {"nvidia/GLM-5-NVFP4", "nvidia/GLM-5.2-NVFP4"} <= _present else set()
+
     test_cases = []
 
-    for common_moe_testcase in get_common_moe_test_cases():
+    for common_moe_testcase in common_cases:
         model_name = common_moe_testcase.model_name
+        if model_name in _drop_models:
+            continue
 
         model_moe_list = moe_list
         if model_name == "zai-org/GLM-5":
             model_moe_list = ["bfloat16"]
         elif model_name == "zai-org/GLM-5-FP8":
             model_moe_list = ["fp8_block"]
-        elif model_name == "nvidia/GLM-5-NVFP4":
+        elif model_name in ("nvidia/GLM-5-NVFP4", "nvidia/GLM-5.2-NVFP4"):
             # nvfp4 MoE; sweep the full EP/TP grid like DeepSeek-V4 (the EP/TP
             # validity is already bounded by get_common_moe_test_cases via
             # tp*ep==gpu / ep<=num_experts / num_experts%ep==0 / inter%tp==0).
@@ -793,10 +801,20 @@ def benchmark_config(
 
     elif use_nvfp4 and use_trtllm_bf16_fp4 and workloads is None:
         from flashinfer.fused_moe import ActivationType, trtllm_fp4_block_scale_routed_moe
-        from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
-            _pack_topk_for_flashinfer_routed,
-            quantize_hidden_states_fp4,
-        )
+        from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import quantize_hidden_states_fp4
+
+        try:
+            from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import _pack_topk_for_flashinfer_routed
+        except ImportError:
+            # Newer sglang (glm52 dev image) dropped this helper from
+            # flashinfer_trtllm; the same trtllm routed-MoE pack
+            # ((expert_id<<16)|bf16_weight, bit-identical) now lives as
+            # fused_pack_topk. Without this the trtllm BF16xFP4 MoE kernel can't
+            # be collected on the dev image (ImportError) and only the slower
+            # cutedsl path survives, making AIC over-predict MoE.
+            from sglang.jit_kernel.trtllm_lora_temp.topk_pack import (
+                fused_pack_topk as _pack_topk_for_flashinfer_routed,
+            )
 
         if hidden_size % 32 != 0 or (shard_intermediate_size // 2) % 32 != 0:
             raise ValueError(

@@ -244,7 +244,11 @@ class TestBuildModuleTestCases:
         assert "deepseek-ai/DeepSeek-V3.2" in model_paths
         assert "zai-org/GLM-5" in model_paths
         assert "zai-org/GLM-5-FP8" in model_paths
-        assert "nvidia/GLM-5-NVFP4" in model_paths
+        # Same-precision DSA dedup collapses the nvfp4 GLM checkpoints
+        # (GLM-5-NVFP4 + GLM-5.2-NVFP4) to the longest-context representative
+        # GLM-5.2-NVFP4; the other distinct-precision checkpoints are untouched.
+        assert "nvidia/GLM-5.2-NVFP4" in model_paths
+        assert "nvidia/GLM-5-NVFP4" not in model_paths
 
     def test_mla_includes_v3_family(self):
         mod = _import_module()
@@ -308,8 +312,11 @@ class TestBuildModuleTestCases:
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("dsa", "context")
+        # nvfp4 GLM is represented by GLM-5.2-NVFP4 after the same-precision
+        # DSA dedup (GLM-5-NVFP4 is collapsed into it).
         assert any(
-            c[6] == "nvidia/GLM-5-NVFP4" and c[3] == "fp8" and c[4] == "bfloat16" and c[5] == "bfloat16" for c in cases
+            c[6] == "nvidia/GLM-5.2-NVFP4" and c[3] == "fp8" and c[4] == "bfloat16" and c[5] == "bfloat16"
+            for c in cases
         )
 
     def test_placeholder_seq_batch(self):

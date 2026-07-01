@@ -207,6 +207,36 @@ class TestContextDSAModule:
 
         assert float(result) == pytest.approx(10.0)
 
+    def test_skip_indexer_routes_to_skip_table(self, stub_perf_db):
+        # skip_indexer=True must read _context_dsa_module_skip_data, not the full
+        # table. Distinct latencies (full 10.0 vs skip 4.0) make a wrong wiring
+        # (a skip query reading the full table) fail instead of silently passing.
+        full = {32: {0: {256: {1: _dsa_value(10.0)}}}}
+        skip = {32: {0: {256: {1: _dsa_value(4.0)}}}}
+        stub_perf_db._context_dsa_module_data = LoadedOpData(
+            _context_dsa_data(full, GLM5_ARCHITECTURE), common.PerfDataFilename.dsa_context_module, "glm5-full"
+        )
+        stub_perf_db._context_dsa_module_skip_data = LoadedOpData(
+            _context_dsa_data(skip, GLM5_ARCHITECTURE), common.PerfDataFilename.dsa_context_module, "glm5-skip"
+        )
+
+        def _q(skip_indexer):
+            return stub_perf_db.query_context_dsa_module(
+                b=1,
+                s=256,
+                prefix=0,
+                num_heads=32,
+                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+                fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.SILICON,
+                architecture=GLM5_ARCHITECTURE,
+                skip_indexer=skip_indexer,
+            )
+
+        assert float(_q(False)) == pytest.approx(10.0)
+        assert float(_q(True)) == pytest.approx(4.0)
+
     def test_glm5_context_prefix_axis_sparse_batch_falls_back_to_smaller_batch(self, stub_perf_db):
         dsa_dict = {16: {0: {16384: {1: _dsa_value(6.2052)}}}}
         stub_perf_db._context_dsa_module_data = LoadedOpData(

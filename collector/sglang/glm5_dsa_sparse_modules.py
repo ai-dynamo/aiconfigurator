@@ -59,6 +59,27 @@ GLM5_ARCHITECTURE = "GlmMoeDsaForCausalLM"
 
 
 def _selected_glm5_models():
+    """GLM model to collect sparse kernels for. The kernels (mqa/topk/dsa_attn)
+    are bf16 and identical across GLM-5 variants, differing only in prefix range.
+    When both GLM-5-NVFP4 and GLM-5.2-NVFP4 are configured, collect only
+    GLM-5.2-NVFP4 (longest context — its range + the max_position ceiling in the
+    derived shapes covers GLM-5); otherwise the default."""
+    try:
+        from collector.sglang.collect_mla_module import get_mla_module_model_specs
+    except ModuleNotFoundError:
+        from collect_mla_module import get_mla_module_model_specs
+    # apply_model_filter=False: decide the representative from the configured
+    # set, independent of a COLLECTOR_MODEL_PATH pin, so a pin to GLM-5.2-NVFP4
+    # still resolves sparse to GLM-5.2-NVFP4 (not the default). Prefer the
+    # longest-context GLM present (GLM-5.2 covers GLM-5 via its range + the
+    # max_position ceiling in derived shapes); only the genuine absence of any
+    # GLM-5.x configured spec falls back to the default. Discovery errors
+    # propagate instead of being silently swallowed into the default path.
+    paths = {s.model_path for s in get_mla_module_model_specs(attention_type="dsa", apply_model_filter=False)}
+    if "nvidia/GLM-5.2-NVFP4" in paths:
+        return ["nvidia/GLM-5.2-NVFP4"]
+    if "nvidia/GLM-5-NVFP4" in paths:
+        return ["nvidia/GLM-5-NVFP4"]
     return [GLM5_DEFAULT_MODEL]
 
 
@@ -384,6 +405,7 @@ def _dsa_context_derived_shapes(model_path):
     try:
         from collector.case_generator import get_mla_module_sweep_spec
         from collector.sglang.collect_mla_module import (
+            _DSA_CEILING_MAX_POSITIONS,
             _dsa_context_prefix_shape_is_valid,
             _filter_cases_from_env,
             _model_max_position_embeddings,
@@ -392,6 +414,7 @@ def _dsa_context_derived_shapes(model_path):
     except ModuleNotFoundError:
         from case_generator import get_mla_module_sweep_spec
         from collect_mla_module import (
+            _DSA_CEILING_MAX_POSITIONS,
             _dsa_context_prefix_shape_is_valid,
             _filter_cases_from_env,
             _model_max_position_embeddings,
@@ -420,13 +443,35 @@ def _dsa_context_derived_shapes(model_path):
         kept = _filter_cases_from_env(tagged, is_prefill=True, attn_type="dsa")
         return [(bs, isl, prefix) for (bs, isl, _ip, prefix) in kept]
 
-    return _derive_context_shapes(
+    shapes = _derive_context_shapes(
         sweep.context_batch_sizes,
         sweep.context_sequence_lengths,
         sweep.context_prefix_lengths,
         _valid,
         env_filter=_env,
     )
+    # Ceiling: put a real (prefix, isl) point at prefix + isl == each hardcoded
+    # DSA max_position (_DSA_CEILING_MAX_POSITIONS); _valid below drops any above
+    # this model's own max. So GLM-5.2 also lands a point at GLM-5's 202752.
+    # Mirrors the DSA context module's ceiling so CP near-max queries interpolate
+    # within data instead of extrapolating across the coarse prefix grid.
+    have = set(shapes)
+    ceiling_candidates = []
+    for cover in _DSA_CEILING_MAX_POSITIONS:
+        for isl in sweep.context_sequence_lengths:
+            ceil_prefix = cover - isl
+            for bs in sweep.context_batch_sizes:
+                key = (ceil_prefix, isl, bs)
+                if ceil_prefix > 0 and key not in have and _valid(bs, isl, ceil_prefix):
+                    ceiling_candidates.append((bs, isl, ceil_prefix))
+    # Subject the injected ceiling points to the same AIC_DSA_CONTEXT_* env pin
+    # as the base shapes, so a targeted collector run can't pick up extra shapes.
+    for bs, isl, ceil_prefix in _env(ceiling_candidates):
+        key = (ceil_prefix, isl, bs)
+        if key not in have:
+            shapes.append(key)
+            have.add(key)
+    return shapes
 
 
 def _dsa_generation_derived_shapes(model_path):
@@ -439,10 +484,10 @@ def _dsa_generation_derived_shapes(model_path):
     """
     try:
         from collector.case_generator import get_mla_module_sweep_spec
-        from collector.sglang.collect_mla_module import _model_max_position_embeddings
+        from collector.sglang.collect_mla_module import _DSA_CEILING_MAX_POSITIONS, _model_max_position_embeddings
     except ModuleNotFoundError:
         from case_generator import get_mla_module_sweep_spec
-        from collect_mla_module import _model_max_position_embeddings
+        from collect_mla_module import _DSA_CEILING_MAX_POSITIONS, _model_max_position_embeddings
     sweep = get_mla_module_sweep_spec("sglang")
     max_pos = _model_max_position_embeddings(model_path)
 
@@ -455,7 +500,20 @@ def _dsa_generation_derived_shapes(model_path):
             return False
         return not (max_pos and kv >= max_pos)  # decode kv length must be < max_position
 
-    return _derive_context_shapes(sweep.generation_batch_sizes, [1], sweep.generation_sequence_lengths, _valid)
+    shapes = _derive_context_shapes(sweep.generation_batch_sizes, [1], sweep.generation_sequence_lengths, _valid)
+    # Ceiling: extend the decode kv-length grid to each hardcoded DSA
+    # max_position-1 (_DSA_CEILING_MAX_POSITIONS) at bs=1, so GLM-5.2 decode near
+    # max doesn't extrapolate. High-context decode is single-stream, so add at
+    # bs=1 and bypass the bs*kv token budget for these ceiling points (kept
+    # kv < max_position). Mirrors the DSA generation module's step ceiling.
+    have = set(shapes)
+    for cover in _DSA_CEILING_MAX_POSITIONS:
+        kv = cover - 1
+        key = (kv, 1, 1)
+        if kv > 0 and (max_pos is None or kv < max_pos) and key not in have:
+            shapes.append(key)
+            have.add(key)
+    return shapes
 
 
 def run_glm5_dsa_sparse_kernel_worker(

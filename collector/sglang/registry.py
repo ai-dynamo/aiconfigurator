@@ -95,6 +95,25 @@ REGISTRY: list[OpEntry] = [
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_GENERATION_MODULE,
     ),
+    # GLM-5.2 skip-indexer layers (index_topk_freq>1): same shapes as the full
+    # DSA module, but the per-layer indexer (mqa+topk+index-K store) is patched
+    # out so the captured cost is the reuse-layer cost. run_func derives a
+    # skip_indexer bool from the "skip_indexer" perf_filename and passes it to
+    # the benchmark subprocess as an explicit arg (no env var).
+    OpEntry(
+        op="dsa_context_module_skip_indexer",
+        module="collector.sglang.collect_mla_module",
+        get_func="get_dsa_context_module_skip_indexer_test_cases",
+        run_func="run_mla_module_worker",
+        perf_filename=PerfFile.DSA_CONTEXT_MODULE_SKIP_INDEXER,
+    ),
+    OpEntry(
+        op="dsa_generation_module_skip_indexer",
+        module="collector.sglang.collect_mla_module",
+        get_func="get_dsa_generation_module_skip_indexer_test_cases",
+        run_func="run_mla_module_worker",
+        perf_filename=PerfFile.DSA_GENERATION_MODULE_SKIP_INDEXER,
+    ),
     # DeepSeek-V4 module-level data (csa/hca x ctx/gen = 4 ops, 1 file each).
     OpEntry(
         op="dsv4_csa_context_module",

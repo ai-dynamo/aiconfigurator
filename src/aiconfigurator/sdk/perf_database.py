@@ -2455,9 +2455,11 @@ class PerfDatabase:
         index_head_dim: int | None = None,
         index_topk: int | None = None,
         dsa_backend: str = "trtllm",
+        skip_indexer: bool = False,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Query context DSA module latency. Delegates to
-        ``ContextDSAModule._query_context_dsa_module_table``."""
+        ``ContextDSAModule._query_context_dsa_module_table``. ``skip_indexer``
+        selects the GLM-5.2 reuse-layer table."""
         from aiconfigurator.sdk.operations.dsa import ContextDSAModule
 
         return ContextDSAModule._query_context_dsa_module_table(
@@ -2475,6 +2477,7 @@ class PerfDatabase:
             index_head_dim=index_head_dim,
             index_topk=index_topk,
             dsa_backend=dsa_backend,
+            skip_indexer=skip_indexer,
         )
 
     @functools.lru_cache(maxsize=32768)
@@ -2492,9 +2495,11 @@ class PerfDatabase:
         index_head_dim: int | None = None,
         index_topk: int | None = None,
         dsa_backend: str = "trtllm",
+        skip_indexer: bool = False,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Query generation DSA module latency. Delegates to
-        GenerationDSAModule._query_generation_dsa_module_table."""
+        GenerationDSAModule._query_generation_dsa_module_table. ``skip_indexer``
+        selects the GLM-5.2 reuse-layer table."""
         from aiconfigurator.sdk.operations.dsa import GenerationDSAModule
 
         return GenerationDSAModule._query_generation_dsa_module_table(
@@ -2510,6 +2515,7 @@ class PerfDatabase:
             index_head_dim=index_head_dim,
             index_topk=index_topk,
             dsa_backend=dsa_backend,
+            skip_indexer=skip_indexer,
         )
 
     @staticmethod

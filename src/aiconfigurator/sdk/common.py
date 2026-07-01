@@ -488,6 +488,7 @@ DefaultHFModels = {
     "zai-org/GLM-5",
     "zai-org/GLM-5-FP8",
     "nvidia/GLM-5-NVFP4",
+    "nvidia/GLM-5.2-NVFP4",
     # DeepSeek V4
     *DEEPSEEK_V4_HF_MODELS,
     # Qwen 3 Models
@@ -999,6 +1000,9 @@ class PerfDataFilename(Enum):
     mla_generation_module = "mla_generation_module_perf.parquet"
     dsa_context_module = "dsa_context_module_perf.parquet"
     dsa_generation_module = "dsa_generation_module_perf.parquet"
+    # NOTE: GLM-5.2 skip-indexer (reuse-layer) rows live in the SAME
+    # dsa_*_module file, tagged by the op_name column; the loader splits them
+    # via op_kind="full"/"skip" — no separate filename needed here.
     mhc_module = "mhc_module_perf.parquet"
     # DeepSeek-V4 module-level data — one file per (attn_kind ∈ {csa, hca},
     # mode ∈ {context, generation}) = 4 files. Each file contains all
