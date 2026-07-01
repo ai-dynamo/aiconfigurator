@@ -484,7 +484,7 @@
             <input id="systems-paths" type="hidden" value="/data/aiconfigurator-data/aic-systems/systems">
           </div>
           <div class="field">
-            <label for="system">GPU 系统</label>
+            <label for="system">GPU 类型</label>
             <select id="system">
               <option value="h200_sxm" selected>h200_sxm</option>
               <option value="h100_sxm">h100_sxm</option>
@@ -495,7 +495,7 @@
             </select>
           </div>
           <div class="field">
-            <label for="backend">推理后端</label>
+            <label for="backend">推理框架</label>
             <select id="backend">
               <option value="vllm" selected>vllm</option>
               <option value="sglang">sglang</option>
@@ -503,7 +503,7 @@
             </select>
           </div>
           <div class="field">
-            <label for="backend-version">后端版本</label>
+            <label for="backend-version">框架版本</label>
             <input id="backend-version" value="0.19.0" placeholder="0.19.0">
           </div>
           <div class="field">
@@ -557,7 +557,7 @@
               <input id="namespace" value="aic-system">
             </div>
             <div class="field-wide">
-              <label for="image">运行时镜像</label>
+              <label for="image">Dynamo 镜像</label>
               <input id="image" value="parties-hub.haiercash.com/nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1">
             </div>
             <div class="field">
