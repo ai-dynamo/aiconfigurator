@@ -143,9 +143,8 @@ wideep/*/registry.py — WideEP-only ops appended when the v2 plan requests them
 network/             — collective communication collectors and Slurm network jobs
 ```
 
-WideEP entries in `framework_manifest.yaml` must keep the same framework version
-as their non-WideEP framework entry. If a WideEP collector needs a special image,
-put only the image override in the WideEP entry and keep the version aligned.
+WideEP entries in `framework_manifest.yaml` describe independent runtimes.
+`collect.py` requires the exact public version and rejects mixed-pin runs.
 
 ## File Naming Convention
 
@@ -397,17 +396,23 @@ Running without `--resume` always starts fresh (overwrites old checkpoint).
 
 ## For SGLang
 
-Suggest to start from lmsysorg docker image. Say, for 0.5.6.post2, we can use lmsysorg/sglang:v0.5.6.post2-cu126
+Use the pinned stock image, `lmsysorg/sglang:v0.5.14` (or its `-cu130`
+variant), for normal SGLang collection.
+
 ```bash
 python3 collect.py --backend sglang
 ```
-This collects all SGLang ops in a single pass, including:
+
+This collects the stock SGLang ops, including:
+
 - GEMM operations (FP8, BF16, INT8, INT4)
 - MLA (Multi-head Latent Attention) for context and generation
 - MLA BMM (Batch Matrix Multiplication) operations
 - MoE (Mixture of Experts) operations
 - Normal attention operations
-- WideEP / DeepSeek-specific collectors (MLA, MLP, DeepEP MoE)
+
+WideEP ops remain pinned to their separate SGLang 0.5.10 image and are not part
+of the stock model plans. Request them explicitly in a separate run.
 
 ### DeepEP multi-node collector
 For **DeepSeek V3** models with DeepEP MoE, inter-node communication data requires a separate multi-node setup:

@@ -8,6 +8,8 @@
 # capable image or put a matching SGLang source tree on PYTHONPATH.
 from __future__ import annotations
 
+__compat__ = "sglang==0.5.14"
+
 import argparse
 import copy
 import gc
@@ -22,7 +24,6 @@ from importlib.metadata import version as get_version
 import torch
 
 os.environ.setdefault("SGLANG_APPLY_CONFIG_BACKUP", "none")
-os.environ.setdefault("SGLANG_OPT_DEEPGEMM_HC_PRENORM", "0")
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if THIS_DIR not in sys.path:
@@ -198,7 +199,6 @@ def _load_one_layer_runner(
         max_running_requests=16,
         max_prefill_tokens=4096,
     )
-    server_args.enable_piecewise_cuda_graph = False
     server_args.attention_backend = "dsv4"
 
     print(f"[mhc-collector] model_path {model_path} -> {local_model_path}")
@@ -238,8 +238,8 @@ def _mhc_call_args(layer):
     # A real DSV4 layer executes mHC once before attention and once before FFN.
     # This collector folds both calls into the reported pre/post op.
     return (
-        (layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base),
-        (layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base),
+        (layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base, layer.input_layernorm),
+        (layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base, layer.post_attention_layernorm),
     )
 
 
@@ -257,13 +257,16 @@ def _make_kernel(layer, op: str, residual: torch.Tensor):
         call_args = _mhc_call_args(layer)
 
         def kernel():
-            return [layer.hc_pre(residual, *args) for args in call_args]
+            return [layer.hc_pre(residual, fn, scale, base, norm=norm) for fn, scale, base, norm in call_args]
 
         return kernel
 
     if op == "post":
         with torch.no_grad():
-            post_inputs = [_hc_pre_post_inputs(layer.hc_pre(residual, *args)) for args in _mhc_call_args(layer)]
+            post_inputs = [
+                _hc_pre_post_inputs(layer.hc_pre(residual, fn, scale, base, norm=norm))
+                for fn, scale, base, norm in _mhc_call_args(layer)
+            ]
         torch.cuda.synchronize()
 
         def kernel():

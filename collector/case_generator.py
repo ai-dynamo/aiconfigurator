@@ -146,6 +146,8 @@ def _profile_int_values(
 def _head_profiles(
     shape_sweep: dict[str, object],
     op_name: str,
+    *,
+    include_model_profiles: bool = True,
 ) -> list[dict[str, object]]:
     raw_profiles = shape_sweep.get("head_profiles")
     if raw_profiles is None:
@@ -155,7 +157,7 @@ def _head_profiles(
             raise TypeError(f"{op_name}.head_profiles must be a list of mappings")
         base_profiles = raw_profiles
 
-    model_profiles = _model_case_values(op_name)
+    model_profiles = _model_case_values(op_name) if include_model_profiles else []
     if _get_model_path_filter() and model_profiles:
         return model_profiles
     return [*base_profiles, *model_profiles]
@@ -165,6 +167,7 @@ def get_attention_head_configs(
     shape_sweep: dict[str, object],
     *,
     phase: str,
+    include_model_profiles: bool = True,
 ) -> list[AttentionHeadConfig]:
     """Expand only valid ``(q, kv, head_dim, window)`` structural tuples.
 
@@ -189,7 +192,11 @@ def get_attention_head_configs(
             seen.add(config)
             configs.append(config)
 
-    for profile in _head_profiles(shape_sweep, "attention"):
+    for profile in _head_profiles(
+        shape_sweep,
+        "attention",
+        include_model_profiles=include_model_profiles,
+    ):
         head_dims = _profile_int_values(
             profile,
             "head_dims",
