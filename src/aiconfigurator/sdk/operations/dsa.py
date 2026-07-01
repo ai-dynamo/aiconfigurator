@@ -131,8 +131,6 @@ _GENERATION_DSA_TARGET_Z: list[int] = [
 # fmt: on
 
 
-
-
 def _select_dsa_backend(arch_dict, dsa_backend):
     """Pick the per-backend sub-dict from a context-DSA architecture node.
 
@@ -469,8 +467,11 @@ class ContextDSAModule(Operation):
                 + 2 * num_heads * tokens * kv_lora * v_dim
             )
 
-            # Indexer logits group — always FP8 (hardcoded in both vLLM and TRT-LLM)
-            if full_s <= index_topk:
+            # Indexer logits group: always FP8 (hardcoded in both vLLM and TRT-LLM).
+            # A skip-indexer (reuse) layer does NOT run the per-layer indexer (no
+            # mqa logits): it reuses a sibling layer's topk indices, so this group
+            # is zero regardless of full_s.
+            if skip_indexer or full_s <= index_topk:
                 indexer_logits_ops = 0
             else:
                 indexer_logits_ops = 2 * tokens * index_n_heads * index_head_dim * full_s
@@ -499,7 +500,8 @@ class ContextDSAModule(Operation):
 
             kv_cache_bytes = b * num_heads * effective_kv * attn_head_dim * kvcache_quant_mode.value.memory
             indexer_entry_bytes = common.indexer_cache_entry_bytes(index_head_dim)
-            indexer_cache_bytes = 0 if full_s <= index_topk else b * full_s * indexer_entry_bytes
+            # Skip layers never store the index-K cache (the indexer never runs).
+            indexer_cache_bytes = 0 if (skip_indexer or full_s <= index_topk) else b * full_s * indexer_entry_bytes
             q_io_bytes = tokens * num_heads * qk_head_dim * fmha_quant_mode.value.memory * 2
 
             total_mem = gemm_weight_bytes + kv_cache_bytes + indexer_cache_bytes + q_io_bytes
@@ -806,9 +808,12 @@ class ContextDSAModule(Operation):
                     if not _finite_result(result):
                         result = None
                 if result is None:
-                    from aiconfigurator.sdk.operations.dsv4 import _dsv4_robust_3d_lookup
+                    try:
+                        from aiconfigurator.sdk.operations.dsv4 import _dsv4_robust_3d_lookup
 
-                    result = _dsv4_robust_3d_lookup(database, prefix_slice, num_heads, s, b)
+                        result = _dsv4_robust_3d_lookup(database, prefix_slice, num_heads, s, b)
+                    except Exception:
+                        return None
                 return result if _finite_result(result) else None
 
             def _interp_results_1d(x0, x1, r0, r1, x):
@@ -846,7 +851,7 @@ class ContextDSAModule(Operation):
                     )
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
-            except interpolation.InterpolationDataNotAvailableError as exc:
+            except (KeyError, TypeError, ValueError, AssertionError) as exc:
                 raise missing_context_dsa_error() from exc
             return database._interp_pr(latency, energy=energy)
         except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError) as e:
@@ -1043,7 +1048,14 @@ class ContextDSAModule(Operation):
         # instrumenting sglang (dsa_indexer index_key 128; deepseek_v2
         # rebuild_cp_kv_cache latent 576).
         # x b: the all-gather moves b sequences' worth of current-chunk KV.
-        ag_kv = float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", b * isl * index_head_dim))
+        # A skip-indexer (reuse) layer never runs the per-layer indexer, so it
+        # does not all-gather the DSA indexer key -- only the MLA compressed-KV/LSE
+        # gather remains. Don't charge the indexer-key AG to skip layers.
+        ag_kv = (
+            0.0
+            if skip_indexer
+            else float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", b * isl * index_head_dim))
+        )
         ag_lse = float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", b * isl * (kv_lora + rope)))
         latency += ag_kv + ag_lse
         return PerformanceResult(latency * self._scale_factor, energy=0.0, source="estimated")

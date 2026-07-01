@@ -650,30 +650,13 @@ def _dedup_same_precision_dsa_models(model_specs):
     return out
 
 
-def _dsa_ceiling_max_positions(model_path):
-    """max_position_embeddings this model's DSA context collection should
-    CEILING-sample (one ``max_pos - seq_len`` point per value): its own plus
-    every same-(architecture, native_quant) sibling's.
-
-    Because the same-precision dedup makes one model (e.g. GLM-5.2-NVFP4,
-    max_position 1048576) represent the shorter ones it dropped (e.g.
-    GLM-5-NVFP4, 202752), the representative must also put a real data point at
-    the TOP of the shorter model's valid range. Otherwise a GLM-5 query near its
-    202752 max would interpolate across the representative's coarse grid gap
-    (131072 -> 262144) instead of hitting collected data. Returns just the own
-    max for models with no same-precision sibling."""
-    own_arch = _module_model_architecture(model_path)
-    own_quant = _model_native_gemm_quant(model_path)
-    positions = set()
-    for spec in get_mla_module_model_specs(apply_model_filter=False):
-        if spec.architecture == own_arch and _model_native_gemm_quant(spec.model_path) == own_quant:
-            mp = _model_max_position_embeddings(spec.model_path)
-            if mp:
-                positions.add(int(mp))
-    own = _model_max_position_embeddings(model_path)
-    if own:
-        positions.add(int(own))
-    return sorted(positions)
+# DSA max_position ceilings to sample (one ``max_pos - seq_len`` point per
+# value), HARDCODED for every DSA model that needs the dsa_module: DeepSeek-V3.2
+# (163840), GLM-5 family (202752), GLM-5.2 (1048576). Callers loop this directly;
+# each model's shape-validity filter drops the ceilings above its own
+# max_position (i.e. only sweeps <= max_position), so collecting GLM-5.2 covers
+# GLM-5 while shorter-context models keep only their own.
+_DSA_CEILING_MAX_POSITIONS = (163840, 202752, 1048576)  # DeepSeek-V3.2, GLM-5, GLM-5.2
 
 
 def _build_module_test_cases(attn_type: str, mode: str):
@@ -1898,6 +1881,15 @@ def _run_prefill(
         # captured forward happens in warmup[0] (discarded); warmup[1:] + all timed
         # runs measure the skip path. No-op unless this is a skip_indexer pass.
         _skip_indexer = _dsa_skip_indexer_enabled(attn_type, model_path)
+        # The skip-indexer pass only takes effect through call_attention_module,
+        # which threads _skip_kwargs() (skip_topk + reused prev_topk_indices) into
+        # the module forward. The full/module piecewise REPLAY path calls
+        # model_runner.forward() and cannot bypass the indexer, so it would record
+        # full-indexer latency for a skip row. Force the eager module path (which
+        # still uses the piecewise CONTEXT when available) whenever skipping.
+        if _skip_indexer:
+            use_full_model_piecewise_replay = False
+            use_module_piecewise_replay = False
         _skip_state = {"prev_topk": None, "hook": None}
         if _skip_indexer and getattr(attention_module, "indexer", None) is not None:
             attention_module.skip_topk = False  # ensure the indexer fires for the capture forward
@@ -2470,15 +2462,12 @@ def run_mla_module(
         # top of the valid prefix range is a real data point, never extrapolated.
         # The shape filter admits prefix + seq_len == max_position (last position
         # = max_pos - 1, still in the RoPE table), so max_position - seq_len is
-        # the largest valid prefix. Ceilings are sampled for the model's OWN
-        # max_position AND every same-precision sibling's (see
-        # _dsa_ceiling_max_positions): a same-precision dedup representative
-        # (e.g. GLM-5.2-NVFP4) thereby also lands a real point at the top of the
-        # shorter sibling's range (e.g. GLM-5-NVFP4's 202752), so the sibling's
-        # near-max queries interpolate within data instead of across the grid gap.
-        # Appended last; skipped if already a grid point or above the own cap.
+        # the largest valid prefix. Ceilings are sampled for every hardcoded DSA
+        # max_position (_DSA_CEILING_MAX_POSITIONS); the validity filter below
+        # drops any above this model's own max — so collecting GLM-5.2 lands a
+        # real point at GLM-5's 202752 too. Skipped if already a grid point.
         if _max_pos is not None:
-            for _cover_pos in _dsa_ceiling_max_positions(model_path):
+            for _cover_pos in _DSA_CEILING_MAX_POSITIONS:
                 for bs, seq_len, ip in base_cases:
                     _ceil = _cover_pos - seq_len
                     if (
@@ -2492,17 +2481,18 @@ def run_mla_module(
         # seq_length here, prefix stays 0). The base generation sweep stops at
         # 131072, so high-context decode (e.g. GLM-5 up to 202752, GLM-5.2 up to
         # 1M) would EXTRAPOLATE. Mirror ctx's prefix coverage: extend the KV-length
-        # grid with ctx's context_prefix_lengths plus the max_position ceilings
-        # (own + same-precision siblings, capped at max_position-1 = last valid KV
-        # position). High-context decode is small-batch, so the extension runs at
-        # bs=1 (keeps bs*seq within the decode budget). Same-precision dedup means
-        # GLM-5.2 thereby also lands a real KV point at GLM-5's 202752 max.
+        # grid with ctx's context_prefix_lengths plus the hardcoded DSA
+        # max_position ceilings (_DSA_CEILING_MAX_POSITIONS) minus 1 (= last valid
+        # KV position), capped below to < this model's max_position. High-context
+        # decode is small-batch, so the extension runs at bs=1 (keeps bs*seq
+        # within the decode budget) — GLM-5.2 thus also lands a KV point at
+        # GLM-5's 202752 max.
         _sweep = get_mla_module_sweep_spec("sglang")
         _max_pos = _model_max_position_embeddings(model_path)
         cases = [(bs, seq_len, ip, 0) for bs, seq_len, ip in base_cases]
         _have = {(bs, sl) for bs, sl, _ in base_cases}
         _extra_kv = set(_sweep.context_prefix_lengths)
-        for _cover_pos in _dsa_ceiling_max_positions(model_path):
+        for _cover_pos in _DSA_CEILING_MAX_POSITIONS:
             _extra_kv.add(_cover_pos - 1)
         for _sl in sorted(_extra_kv):
             if _sl <= 0 or (_max_pos is not None and _sl > _max_pos - 1):

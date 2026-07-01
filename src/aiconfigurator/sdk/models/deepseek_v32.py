@@ -42,8 +42,8 @@ def _dsa_full_layer_fraction(raw_config: dict, num_layers: int) -> float:
     return n_full / int(num_layers) if num_layers else 1.0
 
 
-def _dsa_attention_modules_excluded_from_quant(raw_config: dict) -> bool:
-    """Return whether a GLM/DSA checkpoint keeps DSA attention projections unquantized."""
+def _quant_exclude_patterns(raw_config: dict) -> list:
+    """All module-exclusion globs a ModelOpt/HF quant config can carry."""
     quant_config = raw_config.get("quantization_config")
     quant_config = quant_config if isinstance(quant_config, dict) else {}
 
@@ -52,23 +52,42 @@ def _dsa_attention_modules_excluded_from_quant(raw_config: dict) -> bool:
     hf_quant = hf_quant_config.get("quantization")
     hf_quant = hf_quant if isinstance(hf_quant, dict) else {}
 
-    patterns = [
+    return [
         *list(quant_config.get("modules_to_not_convert") or []),
         *list(quant_config.get("exclude_modules") or []),
         *list(quant_config.get("ignore") or []),
         *list(hf_quant.get("exclude_modules") or []),
         *list(hf_quant.get("ignore") or []),
     ]
+
+
+def _dsa_attention_modules_excluded_from_quant(raw_config: dict) -> bool:
+    """Return whether a GLM/DSA checkpoint keeps DSA attention projections unquantized."""
     # Match either a full projection name (e.g. "self_attn.q_a_proj") or a
     # layer-prefixed glob the ModelOpt exporter emits (e.g.
     # "model.layers.10.self_attn*"). The latter is how nvidia/GLM-5-NVFP4
     # excludes DSA attention from NVFP4; the full-name-only check missed it.
-    return any("self_attn" in str(pattern) for pattern in patterns)
+    return any("self_attn" in str(pattern) for pattern in _quant_exclude_patterns(raw_config))
+
+
+def _shared_experts_excluded_from_quant(raw_config: dict) -> bool:
+    """Return whether a GLM/DSA checkpoint keeps the MoE shared experts unquantized.
+
+    nvidia/GLM-5.2-NVFP4 excludes every ``model.layers.N.mlp.shared_experts*`` from
+    NVFP4 (shared experts stay bf16; only the routed experts are quantized), so the
+    shared-expert GEMMs must be modeled at bf16, not the global gemm_quant_mode."""
+    return any("shared_expert" in str(pattern) for pattern in _quant_exclude_patterns(raw_config))
 
 
 def _dsa_gemm_quant_mode(extra_params: object, fallback: common.GEMMQuantMode) -> common.GEMMQuantMode:
     if isinstance(extra_params, dict):
         return extra_params.get("dsa_gemm_quant_mode", fallback)
+    return fallback
+
+
+def _dsa_shared_expert_quant_mode(extra_params: object, fallback: common.GEMMQuantMode) -> common.GEMMQuantMode:
+    if isinstance(extra_params, dict):
+        return extra_params.get("dsa_shared_expert_quant_mode", fallback)
     return fallback
 
 
@@ -111,6 +130,10 @@ class DeepSeekV32Model(BaseModel):
             model_info.get("raw_config", {})
         ):
             extra_params.setdefault("dsa_gemm_quant_mode", common.GEMMQuantMode.bfloat16)
+        if model_info["architecture"] == "GlmMoeDsaForCausalLM" and _shared_experts_excluded_from_quant(
+            model_info.get("raw_config", {})
+        ):
+            extra_params.setdefault("dsa_shared_expert_quant_mode", common.GEMMQuantMode.bfloat16)
         # GLM-5.2 shares one DSA topk index across ``index_topk_freq`` layers
         # (GLM-5 / DeepSeek-V3.2 omit it => 1). The DSA modules amortize the
         # per-layer indexer cost over the group using the collected skip data.
@@ -119,9 +142,17 @@ class DeepSeekV32Model(BaseModel):
         # the per-layer amortization weights real full vs skip counts, not the
         # 1/freq approximation (GLM-5.2: 21/78=0.2692, not 0.25 — under-counting
         # full made AIC predict too fast).
+        # The skip-indexer perf rows are produced ONLY by the sglang collector.
+        # On backends without a skip producer (e.g. trtllm) the per-layer
+        # amortization must run all-full (fraction 1.0): otherwise the consumer
+        # would weight in a skip table that was never collected for that backend.
+        # The model still HAS skip layers (index_topk_freq reflects that); we just
+        # cannot model their saving without data, so we count them as full.
         extra_params.setdefault(
             "dsa_full_layer_fraction",
-            _dsa_full_layer_fraction(model_info.get("raw_config", {}), model_info["layers"]),
+            _dsa_full_layer_fraction(model_info.get("raw_config", {}), model_info["layers"])
+            if backend_name == "sglang"
+            else 1.0,
         )
 
         if backend_name == "sglang" and model_config.enable_wideep:
@@ -203,7 +234,7 @@ class DeepSeekV32Model(BaseModel):
                     self._num_layers,
                     2 * self._moe_inter_size // moe_tp_size,
                     h,
-                    gemm_quant_mode,
+                    _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
                 ),
                 ops.ElementWise(
                     "context_shared_act_gate",
@@ -217,7 +248,7 @@ class DeepSeekV32Model(BaseModel):
                     self._num_layers,
                     h,
                     self._moe_inter_size // moe_tp_size,
-                    gemm_quant_mode,
+                    _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
                 ),
                 ops.GEMM(
                     "context_router_gemm",
@@ -311,7 +342,7 @@ class DeepSeekV32Model(BaseModel):
                 self._num_layers * self._mtp_scale_factor,
                 2 * self._moe_inter_size // moe_tp_size,
                 h,
-                gemm_quant_mode,
+                _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
             ),
             ops.ElementWise(
                 "generation_shared_act_gate",
@@ -325,7 +356,7 @@ class DeepSeekV32Model(BaseModel):
                 self._num_layers * self._mtp_scale_factor,
                 h,
                 self._moe_inter_size // moe_tp_size,
-                gemm_quant_mode,
+                _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
             ),
         ]
 
@@ -516,7 +547,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                     self._num_layers,
                     2 * self._moe_inter_size,
                     h,
-                    gemm_quant_mode,
+                    _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
                 ),
                 ops.ElementWise(
                     "context_shared_act_gate",
@@ -530,7 +561,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                     self._num_layers,
                     h,
                     self._moe_inter_size,
-                    gemm_quant_mode,
+                    _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
                 ),
                 ops.GEMM(
                     "context_router_gemm",
@@ -608,7 +639,13 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
         )
 
         shared_ops = [
-            ops.GEMM("generation_shared_gate_up_gemm", generation_scale, 2 * self._moe_inter_size, h, gemm_quant_mode),
+            ops.GEMM(
+                "generation_shared_gate_up_gemm",
+                generation_scale,
+                2 * self._moe_inter_size,
+                h,
+                _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
+            ),
             ops.ElementWise(
                 "generation_shared_act_gate",
                 generation_scale,
@@ -616,7 +653,13 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                 self._moe_inter_size,
                 0.8,
             ),
-            ops.GEMM("generation_shared_ffn2_gemm", generation_scale, h, self._moe_inter_size, gemm_quant_mode),
+            ops.GEMM(
+                "generation_shared_ffn2_gemm",
+                generation_scale,
+                h,
+                self._moe_inter_size,
+                _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
+            ),
         ]
         routed_ops = [
             ops.GEMM("generation_router_gemm", generation_scale, self._num_experts, h, common.GEMMQuantMode.bfloat16),
