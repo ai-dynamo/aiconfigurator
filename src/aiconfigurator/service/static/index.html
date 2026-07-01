@@ -186,13 +186,6 @@
       background: var(--good);
       box-shadow: 0 2px 8px rgba(15, 23, 42, 0.22);
     }
-    .yaml-delete-button {
-      padding: 7px 11px;
-      font-size: 12px;
-      color: #fff;
-      background: #dc2626;
-      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.22);
-    }
     .note {
       margin-top: 14px;
       padding: 12px 14px;
@@ -649,7 +642,6 @@
               <div class="code-wrap">
                 <div class="yaml-actions">
                   <button class="yaml-deploy-button" id="deploy-selected-btn" type="button">部署所选方案</button>
-                  <button class="yaml-delete-button" id="delete-selected-btn" type="button">删除部署</button>
                   <button class="copy-button" data-copy-target="deployment-selected-output" type="button">复制</button>
                 </div>
                 <textarea class="codebox yaml-box yaml-editor" id="deployment-selected-output" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off">尚未生成。</textarea>
@@ -1645,40 +1637,6 @@
       return payload;
     }
 
-    async function deleteSelectedDgd() {
-      const content = getCode("deployment-selected-output");
-      if (!content || content === "尚未生成。" || content.startsWith("No ")) {
-        throw new Error("请先加载已部署的 YAML，再从集群删除。");
-      }
-      const selectedArtifact = state.selectedArtifact;
-      if (!selectedArtifact) {
-        throw new Error("请先选择或加载一个已部署的 DGD，再从集群删除。");
-      }
-      const label = selectedArtifact.dgd_id || selectedArtifact.mode || "selected";
-      if (!window.confirm(`确定要从 Kubernetes 集群删除 ${label} 吗？`)) {
-        return null;
-      }
-      setStatus("正在删除");
-      setError("");
-      setCode("apply-output", `正在删除部署 ${label}...`);
-      const payload = await fetchJson("/api/v1/delete-k8s-deployment", {
-        method: "POST",
-        body: JSON.stringify({
-          content,
-          namespace: ids("namespace").value.trim() || null,
-          timeout_seconds: 180,
-          jid: state.jid,
-          dgd_id: selectedArtifact.dgd_id,
-          mode: selectedArtifact.mode,
-          row_index: selectedArtifact.row_index ?? 0
-        })
-      });
-      setStatus("已删除");
-      setCode("apply-output", jsonPretty(payload));
-      await refreshDeploymentRecords();
-      return payload;
-    }
-
     function wireEvents() {
       document.querySelectorAll(".tab-button").forEach((button) => {
         button.addEventListener("click", () => {
@@ -1780,16 +1738,6 @@
           setCode("apply-output", error.message);
         }
       });
-      ids("delete-selected-btn").addEventListener("click", async () => {
-        try {
-          await deleteSelectedDgd();
-        } catch (error) {
-          setStatus("失败");
-          setError(error.message);
-          setCode("apply-output", error.message);
-        }
-      });
-
       ids("deployment-btn").addEventListener("click", async () => {
         const button = ids("deployment-btn");
         try {
