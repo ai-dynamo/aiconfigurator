@@ -533,7 +533,7 @@
           </div>
           <div class="field">
             <label for="tpot">Token 间延迟（TPOT，ms）</label>
-            <input id="tpot" type="number" value="30" min="1" required>
+            <input id="tpot" type="number" value="30" min="1">
           </div>
           <div class="field">
             <label for="request-latency">请求延迟上限（可选）</label>
@@ -794,7 +794,8 @@
 
     function buildEstimateRequest() {
       const requestLatency = ids("request-latency").value.trim();
-      return {
+      const tpot = ids("tpot").value.trim();
+      const request = {
         model_path: ids("model-config-path").value.trim(),
         systems_paths: ids("systems-paths").value.trim() || null,
         total_gpus: Number(ids("total-gpus").value),
@@ -805,10 +806,13 @@
         isl: Number(ids("isl").value),
         osl: Number(ids("osl").value),
         ttft: Number(ids("ttft").value),
-        tpot: Number(ids("tpot").value),
         request_latency: requestLatency ? Number(requestLatency) : null,
         prefix: Number(ids("prefix").value || 0)
       };
+      if (tpot) {
+        request.tpot = Number(tpot);
+      }
+      return request;
     }
 
     function validateEstimateInputs() {
@@ -816,8 +820,7 @@
         ["total-gpus", "GPU 总数"],
         ["isl", "输入序列长度（ISL）"],
         ["osl", "输出序列长度（OSL）"],
-        ["ttft", "首 Token 延迟（TTFT）"],
-        ["tpot", "Token 间延迟（TPOT）"]
+        ["ttft", "首 Token 延迟（TTFT）"]
       ];
       for (const [id, label] of requiredFields) {
         const input = ids(id);
@@ -826,6 +829,11 @@
           input.focus();
           throw new Error(`请填写有效的${label}，数值必须大于 0。`);
         }
+      }
+      const tpot = ids("tpot").value.trim();
+      if (tpot && (!Number.isFinite(Number(tpot)) || Number(tpot) <= 0)) {
+        ids("tpot").focus();
+        throw new Error("Token 间延迟（TPOT）留空时使用默认值；填写时必须大于 0。");
       }
     }
 
