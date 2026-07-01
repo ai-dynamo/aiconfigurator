@@ -92,20 +92,3 @@ framework_specific_op_exceptions:
                 numerator: num_heads
                 denominator: num_key_value_heads
                 gt: 16
-
-known_exceptions:
-  - framework: sglang
-    op: dsa_generation_module
-    reason_type: framework_version_unsupported
-    source: collector/sglang/collect_mla_module.py
-    case_fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type, attention_backend]
-    reason: >
-      On B200/SM100, SGLang DSv3.2 DSA generation with reduced heads (<= 32)
-      and kv_cache_length >= 256 can SIGABRT from an async CUDA illegal memory
-      access in the collector's dummy-weight setup. The collector keeps the
-      top-level case but drops only inner seq_len >= 256 shapes.
-    match:
-      model_path: deepseek-ai/DeepSeek-V3.2
-      attn_type: dsa
-      num_heads_lte: 32
-      inner_seq_len_gte: 256

@@ -660,7 +660,7 @@ def log_perf(
     kernel_source: str,
     perf_filename: str,
     power_stats: dict | None = None,
-):
+) -> bool:
     lock_file = perf_filename + ".lock"
 
     # Try for 1 sec (10 * 0.1s)
@@ -676,7 +676,7 @@ def log_perf(
 
     if not got_lock:
         print(f"Skipping log: can not get lock for {perf_filename}")
-        return
+        return False
 
     try:
         with open(perf_filename, "a", newline="") as f:
@@ -719,10 +719,13 @@ def log_perf(
             os.fsync(f.fileno())
     except Exception as e:
         print(f"Error writing log: {e}")
+        return False
     finally:
         # Delete the lock file, even if writing crashed
         if got_lock and os.path.exists(lock_file):
             os.unlink(lock_file)
+
+    return True
 
 
 def convert_perf_csv_to_parquet(

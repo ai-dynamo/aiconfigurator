@@ -13,7 +13,8 @@ base_ops:
   - gemm
 description: >
   DeepSeek-V3-family model-centric collection plan. Includes shared base op cases
-  plus MoE, MLA, and DeepSeek-V3 WideEP cases.
+  plus stock MoE and MLA cases. WideEP requires a separate runtime and must be
+  requested independently.
 
 model_case_values:
   moe:
@@ -102,10 +103,4 @@ framework_specific_op_cases:
     mla_bmm_gen_pre:
       cases: all
     mla_bmm_gen_post:
-      cases: all
-    wideep_mla_context:
-      cases: all
-    wideep_mla_generation:
-      cases: all
-    wideep_moe:
       cases: all

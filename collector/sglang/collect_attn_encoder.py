@@ -12,7 +12,7 @@ SM dispatch mirrors ``VisionAttention._determine_attention_backend``:
 Quant: bf16 only. SGLang upstream does not support fp8 ViT FMHA.
 """
 
-__compat__ = "sglang>=0.5.11"
+__compat__ = "sglang==0.5.14"
 
 from typing import NamedTuple
 

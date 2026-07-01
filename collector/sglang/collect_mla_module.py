@@ -22,6 +22,8 @@ Usage:
         python collect_mla_module.py --mode generation --attn-type mla
 """
 
+__compat__ = "sglang==0.5.14"
+
 import argparse
 import gc
 import json
@@ -68,6 +70,8 @@ try:
         dsa_indexer_total_kv_tokens_supported,
         dsa_indexer_workspace_bytes,
         dsa_indexer_workspace_limit_bytes,
+        kv_pool_page_size,
+        required_kv_alloc_tokens,
         required_kv_tokens,
         required_prefill_extend_tokens,
         sglang_dsa_mqa_logits_chunking_supported,
@@ -90,6 +94,8 @@ except ModuleNotFoundError:
         dsa_indexer_total_kv_tokens_supported,
         dsa_indexer_workspace_bytes,
         dsa_indexer_workspace_limit_bytes,
+        kv_pool_page_size,
+        required_kv_alloc_tokens,
         required_kv_tokens,
         required_prefill_extend_tokens,
         sglang_dsa_mqa_logits_chunking_supported,
@@ -115,6 +121,7 @@ SGLANG_KV_DTYPE: dict[str, str] = {
     "bfloat16": "bfloat16",
     "fp8": "fp8_e4m3",
 }
+SGLANG_DSA_PAGE_SIZE = 64
 
 # AIC's cached HuggingFace model configs — avoids HF downloads in CI.
 _MODEL_CONFIG_DIR = os.path.join(
@@ -181,17 +188,6 @@ def _is_glm5_dsa_model(model_id: str) -> bool:
     return _module_model_architecture(model_id) == _GLM5_DSA_ARCHITECTURE
 
 
-def _enable_glm5_dsa_piecewise_graph(attn_type: str, model_id: str, dsa_prefill_backend: str = "flashmla_kv") -> bool:
-    if not (attn_type == "dsa" and _is_glm5_dsa_model(model_id)):
-        return False
-    # Incremental trtllm variant collects WITH piecewise CUDA graph (trtllm
-    # prefill avoids the flashmla concat_mla.cuh:309 capture crash). flashmla_kv
-    # is instead timed EAGERLY: piecewise capture of the flashmla path crashes
-    # in concat_mla.cuh:309 (cudaErrorInvalidValue) on sglang >= 0.5.13, and
-    # eager is also what CP prefill serve runs.
-    return dsa_prefill_backend == "trtllm"
-
-
 # Set by run_mla_module() at the start of each benchmark subprocess from its
 # skip_indexer arg (threaded down from run_mla_module_worker, which derives it
 # from the op's perf_filename). Process-local: each subprocess runs exactly one
@@ -217,30 +213,6 @@ def _dsa_skip_indexer_enabled(attn_type: str, model_path: str) -> bool:
     )
 
 
-_MODULE_PIECEWISE_REPLAY_AVAILABLE = None
-
-
-def _module_piecewise_replay_available() -> bool:
-    """Whether the module-level piecewise CUDA graph replay path can run.
-
-    That path imports ``sglang.srt.model_executor.piecewise_cuda_graph_runner``
-    and monkey-patches ``PiecewiseCudaGraphRunner``. The refactored sglang
-    (glm52 dev image) moved piecewise into ``srt/compilation`` and removed that
-    model_executor module, so the replay path can't import -> the collector must
-    time the DSA module EAGERLY instead (which is what GLM-5 DSA flashmla_kv
-    prefill runs in serve anyway). Cached; returns False on the dev image so
-    callers fall back to the existing eager path. Backward compatible: returns
-    True on older sglang where the module exists."""
-    global _MODULE_PIECEWISE_REPLAY_AVAILABLE
-    if _MODULE_PIECEWISE_REPLAY_AVAILABLE is None:
-        import importlib.util
-
-        _MODULE_PIECEWISE_REPLAY_AVAILABLE = (
-            importlib.util.find_spec("sglang.srt.model_executor.piecewise_cuda_graph_runner") is not None
-        )
-    return _MODULE_PIECEWISE_REPLAY_AVAILABLE
-
-
 def _generation_cuda_graph_enabled_for_tokens(model_runner, num_tokens: int) -> bool:
     """Match SGLang decode CUDA graph coverage for the decode microbench.
 
@@ -249,13 +221,13 @@ def _generation_cuda_graph_enabled_for_tokens(model_runner, num_tokens: int) -> 
     that coverage using sglang's own settings -- no AIC env override -- so the
     decode benchmark uses graph timing exactly where serve would.
     """
-    sa = model_runner.server_args
-    if getattr(sa, "disable_cuda_graph", False):
+    decode_config = model_runner.server_args.cuda_graph_config.decode
+    if decode_config.backend == "disabled":
         return False
-    capture_bs = getattr(sa, "cuda_graph_bs", None)
+    capture_bs = decode_config.bs
     if capture_bs:
         return int(num_tokens) in set(capture_bs)
-    max_bs = getattr(sa, "cuda_graph_max_bs", None) or 256
+    max_bs = decode_config.max_bs or 256
     return 0 < int(num_tokens) <= int(max_bs)
 
 
@@ -282,41 +254,9 @@ def _resolve_local_model_path(model_id: str) -> str:
     with open(config_file) as f:
         config = json.load(f)
 
-    # Normalise model_type so sglang's AutoConfig recognises it.
-    original_arch = None
-    if config.get("model_type") in ("deepseek_v32", "glm_moe_dsa"):
-        original_arch = (config.get("architectures") or [None])[0]
-        config["architectures"] = ["DeepseekV3ForCausalLM"]
-        config["model_type"] = "deepseek_v3"
-
     # Strip auto_map to prevent transformers from attempting to download
     # custom config/model classes from HuggingFace when trust_remote_code=True.
     config.pop("auto_map", None)
-
-    # Strip layer_types: transformers >= 5.3 strictly validates layer_types
-    # against a per-architecture whitelist, and GLM-5.2's
-    # "deepseek_sparse_attention" entries are not in the DeepseekV3 whitelist we
-    # rewrote architectures to above -> AutoConfig load raises. The collector
-    # detects DSA via index_topk (is_deepseek_nsa), not layer_types, so dropping
-    # it is safe. Harmless no-op on configs/transformers without layer_types.
-    config.pop("layer_types", None)
-
-    # Re-apply GLM-5 arch-specific overrides that sglang would normally
-    # apply in server_args.py:1609-1612 based on
-    # hf_config.architectures[0] == "GlmMoeDsaForCausalLM" - but we just
-    # rewrote that string to "DeepseekV3ForCausalLM" above so AutoConfig
-    # can find the model_type, so sglang's gate never fires. Without
-    # this, on Blackwell every GLM-5 DSA context probe with max_kv_len
-    # <= 2048 (the default DENSE_ATTN threshold) dispatches to
-    # _forward_standard_mha -> flashinfer.prefill.trtllm_ragged_attention_deepseek
-    # which asserts on GLM-5's v_head_dim=256 and kills the subprocess
-    # after ~14 rows/bucket.
-    if (
-        original_arch == "GlmMoeDsaForCausalLM"
-        and get_sm_version() >= 100
-        and "SGLANG_NSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD" not in os.environ
-    ):
-        os.environ["SGLANG_NSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD"] = "0"
 
     tmp_dir = os.path.join(
         tempfile.gettempdir(),
@@ -356,14 +296,13 @@ def _get_precision_combos(phase: str):
 def _get_backends(attn_type: str):
     """Return the attention backend string to use for a given attention type.
 
-    For DSA: returns "nsa" — SGLang auto-detects nsa_prefill_backend /
-    nsa_decode_backend based on SM + kv_cache_dtype.
+    For DSA: returns the SGLang 0.5.14 "dsa" backend.
     For MLA: returns the best available backend based on SM version.
     Aligns with sglang's _get_default_attn_backend() in server_args.py.
     """
     sm = get_sm_version()
     if attn_type == "dsa":
-        return "nsa"
+        return "dsa"
     else:
         if sm >= 100:
             return "trtllm_mla"
@@ -513,19 +452,15 @@ def _model_shares_dsa_index(model_id: str) -> bool:
 
 
 def _model_native_gemm_quant(model_id: str) -> str | None:
-    """Return the checkpoint's native weight-quantization gemm kind, or ``None``
-    for an unquantized (bf16) checkpoint.
+    """Return the checkpoint loader's native weight quantization, or ``None``.
 
     Different GLM-5 / DeepSeek checkpoints ship at different precisions —
     ``nvidia/GLM-5-NVFP4`` (ModelOpt NVFP4), ``zai-org/GLM-5-FP8`` (block-fp8),
     ``zai-org/GLM-5`` (bf16) — and they are *separate models*, not one model
-    reinterpreted at several precisions.  A module precision combo whose
-    ``gemm_type`` asks for a quantization the checkpoint does not carry (e.g.
-    ``gemm_type=fp8_block`` against the NVFP4 checkpoint) cannot load: SGLang
-    routes to the checkpoint's own quant loader, which then rejects the foreign
-    config (``Cannot find 'quant_algo'``) and the subprocess dies at model load.
-    This reads the checkpoint's quant config so the caller only enumerates
-    combos the input model actually supports.
+    reinterpreted at several precisions. This value therefore selects SGLang's
+    checkpoint loader; it is not automatically the persisted module
+    ``gemm_type``. In particular, the NVFP4 checkpoint's timed DSA projections
+    remain BF16 and are logged as ``bfloat16``.
 
     Reads the same AIC cached config files :func:`_resolve_local_model_path`
     loads:
@@ -566,19 +501,6 @@ def _model_native_gemm_quant(model_id: str) -> str | None:
     return None
 
 
-def _gemm_type_supported_by_model(gemm_type: str | None, native_quant: str | None) -> bool:
-    """Whether a module precision combo's ``gemm_type`` can load on this model.
-
-    ``bfloat16`` always works (unquantized / dummy-weight path).  Any quantized
-    ``gemm_type`` is loadable only when it matches the checkpoint's native
-    quantization (see :func:`_model_native_gemm_quant`) — a mismatch is a
-    different model and fails at load.
-    """
-    if gemm_type in (None, "bfloat16", "bf16"):
-        return True
-    return gemm_type == native_quant
-
-
 def _dsa_context_prefix_shape_is_valid(
     batch_size: int,
     seq_len: int,
@@ -611,25 +533,26 @@ def _dsa_context_prefix_shape_is_valid(
     return not (max_position_embeddings is not None and prefix_len + seq_len > max_position_embeddings)
 
 
-def _dedup_same_precision_dsa_models(model_specs):
-    """Collapse DSA models that share an architecture AND a native quant to a
-    single representative (the longest-context one) so a batch collection of
-    several same-precision GLM checkpoints doesn't re-collect identical DSA data.
+def _model_dsa_operator_gemm_type(model_id: str) -> str:
+    """Return the persisted GEMM type of the model's DSA attention module."""
+    return "fp8_block" if _model_native_gemm_quant(model_id) == "fp8_block" else "bfloat16"
 
-    The DSA attention module is bf16 for every GLM checkpoint (self_attn is
-    excluded from quant), so checkpoints of the same (architecture, native_quant)
-    produce identical DSA module timings and differ only in context length. When
-    e.g. nvidia/GLM-5-NVFP4 and nvidia/GLM-5.2-NVFP4 are collected together (both
-    NVFP4 / GlmMoeDsaForCausalLM), keep only GLM-5.2-NVFP4 (max_position 1M ⊇
-    GLM-5) — the others reuse its rows via the model-agnostic DSA loader. Models
-    of a DIFFERENT precision (zai-org/GLM-5 bf16, GLM-5-FP8 fp8_block) or a
-    different architecture (DeepSeek-V3.2) are NOT merged. A single model, or one
-    model per (arch, quant) group, passes through unchanged.
+
+def _dedup_dsa_consumer_models(model_specs):
+    """Keep one longest-context model per DSA consumer identity.
+
+    The persisted DSA key contains architecture and attention-module GEMM type,
+    but not checkpoint path or top-level MoE quantization. GLM BF16 and NVFP4
+    checkpoints therefore share the BF16 DSA key; GLM-5.2 is their canonical
+    full-sweep representative because its 1M context covers the shorter GLM-5
+    range. The block-FP8 checkpoint remains separate because its DSA projections
+    execute and persist as ``fp8_block``. A targeted model filter still contains
+    one checkpoint and is never replaced.
     """
     groups: dict = {}
     order: list = []
     for spec in model_specs:
-        key = (spec.architecture, _model_native_gemm_quant(spec.model_path))
+        key = (spec.architecture, _model_dsa_operator_gemm_type(spec.model_path))
         if key not in groups:
             groups[key] = []
             order.append(key)
@@ -645,7 +568,7 @@ def _dedup_same_precision_dsa_models(model_specs):
         dropped = [s.model_path for s in specs if s is not best]
         print(
             f"[DSA dedup] {key[0]}/{key[1]}: collecting DSA module on {best.model_path}; "
-            f"reusing for same-precision {dropped}"
+            f"reusing for consumer-equivalent {dropped}"
         )
     return out
 
@@ -684,20 +607,18 @@ def _build_module_test_cases(attn_type: str, mode: str):
     if attn_type == "dsa" and _skip_sm120_deepgemm_attention_modules():
         return []
     model_specs = get_mla_module_model_specs(attention_type=attn_type)
-    # Same-precision DSA dedup (DSA module is bf16 for all GLM checkpoints; only
-    # context length differs). Skip-indexer collection is unaffected: its get_func
-    # already filters to index_topk_freq>1 (GLM-5.2 only), so this is a no-op there.
+    # Canonicalize model paths that map to the same persisted DSA consumer key.
+    # Skip-indexer collection remains non-empty because GLM-5.2 is the
+    # longest-context representative for the shared BF16 GLM key.
     if attn_type == "dsa":
-        model_specs = _dedup_same_precision_dsa_models(model_specs)
+        model_specs = _dedup_dsa_consumer_models(model_specs)
     sweep = get_mla_module_sweep_spec("sglang")
     precision_combos = _get_precision_combos(mode)
     cases = []
     for model_spec in model_specs:
-        # Each checkpoint ships at one native precision; only enumerate the
-        # precision combos it can actually load (bf16 always + its own quant).
-        # Prevents e.g. gemm_type=fp8_block being applied to the NVFP4 checkpoint
-        # (a different model), which dies at model load with "Cannot find quant_algo".
-        native_quant = _model_native_gemm_quant(model_spec.model_path)
+        # Checkpoint load precision and the timed DSA projection label are
+        # separate. Native block-FP8 checkpoints execute FP8 projections;
+        # BF16 and NVFP4 checkpoints keep these DSA projections in BF16.
         # NOTE: do NOT force the checkpoint's top-level gemm (e.g. nvfp4) onto the
         # DSA/MLA attention module. GLM-5 / GLM-5.2 NVFP4 quantize ONLY the MoE
         # expert linears; self_attn (q_a/kv_a/q_b/o_proj + indexer wq_b/wk) is in
@@ -708,8 +629,9 @@ def _build_module_test_cases(attn_type: str, mode: str):
         # CORRECT precision here (fp8_block is filtered out by
         # _gemm_type_supported_by_model for an nvfp4 checkpoint). KV is fp8,
         # carried by kv_dtype independently of gemm_type.
+        operator_gemm_type = _model_dsa_operator_gemm_type(model_spec.model_path)
         for compute_dtype, kv_dtype, gemm_type in precision_combos:
-            if not _gemm_type_supported_by_model(gemm_type, native_quant):
+            if gemm_type != operator_gemm_type:
                 continue
             target_tps = sweep.module_tp_sizes if attn_type == "dsa" else [1]
             for target_tp_size in target_tps:
@@ -720,18 +642,16 @@ def _build_module_test_cases(attn_type: str, mode: str):
                     continue
                 batch_sizes = sweep.context_batch_sizes if attn_type == "dsa" and mode == "context" else [0]
                 for batch_size in batch_sizes:
-                    # Split each DSA fp8 context shape into TWO tasks (one per nsa
-                    # prefill backend) so flashmla_kv and trtllm each get a fresh,
-                    # short-lived subprocess -- avoids the cross-case memory
-                    # accumulation that crashed the long combined sweep
-                    # ("Offset increment outside graph capture"). Other cases keep
-                    # a single flashmla_kv task.
-                    _dsa_backends = (
-                        ["flashmla_kv", "trtllm"]
-                        if (attn_type == "dsa" and kv_dtype == "fp8" and mode == "context")
-                        else ["flashmla_kv"]
-                    )
-                    for _dsa_backend in _dsa_backends:
+                    if attn_type == "dsa" and kv_dtype == "fp8":
+                        default_backend = "trtllm" if get_sm_version() >= 100 else "flashmla_kv"
+                        dsa_backends = (
+                            ("flashmla_kv", "trtllm")
+                            if mode == "context" and get_sm_version() >= 100
+                            else (default_backend,)
+                        )
+                    else:
+                        dsa_backends = (None,)
+                    for dsa_backend in dsa_backends:
                         cases.append(
                             [
                                 0,
@@ -744,7 +664,7 @@ def _build_module_test_cases(attn_type: str, mode: str):
                                 attn_type,
                                 None,
                                 target_tp_size,
-                                _dsa_backend,
+                                dsa_backend,
                             ]
                         )
     return cases
@@ -771,11 +691,19 @@ def _build_wideep_mla_test_cases(mode: str):
     sweep = get_mla_module_sweep_spec("sglang")
     backends = _get_mla_backend_list()
     cases = []
+    seen_consumer_keys = set()
     for model_spec in model_specs:
         for backend in backends:
             for num_heads in sweep.inner_sweep_head_counts:
                 if num_heads > model_spec.native_num_heads:
                     continue
+                # WideEP MLA consumers do not key on model/checkpoint path.
+                # Full collection keeps the first V3-family representative;
+                # an explicit COLLECTOR_MODEL_PATH is filtered before here.
+                consumer_key = (backend, num_heads)
+                if consumer_key in seen_consumer_keys:
+                    continue
+                seen_consumer_keys.add(consumer_key)
                 # Single precision: run with bfloat16, log as fp8_block/fp8
                 cases.append(
                     [
@@ -796,7 +724,7 @@ def _build_wideep_mla_test_cases(mode: str):
 def _skip_sm120_deepgemm_attention_modules() -> bool:
     """Return True when SGLang's DeepGEMM-backed module path is unsupported.
 
-    On SM120 with the SGLang 0.5.10 runtime container, forcing these module
+    On SM120 with the SGLang 0.5.14 runtime container, forcing these module
     collectors produced no usable rows:
     - WideEP MLA context/generation subprocesses failed after every shape was
       skipped, ending with "MLA module ... produced no perf rows".
@@ -805,7 +733,7 @@ def _skip_sm120_deepgemm_attention_modules() -> bool:
       attention.hpp:136 and gemm.hpp:376 "Unsupported architecture".
 
     Keep the skip as the default for this collector/runtime combo so the RTX
-    PRO 6000 collection reflects runnable SGLang 0.5.10 paths. Developers can
+    PRO 6000 collection reflects runnable SGLang 0.5.14 paths. Developers can
     set COLLECTOR_FORCE_DEEPGEMM_ATTENTION_MODULES=1 to repro or validate a
     newer runtime.
     """
@@ -933,7 +861,7 @@ def _patch_nsa_rope_contiguity(model_runner):
     The NSA Indexer's _get_k_bf16 calls torch.split on q/k, producing
     non-contiguous views.  The JIT RoPE kernel rejects these:
       - <=0.5.9  rope.cuh:498 check_cuda_contiguous  (q/k assertion)
-      - >=0.5.10 rope.cuh:299 TensorMatcher verify    (positions stride check)
+      - 0.5.14  rope.cuh:299 TensorMatcher verify    (positions stride check)
 
     We monkey-patch rotary_emb.forward on each NSA Indexer layer to call
     .contiguous() on positions, q, and k before the kernel.
@@ -1002,6 +930,10 @@ def _patch_nsa_indexer_compile_for_module_cuda_graph(attention_module) -> None:
 
 class CudaIllegalAccessError(RuntimeError):
     """Stop the current subprocess after a CUDA illegal access poisons context."""
+
+
+class PerfLogWriteError(RuntimeError):
+    """Fail the subprocess when a measured row was not durably persisted."""
 
 
 def _expect_module_attr(module, attr_name: str, expected: int, module_name: str) -> None:
@@ -1076,7 +1008,7 @@ def load_model_runner(
     head_num: int,
     kv_cache_dtype: str,
     attention_backend: str,
-    dsa_prefill_backend: str = "flashmla_kv",
+    dsa_prefill_backend: str | None = None,
     device: str = "cuda:0",
     tp_rank: int = 0,
     gemm_type: str = "bfloat16",
@@ -1091,12 +1023,10 @@ def load_model_runner(
         head_num: Number of local attention heads to benchmark for one target TP rank.
         kv_cache_dtype: Perf-DB-compatible string ("bfloat16" or "fp8").
             Mapped to SGLang-native string via SGLANG_KV_DTYPE.
-        attention_backend: Backend string for ServerArgs (e.g. "nsa", "fa3").
-        gemm_type: Perf-DB-compatible string ("bfloat16" or "fp8_block").
-            "fp8_block" launches sglang with quantization="fp8" so the
-            attention module's linear projections and the paged MQA scoring
-            kernel fire on real fp8 weights; "bfloat16" keeps quantization
-            disabled and all projections run bf16 with dummy weights.
+        attention_backend: Backend string for ServerArgs (e.g. "dsa", "fa3").
+        gemm_type: Expected Perf-DB label for the timed DSA projections. The
+            checkpoint's own quantization metadata independently selects the
+            SGLang loader; callers pre-filter this label to the executed path.
 
     Environment variables:
         SGLANG_TEST_NUM_LAYERS: Number of layers to load (default 2).
@@ -1106,6 +1036,9 @@ def load_model_runner(
 
     from sglang.srt.configs.model_config import ModelConfig
     from sglang.srt.entrypoints.engine import _set_envs_and_config
+    from sglang.srt.layers.moe import initialize_moe_config
+    from sglang.srt.layers.quantization.fp4_utils import initialize_fp4_gemm_config
+    from sglang.srt.layers.quantization.fp8_utils import initialize_fp8_gemm_config
     from sglang.srt.model_executor.model_runner import ModelRunner
     from sglang.srt.server_args import ServerArgs
     from sglang.srt.utils import suppress_other_loggers
@@ -1127,9 +1060,11 @@ def load_model_runner(
     if attention_backend == "trtllm_mla" and sglang_kv_dtype == "bfloat16":
         sglang_kv_dtype = "bf16"
 
-    # Use AIC's local model configs to avoid HF downloads.  Also patches
-    # model_type for sglang compatibility (glm_moe_dsa → deepseek_v3).
+    # Use AIC's local model configs to avoid HF downloads while preserving
+    # SGLang 0.5.14's native model identity.
     local_model_path = _resolve_local_model_path(model_path)
+    native_quant = _model_native_gemm_quant(model_path)
+    load_quantization = {"fp8_block": "fp8", "nvfp4": "modelopt_fp4", None: None}[native_quant]
 
     server_args = ServerArgs(
         model_path=local_model_path,
@@ -1139,46 +1074,11 @@ def load_model_runner(
         tp_size=1,
         trust_remote_code=True,
         disable_radix_cache=True,
-        # Decode CUDA graphs (sglang init_device_graphs: one full-model decode
-        # capture per batch size, default bs=512..1 = 52 captures) are NEVER
-        # used by the prefill DSA-module measurement and are the multi-second
-        # 'various kernels' burst at the front of the timeline. Skip them
-        # entirely (init_device_graphs early-returns on disable_cuda_graph).
-        # The prefill PIECEWISE graph is independent (init_piecewise_cuda_graphs,
-        # gated only by disable_piecewise_cuda_graph) so it still captures.
-        disable_cuda_graph=True,
+        disable_prefill_cuda_graph=True,
         kv_cache_dtype=sglang_kv_dtype,
         max_total_tokens=max_total_tokens,
+        quantization=load_quantization,
     )
-
-    # Quantization control: bf16 (dummy weights) vs fp8 (real fp8 weight
-    # paths so attention projections and indexer MQA scoring actually fire in
-    # fp8).
-    if gemm_type == "fp8_block":
-        server_args.quantization = "fp8"
-    elif gemm_type == "nvfp4":
-        server_args.quantization = "modelopt_fp4"
-    else:
-        server_args.quantization = None
-
-    if enable_piecewise_cuda_graph:
-        server_args.disable_cuda_graph_padding = True
-        # cuda_graph_max_bs / cuda_graph_bs are left at sglang's own defaults
-        # (ServerArgs.__post_init__ tiers cuda_graph_max_bs by GPU memory; cuda_graph_bs
-        # is auto-generated). They only govern decode cuda graphs, which are disabled
-        # here (disable_cuda_graph=True), so the collector never overrides them.
-        # piecewise_cuda_graph_max_tokens / piecewise_cuda_graph_tokens are left
-        # entirely at sglang's own defaults (ServerArgs.__post_init__ sets 2048 for
-        # MLA backends). The per-case gate below times any token_count above that
-        # default EAGERLY (sglang runs those prefill chunks without a piecewise
-        # graph), so the collector never overrides the ceiling.
-        if hasattr(server_args, "enforce_piecewise_cuda_graph"):
-            server_args.enforce_piecewise_cuda_graph = True
-
-    if hasattr(server_args, "disable_piecewise_cuda_graph"):
-        server_args.disable_piecewise_cuda_graph = not enable_piecewise_cuda_graph
-    else:
-        server_args.enable_piecewise_cuda_graph = enable_piecewise_cuda_graph
 
     server_args.attention_backend = attention_backend
     # Do NOT warm up gemm at sglang ModelRunner init (that is the separate
@@ -1186,32 +1086,19 @@ def load_model_runner(
     # module gemm tuning is instead absorbed into the dsa-module warmup below
     # (run_mla_module, under `with autotune(True)`), so it is part of the module
     # init we actually measure -- not a global init phase.
-    if hasattr(server_args, "disable_flashinfer_autotune"):
-        server_args.disable_flashinfer_autotune = True
-    # Match the serve config: force nsa sub-backends so the DSA FMHA uses the
-    # topk-capped flash_fwd_splitkv_mla_fp8_sparse kernel (flat in prefix),
-    # not the default full-attention paged kernel (scales with prefix).
-    # Only fp8 KV: force flashmla_kv so the DSA FMHA uses the topk-capped
-    # flash_fwd_splitkv_mla_fp8_sparse kernel (flat in prefix). bf16 KV is left
-    # at sglang default (flashmla_kv rejects bf16). Gated by env so reversible.
-    # GLM5 DSA fp8 MUST use flashmla_kv so the FMHA is the topk-capped
-    # flash_fwd_splitkv_mla_fp8_sparse kernel (flat in prefix) = serve. Hardcoded
-    # ON for nsa+fp8 (no env gate); bf16 KV left at sglang default.
-    if attention_backend == "nsa" and sglang_kv_dtype == "fp8_e4m3":
-        # Sub-backend hardcoded by the collection sweep: flashmla_kv (serve
-        # default, topk-capped) or trtllm (incremental variant, piecewise graph).
-        # sglang renamed nsa_* -> dsa_* around e958f4561; set whichever exists.
-        for _pre in ("nsa_prefill_backend", "dsa_prefill_backend"):
-            if hasattr(server_args, _pre):
-                setattr(server_args, _pre, dsa_prefill_backend)
-        for _dec in ("nsa_decode_backend", "dsa_decode_backend"):
-            if hasattr(server_args, _dec):
-                setattr(server_args, _dec, dsa_prefill_backend)
+    server_args.disable_flashinfer_autotune = True
+    # Match SGLang 0.5.14 serving dispatch for FP8 KV. Hopper uses FlashMLA's
+    # sparse kernel; datacenter Blackwell uses TRT-LLM. BF16 KV stays on the
+    # runtime default because flashmla_kv rejects BF16.
+    if attention_backend == "dsa" and sglang_kv_dtype == "fp8_e4m3":
+        if dsa_prefill_backend is None:
+            dsa_prefill_backend = "trtllm" if get_sm_version() >= 100 else "flashmla_kv"
+        server_args.dsa_prefill_backend = dsa_prefill_backend
+        server_args.dsa_decode_backend = dsa_prefill_backend
     print(
         f"Using attention backend: {attention_backend}, kv_cache_dtype: {sglang_kv_dtype}, "
         f"gpu_id: {gpu_id}, chunked_prefill_size={server_args.chunked_prefill_size}, "
-        f"max_prefill_tokens={server_args.max_prefill_tokens}, max_total_tokens={max_total_tokens}, "
-        f"piecewise_cuda_graph={enable_piecewise_cuda_graph}"
+        f"max_prefill_tokens={server_args.max_prefill_tokens}, max_total_tokens={max_total_tokens}"
     )
 
     if num_layers > 0 and load_format == "dummy":
@@ -1223,20 +1110,28 @@ def load_model_runner(
         server_args.json_model_override_args = json.dumps(override_args)
 
     _set_envs_and_config(server_args)
+    initialize_moe_config(server_args)
+    initialize_fp8_gemm_config(server_args)
+    initialize_fp4_gemm_config(server_args)
 
     nccl_port = 29500 + random.randint(0, 10000) + gpu_id * 100
 
     model_config = ModelConfig.from_server_args(server_args)
+    expected_architecture = _module_model_architecture(model_path)
+    actual_architecture = (model_config.hf_config.architectures or [None])[0]
+    if actual_architecture != expected_architecture:
+        raise RuntimeError(
+            f"SGLang loaded architecture={actual_architecture!r} for {model_path}, expected {expected_architecture!r}"
+        )
 
     # Bug A fix: ensure hf_config.quantization_config carries weight_block_size
     # so sglang constructs Fp8Config with block_quant=True. Without this, the
     # Fp8LinearMethod post-load path at fp8.py:660 transposes kv_b_proj.weight
     # from (out=7168, in=512) to (in=512, out=7168), and then
     # deepseek_weight_loader.py:555 unflatten(dim0=512, 448) fails with
-    # `448 ∤ 512`. Our _resolve_local_model_path writes quantization_config into
-    # the tmp config.json, but after the model_type rewrite to deepseek_v3 the
-    # attribute may not survive onto hf_config — re-inject it here.
-    if gemm_type == "fp8_block":
+    # `448 ∤ 512`. Re-inject the cached checkpoint metadata after
+    # AutoConfig parsing so the block shape remains explicit on hf_config.
+    if native_quant == "fp8_block":
         _ensure_fp8_block_quant_config(model_config.hf_config)
 
     model_runner = ModelRunner(
@@ -1253,37 +1148,13 @@ def load_model_runner(
         server_args=server_args,
     )
 
-    _ensure_kv_pool_and_attn_backend(model_runner)
+    model_runner.alloc_memory_pool()
+    model_runner.init_attention_backends()
 
     _patch_nsa_rope_contiguity(model_runner)
     _validate_dsa_tp_module_shapes(model_runner, head_num, target_tp_size)
 
     return model_runner
-
-
-def _ensure_kv_pool_and_attn_backend(model_runner) -> None:
-    """Allocate the KV cache pool and attention backend when the runtime split
-    ModelRunner construction from pool/backend init (newer sglang).
-
-    Older sglang (<= 0.5.x release) allocated ``req_to_token_pool`` /
-    ``token_to_kv_pool_allocator`` and the attention backend inside
-    ``ModelRunner.__init__``, so a bare construction was fully usable. The
-    refactored sglang (0.0.0.dev / glm52 image) moves these out of ``__init__``
-    into ``alloc_memory_pool()`` + ``init_attention_backend()`` that the engine's
-    Scheduler/TpWorker drives after construction — steps the collector does not
-    run, leaving ``req_to_token_pool`` (and ``attn_backend``) as ``None`` and the
-    forward path crashing on ``None.clear()`` / ``None.init_forward_metadata``.
-
-    Detect the split by ``req_to_token_pool is None`` after construction and run
-    the two init steps ourselves. On older sglang the pool is already set, so
-    this is a no-op -> backward compatible.
-    """
-    if getattr(model_runner, "req_to_token_pool", None) is not None:
-        return  # old sglang: __init__ already allocated everything
-    if hasattr(model_runner, "alloc_memory_pool"):
-        model_runner.alloc_memory_pool()
-    if hasattr(model_runner, "init_attention_backend"):
-        model_runner.init_attention_backend()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1308,7 +1179,7 @@ def run_attention_torch(
     gemm_type: str,
     target_tp_size: int = 1,
     use_module_cuda_graph: bool = False,
-    dsa_prefill_backend: str = "flashmla_kv",
+    dsa_prefill_backend: str | None = None,
 ):
     """Run attention benchmark for both prefill and decode phases.
 
@@ -1321,6 +1192,8 @@ def run_attention_torch(
     attention_module = model_runner.model.model.layers[test_layer].self_attn
     architecture = _module_model_architecture(model_path)
     backend_name = model_runner.server_args.attention_backend
+    resolved_dsa_prefill_backend = getattr(model_runner.server_args, "dsa_prefill_backend", None) or dsa_prefill_backend
+    resolved_dsa_decode_backend = getattr(model_runner.server_args, "dsa_decode_backend", None) or dsa_prefill_backend
     version = get_version("sglang")
     device_name = torch.cuda.get_device_name(device)
 
@@ -1386,7 +1259,7 @@ def run_attention_torch(
                     target_tp_size=target_tp_size,
                     prefix_len=prefix_len,
                     use_module_cuda_graph=use_module_cuda_graph,
-                    dsa_prefill_backend=dsa_prefill_backend,
+                    dsa_prefill_backend=resolved_dsa_prefill_backend,
                 )
             )
         else:
@@ -1413,7 +1286,7 @@ def run_attention_torch(
                     log_gemm_type=log_gemm_type,
                     target_tp_size=target_tp_size,
                     use_module_cuda_graph=use_module_cuda_graph,
-                    dsa_prefill_backend=dsa_prefill_backend,
+                    dsa_prefill_backend=resolved_dsa_decode_backend,
                 )
             )
     return logged_count
@@ -1442,9 +1315,11 @@ def _run_prefill(
     target_tp_size: int,
     prefix_len: int = 0,
     use_module_cuda_graph: bool = False,
-    dsa_prefill_backend: str = "flashmla_kv",
+    dsa_prefill_backend: str | None = None,
 ):
     """Run prefill (context) benchmark for a single (batch_size, seq_length) point."""
+    from array import array
+
     is_wideep_mla = attn_type == "mla"
     from sglang.srt.layers.communicator import AttentionInputs, get_attn_tp_context
     from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
@@ -1475,29 +1350,9 @@ def _run_prefill(
                 sampling_params=SamplingParams(temperature=0, max_new_tokens=1),
             )
             req.prefix_indices = prefix_indices[i]
-            req.fill_ids = req.origin_input_ids
-            # sglang >= 0.5.13: ScheduleBatch.prepare_for_extend reads the per-req
-            # sequence length from req.fill_len and the token ids from
-            # req.get_fill_ids() == full_untruncated_fill_ids[:fill_len] (NOT
-            # req.fill_ids). fill_len defaults to 0, so the admission assert
-            # `seq_len - pre_len == req.extend_input_len` fails for every case.
-            # Populate the new fields (full prefix+seq) when they exist; older
-            # sglang has neither attribute and keeps using req.fill_ids.
-            if hasattr(req, "full_untruncated_fill_ids"):
-                from array import array as _array
-
-                req.full_untruncated_fill_ids = _array("q", req.origin_input_ids)
-                req.fill_len = full_length
-            # sglang dev (glm52 image): get_fill_ids() returns
-            # full_untruncated_fill_ids[: extend_range.end] instead of reading
-            # fill_len, and extend_range defaults to None -> AttributeError
-            # ('NoneType' has no attribute 'end') in prepare_for_extend. Set the
-            # extend range [prefix_len, full_length) so get_fill_ids yields the
-            # full prefix+seq ids (prepare_for_extend then strips the prefix).
-            # Guarded: older sglang has no set_extend_range (uses fill_len).
-            if hasattr(req, "set_extend_range"):
-                req.set_extend_range(prefix_len, full_length)
-            req.extend_input_len = seq_length if prefix_len else len(req.fill_ids)
+            req.full_untruncated_fill_ids = array("q", req.origin_input_ids)
+            req.fill_len = full_length
+            req.set_extend_input_len(seq_length if prefix_len else full_length)
             req.logprob_start_len = 0
             reqs.append(req)
 
@@ -1520,11 +1375,7 @@ def _run_prefill(
         )
         with _temporarily_chunked_alloc_extend(model_runner, batch_size * seq_length):
             batch.prepare_for_extend()
-        if hasattr(batch, "get_model_worker_batch"):
-            batch_for_forward = batch.get_model_worker_batch()
-        else:
-            batch_for_forward = batch
-        forward_batch = ForwardBatch.init_new(batch_for_forward, model_runner)
+        forward_batch = ForwardBatch.init_new(batch, model_runner)
         model_runner.attn_backend.init_forward_metadata(forward_batch)
 
         hidden_states = torch.randn(
@@ -1545,18 +1396,12 @@ def _run_prefill(
         attn_inputs = AttentionInputs(hidden_states, forward_batch, dummy_qkv_latent_func)
         get_attn_tp_context().set_attn_inputs(attn_inputs)
 
-        # Newer sglang (glm52 image) removed the model_executor piecewise runner
-        # module the replay path patches; time the module EAGERLY there (the
-        # existing fallback flag both disables replay below and selects the eager
-        # DSA context path at use_module_eager_dsa_context). No-op on old sglang.
-        if not _module_piecewise_replay_available():
-            model_runner._aic_module_piecewise_fallback_eager = True
-        use_module_piecewise_replay = not getattr(model_runner, "_aic_module_piecewise_fallback_eager", False) and (
-            _env_flag("AIC_ENABLE_MODULE_PIECEWISE_REPLAY") or (attn_type == "dsa" and _is_glm5_dsa_model(model_path))
-        )
-        use_full_model_piecewise_replay = _env_flag("AIC_ENABLE_FULL_MODEL_PIECEWISE_REPLAY")
-        use_module_cuda_graph = use_module_cuda_graph or _env_flag("AIC_ENABLE_MODULE_CUDA_GRAPH")
-        use_module_piecewise_context = _env_flag("AIC_ENABLE_MODULE_PIECEWISE_CONTEXT")
+        # SGLang 0.5.14's prefill graph runner owns a full-model compile
+        # contract. This module microbenchmark measures the eager serving path.
+        use_module_piecewise_replay = False
+        use_full_model_piecewise_replay = False
+        use_module_cuda_graph = False
+        use_module_piecewise_context = False
         # Eager DSA timing: proper forward context but NO piecewise CUDA graph.
         # Used when the prefill chunk exceeds the piecewise graph's captured token
         # ceiling (see the fallback just below).
@@ -1594,15 +1439,10 @@ def _run_prefill(
             use_module_cuda_graph = False
             use_module_piecewise_context = False
             use_module_eager_dsa_context = True
-        # piecewise_cuda_graph_tokens was a top-level ServerArgs field on older
-        # sglang; the refactored sglang (glm52 image) moved piecewise config into
-        # cuda_graph_config, so the attribute is absent -> getattr-guard it
-        # (absent => 0 => the token gate below is inert, correct for the eager
-        # flashmla_kv path which runs no piecewise graph anyway).
-        _pw_tokens = getattr(model_runner.server_args, "piecewise_cuda_graph_tokens", None)
-        max_piecewise_tokens = int(getattr(model_runner.server_args, "piecewise_cuda_graph_max_tokens", 0) or 0) or (
-            max(int(x) for x in _pw_tokens) if _pw_tokens else 0
-        )
+        # SGLang 0.5.14 removed the legacy piecewise-prefill ServerArgs fields.
+        # This collector intentionally times the eager module path above, so no
+        # piecewise token ceiling applies here.
+        max_piecewise_tokens = 0
         if use_module_piecewise_replay and max_piecewise_tokens and token_count > max_piecewise_tokens:
             # piecewise_cuda_graph_max_tokens is an sglang serving knob (2048 by
             # default for MLA backends, to avoid kernel-dispatch regression) — NOT
@@ -2052,7 +1892,7 @@ def _run_prefill(
                 if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
                     kernel_source = f"{kernel_source}_trtllm"
             perf_filename = _resolve_perf_path(output_path, perf_fname)
-            log_perf(
+            if not log_perf(
                 item_list=[
                     {
                         "model": model_path,
@@ -2074,7 +1914,10 @@ def _run_prefill(
                 op_name=op_name,
                 kernel_source=kernel_source,
                 perf_filename=perf_filename,
-            )
+            ):
+                raise PerfLogWriteError(f"failed to persist prefill row to {perf_filename}")
+        except PerfLogWriteError:
+            raise
         except Exception as e:
             print(f"  Warning: failed to log prefill metrics: {e}")
             return False
@@ -2082,6 +1925,8 @@ def _run_prefill(
         print(f"  Prefill: {avg_time_ms:.3f} ms (back-to-back avg over {num_iterations} iters)")
         return True
 
+    except PerfLogWriteError:
+        raise
     except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
         print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
         torch.cuda.empty_cache()
@@ -2099,6 +1944,7 @@ def _run_prefill(
         print("  Skipping this configuration...")
         return False
     finally:
+        cleanup_errors = []
         for cleanup_name, cleanup_fn in (
             ("req_to_token_pool.clear", model_runner.req_to_token_pool.clear),
             ("token_to_kv_pool_allocator.clear", model_runner.token_to_kv_pool_allocator.clear),
@@ -2107,10 +1953,9 @@ def _run_prefill(
             try:
                 cleanup_fn()
             except Exception as cleanup_exc:
-                print(
-                    f"  Warning: cleanup step {cleanup_name} failed after benchmark: "
-                    f"{type(cleanup_exc).__name__}: {cleanup_exc}"
-                )
+                cleanup_errors.append(f"{cleanup_name}: {type(cleanup_exc).__name__}: {cleanup_exc}")
+        if cleanup_errors:
+            raise RuntimeError(f"DSA/MLA prefill cleanup failed: {'; '.join(cleanup_errors)}")
 
 
 def _run_decode(
@@ -2135,9 +1980,11 @@ def _run_decode(
     log_gemm_type: str,
     target_tp_size: int,
     use_module_cuda_graph: bool = False,
-    dsa_prefill_backend: str = "flashmla_kv",
+    dsa_prefill_backend: str | None = None,
 ):
     """Run decode (generation) benchmark for a single (batch_size, kv_cache_length) point."""
+    from array import array
+
     is_wideep_mla = attn_type == "mla"
     from sglang.srt.layers.communicator import AttentionInputs, get_attn_tp_context
     from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
@@ -2165,26 +2012,9 @@ def _run_decode(
                 sampling_params=SamplingParams(temperature=0, max_new_tokens=1),
             )
             req.prefix_indices = torch.empty((0,), dtype=torch.int64)
-            req.fill_ids = req.origin_input_ids
-            # sglang >= 0.5.13: ScheduleBatch.prepare_for_extend reads the per-req
-            # length from req.fill_len and the ids from req.get_fill_ids() ==
-            # full_untruncated_fill_ids[:fill_len] (NOT req.fill_ids). fill_len
-            # defaults to 0, so the admission assert
-            # `seq_len - pre_len == req.extend_input_len` fails for every decode
-            # case. Decode has no prefix (pre_len=0) -> fill_len = full kv length.
-            # Older sglang lacks both attributes and keeps using req.fill_ids.
-            if hasattr(req, "full_untruncated_fill_ids"):
-                from array import array as _array
-
-                req.full_untruncated_fill_ids = _array("q", req.origin_input_ids)
-                req.fill_len = len(req.origin_input_ids)
-            # sglang dev (glm52 image): get_fill_ids() slices
-            # full_untruncated_fill_ids[: extend_range.end]; extend_range defaults
-            # to None -> AttributeError in prepare_for_extend. Decode has no prefix,
-            # so the extend range covers all tokens [0, len). hasattr-guarded.
-            if hasattr(req, "set_extend_range"):
-                req.set_extend_range(0, len(req.origin_input_ids))
-            req.extend_input_len = len(req.fill_ids)
+            req.full_untruncated_fill_ids = array("q", req.origin_input_ids)
+            req.fill_len = len(req.origin_input_ids)
+            req.set_extend_input_len(req.fill_len)
             req.logprob_start_len = 0
             req.cached_tokens = 0
             req.already_computed = 0
@@ -2209,13 +2039,10 @@ def _run_decode(
         )
         # Allocate KV cache slots, then switch to decode
         batch.prepare_for_extend()
-        batch.output_ids = torch.randint(0, 10000, (batch_size,), dtype=torch.int64, device="cuda")
+        for req in batch.reqs:
+            req.output_ids.append(0)
         batch.prepare_for_decode()
-        if hasattr(batch, "get_model_worker_batch"):
-            batch_for_forward_decode = batch.get_model_worker_batch()
-        else:
-            batch_for_forward_decode = batch
-        forward_batch_decode = ForwardBatch.init_new(batch_for_forward_decode, model_runner)
+        forward_batch_decode = ForwardBatch.init_new(batch, model_runner)
         model_runner.attn_backend.init_forward_metadata(forward_batch_decode)
 
         decode_hidden = torch.randn(
@@ -2332,7 +2159,7 @@ def _run_decode(
                 log_isl = 1
                 log_step = seq_length
             perf_filename = _resolve_perf_path(output_path, perf_fname)
-            log_perf(
+            if not log_perf(
                 item_list=[
                     {
                         "model": model_path,
@@ -2355,7 +2182,10 @@ def _run_decode(
                 kernel_source=kernel_source,
                 perf_filename=perf_filename,
                 power_stats=power_stats,
-            )
+            ):
+                raise PerfLogWriteError(f"failed to persist decode row to {perf_filename}")
+        except PerfLogWriteError:
+            raise
         except Exception as e:
             print(f"  Warning: failed to log decode metrics: {e}")
             return False
@@ -2363,6 +2193,8 @@ def _run_decode(
         print(f"  Decode: {avg_time_ms:.3f} ms")
         return True
 
+    except PerfLogWriteError:
+        raise
     except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
         print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
         torch.cuda.empty_cache()
@@ -2380,6 +2212,7 @@ def _run_decode(
         print("  Skipping this configuration...")
         return False
     finally:
+        cleanup_errors = []
         for cleanup_name, cleanup_fn in (
             ("req_to_token_pool.clear", model_runner.req_to_token_pool.clear),
             ("token_to_kv_pool_allocator.clear", model_runner.token_to_kv_pool_allocator.clear),
@@ -2388,10 +2221,9 @@ def _run_decode(
             try:
                 cleanup_fn()
             except Exception as cleanup_exc:
-                print(
-                    f"  Warning: cleanup step {cleanup_name} failed after benchmark: "
-                    f"{type(cleanup_exc).__name__}: {cleanup_exc}"
-                )
+                cleanup_errors.append(f"{cleanup_name}: {type(cleanup_exc).__name__}: {cleanup_exc}")
+        if cleanup_errors:
+            raise RuntimeError(f"DSA/MLA decode cleanup failed: {'; '.join(cleanup_errors)}")
 
 
 def _resolve_perf_path(output_path: str | None, filename: str) -> str:
@@ -2420,7 +2252,7 @@ def run_mla_module(
     attention_backend: str | None = None,
     batch_size_filter: int | None = None,
     target_tp_size: int = 1,
-    dsa_prefill_backend: str = "flashmla_kv",
+    dsa_prefill_backend: str | None = None,
     skip_indexer: bool = False,
 ):
     """Run MLA/DSA module benchmark — called inside a subprocess.
@@ -2530,34 +2362,6 @@ def run_mla_module(
         cases = [(bs, seq_len, ip, 0) for bs, seq_len, ip in base_cases]
     cases = _filter_cases_from_env(cases, is_prefill=is_prefill, attn_type=attn_type)
 
-    # Known-crash skip: B200 DSv3.2 DSA generation at reduced heads ≤ 32 and
-    # kv_cache_length ≥ 256 produces an async CUDA illegal memory access
-    # inside the flashinfer trtllm_batch_decode_with_kv_cache_mla kernel —
-    # the subprocess SIGABRTs and every remaining (bs, kv_len) in this task
-    # is lost. Root cause is collector-setup divergence from production
-    # (dummy weights + cleared KV pool + json_model_override_args heads
-    # override) rather than a real kernel bug — InferenceX SemiAnalysis
-    # benchmarks show GLM-5 tp=4 on B200 + fp8-KV works in production.
-    # Skipping these points lets the subprocess complete the sweep and
-    # populate rows for bs in {2..1024} x kv_len in {1..128} at reduced heads
-    # instead of losing them behind the first SIGABRT at (bs=1, kv_len=256).
-    if (
-        not is_prefill
-        and attn_type == "dsa"
-        and model_path == "deepseek-ai/DeepSeek-V3.2"
-        and head_num <= 32
-        and get_sm_version() == 100
-    ):
-        before = len(cases)
-        cases = [(bs, seq_len, ip, prefix_len) for (bs, seq_len, ip, prefix_len) in cases if seq_len < 256]
-        skipped = before - len(cases)
-        if skipped:
-            print(
-                f"[SKIP] B200 DSv3.2 DSA gen reduced-heads: dropping {skipped} "
-                f"(bs, kv_len) cases with kv_len>=256 to avoid SIGABRT "
-                f"(heads={head_num}, kv={kv_cache_dtype}, gemm={gemm_type})"
-            )
-
     print(f"\n{'=' * 60}")
     print(
         f"{attn_type.upper()} Module {phase_name}: model={model_path}, backend={attention_backend}, "
@@ -2567,8 +2371,8 @@ def run_mla_module(
     print(f"Test cases: {len(cases)}")
     print(f"{'=' * 60}")
 
-    use_module_cuda_graph = _enable_glm5_dsa_piecewise_graph(attn_type, model_path, dsa_prefill_backend)
-    enable_runner_piecewise_cuda_graph = _enable_glm5_dsa_piecewise_graph(attn_type, model_path, dsa_prefill_backend)
+    use_module_cuda_graph = False
+    enable_runner_piecewise_cuda_graph = False
 
     if is_prefill and attn_type == "dsa":
         before = len(cases)
@@ -2609,7 +2413,12 @@ def run_mla_module(
     max_total_tokens = None
     if cases:
         max_total_tokens = max(
-            required_kv_tokens(bs, seq_len, prefix_len, is_prefill=ip) for (bs, seq_len, ip, prefix_len) in cases
+            (
+                required_kv_alloc_tokens(bs, seq_len, prefix_len, SGLANG_DSA_PAGE_SIZE, is_prefill=ip)
+                if attn_type == "dsa"
+                else required_kv_tokens(bs, seq_len, prefix_len, is_prefill=ip)
+            )
+            for (bs, seq_len, ip, prefix_len) in cases
         )
         if max_total_tokens > 0:
             max_total_tokens += max(1024, max_total_tokens // 20)
@@ -2654,11 +2463,12 @@ def run_mla_module(
 
             kv_capacity = _kv_pool_capacity_tokens(model_runner)
             if kv_capacity is not None:
+                page_size = kv_pool_page_size(model_runner)
                 before = len(cases)
                 cases = [
                     (bs, seq_len, ip, prefix_len)
                     for (bs, seq_len, ip, prefix_len) in cases
-                    if required_kv_tokens(bs, seq_len, prefix_len, is_prefill=True) <= kv_capacity
+                    if required_kv_alloc_tokens(bs, seq_len, prefix_len, page_size, is_prefill=True) <= kv_capacity
                 ]
                 skipped = before - len(cases)
                 if skipped:
@@ -2708,10 +2518,13 @@ def run_mla_module(
             use_module_cuda_graph=use_module_cuda_graph,
             dsa_prefill_backend=dsa_prefill_backend,
         )
-        if cases and logged_count == 0:
+        error_count = len(cases) - logged_count
+        summary = f"ok={logged_count} error={error_count} skip=0 total={len(cases)}"
+        print(f"[{attn_type.upper()}] {phase_name.lower()} {summary}")
+        if error_count > 0:
             raise RuntimeError(
-                f"{attn_type.upper()} module {phase_name.lower()} produced no perf rows "
-                f"for model={model_path}, heads={head_num}, kv={kv_cache_dtype}, gemm={gemm_type}"
+                f"{attn_type.upper()} module {phase_name.lower()} failed strict completeness: {summary}; "
+                f"model={model_path}, heads={head_num}, kv={kv_cache_dtype}, gemm={gemm_type}"
             )
     finally:
         cleanup_distributed()
@@ -2732,7 +2545,7 @@ def _run_mla_subprocess(
     attention_backend: str | None = None,
     batch_size_filter: int | None = None,
     target_tp_size: int = 1,
-    dsa_prefill_backend: str = "flashmla_kv",
+    dsa_prefill_backend: str | None = None,
     skip_indexer: bool = False,
 ):
     """Run MLA/DSA benchmark in a subprocess with CUDA_VISIBLE_DEVICES isolation."""
@@ -2742,6 +2555,7 @@ def _run_mla_subprocess(
     phase = "context" if is_prefill else "generation"
     output_repr = f'"{output_path}"' if output_path else "None"
     backend_repr = f'"{attention_backend}"' if attention_backend else "None"
+    dsa_backend_repr = f'"{dsa_prefill_backend}"' if dsa_prefill_backend else "None"
     batch_filter_repr = "None" if batch_size_filter is None else str(batch_size_filter)
     code = (
         f'import sys; sys.path.insert(0, "{os.path.dirname(os.path.abspath(__file__))}")\n'
@@ -2749,7 +2563,7 @@ def _run_mla_subprocess(
         f'run_mla_module("{attn_type}", {head_num}, "{model_path}", '
         f'"{kv_cache_dtype}", "{compute_dtype}", "{gemm_type}", {is_prefill}, '
         f"0, {output_repr}, {backend_repr}, {batch_filter_repr}, {target_tp_size}, "
-        f'"{dsa_prefill_backend}", skip_indexer={skip_indexer})\n'
+        f"{dsa_backend_repr}, skip_indexer={skip_indexer})\n"
     )
 
     proc = subprocess.Popen(
@@ -2808,7 +2622,7 @@ def run_mla_module_worker(
     attn_type: str,
     attention_backend: str | None = None,
     target_tp_size: int = 1,
-    dsa_prefill_backend: str = "flashmla_kv",
+    dsa_prefill_backend: str | None = None,
     *,
     perf_filename: str,
     device: str = "cuda:0",
@@ -2854,9 +2668,9 @@ def run_mla_module_worker(
     # the perf files land next to vllm's output — matching artifact collection.
     output_path = os.path.dirname(perf_filename) or os.getcwd()
 
-    # DSA fp8: collect BOTH sub-backends into the SAME perf file, distinguished
-    # by kernel_source ("dsa_nsa" = flashmla_kv, "dsa_nsa_trtllm" = trtllm). The
-    # query side picks flashmla_kv for CP and trtllm (faster) otherwise.
+    # The case builder selects one SGLang 0.5.14 DSA FP8 sub-backend per GPU:
+    # flashmla_kv on Hopper, trtllm on datacenter Blackwell. BF16 leaves the
+    # sub-backend unset so SGLang applies its serving default.
     _run_mla_subprocess(
         attn_type=attn_type,
         head_num=num_heads,

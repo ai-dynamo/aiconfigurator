@@ -98,7 +98,8 @@ pub struct GdnOp {
     pub scale_factor: f64,
     /// GDN kernel name. Context uses `causal_conv1d_fn` and
     /// `chunk_gated_delta_rule`; generation uses `causal_conv1d_update`
-    /// and `fused_sigmoid_gating_delta_rule_update`.
+    /// plus `fused_recurrent_gated_delta_rule_packed_decode` for SGLang or
+    /// `fused_sigmoid_gating_delta_rule_update` for other backends.
     pub kernel_source: String,
     pub phase: String, // "context" | "generation" (matches Python; SOL branch keys on phase == "context")
     pub d_model: u32,
@@ -157,7 +158,11 @@ impl GdnOp {
         let hk = self.head_k_dim as f64;
         let nv = self.num_v_heads as f64;
         let hv = self.head_v_dim as f64;
-        let conv_channels = nk * hk + nv * hv;
+        let conv_channels = if db.backend.eq_ignore_ascii_case("sglang") {
+            2.0 * nk * hk + nv * hv
+        } else {
+            nk * hk + nv * hv
+        };
         let d_conv = self.d_conv as f64;
         let d_model = self.d_model as f64;
         let state_size = nv * hk * hv;
@@ -183,6 +188,13 @@ impl GdnOp {
                 x * (nk * hk + nv * hv) * 2.0 + state_size * 2.0 * bs,
                 x * nv * hv * 2.0 + state_size * 2.0 * bs,
             ),
+            "fused_recurrent_gated_delta_rule_packed_decode" => {
+                let packed_qkv = 2.0 * nk * hk + nv * hv;
+                (
+                    x * (packed_qkv + 2.0 * nv) * 2.0 + 2.0 * nv * 4.0 + state_size * 4.0 * bs,
+                    x * nv * hv * 2.0 + state_size * 4.0 * bs,
+                )
+            }
             _ => (x * d_model * 2.0, x * d_model * 2.0),
         };
         let mem_bw = db.system_spec.gpu.mem_bw.max(1.0);

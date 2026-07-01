@@ -1132,9 +1132,6 @@ def collect_sglang(
     case_plan=None,
 ):
     """Collect performance data for SGLang with enhanced error tracking"""
-    from collector.sglang.registry import REGISTRY
-    from collector.version_resolver import build_collections
-
     os.environ["FLASHINFER_LOG_LEVEL"] = "ERROR"
 
     # DSV4-Pro mhc-pre fast path: the DeepGEMM tf32 prenorm + TileLang fused
@@ -1154,6 +1151,15 @@ def collect_sglang(
     except Exception:
         logger.exception("SGLang is not installed")
         return
+
+    from collector.framework_manifest import require_collector_runtime
+
+    requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
+    wideep_ops = {entry.op for entry in _wideep_registry_for_backend("sglang")}
+    require_collector_runtime("sglang", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
+
+    from collector.sglang.registry import REGISTRY
+    from collector.version_resolver import build_collections
 
     registry = _registry_with_requested_wideep(REGISTRY, "sglang", ops, case_plan)
     collections = build_collections(registry, "sglang", version, ops, logger=logger)

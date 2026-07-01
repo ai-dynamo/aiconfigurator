@@ -3,6 +3,7 @@
 
 import ast
 import itertools
+import json
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SOURCE_PATH = REPO_ROOT / "collector" / "sglang" / "collect_moe.py"
+MODEL_CONFIG_DIR = REPO_ROOT / "src" / "aiconfigurator" / "model_configs"
 
 
 def _load_functions(*names: str, namespace: dict | None = None) -> dict:
@@ -39,19 +41,50 @@ def _gptoss_case(*, tp: int, ep: int):
     )
 
 
-def _populate_gptoss_cases(cases):
+def _populate_gptoss_cases(cases, *, sm_version=100, allowed_mode="w4a8_mxfp4_mxfp8"):
+    allowed_modes = {allowed_mode} if isinstance(allowed_mode, str) else set(allowed_mode)
     loaded = _load_functions(
         "get_moe_test_cases",
         namespace={
             "itertools": itertools,
-            "get_sm_version": lambda: 100,
+            "get_sm_version": lambda: sm_version,
             "get_common_moe_test_cases": lambda: cases,
-            "moe_model_allows_quantization": (lambda _backend, _model, mode: mode == "w4a8_mxfp4_mxfp8"),
+            "moe_model_allows_quantization": (lambda _backend, _model, mode: mode in allowed_modes),
+            "_uses_relu2_moe_activation": lambda _model: False,
             "get_moe_quantization_module_config": lambda *_args, **_kwargs: {},
             "_SM120_NEMOTRON_NVFP4_MODELS": set(),
         },
     )
     return loaded["get_moe_test_cases"]()
+
+
+def _glm5_case(model_name: str):
+    return SimpleNamespace(
+        num_tokens_list=[128],
+        hidden_size=7168,
+        inter_size=2048,
+        topk=8,
+        num_experts=256,
+        tp=1,
+        ep=1,
+        model_name=model_name,
+        token_expert_distribution="balanced",
+        power_law_alpha=None,
+        architecture="GlmMoeDsaForCausalLM",
+    )
+
+
+def test_glm52_nvfp4_replaces_consumer_equivalent_glm5_moe_cases():
+    populated = _populate_gptoss_cases(
+        [
+            _glm5_case("nvidia/GLM-5-NVFP4"),
+            _glm5_case("nvidia/GLM-5.2-NVFP4"),
+        ],
+        allowed_mode="nvfp4",
+    )
+
+    assert populated
+    assert {case[8] for case in populated} == {"nvidia/GLM-5.2-NVFP4"}
 
 
 @pytest.mark.parametrize(("tp", "ep"), [(4, 8), (32, 1), (32, 8)])
@@ -62,6 +95,51 @@ def test_gptoss_mxfp4_population_retains_tp_and_ep_buckets(tp, ep):
     assert populated[0][0] == "w4a8_mxfp4_mxfp8"
     assert populated[0][6:8] == [tp, ep]
     assert populated[0][-1] is None
+
+
+@pytest.mark.parametrize(
+    ("mode", "sm_version", "expected"),
+    [
+        ("nvfp4", 90, "marlin"),
+        ("nvfp4", 100, "flashinfer_trtllm"),
+        ("nvfp4", 103, "flashinfer_trtllm"),
+        ("nvfp4", 120, "flashinfer_cutlass"),
+        ("w4a16_mxfp4", 90, "flashinfer_mxfp4"),
+        ("w4a8_mxfp4_mxfp8", 100, "flashinfer_mxfp4"),
+    ],
+)
+def test_quantized_framework_backend_map_matches_sglang_0514(mode, sm_version, expected):
+    resolve = _load_functions("_resolve_framework_moe_backend")["_resolve_framework_moe_backend"]
+
+    assert resolve(mode, sm_version) == expected
+
+
+@pytest.mark.parametrize(
+    ("model_name", "activation", "scoring", "routing_method", "scale"),
+    [
+        ("nvidia/Kimi-K2.5-NVFP4", "silu", "sigmoid", "DeepSeekV3", 2.827),
+        ("nvidia/MiniMax-M2.5-NVFP4", "silu", "sigmoid", None, None),
+        ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4", "relu2", "sigmoid", "DeepSeekV3", 5.0),
+        ("Qwen/Qwen3-235B-A22B", "silu", "softmax", "Renormalize", None),
+        ("deepseek-ai/DeepSeek-V4-Pro", "silu", "sqrtsoftplus", "DeepSeekV3", 2.5),
+    ],
+)
+def test_framework_routing_comes_from_local_model_contract(model_name, activation, scoring, routing_method, scale):
+    enum = SimpleNamespace(DeepSeekV3="DeepSeekV3", Renormalize="Renormalize")
+    route = _load_functions(
+        "_framework_routing",
+        namespace={
+            "_MODEL_CONFIG_DIR": MODEL_CONFIG_DIR,
+            "json": json,
+            "RoutingMethodType": enum,
+            "SimpleNamespace": SimpleNamespace,
+        },
+    )["_framework_routing"](model_name)
+
+    assert route.activation == activation
+    assert route.scoring_func == scoring
+    assert route.routing_method == routing_method
+    assert route.routed_scale == scale
 
 
 @pytest.mark.parametrize("fail_during_benchmark", [False, True])

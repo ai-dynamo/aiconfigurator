@@ -8,6 +8,8 @@ generation pre/post processing. It consumes YAML-backed synthetic tensor
 shapes, selects SGLang kernel helpers, and logs the resulting MLA BMM perf rows.
 """
 
+__compat__ = "sglang==0.5.14"
+
 import pkg_resources
 import torch
 from sgl_kernel import bmm_fp8
@@ -111,7 +113,6 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, *, per
 
     assert dtype == "bfloat16" or dtype == "fp8", "only support fp8 and bfloat16"
 
-    qk_nope_head_dim = 128
     kv_lora_rank = 512
     v_head_dim = 128
 
@@ -120,7 +121,7 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, *, per
         w_vc = torch.randn([num_heads, v_head_dim, kv_lora_rank]).bfloat16().to(torch.device(device))
         w_vc = w_vc.transpose(1, 2)
         attn_bmm_output = torch.empty(
-            (attn_output.shape[0], qk_nope_head_dim * v_head_dim),
+            (num_tokens, num_heads, v_head_dim),
             dtype=attn_output.dtype,
             device=attn_output.device,
         )
@@ -128,14 +129,14 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, *, per
         torch.bmm(
             attn_output.transpose(0, 1),
             w_vc,
-            out=attn_bmm_output.view(-1, qk_nope_head_dim, v_head_dim).transpose(0, 1),
+            out=attn_bmm_output.transpose(0, 1),
         )
 
         def kernel_func():
             torch.bmm(
                 attn_output.transpose(0, 1),
                 w_vc,
-                out=attn_bmm_output.view(-1, qk_nope_head_dim, v_head_dim).transpose(0, 1),
+                out=attn_bmm_output.transpose(0, 1),
             )
     else:
         attn_output = torch.randn([num_tokens, num_heads, kv_lora_rank], dtype=torch.bfloat16, device=device)
@@ -146,7 +147,7 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, *, per
         w_scale = torch.randn([num_heads, v_head_dim // 128, kv_lora_rank // 128], dtype=torch.float32, device=device)
         attn_bmm_output = torch.randn([num_tokens, num_heads, v_head_dim]).bfloat16().to(torch.device(device))
 
-        zeroscale = torch.tensor([1], dtype=torch.float32, device=device)
+        zeroscale = torch.zeros((1,), dtype=torch.float32, device=device)
 
         def kernel_func():
             attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(

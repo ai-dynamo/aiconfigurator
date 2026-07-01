@@ -9,7 +9,8 @@ gpu_types:
   - h200_sxm
 description: >
   SM90 Hopper exceptions extracted from collector SM gates. Hopper supports
-  FP8/block-FP8 paths but not Blackwell NVFP4 paths.
+  SGLang 0.5.14 ModelOpt NVFP4 MoE through its Marlin fallback; standalone
+  NVFP4 GEMM and the other frameworks' NVFP4 paths remain Blackwell-only.
 
 all_frameworks_op_exceptions:
   gemm:
@@ -22,20 +23,6 @@ all_frameworks_op_exceptions:
 
 framework_specific_op_exceptions:
   sglang:
-    moe:
-      rules:
-        - reason_type: hardware_unsupported
-          reason: SGLang NVFP4 MoE is only emitted for datacenter Blackwell SM100/SM103.
-          fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
-          match:
-            moe_type: nvfp4
-        - reason_type: framework_version_unsupported
-          version_prefixes: ["0.5.10"]
-          reason: SGLang 0.5.10 MoE collector does not support GPT-OSS MoE cases.
-          fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
-          match:
-            model_path:
-              in: [openai/gpt-oss-20b, openai/gpt-oss-120b]
     dsa_context_module:
       rules:
         - reason_type: hardware_unsupported

@@ -9,7 +9,7 @@ this file owns SGLang MLA backend choice, paged KV-cache setup, DP-attention
 mocking, SM-specific skips, and perf logging.
 """
 
-__compat__ = "sglang>=0.5.10rc0"
+__compat__ = "sglang==0.5.14"
 
 import math
 import os
@@ -26,34 +26,18 @@ from sglang.srt.layers.attention.trtllm_mla_backend import TRTLLMMLABackend
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import MLATokenToKVPool, ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+from sglang.srt.runtime_context import get_parallel
 
 from collector.case_generator import get_context_mla_case_specs, get_generation_mla_case_specs
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.registry_types import PerfFile
 
-# Mocking for standalone collector script
-# sglang >=0.5.10 removed _ATTN_TP_SIZE/_ATTN_TP_RANK/_ATTN_TP_GROUP from dp_attention;
-# get_attention_tp_size() now delegates to sglang.srt.distributed. Set the remaining
-# private variables for older versions and always override the public functions.
-if hasattr(sglang.srt.layers.dp_attention, "_ATTN_TP_SIZE"):
-    sglang.srt.layers.dp_attention._ATTN_TP_SIZE = 1
-    sglang.srt.layers.dp_attention._ATTN_TP_RANK = 0
+# The standalone collector has no scheduler to initialize DP state.
 sglang.srt.layers.dp_attention._ATTN_DP_SIZE = 1
 sglang.srt.layers.dp_attention._ATTN_DP_RANK = 0
 sglang.srt.layers.dp_attention._LOCAL_ATTN_DP_SIZE = 1
 sglang.srt.layers.dp_attention._LOCAL_ATTN_DP_RANK = 0
-sglang.srt.layers.dp_attention.get_attention_tp_size = lambda: 1
-sglang.srt.layers.dp_attention.get_attention_tp_rank = lambda: 0
-sglang.srt.layers.dp_attention.get_attention_dp_size = lambda: 1
-sglang.srt.layers.dp_attention.get_attention_dp_rank = lambda: 0
-# Patch imported versions in other modules
-import sglang.srt.layers.attention.flashinfer_mla_backend
-import sglang.srt.layers.attention.triton_backend
-import sglang.srt.layers.attention.trtllm_mla_backend
-
-sglang.srt.layers.attention.flashinfer_mla_backend.get_attention_tp_size = lambda: 1
-sglang.srt.layers.attention.triton_backend.get_attention_tp_size = lambda: 1
-sglang.srt.layers.attention.trtllm_mla_backend.get_attention_tp_size = lambda: 1
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
 
@@ -61,12 +45,10 @@ DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TR
 KV_LORA_RANK = 512
 QK_NOPE_HEAD_DIM = 128  # DeepSeek configs
 QK_ROPE_HEAD_DIM = 64
-MLA_PAGE_SIZE = 64
 # Scaling follows production: 1 / sqrt(qk_nope + qk_rope)
 MLA_SCALING = 1 / math.sqrt(QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM)
 INT32_MAX = 2**31 - 1
-# Largest kv slot index we can safely touch before the old flashmla kernels overflow
-MAX_KV_LOC = (INT32_MAX // (KV_LORA_RANK + QK_ROPE_HEAD_DIM)) - MLA_PAGE_SIZE
+MAX_KV_LOC = INT32_MAX // (KV_LORA_RANK + QK_ROPE_HEAD_DIM)
 
 # We only cover deepseek v3 in this collector script.
 
@@ -79,14 +61,16 @@ def _cuda_version_at_least(major: int, minor: int) -> bool:
 
 
 def _select_default_mla_backend() -> str:
-    """Match SGLang 0.5.10's default MLA backend for DeepSeek V3."""
+    """Match SGLang 0.5.14's default MLA backend for DeepSeek V3."""
     sm_version = get_sm_version()
-    if 100 <= sm_version < 110 and _cuda_version_at_least(12, 8):
+    if sm_version in {100, 103} and _cuda_version_at_least(12, 8):
         # DeepSeek V3/R1/V3.1 special-case in SGLang server_args.py.
         return "trtllm_mla"
-    if 90 <= sm_version < 100 and _cuda_version_at_least(12, 3):
+    if sm_version == 90 and _cuda_version_at_least(12, 3):
         return "fa3"
-    return "triton"
+    if sm_version in {90, 100, 103, 120}:
+        return "triton"
+    raise ValueError(f"No SGLang 0.5.14 MLA backend mapping for SM{sm_version}")
 
 
 class MockModelConfig:
@@ -114,7 +98,9 @@ class MockModelConfig:
         self.kv_lora_rank = kv_lora_rank
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
+        self.head_dim = 256
         self.v_head_dim = v_head_dim
+        self.hf_text_config = self
         self.scaling = scaling
         self.is_local_attention_model = False
 
@@ -136,6 +122,7 @@ class MockServerArgs:
         self.decode_attention_backend = "fa3"
         self.page_size = page_size
         self.device = "cuda"
+        self.is_embedding = False
         self.disable_chunked_prefix_cache = True
         self.disaggregation_mode = None
         self.flashinfer_mla_disable_ragged = False
@@ -157,6 +144,7 @@ class MockModelRunner:
     ):
         self.device = device
         self.gpu_id = device.index if device.index is not None else torch.cuda.current_device()
+        self.tp_size = 1
         self.kv_cache_dtype = kv_cache_dtype
         self.dtype = torch.bfloat16
         self.page_size = page_size
@@ -207,7 +195,8 @@ def benchmark_layer(layer, forward_batch, q, k, v, q_rope, k_rope, **kwargs):
             extra_kwargs["q_rope"] = q_rope
         if k_rope is not None:
             extra_kwargs["k_rope"] = k_rope
-        layer(q, k, v, forward_batch, **extra_kwargs)
+        with forward_context(ForwardContext(attn_backend=forward_batch.attn_backend)):
+            layer(q, k, v, forward_batch, **extra_kwargs)
 
     with benchmark_with_power(
         device=device,
@@ -233,6 +222,7 @@ def get_context_mla_test_cases():
         get_context_mla_case_specs(),
         dtype_list=dtype_list,
         tp_sizes=(1, 2, 4, 8, 16, 32, 64),
+        backend=backend,
     )
 
 
@@ -268,17 +258,13 @@ def _build_mla_test_cases(case_specs, *, dtype_list, tp_sizes, backend=None, sm_
     """
 
     cases_by_physical_key = {}
+    page_size = 64 if backend == "trtllm_mla" else 1
+    max_kv_loc = MAX_KV_LOC - page_size
     expected_geometry = (KV_LORA_RANK, QK_NOPE_HEAD_DIM, QK_ROPE_HEAD_DIM, 128)
     for spec in case_specs:
         geometry = (spec.kv_lora_rank, spec.qk_nope_head_dim, spec.qk_rope_head_dim, spec.v_head_dim)
         if geometry != expected_geometry:
             raise ValueError(f"Unsupported SGLang MLA geometry for {spec.model_name}: {geometry}")
-        if spec.kv_cache_block_size != MLA_PAGE_SIZE:
-            raise ValueError(
-                f"Unsupported SGLang MLA page size for {spec.model_name}: "
-                f"{spec.kv_cache_block_size} (expected {MLA_PAGE_SIZE})"
-            )
-
         for dtype in dtype_list:
             for tp_size in tp_sizes:
                 if spec.num_heads % tp_size:
@@ -293,7 +279,7 @@ def _build_mla_test_cases(case_specs, *, dtype_list, tp_sizes, backend=None, sm_
                     # 128 Q heads from the q tensor regardless of the runtime head count.
                     # local_heads != 128 causes out-of-bounds GPU memory reads and crashes.
                     continue
-                if not spec.is_context_phase and (spec.batch_size * (spec.input_len + 1)) + MLA_PAGE_SIZE > MAX_KV_LOC:
+                if not spec.is_context_phase and (spec.batch_size * (spec.input_len + 1)) + page_size > max_kv_loc:
                     # Guard against int32 overflow in the legacy flashmla kernel path.
                     continue
 
@@ -305,7 +291,7 @@ def _build_mla_test_cases(case_specs, *, dtype_list, tp_sizes, backend=None, sm_
                     spec.num_heads,
                     tp_size,
                     tp_size,
-                    spec.kv_cache_block_size,
+                    page_size,
                     10,
                     6,
                     spec.is_context_phase,
@@ -330,6 +316,14 @@ def _build_mla_test_cases(case_specs, *, dtype_list, tp_sizes, backend=None, sm_
     return list(cases_by_physical_key.values())
 
 
+@get_parallel().override(
+    attn_tp_size=1,
+    attn_tp_rank=0,
+    attn_cp_size=1,
+    attn_cp_rank=0,
+    attn_dp_size=1,
+    attn_dp_rank=0,
+)
 def run_mla(
     input_len,
     batch_size,
@@ -350,16 +344,21 @@ def run_mla(
     torch_device = torch.device(device)
     random.seed(0)
     torch.manual_seed(0)
-    del world_size, tokens_per_block, warming_up, test_ite, output_len
+    del world_size, warming_up, test_ite, output_len
 
     assert kv_cache_dtype in [torch.bfloat16, torch.float8_e4m3fn], "Unsupported kv cache dtype"
     assert num_heads % tp_size == 0, "num_heads must be divisible by tp_size"
     local_num_heads = num_heads // tp_size
 
+    selected_backend = _select_default_mla_backend()
+    expected_page_size = 64 if selected_backend == "trtllm_mla" else 1
+    if tokens_per_block != expected_page_size:
+        raise ValueError(f"SGLang {selected_backend} requires page_size={expected_page_size}, got {tokens_per_block}")
+
     model_runner = MockModelRunner(
         torch_device,
         kv_cache_dtype,
-        MLA_PAGE_SIZE,
+        tokens_per_block,
         num_attention_heads=num_heads,
         scaling=MLA_SCALING,
     )
@@ -367,13 +366,12 @@ def run_mla(
     req_to_token_pool, token_matrix = create_req_to_token_pool(
         batch_size=batch_size,
         total_len=total_len,
-        page_size=MLA_PAGE_SIZE,
+        page_size=tokens_per_block,
         torch_device=torch_device,
         device_str=str(torch_device),
     )
     model_runner.req_to_token_pool = req_to_token_pool
 
-    selected_backend = _select_default_mla_backend()
     model_runner.server_args.attention_backend = selected_backend
     model_runner.server_args.prefill_attention_backend = selected_backend
     model_runner.server_args.decode_attention_backend = selected_backend
@@ -410,10 +408,13 @@ def run_mla(
     model_runner.model_config.scaling = MLA_SCALING
 
     total_tokens = max(1, batch_size * total_len)
-    kv_cache_size = max(MLA_PAGE_SIZE, math.ceil(total_tokens / MLA_PAGE_SIZE) * MLA_PAGE_SIZE)
+    kv_cache_size = max(
+        tokens_per_block,
+        math.ceil(total_tokens / tokens_per_block) * tokens_per_block,
+    )
     kv_pool = MLATokenToKVPool(
         size=kv_cache_size,
-        page_size=MLA_PAGE_SIZE,
+        page_size=tokens_per_block,
         dtype=kv_cache_dtype,
         kv_lora_rank=kv_lora_rank,
         qk_rope_head_dim=qk_rope_head_dim,
