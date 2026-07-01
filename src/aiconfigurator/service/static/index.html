@@ -481,7 +481,7 @@
           <div class="field-full">
             <label for="model-path">模型路径</label>
             <input id="model-path" value="/data/models/qwen3-8b">
-            <input id="systems-paths" type="hidden" value="/data/aiconfigurator-data/aic-systems/systems">
+            <input id="systems-paths" type="hidden" value="">
           </div>
           <div class="field">
             <label for="system">GPU 类型</label>
@@ -594,7 +594,7 @@
 
         <div class="note">
           “模型”决定性能估算使用的配置；“模型路径”会写入最终部署 YAML。
-          系统数据目录固定为 <code>/data/aiconfigurator-data/aic-systems/systems</code>。
+          默认使用镜像内置的系统性能数据库。
           当两种模式均可用时，系统会同时生成 agg 与 disagg 的 Top 1 方案。
         </div>
       </div>
@@ -889,7 +889,13 @@
         payload = { raw: text };
       }
       if (!response.ok) {
-        throw new Error(payload.message || payload.detail || `HTTP ${response.status}`);
+        const validationErrors = payload.details && Array.isArray(payload.details.errors)
+          ? payload.details.errors.map((item) => {
+              const field = Array.isArray(item.loc) ? item.loc.filter((part) => part !== "body").join(".") : "";
+              return `${field || "请求参数"}：${item.msg || "格式不正确"}`;
+            }).join("；")
+          : "";
+        throw new Error(validationErrors || payload.message || payload.detail || `HTTP ${response.status}`);
       }
       return payload;
     }
