@@ -10,7 +10,7 @@ Quant: bf16 only. vLLM upstream supports fp8 ViT FMHA via FLASHINFER;
 enabling that path here is left for the future.
 """
 
-__compat__ = "vllm>=0.21.0"
+__compat__ = "vllm==0.24.0"
 
 import torch
 from vllm.model_executor.models.vision import get_vit_attn_backend

@@ -125,7 +125,7 @@ def _install_vllm_stubs(monkeypatch):
         "vllm.model_executor.layers.fused_moe.layer",
         determine_expert_map=_noop,
     )
-    _stub_module(monkeypatch, "vllm.version", __version__="0.19.0")
+    _stub_module(monkeypatch, "vllm.version", __version__="0.24.0")
     _stub_module(
         monkeypatch,
         "collector.helper",
@@ -275,6 +275,11 @@ def test_vllm_moe_getter_dedupes_equal_resolved_invocations(monkeypatch):
     monkeypatch.setattr(module, "moe_shape_satisfies_constraints", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         module,
+        "_load_model_moe_config",
+        lambda _model_name: {"model_type": "qwen3_moe", "hidden_act": "silu", "norm_topk_prob": True},
+    )
+    monkeypatch.setattr(
+        module,
         "get_moe_quantization_module_config",
         lambda _backend, _mode, *, model_name: module_configs[model_name],
     )
@@ -302,6 +307,11 @@ def test_vllm_moe_getter_rejects_consumer_key_collision(monkeypatch):
     monkeypatch.setattr(module, "get_moe_quantization_modes", lambda *_args, **_kwargs: ["w4a16_mxfp4"])
     monkeypatch.setattr(module, "moe_model_allows_quantization", lambda *_args: True)
     monkeypatch.setattr(module, "moe_shape_satisfies_constraints", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        module,
+        "_load_model_moe_config",
+        lambda _model_name: {"model_type": "qwen3_moe", "hidden_act": "silu", "norm_topk_prob": True},
+    )
     monkeypatch.setattr(
         module,
         "get_moe_quantization_module_config",
@@ -339,9 +349,6 @@ def test_vllm_repository_moe_getter_has_unique_consumer_keys(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     _install_vllm_stubs(monkeypatch)
     module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
-    monkeypatch.setattr(module, "per_block_cast_to_fp8", _noop)
-    monkeypatch.setattr(module, "_nvfp4_available", True)
-    monkeypatch.setattr(module, "_mxfp4_available", True)
 
     consumer_keys = []
     for case in module.get_moe_test_cases():
@@ -368,7 +375,5 @@ def test_vllm_nemotron_topk22_nvfp4_artifacts_are_not_scheduled(monkeypatch, mod
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
     _install_vllm_stubs(monkeypatch)
     module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
-    monkeypatch.setattr(module, "per_block_cast_to_fp8", _noop)
-    monkeypatch.setattr(module, "_nvfp4_available", True)
 
     assert module.get_moe_test_cases() == []

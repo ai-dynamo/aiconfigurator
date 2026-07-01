@@ -3,7 +3,7 @@
 
 """Measure vLLM FP8 activation quantization overhead for static-FP8 GEMM."""
 
-__compat__ = "vllm>=0.14.0"
+__compat__ = "vllm==0.24.0"
 
 import torch
 from vllm import _custom_ops as ops
@@ -60,7 +60,7 @@ def run_computescale(m, k, *, perf_filename, device="cuda:0"):
         version=vllm_version,
         device_name=torch.cuda.get_device_name(device),
         op_name="compute_scale",
-        kernel_source="vllm_default",
+        kernel_source="dynamic_per_token_scaled_fp8_quant_minus_static_scaled_fp8_quant",
         perf_filename=perf_filename,
         power_stats=dynamic_results["power_stats"],
     )
@@ -70,7 +70,7 @@ def run_computescale(m, k, *, perf_filename, device="cuda:0"):
         version=vllm_version,
         device_name=torch.cuda.get_device_name(device),
         op_name="scale_matrix",
-        kernel_source="vllm_default",
+        kernel_source="static_scaled_fp8_quant",
         perf_filename="scale_matrix_perf.txt",
         power_stats=static_results["power_stats"],
     )

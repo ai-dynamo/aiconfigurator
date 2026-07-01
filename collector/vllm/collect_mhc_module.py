@@ -17,13 +17,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import torch
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from collector.case_generator import get_common_mhc_test_cases
 from collector.helper import benchmark_with_power, log_perf
 from collector.registry_types import PerfFile
 from collector.vllm.utils import setup_distributed
 
-__compat__ = "vllm>=0.20.1"
+__compat__ = "vllm==0.24.0"
 
 
 DEFAULT_HIDDEN_SIZE = 4096
@@ -52,12 +53,7 @@ def _resolve_perf_path(output_path: str | None, filename: str | None) -> str:
 def _init_cuda(device: str) -> None:
     setup_distributed(device)
     torch.cuda.set_device(device)
-    try:
-        from vllm.v1.worker.workspace import init_workspace_manager
-
-        init_workspace_manager(torch.device(device))
-    except (ImportError, RuntimeWarning):
-        pass
+    init_workspace_manager(torch.device(device))
 
 
 def _active_mhc_common_cases():

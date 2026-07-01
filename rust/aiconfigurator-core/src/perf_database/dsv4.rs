@@ -31,9 +31,9 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
+use super::interpolation::{interp_1d, nearest_neighbors};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
-use super::interpolation::{interp_1d, nearest_neighbors};
 use crate::perf_database::parquet_loader::PerfReader;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,25 +91,22 @@ impl Dsv4Table {
     }
 
     /// Context-DSV4 latency at `lookup_s = isl` (the new-token count). Mirrors
-    /// Python's context base lookup over `(tp_size, isl, b)` on the
-    /// `native_heads` slice. The context CSVs collected to date carry a single
-    /// `step=0` anchor, so there is no prefix axis to resolve here (the operator
-    /// already supplies the new-token count as `isl`).
+    /// Python's prefix-resolved lookup: each measured prefix runs the existing
+    /// `(isl, batch)` lookup, then off-grid prefixes interpolate between the
+    /// nearest usable anchors or clamp to the nearest boundary.
     ///
     /// `local_heads` is the model's rank-LOCAL head count (`native // tp`); it is
     /// resolved against the CSV head keys via [`resolve_head_key`] (Python
-    /// `_dsv4_resolve_head_key`). The lookup mirrors Python's context path
-    /// `_query_context_attn_table -> _dsv4_lookup_prefix_resolved ->
-    /// _dsv4_robust_3d_lookup(..., batch_axis="z")`: exact `(isl, b)` hit, else
-    /// the sampled-batch-scaling fallback (batch is the inner axis). The single
-    /// `step=0` anchor means the cubic 3-D path is degenerate, so Python always
-    /// falls through to exact-or-batch-scaling here.
+    /// `_dsv4_resolve_head_key`). Within each prefix slice the lookup mirrors
+    /// `_dsv4_robust_3d_lookup(..., batch_axis="z")`: exact `(isl, b)` hit, else
+    /// the sampled-batch-scaling fallback (batch is the inner axis).
     #[allow(clippy::too_many_arguments)]
     pub fn query_context(
         &self,
         attn_kind: AttnKind,
         b: u32,
         isl: u32,
+        prefix: u32,
         local_heads: u32,
         kv_quant: KvCacheQuantMode,
         fmha_quant: FmhaQuantMode,
@@ -120,15 +117,54 @@ impl Dsv4Table {
             AttnKind::Csa => self.load_csa_context()?,
             AttnKind::Hca => self.load_hca_context()?,
         };
-        let by_step = select_resolved(grids, architecture, fmha_quant, kv_quant, gemm_quant, local_heads)?;
-        // Single step=0 anchor: fold the step axis to the `[isl][batch]` slice
-        // (last anchor wins, matching Python's prefix-resolved single anchor).
-        let slice = by_step
-            .values()
-            .next_back()
-            .ok_or_else(|| AicError::PerfDatabase("DSV4 context slice has no step anchor".into()))?;
-        // batch_axis="z": batch is the inner key, isl the outer.
-        robust_lookup_batch_inner(slice, isl, b)
+        let by_step = select_resolved(
+            grids,
+            architecture,
+            fmha_quant,
+            kv_quant,
+            gemm_quant,
+            local_heads,
+        )?;
+
+        if let Some(slice) = by_step.get(&prefix) {
+            if let Ok(latency) = robust_lookup_batch_inner(slice, isl, b) {
+                if latency.is_finite() {
+                    return Ok(latency);
+                }
+            }
+        }
+
+        let mut result_by_prefix = BTreeMap::new();
+        for (&step, slice) in by_step {
+            if let Ok(latency) = robust_lookup_batch_inner(slice, isl, b) {
+                if latency.is_finite() {
+                    result_by_prefix.insert(step, latency);
+                }
+            }
+        }
+        if result_by_prefix.is_empty() {
+            return Err(AicError::PerfDatabase(format!(
+                "DSV4 context has no usable prefix anchor (prefix={prefix}, isl={isl}, b={b})"
+            )));
+        }
+        let prefix_points: Vec<u32> = result_by_prefix.keys().copied().collect();
+        let first = prefix_points[0];
+        let last = prefix_points[prefix_points.len() - 1];
+        if prefix <= first {
+            return Ok(result_by_prefix[&first]);
+        }
+        if prefix >= last {
+            return Ok(result_by_prefix[&last]);
+        }
+
+        let (left, right) = nearest_neighbors(prefix, &prefix_points, true)?;
+        Ok(interp_1d(
+            left as f64,
+            right as f64,
+            result_by_prefix[&left],
+            result_by_prefix[&right],
+            prefix as f64,
+        ))
     }
 
     /// Generation-DSV4 latency. `sequence_tokens = isl + step` (absolute KV
@@ -159,7 +195,14 @@ impl Dsv4Table {
             AttnKind::Csa => self.load_csa_generation()?,
             AttnKind::Hca => self.load_hca_generation()?,
         };
-        let by_step = select_resolved(grids, architecture, fmha_quant, kv_quant, gemm_quant, local_heads)?;
+        let by_step = select_resolved(
+            grids,
+            architecture,
+            fmha_quant,
+            kv_quant,
+            gemm_quant,
+            local_heads,
+        )?;
         // Build the `[batch][s_total]` slice where s_total = isl + step. The
         // generation CSVs use isl=1, so s_total = 1 + step. If multiple
         // (step, isl) pairs map to the same s_total the last write wins, which
@@ -191,13 +234,21 @@ impl Dsv4Table {
     }
     fn load_csa_generation(&self) -> Result<&ModuleGrids, AicError> {
         let cell = self.csa_generation.get_or_init(|| {
-            load_module_parquet(&self.data_root.join("dsv4_csa_generation_module_perf.parquet"))
+            load_module_parquet(
+                &self
+                    .data_root
+                    .join("dsv4_csa_generation_module_perf.parquet"),
+            )
         });
         cell.as_ref().map_err(clone_err)
     }
     fn load_hca_generation(&self) -> Result<&ModuleGrids, AicError> {
         let cell = self.hca_generation.get_or_init(|| {
-            load_module_parquet(&self.data_root.join("dsv4_hca_generation_module_perf.parquet"))
+            load_module_parquet(
+                &self
+                    .data_root
+                    .join("dsv4_hca_generation_module_perf.parquet"),
+            )
         });
         cell.as_ref().map_err(clone_err)
     }
@@ -294,7 +345,12 @@ fn robust_lookup_batch_inner(slice: &ByIsl, outer: u32, b: u32) -> Result<f64, A
 
 /// Interpolate along the outer axis for a fixed batch `bp` within an
 /// `[outer][batch]` slice. Mirrors Python `_lookup_at_batch(batch_axis="z")`.
-fn interp_along_outer_at_batch(slice: &ByIsl, outer: u32, bp: u32, allow_extrapolate: bool) -> Option<f64> {
+fn interp_along_outer_at_batch(
+    slice: &ByIsl,
+    outer: u32,
+    bp: u32,
+    allow_extrapolate: bool,
+) -> Option<f64> {
     // Exact (outer, bp).
     if let Some(by_b) = slice.get(&outer) {
         if let Some(&leaf) = by_b.get(&bp) {
@@ -459,6 +515,8 @@ fn clone_err(err: &AicError) -> AicError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::operators::dsv4::Dsv4ModuleOp;
+    use crate::perf_database::PerfDatabase;
 
     #[test]
     fn dsv4_data_absent_errors_cleanly() {
@@ -472,6 +530,7 @@ mod tests {
                 AttnKind::Csa,
                 1,
                 1024,
+                0,
                 128, // local_heads
                 KvCacheQuantMode::Bfloat16,
                 FmhaQuantMode::Bfloat16,
@@ -483,6 +542,84 @@ mod tests {
             AicError::Io { .. } | AicError::PerfDatabase(_) => {}
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn dsv4_context_prefix_exact_interpolation_clamps_and_op_passthrough() {
+        let prefix_slice = |low: f64, high: f64| -> ByIsl {
+            BTreeMap::from([
+                (1024, BTreeMap::from([(1, low)])),
+                (2048, BTreeMap::from([(1, high)])),
+            ])
+        };
+        let by_step = BTreeMap::from([
+            (32, prefix_slice(10.0, 20.0)),
+            (128, prefix_slice(30.0, 50.0)),
+        ]);
+        let key = ModuleKey {
+            architecture: "DeepseekV4ForCausalLM".into(),
+            fmha_quant: FmhaQuantMode::Bfloat16.name().into(),
+            kv_quant: KvCacheQuantMode::Bfloat16.name().into(),
+            gemm_quant: GemmQuantMode::Bfloat16.name().into(),
+        };
+        let csa_context = OnceLock::new();
+        assert!(csa_context
+            .set(Ok(ModuleGrids {
+                by_keys: BTreeMap::from([(key, BTreeMap::from([(64, by_step)]))]),
+            }))
+            .is_ok());
+        let table = Dsv4Table {
+            data_root: PathBuf::new(),
+            csa_context,
+            hca_context: OnceLock::new(),
+            csa_generation: OnceLock::new(),
+            hca_generation: OnceLock::new(),
+        };
+        let query = |prefix| {
+            table
+                .query_context(
+                    AttnKind::Csa,
+                    1,
+                    1536,
+                    prefix,
+                    64,
+                    KvCacheQuantMode::Bfloat16,
+                    FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Bfloat16,
+                    "DeepseekV4ForCausalLM",
+                )
+                .unwrap()
+        };
+        let approx = |got: f64, want: f64| {
+            assert!((got - want).abs() < 1e-9, "got {got}, want {want}");
+        };
+
+        // Each prefix first interpolates isl=1536 within its own slice.
+        approx(query(32), 15.0);
+        approx(query(128), 40.0);
+        approx(query(80), 27.5);
+        approx(query(0), 15.0);
+        approx(query(256), 40.0);
+
+        let systems_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator/systems");
+        let mut db =
+            PerfDatabase::load(&systems_root, "b200_sxm", "vllm", "0.19.0").expect("db must load");
+        db.dsv4 = table;
+        let op = Dsv4ModuleOp::new(
+            "dsv4_ctx",
+            AttnKind::Csa,
+            64,
+            128,
+            2,
+            KvCacheQuantMode::Bfloat16,
+            FmhaQuantMode::Bfloat16,
+            GemmQuantMode::Bfloat16,
+            "DeepseekV4ForCausalLM",
+        );
+        let result = op.query_context(&db, 1, 1536, 80).unwrap();
+        approx(result.latency_ms, 27.5);
     }
 
     /// Parity regression for the DeepSeek-V4-Pro b200_sxm/sglang/0.5.10 lookup.
@@ -500,23 +637,39 @@ mod tests {
     fn dsv4_pro_head_resolution_and_ragged_generation() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../src/aiconfigurator/systems/data/b200_sxm/sglang/0.5.10");
-        if !root.join("dsv4_csa_generation_module_perf.parquet").exists() {
+        if !root
+            .join("dsv4_csa_generation_module_perf.parquet")
+            .exists()
+        {
             return; // git-lfs data not materialized
         }
         let table = Dsv4Table::new(root);
         let q_gen = |kind, b, s| {
             table
                 .query_generation(
-                    kind, b, s, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
-                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
+                    kind,
+                    b,
+                    s,
+                    16,
+                    KvCacheQuantMode::Fp8,
+                    FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Fp8Block,
+                    "DeepseekV4ForCausalLM",
                 )
                 .unwrap()
         };
         let q_ctx = |kind, b, isl| {
             table
                 .query_context(
-                    kind, b, isl, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
-                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
+                    kind,
+                    b,
+                    isl,
+                    0,
+                    16,
+                    KvCacheQuantMode::Fp8,
+                    FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Fp8Block,
+                    "DeepseekV4ForCausalLM",
                 )
                 .unwrap()
         };
@@ -562,6 +715,7 @@ mod tests {
                 AttnKind::Csa,
                 8,   // batch
                 512, // isl
+                0,   // prefix
                 64,  // local_heads (exact head key)
                 KvCacheQuantMode::Fp8,
                 FmhaQuantMode::Bfloat16,
@@ -569,6 +723,9 @@ mod tests {
                 "DeepseekV4ForCausalLM",
             )
             .expect("DSV4 context lookup must resolve fp8_e4m3 kv_cache_dtype as fp8");
-        assert!(latency.is_finite() && latency > 0.0, "unexpected latency: {latency}");
+        assert!(
+            latency.is_finite() && latency > 0.0,
+            "unexpected latency: {latency}"
+        );
     }
 }

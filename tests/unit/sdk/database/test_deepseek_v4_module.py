@@ -622,7 +622,7 @@ class TestDeepSeekV4AttentionModule:
         assert float(result) > 0
         assert result.energy >= 0
 
-    def test_context_silicon_prefix_csa_without_topk_calib_returns_uncorrected(self, mutable_comprehensive_perf_db):
+    def test_context_silicon_uses_prefix_anchor_without_topk_calib(self, mutable_comprehensive_perf_db):
         """SCHEME A correction is the topK-calib DELTA (flat - top_last), not the
         old paged_mqa_logits sparse-kernel delta. When the topK calib is absent,
         the prefix CSA query returns the measured module latency UNCORRECTED
@@ -632,19 +632,32 @@ class TestDeepSeekV4AttentionModule:
         # prefix-resolved {head}{cr}{prefix}{s}{b}; prefix=8192/s=54 -> c4_len=2061
         # > index_topk, so a correction WOULD apply if a calib were loaded.
         db._context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(4, {8192: {54: {1: _deepseek_v4_value(5.0)}}}, native_heads=16),
+            _context_deepseek_v4_data(
+                4,
+                {
+                    0: {54: {1: _deepseek_v4_value(2.0)}},
+                    8192: {54: {1: _deepseek_v4_value(5.0)}},
+                },
+                native_heads=16,
+            ),
             common.PerfDataFilename.dsv4_csa_context_module,
             "models",
         )
         db._raw_context_deepseek_v4_attention_module_data = None
         db._dsv4_csa_topk_calib = None  # no topK calibration loaded
 
-        result = db.query_context_deepseek_v4_attention_module(
-            **{**_deepseek_v4_attn_kwargs(4), "b": 1, "s": 54, "prefix": 8192, "num_heads": 16},
+        base = {**_deepseek_v4_attn_kwargs(4), "b": 1, "s": 54, "num_heads": 16}
+        prefix0 = db.query_context_deepseek_v4_attention_module(
+            **{**base, "prefix": 0},
+            database_mode=common.DatabaseMode.SILICON,
+        )
+        prefix8192 = db.query_context_deepseek_v4_attention_module(
+            **{**base, "prefix": 8192},
             database_mode=common.DatabaseMode.SILICON,
         )
 
-        assert float(result) == pytest.approx(5.0)
+        assert float(prefix0) == pytest.approx(2.0)
+        assert float(prefix8192) == pytest.approx(5.0)
 
     def test_context_silicon_handles_b3_s2682_prefix0_num_heads8_from_sampled_batches(
         self, mutable_comprehensive_perf_db
