@@ -481,7 +481,7 @@
           <div class="field-full">
             <label for="model-path">模型路径</label>
             <input id="model-path" value="/data/models/qwen3-8b">
-            <input id="systems-paths" type="hidden" value="">
+            <input id="systems-paths" type="hidden" value="/data/aiconfigurator-data/aic-systems/systems">
           </div>
           <div class="field">
             <label for="system">GPU 类型</label>
@@ -517,23 +517,23 @@
           </div>
           <div class="field">
             <label for="total-gpus">GPU 总数</label>
-            <input id="total-gpus" type="number" value="8" min="1">
+            <input id="total-gpus" type="number" value="8" min="1" required>
           </div>
           <div class="field">
             <label for="isl">输入序列长度（ISL）</label>
-            <input id="isl" type="number" value="2048" min="1">
+            <input id="isl" type="number" value="2048" min="1" required>
           </div>
           <div class="field">
             <label for="osl">输出序列长度（OSL）</label>
-            <input id="osl" type="number" value="128" min="1">
+            <input id="osl" type="number" value="128" min="1" required>
           </div>
           <div class="field">
             <label for="ttft">首 Token 延迟（TTFT，ms）</label>
-            <input id="ttft" type="number" value="1000" min="1">
+            <input id="ttft" type="number" value="1000" min="1" required>
           </div>
           <div class="field">
             <label for="tpot">Token 间延迟（TPOT，ms）</label>
-            <input id="tpot" type="number" value="30" min="1">
+            <input id="tpot" type="number" value="30" min="1" required>
           </div>
           <div class="field">
             <label for="request-latency">请求延迟上限（可选）</label>
@@ -594,7 +594,7 @@
 
         <div class="note">
           “模型”决定性能估算使用的配置；“模型路径”会写入最终部署 YAML。
-          默认使用镜像内置的系统性能数据库。
+          系统数据目录固定为 <code>/data/aiconfigurator-data/aic-systems/systems</code>。
           当两种模式均可用时，系统会同时生成 agg 与 disagg 的 Top 1 方案。
         </div>
       </div>
@@ -809,6 +809,24 @@
         request_latency: requestLatency ? Number(requestLatency) : null,
         prefix: Number(ids("prefix").value || 0)
       };
+    }
+
+    function validateEstimateInputs() {
+      const requiredFields = [
+        ["total-gpus", "GPU 总数"],
+        ["isl", "输入序列长度（ISL）"],
+        ["osl", "输出序列长度（OSL）"],
+        ["ttft", "首 Token 延迟（TTFT）"],
+        ["tpot", "Token 间延迟（TPOT）"]
+      ];
+      for (const [id, label] of requiredFields) {
+        const input = ids(id);
+        const value = input.value.trim();
+        if (!value || !Number.isFinite(Number(value)) || Number(value) <= 0) {
+          input.focus();
+          throw new Error(`请填写有效的${label}，数值必须大于 0。`);
+        }
+      }
     }
 
     function buildGeneratorOverrides() {
@@ -1564,6 +1582,7 @@
     }
 
     async function generateDeployments() {
+      validateEstimateInputs();
       setStatus("正在估算");
       setError("");
       setText("current-jid", "生成中...");
