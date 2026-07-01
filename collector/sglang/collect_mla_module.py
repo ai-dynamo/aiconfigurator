@@ -1891,6 +1891,11 @@ def _run_prefill(
             use_full_model_piecewise_replay = False
             use_module_piecewise_replay = False
         _skip_state = {"prev_topk": None, "hook": None}
+        if _skip_indexer and getattr(attention_module, "indexer", None) is None:
+            raise RuntimeError(
+                f"skip_indexer requested for {attn_type} but the attention module has no indexer; "
+                "refusing to record a skip row with full-indexer latency."
+            )
         if _skip_indexer and getattr(attention_module, "indexer", None) is not None:
             attention_module.skip_topk = False  # ensure the indexer fires for the capture forward
 
@@ -1993,6 +1998,12 @@ def _run_prefill(
                 torch.cuda.synchronize()
         if use_full_model_piecewise_replay or use_module_piecewise_replay:
             print(f"  Piecewise can_run_graph={last_can_run_graph}")
+
+        if _skip_indexer and _skip_state["prev_topk"] is None:
+            raise RuntimeError(
+                f"skip_indexer pass for {attn_type} captured no topk index during warmup; "
+                "refusing to record a skip row with full-indexer latency."
+            )
 
         module_cuda_graph = None
         if use_module_cuda_graph:
@@ -2226,6 +2237,11 @@ def _run_decode(
         # timed runs (and any captured CUDA graph) exclude the per-layer indexer.
         _skip_indexer = _dsa_skip_indexer_enabled(attn_type, model_path)
         _skip_state = {"prev_topk": None, "hook": None}
+        if _skip_indexer and getattr(attention_module, "indexer", None) is None:
+            raise RuntimeError(
+                f"skip_indexer requested for {attn_type} but the attention module has no indexer; "
+                "refusing to record a skip row with full-indexer latency."
+            )
         if _skip_indexer and getattr(attention_module, "indexer", None) is not None:
             attention_module.skip_topk = False
 
@@ -2284,6 +2300,12 @@ def _run_decode(
             use_cuda_graph=use_benchmark_cuda_graph,
         ) as results:
             pass
+
+        if _skip_indexer and _skip_state["prev_topk"] is None:
+            raise RuntimeError(
+                f"skip_indexer pass for {attn_type} captured no topk index during warmup; "
+                "refusing to record a skip row with full-indexer latency."
+            )
 
         avg_time_ms = results["latency_ms"]
         power_stats = results["power_stats"]
@@ -2492,8 +2514,12 @@ def run_mla_module(
         cases = [(bs, seq_len, ip, 0) for bs, seq_len, ip in base_cases]
         _have = {(bs, sl) for bs, sl, _ in base_cases}
         _extra_kv = set(_sweep.context_prefix_lengths)
-        for _cover_pos in _DSA_CEILING_MAX_POSITIONS:
-            _extra_kv.add(_cover_pos - 1)
+        # Only extend with the hardcoded DSA max_position ceilings when this
+        # model's context limit is known; otherwise (unknown model) we would add
+        # ~1M-KV shapes and risk OOM / wasted collection. Mirrors the context path.
+        if _max_pos is not None:
+            for _cover_pos in _DSA_CEILING_MAX_POSITIONS:
+                _extra_kv.add(_cover_pos - 1)
         for _sl in sorted(_extra_kv):
             if _sl <= 0 or (_max_pos is not None and _sl > _max_pos - 1):
                 continue
