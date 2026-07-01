@@ -576,26 +576,14 @@
               <label for="worker-node">Worker 节点</label>
               <input id="worker-node" value="kubeflow-master">
             </div>
-            <div class="field">
-              <label for="worker-working-dir">Worker 工作目录</label>
-              <input id="worker-working-dir" value="/workspace/examples/backends/vllm">
-            </div>
-            <div class="field">
-              <label for="frontend-image-pull-policy">Frontend 镜像拉取策略</label>
-              <input id="frontend-image-pull-policy" value="IfNotPresent">
-            </div>
-            <div class="field">
-              <label for="worker-image-pull-policy">Worker 镜像拉取策略</label>
-              <input id="worker-image-pull-policy" value="IfNotPresent">
-            </div>
-            <div class="field-full">
-              <label for="worker-extra-envs">Worker 额外环境变量（JSON 数组）</label>
-              <textarea id="worker-extra-envs">[
+            <input id="worker-working-dir" type="hidden" value="/workspace/examples/backends/vllm">
+            <input id="frontend-image-pull-policy" type="hidden" value="IfNotPresent">
+            <input id="worker-image-pull-policy" type="hidden" value="IfNotPresent">
+            <textarea id="worker-extra-envs" hidden>[
   {"name":"TRITON_CACHE_DIR","value":"/tmp/triton"},
   {"name":"XDG_CACHE_HOME","value":"/tmp/.cache"},
   {"name":"HOME","value":"/tmp"}
 ]</textarea>
-            </div>
           </div>
         </details>
 
