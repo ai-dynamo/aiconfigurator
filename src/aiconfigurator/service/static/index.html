@@ -1,0 +1,1808 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIC 系统部署</title>
+  <style>
+    :root {
+      --bg: #f7f9fc;
+      --panel: #ffffff;
+      --ink: #1f2937;
+      --muted: #607080;
+      --line: #d7dee8;
+      --brand: #326ce5;
+      --brand-dark: #1f4fbf;
+      --brand-soft: #eaf1ff;
+      --accent: #0097a7;
+      --good: #00a67e;
+      --shadow: 0 1px 2px rgba(15, 23, 42, 0.08), 0 8px 24px rgba(15, 23, 42, 0.05);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    .page {
+      max-width: 1520px;
+      margin: 0 auto;
+      padding: 28px;
+    }
+    .hero, .layout {
+      display: grid;
+      gap: 20px;
+    }
+    .hero {
+      grid-template-columns: 1fr;
+      margin-bottom: 20px;
+    }
+    .layout {
+      grid-template-columns: minmax(620px, 0.9fr) minmax(460px, 1.1fr);
+      align-items: start;
+    }
+    .tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .tab-button {
+      color: var(--muted);
+      background: #e9eef6;
+    }
+    .tab-button.active {
+      color: #fff;
+      background: var(--brand);
+    }
+    .tab-panel {
+      display: none;
+    }
+    .tab-panel.active {
+      display: block;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 22px;
+    }
+    h1, h2, h3 {
+      margin: 0;
+    }
+    h1 {
+      font-size: 34px;
+      line-height: 1.1;
+      margin-top: 10px;
+    }
+    h2 {
+      font-size: 20px;
+      margin-bottom: 14px;
+    }
+    h3 {
+      font-size: 16px;
+      margin-bottom: 10px;
+    }
+    .subtitle, .note, .muted {
+      color: var(--muted);
+    }
+    .subtitle {
+      margin-top: 12px;
+      line-height: 1.6;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 16px;
+      background: var(--brand-soft);
+      color: var(--brand);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .artifact-grid {
+      display: grid;
+      gap: 12px;
+    }
+    .artifact-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px 12px;
+    }
+    .field, .field-full {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+    .field-full {
+      grid-column: 1 / -1;
+    }
+    .field-wide {
+      grid-column: span 2;
+    }
+    label {
+      font-size: 13px;
+      font-weight: 600;
+    }
+    input, select, textarea {
+      width: 100%;
+      padding: 11px 13px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+    }
+    textarea {
+      min-height: 110px;
+      resize: vertical;
+    }
+    button {
+      border: 0;
+      border-radius: 6px;
+      padding: 11px 18px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 120ms ease, opacity 120ms ease;
+    }
+    button:hover { transform: translateY(-1px); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+    .primary {
+      color: #fff;
+      background: var(--brand);
+    }
+    .primary:hover {
+      background: var(--brand-dark);
+    }
+    .secondary {
+      color: var(--brand);
+      background: var(--brand-soft);
+    }
+    .copy-button {
+      padding: 7px 11px;
+      font-size: 12px;
+      color: #dbeafe;
+      background: rgba(50, 108, 229, 0.8);
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.22);
+    }
+    .copy-button:hover {
+      background: var(--brand);
+    }
+    .yaml-deploy-button {
+      padding: 7px 11px;
+      font-size: 12px;
+      color: #fff;
+      background: var(--good);
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.22);
+    }
+    .yaml-delete-button {
+      padding: 7px 11px;
+      font-size: 12px;
+      color: #fff;
+      background: #dc2626;
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.22);
+    }
+    .note {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-radius: 8px;
+      background: #f8fbff;
+      border: 1px dashed var(--line);
+      line-height: 1.55;
+      font-size: 13px;
+    }
+    .section {
+      margin-top: 22px;
+    }
+    .result-block {
+      margin-top: 16px;
+    }
+    .collapsible {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcff;
+      overflow: hidden;
+    }
+    .collapsible summary {
+      cursor: pointer;
+      padding: 12px 14px;
+      color: var(--muted);
+      font-weight: 600;
+      list-style-position: inside;
+      user-select: none;
+    }
+    .collapsible .codebox {
+      border-radius: 0;
+      margin: 0;
+      max-height: 420px;
+    }
+    .codebox {
+      background: #111827;
+      color: #dbeafe;
+      border-radius: 8px;
+      padding: 14px;
+      min-height: 120px;
+      overflow: auto;
+      white-space: pre-wrap;
+      font-family: "Cascadia Code", "Consolas", monospace;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .yaml-box {
+      min-height: 320px;
+    }
+    .artifact-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .artifact-header h3 {
+      margin-bottom: 0;
+    }
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .code-wrap {
+      position: relative;
+    }
+    .yaml-actions {
+      position: absolute;
+      top: 10px;
+      right: 18px;
+      z-index: 2;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .code-wrap .codebox {
+      padding-top: 56px;
+      padding-right: 112px;
+    }
+    .yaml-editor {
+      display: block;
+      width: 100%;
+      max-width: 100%;
+      border: 0;
+      resize: vertical;
+    }
+    .kpi-row {
+      display: flex;
+      gap: 14px;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 13px;
+      flex-wrap: wrap;
+    }
+    .recommendation-tables {
+      display: grid;
+      gap: 14px;
+      margin-top: 16px;
+    }
+    .config-table-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      overflow: hidden;
+    }
+    .config-table-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      color: var(--ink);
+      font-weight: 700;
+    }
+    .title-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .recommended-badge {
+      display: none;
+      padding: 3px 8px;
+      border-radius: 999px;
+      color: var(--brand);
+      background: var(--brand-soft);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .config-table-card.recommended .recommended-badge {
+      display: inline-flex;
+    }
+    .config-table-scroll {
+      overflow-x: auto;
+    }
+    .table-empty {
+      min-height: 48px;
+      background: #fbfcff;
+    }
+    .config-table {
+      width: 100%;
+      border-collapse: collapse;
+      white-space: nowrap;
+      font-size: 12px;
+    }
+    .config-table th,
+    .config-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: right;
+    }
+    .config-table th {
+      color: var(--muted);
+      background: #f8fbff;
+      font-weight: 700;
+    }
+    .config-table th:first-child,
+    .config-table td:first-child,
+    .config-table th:nth-child(2),
+    .config-table td:nth-child(2) {
+      text-align: left;
+    }
+    .config-table tbody tr:last-child td {
+      border-bottom: 0;
+    }
+    .config-table tbody tr.selected-row td {
+      background: #eaf1ff;
+      color: #1f4fbf;
+      font-weight: 700;
+    }
+    .select-row-button {
+      padding: 6px 10px;
+      font-size: 12px;
+      color: #fff;
+      background: var(--accent);
+    }
+    .run-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 16px;
+      margin-bottom: 16px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f8fbff;
+      font-size: 13px;
+    }
+    .run-meta code {
+      color: var(--brand);
+      font-weight: 700;
+    }
+    .run-lookup {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .records-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin: 10px 0;
+      flex-wrap: wrap;
+    }
+    .status-error {
+      display: none;
+      margin-top: -8px;
+      margin-bottom: 14px;
+      padding: 10px 12px;
+      border: 1px solid #fecaca;
+      border-radius: 8px;
+      color: #991b1b;
+      background: #fff5f5;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .status-error.active {
+      display: block;
+    }
+    .dgd-note {
+      margin-bottom: 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .record-actions {
+      display: flex;
+      gap: 8px;
+    }
+    .record-actions button {
+      padding: 6px 10px;
+      font-size: 12px;
+    }
+    .records-yaml {
+      margin-top: 18px;
+    }
+    @media (max-width: 1220px) {
+      .hero, .layout, .artifact-grid {
+        grid-template-columns: 1fr;
+      }
+      .grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .field-wide {
+        grid-column: 1 / -1;
+      }
+    }
+    @media (max-width: 760px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <section class="hero">
+      <div class="card">
+        <div class="pill">AIC SYSTEM</div>
+        <h1>推理服务部署</h1>
+        <p class="subtitle">
+          配置模型与性能目标，自动比较聚合式（agg）和分离式（disagg）部署方案，
+          推荐更优配置并生成可直接使用的 Kubernetes YAML。
+        </p>
+      </div>
+    </section>
+
+    <nav class="tabs" aria-label="部署工作区">
+      <button class="tab-button active" data-tab="generate-panel" type="button">创建部署</button>
+      <button class="tab-button" data-tab="records-panel" type="button">部署记录</button>
+    </nav>
+
+    <section class="layout tab-panel active" id="generate-panel">
+      <div class="card">
+        <h2>基础配置</h2>
+        <div class="grid">
+          <div class="field-full">
+            <label for="model-config-path">模型</label>
+            <select id="model-config-path">
+              <option value="Qwen/Qwen3-8B" selected>Qwen/Qwen3-8B</option>
+            </select>
+          </div>
+          <div class="field-full">
+            <label for="model-path">模型路径</label>
+            <input id="model-path" value="/data/models/qwen3-8b">
+            <input id="systems-paths" type="hidden" value="/data/aiconfigurator-data/aic-systems/systems">
+          </div>
+          <div class="field">
+            <label for="system">GPU 系统</label>
+            <select id="system">
+              <option value="h200_sxm" selected>h200_sxm</option>
+              <option value="h100_sxm">h100_sxm</option>
+              <option value="b200_sxm">b200_sxm</option>
+              <option value="gb200">gb200</option>
+              <option value="l20">l20</option>
+              <option value="h20">h20</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="backend">推理后端</label>
+            <select id="backend">
+              <option value="vllm" selected>vllm</option>
+              <option value="sglang">sglang</option>
+              <option value="trtllm">trtllm</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="backend-version">后端版本</label>
+            <input id="backend-version" value="0.19.0" placeholder="0.19.0">
+          </div>
+          <div class="field">
+            <label for="database-mode">性能数据库模式</label>
+            <select id="database-mode">
+              <option>SILICON</option>
+              <option selected>HYBRID</option>
+              <option>EMPIRICAL</option>
+              <option>SOL</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="total-gpus">GPU 总数</label>
+            <input id="total-gpus" type="number" value="8" min="1">
+          </div>
+          <div class="field">
+            <label for="isl">输入序列长度（ISL）</label>
+            <input id="isl" type="number" value="2048" min="1">
+          </div>
+          <div class="field">
+            <label for="osl">输出序列长度（OSL）</label>
+            <input id="osl" type="number" value="128" min="1">
+          </div>
+          <div class="field">
+            <label for="ttft">首 Token 延迟（TTFT，ms）</label>
+            <input id="ttft" type="number" value="1000" min="1">
+          </div>
+          <div class="field">
+            <label for="tpot">Token 间延迟（TPOT，ms）</label>
+            <input id="tpot" type="number" value="30" min="1">
+          </div>
+          <div class="field">
+            <label for="request-latency">请求延迟上限（可选）</label>
+            <input id="request-latency" type="number" value="">
+          </div>
+          <div class="field">
+            <label for="prefix">前缀缓存长度</label>
+            <input id="prefix" type="number" value="0" min="0">
+          </div>
+        </div>
+
+        <details class="section collapsible" open>
+          <summary>Kubernetes 高级设置</summary>
+          <div class="grid" style="padding: 14px;">
+            <div class="field">
+              <label for="deployment-name">部署名称</label>
+              <input id="deployment-name" value="dynamo-qwen3-8b">
+            </div>
+            <div class="field">
+              <label for="namespace">命名空间（Namespace）</label>
+              <input id="namespace" value="aic-system">
+            </div>
+            <div class="field-wide">
+              <label for="image">运行时镜像</label>
+              <input id="image" value="parties-hub.haiercash.com/nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1">
+            </div>
+            <div class="field">
+              <label for="served-model-name">服务模型名称</label>
+              <input id="served-model-name" value="qwen3-8b">
+            </div>
+            <div class="field">
+              <label for="service-port">服务端口</label>
+              <input id="service-port" type="number" value="8000" min="1">
+            </div>
+            <div class="field">
+              <label for="frontend-node">Frontend 节点</label>
+              <input id="frontend-node" value="kubeflow-master">
+            </div>
+            <div class="field">
+              <label for="worker-node">Worker 节点</label>
+              <input id="worker-node" value="kubeflow-master">
+            </div>
+            <div class="field">
+              <label for="worker-working-dir">Worker 工作目录</label>
+              <input id="worker-working-dir" value="/workspace/examples/backends/vllm">
+            </div>
+            <div class="field">
+              <label for="frontend-image-pull-policy">Frontend 镜像拉取策略</label>
+              <input id="frontend-image-pull-policy" value="IfNotPresent">
+            </div>
+            <div class="field">
+              <label for="worker-image-pull-policy">Worker 镜像拉取策略</label>
+              <input id="worker-image-pull-policy" value="IfNotPresent">
+            </div>
+            <div class="field-full">
+              <label for="worker-extra-envs">Worker 额外环境变量（JSON 数组）</label>
+              <textarea id="worker-extra-envs">[
+  {"name":"TRITON_CACHE_DIR","value":"/tmp/triton"},
+  {"name":"XDG_CACHE_HOME","value":"/tmp/.cache"},
+  {"name":"HOME","value":"/tmp"}
+]</textarea>
+            </div>
+          </div>
+        </details>
+
+        <div class="actions">
+          <button class="secondary" id="load-options-btn">刷新选项</button>
+          <button class="primary" id="deployment-btn">生成部署方案</button>
+        </div>
+
+        <div class="note">
+          “模型”决定性能估算使用的配置；“模型路径”会写入最终部署 YAML。
+          系统数据目录固定为 <code>/data/aiconfigurator-data/aic-systems/systems</code>。
+          当两种模式均可用时，系统会同时生成 agg 与 disagg 的 Top 1 方案。
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>运行状态</h2>
+        <div class="run-meta">
+          <span>运行 ID：<code id="current-jid">尚未生成</code></span>
+          <span>已选 DGD：<code id="current-dgd-id">无</code></span>
+          <span>状态：<code id="run-status">空闲</code></span>
+        </div>
+        <div class="status-error" id="status-error"></div>
+
+        <div class="section" id="recommended-result">
+          <h2>推荐方案</h2>
+        </div>
+        <div class="recommendation-tables">
+          <div class="config-table-card" id="agg-config-card">
+            <div class="config-table-title">
+              <span>agg top1</span>
+              <span class="title-actions">
+                <span class="recommended-badge">推荐</span>
+                <button class="select-row-button" data-view-mode="agg" type="button">查看 YAML</button>
+              </span>
+            </div>
+            <div class="config-table-scroll table-empty" id="agg-config-table"></div>
+          </div>
+          <div class="config-table-card" id="disagg-config-card">
+            <div class="config-table-title">
+              <span>disagg top1</span>
+              <span class="title-actions">
+                <span class="recommended-badge">推荐</span>
+                <button class="select-row-button" data-view-mode="disagg" type="button">查看 YAML</button>
+              </span>
+            </div>
+            <div class="config-table-scroll table-empty" id="disagg-config-table"></div>
+          </div>
+        </div>
+
+        <div class="result-block" id="deployment-yamls">
+          <details class="collapsible">
+            <summary>估算响应</summary>
+            <pre class="codebox" id="estimate-output">尚未发起请求。</pre>
+          </details>
+        </div>
+
+        <div class="result-block" id="dgd-yaml-section">
+          <details class="collapsible" id="dgd-yaml-details">
+            <summary>部署 YAML</summary>
+            <div style="padding: 14px;">
+              <div class="dgd-note" id="dgd-yaml-note">尚未生成。</div>
+              <div class="code-wrap">
+                <div class="yaml-actions">
+                  <button class="yaml-deploy-button" id="deploy-selected-btn" type="button">部署所选方案</button>
+                  <button class="yaml-delete-button" id="delete-selected-btn" type="button">删除部署</button>
+                  <button class="copy-button" data-copy-target="deployment-selected-output" type="button">复制</button>
+                </div>
+                <textarea class="codebox yaml-box yaml-editor" id="deployment-selected-output" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off">尚未生成。</textarea>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <div class="result-block">
+          <details class="collapsible" open>
+            <summary>部署执行状态</summary>
+            <pre class="codebox" id="apply-output">尚未执行部署。</pre>
+          </details>
+        </div>
+
+      </div>
+    </section>
+
+    <section class="tab-panel" id="records-panel">
+      <div class="card">
+        <h2>部署记录</h2>
+        <div class="run-lookup">
+          <input id="lookup-jid" placeholder="输入已部署的运行 ID，例如 aic-20260528-051619-ba115224">
+          <button class="secondary" id="load-run-btn" type="button">加载记录</button>
+        </div>
+        <div class="records-actions">
+          <span class="muted">按运行 ID 查询，或从下方选择历史部署记录。</span>
+          <button class="secondary" id="refresh-records-btn" type="button">刷新记录</button>
+        </div>
+        <div class="config-table-scroll table-empty" id="deployment-records-table"></div>
+        <div class="records-yaml" id="records-yaml-section">
+          <div class="section-header">
+            <h2>记录中的 DGD YAML</h2>
+          </div>
+          <div class="dgd-note" id="records-yaml-note">请选择记录或输入运行 ID。</div>
+          <div class="code-wrap">
+            <div class="yaml-actions">
+              <button class="copy-button" data-copy-target="records-yaml-output" type="button">复制</button>
+            </div>
+            <textarea class="codebox yaml-box yaml-editor" id="records-yaml-output" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off">尚未生成。</textarea>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const ids = (name) => document.getElementById(name);
+    const fallbackOptions = {
+      models: ["Qwen/Qwen3-8B"],
+      systems: ["h200_sxm", "h100_sxm", "b200_sxm", "gb200", "l20", "h20"],
+      backends: ["vllm", "sglang", "trtllm"],
+      supported_databases: {}
+    };
+    const state = {
+      options: null,
+      lastEstimate: null,
+      lastDeployments: null,
+      jid: null,
+      selected: null,
+      selectedArtifact: null,
+      candidatesByMode: null,
+      modeComparison: null,
+      recommendedMode: null
+    };
+
+    function safeJsonParse(raw, fallback = []) {
+      if (!raw.trim()) {
+        return fallback;
+      }
+      try {
+        return JSON.parse(raw);
+      } catch (error) {
+        throw new Error(`JSON 解析失败：${error.message}`);
+      }
+    }
+
+    function setText(id, value) {
+      ids(id).textContent = value ?? "-";
+    }
+
+    function setCode(id, value) {
+      const element = ids(id);
+      if ("value" in element) {
+        element.value = value || "";
+      } else {
+        element.textContent = value || "";
+      }
+    }
+
+    function setStatus(value) {
+      setText("run-status", value);
+    }
+
+    function setError(value = "") {
+      const target = ids("status-error");
+      target.textContent = value;
+      target.classList.toggle("active", Boolean(value));
+    }
+
+    function switchTab(panelId) {
+      document.querySelectorAll(".tab-panel").forEach((panel) => {
+        panel.classList.toggle("active", panel.id === panelId);
+      });
+      document.querySelectorAll(".tab-button").forEach((button) => {
+        button.classList.toggle("active", button.dataset.tab === panelId);
+      });
+    }
+
+    function getCode(id) {
+      const element = ids(id);
+      return ("value" in element ? element.value : element.textContent).trim();
+    }
+
+    function jsonPretty(value) {
+      return JSON.stringify(value, null, 2);
+    }
+
+    function deriveServedModelName(modelPath) {
+      const cleaned = modelPath.trim().replace(/[\\/]+$/, "");
+      if (!cleaned) {
+        return "";
+      }
+      const lastSegment = cleaned.split(/[\\/]/).pop() || cleaned;
+      return lastSegment.replace(/[^A-Za-z0-9._-]+/g, "-").toLowerCase();
+    }
+
+    function deriveDeploymentName(servedModelName) {
+      const cleaned = servedModelName.trim().replace(/[^A-Za-z0-9._-]+/g, "-").toLowerCase();
+      return cleaned ? `dynamo-${cleaned}` : "dynamo";
+    }
+
+    function syncDeploymentName(force = false) {
+      const deploymentInput = ids("deployment-name");
+      const current = deploymentInput.value.trim();
+      if (!force && current && deploymentInput.dataset.auto !== "true") {
+        return;
+      }
+      deploymentInput.value = deriveDeploymentName(ids("served-model-name").value);
+      deploymentInput.dataset.auto = "true";
+    }
+
+    function buildEstimateRequest() {
+      const requestLatency = ids("request-latency").value.trim();
+      return {
+        model_path: ids("model-config-path").value.trim(),
+        systems_paths: ids("systems-paths").value.trim() || null,
+        total_gpus: Number(ids("total-gpus").value),
+        system: ids("system").value,
+        backend: ids("backend").value,
+        backend_version: ids("backend-version").value || null,
+        database_mode: ids("database-mode").value,
+        isl: Number(ids("isl").value),
+        osl: Number(ids("osl").value),
+        ttft: Number(ids("ttft").value),
+        tpot: Number(ids("tpot").value),
+        request_latency: requestLatency ? Number(requestLatency) : null,
+        prefix: Number(ids("prefix").value || 0)
+      };
+    }
+
+    function buildGeneratorOverrides() {
+      const modelPath = ids("model-path").value.trim();
+      const servedModelName = (ids("served-model-name").value.trim() || deriveServedModelName(modelPath)).toLowerCase();
+      const deploymentName = (ids("deployment-name").value.trim() || deriveDeploymentName(servedModelName)).toLowerCase();
+      return {
+        service_config: {
+          model_path: modelPath,
+          served_model_path: modelPath,
+          served_model_name: servedModelName,
+          port: Number(ids("service-port").value || 8000)
+        },
+        k8s_config: {
+          name: deploymentName,
+          k8s_namespace: ids("namespace").value.trim(),
+          k8s_image: ids("image").value.trim(),
+          frontend_image_pull_policy: ids("frontend-image-pull-policy").value.trim(),
+          worker_image_pull_policy: ids("worker-image-pull-policy").value.trim(),
+          worker_working_dir: ids("worker-working-dir").value.trim(),
+          frontend_node_selector: {
+            "kubernetes.io/hostname": ids("frontend-node").value.trim()
+          },
+          worker_node_selector: {
+            "kubernetes.io/hostname": ids("worker-node").value.trim()
+          },
+          frontend_extra_volumes: [
+            {
+              name: "model-dir",
+              hostPath: { path: modelPath, type: "Directory" }
+            }
+          ],
+          worker_extra_volumes: [
+            {
+              name: "model-dir",
+              hostPath: { path: modelPath, type: "Directory" }
+            },
+            { name: "triton-cache", emptyDir: {} },
+            { name: "xdg-cache", emptyDir: {} }
+          ],
+          frontend_extra_volume_mounts: [
+            {
+              name: "model-dir",
+              mountPath: modelPath,
+              readOnly: true
+            }
+          ],
+          worker_extra_volume_mounts: [
+            {
+              name: "model-dir",
+              mountPath: modelPath,
+              readOnly: true
+            },
+            {
+              name: "triton-cache",
+              mountPath: "/tmp/triton"
+            },
+            {
+              name: "xdg-cache",
+              mountPath: "/tmp/.cache"
+            }
+          ],
+          worker_extra_envs: safeJsonParse(ids("worker-extra-envs").value)
+        }
+      };
+    }
+
+    async function fetchJson(url, options = {}) {
+      const response = await fetch(url, {
+        headers: { "Content-Type": "application/json" },
+        ...options
+      });
+      const text = await response.text();
+      let payload = {};
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch {
+        payload = { raw: text };
+      }
+      if (!response.ok) {
+        throw new Error(payload.message || payload.detail || `HTTP ${response.status}`);
+      }
+      return payload;
+    }
+
+    function fillSelect(select, values, preferred) {
+      select.innerHTML = "";
+      const items = values || [];
+      items.forEach((value) => {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        if (value === preferred) {
+          option.selected = true;
+        }
+        select.appendChild(option);
+      });
+      if (!select.value && items.length > 0) {
+        select.value = items[0];
+      }
+    }
+
+    function fillModelSelect(models = [], localModelConfigs = [], preferred = "") {
+      const select = ids("model-config-path");
+      select.innerHTML = "";
+
+      const addGroup = (label, items) => {
+        if (!items.length) {
+          return;
+        }
+        const group = document.createElement("optgroup");
+        group.label = label;
+        items.forEach((item) => {
+          const option = document.createElement("option");
+          option.value = item.value;
+          option.textContent = item.label;
+          if (item.value === preferred) {
+            option.selected = true;
+          }
+          group.appendChild(option);
+        });
+        select.appendChild(group);
+      };
+
+      const builtInItems = (models || []).map((model) => ({ label: model, value: model }));
+      const localItems = (localModelConfigs || []).map((item) => ({
+        label: `Local: ${item.label}`,
+        value: item.value
+      }));
+
+      addGroup("Built-in Models", builtInItems);
+      addGroup("/data/model-configs", localItems);
+
+      if (!select.value) {
+        select.value = preferred || "Qwen/Qwen3-8B";
+      }
+      if (!select.value && select.options.length > 0) {
+        select.selectedIndex = 0;
+      }
+    }
+
+    function loadFallbackOptions() {
+      state.options = fallbackOptions;
+      fillModelSelect(fallbackOptions.models || ["Qwen/Qwen3-8B"], [], ids("model-config-path").value || "Qwen/Qwen3-8B");
+      fillSelect(ids("system"), fallbackOptions.systems, ids("system").value || "h200_sxm");
+      fillSelect(ids("backend"), fallbackOptions.backends, ids("backend").value || "vllm");
+      refreshVersions();
+    }
+
+    function refreshVersions() {
+      if (!state.options) {
+        return;
+      }
+      const system = ids("system").value;
+      const backend = ids("backend").value;
+      const versionChoices = (((state.options.supported_databases || {})[system] || {})[backend]) || [];
+      const versionInput = ids("backend-version");
+      versionInput.placeholder = versionChoices.at(-1) || "Enter backend version";
+      if (!versionInput.value && versionChoices.length > 0) {
+        versionInput.value = versionChoices.at(-1);
+      }
+    }
+
+    async function loadOptions() {
+      const payload = await fetchJson("/api/v1/options");
+      state.options = payload;
+      fillModelSelect(payload.models || fallbackOptions.models || [], payload.local_model_configs || [], ids("model-config-path").value || "Qwen/Qwen3-8B");
+      const systems = Array.from(new Set([...(payload.systems || []), "l20", "h20"])).sort();
+      fillSelect(ids("system"), systems.length ? systems : fallbackOptions.systems, ids("system").value || "h200_sxm");
+      fillSelect(ids("backend"), (payload.backends || []).length ? payload.backends : fallbackOptions.backends, ids("backend").value || "vllm");
+      refreshVersions();
+    }
+
+    function renderComparison(payload) {
+      const comparison = payload.mode_comparison || {};
+      const recommended = payload.recommended_mode || payload.chosen_exp || "-";
+      ids("agg-config-card").classList.toggle("recommended", recommended === "agg");
+      ids("disagg-config-card").classList.toggle("recommended", recommended === "disagg");
+      renderTopConfigTable("agg-config-table", "agg", comparison.agg && comparison.agg.top1);
+      renderTopConfigTable("disagg-config-table", "disagg", comparison.disagg && comparison.disagg.top1);
+    }
+
+    function displayValue(value) {
+      if (value === null || value === undefined || value === "") {
+        return "-";
+      }
+      if (typeof value === "number") {
+        return Number.isInteger(value) ? String(value) : value.toFixed(2);
+      }
+      return String(value);
+    }
+
+    function renderTopConfigTable(targetId, mode, top1 = null) {
+      const target = ids(targetId);
+      if (!top1) {
+        target.innerHTML = "";
+        target.classList.add("table-empty");
+        return;
+      }
+      const table = buildTopConfigTable(mode, top1);
+      target.innerHTML = "";
+      target.classList.remove("table-empty");
+      target.appendChild(table);
+    }
+
+    function renderCandidateTable(targetId, mode, candidates = null, fallbackTop1 = null) {
+      if (!candidates || candidates.length === 0) {
+        renderTopConfigTable(targetId, mode, fallbackTop1);
+        return;
+      }
+      const target = ids(targetId);
+      target.innerHTML = "";
+      target.classList.remove("table-empty");
+      const table = document.createElement("table");
+      table.className = "config-table";
+      const headers = ["选择", "序号", "后端", "tokens/s/gpu", "req/s", "TTFT", "TPOT", "并行配置"];
+      const thead = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      headers.forEach((header) => {
+        const th = document.createElement("th");
+        th.textContent = header;
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+      const tbody = document.createElement("tbody");
+      candidates.forEach((candidate) => {
+        const row = candidate.summary || {};
+        const tr = document.createElement("tr");
+        tr.dataset.mode = mode;
+        tr.dataset.rowIndex = candidate.row_index;
+        if (state.selected && state.selected.mode === mode && state.selected.rowIndex === candidate.row_index) {
+          tr.classList.add("selected-row");
+        }
+        const buttonCell = document.createElement("td");
+        const button = document.createElement("button");
+        button.className = "select-row-button";
+        button.type = "button";
+        button.textContent = "查看 DGD";
+        button.addEventListener("click", async () => {
+          try {
+            button.disabled = true;
+            button.textContent = "加载中";
+            await viewDgd(mode, candidate.row_index);
+          } catch (error) {
+            setStatus("失败");
+            setError(error.message);
+          } finally {
+            button.disabled = false;
+            button.textContent = "查看 DGD";
+          }
+        });
+        buttonCell.appendChild(button);
+        tr.appendChild(buttonCell);
+        [
+          candidate.row_index,
+          row["(d)backend"] || row["(p)backend"] || row.backend,
+          row["tokens/s/gpu"],
+          row.request_rate ?? row["seq/s"],
+          row.ttft,
+          row.tpot,
+          row.parallel || row["(p)parallel"] || row["(d)parallel"] || parallelLabel(row)
+        ].forEach((value) => {
+          const td = document.createElement("td");
+          td.textContent = displayValue(value);
+          tr.appendChild(td);
+        });
+        tr.addEventListener("dblclick", () => viewDgd(mode, candidate.row_index));
+        tbody.appendChild(tr);
+      });
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      target.appendChild(table);
+    }
+
+    function buildTable(headers, values) {
+      const table = document.createElement("table");
+      table.className = "config-table";
+      const thead = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      headers.forEach((header) => {
+        const th = document.createElement("th");
+        th.textContent = header;
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+      const tbody = document.createElement("tbody");
+      const bodyRow = document.createElement("tr");
+      values.forEach((value) => {
+        const td = document.createElement("td");
+        td.textContent = displayValue(value);
+        bodyRow.appendChild(td);
+      });
+      tbody.appendChild(bodyRow);
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      return table;
+    }
+
+    function shortText(value, max = 44) {
+      const text = displayValue(value);
+      return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+    }
+
+    async function refreshDeploymentRecords() {
+      const payload = await fetchJson("/api/v1/deployment-records");
+      renderDeploymentRecords(payload.records || []);
+      return payload;
+    }
+
+    function renderDeploymentRecords(records) {
+      const target = ids("deployment-records-table");
+      target.innerHTML = "";
+      if (!records.length) {
+        target.classList.add("table-empty");
+        target.textContent = "暂无部署记录。";
+        return;
+      }
+      target.classList.remove("table-empty");
+      const table = document.createElement("table");
+      table.className = "config-table";
+      const headers = [
+        "Action",
+        "Model",
+        "Run ID",
+        "推荐模式",
+        "Final Deployed DGD",
+        "Namespace",
+        "部署名称",
+        "部署时间",
+        "Status"
+      ];
+      const thead = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      headers.forEach((header) => {
+        const th = document.createElement("th");
+        th.textContent = header;
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+      const tbody = document.createElement("tbody");
+      records.forEach((record) => {
+        const tr = document.createElement("tr");
+        const actionCell = document.createElement("td");
+        const actions = document.createElement("div");
+        actions.className = "record-actions";
+        const yamlButton = document.createElement("button");
+        yamlButton.className = "select-row-button";
+        yamlButton.type = "button";
+        yamlButton.textContent = "查看 YAML";
+        yamlButton.addEventListener("click", async () => {
+          try {
+            yamlButton.disabled = true;
+            yamlButton.textContent = "加载中";
+            await openRecord(record);
+          } catch (error) {
+            setStatus("失败");
+            setError(error.message);
+            setRecordsDgd(null, error.message);
+          } finally {
+            yamlButton.disabled = false;
+            yamlButton.textContent = "查看 YAML";
+          }
+        });
+        const copyButton = document.createElement("button");
+        copyButton.className = "secondary";
+        copyButton.type = "button";
+        copyButton.textContent = "复制运行 ID";
+        copyButton.addEventListener("click", async () => {
+          await copyTextToClipboard(record.jid);
+          copyButton.textContent = "已复制";
+          window.setTimeout(() => {
+            copyButton.textContent = "复制运行 ID";
+          }, 1200);
+        });
+        actions.appendChild(yamlButton);
+        actions.appendChild(copyButton);
+        actionCell.appendChild(actions);
+        tr.appendChild(actionCell);
+        [
+          record.served_model_name || record.model_path,
+          record.jid,
+          record.recommended_mode,
+          record.deployed_dgd_id,
+          record.namespace,
+          record.deployment_name,
+          record.deployed_at || record.created_at,
+          "已部署"
+        ].forEach((value, index) => {
+          const td = document.createElement("td");
+          td.textContent = index === 0 || index === 1 || index === 2 ? shortText(value) : displayValue(value);
+          td.title = displayValue(value);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      target.appendChild(table);
+    }
+
+    function numeric(value, fallback = 0) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function totalGpuBudget() {
+      return Math.max(1, numeric(ids("total-gpus").value, 1));
+    }
+
+    function replicaCount(gpusPerReplica) {
+      const gpus = numeric(gpusPerReplica, 0);
+      return gpus > 0 ? Math.max(1, Math.floor(totalGpuBudget() / gpus)) : 1;
+    }
+
+    function clusterThroughput(top1, gpusPerReplica, replicas) {
+      if (top1["tokens/s/gpu_cluster"] !== undefined) {
+        return top1["tokens/s/gpu_cluster"];
+      }
+      const budget = totalGpuBudget();
+      return budget > 0 ? numeric(top1["tokens/s/gpu"]) * replicas * numeric(gpusPerReplica) / budget : top1["tokens/s/gpu"];
+    }
+
+    function clusterRequestRate(top1, replicas) {
+      const requestRate = top1.request_rate ?? top1["seq/s"];
+      return numeric(requestRate) * replicas;
+    }
+
+    function clusterConcurrency(top1, replicas) {
+      const concurrency = numeric(top1.concurrency);
+      return `${displayValue(concurrency * replicas)} (=${displayValue(concurrency)}x${replicas})`;
+    }
+
+    function totalGpusUsedLabel(gpusPerReplica, replicas) {
+      const used = numeric(gpusPerReplica) * replicas;
+      return `${totalGpuBudget()} (${displayValue(used)}=${replicas}x${displayValue(gpusPerReplica)})`;
+    }
+
+    function parallelLabel(row, prefix = "") {
+      const get = (name, fallback = 1) => row[`${prefix}${name}`] ?? fallback;
+      const base = `tp${get("tp")}pp${get("pp")}`;
+      const dp = row[`${prefix}dp`] !== undefined ? `dp${get("dp")}` : "";
+      const moe = row[`${prefix}moe_tp`] !== undefined || row[`${prefix}moe_ep`] !== undefined
+        ? `etp${get("moe_tp")}ep${get("moe_ep")}`
+        : "";
+      return `${base}${dp}${moe}`;
+    }
+
+    function gpusWorkerLabel(row, prefix = "") {
+      const tp = numeric(row[`${prefix}tp`], 1);
+      const pp = numeric(row[`${prefix}pp`], 1);
+      const dp = numeric(row[`${prefix}dp`], 1);
+      const hasDp = row[`${prefix}dp`] !== undefined;
+      const total = tp * pp * (hasDp ? dp : 1);
+      return hasDp ? `${total} (=${tp}x${pp}x${dp})` : `${total} (=${tp}x${pp})`;
+    }
+
+    function buildTopConfigTable(mode, top1) {
+      if (mode === "disagg") {
+        const prefillWorkers = top1["(p)workers"];
+        const decodeWorkers = top1["(d)workers"];
+        const prefillGpus = numeric(top1["(p)tp"], 1) * numeric(top1["(p)pp"], 1) * numeric(top1["(p)dp"], 1);
+        const decodeGpus = numeric(top1["(d)tp"], 1) * numeric(top1["(d)pp"], 1) * numeric(top1["(d)dp"], 1);
+        const gpusPerReplica = numeric(top1.num_total_gpus) || numeric(prefillWorkers) * prefillGpus + numeric(decodeWorkers) * decodeGpus;
+        const replicas = replicaCount(gpusPerReplica);
+        return buildTable(
+          [
+            "Rank",
+            "backend",
+            "tokens/s/gpu",
+            "tokens/s/user",
+            "req/s",
+            "TTFT",
+            "TPOT",
+            "request_latency",
+            "concurrency",
+            "total_gpus (used)",
+            "replicas",
+            "gpus/replica",
+            "(p)workers",
+            "(p)gpus/worker",
+            "(p)parallel",
+            "(p)bs",
+            "(d)workers",
+            "(d)gpus/worker",
+            "(d)parallel",
+            "(d)bs"
+          ],
+          [
+            1,
+            top1["(d)backend"] || top1["(p)backend"] || top1.backend,
+            clusterThroughput(top1, gpusPerReplica, replicas),
+            top1["tokens/s/user"],
+            clusterRequestRate(top1, replicas),
+            top1.ttft,
+            top1.tpot,
+            top1.request_latency,
+            clusterConcurrency(top1, replicas),
+            totalGpusUsedLabel(gpusPerReplica, replicas),
+            replicas,
+            `${displayValue(gpusPerReplica)} (=${displayValue(prefillWorkers)}x${displayValue(prefillGpus)}+${displayValue(decodeWorkers)}x${displayValue(decodeGpus)})`,
+            prefillWorkers,
+            gpusWorkerLabel(top1, "(p)"),
+            top1["(p)parallel"] || parallelLabel(top1, "(p)"),
+            top1["(p)bs"],
+            decodeWorkers,
+            gpusWorkerLabel(top1, "(d)"),
+            top1["(d)parallel"] || parallelLabel(top1, "(d)"),
+            top1["(d)bs"]
+          ]
+        );
+      }
+      const gpusPerReplica = numeric(top1.num_total_gpus) || numeric(top1.tp, 1) * numeric(top1.pp, 1) * numeric(top1.dp, 1);
+      const replicas = replicaCount(gpusPerReplica);
+      return buildTable(
+        [
+          "Rank",
+          "backend",
+          "tokens/s/gpu",
+          "tokens/s/user",
+          "req/s",
+          "TTFT",
+          "TPOT",
+          "request_latency",
+          "concurrency",
+          "total_gpus (used)",
+          "replicas",
+          "gpus/replica",
+          "gpus/worker",
+          "parallel",
+          "bs"
+        ],
+        [
+          1,
+          top1.backend,
+          clusterThroughput(top1, gpusPerReplica, replicas),
+          top1["tokens/s/user"],
+          clusterRequestRate(top1, replicas),
+          top1.ttft,
+          top1.tpot,
+          top1.request_latency,
+          clusterConcurrency(top1, replicas),
+          totalGpusUsedLabel(gpusPerReplica, replicas),
+          replicas,
+          gpusPerReplica,
+          gpusWorkerLabel(top1),
+          top1.parallel || parallelLabel(top1),
+          top1.bs
+        ]
+      );
+    }
+
+    function setSelectedDgd(artifact, note = "") {
+      state.selectedArtifact = artifact || null;
+      const content = artifact && artifact.content ? artifact.content : "尚未生成。";
+      setCode("deployment-selected-output", content);
+      setText("current-dgd-id", artifact && artifact.dgd_id ? artifact.dgd_id : "无");
+      ids("dgd-yaml-note").textContent = note || (artifact
+        ? `${artifact.mode} row ${artifact.row_index ?? 0}`
+        : "尚未生成。");
+    }
+
+    function setRecordsDgd(artifact, note = "") {
+      const content = artifact && artifact.content ? artifact.content : "尚未生成。";
+      setCode("records-yaml-output", content);
+      ids("records-yaml-note").textContent = note || (artifact
+        ? `${artifact.dgd_id || `${artifact.mode} row ${artifact.row_index ?? 0}`}`
+        : "请选择记录或输入运行 ID。");
+    }
+
+    function getCachedDgd(mode, rowIndex = 0, payload = null) {
+      const source = payload || {};
+      const dgdId = source.jid ? `${source.jid}:${mode}:${rowIndex}` : null;
+      const cached = dgdId ? (source.dgds || {})[dgdId] : null;
+      if (cached && cached.content) {
+        return cached;
+      }
+      const artifact = ((source.artifacts_by_mode || state.lastDeployments || {})[mode]) || null;
+      if (artifact && artifact.content && Number(artifact.row_index || 0) === Number(rowIndex)) {
+        return artifact;
+      }
+      return null;
+    }
+
+    function renderDeployments(payload) {
+      const artifacts = payload.artifacts_by_mode || {};
+      state.jid = payload.jid || null;
+      state.lastDeployments = artifacts;
+      state.candidatesByMode = payload.candidates_by_mode || null;
+      state.modeComparison = payload.mode_comparison || null;
+      state.recommendedMode = payload.recommended_mode || null;
+      setText("current-jid", state.jid || "尚未生成");
+      ids("lookup-jid").value = state.jid || "";
+      const recommendedArtifact = payload.recommended_mode ? artifacts[payload.recommended_mode] : null;
+      if (recommendedArtifact) {
+        state.selected = {
+          mode: recommendedArtifact.mode || payload.recommended_mode,
+          rowIndex: recommendedArtifact.row_index ?? 0
+        };
+        setSelectedDgd(recommendedArtifact, `推荐方案：${state.selected.mode} Top 1。`);
+      } else {
+        state.selected = null;
+        setSelectedDgd(null);
+      }
+      if (payload.mode_comparison) {
+        renderComparison(payload);
+      }
+    }
+
+    async function loadRunById(jidOverride = null, expandYaml = true) {
+      const jid = (jidOverride || ids("lookup-jid").value).trim();
+      if (!jid) {
+        throw new Error("请先输入运行 ID。");
+      }
+      setStatus("正在加载记录");
+      setError("");
+      const record = await fetchJson(`/api/v1/runs/${encodeURIComponent(jid)}`);
+      const payload = record.payload || {};
+      if (!payload.jid) {
+        payload.jid = jid;
+      }
+      renderDeployments(payload);
+      state.selected = null;
+      setCode("estimate-output", jsonPretty(record));
+      const deployed = payload.deployed_dgd || null;
+      const mode = deployed ? deployed.mode : payload.recommended_mode || Object.keys(payload.candidates_by_mode || {})[0];
+      const rowIndex = deployed && deployed.row_index !== null && deployed.row_index !== undefined ? deployed.row_index : 0;
+      if (mode) {
+        await viewDgd(mode, rowIndex, deployed ? "Final deployed DGD." : "Generated only. Showing recommended top1 DGD.");
+      }
+      if (expandYaml) {
+        ids("dgd-yaml-details").open = true;
+        ids("dgd-yaml-section").scrollIntoView({ behavior: "smooth", block: "start" });
+      } else {
+        ids("recommended-result").scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      setStatus(deployed ? "已部署" : "已生成");
+      return record;
+    }
+
+    async function viewRecommendedDgd(mode) {
+      await viewDgd(mode, 0, `${mode} top1.`);
+      ids("dgd-yaml-details").open = true;
+      ids("dgd-yaml-section").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
+    async function loadRecordYamlById(jidOverride = null) {
+      const jid = (jidOverride || ids("lookup-jid").value).trim();
+      if (!jid) {
+        throw new Error("请先输入运行 ID。");
+      }
+      setStatus("正在加载记录");
+      setError("");
+      setRecordsDgd(null, "正在加载记录...");
+      const record = await fetchJson(`/api/v1/runs/${encodeURIComponent(jid)}`);
+      const payload = record.payload || {};
+      const deployed = payload.deployed_dgd || null;
+      const mode = deployed ? deployed.mode : payload.recommended_mode || Object.keys(payload.candidates_by_mode || {})[0];
+      const rowIndex = deployed && deployed.row_index !== null && deployed.row_index !== undefined ? deployed.row_index : 0;
+      if (!mode) {
+        throw new Error("该运行记录没有可显示的 DGD 模式。");
+      }
+      const cached = getCachedDgd(mode, rowIndex, payload);
+      const artifact = cached || await fetchJson(`/api/v1/runs/${encodeURIComponent(jid)}/dgd`, {
+        method: "POST",
+        body: JSON.stringify({ mode, row_index: rowIndex })
+      });
+      setRecordsDgd(artifact, deployed ? `Final deployed DGD: ${artifact.dgd_id}` : `Generated only. Showing recommended top1 DGD: ${artifact.dgd_id}`);
+      ids("records-yaml-section").scrollIntoView({ behavior: "smooth", block: "start" });
+      setStatus(deployed ? "已部署" : "已生成");
+      return record;
+    }
+
+    async function openRecord(record) {
+      ids("lookup-jid").value = record.jid;
+      return loadRecordYamlById(record.jid);
+    }
+
+    async function viewDgd(mode, rowIndex, note = "") {
+      if (!state.jid) {
+        throw new Error("请先生成部署方案，再查看 DGD。");
+      }
+      setStatus("正在查看 DGD");
+      setError("");
+      const cached = getCachedDgd(mode, rowIndex);
+      const payload = cached || await fetchJson(`/api/v1/runs/${encodeURIComponent(state.jid)}/dgd`, {
+        method: "POST",
+        body: JSON.stringify({ mode, row_index: rowIndex })
+      });
+      state.selected = { mode, rowIndex };
+      state.lastDeployments = state.lastDeployments || {};
+      state.lastDeployments[mode] = payload;
+      setSelectedDgd(payload, note || `${mode} row ${rowIndex}.`);
+      if (state.modeComparison) {
+        renderComparison({
+          mode_comparison: state.modeComparison,
+          candidates_by_mode: state.candidatesByMode,
+          recommended_mode: state.recommendedMode
+        });
+      }
+      setStatus("已生成");
+      return payload;
+    }
+
+    async function copyTextToClipboard(text) {
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-9999px";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      const copied = document.execCommand("copy");
+      textArea.remove();
+      if (!copied) {
+        throw new Error("复制失败");
+      }
+    }
+
+    function selectOutput(target) {
+      if ("select" in target) {
+        target.focus();
+        target.select();
+        return;
+      }
+      const range = document.createRange();
+      range.selectNodeContents(target);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+
+    async function copyOutput(button) {
+      const text = getCode(button.dataset.copyTarget);
+      if (!text || text === "尚未生成。") {
+        button.textContent = "无内容";
+      } else {
+        await copyTextToClipboard(text);
+        button.textContent = "已复制";
+      }
+      window.setTimeout(() => {
+        button.textContent = "复制";
+      }, 1200);
+    }
+
+    async function generateDeployments() {
+      setStatus("正在估算");
+      setError("");
+      setText("current-jid", "生成中...");
+      setText("current-dgd-id", "无");
+      setSelectedDgd(null, "正在估算，请稍候。");
+      const request = {
+        backend: ids("backend").value,
+        backend_version: ids("backend-version").value || null,
+        generator_overrides: buildGeneratorOverrides(),
+        estimate_request: buildEstimateRequest()
+      };
+      const payload = await fetchJson("/api/v1/generate-k8s-deployment", {
+        method: "POST",
+        body: JSON.stringify(request)
+      });
+      renderDeployments(payload);
+      await refreshDeploymentRecords();
+      setStatus("已生成");
+      if (payload.estimate) {
+        state.lastEstimate = payload.estimate;
+        setCode("estimate-output", jsonPretty(payload.estimate));
+      }
+    }
+
+    async function deploySelectedDgd() {
+      const content = getCode("deployment-selected-output");
+      if (!content || content === "尚未生成。" || content.startsWith("No ")) {
+        throw new Error("请先生成部署 YAML，再应用到集群。");
+      }
+      const selectedArtifact = state.selectedArtifact;
+      if (!selectedArtifact) {
+        throw new Error("请先选择一个 DGD 方案，再部署到集群。");
+      }
+      setStatus("正在部署");
+      setError("");
+      setCode("apply-output", `正在部署 ${selectedArtifact.dgd_id || selectedArtifact.mode}...`);
+      const payload = await fetchJson("/api/v1/apply-k8s-deployment", {
+        method: "POST",
+        body: JSON.stringify({
+          content,
+          namespace: ids("namespace").value.trim() || null,
+          timeout_seconds: 180,
+          jid: state.jid,
+          dgd_id: selectedArtifact.dgd_id,
+          mode: selectedArtifact.mode,
+          row_index: selectedArtifact.row_index ?? 0
+        })
+      });
+      setStatus("已部署");
+      setCode("apply-output", jsonPretty(payload));
+      await refreshDeploymentRecords();
+      return payload;
+    }
+
+    async function deleteSelectedDgd() {
+      const content = getCode("deployment-selected-output");
+      if (!content || content === "尚未生成。" || content.startsWith("No ")) {
+        throw new Error("请先加载已部署的 YAML，再从集群删除。");
+      }
+      const selectedArtifact = state.selectedArtifact;
+      if (!selectedArtifact) {
+        throw new Error("请先选择或加载一个已部署的 DGD，再从集群删除。");
+      }
+      const label = selectedArtifact.dgd_id || selectedArtifact.mode || "selected";
+      if (!window.confirm(`确定要从 Kubernetes 集群删除 ${label} 吗？`)) {
+        return null;
+      }
+      setStatus("正在删除");
+      setError("");
+      setCode("apply-output", `正在删除部署 ${label}...`);
+      const payload = await fetchJson("/api/v1/delete-k8s-deployment", {
+        method: "POST",
+        body: JSON.stringify({
+          content,
+          namespace: ids("namespace").value.trim() || null,
+          timeout_seconds: 180,
+          jid: state.jid,
+          dgd_id: selectedArtifact.dgd_id,
+          mode: selectedArtifact.mode,
+          row_index: selectedArtifact.row_index ?? 0
+        })
+      });
+      setStatus("已删除");
+      setCode("apply-output", jsonPretty(payload));
+      await refreshDeploymentRecords();
+      return payload;
+    }
+
+    function wireEvents() {
+      document.querySelectorAll(".tab-button").forEach((button) => {
+        button.addEventListener("click", () => {
+          switchTab(button.dataset.tab);
+        });
+      });
+      ids("load-options-btn").addEventListener("click", async () => {
+        try {
+          await loadOptions();
+        } catch (error) {
+          setStatus("失败");
+          setError(error.message);
+          setCode("estimate-output", error.message);
+        }
+      });
+      ids("load-run-btn").addEventListener("click", async () => {
+        const button = ids("load-run-btn");
+        try {
+          button.disabled = true;
+          button.textContent = "加载中...";
+          await loadRecordYamlById();
+        } catch (error) {
+          setStatus("失败");
+          setError(error.message);
+          setRecordsDgd(null, error.message);
+        } finally {
+          button.disabled = false;
+          button.textContent = "加载记录";
+        }
+      });
+      ids("refresh-records-btn").addEventListener("click", async () => {
+        const button = ids("refresh-records-btn");
+        try {
+          button.disabled = true;
+          button.textContent = "刷新中...";
+          await refreshDeploymentRecords();
+        } catch (error) {
+          setStatus("失败");
+          setError(error.message);
+        } finally {
+          button.disabled = false;
+          button.textContent = "刷新记录";
+        }
+      });
+
+      ids("system").addEventListener("change", refreshVersions);
+      ids("backend").addEventListener("change", refreshVersions);
+      ids("deployment-name").addEventListener("input", () => {
+        ids("deployment-name").dataset.auto = "false";
+      });
+      ids("model-path").addEventListener("input", () => {
+        if (!ids("served-model-name").value.trim()) {
+          ids("served-model-name").value = deriveServedModelName(ids("model-path").value);
+          syncDeploymentName(true);
+        }
+      });
+      ids("served-model-name").addEventListener("input", () => {
+        const input = ids("served-model-name");
+        const lower = input.value.toLowerCase();
+        if (input.value !== lower) {
+          input.value = lower;
+        }
+        syncDeploymentName();
+      });
+      document.querySelectorAll("[data-view-mode]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          try {
+            button.disabled = true;
+            button.textContent = "加载中";
+            await viewRecommendedDgd(button.dataset.viewMode);
+          } catch (error) {
+            setStatus("失败");
+            setError(error.message);
+          } finally {
+            button.disabled = false;
+            button.textContent = "查看 YAML";
+          }
+        });
+      });
+      document.querySelectorAll("[data-copy-target]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          try {
+            await copyOutput(button);
+          } catch (error) {
+            selectOutput(ids(button.dataset.copyTarget));
+            button.textContent = "已选择";
+            window.setTimeout(() => {
+              button.textContent = "复制";
+            }, 1200);
+          }
+        });
+      });
+      ids("deploy-selected-btn").addEventListener("click", async () => {
+        try {
+          await deploySelectedDgd();
+        } catch (error) {
+          setStatus("失败");
+          setError(error.message);
+          setCode("apply-output", error.message);
+        }
+      });
+      ids("delete-selected-btn").addEventListener("click", async () => {
+        try {
+          await deleteSelectedDgd();
+        } catch (error) {
+          setStatus("失败");
+          setError(error.message);
+          setCode("apply-output", error.message);
+        }
+      });
+
+      ids("deployment-btn").addEventListener("click", async () => {
+        const button = ids("deployment-btn");
+        try {
+          button.disabled = true;
+          button.textContent = "生成中...";
+          await generateDeployments();
+        } catch (error) {
+          setStatus("失败");
+          setError(error.message);
+          setSelectedDgd(null, "尚未生成。");
+        } finally {
+          button.disabled = false;
+          button.textContent = "生成部署方案";
+        }
+      });
+
+    }
+
+    async function init() {
+      wireEvents();
+      loadFallbackOptions();
+      ids("served-model-name").value = deriveServedModelName(ids("model-path").value);
+      syncDeploymentName(true);
+      try {
+        await loadOptions();
+        await refreshDeploymentRecords();
+      } catch (error) {
+        loadFallbackOptions();
+        setCode("estimate-output", `加载选项失败：${error.message}`);
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
