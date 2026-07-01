@@ -6,17 +6,17 @@
   <title>AIC 系统部署</title>
   <style>
     :root {
-      --bg: #f7f9fc;
+      --bg: #f5f7fa;
       --panel: #ffffff;
-      --ink: #1f2937;
-      --muted: #607080;
-      --line: #d7dee8;
-      --brand: #326ce5;
-      --brand-dark: #1f4fbf;
-      --brand-soft: #eaf1ff;
+      --ink: #172b4d;
+      --muted: #60738a;
+      --line: #dce3eb;
+      --brand: #064b87;
+      --brand-dark: #033b6c;
+      --brand-soft: #e8eef5;
       --accent: #0097a7;
       --good: #00a67e;
-      --shadow: 0 1px 2px rgba(15, 23, 42, 0.08), 0 8px 24px rgba(15, 23, 42, 0.05);
+      --shadow: none;
     }
     * { box-sizing: border-box; }
     body {
@@ -24,11 +24,47 @@
       font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
       color: var(--ink);
       background: var(--bg);
+      border-left: 8px solid #073f73;
+      min-height: 100vh;
+    }
+    .app-bar {
+      height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 36px 0 44px;
+      background: #fff;
+      border-bottom: 1px solid #e5e9ef;
+      box-shadow: 0 2px 8px rgba(23, 43, 77, 0.08);
+    }
+    .app-brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: #40536a;
+      font-size: 18px;
+      font-weight: 600;
+    }
+    .app-brand-mark {
+      color: #5d6b7a;
+      font-size: 21px;
+    }
+    .app-brand-caret {
+      width: 0;
+      height: 0;
+      border-left: 5px solid transparent;
+      border-right: 5px solid transparent;
+      border-top: 6px solid #5d6b7a;
+    }
+    .app-exit {
+      color: #111;
+      font-size: 25px;
+      line-height: 1;
     }
     .page {
-      max-width: 1520px;
-      margin: 0 auto;
-      padding: 28px;
+      max-width: none;
+      margin: 0;
+      padding: 0 0 32px;
     }
     .hero, .layout {
       display: grid;
@@ -36,20 +72,24 @@
     }
     .hero {
       grid-template-columns: 1fr;
-      margin-bottom: 20px;
+      margin-bottom: 0;
+      padding: 28px 34px 24px;
+      background: #fff;
+      border-bottom: 1px solid var(--line);
     }
     .layout {
       grid-template-columns: minmax(620px, 0.9fr) minmax(460px, 1.1fr);
       align-items: start;
+      margin: 0 34px;
     }
     .tabs {
       display: flex;
       gap: 10px;
-      margin-bottom: 20px;
+      margin: 24px 34px;
     }
     .tab-button {
       color: var(--muted);
-      background: #e9eef6;
+      background: #e6ebf1;
     }
     .tab-button.active {
       color: #fff;
@@ -64,17 +104,22 @@
     .card {
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 10px;
       box-shadow: var(--shadow);
       padding: 22px;
+    }
+    .hero .card {
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
     }
     h1, h2, h3 {
       margin: 0;
     }
     h1 {
-      font-size: 34px;
-      line-height: 1.1;
-      margin-top: 10px;
+      font-size: 29px;
+      line-height: 1.25;
     }
     h2 {
       font-size: 20px;
@@ -88,7 +133,7 @@
       color: var(--muted);
     }
     .subtitle {
-      margin-top: 12px;
+      margin: 6px 0 0;
       line-height: 1.6;
     }
     .pill {
@@ -132,7 +177,7 @@
       width: 100%;
       padding: 11px 13px;
       border: 1px solid var(--line);
-      border-radius: 6px;
+      border-radius: 7px;
       background: #fff;
       color: var(--ink);
       font: inherit;
@@ -143,7 +188,7 @@
     }
     button {
       border: 0;
-      border-radius: 6px;
+      border-radius: 7px;
       padding: 11px 18px;
       font: inherit;
       font-weight: 700;
@@ -438,6 +483,18 @@
       }
     }
     @media (max-width: 760px) {
+      .app-bar {
+        padding: 0 18px;
+      }
+      .hero {
+        padding: 22px 18px;
+      }
+      .tabs {
+        margin: 18px;
+      }
+      .layout {
+        margin: 0 18px;
+      }
       .grid {
         grid-template-columns: 1fr;
       }
@@ -445,6 +502,14 @@
   </style>
 </head>
 <body>
+  <header class="app-bar">
+    <div class="app-brand">
+      <span class="app-brand-mark">◇</span>
+      <span>ai-plat</span>
+      <span class="app-brand-caret" aria-hidden="true"></span>
+    </div>
+    <span class="app-exit" aria-label="退出">↪</span>
+  </header>
   <div class="page">
     <section class="hero">
       <div class="card">
