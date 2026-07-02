@@ -309,6 +309,12 @@ def task_config_to_generator_config(
         params["rule"] = rule_name
     if "preserve_engine_limits" in overrides:
         params["preserve_engine_limits"] = bool(overrides["preserve_engine_limits"])
+    # Preserve the LlmdConfig section for the llm-d deployment targets (same
+    # semantics as the naive path: only emitted when non-empty). Dropping it
+    # made llm-d artifacts silently fall back to template defaults.
+    llmd_config = overrides.get("LlmdConfig")
+    if isinstance(llmd_config, dict) and llmd_config:
+        params["LlmdConfig"] = copy.deepcopy(llmd_config)
     params["ModelConfig"] = model_cfg
     return params
 
