@@ -16,10 +16,10 @@ dependencies = [
     "pydantic>=2.5",
     "pyyaml>=6.0",
     "tqdm>=4.0",
-    # Lower-layer provider: model/MoE detection, weight estimate, system spec,
-    # parallel enumeration + memory-fit floor. Spica lives in the aiconfigurator
-    # repo, so dev installs it editable from the parent (see [tool.uv.sources]).
-    "aiconfigurator>=0.9.0",
+    # The aiconfigurator wheel owns the Spica modules as well as the lower-layer
+    # model/MoE, memory, and forward-pass providers. This project preserves the
+    # standalone Spica dependency groups and console entry point.
+    "aiconfigurator>=0.10.0",
 ]
 
 [project.optional-dependencies]
@@ -97,7 +97,7 @@ search-gpu = [
 spica = "spica.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/spica"]
+bypass-selection = true
 
 # The [dynamo] extra pins ai-dynamo / ai-dynamo-runtime to a git commit (direct
 # references); hatchling requires this opt-in to allow them in the metadata.
@@ -108,7 +108,7 @@ allow-direct-references = true
 testpaths = ["tests"]
 
 [tool.ruff]
-src = ["src", "tests"]
+src = ["../src/spica", "tests"]
 line-length = 120
 target-version = "py310"
 

@@ -28,10 +28,11 @@ Design proposal: `docs/proposals/dgdr-profiler-smart-search-plan.md` in
 - [sample.md](docs/sample.md) — the flat *unrolled sample* and the three ways to
   pin/override what it emits.
 
-It is an **independent project** living inside the aiconfigurator repo. It
-depends on `aiconfigurator` (lower-layer forward-pass / memory provider) and
-uses `ai-dynamo` for Replay-backed evaluation when the real sweep runs. The
-`aiconfigurator` package never imports Spica — Spica is the upper layer.
+Spica's source lives in `src/spica` at the repository root and ships in the
+`aiconfigurator` wheel. This directory keeps Spica's standalone dependency
+groups, console entry point, tests, examples, and documentation. Spica uses
+AIConfigurator's lower-layer forward-pass / memory provider and `ai-dynamo`
+for Replay-backed evaluation when the real sweep runs.
 
 ## Status
 
