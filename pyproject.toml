@@ -48,6 +48,7 @@ dependencies = [
     "plotext>=5.3.2",
     "plotly>=6.0.1",
     "prettytable>=3.16.0",
+    "pydantic>=2.5",
     "pyarrow>=15.0.0",
     "pyyaml>=6.0",
     "scipy>=1.13.1",
@@ -82,7 +83,6 @@ service = [
     "uvicorn>=0.34.2"
 ]
 spica = [
-    "pydantic>=2.5; python_version < '3.13'",
     "google-vizier[jax]==0.1.21; python_version < '3.13'",
     "jax==0.4.38; python_version < '3.13'",
     "jaxlib==0.4.38; python_version < '3.13'",
@@ -102,6 +102,7 @@ build-backend = "maturin"
 
 [project.scripts]
 aiconfigurator = "aiconfigurator.main:main"
+spica = "spica.__main__:main"
 
 [tool.maturin]
 manifest-path = "rust/aiconfigurator-core/Cargo.toml"
@@ -182,7 +183,13 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["aiconfigurator", "utils", "helper"]
+known-first-party = ["aiconfigurator", "spica", "utils", "helper"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/aiconfigurator/webapp/components/**/*.py" = ["E501", "W291", "SIM117"]
+# Keep Spica's public exception names and its API-grouped export list stable.
+"src/spica/__init__.py" = ["RUF022"]
+"src/spica/config.py" = ["TRY004"]
+"src/spica/kv_estimate.py" = ["N818"]
+"src/spica/kv_load.py" = ["N818"]
+"src/spica/model_hw.py" = ["N818"]

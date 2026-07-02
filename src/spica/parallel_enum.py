@@ -104,9 +104,7 @@ def _backend_allows_moe_tp(backend: str, *, enable_wideep: bool, moe_backend: st
     deployments run MoE tensor-parallel multinode (InferenceX reports EP=1), so MoE-TP
     stays available. ``enable_wideep`` is accepted for call-site compatibility."""
     del enable_wideep  # no longer gates MoE-TP; kept in the signature for callers
-    if backend == "sglang" and moe_backend in {"deepep_moe", "megamoe"}:
-        return False
-    return True
+    return not (backend == "sglang" and moe_backend in {"deepep_moe", "megamoe"})
 
 
 def enumerate_worker_shapes(

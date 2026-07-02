@@ -25,7 +25,6 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
     rm -rf /var/lib/apt/lists/*
 COPY src/ /workspace/src/
-COPY spica/ /workspace/spica/
 COPY rust/ /workspace/rust/
 COPY LICENSE pyproject.toml README.md /workspace/
 COPY tools/verify_release_wheels.py /workspace/tools/verify_release_wheels.py
@@ -59,6 +58,7 @@ RUN AIC_WHL=$(ls /wheelhouse/aiconfigurator-*.whl) && \
 
 COPY pytest.ini /workspace/
 COPY tests/ /workspace/tests/
+COPY docs/spica/examples/ /workspace/docs/spica/examples/
 COPY src/ /workspace/src/
 COPY tools/ /workspace/tools/
 COPY collector/ /workspace/collector/
