@@ -275,8 +275,24 @@ def task_config_to_generator_config(
     )
 
     params = _deep_merge(params, overrides.get("Params"))
-    # Expose SDK's system identifier to templates via NodeConfig.system_name
-    params.setdefault("NodeConfig", {})["system_name"] = task_config.system_name
+    # Expose SDK's system identifier to templates via NodeConfig.system_name.
+    # Task v2 prefix discipline keeps the top-level system_name empty for
+    # disagg, so read primary_system_name (prefill side) — the raw field left
+    # NodeConfig.system_name blank and facts resolution silently skipped all
+    # hardware placement/env for disagg DGDs.
+    if task_config.serving_mode != "agg":
+        prefill_system = task_config.prefill_system_name
+        decode_system = task_config.decode_system_name
+        if prefill_system and decode_system and prefill_system != decode_system:
+            # NodeConfig carries a single system: emitting prefill facts for
+            # decode workers would silently misplace them. Reject until the
+            # generator supports per-role hardware profiles.
+            raise ValueError(
+                "Disaggregated generation does not support heterogeneous systems yet: "
+                f"prefill_system_name={prefill_system!r} != decode_system_name={decode_system!r}. "
+                "Generate per-system deployments separately or use matching systems."
+            )
+    params.setdefault("NodeConfig", {})["system_name"] = task_config.primary_system_name
     rule_name = overrides.get("rule")
     if rule_name:
         params["rule"] = rule_name
