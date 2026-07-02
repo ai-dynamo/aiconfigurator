@@ -85,16 +85,10 @@ def test_disagg_gb200_hardware_facts_reach_dgd():
     placement and NCCL/UCX environment on disagg workers in the raw DGD."""
     task = _disagg_task("gb200", "gb200")
     cfg = task_config_to_generator_config(task_config=task, result_df=_result_row())
-    artifacts = generate_backend_artifacts(
-        cfg, "sglang", backend_version="0.5.11", deployment_target="dynamo-j2"
-    )
+    artifacts = generate_backend_artifacts(cfg, "sglang", backend_version="0.5.11", deployment_target="dynamo-j2")
     dgd = yaml.safe_load(artifacts["k8s_deploy.yaml"])
 
-    workers = {
-        name: svc
-        for name, svc in dgd["spec"]["services"].items()
-        if svc.get("componentType") == "worker"
-    }
+    workers = {name: svc for name, svc in dgd["spec"]["services"].items() if svc.get("componentType") == "worker"}
     assert workers, "expected disagg worker services in the DGD"
     for name, svc in workers.items():
         pod = svc.get("extraPodSpec") or {}

@@ -44,9 +44,7 @@ def _spica_like_namespace(serving_mode: str) -> argparse.Namespace:
 @pytest.mark.parametrize("serving_mode", ["agg", "disagg"])
 def test_bridge_accepts_spica_namespace(serving_mode):
     row = pd.Series({"tp": 1, "(p)tp": 1, "(d)tp": 1})
-    cfg = task_config_to_generator_config(
-        task_config=_spica_like_namespace(serving_mode), result_df=row
-    )
+    cfg = task_config_to_generator_config(task_config=_spica_like_namespace(serving_mode), result_df=row)
     assert cfg["NodeConfig"]["system_name"] == "h200_sxm"
     # No image fields on the namespace -> image workload must stay disabled.
     assert cfg["BenchConfig"].get("image_batch_size", 0) == 0

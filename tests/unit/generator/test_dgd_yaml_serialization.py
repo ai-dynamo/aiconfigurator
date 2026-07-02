@@ -29,10 +29,28 @@ from aiconfigurator.generator.builders.dgd_model import (
 # The go-yaml (YAML 1.1) implicit boolean tokens. PyYAML quotes the multi-letter
 # ones on its own; the single letters y/Y/n/N are the regression trigger.
 GO_YAML_BOOL_TOKENS = [
-    "y", "Y", "n", "N",
-    "yes", "Yes", "YES", "no", "No", "NO",
-    "true", "True", "TRUE", "false", "False", "FALSE",
-    "on", "On", "ON", "off", "Off", "OFF",
+    "y",
+    "Y",
+    "n",
+    "N",
+    "yes",
+    "Yes",
+    "YES",
+    "no",
+    "No",
+    "NO",
+    "true",
+    "True",
+    "TRUE",
+    "false",
+    "False",
+    "FALSE",
+    "on",
+    "On",
+    "ON",
+    "off",
+    "Off",
+    "OFF",
 ]
 
 _UNQUOTED_BOOL_LIKE = re.compile(

@@ -309,9 +309,9 @@ def task_config_to_generator_config(
                 f"prefill_system_name={prefill_system!r} != decode_system_name={decode_system!r}. "
                 "Generate per-system deployments separately or use matching systems."
             )
-    params.setdefault("NodeConfig", {})["system_name"] = getattr(
-        task_config, "primary_system_name", None
-    ) or getattr(task_config, "system_name", "")
+    params.setdefault("NodeConfig", {})["system_name"] = getattr(task_config, "primary_system_name", None) or getattr(
+        task_config, "system_name", ""
+    )
     # Explicit --generator-set NodeConfig.* overrides win over derived values
     # (same precedence as the naive path); previously they were dropped.
     node_overrides = overrides.get("NodeConfig")

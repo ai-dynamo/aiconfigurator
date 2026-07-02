@@ -68,9 +68,7 @@ def test_node_config_overrides_propagate():
 @pytest.mark.unit
 def test_b60_run_script_uses_oneapi_device_selector():
     params = _naive_params("b60")
-    artifacts = generate_backend_artifacts(
-        params, "vllm", backend_version="0.20.1", deployment_target="dynamo-j2"
-    )
+    artifacts = generate_backend_artifacts(params, "vllm", backend_version="0.20.1", deployment_target="dynamo-j2")
     run_scripts = {k: v for k, v in artifacts.items() if k.startswith("run_")}
     assert run_scripts, f"expected run scripts, got {sorted(artifacts)}"
     for name, content in run_scripts.items():
@@ -81,9 +79,7 @@ def test_b60_run_script_uses_oneapi_device_selector():
 @pytest.mark.unit
 def test_non_b60_run_script_keeps_cuda_device_selector():
     params = _naive_params("h200_sxm")
-    artifacts = generate_backend_artifacts(
-        params, "vllm", backend_version="0.20.1", deployment_target="dynamo-j2"
-    )
+    artifacts = generate_backend_artifacts(params, "vllm", backend_version="0.20.1", deployment_target="dynamo-j2")
     run_scripts = {k: v for k, v in artifacts.items() if k.startswith("run_")}
     assert run_scripts
     for name, content in run_scripts.items():

@@ -59,9 +59,7 @@ def test_text_only_task_keeps_images_disabled():
 @pytest.mark.unit
 def test_explicit_bench_overrides_win_over_task_workload():
     task = _task(image_height=1024, image_width=1024, num_images_per_request=1)
-    bench = _bridge(task, {"BenchConfig": {"image_batch_size": 4, "image_width_mean": 512}})[
-        "BenchConfig"
-    ]
+    bench = _bridge(task, {"BenchConfig": {"image_batch_size": 4, "image_width_mean": 512}})["BenchConfig"]
     assert bench["image_batch_size"] == 4
     assert bench["image_width_mean"] == 512
     assert bench["image_height_mean"] == 1024
@@ -71,9 +69,7 @@ def test_explicit_bench_overrides_win_over_task_workload():
 def test_image_arguments_reach_benchmark_artifacts():
     task = _task(image_height=1024, image_width=1024, num_images_per_request=1)
     cfg = _bridge(task)
-    artifacts = generate_backend_artifacts(
-        cfg, "vllm", backend_version="0.20.1", deployment_target="dynamo-j2"
-    )
+    artifacts = generate_backend_artifacts(cfg, "vllm", backend_version="0.20.1", deployment_target="dynamo-j2")
     bench_artifacts = {k: v for k, v in artifacts.items() if "bench" in k}
     assert bench_artifacts, f"expected benchmark artifacts, got {sorted(artifacts)}"
     for name, content in bench_artifacts.items():
@@ -84,9 +80,7 @@ def test_image_arguments_reach_benchmark_artifacts():
 @pytest.mark.unit
 def test_text_only_benchmark_artifacts_omit_image_arguments():
     cfg = _bridge(_task())
-    artifacts = generate_backend_artifacts(
-        cfg, "vllm", backend_version="0.20.1", deployment_target="dynamo-j2"
-    )
+    artifacts = generate_backend_artifacts(cfg, "vllm", backend_version="0.20.1", deployment_target="dynamo-j2")
     for name, content in artifacts.items():
         if "bench" in name:
             assert "BENCH_IMAGE_BATCH_SIZE" not in content, f"{name}: unexpected image block"

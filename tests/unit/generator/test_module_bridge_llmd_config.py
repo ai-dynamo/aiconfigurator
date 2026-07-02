@@ -66,9 +66,7 @@ def test_absent_llmd_override_leaves_section_out():
 @pytest.mark.unit
 def test_llmd_kustomize_artifacts_use_overridden_image_and_base():
     cfg = _bridge(_LLMD_OVERRIDES)
-    artifacts = generate_backend_artifacts(
-        cfg, "vllm", backend_version="0.20.1", deployment_target="llm-d-kustomize"
-    )
+    artifacts = generate_backend_artifacts(cfg, "vllm", backend_version="0.20.1", deployment_target="llm-d-kustomize")
     assert set(artifacts) >= {"kustomization.yaml", "patch-decode.yaml", "patch-prefill.yaml"}
 
     kustomization = yaml.safe_load(artifacts["kustomization.yaml"])
@@ -82,9 +80,7 @@ def test_llmd_kustomize_artifacts_use_overridden_image_and_base():
 @pytest.mark.unit
 def test_llmd_helm_values_use_overridden_image():
     cfg = _bridge(_LLMD_OVERRIDES)
-    artifacts = generate_backend_artifacts(
-        cfg, "vllm", backend_version="0.20.1", deployment_target="llm-d-helm"
-    )
+    artifacts = generate_backend_artifacts(cfg, "vllm", backend_version="0.20.1", deployment_target="llm-d-helm")
     values = artifacts["llm-d-values.yaml"]
     assert _IMAGE in values
     assert "vllm/vllm-openai:latest" not in values
