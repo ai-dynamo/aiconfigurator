@@ -152,6 +152,7 @@ mod tests {
             quant_mode: GemmQuantMode::Fp8,
             scale_num_tokens: 0,
             low_precision_input: true,
+                seq_split: 1,
         }
     }
 
@@ -162,6 +163,7 @@ mod tests {
             vocab_size: 128_256,
             hidden_size: 4096,
             quant_mode: GemmQuantMode::Bfloat16,
+            seq_split: 1,
         }
     }
 
@@ -170,6 +172,7 @@ mod tests {
             name: "rmsnorm".into(),
             scale_factor: 1.5,
             bytes_per_token: 8192.0,
+            seq_split: 1,
         }
     }
 
@@ -184,6 +187,7 @@ mod tests {
             kv_cache_dtype: KvCacheQuantMode::Fp8,
             fmha_quant_mode: FmhaQuantMode::Bfloat16,
             use_qk_norm: true,
+            cp_size: 1,
         }
     }
 
@@ -280,6 +284,8 @@ mod tests {
             flavor: DispatchFlavor::TrtllmAlltoall,
             comm_quant: CommQuantMode::Half,
             moe_quant: MoeQuantMode::Fp8Block,
+            attn_cp_size: 1,
+            is_context: false,
         }
     }
 
@@ -290,6 +296,7 @@ mod tests {
             hidden_size: 4096,
             tp_size: 8,
             quant: CommQuantMode::Half,
+            seq_split: 1,
         }
     }
 
@@ -297,10 +304,11 @@ mod tests {
         NcclOp {
             name: "nccl_all_reduce".into(),
             scale_factor: 1.0,
-            hidden_size: 4096,
+            hidden_size: 4096.0,
             num_gpus: 8,
             dtype: CommQuantMode::Half,
             operation: "all_reduce".into(),
+            seq_split: 1,
         }
     }
 
@@ -310,6 +318,7 @@ mod tests {
             scale_factor: 1.0,
             pp_size: 4,
             hidden_size: 4096,
+            seq_split: 1,
         }
     }
 
@@ -549,6 +558,7 @@ mod tests {
                 attention_dp_size: Some(8),
                 moe_tp_size: Some(1),
                 moe_ep_size: Some(8),
+                cp_size: None,
             },
             quantization: QuantizationConfig {
                 weight_dtype: Some(DataType::Fp8),

@@ -34,6 +34,7 @@ fn context_ops() -> Vec<Op> {
             name: "rmsnorm".into(),
             scale_factor: 1.0,
             bytes_per_token: 8192.0,
+                seq_split: 1,
         }),
         Op::Gemm(GemmOp {
             name: "qkv_gemm".into(),
@@ -43,6 +44,7 @@ fn context_ops() -> Vec<Op> {
             quant_mode: GemmQuantMode::Fp8Block,
             scale_num_tokens: 0,
             low_precision_input: false,
+                seq_split: 1,
         }),
         Op::ContextAttention(ContextAttentionOp {
             name: "context_attention".into(),
@@ -54,6 +56,7 @@ fn context_ops() -> Vec<Op> {
             kv_cache_dtype: KvCacheQuantMode::Fp8,
             fmha_quant_mode: FmhaQuantMode::Bfloat16,
             use_qk_norm: false,
+                cp_size: 1,
         }),
     ]
 }
@@ -64,6 +67,7 @@ fn generation_ops() -> Vec<Op> {
             name: "rmsnorm".into(),
             scale_factor: 1.0,
             bytes_per_token: 8192.0,
+                seq_split: 1,
         }),
         Op::GenerationAttention(GenerationAttentionOp {
             name: "generation_attention".into(),
@@ -92,6 +96,7 @@ fn fixture_engine_config() -> EngineConfig {
             attention_dp_size: Some(1),
             moe_tp_size: Some(1),
             moe_ep_size: Some(8),
+                cp_size: None,
         },
         quantization: QuantizationConfig {
             weight_dtype: None,

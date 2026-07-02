@@ -56,6 +56,15 @@ pub struct MoEDispatchOp {
     pub flavor: DispatchFlavor,
     pub comm_quant: CommQuantMode,
     pub moe_quant: MoeQuantMode,
+    /// Attention-side context-parallel factor (Python's `_attn_cp_size`,
+    /// = `cp_size`). Under CP (sglang, prefill) the pre-dispatch all-gathers
+    /// / post-dispatch reduce-scatters the CP-sharded tokens. Defaults to 1.
+    #[serde(default = "crate::operators::gemm::default_seq_split")]
+    pub attn_cp_size: u32,
+    /// Whether this is a context (prefill) dispatch. CP dispatch comm only runs
+    /// in prefill; decode replicates attention across CP ranks (no comm).
+    #[serde(default)]
+    pub is_context: bool,
 }
 
 impl MoEDispatchOp {
@@ -85,6 +94,8 @@ impl MoEDispatchOp {
             flavor,
             comm_quant: CommQuantMode::Half,
             moe_quant: MoeQuantMode::Bfloat16,
+            attn_cp_size: 1,
+            is_context: false,
         }
     }
 
@@ -149,7 +160,7 @@ impl MoEDispatchOp {
                             let nccl = NcclOp::new(
                                 &self.name,
                                 1.0,
-                                self.hidden_size,
+                                self.hidden_size as f64,
                                 num_gpus,
                                 op_name,
                             );
@@ -180,10 +191,25 @@ impl MoEDispatchOp {
                                     num_tokens,
                                 )
                             };
-                            let n1 = NcclOp::new(&self.name, 1.0, self.hidden_size, gpus1, op1);
-                            let n2 = NcclOp::new(&self.name, 1.0, self.hidden_size, gpus2, op2);
+                            let n1 = NcclOp::new(&self.name, 1.0, self.hidden_size as f64, gpus1, op1);
+                            let n2 = NcclOp::new(&self.name, 1.0, self.hidden_size as f64, gpus2, op2);
                             n1.query(db, tokens1)?.latency_ms
                                 + n2.query(db, tokens2)?.latency_ms
+                        } else if self.attn_cp_size > 1 {
+                            // Context parallelism (Python moe.py:1390-1401):
+                            //  * prefill: tokens are CP-sharded; all_gather (pre)
+                            //    to assemble the full token set / reduce_scatter
+                            //    (combine) back. volume = num_tokens * hidden.
+                            //  * decode: CP does not run (attention replicated);
+                            //    the selection is local -> no comm.
+                            if self.is_context {
+                                let op_name = if pre { "all_gather" } else { "reduce_scatter" };
+                                let nccl =
+                                    NcclOp::new(&self.name, 1.0, self.hidden_size as f64, num_gpus, op_name);
+                                nccl.query(db, num_tokens)?.latency_ms
+                            } else {
+                                0.0
+                            }
                         } else if attn_tp > 1 {
                             let ar = CustomAllReduceOp::new(
                                 &self.name,
@@ -197,7 +223,7 @@ impl MoEDispatchOp {
                             let nccl = NcclOp::new(
                                 &self.name,
                                 1.0,
-                                self.hidden_size,
+                                self.hidden_size as f64,
                                 num_gpus,
                                 op_name,
                             );
