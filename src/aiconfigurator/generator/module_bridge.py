@@ -304,6 +304,11 @@ def task_config_to_generator_config(
                 "Generate per-system deployments separately or use matching systems."
             )
     params.setdefault("NodeConfig", {})["system_name"] = task_config.primary_system_name
+    # Explicit --generator-set NodeConfig.* overrides win over derived values
+    # (same precedence as the naive path); previously they were dropped.
+    node_overrides = overrides.get("NodeConfig")
+    if isinstance(node_overrides, dict) and node_overrides:
+        params["NodeConfig"] = _deep_merge(params["NodeConfig"], node_overrides)
     rule_name = overrides.get("rule")
     if rule_name:
         params["rule"] = rule_name

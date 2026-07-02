@@ -104,3 +104,17 @@ def test_disagg_gb200_hardware_facts_reach_dgd():
         env = {e["name"]: e.get("value") for e in (pod.get("mainContainer") or {}).get("env") or []}
         assert "NCCL_MNNVL_ENABLE" in env, f"{name}: missing GB200 NCCL facts"
         assert "UCX_CUDA_IPC_ENABLE_MNNVL" in env, f"{name}: missing GB200 UCX facts"
+
+
+@pytest.mark.unit
+def test_explicit_node_config_overrides_win():
+    """--generator-set NodeConfig.* must survive the bridge and take precedence
+    over derived values (same precedence as the naive path)."""
+    task = _disagg_task("gb200", "gb200")
+    cfg = task_config_to_generator_config(
+        task_config=task,
+        result_df=_result_row(),
+        generator_overrides={"NodeConfig": {"system_name": "custom-system", "num_gpus_per_node": 4}},
+    )
+    assert cfg["NodeConfig"]["system_name"] == "custom-system"
+    assert cfg["NodeConfig"]["num_gpus_per_node"] == 4
