@@ -18,6 +18,13 @@ def kv_pool_capacity_tokens(model_runner) -> int | None:
     allocator = getattr(model_runner, "token_to_kv_pool_allocator", None)
     if allocator is None:
         return None
+    # Hybrid SWA allocators report min(full, swa) from available_size().
+    # Logical sequence capacity follows the full-attention pool instead.
+    if hasattr(allocator, "full_available_size"):
+        try:
+            return int(allocator.full_available_size())
+        except Exception:
+            return None
     if hasattr(allocator, "available_size"):
         try:
             return int(allocator.available_size())
@@ -28,6 +35,18 @@ def kv_pool_capacity_tokens(model_runner) -> int | None:
         if isinstance(value, int) and value > 0:
             return value
     return None
+
+
+def swa_kv_pool_capacity_tokens(model_runner) -> int | None:
+    """Best-effort token capacity of SGLang's hybrid SWA KV pool."""
+    allocator = getattr(model_runner, "token_to_kv_pool_allocator", None)
+    available_size = getattr(allocator, "swa_available_size", None)
+    if not callable(available_size):
+        return None
+    try:
+        return int(available_size())
+    except Exception:
+        return None
 
 
 def required_kv_tokens(batch_size: int, seq_len: int, prefix_len: int, *, is_prefill: bool) -> int:
@@ -60,7 +79,12 @@ def required_kv_alloc_tokens(
     though ``bs*sl`` is tiny — so ``alloc_extend`` fails with "Prefill out of
     memory" while the naive check passes. This returns that true paged
     requirement so such shapes are skipped BEFORE launching. With ``page_size==1``
-    it equals ``required_kv_tokens`` (a no-op for token-level allocators).
+    it equals the logical span plus the fresh decode token (a no-op for
+    token-level page rounding).
+
+    Decode also allocates one fresh token per request. When ``seq_len`` lands
+    exactly on a page boundary, that token requires one additional page for
+    every request.
 
     NOTE: this is the real allocation size only, NOT SGLang's eviction
     over-estimate (``extend_num_tokens + bs*page_size``). The collector clears
@@ -70,8 +94,33 @@ def required_kv_alloc_tokens(
     if batch_size <= 0:
         return 0
     per_req = required_kv_tokens(batch_size, seq_len, prefix_len, is_prefill=is_prefill) // batch_size
+    if not is_prefill:
+        per_req += 1
     pages_per_req = (per_req + page_size - 1) // page_size
     return batch_size * pages_per_req * page_size
+
+
+def required_swa_kv_alloc_tokens(
+    batch_size: int,
+    seq_len: int,
+    prefix_len: int,
+    page_size: int,
+    window_size: int,
+    *,
+    is_prefill: bool,
+) -> int:
+    """Page-rounded hybrid SWA allocation needed by one collector shape."""
+    if batch_size <= 0:
+        return 0
+    past_len = prefix_len if is_prefill else seq_len
+    fresh_len = seq_len if is_prefill else 1
+    window_start = max(0, past_len - window_size)
+    window_start = (window_start // page_size) * page_size
+    swa_tail_len = past_len - window_start
+    rounded_tail = ((swa_tail_len + page_size - 1) // page_size) * page_size
+    rounded_past = ((past_len + page_size - 1) // page_size) * page_size
+    rounded_total = ((past_len + fresh_len + page_size - 1) // page_size) * page_size
+    return batch_size * (rounded_tail + rounded_total - rounded_past)
 
 
 def dsa_indexer_workspace_bytes(
@@ -246,6 +295,38 @@ def alloc_prefix_indices(model_runner, batch_size: int, prefix_len: int) -> list
         return [torch.empty((0,), dtype=torch.int64, device=device) for _ in range(batch_size)]
 
     allocator = model_runner.token_to_kv_pool_allocator
+    alloc_swa_tail = getattr(allocator, "alloc_extend_swa_tail", None)
+    window_size = getattr(getattr(model_runner, "model_config", None), "window_size", None)
+    page_size = getattr(allocator, "page_size", None)
+    if callable(alloc_swa_tail) and isinstance(window_size, int) and window_size > 0:
+        if not isinstance(page_size, int) or page_size <= 1:
+            raise RuntimeError("SGLang SWA tail allocation requires a paged KV allocator")
+        window_start = max(0, prefix_len - window_size)
+        window_start = (window_start // page_size) * page_size
+        swa_tail_len = prefix_len - window_start
+        per_request = []
+        for _ in range(batch_size):
+            prefix_lens_cpu = torch.zeros(1, dtype=torch.int64)
+            seq_lens_cpu = torch.full((1,), prefix_len, dtype=torch.int64)
+            prefix_lens = prefix_lens_cpu.to(device, non_blocking=True)
+            seq_lens = seq_lens_cpu.to(device, non_blocking=True)
+            last_loc = torch.full((1,), -1, dtype=torch.int64, device=device)
+            indices = alloc_swa_tail(
+                prefix_lens,
+                prefix_lens_cpu,
+                seq_lens,
+                seq_lens_cpu,
+                last_loc,
+                prefix_len,
+                swa_tail_len,
+            )
+            if indices is None:
+                raise RuntimeError(
+                    f"failed to allocate SWA-tail prefix cache: prefix_len={prefix_len}, swa_tail_len={swa_tail_len}"
+                )
+            per_request.append(indices.contiguous())
+        return per_request
+
     chunk_size = runtime_chunk_size(model_runner)
     alloc_extend = allocator.alloc_extend
     if batch_size * prefix_len > chunk_size:

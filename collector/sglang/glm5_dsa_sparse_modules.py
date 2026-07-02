@@ -25,6 +25,8 @@ CSV schema matches the aic module CSVs (``isl``=M, ``step``=past_kv).
 
 from __future__ import annotations
 
+__compat__ = "sglang==0.5.14"
+
 import os
 
 import torch
@@ -43,9 +45,9 @@ from collector.sglang.deepseekv4_sparse_modules import (
 )
 
 try:
-    from collector.sglang.helper import log_perf
+    from collector.sglang.helper import get_sm_version, log_perf
 except ModuleNotFoundError:
-    from helper import log_perf
+    from helper import get_sm_version, log_perf
 
 __all__ = [
     "get_glm5_dsa_attn_test_cases",
@@ -54,7 +56,6 @@ __all__ = [
     "run_glm5_dsa_sparse_kernel_worker",
 ]
 
-GLM5_DEFAULT_MODEL = "nvidia/GLM-5-NVFP4"
 GLM5_ARCHITECTURE = "GlmMoeDsaForCausalLM"
 
 
@@ -63,24 +64,21 @@ def _selected_glm5_models():
     are bf16 and identical across GLM-5 variants, differing only in prefix range.
     When both GLM-5-NVFP4 and GLM-5.2-NVFP4 are configured, collect only
     GLM-5.2-NVFP4 (longest context — its range + the max_position ceiling in the
-    derived shapes covers GLM-5); otherwise the default."""
+    derived shapes covers GLM-5). Return no cases when a targeted model filter
+    selects a non-GLM checkpoint."""
     try:
         from collector.sglang.collect_mla_module import get_mla_module_model_specs
     except ModuleNotFoundError:
         from collect_mla_module import get_mla_module_model_specs
-    # apply_model_filter=False: decide the representative from the configured
-    # set, independent of a COLLECTOR_MODEL_PATH pin, so a pin to GLM-5.2-NVFP4
-    # still resolves sparse to GLM-5.2-NVFP4 (not the default). Prefer the
-    # longest-context GLM present (GLM-5.2 covers GLM-5 via its range + the
-    # max_position ceiling in derived shapes); only the genuine absence of any
-    # GLM-5.x configured spec falls back to the default. Discovery errors
-    # propagate instead of being silently swallowed into the default path.
-    paths = {s.model_path for s in get_mla_module_model_specs(attention_type="dsa", apply_model_filter=False)}
+    # Respect COLLECTOR_MODEL_PATH for targeted runs. Without a model filter,
+    # prefer the longest-context GLM representative so one full/raw sparse sweep
+    # covers the shorter GLM-5 range as well.
+    paths = {s.model_path for s in get_mla_module_model_specs(attention_type="dsa")}
     if "nvidia/GLM-5.2-NVFP4" in paths:
         return ["nvidia/GLM-5.2-NVFP4"]
     if "nvidia/GLM-5-NVFP4" in paths:
         return ["nvidia/GLM-5-NVFP4"]
-    return [GLM5_DEFAULT_MODEL]
+    return []
 
 
 def _glm5_sparse_config(model_path: str):
@@ -161,7 +159,7 @@ def _write_row(
     }
     if score_mode is not None:
         item["score_mode"] = score_mode
-    log_perf(
+    if not log_perf(
         item_list=[item],
         framework="SGLang",
         version="kernel-level",
@@ -169,7 +167,8 @@ def _write_row(
         op_name=op_name_map[kernel],
         kernel_source=kernel_source or KERNEL_TO_KERNEL_SOURCE[kernel],
         perf_filename=perf_filename,
-    )
+    ):
+        raise RuntimeError(f"failed to persist {architecture} sparse row to {perf_filename}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -206,15 +205,21 @@ def _bench_glm5_mqa(M, past_kv, isl, *, index_n_heads, index_head_dim, device): 
 
 def _glm5_fuse_topk_enabled() -> bool:
     """Whether SGLang runs the FUSED topk+index-transform (env default = True)."""
-    try:
-        from sglang.srt import environ as _environ
+    from sglang.srt import environ as _environ
 
-        return bool(_environ.envs.SGLANG_NSA_FUSE_TOPK.get())
-    except Exception:
-        return True  # sglang environ.py: SGLANG_NSA_FUSE_TOPK = EnvBool(True)
+    return bool(_environ.envs.SGLANG_DSA_FUSE_TOPK.get())
 
 
-def _make_glm5_topk_scores(mode, rows, seq, device, generator, topk_k):
+def _glm5_topk_metadata(bs, isl, past_kv):
+    """Return causal row lengths, ragged KV offsets, and full KV width."""
+    max_seqlen_k = max(1, past_kv + isl)
+    lengths = [past_kv + token_idx + 1 for _ in range(bs) for token_idx in range(isl)]
+    cu_seqlens_k = [request_idx * max_seqlen_k for request_idx in range(bs + 1)]
+    topk_indices_offset = [cu_seqlens_k[request_idx] for request_idx in range(bs) for _ in range(isl)]
+    return lengths, topk_indices_offset, max_seqlen_k
+
+
+def _make_glm5_topk_scores(mode, lengths, seq, device, generator, topk_k):
     """DSV4-style score distributions for the topk DELTA calibration.
 
     * ``flat``     — all zeros: degenerate worst case (every element ties, so
@@ -222,30 +227,38 @@ def _make_glm5_topk_scores(mode, rows, seq, device, generator, topk_k):
     * ``top_last`` — background ~-5 with the last ``topk_k`` positions ~+5:
                      representative (clear winners, the common real case).
 
-    Width padded to a multiple of 4 (kernel TMA 16B alignment); kernel reads
-    ``[:, :seq]``.
+    Each row's winners occupy its own causal ``[length-k:length)`` span.
+    Width is padded to a multiple of 4 (kernel TMA 16B alignment).
     """
+    rows = lengths.numel()
     pad = ((seq + 3) // 4) * 4
     if mode == "flat":
         return torch.zeros(rows, pad, dtype=torch.float32, device=device)
     if mode == "top_last":
         s = -5.0 + 0.05 * torch.randn(rows, pad, dtype=torch.float32, device=device, generator=generator)
-        k = min(topk_k, seq)
-        s[:, seq - k : seq] = 5.0 + torch.randn(rows, k, dtype=torch.float32, device=device, generator=generator)
+        counts = lengths.to(torch.int64).clamp(min=0, max=min(topk_k, seq))
+        offsets = torch.arange(topk_k, device=device)
+        columns = lengths.to(torch.int64).unsqueeze(1) - counts.unsqueeze(1) + offsets.unsqueeze(0)
+        valid = offsets.unsqueeze(0) < counts.unsqueeze(1)
+        row_ids = torch.arange(rows, device=device).unsqueeze(1).expand_as(columns)
+        selected = int(valid.sum().item())
+        s[row_ids[valid], columns[valid]] = 5.0 + torch.randn(
+            selected, dtype=torch.float32, device=device, generator=generator
+        )
         return s.contiguous()
     raise ValueError(f"unknown topk score mode: {mode}")
 
 
 def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
-    """GLM-5 indexer top-k — the kernel SGLang's NSA backend ACTUALLY runs,
+    """GLM-5 indexer top-k — the kernel SGLang's DSA backend ACTUALLY runs,
     benched as a FLAT/TOP_LAST DELTA calibration (DSV4-style).
 
-    Kernel selection (``SGLANG_NSA_FUSE_TOPK`` env default = True → fused):
+    Kernel selection (``SGLANG_DSA_FUSE_TOPK`` env default = True → fused):
       * prefill / context (isl > 1, ragged): ``fast_topk_transform_ragged_fused``
       * decode  / generation (isl == 1, paged): ``fast_topk_transform_fused``
       * fuse-topk disabled: plain ``fast_topk_v2``.
     All metadata (``cu_seqlens`` / ``topk_indices_offset`` / page table /
-    lengths) is built from ``(bs, isl, past_kv)`` EXACTLY as the NSA backend
+    lengths) is built from ``(bs, isl, past_kv)`` EXACTLY as the DSA backend
     does — no model weights — so the standalone call is the real kernel with
     real arg shapes.
 
@@ -264,11 +277,6 @@ def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
         fast_topk_v2,
     )
 
-    try:
-        from sglang.srt.layers.attention.nsa_backend import compute_cu_seqlens
-    except Exception:
-        from sglang.srt.layers.attention.dsa.dsa_backend_mtp_precompute import compute_cu_seqlens
-
     fused = _glm5_fuse_topk_enabled()
     if not fused:
         kernel_src = "fast_topk_v2"
@@ -278,12 +286,12 @@ def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
         kernel_src = "fast_topk_transform_ragged_fused"
 
     # GLM-5 is uniform DSA (ratio=1): per-request full context = past_kv + isl.
-    seq = max(1, past_kv + isl)
-    if seq <= topk:
+    length_values, topk_offset_values, max_seqlen_k = _glm5_topk_metadata(bs, isl, past_kv)
+    if max_seqlen_k <= topk:
         # nothing to select -> no data-dependent cost; DELTA is 0.
         return [("flat", 0.0), ("top_last", 0.0)], kernel_src
 
-    lengths = torch.full((M,), seq, dtype=torch.int32, device=device)
+    lengths = torch.tensor(length_values, dtype=torch.int32, device=device)
     ks = torch.zeros(M, dtype=torch.int32, device=device)
     generator = torch.Generator(device=device)
     generator.manual_seed(1234)
@@ -293,10 +301,9 @@ def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
         def make_fn(score):
             return lambda: fast_topk_v2(score, lengths, topk, row_starts=ks)
     elif isl == 1:
-        cols = max(topk, 1)
-        pt = torch.arange(cols, dtype=torch.int32, device=device).clamp(max=seq - 1)
-        page_table_size_1 = pt.view(1, cols).repeat(M, 1).contiguous()
-        cu_seqlens_q = compute_cu_seqlens(torch.ones(M, dtype=torch.int32, device=device))
+        pt = torch.arange(max_seqlen_k, dtype=torch.int32, device=device)
+        page_table_size_1 = pt.view(1, max_seqlen_k).repeat(M, 1).contiguous()
+        cu_seqlens_q = torch.arange(M + 1, dtype=torch.int32, device=device)
 
         def make_fn(score):
             return lambda: fast_topk_transform_fused(
@@ -308,22 +315,20 @@ def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
                 row_starts=ks,
             )
     else:
-        seqlens_q = torch.full((bs,), isl, dtype=torch.int32, device=device)
-        cu_seqlens_q_topk = compute_cu_seqlens(seqlens_q)
-        cu_topk_indices_offset = torch.repeat_interleave(cu_seqlens_q_topk[:-1], seqlens_q)
+        topk_indices_offset = torch.tensor(topk_offset_values, dtype=torch.int32, device=device)
 
         def make_fn(score):
             return lambda: fast_topk_transform_ragged_fused(
                 score=score,
                 lengths=lengths,
-                topk_indices_offset=cu_topk_indices_offset,
+                topk_indices_offset=topk_indices_offset,
                 topk=topk,
                 row_starts=ks,
             )
 
     results = []
     for mode in ("flat", "top_last"):
-        score = _make_glm5_topk_scores(mode, M, seq, device, generator, topk)
+        score = _make_glm5_topk_scores(mode, lengths, max_seqlen_k, device, generator, topk)
         r = _bench_cuda_graph(make_fn(score), allow_graph_fail=True, device=device)
         results.append((mode, round(r["latency_ms"], 6)))
     return results, kernel_src
@@ -331,26 +336,26 @@ def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
 
 def _bench_glm5_dsa_attn(M, past_kv, isl, *, native_heads, d_qk, d_v, topk, device):  # noqa: N803
     """flash_mla_sparse_fwd — sparse FMLA, ragged batch of bs = M // isl reqs.
-    q (M=bs*isl, heads->pad128, d_qk), kv = CONCATENATED bs segments of
+    q (M=bs*isl, heads->64 on SM90 / pad128 on SM100+, d_qk), kv = CONCATENATED bs segments of
     (past_kv + isl); indices (M, 1, K) are absolute into each token's own
-    segment. K = min(topk, per-request context)."""
+    segment. The production top-k transform always returns ``topk`` columns,
+    filling positions beyond the current context with -1."""
     from sgl_kernel.flash_mla import flash_mla_sparse_fwd
 
     bs = max(1, M // isl)
     seg = past_kv + isl
     full_s = max(1, bs * seg)  # concatenated bs segments of (past_kv + isl)
-    k = min(topk, seg)  # topk capped by PER-REQUEST context
-    pad_heads = 128 if (native_heads % 128) else native_heads
-    q = torch.randn(M, pad_heads, d_qk, dtype=torch.bfloat16, device=device)
+    valid_k = min(topk, seg)
+    sm_major, _ = torch.cuda.get_device_capability(device)
+    q_heads = 128 if sm_major >= 10 else native_heads
+    q = torch.randn(M, q_heads, d_qk, dtype=torch.bfloat16, device=device)
     kv = torch.randn(full_s, 1, d_qk, dtype=torch.bfloat16, device=device)
     # each token selects k positions inside its own segment [r*seg, r*seg+seg)
     seg_start = torch.repeat_interleave(torch.arange(bs, dtype=torch.int32, device=device) * seg, isl)
-    indices = seg_start.view(M, 1, 1) + torch.arange(k, dtype=torch.int32, device=device).view(1, 1, k)
-    if k % 64:
-        pad = 64 - k % 64
-        indices = torch.cat(
-            [indices, torch.full((M, 1, pad), -1, dtype=torch.int32, device=device)], dim=-1
-        ).contiguous()
+    indices = torch.full((M, 1, topk), -1, dtype=torch.int32, device=device)
+    indices[:, :, :valid_k] = seg_start.view(M, 1, 1) + torch.arange(valid_k, dtype=torch.int32, device=device).view(
+        1, 1, valid_k
+    )
     sm_scale = 1.0 / (d_qk**0.5)
 
     def kernel_fn():
@@ -561,7 +566,13 @@ def run_glm5_dsa_sparse_kernel_worker(
         if out is None:
             continue
         kernel_source, results = out
-        n_ok += 1
+        expected_modes = {"flat", "top_last"} if kernel == "topk" else {None}
+        if len(results) != len(expected_modes) or {score_mode for score_mode, _ in results} != expected_modes:
+            print(
+                f"  incomplete result at bs={bs} isl={isl} past_kv={prefix}: "
+                f"expected score modes {expected_modes}, got {results}"
+            )
+            continue
         for score_mode, latency_ms in results:
             _write_row(
                 perf_path,
@@ -579,10 +590,17 @@ def run_glm5_dsa_sparse_kernel_worker(
                 architecture=architecture,
                 op_name_map=op_name_map,
             )
-    print(f"  {kernel}: benched {n_ok}/{len(shapes)} unique shapes")
+        n_ok += 1
+    error_count = len(shapes) - n_ok
+    summary = f"ok={n_ok} error={error_count} skip=0 total={len(shapes)}"
+    print(f"  {kernel}: {summary}")
+    if error_count > 0:
+        raise RuntimeError(f"{label}-sparse {kernel} bs={bs_only}: {summary}")
 
 
 def _glm5_sparse_kernel_cases(kernel):
+    if get_sm_version() not in {90, 100, 103}:
+        return []
     # One task per (model, bs) so collect.py spreads bs across the GPU workers
     # (no single-worker cuda-graph private-pool buildup -> no 1-worker-sweep
     # deadlock). All sparse kernels run a single fixed head config: the FMLA

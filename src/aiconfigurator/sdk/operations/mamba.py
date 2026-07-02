@@ -286,7 +286,8 @@ class GDNKernel(Operation):
         - "chunk_gated_delta_rule": GDN chunked scan (core recurrence)
       Generation phase:
         - "causal_conv1d_update": Single-step causal conv state update
-        - "fused_sigmoid_gating_delta_rule_update": Single-step GDN recurrence
+        - "fused_recurrent_gated_delta_rule_packed_decode": SGLang packed recurrence
+        - "fused_sigmoid_gating_delta_rule_update": Other-backend recurrence
 
     Uses full (unsharded) dimensions for database lookup; collector data is per-layer.
 
@@ -379,7 +380,10 @@ class GDNKernel(Operation):
         def get_sol() -> tuple[float, float, float]:
             x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
             if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
-                conv_channels = num_k_heads * head_k_dim + num_v_heads * head_v_dim
+                if database.backend.lower() == "sglang":
+                    conv_channels = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim
+                else:
+                    conv_channels = num_k_heads * head_k_dim + num_v_heads * head_v_dim
                 read_bytes = x * conv_channels * (d_conv + 1) * 2
                 write_bytes = x * conv_channels * 2
             elif kernel_source == "chunk_gated_delta_rule":
@@ -407,6 +411,12 @@ class GDNKernel(Operation):
                 state_size = num_v_heads * head_k_dim * head_v_dim
                 read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 2 * batch_size
                 write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 2 * batch_size
+            elif kernel_source == "fused_recurrent_gated_delta_rule_packed_decode":
+                # SGLang 0.5.14 consumes packed Q+K+V, a/b gates, and an FP32 state pool.
+                state_size = num_v_heads * head_k_dim * head_v_dim
+                packed_qkv = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim
+                read_bytes = x * (packed_qkv + 2 * num_v_heads) * 2 + 2 * num_v_heads * 4 + state_size * 4 * batch_size
+                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 4 * batch_size
             else:
                 read_bytes = x * d_model * 2
                 write_bytes = x * d_model * 2

@@ -52,8 +52,8 @@ def test_model_case_plan_merges_required_base_and_framework_specific_ops():
     assert "attention_generation" not in plan.op_cases
     assert "moe" in plan.op_cases
     assert "mla_context" in plan.op_cases
-    assert "wideep_mla_context" in plan.op_cases
-    assert "wideep_moe" in plan.op_cases
+    assert "wideep_mla_context" not in plan.op_cases
+    assert "wideep_moe" not in plan.op_cases
     assert "trtllm_moe_wideep" not in plan.op_cases
 
 
@@ -296,9 +296,10 @@ def test_base_gemm_cases_are_readable_shape_specs():
 
 
 def test_moe_model_quantization_policy_is_yaml_backed():
-    assert not moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "w4a8_mxfp4_mxfp8")
+    assert moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "w4a8_mxfp4_mxfp8")
     assert not moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "bfloat16")
     assert not moe_model_allows_quantization("sglang", "Qwen/Qwen3-235B-A22B", "w4a8_mxfp4_mxfp8")
+    assert moe_model_allows_quantization("sglang", "nvidia/GLM-5.2-NVFP4", "nvfp4")
 
     assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a16_mxfp4")
     assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a8_mxfp4_mxfp8")
@@ -314,8 +315,8 @@ def test_moe_model_quantization_policy_is_yaml_backed():
 def test_dsv4_moe_quantization_policy_prunes_unrelated_modes():
     expected_by_backend = {
         "sglang": {
-            "deepseek-ai/DeepSeek-V4-Flash": set(),
-            "deepseek-ai/DeepSeek-V4-Pro": set(),
+            "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
+            "deepseek-ai/DeepSeek-V4-Pro": {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
         },
@@ -350,6 +351,7 @@ def test_kimi_moe_quantization_is_artifact_specific():
     for backend in ("sglang", "trtllm", "vllm"):
         available_modes = {spec.name for spec in get_moe_quantization_specs(backend)}
         for model_path, expected in expected_by_artifact.items():
+            expected = set() if backend == "sglang" and model_path == "moonshotai/Kimi-K2.5" else expected
             allowed = {mode for mode in available_modes if moe_model_allows_quantization(backend, model_path, mode)}
             assert allowed == expected, (backend, model_path)
 
@@ -396,6 +398,7 @@ def test_gptoss_mxfp4_modes_are_additive_on_blackwell():
         }
 
     assert selected_modes("sglang", 100) == {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
+    assert selected_modes("sglang", 90) == {"w4a16_mxfp4"}
     assert selected_modes("trtllm", 90) == {"w4a16_mxfp4"}
     assert selected_modes("trtllm", 100) == {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
 
@@ -906,7 +909,7 @@ def test_dsv4_plan_only_uses_backend_specific_case_plan():
 
     assert payload["ops"] == expected_ops
     assert "dsv4_csa_topk_calib" in payload["ops"]
-    assert "wideep_moe" in payload["ops"]
+    assert "wideep_moe" not in payload["ops"]
 
 
 def test_vllm_dsv4_collectors_are_registry_only():
@@ -1012,7 +1015,7 @@ def test_full_mode_aggregates_all_model_case_files():
 
     assert plan.model_path is None
     assert len(plan.model_cases_paths) >= 18
-    assert "wideep_mla_context" in plan.op_cases
+    assert "wideep_mla_context" not in plan.op_cases
     assert "dsv4_csa_context_module" in plan.op_cases
     assert "gdn" in plan.op_cases
 
@@ -1126,7 +1129,7 @@ schema_version: 1
 sm_version: 100
 framework_specific_op_exceptions:
   sglang:
-    wideep_moe:
+    mla_context:
       drop: true
 """,
         encoding="utf-8",
@@ -1141,8 +1144,8 @@ framework_specific_op_exceptions:
 
     assert plan.sm_version == 100
     assert plan.sm_exceptions_path == exceptions.resolve()
-    assert "wideep_moe" not in plan.op_cases
-    assert "wideep_mla_context" in plan.op_cases
+    assert "mla_context" not in plan.op_cases
+    assert "mla_generation" in plan.op_cases
 
 
 def test_sm_exception_catalog_does_not_activate_unrelated_ops():
@@ -1168,7 +1171,7 @@ schema_version: 1
 sm_version: 100
 framework_specific_op_exceptions:
   sglang:
-    wideep_moe:
+    mla_context:
       drop: true
 """,
         encoding="utf-8",
@@ -1185,7 +1188,7 @@ framework_specific_op_exceptions:
     assert plan.sm_version == 100
     assert plan.sm_exceptions_path == default_sm_exceptions_path(100)
     assert plan.sm_exceptions_path == exceptions
-    assert "wideep_moe" not in plan.op_cases
+    assert "mla_context" not in plan.op_cases
 
 
 def test_sm_exception_files_list_matching_gpu_types():

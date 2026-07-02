@@ -30,11 +30,10 @@ CSV schema matches existing aic dsv4 module CSVs (so loaders can be shared):
 CSA(=4) / HCA(=128).
 """
 
-# Requires an SGLang build with DeepSeek-V4 support. Stock lmsysorg/sglang:v*
-# images may not include the required deepseek_v4 modules; use a
-# deepseek-v4-blackwell/deepseek-v4-grace-blackwell image or matching Dynamo
-# sglang-runtime:*deepseek-v4* image.
+# Requires stock SGLang 0.5.14 with its matching ``sgl-kernel`` package.
 from __future__ import annotations
+
+__compat__ = "sglang==0.5.14"
 
 import functools
 import importlib.util
@@ -283,16 +282,17 @@ def _dsv4_sparse_kernel_supported(kernel: str) -> bool:
     """Return True when the active runtime can execute a DSV4 sparse kernel."""
     if os.environ.get("COLLECTOR_FORCE_DSV4_SPARSE") == "1":
         return True
+    if torch.cuda.is_available():
+        major, minor = torch.cuda.get_device_capability()
+        sm_version = major * 10 + minor
+        # The pinned DeepGEMM/FlashMLA sparse APIs cover Hopper and datacenter
+        # Blackwell. SM120 has a different API and pre-Hopper lacks the kernels.
+        if sm_version not in {90, 100, 103}:
+            return False
     if kernel in ("hca_attn", "csa_attn"):
         return importlib.util.find_spec("flash_mla") is not None
     if kernel == "paged_mqa_logits":
-        if importlib.util.find_spec("deep_gemm") is None:
-            return False
-        if torch.cuda.is_available():
-            major, _minor = torch.cuda.get_device_capability()
-            if major >= 12:
-                return False
-        return True
+        return importlib.util.find_spec("deep_gemm") is not None
     raise ValueError(f"unknown DSV4 sparse kernel: {kernel}")
 
 
@@ -459,17 +459,16 @@ def _bench_paged_mqa_logits(
 ) -> float:
     """Benchmark paged_mqa_logits.
 
-    Note: the SM90 kernel imposes ``next_n ≤ 2`` (smem capacity); larger M
-    must be split into multiple per-request entries.  For prefill chunks
-    with many tokens we map ``M → batch_dim`` and keep ``next_n=1``.  Work
-    is identical (M x full_c4 x n_idx_heads x idx_head_dim) — only the
-    request grouping changes.  In real serving, sglang's
-    ``fp8_paged_mqa_logits_chunked`` wraps the same idea (chunk along M).
+    The kernel imposes ``next_n ≤ 2`` (smem capacity), so prefill tokens map
+    to ``batch_dim`` with ``next_n=1``. Per-request causal lengths remain
+    distinct even though those token rows share one physical KV cache.
     """
     from deep_gemm import fp8_paged_mqa_logits, get_paged_mqa_logits_metadata
 
-    del batch_size  # ignored — we treat each new token as its own batch entry
-    full_s = M + past_kv
+    if batch_size <= 0 or M % batch_size:
+        raise ValueError(f"M={M} must be divisible by positive batch_size={batch_size}")
+    isl = M // batch_size
+    full_s = isl + past_kv
     full_c4 = max(1, full_s // 4)
     block_kv = _dsv4_kv_page_size()
 
@@ -489,12 +488,8 @@ def _bench_paged_mqa_logits(
 
     weights = torch.randn(b * next_n, index_n_heads, dtype=torch.float32, device=device)
 
-    # Per-token causal context_lens — matches sglang's ``seq_lens_casual``
-    # (deepseek_v4_backend_radix.py:1124).  Each new token i has effective
-    # past+i+1 KV positions (causal); c4_seq_lens = (past+i+1) // 4.
-    # Without this, each query scans the full c4 cache uniformly →
-    # benchmark work is M x full_c4 instead of triangular M x full_c4 / 2.
-    causal_seq = torch.arange(past_kv + 1, past_kv + M + 1, dtype=torch.int32, device=device)
+    # Compute each request's causal span before flattening the token rows.
+    causal_seq = torch.arange(past_kv + 1, past_kv + isl + 1, dtype=torch.int32, device=device).repeat(batch_size)
     causal_c4 = (causal_seq // 4).clamp(min=1)  # min=1 to avoid empty scans
     context_lens = causal_c4.view(b, next_n)
 
@@ -729,7 +724,7 @@ def _write_row(
     if score_mode is not None:
         item["score_mode"] = score_mode
 
-    log_perf(
+    if not log_perf(
         item_list=[item],
         framework="SGLang",
         version="kernel-level",
@@ -738,7 +733,8 @@ def _write_row(
         kernel_source=KERNEL_TO_KERNEL_SOURCE[kernel],
         perf_filename=perf_filename,
         power_stats=power_stats,
-    )
+    ):
+        raise RuntimeError(f"failed to persist DeepSeek-V4 sparse row to {perf_filename}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -766,8 +762,9 @@ def _guarded_bench(bench_fn: Callable[[], object], label: str):
 
 def _bench_sparse_kernel_shape(kernel, prefix, isl, bs, sc, device):
     """Bench one module ``(prefix, isl, bs)`` shape; return a list of
-    ``(score_mode, latency_ms)`` rows. TP-independent (paged_mqa flattens bs→b=M;
-    FMLA pads to full native heads), so this is computed once per shape.
+    ``(score_mode, latency_ms)`` rows. TP-independent (paged_mqa maps tokens to
+    b=M while preserving request-local causal lengths; FMLA pads to full native
+    heads), so this is computed once per shape.
 
     Single-latency kernels return one ``(None, latency)``; topk returns the
     flat-vs-representative pair ``[("flat", …), ("top_last", …)]`` whose DELTA
@@ -791,12 +788,14 @@ def _bench_sparse_kernel_shape(kernel, prefix, isl, bs, sc, device):
         return [(None, lat)]
     if kernel == "topk":
         return _bench_topk_shape(prefix, isl, bs, sc, device)
-    # paged_mqa_logits: bs flattened to b=M, next_n=1
+    # paged_mqa_logits: tokens map to b=M, next_n=1, while causal lengths repeat
+    # per request.
     lat = _bench_paged_mqa_logits(
         M,
         prefix,
         index_n_heads=sc.index_n_heads,
         index_head_dim=sc.index_head_dim,
+        batch_size=bs,
         device=device,
     )["latency_ms"]
     return [(None, lat)]
@@ -859,8 +858,10 @@ def _sglang_chunked_prefill_size():
     global _CHUNKED_PREFILL
     if _CHUNKED_PREFILL is None:
         try:
+            from sglang.srt.model_executor.cuda_graph_config import default_cuda_graph_config
             from sglang.srt.server_args import ServerArgs, get_device_memory_capacity
         except ModuleNotFoundError:
+            from srt.model_executor.cuda_graph_config import default_cuda_graph_config
             from srt.server_args import ServerArgs, get_device_memory_capacity
         gpu_mem = None
         try:
@@ -869,8 +870,7 @@ def _sglang_chunked_prefill_size():
             pass
         sa = ServerArgs.__new__(ServerArgs)
         sa.chunked_prefill_size = None
-        sa.cuda_graph_max_bs = None
-        sa.cuda_graph_bs = None
+        sa.cuda_graph_config = default_cuda_graph_config()
         sa.tp_size = 1
         sa.device = "cuda"
         try:
@@ -1043,7 +1043,13 @@ def run_dsv4_sparse_kernel_worker(
         )
         if results is None:
             continue
-        n_ok += 1
+        expected_modes = {"flat", "top_last"} if kernel == "topk" else {None}
+        if len(results) != len(expected_modes) or {score_mode for score_mode, _ in results} != expected_modes:
+            print(
+                f"  incomplete result at bs={bs} isl={isl} past_kv={prefix}: "
+                f"expected score modes {expected_modes}, got {results}"
+            )
+            continue
         for score_mode, latency_ms in results:
             _write_row(
                 perf_path,
@@ -1058,7 +1064,12 @@ def run_dsv4_sparse_kernel_worker(
                 model_path=model_path,
                 score_mode=score_mode,
             )
-    print(f"  {kernel}: benched {n_ok}/{len(shapes)} unique shapes")
+        n_ok += 1
+    error_count = len(shapes) - n_ok
+    summary = f"ok={n_ok} error={error_count} skip=0 total={len(shapes)}"
+    print(f"  {kernel}: {summary}")
+    if error_count > 0:
+        raise RuntimeError(f"dsv4-sparse {kernel} bs={bs_only}: {summary}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1079,9 +1090,13 @@ def run_dsv4_sparse_kernel_worker(
 
 
 def _dsv4_topk_kernel_supported() -> bool:
-    """True when the SGLang build exposes the sm_100 topk_512 indexer kernel."""
+    """True when the Hopper/datacenter-Blackwell topk indexer is available."""
     if os.environ.get("COLLECTOR_FORCE_DSV4_SPARSE") == "1":
         return True
+    if torch.cuda.is_available():
+        major, minor = torch.cuda.get_device_capability()
+        if major * 10 + minor not in {90, 100, 103}:
+            return False
     try:
         # find_spec raises (not returns None) when a PARENT package is absent.
         return importlib.util.find_spec("sglang.jit_kernel.dsv4.topk") is not None
@@ -1089,20 +1104,34 @@ def _dsv4_topk_kernel_supported() -> bool:
         return False
 
 
-def _make_topk_scores(mode: str, rows: int, seq: int, device: str, generator, topk_k: int) -> torch.Tensor:
+def _make_topk_scores(
+    mode: str,
+    seq_lens: torch.Tensor,
+    seq: int,
+    device: str,
+    generator,
+    topk_k: int,
+) -> torch.Tensor:
     # score_stride must be a multiple of 4 (kernel TMA 16B alignment); allocate
     # padded width and let the kernel read [:, :seq].
+    rows = seq_lens.numel()
     pad = ((seq + 3) // 4) * 4
     if mode == "flat":
         return torch.zeros(rows, pad, device=device)
     if mode == "top_last":
         s = -5.0 + 0.05 * torch.randn(rows, pad, device=device, generator=generator)
-        s[:, seq - topk_k : seq] = 5.0 + torch.randn(rows, topk_k, device=device, generator=generator)
+        counts = seq_lens.to(torch.int64).clamp(min=0, max=min(topk_k, seq))
+        offsets = torch.arange(topk_k, device=device)
+        columns = seq_lens.to(torch.int64).unsqueeze(1) - counts.unsqueeze(1) + offsets.unsqueeze(0)
+        valid = offsets.unsqueeze(0) < counts.unsqueeze(1)
+        row_ids = torch.arange(rows, device=device).unsqueeze(1).expand_as(columns)
+        selected = int(valid.sum().item())
+        s[row_ids[valid], columns[valid]] = 5.0 + torch.randn(selected, device=device, generator=generator)
         return s.contiguous()
     raise ValueError(f"unknown topk score mode: {mode}")
 
 
-def _bench_topk_512(rows: int, c4_len: int, mode: str, device: str, topk_k: int) -> float:
+def _bench_topk_512(seq_lens: torch.Tensor, mode: str, device: str, topk_k: int) -> float:
     """Time one topk_transform shape via the shared ``_bench_cuda_graph`` path
     (same bench helper as paged_mqa_logits/hca_attn).
 
@@ -1116,12 +1145,13 @@ def _bench_topk_512(rows: int, c4_len: int, mode: str, device: str, topk_k: int)
 
     generator = torch.Generator(device=device)
     generator.manual_seed(1234)
-    seq_lens = torch.full((rows,), c4_len, dtype=torch.int32, device=device)
+    rows = seq_lens.numel()
+    c4_len = int(seq_lens.max().item())
     meta = plan_topk_v2(seq_lens, 0)
     torch.cuda.synchronize(device)
     pages = (c4_len + _dsv4_kv_page_size() - 1) // _dsv4_kv_page_size()
     page_table = torch.arange(pages, dtype=torch.int32, device=device).unsqueeze(0).repeat(rows, 1)
-    scores = _make_topk_scores(mode, rows, c4_len, device, generator, topk_k=topk_k)
+    scores = _make_topk_scores(mode, seq_lens, c4_len, device, generator, topk_k=topk_k)
     out = torch.empty((rows, topk_k), dtype=torch.int32, device=device)
 
     def kernel_func():
@@ -1147,10 +1177,9 @@ def _bench_topk_shape(prefix: int, isl: int, bs: int, sc, device: str) -> list:
     (DELTA 0). ``rows`` = bs*isl is the per-token causal scan count."""
     ratio = sc.csa_compress_ratio  # CSA compress ratio (=4)
     topk_k = sc.index_topk  # V4-Pro=1024, V4-Flash=512
-    rows = max(bs * isl, 1)
-    c4_len = (prefix + isl) // ratio
+    causal_seq = torch.arange(prefix + 1, prefix + isl + 1, dtype=torch.int32, device=device)
+    seq_lens = (causal_seq // ratio).clamp(min=1).repeat(bs)
+    c4_len = int(seq_lens.max().item())
     if c4_len <= topk_k:
         return [("flat", 0.0), ("top_last", 0.0)]
-    return [
-        (mode, round(_bench_topk_512(rows, c4_len, mode, device, topk_k=topk_k), 6)) for mode in ("flat", "top_last")
-    ]
+    return [(mode, round(_bench_topk_512(seq_lens, mode, device, topk_k=topk_k), 6)) for mode in ("flat", "top_last")]

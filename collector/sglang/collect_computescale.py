@@ -3,7 +3,7 @@
 
 """Measure SGLang FP8 activation quantization overhead for static-FP8 GEMM."""
 
-__compat__ = "sglang>=0.5.10rc0"
+__compat__ = "sglang==0.5.14"
 
 import pkg_resources
 import torch
