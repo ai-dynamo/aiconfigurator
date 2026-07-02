@@ -9,7 +9,8 @@ For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP
 
 These flags are shared across modes (a few are sweep-only, as noted):
 
-- `--debug`: Enable verbose debug logging. (all modes)
+- `--log-level LEVEL`: Set the minimum log level (`CRITICAL`, `ERROR`, `WARNING`, `INFO`, `DEBUG`). Priority: `--log-level > AICONFIGURATOR_LOG_LEVEL > --debug > INFO`. (all modes)
+- `--debug`: Deprecated alias for `--log-level DEBUG`, kept for backward compatibility. Prefer `--log-level`. (all modes)
 - `--no-color`: Disable ANSI colors in output. (all modes)
 - `--save-dir DIR`: Directory to write results and generated deployment artifacts. (`default`, `exp`, `generate`, `estimate`)
 - `--top-n N`: Number of top configurations to output — per experiment in `exp` mode, or per serving mode (agg/disagg) in `default` mode. Default: `5`. (`default`, `exp`, `generate`, `estimate`)
@@ -17,7 +18,7 @@ These flags are shared across modes (a few are sweep-only, as noted):
 - `--deployment-target`: Generated-artifact platform — `dynamo-j2` (default), `dynamo-python`, or `llm-d`. See [Deployment Target Selection](#default-mode). (`default`, `exp`, `generate`, `estimate`)
 - `--engine-step-backend`: Experimental static-latency backend — `python` (default) or `rust` (routes static step estimates through the Rust FPM estimator). (`default`, `exp`, `generate`, `estimate`)
 
-The `support` mode accepts only `--debug` and `--no-color` from this list. Generator-artifact flags (`--generator-config`, `--generator-set`, `--generator-help`, `--generator-help-backend`, `--generated-config-version`, `--generator-dynamo-version`) are documented under [Default mode](#default-mode).
+The `support` mode accepts only `--log-level`, `--debug`, and `--no-color` from this list. Generator-artifact flags (`--generator-config`, `--generator-set`, `--generator-help`, `--generator-help-backend`, `--generated-config-version`, `--generator-dynamo-version`) are documented under [Default mode](#default-mode).
 
 ## Defaults and Implicit Behavior
 
