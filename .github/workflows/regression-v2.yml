@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Regression Gate V2"
+
+# Two-tier PR regression gate (docs/design/regression_test_v2_design.md):
+#   Tier 1: run_static prefill/decode sampling over system x backend x version x
+#           model x parallelism x quant, SILICON with the shared layer OFF,
+#           compared against committed baselines (tests/baselines/regression_v2).
+#   Tier 2: curated agg/disagg scheduling-defense configs vs committed goldens.
+#
+# Any diff fails with a categorized report. Intended changes regenerate the
+# baseline/golden in the same PR:
+#   python tools/regression_v2/collect_static_baseline.py --update
+#   AIC_REGV2_UPDATE_GOLDEN=1 pytest -m regression_v2 tests/regression_v2/test_scheduling_regression.py
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+  workflow_dispatch:
+
+jobs:
+  regression-v2:
+    name: AIC Regression Gate V2
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          lfs: true
+
+      - name: Git LFS Pull
+        run: git lfs pull
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e src/aiconfigurator-core
+          python -m pip install -e ".[dev]"
+
+      - name: Collect tier-1 static samples
+        run: |
+          python tools/regression_v2/collect_static_baseline.py \
+            --output-dir /tmp/regv2-current \
+            --jobs "$(nproc)"
+
+      - name: Run regression gate
+        env:
+          AIC_REGV2_CURRENT_DIR: /tmp/regv2-current
+          AIC_REGV2_REPORT: /tmp/regv2-report/drift_report.csv
+        run: |
+          python -m pytest tests/regression_v2/ -m regression_v2 -q
+
+      - name: Upload diff artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: regression-v2-results
+          path: |
+            /tmp/regv2-report/drift_report.csv
+            /tmp/regv2-current
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Add summary
+        if: always()
+        run: |
+          echo "## AIC Regression Gate V2" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f /tmp/regv2-report/drift_report.csv ]; then
+            echo "Differences vs committed baselines (first 50):" >> "$GITHUB_STEP_SUMMARY"
+            echo '```csv' >> "$GITHUB_STEP_SUMMARY"
+            head -51 /tmp/regv2-report/drift_report.csv >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "If intended, refresh baselines in this PR (the freshly collected CSVs are in the run artifact):" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "python tools/regression_v2/collect_static_baseline.py --update" >> "$GITHUB_STEP_SUMMARY"
+            echo "AIC_REGV2_UPDATE_GOLDEN=1 pytest -m regression_v2 tests/regression_v2/test_scheduling_regression.py" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No differences vs committed baselines." >> "$GITHUB_STEP_SUMMARY"
+          fi
