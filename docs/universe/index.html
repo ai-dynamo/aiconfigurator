@@ -1,0 +1,1648 @@
+<!DOCTYPE html>
+<!--
+  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  SPDX-License-Identifier: Apache-2.0
+
+  AIConfigurator — Interactive Universe Map (aiconfigurator + dynamo)
+  Self-contained (no network / CDN). Open directly in any modern browser.
+  Generated from a code walk of repo/aiconfigurator (+ rust/aiconfigurator-core)
+  and repo/dynamo (operator CRDs · profiler · planner).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Interactive AIConfigurator and Dynamo architecture map, including current components, planned paths, performance models, collection inputs, and automation infrastructure." />
+<meta name="theme-color" id="themeColor" content="#0c0f14" />
+<title>AIConfigurator — Universe Map</title>
+<script>/* set theme before first paint to avoid a flash */
+try{document.documentElement.setAttribute('data-theme',localStorage.getItem('theme')||localStorage.getItem('aic_theme')||'dark');}
+catch(e){document.documentElement.setAttribute('data-theme','dark');}</script>
+<style>
+  :root{
+    color-scheme:dark;
+    /* ===== dark (default) ===== */
+    --bg:#0c0f14; --panel:#11161f; --panel2:#161d29; --line:#243044;
+    --text:#e7edf5; --muted:#93a1b5; --accent:#76b900; --amber:#fbbf24; --dyn:#22d3ee;
+    --code:#0a0e14;
+    --soft:#c6d2e2; --hover-bg:#1d2636; --hover-border:#36506e;
+    --stage-glow:#131a26;
+    --node-bg1:#172033; --node-bg2:#121927; --node-border:#334455; --node-title:#ffffff;
+    --node-shadow:0 6px 18px #0006; --node-shadow-hover:0 10px 24px #0008;
+    --hl-outline:#ffffff33; --sel-glow:#76b90022;
+    --edge:#3a4862; --band-a:#0f1622; --band-b:#0e131c; --band-text:#7f90a8;
+    --aic-bg:#1c2a12; --aic-fg:#9bd650; --aic-border:#34501a;
+    --dynb-bg:#06303a; --dynb-fg:#3fd6ee; --dynb-border:#0e5566;
+    --badgeq-bg:#3a2e08; --badgeq-fg:#fbbf24; --badgeq-border:#6b5310;
+    --badgef-bg:#26303f; --badgef-fg:#9fb3cb; --badgef-border:#3a4a60;
+    --badget-bg:#241a33; --badget-fg:#cfa8ff; --badget-border:#5a3d86;
+    --pill-bg:#1c2636; --pill-text:#bbccdd; --detail-text:#d4deec;
+    --code-text:#a9e08a; --code-border:#1d2636; --chip-text:#ccffee;
+    --qbox-bg:#1c1707; --qbox-border:#4a3a0e; --link:#8fc9ff;
+    --dhead-fade:#11161fe8; --tab-shadow:0 2px 8px #0003;
+  }
+  :root[data-theme="light"]{
+    color-scheme:light;
+    /* ===== light ===== */
+    --bg:#eef1f6; --panel:#ffffff; --panel2:#eef2f8; --line:#d4dce7;
+    --text:#1a2230; --muted:#5d6b80; --accent:#477600; --amber:#805500; --dyn:#09677e;
+    --code:#f1f4f9;
+    --soft:#3a4760; --hover-bg:#e6ecf4; --hover-border:#b9c6d8;
+    --stage-glow:#e9eef6;
+    --node-bg1:#ffffff; --node-bg2:#eef2f8; --node-border:#c7d2e0; --node-title:#152033;
+    --node-shadow:0 4px 14px #0000001f; --node-shadow-hover:0 8px 22px #00000029;
+    --hl-outline:#00000026; --sel-glow:#76b90033;
+    --edge:#8695aa; --band-a:#ffffff; --band-b:#e9eef6; --band-text:#536176;
+    --aic-bg:#e7f3d6; --aic-fg:#46760a; --aic-border:#bcdd8e;
+    --dynb-bg:#d8f0f6; --dynb-fg:#0b6b85; --dynb-border:#9bd6e6;
+    --badgeq-bg:#fdf0d4; --badgeq-fg:#8a5a06; --badgeq-border:#e3c068;
+    --badgef-bg:#e6edf5; --badgef-fg:#45596f; --badgef-border:#c5d1e1;
+    --badget-bg:#f0e4fb; --badget-fg:#6b3fae; --badget-border:#d0b3f0;
+    --pill-bg:#eef2f8; --pill-text:#42546c; --detail-text:#33425a;
+    --code-text:#3f7a16; --code-border:#dce3ed; --chip-text:#2f4658;
+    --qbox-bg:#fdf6e6; --qbox-border:#e6cf93; --link:#1e6fd0;
+    --dhead-fade:#ffffffe8; --tab-shadow:0 2px 8px #00000022;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    transition:background .25s ease,color .25s ease;}
+  #app{display:grid;grid-template-columns:268px minmax(0,1fr) 360px;height:100vh;height:100dvh;overflow:hidden;
+    transition:grid-template-columns .22s ease}
+  #app.rail-collapsed{grid-template-columns:0 1fr 360px}
+  #app.detail-collapsed{grid-template-columns:268px 1fr 0}
+  #app.rail-collapsed.detail-collapsed{grid-template-columns:0 1fr 0}
+  #app.rail-collapsed #rail{display:none}
+  #app.detail-collapsed #detail{display:none}
+
+  /* ---- left rail ---- */
+  #rail{grid-column:1;background:var(--panel);border-right:1px solid var(--line);overflow-y:auto;padding:18px 16px}
+  #rail h1{font-size:17px;margin:0 0 2px;letter-spacing:.2px}
+  #rail h1 b{color:var(--accent)}
+  #rail .tag{color:var(--muted);font-size:11.5px;margin-bottom:16px}
+  .rail-sec{margin:18px 0 8px;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+  .legend div{display:flex;align-items:center;gap:8px;margin:6px 0;font-size:12.5px;color:var(--soft)}
+  .sw{width:14px;height:14px;border-radius:4px;flex:0 0 auto;border:1px solid #0006}
+  .sw.dash{background:transparent;border:1.5px dashed var(--muted)}
+  .sw.q{background:transparent;border:1.5px dashed var(--amber)}
+  .layer-toggle{display:flex;align-items:center;gap:8px;margin:5px 0;cursor:pointer;font-size:12.5px;color:var(--soft);user-select:none}
+  button.layer-toggle{width:100%;padding:1px 0;border:0;background:transparent;text-align:left;font:inherit}
+  .layer-toggle .sw{border-radius:3px}
+  .layer-toggle.off{opacity:.4}
+  .q-item{display:block;width:100%;text-align:left;background:var(--panel2);border:1px solid var(--line);
+    border-left:3px solid var(--amber);color:var(--soft);padding:8px 10px;border-radius:7px;margin:7px 0;cursor:pointer;font-size:12px}
+  .q-item:hover{background:var(--hover-bg);border-color:var(--hover-border)}
+  .q-item b{color:var(--amber);font-weight:600}
+  .btn{background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:7px 10px;border-radius:7px;cursor:pointer;font-size:12px}
+  .btn:hover{background:var(--hover-bg)}
+  :where(a,button,select,[role="button"]):focus-visible{outline:2px solid var(--dyn);outline-offset:2px}
+  .zoom-select{min-width:78px;padding-right:6px;font-variant-numeric:tabular-nums}
+
+  /* ---- canvas ---- */
+  #stage{grid-column:2;position:relative;overflow:hidden;background:
+     radial-gradient(1200px 700px at 60% -10%, var(--stage-glow) 0%, var(--bg) 60%);}
+  #svg{width:100%;height:100%;display:block;cursor:grab;touch-action:none}
+  #svg.grabbing{cursor:grabbing}
+  .toolbar{position:absolute;top:12px;right:12px;display:flex;justify-content:flex-end;flex-wrap:wrap;gap:6px;max-width:calc(100% - 24px);z-index:5}
+  .hint{position:absolute;left:12px;bottom:10px;color:var(--muted);font-size:11px;z-index:5;pointer-events:none}
+  /* anchored to the STAGE edges so each tab sits ON the seam it controls:
+     left tab = rail|graph boundary, right tab = graph|detail boundary */
+  .edge-tab{position:absolute;top:50%;transform:translateY(-50%);z-index:7;
+    width:28px;height:66px;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;
+    background:var(--panel2);border:1px solid var(--line);color:var(--muted);
+    cursor:pointer;font-size:15px;box-shadow:var(--tab-shadow);
+    transition:background .12s,color .12s}
+  .edge-tab:hover{background:var(--hover-bg);color:var(--text)}
+  #tabLeft{left:0;border-left:none;border-radius:0 10px 10px 0}
+  #tabRight{right:0;border-right:none;border-radius:10px 0 0 10px}
+
+  /* node (foreignObject) */
+  .node{height:100%;border-radius:11px;background:linear-gradient(180deg,var(--node-bg1),var(--node-bg2));
+    border:1px solid var(--nc,var(--node-border));box-shadow:var(--node-shadow);padding:9px 11px;cursor:pointer;
+    transition:transform .08s, box-shadow .12s, opacity .15s;overflow:hidden;position:relative}
+  .node:hover{transform:translateY(-2px);box-shadow:var(--node-shadow-hover)}
+  .node .ttl{font-weight:650;font-size:12.6px;color:var(--node-title);display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;line-height:1.22;padding-right:0}
+  .node .ttl .title-text{flex:1 1 calc(100% - 18px);min-width:0;overflow-wrap:anywhere}
+  .node .ttl .nano{display:block;font-weight:500;font-size:9.3px;color:var(--muted);letter-spacing:.01em}
+  .node .ttl .badge-line{flex-basis:100%;display:flex;gap:4px;padding-left:15px;margin-top:1px}
+  .node .dot{width:9px;height:9px;border-radius:50%;background:var(--nc,#5af);flex:0 0 auto}
+  .node .sub{color:var(--muted);font-size:10.6px;margin-top:4px;line-height:1.3;padding-right:34px}
+  .node.q{border-style:dashed;border-color:var(--amber)}
+  .node.future{border-style:dashed;opacity:.96}
+  .node.dyn{box-shadow:inset 0 3px 0 0 var(--dyn), var(--node-shadow)}
+  .node.dyn:hover{box-shadow:inset 0 3px 0 0 var(--dyn), var(--node-shadow-hover)}
+  .node .repo{position:absolute;bottom:6px;right:8px;font-size:8.5px;font-weight:800;letter-spacing:.07em;
+    padding:1px 5px;border-radius:6px}
+  .node .repo.aic{background:var(--aic-bg);color:var(--aic-fg);border:1px solid var(--aic-border)}
+  .node .repo.dyn{background:var(--dynb-bg);color:var(--dynb-fg);border:1px solid var(--dynb-border)}
+  .node .badge{position:static;font-size:9px;letter-spacing:.06em;
+    padding:1px 6px;border-radius:9px;text-transform:uppercase;font-weight:700}
+  .node .badge.q{background:var(--badgeq-bg);color:var(--badgeq-fg);border:1px solid var(--badgeq-border)}
+  .node .badge.future{background:var(--badgef-bg);color:var(--badgef-fg);border:1px solid var(--badgef-border)}
+  .node .badge.tag{background:var(--badget-bg);color:var(--badget-fg);border:1px solid var(--badget-border)}
+  .node.dim{opacity:.16;filter:saturate(.4)}
+  .node.hl{outline:2px solid var(--hl-outline);}
+  .node.sel{outline:2.5px solid var(--accent);box-shadow:0 0 0 4px var(--sel-glow),var(--node-shadow-hover)}
+  .node:focus-visible{outline:3px solid var(--dyn);outline-offset:-1px;box-shadow:0 0 0 4px color-mix(in srgb,var(--dyn) 22%,transparent),var(--node-shadow-hover)}
+
+  path.edge{fill:none;stroke:var(--edge);stroke-width:1.5;opacity:.22;transition:opacity .15s,stroke .15s}
+  path.edge.feedback{stroke:var(--amber);stroke-dasharray:5 4}
+  path.edge.alt{stroke-dasharray:4 4}
+  path.edge.bridge{stroke:var(--accent)}
+  path.edge.control{stroke:var(--dyn);stroke-dasharray:7 4}
+  path.edge.group-link{stroke:#818cf8;stroke-width:1.8;opacity:.65}
+  path.edge.planned{stroke:#a78bfa;stroke-dasharray:2 4}
+  path.edge.active{opacity:.95;stroke-width:2.2}
+  path.edge.faded{opacity:.05}
+  .lbl-band text{fill:var(--band-text);font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}
+  .knob-space-label,.knob-space-line{transition:opacity .15s,filter .15s,stroke-width .15s}
+  .knob-space-label{opacity:.68}
+  .knob-space-line{opacity:.32}
+  .knob-space-label.active{opacity:1;filter:drop-shadow(0 0 5px #818cf8)}
+  .knob-space-line.active{opacity:1;stroke-width:3}
+  .knob-space-label.faded,.knob-space-line.faded{opacity:.08}
+  .band-rect{opacity:.5}
+  .band-rect.band-a{fill:var(--band-a)}
+  .band-rect.band-b{fill:var(--band-b)}
+
+  /* ---- detail ---- */
+  #detail{grid-column:3;background:var(--panel);border-left:1px solid var(--line);overflow-y:auto;padding:0}
+  #detail .pad{padding:18px 18px 40px}
+  #dhead{position:sticky;top:0;background:linear-gradient(180deg,var(--panel),var(--dhead-fade));backdrop-filter:blur(4px);
+    border-bottom:1px solid var(--line);padding:16px 18px}
+  #dhead .dhead-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+  #dhead .lname{font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  #dhead h2{margin:3px 0 0;font-size:18px}
+  #dhead .back-btn{flex:0 0 auto;padding:5px 9px;margin-top:1px}
+  #dhead .pill{display:inline-block;margin:7px 6px 0 0;font-size:10.5px;padding:2px 9px;border-radius:20px;
+    background:var(--pill-bg);border:1px solid var(--line);color:var(--pill-text)}
+  #detail h3{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin:20px 0 7px}
+  #detail p{margin:7px 0;color:var(--detail-text)}
+  #detail code{background:var(--code);border:1px solid var(--code-border);border-radius:5px;padding:1px 6px;font-size:11.5px;
+    color:var(--code-text);font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;word-break:break-word}
+  #detail ul{margin:7px 0;padding-left:18px}#detail li{margin:4px 0;color:var(--detail-text)}
+  #detail .conn{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+  #detail .chip{font-size:11px;padding:3px 9px;border-radius:7px;background:var(--panel2);border:1px solid var(--line);
+    color:var(--chip-text);cursor:pointer}
+  #detail button.chip{font-family:inherit;line-height:1.4}
+  #detail .chip:hover{background:var(--hover-bg);border-color:var(--hover-border)}
+  .qbox{background:var(--qbox-bg);border:1px solid var(--qbox-border);border-left:3px solid var(--amber);border-radius:8px;padding:11px 12px;margin-top:8px}
+  .qbox b{color:var(--amber)}
+  #detail h3.todo-h{color:var(--accent)}
+  #detail .todobox{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:6px 12px 9px;margin-top:6px}
+  #detail ul.todo{list-style:none;margin:6px 0 2px;padding-left:0}
+  #detail ul.todo li{position:relative;padding-left:22px;margin:7px 0;color:var(--detail-text)}
+  #detail ul.todo li::before{content:"";position:absolute;left:1px;top:3px;width:11px;height:11px;border:1.6px solid var(--accent);border-radius:3px;opacity:.9}
+  #detail .todo-empty{margin:4px 0;color:var(--muted);font-size:12px;font-style:italic}
+  .note-map{font-size:11.5px;color:var(--muted)}
+  .note-map b{color:var(--soft)}
+  .note-map-item{display:block;width:100%;margin:7px 0;padding:0;border:0;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
+  .snapshot{margin:12px 0 2px;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);font-size:10.5px;color:var(--muted);line-height:1.45}
+  .snapshot strong{display:block;color:var(--soft);font-size:11px}
+  .snapshot a{white-space:nowrap}
+  .source-ref{margin:3px 0}
+  .source-link{display:inline-block;max-width:100%;text-decoration:none}
+  .source-link code{cursor:pointer;text-decoration:underline;text-decoration-color:color-mix(in srgb,var(--link) 55%,transparent);text-underline-offset:2px}
+  .source-link::after{content:" ↗";font-size:10px;color:var(--link)}
+  .source-link:hover code{border-color:var(--hover-border);background:var(--hover-bg)}
+  a{color:var(--link)}
+
+  @media (max-width:1199px){
+    #app,#app.detail-collapsed{grid-template-columns:248px minmax(0,1fr)}
+    #app.rail-collapsed,#app.rail-collapsed.detail-collapsed{grid-template-columns:0 minmax(0,1fr)}
+    #stage{grid-column:2}
+    #detail{position:fixed;inset:0 0 0 auto;width:360px;z-index:20;box-shadow:-12px 0 34px #0006}
+    #tabRight{position:fixed;right:360px;z-index:25}
+    #app.detail-collapsed #tabRight{right:0}
+  }
+  @media (max-width:759px){
+    :root{--mobile-rail:min(320px,86vw);--mobile-detail:min(360px,92vw)}
+    #app,#app.rail-collapsed,#app.detail-collapsed,#app.rail-collapsed.detail-collapsed{grid-template-columns:minmax(0,1fr)}
+    #stage{grid-column:1}
+    #rail{position:fixed;inset:0 auto 0 0;width:var(--mobile-rail);z-index:20;box-shadow:12px 0 34px #0006}
+    #detail{width:var(--mobile-detail)}
+    #tabLeft{position:fixed;left:var(--mobile-rail);z-index:25}
+    #app.rail-collapsed #tabLeft{left:0}
+    #tabRight{right:var(--mobile-detail)}
+    #app.detail-collapsed #tabRight{right:0}
+    #app:not(.detail-collapsed) #tabLeft{display:none}
+    #app:not(.rail-collapsed) #tabRight{display:none}
+    .hint{font-size:10px;max-width:calc(100% - 32px)}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- LEFT RAIL -->
+  <aside id="rail">
+    <h1><b>AIConfigurator</b> Universe</h1>
+    <div class="tag">AIConfigurator end to end — entry points → perf-modeling core → generated Dynamo deployments · interactive map</div>
+    <div class="snapshot">
+      <strong>Internal architecture snapshot</strong>
+      Reviewed June 30, 2026 · current + planned paths<br />
+      Sources: <a href="https://github.com/ai-dynamo/aiconfigurator/commit/ad0e3e5e31ee3b8ebcc69617f51b1bd5cfdd659a" target="_blank" rel="noopener noreferrer">AIC ad0e3e5</a> ·
+      <a href="https://github.com/ai-dynamo/dynamo/commit/ec45adf2a3f7b719fcba5d5c7c2cf32747b4e030" target="_blank" rel="noopener noreferrer">Dynamo ec45adf</a>
+    </div>
+
+    <div class="rail-sec">Layers</div>
+    <div id="layerToggles"></div>
+
+    <div class="rail-sec">Repositories</div>
+    <div class="legend">
+      <div><span class="sw" style="background:var(--aic-bg);border-color:var(--aic-border)"></span> <b style="color:var(--aic-fg)">AIC</b>&nbsp;— aiconfigurator repo</div>
+      <div><span class="sw" style="background:var(--dynb-bg);border-top:3px solid var(--dyn)"></span> <b style="color:var(--dynb-fg)">DYN</b>&nbsp;— dynamo repo (cyan stripe)</div>
+    </div>
+
+    <div class="rail-sec">Edge legend</div>
+    <div class="legend">
+      <div><span class="sw" style="background:#3a4862"></span> data flow</div>
+      <div><span class="sw" style="background:#76b900"></span> Python wheel → Rust crate</div>
+      <div><span class="sw" style="background:#22d3ee"></span> Dynamo control (planned DGDR v2 → Sweeper V2)</div>
+      <div><span class="sw" style="background:#818cf8"></span> component → grouped knobs / models</div>
+      <div><span class="sw dash"></span> alt path</div>
+      <div><span class="sw" style="background:transparent;border:1.5px dashed #a78bfa"></span> planned path / component</div>
+      <div><span class="sw q" style="border-color:#fbbf24;border-style:dashed"></span> feedback loop (benchmarks → DB)</div>
+      <div><span class="sw q"></span> open design question</div>
+    </div>
+
+    <div class="rail-sec">Open design questions</div>
+    <div id="questions"></div>
+
+    <div class="rail-sec">Your notes → map</div>
+    <div class="note-map" id="noteMap"></div>
+  </aside>
+
+  <!-- CENTER STAGE -->
+  <main id="stage">
+    <div class="toolbar">
+      <a class="btn" href="../" title="Back to AIConfigurator docs" style="text-decoration:none">← AIConfigurator</a>
+      <button class="btn" id="btnTheme" title="Toggle light / dark theme">🌙 Dark</button>
+      <select class="btn zoom-select" id="zoomSelect" aria-label="Zoom scale" title="Fit graph or select a zoom scale">
+        <option value="fit">Fit</option>
+        <option value="current" id="zoomCurrent" hidden disabled></option>
+      </select>
+      <button class="btn" id="btnReset">Reset</button>
+    </div>
+    <button class="edge-tab" id="tabLeft" title="Hide left panel" aria-controls="rail">‹</button>
+    <button class="edge-tab" id="tabRight" title="Hide right panel" aria-controls="detail">›</button>
+    <svg id="svg" role="group" aria-label="Interactive AIConfigurator architecture graph">
+      <title>AIConfigurator Universe architecture graph</title>
+      <desc>Eleven layers connect consumers, search spaces, Dynamo simulation, AIC performance models, collectors, inputs, and automation infrastructure.</desc>
+      <g id="viewport"></g>
+    </svg>
+    <div class="hint">drag to pan · use the zoom menu or scroll · click a box for details · hover/focus to trace connections</div>
+  </main>
+
+  <!-- RIGHT DETAIL -->
+  <aside id="detail" aria-live="polite">
+    <div id="dhead"><div class="lname">Overview</div><h2>How AIConfigurator works</h2>
+      <span class="pill">click any node to inspect</span><span class="pill">TODOs on every tile</span></div>
+    <div class="pad" id="dbody"></div>
+  </aside>
+</div>
+
+<script>
+/* ============================ MODEL ============================ */
+const LAYERS = [
+  {name:'Consumers · Entry Points', color:'#76b900'},
+  {name:'Sweepers · Orchestration', color:'#4cc9f0'},
+  {name:'Search Space', color:'#818cf8'},
+  {name:'Deployment Simulation · Dynamo + AIC', color:'#38bdf8'},
+  {name:'AIC Core · Python Wheel + Rust Crate', color:'#c77dff'},
+  {name:'Perf Model Variants · 4 Op Modes / Layerwise / FPM / FPM-tuned', color:'#ff9e64'},
+  {name:'Op Collector Solution · Model / Operations / PerfDatabase', color:'#2dd4bf'},
+  {name:'Op Data Points', color:'#14b8a6'},
+  {name:'Op Collectors', color:'#fbbf24'},
+  {name:'Collection Inputs · GPUs / LLMs / Frameworks / Versions', color:'#60a5fa'},
+  {name:'Infrastructure · Automated Collection / Healing / Fidelity', color:'#fb7185'},
+];
+
+// repo:'aic'|'dyn'  ·  flag:'q'(open question)|'future'(planned) · tag:status badge
+const NODES = [
+  // ---- L0 Consumers ----
+  {id:'cli', l:0, repo:'aic', flag:'future', label:'CLI V2', sub:'planned · aiconfigurator cli · recommend · simulate',
+   det:{file:['src/aiconfigurator/main.py','src/aiconfigurator/cli/main.py'],
+     desc:'The planned <b>CLI V2</b> entry point — <code>aiconfigurator cli</code>. <b>recommend</b> will return the best deployment configs and <b>Pareto curves</b> (throughput vs latency) for a specific <b>SLA, traffic, model, and GPU</b>; most other config options will be customizable through a single <b>YAML</b> file. <b>simulate</b> will instead take a supplied config and generate simulated performance results for that exact config — no sweep.',
+     sym:['<code>recommend</code> — best configs + Pareto for your SLA · traffic · model · GPU','<code>simulate</code> — one user-given config → simulated results (no sweep)','<code>--backend</code> trtllm | vllm | sglang','<code>--deployment-target</code> dynamo-j2 | dynamo-python | llm-d']}},
+  {id:'dgdr', l:0, repo:'dyn', flag:'future', label:'DGDR v2  ·  <span class="nano">DynamoGraphDeploymentRequest</span>', sub:'planned · model + HW + SLA → zero-config YAML',
+   det:{file:['dynamo: deploy/operator/api/v1beta1/dynamographdeploymentrequest_types.go','dynamo: components/src/dynamo/profiler/utils/dgdr_v1beta1_types.py'],
+     desc:'The planned <b>DGDR v2</b> Kubernetes CRD is the zero-config “Kubelet interface.” A user will declare <b>model + hardware + SLA</b> in one YAML; the <b>Dynamo operator</b> will reconcile it, run <b>Sweeper V2 (Spica)</b>, let the <b>Planner</b> optimize topology, and materialize a <b>DGD</b>. No hand-running CLI V2.',
+     sym:['CRD <code>nvidia.com/DynamoGraphDeploymentRequest</code>','<code>DGDR_NAME / _NAMESPACE / _UID</code> → ownerReference auto-cleanup','docs: <code>kubernetes-deployment/.../dgdr-reference</code>']}},
+
+  // ---- L1 Sweepers · Orchestration  ·  4 parallel sub-sections: Sweepers · Optimizers · Pareto · Config Generator ----
+  // ---- L1 components · Sweeper V2 (Spica) ----
+  {id:'profiler', l:1, repo:'dyn', label:'Sweeper V2 (Spica)', sub:'dynamo knobs + engine knobs · full deployment · → Dynamo + Engine Knob Space',
+   det:{file:['aiconfigurator: spica/src/spica/search.py','aiconfigurator: spica/src/spica/search_space.py','aiconfigurator: spica/src/spica/__main__.py'],
+     desc:'The <b>full-deployment</b> sweeper. It sweeps the whole <b>Dynamo Knob Space</b> — router mode &amp; KV-score, planner scaling policy + load predictor, KV-tier, replicas — <b>and</b> the engine knobs of the <b>Engine Knob Space</b>. It uses the <b>Vizier</b> optimizer to propose candidates and evaluates them through AIC’s modeling core; branches by <code>deployment_mode</code> (agg/disagg) and ranks by goal (throughput / e2e_latency / goodput / goodput_per_gpu).',
+     sym:['<code>run_smart_search(SmartSearchConfig) → list[Candidate]</code>','sweeps Dynamo knobs <b>+</b> engine knobs','one YAML: <code>python -m dynamo.profiler.v2 --config smart_sweep.yaml</code>'],
+     q:'<b>“Full Dynamo knob sweep instead of just the engine sweep.”</b> (Dynamo&nbsp;#9410). <b>Sweeper V2 (Spica)</b> replaces the AIC sweeper/picker role; <b>AIC stays the lower-level provider</b> (backend support, legal parallelism, perf-model data, memory/capacity). Dynamo injects into AIC — AIC never imports Dynamo.'}},
+  // ---- L1 components · Vizier optimizer ----
+  {id:'vizier', l:1, repo:'dyn', label:'Vizier', sub:'Bayesian candidate suggester · guides Sweeper V2 (Spica)',
+   det:{file:['aiconfigurator: spica/src/spica/sampler.py','aiconfigurator: spica/src/spica/search.py'],
+     desc:'The smart-search optimizer. Each round it suggests candidate knob assignments; the decoded candidates are scored through AIC’s modeling core and the scores guide the next suggestions — far fewer evaluations than a full grid. Drives <b>Sweeper V2 (Spica)</b>; runs one flat study per branch (agg/disagg).',
+     sym:['<code>VizierBranchSampler</code>','<code>suggest()</code> · <code>observe()</code> · <code>observe_infeasible()</code>','<code>make_branch_sampler()</code> · GP-bandit default / random-search option']}},
+  // ---- L2 Search Space · two explicit groups: Dynamo Knob Space (DYN) + Engine Knob Space (AIC) ----
+  // -- Dynamo Knob Space --
+  {id:'knob_router', l:2, repo:'dyn', label:'Router', sub:'mode · overlap-score · prefill-load · cache-hit · temperature',
+   det:{file:['aiconfigurator: spica/src/spica/config.py','aiconfigurator: spica/src/spica/search_space.py'],
+     desc:'Router knobs of the <b>Dynamo Knob Space</b> — how requests are routed across workers. Searched by <b>Sweeper V2 (Spica)</b>.',
+     sym:['<code>router_mode</code>','<code>overlap_score_credit</code>','<code>prefill_load_scale</code>','cache-hit weights','<code>router_temperature</code>']}},
+  {id:'knob_planner', l:2, repo:'dyn', label:'Planner', sub:'scaling policy · fpm-sampling · load-sensitivity · load predictor',
+   det:{file:['aiconfigurator: spica/src/spica/config.py','aiconfigurator: spica/src/spica/load_predictor_sweep.py'],
+     desc:'Planner knobs of the <b>Dynamo Knob Space</b> — SLA-driven scaling policy plus the load predictor that drives runtime autoscaling.',
+     sym:['<code>planner_scaling_policy</code>','<code>fpm_sampling</code>','<code>load_sensitivity</code>','load predictor (separate deterministic grid)']}},
+  {id:'knob_kvtier', l:2, repo:'dyn', flag:'future', label:'KV Tier / Offload', sub:'G1 device · G2 host · G3 disk/shared · pinned today → sweepable',
+   det:{file:['aiconfigurator: spica/src/spica/config.py','aiconfigurator: spica/docs/search-space.md','dynamo: lib/kvbm-engine/'],
+     desc:'Storage-plane knobs of the <b>Dynamo Knob Space</b>: device, host, disk, and shared KV tiers plus their capacity and transfer policy. Spica accepts KVBM tier/offload settings as pinned inputs today; sweeping them is planned. <b>Dynamo KVBM / KV Transfer</b> owns their simulation.',
+     sym:['tiers: G1 device · G2 host · G3 disk/shared','offload · onboard · transfer bandwidth','KVBM / NIXL']}},
+  {id:'knob_replicas', l:2, repo:'dyn', label:'Replica Topology', sub:'agg replicas · prefill/decode pools · static fleet or Planner scaling',
+   det:{file:['aiconfigurator: spica/src/spica/parallel_enum.py','aiconfigurator: spica/src/spica/deploy.py','dynamo: lib/mocker/src/replay/offline/'],
+     desc:'The worker-pool shape of each deployment candidate. Aggregated mode has one replica pool; disaggregated mode has separate prefill and decode pools. Spica searches the initial counts, the <b>Mocker Replay Runtime</b> executes that topology, and the <b>Dynamo Planner</b> may change the counts during planner-in-the-loop simulation.',
+     sym:['agg: <code>replicas</code>','disagg: <code>prefill_replicas</code> + <code>decode_replicas</code>','static fleet vs Planner scale decisions']}},
+  // -- Engine Knob Space --
+  {id:'knob_serving', l:2, repo:'aic', label:'Serving Mode', sub:'agg (IFB) vs disagg (prefill/decode split) · both swept → one Pareto',
+   det:{file:['spica/src/spica/search_space.py','spica/src/spica/deploy.py','dynamo: lib/mocker/src/replay/offline/agg.rs','dynamo: lib/mocker/src/replay/offline/disagg.rs','src/aiconfigurator/sdk/sweep.py'],
+     desc:'The top-level topology branch. Spica builds one search branch per <code>deployment_mode</code>, then creates either one aggregated replica pool or separate prefill/decode pools. <b>Dynamo Mocker Replay</b> executes the request-level behavior through <code>AggRuntime</code> or <code>DisaggRuntime</code>. Separately, the standalone AIC SDK provides analytical <code>sweep_agg()</code>/<code>sweep_disagg()</code>; its disagg path rate-matches worker throughput without simulating queues or handoff. AFD is a separate, orthogonal split.',
+     sym:['Spica <code>DeploymentPlan</code>','Mocker <code>AggRuntime</code> · <code>DisaggRuntime</code>','standalone AIC <code>sweep_agg()</code> · <code>sweep_disagg()</code>']}},
+  {id:'knob_parallel', l:2, repo:'aic', label:'Parallelism', sub:'{tp · pp · dp · moe_tp · moe_ep} · legal shapes (pruned)',
+   det:{file:['src/aiconfigurator/sdk/sweep.py','src/aiconfigurator/sdk/utils.py'],
+     desc:'The parallelism dimensions of the <b>Engine Knob Space</b>: {tp, pp, dp, moe_tp, moe_ep}, pruned by GPU-count feasibility, weight-fits-in-memory, and MoE <code>tp·dp = moe_tp·moe_ep</code>. Enumerated by <code>enumerate_parallel_config()</code> and searched by <b>Sweeper V2 (Spica)</b> as the engine slice of its space.',
+     sym:['<code>enumerate_parallel_config()</code>','tp · pp · dp','moe_tp · moe_ep (WideEP)'],
+     q:'<b>The engine-knob half of the search.</b> The headline change (Dynamo&nbsp;#9410): <b>Sweeper V2 (Spica)</b> generalizes from this engine grid to the <b>full Dynamo Knob Space</b> — see <b>Sweeper V2 (Spica)</b> and the Dynamo Knob Space group.'}},
+  {id:'knob_precision', l:2, repo:'aic', flag:'future', label:'Precision / Quant', sub:'kv · fmha · comm (+ weight/moe) dtype · fixed today → sweepable',
+   det:{file:['src/aiconfigurator/sdk/config.py','src/aiconfigurator/sdk/common.py'],
+     desc:'Precision / quantization knobs. <code>ModelConfig</code> carries five modes — <code>gemm/moe/kvcache/fmha/comm_quant_mode</code>. The runtime-tunable ones (KV-cache, FMHA, comm dtype) are independent of the checkpoint and swing memory + compute hard — e.g. FP8 vs BF16 KV cache ~doubles batch capacity. <b>Today auto-inferred from the checkpoint; not yet enumerated by the sweep.</b>',
+     sym:['<code>KVCacheQuantMode</code> · <code>FMHAQuantMode</code> · <code>CommQuantMode</code>','<code>GEMMQuantMode</code> · <code>MoEQuantMode</code>','FP8 · NVFP4 · INT8 · BF16']}},
+  {id:'knob_spec', l:2, repo:'aic', flag:'future', label:'Speculative Decoding · MTP', sub:'nextn draft depth × accept rates · default-set today → sweepable',
+   det:{file:['dynamo: lib/mocker/src/common/speculative.rs','dynamo: lib/mocker/src/scheduler/vllm/core.rs','dynamo: lib/mocker/src/scheduler/sglang/decode.rs','src/aiconfigurator/sdk/config.py'],
+     desc:'A shared scheduler/timing knob. Mocker owns speculative-token reservation, acceptance sampling, and visible output-token lifecycle; AIC’s ForwardPassPerfModel times the resulting decode forward pass with <code>nextn</code> encoded in its engine config. Spica does not yet sweep draft depth and acceptance rates broadly.',
+     sym:['<code>aic_nextn</code> (1..5 draft tokens)','<code>SpeculativeDecodeSampler</code>','conditional accept rates','Mocker lifecycle + AIC pass timing']}},
+  {id:'knob_afd', l:2, repo:'aic', flag:'future', label:'AFD  ·  <span class="nano">Attention-FFN Disagg</span>', sub:'A-pool / F-pool split · estimate-mode only today → sweepable',
+   det:{file:['src/aiconfigurator/sdk/afd_partition.py','src/aiconfigurator/sdk/operations/afd_transfer.py'],
+     desc:'Attention-FFN Disaggregation — attention on <b>A-workers</b>, FFN/MoE on <b>F-workers</b>, separated by a cross-pool link. <b>Orthogonal to prefill/decode disagg</b> (<code>afd_phase</code> ∈ prefill/decode/both). Today exposed only as a single-config <b>estimate mode</b> (<code>cli estimate --estimate-mode afd</code>) with the A/F topology fixed by the user; <b>not yet swept</b>.',
+     sym:['<code>AFDOpsPartition</code> (attn / ffn split)','<code>AFDTransfer</code> op (cross-pool comm)','topology: <code>n_a</code> / <code>n_f</code> nodes · <code>tp_a</code> · <code>f_moe_ep</code>']}},
+  {id:'knob_kernels', l:2, repo:'aic', flag:'future', label:'Kernels / CUDA graph', sub:'capture sizes · keep/no-reload · multi-kernel · not yet swept',
+   det:{file:['rust/aiconfigurator-core/src/fpm/model.rs','src/aiconfigurator/systems/data/'],
+     desc:'Kernel-level knobs — CUDA-graph capture sizes, capture-once/replay (“keep / no-reload”), and multi-kernel op fusion. Perf rows are tagged <code>used_cuda_graph</code>; faithfully modeling capture/replay + multi-kernel ops is an open accuracy item (see <b>ForwardPassPerfModel</b>). <b>Not yet a swept dimension.</b>',
+     sym:['cuda-graph capture sizes','<code>used_cuda_graph</code> perf-row tag','keep / no-reload · multi-kernel']}},
+  // -- Scheduler Knobs (engine scheduler sub-space) --
+  {id:'knob_batch', l:2, repo:'aic', label:'Batch / Tokens', sub:'batch schedule × max-num-tokens · per-iteration token budget',
+   det:{file:['dynamo: lib/mocker/src/common/protocols.rs','dynamo: lib/mocker/src/scheduler/vllm/core.rs','dynamo: lib/mocker/src/scheduler/sglang/'],
+     desc:'The Mocker scheduler’s hard admission and per-iteration budgets: <code>max_num_seqs</code> and <code>max_num_batched_tokens</code>. They determine which queued requests become the next prefill/decode/mixed pass; AIC times the pass after Mocker has chosen its exact scheduled workload.',
+     sym:['<code>max_num_seqs</code>','<code>max_num_batched_tokens</code>','scheduled prefill/decode workload → FPM']}},
+  {id:'knob_chunked', l:2, repo:'aic', flag:'future', label:'Chunked Prefill', sub:'on/off + chunk size · reshapes ctx-token schedule · fixed today',
+   det:{file:['dynamo: lib/mocker/src/common/protocols.rs','dynamo: lib/mocker/src/scheduler/vllm/core.rs','dynamo: lib/mocker/src/scheduler/sglang/'],
+     desc:'Controls whether a long prompt is admitted as one prefill or split across scheduler iterations. Mocker owns the chunking and queue progression; its token budget determines each chunk passed to AIC for timing. Present as a fixed engine argument today rather than a broadly searched Spica dimension.',
+     sym:['<code>enable_chunked_prefill</code>','scheduler token budget','one chunk → one or more timed passes']}},
+  {id:'knob_kvcap', l:2, repo:'aic', flag:'future', label:'KV-cache Capacity', sub:'free-mem frac · max_seq_len · block paging · bounds concurrency',
+   det:{file:['dynamo: lib/mocker/src/common/protocols.rs','dynamo: lib/mocker/src/scheduler/vllm/','dynamo: lib/mocker/src/scheduler/sglang/'],
+     desc:'Engine-local KV capacity: block count, block/page size, model length, and memory-utilization-derived limits. Mocker’s block manager enforces allocation, reuse, eviction/preemption, and admission against that capacity. This is distinct from multi-tier KVBM offload.',
+     sym:['<code>num_gpu_blocks</code> · <code>block_size</code>','<code>max_model_len</code>','prefix-cache reuse','local allocation / preemption']}},
+  {id:'knob_sched', l:2, repo:'aic', flag:'future', label:'Overlap / Policy', sub:'overlap scheduler · guaranteed-no-evict vs max-util · backend-fixed today',
+   det:{file:['dynamo: lib/mocker/src/scheduler/vllm/','dynamo: lib/mocker/src/scheduler/sglang/','dynamo: lib/mocker/src/common/protocols.rs'],
+     desc:'Backend-specific scheduling and capacity policy: request ordering, overlap, preemption/recompute, and guaranteed-no-evict versus utilization-oriented admission. Mocker owns these runtime decisions; most remain backend defaults rather than searched Spica knobs.',
+     sym:['waiting/running queues','preemption · recompute · retraction','guaranteed-no-evict vs utilization','backend scheduling policy']}},
+  // ---- L1 components · Pareto Analysis ----
+  {id:'pareto', l:1, repo:'aic', label:'Pareto Analysis', sub:'pareto_analysis.py · throughput vs latency frontier',
+   det:{file:['src/aiconfigurator/sdk/pareto_analysis.py'],
+     desc:'Reduces the feasible candidate set to the throughput/latency Pareto frontier that the planned CLI V2 will surface and that the Config Generator selects from.'}},
+  // ---- L1 components · Config Generator ----
+  {id:'configgen', l:1, repo:'aic', label:'Config Generator', sub:'select winning config (picking) → deployment-artifact handoff',
+   det:{file:['src/aiconfigurator/sdk/picking.py','src/aiconfigurator/generator/module_bridge.py','src/aiconfigurator/generator/api.py'],
+     desc:'The config-generation handoff. It <b>selects</b> the winning config — max throughput under SLA (default), min-GPU load-match, or independent prefill/decode autoscale (the old <code>picking</code> step) — then converts it through the <b>Module Bridge / Aggregators</b> into the generator’s unified parameters. The downstream artifact-rendering implementation is intentionally not expanded as a graph layer.',
+     sym:['<code>pick_default / pick_load_match / pick_autoscale</code>','<code>task_config_to_generator_config()</code>','handoff to <code>generate_backend_artifacts()</code>']}},
+
+  // ---- L3 Deployment Simulation · ownership-specific components ----
+  // Dynamo Replay owns topology + request lifecycle; component models plug into it; AIC supplies per-pass timing.
+  {id:'m_planner', l:3, repo:'dyn', label:'Dynamo Planner', sub:'SLA/load-driven scaling · agg or prefill/decode pool counts',
+   det:{file:['dynamo: components/src/dynamo/planner/','dynamo: lib/mocker/src/replay/offline/planner_hook.rs','dynamo: lib/mocker/src/replay/planner_handle.rs'],
+     desc:'Owns Planner policy evaluation and <b>dynamic replica decisions</b>. During planner-in-the-loop replay, the Mocker runtime emits periodic Planner ticks with traffic and forward-pass metrics; the Planner returns scale decisions for the aggregated pool or the separate prefill/decode pools. Replay applies those decisions to the simulated topology.',
+     sym:['<code>PlannerHook</code> · recurring <code>PlannerTick</code>','throughput scaling · load scaling · SLA targets','scale aggregated / prefill / decode pools']}},
+  {id:'m_router', l:3, repo:'dyn', label:'Dynamo KV Router', sub:'KV-overlap + prefill-load placement · queue admission · GPU-free',
+   det:{file:['dynamo: lib/llm/src/kv_router/','dynamo: lib/mocker/src/replay/offline/components/router.rs'],
+     desc:'Owns the <b>Router knob space</b>: worker selection and queue admission from KV-cache overlap, prefill load, active blocks, and configured scoring weights. Offline replay uses a synchronous in-process router and indexer so the same routing decisions run on the simulator’s logical clock.',
+     sym:['<code>OfflineReplayRouter</code>','<code>CacheHitEstimates</code> · <code>PrefillLoadEstimator</code>','round-robin vs KV-aware routing','router pending queue']}},
+  {id:'m_kvbm', l:3, repo:'dyn', label:'Dynamo KVBM · KV Transfer', sub:'G1/G2/G3 capacity · offload/onboard · prefill→decode transfer',
+   det:{file:['dynamo: lib/kvbm-engine/','dynamo: lib/mocker/src/kv_manager/','dynamo: lib/mocker/src/replay/offline/disagg.rs'],
+     desc:'Owns the <b>KV tier / offload</b> behavior: allocation, eviction, G1↔G2↔G3 movement, and bandwidth/capacity effects. In disaggregated replay, coordinated transfer and handoff events move request ownership and KV state from a prefill worker to a decode worker on the same logical timeline.',
+     sym:['G1 device · G2 host · G3 disk/shared','offload · onboard · transfer completion','<code>HandoffFact</code> / <code>TransferComplete</code>','<code>KvCacheEvent</code>']}},
+  {id:'m_sched', l:3, repo:'dyn', label:'Dynamo Mocker Replay Runtime', sub:'AggRuntime + DisaggRuntime · scheduler cores · logical event clock',
+   det:{file:['dynamo: lib/mocker/src/replay/offline/agg.rs','dynamo: lib/mocker/src/replay/offline/disagg.rs','dynamo: lib/mocker/src/scheduler/vllm/core.rs','dynamo: lib/mocker/src/scheduler/sglang/'],
+     desc:'The component that owns the <b>runtime semantics</b> of aggregated and disaggregated serving. <code>AggRuntime</code> drives one pool of mixed prefill/decode workers; <code>DisaggRuntime</code> drives separate prefill and decode pools, routing and P→D handoff. The Mocker scheduler cores model batching, chunked prefill, preemption, local KV blocks, and request lifecycle on a deterministic event clock.',
+     sym:['<code>AggRuntime</code> · <code>DisaggRuntime</code>','<code>WorkerType</code>: aggregated · prefill · decode','<code>VllmCore::execute_pass()</code> · <code>SglangCore::execute_pass()</code>','<code>python -m dynamo.replay</code>']}},
+  {id:'m_estlat', l:3, repo:'aic', label:'AIC ForwardPassPerfModel', sub:'mixed agg or prefill/decode scheduled pass → latency',
+   det:{file:['dynamo: lib/mocker/src/common/engine_perf.rs','aiconfigurator: rust/aiconfigurator-core/src/fpm/model.rs','aiconfigurator: src/aiconfigurator/sdk/rust_engine_step.py'],
+     desc:'AIC’s <b>per-forward-pass timing model</b>. Mocker supplies the exact scheduled workload: mixed prefill+decode fields for an aggregated pass, prefill-only fields for a prefill worker, or decode-only fields for a decode worker. It predicts duration from the AIC modeling core and measured perf data; it does <b>not</b> own queues, routing, replica pools, KV allocation, or P→D handoff.',
+     sym:['<code>EnginePerfModel</code> → <code>ForwardPassPerfModel</code>','<code>estimate_forward_pass_time()</code>','mixed · prefill · decode FPM workload kinds','native AIC model with regression fallback']}},
+
+  // ---- L4 AIC Core · two distribution surfaces over one native implementation ----
+  {id:'core_wheel', l:4, repo:'aic', label:'aiconfigurator-core · Python Wheel', sub:'EngineConfig · ForwardPassMetrics · RustForwardPassPerfModel estimator',
+   det:{file:['src/aiconfigurator-core/pyproject.toml','src/aiconfigurator_core/__init__.py','rust/aiconfigurator-core/src/py.rs'],
+     desc:'The Maturin-built <b>Python distribution surface</b> over the same Rust core. Python imports <code>aiconfigurator_core</code>, supplies <code>EngineConfig</code> and per-iteration <code>ForwardPassMetrics</code>, then calls <code>RustForwardPassPerfModel</code> for forward-pass latency. It exposes the four op-based database modes (SILICON, HYBRID, EMPIRICAL, SOL), pure-FPM regression, and FPM-calibrated native strategy; the layerwise strategy below is planned. The wheel also bundles the Python SDK, system data, and model configs.',
+     sym:['distribution <code>aiconfigurator-core</code> · import <code>aiconfigurator_core</code>','<code>AicEngine</code>','<code>RustForwardPassPerfModel</code>','Maturin abi3 wheel']}},
+
+  {id:'core_crate', l:4, repo:'aic', label:'aiconfigurator-core · Rust Crate', sub:'EngineConfig · ForwardPassMetrics · ForwardPassPerfModel estimator',
+   det:{file:['rust/aiconfigurator-core/Cargo.toml','rust/aiconfigurator-core/src/lib.rs','rust/aiconfigurator-core/src/config.rs','rust/aiconfigurator-core/src/fpm/metrics.rs','rust/aiconfigurator-core/src/fpm/model.rs'],
+     desc:'The native <b>Rust implementation surface</b> built as both <code>rlib</code> and <code>cdylib</code>. <code>EngineConfig</code> fixes the engine identity, <code>ForwardPassMetrics</code> describes one scheduled iteration, and <code>ForwardPassPerfModel</code> estimates its latency. Today the Rust engine-step op path is wired to SILICON; HYBRID, EMPIRICAL, and SOL remain schema-preserving enum variants in Rust while their working implementations live in the bundled Python SDK. The crate also implements native + FPM correction and pure-FPM regression; the layerwise strategy is planned.',
+     sym:['<code>aiconfigurator_core::EngineConfig</code>','<code>aiconfigurator_core::ForwardPassMetrics</code>','<code>aiconfigurator_core::ForwardPassPerfModel</code>','<code>estimate_forward_pass_time_ms()</code>']}},
+
+  // ---- L5 Forward-pass performance model strategies ----
+  {id:'pm_ops', l:5, repo:'aic', tag:'default', label:'Op Silicon Mode', sub:'silicon tables · analytical-only ops · shared-layer reuse',
+   det:{file:['src/aiconfigurator/sdk/common.py','src/aiconfigurator/sdk/perf_database.py','src/aiconfigurator/sdk/engine.py','rust/aiconfigurator-core/src/engine/runtime.rs'],
+     desc:'The default op-based mode: <code>DatabaseMode.SILICON</code>. <code>EngineConfig</code> compiles the HF model into context and generation operation lists; the scheduled FPM selects the prefill, decode, or mixed composition. Operations use measured silicon/shared-layer rows where a table exists, while analytical-only operations such as raw memory and P2P retain their formula path. The engine then sums the critical-path latency. Missing required silicon data remains an explicit error—there is no blanket empirical fallback.',
+     sym:['<code>DatabaseMode.SILICON</code> (default)','silicon-table ops: measured data + interpolation','analytical-only memory / P2P formula paths','missing required silicon data → explicit failure']}},
+
+  {id:'pm_op_hybrid', l:5, repo:'aic', label:'Op Hybrid Mode', sub:'silicon rows when available · empirical fallback for coverage gaps',
+   det:{file:['src/aiconfigurator/sdk/common.py','src/aiconfigurator/sdk/perf_database.py','src/aiconfigurator/sdk/operations/base.py','src/aiconfigurator/cli/main.py'],
+     desc:'The coverage-extending op mode: <code>DatabaseMode.HYBRID</code>. It uses the same op graph and measured silicon/shared-layer rows as SILICON, then falls back to the SOL-anchored empirical estimate whenever the silicon query raises. This is the recommended op mode for frontier or newly released models whose measured database coverage is incomplete; the current broad exception catch should be narrowed so unexpected query failures are not mistaken for coverage gaps.',
+     sym:['<code>DatabaseMode.HYBRID</code>','silicon first → empirical fallback on query exception','shared-layer reuse enabled','recommended for frontier / new models']}},
+
+  {id:'pm_op_empirical', l:5, repo:'aic', label:'Op Empirical Mode', sub:'formula-only · SOL + empirical utilization factor',
+   det:{file:['src/aiconfigurator/sdk/common.py','src/aiconfigurator/sdk/perf_database.py','src/aiconfigurator/sdk/operations/'],
+     desc:'The formula-only op mode: <code>DatabaseMode.EMPIRICAL</code>. Most operations are estimated from their speed-of-light compute or bandwidth bound plus an empirical utilization factor; operations without an empirical model may remain SOL-derived. It does not consume silicon rows or shared-layer file reuse. The model and operation graph remain the same, but the per-op latency source is synthetic.',
+     sym:['<code>DatabaseMode.EMPIRICAL</code>','SOL bound + empirical correction where modeled','no silicon-row lookup','per-op source: <code>empirical</code> or <code>sol</code>']}},
+
+  {id:'pm_op_sol', l:5, repo:'aic', label:'Op SOL Mode', sub:'formula-only · theoretical compute / bandwidth lower bound',
+   det:{file:['src/aiconfigurator/sdk/common.py','src/aiconfigurator/sdk/perf_database.py','src/aiconfigurator/sdk/operations/'],
+     desc:'The theoretical op mode: <code>DatabaseMode.SOL</code>. Each operation returns its speed-of-light compute or memory/communication time without silicon measurements or an empirical utilization factor. It is useful as a lower-bound diagnostic; <code>SOL_FULL</code> exposes additional SOL details but is intentionally excluded from the normal CLI mode list.',
+     sym:['<code>DatabaseMode.SOL</code>','theoretical compute / bandwidth bound','no silicon or empirical correction','<code>SOL_FULL</code> = diagnostic detail variant']}},
+
+  {id:'pm_layerwise', l:5, repo:'aic', flag:'future', label:'Layerwise Collector–based Perf Model', sub:'whole-layer framework measurements + comm → pass latency',
+   det:{file:['prototype: origin/simonec/layerwise-moe · collector/layerwise_design.md','aic-layerwise: README.md','aic-layerwise: layerwise_tools/common/parse_nsys_step_sweep.py'],
+     desc:'The <b>planned</b> layer-granularity alternative. Real vLLM, SGLang, and TensorRT-LLM executions are traced with NVTX + CUPTI/Nsight, producing per-step × module/layer GPU time and kernel counts across batch, past-KV, precision, and parallelism. It is intended to capture fusion, CUDA-graph, and framework effects that per-op composition can miss. The collector prototype is substantial, but no stable estimator or main-branch integration exists yet; communication remains separate.',
+     sym:['planned <code>Layerwise</code> operation','planned <code>query_layerwise()</code>','<code>layerwise_perf.csv</code>','NVTX module ranges + CUPTI kernel attribution']}},
+
+  {id:'pm_fpm', l:5, repo:'aic', label:'Pure FPM Data–based Perf Model', sub:'scheduled FPM features + observed wall_time → bucketed regression',
+   det:{file:['rust/aiconfigurator-core/src/fpm/model.rs','rust/aiconfigurator-core/src/fpm/regression.rs','rust/aiconfigurator-core/src/fpm/metrics.rs'],
+     desc:'The implemented <b>FPM-only regression</b> path. It uses no HF config, system spec, op graph, or op database: scheduled FPM fields are the features and positive <code>wall_time</code> observations are the target. Separate prefill, decode, and mixed regressions become available only after their minimum observation count is reached; fitting is currently in-memory.',
+     sym:['<code>ForwardPassPerfModel::from_regression()</code>','<code>tune_with_fpms()</code>','<code>BucketedRegression</code>','source: <code>FallbackRegression</code>']}},
+
+  {id:'pm_fpm_tuned', l:5, repo:'aic', label:'Fine-tuned with FPM Perf Model', sub:'native op estimate + FPM correction buckets · observed/native calibration',
+   det:{file:['rust/aiconfigurator-core/src/fpm/model.rs','rust/aiconfigurator-core/src/fpm/correction.rs','rust/aiconfigurator-core/src/fpm/samples.rs','rust/aiconfigurator-core/src/fpm/options.rs'],
+     desc:'The <b>FPM-calibrated native path</b>. It starts with the op-collector/native AIC estimate, then <code>tune_with_fpms()</code> uses observed FPM iterations to learn local correction factors. Each ready workload region applies the median <code>observed_ms / native_ms</code> ratio, bounded by configured correction limits. This is online performance-model calibration—not LLM weight fine-tuning—and remains analytically grounded in the native op model.',
+     sym:['<code>tune_with_fpms()</code>','<code>CorrectionBuckets</code>','median <code>observed_ms / native_ms</code>','source: <code>AicWithCorrection</code>']}},
+
+  // ---- L6 Current op-collector solution internals ----
+  {id:'op_model', l:6, repo:'aic', label:'Model · EngineSpec', sub:'HF config → model family → context / generation op graph',
+   det:{file:['src/aiconfigurator/sdk/models/','src/aiconfigurator/sdk/engine.py','rust/aiconfigurator-core/src/engine/spec.rs'],
+     desc:'Resolves the Hugging Face architecture through the model registry and builds ordered <code>context_ops</code> and <code>generation_ops</code>. <code>compile_engine()</code> serializes those lists together with <code>EngineConfig</code> into the <code>EngineSpec</code> consumed by the Rust runtime.',
+     sym:['<code>register_model()</code> / <code>get_model()</code>','<code>compile_engine()</code>','<code>EngineSpec</code>','<code>context_ops</code> · <code>generation_ops</code>']}},
+
+  {id:'op_operations', l:6, repo:'aic', label:'Operations', sub:'typed op graph · GEMM / attention / MoE / MLA / comm / state-space',
+   det:{file:['src/aiconfigurator/sdk/operations/','rust/aiconfigurator-core/src/operators/','rust/aiconfigurator-core/src/operators/op.rs'],
+     desc:'The typed nodes of the analytical execution graph. Each operation carries its structural and quantization parameters, derives the runtime query shape, and asks <b>PerfDatabase</b> for latency. <code>Overlap</code> and <code>Fallback</code> compose child operations while the engine sums the critical path.',
+     sym:['<code>Gemm</code> · <code>Attention</code> · <code>Moe</code> · <code>Mla</code>','<code>Communication</code> · <code>Dsa</code> · <code>Mamba</code>','<code>OverlapOp</code> · <code>FallbackOp</code>']}},
+
+  {id:'op_perfdb', l:6, repo:'aic', label:'PerfDatabase', sub:'<GPU>/<framework>/<version> · lazy Parquet tables · interpolation',
+   det:{file:['src/aiconfigurator/sdk/perf_database.py','rust/aiconfigurator-core/src/perf_database/','rust/aiconfigurator-core/src/perf_database/interpolation.rs'],
+     desc:'The op-query engine for one GPU/system, framework, and framework version. It resolves the matching data root, lazily loads each op-family Parquet table on first use, filters by exact categorical fields, and interpolates or extrapolates numeric shape dimensions when an exact measured row is unavailable.',
+     sym:['<code>PerfDatabase</code>','lazy per-op table loading','exact filter → interpolation / extrapolation','SILICON · HYBRID · EMPIRICAL · SOL']}},
+
+  // ---- L7 Measured operation rows ----
+  {id:'op_data_points', l:7, repo:'aic', flag:'q', label:'Op Data Points', sub:'*_perf.parquet · shape + quant + kernel source → latency (+ power)',
+   det:{file:['src/aiconfigurator/systems/data/<gpu>/<framework>/<framework-version>/','collector/registry_types.py','src/aiconfigurator/sdk/common.py'],
+     desc:'Measured operation rows for GEMM, attention, MoE, MLA/DSA, communication/NCCL, state-space, and module-level kernels. Common provenance includes GPU/device, framework, framework version, operation, and <code>kernel_source</code>; op-specific columns hold shape, parallelism, and quantization inputs, with latency and optional power as outputs. Collectors stage CSV and publish curated Parquet files.',
+     sym:['<code>gemm_perf.parquet</code>','<code>context_attention_perf.parquet</code> · <code>generation_attention_perf.parquet</code>','<code>moe_perf.parquet</code> · <code>generation_mla_perf.parquet</code>','<code>nccl_perf.parquet</code> · <code>custom_allreduce_perf.parquet</code>'],
+     q:'<b>Fidelity check.</b> Before trusting an op model, audit whether rows have a named, reproducible <code>kernel_source</code> or rely on a low-fidelity/shared fallback. The same data-point layer carries <code>used_cuda_graph</code>, framework/version, device, and operation provenance.'}},
+
+  // ---- L8 Collector planning + backend runners ----
+  {id:'collector_plan', l:8, repo:'aic', label:'Collector V2 Case Planner', sub:'LLM + GPU/SM + framework → selected operations and concrete cases',
+   det:{file:['collector/model_cases.py','collector/case_generator.py','collector/cases/base_ops/','collector/cases/models/','collector/cases/sm_exceptions/'],
+     desc:'Builds the collection plan. It merges shared base-op cases, model-specific structural cases, and GPU/SM exceptions, then selects the operation subset and concrete benchmark shapes for the requested LLM, GPU, and framework.',
+     sym:['<code>build_collection_case_plan()</code>','base op cases + model cases + SM exceptions','plan-only inspection']}},
+
+  {id:'op_collectors', l:8, repo:'aic', label:'Per-backend Op Collectors', sub:'OpEntry registry → version-routed runner → real kernel benchmark',
+   det:{file:['collector/collect.py','collector/registry_types.py','collector/version_resolver.py','collector/trtllm/registry.py','collector/vllm/registry.py','collector/sglang/registry.py'],
+     desc:'Executes the planned cases on real hardware. Each framework registry maps an operation to its case generator, benchmark runner, canonical output file, and optional version routes. The harness covers framework kernels plus network/NCCL and WideEP collectors, then writes the measured op data points.',
+     sym:['<code>OpEntry</code> · <code>PerfFile</code> · <code>VersionRoute</code>','TRT-LLM · vLLM · SGLang registries','GEMM · attention · MLA · MoE · module ops','network/NCCL · custom all-reduce · WideEP']}},
+
+  // ---- L9 Collection inputs / dimensions ----
+  {id:'collect_gpus', l:9, repo:'aic', label:'GPUs', sub:'system YAML + live device / SM · hardware-specific exclusions',
+   det:{file:['src/aiconfigurator/systems/*.yaml','collector/cases/sm_exceptions/','collector/helper.py'],
+     desc:'The target execution hardware. <code>--gpu</code> resolves the system YAML and SM generation used to plan cases and exclusions; the live device runs the benchmark and is recorded in each output row.',
+     sym:['H100 · H200 · B200 · GB200 · A100 · L40S …','SM-specific exception plan','memory · bandwidth · compute characteristics']}},
+
+  {id:'collect_llms', l:9, repo:'aic', label:'LLMs', sub:'HF model path + architecture · model-specific operation shapes',
+   det:{file:['src/aiconfigurator/model_configs/','collector/cases/models/','collector/model_cases.py'],
+     desc:'The Hugging Face model and architecture select the relevant operation subset and structural case shapes. Model-specific module rows may retain model identity, while generic shape-only operation rows are shared and deduplicated rather than universally partitioned by LLM.',
+     sym:['<code>--model-path</code> · <code>--model-architecture</code>','architecture-specific case YAML','base cases + model extensions']}},
+
+  {id:'collect_frameworks', l:9, repo:'aic', label:'Frameworks', sub:'TensorRT-LLM · vLLM · SGLang · framework-native kernels',
+   det:{file:['collector/framework_manifest.yaml','collector/trtllm/registry.py','collector/vllm/registry.py','collector/sglang/registry.py'],
+     desc:'Selects the backend registry and the real framework implementation to benchmark. The same conceptual operation can have different kernels, launch behavior, CUDA-graph semantics, and supported shapes across frameworks.',
+     sym:['<code>trtllm</code>','<code>vllm</code>','<code>sglang</code>']}},
+
+  {id:'collect_versions', l:9, repo:'aic', label:'Framework Versions', sub:'runtime manifest · compatibility rules · PEP 440 module routing',
+   det:{file:['collector/framework_manifest.yaml','collector/version_resolver.py','collector/registry_types.py'],
+     desc:'The detected runtime version chooses the compatible collector implementation through manifest constraints and <code>VersionRoute</code>. It is recorded in every row and becomes the framework-version directory partition loaded by PerfDatabase.',
+     sym:['<code>VersionRoute(min_version, module)</code>','runtime <code>__compat__</code>','data key: <code>&lt;framework&gt;/&lt;version&gt;</code>']}},
+
+  // ---- L10 Automated infrastructure ----
+  {id:'auto_op_collector', l:10, repo:'aic', tag:'current', label:'Auto Op Collector', sub:'plan → GPU collection → op perf data → quality gates → PR',
+   det:{file:['aic-auto-collector: README.md','aic-auto-collector: data_collection/generate_ci_config.py','aic-auto-collector: data_collection/ci_job.py','aic-auto-collector: data_collection/gpu_node.sh','aic-auto-collector: campaign/README.md'],
+     desc:'Automates op-data campaigns across GPUs, frameworks, framework versions, LLMs, and operation subsets. It plans the job matrix, allocates GPU nodes, runs <code>collector/collect.py</code>, retains checkpoints/artifacts, triages collector failures, and can publish the resulting AIC data changes as a PR.',
+     sym:['dynamic child-job matrix','smoke → sample → full collection','checkpoint / resume · artifact collection','optional automated data PR']}},
+
+  {id:'support_matrix_healer', l:10, repo:'aic', tag:'current', label:'Support Matrix Healer', sub:'non-PASS cells → targeted collect / repair / replay / verify / PR',
+   det:{file:['aic-matrix-healer: src/aic_matrix_healer/temporal/workflows.py','aic-matrix-healer: src/aic_matrix_healer/support_matrix/collection_plan.py','aic-matrix-healer: src/aic_matrix_healer/stages/one_gpu_node/phase_full_collector.py','aic-matrix-healer: src/aic_matrix_healer/stages/one_gpu_node/phase_heal_cells.py'],
+     desc:'The durable coverage and executability repair system. Per-GPU workflows refresh the support matrix, identify non-PASS cells, acquire reusable CPU/GPU resources, run targeted Full Collector and Heal Cells phases, replay the affected rows, verify the delta, and maintain PR state.',
+     sym:['Temporal per-GPU workflows','support-matrix collection plan','Full Collector → Heal Cells → Review Gate','delta replay / verification']}},
+
+  {id:'auto_gap_analysis', l:10, repo:'aic', tag:'fidelity', label:'Auto Gap Analysis', sub:'AIC estimates vs ground-truth silicon → ranked accuracy report',
+   det:{file:['revati-poc: revati/gap_analysis.py','revati-poc: revati/shim/run_gap_analysis.py','aiconfigurator: ntech_2026/archive_2page_pdf/abstract_draft.md'],
+     desc:'The prediction-fidelity pipeline, distinct from support-matrix coverage healing. It runs AIC/emulator predictions and compares them with AIPerf or other silicon measurements across models and workloads, then reports throughput, TTFT, TPOT/ITL, and per-GPU accuracy gaps for diagnosis.',
+     sym:['prediction vs silicon','throughput · TTFT · TPOT / ITL','MAPE / ranked gap report','persisted logs, metrics, and benchmark artifacts']}},
+
+  {id:'auto_gap_mitigation', l:10, repo:'aic', tag:'agentic', label:'Auto Gap Mitigation', sub:'diagnose gap → data / collector / model fix → recollect → revalidate',
+   det:{file:['aiconfigurator: ntech_2026/archive_2page_pdf/abstract_draft.md','aic-auto-collector: campaign/server/agent.py','aic-auto-collector: campaign/server/pipeline_monitor.py','revati-poc: README.md'],
+     desc:'The agentic feedback loop that consumes fidelity findings, localizes the likely cause—missing or low-fidelity data, collector behavior, analytical formula, or scheduler/runtime modeling—applies or proposes a targeted repair, then recollects and reruns the gap analysis. The pieces exist across current tooling even though this is not yet one monolithic service.',
+     sym:['gap classification / root-cause evidence','collector + model repair','automatic triage and fix loop','revalidate against silicon']}},
+
+  {id:'auto_fpm_collector', l:10, repo:'aic', flag:'future', label:'Auto FPM Collector', sub:'planned · scheduled ForwardPassMetrics + observed wall_time datasets',
+   det:{file:['aiconfigurator: rust/aiconfigurator-core/src/fpm/metrics.rs','aiconfigurator: rust/aiconfigurator-core/src/fpm/model.rs','dynamo: lib/mocker/src/common/engine_perf.rs'],
+     desc:'A planned automated telemetry collector for the two FPM-trained L5 strategies. It would capture scheduled prefill/decode/mixed <code>ForwardPassMetrics</code> together with positive observed <code>wall_time</code>, preserve GPU/model/framework/version provenance, and publish reusable training/calibration datasets. No production collection pipeline exists yet.',
+     sym:['<code>ForwardPassMetrics</code>','scheduled workload features','target: positive <code>wall_time</code>','feeds pure-FPM regression + native FPM correction']}},
+
+];
+
+const EDGES = [
+  // entry → Sweeper V2 (Spica)
+  ['cli','profiler','planned'],             // planned: CLI V2 → Sweeper V2 (Spica)
+  ['dgdr','profiler','control'],            // planned operator path: DGDR v2 → Sweeper V2 (Spica)
+  // Sweeper V2 (Spica) · Vizier-guided smart loop + AIC evaluation
+  ['profiler','vizier'],['vizier','profiler','feedback'],
+  // pareto → config generator
+  ['pareto','configgen'],                   // frontier → select winning config
+  // L2 knob spaces → their direct L3 owners/evaluators
+  ['knob_planner','m_planner'],['knob_router','m_router'],['knob_kvtier','m_kvbm','alt'],
+  ['knob_replicas','m_sched'],['knob_replicas','m_planner'],
+  ['knob_serving','m_sched'],['knob_batch','m_sched'],['knob_chunked','m_sched','alt'],['knob_sched','m_sched','alt'],
+  ['knob_kvcap','m_sched','alt'],
+  ['knob_parallel','m_estlat'],['knob_precision','m_estlat','alt'],
+  ['knob_spec','m_sched','alt'],['knob_spec','m_estlat','alt'],
+  ['knob_afd','m_estlat','alt'],['knob_kernels','m_estlat','alt'],
+  // L3 composition — Replay calls the component models and AIC timing oracle.
+  ['m_sched','m_estlat'],
+  ['m_sched','m_router','alt'],['m_sched','m_planner','alt'],['m_sched','m_kvbm','alt'],
+  // AIC ForwardPassPerfModel → both aiconfigurator-core distribution surfaces.
+  ['m_estlat','core_wheel'],['m_estlat','core_crate'],
+  // The Python wheel is built from the Rust crate; group-level links expose both L5 families.
+  ['core_wheel','core_crate','bridge'],
+  ['core_crate','pm_ops'],                 // Rust engine-step op path is SILICON-only today.
+  // All four op modes share the L6 op graph; mode-specific behavior resolves in PerfDatabase.
+  ['pm_ops','op_model'],['pm_ops','op_operations'],['pm_ops','op_perfdb'],
+  ['pm_op_hybrid','op_perfdb'],['pm_op_empirical','op_perfdb'],['pm_op_sol','op_perfdb'],
+  // L6 compiled analytical model: model graph → typed operations → op query engine.
+  ['op_model','op_operations'],['op_operations','op_perfdb'],
+  // L7–L9 measured-data provenance: rows → collector runners → collection inputs.
+  ['op_perfdb','op_data_points'],
+  ['op_data_points','op_collectors'],['collector_plan','op_collectors'],
+  ['collector_plan','collect_gpus'],['collector_plan','collect_llms'],
+  ['op_collectors','collect_frameworks'],['op_collectors','collect_versions'],
+  // L10 infrastructure — representative low-clutter anchors into the full collection matrix.
+  ['collect_gpus','auto_op_collector'],['collect_llms','auto_gap_analysis'],
+  ['collect_frameworks','support_matrix_healer'],['collect_versions','support_matrix_healer'],
+  // Coverage-healing path and prediction-fidelity path remain distinct.
+  ['support_matrix_healer','auto_op_collector'],
+  ['auto_gap_analysis','auto_gap_mitigation'],['auto_gap_mitigation','auto_fpm_collector','planned'],
+];
+
+// Group-level links avoid drawing one edge to every member tile.
+const GROUP_EDGES = [
+  ['profiler','space_dyn'],
+  ['profiler','space_sched'],
+  ['profiler','space_engine'],
+  ['core_wheel','models_op'],
+  ['core_wheel','models_fpm'],
+  ['core_crate','models_fpm'],
+];
+
+const QUESTIONS = [
+  {n:'profiler', t:'Sweeper V2 (Spica) — full Dynamo + engine knob sweep', s:'Vizier-guided · replaces engine-only sweep · #9410'},
+  {n:'knob_parallel', t:'Engine Knob Space — the engine-knob slice', s:'serving · parallelism · scheduler · precision · spec · AFD · kernels · #9410'},
+  {n:'op_data_points', t:'Fidelity check — high vs low fidelity op data', s:'audit provenance before trusting a sweep'},
+];
+
+const NOTE_MAP = [
+  ['CLI V2 (planned · default · exp · smart)', 'cli'],
+  ['Kubelet interface (planned DGDR v2)', 'dgdr'],
+  ['Sweeper V2 (Spica) · full knob sweep · #9410', 'profiler'],
+  ['Full Dynamo knob sweep vs engine sweep', 'knob_router','knob_parallel'],
+  ['Vizier optimizer · smart sweep', 'vizier'],
+  ['Config Generator · pick → bridge → generate', 'configgen'],
+  ['Deployment simulation · Mocker Replay (agg + disagg)', 'm_sched'],
+  ['Planner · KV Router · KVBM / KV Transfer', 'm_planner','m_router','m_kvbm'],
+  ['AIC ForwardPassPerfModel · per-pass timing', 'm_estlat'],
+  ['aiconfigurator-core Python wheel', 'core_wheel'],
+  ['aiconfigurator-core Rust crate', 'core_crate'],
+  ['EngineConfig · ForwardPassMetrics · ForwardPassPerfModel', 'core_wheel','core_crate'],
+  ['7 L5 variants · 4 op modes · layerwise · pure FPM · FPM-tuned', 'pm_ops','pm_op_hybrid','pm_op_empirical','pm_op_sol','pm_layerwise','pm_fpm','pm_fpm_tuned'],
+  ['Op model internals · Model → Operations → PerfDatabase', 'op_model','op_operations','op_perfdb'],
+  ['Op data → collectors → GPUs / LLMs / frameworks / versions', 'op_data_points','op_collectors','collect_gpus','collect_llms','collect_frameworks','collect_versions'],
+  ['Infrastructure · collect / heal / analyze / mitigate / FPM', 'auto_op_collector','support_matrix_healer','auto_gap_analysis','auto_gap_mitigation','auto_fpm_collector'],
+  ['HuggingFace config', 'op_model'],
+  ['Fidelity check', 'op_data_points'],
+];
+
+/* Per-component next steps. Empty arrays intentionally mean no open TODO is recorded. */
+const TODOS = {
+  // L0 · planned entry points
+  cli: [
+    'Prune the command surface to <code>recommend</code> + <code>simulate</code>; retire the overlapping <code>generate</code>, <code>estimate</code>, and <code>support</code> paths.',
+    'Build <code>recommend</code> from the current default flow and return ranked candidates plus the full Pareto frontier for the requested SLA, traffic, model, and GPU.',
+    'Build <code>simulate</code> from the current experimental flow: one supplied config, no sweep, with a stable machine-readable result schema.',
+  ],
+  dgdr: [
+    'Define the DGDR v2 spec/status contract for model, hardware, workload, SLA, constraints, progress, skipped candidates, and ranked results.',
+    'Implement operator reconciliation that invokes the current Sweeper V2 / Vizier flow and records durable status conditions across retries.',
+    'Materialize the selected DGD plus router/planner settings and attach owner references for automatic cleanup.',
+  ],
+
+  // L1 · current orchestration components
+  profiler: [
+    'Expose one current Spica runner to both planned entry points — CLI V2 <code>recommend</code> and DGDR v2 — so search behavior cannot diverge.',
+    'Stabilize the candidate record: branch, full knob assignment, seed, feasibility outcome, predicted metrics, GPU cost, and rejection reason.',
+    'Register future L2 dimensions behind capability checks so unsupported KVBM, precision, speculative, AFD, kernel, and scheduler combinations are pruned before Vizier.',
+  ],
+  vizier: [
+    'Define comparable evaluation budgets and stopping rules for the separate agg and disagg studies.',
+    'Persist and restore suggestions/observations so a DGDR reconciliation retry can resume the same study instead of restarting it.',
+    'Pass structured constraint failures through <code>observe_infeasible()</code> so repeated invalid regions are avoided and explainable.',
+  ],
+  pareto: [
+    'Normalize agg and disagg throughput, latency, SLA, and GPU-cost fields before computing one shared frontier.',
+    'Preserve candidate IDs, full knob assignments, and metric provenance on every non-dominated point surfaced to CLI V2 and DGDR v2.',
+    'Add goodput and goodput-per-GPU frontier views while retaining throughput-vs-latency as the canonical comparison.',
+  ],
+  configgen: [
+    'Accept the canonical Spica candidate record directly instead of reconstructing the selection through legacy picking inputs.',
+    'Generate backend, DGD, router, and planner artifacts from the same selected candidate for both agg and disagg deployments.',
+    'Round-trip generated artifact values back to the candidate and fail on dropped or silently changed knobs.',
+  ],
+
+  // L2 · search dimensions
+  knob_router: [
+    'Make sampled fields conditional on <code>router_mode</code>; do not spend trials on inactive cache-hit or load-scoring weights.',
+    'Keep Spica names, defaults, ranges, and units aligned with the live Dynamo router configuration.',
+    'Add a fixed-trace golden test that compares offline worker assignments and pending-queue order with the production router logic.',
+  ],
+  knob_planner: [
+    'Include the load-predictor choice in the candidate identity and result instead of leaving it as an opaque side grid.',
+    'Constrain scaling policy, FPM sampling, and load-sensitivity combinations to options the selected Planner implementation supports.',
+    'Replay fixed workloads and assert the exact agg or prefill/decode scale-decision timeline and resulting SLA impact.',
+  ],
+  knob_kvtier: [
+    'Promote pinned G1/G2/G3 and offload settings to typed search dimensions with legal tier, capacity, and topology constraints.',
+    'Feed per-tier capacity, bandwidth, and transfer-concurrency choices into KVBM Replay and candidate metrics.',
+    'Prune storage/NIXL combinations that are unavailable on the selected deployment target before evaluation.',
+  ],
+  knob_replicas: [
+    'Enforce GPU-budget and min/max pool constraints on agg and prefill/decode initial replica counts before replay.',
+    'Record the initial topology and every Planner-driven topology change as part of the candidate result.',
+    'Serialize static-fleet versus Planner-managed topology explicitly so artifact generation cannot change the scaling mode.',
+  ],
+  knob_serving: [
+    'Normalize agg and disagg SLA metrics and total GPU cost before placing both branches on one Pareto frontier.',
+    'Require disagg evaluation to include prefill-to-decode handoff and KV-transfer latency, not only rate matching.',
+    'Keep prefill/decode disaggregation and AFD as independent axes in candidate schemas, constraints, and generated artifacts.',
+  ],
+  knob_parallel: [
+    'Emit a concrete prune reason for every rejected shape: GPU count, weight memory, MoE identity, or backend support.',
+    'Gate TP/PP/DP/MoE shapes against the backend/framework support matrix before running Replay.',
+    'Assert that the selected parallel shape reaches <code>EngineConfig</code> and generated artifacts unchanged.',
+  ],
+  knob_precision: [
+    'Separate checkpoint-fixed GEMM/MoE quantization from runtime-sweepable KV-cache, FMHA, and communication precision.',
+    'Enumerate only precision candidates with matching backend support and measured performance data.',
+    'Propagate each precision choice into memory capacity, FPM lookup keys, and the generated runtime configuration.',
+  ],
+  knob_spec: [
+    'Add <code>aic_nextn</code> and an acceptance-rate profile to the typed search schema.',
+    'Model conditional acceptance by draft position and workload instead of one global scalar.',
+    'Prune unsupported model/backend combinations and carry the selected settings consistently into Mocker, AIC, and artifacts.',
+  ],
+  knob_afd: [
+    'Promote estimate-only AFD into search branches for prefill, decode, or both, including <code>n_a</code>, <code>n_f</code>, and per-pool parallelism.',
+    'Score A/F compute balance and cross-pool transfer cost together rather than optimizing either side in isolation.',
+    'Emit deployable A-worker/F-worker topology and link settings for the selected AFD candidate.',
+  ],
+  knob_kernels: [
+    'Represent CUDA-graph capture sizes, keep/no-reload behavior, and multi-kernel fusion as explicit candidate fields.',
+    'Offer a kernel candidate only when matching <code>used_cuda_graph</code> and kernel-source performance data exists.',
+    'Separate one-time capture/warmup cost from steady-state replay latency in candidate metrics.',
+  ],
+  knob_batch: [
+    'Search <code>max_num_seqs</code> and <code>max_num_batched_tokens</code> jointly for each serving branch.',
+    'Reject batch/token budgets that exceed the candidate KV capacity or memory limit before Replay.',
+    'Record the actual prefill/decode/mixed pass shapes scheduled by Mocker so the score is explainable.',
+  ],
+  knob_chunked: [
+    'Add chunked-prefill enablement and chunk size/token budget as typed search dimensions.',
+    'Evaluate TTFT and TPOT tradeoffs using the exact multi-iteration chunks produced by the Mocker scheduler.',
+    'Gate choices by backend capability and verify equivalent chunk progression for supported vLLM and SGLang modes.',
+  ],
+  knob_kvcap: [
+    'Derive feasible GPU-block counts from model memory, precision, block size, and memory-utilization settings.',
+    'Search block size, memory fraction, and max model length only as constraint-consistent combinations.',
+    'Expose allocation failures, prefix-cache reuse, and preemption caused by the selected capacity in candidate results.',
+  ],
+  knob_sched: [
+    'Define a typed, backend-specific policy space for overlap, admission, preemption/recompute, and no-evict behavior.',
+    'Map every sampled policy to implemented Mocker behavior and reject unsupported cross-backend combinations.',
+    'Compare utilization-oriented and guaranteed-no-evict policies on the same trace, seed, topology, and SLA.',
+  ],
+
+  // L3 · current simulation components
+  m_planner: [
+    'Feed <code>PlannerHook</code> the same metrics, units, and policy fields used by the online Dynamo Planner.',
+    'Model scale-actuation delay, pool min/max bounds, and GPU budget when applying Planner decisions to Replay.',
+    'Add golden timelines for aggregated scaling and independent prefill/decode scaling.',
+  ],
+  m_router: [
+    'Share scoring configuration and index-update semantics with the production KV Router so offline placement cannot drift.',
+    'Model worker membership changes and the pending queue while Planner scaling is in flight.',
+    'Add fixed-trace golden placements for round-robin and KV-aware modes.',
+  ],
+  m_kvbm: [
+    'Model capacity, bandwidth, and concurrent transfers across G1, G2, and G3 tiers.',
+    'Enforce deterministic ownership ordering across offload, onboard, handoff, and transfer-complete events.',
+    'Expose transfer delay, bytes moved, eviction, and tier-hit metrics in each replay result.',
+  ],
+  m_sched: [
+    'Keep vLLM and SGLang Replay semantics aligned for batching, chunked prefill, preemption, KV blocks, and request completion.',
+    'Guarantee deterministic event ordering under a recorded seed, including simultaneous planner, router, and transfer events.',
+    'Export per-request queue time, TTFT, TPOT, handoff, and completion traces for candidate diagnosis.',
+  ],
+  m_estlat: [
+    'Stabilize the request contract for mixed, prefill-only, and decode-only passes, including the exact <code>EngineConfig</code> identity.',
+    'Return model/data provenance and fallback confidence with every estimate so low-fidelity candidates can be rejected explicitly.',
+    'Add Rust/Python parity tests and measured-FPM checks for the same scheduled pass shapes.',
+  ],
+
+  // L4–L7 · AIC core and performance-model data
+  core_wheel: [
+    'Expose the planned layerwise strategy through <code>aiconfigurator_core</code> once its estimator is stable.',
+  ],
+  core_crate: [
+    'Implement the planned layerwise <code>ForwardPassPerfModel</code> strategy in the Rust core.',
+  ],
+  pm_ops: [],
+  pm_op_hybrid: [
+    'Emit the selected source for every op result — measured silicon, shared-layer row, or empirical fallback — so mixed-fidelity estimates are auditable.',
+    'Narrow HYBRID fallback to recognized coverage or missing-data exceptions; propagate unexpected query failures instead of converting every exception to empirical.',
+    'Validate frontier/new-model recommendations against later silicon collections and track fallback error by operation family.',
+  ],
+  pm_op_empirical: [
+    'Calibrate empirical utilization factors by operation family and GPU generation against held-out silicon data.',
+    'Version the factor set and return its provenance and confidence with every formula-derived result.',
+    'Test that EMPIRICAL mode remains formula-only and does not depend on backend/version data files or shared-layer reuse.',
+  ],
+  pm_op_sol: [
+    'Audit peak compute, memory-bandwidth, and communication assumptions and keep units consistent across operation families.',
+    'Expose the limiting compute or bandwidth term through the SOL detail path for every estimate.',
+    'Add regression tests proving SOL mode never consumes silicon rows or empirical correction factors.',
+  ],
+  pm_layerwise: [
+    'Turn the prototype <code>layerwise_perf.csv</code> data into a stable <code>Layerwise</code> / <code>query_layerwise()</code> estimator.',
+    'Integrate the layerwise collector and estimator into the main branch and expose the strategy through the core crate and wheel.',
+    'Combine the separately modeled communication cost with measured layer compute to produce whole-pass latency.',
+  ],
+  pm_fpm: [
+    'Persist and reload the prefill, decode, and mixed regression fits instead of keeping them only in memory.',
+  ],
+  pm_fpm_tuned: [],
+  op_model: [],
+  op_operations: [],
+  op_perfdb: [],
+  op_data_points: [
+    'Audit curated rows for a named, reproducible <code>kernel_source</code> and flag low-fidelity or shared fallbacks.',
+    'Validate that <code>used_cuda_graph</code>, framework/version, device, and operation provenance remain attached to every published Parquet row.',
+    'Recollect rows with missing or non-reproducible provenance before using them to validate a sweep.',
+  ],
+
+  // L8–L10 · collectors, inputs, and infrastructure
+  collector_plan: [
+    'Emit a deterministic plan-only manifest that records whether each case came from base ops, model cases, or an SM exception.',
+    'Reject empty, duplicate, or conflicting case plans before GPU dispatch.',
+    'Add merge-behavior tests for base cases + model extensions + GPU/SM exceptions.',
+  ],
+  op_collectors: [
+    'Add a real-GPU smoke test for every registered <code>OpEntry</code> and applicable <code>VersionRoute</code>.',
+    'Gate publication on canonical schema, units, latency validity, and reproducible <code>kernel_source</code> provenance.',
+    'Verify that TRT-LLM, vLLM, and SGLang runners write the canonical output file declared by their registry.',
+  ],
+  collect_gpus: [
+    'Fail fast when the requested system YAML, detected GPU, or detected SM generation disagree.',
+    'Add coverage tests for every supported GPU and its SM-specific exception plan.',
+    'Require detected device and SM provenance on every collected row.',
+  ],
+  collect_llms: [
+    'Verify that every supported HF architecture resolves to a non-empty base + model-specific case plan.',
+    'Deduplicate generic shape-only cases across LLMs while retaining model identity for model-specific module rows.',
+  ],
+  collect_frameworks: [
+    'Maintain an explicit operation-support matrix for TRT-LLM, vLLM, and SGLang and flag registry gaps.',
+    'Record framework-native kernel and CUDA-graph behavior in the emitted row provenance.',
+  ],
+  collect_versions: [
+    'Add boundary and overlap tests for every manifest constraint and <code>VersionRoute</code> using PEP 440 semantics.',
+    'Fail clearly on unsupported runtime versions and record the selected framework version and route in every row.',
+  ],
+  auto_op_collector: [
+    'Harden the current smoke → sample → full promotion gates and block data PRs on schema or provenance regressions.',
+    'Prove checkpoint/resume idempotency across GPU allocation failures and collector retries.',
+    'Attach collection-matrix coverage, failures, artifacts, and the resulting data diff to each automated PR.',
+  ],
+  support_matrix_healer: [
+    'Keep healing scoped to non-PASS coverage and executability cells; prediction-error metrics belong to the fidelity pipeline.',
+    'Require affected-row replay and a verified before/after support-matrix delta before updating a healing PR.',
+    'Harden durable resume and reusable CPU/GPU resource recovery across Full Collector, Heal Cells, and Review Gate.',
+  ],
+  auto_gap_analysis: [
+    'Productionize the existing Revati PoC into a repeatable AIC-versus-silicon comparison pipeline.',
+    'Normalize throughput, TTFT, TPOT/ITL, and error metrics, then rank gaps by GPU, model, and workload.',
+    'Persist paired inputs, predictions, silicon measurements, logs, and metrics so every ranked gap is reproducible.',
+  ],
+  auto_gap_mitigation: [
+    'Unify the existing agent and pipeline-monitor pieces into one auditable gap → repair → recollect → revalidate workflow.',
+    'Classify root cause with evidence as data, collector, analytical-model, or scheduler/runtime before selecting a repair.',
+    'Require recollection and silicon revalidation, with a review gate, before closing a fidelity gap.',
+  ],
+  auto_fpm_collector: [
+    'Define and version a telemetry schema pairing each <code>ForwardPassMetrics</code> record with positive observed <code>wall_time</code> and full provenance.',
+    'Build planned capture for prefill, decode, and mixed iterations with validation, deduplication, and workload-balance checks.',
+    'Publish reusable datasets and connect them to pure-FPM regression and native FPM-correction calibration.',
+  ],
+};
+
+/* ============================ LAYOUT ============================ */
+const GUT=170, NW=200, NH=116, LH=176, TOP=88, PADX=34;
+const LAYER_ORDER = {
+  1: ['profiler', 'vizier', 'pareto', 'configgen'],
+  5: ['pm_ops', 'pm_op_hybrid', 'pm_op_empirical', 'pm_op_sol', 'pm_layerwise', 'pm_fpm', 'pm_fpm_tuned'],
+  6: ['op_model', 'op_operations', 'op_perfdb'],
+  8: ['collector_plan', 'op_collectors'],
+  9: ['collect_gpus', 'collect_llms', 'collect_frameworks', 'collect_versions'],
+  10: ['auto_op_collector', 'support_matrix_healer', 'auto_gap_analysis', 'auto_gap_mitigation', 'auto_fpm_collector'],
+};
+// layers split into explicit named clusters (rendered as sub-headers in the band)
+const LAYER_GROUPS = {
+  2: [
+    {id:'space_dyn',    label:'Dynamo Knob Space', color:'var(--dyn)',    ids:['knob_planner','knob_router','knob_kvtier','knob_replicas']},
+    {id:'space_sched',  label:'Scheduler Knob Space', color:'var(--accent)', ids:['knob_batch','knob_chunked','knob_kvcap','knob_sched']},
+    {id:'space_engine', label:'Engine Knob Space', color:'var(--accent)', ids:['knob_serving','knob_parallel','knob_precision','knob_spec','knob_afd','knob_kernels']},
+  ],
+  5: [
+    {id:'models_op', label:'Op-based Modes · Silicon / Hybrid / Empirical / SOL', color:'var(--accent)', ids:['pm_ops','pm_op_hybrid','pm_op_empirical','pm_op_sol']},
+    {id:'models_fpm', label:'Layerwise / FPM Models', color:'var(--amber)', ids:['pm_layerwise','pm_fpm','pm_fpm_tuned']},
+  ],
+};
+const LAYER_GROUP_LAYOUT = {2:'rows',5:'columns'};
+const byLayer = LAYERS.map((_,i)=>NODES.filter(n=>n.l===i));
+byLayer.forEach((g, i)=>{
+  const order = LAYER_ORDER[i];
+  if(!order) return;
+  const rank = Object.fromEntries(order.map((id, idx)=>[id, idx]));
+  g.sort((a,b)=>(rank[a.id] ?? 999) - (rank[b.id] ?? 999));
+});
+const NODE_GAP=28, GROUP_ROW_H=160;
+let CONTENT = 1500;
+byLayer.forEach((g,li)=>{
+  const groups=LAYER_GROUPS[li];
+  if(groups){
+    if(LAYER_GROUP_LAYOUT[li]==='columns'){
+      const count=groups.reduce((sum,gr)=>sum+gr.ids.length,0);
+      CONTENT=Math.max(CONTENT,count*NW+Math.max(0,count-1)*12);
+    }else{
+      groups.forEach(gr=>{ CONTENT=Math.max(CONTENT,gr.ids.length*(NW+NODE_GAP)); });
+    }
+  }else{
+    CONTENT=Math.max(CONTENT,g.length*(NW+NODE_GAP));
+  }
+});
+const LAYER_HEIGHTS=LAYERS.map((_,li)=>LAYER_GROUPS[li] && LAYER_GROUP_LAYOUT[li]!=='columns' ? LAYER_GROUPS[li].length*GROUP_ROW_H+8 : LH);
+const LAYER_TOPS=[];
+let layerCursor=TOP;
+LAYER_HEIGHTS.forEach(height=>{ LAYER_TOPS.push(layerCursor); layerCursor+=height; });
+const TOTAL_W = GUT + CONTENT + PADX*2;
+const TOTAL_H = layerCursor + 24;
+const pos = {};
+const groupMeta = {};   // layer index -> [{id,label,color,cx,x0,x1,labelY,lineY,anchorX,labelEl,lineEl}]
+byLayer.forEach((g,li)=>{
+  const areaL = GUT + PADX, areaW = CONTENT;
+  const layerTop=LAYER_TOPS[li], layerH=LAYER_HEIGHTS[li];
+  const groups = LAYER_GROUPS[li];
+  if(groups){
+    groupMeta[li] = [];
+    if(LAYER_GROUP_LAYOUT[li]==='columns'){
+      const count=groups.reduce((sum,gr)=>sum+gr.ids.length,0), slot=areaW/count;
+      const yTop=layerTop+48, cy=yTop+NH/2;
+      let offset=0;
+      groups.forEach(gr=>{
+        const x0=areaL+slot*offset, x1=areaL+slot*(offset+gr.ids.length);
+        gr.ids.forEach((id,i)=>{
+          const cx=areaL+slot*(offset+i+0.5);
+          pos[id]={x:cx-NW/2,y:yTop,cx,cy};
+        });
+        groupMeta[li].push({
+          id:gr.id,label:gr.label,color:gr.color,cx:(x0+x1)/2,x0,x1,
+          labelY:layerTop+24,lineY:layerTop+32,anchorX:x0+12,
+        });
+        offset+=gr.ids.length;
+      });
+      return;
+    }
+    groups.forEach((gr,row)=>{
+      const rowTop=layerTop+row*GROUP_ROW_H;
+      const gw=Math.min(areaW,gr.ids.length*(NW+NODE_GAP));
+      const x0=areaL+(areaW-gw)/2, slot=gw/gr.ids.length;
+      const yTop=rowTop+40, cy=yTop+NH/2;
+      gr.ids.forEach((id,i)=>{
+        const cx=x0+slot*(i+0.5);
+        pos[id] = {x: cx - NW/2, y: yTop, cx, cy};
+      });
+      groupMeta[li].push({
+        id:gr.id,label:gr.label,color:gr.color,cx:x0+gw/2,x0,x1:x0+gw,
+        labelY:rowTop+24,lineY:rowTop+32,anchorX:x0+12,
+      });
+    });
+    return;
+  }
+  const yTop=layerTop+(layerH-NH)/2, cy=yTop+NH/2;
+  g.forEach((n,i)=>{
+    const slot = areaW/g.length;
+    const cx = areaL + slot*(i+0.5);
+    pos[n.id] = {x: cx - NW/2, y: yTop, cx, cy};
+  });
+});
+
+/* ============================ RENDER ============================ */
+const SVGNS='http://www.w3.org/2000/svg';
+const vp = document.getElementById('viewport');
+const svg = document.getElementById('svg');
+function textOnly(html){
+  const el=document.createElement('div'); el.innerHTML=html;
+  return (el.textContent||'').replace(/\s+/g,' ').trim();
+}
+function escapeHtml(value){
+  return String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+}
+
+const defs = document.createElementNS(SVGNS,'defs');
+defs.innerHTML = `
+ <marker id="arr" markerWidth="9" markerHeight="9" refX="7.5" refY="3" orient="auto">
+   <path d="M0,0 L7,3 L0,6 Z" fill="#5a6c87"/></marker>
+ <marker id="arrA" markerWidth="9" markerHeight="9" refX="7.5" refY="3" orient="auto">
+   <path d="M0,0 L7,3 L0,6 Z" fill="#fbbf24"/></marker>
+ <marker id="arrG" markerWidth="9" markerHeight="9" refX="7.5" refY="3" orient="auto">
+   <path d="M0,0 L7,3 L0,6 Z" fill="#76b900"/></marker>
+ <marker id="arrC" markerWidth="9" markerHeight="9" refX="7.5" refY="3" orient="auto">
+   <path d="M0,0 L7,3 L0,6 Z" fill="#22d3ee"/></marker>
+ <marker id="arrS" markerWidth="9" markerHeight="9" refX="7.5" refY="3" orient="auto">
+   <path d="M0,0 L7,3 L0,6 Z" fill="#818cf8"/></marker>
+ <marker id="arrP" markerWidth="9" markerHeight="9" refX="7.5" refY="3" orient="auto">
+   <path d="M0,0 L7,3 L0,6 Z" fill="#a78bfa"/></marker>`;
+svg.insertBefore(defs, vp);
+
+// layer bands
+const bandG = document.createElementNS(SVGNS,'g'); bandG.setAttribute('class','lbl-band'); vp.appendChild(bandG);
+LAYERS.forEach((L,li)=>{
+  const y = LAYER_TOPS[li], layerH = LAYER_HEIGHTS[li];
+  const r = document.createElementNS(SVGNS,'rect');
+  r.setAttribute('x',8); r.setAttribute('y',y+8); r.setAttribute('width',TOTAL_W-16);
+  r.setAttribute('height',layerH-16); r.setAttribute('rx',14);
+  r.setAttribute('class','band-rect '+(li%2 ? 'band-b' : 'band-a'));
+  r.setAttribute('stroke',L.color+'22');
+  bandG.appendChild(r);
+  const t = document.createElementNS(SVGNS,'text');
+  t.setAttribute('x',22); t.setAttribute('y',y+26); t.textContent = 'L'+li;
+  bandG.appendChild(t);
+  const words = L.name.split(' '); let line='', dy=0;
+  words.forEach(w=>{
+    if((line+' '+w).length>13){ addLine(line,dy); line=w; dy+=12; } else line = line?line+' '+w:w;
+  });
+  addLine(line,dy);
+  (groupMeta[li]||[]).forEach(m=>{
+    const gl=document.createElementNS(SVGNS,'text');
+    gl.setAttribute('x',m.cx); gl.setAttribute('y',m.labelY); gl.setAttribute('text-anchor','middle');
+    gl.setAttribute('class','knob-space-label');
+    gl.style.fill=m.color; gl.style.fontSize='11px'; gl.style.fontWeight='800'; gl.style.letterSpacing='.10em';
+    gl.textContent=m.label.toUpperCase(); bandG.appendChild(gl);
+    const ln=document.createElementNS(SVGNS,'line');
+    ln.setAttribute('class','knob-space-line');
+    ln.setAttribute('x1',m.x0+12); ln.setAttribute('x2',m.x1-12);
+    ln.setAttribute('y1',m.lineY); ln.setAttribute('y2',m.lineY);
+    ln.style.stroke=m.color; ln.setAttribute('stroke-width','1.5');
+    bandG.appendChild(ln);
+    m.labelEl=gl; m.lineEl=ln;
+  });
+  function addLine(txt,off){
+    const e=document.createElementNS(SVGNS,'text');
+    e.setAttribute('x',22); e.setAttribute('y',y+42+off);
+    e.setAttribute('fill','var(--band-text)'); e.style.fontSize='9.5px'; e.style.letterSpacing='.08em';
+    e.textContent=txt.toUpperCase(); bandG.appendChild(e);
+  }
+});
+
+// edges
+const edgeG = document.createElementNS(SVGNS,'g'); vp.appendChild(edgeG);
+const edgeEls = [];
+const groupEdgeEls = [];
+function anchors(a,b){
+  const A=pos[a], B=pos[b];
+  const la = NODES.find(n=>n.id===a).l, lb = NODES.find(n=>n.id===b).l;
+  if(la<lb){ return [A.cx, A.y+NH, B.cx, B.y, 'v']; }
+  if(la>lb){ return [A.cx, A.y, B.cx, B.y+NH, 'u']; }
+  if(A.cx<B.cx) return [A.x+NW, A.cy, B.x, B.cy, 'h'];
+  return [A.x, A.cy, B.x+NW, B.cy, 'h'];
+}
+function pathD(sx,sy,tx,ty,dir){
+  if(dir==='h'){ const mx=(sx+tx)/2; return `M${sx},${sy} C${mx},${sy} ${mx},${ty} ${tx},${ty}`; }
+  const my=(sy+ty)/2; return `M${sx},${sy} C${sx},${my} ${tx},${my} ${tx},${ty}`;
+}
+function groupPathD(sx,sy,tx,ty){
+  const laneX=GUT+PADX/2;
+  const bendY=Math.min(sy+42,ty-14);
+  return `M${sx},${sy} C${sx},${bendY} ${laneX},${bendY} ${laneX},${bendY} L${laneX},${ty-10} C${laneX},${ty-4} ${tx},${ty-4} ${tx},${ty}`;
+}
+function stackedL2PathD(sx,sy,tx,ty,index){
+  const laneX=TOTAL_W-18-index*8;
+  const exitY=sy+12, approachY=ty-18;
+  return `M${sx},${sy} C${sx},${sy+7} ${sx},${exitY} ${sx+12},${exitY} L${laneX},${exitY} L${laneX},${approachY} C${laneX},${ty-6} ${tx},${ty-6} ${tx},${ty}`;
+}
+function l3GutterPathD(a,b,index){
+  const A=pos[a], B=pos[b];
+  const sourceY=A.y+NH, targetY=B.y+NH, laneY=Math.max(sourceY,targetY)+10+index*8;
+  return `M${A.cx},${sourceY} C${A.cx},${laneY-4} ${A.cx},${laneY} ${A.cx-12},${laneY} L${B.cx+12},${laneY} C${B.cx},${laneY} ${B.cx},${laneY-4} ${B.cx},${targetY}`;
+}
+let stackedL2RouteIndex=0;
+let l3GutterRouteIndex=0;
+EDGES.forEach(([a,b,kind])=>{
+  const [sx,sy,tx,ty,dir]=anchors(a,b);
+  const source=NODES.find(n=>n.id===a), target=NODES.find(n=>n.id===b);
+  const sourceGroupRow=source.l===2 ? LAYER_GROUPS[2].findIndex(group=>group.ids.includes(a)) : -1;
+  const routeAroundStack=source.l===2 && target.l===3 && sourceGroupRow>=0 && sourceGroupRow<LAYER_GROUPS[2].length-1;
+  const routeAroundL3Cards=a==='m_sched' && (b==='m_router' || b==='m_planner');
+  const p=document.createElementNS(SVGNS,'path');
+  let d=pathD(sx,sy,tx,ty,dir);
+  if(routeAroundStack) d=stackedL2PathD(sx,sy,tx,ty,stackedL2RouteIndex++);
+  if(routeAroundL3Cards) d=l3GutterPathD(a,b,l3GutterRouteIndex++);
+  p.setAttribute('d',d);
+  p.setAttribute('class','edge'+(kind?' '+kind:''));
+  p.setAttribute('marker-end',
+    kind==='feedback'?'url(#arrA)': kind==='bridge'?'url(#arrG)': kind==='control'?'url(#arrC)': kind==='planned'?'url(#arrP)':'url(#arr)');
+  p.dataset.a=a; p.dataset.b=b;
+  edgeG.appendChild(p);
+  edgeEls.push({el:p,a,b});
+});
+
+function groupAnchor(id){
+  for(const groups of Object.values(groupMeta)){
+    const group=groups.find(g=>g.id===id);
+    if(group) return {cx:group.anchorX, y:group.lineY};
+  }
+  throw new Error(`Unknown group anchor: ${id}`);
+}
+GROUP_EDGES.forEach(([a,groupId])=>{
+  const A=pos[a], B=groupAnchor(groupId);
+  const p=document.createElementNS(SVGNS,'path');
+  p.setAttribute('d',groupPathD(A.cx,A.y+NH,B.cx,B.y));
+  p.setAttribute('class','edge group-link');
+  p.setAttribute('marker-end','url(#arrS)');
+  p.dataset.a=a; p.dataset.group=groupId;
+  edgeG.appendChild(p);
+  groupEdgeEls.push({el:p,a,groupId});
+});
+
+// nodes
+const nodeG = document.createElementNS(SVGNS,'g'); vp.appendChild(nodeG);
+const nodeEls = {};
+NODES.forEach(n=>{
+  const P=pos[n.id], L=LAYERS[n.l];
+  const fo=document.createElementNS(SVGNS,'foreignObject');
+  fo.setAttribute('x',P.x); fo.setAttribute('y',P.y); fo.setAttribute('width',NW); fo.setAttribute('height',NH);
+  const div=document.createElement('div');
+  div.className='node'+(n.flag==='q'?' q':'')+(n.flag==='future'?' future':'')+(n.repo==='dyn'?' dyn':'');
+  div.tabIndex=0; div.setAttribute('role','button'); div.setAttribute('aria-pressed','false');
+  div.setAttribute('aria-label',`${textOnly(n.label)}. ${n.sub}`);
+  div.style.setProperty('--nc', n.flag==='q'?'#fbbf24':L.color);
+  const badge = [
+    n.flag==='q'?'<span class="badge q">open Q</span>':'',
+    n.flag==='future'?'<span class="badge future">planned</span>':'',
+    n.tag?`<span class="badge tag">${n.tag}</span>`:'',
+  ].filter(Boolean).join('');
+  div.innerHTML =
+    `<div class="ttl"><span class="dot"></span><span class="title-text">${n.label}</span>${badge?`<span class="badge-line">${badge}</span>`:''}</div><div class="sub">${escapeHtml(n.sub)}</div>`+
+    `<span class="repo ${n.repo||'aic'}">${n.repo==='dyn'?'DYN':'AIC'}</span>`;
+  div.addEventListener('click',e=>{e.stopPropagation(); select(n.id);});
+  div.addEventListener('keydown',e=>{
+    if(e.key!=='Enter' && e.key!==' ') return;
+    e.preventDefault(); e.stopPropagation(); select(n.id);
+  });
+  div.addEventListener('mouseenter',()=>hover(n.id));
+  div.addEventListener('mouseleave',()=>hover(null));
+  div.addEventListener('focus',()=>{hover(n.id);ensureNodeVisible(n.id);});
+  div.addEventListener('blur',()=>hover(null));
+  fo.appendChild(div); nodeG.appendChild(fo);
+  nodeEls[n.id]={fo,div};
+});
+
+// adjacency
+const adj={}; NODES.forEach(n=>adj[n.id]=new Set());
+EDGES.forEach(([a,b])=>{adj[a].add(b);adj[b].add(a);});
+const groupById=Object.fromEntries(
+  Object.values(LAYER_GROUPS).flat().map(group=>[group.id,group])
+);
+const groupLayerById=Object.fromEntries(
+  Object.entries(LAYER_GROUPS).flatMap(([layer,groups])=>groups.map(group=>[group.id,Number(layer)]))
+);
+
+/* ============================ INTERACTION ============================ */
+let selId=null, lastDetailState=null;
+function setDim(activeSet, focusId=null){
+  NODES.forEach(n=>{
+    const d=nodeEls[n.id].div;
+    d.classList.toggle('dim', activeSet && !activeSet.has(n.id));
+    d.classList.toggle('hl', activeSet && activeSet.has(n.id) && n.id!==selId);
+  });
+  edgeEls.forEach(({el,a,b})=>{
+    if(!activeSet){ el.classList.remove('active','faded'); return; }
+    const on = activeSet.has(a)&&activeSet.has(b);
+    el.classList.toggle('active',on); el.classList.toggle('faded',!on);
+  });
+  groupEdgeEls.forEach(({el,a,groupId})=>{
+    if(!activeSet){ el.classList.remove('active','faded'); return; }
+    const on=focusId===a || groupById[groupId].ids.includes(focusId);
+    el.classList.toggle('active',on); el.classList.toggle('faded',!on);
+  });
+  const activeGroupIds=new Set(
+    GROUP_EDGES.filter(([sourceId])=>sourceId===focusId).map(([,groupId])=>groupId)
+  );
+  Object.values(LAYER_GROUPS).flat().forEach(group=>{
+    if(group.ids.includes(focusId) || group.ids.some(id=>activeSet?.has(id))) activeGroupIds.add(group.id);
+  });
+  Object.values(groupMeta).flat().forEach(({id,labelEl,lineEl})=>{
+    if(!activeSet || activeGroupIds.size===0){
+      labelEl.classList.remove('active','faded');
+      lineEl.classList.remove('active','faded');
+      return;
+    }
+    const on=activeGroupIds.has(id);
+    labelEl.classList.toggle('active',on); labelEl.classList.toggle('faded',!on);
+    lineEl.classList.toggle('active',on); lineEl.classList.toggle('faded',!on);
+  });
+}
+function activeNeighborhood(id){
+  const s=new Set([id]);
+  adj[id].forEach(nodeId=>s.add(nodeId));
+  GROUP_EDGES.forEach(([sourceId,groupId])=>{
+    const group=groupById[groupId];
+    if(sourceId===id) group.ids.forEach(nodeId=>s.add(nodeId));
+    if(group.ids.includes(id)) s.add(sourceId);
+  });
+  return s;
+}
+function hover(id){
+  if(selId) return;
+  if(!id){ setDim(null); return; }
+  setDim(activeNeighborhood(id),id);
+}
+function rememberDetailState(id){
+  if(!id) return;
+  lastDetailState = {id, camera:captureCamera()};
+}
+function select(id, opts={}){
+  const node=NODES.find(n=>n.id===id);
+  if(node && layerOn?.[node.l]===false) setLayerVisibility(node.l,true);
+  selId=id;
+  if(opts.remember!==false) rememberDetailState(id);
+  NODES.forEach(n=>{
+    nodeEls[n.id].div.classList.toggle('sel', n.id===id);
+    nodeEls[n.id].div.setAttribute('aria-pressed',String(n.id===id));
+  });
+  setDim(activeNeighborhood(id),id);
+  renderDetail(id);
+  const appEl=document.getElementById('app');
+  if(opts.reveal!==false && matchMedia('(max-width:1199px)').matches && appEl.classList.contains('detail-collapsed')) setDetail(false);
+}
+function clearSel(keepBack=true){
+  if(keepBack && selId) rememberDetailState(selId);
+  selId=null; NODES.forEach(n=>{
+    nodeEls[n.id].div.classList.remove('sel');
+    nodeEls[n.id].div.setAttribute('aria-pressed','false');
+  });
+  setDim(null); renderOverview();
+}
+
+/* detail panel */
+const detail=document.getElementById('detail'), dhead=document.getElementById('dhead'), dbody=document.getElementById('dbody');
+const SOURCE_REPOS={
+  aiconfigurator:{base:'https://github.com/ai-dynamo/aiconfigurator',ref:'ad0e3e5e31ee3b8ebcc69617f51b1bd5cfdd659a'},
+  dynamo:{base:'https://github.com/ai-dynamo/dynamo',ref:'ec45adf2a3f7b719fcba5d5c7c2cf32747b4e030'},
+};
+function encodeSourcePath(path){ return path.split('/').filter(Boolean).map(encodeURIComponent).join('/'); }
+function sourceRef(ref){
+  const display=escapeHtml(ref);
+  const prototype=ref.match(/^prototype:\s+origin\/([^·]+)\s+·\s+(.+)$/);
+  if(prototype){
+    const branch=encodeURIComponent(prototype[1].trim()), path=encodeSourcePath(prototype[2].trim());
+    const href=`${SOURCE_REPOS.aiconfigurator.base}/blob/${branch}/${path}`;
+    return `<div class="source-ref"><a class="source-link" href="${href}" target="_blank" rel="noopener noreferrer" title="Open prototype source reference"><code>${display}</code></a></div>`;
+  }
+  const match=ref.match(/^([a-z0-9-]+):\s+(.+)$/i);
+  const repo=match ? match[1].toLowerCase() : 'aiconfigurator';
+  const rawPath=match ? match[2] : ref;
+  const path=rawPath.replace(/\s+\(#[^)]+\)\s*$/,'').trim();
+  const source=SOURCE_REPOS[repo];
+  const missingMain=(repo==='dynamo' && (path==='docs/proposals/dgdr-profiler-smart-search-plan.md' || path.startsWith('components/src/dynamo/profiler/v2/')))
+    || (repo==='aiconfigurator' && path==='ntech_2026/archive_2page_pdf/abstract_draft.md');
+  const safePath=!path.startsWith('origin/') && !/[\s<>*]/.test(path) && !path.includes('→') && !missingMain;
+  if(!source || !safePath){
+    const issue=ref.includes('dgdr-profiler-smart-search-plan.md (#9410)')
+      ? ' <a href="https://github.com/ai-dynamo/dynamo/issues/9410" target="_blank" rel="noopener noreferrer">issue #9410</a>' : '';
+    return `<div class="source-ref"><code>${display}</code>${issue}</div>`;
+  }
+  const view=path.endsWith('/') ? 'tree' : 'blob';
+  const href=`${source.base}/${view}/${source.ref}/${encodeSourcePath(path)}`;
+  return `<div class="source-ref"><a class="source-link" href="${href}" target="_blank" rel="noopener noreferrer" title="Open source reference"><code>${display}</code></a></div>`;
+}
+function renderDetail(id){
+  const n=NODES.find(x=>x.id===id), L=LAYERS[n.l], d=n.det||{};
+  const repoPill = n.repo==='dyn'
+    ? '<span class="pill" style="border-color:var(--dynb-border);color:var(--dynb-fg)">dynamo repo</span>'
+    : '<span class="pill" style="border-color:var(--aic-border);color:var(--aic-fg)">aiconfigurator repo</span>';
+  dhead.innerHTML=`<div class="lname" style="border-left:3px solid ${L.color};padding-left:7px">${L.name}</div>
+     <h2>${n.label}</h2>
+     ${repoPill}
+     ${n.flag==='q'?'<span class="pill" style="border-color:var(--badgeq-border);color:var(--amber)">open design question</span>':
+       n.flag==='future'?'<span class="pill">planned</span>':''}`;
+  let h='';
+  if(d.desc) h+=`<p>${d.desc}</p>`;
+  if(d.note) h+=`<p style="color:var(--muted);font-size:12.5px">${d.note}</p>`;
+  if(d.q) h+=`<div class="qbox">${d.q}</div>`;
+  if(d.file){ h+=`<h3>Where</h3>`+d.file.map(sourceRef).join(''); }
+  if(d.sym){ h+=`<h3>Key symbols</h3><ul>`+d.sym.map(s=>`<li>${s}</li>`).join('')+`</ul>`; }
+  const groupIns=GROUP_EDGES.filter(([,groupId])=>groupById[groupId].ids.includes(id)).map(([sourceId])=>sourceId);
+  const ins=[...new Set([...EDGES.filter(e=>e[1]===id).map(e=>e[0]),...groupIns])];
+  const outs=EDGES.filter(e=>e[0]===id).map(e=>e[1]);
+  if(ins.length) h+=`<h3>Upstream</h3><div class="conn">`+ins.map(chip).join('')+`</div>`;
+  if(outs.length) h+=`<h3>Downstream</h3><div class="conn">`+outs.map(chip).join('')+`</div>`;
+  const todo = TODOS[id]||[];
+  h+=`<h3 class="todo-h">TODOs · next steps</h3><div class="todobox">`+
+    (todo.length ? `<ul class="todo">${todo.map(t=>`<li>${t}</li>`).join('')}</ul>` : '<p class="todo-empty">No open TODO recorded for this component.</p>')+
+    `</div>`;
+  dbody.innerHTML=h;
+  dbody.querySelectorAll('.chip').forEach(c=>c.addEventListener('click',()=>select(c.dataset.id)));
+  detail.scrollTop=0;
+}
+function chip(id){const n=NODES.find(x=>x.id===id);return `<button type="button" class="chip" data-id="${id}">${n.label}</button>`;}
+
+function renderOverview(){
+  const back = lastDetailState ? '<button class="btn back-btn" id="btnBackDetail" type="button" title="Back to previous view">‹ Back</button>' : '';
+  dhead.innerHTML=`<div class="dhead-row"><div><div class="lname">Overview</div><h2>How AIConfigurator works</h2></div>${back}</div>
+    <span class="pill">click any node to inspect</span><span class="pill">TODOs on every tile</span>`;
+  dbody.innerHTML=`
+    <p>Given a <b>model + GPU type + GPU count + SLA</b>, AIConfigurator searches thousands of
+    deployment configs and emits a ready-to-deploy <b>Dynamo</b> (or llm-d) config — without touching a GPU.
+    It is the modeling engine intended to sit <b>inside Dynamo's planned zero-config (DGDR v2) loop</b>.</p>
+    <h3>Planned entry points</h3>
+    <ul>
+      <li><b>CLI V2</b> (planned: <code>default</code> / <code>exp</code> / <code>smart</code>) — will drive the sweep directly. <span style="color:var(--aic-fg)">AIC</span></li>
+      <li><b>DGDR v2</b> (planned) — one YAML will ask the Dynamo <b>operator</b> to run <b>Sweeper V2 (Spica)</b>, which calls AIC. <span style="color:var(--dynb-fg)">DYN</span></li>
+    </ul>
+    <h3>The sweeper</h3>
+    <ul>
+      <li><b>Sweeper V2 (Spica)</b> (#9410) — sweeps the <b>full Dynamo Knob Space + engine knobs</b> (router / planner / KV-tier / replicas too), <b>Vizier</b>-guided; <b>it is the sweeper, AIC the lower-level provider</b>.</li>
+    </ul>
+    <h3>L1 orchestration · 4 components</h3>
+    <ul>
+      <li><b>Sweeper V2 (Spica)</b> — the full-deployment sweep.</li>
+      <li><b>Vizier</b> — Bayesian optimizer guiding the sweep.</li>
+      <li><b>Pareto Analysis</b> — reduce candidates to the throughput/latency frontier.</li>
+      <li><b>Config Generator</b> — pick the winning config and hand it to downstream artifact generation.</li>
+    </ul>
+    <h3>The rest of the spine</h3>
+    <ul>
+      <li><b>Deployment simulation</b> — Dynamo Mocker Replay owns <code>AggRuntime</code>/<code>DisaggRuntime</code> and scheduler behavior; Planner, KV Router, and KVBM contribute their component decisions; AIC’s <code>ForwardPassPerfModel</code> times each scheduled pass.</li>
+      <li><b>AIC core</b> has two package surfaces over one native implementation: the <code>aiconfigurator-core</code> <b>Python wheel</b> and <b>Rust crate</b>, centered on <code>EngineConfig</code>, <code>ForwardPassMetrics</code>, and the <code>ForwardPassPerfModel</code> estimator.</li>
+      <li><b>Seven L5 variants</b> — four op-based database modes (<b>SILICON</b>, <b>HYBRID</b>, <b>EMPIRICAL</b>, <b>SOL</b>), the planned <b>layerwise-collector</b> model, the <b>pure FPM-data</b> regression, and the <b>native model fine-tuned with FPM calibration</b>.</li>
+      <li><b>Op-mode drill-down</b> — all four op modes share <b>Model → Operations → PerfDatabase</b>; the database mode selects silicon-first, silicon-with-formula-fallback, formula-only empirical/SOL, or theoretical SOL latency. The stack continues through <b>Op Data Points → Op Collectors</b>, parameterized by GPUs, LLMs, frameworks, and framework versions.</li>
+      <li><b>Infrastructure (L10)</b> — Auto Op Collector, Support Matrix Healer, Auto Gap Analysis, Auto Gap Mitigation, and the planned Auto FPM Collector automate coverage and fidelity loops.</li>
+    </ul>
+    <div class="qbox"><b>AIC ⇄ Dynamo direction never inverts:</b> Dynamo injects into AIC (<b>Sweeper V2 (Spica)</b> + <b>Vizier</b> plug into AIC’s sweep + evaluation seams); AIC never imports Dynamo and stays the forward-pass / memory provider.</div>`;
+  const backBtn = document.getElementById('btnBackDetail');
+  if(backBtn) backBtn.addEventListener('click',goBackFromOverview);
+  detail.scrollTop=0;
+}
+function goBackFromOverview(){
+  if(!lastDetailState) return;
+  const previous = lastDetailState;
+  select(previous.id, {remember:false});
+  restoreCamera(previous.camera);
+  lastDetailState = previous;
+}
+
+/* left rail widgets */
+const qWrap=document.getElementById('questions');
+QUESTIONS.forEach(q=>{
+  const b=document.createElement('button'); b.className='q-item';
+  b.type='button'; b.innerHTML=`<b>?</b> ${q.t}<br><span style="color:var(--muted)">${q.s}</span>`;
+  b.addEventListener('click',()=>{select(q.n); centerOn(q.n);});
+  qWrap.appendChild(b);
+});
+const nm=document.getElementById('noteMap');
+NOTE_MAP.forEach(([txt,...ids])=>{
+  const d=document.createElement('button'); d.type='button'; d.className='note-map-item';
+  d.innerHTML=`<b>•</b> ${txt}`;
+  d.addEventListener('click',()=>{select(ids[0]); centerOn(ids[0]);});
+  nm.appendChild(d);
+});
+const lt=document.getElementById('layerToggles');
+const layerOn=LAYERS.map(()=>true);
+const layerToggleEls=[];
+function setLayerVisibility(i,on){
+  layerOn[i]=on;
+  const toggle=layerToggleEls[i];
+  if(toggle){
+    toggle.classList.toggle('off',!on);
+    toggle.setAttribute('aria-pressed',String(on));
+    toggle.setAttribute('aria-label',`${on?'Hide':'Show'} ${LAYERS[i].name} layer`);
+  }
+  byLayer[i].forEach(n=>nodeEls[n.id].fo.style.display=on?'':'none');
+  (groupMeta[i]||[]).forEach(({labelEl,lineEl})=>{
+    labelEl.style.display=on?'':'none'; lineEl.style.display=on?'':'none';
+  });
+  edgeEls.forEach(({el,a,b})=>{
+    const la=NODES.find(n=>n.id===a).l, lb=NODES.find(n=>n.id===b).l;
+    el.style.display=(layerOn[la]&&layerOn[lb])?'':'none';
+  });
+  groupEdgeEls.forEach(({el,a,groupId})=>{
+    const la=NODES.find(n=>n.id===a).l, lb=groupLayerById[groupId];
+    el.style.display=(layerOn[la]&&layerOn[lb])?'':'none';
+  });
+  if(!on && selId && NODES.find(n=>n.id===selId).l===i) clearSel(false);
+}
+LAYERS.forEach((L,i)=>{
+  const d=document.createElement('button'); d.type='button'; d.className='layer-toggle';
+  d.setAttribute('aria-pressed','true'); d.setAttribute('aria-label',`Hide ${L.name} layer`);
+  d.innerHTML=`<span class="sw" style="background:${L.color}"></span> <span>${L.name}</span>`;
+  d.addEventListener('click',()=>setLayerVisibility(i,!layerOn[i]));
+  layerToggleEls.push(d); lt.appendChild(d);
+});
+
+/* ============================ PAN / ZOOM ============================ */
+const zoomSelect=document.getElementById('zoomSelect');
+const zoomCurrent=document.getElementById('zoomCurrent');
+const MIN_ZOOM=0.10, MAX_ZOOM=10;
+const ZOOM_PRESETS=[10,25,50,75,100,125,150,200,300,500,750,1000];
+for(const percent of ZOOM_PRESETS){
+  const option=document.createElement('option');
+  option.value=String(percent); option.textContent=`${percent}%`;
+  zoomSelect.appendChild(option);
+}
+const view={x:0,y:0,k:1};
+function syncZoomSelect(mode='scale'){
+  if(mode==='fit'){
+    zoomCurrent.hidden=true;
+    zoomSelect.value='fit';
+    return;
+  }
+  const percent=view.k*100;
+  const preset=ZOOM_PRESETS.find(value=>Math.abs(percent-value)<0.001);
+  if(preset!==undefined){
+    zoomCurrent.hidden=true;
+    zoomSelect.value=String(preset);
+    return;
+  }
+  zoomCurrent.hidden=false;
+  zoomCurrent.textContent=`${Math.round(percent)}%`;
+  zoomSelect.value='current';
+}
+function apply(mode='scale'){
+  vp.setAttribute('transform',`translate(${view.x},${view.y}) scale(${view.k})`);
+  syncZoomSelect(mode);
+}
+function zoomAt(k,mx,my){
+  const r=svg.getBoundingClientRect();
+  mx=mx??r.width/2; my=my??r.height/2;
+  const k2=Math.max(MIN_ZOOM,Math.min(MAX_ZOOM,k));
+  view.x=mx-(mx-view.x)*(k2/view.k);
+  view.y=my-(my-view.y)*(k2/view.k);
+  view.k=k2; apply();
+}
+function fit(){
+  const r=svg.getBoundingClientRect();
+  const k=Math.max(MIN_ZOOM,Math.min(MAX_ZOOM,Math.min(r.width/TOTAL_W, r.height/TOTAL_H)*0.96));
+  view.k=k; view.x=(r.width-TOTAL_W*k)/2; view.y=(r.height-TOTAL_H*k)/2; apply('fit');
+}
+function copyView(){ return {x:view.x,y:view.y,k:view.k}; }
+function restoreView(v){ view.x=v.x; view.y=v.y; view.k=v.k; apply(); }
+function captureCamera(){
+  const r=svg.getBoundingClientRect();
+  return {cx:(r.width/2-view.x)/view.k, cy:(r.height/2-view.y)/view.k, k:view.k};
+}
+function restoreCamera(c){
+  const r=svg.getBoundingClientRect();
+  view.k=c.k; view.x=r.width/2-c.cx*view.k; view.y=r.height/2-c.cy*view.k; apply();
+}
+svg.addEventListener('wheel',e=>{
+  e.preventDefault();
+  const r=svg.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+  const dir=e.deltaY<0?1.12:1/1.12;
+  zoomAt(view.k*dir,mx,my);
+},{passive:false});
+let drag=null;
+let suppressCanvasClearUntil = 0;
+function suppressCanvasClear(){ suppressCanvasClearUntil = performance.now() + 420; }
+svg.addEventListener('pointerdown',e=>{
+  if(drag || (e.pointerType==='mouse' && e.button!==0) || e.target.closest?.('.node,button,a,select')) return;
+  drag={id:e.pointerId,sx:e.clientX,sy:e.clientY,ox:view.x,oy:view.y,moved:false};
+  try{ svg.setPointerCapture?.(e.pointerId); }catch(err){}
+  svg.classList.add('grabbing');
+});
+svg.addEventListener('pointermove',e=>{
+  if(!drag || drag.id!==e.pointerId) return;
+  const dx=e.clientX-drag.sx, dy=e.clientY-drag.sy;
+  if(Math.hypot(dx,dy)>3) drag.moved=true;
+  if(!drag.moved) return;
+  e.preventDefault(); view.x=drag.ox+dx; view.y=drag.oy+dy; apply();
+});
+function endPointerDrag(e){
+  if(!drag || drag.id!==e.pointerId) return;
+  if(drag.moved) suppressCanvasClearUntil=performance.now()+180;
+  try{ svg.releasePointerCapture?.(e.pointerId); }catch(err){}
+  drag=null; svg.classList.remove('grabbing');
+}
+svg.addEventListener('pointerup',endPointerDrag);
+svg.addEventListener('pointercancel',endPointerDrag);
+svg.addEventListener('click',e=>{
+  if(performance.now() < suppressCanvasClearUntil) return;
+  clearSel();
+});
+function centerOn(id){
+  const P=pos[id], r=svg.getBoundingClientRect();
+  view.k=Math.max(view.k,0.85);
+  view.x=r.width/2 - P.cx*view.k; view.y=r.height/2 - P.cy*view.k; apply();
+}
+function ensureNodeVisible(id){
+  const node=nodeEls[id]?.div, stage=document.getElementById('stage');
+  if(!node || !stage) return;
+  const r=node.getBoundingClientRect(), s=stage.getBoundingClientRect(), toolbar=document.querySelector('.toolbar').getBoundingClientRect();
+  const left=s.left+36, right=s.right-36, top=Math.max(s.top+24,toolbar.bottom+8), bottom=s.bottom-32;
+  if(r.right<left || r.left>right || r.bottom<top || r.top>bottom) centerOn(id);
+}
+zoomSelect.addEventListener('change',()=>{
+  if(zoomSelect.value==='fit'){ fit(); return; }
+  if(zoomSelect.value!=='current') zoomAt(Number(zoomSelect.value)/100);
+});
+document.getElementById('btnReset').addEventListener('click',()=>{
+  layerOn.forEach((_,i)=>setLayerVisibility(i,true));
+  lastDetailState=null; clearSel(false); fit();
+});
+
+/* ============================ THEME + PANELS ============================ */
+const root=document.documentElement, app=document.getElementById('app');
+const btnTheme=document.getElementById('btnTheme');
+const tabLeft=document.getElementById('tabLeft'), tabRight=document.getElementById('tabRight');
+const layoutViews = new Map();
+let panelRestoreFrame = 0, panelRestoreTimer = 0;
+
+function applyTheme(mode){
+  root.setAttribute('data-theme', mode);
+  btnTheme.textContent = mode==='light' ? '☀ Light' : '🌙 Dark';
+  document.getElementById('themeColor').setAttribute('content',mode==='light'?'#eef1f6':'#0c0f14');
+  try{ localStorage.setItem('theme', mode); localStorage.removeItem('aic_theme'); }catch(e){}
+}
+btnTheme.addEventListener('click',()=>
+  applyTheme(root.getAttribute('data-theme')==='light' ? 'dark' : 'light'));
+
+function layoutKey(){
+  return [
+    app.classList.contains('rail-collapsed') ? 'rail0' : 'rail1',
+    app.classList.contains('detail-collapsed') ? 'detail0' : 'detail1'
+  ].join('|');
+}
+function updatePanelButtons(){
+  const rail = app.classList.contains('rail-collapsed');
+  const detail = app.classList.contains('detail-collapsed');
+  tabLeft.textContent  = rail ? '›' : '‹';
+  tabLeft.title = (rail?'Show':'Hide')+' left panel';
+  tabLeft.setAttribute('aria-label', tabLeft.title);
+  tabLeft.setAttribute('aria-expanded',String(!rail));
+  tabRight.textContent = detail ? '‹' : '›';
+  tabRight.title = (detail?'Show':'Hide')+' right panel';
+  tabRight.setAttribute('aria-label', tabRight.title);
+  tabRight.setAttribute('aria-expanded',String(!detail));
+}
+function preservePanelView(beforeKey, camera, restoreTargetView){
+  const afterKey = layoutKey();
+  const previous = restoreTargetView ? layoutViews.get(afterKey) : null;
+  if(panelRestoreFrame) cancelAnimationFrame(panelRestoreFrame);
+  if(panelRestoreTimer) clearTimeout(panelRestoreTimer);
+  layoutViews.set(beforeKey, copyView());
+  panelRestoreFrame = requestAnimationFrame(()=>{
+    if(previous) restoreView(previous);
+    else restoreCamera(camera);
+    panelRestoreFrame = 0;
+  });
+  panelRestoreTimer = setTimeout(()=>{
+    if(previous) restoreView(previous);
+    else restoreCamera(camera);
+    layoutViews.set(afterKey, copyView());
+    panelRestoreTimer = 0;
+  }, 260);
+}
+function restoreSelectionAfterPanelToggle(expectedId){
+  if(!expectedId) return;
+  requestAnimationFrame(()=>{ if(!selId) select(expectedId); });
+  setTimeout(()=>{ if(!selId) select(expectedId); }, 280);
+}
+function setRail(collapsed){
+  const beforeKey = layoutKey(), camera = captureCamera(), selected = selId;
+  if(!collapsed && matchMedia('(max-width:759px)').matches){
+    app.classList.add('detail-collapsed');
+    try{ localStorage.setItem('aic_detail','collapsed'); }catch(e){}
+  }
+  app.classList.toggle('rail-collapsed', collapsed);
+  updatePanelButtons();
+  try{ localStorage.setItem('aic_rail', collapsed?'collapsed':'open'); }catch(e){}
+  preservePanelView(beforeKey, camera, !collapsed);
+  restoreSelectionAfterPanelToggle(selected);
+}
+function setDetail(collapsed){
+  const beforeKey = layoutKey(), camera = captureCamera(), selected = selId;
+  if(!collapsed && matchMedia('(max-width:759px)').matches){
+    app.classList.add('rail-collapsed');
+    try{ localStorage.setItem('aic_rail','collapsed'); }catch(e){}
+  }
+  app.classList.toggle('detail-collapsed', collapsed);
+  updatePanelButtons();
+  try{ localStorage.setItem('aic_detail', collapsed?'collapsed':'open'); }catch(e){}
+  preservePanelView(beforeKey, camera, !collapsed);
+  restoreSelectionAfterPanelToggle(selected);
+}
+function bindPanelTab(tab, toggle){
+  tab.addEventListener('pointerdown',e=>{
+    e.preventDefault();
+    e.stopPropagation();
+    suppressCanvasClear();
+    toggle();
+  });
+  tab.addEventListener('click',e=>{
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  tab.addEventListener('keydown',e=>{
+    if(e.key!=='Enter' && e.key!==' ') return;
+    e.preventDefault();
+    e.stopPropagation();
+    suppressCanvasClear();
+    toggle();
+  });
+}
+bindPanelTab(tabLeft, ()=>setRail(!app.classList.contains('rail-collapsed')));
+bindPanelTab(tabRight, ()=>setDetail(!app.classList.contains('detail-collapsed')));
+
+(function restorePrefs(){
+  let theme='dark', rail=matchMedia('(max-width:759px)').matches, detail=matchMedia('(max-width:1199px)').matches;
+  try{
+    theme = localStorage.getItem('theme')||localStorage.getItem('aic_theme')||'dark';
+    const savedRail=localStorage.getItem('aic_rail'), savedDetail=localStorage.getItem('aic_detail');
+    if(savedRail!==null) rail=savedRail==='collapsed';
+    if(savedDetail!==null) detail=savedDetail==='collapsed';
+  }catch(e){}
+  if(matchMedia('(max-width:759px)').matches && !rail && !detail){ rail=true; detail=true; }
+  applyTheme(theme);
+  app.classList.toggle('rail-collapsed', rail);
+  app.classList.toggle('detail-collapsed', detail);
+  updatePanelButtons();
+})();
+
+/* init */
+renderOverview(); fit();
+layoutViews.set(layoutKey(), copyView());
+window.addEventListener('resize',()=>{ if(!selId) fit(); });
+const mobileLayoutQuery=matchMedia('(max-width:759px)');
+let widerPanelState=null;
+let responsiveLayoutTimer=0;
+mobileLayoutQuery.addEventListener('change',e=>{
+  if(e.matches){
+    widerPanelState={
+      rail:app.classList.contains('rail-collapsed'),
+      detail:app.classList.contains('detail-collapsed'),
+    };
+    if(!widerPanelState.rail && !widerPanelState.detail) app.classList.add('rail-collapsed','detail-collapsed');
+  }else if(widerPanelState){
+    app.classList.toggle('rail-collapsed',widerPanelState.rail);
+    app.classList.toggle('detail-collapsed',widerPanelState.detail);
+    widerPanelState=null;
+  }
+  updatePanelButtons();
+  const refreshView=()=>selId ? ensureNodeVisible(selId) : fit();
+  requestAnimationFrame(refreshView);
+  if(responsiveLayoutTimer) clearTimeout(responsiveLayoutTimer);
+  responsiveLayoutTimer=setTimeout(()=>{ refreshView(); responsiveLayoutTimer=0; },260);
+});
+</script>
+</body>
+</html>
