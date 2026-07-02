@@ -127,7 +127,7 @@ aiconfigurator cli estimate --model-path Qwen/Qwen3-32B --system h200_sxm --tp-s
 - `--moe-ep-size` (alias `--ep`): MoE expert parallelism size (auto-inferred if omitted)
 - `--gemm-quant-mode`: GEMM quantization mode (auto-inferred from model config if omitted)
 - `--kvcache-quant-mode`: KV cache quantization mode (auto-inferred if omitted)
-- `--fmha-quant-mode`: FMHA quantization mode (auto-inferred if omitted)
+- `--fmha-quant-mode`: FMHA quantization mode (auto-inferred if omitted). DeepSeek-V3 / Kimi-K2.5 context attention (MLA prefill) has no fp8 FMHA data — auto-inferred fp8 is downgraded to `bfloat16` for context-touching estimates (agg, prefill, static, static_ctx, AFD prefill), while decode/generation keeps fp8. Explicitly passing `fp8` for a context estimate is rejected with a clear error.
 - `--moe-quant-mode`: MoE quantization mode (auto-inferred if omitted)
 - `--comm-quant-mode`: Communication quantization mode (auto-inferred; default `half`)
 - `--prefix`: Prefix cache length (subset of ISL already cached per request). Default: `0`
