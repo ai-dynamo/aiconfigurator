@@ -18,10 +18,12 @@ two contracts verified here:
 import pytest
 
 from aiconfigurator.sdk.errors import (
+    EmpiricalNotImplementedError,
     InsufficientMemoryError,
     KVCacheCapacityError,
     NoFeasibleConfigError,
     NoResultsError,
+    is_expected_cli_error,
     is_expected_no_result_cause,
 )
 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
@@ -110,3 +112,59 @@ def test_recognizer_avoids_cycles() -> None:
     nested.__context__ = error
 
     assert not is_expected_no_result_cause(error)
+
+
+# ---------------------------------------------------------------------------
+# is_expected_cli_error — the shared CLI classifier (NVBug 6401889)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        NoFeasibleConfigError("sla"),
+        InsufficientMemoryError("oom"),
+        KVCacheCapacityError("kv"),
+        PerfDataNotAvailableError("missing silicon data"),
+        EmpiricalNotImplementedError("no basis"),
+        ValueError("Unsupported gemm quant mode 'fp8_static'"),
+    ],
+)
+def test_cli_classifier_accepts_expected_user_errors(exc) -> None:
+    """SLA/OOM/KV, perf-data misses, and config/compatibility ValueErrors are concise."""
+    assert is_expected_cli_error(exc)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        KeyError("bug"),
+        AttributeError("bug"),
+        TypeError("bug"),
+        RuntimeError("OOM: model does not fit"),  # plain RuntimeError (e.g. OOM) keeps traceback
+        IndexError("bug"),
+    ],
+)
+def test_cli_classifier_rejects_programming_errors(exc) -> None:
+    """Genuine defects (and OOM RuntimeError) are NOT concise — they keep tracebacks."""
+    assert not is_expected_cli_error(exc)
+
+
+def test_cli_classifier_accepts_wrapper_chained_from_expected_cause() -> None:
+    # A ValueError (unsupported quant) wrapped by a generic RuntimeError is still expected.
+    try:
+        raise RuntimeError("task failed") from ValueError("Unsupported quant mode")
+    except RuntimeError as exc:
+        assert is_expected_cli_error(exc)
+    # Same for a perf-data miss surfaced through a wrapper.
+    try:
+        raise RuntimeError("task failed") from PerfDataNotAvailableError("miss")
+    except RuntimeError as exc:
+        assert is_expected_cli_error(exc)
+
+
+def test_cli_classifier_rejects_wrapper_around_real_bug() -> None:
+    try:
+        raise RuntimeError("task failed") from KeyError("unexpected")
+    except RuntimeError as exc:
+        assert not is_expected_cli_error(exc)
