@@ -586,6 +586,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
     "Qwen2ForCausalLM": "LLAMA",
     "Qwen3ForCausalLM": "LLAMA",
+    "Phi3ForCausalLM": "LLAMA",
     "Qwen3VLForConditionalGeneration": "QWEN3VL",
     "Qwen3VLMoeForConditionalGeneration": "QWEN3VL_MOE",
     "MiMoForCausalLM": "LLAMA",
