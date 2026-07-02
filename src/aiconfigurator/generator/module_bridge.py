@@ -252,7 +252,18 @@ def task_config_to_generator_config(
         "tpot": _safe_float(_series_val(result_df, "tpot", task_config.tpot), task_config.tpot),
     }
     sla_cfg = _deep_merge(sla_cfg, overrides.get("SlaConfig"))
-    bench_cfg = overrides.get("BenchConfig")
+    # Seed BenchConfig from the Task's multimodal image workload so a VL
+    # benchmark doesn't silently degrade to text-only (the schema default
+    # image_batch_size: 0 disables every image block in the bench templates).
+    # Explicit --generator-set BenchConfig.* overrides keep highest precedence.
+    bench_cfg: dict[str, Any] = {}
+    if task_config.image_height > 0 and task_config.image_width > 0:
+        bench_cfg = {
+            "image_batch_size": task_config.num_images_per_request,
+            "image_width_mean": task_config.image_width,
+            "image_height_mean": task_config.image_height,
+        }
+    bench_cfg = _deep_merge(bench_cfg, overrides.get("BenchConfig"))
 
     params = collect_generator_params(
         service=service_cfg,
