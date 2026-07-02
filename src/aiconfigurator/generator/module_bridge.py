@@ -256,12 +256,16 @@ def task_config_to_generator_config(
     # benchmark doesn't silently degrade to text-only (the schema default
     # image_batch_size: 0 disables every image block in the bench templates).
     # Explicit --generator-set BenchConfig.* overrides keep highest precedence.
+    # getattr: duck-typed callers (spica's argparse.Namespace) lack the
+    # optional Task fields.
     bench_cfg: dict[str, Any] = {}
-    if task_config.image_height > 0 and task_config.image_width > 0:
+    image_height = _safe_int(getattr(task_config, "image_height", 0), 0)
+    image_width = _safe_int(getattr(task_config, "image_width", 0), 0)
+    if image_height > 0 and image_width > 0:
         bench_cfg = {
-            "image_batch_size": task_config.num_images_per_request,
-            "image_width_mean": task_config.image_width,
-            "image_height_mean": task_config.image_height,
+            "image_batch_size": _safe_int(getattr(task_config, "num_images_per_request", 1), 1),
+            "image_width_mean": image_width,
+            "image_height_mean": image_height,
         }
     bench_cfg = _deep_merge(bench_cfg, overrides.get("BenchConfig"))
 
@@ -292,8 +296,10 @@ def task_config_to_generator_config(
     # NodeConfig.system_name blank and facts resolution silently skipped all
     # hardware placement/env for disagg DGDs.
     if task_config.serving_mode != "agg":
-        prefill_system = task_config.prefill_system_name
-        decode_system = task_config.decode_system_name
+        # getattr: duck-typed callers (spica) carry only the primary_* views,
+        # not the per-role disagg fields.
+        prefill_system = getattr(task_config, "prefill_system_name", "")
+        decode_system = getattr(task_config, "decode_system_name", "")
         if prefill_system and decode_system and prefill_system != decode_system:
             # NodeConfig carries a single system: emitting prefill facts for
             # decode workers would silently misplace them. Reject until the
@@ -303,7 +309,9 @@ def task_config_to_generator_config(
                 f"prefill_system_name={prefill_system!r} != decode_system_name={decode_system!r}. "
                 "Generate per-system deployments separately or use matching systems."
             )
-    params.setdefault("NodeConfig", {})["system_name"] = task_config.primary_system_name
+    params.setdefault("NodeConfig", {})["system_name"] = getattr(
+        task_config, "primary_system_name", None
+    ) or getattr(task_config, "system_name", "")
     # Explicit --generator-set NodeConfig.* overrides win over derived values
     # (same precedence as the naive path); previously they were dropped.
     node_overrides = overrides.get("NodeConfig")
