@@ -420,6 +420,10 @@ def build_naive_generator_params(
     }
     node_config = {
         "num_gpus_per_node": gpus_per_node,
+        # Templates branch on NodeConfig.system_name (e.g. the vllm run.sh
+        # B60 ONEAPI vs CUDA device selector); K8sConfig.system_name alone
+        # only feeds facts resolution for the k8s artifacts.
+        "system_name": system_name,
     }
     model_config = {
         "is_moe": is_moe,
@@ -508,6 +512,11 @@ def build_naive_generator_params(
             backend=backend_name,
             generator_dynamo_version=effective_dynamo_version,
         )
+
+    # collect_generator_params rebuilds NodeConfig from the num_gpus_per_node
+    # scalar only; merge the full local node_config back so the system
+    # identity and explicit NodeConfig.* overrides survive into the output.
+    params["NodeConfig"] = _deep_merge_dicts(params.get("NodeConfig", {}), node_config)
 
     params["ModelConfig"] = model_config
     if llmd_config:
