@@ -283,6 +283,13 @@ def task_config_to_generator_config(
     if "preserve_engine_limits" in overrides:
         params["preserve_engine_limits"] = bool(overrides["preserve_engine_limits"])
     params["ModelConfig"] = model_cfg
+    # Preserve LlmdConfig overrides (e.g. vllm_image, kustomize_base_path) so the
+    # llm-d artifacts honor them. The bridge handles the other config sections
+    # explicitly but omitted this one, so the llm-d templates fell back to their
+    # defaults. Matches the naive generator's behavior.
+    llmd_config = copy.deepcopy(overrides.get("LlmdConfig") or {})
+    if llmd_config:
+        params["LlmdConfig"] = llmd_config
     return params
 
 
