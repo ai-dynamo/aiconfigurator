@@ -41,6 +41,7 @@ class EngineStepParityCase:
     attention_dp_size: int = 1
     moe_tp_size: int = 1
     moe_ep_size: int = 8
+    cp_size: int = 1
     agg_batch_size: int = 2
     agg_ctx_tokens: int | None = None
     disagg_prefill_batch_size: int = 1
@@ -703,6 +704,7 @@ def _python_mixed_step_ms(case: EngineStepParityCase) -> float:
         attention_dp_size=case.attention_dp_size,
         moe_tp_size=case.moe_tp_size,
         moe_ep_size=case.moe_ep_size,
+        cp_size=case.cp_size,
     )
     model = _quiet_call(get_model, case.model_path, model_config, case.backend_name)
     backend = get_backend(case.backend_name)
@@ -741,6 +743,7 @@ def _rust_mixed_step_ms(case: EngineStepParityCase) -> float:
         attention_dp_size=case.attention_dp_size,
         moe_tp_size=case.moe_tp_size,
         moe_ep_size=case.moe_ep_size,
+        cp_size=case.cp_size,
     )
     model = _quiet_call(get_model, case.model_path, model_config, case.backend_name)
     shape = _mix_step_shape(case)
@@ -909,4 +912,62 @@ class TestRustEngineStepDisaggParity:
         _prepare_rust_core(monkeypatch)
 
         reason = _parity_mismatch_reason(_disagg_comparison_metrics(case))
+        assert reason is None, reason
+
+
+# Context-parallelism (CP) parity cases. CP is SGLang-only and shards prefill
+# sequence tokens: token-major ops divide their per-rank token count by cp
+# (seq_split), ContextAttention models rank-0's zigzag chunk split, and
+# MoEDispatch all-gathers (pre) / reduce-scatters (combine) the CP-sharded
+# tokens. sglang CP requires tp_size=1 and attention_dp_size=1, so the width
+# (tp*dp*cp) is carried entirely by cp and matched by moe_tp*moe_ep.
+#
+# Validated on the mix-step surface: the prefill chunk exercises the CP ops
+# (context attention, GEMMs, comm, MoE dispatch). Without the Rust CP support
+# these cases drift (Rust would evaluate the cp>1 config as cp=1); with it the
+# Python and Rust engine steps match within PARITY_RTOL.
+CP_CASES = [
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-235B-A22B",
+            system_name="b200_sxm",
+            backend_name="sglang",
+            backend_version="0.5.10",
+            tp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=8,
+            moe_ep_size=1,
+            cp_size=8,
+        ),
+        id="qwen3-235b-a22b-b200-sglang-0510-cp8",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-235B-A22B",
+            system_name="b200_sxm",
+            backend_name="sglang",
+            backend_version="0.5.10",
+            tp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=4,
+            moe_ep_size=1,
+            cp_size=4,
+        ),
+        id="qwen3-235b-a22b-b200-sglang-0510-cp4",
+    ),
+]
+
+
+class TestRustEngineStepCpMixedStepParity:
+    """CP parity on the mix-step surface (CP ops run in the prefill chunk)."""
+
+    @pytest.mark.parametrize("case", CP_CASES)
+    def test_cp_parity(
+        self,
+        case: EngineStepParityCase,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _prepare_rust_core(monkeypatch)
+
+        reason = _parity_mismatch_reason(_mixed_step_comparison_metrics(case))
         assert reason is None, reason

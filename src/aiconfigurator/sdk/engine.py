@@ -123,6 +123,7 @@ def _gemm(op: GEMM) -> dict:
         "quant_mode": _quant_name(op._quant_mode),
         "scale_num_tokens": op._scale_num_tokens,
         "low_precision_input": op._low_precision_input,
+        "seq_split": op._seq_split,
     }
 
 
@@ -136,6 +137,7 @@ def _embedding(op: Embedding) -> dict:
         # query ignores it (memory-only op). Bfloat16 is the neutral value the
         # Rust builders use for embeddings.
         "quant_mode": "bfloat16",
+        "seq_split": op._seq_split,
     }
 
 
@@ -149,6 +151,7 @@ def _elementwise(op: ElementWise) -> dict:
         "name": op._name,
         "scale_factor": op._scale_factor,
         "bytes_per_token": float(bytes_per_token),
+        "seq_split": op._seq_split,
     }
 
 
@@ -163,6 +166,7 @@ def _context_attention(op: ContextAttention) -> dict:
         "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
         "use_qk_norm": op._use_qk_norm,
+        "cp_size": op._cp_size,
     }
 
 
@@ -282,6 +286,8 @@ def _moe_dispatch(op: MoEDispatch, *, backend: str) -> dict:
         "flavor": _dispatch_flavor(backend),
         "comm_quant": "half",
         "moe_quant": _quant_name(quant) if quant is not None else "bfloat16",
+        "attn_cp_size": op._attn_cp_size,
+        "is_context": op._is_context,
     }
 
 
@@ -292,6 +298,7 @@ def _custom_all_reduce(op: CustomAllReduce) -> dict:
         "hidden_size": op._h,
         "tp_size": op._tp_size,
         "quant": "half",
+        "seq_split": op._seq_split,
     }
 
 
@@ -303,6 +310,7 @@ def _nccl(op: NCCL) -> dict:
         "num_gpus": op._num_gpus,
         "dtype": "half",
         "operation": op._nccl_op,
+        "seq_split": op._seq_split,
     }
 
 
@@ -312,6 +320,7 @@ def _p2p(op: P2P) -> dict:
         "scale_factor": op._scale_factor,
         "pp_size": op._pp_size,
         "hidden_size": op._h,
+        "seq_split": op._seq_split,
     }
 
 
@@ -609,6 +618,7 @@ def _engine_config_dict(
         "attention_dp_size": _opt_int(getattr(cfg, "attention_dp_size", None)),
         "moe_tp_size": _opt_int(getattr(cfg, "moe_tp_size", None)),
         "moe_ep_size": _opt_int(getattr(cfg, "moe_ep_size", None)),
+        "cp_size": _opt_int(getattr(cfg, "cp_size", None)),
         # QuantizationConfig (flattened)
         "weight_dtype": _rust_quant_to_dtype(getattr(cfg, "gemm_quant_mode", None)),
         "moe_dtype": _rust_moe_quant_to_dtype(getattr(cfg, "moe_quant_mode", None)),

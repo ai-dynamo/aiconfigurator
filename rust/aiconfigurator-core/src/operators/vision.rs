@@ -54,6 +54,7 @@ impl VisionEncoderOp {
             quant_mode: self.gemm_quant,
             scale_num_tokens: 1,
             low_precision_input: false,
+                seq_split: 1,
         };
         let attn = EncoderAttentionOp::new(
             format!("{}.attn", self.name),
@@ -69,6 +70,7 @@ impl VisionEncoderOp {
             quant_mode: self.gemm_quant,
             scale_num_tokens: 1,
             low_precision_input: false,
+                seq_split: 1,
         };
         let ffn1 = GemmOp {
             name: format!("{}.ffn1", self.name),
@@ -78,6 +80,7 @@ impl VisionEncoderOp {
             quant_mode: self.gemm_quant,
             scale_num_tokens: 1,
             low_precision_input: false,
+                seq_split: 1,
         };
         let ffn2 = GemmOp {
             name: format!("{}.ffn2", self.name),
@@ -87,6 +90,7 @@ impl VisionEncoderOp {
             quant_mode: self.gemm_quant,
             scale_num_tokens: 1,
             low_precision_input: false,
+                seq_split: 1,
         };
         let norms = ElementwiseOp::new(
             format!("{}.norms", self.name),

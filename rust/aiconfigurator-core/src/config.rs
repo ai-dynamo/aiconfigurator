@@ -70,6 +70,12 @@ pub struct ParallelMapping {
     pub moe_tp_size: Option<u32>,
     #[serde(default)]
     pub moe_ep_size: Option<u32>,
+    /// Context-parallel size. Part of the engine identity so cp variants get
+    /// distinct compiled handles. `None`/1 means no CP. The per-op CP math is
+    /// carried on the ops themselves (seq_split / cp_size / attn_cp_size), not
+    /// re-derived from this field.
+    #[serde(default)]
+    pub cp_size: Option<u32>,
 }
 
 /// Precision/quantization dtypes. Flattened into [`EngineConfig`]. Field
