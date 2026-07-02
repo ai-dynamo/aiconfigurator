@@ -1,0 +1,17 @@
+id,status,ttft_ms,tpot_ms
+dense_agg_c256,OK,634.199109,59.793989
+dense_agg_c64,OK,579.316244,20.439580
+dense_agg_c8,OK,314.651734,8.456140
+dense_agg_long_isl,OK,4135.757484,88.798145
+dense_disagg_ratematch,OK,2039.771000,21.685000
+moe_agg_adp_wideep,OK,1121.779293,47.901235
+moe_agg_gptoss,OK,290.490166,18.575867
+moe_disagg_wideep,OK,4205.952000,45.988000
+mtp_nextn1,OK,1121.779293,38.758572
+mtp_nextn2,OK,1121.779293,39.556396
+oom_boundary_405b_tp1,RuntimeError,,
+prefix_cache,OK,551.911687,16.273981
+sglang_dense_agg,OK,577.318659,23.643015
+sglang_dense_disagg,OK,1029.595000,17.229000
+vl_encoder,OK,560.426002,11.041952
+vllm_dense_agg,OK,580.563899,34.944226

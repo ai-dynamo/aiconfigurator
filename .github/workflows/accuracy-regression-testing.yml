@@ -1,16 +1,19 @@
 name: "Accuracy Regression Testing"
 
+# Demoted from a PR gate to a scheduled silicon-accuracy tracker; the blocking
+# PR gate is now "Regression Gate V2" (regression-v2.yml), see
+# docs/design/regression_test_v2_design.md. Scheduled runs compare main HEAD
+# against the most recent release tag as the trend anchor.
+
 on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
+  schedule:
+    - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
       old-ref:
-        description: "Old revision to compare against"
+        description: "Old revision to compare against (default: latest release tag)"
         required: false
-        default: "main"
+        default: ""
         type: string
 
 jobs:
@@ -44,10 +47,9 @@ jobs:
       - name: Resolve old revision
         id: old-ref
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            OLD_REF="${{ github.event.pull_request.base.sha }}"
-          else
-            OLD_REF="${{ inputs.old-ref }}"
+          OLD_REF="${{ inputs.old-ref }}"
+          if [ -z "${OLD_REF}" ]; then
+            OLD_REF="$(git describe --tags --abbrev=0 2>/dev/null || echo main)"
           fi
           echo "old_ref=${OLD_REF}" >> "$GITHUB_OUTPUT"
           echo "Comparing old revision ${OLD_REF} against incoming revision $(git rev-parse HEAD)"
@@ -137,26 +139,3 @@ jobs:
           else
             echo "Comparison summary was not generated." >> "$GITHUB_STEP_SUMMARY"
           fi
-
-      - name: Prepare PR comment inputs
-        if: always() && github.event_name == 'pull_request'
-        env:
-          ARTIFACT_URL: ${{ steps.upload-regression-artifacts.outputs.artifact-url }}
-          OLD_REF: ${{ steps.old-ref.outputs.old_ref }}
-        run: |
-          set -euo pipefail
-          rm -rf accuracy-regression-comment-inputs
-          mkdir -p accuracy-regression-comment-inputs
-          printf '%s\n' "${OLD_REF}" > accuracy-regression-comment-inputs/old-ref.txt
-          printf '%s\n' "${ARTIFACT_URL}" > accuracy-regression-comment-inputs/artifact-url.txt
-          printf '%s\n' "${{ github.event.pull_request.number }}" > accuracy-regression-comment-inputs/pr-number.txt
-          cp tools/accuracy_regression_testing/results/comparison_summary.csv accuracy-regression-comment-inputs/ 2>/dev/null || true
-          cp tools/accuracy_regression_testing/results/comparison_plot.png accuracy-regression-comment-inputs/ 2>/dev/null || true
-
-      - name: Upload PR comment inputs
-        if: always() && github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v7
-        with:
-          name: accuracy-regression-comment-inputs
-          path: accuracy-regression-comment-inputs/**
-          retention-days: 30

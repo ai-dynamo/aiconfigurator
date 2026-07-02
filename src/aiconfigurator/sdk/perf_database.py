@@ -435,6 +435,7 @@ def get_database(
     systems_paths: str | list[str] | None = None,
     allow_missing_data: bool = False,
     database_mode: str | None = None,
+    shared_layer: bool | None = None,
 ) -> PerfDatabase | None:
     """
     Get the database for a given system, backend and version.
@@ -454,6 +455,11 @@ def get_database(
             the shared layer (sibling-row inheritance, including
             `kernel_source=default` fallback rows) so missing shapes are filled
             from older collected data; explicit formula-only modes keep it off.
+        shared_layer: explicit shared-layer override. ``None`` (default) derives
+            the flag from ``database_mode``; ``False`` restricts loading to the
+            active backend/version's own rows even under SILICON; ``True``
+            forces sibling inheritance on. Overridden templates are cached
+            separately from derived ones.
 
     Returns:
         PerfDatabase for the given system, backend, version.
@@ -467,7 +473,11 @@ def get_database(
         logger.error(f"No database version available for {system=}, {backend=}")
         return None
 
-    shared_flag = _shared_layer_enabled(database_mode)
+    shared_flag = _shared_layer_enabled(database_mode) if shared_layer is None else bool(shared_layer)
+    # Only pass the override kwarg when explicitly set: PerfDatabase derives the
+    # same flag from database_mode otherwise, and tests monkeypatch PerfDatabase
+    # with fakes that predate the kwarg.
+    extra_database_kwargs = {} if shared_layer is None else {"shared_layer": shared_flag}
     missing_data_candidate = None
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
@@ -497,6 +507,7 @@ def get_database(
                         version,
                         systems_root,
                         database_mode=database_mode,
+                        **extra_database_kwargs,
                     )
                     databases_cache[cache_key][backend][version] = database
                     return database
@@ -522,7 +533,9 @@ def get_database(
         except KeyError:
             logger.info(f"Loading estimate-only database for {system=}, {backend=}, {version=}")
             try:
-                database = PerfDatabase(system, backend, version, systems_root, database_mode=database_mode)
+                database = PerfDatabase(
+                    system, backend, version, systems_root, database_mode=database_mode, **extra_database_kwargs
+                )
                 databases_cache[cache_key][backend][version] = database
                 return database
             except Exception:
@@ -575,13 +588,14 @@ def _get_configured_database_view(
     database: PerfDatabase,
     mode: str | common.DatabaseMode | None,
     transfer_policy=None,
+    shared_layer: bool | None = None,
 ) -> PerfDatabase:
     """Return a cached configured copy rooted at the original data template."""
     normalized_mode = _normalize_database_mode(mode)
     policy = common.resolve_transfer_policy(transfer_policy)
     root_template = getattr(database, "_root_database_template", database)
 
-    expected_shared_layer = _shared_layer_enabled(normalized_mode.name)
+    expected_shared_layer = _shared_layer_enabled(normalized_mode.name) if shared_layer is None else bool(shared_layer)
     if root_template.enable_shared_layer != expected_shared_layer:
         raise ValueError(
             f"Cannot create a {normalized_mode.name} query view from a database template with "
@@ -600,6 +614,7 @@ def get_database_view(
     allow_missing_data: bool = False,
     database_mode: str | common.DatabaseMode | None = None,
     transfer_policy=None,
+    shared_layer: bool | None = None,
 ) -> PerfDatabase | None:
     """Return an isolated, lightweight query view over a cached database.
 
@@ -609,7 +624,9 @@ def get_database_view(
     read-only perf tables while owning its interpolation cache and lazy
     support-matrix binding. ``database_mode`` is also forwarded to
     :func:`get_database` so EMPIRICAL/SOL views do not accidentally inherit the
-    shared SILICON data layer.
+    shared SILICON data layer. ``shared_layer`` explicitly overrides the
+    mode-derived shared-layer flag (see :func:`get_database`); regression
+    harnesses pass ``False`` to pin SILICON queries to per-version data.
     """
     mode = _normalize_database_mode(database_mode)
     database_kwargs = {
@@ -618,13 +635,14 @@ def get_database_view(
         "version": version,
         "allow_missing_data": allow_missing_data,
         "database_mode": mode.name,
+        "shared_layer": shared_layer,
     }
     if systems_paths is not None:
         database_kwargs["systems_paths"] = systems_paths
     database = get_database(**database_kwargs)
     if database is None:
         return None
-    return _get_configured_database_view(database, mode, transfer_policy)
+    return _get_configured_database_view(database, mode, transfer_policy, shared_layer=shared_layer)
 
 
 DatabaseRef = tuple[str, str, str, str]
@@ -1392,6 +1410,7 @@ class PerfDatabase:
         version: str,
         systems_root: str = "./systems",
         database_mode: str | None = None,
+        shared_layer: bool | None = None,
     ) -> None:
         """
         Initialize the perf database.
@@ -1403,12 +1422,17 @@ class PerfDatabase:
                 formula-only modes keep it off. Doesn't change which rows are
                 interpolated at query time; that's controlled by
                 `set_default_database_mode`.
+            shared_layer: explicit shared-layer override. ``None`` (default)
+                derives the flag from ``database_mode`` as described above;
+                ``False`` loads only the active backend/version's own rows even
+                under SILICON (used by regression harnesses to pin per-version
+                behavior); ``True`` forces sibling inheritance on.
         """
         self.system = system
         self.backend = backend
         self.version = version
         self.systems_root = systems_root
-        self._shared_layer_mode = _shared_layer_enabled(database_mode)
+        self._shared_layer_mode = _shared_layer_enabled(database_mode) if shared_layer is None else bool(shared_layer)
         # Which empirical transfer kinds are permitted (HYBRID/EMPIRICAL only). All on by
         # default = current behaviour; set_transfer_policy() narrows it for fine-grained
         # HYBRID control. Read at query time by op get_empirical, so it can be retuned on

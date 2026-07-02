@@ -432,3 +432,100 @@ def test_newest_same_framework_version_wins(env: Path) -> None:
 
     db = _build_db(env)
     assert _gemm_lookup(db, 1024, 4096, 4096) == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Explicit shared_layer override (regression-harness knob)
+# ---------------------------------------------------------------------------
+
+
+def test_shared_layer_override_off_in_silicon_mode(env: Path) -> None:
+    """shared_layer=False pins a SILICON database to its own version's rows."""
+    active_csv = _backend_csv(env)
+    active_csv.parent.mkdir(parents=True, exist_ok=True)
+    _write_gemm_csv(active_csv, [("trtllm", "torch_flow", 512, 512, 512, 0.3)])
+
+    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+
+    db = PerfDatabase(
+        system="h100_sxm",
+        backend="trtllm",
+        version="1.0",
+        systems_root=str(env),
+        database_mode="SILICON",
+        shared_layer=False,
+    )
+    assert db.enable_shared_layer is False
+    # Own rows still load; sibling rows do not.
+    assert _gemm_lookup(db, 512, 512, 512) == 0.3
+    assert _gemm_lookup(db, 1024, 4096, 4096) is None
+
+
+def test_shared_layer_override_none_keeps_mode_derived_behavior(env: Path) -> None:
+    """shared_layer=None is the default and preserves mode-derived semantics."""
+    active_csv = _backend_csv(env)
+    active_csv.parent.mkdir(parents=True, exist_ok=True)
+    active_csv.write_text(_GEMM_HEADER)
+
+    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+
+    db = PerfDatabase(
+        system="h100_sxm",
+        backend="trtllm",
+        version="1.0",
+        systems_root=str(env),
+        database_mode="SILICON",
+        shared_layer=None,
+    )
+    assert db.enable_shared_layer is True
+    assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
+
+
+def test_get_database_shared_layer_override_cached_separately(env: Path) -> None:
+    """Overridden templates must not alias the mode-derived cache entry."""
+    active_csv = _backend_csv(env)
+    active_csv.parent.mkdir(parents=True, exist_ok=True)
+    active_csv.write_text(_GEMM_HEADER)
+
+    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+
+    databases_cache.clear()
+    try:
+        shared_on = get_database("h100_sxm", "trtllm", "1.0", systems_paths=str(env), database_mode="SILICON")
+        shared_off = get_database(
+            "h100_sxm", "trtllm", "1.0", systems_paths=str(env), database_mode="SILICON", shared_layer=False
+        )
+        assert shared_on is not None and shared_off is not None
+        assert shared_on is not shared_off
+        assert shared_on.enable_shared_layer is True
+        assert shared_off.enable_shared_layer is False
+        assert _gemm_lookup(shared_on, 1024, 4096, 4096) == 0.7
+        assert _gemm_lookup(shared_off, 1024, 4096, 4096) is None
+    finally:
+        databases_cache.clear()
+
+
+def test_get_database_view_shared_layer_override(env: Path) -> None:
+    """get_database_view(shared_layer=False) yields a SILICON view without the shared layer."""
+    from aiconfigurator.sdk.perf_database import get_database_view
+
+    active_csv = _backend_csv(env)
+    active_csv.parent.mkdir(parents=True, exist_ok=True)
+    active_csv.write_text(_GEMM_HEADER)
+
+    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+
+    databases_cache.clear()
+    try:
+        view = get_database_view(
+            "h100_sxm", "trtllm", "1.0", systems_paths=str(env), database_mode="SILICON", shared_layer=False
+        )
+        assert view is not None
+        assert view.enable_shared_layer is False
+        assert _gemm_lookup(view, 1024, 4096, 4096) is None
+    finally:
+        databases_cache.clear()
