@@ -383,9 +383,10 @@ def run_moe_torch(
                 "activation": str(mxfp4_module_config.get("activation", "silu")),
                 "pcp_size": 1,
             }
-            if "reduce_results" in inspect.signature(FusedMoE.__init__).parameters:
+            _fused_moe_init_params = inspect.signature(FusedMoE.__init__).parameters
+            if "reduce_results" in _fused_moe_init_params:
                 fused_moe_kwargs["reduce_results"] = False
-            if "ep_size" in inspect.signature(FusedMoE.__init__).parameters:
+            if "ep_size" in _fused_moe_init_params:
                 fused_moe_kwargs["ep_size"] = moe_ep_size
             moe_module = FusedMoE(**fused_moe_kwargs)
             moe_module.to(device)
