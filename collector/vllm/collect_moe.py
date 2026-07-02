@@ -26,6 +26,20 @@ except ImportError:
     from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
+# fused_experts dropped the ``inplace`` kwarg in vLLM 0.23.0 (replaced by
+# ``activation`` / ``apply_router_weight_on_input`` and now always returns a
+# fresh tensor). Probe once at import time: keep passing ``inplace=False`` on
+# older vLLM where it exists to protect the reused ``hidden_states`` buffer
+# from in-place writes, and omit it on 0.23+ where the kwarg is rejected.
+_fused_experts_accepts_inplace: bool
+try:
+    import inspect
+
+    _fused_experts_accepts_inplace = "inplace" in inspect.signature(fused_experts).parameters
+except Exception:
+    _fused_experts_accepts_inplace = False
+_fused_experts_inplace_kw: dict = {"inplace": False} if _fused_experts_accepts_inplace else {}
+
 # Compatibility: block FP8 helpers may differ by version.
 # Priority: vllm.utils.deep_gemm -> deep_gemm extension -> None.
 try:
@@ -364,14 +378,16 @@ def run_moe_torch(
                 "quant_config": mxfp4_quant_config,
                 "tp_size": 1,
                 "dp_size": 1,
-                "ep_size": moe_ep_size,
                 "prefix": "",
                 "has_bias": bool(mxfp4_module_config.get("has_bias", False)),
                 "activation": str(mxfp4_module_config.get("activation", "silu")),
                 "pcp_size": 1,
             }
-            if "reduce_results" in inspect.signature(FusedMoE.__init__).parameters:
+            _fused_moe_init_params = inspect.signature(FusedMoE.__init__).parameters
+            if "reduce_results" in _fused_moe_init_params:
                 fused_moe_kwargs["reduce_results"] = False
+            if "ep_size" in _fused_moe_init_params:
+                fused_moe_kwargs["ep_size"] = moe_ep_size
             moe_module = FusedMoE(**fused_moe_kwargs)
             moe_module.to(device)
             moe_module.eval()
@@ -666,7 +682,7 @@ def run_moe_torch(
                         w2,
                         tw,
                         ti,
-                        inplace=False,
+                        **_fused_experts_inplace_kw,
                         quant_config=quant_config,
                         global_num_experts=num_experts,
                         expert_map=expert_map,
@@ -679,7 +695,7 @@ def run_moe_torch(
                     w2,
                     routed_weights,
                     topk_ids,
-                    inplace=False,
+                    **_fused_experts_inplace_kw,
                     quant_config=quant_config,
                     global_num_experts=num_experts,
                     expert_map=expert_map,
