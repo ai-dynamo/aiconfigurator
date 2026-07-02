@@ -22,6 +22,7 @@ dicts/lists passed through verbatim.
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +30,33 @@ import yaml
 
 DGD_API_VERSION = "nvidia.com/v1alpha1"
 DGD_KIND = "DynamoGraphDeployment"
+
+# Boolean tokens of go-yaml (YAML 1.1), which Kubernetes uses for YAML-to-JSON
+# conversion. PyYAML's own resolver omits the single letters y/Y/n/N, so it
+# emits the string "y" as a plain scalar that the API server decodes as the
+# JSON boolean true — the DGD admission webhook then rejects the manifest
+# because EnvVar.value must be a string. Quote every token in the go-yaml set.
+_YAML11_BOOL_TOKENS = re.compile(
+    r"^(?:y|Y|n|N|yes|Yes|YES|no|No|NO|true|True|TRUE"
+    r"|false|False|FALSE|on|On|ON|off|Off|OFF)$"
+)
+
+
+class _K8sSafeDumper(yaml.SafeDumper):
+    """SafeDumper that keeps YAML-1.1 boolean-like strings quoted for K8s."""
+
+
+def _represent_str_k8s(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:
+    style = "'" if _YAML11_BOOL_TOKENS.match(data) else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
+
+
+_K8sSafeDumper.add_representer(str, _represent_str_k8s)
+
+
+def k8s_safe_dump(data: Any) -> str:
+    """Serialize a K8s manifest dict without losing string types to YAML 1.1."""
+    return yaml.dump(data, Dumper=_K8sSafeDumper, sort_keys=False)
 
 
 def _put(out: dict[str, Any], key: str, value: Any) -> None:
@@ -221,7 +249,7 @@ class DGD:
         return out
 
     def to_yaml(self) -> str:
-        return yaml.safe_dump(self.to_dict(), sort_keys=False)
+        return k8s_safe_dump(self.to_dict())
 
 
 @dataclass
@@ -268,7 +296,7 @@ class ConfigMapDoc:
         return out
 
     def to_yaml(self) -> str:
-        return yaml.safe_dump(self.to_dict(), sort_keys=False)
+        return k8s_safe_dump(self.to_dict())
 
 
 @dataclass
@@ -327,7 +355,7 @@ class ComputeDomainDoc:
         return out
 
     def to_yaml(self) -> str:
-        return yaml.safe_dump(self.to_dict(), sort_keys=False)
+        return k8s_safe_dump(self.to_dict())
 
 
 def dgd_documents_to_yaml(docs: list[Any]) -> str:
