@@ -39,6 +39,7 @@ _BACKEND_SOURCES = {
 
 _ALLOWED_CLI_FLAGS = {
     "vllm": {
+        "--served-model-name",
         "--tensor-parallel-size",
         "--pipeline-parallel-size",
         "--data-parallel-size",

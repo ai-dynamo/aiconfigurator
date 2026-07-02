@@ -1,4 +1,6 @@
 {%- set args = [] -%}
+{#- Gate B fix: emit served-model-name (mirrors sglang/trtllm worker args) so local-path models register under the served name, not the path. Guarded: omitted when unset/empty. Placed first so k8s worker args read `--model <path> --served-model-name <name> ...` like sglang. -#}
+{%- if ServiceConfig is defined and ServiceConfig.served_model_name -%}{%- set _ = args.append('--served-model-name "' ~ ServiceConfig.served_model_name ~ '"') -%}{%- endif -%}
 {%- if vllm['tensor-parallel-size'] is defined -%}{%- set _ = args.append('--tensor-parallel-size "' ~ vllm['tensor-parallel-size'] ~ '"') -%}{%- endif -%}
 {%- if vllm['pipeline-parallel-size'] is defined -%}{%- set _ = args.append('--pipeline-parallel-size "' ~ vllm['pipeline-parallel-size'] ~ '"') -%}{%- endif -%}
 {%- if vllm['data-parallel-size'] is defined -%}{%- set _ = args.append('--data-parallel-size "' ~ vllm['data-parallel-size'] ~ '"') -%}{%- endif -%}
