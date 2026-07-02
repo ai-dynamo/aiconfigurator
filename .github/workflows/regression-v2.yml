@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Regression Gate V2"
+
+# Old-vs-new regression gate (docs/design/regression_test_v2_design.md):
+# collect a run_static + scheduling snapshot on the base revision and on the
+# head revision (in parallel, each side with its own copy of the harness),
+# then diff. OK -> not-OK transitions block; drift and coverage changes are
+# reported for review.
+#
+# Rollout is two PRs: this file ships with workflow_dispatch only (manual
+# validation); a follow-up PR adds the pull_request trigger and demotes the
+# old accuracy-regression job. The ref-resolution below already handles the
+# pull_request event so that follow-up is trigger-only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      old-ref:
+        description: "Old revision to compare against (default: main)"
+        required: false
+        default: ""
+
+concurrency:
+  group: regv2-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  refs:
+    name: Resolve revisions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      old: ${{ steps.resolve.outputs.old }}
+    steps:
+      - name: Resolve old revision
+        id: resolve
+        env:
+          OLD_REF_INPUT: ${{ inputs.old-ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            OLD_REF="${BASE_SHA}"
+          else
+            OLD_REF="${OLD_REF_INPUT:-main}"
+          fi
+          echo "old=${OLD_REF}" >> "$GITHUB_OUTPUT"
+          echo "Old revision: ${OLD_REF}"
+
+  collect:
+    name: Collect snapshot (${{ matrix.side }})
+    needs: refs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [old, new]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # New side: default checkout (PR merge ref / dispatched ref).
+          ref: ${{ matrix.side == 'old' && needs.refs.outputs.old || '' }}
+          lfs: true
+
+      - name: Git LFS Pull
+        run: git lfs pull
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Split-era revisions need the payload-bearing Maturin core installed
+          # first; newer revisions bundle it in the root package.
+          if grep -q 'build-backend = "maturin"' src/aiconfigurator-core/pyproject.toml 2>/dev/null; then
+            python -m pip install -e src/aiconfigurator-core
+          fi
+          python -m pip install -e ".[dev]"
+
+      - name: Collect tier-1 + tier-2 snapshot
+        run: |
+          mkdir -p /tmp/regv2-snapshot
+          if [ ! -f tools/regression_v2/collect_static.py ]; then
+            echo "revision has no regression-v2 harness; uploading empty snapshot"
+            touch /tmp/regv2-snapshot/NO_HARNESS.txt
+            exit 0
+          fi
+          python tools/regression_v2/collect_static.py \
+            --output-dir /tmp/regv2-snapshot \
+            --jobs "$(nproc)"
+          python tools/regression_v2/run_tier2.py --output-dir /tmp/regv2-snapshot
+          python tools/regression_v2/run_silicon.py --output-dir /tmp/regv2-snapshot
+
+      - name: Upload snapshot
+        uses: actions/upload-artifact@v7
+        with:
+          name: regv2-${{ matrix.side }}
+          path: /tmp/regv2-snapshot
+          retention-days: 30
+
+  report:
+    name: AIC Regression Gate V2
+    needs: collect
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download snapshots
+        uses: actions/download-artifact@v7
+        with:
+          pattern: regv2-*
+          path: /tmp/snapshots
+
+      - name: Compare and gate
+        run: |
+          python tools/regression_v2/report.py \
+            --old /tmp/snapshots/regv2-old \
+            --new /tmp/snapshots/regv2-new \
+            --report-dir /tmp/regv2-report
+
+      - name: Add summary
+        if: always()
+        run: |
+          if [ -f /tmp/regv2-report/summary.md ]; then
+            cat /tmp/regv2-report/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: regression-v2-report
+          path: /tmp/regv2-report
+          if-no-files-found: ignore
+          retention-days: 30
