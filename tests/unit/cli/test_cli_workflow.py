@@ -69,6 +69,21 @@ class TestCLILogLevelResolution:
         args = argparse.Namespace(log_level=None)
         assert _resolve_cli_log_level(args) == logging.INFO
 
+    def test_legacy_debug_flag_resolves_to_debug(self, monkeypatch) -> None:
+        monkeypatch.delenv("AICONFIGURATOR_LOG_LEVEL", raising=False)
+        args = argparse.Namespace(log_level=None, debug=True)
+        assert _resolve_cli_log_level(args) == logging.DEBUG
+
+    def test_env_var_overrides_legacy_debug(self, monkeypatch) -> None:
+        monkeypatch.setenv("AICONFIGURATOR_LOG_LEVEL", "warning")
+        args = argparse.Namespace(log_level=None, debug=True)
+        assert _resolve_cli_log_level(args) == logging.WARNING
+
+    def test_cli_flag_overrides_legacy_debug(self, monkeypatch) -> None:
+        monkeypatch.setenv("AICONFIGURATOR_LOG_LEVEL", "warning")
+        args = argparse.Namespace(log_level="ERROR", debug=True)
+        assert _resolve_cli_log_level(args) == logging.ERROR
+
 
 class TestCLIIntegration:
     """Workflow tests for the CLI orchestration layer (builders/executor/save)."""
