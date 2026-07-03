@@ -276,7 +276,7 @@ def sweep_load_predictor(config: SmartSearchConfig, *, show_progress: bool = Tru
 
     if not config.workload.is_trace_based:
         return LoadPredictorResult(
-            best_by_interval={iv: "constant_last" for iv in intervals},
+            best_by_interval=dict.fromkeys(intervals, "constant_last"),
             reason="static_workload_constant",
         )
 
@@ -291,7 +291,7 @@ def sweep_load_predictor(config: SmartSearchConfig, *, show_progress: bool = Tru
         best_entry: str | dict[str, Any] | None = None
         best_loss = math.inf
         bar = tqdm(
-            zip(labels, presets),
+            zip(labels, presets, strict=True),
             total=len(presets),
             desc=f"load-predictor @ {iv}s ({len(windows)} windows, warmup {warmup})",
             unit="preset",

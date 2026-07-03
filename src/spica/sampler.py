@@ -25,9 +25,9 @@ knobs are always offered as params; ``unroll_sample`` ignores them under
 from __future__ import annotations
 
 import os
-
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from .parallel_enum import DisaggParallelConfig, ReplicaParallelConfig
 from .search_space import BranchSpace
@@ -63,7 +63,7 @@ def _decoder_for(choices: list[Any]) -> Callable[[Any], Any]:
     if all(isinstance(c, str) for c in choices):
         return str  # categorical -> already a str
     if all(isinstance(c, int) and not isinstance(c, bool) for c in choices):
-        return lambda v: int(round(float(v)))  # discrete int (Vizier stores float)
+        return lambda v: round(float(v))  # discrete int (Vizier stores float)
     return float  # discrete float
 
 
@@ -71,7 +71,7 @@ def _index_decoder(choices: list[Any]) -> Callable[[Any], Any]:
     """Decode a categorical *index* back to the chosen entry. Used when a knob's
     choices include dicts (a composite knob with pinned-dict entries) — dicts can't
     be Vizier categorical values, so we categorize over the index instead."""
-    return lambda v: choices[int(round(float(v)))]
+    return lambda v: choices[round(float(v))]
 
 
 class VizierBranchSampler:

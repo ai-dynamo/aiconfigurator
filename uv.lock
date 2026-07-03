@@ -28,20 +28,26 @@ wheels = [
 
 [[package]]
 name = "aiconfigurator"
-version = "0.9.0"
+version = "0.10.0"
 source = { editable = "." }
 dependencies = [
-    { name = "aiconfigurator-core" },
     { name = "bokeh" },
     { name = "jinja2" },
     { name = "matplotlib" },
+    { name = "munch" },
     { name = "numpy" },
+    { name = "nvidia-ml-py" },
     { name = "packaging" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or python_full_version >= '3.14'" },
     { name = "pandas", version = "3.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "plotext" },
     { name = "plotly" },
     { name = "prettytable" },
+    { name = "pyarrow" },
+    { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "tqdm" },
 ]
 
@@ -73,7 +79,6 @@ spica = [
     { name = "jax", marker = "python_full_version < '3.13'" },
     { name = "jaxlib", marker = "python_full_version < '3.13'" },
     { name = "optax", marker = "python_full_version < '3.13'" },
-    { name = "pydantic", marker = "python_full_version < '3.13'" },
     { name = "tensorflow-probability", extra = ["jax"], marker = "python_full_version < '3.13'" },
 ]
 webapp = [
@@ -82,7 +87,6 @@ webapp = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiconfigurator-core", editable = "src/aiconfigurator-core" },
     { name = "bokeh" },
     { name = "chex", marker = "python_full_version < '3.13' and extra == 'spica'", specifier = "==0.1.87" },
     { name = "fastapi", marker = "extra == 'service'", specifier = ">=0.115.12" },
@@ -94,16 +98,20 @@ requires-dist = [
     { name = "jaxlib", marker = "python_full_version < '3.13' and extra == 'spica'", specifier = "==0.4.38" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "matplotlib", specifier = ">=3.9.4" },
+    { name = "munch", specifier = ">=4.0.0" },
     { name = "numpy", specifier = "~=1.26.4" },
+    { name = "nvidia-ml-py" },
     { name = "optax", marker = "python_full_version < '3.13' and extra == 'spica'", specifier = "==0.2.4" },
     { name = "orjson", marker = "extra == 'service'", specifier = ">=3.10.16" },
     { name = "packaging", specifier = ">=20.0" },
     { name = "pandas", specifier = ">=2.2.3" },
+    { name = "plotext", specifier = ">=5.3.2" },
     { name = "plotly", specifier = ">=6.0.1" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = "==4.3.0" },
     { name = "prettytable", specifier = ">=3.16.0" },
     { name = "prometheus-api-client", marker = "extra == 'dev'", specifier = "==0.6.0" },
-    { name = "pydantic", marker = "python_full_version < '3.13' and extra == 'spica'", specifier = ">=2.5" },
+    { name = "pyarrow", specifier = ">=15.0.0" },
+    { name = "pydantic", specifier = ">=2.5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.5" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.26.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.1.1" },
@@ -114,47 +122,13 @@ requires-dist = [
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = "==3.8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.14.1" },
+    { name = "scipy", specifier = ">=1.13.1" },
     { name = "tensorflow-probability", extras = ["jax"], marker = "python_full_version < '3.13' and extra == 'spica'", specifier = "==0.25.0" },
     { name = "tqdm", specifier = ">=4.0.0" },
     { name = "uv", marker = "extra == 'dev'" },
     { name = "uvicorn", marker = "extra == 'service'", specifier = ">=0.34.2" },
 ]
 provides-extras = ["dev", "webapp", "service", "spica"]
-
-[[package]]
-name = "aiconfigurator-core"
-version = "0.9.0"
-source = { editable = "src/aiconfigurator-core" }
-dependencies = [
-    { name = "matplotlib" },
-    { name = "munch" },
-    { name = "numpy" },
-    { name = "nvidia-ml-py" },
-    { name = "packaging" },
-    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or python_full_version >= '3.14'" },
-    { name = "pandas", version = "3.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
-    { name = "plotext" },
-    { name = "pyarrow" },
-    { name = "pyyaml" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "tqdm" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "matplotlib", specifier = ">=3.9.4" },
-    { name = "munch", specifier = ">=4.0.0" },
-    { name = "numpy", specifier = "~=1.26.4" },
-    { name = "nvidia-ml-py" },
-    { name = "packaging", specifier = ">=20.0" },
-    { name = "pandas", specifier = ">=2.2.3" },
-    { name = "plotext", specifier = ">=5.3.2" },
-    { name = "pyarrow", specifier = ">=15.0.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "scipy", specifier = ">=1.13.1" },
-    { name = "tqdm", specifier = ">=4.0.0" },
-]
 
 [[package]]
 name = "aiofiles"

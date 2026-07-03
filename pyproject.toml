@@ -40,17 +40,22 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 
 dependencies = [
-    "aiconfigurator-core==0.10.0",
     "jinja2>=3.1.0",
     "packaging>=20.0",
     "matplotlib>=3.9.4",
     "numpy~=1.26.4",
     "pandas>=2.2.3",
+    "plotext>=5.3.2",
     "plotly>=6.0.1",
     "prettytable>=3.16.0",
+    "pydantic>=2.5",
+    "pyarrow>=15.0.0",
     "pyyaml>=6.0",
+    "scipy>=1.13.1",
     "tqdm>=4.0.0",
     "bokeh",
+    "nvidia-ml-py",
+    "munch>=4.0.0",
 ]
 
 [project.optional-dependencies]
@@ -78,7 +83,6 @@ service = [
     "uvicorn>=0.34.2"
 ]
 spica = [
-    "pydantic>=2.5; python_version < '3.13'",
     "google-vizier[jax]==0.1.21; python_version < '3.13'",
     "jax==0.4.38; python_version < '3.13'",
     "jaxlib==0.4.38; python_version < '3.13'",
@@ -93,33 +97,38 @@ GitHub = "https://github.com/ai-dynamo/aiconfigurator"
 Repository = "https://github.com/ai-dynamo/aiconfigurator.git"
 
 [build-system]
-requires = ["setuptools>=69", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
 
 [project.scripts]
 aiconfigurator = "aiconfigurator.main:main"
+spica = "spica.__main__:main"
 
-[tool.setuptools]
-include-package-data = false
-
-[tool.setuptools.package-data]
-"aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
-"aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule", "facts/**/*.yaml", "environment/*.yaml"]
-"aiconfigurator.webapp.components.profiling" = ["styles.css", "js/*.js"]
-
-[tool.setuptools.packages.find]
-where = ["src", "spica/src"]
+[tool.maturin]
+manifest-path = "rust/aiconfigurator-core/Cargo.toml"
+module-name = "aiconfigurator_core._aiconfigurator_core"
+python-source = "src"
+python-packages = ["aiconfigurator", "spica"]
+abi3 = true
+features = ["pyo3/extension-module"]
 include = [
-    "aiconfigurator",
-    "aiconfigurator.cli*",
-    "aiconfigurator.generator*",
-    "aiconfigurator.webapp*",
-    "spica*",
+    "aiconfigurator/cli/*.yaml",
+    "aiconfigurator/cli/exps/*.yaml",
+    "aiconfigurator/generator/config/**/*.yaml",
+    "aiconfigurator/generator/config/backend_templates/**/*.j2",
+    "aiconfigurator/generator/rule_plugin/**/*.rule",
+    "aiconfigurator/generator/facts/**/*.yaml",
+    "aiconfigurator/generator/environment/*.yaml",
+    "aiconfigurator/systems/*.yaml",
+    "aiconfigurator/systems/*.csv",
+    "aiconfigurator/systems/**/*.csv",
+    "aiconfigurator/systems/**/*.json",
+    "aiconfigurator/systems/**/*.txt",
+    "aiconfigurator/systems/**/*.parquet",
+    "aiconfigurator/model_configs/*.json",
+    "aiconfigurator/webapp/components/profiling/styles.css",
+    "aiconfigurator/webapp/components/profiling/js/*.js",
 ]
-exclude = ["aiconfigurator.sdk*", "aiconfigurator.systems*", "aiconfigurator.model_configs*", "aiconfigurator_core*"]
-
-[tool.uv.sources]
-aiconfigurator-core = { path = "src/aiconfigurator-core", editable = true }
 
 [tool.ruff]
 line-length = 120
@@ -174,7 +183,12 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["aiconfigurator", "utils", "helper"]
+known-first-party = ["aiconfigurator", "spica", "utils", "helper"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/aiconfigurator/webapp/components/**/*.py" = ["E501", "W291", "SIM117"]
+# Keep Spica's public exception names and its API-grouped export list stable.
+"src/spica/__init__.py" = ["RUF022"]
+"src/spica/config.py" = ["TRY004"]
+"src/spica/kv_estimate.py" = ["N818"]
+"src/spica/model_hw.py" = ["N818"]

@@ -7,8 +7,7 @@ from __future__ import annotations
 
 # First, before anything (lazily) imports vizier/jax: pin JAX to CPU + quiet the
 # jax/equinox/jaxopt import noise the Vizier GP-bandit pulls in. See spica._quiet.
-from . import _quiet as _quiet  # noqa: F401  (side-effecting; must run before vizier/jax)
-
+from . import _quiet as _quiet
 from .config import (
     Candidate,
     OptimizationGoal,
@@ -26,13 +25,13 @@ from .kv_estimate import (
     estimate_kv_tokens,
     feasible_shape_tokens,
 )
-from .model_hw import ModelHardware, NoViableParallelConfig, parallel_configs_for, resolve_model_hardware
 from .load_predictor_sweep import (
     LoadPredictorResult,
     predictor_fields,
     sweep_load_predictor,
     window_loss,
 )
+from .model_hw import ModelHardware, NoViableParallelConfig, parallel_configs_for, resolve_model_hardware
 from .parallel_enum import (
     DisaggParallelConfig,
     ParallelShape,

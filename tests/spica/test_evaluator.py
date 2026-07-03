@@ -11,12 +11,12 @@ import pytest
 
 pytest.importorskip("dynamo.mocker")
 
-import dynamo.mocker  # noqa: E402
-import dynamo.replay.api  # noqa: E402
+import dynamo.mocker
+import dynamo.replay.api
 
-from spica.config import OptimizationGoal, OptimizationTarget, SLATarget, Workload  # noqa: E402
-from spica.deploy import DeploymentPlan  # noqa: E402
-from spica.evaluator import ReplayEvaluator  # noqa: E402
+from spica.config import OptimizationGoal, OptimizationTarget, SLATarget, Workload
+from spica.deploy import DeploymentPlan
+from spica.evaluator import ReplayEvaluator
 
 
 class _FakeArgs:

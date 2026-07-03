@@ -160,8 +160,8 @@ search depth:
 ## Reproduce
 
 ```bash
-cd aiconfigurator/spica
-python -m spica --config <this-config>.yaml      # static disagg, closed-loop concurrency Pareto sweep
+cd aiconfigurator
+python -m spica --config docs/spica/examples/<this-config>.yaml  # static disagg, closed-loop concurrency Pareto sweep
 ```
 
 Notes: the AIC perf model needs the `aic-forward-pass` binding (see README), and **PR #10964**

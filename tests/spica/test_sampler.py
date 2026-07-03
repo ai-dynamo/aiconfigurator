@@ -43,9 +43,9 @@ def test_index_decoder_maps_index_back_to_entry():
 
 pytest.importorskip("vizier")
 
-from spica.parallel_enum import ParallelShape, ReplicaParallelConfig  # noqa: E402
-from spica.sampler import _PARALLEL_PARAM, Suggestion, make_branch_sampler  # noqa: E402
-from spica.search_space import BranchSpace  # noqa: E402
+from spica.parallel_enum import ParallelShape, ReplicaParallelConfig
+from spica.sampler import _PARALLEL_PARAM, Suggestion, make_branch_sampler
+from spica.search_space import BranchSpace
 
 
 def _branch() -> BranchSpace:
