@@ -32,4 +32,18 @@ REGISTRY: list[OpEntry] = [
         run_func="run_wideep_moe",
         perf_filename=PerfFile.WIDEEP_MOE,
     ),
+    OpEntry(
+        op="deepep_ll",
+        module="collector.wideep.sglang.collect_deepep_ll",
+        get_func="get_deepep_ll_test_cases",
+        run_func="run_deepep_ll_fullnode",
+        perf_filename=PerfFile.WIDEEP_DEEPEP_LL,
+    ),
+    OpEntry(
+        op="deepep_normal",
+        module="collector.wideep.sglang.collect_deepep_normal",
+        get_func="get_deepep_normal_test_cases",
+        run_func="run_deepep_normal_fullnode",
+        perf_filename=PerfFile.WIDEEP_DEEPEP_NORMAL,
+    ),
 ]
