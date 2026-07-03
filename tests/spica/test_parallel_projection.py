@@ -11,8 +11,8 @@ from spica.parallel_projection import (
     DECODE_GPUS_PER_ENGINE,
     PREFILL_ATTENTION_MODE,
     PREFILL_FFN_MODE,
-    PREFILL_GPUS_PER_ENGINE,
     PREFILL_GPU_SHARE,
+    PREFILL_GPUS_PER_ENGINE,
     USED_GPU_RATIO,
     ParallelConfigProjector,
 )
