@@ -1,3 +1,11 @@
+---
+description: >
+  Collector failure doctrine: observe don't predict; escalation decision tree.
+paths:
+  - "collector/**"
+  - "tests/unit/collector/**"
+---
+
 # Collector Failure Handling
 
 Core doctrine: **observe, don't predict.** A failing case costs seconds and is

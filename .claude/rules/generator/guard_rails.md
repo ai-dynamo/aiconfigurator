@@ -1,3 +1,10 @@
+---
+description: >
+  Hard constraints (CRASH/OOM/SILENT severity) for generator output.
+paths:
+  - "src/aiconfigurator/generator/**"
+---
+
 # Guard Rails Reference
 
 Distilled from ~60 merged PRs. These are constraints that MUST NOT be violated.

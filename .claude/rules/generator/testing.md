@@ -1,3 +1,10 @@
+---
+description: >
+  Generator testing strategy: unit, golden snapshots, validator.
+paths:
+  - "src/aiconfigurator/generator/**"
+---
+
 # Generator Testing Reference
 
 Generator testing has unique challenges: combinatorial output space, no backend

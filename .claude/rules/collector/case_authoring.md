@@ -1,3 +1,11 @@
+---
+description: >
+  Adding/changing collector case coverage: base grids, model shapes, capability floors.
+paths:
+  - "collector/**"
+  - "tests/unit/collector/**"
+---
+
 # Collector Case Authoring
 
 How to add or change collection coverage. The declaration surface is exactly

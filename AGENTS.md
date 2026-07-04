@@ -12,23 +12,18 @@ MUST read:
 
 ## Required Collector First Step
 
-Before adding a Collector operation or changing Collector case population under:
-- `collector/cases/**`
-- `collector/case_generator.py`
-- `collector/model_cases.py`
-- `collector/collect.py`
-- `collector/registry_types.py`
-- `collector/framework_manifest.yaml`
-- `collector/*/registry.py`
-- `collector/*/collect_*.py`
-- `collector/wideep/*/registry.py`
-- `collector/wideep/*/collect_*.py`
+Before making any change under `collector/**` MUST read:
+- `.claude/rules/collector/layer_permissions.md` (layer permission table,
+  module boundary, dispatch-vs-skip rule)
+- `.claude/rules/collector/failure_handling.md` (observe-don't-predict
+  doctrine, escalation decision tree)
+- For case YAML work: `.claude/rules/collector/case_authoring.md`
 
-MUST read and follow:
-- `.agents/skills/aic-collector-op-development/SKILL.md`
-
-New operations MUST complete that skill's consumer-contract, case-identity,
-deduplication, and validation gates before they are treated as supported.
+For adding a new Collector operation, additionally follow
+`.agents/skills/aic-collector-op-development/SKILL.md` (consumer-contract,
+case-identity, deduplication, and validation gates). Where that skill
+references the retired sm_exceptions/selector machinery, the
+`.claude/rules/collector/` files take precedence.
 
 ## Cursor Cloud specific instructions
 

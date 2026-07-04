@@ -1,3 +1,11 @@
+---
+description: >
+  Which collector layer may hold which kind of rule; module boundary; dispatch-vs-skip rule.
+paths:
+  - "collector/**"
+  - "tests/unit/collector/**"
+---
+
 # Collector Layer Permissions
 
 Which layer of the collector may hold which kind of rule. This is the single
