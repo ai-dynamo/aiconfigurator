@@ -223,3 +223,36 @@ def test_four_axis_util_hold_beyond_prefix_range():
     # prefix=16384 beyond the collected range: hold util, SOL carries growth.
     lat = _lat(perf_interp.query(_dsa_cfg(), _dsa_table(), 8, 16384, 512, 1))
     assert lat == pytest.approx(_dsa_lat(8, 16384, 512, 1))
+
+
+# ---------------------------------------------------------------------------
+# 1-axis (the 1-D/2-D convergence wave: comm/moe-tokens/bmm curves)
+# ---------------------------------------------------------------------------
+
+
+def _curve_lat(size):
+    return 2e-9 * size  # bandwidth-bound: linear
+
+
+def _curve_cfg():
+    return perf_interp.OpInterpConfig(
+        axes=("message_bytes",),
+        resolver=perf_interp.Grid(),
+        sol_fn=_curve_lat,  # util == 1 -> holds exact
+    )
+
+
+def _curve_table():
+    return {s: {"latency": _curve_lat(s), "energy": 0.0} for s in (1024, 4096, 16384, 65536)}
+
+
+def test_one_axis_exact_and_interp():
+    data = _curve_table()
+    assert perf_interp.query(_curve_cfg(), data, 4096) is data[4096]
+    lat = _lat(perf_interp.query(_curve_cfg(), data, 8192))
+    assert lat == pytest.approx(_curve_lat(8192))
+
+
+def test_one_axis_util_hold_beyond_range():
+    lat = _lat(perf_interp.query(_curve_cfg(), _curve_table(), 1 << 20))
+    assert lat == pytest.approx(_curve_lat(1 << 20))

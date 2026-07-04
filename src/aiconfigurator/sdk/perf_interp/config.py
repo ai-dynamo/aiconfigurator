@@ -173,8 +173,8 @@ class OpInterpConfig:
     transform_axis: str | None = None
 
     def __post_init__(self) -> None:
-        if len(self.axes) < 2:
-            raise ValueError(f"need at least 2 axes, got {self.axes}")
+        if len(self.axes) < 1:
+            raise ValueError(f"need at least 1 axis, got {self.axes}")
         if isinstance(self.resolver, ScatteredSites):
             names = set(self.axes)
             unknown = [a for a in (*self.resolver.site_axes, self.resolver.curve_axis) if a not in names]
