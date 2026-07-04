@@ -11,7 +11,6 @@ backend selection exactly as it does for model execution.
 __compat__ = "vllm==0.24.0"
 
 import json
-import multiprocessing as mp
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,7 +26,6 @@ from collector.case_generator import (
     moe_shape_satisfies_constraints,
 )
 from collector.helper import (
-    EXIT_CODE_RESTART,
     balanced_logits,
     benchmark_with_power,
     get_sm_version,
@@ -555,12 +553,6 @@ def run_moe_torch(
                 perf_filename=perf_filename,
                 power_stats=power_stats,
             )
-
-    # vLLM retains MoE workspaces across tasks. Recycle collector workers so
-    # the next model starts with a clean CUDA process, while standalone callers
-    # can still run multiple cases in sequence.
-    if mp.parent_process() is not None:
-        raise SystemExit(EXIT_CODE_RESTART)
 
 
 if __name__ == "__main__":

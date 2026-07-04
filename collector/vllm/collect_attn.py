@@ -432,15 +432,6 @@ def get_generation_attention_test_cases():
                 target_s_list = sorted(s_list_limited)
                 if b >= min_drop_batch:
                     target_s_list = target_s_list[:-1]
-                # On datacenter Blackwell SM100/SM103, vLLM 0.24.0 uses
-                # FlashInfer and routes decode to
-                # trtllm_batch_decode_with_kv_cache, whose GQA ratio is capped
-                # at 16. SM120 takes the FlashAttention path, so applying this
-                # constraint to every SM >= 100 would incorrectly prune RTX
-                # Blackwell. These non-SM90 paths are source-derived and remain
-                # hardware-unvalidated here.
-                if get_sm_version() in (100, 103) and n // n_kv > 16:
-                    continue
                 for s in target_s_list:
                     for is_fp8_kv_cache in kv_cache_dtype_list:
                         test_cases.append(
