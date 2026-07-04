@@ -193,9 +193,13 @@ def get_moe_test_cases():
             "w4a8_mxfp4_mxfp8",
         ]
     else:
-        # SGLang 0.5.14 routes many nvfp4 MoE cases through FlashInfer paths
-        # that were not validated on SM120. Add back only live-smoked Nemotron
-        # NVFP4 model cases below instead of enabling the mode globally.
+        # TODO(SM120 bring-up): Re-audit the Nemotron-only NVFP4 gate retained
+        # from f027123f/c3ef575c on real SM120 hardware. Pinned SGLang 0.5.14
+        # (49e384ce) selects flashinfer_cutlass for ordinary modelopt_fp4 on
+        # SM120 (EP=1 or EP=TP). Its GPT-OSS/DeepSeek-V4 MXFP4 Marlin W4A16
+        # repack is not an MXFP4 measurement and remains rejected here. Probe
+        # every registered artifact before expanding population; SM100 results
+        # are not SM120 evidence.
         moe_list = ["bfloat16", "fp8_block"]
 
     common_cases = get_common_moe_test_cases()
