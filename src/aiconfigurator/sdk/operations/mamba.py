@@ -31,7 +31,7 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common, interpolation, perf_interp
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -162,10 +162,10 @@ class Mamba2Kernel(Operation):
         if not getattr(mamba2_data, "loaded", False):
             mamba2_data = {}
 
-        def get_sol() -> tuple[float, float, float]:
+        def get_sol(b: int = batch_size, s: int | None = seq_len) -> tuple[float, float, float]:
             d_inner = nheads * head_dim
             conv_dim = d_inner + 2 * n_groups * d_state
-            x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
+            x = (b * s) if phase == "context" and s else b
             if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
                 conv_read_bytes = x * conv_dim * (d_conv + 1) * 2
                 conv_write_bytes = x * conv_dim * 2
@@ -202,23 +202,26 @@ class Mamba2Kernel(Operation):
         if phase == "context":
             if seq_len is None or seq_len <= 0:
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            # 2-axis RAW grid (memory-bound ~linear per axis); beyond-range is
+            # util-hold via the kernel SOL. DEGRADATION CONTRACT preserved: a
+            # genuine data miss falls back to plain SOL (returns, not raises).
+            config = perf_interp.OpInterpConfig(
+                axes=("batch", "seq_len"),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda b_v, s_v: get_sol(b_v, s_v)[0],
+            )
             try:
-                result = interpolation.interp_2d_linear(batch_size, seq_len, table, database._extracted_metrics_cache)
-            except (KeyError, ValueError):
+                result = perf_interp.query(config, table, batch_size, seq_len)
+            except (interpolation.InterpolationDataNotAvailableError, KeyError, ValueError):
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             return database._interp_pr(
-                result["latency"],
-                energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
+                interpolation.get_value(result, "latency"),
+                energy=interpolation.get_value(result, "energy"),
             )
         else:
-            try:
-                batch_left, batch_right = interpolation.nearest_1d_point_helper(
-                    batch_size, list(table.keys()), inner_only=False
-                )
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-            # Ensure we pass entry dicts {latency, power, energy}; handle legacy nested batch_size -> seq_len -> entry
+            # Normalize to a flat {batch: entry} curve first (legacy tables nest
+            # batch -> seq -> entry; generation rows have a single seq), then a
+            # 1-axis RAW engine query with SOL-fallback degradation.
             def _mamba2_gen_entry(val):
                 if isinstance(val, dict) and "latency" in val:
                     return val
@@ -228,21 +231,18 @@ class Mamba2Kernel(Operation):
                         return inner
                 return None
 
-            y_left = _mamba2_gen_entry(table[batch_left])
-            y_right = _mamba2_gen_entry(table[batch_right])
-            if y_left is None or y_right is None:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            result = interpolation.interp_1d(
-                [batch_left, batch_right],
-                [y_left, y_right],
-                batch_size,
+            curve = {bb: entry for bb, entry in ((bb, _mamba2_gen_entry(v)) for bb, v in table.items()) if entry}
+            config = perf_interp.OpInterpConfig(
+                axes=("batch",),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda b_v: get_sol(b_v, seq_len)[0],
             )
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", result.get("power", 0.0) * lat)
-            else:
-                lat = result
-                energy = 0.0
+            try:
+                result = perf_interp.query(config, curve, batch_size)
+            except (interpolation.InterpolationDataNotAvailableError, KeyError, ValueError):
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            lat = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
             return database._interp_pr(lat, energy=energy)
 
     # ------------------------------------------------------------------
@@ -376,8 +376,8 @@ class GDNKernel(Operation):
         if not getattr(gdn_data, "loaded", False):
             gdn_data = {}
 
-        def get_sol() -> tuple[float, float, float]:
-            x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
+        def get_sol(b: int = batch_size, s: int | None = seq_len) -> tuple[float, float, float]:
+            x = (b * s) if phase == "context" and s else b
             if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
                 conv_channels = num_k_heads * head_k_dim + num_v_heads * head_v_dim
                 read_bytes = x * conv_channels * (d_conv + 1) * 2
@@ -390,23 +390,23 @@ class GDNKernel(Operation):
                 # (no dtype override), so matches input dtype: FP16/BF16 → 2 bytes.
                 chunk_size = 64  # flash-linear-attention default for chunk_gated_delta_rule
                 state_size = num_v_heads * head_k_dim * head_v_dim
-                num_chunks = (seq_len // chunk_size) if seq_len else 0
-                h_chunks_bytes = num_chunks * state_size * 2 * batch_size
+                num_chunks = (s // chunk_size) if s else 0
+                h_chunks_bytes = num_chunks * state_size * 2 * b
                 read_bytes = (
                     x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2
-                    + state_size * 2 * batch_size
+                    + state_size * 2 * b
                     + h_chunks_bytes  # chunk_o reads h_chunks from global memory
                 )
                 write_bytes = (
                     x * num_v_heads * head_v_dim * 2
-                    + state_size * 2 * batch_size
+                    + state_size * 2 * b
                     + h_chunks_bytes  # chunk_delta_h writes h_chunks to global memory
                 )
             elif kernel_source == "fused_sigmoid_gating_delta_rule_update":
                 # GDN single-step decode. State stored as BF16 in global memory.
                 state_size = num_v_heads * head_k_dim * head_v_dim
-                read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 2 * batch_size
-                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 2 * batch_size
+                read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 2 * b
+                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 2 * b
             else:
                 read_bytes = x * d_model * 2
                 write_bytes = x * d_model * 2
@@ -438,22 +438,25 @@ class GDNKernel(Operation):
         if phase == "context":
             if seq_len is None or seq_len <= 0:
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            # 2-axis RAW grid (memory-bound ~linear per axis); beyond-range is
+            # util-hold via the kernel SOL. DEGRADATION CONTRACT preserved: a
+            # genuine data miss falls back to plain SOL (returns, not raises).
+            config = perf_interp.OpInterpConfig(
+                axes=("batch", "seq_len"),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda b_v, s_v: get_sol(b_v, s_v)[0],
+            )
             try:
-                result = interpolation.interp_2d_linear(batch_size, seq_len, table, database._extracted_metrics_cache)
-            except (KeyError, ValueError):
+                result = perf_interp.query(config, table, batch_size, seq_len)
+            except (interpolation.InterpolationDataNotAvailableError, KeyError, ValueError):
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             return database._interp_pr(
-                result["latency"],
-                energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
+                interpolation.get_value(result, "latency"),
+                energy=interpolation.get_value(result, "energy"),
             )
         else:
-            try:
-                batch_left, batch_right = interpolation.nearest_1d_point_helper(
-                    batch_size, list(table.keys()), inner_only=False
-                )
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
+            # See mamba2: normalize legacy nesting to {batch: entry}, then a
+            # 1-axis RAW engine query with SOL-fallback degradation.
             def _gdn_gen_entry(val):
                 if isinstance(val, dict) and "latency" in val:
                     return val
@@ -463,21 +466,18 @@ class GDNKernel(Operation):
                         return inner
                 return None
 
-            y_left = _gdn_gen_entry(table[batch_left])
-            y_right = _gdn_gen_entry(table[batch_right])
-            if y_left is None or y_right is None:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            result = interpolation.interp_1d(
-                [batch_left, batch_right],
-                [y_left, y_right],
-                batch_size,
+            curve = {bb: entry for bb, entry in ((bb, _gdn_gen_entry(v)) for bb, v in table.items()) if entry}
+            config = perf_interp.OpInterpConfig(
+                axes=("batch",),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda b_v: get_sol(b_v, seq_len)[0],
             )
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", result.get("power", 0.0) * lat)
-            else:
-                lat = result
-                energy = 0.0
+            try:
+                result = perf_interp.query(config, curve, batch_size)
+            except (interpolation.InterpolationDataNotAvailableError, KeyError, ValueError):
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            lat = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
             return database._interp_pr(lat, energy=energy)
 
     # ------------------------------------------------------------------

@@ -53,11 +53,15 @@ def _leaf_lat(leaf) -> float:
 
 
 def _leaf_power(leaf) -> float:
-    """Average power = energy / latency; 0.0 when absent (legacy float leaves)."""
+    """Average power = energy / latency; falls back to the leaf's explicit
+    "power" field when energy is absent (some tables carry power-only rows);
+    0.0 for legacy float leaves."""
     if isinstance(leaf, dict):
         lat = float(leaf.get("latency", 0.0))
         energy = float(leaf.get("energy", 0.0) or 0.0)
-        return energy / lat if lat > 0 else 0.0
+        if energy > 0 and lat > 0:
+            return energy / lat
+        return float(leaf.get("power", 0.0) or 0.0)
     return 0.0
 
 
