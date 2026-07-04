@@ -207,21 +207,28 @@ def gemm_config(sol_fn: Callable[[float, float, float], float]) -> OpInterpConfi
     )
 
 
-def context_attention_config(sol_fn: Callable[[float, float, float], float]) -> OpInterpConfig:
-    """Context attention data[num_heads][seq_len][batch]: corner-truncated grid.
-    latency ~ seq^2 -> SQRT in-slice; the truncated corner is just out-of-range
-    util-hold (SOL restores the growth)."""
+def context_grid_config(sol_fn: Callable[[float, float, float], float]) -> OpInterpConfig:
+    """CONTEXT-type grid ops: data[num_heads][seq_len][batch], latency ~ seq^2
+    along seq but ~linear along heads/batch -> SQRT on the seq axis only. The
+    corner-truncated staircase is ordinary out-of-range util-hold.
+
+    Consumers: context attention (GQA), encoder attention (full N^2), context
+    MLA, MLAModule-context, WideEP context MLA."""
     return OpInterpConfig(
         axes=("num_heads", "seq_len", "batch"),
         resolver=Grid(),
         sol_fn=sol_fn,
         value_transform=ValueTransform.SQRT,
-        transform_axis="seq_len",  # sqrt linearises seq^2 ONLY along seq; batch/heads are ~linear
+        transform_axis="seq_len",
     )
 
 
-def generation_attention_config(sol_fn: Callable[[float, float, float], float]) -> OpInterpConfig:
-    """Generation attention data[num_heads][batch][seq_len]: ~linear in seq -> RAW."""
+def generation_grid_config(sol_fn: Callable[[float, float, float], float]) -> OpInterpConfig:
+    """GENERATION-type grid ops: data[num_heads][batch][seq_len], ~linear in
+    seq -> RAW everywhere.
+
+    Consumers: generation attention, generation MLA, MLAModule-generation,
+    WideEP generation MLA."""
     return OpInterpConfig(
         axes=("num_heads", "batch", "seq_len"),
         resolver=Grid(),
@@ -229,12 +236,17 @@ def generation_attention_config(sol_fn: Callable[[float, float, float], float]) 
     )
 
 
+# Named aliases (the physics recipe is the config; ops share it).
+context_attention_config = context_grid_config
+generation_attention_config = generation_grid_config
+
+
 #: Registry sketch: op name -> factory(sol_fn) -> OpInterpConfig.
-#: context_mla / generation_mla / wideep_* / encoder / dsa: add records here.
+#: dsa (4-axis, raw) gets its own record when migrated.
 OP_CONFIG_FACTORIES: dict[str, Callable[[Callable[[float, float, float], float]], OpInterpConfig]] = {
     "gemm": gemm_config,
-    "context_attention": context_attention_config,
-    "generation_attention": generation_attention_config,
+    "context_attention": context_grid_config,
+    "generation_attention": generation_grid_config,
 }
 
 
@@ -245,6 +257,8 @@ __all__ = [
     "ScatteredSites",
     "ValueTransform",
     "context_attention_config",
+    "context_grid_config",
     "gemm_config",
     "generation_attention_config",
+    "generation_grid_config",
 ]

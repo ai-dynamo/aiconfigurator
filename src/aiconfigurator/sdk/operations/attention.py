@@ -20,7 +20,6 @@ enable_shared_layer)``, same as GEMM (and every other migrated op).
 
 from __future__ import annotations
 
-import copy
 import logging
 import math
 from collections import defaultdict
@@ -677,14 +676,10 @@ class GenerationAttention(Operation):
             )
 
             cls._correct_sol(database, cls._data_cache[key])
-            cls._raw_data_cache[key] = copy.deepcopy(cls._data_cache[key])
-            cls._extrapolate(cls._data_cache[key])
-            # Re-clamp after extrapolation: interpolated/extrapolated grid
-            # points can land below the SOL bound. The legacy init path ran
-            # ``_correct_data()`` a second time which caught these; replicate
-            # that here so standalone ``load_data`` callers get the same
-            # physically-consistent floor.
-            cls._correct_sol(database, cls._data_cache[key])
+            # No load-time grid pre-expansion: queries resolve on the RAW table
+            # via perf_interp, so the table IS the raw data (the former deepcopy
+            # for _raw_generation_attention_data is now just an alias).
+            cls._raw_data_cache[key] = cls._data_cache[key]
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -901,7 +896,7 @@ class GenerationAttention(Operation):
             n_kv_lookup = n_kv if n_kv != n else 0
 
             # Use the real windowed slice when present (more accurate than a window=0 +
-            # SOL reconstruction); when absent/too sparse, interp_3d raises and
+            # SOL reconstruction); when absent/too sparse, perf_interp raises and
             # HYBRID/EMPIRICAL fall back to get_empirical's window=0 + SOL derivation.
             attention_dict = util_empirical.require_data_slice(
                 data_wrapper,
@@ -909,6 +904,20 @@ class GenerationAttention(Operation):
                 n_kv_lookup,
                 head_size,
                 window_size,
+            )
+            # Generation is ~linear in seq -> RAW grid resolve on the raw table.
+            # The +-10% seq-sample averaging is op-level smoothing (decode s
+            # drifts across a request) and is kept as-is.
+            config = perf_interp.generation_attention_config(
+                sol_fn=lambda n_v, b_v, s_v: get_sol(
+                    b_v,
+                    s_v,
+                    n_v,
+                    (n_v if n_kv_lookup == 0 else n_kv_lookup),
+                    head_size,
+                    window_size,
+                    kvcache_quant_mode,
+                )[0]
             )
             s_min = max(1, int(s * 0.9))
             s_max = max(s_min, int(s * 1.1))
@@ -918,9 +927,9 @@ class GenerationAttention(Operation):
             latency_sum = 0.0
             energy_sum = 0.0
             for s_i in s_samples:
-                r = interpolation.interp_3d(n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache)
-                latency_sum += float(r["latency"])
-                energy_sum += float(r.get("energy", 0.0))
+                r = perf_interp.query(config, attention_dict, n, b, s_i)
+                latency_sum += interpolation.get_value(r, "latency")
+                energy_sum += interpolation.get_value(r, "energy")
 
             latency = latency_sum / sample_cnt
             energy = energy_sum / sample_cnt
@@ -1042,7 +1051,7 @@ class EncoderAttention(Operation):
                 load_encoder_attention_data(sources), PerfDataFilename.encoder_attention, primary_path
             )
 
-            cls._extrapolate(cls._data_cache[key])
+            # No load-time grid pre-expansion: queries resolve on the RAW grid via perf_interp.
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -1142,8 +1151,15 @@ class EncoderAttention(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             attention_dict = util_empirical.require_data_slice(data_wrapper, fmha_quant_mode, head_size)
-            result = interpolation.interp_3d(n, s, b, attention_dict, "cubic", database._extracted_metrics_cache)
-            return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
+            # Encoder is full N^2 (~seq^2 along seq, ~linear along heads/batch):
+            # context_attention_config = sqrt on the seq axis only, raw elsewhere.
+            config = perf_interp.context_attention_config(
+                sol_fn=lambda n_v, s_v, b_v: get_sol(b_v, s_v, n_v, head_size, fmha_quant_mode)[0]
+            )
+            result = perf_interp.query(config, attention_dict, n, s, b)
+            latency = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
+            return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,

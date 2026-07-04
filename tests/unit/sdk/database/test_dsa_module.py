@@ -277,7 +277,11 @@ class TestContextDSAModule:
         assert above["latency"] == pytest.approx(80.0 + (100.0 - 80.0) / 1024.0 * (2049 - 3072))
         assert above["latency"] > raw_dsa_dict[32][2048][1]["latency"]
 
-    def test_topk_plus_one_uses_raw_piecewise_instead_of_cubic_fallback(self, stub_perf_db, monkeypatch):
+    def test_topk_plus_one_plain_crossing_on_raw_table(self, stub_perf_db):
+        """s = topk+1 interpolates PLAINLY between the collected 2048 and 3072
+        rows. The old topk-piecewise (same-regime-only anchors) was removed:
+        leave-one-out on every real config showed plain crossing ties or beats
+        it, incl. just above the boundary (the knee itself is collected)."""
         raw_dsa_dict = {
             32: {
                 2048: {1: _dsa_value(20.0)},
@@ -285,25 +289,10 @@ class TestContextDSAModule:
                 4096: {1: _dsa_value(100.0)},
             }
         }
-        extrapolated_dsa_dict = {
-            32: {
-                2048: {1: _dsa_value(20.0)},
-                2049: {1: _dsa_value(21.0)},
-                3072: {1: _dsa_value(80.0)},
-                4096: {1: _dsa_value(100.0)},
-            }
-        }
         stub_perf_db._raw_context_dsa_module_data = LoadedOpData(
             _context_dsa_data(raw_dsa_dict), common.PerfDataFilename.dsa_context_module, "raw"
         )
-        stub_perf_db._context_dsa_module_data = LoadedOpData(
-            _context_dsa_data(extrapolated_dsa_dict), common.PerfDataFilename.dsa_context_module, "extrapolated"
-        )
-
-        def fail_interp_3d(*args, **kwargs):
-            raise AssertionError("_interp_3d should not be used for topk + 1 when raw right-regime anchors exist")
-
-        monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", fail_interp_3d)
+        stub_perf_db._context_dsa_module_data = stub_perf_db._raw_context_dsa_module_data
 
         result = stub_perf_db.query_context_dsa_module(
             b=1,
@@ -317,10 +306,13 @@ class TestContextDSAModule:
             database_mode=common.DatabaseMode.SILICON,
         )
 
-        assert float(result) == pytest.approx(80.0 + (100.0 - 80.0) / 1024.0 * (2049 - 3072))
-        assert result.energy == pytest.approx((80.0 + (100.0 - 80.0) / 1024.0 * (2049 - 3072)) * 10.0)
+        expected = 20.0 + (80.0 - 20.0) / (3072 - 2048) * (2049 - 2048)
+        assert float(result) == pytest.approx(expected)
+        assert result.energy == pytest.approx(expected * 10.0)
 
-    def test_topk_piecewise_falls_back_when_raw_same_regime_anchors_are_unavailable(self, stub_perf_db, monkeypatch):
+    def test_topk_plus_one_plain_crossing_with_sparse_anchors(self, stub_perf_db):
+        """With only 2048 and 4096 collected, s=2049 plainly brackets them —
+        no cubic fallback, no piecewise; the engine resolves the raw grid."""
         raw_dsa_dict = {
             32: {
                 2048: {1: _dsa_value(20.0)},
@@ -330,16 +322,7 @@ class TestContextDSAModule:
         stub_perf_db._raw_context_dsa_module_data = LoadedOpData(
             _context_dsa_data(raw_dsa_dict), common.PerfDataFilename.dsa_context_module, "raw"
         )
-        stub_perf_db._context_dsa_module_data = LoadedOpData(
-            _context_dsa_data(raw_dsa_dict), common.PerfDataFilename.dsa_context_module, "extrapolated"
-        )
-        cubic_calls = []
-
-        def fake_interp_3d(*args, **kwargs):
-            cubic_calls.append((args, kwargs))
-            return {"latency": 123.0, "power": 0.0, "energy": 456.0}
-
-        monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", fake_interp_3d)
+        stub_perf_db._context_dsa_module_data = stub_perf_db._raw_context_dsa_module_data
 
         result = stub_perf_db.query_context_dsa_module(
             b=1,
@@ -353,9 +336,9 @@ class TestContextDSAModule:
             database_mode=common.DatabaseMode.SILICON,
         )
 
-        assert float(result) == pytest.approx(123.0)
-        assert result.energy == pytest.approx(456.0)
-        assert len(cubic_calls) == 1
+        expected = 20.0 + (100.0 - 20.0) / (4096 - 2048) * (2049 - 2048)
+        assert float(result) == pytest.approx(expected)
+        assert result.energy == pytest.approx(expected * 10.0)
 
     def test_prefix_axis_interpolates_measured_prefix_slices(self, stub_perf_db):
         dsa_dict = {
@@ -916,16 +899,14 @@ class TestGenerationDSAModule:
 
     def test_silicon_sequence_overflow_uses_raw_boundary_util(self, mutable_comprehensive_perf_db):
         db = mutable_comprehensive_perf_db
+        # No pre-expansion in v2: the working table IS the raw measurements
+        # (bogus synthesized points can no longer exist to supersede them).
         raw = {32: {4: {65: _dsa_value(10.0), 129: _dsa_value(11.0)}}}
-        # The working table deliberately contains a bogus exact target.  An
-        # extrapolated point must not supersede the last measured utilization.
-        working = {32: {4: {65: _dsa_value(10.0), 129: _dsa_value(11.0), 11000: _dsa_value(999.0)}}}
-        db._raw_generation_dsa_module_data = LoadedOpData(
+        wrapper = LoadedOpData(
             _generation_dsa_data_with_backend(raw), common.PerfDataFilename.dsa_generation_module, "raw"
         )
-        db._generation_dsa_module_data = LoadedOpData(
-            _generation_dsa_data_with_backend(working), common.PerfDataFilename.dsa_generation_module, "working"
-        )
+        db._raw_generation_dsa_module_data = wrapper
+        db._generation_dsa_module_data = wrapper
         db.clear_runtime_caches()
 
         query = {
@@ -967,7 +948,11 @@ class TestGenerationDSAModule:
         assert result.energy == pytest.approx(120.0)
         assert result.power == pytest.approx(10.0)
 
-    def test_silicon_sequence_overflow_interpolates_raw_batches(self, mutable_comprehensive_perf_db):
+    def test_silicon_sequence_overflow_snaps_batch_and_holds_boundary_util(self, mutable_comprehensive_perf_db):
+        """Query (b=3, s=1024) with both axes off-grid and s beyond every
+        collected sweep: the engine snaps outer axes to the nearest collected
+        path (batch 3 -> 2), holds that curve's boundary util (s=128), and
+        lets SOL(query) carry the growth."""
         db = mutable_comprehensive_perf_db
         raw = {
             32: {
@@ -975,16 +960,11 @@ class TestGenerationDSAModule:
                 4: {64: _dsa_value(17.0), 128: _dsa_value(18.0)},
             }
         }
-        # b=3 is a synthetic working-table batch and must not take the exact
-        # fast path. Extrapolate each measured batch in util-space first,
-        # then interpolate those two results along batch.
-        working = {32: {**raw[32], 3: {1024: _dsa_value(999.0)}}}
-        db._raw_generation_dsa_module_data = LoadedOpData(
+        wrapper = LoadedOpData(
             _generation_dsa_data_with_backend(raw), common.PerfDataFilename.dsa_generation_module, "raw"
         )
-        db._generation_dsa_module_data = LoadedOpData(
-            _generation_dsa_data_with_backend(working), common.PerfDataFilename.dsa_generation_module, "working"
-        )
+        db._raw_generation_dsa_module_data = wrapper
+        db._generation_dsa_module_data = wrapper
         db.clear_runtime_caches()
 
         def sol(batch: int, sequence: int) -> float:
@@ -999,9 +979,6 @@ class TestGenerationDSAModule:
                 )
             )
 
-        at_b2 = 10.0 * sol(2, 1024) / sol(2, 128)
-        at_b4 = 18.0 * sol(4, 1024) / sol(4, 128)
-        expected = (at_b2 + at_b4) / 2.0
         result = db.query_generation_dsa_module(
             b=3,
             s=1024,
@@ -1011,9 +988,10 @@ class TestGenerationDSAModule:
             database_mode=common.DatabaseMode.SILICON,
         )
 
+        expected = 10.0 * sol(3, 1024) / sol(2, 128)  # anchor: batch snapped to 2, boundary s=128
         assert float(result) == pytest.approx(expected)
-        assert result.energy == pytest.approx(expected * 10.0)
         assert result.power == pytest.approx(10.0)
+        assert result.energy == pytest.approx(expected * 10.0)
 
     def test_empirical_prefers_exact_head_slice_over_longer_other_tp(self, mutable_comprehensive_perf_db):
         db = mutable_comprehensive_perf_db

@@ -13,8 +13,10 @@ from aiconfigurator.sdk.perf_interp.config import (
     ScatteredSites,
     ValueTransform,
     context_attention_config,
+    context_grid_config,
     gemm_config,
     generation_attention_config,
+    generation_grid_config,
 )
 from aiconfigurator.sdk.perf_interp.engine import clear_caches, query
 
@@ -26,7 +28,9 @@ __all__ = [
     "ValueTransform",
     "clear_caches",
     "context_attention_config",
+    "context_grid_config",
     "gemm_config",
     "generation_attention_config",
+    "generation_grid_config",
     "query",
 ]

@@ -36,7 +36,7 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common, interpolation, perf_interp
 from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
@@ -161,7 +161,7 @@ class ContextMLA(Operation):
             cls._data_cache[key] = LoadedOpData(
                 load_context_mla_data(sources), PerfDataFilename.context_mla, primary_path
             )
-            cls._extrapolate(cls._data_cache[key])
+            # No load-time grid pre-expansion: queries resolve on the RAW grid via perf_interp.
             cls._record_load()
 
         if "_context_mla_data" not in database.__dict__:
@@ -280,9 +280,13 @@ class ContextMLA(Operation):
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             mla_dict = util_empirical.require_data_slice(data_wrapper, fmha_quant_mode, kvcache_quant_mode)
-            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            # Context MLA ~ seq^2 -> context grid (sqrt on seq only); samples are prefix=0.
+            config = perf_interp.context_grid_config(
+                sol_fn=lambda n_v, s_v, b_v: get_sol(b_v, s_v, 0, n_v, kvcache_quant_mode, fmha_quant_mode)[0]
+            )
+            result = perf_interp.query(config, mla_dict, num_heads, full_s, b)
+            latency = interpolation.get_value(result, "latency") * prefix_correction
+            energy = interpolation.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -375,7 +379,7 @@ class GenerationMLA(Operation):
             cls._data_cache[key] = LoadedOpData(
                 load_generation_mla_data(sources), PerfDataFilename.generation_mla, primary_path
             )
-            cls._extrapolate(cls._data_cache[key])
+            # No load-time grid pre-expansion: queries resolve on the RAW grid via perf_interp.
             cls._record_load()
 
         if "_generation_mla_data" not in database.__dict__:
@@ -471,9 +475,13 @@ class GenerationMLA(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             mla_dict = util_empirical.require_data_slice(data_wrapper, kvcache_quant_mode)
-            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
+            # Generation MLA ~ linear in seq -> raw generation grid.
+            config = perf_interp.generation_grid_config(
+                sol_fn=lambda n_v, b_v, s_v: get_sol(b_v, s_v, n_v, kvcache_quant_mode)[0]
+            )
+            result = perf_interp.query(config, mla_dict, num_heads, b, s)
+            latency = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -755,8 +763,7 @@ class MLAModule(Operation):
                 load_generation_mla_module_data(gen_sources), PerfDataFilename.mla_generation_module, gen_path
             )
 
-            cls._extrapolate_context(cls._context_data_cache[key])
-            cls._extrapolate_generation(cls._generation_data_cache[key])
+            # No load-time grid pre-expansion: queries resolve on the RAW grid via perf_interp.
             cls._record_load()
 
         if "_context_mla_module_data" not in database.__dict__:
@@ -905,9 +912,13 @@ class MLAModule(Operation):
                 kvcache_quant_mode,
                 gemm_quant_mode,
             )
-            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            # Context MLA module ~ seq^2 -> context grid (sqrt on seq only); samples are prefix=0.
+            config = perf_interp.context_grid_config(
+                sol_fn=lambda n_v, s_v, b_v: get_sol(b_v, s_v, 0, n_v, kvcache_quant_mode, fmha_quant_mode)[0]
+            )
+            result = perf_interp.query(config, mla_dict, num_heads, full_s, b)
+            latency = interpolation.get_value(result, "latency") * prefix_correction
+            energy = interpolation.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -1016,9 +1027,13 @@ class MLAModule(Operation):
                 kv_cache_dtype,
                 gemm_quant_mode,
             )
-            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
+            # Generation MLA module ~ linear in seq -> raw generation grid.
+            config = perf_interp.generation_grid_config(
+                sol_fn=lambda n_v, b_v, s_v: get_sol(b_v, s_v, n_v, kv_cache_dtype)[0]
+            )
+            result = perf_interp.query(config, mla_dict, num_heads, b, s)
+            latency = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -1133,7 +1148,7 @@ class WideEPGenerationMLA(Operation):
                     PerfDataFilename.wideep_generation_mla,
                     primary_path,
                 )
-                cls._extrapolate(cls._data_cache[key])
+                # No load-time grid pre-expansion: queries resolve on the RAW grid via perf_interp.
             cls._record_load()
 
         if "_wideep_generation_mla_data" not in database.__dict__:
@@ -1306,9 +1321,14 @@ class WideEPGenerationMLA(Operation):
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
             mla_dict = util_empirical.require_data_slice(attn_data, kvcache_quant_mode)
-            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
+            # Raw generation grid; the table is keyed by num_heads while the SOL
+            # takes tp_size, so the sol_fn maps n_v -> 128 // n_v.
+            config = perf_interp.generation_grid_config(
+                sol_fn=lambda n_v, b_v, s_v: get_sol(b_v, s_v, 128 // n_v, kvcache_quant_mode, fmha_quant_mode)[0]
+            )
+            result = perf_interp.query(config, mla_dict, num_heads, b, s)
+            latency = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -1407,7 +1427,7 @@ class WideEPContextMLA(Operation):
                     PerfDataFilename.wideep_context_mla,
                     primary_path,
                 )
-                cls._extrapolate(cls._data_cache[key])
+                # No load-time grid pre-expansion: queries resolve on the RAW grid via perf_interp.
             cls._record_load()
 
         if "_wideep_context_mla_data" not in database.__dict__:
@@ -1590,9 +1610,14 @@ class WideEPContextMLA(Operation):
             mla_dict = util_empirical.require_data_slice(attn_data, fmha_quant_mode, kvcache_quant_mode)
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            # Context grid (sqrt on seq only); table keyed by num_heads, SOL takes
+            # tp_size -> map n_v -> 128 // n_v; samples are prefix=0.
+            config = perf_interp.context_grid_config(
+                sol_fn=lambda n_v, s_v, b_v: get_sol(b_v, s_v, 0, 128 // n_v, kvcache_quant_mode, fmha_quant_mode)[0]
+            )
+            result = perf_interp.query(config, mla_dict, num_heads, full_s, b)
+            latency = interpolation.get_value(result, "latency") * prefix_correction
+            energy = interpolation.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
