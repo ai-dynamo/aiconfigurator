@@ -147,6 +147,68 @@ def test_smoke_has_zero_and_nonzero_prefix_without_endpoint_sweep(dsv4_module, m
     assert {(case[0], case[9]) for case in cases} == {(64, 0), (64, 128)}
 
 
+@pytest.mark.parametrize("kernel", ["paged_mqa_logits", "hca_attn"])
+def test_sparse_cases_queue_short_shapes_for_runtime_observation(dsv4_module, monkeypatch, kernel):
+    mod = dsv4_module
+    monkeypatch.setattr(sys, "argv", ["pytest"])
+    monkeypatch.setattr(mod, "_selected_dsv4_models", lambda: ("model",))
+    monkeypatch.setattr(mod, "_DSV4_SPARSE_BS_LIST", [1])
+    monkeypatch.setattr(mod, "_DSV4_SPARSE_ISL_LIST", [1])
+    monkeypatch.setattr(mod, "_DSV4_SPARSE_PAST_KV_LIST", [0])
+    monkeypatch.setattr(mod, "_DSV4_SPARSE_TP_LIST_ATTN", [1])
+    monkeypatch.setattr(mod, "_DSV4_SPARSE_TP_LIST_INDEXER", [1])
+
+    assert mod._build_vllm_dsv4_sparse_test_cases(kernel) == [[1, 1, 0, 1, kernel, "model"]]
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"kv_cache_dtype": "bfloat16"}, "kv_cache_dtype"),
+        ({"compute_dtype": "float16"}, "compute_dtype"),
+        ({"attention_backend": "FLASH_ATTN"}, "attention_backend must be unset"),
+    ],
+)
+def test_dsv4_worker_rejects_ignored_runtime_inputs(dsv4_module, override, message):
+    args = {
+        "seq_len": 64,
+        "batch_size": 1,
+        "tp_size": 1,
+        "kv_cache_dtype": "fp8",
+        "compute_dtype": "bfloat16",
+        "gemm_type": "fp8_block",
+        "model_path": "model",
+        "attn_kind": "csa",
+        "attention_backend": None,
+        "perf_filename": "dsv4_csa_context_module_perf.txt",
+    }
+    args.update(override)
+
+    with pytest.raises(ValueError, match=message):
+        dsv4_module.run_dsv4_attn_worker(**args)
+
+
+@pytest.mark.parametrize("kernel", ["paged_mqa_logits", "hca_attn"])
+def test_sparse_worker_observes_short_shapes(dsv4_module, monkeypatch, kernel):
+    calls = {}
+    monkeypatch.setattr(dsv4_module, "_init_cuda", lambda device: calls.setdefault("device", device))
+    monkeypatch.setattr(dsv4_module, "_bench_sparse_kernel_shape", lambda **kwargs: calls.update(kwargs))
+
+    dsv4_module.run_dsv4_sparse_kernel_worker(
+        1,
+        1,
+        0,
+        1,
+        kernel,
+        "model",
+        perf_filename="perf.txt",
+    )
+
+    assert calls["kernel"] == kernel
+    assert calls["isl"] == 1
+    assert calls["past_kv"] == 0
+
+
 @pytest.mark.parametrize(
     ("mode", "seq_len", "prefix_len", "metadata_seq_len", "query_len", "logged_isl", "logged_step"),
     [

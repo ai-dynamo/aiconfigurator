@@ -914,10 +914,6 @@ def _build_vllm_dsv4_sparse_test_cases(kernel: str) -> list[list]:
                         full_s = isl + past_kv
                         if bs * full_s > _DSV4_SPARSE_MAX_FULL_S:
                             continue
-                        if kernel == "paged_mqa_logits" and full_s < 4:
-                            continue
-                        if kernel == "hca_attn" and full_s < 64:
-                            continue
                         cases.append([bs, isl, past_kv, tp_size, kernel, model_path])
     return cases
 
@@ -937,13 +933,20 @@ def run_dsv4_attn_worker(
     perf_filename: str,
     device: str = "cuda:0",
 ) -> None:
-    del kv_cache_dtype, compute_dtype, attention_backend
     if attn_kind not in DSV4_ATTN_KINDS:
         raise ValueError(f"unknown attn_kind={attn_kind}")
     if tp_size not in _DSV4_MODULE_TP_SIZES:
         raise ValueError(f"unsupported tp_size={tp_size}")
+    if kv_cache_dtype != "fp8":
+        raise ValueError(f"unsupported vLLM DSV4 kv_cache_dtype={kv_cache_dtype}; expected fp8")
+    if compute_dtype != "bfloat16":
+        raise ValueError(f"unsupported vLLM DSV4 compute_dtype={compute_dtype}; expected bfloat16")
     if gemm_type not in SUPPORTED_GEMM_TYPES:
         raise ValueError(f"unsupported vLLM DSV4 gemm_type={gemm_type}; supported={sorted(SUPPORTED_GEMM_TYPES)}")
+    if attention_backend is not None:
+        raise ValueError(
+            f"vLLM DSV4 attention_backend must be unset because vLLM selects it internally; got {attention_backend!r}"
+        )
 
     mode = "context" if "context" in os.path.basename(perf_filename) else "generation"
     _init_cuda(device)
@@ -992,11 +995,6 @@ def run_dsv4_sparse_kernel_worker(
             f"{kernel} b={batch_size} isl={isl} past_kv={past_kv} has "
             f"full_s={full_s} > max_position_embeddings={_DSV4_SPARSE_MAX_FULL_S}"
         )
-    if kernel == "paged_mqa_logits" and full_s < 4:
-        raise ValueError(f"paged_mqa_logits b={batch_size} isl={isl} past_kv={past_kv} requires full_s >= 4")
-    if kernel == "hca_attn" and full_s < 64:
-        raise ValueError(f"hca_attn b={batch_size} isl={isl} past_kv={past_kv} requires full_s >= 64")
-
     _init_cuda(device)
     try:
         _bench_sparse_kernel_shape(
