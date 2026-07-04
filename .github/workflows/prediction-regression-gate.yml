@@ -105,6 +105,9 @@ jobs:
           python tools/accuracy_tracking/run_silicon.py --output-dir /tmp/gate-snapshot
 
       - name: Upload snapshot
+        # always(): a failed collection still uploads the partial snapshot as
+        # debugging evidence (the job itself stays red; report needs both sides).
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: gate-${{ matrix.side }}

@@ -217,7 +217,7 @@ to new-side statistics with exit 0.
 
 | piece | file(s) |
 |---|---|
-| SDK shared-layer knob | `sdk/perf_database.py` + `tests/unit/sdk/test_perf_database_shared_layer.py` |
+| SDK shared-layer knob | `src/aiconfigurator/sdk/perf_database.py` + `tests/unit/sdk/test_perf_database_shared_layer.py` |
 | Tier-1 grid policy | `tools/prediction_regression_gate/grid.py` — 9 shape points, 3 parallelism layouts per family, quant default+fp8 (+nvfp4 on Blackwell-family systems) |
 | Tier-1 collector | `tools/prediction_regression_gate/collect_static.py` — multiprocess over combos, `--output-dir`/`--systems`/`--backends`/`--versions latest\|all` |
 | Tier-2 collector | `tools/prediction_regression_gate/run_tier2.py` + `tier2_configs.yaml` (16 configs) |
