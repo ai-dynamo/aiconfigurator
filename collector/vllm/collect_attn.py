@@ -79,7 +79,9 @@ def run_attention_torch(
         )
     else:
         batch_spec = BatchSpec(
-            seq_lens=[input_len] * batch_size,
+            # vLLM seq_lens includes the current query token. ``input_len`` is
+            # the persisted pre-query history (the raw ``step`` column).
+            seq_lens=[input_len + 1] * batch_size,
             query_lens=[1] * batch_size,
         )
 
@@ -103,7 +105,7 @@ def run_attention_torch(
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_dim,
         dtype=dtype,
-        kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+        kv_cache_dtype="fp8" if use_fp8_kv_cache else "auto",
         block_size=block_size,
         use_mla=False,
         has_sink=False,
@@ -162,7 +164,7 @@ def run_attention_torch(
         block_size=block_size,
         num_kv_heads=num_kv_heads,
         head_size=head_dim,
-        dtype=current_platform.fp8_dtype() if use_fp8_kv_cache else dtype,
+        dtype=kv_cache_spec.dtype,
         device=device,
         num_blocks=num_blocks,
         common_attn_metadata=common_attn_metadata,
@@ -253,6 +255,14 @@ def run_attention_torch(
     output = torch.empty_like(query_vllm)
 
     def run():
+        if not backend_cls.forward_includes_kv_cache_update:
+            impl.do_kv_cache_update(
+                mock_layer,
+                key_vllm,
+                value_vllm,
+                kv_cache,
+                common_attn_metadata.slot_mapping,
+            )
         impl.forward(
             mock_layer,
             query_fwd,

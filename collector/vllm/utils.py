@@ -29,12 +29,11 @@ from vllm.config import (
 from vllm.config.model import ModelDType
 from vllm.distributed import init_distributed_environment
 from vllm.distributed.parallel_state import ensure_model_parallel_initialized
-from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec, get_kv_quant_mode
 
 
 class MockAttentionLayer:
@@ -133,15 +132,22 @@ def get_attention_backend(backend_name: AttentionBackendEnum):
     return backend_class.get_builder_cls(), backend_class.get_impl_cls()
 
 
-def create_standard_kv_cache_spec(vllm_config: VllmConfig, use_fp8_kv_cache: bool = False) -> FullAttentionSpec:
-    """Create a FullAttentionSpec from ModelParams only."""
-    return FullAttentionSpec(
+def create_standard_kv_cache_spec(
+    vllm_config: VllmConfig, use_fp8_kv_cache: bool = False
+) -> FullAttentionSpec | SlidingWindowSpec:
+    """Create the KV-cache spec used by vLLM's production attention layer."""
+    spec_kwargs = dict(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config),
         head_size=vllm_config.model_config.get_head_size(),
-        dtype=current_platform.fp8_dtype() if use_fp8_kv_cache else vllm_config.model_config.dtype,
-        sliding_window=vllm_config.model_config.get_sliding_window(),
+        head_size_v=vllm_config.model_config.get_head_size(),
+        dtype=kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config),
+        kv_quant_mode=get_kv_quant_mode(vllm_config.cache_config.cache_dtype),
     )
+    sliding_window = vllm_config.model_config.get_sliding_window()
+    if sliding_window is not None:
+        return SlidingWindowSpec(sliding_window=sliding_window, **spec_kwargs)
+    return FullAttentionSpec(**spec_kwargs)
 
 
 def create_vllm_config(
