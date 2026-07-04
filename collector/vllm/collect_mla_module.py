@@ -633,6 +633,16 @@ def run_mla_module(
     test_ite: int = 6,
 ):
     """Run a single MLA / DSA module-level benchmark point."""
+    if attn_type not in {"mla", "dsa"}:
+        raise ValueError(f"unsupported vLLM attention type: {attn_type!r}")
+    if kv_cache_dtype not in {"bfloat16", "fp8"}:
+        raise ValueError(f"unsupported vLLM MLA KV-cache dtype: {kv_cache_dtype!r}")
+    if compute_dtype != "bfloat16":
+        raise ValueError(
+            "vLLM 0.24.0's default MLA prefill selector does not use FP8 "
+            f"query compute; got compute_dtype={compute_dtype!r}"
+        )
+
     setup_distributed(device)
     torch.cuda.set_device(device)
 
@@ -640,11 +650,6 @@ def run_mla_module(
     init_workspace_manager(torch.device(device))
 
     use_fp8_kv_cache = kv_cache_dtype == "fp8"
-    if compute_dtype != "bfloat16":
-        raise ValueError(
-            "vLLM 0.24.0's default MLA prefill selector does not use FP8 "
-            f"query compute; got compute_dtype={compute_dtype!r}"
-        )
     is_context = "context" in perf_filename
     prefix_len = int(prefix_len) if is_context else 0
     phase = "context" if is_context else "generation"

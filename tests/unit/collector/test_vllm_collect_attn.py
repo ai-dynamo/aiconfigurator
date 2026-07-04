@@ -18,6 +18,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[3]
 ATTN_SOURCE = ROOT / "collector/vllm/collect_attn.py"
 ENCODER_ATTN_SOURCE = ROOT / "collector/vllm/collect_attn_encoder.py"
+MLA_ATTN_SOURCE = ROOT / "collector/vllm/collect_mla_module.py"
 UTILS_SOURCE = ROOT / "collector/vllm/utils.py"
 BF16, FP8, UINT8 = object(), object(), object()
 
@@ -311,6 +312,32 @@ def test_encoder_attention_rejects_missing_flash_attention_version():
 
     with pytest.raises(RuntimeError, match="without a concrete FA version"):
         run(1, 64, 4, 128, perf_filename="encoder_attention_perf.txt")
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "compute_dtype", "attn_type", "message"),
+    [
+        ("bfloat16", "bfloat16", "unknown", "attention type"),
+        ("float16", "bfloat16", "mla", "KV-cache dtype"),
+        ("bfloat16", "float16", "mla", "query compute"),
+    ],
+)
+def test_mla_module_rejects_unknown_runtime_inputs(kv_cache_dtype, compute_dtype, attn_type, message):
+    run = _load_function(MLA_ATTN_SOURCE, "run_mla_module", {})
+
+    with pytest.raises(ValueError, match=message):
+        run(
+            None,
+            64,
+            1,
+            8,
+            kv_cache_dtype,
+            compute_dtype,
+            "fp8_block",
+            "perf.txt",
+            model_path="model",
+            attn_type=attn_type,
+        )
 
 
 @pytest.mark.parametrize(
