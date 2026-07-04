@@ -27,6 +27,14 @@ unless the task actually targets `src/aiconfigurator/generator/`.
 - Editing `collector/**` → collector rules auto-load; entry point
   `.claude/rules/collector/layer_permissions.md`.
 
+## Reviews are governed too
+
+These rules bind reviewers, not just authors. When reviewing a diff (or a
+PR) that touches a governed area, READ that area's rule files first — the
+path-based auto-loading may not fire for read-only review sessions — and
+review the change against them. A change that violates a rule is a review
+finding even when the code works.
+
 ## Cross-cutting hard rules (apply to every task)
 
 1. **A task stays in its module.** Collector tasks touch `collector/` (+ its

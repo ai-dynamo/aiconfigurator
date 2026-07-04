@@ -67,6 +67,14 @@ reviews:
         - Check cross-backend consistency across TRT-LLM, vLLM, and SGLang when a backend-specific rule, template, parameter, or versioned artifact changes.
         - For new user-facing generator parameters, require matching CLI, SDK/profiler bridge, generator validator, docs, and test coverage updates where applicable.
         - For versioned template changes, verify the affected backend versions against `src/aiconfigurator/generator/config/backend_version_matrix.yaml`.
+    - path: "collector/**"
+      instructions: |
+        - Enforce the collector rules from `.claude/rules/collector/layer_permissions.md`, `failure_handling.md`, and `case_authoring.md`.
+        - Flag any silent case skip in collector code (a queued case may only execute or raise); the sole sanctioned filter is generation-time memory feasibility with counted drops.
+        - Flag invented fallbacks on both ends: generation must raise on unresolvable declarations (never substitute defaults or another model's geometry); collectors must never swap in a different backend/kernel than the framework's own dispatch selects — manual pins require framework source citations.
+        - Flag any reintroduction of selector/exception machinery (case_ids/contains/indices/ranges/limit/rules, sm_exceptions-style shape or version predicates) in YAML or code.
+        - Capability floors (`cases/capabilities.yaml`) may hold hardware facts only: no shapes, no framework versions, no per-backend nesting. `cases/denylist.yaml` is for hang/node-killers only, dated.
+        - Collector changes must stay within `collector/` and `tests/unit/collector/`; flag producer+consumer contract changes (perf row schema, PerfFile names) unless the PR explicitly declares them.
     - path: "src/aiconfigurator/cli/**"
       instructions: |
         - Check that CLI argument changes preserve backward compatibility, validation behavior, defaults, and plain-output expectations.
