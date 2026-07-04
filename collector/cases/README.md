@@ -154,6 +154,9 @@ a MoE model row may positively declare `frameworks: [vllm]` (or another list).
 Omitting the field means all frameworks. `get_common_moe_test_cases()` without
 a backend retains the legacy union during collector migrations; upgraded
 collectors pass their backend so geometry and quantization remain separate facts.
+Backend MoE values may also declare correlated `parallel_topologies`; each row
+expands only its listed TP and EP axes, and the union defines representable
+framework topologies without a collector-side skip.
 
 `include_base: true` means "include the small universal base set" declared by
 base-file `model_ops` (currently dense attention and GEMM). Use an explicit

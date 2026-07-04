@@ -126,6 +126,13 @@ common_case_values:
       - openai/gpt-oss-20b
       - openai/gpt-oss-120b
   moe_vllm:
+    # vLLM 0.24 represents either routed-expert TP or EP. Enabling EP flattens
+    # the requested parallel world into EP rather than preserving TP x EP.
+    parallel_topologies:
+    - tensor_parallel_sizes: [1, 2, 4, 8, 16, 32]
+      expert_parallel_sizes: [1]
+    - tensor_parallel_sizes: [1]
+      expert_parallel_sizes: [2, 4, 8, 16, 32, 64, 128, 256]
     quantization_modes:
     - name: bfloat16
     - name: int4_wo

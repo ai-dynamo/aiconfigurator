@@ -1139,6 +1139,26 @@ def get_common_moe_test_cases(*, backend: str | None = None):
     num_gpu_list = _as_int_list(moe_sweep.get("gpu_counts"), field_name="moe.gpu_counts")
     token_distributions = _moe_token_expert_distributions(moe_sweep)
 
+    allowed_parallel_topologies = None
+    if backend is not None:
+        raw_topologies = _moe_backend_values(backend).get("parallel_topologies")
+        if raw_topologies is not None:
+            if not isinstance(raw_topologies, list):
+                raise TypeError(f"common_case_values.moe_{backend}.parallel_topologies must be a list")
+            allowed_parallel_topologies = set()
+            for index, topology in enumerate(raw_topologies):
+                if not isinstance(topology, dict):
+                    raise TypeError(f"common_case_values.moe_{backend}.parallel_topologies[{index}] must be a mapping")
+                topology_tps = _as_int_list(
+                    topology.get("tensor_parallel_sizes"),
+                    field_name=f"moe_{backend}.parallel_topologies[{index}].tensor_parallel_sizes",
+                )
+                topology_eps = _as_int_list(
+                    topology.get("expert_parallel_sizes"),
+                    field_name=f"moe_{backend}.parallel_topologies[{index}].expert_parallel_sizes",
+                )
+                allowed_parallel_topologies.update(itertools.product(topology_tps, topology_eps))
+
     model_config_list = []
     for model_config in _model_case_values("moe"):
         raw_frameworks = model_config.get("frameworks")
@@ -1171,6 +1191,9 @@ def get_common_moe_test_cases(*, backend: str | None = None):
 
         max_tp_exclusive = model_config.get("max_tp_exclusive")
         if max_tp_exclusive is not None and tp >= int(max_tp_exclusive):
+            continue
+
+        if allowed_parallel_topologies is not None and (tp, ep) not in allowed_parallel_topologies:
             continue
 
         if tp * ep != num_gpu:

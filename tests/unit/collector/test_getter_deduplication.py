@@ -437,6 +437,18 @@ def test_nemotron_ultra_declares_backend_specific_moe_geometry(monkeypatch, mode
     assert {case.hidden_size for case in get_common_moe_test_cases(backend="trtllm")} == {8192}
 
 
+def test_vllm_moe_declares_representable_parallel_topologies(monkeypatch):
+    from collector.case_generator import get_common_moe_test_cases
+
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    cases = get_common_moe_test_cases(backend="vllm")
+    topologies = {(case.tp, case.ep) for case in cases}
+
+    assert all(tp == 1 or ep == 1 for tp, ep in topologies)
+    assert any(tp > 1 and ep == 1 for tp, ep in topologies)
+    assert any(tp == 1 and ep > 1 for tp, ep in topologies)
+
+
 def test_vllm_moe_cuda_graph_fails_closed():
     tree = ast.parse((REPO_ROOT / "collector/vllm/collect_moe.py").read_text())
     run_moe = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_moe_torch")

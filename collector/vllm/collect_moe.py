@@ -210,10 +210,6 @@ def get_moe_test_cases():
     for common_moe_testcase in get_common_moe_test_cases(backend="vllm"):
         model_name = common_moe_testcase.model_name
 
-        # vllm does not support TP when EP is enabled.
-        if common_moe_testcase.tp > 1 and common_moe_testcase.ep > 1:
-            continue
-
         for moe_type in enabled_moe_types:
             if not moe_model_allows_quantization("vllm", model_name, moe_type):
                 continue
