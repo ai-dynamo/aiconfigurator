@@ -46,7 +46,7 @@ from collections import defaultdict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common, interpolation, perf_interp
 from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
@@ -1129,10 +1129,16 @@ class MoEDispatch(Operation):
             return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0, source="empirical")
         else:
             data = database._wideep_deepep_ll_data[node_num][hidden_size][topk][num_experts]
-            num_left, num_right = interpolation.nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
-            result = interpolation.interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
-            lat = result["latency"] if isinstance(result, dict) else result
-            energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+            # 1-D tokens curve. Dispatch has no implemented roofline, but util-hold
+            # only needs the SOL *ratio*: dispatch bytes scale ~linearly with
+            # tokens (hidden/topk fixed per slice), so a linear proxy is
+            # ratio-equivalent to any bandwidth roofline.
+            config = perf_interp.OpInterpConfig(
+                axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=lambda t: float(t)
+            )
+            result = perf_interp.query(config, data, num_tokens)
+            lat = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
             return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
 
     @classmethod
@@ -1171,12 +1177,13 @@ class MoEDispatch(Operation):
         else:
             if node_num == 1 and sms == 20:  # only collect sm=20 for now
                 data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
-                num_left, num_right = interpolation.nearest_1d_point_helper(
-                    num_tokens, list(data.keys()), inner_only=False
+                # 1-D tokens curve; linear token proxy SOL (see deepep_ll note).
+                config = perf_interp.OpInterpConfig(
+                    axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=lambda t: float(t)
                 )
-                result = interpolation.interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
-                lat = result["latency"] if isinstance(result, dict) else result
-                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+                result = perf_interp.query(config, data, num_tokens)
+                lat = interpolation.get_value(result, "latency")
+                energy = interpolation.get_value(result, "energy")
             else:
                 data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
                 result = interpolation.interp_2d_linear(sms, num_tokens, data, database._extracted_metrics_cache)

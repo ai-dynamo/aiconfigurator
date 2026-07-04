@@ -31,7 +31,7 @@ from collections import defaultdict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common, interpolation, perf_interp
 from aiconfigurator.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
@@ -208,19 +208,19 @@ class CustomAllReduce(Operation):
                     "Consider using HYBRID mode, or supply custom_allreduce_perf.txt rows "
                     "covering this tp_size."
                 )
-            size_left, size_right = interpolation.nearest_1d_point_helper(
-                size, list(comm_dict.keys()), inner_only=False
+            # 1-D size curve on the raw table: RAW lerp in range (allreduce is
+            # bandwidth-bound ~linear in size); beyond the collected range hold
+            # the boundary util and let SOL carry the growth (the legacy raw
+            # two-point extrapolation could undershoot the launch floor or even
+            # go negative below the smallest collected size).
+            config = perf_interp.OpInterpConfig(
+                axes=("message_bytes",),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda sz: get_sol(quant_mode, effective_tp, sz)[0],
             )
-            result = interpolation.interp_1d(
-                [size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size
-            )
-
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
+            result = perf_interp.query(config, comm_dict, size)
+            lat = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
 
             if tp_size > database.system_spec["node"]["num_gpus_per_node"]:
                 base_bw = database._get_p2p_bandwidth(database.system_spec["node"]["num_gpus_per_node"])
@@ -473,23 +473,16 @@ class NCCL(Operation):
                 util_empirical.require_data_slice(by_num_gpus, effective_num_gpus),
                 f"dtype={dtype.value.name}, operation={operation!r}, num_gpus={effective_num_gpus}",
             )
-            size_left, size_right = interpolation.nearest_1d_point_helper(
-                message_size,
-                list(nccl_dict.keys()),
-                inner_only=False,
+            # 1-D size curve on the raw table (see custom_allreduce note): RAW
+            # lerp in range, boundary util-hold beyond it via the collective SOL.
+            config = perf_interp.OpInterpConfig(
+                axes=("message_bytes",),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda sz: get_sol(dtype, effective_num_gpus, operation, sz)[0],
             )
-            result = interpolation.interp_1d(
-                [size_left, size_right],
-                [nccl_dict[size_left], nccl_dict[size_right]],
-                message_size,
-            )
-
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
+            result = perf_interp.query(config, nccl_dict, message_size)
+            lat = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
 
             if num_gpus > max_num_gpus:  # need to do some correction
                 logger.debug(f"nccl num_gpus {num_gpus} > max_num_gpus {max_num_gpus}, need to do some correction")
