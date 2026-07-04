@@ -1,6 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Modifications copyright (C) 2025 NVIDIA CORPORATION & AFFILIATES.
 
 # Modified from https://github.com/vllm-project/vllm/blob/v0.11.0/tests/v1/attention/utils.py
 
