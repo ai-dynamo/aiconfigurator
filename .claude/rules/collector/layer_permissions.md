@@ -71,6 +71,17 @@ wrong data, which is worse than a crash.
    framework upgrades change. The upgrade audit re-checks every pinned
    backend and every `FIXME(kernel-limit)` against the new source before
    collected data is trusted.
+5. **No invented fallbacks.** If the framework-selected path cannot be
+   constructed or invoked, raise a classified error — never substitute
+   another backend "to keep collecting"; a try/except backend swap is the
+   most deceptive form of wrong-data. Replicating a fallback chain is legal
+   only when the framework itself performs it in serving, and
+   `kernel_source` must record what actually ran. Measurement-method
+   degradation (e.g. CUDA-graph capture falling back to eager) is allowed
+   only when recorded in the output row (`used_cuda_graph`-style flags).
+   The same applies to API-compat shims: they may only change HOW the same
+   kernel is constructed, never WHICH kernel runs — version-divergent
+   selection belongs in registry version forks.
 
 ## The one sanctioned in-collector filter: memory feasibility
 

@@ -72,6 +72,26 @@ filtering; that is how the selector engine was born. Over-collection in the
 meantime is acceptable: extra valid points are interpolation support, and
 invalid ones fail into the classified log.
 
+## Unresolvable declarations fail loudly (no generation-side fallbacks)
+
+Fallback deception has a generation-side twin: cases that carry the wrong
+identity are worse than no cases, because they benchmark successfully and
+poison the database with mislabeled rows.
+
+1. When a declared input cannot be resolved — a model row, a quant mode, an
+   attention/MLA profile, an artifact's config — the generator RAISES. It
+   never substitutes defaults, another model's geometry, or a "close enough"
+   quant mode.
+2. `model_aliases` is the only sanctioned aliasing, and only for declared
+   shape-only ops where the artifact provably cannot change the invoked
+   kernel or the persisted key. Everything else uses `model_paths` (one
+   physical case per artifact) or fails.
+3. A planned op that expands to zero cases must be explainable from logged
+   drops (capability floors, memory filter). Zero cases with no logged
+   reason is a population bug to fix — not a clean completion.
+
+## Running subsets (healing)
+
 Subset selection is a RUNTIME concern, never persisted to YAML:
 
 ```bash
