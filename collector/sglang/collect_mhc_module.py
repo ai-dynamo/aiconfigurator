@@ -368,6 +368,7 @@ def run_mhc_module(
     version = get_version("sglang")
     device_name = torch.cuda.get_device_name(device)
     results: list[dict[str, float]] = []
+    error_count = 0
 
     print(
         "[mhc-collector] "
@@ -389,6 +390,7 @@ def run_mhc_module(
                     )
                 except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
                     print(f"  OOM: op={op}, num_tokens={num_tokens}; skipping")
+                    error_count += 1
                     torch.cuda.empty_cache()
                     continue
                 except RuntimeError as err:
@@ -396,6 +398,7 @@ def run_mhc_module(
                     # unsupported shapes) should skip the single case rather than
                     # abort the whole sweep.
                     print(f"  RuntimeError: op={op}, num_tokens={num_tokens}; skipping ({err})")
+                    error_count += 1
                     torch.cuda.empty_cache()
                     continue
 
@@ -428,8 +431,17 @@ def run_mhc_module(
                 gc.collect()
     finally:
         del model_runner
+        from sglang.srt.distributed.parallel_state import destroy_model_parallel
+
+        destroy_model_parallel()
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
         torch.cuda.empty_cache()
         gc.collect()
+    summary = f"ok={len(results)} error={error_count} skip=0 total={len(results) + error_count}"
+    print(f"[mhc-collector] {summary}")
+    if not results or error_count > 0:
+        raise RuntimeError(f"mHC sweep failed: {summary}")
     return results
 
 
