@@ -19,8 +19,12 @@ __compat__ = "vllm==0.24.0"
 from types import SimpleNamespace
 
 import torch
+import vllm.envs as envs
 from vllm._custom_ops import scaled_fp4_quant as _scaled_fp4_quant
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+    FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+)
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
     CompressedTensorsConfig as _CompressedTensorsConfig,
@@ -182,7 +186,16 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
         op_list.append(create_gemm())
 
     if gemm_type in {"fp8", "fp8_block"}:
-        kernel_sources = {type(op.quant_method.fp8_linear).__name__ for op in op_list}
+        kernel_sources = set()
+        for op in op_list:
+            selected_kernel = op.quant_method.fp8_linear
+            if isinstance(selected_kernel, FlashInferFp8DeepGEMMDynamicBlockScaledKernel):
+                # vLLM 0.24's custom op selects the same two leaf objects at
+                # scaled_mm/flashinfer.py:301-315.
+                selected_kernel = (
+                    selected_kernel.fallback if envs.VLLM_BATCH_INVARIANT or m >= 32 else selected_kernel.base
+                )
+            kernel_sources.add(type(selected_kernel).__name__)
     elif gemm_type == "nvfp4":
         kernel_sources = {type(op.scheme.kernel).__name__ for op in op_list}
     else:
