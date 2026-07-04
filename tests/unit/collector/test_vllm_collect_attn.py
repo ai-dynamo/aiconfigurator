@@ -99,6 +99,7 @@ def test_generation_uses_total_runtime_length_and_production_call_order(use_fp8_
 
     class Impl:
         supports_quant_query_input = False
+        vllm_flash_attn_version = 3
 
         def __init__(self, *_args, **_kwargs):
             pass
@@ -174,6 +175,7 @@ def test_generation_uses_total_runtime_length_and_production_call_order(use_fp8_
     assert calls["selector"].kv_cache_dtype == ("fp8" if use_fp8_kv_cache else "auto")
     assert calls["log"]["item_list"][0]["isl"] == 1
     assert calls["log"]["item_list"][0]["step"] == 64
+    assert calls["log"]["kernel_source"] == "vllm_flash_attn_fa3"
     assert [event[0] for event in events] == ["update", "update", "forward", "update", "forward"]
     assert events[0][5] is history_slot_mapping
     for update, forward in zip(events[1::2], events[2::2], strict=True):

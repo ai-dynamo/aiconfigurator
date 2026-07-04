@@ -307,7 +307,18 @@ def run_attention_torch(
 
     kv_cache_dtype_str = "bfloat16" if not use_fp8_kv_cache else "fp8"
     dtype_str = "bfloat16"
-    kernel_source = f"vllm_{backend_name_str}".lower()
+    if backend_name_str == "FLASH_ATTN":
+        fa_version = impl.vllm_flash_attn_version
+        if fa_version is None:
+            raise RuntimeError("vLLM selected FlashAttention without a concrete FA version")
+        kernel_source = f"vllm_flash_attn_fa{fa_version}"
+    elif backend_name_str == "FLASHINFER":
+        phase_metadata = attn_metadata.prefill if is_context_phase else attn_metadata.decode
+        if phase_metadata is None:
+            raise RuntimeError("vLLM FlashInfer metadata is missing the active attention phase")
+        kernel_source = f"vllm_flashinfer_{type(phase_metadata).__name__}".lower()
+    else:
+        kernel_source = f"vllm_{backend_name_str}".lower()
 
     log_perf(
         item_list=[

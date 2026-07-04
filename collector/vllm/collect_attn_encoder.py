@@ -133,6 +133,11 @@ def run_encoder_attention_torch(
     latency = results["latency_ms"]
     print(f"encoder attn latency: {latency}")
 
+    if backend == AttentionBackendEnum.FLASH_ATTN:
+        kernel_source = f"vllm_vit_flash_attn_fa{fa_version}"
+    else:
+        kernel_source = f"vllm_vit_{backend.name}".lower()
+
     log_perf(
         item_list=[
             {
@@ -148,7 +153,7 @@ def run_encoder_attention_torch(
         version=vllm_version,
         device_name=torch.cuda.get_device_name(device),
         op_name="encoder_attention",
-        kernel_source=f"vllm_vit_{backend.name}".lower(),
+        kernel_source=kernel_source,
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
     )
