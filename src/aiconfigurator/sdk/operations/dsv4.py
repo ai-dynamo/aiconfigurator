@@ -440,10 +440,9 @@ class DeepSeekV4MHCModule(Operation):
             def _lookup_single(op_name: str) -> PerformanceResult:
                 # Validate bucket presence before chained indexing; mhc_data is
                 # a nested defaultdict, so `mhc_data[op][hc_mult][hidden_size]`
-                # would silently materialize empty dicts and then fall through
-                # to _nearest_1d_point_helper with an empty key list, surfacing
-                # as an opaque AssertionError instead of a structured
-                # PerfDataNotAvailableError.
+                # would silently materialize empty dicts and then query an
+                # empty table, surfacing as an opaque miss instead of a
+                # structured PerfDataNotAvailableError.
                 if (
                     op_name not in mhc_data
                     or hc_mult not in mhc_data[op_name]
@@ -707,15 +706,17 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
     ) -> Optional[float]:
         """Look up a sparse-kernel latency at (kernel, bs, isl, past_kv, tp).
 
-        Strategy:
-          1. Exact (bs, isl, past_kv, tp) hit  → return latency
-          2. Cubic 3D interpolation on (past_kv, isl, bs) within the fixed tp slice
-          3. If cubic fails, use the largest sampled batch no larger than the query
-             batch that covers isl, interpolate on (past_kv, isl), then scale by batch.
-        Returns None if the kernel CSV is not loaded.
+        The (past_kv, isl, bs) grid resolves on perf_interp with a scored-pair
+        SOL, work ~ bs * (past_kv * isl + isl^2 / 2) -- the attention-family
+        pair count these kernels compute over (causal indexer logits / sparse
+        attention). This is the CP model's own stated premise ("super-linear
+        sub-kernels", linear in batch), and it is what the data shows: util
+        under isl^2 flattens from isl~2048, and holding it predicts the held-
+        out isl=8192 point at -0% where the old raw-linear isl trend was -58%
+        (flat clamp -86%). CP queries live far beyond the collected isl sweep
+        (8192), so the extrapolation direction is the common case, not the
+        edge. Returns None when the kernel table is absent or has no anchor.
         """
-        from collections import defaultdict
-
         all_data = getattr(database, "_dsv4_sparse_kernel_data", None)
         if all_data is None or kernel not in all_data:
             return None
@@ -728,7 +729,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         if tp_size in per_tp:
             per_tp_dict = per_tp[tp_size]
         elif 1 in per_tp:
-            # paged_mqa_logits is collected at tp=1 only — kernel work itself
+            # paged_mqa_logits is collected at tp=1 only -- kernel work itself
             # is TP-independent so we fall back when caller asks for tp>1.
             per_tp_dict = per_tp[1]
         else:
@@ -736,104 +737,17 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         if not per_tp_dict:
             return None
 
-        def _finite_latency(value):
-            return value is not None and bool(np.all(np.isfinite(np.asarray(value))))
-
-        if past_kv in per_tp_dict and isl in per_tp_dict[past_kv] and bs in per_tp_dict[past_kv][isl]:
-            latency = per_tp_dict[past_kv][isl][bs]["latency"]
-            if _finite_latency(latency):
-                return float(np.asarray(latency))
-
-        try:
-            result = interpolation.interp_3d(past_kv, isl, bs, per_tp_dict, "cubic", database._extracted_metrics_cache)
-            latency = result.get("latency") if isinstance(result, dict) else None
-            if _finite_latency(latency):
-                return float(np.asarray(latency))
-        except Exception:
-            pass
-
-        batch_points = sorted(
-            {
-                sampled_b
-                for isl_dict in per_tp_dict.values()
-                if isinstance(isl_dict, dict)
-                for isl_data in isl_dict.values()
-                if isinstance(isl_data, dict)
-                for sampled_b in isl_data
-                if sampled_b <= bs
-            },
-            reverse=True,
+        config = perf_interp.OpInterpConfig(
+            axes=("past_kv", "seq_len", "batch"),
+            resolver=perf_interp.Grid(),
+            sol_fn=lambda p_v, i_v, b_v: float(b_v) * (float(p_v) * i_v + i_v * i_v / 2.0),
         )
-
-        def _lookup_at_batch(bp, *, allow_extrapolate: bool):
-            batch_slice = defaultdict(dict)
-            for sampled_past, isl_dict in per_tp_dict.items():
-                if not isinstance(isl_dict, dict):
-                    continue
-                for sampled_isl, isl_data in isl_dict.items():
-                    if isinstance(isl_data, dict) and bp in isl_data:
-                        batch_slice[sampled_past][sampled_isl] = isl_data[bp]
-
-            if not batch_slice:
-                return None
-
-            try:
-                latency = interpolation.interp_2d_linear(past_kv, isl, batch_slice, database._extracted_metrics_cache)[
-                    "latency"
-                ]
-                if _finite_latency(latency):
-                    return latency
-            except Exception:
-                pass
-
-            def _lookup_isl_at_past(sampled_past):
-                isl_dict = batch_slice.get(sampled_past)
-                if not isinstance(isl_dict, dict):
-                    return None
-                if isl in isl_dict:
-                    return isl_dict[isl].get("latency")
-                isl_points = sorted(s for s, leaf in isl_dict.items() if isinstance(leaf, dict) and "latency" in leaf)
-                if len(isl_points) < 2:
-                    return None
-                if not allow_extrapolate and not (isl_points[0] <= isl <= isl_points[-1]):
-                    return None
-                left, right = interpolation.nearest_1d_point_helper(isl, isl_points, inner_only=not allow_extrapolate)
-                latency = interpolation.interp_1d(
-                    [left, right],
-                    [isl_dict[left].get("latency"), isl_dict[right].get("latency")],
-                    isl,
-                )
-                return latency
-
-            if past_kv in batch_slice:
-                return _lookup_isl_at_past(past_kv)
-
-            past_points = sorted(
-                sampled_past for sampled_past in batch_slice if _lookup_isl_at_past(sampled_past) is not None
-            )
-            if len(past_points) < 2:
-                return None
-            if not allow_extrapolate and not (past_points[0] <= past_kv <= past_points[-1]):
-                return None
-            left, right = interpolation.nearest_1d_point_helper(past_kv, past_points, inner_only=not allow_extrapolate)
-            left_latency = _lookup_isl_at_past(left)
-            right_latency = _lookup_isl_at_past(right)
-            if left_latency is None or right_latency is None:
-                return None
-            return interpolation.interp_1d([left, right], [left_latency, right_latency], past_kv)
-
-        for allow_extrapolate in (False, True):
-            for bp in batch_points:
-                try:
-                    latency = _lookup_at_batch(bp, allow_extrapolate=allow_extrapolate)
-                    if latency is None:
-                        continue
-                    latency = latency * bs / bp
-                    if _finite_latency(latency):
-                        return latency
-                except Exception:
-                    continue
-        return None
+        try:
+            result = perf_interp.query(config, per_tp_dict, past_kv, isl, bs)
+        except interpolation.InterpolationDataNotAvailableError:
+            return None
+        latency = interpolation.get_value(result, "latency")
+        return float(latency) if np.isfinite(latency) else None
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_context_deepseek_v4_attention_module)

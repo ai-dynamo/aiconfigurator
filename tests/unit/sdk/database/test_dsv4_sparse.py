@@ -6,7 +6,7 @@
 Covers:
   * the per-(attn_kind, mode) module loaders and their split-file merge
   * the sparse-kernel CSV loader (paged_mqa_logits / hca_attn)
-  * ``_lookup_dsv4_sparse_kernel`` (exact + interp + tp fallback)
+  * ``_lookup_sparse_kernel`` (exact + engine resolve + tp fallback)
   * ``_deep_merge_dsv4_dicts`` cross-kind dict merge
 """
 
@@ -184,9 +184,8 @@ def test_load_context_dsv4_kind_module_data_keys_by_local_head(tmp_path):
 def test_load_generation_dsv4_kind_module_data_b_before_s(tmp_path):
     """Generation loader must use ``[head][b][s_total]`` (b before s).
 
-    aic_dev's ``_interp_3d`` in generation queries is called as
-    ``_interp_3d(num_heads, b, s, ...)`` — the data dict must follow
-    that argument order.
+    Generation queries resolve with axes ``(num_heads, b, s_total)`` — the
+    data dict nesting must follow that axis order.
     """
     rows = [
         _gen_row(attn_kind="csa", cr=4, bs=1, isl=1, step=1023, tp=1, lat=0.1),
@@ -268,7 +267,6 @@ def _make_sparse_db_with_paged_mqa(tmp_path, *, lat_at_past0: float, lat_at_past
         _dsv4_sparse_kernel_data: ClassVar[dict] = {
             "paged_mqa_logits": LoadedOpData(data, None, path),
         }
-        _extracted_metrics_cache: ClassVar[dict] = {}
 
     return _DB()
 
@@ -310,7 +308,6 @@ def _make_sparse_db_from_grid(per_tp_dict: dict):
                 "mock_paged_mqa_logits",
             ),
         }
-        _extracted_metrics_cache: ClassVar[dict] = {}
 
     return _DB()
 
@@ -397,8 +394,16 @@ def test_lookup_sparse_kernel_uses_requested_native_heads(tmp_path):
     assert val == pytest.approx(0.9)
 
 
-def test_lookup_sparse_kernel_uses_cubic_3d_before_fallback(monkeypatch):
-    calls = []
+def test_lookup_sparse_kernel_holds_util_on_isolated_leaves():
+    """Two isolated leaves that bracket past_kv but share no (isl, batch) grid.
+
+    Neither past_kv branch can resolve (isl=1536, bs=2) in-data, so the engine
+    falls to util-hold: snap outer axes to the nearest collected path
+    (past=0 -> isl=1024), anchor util on its boundary leaf b=1
+    (util = SOL(0,1024,1)/1.0 = 1024^2/2), and scale by the pair-count SOL at
+    the query: SOL(2048,1536,2)/util = 8650752/524288 = 16.5.
+    (Previously this cloud went to scattered cubic griddata.)
+    """
 
     class _DB:
         _dsv4_sparse_kernel_data: ClassVar[dict] = {
@@ -415,15 +420,6 @@ def test_lookup_sparse_kernel_uses_cubic_3d_before_fallback(monkeypatch):
                 "mock_paged_mqa_logits",
             ),
         }
-        # Carry the cache attribute that ``interpolation.interp_3d`` now
-        # expects to receive from callers.
-        _extracted_metrics_cache: ClassVar[dict] = {}
-
-    def _spy_interp_3d(x, y, z, data, method, _cache):
-        calls.append((x, y, z, method))
-        return {"latency": 7.0}
-
-    monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", _spy_interp_3d)
 
     val = ContextDeepSeekV4AttentionModule._lookup_sparse_kernel(
         _DB(),
@@ -435,11 +431,22 @@ def test_lookup_sparse_kernel_uses_cubic_3d_before_fallback(monkeypatch):
         native_heads=_FLASH_NATIVE_HEADS,
     )
 
-    assert val == pytest.approx(7.0)
-    assert calls == [(2048, 1536, 2, "cubic")]
+    sol_q = 2 * (2048 * 1536 + 1536**2 / 2)
+    anchor_util = 1 * (1024**2 / 2) / 1.0
+    assert val == pytest.approx(sol_q / anchor_util)  # 16.5
 
 
-def test_lookup_sparse_kernel_uses_b2_when_bs3_s2682_is_missing():
+def test_lookup_sparse_kernel_brackets_batch_and_drops_ragged_isl_branch():
+    """bs=3 at isl=2682 on the batch-capped grid.
+
+    The isl brackets are {2048, 4096}; the 4096 row is batch-capped at b=2 so
+    it cannot cover bs=3 and is dropped (weight renormalised onto 2048). The
+    2048 row brackets b in {2, 4}: 4.8 + (8.0-4.8)/2 = 6.4.
+    (The legacy path instead picked the b=2 curve and scaled x3/2 linearly --
+    the old robust-lookup comments themselves flagged batch scaling as the
+    worse estimate: "simply scaling the lower batch can nearly double
+    latency".)
+    """
     db = _make_sparse_db_from_grid({0: _sparse_sampled_batch_caps_grid()})
     val = ContextDeepSeekV4AttentionModule._lookup_sparse_kernel(
         db,
@@ -451,11 +458,19 @@ def test_lookup_sparse_kernel_uses_b2_when_bs3_s2682_is_missing():
         native_heads=_FLASH_NATIVE_HEADS,
     )
 
-    b2_at_2682 = 4.80 + (5.80 - 4.80) * (2682 - 2048) / (4096 - 2048)
-    assert val == pytest.approx(b2_at_2682 * 3 / 2)
+    b3_at_2048 = 4.80 + (8.00 - 4.80) * (3 - 2) / (4 - 2)
+    assert val == pytest.approx(b3_at_2048)  # 6.4
 
 
-def test_lookup_sparse_kernel_uses_largest_batch_that_covers_isl():
+def test_lookup_sparse_kernel_holds_util_beyond_all_batches():
+    """bs=5 exceeds every collected batch at every isl -> util-hold.
+
+    No isl branch covers bs=5 so in-data resolution fails entirely. The hold
+    snaps isl to the nearest collected row (2048), anchors util on its
+    boundary batch b=4 (util = SOL(0,2048,4)/8.0), and scales by the
+    pair-count SOL at the query, so the isl growth 2048->2682 rides the
+    quadratic SOL rather than a linear batch extrapolation.
+    """
     db = _make_sparse_db_from_grid({0: _sparse_sampled_batch_caps_grid()})
     val = ContextDeepSeekV4AttentionModule._lookup_sparse_kernel(
         db,
@@ -467,11 +482,19 @@ def test_lookup_sparse_kernel_uses_largest_batch_that_covers_isl():
         native_heads=_FLASH_NATIVE_HEADS,
     )
 
-    b2_at_2682 = 4.80 + (5.80 - 4.80) * (2682 - 2048) / (4096 - 2048)
-    assert val == pytest.approx(b2_at_2682 * 5 / 2)
+    anchor_util = 4 * (2048**2 / 2) / 8.00
+    sol_q = 5 * (2682**2 / 2)
+    assert val == pytest.approx(sol_q / anchor_util, rel=1e-4)  # ~17.15
 
 
-def test_lookup_sparse_kernel_uses_b4_when_bs5_s1565_is_missing():
+def test_lookup_sparse_kernel_brackets_batch_within_covering_isl_row():
+    """bs=5, isl=1565.2: only the isl=1024 row reaches b=8 and can bracket
+    bs=5.
+
+    The isl brackets are {1024, 2048}; the 2048 row is capped at b=4 so it
+    drops, and the 1024 row bracket-blends b in {4, 8}: 6 + (12-6)/4 = 7.5 --
+    a measured bracket instead of the legacy x5/4 linear batch scaling.
+    """
     isl = 1565.2
     db = _make_sparse_db_from_grid({0: _sparse_sampled_batch_caps_grid()})
     val = ContextDeepSeekV4AttentionModule._lookup_sparse_kernel(
@@ -484,11 +507,17 @@ def test_lookup_sparse_kernel_uses_b4_when_bs5_s1565_is_missing():
         native_heads=_FLASH_NATIVE_HEADS,
     )
 
-    b4_at_isl = 6.00 + (8.00 - 6.00) * (isl - 1024) / (2048 - 1024)
-    assert val == pytest.approx(b4_at_isl * 5 / 4)
+    b5_at_1024 = 6.00 + (12.00 - 6.00) * (5 - 4) / (8 - 4)
+    assert val == pytest.approx(b5_at_1024)  # 7.5
 
 
-def test_lookup_sparse_kernel_interpolates_past_kv_after_batch_fallback():
+def test_lookup_sparse_kernel_blends_past_kv_branches():
+    """past_kv=2048 midway between two collected grids blends both branches.
+
+    Each past_kv branch resolves like the covering-isl-row case above
+    (b in {4, 8} bracket at isl=1024: 7.5 and offset+4 -> 11.5), then the
+    past_kv bracket blends them at weight 1/2: (7.5 + 11.5)/2 = 9.5.
+    """
     isl = 1565.2
     db = _make_sparse_db_from_grid(
         {
@@ -506,10 +535,10 @@ def test_lookup_sparse_kernel_interpolates_past_kv_after_batch_fallback():
         native_heads=_FLASH_NATIVE_HEADS,
     )
 
-    b4_at_isl = 6.00 + (8.00 - 6.00) * (isl - 1024) / (2048 - 1024)
-    at_past_0 = b4_at_isl * 5 / 4
-    at_past_4096 = (b4_at_isl + 4.0) * 5 / 4
-    assert val == pytest.approx((at_past_0 + at_past_4096) / 2)
+    b5_at_1024 = 6.00 + (12.00 - 6.00) * (5 - 4) / (8 - 4)
+    at_past_0 = b5_at_1024
+    at_past_4096 = b5_at_1024 + 4.0
+    assert val == pytest.approx((at_past_0 + at_past_4096) / 2)  # 9.5
 
 
 def test_lookup_sparse_kernel_missing_returns_none():
