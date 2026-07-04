@@ -1003,51 +1003,6 @@ def moe_model_allows_quantization(backend: str, model_name: str, moe_type: str) 
     return True
 
 
-def moe_shape_satisfies_constraints(
-    backend: str,
-    moe_type: str,
-    *,
-    hidden_size: int,
-    inter_size: int,
-    tensor_parallel_size: int,
-    topk: int,
-) -> bool:
-    """Return whether a MoE shape satisfies backend YAML quantization limits."""
-
-    values = _moe_backend_values(backend)
-    raw_constraints = values.get("shape_constraints", [])
-    if not isinstance(raw_constraints, list):
-        raise TypeError(f"common_case_values.moe_{backend}.shape_constraints must be a list")
-
-    local_inter_size = inter_size // tensor_parallel_size
-    fields = {
-        "hidden_size": hidden_size,
-        "inter_size": inter_size,
-        "local_inter_size": local_inter_size,
-        "topk": topk,
-    }
-    for raw_constraint in raw_constraints:
-        if not isinstance(raw_constraint, dict):
-            raise TypeError(f"common_case_values.moe_{backend}.shape_constraints entries must be mappings")
-        if str(raw_constraint.get("mode")) != moe_type:
-            continue
-
-        divisible_by = raw_constraint.get("divisible_by", {})
-        if not isinstance(divisible_by, dict):
-            raise TypeError(f"common_case_values.moe_{backend}.shape_constraints.divisible_by must be a mapping")
-        for field_name, divisor in divisible_by.items():
-            if field_name not in fields:
-                raise ValueError(f"Unknown MoE shape constraint field: {field_name}")
-            if fields[field_name] % int(divisor) != 0:
-                return False
-
-        max_topk = raw_constraint.get("max_topk")
-        if max_topk is not None and topk > int(max_topk):
-            return False
-
-    return True
-
-
 def _moe_backend_model_cases(backend: str) -> list[dict[str, object]]:
     values = _moe_backend_values(backend)
     raw_cases = values.get("model_cases", [])

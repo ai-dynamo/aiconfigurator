@@ -23,7 +23,6 @@ from collector.case_generator import (
     get_moe_quantization_modes,
     get_moe_quantization_module_config,
     moe_model_allows_quantization,
-    moe_shape_satisfies_constraints,
 )
 from collector.helper import (
     balanced_logits,
@@ -217,15 +216,6 @@ def get_moe_test_cases():
 
         for moe_type in enabled_moe_types:
             if not moe_model_allows_quantization("vllm", model_name, moe_type):
-                continue
-            if not moe_shape_satisfies_constraints(
-                "vllm",
-                moe_type,
-                hidden_size=common_moe_testcase.hidden_size,
-                inter_size=common_moe_testcase.inter_size,
-                tensor_parallel_size=common_moe_testcase.tp,
-                topk=common_moe_testcase.topk,
-            ):
                 continue
 
             execution_key = _moe_execution_key(common_moe_testcase, moe_type)

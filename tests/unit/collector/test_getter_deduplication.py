@@ -273,7 +273,6 @@ def test_vllm_moe_getter_dedupes_equal_resolved_invocations(monkeypatch):
     monkeypatch.setattr(module, "get_common_moe_test_cases", lambda **_kwargs: common_cases)
     monkeypatch.setattr(module, "get_moe_quantization_modes", lambda *_args, **_kwargs: ["w4a16_mxfp4"])
     monkeypatch.setattr(module, "moe_model_allows_quantization", lambda *_args: True)
-    monkeypatch.setattr(module, "moe_shape_satisfies_constraints", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         module,
         "_load_model_moe_config",
@@ -307,7 +306,6 @@ def test_vllm_moe_getter_rejects_consumer_key_collision(monkeypatch):
     monkeypatch.setattr(module, "get_common_moe_test_cases", lambda **_kwargs: common_cases)
     monkeypatch.setattr(module, "get_moe_quantization_modes", lambda *_args, **_kwargs: ["w4a16_mxfp4"])
     monkeypatch.setattr(module, "moe_model_allows_quantization", lambda *_args: True)
-    monkeypatch.setattr(module, "moe_shape_satisfies_constraints", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         module,
         "_load_model_moe_config",
@@ -379,8 +377,8 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
         "sgl-project/DeepSeek-V4-Pro-FP8",
     }
 
-    assert len(cases) == 1668
-    assert sum(len(case[1]) for case in cases) == 45036
+    assert len(cases) == 1806
+    assert sum(len(case[1]) for case in cases) == 48762
     assert not any(case[8] in dsv4_models for case in cases)
 
 

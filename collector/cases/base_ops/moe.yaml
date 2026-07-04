@@ -144,24 +144,6 @@ common_case_values:
     - name: w4a16_mxfp4
       requires_runtime_feature: mxfp4
       requires_model_quantization_config: true
-    shape_constraints:
-    - mode: fp8_block
-      divisible_by:
-        hidden_size: 128
-        local_inter_size: 128
-    - mode: nvfp4
-      divisible_by:
-        hidden_size: 512
-        local_inter_size: 64
-      max_topk: 10
-    - mode: w4a16_mxfp4
-      divisible_by:
-        hidden_size: 32
-        local_inter_size: 32
-    - mode: int4_wo
-      divisible_by:
-        hidden_size: 32
-        local_inter_size: 32
   moe_vllm_xpu:
     token_counts:
     - 1

@@ -602,7 +602,6 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
         get_moe_quantization_modes,
         get_moe_quantization_module_config,
         moe_model_allows_quantization,
-        moe_shape_satisfies_constraints,
     )
 
     assert get_moe_quantization_modes("vllm", sm_version=90, runtime_features={"per_block_fp8": True}) == [
@@ -635,31 +634,6 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
     assert get_moe_quantization_module_config("vllm", "int4_wo", model_name="moonshotai/Kimi-K2.5") == {
         "group_size": 32
     }
-
-    assert moe_shape_satisfies_constraints(
-        "vllm",
-        "fp8_block",
-        hidden_size=4096,
-        inter_size=1536,
-        tensor_parallel_size=1,
-        topk=8,
-    )
-    assert not moe_shape_satisfies_constraints(
-        "vllm",
-        "fp8_block",
-        hidden_size=4100,
-        inter_size=1536,
-        tensor_parallel_size=1,
-        topk=8,
-    )
-    assert not moe_shape_satisfies_constraints(
-        "vllm",
-        "nvfp4",
-        hidden_size=4096,
-        inter_size=1536,
-        tensor_parallel_size=1,
-        topk=22,
-    )
 
 
 def test_vllm_xpu_moe_metadata_is_yaml_backed(monkeypatch):
