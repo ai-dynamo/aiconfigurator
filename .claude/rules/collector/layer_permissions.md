@@ -104,7 +104,10 @@ Rules:
    parses is a producer+consumer coordinated change. If you discover the need
    mid-task: STOP, write up the proposal (new dimension, why, which consumers
    must change), and hand it to the human. Do not implement both sides
-   "while you're at it".
+   "while you're at it". Approval — not PR count — is the requirement: an
+   explicitly approved framework-upgrade PR that declares the contract change
+   may carry the coordinated producer and consumer changes together; two
+   dependent PRs are equally acceptable.
 3. The reverse holds too: SDK/modeling tasks do not reach into `collector/`.
 4. These rule files themselves (`.claude/rules/collector/`) are human-owned
    policy. Do not edit them as a side effect of a fix task; propose changes

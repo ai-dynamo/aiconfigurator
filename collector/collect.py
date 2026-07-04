@@ -147,15 +147,28 @@ class ResumeCheckpoint:
 
     FLUSH_INTERVAL_SEC = 2.0
 
-    def __init__(self, backend: str, module_name: str, run_func_name: str, checkpoint_dir: str):
+    def __init__(
+        self,
+        backend: str,
+        module_name: str,
+        run_func_name: str,
+        checkpoint_dir: str,
+        framework_version: str | None = None,
+        sm_version: int | None = None,
+    ):
         self.module_name = module_name
         self._dirty = False
         self._last_flush = 0.0
+        # framework_version/sm_version bind the checkpoint to the runtime it
+        # was collected under: resuming a plan across a version bump or on a
+        # different GPU generation silently mislabels data, so it must fail.
         self._metadata = {
             "schema": RESUME_SCHEMA_VERSION,
             "backend": backend,
             "module": module_name,
             "run_func": run_func_name,
+            "framework_version": framework_version,
+            "sm_version": sm_version,
         }
         self._done: set[str] = set()
         self._failed: set[str] = set()
@@ -178,7 +191,7 @@ class ResumeCheckpoint:
                 f"Failed to load checkpoint {self._path}: {e}. Run without --resume to start fresh."
             ) from e
 
-        for key in ("schema", "backend", "module", "run_func"):
+        for key in ("schema", "backend", "module", "run_func", "framework_version", "sm_version"):
             if data.get(key) != self._metadata[key]:
                 raise RuntimeError(
                     f"{self.module_name}: checkpoint mismatch "
@@ -225,6 +238,10 @@ class ResumeCheckpoint:
         self._failed.add(task_id)
         self._dirty = True
         self.flush()
+
+    def unresolved_failed_count(self) -> int:
+        """Number of tasks the checkpoint holds as failed and unresolved."""
+        return len(self._failed)
 
     # Keep mark_done as alias for backwards compat
     mark_done = mark_passed
@@ -583,6 +600,8 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
         module_name=module_name,
         run_func_name=func_name,
         checkpoint_dir=checkpoint_dir,
+        framework_version=resume_options.get("framework_version") if resume_options else None,
+        sm_version=resume_options.get("sm_version") if resume_options else None,
     )
 
     if resume_options and resume_options.get("resume"):
@@ -592,9 +611,32 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     else:
         task_infos = raw_task_infos
 
+    def _unresolved_failure_errors():
+        # A resumed run must not look clean while its checkpoint still holds
+        # unresolved failures: completion and acceptance are distinct.
+        if not (resume_options and resume_options.get("resume")):
+            return []
+        unresolved = resume_tracker.unresolved_failed_count()
+        if not unresolved:
+            return []
+        logger.warning(
+            f"{module_name}: checkpoint holds {unresolved} unresolved failed tasks "
+            "(skipped on resume; rerun with --resume-retry-failed to retry)"
+        )
+        return [
+            {
+                "module": module_name,
+                "task_id": "resume_unresolved",
+                "error_type": "UnresolvedFailures",
+                "error_message": f"checkpoint holds {unresolved} unresolved failed tasks",
+                "classification": "unresolved_from_checkpoint",
+                "timestamp": datetime.now().isoformat(),
+            }
+        ]
+
     if not task_infos:
         logger.info(f"{module_name}: no tasks to run")
-        return []
+        return _unresolved_failure_errors()
 
     queue = mp.Queue()
     error_queue = mp.Queue()
@@ -853,6 +895,8 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
         if count >= 5:
             logger.warning(f"{module_name}: failure group {group!r} failed {count} times — needs fixing")
 
+    errors.extend(_unresolved_failure_errors())
+
     # Log summary
     if errors:
         log_dir = os.environ.get("COLLECTOR_LOG_DIR", "")
@@ -989,7 +1033,12 @@ def collect_ops(
                     cases = cases[:limit]
                 return cases
 
-            merged_resume = {**(resume_options or {}), "backend": backend}
+            merged_resume = {
+                **(resume_options or {}),
+                "backend": backend,
+                "framework_version": runtime_version,
+                "sm_version": sm_version,
+            }
             errors = collect_module_safe(
                 collection["name"],
                 collection["type"],

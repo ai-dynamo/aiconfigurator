@@ -423,3 +423,44 @@ class TestSignalCrashRecovery:
         failed = _load_failed_ids(tmp_path, "sigabrt_restart_mix")
         assert {"b", "c", "e", "f"} == done  # exit_restart + normal = passed
         assert {"a", "d"} == failed  # sigabrt = failed
+
+
+class TestResumeIntegrity:
+    """Checkpoint binds runtime identity; resume surfaces unresolved failures."""
+
+    def test_checkpoint_binds_framework_version_and_sm(self, tmp_path):
+        kwargs = {
+            "backend": "unknown",
+            "module_name": "bind",
+            "run_func_name": "f",
+            "checkpoint_dir": str(tmp_path / ".checkpoint"),
+        }
+        first = _collect_mod.ResumeCheckpoint(framework_version="1.0.0", sm_version=90, **kwargs)
+        first.mark_failed("t1")
+        first.flush(force=True)
+
+        version_changed = _collect_mod.ResumeCheckpoint(framework_version="2.0.0", sm_version=90, **kwargs)
+        with pytest.raises(RuntimeError, match="framework_version"):
+            version_changed.load_existing()
+
+        sm_changed = _collect_mod.ResumeCheckpoint(framework_version="1.0.0", sm_version=100, **kwargs)
+        with pytest.raises(RuntimeError, match="sm_version"):
+            sm_changed.load_existing()
+
+    def test_resume_reports_unresolved_failures(self, tmp_path):
+        tasks = _tasks([("a", "error"), ("b", "normal")])
+        _run(tasks, 1, tmp_path, module_name="resume_unresolved")
+
+        # All tasks are skipped on resume (a failed, b passed) — the run must
+        # still surface the unresolved failure instead of reporting clean.
+        resumed = parallel_run(
+            tasks,
+            _task_fn,
+            num_processes=1,
+            module_name="resume_unresolved",
+            resume_options={"checkpoint_dir": str(tmp_path / ".checkpoint"), "resume": True},
+        )
+        unresolved = [e for e in resumed if e.get("error_type") == "UnresolvedFailures"]
+        assert len(unresolved) == 1
+        assert unresolved[0]["classification"] == "unresolved_from_checkpoint"
+        assert "1 unresolved" in unresolved[0]["error_message"]
