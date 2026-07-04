@@ -466,22 +466,6 @@ class TestHFModelSupport:
         assert op_ratio_counts[4] == expected_ratio_counts.get(4, 0)
         assert op_ratio_counts[128] == expected_ratio_counts.get(128, 0) + expected_ratio_counts.get(0, 0)
 
-    @pytest.mark.parametrize(
-        ("backend_name", "expected_kernel_source"),
-        [
-            ("sglang", "fused_recurrent_gated_delta_rule_packed_decode"),
-            ("trtllm", "fused_sigmoid_gating_delta_rule_update"),
-            ("vllm", "fused_sigmoid_gating_delta_rule_update"),
-        ],
-    )
-    def test_qwen35_generation_gdn_uses_backend_kernel_source(self, backend_name, expected_kernel_source):
-        model_config = config.ModelConfig(tp_size=1, moe_tp_size=1, moe_ep_size=1)
-
-        model = get_model("Qwen/Qwen3.5-27B", model_config, backend_name=backend_name)
-        recurrence = next(op for op in model.generation_ops if op._name == "generation_gdn_recurrence")
-
-        assert recurrence._kernel_source == expected_kernel_source
-
     def test_deepseek_v4_kvcache_bytes_include_csa_indexer_cache_and_decode_buffers(self):
         model_config = config.ModelConfig(
             tp_size=8,

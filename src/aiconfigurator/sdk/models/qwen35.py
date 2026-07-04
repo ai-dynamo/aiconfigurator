@@ -39,12 +39,10 @@ class Qwen35Model(BaseModel):
             model_info["context"],
             model_config,
             model_info["extra_params"],
-            backend_name=backend_name,
         )
 
-    def __init__(self, *args, backend_name: str = "") -> None:
+    def __init__(self, *args) -> None:
         super().__init__(*args)
-        self._backend_name = backend_name
         cfg: common.Qwen35Config = self.extra_params
         assert isinstance(cfg, common.Qwen35Config), "Qwen35Model requires Qwen35Config extra_params"
 
@@ -334,11 +332,7 @@ class Qwen35Model(BaseModel):
                     ops.GDNKernel(
                         "generation_gdn_recurrence",
                         c,
-                        (
-                            "fused_recurrent_gated_delta_rule_packed_decode"
-                            if self._backend_name == "sglang"
-                            else "fused_sigmoid_gating_delta_rule_update"
-                        ),
+                        "fused_sigmoid_gating_delta_rule_update",
                         "generation",
                         h,
                         nk,

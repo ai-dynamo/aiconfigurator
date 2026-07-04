@@ -152,6 +152,22 @@ is designed. This reversal does not alter the historical chronology recorded
 in `ATTN-VARIANT-KEY-0514` or `ENGINE-SPEC-V2-ATTENTION`; it supersedes their
 present-tense product status for this branch.
 
+### GDN consumer reversal (2026-07-04)
+
+The original SGLang 0.5.14 upgrade changed the Python and Rust Qwen3.5 model
+and GDN SOL paths to consume
+`fused_recurrent_gated_delta_rule_packed_decode`. That query-side change is
+rejected for this collector-only effort. The collector still records the
+packed SGLang 0.5.14 kernel source and its exact invocation, but Python/Rust
+models and lookup behavior remain byte-for-byte equal to `main`. Consuming the
+new source is a separate reviewed SDK change with its own packaged-data tests.
+
+This reversal has no collector plan or execution-path delta, so it does not
+invalidate the existing H20 GDN measurements. Those measurements remain
+collector evidence only: 1,846/1,848 rows, with the two disclosed batch-1024
+grid-Y failures. They do not establish that the current SDK consumes the new
+generation recurrence rows.
+
 ### MoE FP4/INT4 identity reversal (2026-07-04)
 
 The SM90 `NVFP4 -> Marlin` collector path introduced on the divergent
