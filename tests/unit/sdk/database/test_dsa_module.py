@@ -7,7 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.dsa import (
     DEFAULT_DSA_ARCHITECTURE,
     ContextDSAModule,
@@ -257,25 +257,6 @@ class TestContextDSAModule:
 
         assert float(result) == pytest.approx(12.4104)
         assert result.energy == pytest.approx(124.104)
-
-    def test_topk_piecewise_from_raw_handles_both_boundary_sides(self, stub_perf_db):
-        raw_dsa_dict = {
-            32: {
-                1024: {1: _dsa_value(10.0)},
-                2048: {1: _dsa_value(20.0)},
-                3072: {1: _dsa_value(80.0)},
-                4096: {1: _dsa_value(100.0)},
-            }
-        }
-
-        below = interpolation.interp_dsa_context_topk_piecewise_from_raw(32, 2047, 1, raw_dsa_dict, 2048)
-        above = interpolation.interp_dsa_context_topk_piecewise_from_raw(32, 2049, 1, raw_dsa_dict, 2048)
-
-        assert below is not None
-        assert above is not None
-        assert below["latency"] == pytest.approx(10.0 + (20.0 - 10.0) / 1024.0 * (2047 - 1024))
-        assert above["latency"] == pytest.approx(80.0 + (100.0 - 80.0) / 1024.0 * (2049 - 3072))
-        assert above["latency"] > raw_dsa_dict[32][2048][1]["latency"]
 
     def test_topk_plus_one_plain_crossing_on_raw_table(self, stub_perf_db):
         """s = topk+1 interpolates PLAINLY between the collected 2048 and 3072

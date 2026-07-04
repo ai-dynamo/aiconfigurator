@@ -7,10 +7,12 @@ Both ContextDSAModule and GenerationDSAModule own their CSV-backed perf
 tables and grid extrapolation. ``PerfDatabase.query_context_dsa_module``
 and ``query_generation_dsa_module`` delegate here.
 
-Both classes additionally maintain a ``_raw_data_cache`` — a
-``copy.deepcopy`` of the loaded table BEFORE extrapolation runs. Context uses
-it for the topk-boundary regime-aware piecewise lookup (PR #903); generation
-uses it to anchor sequence overflow to measured boundary utilization.
+Both classes still bind a ``_raw_data_cache`` for backward compatibility,
+but with load-time pre-expansion removed the table IS the raw measurements,
+so it is a plain alias. (The PR #903 topk-piecewise lookup and the hand-rolled
+boundary-util anchoring it served are superseded by perf_interp: linear
+bracket blends cannot overshoot the topk knee the way cubic did, and
+util-hold is native.)
 
 No SOL clamping in the legacy ``_correct_data`` for either DSA op —
 extrapolation only. The legacy ``__init__`` loaded DSA twice (once near
