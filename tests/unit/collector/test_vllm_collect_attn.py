@@ -17,6 +17,7 @@ pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parents[3]
 ATTN_SOURCE = ROOT / "collector/vllm/collect_attn.py"
+ENCODER_ATTN_SOURCE = ROOT / "collector/vllm/collect_attn_encoder.py"
 UTILS_SOURCE = ROOT / "collector/vllm/utils.py"
 BF16, FP8, UINT8 = object(), object(), object()
 
@@ -282,6 +283,27 @@ def test_mla_fp8_history_uses_framework_cache_writer():
     assert calls[0][3] == "fp8"
     assert calls[0][4].item() == 2.0
     assert torch.equal(cache[1, :2], torch.full((2, 6), 17, dtype=torch.uint8))
+
+
+def test_encoder_attention_rejects_missing_flash_attention_version():
+    flash_attn = object()
+    torch = SimpleNamespace(
+        bfloat16=object(),
+        int32=object(),
+        cuda=SimpleNamespace(set_device=lambda _device: None),
+        randn=lambda *_args, **_kwargs: object(),
+        arange=lambda *_args, **_kwargs: object(),
+    )
+    namespace = {
+        "torch": torch,
+        "get_vit_attn_backend": lambda **_kwargs: flash_attn,
+        "AttentionBackendEnum": SimpleNamespace(FLASH_ATTN=flash_attn),
+        "get_flash_attn_version": lambda **_kwargs: None,
+    }
+    run = _load_function(ENCODER_ATTN_SOURCE, "run_encoder_attention_torch", namespace)
+
+    with pytest.raises(RuntimeError, match="without a concrete FA version"):
+        run(1, 64, 4, 128, perf_filename="encoder_attention_perf.txt")
 
 
 @pytest.mark.parametrize(

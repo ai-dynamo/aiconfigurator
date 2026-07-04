@@ -85,6 +85,8 @@ def run_encoder_attention_torch(
 
     if backend == AttentionBackendEnum.FLASH_ATTN:
         fa_version = get_flash_attn_version(head_size=head_dim)
+        if fa_version is None:
+            raise RuntimeError("vLLM selected FlashAttention for ViT without a concrete FA version")
 
         def run():
             vit_flash_attn_wrapper(
