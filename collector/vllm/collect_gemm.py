@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# FIXME(kernel-limit): retired sm_exceptions rule (PR #1302), not verified
+# against vLLM kernel source. On SM100/103/120, vLLM block-FP8 GEMM reportedly
+# requires token_count to be divisible by 4; token counts 1/2 currently fail
+# at runtime. On the next version bump: verify, then probe-and-raise or delete
+# this note. Never move this back into YAML.
+
 """vLLM GEMM collector for CUDA backends.
 
 Builds vLLM RowParallelLinear layers with synthetic weights to benchmark BF16,

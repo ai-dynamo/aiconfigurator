@@ -59,6 +59,23 @@ feasibility, under exactly these conditions:
 
 Anything beyond this pattern goes back to the normal rule: run it or raise.
 
+## Parking framework kernel limits: `FIXME(kernel-limit)`
+
+Framework kernel limits (backend × SM constraints with shape flavor, e.g.
+"Blackwell attention rejects GQA ratio >= 32 unless divisible by 32") are
+neither hardware facts (not capabilities.yaml material) nor version bugs
+(too stable to ignore). Their home is a **`FIXME(kernel-limit)` comment at
+the invocation site in the owning collector**, stating the claimed limit,
+its origin, and that it is unverified. The affected cases simply fail at
+runtime meanwhile.
+
+Lifecycle: on the next framework version bump, the upgrade audit greps
+`FIXME(kernel-limit)`, verifies each claim against the framework source, and
+either implements it as a probe (ask the framework's own selector — never a
+prediction) or a guard that raises a classified error citing the framework
+source line, or deletes the note. Do not implement guards from unverified
+claims, and never express these limits in YAML.
+
 ## Meta rules
 
 1. **Default action for a failing case is NO CHANGE.** Confirm it is recorded

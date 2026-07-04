@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# FIXME(kernel-limit): retired sm_exceptions rule (PR #1302), not verified
+# against TRT-LLM kernel-selection source. On SM100/103/120, TRT-LLM attention
+# kernels reportedly reject GQA ratios (num_heads/num_kv_heads) >= 32 unless
+# the ratio is a multiple of 32; affected cases currently fail at runtime.
+# On the next version bump: verify against the framework source, then either
+# probe-and-raise before invocation or delete this note. Never move this back
+# into YAML (see .claude/rules/collector/layer_permissions.md).
+
 """TensorRT-LLM dense attention collector.
 
 Constructs a single TRT-LLM torch-flow attention layer and synthetic metadata to

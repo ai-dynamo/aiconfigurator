@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# FIXME(kernel-limit): retired sm_exceptions rule (PR #1302), not verified
+# against vLLM backend-selector source. On SM100/103/120, vLLM
+# FlashInfer/TRT-LLM batch decode reportedly supports GQA ratio
+# (num_heads/num_kv_heads) <= 16 only; affected generation cases currently
+# fail at runtime. On the next version bump: verify, then probe-and-raise or
+# delete this note. Never move this back into YAML.
+
 """vLLM dense attention collector for CUDA backends.
 
 Creates minimal vLLM configs, KV-cache specs, attention metadata, and mock
