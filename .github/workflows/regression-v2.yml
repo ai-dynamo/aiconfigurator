@@ -68,6 +68,7 @@ jobs:
           # New side: default checkout (PR merge ref / dispatched ref).
           ref: ${{ matrix.side == 'old' && needs.refs.outputs.old || '' }}
           lfs: true
+          persist-credentials: false
 
       - name: Git LFS Pull
         run: git lfs pull
@@ -118,6 +119,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Download snapshots
         uses: actions/download-artifact@v7
