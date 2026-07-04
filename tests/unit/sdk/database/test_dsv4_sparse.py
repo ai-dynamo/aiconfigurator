@@ -7,7 +7,6 @@ Covers:
   * the per-(attn_kind, mode) module loaders and their split-file merge
   * the sparse-kernel CSV loader (paged_mqa_logits / hca_attn)
   * ``_lookup_dsv4_sparse_kernel`` (exact + interp + tp fallback)
-  * ``_dsv4_robust_3d_lookup`` exact-match short-circuit
   * ``_deep_merge_dsv4_dicts`` cross-kind dict merge
 """
 
@@ -17,12 +16,10 @@ from typing import ClassVar
 
 import pytest
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.dsv4 import (
     ContextDeepSeekV4AttentionModule,
     _deep_merge_dsv4_dicts,
-    _dsv4_lookup_prefix_resolved,
-    _dsv4_robust_3d_lookup,
 )
 from aiconfigurator.sdk.perf_database import (
     LoadedOpData,
@@ -247,59 +244,6 @@ def test_deep_merge_dsv4_dicts_preserves_disjoint_keys():
     assert sorted(merged["f"]["k"]["g"].keys()) == [4, 128]
     assert merged["f"]["k"]["g"][4] == {"x": 1}
     assert merged["f"]["k"]["g"][128] == {"x": 2}
-
-
-# ───────────────────────────────────────────────────────────────────────
-# _dsv4_robust_3d_lookup — exact-match short-circuit
-# ───────────────────────────────────────────────────────────────────────
-
-
-def test_robust_3d_lookup_exact_match_short_circuits():
-    """Avoids cubic / qhull when the exact (head, s, b) point is in the data."""
-
-    class _Stub:
-        def _interp_3d(self, *a, **kw):
-            raise AssertionError("must not call _interp_3d when exact match exists")
-
-    data = {8: {8192: {1: {"latency": 11.7, "energy": 0.0}}}}
-    result = _dsv4_robust_3d_lookup(_Stub(), data, 8, 8192, 1)
-    assert result["latency"] == pytest.approx(11.7)
-
-
-def test_robust_3d_lookup_only_swallows_typed_coverage_misses(monkeypatch):
-    class _Stub:
-        _extracted_metrics_cache: ClassVar[dict] = {}
-
-    data = {
-        8: {
-            1024: {1: {"latency": 10.0, "power": 0.0, "energy": 0.0}},
-            2048: {1: {"latency": 20.0, "power": 0.0, "energy": 0.0}},
-        }
-    }
-
-    def coverage_miss(*args, **kwargs):
-        raise interpolation.InterpolationDataNotAvailableError("no cubic bracket")
-
-    monkeypatch.setattr(interpolation, "interp_3d", coverage_miss)
-    result = _dsv4_robust_3d_lookup(_Stub(), data, 8, 1536, 1)
-    assert result["latency"] == pytest.approx(15.0)
-
-    def programming_bug(*args, **kwargs):
-        raise RuntimeError("interpolator bug")
-
-    monkeypatch.setattr(interpolation, "interp_3d", programming_bug)
-    with pytest.raises(RuntimeError, match="interpolator bug"):
-        _dsv4_robust_3d_lookup(_Stub(), data, 8, 1536, 1)
-
-
-def test_prefix_resolved_lookup_rejects_malformed_requested_prefix():
-    data = {
-        0: [],
-        128: {1024: {1: {"latency": 9.0}}},
-    }
-
-    with pytest.raises(TypeError, match=r"prefix=0.*list"):
-        _dsv4_lookup_prefix_resolved(object(), data, 0, 1024, 1)
 
 
 # ───────────────────────────────────────────────────────────────────────

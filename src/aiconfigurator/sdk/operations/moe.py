@@ -1058,9 +1058,19 @@ class MoEDispatch(Operation):
                 energy = interpolation.get_value(result, "energy")
             else:
                 data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
-                result = interpolation.interp_2d_linear(sms, num_tokens, data, database._extracted_metrics_cache)
-                lat = result["latency"] if isinstance(result, dict) else result
-                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+                # 2-axis grid (sms, tokens). Only sm=20 is collected today, so an
+                # off-grid sms snaps to the nearest collected value (the legacy
+                # 2-D scattered interp simply failed on a single-sms cloud);
+                # tokens use the linear proxy SOL (see the DeepEP ll note; SOL is
+                # constant in sms — no data supports an sms scaling story yet).
+                config = perf_interp.OpInterpConfig(
+                    axes=("sms", "num_tokens"),
+                    resolver=perf_interp.Grid(),
+                    sol_fn=lambda _sm, t: float(t),
+                )
+                result = perf_interp.query(config, data, sms, num_tokens)
+                lat = interpolation.get_value(result, "latency")
+                energy = interpolation.get_value(result, "energy")
             return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
 
     # ------------------------------------------------------------------

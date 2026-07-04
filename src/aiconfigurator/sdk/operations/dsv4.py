@@ -23,7 +23,7 @@ Four op classes migrate from ``_legacy.py`` into ``operations/dsv4.py``:
 
 No SOL clamping in the legacy ``_correct_data`` for DSV4 (the per-attn
 SOL formula runs inside the query path). No grid extrapolation either —
-``_dsv4_robust_3d_lookup`` handles interpolation/fallback at query time.
+Interpolation/fallback is handled by ``perf_interp`` at query time.
 
 Cache key matches every other migrated op:
 ``(systems_root, system, backend, version, enable_shared_layer)``.
@@ -34,7 +34,6 @@ from __future__ import annotations
 import logging
 import os
 from collections import defaultdict
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar, Optional
 
 import numpy as np
@@ -85,149 +84,6 @@ def _deep_merge_dsv4_dicts(dest, src):
     return dest
 
 
-def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
-    """DeepSeek-V4 3D lookup: exact, cubic, then sampled-batch fallback.
-
-    Generic ``_interp_3d`` raises ``QhullError`` when the point cloud has
-    a degenerate axis (e.g. the DSV4 sweep caps b=1 at s=8192, so the
-    b axis is flat near that query point).
-
-      1. Try an exact ``dict[x][y][z]`` lookup — handles the common case
-         of querying at a measured bench point.
-      2. Try the existing cubic interpolation path.
-      3. If interpolation fails and batches on both sides of the query cover
-         its sequence length, interpolate along sequence within each batch and
-         then across batch.
-      4. Otherwise, use the largest sampled batch no larger than the query
-         batch, interpolate/extrapolate along sequence length, and scale by
-         batch. ``batch_axis`` selects whether fallback treats ``y`` or ``z``
-         as the batch axis.
-
-    First positional arg is named ``self`` to match the legacy signature so
-    existing test stubs (``PerfDatabase._lookup_dsv4_sparse_kernel`` style)
-    keep working.
-    """
-    if batch_axis not in ("y", "z"):
-        raise ValueError(f"unsupported DeepSeek-V4 fallback {batch_axis=}; expected 'y' or 'z'")
-
-    # Use .get() chain instead of [] indexing: dict_ may be a (nested)
-    # defaultdict, so [] reads would create spurious empty branches that
-    # later poison _interp_3d's grid traversal.
-    level1 = dict_.get(x) if isinstance(dict_, dict) else None
-    level2 = level1.get(y) if isinstance(level1, dict) else None
-    exact = level2.get(z) if isinstance(level2, dict) else None
-    if isinstance(exact, dict) and "latency" in exact:
-        return exact
-
-    def _finite_result(result):
-        if not isinstance(result, dict):
-            return False
-        value = result.get("latency")
-        return value is not None and bool(np.all(np.isfinite(np.asarray(value))))
-
-    try:
-        result = interpolation.interp_3d(x, y, z, dict_, "cubic", self._extracted_metrics_cache)
-        if _finite_result(result):
-            return result
-    except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError):
-        pass
-
-    # Fallback: real DeepSeek-V4 data is sampled at batches like 1/2/4/8.
-    # First interpolate between lower/upper batches when both batch curves
-    # cover the query sequence. This preserves launch-overhead plateaus; simply
-    # scaling the lower batch can nearly double latency between b=4 and b=8.
-    # When no upper batch covers the sequence, retain the legacy behavior:
-    # prefer the largest batch <= query batch and scale it by batch, only
-    # extrapolating along sequence if no lower batch covers it.
-    sub = dict_.get(x) if isinstance(dict_, dict) else None
-    if isinstance(sub, dict):
-        query_s, query_b = (z, y) if batch_axis == "y" else (y, z)
-
-        def _all_batch_points():
-            if batch_axis == "y":
-                return sorted(bp for bp, sd in sub.items() if isinstance(sd, dict))
-            return sorted({bp for sd in sub.values() if isinstance(sd, dict) for bp in sd})
-
-        def _leaf_at(s, b):
-            first_key, second_key = (b, s) if batch_axis == "y" else (s, b)
-            level = sub.get(first_key)
-            return level.get(second_key) if isinstance(level, dict) else None
-
-        def _seq_points_at_batch(b):
-            if batch_axis == "y":
-                level = sub.get(b)
-                return sorted(level.keys()) if isinstance(level, dict) else []
-            return sorted(s for s, sd in sub.items() if isinstance(sd, dict) and b in sd)
-
-        def _lookup_at_batch(bp, *, allow_extrapolate: bool):
-            exact_at_batch = _leaf_at(query_s, bp)
-            if exact_at_batch is not None:
-                return exact_at_batch
-            ss = _seq_points_at_batch(bp)
-            if len(ss) < 2:
-                return None
-            if not allow_extrapolate and not (ss[0] <= query_s <= ss[-1]):
-                return None
-            sl, sr = interpolation.nearest_1d_point_helper(query_s, ss, inner_only=not allow_extrapolate)
-            left = _leaf_at(sl, bp)
-            right = _leaf_at(sr, bp)
-            if not isinstance(left, dict) or not isinstance(right, dict):
-                return None
-            return {
-                field: interpolation.interp_1d([sl, sr], [left.get(field, 0.0), right.get(field, 0.0)], query_s)
-                for field in ("latency", "power", "energy")
-            }
-
-        batch_points = _all_batch_points()
-        covered = {}
-        for bp in batch_points:
-            try:
-                leaf = _lookup_at_batch(bp, allow_extrapolate=False)
-                if _finite_result(leaf):
-                    covered[bp] = leaf
-            except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError):
-                continue
-
-        lower_batches = [bp for bp in covered if bp <= query_b]
-        upper_batches = [bp for bp in covered if bp >= query_b]
-        if lower_batches and upper_batches:
-            lower_b = max(lower_batches)
-            upper_b = min(upper_batches)
-            if lower_b == upper_b:
-                return covered[lower_b]
-            lower = covered[lower_b]
-            upper = covered[upper_b]
-            result = {
-                field: interpolation.interp_1d(
-                    [lower_b, upper_b],
-                    [lower.get(field, 0.0), upper.get(field, 0.0)],
-                    query_b,
-                )
-                for field in ("latency", "power", "energy")
-            }
-            if _finite_result(result):
-                return result
-
-        lower_batch_points = sorted((bp for bp in batch_points if bp <= query_b), reverse=True)
-        for allow_extrapolate in (False, True):
-            for bp in lower_batch_points:
-                try:
-                    leaf = _lookup_at_batch(bp, allow_extrapolate=allow_extrapolate)
-                    if leaf is None:
-                        continue
-                    result = {f: leaf.get(f, 0.0) * query_b / bp for f in ("latency", "power", "energy")}
-                    if _finite_result(result):
-                        return result
-                except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError):
-                    continue
-
-    if batch_axis == "y":
-        raise interpolation.InterpolationDataNotAvailableError(
-            f"DeepSeek-V4 robust lookup failed (tp={x}, b={y}, s={z})"
-        )
-    raise interpolation.InterpolationDataNotAvailableError(f"DeepSeek-V4 robust lookup failed (tp={x}, s={y}, b={z})")
-
-
 def _dsv4_resolve_head_key(quant_data, num_heads):
     """SCHEME A head-key resolution.
 
@@ -251,80 +107,6 @@ def _dsv4_resolve_head_key(quant_data, num_heads):
         le = [k for k in head_keys if k <= num_heads]
         return max(le) if le else min(head_keys)
     return None
-
-
-def _dsv4_lookup_prefix_resolved(database, cr_dict, prefix, s, b):
-    """SCHEME A prefix-resolved silicon lookup.
-
-    ``cr_dict`` is ``{prefix: {s: {b: leaf}}}``.  At a measured prefix we wrap
-    the ``{s: {b}}`` slice and run the robust 3D lookup (exact -> cubic ->
-    sampled-batch fallback) with the prefix as the leading axis.  Off-grid
-    prefixes are linearly interpolated between the two nearest prefix anchors
-    that can answer the (s, b) query.  Returns a leaf dict or ``None``.
-    """
-    if cr_dict is None:
-        return None
-    if not isinstance(cr_dict, Mapping):
-        raise TypeError(f"Malformed DeepSeek-V4 prefix table: expected a mapping, got {type(cr_dict).__name__}.")
-    if not cr_dict:
-        return None
-    for prefix_value, sb_slice in cr_dict.items():
-        if sb_slice is not None and not isinstance(sb_slice, Mapping):
-            raise TypeError(
-                "Malformed DeepSeek-V4 prefix slice: expected a mapping at "
-                f"prefix={prefix_value}, got {type(sb_slice).__name__}."
-            )
-
-    def _finite(result):
-        if not isinstance(result, dict):
-            return False
-        value = result.get("latency")
-        return value is not None and bool(np.all(np.isfinite(np.asarray(value))))
-
-    def _lookup_at_prefix(prefix_value):
-        sb_slice = cr_dict.get(prefix_value)
-        if sb_slice is None:
-            return None
-        wrapped = {prefix_value: sb_slice}
-        try:
-            result = _dsv4_robust_3d_lookup(database, wrapped, prefix_value, s, b)
-        except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError):
-            return None
-        return result if _finite(result) else None
-
-    prefix = int(prefix)
-    if prefix in cr_dict:
-        exact = _lookup_at_prefix(prefix)
-        if exact is not None:
-            return exact
-
-    prefix_points = sorted(p for p, sl in cr_dict.items() if isinstance(sl, dict))
-    if not prefix_points:
-        return None
-    if len(prefix_points) == 1:
-        return _lookup_at_prefix(prefix_points[0])
-
-    result_by_prefix = {}
-    for p in prefix_points:
-        r = _lookup_at_prefix(p)
-        if r is not None:
-            result_by_prefix[p] = r
-    if not result_by_prefix:
-        return None
-    keys = sorted(result_by_prefix)
-    if prefix in result_by_prefix:
-        return result_by_prefix[prefix]
-    if len(keys) == 1 or prefix <= keys[0]:
-        return result_by_prefix[keys[0]]
-    if prefix >= keys[-1]:
-        return result_by_prefix[keys[-1]]
-    left = max(k for k in keys if k < prefix)
-    right = min(k for k in keys if k > prefix)
-    rl, rr = result_by_prefix[left], result_by_prefix[right]
-    return {
-        field: interpolation.interp_1d([left, right], [rl.get(field, 0.0), rr.get(field, 0.0)], prefix)
-        for field in ("latency", "power", "energy")
-    }
 
 
 def _deepseek_v4_attention_sol(
