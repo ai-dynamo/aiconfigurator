@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
+import json
 import sys
 import types
 from pathlib import Path
@@ -223,7 +224,43 @@ class TestDsaCudaGraph:
         assert not mod._generation_cuda_graph_enabled_for_tokens(runner, 4)
 
 
+class TestDsaSkipIndexer:
+    def test_uses_sglang_cross_layer_topk_contract(self):
+        source_path = Path("collector/sglang/collect_mla_module.py")
+        source = source_path.read_text()
+        tree = ast.parse(source, filename=str(source_path))
+        functions = {
+            node.name: ast.get_source_segment(source, node) for node in tree.body if isinstance(node, ast.FunctionDef)
+        }
+
+        prefill = functions["_run_prefill"]
+        assert "AttnForwardMethod.MHA_ONE_SHOT" in prefill
+        assert "attention_module.next_skip_topk = True" in prefill
+        assert '_skip_state["prev_topk"] = warmup_output[1].detach()' in prefill
+        assert "attention_module.skip_topk = _skip_uses_dense_mha" in prefill
+        assert 'not _skip_uses_dense_mha and _skip_state["prev_topk"] is None' in prefill
+
+        decode = functions["_run_decode"]
+        assert "attention_module.next_skip_topk = True" in decode
+        assert '_skip_state["prev_topk"] = warmup_output[1].detach()' in decode
+        assert "return attention_module(" in decode
+
+        assert "register_forward_hook" not in prefill
+        assert "register_forward_hook" not in decode
+
+
 class TestBuildModuleTestCases:
+    def test_glm52_local_config_uses_transformers_v5_layer_type(self):
+        mod = _import_module()
+
+        local_path = Path(mod._resolve_local_model_path("nvidia/GLM-5.2-NVFP4"))
+        config = json.loads((local_path / "config.json").read_text())
+
+        assert "deepseek_sparse_attention" not in config["layer_types"]
+        assert set(config["layer_types"]) == {"compressed_sparse_attention"}
+        assert config["architectures"] == ["GlmMoeDsaForCausalLM"]
+        assert config["index_topk_freq"] == 4
+
     def test_module_precision_respects_outer_sm_gate(self):
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=89):

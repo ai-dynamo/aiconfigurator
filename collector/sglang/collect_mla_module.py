@@ -258,6 +258,18 @@ def _resolve_local_model_path(model_id: str) -> str:
     # custom config/model classes from HuggingFace when trust_remote_code=True.
     config.pop("auto_map", None)
 
+    # GLM-5.2's cached checkpoint config uses the pre-Transformers-v5 name
+    # ``deepseek_sparse_attention``.  The Transformers build shipped in the
+    # pinned SGLang 0.5.14 image validates layer_types before SGLang can apply
+    # its GLM DSA compatibility path and accepts the canonical CSA name only.
+    # This field is descriptive for GlmMoeDsaForCausalLM; DSA dispatch itself
+    # is selected from architecture + index_topk, which remain unchanged.
+    if isinstance(config.get("layer_types"), list):
+        config["layer_types"] = [
+            "compressed_sparse_attention" if layer_type == "deepseek_sparse_attention" else layer_type
+            for layer_type in config["layer_types"]
+        ]
+
     tmp_dir = os.path.join(
         tempfile.gettempdir(),
         f"aic_sglang_config_{model_id.replace('/', '_')}_{os.getpid()}",
@@ -643,6 +655,12 @@ def _build_module_test_cases(attn_type: str, mode: str):
                 batch_sizes = sweep.context_batch_sizes if attn_type == "dsa" and mode == "context" else [0]
                 for batch_size in batch_sizes:
                     if attn_type == "dsa" and kv_dtype == "fp8":
+                        # Mirrors SGLang 0.5.14's major-based selector. The
+                        # exact image has a runnable TRTLLM-GEN path on SM100,
+                        # but its own capability test rejects SM103 even though
+                        # the selector chooses the same name there. SM120 is
+                        # excluded above and must not be inferred from this
+                        # branch; see _skip_sm120_deepgemm_attention_modules.
                         default_backend = "trtllm" if get_sm_version() >= 100 else "flashmla_kv"
                         dsa_backends = (
                             ("flashmla_kv", "trtllm")
@@ -724,18 +742,19 @@ def _build_wideep_mla_test_cases(mode: str):
 def _skip_sm120_deepgemm_attention_modules() -> bool:
     """Return True when SGLang's DeepGEMM-backed module path is unsupported.
 
-    On SM120 with the SGLang 0.5.14 runtime container, forcing these module
-    collectors produced no usable rows:
+    This skip originated from an SM120 SGLang 0.5.10 hardware run in
+    ``37826f10``. Forcing these module collectors produced no usable rows:
     - WideEP MLA context/generation subprocesses failed after every shape was
       skipped, ending with "MLA module ... produced no perf rows".
     - DSA context/generation failed the same way, and the underlying DeepGEMM
       calls reported unsupported Blackwell paths, e.g.
       attention.hpp:136 and gemm.hpp:376 "Unsupported architecture".
 
-    Keep the skip as the default for this collector/runtime combo so the RTX
-    PRO 6000 collection reflects runnable SGLang 0.5.14 paths. Developers can
-    set COLLECTOR_FORCE_DEEPGEMM_ATTENTION_MODULES=1 to repro or validate a
-    newer runtime.
+    The exact 0.5.14 image is source-derived only here: SGLang forces
+    TRTLLM-GEN for DSA while the bundled capability check accepts exact SM100,
+    not SM120, and the bundled FlashMLA binary has no SM120 target. Keep the
+    skip until 0.5.14 is hardware-validated on SM120. Developers can set
+    COLLECTOR_FORCE_DEEPGEMM_ATTENTION_MODULES=1 to repro or validate it.
     """
     return os.environ.get("COLLECTOR_FORCE_DEEPGEMM_ATTENTION_MODULES") != "1" and get_sm_version() >= 120
 
@@ -1087,9 +1106,12 @@ def load_model_runner(
     # (run_mla_module, under `with autotune(True)`), so it is part of the module
     # init we actually measure -- not a global init phase.
     server_args.disable_flashinfer_autotune = True
-    # Match SGLang 0.5.14 serving dispatch for FP8 KV. Hopper uses FlashMLA's
-    # sparse kernel; datacenter Blackwell uses TRT-LLM. BF16 KV stays on the
-    # runtime default because flashmla_kv rejects BF16.
+    # Match SGLang 0.5.14's configured FP8-KV dispatch. Hopper uses
+    # flashmla_kv; the exact image has a runnable TRTLLM-GEN path on SM100.
+    # SGLang's major-based selector also names TRT-LLM on SM103, but the
+    # bundled capability test rejects that target; SM120 is skipped by the
+    # case builder. BF16 KV stays on the runtime default because flashmla_kv
+    # rejects BF16.
     if attention_backend == "dsa" and sglang_kv_dtype == "fp8_e4m3":
         if dsa_prefill_backend is None:
             dsa_prefill_backend = "trtllm" if get_sm_version() >= 100 else "flashmla_kv"
@@ -1713,13 +1735,12 @@ def _run_prefill(
 
         # skip_indexer collection: GLM-5.2 (index_topk_freq>1) reuse layers run
         # proj GEMMs + DSA attention but NOT the per-layer indexer (mqa logits +
-        # topk + index-K store) — they reuse a sibling layer's topk indices via
-        # skip_topk. To time that reuse-layer cost: capture a real topk_indices
-        # from ONE forward (indexer fires), then force skip_topk=True and feed it
-        # back as prev_topk_indices so forward_absorb_prepare bypasses the indexer
-        # (`if not skip_topk: indexer(...)` else reuse prev_topk_indices). The
-        # captured forward happens in warmup[0] (discarded); warmup[1:] + all timed
-        # runs measure the skip path. No-op unless this is a skip_indexer pass.
+        # topk + index-K store). SGLang carries the producer layer's real topk as
+        # the second self-attention return value when next_skip_topk=True. Capture
+        # that production value from warmup[0], then force skip_topk=True and feed
+        # it back as prev_topk_indices. Warmup[1:] and every timed run therefore
+        # execute the reuse-layer path. Short prefill uses MHA_ONE_SHOT and never
+        # runs the indexer, so there is intentionally no topk tensor to carry.
         _skip_indexer = _dsa_skip_indexer_enabled(attn_type, model_path)
         # The skip-indexer pass only takes effect through call_attention_module,
         # which threads _skip_kwargs() (skip_topk + reused prev_topk_indices) into
@@ -1730,30 +1751,37 @@ def _run_prefill(
         if _skip_indexer:
             use_full_model_piecewise_replay = False
             use_module_piecewise_replay = False
-        _skip_state = {"prev_topk": None, "hook": None}
+        _skip_uses_dense_mha = False
+        if _skip_indexer:
+            from sglang.srt.models.deepseek_common.attention_forward_methods.forward_methods import (
+                AttnForwardMethod,
+            )
+
+            with forward_context(forward_context_type(attn_backend=model_runner.attn_backend)):
+                _skip_uses_dense_mha = (
+                    attention_module.dispatch_attn_forward_method(forward_batch) == AttnForwardMethod.MHA_ONE_SHOT
+                )
+        _skip_state = {"prev_topk": None}
         if _skip_indexer and getattr(attention_module, "indexer", None) is None:
             raise RuntimeError(
                 f"skip_indexer requested for {attn_type} but the attention module has no indexer; "
                 "refusing to record a skip row with full-indexer latency."
             )
-        if _skip_indexer and getattr(attention_module, "indexer", None) is not None:
-            attention_module.skip_topk = False  # ensure the indexer fires for the capture forward
-
-            def _capture_topk(_m, _inp, _out):
-                if _skip_state["prev_topk"] is None and _out is not None:
-                    _skip_state["prev_topk"] = _out.detach()
-
-            _skip_state["hook"] = attention_module.indexer.register_forward_hook(_capture_topk)
+        original_next_skip_topk = getattr(attention_module, "next_skip_topk", None)
+        if _skip_indexer:
+            attention_module.skip_topk = _skip_uses_dense_mha
+            if _skip_uses_dense_mha:
+                print("  Skip-indexer reuse uses MHA_ONE_SHOT; no topk tensor is produced or required")
+            else:
+                attention_module.next_skip_topk = True  # return the producer topk from warmup[0]
 
         def _skip_kwargs():
             # Once a real topk index is captured, bypass the indexer for all
             # subsequent (timed) forwards by forcing skip_topk + reusing it.
-            if _skip_indexer and _skip_state["prev_topk"] is not None:
+            if _skip_indexer and (_skip_uses_dense_mha or _skip_state["prev_topk"] is not None):
                 attention_module.skip_topk = True
-                if _skip_state["hook"] is not None:
-                    _skip_state["hook"].remove()
-                    _skip_state["hook"] = None
-                return {"prev_topk_indices": _skip_state["prev_topk"]}
+                if _skip_state["prev_topk"] is not None:
+                    return {"prev_topk_indices": _skip_state["prev_topk"]}
             return {}
 
         def call_attention_module():
@@ -1774,7 +1802,7 @@ def _run_prefill(
                         # piecewise path even when we do not replay a
                         # captured CUDA graph for this token count.
                         model_runner.attn_backend.init_forward_metadata(forward_batch)
-                        attention_module(
+                        return attention_module(
                             positions=positions,
                             hidden_states=hidden_states,
                             forward_batch=forward_batch,
@@ -1791,7 +1819,7 @@ def _run_prefill(
                     # attention metadata is all the NSA indexer needs (its metadata
                     # is built in init_forward_metadata, not via the forward context).
                     model_runner.attn_backend.init_forward_metadata(forward_batch)
-                    attention_module(
+                    return attention_module(
                         positions=positions,
                         hidden_states=hidden_states,
                         forward_batch=forward_batch,
@@ -1799,7 +1827,7 @@ def _run_prefill(
                         **_skip_kwargs(),
                     )
                 else:
-                    attention_module(
+                    return attention_module(
                         positions=positions,
                         hidden_states=hidden_states,
                         forward_batch=forward_batch,
@@ -1831,15 +1859,28 @@ def _run_prefill(
             _tune_ctx = _fi_autotune(True)
         except Exception:
             _tune_ctx = contextlib.nullcontext()
-        with _tune_ctx:
-            for _ in range(num_warmup):
-                with torch.no_grad():
-                    call_target()
-                torch.cuda.synchronize()
+        try:
+            with _tune_ctx:
+                for _ in range(num_warmup):
+                    with torch.no_grad():
+                        warmup_output = call_target()
+                    torch.cuda.synchronize()
+                    if (
+                        _skip_indexer
+                        and _skip_state["prev_topk"] is None
+                        and isinstance(warmup_output, tuple)
+                        and len(warmup_output) == 2
+                        and warmup_output[1] is not None
+                    ):
+                        _skip_state["prev_topk"] = warmup_output[1].detach()
+                        attention_module.next_skip_topk = original_next_skip_topk
+        finally:
+            if _skip_indexer:
+                attention_module.next_skip_topk = original_next_skip_topk
         if use_full_model_piecewise_replay or use_module_piecewise_replay:
             print(f"  Piecewise can_run_graph={last_can_run_graph}")
 
-        if _skip_indexer and _skip_state["prev_topk"] is None:
+        if _skip_indexer and not _skip_uses_dense_mha and _skip_state["prev_topk"] is None:
             raise RuntimeError(
                 f"skip_indexer pass for {attn_type} captured no topk index during warmup; "
                 "refusing to record a skip row with full-indexer latency."
@@ -2059,37 +2100,30 @@ def _run_decode(
         if use_module_cuda_graph or _env_flag("AIC_ENABLE_MODULE_CUDA_GRAPH"):
             _patch_nsa_indexer_compile_for_module_cuda_graph(attention_module)
 
-        # skip_indexer (see _run_prefill): capture a real decode topk index from
-        # the first eager warmup forward, then force skip_topk + reuse it so the
+        # skip_indexer (see _run_prefill): obtain the real producer-layer topk
+        # through SGLang's next_skip_topk return contract, then reuse it so the
         # timed runs (and any captured CUDA graph) exclude the per-layer indexer.
         _skip_indexer = _dsa_skip_indexer_enabled(attn_type, model_path)
-        _skip_state = {"prev_topk": None, "hook": None}
+        _skip_state = {"prev_topk": None}
         if _skip_indexer and getattr(attention_module, "indexer", None) is None:
             raise RuntimeError(
                 f"skip_indexer requested for {attn_type} but the attention module has no indexer; "
                 "refusing to record a skip row with full-indexer latency."
             )
-        if _skip_indexer and getattr(attention_module, "indexer", None) is not None:
+        original_next_skip_topk = getattr(attention_module, "next_skip_topk", None)
+        if _skip_indexer:
             attention_module.skip_topk = False
-
-            def _capture_topk(_m, _inp, _out):
-                if _skip_state["prev_topk"] is None and _out is not None:
-                    _skip_state["prev_topk"] = _out.detach()
-
-            _skip_state["hook"] = attention_module.indexer.register_forward_hook(_capture_topk)
+            attention_module.next_skip_topk = True
 
         def _skip_kwargs():
             if _skip_indexer and _skip_state["prev_topk"] is not None:
                 attention_module.skip_topk = True
-                if _skip_state["hook"] is not None:
-                    _skip_state["hook"].remove()
-                    _skip_state["hook"] = None
                 return {"prev_topk_indices": _skip_state["prev_topk"]}
             return {}
 
         def kernel_func():
             with forward_context(forward_context_type(attn_backend=model_runner.attn_backend)):
-                attention_module(
+                return attention_module(
                     positions=decode_positions,
                     hidden_states=decode_hidden,
                     forward_batch=forward_batch_decode,
@@ -2108,10 +2142,23 @@ def _run_decode(
         # the warmup-time JIT cache from heads=64 doesn't satisfy the new
         # template instantiation). A few extra eager kernel_func calls
         # with explicit syncs in between flush that path before capture.
-        if torch.cuda.is_available():
-            for _ in range(5):
-                kernel_func()
-                torch.cuda.synchronize()
+        try:
+            if torch.cuda.is_available():
+                for _ in range(5):
+                    warmup_output = kernel_func()
+                    torch.cuda.synchronize()
+                    if (
+                        _skip_indexer
+                        and _skip_state["prev_topk"] is None
+                        and isinstance(warmup_output, tuple)
+                        and len(warmup_output) == 2
+                        and warmup_output[1] is not None
+                    ):
+                        _skip_state["prev_topk"] = warmup_output[1].detach()
+                        attention_module.next_skip_topk = original_next_skip_topk
+        finally:
+            if _skip_indexer:
+                attention_module.next_skip_topk = original_next_skip_topk
 
         use_benchmark_cuda_graph = not (
             attn_type == "dsa" and not _generation_cuda_graph_enabled_for_tokens(model_runner, batch_size)
@@ -2668,9 +2715,11 @@ def run_mla_module_worker(
     # the perf files land next to vllm's output — matching artifact collection.
     output_path = os.path.dirname(perf_filename) or os.getcwd()
 
-    # The case builder selects one SGLang 0.5.14 DSA FP8 sub-backend per GPU:
-    # flashmla_kv on Hopper, trtllm on datacenter Blackwell. BF16 leaves the
-    # sub-backend unset so SGLang applies its serving default.
+    # The case builder records configured backend buckets, not every leaf
+    # kernel selected by an individual shape: flashmla_kv on Hopper and
+    # trtllm on validated SM100. SM103 mirrors an upstream selector whose
+    # bundled TRTLLM-GEN kernel is unavailable; SM120 is excluded. BF16 leaves
+    # the sub-backend unset so SGLang applies its serving default.
     _run_mla_subprocess(
         attn_type=attn_type,
         head_num=num_heads,
