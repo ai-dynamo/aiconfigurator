@@ -48,6 +48,30 @@ raise**. "Whether it runs" is decided only outside the collector, in three
 auditable places: capability floors (generation time), registry `unverified`
 markers, and the hang denylist.
 
+## Kernel/backend selection: framework truth, never your guess
+
+A collector measures what the framework would actually run in serving. The
+kernel/backend invoked for a (model, phase, dtype/quant, shape, SM) case MUST
+be the one the framework's own dispatch selects under those conditions —
+never chosen by familiarity, assumption, or "this backend should be right".
+A benchmark that successfully invokes the wrong backend produces silently
+wrong data, which is worse than a crash.
+
+1. **Prefer the framework's own dispatch path.** Construct modules through
+   the framework's builder/selector so backend selection happens exactly as
+   in serving (the `ops/build_transformer_layer` approach), instead of
+   manually instantiating a specific backend class.
+2. **Manual pinning requires source proof.** If a backend must be pinned,
+   the pin needs a comment citing the framework source (file:line at the
+   pinned version) showing that this is what the framework selects for those
+   conditions — SM- and dtype-dependent branches included.
+3. **`kernel_source` records ground truth**, the actually-invoked kernel —
+   never the intended one.
+4. **Re-verify on every version bump.** Dispatch logic is precisely what
+   framework upgrades change. The upgrade audit re-checks every pinned
+   backend and every `FIXME(kernel-limit)` against the new source before
+   collected data is trusted.
+
 ## The one sanctioned in-collector filter: memory feasibility
 
 Device memory is a permanent hardware fact, but its expression needs
