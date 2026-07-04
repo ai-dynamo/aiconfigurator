@@ -69,23 +69,23 @@ def predict_ref(row: dict) -> dict:
 
     kwargs = _estimate_kwargs(row)
 
-    def estimate() -> tuple[float, float]:
+    def estimate() -> tuple[float, float, str]:
         with redirect_stdout(io.StringIO()):
             result = cli_estimate(**kwargs)
-        return result.ttft, result.tpot
+        return result.ttft, result.tpot, result.backend_version
 
     out = dict.fromkeys(SILICON_FIELDS, "")
     out.update(id=row["id"], silicon_ttft_ms=row["silicon_ttft_ms"], silicon_tpot_ms=row["silicon_tpot_ms"])
     try:
         try:
-            ttft, tpot = estimate()
+            ttft, tpot, version_used = estimate()
         except ValueError as e:
             # Measured version has no local database: predict with the latest
             # local data instead (V1 semantics) and record the skew.
             if kwargs["backend_version"] is None or "Failed to load perf database" not in str(e):
                 raise
             kwargs["backend_version"] = None
-            ttft, tpot = estimate()
+            ttft, tpot, version_used = estimate()
         measured_ttft, measured_tpot = float(row["silicon_ttft_ms"]), float(row["silicon_tpot_ms"])
         out.update(
             status="OK",
@@ -93,7 +93,7 @@ def predict_ref(row: dict) -> dict:
             predicted_tpot_ms=f"{tpot:.6f}",
             ttft_rel_err=f"{(ttft - measured_ttft) / max(abs(measured_ttft), 1e-9):.6f}",
             tpot_rel_err=f"{(tpot - measured_tpot) / max(abs(measured_tpot), 1e-9):.6f}",
-            predicted_with_version=kwargs["backend_version"] or "latest",
+            predicted_with_version=version_used,
         )
     except Exception as e:
         out.update(status=type(e).__name__, err=str(e)[:200])

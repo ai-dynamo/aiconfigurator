@@ -23,7 +23,9 @@ on:
         default: ""
 
 concurrency:
-  group: regv2-${{ github.workflow }}-${{ github.ref }}
+  # PR runs: cancel stale runs per ref. Manual dispatches: unique group per
+  # run so two concurrent validations never cancel each other.
+  group: regv2-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
