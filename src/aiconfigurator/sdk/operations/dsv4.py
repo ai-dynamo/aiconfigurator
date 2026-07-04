@@ -672,10 +672,16 @@ class DeepSeekV4MHCModule(Operation):
                         f"No mHC silicon data for op='{op_name}', hc_mult={hc_mult}, hidden_size={hidden_size}."
                     )
                 mhc_dict = mhc_data[op_name][hc_mult][hidden_size]
-                left, right = interpolation.nearest_1d_point_helper(num_tokens, list(mhc_dict.keys()), inner_only=False)
-                result = interpolation.interp_1d([left, right], [mhc_dict[left], mhc_dict[right]], num_tokens)
-                latency = result["latency"] if isinstance(result, dict) else result
-                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+                # 1-D tokens curve: RAW lerp in range; boundary util-hold via
+                # the per-op mHC SOL beyond it.
+                config = perf_interp.OpInterpConfig(
+                    axes=("num_tokens",),
+                    resolver=perf_interp.Grid(),
+                    sol_fn=lambda t: get_sol(t, op_name)[0],
+                )
+                result = perf_interp.query(config, mhc_dict, num_tokens)
+                latency = interpolation.get_value(result, "latency")
+                energy = interpolation.get_value(result, "energy")
                 return database._interp_pr(latency, energy=energy)
 
             # Silicon tables only store "pre" and "post" rows. For op=="both"
@@ -1810,18 +1816,18 @@ class DeepSeekV4MegaMoEModule(Operation):
                 f"{moe_tp_size=}, {moe_ep_size=}."
             ) from exc
 
-        num_left, num_right = interpolation.nearest_1d_point_helper(
-            num_tokens, list(token_dict.keys()), inner_only=False
+        # 1-D tokens curve. No analytic SOL is implemented for the fused
+        # MegaMoE module, but util-hold only needs the SOL RATIO: routed-expert
+        # work scales ~linearly with tokens at fixed topk/experts/hidden, so a
+        # linear token proxy is ratio-equivalent (see the DeepEP note).
+        config = perf_interp.OpInterpConfig(
+            axes=("num_tokens",),
+            resolver=perf_interp.Grid(),
+            sol_fn=lambda t: float(t),
         )
-        result = interpolation.interp_1d(
-            [num_left, num_right], [token_dict[num_left], token_dict[num_right]], num_tokens
-        )
-        if isinstance(result, dict):
-            latency = float(result["latency"])
-            energy = float(result["energy"])
-        else:
-            latency = float(result)
-            energy = 0.0
+        result = perf_interp.query(config, token_dict, num_tokens)
+        latency = float(interpolation.get_value(result, "latency"))
+        energy = float(interpolation.get_value(result, "energy"))
         return PerformanceResult(latency, energy=energy)
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
