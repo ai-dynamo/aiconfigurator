@@ -191,33 +191,6 @@ def _gen_headsize_ref_grid(database, kvcache_quant_mode, n_kv_lookup, target_hs,
 # Extrapolation target grids — lifted verbatim from the legacy blocks in
 # ``PerfDatabase.__init__`` so behavior stays bit-identical.
 
-# fmt: off
-_CONTEXT_ATTENTION_TARGET_X: list[int] = [
-    1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48,
-    56, 72, 96, 128,
-]  # n
-_CONTEXT_ATTENTION_TARGET_Y: list[int] = (
-    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-    + [4096 + i * 2048 for i in range(14)]
-    + [32768 + 16384 * i for i in range(6)]
-    + [131072 + 32768 * i for i in range(12)]
-    + [524288 + 65536 * i for i in range(9)]
-)  # s
-_CONTEXT_ATTENTION_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 384, 1024, 2048,
-]  # b
-
-_GENERATION_ATTENTION_TARGET_X: list[int] = [
-    1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48,
-    56, 72, 96, 128,
-]  # n
-_GENERATION_ATTENTION_TARGET_Y: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192,
-]  # b
-_GENERATION_ATTENTION_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
-    32768, 65536, 131072, 262144, 2097152 * 8,
-]  # s
 # fmt: on
 
 
@@ -321,29 +294,6 @@ class ContextAttention(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the legacy 4-level (quant_mode → kv_cache_dtype → num_kv_heads
-        → head_size → window_size → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-
-        for quant_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[quant_mode]:
-                for num_kv_heads in data_wrapper[quant_mode][kv_cache_dtype]:
-                    for head_size in data_wrapper[quant_mode][kv_cache_dtype][num_kv_heads]:
-                        for window_size in data_wrapper[quant_mode][kv_cache_dtype][num_kv_heads][head_size]:
-                            data_dict = data_wrapper[quant_mode][kv_cache_dtype][num_kv_heads][head_size][window_size]
-                            min_x = min(data_dict.keys())
-                            filtered_x = [i for i in _CONTEXT_ATTENTION_TARGET_X if i >= min_x]
-                            interpolation.extrapolate_data_grid(
-                                data_dict=data_dict,
-                                target_x_list=filtered_x,
-                                target_y_list=_CONTEXT_ATTENTION_TARGET_Y,
-                                target_z_list=_CONTEXT_ATTENTION_TARGET_Z,
-                                sqrt_y_value=True,
-                            )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_context_attention)
@@ -738,26 +688,6 @@ class GenerationAttention(Operation):
                                         else:
                                             data_wrapper[quant_mode][n_kv][head_size][window_size][n][b][s] = float(sol)
 
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the legacy 4-level extrapolation grid."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-
-        for kv_cache_dtype in data_wrapper:
-            for num_kv_heads in data_wrapper[kv_cache_dtype]:
-                for head_size in data_wrapper[kv_cache_dtype][num_kv_heads]:
-                    for window_size in data_wrapper[kv_cache_dtype][num_kv_heads][head_size]:
-                        data_dict = data_wrapper[kv_cache_dtype][num_kv_heads][head_size][window_size]
-                        min_x = min(data_dict.keys())
-                        filtered_x = [i for i in _GENERATION_ATTENTION_TARGET_X if i >= min_x]
-                        interpolation.extrapolate_data_grid(
-                            data_dict=data_dict,
-                            target_x_list=filtered_x,
-                            target_y_list=_GENERATION_ATTENTION_TARGET_Y,
-                            target_z_list=_GENERATION_ATTENTION_TARGET_Z,
-                        )
-
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_generation_attention)
     # ------------------------------------------------------------------
@@ -998,7 +928,7 @@ class EncoderAttention(Operation):
     Owns ``_data_cache: {key: LoadedOpData}`` for the encoder attention CSV.
     Schema is simpler than context attention: MHA only (no n_kv), no KV cache
     (no kvcache_quant_mode), no sliding window. No SOL clamp. Grid extrapolation
-    reuses ``_CONTEXT_ATTENTION_TARGET_*``.
+    resolves on the raw grid via perf_interp.
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -1061,26 +991,6 @@ class EncoderAttention(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Densify the (n, s, b) grid. Reuses ``_CONTEXT_ATTENTION_TARGET_*``
-        since the encoder query shape matches context attention exactly."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-
-        for quant_mode in data_wrapper:
-            for head_size in data_wrapper[quant_mode]:
-                data_dict = data_wrapper[quant_mode][head_size]
-                min_x = min(data_dict.keys())
-                filtered_x = [i for i in _CONTEXT_ATTENTION_TARGET_X if i >= min_x]
-                interpolation.extrapolate_data_grid(
-                    data_dict=data_dict,
-                    target_x_list=filtered_x,
-                    target_y_list=_CONTEXT_ATTENTION_TARGET_Y,
-                    target_z_list=_CONTEXT_ATTENTION_TARGET_Z,
-                    sqrt_y_value=True,
-                )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_encoder_attention)

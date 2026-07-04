@@ -63,50 +63,6 @@ def _cache_key(database: PerfDatabase) -> tuple:
     )
 
 
-# Shared extrapolation target lists — lifted verbatim from the legacy
-# ``PerfDatabase.__init__`` blocks (lines 2984-3206 pre-migration).
-#
-# fmt: off
-_REGULAR_CONTEXT_MLA_TARGET_Y: list[int] = (
-    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-    + [4096 + i * 2048 for i in range(14)]
-    + [32768 + 16384 * i for i in range(6)]
-    + [131072 + 32768 * i for i in range(12)]
-    + [524288 + 65536 * i for i in range(9)]
-)  # s
-_REGULAR_CONTEXT_MLA_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048,
-]  # b
-
-_WIDEEP_CONTEXT_MLA_TARGET_Y: list[int] = (
-    [16, 32, 64, 128, 256, 512, 1024, 2048]
-    + [4096 + i * 2048 for i in range(14)]
-    + [32768 + 16384 * i for i in range(6)]
-    + [131072 + 32768 * i for i in range(12)]
-    + [524288 + 65536 * i for i in range(9)]
-)  # s — note: starts at 16, not 1
-_WIDEEP_CONTEXT_MLA_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048,
-]  # b
-
-_GENERATION_MLA_TARGET_Y: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192,
-]  # b
-_GENERATION_MLA_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
-    16384, 32768, 65536, 131072, 262144, 2097152 * 8,
-]  # s
-
-_CONTEXT_MLA_MODULE_TARGET_Y: list[int] = (
-    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-    + [4096 + i * 2048 for i in range(14)]
-    + [32768 + 16384 * i for i in range(6)]
-    + [131072 + 32768 * i for i in range(12)]
-    + [524288 + 65536 * i for i in range(9)]
-)  # s — same as regular context MLA
-_CONTEXT_MLA_MODULE_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048,
-]  # b — same as regular context MLA
 # fmt: on
 
 
@@ -170,23 +126,6 @@ class ContextMLA(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 2-level (quant_mode → kv_cache_dtype → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for quant_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[quant_mode]:
-                num_heads_list = list(data_wrapper[quant_mode][kv_cache_dtype].keys())
-                data_dict = data_wrapper[quant_mode][kv_cache_dtype]
-                interpolation.extrapolate_data_grid(
-                    data_dict=data_dict,
-                    target_x_list=num_heads_list,
-                    target_y_list=_REGULAR_CONTEXT_MLA_TARGET_Y,
-                    target_z_list=_REGULAR_CONTEXT_MLA_TARGET_Z,
-                    sqrt_y_value=True,
-                )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_context_mla)
@@ -388,21 +327,6 @@ class GenerationMLA(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 1-level (kv_cache_dtype → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for kv_cache_dtype in data_wrapper:
-            tp_list = list(data_wrapper[kv_cache_dtype].keys())
-            data_dict = data_wrapper[kv_cache_dtype]
-            interpolation.extrapolate_data_grid(
-                data_dict=data_dict,
-                target_x_list=tp_list,
-                target_y_list=_GENERATION_MLA_TARGET_Y,
-                target_z_list=_GENERATION_MLA_TARGET_Z,
-            )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_generation_mla)
@@ -771,40 +695,6 @@ class MLAModule(Operation):
         cls._context_data_cache.clear()
         cls._generation_data_cache.clear()
 
-    @classmethod
-    def _extrapolate_context(cls, data_wrapper) -> None:
-        """3-level (fmha_mode → kv_dtype → gemm_mode → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for fmha_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[fmha_mode]:
-                for gemm_mode in data_wrapper[fmha_mode][kv_cache_dtype]:
-                    data_dict = data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode]
-                    num_heads_list = list(data_dict.keys())
-                    interpolation.extrapolate_data_grid(
-                        data_dict=data_dict,
-                        target_x_list=num_heads_list,
-                        target_y_list=_CONTEXT_MLA_MODULE_TARGET_Y,
-                        target_z_list=_CONTEXT_MLA_MODULE_TARGET_Z,
-                    )
-
-    @classmethod
-    def _extrapolate_generation(cls, data_wrapper) -> None:
-        """3-level (fmha_mode → kv_dtype → gemm_mode → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for fmha_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[fmha_mode]:
-                for gemm_mode in data_wrapper[fmha_mode][kv_cache_dtype]:
-                    data_dict = data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode]
-                    num_heads_list = list(data_dict.keys())
-                    interpolation.extrapolate_data_grid(
-                        data_dict=data_dict,
-                        target_x_list=num_heads_list,
-                        target_y_list=_GENERATION_MLA_TARGET_Y,
-                        target_z_list=_GENERATION_MLA_TARGET_Z,
-                    )
-
     # ------------------------------------------------------------------
     # Query tables (formerly PerfDatabase.query_context_mla_module /
     # query_generation_mla_module)
@@ -1153,22 +1043,6 @@ class WideEPGenerationMLA(Operation):
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
 
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 2-level (kernel_source → kv_cache_dtype → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for kernel_source in data_wrapper:
-            for kv_cache_dtype in data_wrapper[kernel_source]:
-                tp_list = list(data_wrapper[kernel_source][kv_cache_dtype].keys())
-                data_dict = data_wrapper[kernel_source][kv_cache_dtype]
-                interpolation.extrapolate_data_grid(
-                    data_dict=data_dict,
-                    target_x_list=tp_list,
-                    target_y_list=_GENERATION_MLA_TARGET_Y,
-                    target_z_list=_GENERATION_MLA_TARGET_Z,
-                )
-
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_wideep_generation_mla)
     # ------------------------------------------------------------------
@@ -1431,24 +1305,6 @@ class WideEPContextMLA(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 3-level (kernel_source → quant_mode → kv_cache_dtype → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for kernel_source in data_wrapper:
-            for quant_mode in data_wrapper[kernel_source]:
-                for kv_cache_dtype in data_wrapper[kernel_source][quant_mode]:
-                    num_heads_list = list(data_wrapper[kernel_source][quant_mode][kv_cache_dtype].keys())
-                    data_dict = data_wrapper[kernel_source][quant_mode][kv_cache_dtype]
-                    interpolation.extrapolate_data_grid(
-                        data_dict=data_dict,
-                        target_x_list=num_heads_list,
-                        target_y_list=_WIDEEP_CONTEXT_MLA_TARGET_Y,
-                        target_z_list=_WIDEEP_CONTEXT_MLA_TARGET_Z,
-                        sqrt_y_value=True,
-                    )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_wideep_context_mla)

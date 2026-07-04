@@ -109,25 +109,6 @@ def _dsa_sparse_file_prefix(architecture: str) -> str:
 # Extrapolation grids — lifted verbatim from the legacy blocks in
 # ``PerfDatabase.__init__``.
 
-# fmt: off
-_CONTEXT_DSA_TARGET_Y: list[int] = (
-    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-    + [4096 + i * 2048 for i in range(14)]
-    + [32768 + 16384 * i for i in range(6)]
-    + [131072 + 32768 * i for i in range(12)]
-    + [524288 + 65536 * i for i in range(9)]
-)  # s
-_CONTEXT_DSA_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048,
-]  # b
-
-_GENERATION_DSA_TARGET_Y: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192,
-]  # b
-_GENERATION_DSA_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
-    16384, 32768, 65536, 131072, 262144, 2097152 * 8,
-]  # s
 # fmt: on
 
 
@@ -318,68 +299,6 @@ class ContextDSAModule(Operation):
         cls._glm5_sparse_cache.clear()
         cls._skip_data_cache.clear()
         cls._raw_skip_data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 5-level (fmha_mode → kv_cache_dtype → gemm_mode → arch
-        → dsa_backend → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-
-        for fmha_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[fmha_mode]:
-                for gemm_mode in data_wrapper[fmha_mode][kv_cache_dtype]:
-                    for arch in data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode]:
-                        arch_dict = data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode][arch]
-
-                        def _is_latency_leaf(value):
-                            return isinstance(value, dict) and "latency" in value
-
-                        def _has_prefix_axis(module_dict):
-                            for head_data in module_dict.values():
-                                if not isinstance(head_data, dict):
-                                    continue
-                                for first_slice in head_data.values():
-                                    if not isinstance(first_slice, dict):
-                                        continue
-                                    # Legacy shape: [num_heads][s][b].
-                                    return not any(_is_latency_leaf(v) for v in first_slice.values())
-                            return False
-
-                        # arch_dict is {dsa_backend: {num_heads: {prefix: {s: {b}}}}}.
-                        for dsa_backend_key in list(arch_dict.keys()):
-                            data_dict = arch_dict[dsa_backend_key]
-
-                            if _has_prefix_axis(data_dict):
-                                prefix_values = sorted(
-                                    {
-                                        prefix
-                                        for head_data in data_dict.values()
-                                        if isinstance(head_data, dict)
-                                        for prefix in head_data
-                                    }
-                                )
-                                for prefix in prefix_values:
-                                    prefix_slice = {
-                                        head: head_data[prefix]
-                                        for head, head_data in data_dict.items()
-                                        if isinstance(head_data, dict) and prefix in head_data
-                                    }
-                                    interpolation.extrapolate_data_grid(
-                                        data_dict=prefix_slice,
-                                        target_x_list=list(prefix_slice.keys()),
-                                        target_y_list=_CONTEXT_DSA_TARGET_Y,
-                                        target_z_list=_CONTEXT_DSA_TARGET_Z,
-                                    )
-                                    for head, head_slice in prefix_slice.items():
-                                        data_dict[head][prefix] = head_slice
-                            else:
-                                interpolation.extrapolate_data_grid(
-                                    data_dict=data_dict,
-                                    target_x_list=list(data_dict.keys()),
-                                    target_y_list=_CONTEXT_DSA_TARGET_Y,
-                                    target_z_list=_CONTEXT_DSA_TARGET_Z,
-                                )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_context_dsa_module)
@@ -1164,27 +1083,6 @@ class GenerationDSAModule(Operation):
         cls._raw_data_cache.clear()
         cls._skip_data_cache.clear()
         cls._raw_skip_data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 4-level (kv_cache_dtype → gemm_mode → arch
-        → dsa_backend → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-
-        for kv_cache_dtype in data_wrapper:
-            for gemm_mode in data_wrapper[kv_cache_dtype]:
-                for arch in data_wrapper[kv_cache_dtype][gemm_mode]:
-                    arch_dict = data_wrapper[kv_cache_dtype][gemm_mode][arch]
-                    # arch_dict is {dsa_backend: {num_heads: {b: {s}}}}.
-                    for dsa_backend_key in list(arch_dict.keys()):
-                        data_dict = arch_dict[dsa_backend_key]
-                        interpolation.extrapolate_data_grid(
-                            data_dict=data_dict,
-                            target_x_list=list(data_dict.keys()),
-                            target_y_list=_GENERATION_DSA_TARGET_Y,
-                            target_z_list=_GENERATION_DSA_TARGET_Z,
-                        )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_generation_dsa_module)

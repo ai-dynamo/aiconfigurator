@@ -1766,23 +1766,28 @@ class TrtLLMWideEPMoE(Operation):
                 moe_ep_size,
             )
 
-            num_left, num_right = interpolation.nearest_1d_point_helper(
-                num_tokens,
-                list(moe_dict.keys()),
-                inner_only=False,
+            # 1-D tokens curve: RAW lerp in range; boundary util-hold via the
+            # wideep-MoE roofline beyond it (the SOL's weight-read term keeps
+            # small-token holds above the launch/weight floor).
+            config = perf_interp.OpInterpConfig(
+                axes=("num_tokens",),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda t: get_sol(
+                    t,
+                    hidden_size,
+                    inter_size,
+                    topk,
+                    num_experts,
+                    num_slots,
+                    moe_tp_size,
+                    moe_ep_size,
+                    quant_mode,
+                    workload_distribution,
+                )[0],
             )
-            result = interpolation.interp_1d(
-                [num_left, num_right],
-                [moe_dict[num_left], moe_dict[num_right]],
-                num_tokens,
-            )
-
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
+            result = perf_interp.query(config, moe_dict, num_tokens)
+            lat = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
 
             return database._interp_pr(lat, energy=energy)
 
@@ -2235,23 +2240,16 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 moe_ep_size,
             )
 
-            num_left, num_right = interpolation.nearest_1d_point_helper(
-                num_tokens,
-                list(alltoall_dict.keys()),
-                inner_only=False,
+            # 1-D tokens curve: RAW lerp in range; boundary util-hold via the
+            # alltoall communication SOL beyond it.
+            config = perf_interp.OpInterpConfig(
+                axes=("num_tokens",),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda t: get_sol(t, hidden_size, topk, num_experts, moe_ep_size, quant_mode, node_num)[0],
             )
-            result = interpolation.interp_1d(
-                [num_left, num_right],
-                [alltoall_dict[num_left], alltoall_dict[num_right]],
-                num_tokens,
-            )
-
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
+            result = perf_interp.query(config, alltoall_dict, num_tokens)
+            lat = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
 
             return database._interp_pr(lat, energy=energy)
 

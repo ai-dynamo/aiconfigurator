@@ -413,28 +413,6 @@ class GEMM(Operation):
         262144,
     ]  # to fit vocab gemm
 
-    @classmethod
-    def _extrapolate_gemm_data(cls, gemm_data) -> None:
-        """Apply the 3D extrapolation grid to each quant_mode's table.
-
-        Takes the GEMM data wrapper explicitly. ``load_data`` passes the
-        canonical class-cache value; tests that need to extrapolate a
-        custom-loaded dict can call this with their own LoadedOpData."""
-        if gemm_data is None or not gemm_data.loaded:
-            return
-
-        target_x_list = cls._EXTRAPOLATION_TARGET_X
-        target_y_list = cls._EXTRAPOLATION_TARGET_Y
-        target_z_list = cls._EXTRAPOLATION_TARGET_Y
-
-        for _quant_mode, data_dict in gemm_data.items():
-            interpolation.extrapolate_data_grid(
-                data_dict=data_dict,
-                target_x_list=target_x_list,
-                target_y_list=target_y_list,
-                target_z_list=target_z_list,
-            )
-
     # ------------------------------------------------------------------
     # Table query classmethods (formerly PerfDatabase.query_*)
     # ------------------------------------------------------------------
