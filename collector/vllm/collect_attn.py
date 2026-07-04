@@ -25,8 +25,8 @@ from collector.case_generator import (
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.vllm.utils import (
     BatchSpec,
-    create_and_prepopulate_kv_cache,
     create_common_attn_metadata,
+    create_kv_cache_and_block_mappings,
     create_standard_kv_cache_spec,
     create_vllm_config,
     get_attention_backend,
@@ -157,10 +157,8 @@ def run_attention_torch(
 
     common_attn_metadata = create_common_attn_metadata(batch_spec, vllm_config.cache_config.block_size, device)
 
-    # 3. Simulate Paged KV Cache and a realistic slot_mapping
-    kv_cache = create_and_prepopulate_kv_cache(
-        k_contexts=k_contexts,
-        v_contexts=v_contexts,
+    # 3. Simulate Paged KV Cache and realistic history/query slot mappings.
+    kv_cache, history_slot_mapping = create_kv_cache_and_block_mappings(
         block_size=block_size,
         num_kv_heads=num_kv_heads,
         head_size=head_dim,
@@ -243,6 +241,18 @@ def run_attention_torch(
 
     # Create mock layer
     mock_layer = MockAttentionLayer(device)
+
+    # Populate persisted history through the selected backend's production
+    # writer. In particular, vLLM stores FP8 KV as uint8 and the writer applies
+    # the layer scales plus the backend-specific physical cache layout.
+    if history_slot_mapping.numel() > 0:
+        impl.do_kv_cache_update(
+            mock_layer,
+            torch.cat(k_contexts),
+            torch.cat(v_contexts),
+            kv_cache,
+            history_slot_mapping,
+        )
 
     # Run forward pass
 

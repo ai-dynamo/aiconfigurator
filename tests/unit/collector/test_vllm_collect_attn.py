@@ -58,9 +58,11 @@ class BatchSpec:
     query_lens: list[int]
 
 
-def test_generation_uses_total_runtime_length_and_production_call_order():
+@pytest.mark.parametrize("use_fp8_kv_cache", [False, True])
+def test_generation_uses_total_runtime_length_and_production_call_order(use_fp8_kv_cache):
     calls, events = {}, []
     slot_mapping = object()
+    history_slot_mapping = SimpleNamespace(numel=lambda: 128)
 
     torch = SimpleNamespace(
         bfloat16=BF16,
@@ -143,9 +145,9 @@ def test_generation_uses_total_runtime_length_and_production_call_order():
         "current_platform": Platform(),
         "resolve_obj_by_qualname": lambda _path: Backend,
         "AttentionBackendEnum": {"FLASH_ATTN": object()},
-        "create_standard_kv_cache_spec": lambda *_args: SimpleNamespace(dtype=BF16),
+        "create_standard_kv_cache_spec": lambda *_args: SimpleNamespace(dtype=UINT8 if use_fp8_kv_cache else BF16),
         "create_common_attn_metadata": create_metadata,
-        "create_and_prepopulate_kv_cache": lambda **_kwargs: FakeTensor(),
+        "create_kv_cache_and_block_mappings": lambda **_kwargs: (FakeTensor(), history_slot_mapping),
         "set_kv_cache_layout": lambda _layout: None,
         "get_attention_backend": lambda _backend: (Builder, Impl),
         "benchmark_with_power": benchmark,
@@ -161,20 +163,70 @@ def test_generation_uses_total_runtime_length_and_production_call_order():
             num_heads=8,
             num_kv_heads=2,
             head_dim=128,
-            use_fp8_kv_cache=False,
+            use_fp8_kv_cache=use_fp8_kv_cache,
             is_context_phase=False,
             perf_filename="generation_attention_perf.txt",
         )
 
     assert calls["batch"] == BatchSpec(seq_lens=[65, 65], query_lens=[1, 1])
     assert calls["config"]["max_model_len"] == 65
-    assert calls["selector"].kv_cache_dtype == "auto"
+    assert calls["selector"].kv_cache_dtype == ("fp8" if use_fp8_kv_cache else "auto")
     assert calls["log"]["item_list"][0]["isl"] == 1
     assert calls["log"]["item_list"][0]["step"] == 64
-    assert [event[0] for event in events] == ["update", "forward", "update", "forward"]
-    for update, forward in zip(events[::2], events[1::2], strict=True):
+    assert [event[0] for event in events] == ["update", "update", "forward", "update", "forward"]
+    assert events[0][5] is history_slot_mapping
+    for update, forward in zip(events[1::2], events[2::2], strict=True):
         assert update[1:5] == (forward[1], forward[3], forward[4], forward[5])
         assert update[5] is slot_mapping
+
+
+@pytest.mark.parametrize("randomize_blocks", [False, True])
+def test_dense_kv_cache_history_slots_follow_block_table(randomize_blocks):
+    torch = pytest.importorskip("torch")
+
+    namespace = {
+        "torch": torch,
+        "CommonAttentionMetadata": object,
+        "cdiv": lambda value, divisor: (value + divisor - 1) // divisor,
+    }
+    create_cache = _load_function(UTILS_SOURCE, "create_kv_cache_and_block_mappings", namespace)
+    metadata = SimpleNamespace(
+        num_reqs=2,
+        seq_lens_cpu=torch.tensor([70, 5], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        num_computed_tokens_cpu=torch.tensor([69, 4], dtype=torch.int32),
+        block_table_tensor=torch.full((2, 2), -1, dtype=torch.int32),
+        slot_mapping=torch.full((2,), -1, dtype=torch.long),
+    )
+
+    cache, history_slots = create_cache(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.bfloat16,
+        device=torch.device("cpu"),
+        num_blocks=8,
+        common_attn_metadata=metadata,
+        randomize_blocks=randomize_blocks,
+    )
+
+    expected_history_slots = []
+    for request, context_len in enumerate([69, 4]):
+        for offset in range(context_len):
+            block_id = int(metadata.block_table_tensor[request, offset // 64])
+            expected_history_slots.append(block_id * 64 + offset % 64)
+
+    assert cache.shape == (2, 8, 64, 1, 8)
+    assert sorted(metadata.block_table_tensor[0, :2].tolist() + metadata.block_table_tensor[1, :1].tolist()) == [
+        1,
+        2,
+        3,
+    ]
+    assert metadata.slot_mapping.tolist() == [
+        int(metadata.block_table_tensor[0, 1]) * 64 + 5,
+        int(metadata.block_table_tensor[1, 0]) * 64 + 4,
+    ]
+    assert history_slots.tolist() == expected_history_slots
 
 
 @pytest.mark.parametrize(

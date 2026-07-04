@@ -408,9 +408,7 @@ def create_and_prepopulate_kv_cache_mla(
     return kv_cache
 
 
-def create_and_prepopulate_kv_cache(
-    k_contexts: list[torch.Tensor],
-    v_contexts: list[torch.Tensor],
+def create_kv_cache_and_block_mappings(
     block_size: int,
     num_kv_heads: int,
     head_size: int,
@@ -419,27 +417,24 @@ def create_and_prepopulate_kv_cache(
     num_blocks: int,
     common_attn_metadata: CommonAttentionMetadata,
     randomize_blocks: bool = True,
-) -> torch.Tensor:
-    """Create and prepopulate a KV cache with context data.
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Create an empty KV cache and its history/query block mappings.
 
     Args:
-        k_contexts: List of key context tensors for each sequence
-        v_contexts: List of value context tensors for each sequence
-        seq_lens: List of sequence lengths
         block_size: Size of each block
         num_kv_heads: Number of KV heads
         head_size: Size of each head
         dtype: Data type for the cache
         device: Device to create the cache on
         num_blocks: Total number of blocks in the cache
-        block_table: Block table tensor to populate
+        common_attn_metadata: Attention metadata whose mappings are populated
         randomize_blocks: Whether to randomly permute blocks
                           or use sequential order
 
     Returns:
-        Tuple of (kv_cache, updated_block_table)
+        Tuple of the empty KV cache and flattened history slot mapping
     """
-    batch_size = len(k_contexts)
+    batch_size = common_attn_metadata.num_reqs
     seq_lens = common_attn_metadata.seq_lens_cpu
     query_lens = common_attn_metadata.query_start_loc_cpu[1:] - common_attn_metadata.query_start_loc_cpu[:-1]
     context_lens = common_attn_metadata.num_computed_tokens_cpu
@@ -448,46 +443,22 @@ def create_and_prepopulate_kv_cache(
 
     # Create KV cache
     kv_cache = torch.empty(2, num_blocks, block_size, num_kv_heads, head_size, dtype=dtype, device=device)
-    kv_cache_flat = kv_cache.view(2, -1, num_kv_heads, head_size)
 
-    # Populate the cache with the context tokens
-    # Start from block_id=1 since block_id=0 is considered the null block
+    # Reserve enough block IDs for each full runtime sequence. Block 0 is the
+    # null block, so usable IDs start at 1.
     start_block_idx = 1
     for i in range(batch_size):
-        k_context, v_context = k_contexts[i], v_contexts[i]
-        start = start_block_idx * block_size
-        end = start + k_context.shape[0]
-        kv_cache_flat[0, start:end, ...] = k_context
-        kv_cache_flat[1, start:end, ...] = v_context
-
-        # Stay block aligned and allocate enough blocks for the new tokens
         start_block_idx += cdiv(int(seq_lens[i]), block_size)
 
     blocks_end = start_block_idx
 
-    # Permute the context blocks (excluding block 0 which is null)
+    # Randomize physical block IDs without copying the still-empty cache.
     if randomize_blocks:
-        # Random permutation starting from block 1
-        perm = torch.randperm(blocks_end - 1) + 1
+        perm = torch.randperm(blocks_end - 1, device=device) + 1
+        inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
+        inv_perm[1:] = torch.argsort(perm) + 1
     else:
-        # Sequential order starting from block 1
-        perm = torch.arange(1, blocks_end)
-
-    inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
-    # Add 1 to account for starting from block 1
-    inv_perm[1:] = torch.argsort(perm) + 1
-
-    # Workaround for XPU FP8 indexing not implemented:
-    # Intel Extension for PyTorch (IPEX) currently lacks support for advanced
-    # indexing (slicing via LongTensor) on Float8 tensors ("index_xpu" not implemented).
-    # To bypass this, we temporarily cast the KV cache to bfloat16, perform the
-    # permutation, and then cast it back to the original FP8 format.
-    if "xpu" in str(device) and kv_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-        temp_cache = kv_cache.to(torch.bfloat16)
-        temp_cache_sliced = temp_cache[:, perm, ...]
-        kv_cache[:, 1:blocks_end, ...] = temp_cache_sliced.to(kv_cache.dtype)
-    else:
-        kv_cache[:, 1:blocks_end, ...] = kv_cache[:, perm, ...]
+        inv_perm = torch.arange(blocks_end, dtype=torch.long, device=device)
 
     # Construct the right block table
     # Start from block_id=1 since block_id=0 is considered the null block
@@ -499,16 +470,29 @@ def create_and_prepopulate_kv_cache(
         block_table[i, :num_blocks_for_seq] = inv_perm[start:end]
         start_block_idx += num_blocks_for_seq
 
-        # Create a realistic slot mapping that corresponds to the block table
+    # Create realistic query and history slot mappings from the same table.
+    history_slot_mappings = []
     for i in range(batch_size):
-        token_offsets = torch.arange(int(query_lens[i])) + int(context_lens[i])
+        token_offsets = torch.arange(int(query_lens[i]), dtype=torch.long, device=device) + int(context_lens[i])
         block_indices = token_offsets // block_size
         token_inter_block_offsets = token_offsets % block_size
         start = common_attn_metadata.query_start_loc_cpu[i]
         end = common_attn_metadata.query_start_loc_cpu[i + 1]
-        slot_mapping[start:end] = block_table[i, block_indices] * block_size + token_inter_block_offsets.to(device)
+        query_block_ids = block_table[i, block_indices].to(torch.long)
+        slot_mapping[start:end] = query_block_ids * block_size + token_inter_block_offsets
 
-    return kv_cache
+        context_len = int(context_lens[i])
+        if context_len > 0:
+            history_offsets = torch.arange(context_len, dtype=torch.long, device=device)
+            history_block_ids = block_table[i, history_offsets // block_size].to(torch.long)
+            history_slot_mappings.append(history_block_ids * block_size + history_offsets % block_size)
+
+    if history_slot_mappings:
+        history_slot_mapping = torch.cat(history_slot_mappings)
+    else:
+        history_slot_mapping = torch.empty(0, dtype=torch.long, device=device)
+
+    return kv_cache, history_slot_mapping
 
 
 @functools.cache  # only run once per process
