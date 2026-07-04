@@ -107,6 +107,24 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
         }.get(activation, activation)
         activation = f"{activation}_no_mul"
 
+    if use_grouped_topk:
+        missing_fields = [field for field in ("n_group", "topk_group") if model_config.get(field) is None]
+        if missing_fields:
+            raise ValueError(f"vLLM grouped-topk model {model_name!r} is missing {', '.join(missing_fields)}")
+        try:
+            num_expert_group = int(model_config["n_group"])
+            topk_group = int(model_config["topk_group"])
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"vLLM grouped-topk model {model_name!r} requires integer group fields") from error
+        if num_expert_group <= 0 or topk_group <= 0 or topk_group > num_expert_group:
+            raise ValueError(
+                f"vLLM grouped-topk model {model_name!r} has invalid "
+                f"n_group={num_expert_group}, topk_group={topk_group}"
+            )
+    else:
+        num_expert_group = None
+        topk_group = None
+
     return {
         "renormalize": renormalize,
         "scoring_func": scoring_func,
@@ -114,8 +132,8 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
         "routed_scaling_factor": float(model_config.get("routed_scaling_factor") or 1.0),
         "swiglu_limit": model_config.get("swiglu_limit") if model_type == "deepseek_v4" else None,
         "use_grouped_topk": use_grouped_topk,
-        "num_expert_group": int(model_config.get("n_group", 1)) if use_grouped_topk else None,
-        "topk_group": int(model_config.get("topk_group", 1)) if use_grouped_topk else None,
+        "num_expert_group": num_expert_group,
+        "topk_group": topk_group,
         "apply_routed_scale_to_output": model_type in {"deepseek_v3", "kimi_k2", "glm_moe_dsa", "nemotron_h"},
         "use_routing_bias": use_routing_bias,
         "router_logits_float32": use_routing_bias or scoring_func in {"sigmoid", "sqrtsoftplus"},
@@ -297,6 +315,20 @@ def run_moe_torch(
 
     module_config = get_moe_quantization_module_config("vllm", moe_type, model_name=model_name)
     runtime_config = _resolve_moe_runtime_config(model_name, module_config)
+    if runtime_config["use_grouped_topk"]:
+        num_expert_group = runtime_config["num_expert_group"]
+        topk_group = runtime_config["topk_group"]
+        if num_experts <= num_expert_group or num_experts % num_expert_group != 0:
+            raise ValueError(
+                f"vLLM grouped-topk model {model_name!r} cannot divide {num_experts} experts "
+                f"into {num_expert_group} groups"
+            )
+        experts_per_group = num_experts // num_expert_group
+        if topk > topk_group * experts_per_group:
+            raise ValueError(
+                f"vLLM grouped-topk model {model_name!r} requests topk={topk}, but "
+                f"topk_group={topk_group} exposes only {topk_group * experts_per_group} experts"
+            )
     e_score_correction_bias = (
         torch.zeros(num_experts, dtype=torch.float32, device=device) if runtime_config["use_routing_bias"] else None
     )

@@ -431,3 +431,35 @@ def test_vllm_moe_cuda_graph_fails_closed():
 
     assert len(benchmark_calls) == 1
     assert all(keyword.arg != "allow_graph_fail" for keyword in benchmark_calls[0].keywords)
+
+
+@pytest.mark.parametrize(
+    ("group_fields", "message"),
+    [
+        ({"topk_group": 4}, "missing n_group"),
+        ({"n_group": 8}, "missing topk_group"),
+        ({"n_group": "invalid", "topk_group": 1}, "requires integer group fields"),
+        ({"n_group": 0, "topk_group": 1}, "invalid n_group=0"),
+        ({"n_group": 4, "topk_group": 8}, "invalid n_group=4, topk_group=8"),
+    ],
+)
+def test_vllm_grouped_topk_config_fails_closed(monkeypatch, group_fields, message):
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    model_config = {"model_type": "deepseek_v3", "hidden_act": "silu", **group_fields}
+    monkeypatch.setattr(module, "_load_model_moe_config", lambda _model_name: model_config)
+
+    with pytest.raises(ValueError, match=message):
+        module._resolve_moe_runtime_config("model", {})
+
+
+def test_vllm_standard_topk_does_not_require_group_fields(monkeypatch):
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    monkeypatch.setattr(module, "_load_model_moe_config", lambda _model_name: {"model_type": "qwen3_moe"})
+
+    runtime_config = module._resolve_moe_runtime_config("model", {})
+
+    assert runtime_config["use_grouped_topk"] is False
+    assert runtime_config["num_expert_group"] is None
+    assert runtime_config["topk_group"] is None
