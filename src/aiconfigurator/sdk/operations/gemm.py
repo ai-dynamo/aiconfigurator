@@ -616,27 +616,26 @@ class GEMM(Operation):
                     f"Supported modes: {supported}"
                 )
             table = compute_scale_wrapper[table_quant_mode]
-            m_i = int(m)
-            k_i = int(k)
-
+            # Clamp into the collected range FIRST (preserving the legacy
+            # contract), then resolve the interior on the engine (RAW 2-axis).
             m_keys = sorted(table.keys())
-            m_i = max(m_keys[0], min(m_i, m_keys[-1]))
-
-            k_min = None
-            k_max = None
-            for row in table.values():
-                if not row:
-                    continue
-                row_min = min(row.keys())
-                row_max = max(row.keys())
-                k_min = row_min if k_min is None else min(k_min, row_min)
-                k_max = row_max if k_max is None else max(k_max, row_max)
-
-            if k_min is not None and k_max is not None:
-                k_i = max(k_min, min(k_i, k_max))
-
-            result = interpolation.interp_2d_linear(m_i, k_i, table, database._extracted_metrics_cache)
-            return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
+            m_c = max(m_keys[0], min(int(m), m_keys[-1]))
+            k_min = min(min(row) for row in table.values() if row)
+            k_max = max(max(row) for row in table.values() if row)
+            k_c = max(k_min, min(int(k), k_max))
+            config = perf_interp.OpInterpConfig(
+                axes=("m", "k"),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda m_v, k_v: get_sol(m_v, k_v)[0],
+            )
+            result = perf_interp.query(config, table, m_c, k_c)
+            interpolated = database._interp_pr(
+                interpolation.get_value(result, "latency"),
+                energy=interpolation.get_value(result, "energy"),
+            )
+            # compute_scale is a quantization-overhead DELTA: beyond the grid it
+            # is deliberately held FLAT at the clamped boundary (legacy contract).
+            return interpolated
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,
@@ -709,37 +708,30 @@ class GEMM(Operation):
                     f"Supported modes: {supported}"
                 )
             table = scale_matrix_wrapper[table_quant_mode]
-            m_query = int(m)
-            k_query = int(k)
-            m_i = m_query
-            k_i = k_query
-
+            # Clamp into the collected range FIRST (preserving the legacy
+            # contract), then resolve the interior on the engine (RAW 2-axis).
             m_keys = sorted(table.keys())
-            m_i = max(m_keys[0], min(m_i, m_keys[-1]))
-
-            k_min = None
-            k_max = None
-            for row in table.values():
-                if not row:
-                    continue
-                row_min = min(row.keys())
-                row_max = max(row.keys())
-                k_min = row_min if k_min is None else min(k_min, row_min)
-                k_max = row_max if k_max is None else max(k_max, row_max)
-
-            if k_min is not None and k_max is not None:
-                k_i = max(k_min, min(k_i, k_max))
-
-            result = interpolation.interp_2d_linear(m_i, k_i, table, database._extracted_metrics_cache)
-            interpolated = database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
-            if m_i == m_query and k_i == k_query:
+            m_c = max(m_keys[0], min(int(m), m_keys[-1]))
+            k_min = min(min(row) for row in table.values() if row)
+            k_max = max(max(row) for row in table.values() if row)
+            k_c = max(k_min, min(int(k), k_max))
+            config = perf_interp.OpInterpConfig(
+                axes=("m", "k"),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda m_v, k_v: get_sol(m_v, k_v)[0],
+            )
+            result = perf_interp.query(config, table, m_c, k_c)
+            interpolated = database._interp_pr(
+                interpolation.get_value(result, "latency"),
+                energy=interpolation.get_value(result, "energy"),
+            )
+            if m_c == int(m) and k_c == int(k):
                 return interpolated
-
-            # The table is finite, but scale_matrix is a real memory kernel.
-            # Outside its grid, freeze utilization at the clamped boundary
-            # rather than freezing latency: L(q) = L(boundary) * SOL(q)/SOL(boundary).
-            boundary_sol = get_sol(m_i, k_i)[0]
-            query_sol = get_sol(m_query, k_query)[0]
+            # Outside the grid, freeze utilization at the clamped boundary:
+            # L(q) = L(boundary) * SOL(q)/SOL(boundary) (a real memory kernel,
+            # unlike the compute_scale delta above).
+            boundary_sol = get_sol(m_c, k_c)[0]
+            query_sol = get_sol(int(m), int(k))[0]
             ratio = query_sol / boundary_sol
             return PerformanceResult(
                 latency=float(interpolated) * ratio,
