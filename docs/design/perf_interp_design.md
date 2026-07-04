@@ -205,9 +205,15 @@ sub-kernels" comment). The migration is a bug fix, not a risk trade:
 - the sparse sweep collects isl <= 8k while the CP path queries `mqa_full` at
   the FULL sequence length (128k+), so isl extrapolation is the *common case*;
 - measured `latency/isl^2` flattens for isl >= 2048 (the kernel is genuinely
-  ~quadratic in isl), and a hold-out at the isl=8192 frontier scores legacy
-  linear-trend at **-58%**, flat-hold at -86%, and util-hold under the
-  pair-count SOL at **~0%**;
+  ~quadratic in isl). Hold-out A/B across all 288 collected slices
+  (gb200/gb300/b200/b300, every heads/tp/past_kv/batch): predicting the
+  frontier point from a table truncated to `max_isl/4` (a 4x extrapolation —
+  still *short* of the 16x the CP path actually asks for) scores legacy
+  linear-trend at median **-49%** (p10 -70%), flat-hold at **-86%**, and
+  util-hold under the pair-count SOL at **-1%** (p10/p90 -20%/+25%). At short
+  range (hold out only the frontier point) the gap narrows (-17% / -45% /
+  -12%) — the linear-trend error *grows with extrapolation distance*, and CP
+  lives at the far end;
 - the legacy largest-lower-batch x `bs/bp` scaling is replaced by measured
   batch brackets — the old robust-lookup comments themselves called linear
   batch scaling the worse estimate ("simply scaling the lower batch can
