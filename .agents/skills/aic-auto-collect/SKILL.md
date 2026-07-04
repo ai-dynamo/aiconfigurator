@@ -130,7 +130,16 @@ It is not the raw registry run with no model-case flags.
 Before GPU work, record per-op raw, retained, and unique physical counts;
 artifact/model coverage; dtype counts; and SM exception counts. Verify every
 required model produces executable cases. Preserve checkpoint-native
-quantization identities when they change the invoked kernel.
+quantization identities when they change the invoked kernel. Do not equate
+checkpoint compatibility with execution-precision support: a backend that
+repacks an FP4 checkpoint into a weight-only INT4/W4A16 kernel is not an FP4
+measurement. In the SGLang collector, Marlin is allowed only for `int4_wo`;
+do not map NVFP4 or MXFP4 to Marlin, and fail any direct invocation that tries
+to combine them. Apply the same rule to full-model setup for another timed
+operator: do not load an NVFP4/MXFP4 checkpoint on an SM where the pinned
+framework would repack its weights into Marlin merely because the timed module
+itself has a BF16 key. This statement covers the stock collector; audit a
+special/WideEP runtime separately instead of inheriting the conclusion.
 
 ## Separate population from failure policy
 

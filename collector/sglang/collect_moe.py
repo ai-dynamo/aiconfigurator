@@ -183,7 +183,7 @@ def get_moe_test_cases():
     if sm_version < 90:
         moe_list = ["bfloat16"]
     elif sm_version < 100:
-        moe_list = ["bfloat16", "fp8_block", "int4_wo", "nvfp4", "w4a16_mxfp4"]
+        moe_list = ["bfloat16", "fp8_block", "int4_wo", "w4a16_mxfp4"]
     elif sm_version in (100, 103):
         moe_list = [
             "bfloat16",
@@ -222,7 +222,7 @@ def get_moe_test_cases():
             # validity is already bounded by get_common_moe_test_cases via
             # tp*ep==gpu / ep<=num_experts / num_experts%ep==0 / inter%tp==0).
             # (Previously hard-pinned to ep==1 & tp<32 as an nvfp4-EP>1 workaround.)
-            model_moe_list = ["nvfp4"]
+            model_moe_list = ["nvfp4"] if "nvfp4" in moe_list else []
         elif sm_version >= 120 and model_name in _SM120_NEMOTRON_NVFP4_MODELS:
             model_moe_list = [*model_moe_list, "nvfp4"]
 
@@ -626,11 +626,6 @@ def get_moe_test_cases():
 
             if moe_type == "nvfp4":
                 shard_k = common_moe_testcase.inter_size // common_moe_testcase.tp
-                marlin_inter_alignment = 64 if common_moe_testcase.sglang_moe_is_gated else 128
-                if moe_backend == "marlin" and (
-                    common_moe_testcase.hidden_size % 128 != 0 or shard_k % marlin_inter_alignment != 0
-                ):
-                    continue
                 # fp4_quantize requires weight dims divisible by 16 after TP sharding.
                 # CuteDSL grouped GEMM additionally requires 16-byte contiguous alignment:
                 # for fp4 (4-bit), that's 32 elements (16 * 8 // 4 = 32).
@@ -1323,6 +1318,8 @@ def run_moe_torch(
         "flashinfer_mxfp4",
     }:
         raise ValueError(f"Unsupported SGLang MoE backend: {moe_backend}")
+    if moe_backend == "marlin" and moe_type != "int4_wo":
+        raise ValueError(f"SGLang Marlin is only valid for int4_wo, got moe_type={moe_type!r}")
     if is_fp4_experts:
         expected_backend = {
             "w4a16_mxfp4": "flashinfer_mxfp4",
@@ -1366,18 +1363,6 @@ def run_moe_torch(
             "SGLang SM90 DeepSeek-V4 W4A16 FP4 experts require hidden_size and local_inter_size "
             f"to be divisible by 128, got hidden_size={hidden_size}, local_inter_size={local_inter_size}"
         )
-    marlin_inter_alignment = 64 if is_gated else 128
-    if (
-        moe_type == "nvfp4"
-        and moe_backend == "marlin"
-        and (hidden_size % 128 != 0 or local_inter_size % marlin_inter_alignment != 0)
-    ):
-        raise ValueError(
-            "SGLang NVFP4 Marlin requires hidden_size to be divisible by 128 "
-            f"and local_inter_size to be divisible by {marlin_inter_alignment}, "
-            f"got hidden_size={hidden_size}, local_inter_size={local_inter_size}"
-        )
-
     use_int4_w4a16 = moe_type == "int4_wo"
     if use_int4_w4a16 and moe_backend != "marlin":
         raise ValueError(f"SGLang SM90 int4_wo requires the Marlin backend, got {moe_backend}")

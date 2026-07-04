@@ -310,8 +310,21 @@ class TestBuildModuleTestCases:
         assert model_paths == {
             "deepseek-ai/DeepSeek-R1",
             "deepseek-ai/DeepSeek-V3",
-            "nvidia/DeepSeek-V3.1-NVFP4",
         }
+
+    def test_mla_blackwell_keeps_native_nvfp4_checkpoint(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=100):
+            cases = mod._build_module_test_cases("mla", "context")
+        assert "nvidia/DeepSeek-V3.1-NVFP4" in {c[6] for c in cases}
+
+    def test_hopper_dsa_uses_bf16_glm_checkpoint(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=90):
+            cases = mod._build_module_test_cases("dsa", "context")
+        model_paths = {case[6] for case in cases}
+        assert "zai-org/GLM-5" in model_paths
+        assert not any("NVFP4" in model_path for model_path in model_paths)
 
     def test_targeted_quantized_artifact_keeps_requested_checkpoint(self, monkeypatch):
         mod = _import_module()
@@ -358,15 +371,23 @@ class TestBuildModuleTestCases:
         selector_node = next(
             node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_selected_glm5_models"
         )
-        namespace = {}
+        namespace = {"get_sm_version": lambda: 90}
         exec(compile(ast.Module(body=[selector_node], type_ignores=[]), str(source_path), "exec"), namespace)
         selector = namespace["_selected_glm5_models"]
 
         monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
-        assert selector() == ["nvidia/GLM-5.2-NVFP4"]
+        assert selector() == ["zai-org/GLM-5"]
         for model_path in ("nvidia/GLM-5-NVFP4", "nvidia/GLM-5.2-NVFP4"):
             monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
-            assert selector() == [model_path]
+            assert selector() == []
+
+        namespace["get_sm_version"] = lambda: 100
+        monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+        assert selector() == ["nvidia/GLM-5.2-NVFP4"]
+        monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/GLM-5-NVFP4")
+        assert selector() == ["nvidia/GLM-5-NVFP4"]
+
+        namespace["get_sm_version"] = lambda: 90
         monkeypatch.setenv("COLLECTOR_MODEL_PATH", "deepseek-ai/DeepSeek-V3.2")
         assert selector() == []
 
@@ -398,14 +419,27 @@ class TestBuildModuleTestCases:
         batch_sizes = {c[1] for c in cases}
         assert batch_sizes == set(mod.get_mla_module_sweep_spec("sglang").context_batch_sizes)
 
-    def test_targeted_glm5_nvfp4_context_includes_fp8_kv_module_case(self, monkeypatch):
+    def test_targeted_glm5_nvfp4_context_is_not_emitted_on_hopper(self, monkeypatch):
         mod = _import_module()
         monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/GLM-5-NVFP4")
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("dsa", "context")
-        assert any(
-            c[6] == "nvidia/GLM-5-NVFP4" and c[3] == "fp8" and c[4] == "bfloat16" and c[5] == "bfloat16" for c in cases
-        )
+        assert cases == []
+
+    def test_targeted_nvfp4_wideep_mla_is_not_emitted_on_hopper(self, monkeypatch):
+        mod = _import_module()
+        monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/DeepSeek-V3.1-NVFP4")
+        with patch.object(mod, "get_sm_version", return_value=90):
+            assert mod._build_wideep_mla_test_cases("context") == []
+
+    def test_hopper_loader_rejects_nvfp4_before_sglang_initialization(self):
+        mod = _import_module()
+        with (
+            patch.object(mod, "get_sm_version", return_value=90),
+            patch.object(mod, "_model_native_gemm_quant", return_value="nvfp4"),
+            pytest.raises(ValueError, match=r"no collector-supported native NVFP4.*SM90"),
+        ):
+            mod.load_model_runner("example/NVFP4", 8, "bfloat16", "dsa")
 
     def test_placeholder_seq_batch(self):
         """seq_len and batch_size are placeholders (0) — subprocess sweeps internally."""

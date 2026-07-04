@@ -1091,21 +1091,30 @@ def get_sglang_moe_backend(test_case: MoeCommonTestCase, moe_type: str, sm_versi
         raise TypeError("common_case_values.moe_sglang.backends must be a mapping")
 
     model_backends = test_case.sglang_moe_backends
-    for backend_map in (
+    mode_backends = (
         model_backends.get(moe_type),
-        model_backends.get("default"),
         base_backends.get(moe_type),
-        base_backends.get("default"),
-    ):
+    )
+    backend_maps = (
+        mode_backends
+        if any(backend_map is not None for backend_map in mode_backends)
+        else (model_backends.get("default"), base_backends.get("default"))
+    )
+    for backend_map in backend_maps:
         if backend_map is None:
             continue
         if isinstance(backend_map, str):
-            return backend_map
-        if not isinstance(backend_map, dict):
-            raise TypeError("SGLang MoE backend entries must be strings or mappings")
-        backend = backend_map.get(sm_version, backend_map.get(str(sm_version), backend_map.get("default")))
-        if backend is not None:
-            return str(backend)
+            backend = backend_map
+        else:
+            if not isinstance(backend_map, dict):
+                raise TypeError("SGLang MoE backend entries must be strings or mappings")
+            backend = backend_map.get(sm_version, backend_map.get(str(sm_version), backend_map.get("default")))
+            if backend is None:
+                continue
+            backend = str(backend)
+        if backend == "marlin" and moe_type != "int4_wo":
+            raise ValueError(f"SGLang Marlin is only valid for int4_wo, got moe_type={moe_type!r}")
+        return backend
     raise ValueError(f"No SGLang MoE backend for moe_type={moe_type!r}, sm_version={sm_version}")
 
 

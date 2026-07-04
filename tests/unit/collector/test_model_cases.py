@@ -354,8 +354,43 @@ def test_kimi_moe_quantization_is_artifact_specific():
     assert get_moe_quantization_module_config("sglang", "int4_wo", model_name="moonshotai/Kimi-K2.5") == {
         "group_size": 32
     }
-    assert "int4_wo" in get_moe_quantization_modes("sglang", sm_version=90)
+    sm90_modes = get_moe_quantization_modes("sglang", sm_version=90)
+    assert "int4_wo" in sm90_modes
+    assert "nvfp4" not in sm90_modes
+    assert "w4a16_mxfp4" in sm90_modes
     assert "int4_wo" not in get_moe_quantization_modes("sglang", sm_version=100)
+    assert "nvfp4" in get_moe_quantization_modes("sglang", sm_version=100)
+
+
+def test_sglang_marlin_is_declared_only_for_int4_wo():
+    def backend_maps(value):
+        if isinstance(value, dict):
+            if "sglang_moe_backends" in value:
+                yield value["sglang_moe_backends"]
+            for child in value.values():
+                yield from backend_maps(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from backend_maps(child)
+
+    base = load_yaml_file(REPO_ROOT / "collector/cases/base_ops/moe.yaml")
+    maps = [base["common_case_values"]["moe_sglang"]["backends"]]
+    for path in (REPO_ROOT / "collector/cases/models").glob("*_cases.yaml"):
+        maps.extend(backend_maps(load_yaml_file(path)))
+
+    marlin_modes = {
+        mode for backends in maps for mode, mapping in backends.items() if "marlin" in json.dumps(mapping).lower()
+    }
+    assert marlin_modes == {"int4_wo"}
+
+
+def test_sm90_drops_glm52_skip_indexer_until_a_non_nvfp4_artifact_is_registered():
+    sm90 = build_collection_case_plan(backend="sglang", full=True, sm_version=90)
+    sm100 = build_collection_case_plan(backend="sglang", full=True, sm_version=100)
+
+    for op in ("dsa_context_module_skip_indexer", "dsa_generation_module_skip_indexer"):
+        assert op not in sm90.op_cases
+        assert op in sm100.op_cases
 
 
 def test_deepseek_minimax_and_nemotron_moe_quantization_is_artifact_specific():

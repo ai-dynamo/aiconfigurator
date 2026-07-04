@@ -64,11 +64,11 @@ GLM5_ARCHITECTURE = "GlmMoeDsaForCausalLM"
 
 def _selected_glm5_models():
     """GLM model to collect sparse kernels for. The kernels (mqa/topk/dsa_attn)
-    are bf16 and identical across GLM-5 variants, differing only in prefix range.
-    When both GLM-5-NVFP4 and GLM-5.2-NVFP4 are configured, collect only
-    GLM-5.2-NVFP4 (longest context — its range + the max_position ceiling in the
-    derived shapes covers GLM-5). Return no cases when a targeted model filter
-    selects a non-GLM checkpoint."""
+    are checkpoint-quantization-independent and use only model geometry. On
+    SM90, select the registered BF16 GLM-5 identity to match the supported
+    full-module plan without advertising an NVFP4 artifact. On SM100/103,
+    prefer GLM-5.2-NVFP4 because its longer range covers GLM-5. Return no cases
+    when a targeted model filter selects an unsupported or non-GLM checkpoint."""
     try:
         from collector.sglang.collect_mla_module import get_mla_module_model_specs
     except ModuleNotFoundError:
@@ -77,6 +77,8 @@ def _selected_glm5_models():
     # prefer the longest-context GLM representative so one full/raw sparse sweep
     # covers the shorter GLM-5 range as well.
     paths = {s.model_path for s in get_mla_module_model_specs(attention_type="dsa")}
+    if get_sm_version() not in {100, 103, 120}:
+        return ["zai-org/GLM-5"] if "zai-org/GLM-5" in paths else []
     if "nvidia/GLM-5.2-NVFP4" in paths:
         return ["nvidia/GLM-5.2-NVFP4"]
     if "nvidia/GLM-5-NVFP4" in paths:

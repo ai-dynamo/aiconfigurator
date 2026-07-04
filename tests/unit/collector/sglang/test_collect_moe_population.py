@@ -85,7 +85,7 @@ def _populate_gptoss_cases(
                 resolved_backend
                 or (
                     "marlin"
-                    if sm == 90 and mode in {"int4_wo", "nvfp4"}
+                    if sm == 90 and mode == "int4_wo"
                     else "flashinfer_trtllm"
                     if mode == "nvfp4" and sm in {100, 103}
                     else "flashinfer_mxfp4"
@@ -251,22 +251,12 @@ def test_dsv4_w4a16_population_uses_sm90_fp4_expert_alignment():
     assert blackwell[0][0] == "w4a8_mxfp4_mxfp8"
 
 
-@pytest.mark.parametrize(
-    ("is_gated", "invalid_inter", "valid_inter"),
-    [(True, 96, 64), (False, 64, 128)],
-)
-def test_nvfp4_marlin_population_uses_model_gating_alignment(is_gated, invalid_inter, valid_inter):
-    invalid = _glm5_case("example/nvfp4")
-    invalid.hidden_size = 128
-    invalid.inter_size = invalid_inter
-    invalid.topk = 2
-    invalid.num_experts = 8
-    invalid.sglang_moe_is_gated = is_gated
-    valid = SimpleNamespace(**vars(invalid))
-    valid.inter_size = valid_inter
-
-    assert not _populate_gptoss_cases([invalid], sm_version=90, allowed_mode="nvfp4")
-    assert len(_populate_gptoss_cases([valid], sm_version=90, allowed_mode="nvfp4")) == 1
+def test_sm90_population_excludes_nvfp4_instead_of_using_marlin():
+    assert not _populate_gptoss_cases(
+        [_glm5_case("nvidia/GLM-5.2-NVFP4")],
+        sm_version=90,
+        allowed_mode="nvfp4",
+    )
 
 
 def test_moe_population_deduplicates_equal_persisted_keys_and_rejects_semantic_conflicts():
@@ -349,7 +339,6 @@ def test_gptoss_mxfp4_population_retains_tp_and_ep_buckets(tp, ep):
 @pytest.mark.parametrize(
     ("mode", "sm_version", "expected"),
     [
-        ("nvfp4", 90, "marlin"),
         ("nvfp4", 100, "flashinfer_trtllm"),
         ("nvfp4", 103, "flashinfer_trtllm"),
         ("nvfp4", 120, "flashinfer_cutlass"),
@@ -364,12 +353,27 @@ def test_yaml_backend_map_matches_sglang_0514(mode, sm_version, expected):
     assert get_sglang_moe_backend(SimpleNamespace(sglang_moe_backends={}), mode, sm_version) == expected
 
 
+@pytest.mark.parametrize("mode", ["nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"])
+def test_fp4_modes_reject_marlin_backend(mode):
+    from collector.case_generator import get_sglang_moe_backend
+
+    test_case = SimpleNamespace(sglang_moe_backends={mode: {90: "marlin"}})
+    with pytest.raises(ValueError, match="Marlin is only valid for int4_wo"):
+        get_sglang_moe_backend(test_case, mode, 90)
+
+
+def test_sm90_nvfp4_has_no_backend():
+    from collector.case_generator import get_sglang_moe_backend
+
+    with pytest.raises(ValueError, match="No SGLang MoE backend"):
+        get_sglang_moe_backend(SimpleNamespace(sglang_moe_backends={}), "nvfp4", 90)
+
+
 @pytest.mark.parametrize("persisted", [True, False])
 @pytest.mark.parametrize(
     ("moe_type", "moe_backend", "model_name", "sm_version", "kernel_source"),
     [
         ("int4_wo", "marlin", "moonshotai/Kimi-K2.5", 90, "sglang_marlin_moe"),
-        ("nvfp4", "marlin", "nvidia/GLM-5.2-NVFP4", 90, "sglang_marlin_moe"),
         ("w4a16_mxfp4", "flashinfer_mxfp4", "openai/gpt-oss-120b", 90, "sglang_flashinfer_mxfp4_moe"),
         (
             "w4a8_mxfp4_mxfp8",
@@ -513,8 +517,6 @@ def test_raw_moe_case_cleans_gpu_state_and_fails_closed():
     ("moe_type", "hidden_size", "inter_size", "tp", "is_gated", "error"),
     [
         ("fp8_block", 128, 384, 2, True, "fp8_block.*local_inter_size"),
-        ("nvfp4", 128, 96, 1, True, "NVFP4 Marlin.*64"),
-        ("nvfp4", 128, 64, 1, False, "NVFP4 Marlin.*128"),
     ],
 )
 def test_runtime_rejects_misaligned_quantized_cases(moe_type, hidden_size, inter_size, tp, is_gated, error):
@@ -540,6 +542,33 @@ def test_runtime_rejects_misaligned_quantized_cases(moe_type, hidden_size, inter
             "example/model",
             moe_backend="triton" if moe_type == "fp8_block" else "marlin",
             is_gated=is_gated,
+            perf_filename="moe.csv",
+        )
+
+
+@pytest.mark.parametrize("moe_type", ["nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"])
+def test_runtime_rejects_fp4_modes_on_marlin(moe_type):
+    fake_torch = SimpleNamespace(
+        set_default_device=lambda _device: None,
+        cuda=SimpleNamespace(set_device=lambda _device: None),
+    )
+    run = _load_functions(
+        "run_moe_torch",
+        namespace={"torch": fake_torch, "get_sm_version": lambda: 90},
+    )["run_moe_torch"]
+
+    with pytest.raises(ValueError, match="Marlin is only valid for int4_wo"):
+        run(
+            moe_type,
+            128,
+            128,
+            128,
+            2,
+            8,
+            1,
+            1,
+            "example/model",
+            moe_backend="marlin",
             perf_filename="moe.csv",
         )
 

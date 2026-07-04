@@ -131,6 +131,7 @@ _MODEL_CONFIG_DIR = os.path.join(
     "model_configs",
 )
 _GLM5_DSA_ARCHITECTURE = "GlmMoeDsaForCausalLM"
+_NATIVE_NVFP4_SMS = {100, 103, 120}
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -555,9 +556,10 @@ def _dedup_dsa_consumer_models(model_specs):
 
     The persisted DSA key contains architecture and attention-module GEMM type,
     but not checkpoint path or top-level MoE quantization. GLM BF16 and NVFP4
-    checkpoints therefore share the BF16 DSA key; GLM-5.2 is their canonical
-    full-sweep representative because its 1M context covers the shorter GLM-5
-    range. The block-FP8 checkpoint remains separate because its DSA projections
+    checkpoints therefore share the BF16 DSA key. The caller first removes
+    checkpoints whose native quantization has no valid backend on the target
+    SM, then this function chooses the longest-context remaining candidate.
+    The block-FP8 checkpoint remains separate because its DSA projections
     execute and persist as ``fp8_block``. A targeted model filter still contains
     one checkpoint and is never replaced.
     """
@@ -619,9 +621,11 @@ def _build_module_test_cases(attn_type: str, mode: str):
     if attn_type == "dsa" and _skip_sm120_deepgemm_attention_modules():
         return []
     model_specs = get_mla_module_model_specs(attention_type=attn_type)
+    if get_sm_version() not in _NATIVE_NVFP4_SMS:
+        model_specs = [spec for spec in model_specs if _model_native_gemm_quant(spec.model_path) != "nvfp4"]
     # Canonicalize model paths that map to the same persisted DSA consumer key.
-    # Skip-indexer collection remains non-empty because GLM-5.2 is the
-    # longest-context representative for the shared BF16 GLM key.
+    # This happens after the native-quantization capability filter so an
+    # unsupported checkpoint cannot replace a valid BF16 representative.
     if attn_type == "dsa":
         model_specs = _dedup_dsa_consumer_models(model_specs)
     sweep = get_mla_module_sweep_spec("sglang")
@@ -706,6 +710,8 @@ def _build_wideep_mla_test_cases(mode: str):
     if _skip_sm120_deepgemm_attention_modules():
         return []
     model_specs = get_mla_module_model_specs(attention_type="mla", wideep_mla=True)
+    if get_sm_version() not in _NATIVE_NVFP4_SMS:
+        model_specs = [spec for spec in model_specs if _model_native_gemm_quant(spec.model_path) != "nvfp4"]
     sweep = get_mla_module_sweep_spec("sglang")
     backends = _get_mla_backend_list()
     cases = []
@@ -1051,6 +1057,14 @@ def load_model_runner(
         SGLANG_TEST_NUM_LAYERS: Number of layers to load (default 2).
         SGLANG_LOAD_FORMAT: Weight format (default "dummy").
     """
+    native_quant = _model_native_gemm_quant(model_path)
+    sm_version = get_sm_version()
+    if native_quant == "nvfp4" and sm_version not in _NATIVE_NVFP4_SMS:
+        raise ValueError(
+            f"SGLang has no collector-supported native NVFP4 model-loader backend on SM{sm_version}; "
+            "Marlin is valid only for INT4-WO"
+        )
+
     import random
 
     from sglang.srt.configs.model_config import ModelConfig
@@ -1082,7 +1096,6 @@ def load_model_runner(
     # Use AIC's local model configs to avoid HF downloads while preserving
     # SGLang 0.5.14's native model identity.
     local_model_path = _resolve_local_model_path(model_path)
-    native_quant = _model_native_gemm_quant(model_path)
     load_quantization = {"fp8_block": "fp8", "nvfp4": "modelopt_fp4", None: None}[native_quant]
 
     server_args = ServerArgs(

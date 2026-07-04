@@ -152,6 +152,104 @@ is designed. This reversal does not alter the historical chronology recorded
 in `ATTN-VARIANT-KEY-0514` or `ENGINE-SPEC-V2-ATTENTION`; it supersedes their
 present-tense product status for this branch.
 
+### MoE FP4/INT4 identity reversal (2026-07-04)
+
+The SM90 `NVFP4 -> Marlin` collector path introduced on the divergent
+`c8c00f42` line, independently introduced on the current line by `9a5fe012`,
+and made explicit in YAML by `06227023` is rejected. The framework-internal
+ability to repack an NVFP4 checkpoint into a different weight-only execution
+path is evidence that this is not an NVFP4 measurement; the collector does not
+expose that path as a fallback or supported backend in the stock runtime. Git
+author metadata on those local commits uses the release owner's identity; the
+path was generated during the agent-led 0.5.14 upgrade and was not introduced
+by the earlier B200 work.
+
+The collector contract keeps three precision families distinct:
+
+- `int4_wo` may use Marlin as its weight-only W4A16 backend;
+- `nvfp4` requires a native NVFP4 backend and must fail if it resolves to
+  Marlin; and
+- `w4a16_mxfp4` / `w4a8_mxfp4_mxfp8` require their declared MXFP4 backend and
+  must also fail if they resolve to Marlin.
+
+Before correction, the SM90 getter emitted 113,376 unique cases: 44,955 BF16,
+38,799 FP8-block, 20,493 invalid NVFP4-to-Marlin, 6,051 W4A16-MXFP4, and 3,078
+INT4-WO. All 6,051 SM90 MXFP4 cases already resolve to
+`flashinfer_mxfp4` (GPT-OSS 20B/120B and DeepSeek-V4-Pro); all 3,078 INT4-WO
+cases are Kimi-K2.5 Marlin. The corrected SM90 target is therefore 92,883
+cases with zero NVFP4 rows. Existing H20 rows labelled NVFP4 but sourced from
+`sglang_marlin_moe` are rejected evidence and must not be published or reused.
+Blackwell NVFP4 mappings remain separate and require their native-backend
+hardware validation.
+
+SM90 NVFP4 is absent from the retained plan; it is not an expected-failure
+case. The resolver and runtime errors are defensive contract checks for a
+manually constructed invalid NVFP4/MXFP4-plus-Marlin invocation, not support
+for collecting that invocation.
+
+This section supersedes the present-tense SM90 NVFP4/Marlin claims and counts
+in `MOE-ONE-RUNTIME-TRUTH` and `MOE-BACKEND-ARTIFACT`. Those earlier entries
+remain only as chronology for the rejected snapshot; they do not describe the
+current collector contract.
+
+#### Full-model module-loader consequence
+
+The same audit found a second SM90 path outside the MoE benchmark itself.
+`collect_mla_module.py` loaded GLM-5/5.2 and targeted DeepSeek-V3.1 NVFP4
+checkpoints through `modelopt_fp4` before timing their BF16 attention modules.
+SGLang 0.5.14 selects Marlin as the SM90 FP4 policy before model construction,
+so the setup still enters through an unsupported NVFP4-to-Marlin contract even
+when the timed module has a BF16 key. The two-layer GLM-5.2 dummy override
+excludes those layers' MoE weights, so this record does not claim that its
+timed DSA path executed Marlin or that Marlin changed its measured capacity.
+DeepSeek-V3.1 is the direct execution proof: its NVFP4 exclusions do not cover
+`o_proj`, and the timed MLA forward executes that projection through Marlin.
+
+This is `not_applicable` for the pinned SM90 collector, not an expected
+failure. Before correction, the full SM90 DSA getters emitted 264 context and
+24 generation outer tasks, canonicalizing the BF16 GLM consumer key to
+`nvidia/GLM-5.2-NVFP4`; the skip-indexer getters emitted another 88 context
+and 8 generation tasks for that artifact. The correction filters NVFP4
+checkpoints before operation-local canonicalization, so ordinary GLM DSA uses
+the BF16 `zai-org/GLM-5` artifact and SM90 skip-indexer has no valid GLM-5.2
+artifact. Direct loader calls fail before SGLang initialization. Native
+NVFP4 module paths on SM100/103 remain distinct and must reverse-test with
+unchanged getter sets; SM120 remains separately gated by its module policy.
+
+The canonical six-getter outer-task set changes on SM90 from 404 tasks
+(`06dcaad8...`) to 308 (`74222334...`): 192 old invocations are removed and
+96 BF16-GLM replacements are added. Context and generation stay at 264 and 24
+tasks while replacing 88 and 8 GLM-5.2 invocations respectively; skip-indexer
+changes from 88/8 to 0/0; both WideEP MLA getters remain byte-for-byte equal at
+10 tasks. SM100 and SM103 each remain byte-for-byte equal at 570 tasks with
+canonical hash `6037fbce...`; SM120 remains the same empty module set. These
+hashes cover operation-qualified serialized getter tuples from the pinned
+image, not inner runtime rows.
+
+The old H20 GLM-5.2 module rows were collected with the rejected setup and are
+not publishable. This includes 17,587 full-context, 17,357 frozen
+skip-indexer-context (17,567 in the reconciled diagnostic), and 1,224 rows for
+each generation variant. Unaffected-model rows in those combined files remain
+diagnostic evidence only; a corrected accepted artifact requires a new source
+snapshot, plan fingerprint, and namespace.
+
+The standalone GLM sparse kernels do not load a quantized model and never
+initialize Marlin. Their SM90 selector nevertheless moves to the registered
+BF16 `zai-org/GLM-5` identity so shapes derive from the corrected module
+artifact rather than the rejected GLM-5.2 run. The newly published BF16
+`zai-org/GLM-5.2` artifact is not registered or frozen in this repository and
+is deliberately not added as part of this correction; onboarding it and
+restoring 1M/skip-indexer coverage is a separate artifact effort.
+
+The three sparse getters remain 33 outer tasks on SM90, but all 33 identities
+move from GLM-5.2 (`f8f56c96...`) to BF16 GLM-5 (`544f1938...`). Their static
+inner target changes from 13,328 to 12,100 rows. Together with ordinary DSA
+changing from 17,616/1,224 ideal GLM-5.2 context/generation rows to
+15,744/1,192 BF16 GLM-5 rows and skip-indexer changing from 17,616/1,224 to
+zero, the explicit SM90 GLM scope decreases from 51,008 to 29,036 rows
+(`-21,972`). SM100/103 sparse outer sets remain byte-for-byte equal at 33 tasks
+with hash `f8f56c96...`; this reduction is not copied to native Blackwell.
+
 ### DSV4 context exact historical sets
 
 The H20 static context plan is 20,392 rows per attention kind. The historical

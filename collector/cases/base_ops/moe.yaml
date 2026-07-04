@@ -80,7 +80,7 @@ common_case_values:
       bfloat16: {default: triton}
       fp8_block: {default: triton}
       int4_wo: {90: marlin}
-      nvfp4: {90: marlin, 100: flashinfer_trtllm, 103: flashinfer_trtllm, 120: flashinfer_cutlass}
+      nvfp4: {100: flashinfer_trtllm, 103: flashinfer_trtllm, 120: flashinfer_cutlass}
       w4a16_mxfp4: {90: flashinfer_mxfp4, 100: flashinfer_mxfp4, 103: flashinfer_mxfp4}
       w4a8_mxfp4_mxfp8: {100: flashinfer_mxfp4, 103: flashinfer_mxfp4}
     quantization_modes:
@@ -95,7 +95,7 @@ common_case_values:
     - name: fp8_block
       min_sm: 90
     - name: nvfp4
-      min_sm: 90
+      min_sm: 100
       allowed_model_paths:
       - nvidia/DeepSeek-V3.1-NVFP4
       - nvidia/GLM-5-NVFP4

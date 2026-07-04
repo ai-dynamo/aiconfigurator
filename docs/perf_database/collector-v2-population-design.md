@@ -528,7 +528,13 @@ reject impossible explicit GEMM combinations, but `quantization=None` may still
 auto-detect the artifact's config for a BF16-labelled module case. The getters
 therefore retain distinct paths even when those rows later project to the same
 consumer key. A physical-key collision by itself is not permission to drop a
-path-sensitive invocation.
+path-sensitive invocation. Conversely, a BF16 timed-module label does not make
+an unsupported full-model setup valid: for exact SGLang 0.5.14 on SM90, an
+NVFP4 checkpoint initializes Marlin before the module benchmark. Because
+Marlin is an INT4-WO backend in this collector contract, those checkpoint
+invocations are `not_applicable` and are filtered before canonicalization;
+ordinary GLM DSA uses the remaining BF16 artifact. SM100/103 native NVFP4
+module paths remain separate invocations.
 
 SGLang's inner MLA/DSA module sweep reads the same YAML precision specs and SM
 gates as the population layer. In particular, Ada/Hopper expand `fp8_block`,
