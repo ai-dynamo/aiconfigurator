@@ -76,6 +76,32 @@ prediction) or a guard that raises a classified error citing the framework
 source line, or deletes the note. Do not implement guards from unverified
 claims, and never express these limits in YAML.
 
+## Module boundary: a collector task may only touch collector/
+
+The collector's outward surface is its **data contract**: the perf row schema
+(columns written by `helper.log_perf`), the canonical filenames
+(`registry_types.PerfFile`), and the parquet finalization format. Everything
+downstream — `src/aiconfigurator/sdk/perf_database.py`, the Rust
+`aiconfigurator-core` operators, `tools/support_matrix/`, packaged data under
+`src/aiconfigurator/systems/data/` — consumes that contract.
+
+Rules:
+
+1. A collector task may modify `collector/` and `tests/unit/collector/`.
+   **Nothing else.** Not the SDK, not Rust, not tools, not systems data, not
+   the generator — even when the collector change "obviously needs" a
+   consumer-side change to be useful.
+2. **Changing the data contract requires explicit human approval.** Adding a
+   column, a new perf file, a new key dimension, or renaming anything the SDK
+   parses is a producer+consumer coordinated change. If you discover the need
+   mid-task: STOP, write up the proposal (new dimension, why, which consumers
+   must change), and hand it to the human. Do not implement both sides
+   "while you're at it".
+3. The reverse holds too: SDK/modeling tasks do not reach into `collector/`.
+4. These rule files themselves (`.claude/rules/collector/`) are human-owned
+   policy. Do not edit them as a side effect of a fix task; propose changes
+   instead.
+
 ## Meta rules
 
 1. **Default action for a failing case is NO CHANGE.** Confirm it is recorded
