@@ -165,6 +165,12 @@ class OpInterpConfig:
     sol_fn: Callable[[float, float, float], float]
     #: In-slice interpolation space (see module docstring).
     value_transform: ValueTransform = ValueTransform.RAW
+    #: Curvature is PER-AXIS, not per-table: attention is ~seq^2 along seq but
+    #: ~linear along batch/heads, so sqrt must apply only when blending along
+    #: seq (LOO: global sqrt 9.4% vs seq-only sqrt beats raw's 2.0%; the legacy
+    #: pre-expansion's sqrt_y_value=True encoded the same fact). None = apply
+    #: value_transform on every axis.
+    transform_axis: str | None = None
 
     def __post_init__(self) -> None:
         if len(self.axes) < 2:
@@ -210,6 +216,7 @@ def context_attention_config(sol_fn: Callable[[float, float, float], float]) -> 
         resolver=Grid(),
         sol_fn=sol_fn,
         value_transform=ValueTransform.SQRT,
+        transform_axis="seq_len",  # sqrt linearises seq^2 ONLY along seq; batch/heads are ~linear
     )
 
 

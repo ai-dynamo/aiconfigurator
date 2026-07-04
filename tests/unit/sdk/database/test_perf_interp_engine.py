@@ -145,6 +145,15 @@ def test_grid_sqrt_blend_is_exact_for_quadratic_seq():
     assert lat == pytest.approx(_attn_lat(8, 1536, 2))
 
 
+def test_transform_applies_only_along_its_axis():
+    # batch=3 between 2 and 4 (seq exact): latency is LINEAR in batch, so the
+    # blend must be raw-exact — sqrt (configured for the seq axis) must NOT
+    # distort the batch axis. Curvature is per-axis (LOO: global sqrt 9.4% vs
+    # per-axis 2.0% interior on real data).
+    lat = _lat(perf_interp.query(_attn_cfg(), _attn_table(), 8, 1024, 3))
+    assert lat == pytest.approx(_attn_lat(8, 1024, 3))
+
+
 def test_grid_corner_hole_is_util_hold():
     # (seq=4096, batch=8) sits inside the truncated corner (batch <= 2 there):
     # hold the frontier util, SOL restores the batch scaling.

@@ -319,7 +319,11 @@ def _grid_interior(cfg: OpInterpConfig, node, coords, depth: int):
 
     (_, (lat_lo, p_lo)), (_, (lat_hi, p_hi)) = results
     w = (c - k_lo) / (k_hi - k_lo)
+    # Curvature is per-axis: apply the transform only when blending along the
+    # configured axis (e.g. sqrt on seq); other axes are ~linear -> raw.
     vt = cfg.value_transform
+    if cfg.transform_axis is not None and cfg.axes[depth] != cfg.transform_axis:
+        vt = ValueTransform.RAW
     lat = _from_space(vt, _to_space(vt, lat_lo) + (_to_space(vt, lat_hi) - _to_space(vt, lat_lo)) * w)
     return lat, p_lo + (p_hi - p_lo) * w
 
