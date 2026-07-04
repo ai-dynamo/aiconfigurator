@@ -44,8 +44,10 @@ Resolution order (the whole engine in four steps)
 
 Invariants (deliberately NOT knobs)
 -----------------------------------
-* Coordinates are compared and blended in **log space** (all axes are sizes
-  >= 1, sampled geometrically).
+* Site **distances** are measured in log space (scale-free shape similarity).
+  Bracket **blend weights** use the plain coordinate — curvature is what
+  ``value_transform`` is for (raw is exact for ~linear physics, sqrt for
+  ~seq^2), and a log-space lerp would break that exactness.
 * **Cross-site transfer and extrapolation are always in util space.** A
   neighbouring shape's latency is meaningless at the query shape, but its
   efficiency transfers, and ``SOL(query)`` re-applies the correct scaling.
@@ -180,10 +182,15 @@ class OpInterpConfig:
 
 def gemm_config(sol_fn: Callable[[float, float, float], float]) -> OpInterpConfig:
     """GEMM data[m][n][k]: (n,k) = scattered real shapes, m = swept curve.
-    Near-linear in m -> RAW in-slice; SOL ~ m carries extrapolation."""
+    Near-linear in m -> RAW in-slice; SOL ~ m carries extrapolation.
+
+    max_site_distance = 2.0 octaves joint (n,k) distance (~4x per dimension):
+    util transfers well between comparable shapes (and SOL re-applies the exact
+    m*n*k scaling), but a shape with no collected neighbour within ~4x has no
+    efficiency basis -> structured miss. Tune with the site-holdout LOO."""
     return OpInterpConfig(
         axes=("m", "n", "k"),
-        resolver=ScatteredSites(site_axes=("n", "k"), curve_axis="m"),
+        resolver=ScatteredSites(site_axes=("n", "k"), curve_axis="m", max_site_distance=2.0),
         sol_fn=sol_fn,
     )
 

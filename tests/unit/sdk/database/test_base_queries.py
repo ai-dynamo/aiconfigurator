@@ -77,40 +77,30 @@ def test_query_gemm_exact_match_skips_3d_interpolation(comprehensive_perf_db, mo
     assert math.isclose(float(observed), expected)
 
 
-def test_query_gemm_interpolates_only_on_m_when_nk_match(comprehensive_perf_db, monkeypatch):
-    """GEMM lookup should use 1D interpolation on m when n and k match."""
+def test_query_gemm_interp_on_m_at_collected_nk_is_faithful(comprehensive_perf_db):
+    """A collected (n, k) site answers from its OWN m-curve: with the fixture's
+    linear-in-m latency, the site-curve lerp reproduces the formula exactly.
+
+    (Was a white-box interp_1d/interp_3d spy; perf_interp resolves the site
+    curve internally, so the guarantee we assert is the value, not the helper.)"""
     quant_mode = common.GEMMQuantMode.bfloat16
     m, n, k = 12, 128, 128
-    calls = {}
-
-    def _fail_interp_3d(*args, **kwargs):
-        raise AssertionError("_interp_3d should not be used when n/k match and only m needs interpolation")
-
-    def _spy_interp_1d(x, y, value):
-        calls["x"] = x
-        calls["y"] = y
-        calls["value"] = value
-        return {"latency": 0.1 + value * 0.001 + n * 0.0001 + k * 0.00001, "power": 0.0, "energy": 0.0}
-
-    monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", _fail_interp_3d)
-    monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_1d", _spy_interp_1d)
 
     observed = comprehensive_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SILICON)
     expected = 0.1 + m * 0.001 + n * 0.0001 + k * 0.00001
 
     assert math.isclose(float(observed), expected)
-    assert calls["x"] == [8, 16]
-    assert calls["value"] == m
     assert observed.source == "silicon"
 
 
 def test_query_gemm_hybrid_propagates_plain_interpolation_value_error(comprehensive_perf_db, monkeypatch):
-    """Only the typed interpolation coverage signal may trigger HYBRID fallback."""
+    """Only the typed interpolation coverage signal may trigger HYBRID fallback:
+    a plain ValueError from the resolver (a bug, not a data miss) must propagate."""
 
-    def _broken_interp_3d(*args, **kwargs):
+    def _broken_query(*args, **kwargs):
         raise ValueError("malformed GEMM interpolation input")
 
-    monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", _broken_interp_3d)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_interp.query", _broken_query)
     comprehensive_perf_db.query_gemm.cache_clear()
 
     with pytest.raises(ValueError, match="malformed GEMM interpolation input"):

@@ -26,7 +26,7 @@ import math
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common, interpolation, perf_interp
 from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
@@ -310,7 +310,9 @@ class ContextAttention(Operation):
                 load_context_attention_data(sources), PerfDataFilename.context_attention, primary_path
             )
 
-            cls._extrapolate(cls._data_cache[key])
+            # No load-time grid pre-expansion: queries resolve on the RAW grid via
+            # perf_interp (sqrt-space blend; the truncated large-seq x large-batch
+            # corner is ordinary out-of-range util-hold).
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -504,8 +506,8 @@ class ContextAttention(Operation):
             # Use the real windowed slice when present -- validation shows it beats a
             # window=0 + SOL-ratio reconstruction (the latter is ~25-77% off vs measured
             # windowed data). When the windowed slice is absent or too sparse to
-            # interpolate, interp_3d fails accurately (raises) and HYBRID/EMPIRICAL fall
-            # back to get_empirical's window=0 + SOL derivation.
+            # interpolate, perf_interp fails accurately (raises) and HYBRID/EMPIRICAL
+            # fall back to get_empirical's window=0 + SOL derivation.
             attention_dict = util_empirical.require_data_slice(
                 data_wrapper,
                 fmha_quant_mode,
@@ -514,16 +516,27 @@ class ContextAttention(Operation):
                 head_size,
                 window_size,
             )
-            result = interpolation.interp_3d(
-                n,
-                full_s,
-                b,
-                attention_dict,
-                "cubic",
-                database._extracted_metrics_cache,
+            # Resolve on the raw (n, full_s, batch) grid: sqrt-space blend for the
+            # ~seq^2 curvature; past the staircase frontier (large seq x large
+            # batch, uncollected) the engine holds the boundary util and lets the
+            # SOL carry the growth. Samples are full attention, so the sol_fn is
+            # evaluated at prefix=0 with the slice's own kv-head/window setup.
+            config = perf_interp.context_attention_config(
+                sol_fn=lambda n_v, s_v, b_v: get_sol(
+                    b_v,
+                    s_v,
+                    0,
+                    n_v,
+                    n_v if n_kv_lookup == 0 else n_kv_lookup,
+                    head_size,
+                    window_size,
+                    kvcache_quant_mode,
+                    fmha_quant_mode,
+                )[0]
             )
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            result = perf_interp.query(config, attention_dict, n, full_s, b)
+            latency = interpolation.get_value(result, "latency") * prefix_correction
+            energy = interpolation.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(

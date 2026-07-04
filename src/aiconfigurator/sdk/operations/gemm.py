@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common, interpolation, perf_interp
 from aiconfigurator.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
@@ -206,26 +206,15 @@ class GEMM(Operation):
             compute_scale_loaded = _load(PerfDataFilename.compute_scale, load_compute_scale_data)
             scale_matrix_loaded = _load(PerfDataFilename.scale_matrix, load_scale_matrix_data)
 
-            # Correct + extrapolate the CANONICAL class-cache values directly
+            # Clamp the CANONICAL class-cache values to the SOL floor directly
             # (not via ``database._gemm_data``) so a pre-set test override
             # can't leave the cached wrapper uncorrected — a later DB sharing
-            # the same cache key would otherwise bind unextrapolated data.
+            # the same cache key would otherwise bind unclamped data.
             #
-            # The ordering (clamp THEN extrapolate) matches the legacy
-            # ``PerfDatabase.__init__`` flow exactly: ``_correct_data()``
-            # ran before the GEMM extrapolation block. Newly-extrapolated
-            # rows are derived from already-clamped real measurements so
-            # they sit at or above the SOL bound by construction.
-            # ``PerfDatabase._correct_data`` re-clamps via the backward-compat
-            # forward when called from ``__init__``, but standalone callers
-            # of ``GEMM.load_data`` get the legacy single-pass semantics.
-            cls._correct_sol(database, gemm_loaded)
-            cls._extrapolate_gemm_data(gemm_loaded)
-            # Re-clamp after extrapolation: interpolated/extrapolated grid
-            # points can land below the SOL bound. The legacy init path ran
-            # ``_correct_data()`` a second time which caught these; replicate
-            # that here so standalone ``load_data`` callers get the same
-            # physically-consistent floor.
+            # No load-time grid pre-expansion: queries resolve on the RAW table
+            # via perf_interp (site curves + util-hold + nearest-site transfer),
+            # so rectangularizing the scattered (n, k) shapes is both redundant
+            # and harmful (it mangles asymmetric dense-m sweeps).
             cls._correct_sol(database, gemm_loaded)
 
             # All three loads + correction + extrapolation succeeded — commit
@@ -540,20 +529,12 @@ class GEMM(Operation):
 
             gemm_data = gemm_data_wrapper[table_quant_mode]
 
-            if m in gemm_data and n in gemm_data[m] and k in gemm_data[m][n]:
-                result = gemm_data[m][n][k]
-                return _to_performance_result(result)
-
-            m_values = sorted(m_key for m_key in gemm_data if n in gemm_data[m_key] and k in gemm_data[m_key][n])
-            if len(m_values) >= 2:
-                m_left, m_right = interpolation.nearest_1d_point_helper(m, m_values, inner_only=False)
-                result = interpolation.interp_1d(
-                    [m_left, m_right], [gemm_data[m_left][n][k], gemm_data[m_right][n][k]], m
-                )
-                return _to_performance_result(result)
-
+            # Resolve on the raw table: exact hit -> the collected (n, k) site's
+            # own m-curve -> nearest-site util transfer -> util-hold beyond the
+            # sweep. See sdk/perf_interp/config.py for the design.
+            config = perf_interp.gemm_config(sol_fn=lambda m_v, n_v, k_v: get_sol(m_v, n_v, k_v, quant_mode)[0])
             try:
-                result = interpolation.interp_3d(m, n, k, gemm_data, "cubic", database._extracted_metrics_cache)
+                result = perf_interp.query(config, gemm_data, m, n, k)
             except interpolation.InterpolationDataNotAvailableError as exc:
                 raise PerfDataNotAvailableError(
                     "GEMM perf data not available for requested shape. "

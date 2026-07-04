@@ -2,16 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """Perf-table interpolation/extrapolation engine (v2).
 
-Currently ships the declarative per-op config schema (:mod:`config`); the shared
-resolver engine and the leave-one-out harness land next. See ``config.py`` for
-the full design.
+``config`` declares the per-op records; ``engine.query(cfg, data, x, y, z)``
+resolves a query. See ``config.py`` for the full design.
 """
 
 from aiconfigurator.sdk.perf_interp.config import (
+    OP_CONFIG_FACTORIES,
     Grid,
     OpInterpConfig,
     ScatteredSites,
     ValueTransform,
+    context_attention_config,
+    gemm_config,
+    generation_attention_config,
 )
+from aiconfigurator.sdk.perf_interp.engine import query
 
-__all__ = ["Grid", "OpInterpConfig", "ScatteredSites", "ValueTransform"]
+__all__ = [
+    "OP_CONFIG_FACTORIES",
+    "Grid",
+    "OpInterpConfig",
+    "ScatteredSites",
+    "ValueTransform",
+    "context_attention_config",
+    "gemm_config",
+    "generation_attention_config",
+    "query",
+]
