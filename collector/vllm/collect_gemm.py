@@ -3,7 +3,7 @@
 
 # vLLM 0.24.0 owns block-FP8 dispatch on Blackwell: its dynamic wrapper uses
 # FlashInfer for small token counts and DeepGEMM for larger ones. Keep every
-# aligned M/N/K shape observable instead of hiding a presumed M-divisibility
+# grid M/N/K shape observable instead of hiding a presumed M-divisibility
 # restriction in population logic.
 
 """vLLM GEMM collector for CUDA backends.
@@ -11,12 +11,11 @@
 Builds vLLM RowParallelLinear layers with synthetic weights to benchmark BF16,
 FP8, FP8 block, and FP4-style paths where available. Shared GEMM shapes come
 from `case_generator.py`; this file handles vLLM config contexts, distributed setup,
-quantized-weight preparation, and backend-specific skips.
+quantized-weight preparation, and selected-kernel reporting.
 """
 
 __compat__ = "vllm==0.24.0"
 
-import os
 from types import SimpleNamespace
 
 import torch
@@ -63,11 +62,6 @@ def get_gemm_test_cases():
     if sm in BLACKWELL_SMS:
         gemm_list += ["nvfp4"]
 
-    requested_gemm_types = os.environ.get("AIC_COLLECT_GEMM_TYPES")
-    if requested_gemm_types:
-        requested = {item.strip() for item in requested_gemm_types.split(",") if item.strip()}
-        gemm_list = [gemm_type for gemm_type in gemm_list if gemm_type in requested]
-
     test_cases = []
 
     for gemm_common_testcase in get_gemm_case_specs():
@@ -75,16 +69,6 @@ def get_gemm_test_cases():
         n = gemm_common_testcase.n
         k = gemm_common_testcase.k
         for gemm_type in gemm_list:
-            if gemm_type in ("nvfp4", "fp8_block") and (n < 128 or k < 128):
-                continue
-            if gemm_type == "nvfp4" and ((n % 16) != 0 or (k % 16) != 0):
-                continue
-            if gemm_type == "fp8_block":
-                block_n, block_k = FP8_BLOCK_SHAPE
-                # Block-wise kernels expect dimensions that align with the block.
-                if (n % block_n) != 0 or (k % block_k) != 0:
-                    continue
-
             test_cases.append([gemm_type, x, n, k])
 
     return test_cases
