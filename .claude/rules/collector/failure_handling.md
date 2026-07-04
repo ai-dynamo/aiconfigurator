@@ -28,8 +28,12 @@ case failed
 ├─ Is it recorded & classified in the failure log?  → yes → DONE (default path)
 ├─ Does it HANG or kill the node?                   → denylist.yaml entry (dated + reason)
 ├─ Whole (op × backend) never debugged?             → registry OpEntry unverified=True
+├─ Not validated on THIS SM only?                   → registry OpEntry unverified_sms=(sm,)
 ├─ Physically impossible on this hardware?          → capabilities.yaml positive floor
 │    (dtype doesn't exist below SM X — NOT "this framework version lacks a kernel")
+├─ Out of memory?                                   → treat as unclassified until it
+│    reproduces on a clean GPU; if real, the collector's generation-time memory
+│    filter may exclude it (see layer_permissions.md — the one sanctioned filter)
 └─ Proven collector-code bug?                       → fix the code; never fix via skip;
                                                       re-check the dispatch/skip rule
 ```

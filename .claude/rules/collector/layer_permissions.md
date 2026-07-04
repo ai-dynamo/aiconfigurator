@@ -20,8 +20,8 @@ result     = perf rows  +  classified failure records   (failure is DATA, not a 
 | `cases/base_ops/*.yaml` | sweep density/ranges; axis-level `min_sm` on quant/precision modes | per-model special cases; shape exclusion rules |
 | `cases/models/*_cases.yaml` | model structural shapes, correlated tuples, artifact/quant policy, op activation (`cases: all`) | selectors, match rules, a second generator recipe |
 | `cases/capabilities.yaml` | positive dtype/op → min-SM floors (hardware facts only) | negative "drop" rules; shape axes; framework-version conditions; per-backend nesting |
-| `<backend>/registry.py` | version routing (`VersionRoute`); `unverified=True` maturity marker (op × backend) | any shape-level information |
-| `collect_*.py` collector code | **dispatch**: pick kernel path by SM/version, record `kernel_source`; runtime probe → **raise a classified exception** | silent `continue`/skip of a case; case filtering; patching code so one shape passes |
+| `<backend>/registry.py` | version routing (`VersionRoute`); maturity markers `unverified=True` (op × backend) and `unverified_sms=(...)` (op × backend × SM) | any shape-level information |
+| `collect_*.py` collector code | **dispatch**: pick kernel path by SM/version, record `kernel_source`; runtime probe → **raise a classified exception**; **memory-feasibility filter** (see below) | silent `continue`/skip of a queued case; any other case filtering; patching code so one shape passes |
 | `cases/denylist.yaml` | cases that HANG or kill the node (dated, with reason) | ordinary crashes — those belong to the failure log |
 | executor (`collect.py`) | — mechanism is off-limits during case-fixing tasks | changing checkpoint/case-ID/failure-classification logic to make a case pass |
 | failure records (`errors_*.json`, summary) | append-only observation | feeding failures back into ANY declaration layer as new rules |
@@ -39,6 +39,25 @@ A collector has exactly two legal responses to a queued case: **execute it, or
 raise**. "Whether it runs" is decided only outside the collector, in three
 auditable places: capability floors (generation time), registry `unverified`
 markers, and the hang denylist.
+
+## The one sanctioned in-collector filter: memory feasibility
+
+Device memory is a permanent hardware fact, but its expression needs
+op-specific arithmetic (KV cache, weights, activation peaks) that only the
+collector knows. Therefore a collector MAY filter cases on memory
+feasibility, under exactly these conditions:
+
+1. **Generation time only** — inside `get_*_test_cases()`, so the case is
+   never queued. Never a runtime `continue`.
+2. **Predicate = size vs capacity, nothing else** — preferred:
+   `estimated_footprint(shape) > device_total_memory * safety_factor` with
+   memory queried live (`torch.cuda.get_device_properties`); acceptable
+   fallback: a shape metric against a per-SM/per-capacity constant. NEVER
+   framework-version or model-name conditions — that is exception smuggling.
+3. **Drops are counted, never silent** — log one line:
+   `<op>: dropped N/M cases (memory budget, device=<GB>)`.
+
+Anything beyond this pattern goes back to the normal rule: run it or raise.
 
 ## Meta rules
 

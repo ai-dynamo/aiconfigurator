@@ -927,16 +927,20 @@ def collect_ops(
             if case_plan is not None and not case_plan.has_op(collection["type"]):
                 logger.info(f"Skipping {collection['name']}.{collection['type']} — not in collector v2 case plan")
                 continue
-            if collection.get("unverified"):
+            unverified_here = collection.get("unverified") or (
+                sm_version is not None and sm_version in (collection.get("unverified_sms") or ())
+            )
+            if unverified_here:
+                scope = "this backend" if collection.get("unverified") else f"SM{sm_version}"
                 logger.warning(
                     f"Skipping {collection['name']}.{collection['type']} — registry marks it unverified "
-                    "for this backend; flip the OpEntry flag once the collector is debugged"
+                    f"on {scope}; remove the OpEntry marker once the collector is debugged there"
                 )
                 all_errors.append(
                     {
                         "module": f"{collection['name']}.{collection['type']}",
                         "error_type": "UnverifiedCollector",
-                        "error_message": "registry marks this op unverified; collection skipped",
+                        "error_message": f"registry marks this op unverified on {scope}; collection skipped",
                         "classification": "unverified_skipped",
                     }
                 )

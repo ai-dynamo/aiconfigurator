@@ -241,9 +241,19 @@ class TestBuildCollections:
     def test_output_dict_shape(self):
         colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.17.0", ops=["gemm"])
         c = colls[0]
-        assert set(c.keys()) == {"name", "type", "module", "get_func", "run_func", "perf_filename", "unverified"}
+        assert set(c.keys()) == {
+            "name",
+            "type",
+            "module",
+            "get_func",
+            "run_func",
+            "perf_filename",
+            "unverified",
+            "unverified_sms",
+        }
         assert c["name"] == "vllm"
         assert c["unverified"] is False
+        assert c["unverified_sms"] == ()
 
     def test_perf_filename_propagated(self):
         colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.17.0", ops=["gemm"])
