@@ -196,7 +196,7 @@ def run_gdn_context_benchmark(
             # Release the packed convolution input before allocating Q/K/V for
             # the scan; the largest full-collection points otherwise hold both
             # large representations at once.
-            del conv_input, conv_state
+            del run_conv1d, conv_input, conv_state
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -286,7 +286,7 @@ def run_gdn_context_benchmark(
                     power_stats=results["power_stats"],
                 )
 
-            del q, k, v, g, beta, gdn_state
+            del run_gdn_scan, q, k, v, g, beta, gdn_state
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -387,6 +387,10 @@ def run_gdn_generation_benchmark(
                 power_stats=results["power_stats"],
             )
 
+        del run_conv1d_update, conv_input, conv_state
+        gc.collect()
+        torch.cuda.empty_cache()
+
         # vLLM 0.24.0's packed recurrent kernel launches grid-y as
         # batch_size * num_v_heads; CUDA limits grid-y to 65,535. Keep the
         # valid convolution measurement above, then surface the unsupported
@@ -460,7 +464,7 @@ def run_gdn_generation_benchmark(
                 power_stats=results["power_stats"],
             )
 
-        del conv_input, conv_state, mixed_qkv, a, b, gdn_state, out
+        del run_gdn_update, mixed_qkv, a, b, gdn_state, out
         gc.collect()
         torch.cuda.empty_cache()
 
