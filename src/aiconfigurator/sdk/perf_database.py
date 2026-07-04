@@ -18,8 +18,7 @@ import yaml
 
 from aiconfigurator.sdk import common, perf_interp
 from aiconfigurator.sdk.common import PerfDataFilename, parse_support_matrix_version
-from aiconfigurator.sdk.errors import PerfDataNotAvailableError
-from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
+from aiconfigurator.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
 from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.system_spec import SystemSpec
 

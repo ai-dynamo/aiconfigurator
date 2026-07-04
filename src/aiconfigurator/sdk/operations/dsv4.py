@@ -38,8 +38,8 @@ from typing import TYPE_CHECKING, ClassVar, Optional
 
 import numpy as np
 
-from aiconfigurator.sdk import common, interpolation, perf_interp
-from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+from aiconfigurator.sdk import common, perf_interp
+from aiconfigurator.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 
@@ -461,8 +461,8 @@ class DeepSeekV4MHCModule(Operation):
                     sol_fn=lambda t: get_sol(t, op_name)[0],
                 )
                 result = perf_interp.query(config, mhc_dict, num_tokens)
-                latency = interpolation.get_value(result, "latency")
-                energy = interpolation.get_value(result, "energy")
+                latency = perf_interp.get_value(result, "latency")
+                energy = perf_interp.get_value(result, "energy")
                 return database._interp_pr(latency, energy=energy)
 
             # Silicon tables only store "pre" and "post" rows. For op=="both"
@@ -744,9 +744,9 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         )
         try:
             result = perf_interp.query(config, per_tp_dict, past_kv, isl, bs)
-        except interpolation.InterpolationDataNotAvailableError:
+        except InterpolationDataNotAvailableError:
             return None
-        latency = interpolation.get_value(result, "latency")
+        latency = perf_interp.get_value(result, "latency")
         return float(latency) if np.isfinite(latency) else None
 
     # ------------------------------------------------------------------
@@ -928,13 +928,13 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             )
             try:
                 result = perf_interp.query(config, cr_dict, prefix, s, b)
-            except interpolation.InterpolationDataNotAvailableError as exc:
+            except InterpolationDataNotAvailableError as exc:
                 raise PerfDataNotAvailableError(
                     f"DeepSeek-V4 prefix-resolved context attention module data not available for "
                     f"{b=}, {s=}, {prefix=}, {num_heads=}, {compress_ratio=}."
                 ) from exc
-            latency = float(interpolation.get_value(result, "latency"))
-            energy = float(interpolation.get_value(result, "energy"))
+            latency = float(perf_interp.get_value(result, "latency"))
+            energy = float(perf_interp.get_value(result, "energy"))
 
             # SCHEME A: for CSA (compress_ratio==4) ONLY, subtract the measured
             # topK DELTA = flat_ms - top_last_ms (degenerate collector topK vs
@@ -1299,8 +1299,8 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 sol_fn=lambda b_v, s_v: get_sol(b_v, s_v)[0],
             )
             result = perf_interp.query(config, deepseek_v4_dict, b, s)
-            latency = float(interpolation.get_value(result, "latency"))
-            energy = float(interpolation.get_value(result, "energy"))
+            latency = float(perf_interp.get_value(result, "latency"))
+            energy = float(perf_interp.get_value(result, "energy"))
 
             # SCHEME A: subtract the topK DELTA for CSA (cr==4) only. Decode is
             # q_len=1 with past_kv = s_total - 1.
@@ -1522,8 +1522,8 @@ class DeepSeekV4MegaMoEModule(Operation):
             sol_fn=lambda t: float(t),
         )
         result = perf_interp.query(config, token_dict, num_tokens)
-        latency = float(interpolation.get_value(result, "latency"))
-        energy = float(interpolation.get_value(result, "energy"))
+        latency = float(perf_interp.get_value(result, "latency"))
+        energy = float(perf_interp.get_value(result, "energy"))
         return PerformanceResult(latency, energy=energy)
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:

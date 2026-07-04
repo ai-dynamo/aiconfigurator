@@ -47,8 +47,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from aiconfigurator.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
-from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
+from aiconfigurator.sdk.errors import (
+    EmpiricalNotImplementedError,
+    InterpolationDataNotAvailableError,
+    PerfDataNotAvailableError,
+)
 
 Coords = tuple[float, ...]
 

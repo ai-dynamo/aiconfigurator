@@ -13,7 +13,7 @@ import math
 import pytest
 
 from aiconfigurator.sdk import perf_interp
-from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
+from aiconfigurator.sdk.errors import InterpolationDataNotAvailableError
 
 pytestmark = pytest.mark.unit
 
@@ -256,3 +256,18 @@ def test_one_axis_exact_and_interp():
 def test_one_axis_util_hold_beyond_range():
     lat = _lat(perf_interp.query(_curve_cfg(), _curve_table(), 1 << 20))
     assert lat == pytest.approx(_curve_lat(1 << 20))
+
+
+def test_data_unavailable_error_subclasses_value_error():
+    """Existing ``except ValueError`` callers must keep working."""
+    assert issubclass(InterpolationDataNotAvailableError, ValueError)
+
+
+def test_get_value_dict_and_legacy_float_leaves():
+    leaf = {"latency": 1.5, "power": 2.0}
+    assert perf_interp.get_value(leaf) == 1.5
+    assert perf_interp.get_value(leaf, "power") == 2.0
+    assert perf_interp.get_value(leaf, "energy") == 0.0  # absent -> 0
+    # Legacy format: raw float is latency, other metrics are 0
+    assert perf_interp.get_value(0.7) == 0.7
+    assert perf_interp.get_value(0.7, "power") == 0.0

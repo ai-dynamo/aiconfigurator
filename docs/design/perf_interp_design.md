@@ -221,9 +221,10 @@ sub-kernels" comment). The migration is a bug fix, not a risk trade:
 
 With it gone the scipy interp family (`interp_1d/2d/3d`, griddata wrappers,
 nearest-point helpers, the `_extracted_metrics_cache` plumbing) lost its last
-consumer and was deleted; `interpolation.py` now holds only the structured-miss
-error class and the `get_value` leaf accessor, and **scipy is no longer a
-dependency of the wheel**.
+consumer and `interpolation.py` was deleted outright: the structured-miss
+error class lives in `sdk/errors.py` (next to its siblings), the `get_value`
+leaf accessor lives in `perf_interp`, and **scipy is no longer a dependency
+of the wheel**.
 
 ### 5.7 Contracts deliberately preserved
 
@@ -241,9 +242,10 @@ test-locked, and survive unchanged at op level:
 
 ## 6. Current state and remaining work
 
-- **Every query path resolves through `perf_interp`.** The scipy interp
-  family is deleted (see 5.6) and `interpolation.py` is down to the error
-  class + `get_value`; scipy is out of the dependency list.
+- **Every query path resolves through `perf_interp`.** `interpolation.py`
+  is deleted (see 5.6): `InterpolationDataNotAvailableError` moved to
+  `sdk/errors.py`, `get_value` to `perf_interp`; scipy is out of the
+  dependency list.
 - The DeepEP `sms` axis has no scaling story (only sm=20 is collected);
   off-grid `sms` snaps to the nearest collected value until data exists.
 - Frontier-tail accuracy (min-side extrapolation) is the main quality

@@ -23,7 +23,7 @@ Conventions:
 - A leaf is a float (legacy: latency only) or ``{"latency", "power", "energy"}``.
   Energy is carried as average power (= energy/latency, smooth and bounded),
   blended with the same weights as latency, then re-multiplied.
-- Misses raise ``interpolation.InterpolationDataNotAvailableError`` (a
+- Misses raise ``errors.InterpolationDataNotAvailableError`` (a
   ValueError), the same structured error the legacy path used, so op-level
   ``PerfDataNotAvailableError`` wrapping keeps working unchanged.
 """
@@ -35,7 +35,7 @@ import math
 import statistics
 from collections import OrderedDict
 
-from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
+from aiconfigurator.sdk.errors import InterpolationDataNotAvailableError
 from aiconfigurator.sdk.perf_interp.config import OpInterpConfig, ScatteredSites, ValueTransform
 
 
@@ -89,6 +89,14 @@ def _miss(cfg: OpInterpConfig, coords, reason: str) -> InterpolationDataNotAvail
 
 
 _MISSING = object()
+
+
+def get_value(data_value, metric: str = "latency"):
+    """Extract a metric from a query result / table leaf (dict or legacy float)."""
+    if isinstance(data_value, dict):
+        return data_value.get(metric, 0.0)
+    # Legacy format: raw float is latency, power is 0
+    return data_value if metric == "latency" else 0.0
 
 
 def query(cfg: OpInterpConfig, data: dict, *coords):

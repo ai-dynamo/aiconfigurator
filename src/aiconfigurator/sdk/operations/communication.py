@@ -31,7 +31,7 @@ from collections import defaultdict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation, perf_interp
+from aiconfigurator.sdk import common, perf_interp
 from aiconfigurator.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
@@ -219,8 +219,8 @@ class CustomAllReduce(Operation):
                 sol_fn=lambda sz: get_sol(quant_mode, effective_tp, sz)[0],
             )
             result = perf_interp.query(config, comm_dict, size)
-            lat = interpolation.get_value(result, "latency")
-            energy = interpolation.get_value(result, "energy")
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
 
             if tp_size > database.system_spec["node"]["num_gpus_per_node"]:
                 base_bw = database._get_p2p_bandwidth(database.system_spec["node"]["num_gpus_per_node"])
@@ -481,8 +481,8 @@ class NCCL(Operation):
                 sol_fn=lambda sz: get_sol(dtype, effective_num_gpus, operation, sz)[0],
             )
             result = perf_interp.query(config, nccl_dict, message_size)
-            lat = interpolation.get_value(result, "latency")
-            energy = interpolation.get_value(result, "energy")
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
 
             if num_gpus > max_num_gpus:  # need to do some correction
                 logger.debug(f"nccl num_gpus {num_gpus} > max_num_gpus {max_num_gpus}, need to do some correction")

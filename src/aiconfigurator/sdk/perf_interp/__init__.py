@@ -18,7 +18,7 @@ from aiconfigurator.sdk.perf_interp.config import (
     generation_attention_config,
     generation_grid_config,
 )
-from aiconfigurator.sdk.perf_interp.engine import clear_caches, query
+from aiconfigurator.sdk.perf_interp.engine import clear_caches, get_value, query
 
 __all__ = [
     "OP_CONFIG_FACTORIES",
@@ -32,5 +32,6 @@ __all__ = [
     "gemm_config",
     "generation_attention_config",
     "generation_grid_config",
+    "get_value",
     "query",
 ]

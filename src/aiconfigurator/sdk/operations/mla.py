@@ -36,7 +36,7 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation, perf_interp
+from aiconfigurator.sdk import common, perf_interp
 from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
@@ -224,8 +224,8 @@ class ContextMLA(Operation):
                 sol_fn=lambda n_v, s_v, b_v: get_sol(b_v, s_v, 0, n_v, kvcache_quant_mode, fmha_quant_mode)[0]
             )
             result = perf_interp.query(config, mla_dict, num_heads, full_s, b)
-            latency = interpolation.get_value(result, "latency") * prefix_correction
-            energy = interpolation.get_value(result, "energy") * prefix_correction
+            latency = perf_interp.get_value(result, "latency") * prefix_correction
+            energy = perf_interp.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -404,8 +404,8 @@ class GenerationMLA(Operation):
                 sol_fn=lambda n_v, b_v, s_v: get_sol(b_v, s_v, n_v, kvcache_quant_mode)[0]
             )
             result = perf_interp.query(config, mla_dict, num_heads, b, s)
-            latency = interpolation.get_value(result, "latency")
-            energy = interpolation.get_value(result, "energy")
+            latency = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -577,8 +577,8 @@ class MLABmm(Operation):
                 sol_fn=lambda t: get_sol(t, num_heads, quant_mode, if_pre)[0],
             )
             result = perf_interp.query(config, mla_bmm_dict, num_tokens)
-            lat = interpolation.get_value(result, "latency")
-            energy = interpolation.get_value(result, "energy")
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(lat, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -802,8 +802,8 @@ class MLAModule(Operation):
                 sol_fn=lambda n_v, s_v, b_v: get_sol(b_v, s_v, 0, n_v, kvcache_quant_mode, fmha_quant_mode)[0]
             )
             result = perf_interp.query(config, mla_dict, num_heads, full_s, b)
-            latency = interpolation.get_value(result, "latency") * prefix_correction
-            energy = interpolation.get_value(result, "energy") * prefix_correction
+            latency = perf_interp.get_value(result, "latency") * prefix_correction
+            energy = perf_interp.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -917,8 +917,8 @@ class MLAModule(Operation):
                 sol_fn=lambda n_v, b_v, s_v: get_sol(b_v, s_v, n_v, kv_cache_dtype)[0]
             )
             result = perf_interp.query(config, mla_dict, num_heads, b, s)
-            latency = interpolation.get_value(result, "latency")
-            energy = interpolation.get_value(result, "energy")
+            latency = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -1196,8 +1196,8 @@ class WideEPGenerationMLA(Operation):
                 sol_fn=lambda n_v, b_v, s_v: get_sol(b_v, s_v, 128 // n_v, kvcache_quant_mode, fmha_quant_mode)[0]
             )
             result = perf_interp.query(config, mla_dict, num_heads, b, s)
-            latency = interpolation.get_value(result, "latency")
-            energy = interpolation.get_value(result, "energy")
+            latency = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -1467,8 +1467,8 @@ class WideEPContextMLA(Operation):
                 sol_fn=lambda n_v, s_v, b_v: get_sol(b_v, s_v, 0, 128 // n_v, kvcache_quant_mode, fmha_quant_mode)[0]
             )
             result = perf_interp.query(config, mla_dict, num_heads, full_s, b)
-            latency = interpolation.get_value(result, "latency") * prefix_correction
-            energy = interpolation.get_value(result, "energy") * prefix_correction
+            latency = perf_interp.get_value(result, "latency") * prefix_correction
+            energy = perf_interp.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(

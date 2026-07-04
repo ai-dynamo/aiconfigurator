@@ -24,8 +24,12 @@ from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 
-from aiconfigurator.sdk import common, interpolation, perf_interp
-from aiconfigurator.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
+from aiconfigurator.sdk import common, perf_interp
+from aiconfigurator.sdk.errors import (
+    EmpiricalNotImplementedError,
+    InterpolationDataNotAvailableError,
+    PerfDataNotAvailableError,
+)
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -514,7 +518,7 @@ class GEMM(Operation):
             config = perf_interp.gemm_config(sol_fn=lambda m_v, n_v, k_v: get_sol(m_v, n_v, k_v, quant_mode)[0])
             try:
                 result = perf_interp.query(config, gemm_data, m, n, k)
-            except interpolation.InterpolationDataNotAvailableError as exc:
+            except InterpolationDataNotAvailableError as exc:
                 raise PerfDataNotAvailableError(
                     "GEMM perf data not available for requested shape. "
                     f"system='{database.system}', backend='{database.backend}', version='{database.version}', "
@@ -608,8 +612,8 @@ class GEMM(Operation):
             )
             result = perf_interp.query(config, table, m_c, k_c)
             interpolated = database._interp_pr(
-                interpolation.get_value(result, "latency"),
-                energy=interpolation.get_value(result, "energy"),
+                perf_interp.get_value(result, "latency"),
+                energy=perf_interp.get_value(result, "energy"),
             )
             # compute_scale is a quantization-overhead DELTA: beyond the grid it
             # is deliberately held FLAT at the clamped boundary (legacy contract).
@@ -700,8 +704,8 @@ class GEMM(Operation):
             )
             result = perf_interp.query(config, table, m_c, k_c)
             interpolated = database._interp_pr(
-                interpolation.get_value(result, "latency"),
-                energy=interpolation.get_value(result, "energy"),
+                perf_interp.get_value(result, "latency"),
+                energy=perf_interp.get_value(result, "energy"),
             )
             if m_c == int(m) and k_c == int(k):
                 return interpolated

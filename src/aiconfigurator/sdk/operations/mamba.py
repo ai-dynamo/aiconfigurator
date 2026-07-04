@@ -31,7 +31,8 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation, perf_interp
+from aiconfigurator.sdk import common, perf_interp
+from aiconfigurator.sdk.errors import InterpolationDataNotAvailableError
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -212,11 +213,11 @@ class Mamba2Kernel(Operation):
             )
             try:
                 result = perf_interp.query(config, table, batch_size, seq_len)
-            except (interpolation.InterpolationDataNotAvailableError, KeyError, ValueError):
+            except (InterpolationDataNotAvailableError, KeyError, ValueError):
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             return database._interp_pr(
-                interpolation.get_value(result, "latency"),
-                energy=interpolation.get_value(result, "energy"),
+                perf_interp.get_value(result, "latency"),
+                energy=perf_interp.get_value(result, "energy"),
             )
         else:
             # Normalize to a flat {batch: entry} curve first (legacy tables nest
@@ -239,10 +240,10 @@ class Mamba2Kernel(Operation):
             )
             try:
                 result = perf_interp.query(config, curve, batch_size)
-            except (interpolation.InterpolationDataNotAvailableError, KeyError, ValueError):
+            except (InterpolationDataNotAvailableError, KeyError, ValueError):
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            lat = interpolation.get_value(result, "latency")
-            energy = interpolation.get_value(result, "energy")
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(lat, energy=energy)
 
     # ------------------------------------------------------------------
@@ -448,11 +449,11 @@ class GDNKernel(Operation):
             )
             try:
                 result = perf_interp.query(config, table, batch_size, seq_len)
-            except (interpolation.InterpolationDataNotAvailableError, KeyError, ValueError):
+            except (InterpolationDataNotAvailableError, KeyError, ValueError):
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             return database._interp_pr(
-                interpolation.get_value(result, "latency"),
-                energy=interpolation.get_value(result, "energy"),
+                perf_interp.get_value(result, "latency"),
+                energy=perf_interp.get_value(result, "energy"),
             )
         else:
             # See mamba2: normalize legacy nesting to {batch: entry}, then a
@@ -474,10 +475,10 @@ class GDNKernel(Operation):
             )
             try:
                 result = perf_interp.query(config, curve, batch_size)
-            except (interpolation.InterpolationDataNotAvailableError, KeyError, ValueError):
+            except (InterpolationDataNotAvailableError, KeyError, ValueError):
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            lat = interpolation.get_value(result, "latency")
-            energy = interpolation.get_value(result, "energy")
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(lat, energy=energy)
 
     # ------------------------------------------------------------------

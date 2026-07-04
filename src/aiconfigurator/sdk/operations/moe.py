@@ -46,7 +46,7 @@ from collections import defaultdict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation, perf_interp
+from aiconfigurator.sdk import common, perf_interp
 from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
@@ -674,8 +674,8 @@ class MoE(Operation):
                         )[0],
                     )
                     result = perf_interp.query(config, moe_dict, query_tokens)
-                    lat = interpolation.get_value(result, "latency")
-                    energy = interpolation.get_value(result, "energy")
+                    lat = perf_interp.get_value(result, "latency")
+                    energy = perf_interp.get_value(result, "energy")
                     return database._interp_pr(lat, energy=energy)
 
                 if database.backend == common.BackendName.sglang.value:
@@ -1009,8 +1009,8 @@ class MoEDispatch(Operation):
                 axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=lambda t: float(t)
             )
             result = perf_interp.query(config, data, num_tokens)
-            lat = interpolation.get_value(result, "latency")
-            energy = interpolation.get_value(result, "energy")
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
 
     @classmethod
@@ -1054,8 +1054,8 @@ class MoEDispatch(Operation):
                     axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=lambda t: float(t)
                 )
                 result = perf_interp.query(config, data, num_tokens)
-                lat = interpolation.get_value(result, "latency")
-                energy = interpolation.get_value(result, "energy")
+                lat = perf_interp.get_value(result, "latency")
+                energy = perf_interp.get_value(result, "energy")
             else:
                 data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
                 # 2-axis grid (sms, tokens). Only sm=20 is collected today, so an
@@ -1069,8 +1069,8 @@ class MoEDispatch(Operation):
                     sol_fn=lambda _sm, t: float(t),
                 )
                 result = perf_interp.query(config, data, sms, num_tokens)
-                lat = interpolation.get_value(result, "latency")
-                energy = interpolation.get_value(result, "energy")
+                lat = perf_interp.get_value(result, "latency")
+                energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
 
     # ------------------------------------------------------------------
@@ -1796,8 +1796,8 @@ class TrtLLMWideEPMoE(Operation):
                 )[0],
             )
             result = perf_interp.query(config, moe_dict, num_tokens)
-            lat = interpolation.get_value(result, "latency")
-            energy = interpolation.get_value(result, "energy")
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
 
             return database._interp_pr(lat, energy=energy)
 
@@ -2258,8 +2258,8 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 sol_fn=lambda t: get_sol(t, hidden_size, topk, num_experts, moe_ep_size, quant_mode, node_num)[0],
             )
             result = perf_interp.query(config, alltoall_dict, num_tokens)
-            lat = interpolation.get_value(result, "latency")
-            energy = interpolation.get_value(result, "energy")
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
 
             return database._interp_pr(lat, energy=energy)
 

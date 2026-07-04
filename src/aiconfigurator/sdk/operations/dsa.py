@@ -31,8 +31,8 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation, perf_interp
-from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+from aiconfigurator.sdk import common, perf_interp
+from aiconfigurator.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -660,12 +660,12 @@ class ContextDSAModule(Operation):
                         sol_fn=lambda n_v, s_v, b_v: get_sol(b_v, s_v, 0, n_v, kvcache_quant_mode, fmha_quant_mode)[0],
                     )
                     result = perf_interp.query(config, dsa_dict, num_heads, s, b)
-                latency = interpolation.get_value(result, "latency")
-                energy = interpolation.get_value(result, "energy")
-            except interpolation.InterpolationDataNotAvailableError as exc:
+                latency = perf_interp.get_value(result, "latency")
+                energy = perf_interp.get_value(result, "energy")
+            except InterpolationDataNotAvailableError as exc:
                 raise missing_context_dsa_error() from exc
             return database._interp_pr(latency, energy=energy)
-        except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError) as e:
+        except (PerfDataNotAvailableError, InterpolationDataNotAvailableError) as e:
             if database_mode == common.DatabaseMode.HYBRID:
                 logger.debug(
                     f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
@@ -1315,12 +1315,12 @@ class GenerationDSAModule(Operation):
                     sol_fn=lambda n_v, b_v, s_v: get_sol(b_v, s_v, n_v, kv_cache_dtype)[0]
                 )
                 result = perf_interp.query(config, dsa_dict, num_heads, b, s)
-                latency = interpolation.get_value(result, "latency")
-                energy = interpolation.get_value(result, "energy")
-            except interpolation.InterpolationDataNotAvailableError as exc:
+                latency = perf_interp.get_value(result, "latency")
+                energy = perf_interp.get_value(result, "energy")
+            except InterpolationDataNotAvailableError as exc:
                 raise missing_generation_dsa_error() from exc
             return database._interp_pr(latency, energy=energy)
-        except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError) as e:
+        except (PerfDataNotAvailableError, InterpolationDataNotAvailableError) as e:
             if database_mode == common.DatabaseMode.HYBRID:
                 logger.debug(
                     f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "

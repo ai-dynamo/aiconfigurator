@@ -25,7 +25,7 @@ import math
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation, perf_interp
+from aiconfigurator.sdk import common, perf_interp
 from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
@@ -484,8 +484,8 @@ class ContextAttention(Operation):
                 )[0]
             )
             result = perf_interp.query(config, attention_dict, n, full_s, b)
-            latency = interpolation.get_value(result, "latency") * prefix_correction
-            energy = interpolation.get_value(result, "energy") * prefix_correction
+            latency = perf_interp.get_value(result, "latency") * prefix_correction
+            energy = perf_interp.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -858,8 +858,8 @@ class GenerationAttention(Operation):
             energy_sum = 0.0
             for s_i in s_samples:
                 r = perf_interp.query(config, attention_dict, n, b, s_i)
-                latency_sum += interpolation.get_value(r, "latency")
-                energy_sum += interpolation.get_value(r, "energy")
+                latency_sum += perf_interp.get_value(r, "latency")
+                energy_sum += perf_interp.get_value(r, "energy")
 
             latency = latency_sum / sample_cnt
             energy = energy_sum / sample_cnt
@@ -1067,8 +1067,8 @@ class EncoderAttention(Operation):
                 sol_fn=lambda n_v, s_v, b_v: get_sol(b_v, s_v, n_v, head_size, fmha_quant_mode)[0]
             )
             result = perf_interp.query(config, attention_dict, n, s, b)
-            latency = interpolation.get_value(result, "latency")
-            energy = interpolation.get_value(result, "energy")
+            latency = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(

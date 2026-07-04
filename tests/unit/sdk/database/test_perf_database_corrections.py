@@ -4,28 +4,9 @@
 
 import pytest
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
 
 pytestmark = pytest.mark.unit
-
-
-class TestInterpolationModule:
-    """The scipy interp family was migrated to ``sdk.perf_interp`` and deleted;
-    what remains here is the structured-miss error contract and the leaf
-    accessor shared by all query paths."""
-
-    def test_data_unavailable_errors_subclass_value_error(self):
-        """Existing ``except ValueError`` callers must keep working."""
-        assert issubclass(interpolation.InterpolationDataNotAvailableError, ValueError)
-
-    def test_get_value_dict_and_legacy_float_leaves(self):
-        leaf = {"latency": 1.5, "power": 2.0}
-        assert interpolation.get_value(leaf) == 1.5
-        assert interpolation.get_value(leaf, "power") == 2.0
-        assert interpolation.get_value(leaf, "energy") == 0.0  # absent -> 0
-        # Legacy format: raw float is latency, other metrics are 0
-        assert interpolation.get_value(0.7) == 0.7
-        assert interpolation.get_value(0.7, "power") == 0.0
 
 
 class TestCorrectData:
