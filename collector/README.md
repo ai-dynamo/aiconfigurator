@@ -10,6 +10,13 @@ configs with Dynamo + trtllm 1.0.0rc4 worker.
 If you want to go through the process, you can try belowing commands. However, you need to prepare the env by yourself such as installing a specific trtllm version.
 This process is not well verified, you need to debug sometimes.
 
+For a framework-version or GPU-platform upgrade, follow the
+[Collector Upgrade Playbook](../docs/perf_database/collector-upgrade-playbook.md).
+The repo-tracked [`aic-auto-collect`](../.agents/skills/aic-auto-collect/SKILL.md)
+skill applies that workflow during long, resumable collection runs.
+SGLang 0.5.14 Hopper/Blackwell follow-up work must also consult the
+[platform alignment ledger](../docs/perf_database/sglang-0.5.14-hopper-blackwell-ledger.md).
+
 # Preparation
 Before collecting the data, make sure you own the whole node and no interfierence happens.
 Next, please enable persistent-mode and lock frequency of the node. Make sure the cooling system of the node is working well.

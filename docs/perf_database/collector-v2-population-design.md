@@ -113,6 +113,239 @@ a later selector can distinguish two equivalent recipe representations, the
 getter must choose a documented canonical representative that remains
 selectable; standalone MLA uses the smallest TP for this reason.
 
+## Separate coverage, pruning, quarantine, and observed failure
+
+Collector V2 defaults to attempting a generated case. A failed measurement is
+evidence about one exact invocation; it is not, by itself, a reason to remove
+the shape from future plans. Keep these four states distinct:
+
+1. **Out of scope** is a release coverage decision, such as collecting only
+   TP1/2/4/8. It does not claim that TP16/32 is unsupported. Record the omitted
+   axis and count as plan policy rather than as a kernel exception.
+2. **Not applicable** means no valid measurement exists by definition. Examples
+   include mathematically invalid TP/EP shards, an artifact/quantization
+   mismatch, a framework operation absent from the pinned runtime, or distinct
+   invocations that the current database key cannot represent safely. Prune
+   these cases during population, or fail population when ambiguity would be
+   hidden.
+3. **Known unsafe** means an exact invocation has repeatedly poisoned the CUDA
+   context, aborted its process, or caused enough deterministic fatal churn to
+   make a full run unsafe. Preserve the case identity, reason, failing evidence,
+   and nearest successful controls even when execution is quarantined.
+4. **Attempted** covers every other generated case. Persist either a valid
+   measurement or an explicit failed/expected-failed checkpoint result. Do not
+   manufacture a row or silently remove the case to make completion appear
+   green.
+
+`expected-failed` is an outcome of an attempted case, not a fifth population
+state. Its exact failure contract must exist in the decision catalog before the
+run and name the permitted error class/signature. A matching failure records
+`expected-failed`; a success records `passed` and makes the old expectation a
+stale contract to review. Never relabel an unexpected failure retroactively in
+the same checkpoint. A framework version, backend, GPU path, benchmark
+contract, or decision-catalog change requires a new fingerprint and namespace.
+
+These categories are a decision contract, not a requirement to introduce a
+new class hierarchy or generic rule engine. The first implementation may emit
+them through one canonical plan manifest while reusing existing structured
+selectors and checkpoints.
+
+Ordinary runtime errors, isolated OOMs, low-priority TP sizes, and failures that
+may change with a different backend or framework release remain attempted by
+default. The parallel runner records the failed task and replaces a worker
+after fatal CUDA errors or process exits; artifact validators must reject
+unexplained missing rows or partial output.
+
+A compatibility or safety rule must describe the invocation that actually
+failed:
+
+```text
+framework + exact version + GPU/SM + model/artifact + quantization
++ resolved backend/kernel + phase + TP/EP + shape
+```
+
+A bare rule such as `TP >= 16` is not equivalent to that identity. If the
+framework selects CUTLASS on one SM and TRT-LLM on another, those are different
+invocations even when model and TP match. Stable model mathematics may be
+shared across frameworks and platforms; kernel alignment, launch, and resource
+limits are scoped to the framework/version/SM/backend path that established
+them.
+
+Do not automatically carry a known-unsafe or expected-failure classification
+to a new framework version, backend selection, or GPU path. Regenerate the raw
+plan, probe the new selector, and attempt representative failing boundaries and
+nearby successes before retaining the classification. Keep raw, out-of-scope,
+not-applicable, quarantined, attempted, passed, and failed counts separately so
+that a filtered point never disappears from review.
+
+## Simplified ownership model
+
+Collector V2 currently consumes the same YAML through both the case planner and
+operation generators, then may remove a case again in a framework getter, an SM
+exception, or an operation's inner loop. This is a migration state, not a
+license to encode the same fact in every layer. Use the following ownership
+contract for new work and migrate existing rules toward it without changing
+case IDs first:
+
+```text
+model facts + release coverage
+    -> raw physical case
+    -> exact framework invocation resolver
+    -> exact safety quarantine
+    -> execution and per-point outcome
+    -> one central artifact acceptance gate
+```
+
+| Owner | May decide | Must not decide |
+| --- | --- | --- |
+| Base/model YAML | Stable model and artifact facts, correlated dimensions, shared workload axes, and explicit release coverage | A transient kernel failure, one framework's backend workaround, or a capacity observation from one GPU |
+| Population engine | Convert stable mathematical, model/artifact, and database-key facts into a raw invocation candidate or an explicit not-applicable decision | Framework runtime capability, backend failure history, or a silent drop with no decision record |
+| Framework getter/resolver | Convert each raw candidate into one exact invocation or an explicit pinned-runtime not-applicable decision, including resolved backend/kernel and framework-local structural constraints | Shared model truth, another framework's support, a silent `continue`, or a historical failure table used only to make a run green |
+| Exception/quarantine catalog | One evidence-backed, exactly scoped known-unsafe decision, plus a pre-run expected-failure signature over an attempted case | A second owner for not-applicable, generic TP/EP removal, failure-rate acceptance, retroactive relabeling, or an unversioned copy of another platform's exception |
+| Runtime collector | Execute the resolved invocation, fail loudly on invariant or persistence errors, and report every inner point | Silently `continue` after an unexpected error or change backend to avoid a failure |
+| Checkpoint and plan manifest | Preserve the complete decision/outcome set and bind it to the runtime and plan identity | Infer success from process exit alone or reuse state across an identity mismatch |
+| Artifact validator | Decide whether the complete result is publishable | Manufacture missing rows, accept unexplained gaps, or reinterpret rows from an older snapshot |
+
+Do not add another selector language or a generic compatibility framework while
+migrating. Use existing structured named-field rules. Treat `indices`,
+`ranges`, string `contains`, and exact generated case IDs as diagnostic tools,
+not durable release policy: ordering and case-string changes can silently alter
+their meaning.
+
+Keep one source of truth for each decision. A plan-time predicate may have a
+matching runtime assertion, but both must evaluate the same narrowly named
+invariant; do not maintain two independent lists. Extract a small pure
+predicate only when the same rule is genuinely consumed in both places. Do not
+introduce a broad helper abstraction for a single filter.
+
+Capacity is a runtime property of a concrete GPU product, not just an SM. An SM
+exception file can represent an architecture capability, but it cannot prove
+that H100 and H200, or B200 and GB200, share a memory boundary. Derive capacity
+from the live runtime where possible; otherwise scope and label the observation
+to the measured product rather than promoting it to an SM-wide rule.
+
+## Central acceptance invariants
+
+The default-attempt policy is safe only when incomplete output cannot look
+complete. Before removing broad pre-execution filters, Collector core must
+enforce these invariants:
+
+1. Unexpected failed tasks remain in the final checkpoint even after resume.
+2. Any unresolved unexpected failure keeps CSV staging data for diagnosis,
+   prevents parquet finalization, and makes the command exit nonzero.
+3. Expected-failed tasks are accepted only through an exact reviewed contract;
+   the observed error class/signature must match, and a failure percentage is
+   never an acceptance rule.
+4. A checkpoint fingerprint binds the framework image digest, package version
+   and source revision; collector code/config manifest including base/model
+   YAML; GPU product and SM; model/full-plan scope; decision-catalog digest;
+   benchmark contract; and canonical expanded leaf invocation IDs. A mismatch
+   fails closed instead of silently reusing prior work.
+5. A persistence failure cannot mark a task done. Task IDs, output keys,
+   duplicate checks, and written rows must reconcile before finalization.
+6. Grouped collectors such as MoE, DSV4, GDN, mHC, and MLA-module report
+   outcomes for every inner point. An outer task cannot be green while hiding
+   unexpected inner failures.
+
+Maintain append-only attempt history and one terminal status per leaf under one
+fingerprint. An unexpected failure is resolved only by a successful retry under
+that same fingerprint, or by fresh execution in a new decision-manifest and
+checkpoint namespace after an exact failure contract was approved. In the
+second path, the new observed error must match the pre-existing contract; the
+old failure is never reused as its own approval evidence. Use the checkpoint as
+the outcome source of truth, the plan manifest as the decision source of truth,
+error logs as diagnostic detail, and validators as the publication gate. Do not
+create another independent failure ledger.
+
+## AI filter-change gate
+
+An AI agent must not add, remove, widen, or relocate a case rule before meeting
+the evidence requirements for its classification.
+
+Every change requires:
+
+1. the exact framework/version, GPU product/SM, operation, model/artifact,
+   quantization, phase, resolved backend/kernel when one exists, TP/EP, and
+   shape in scope;
+2. one population classification and the current rule owner with its complete
+   framework/platform blast radius;
+3. canonical before/after set diffs, counts, and hashes for out-of-scope,
+   not-applicable, quarantined, and attempted decisions; benchmark invocation
+   IDs; scheduler task IDs; persisted physical keys; and expected-failure
+   contract IDs/signatures;
+4. reverse checks for every untouched framework/platform consuming a changed
+   shared input;
+5. checkpoint and existing artifact compatibility, including the new
+   fingerprint/namespace requirement; and
+6. an alignment-ledger entry naming the introducing/dropping commit or exact
+   uncommitted snapshot when the scoped project maintains such a ledger.
+
+Additional evidence depends on the classification:
+
+- **Out of scope:** require an explicit user or release-owner coverage decision
+  and the omitted axis/set. No runtime failure is required and the decision
+  must not be described as unsupported.
+- **Not applicable:** require mathematical, model/artifact, authoritative
+  framework-source, or database-schema proof. Probe a selector or runtime leaf
+  only when one exists and is relevant.
+- **Known unsafe or attempted with an expected-failure contract:** require
+  framework selector/source evidence, clean-GPU reproduction, exact error
+  class/signature, post-failure process/GPU state, and nearest same-family
+  successes. The population classification remains attempted.
+- **Attempted:** require no exception rule; retain and report the observed
+  outcome.
+
+If the applicable evidence is unavailable, stop at diagnosis and leave
+execution policy unchanged. In particular, an AI agent must not:
+
+- change a shared base/model axis to fix one framework or backend;
+- encode one failure as a broad `TP >=`, `SM >=`, model-family, dtype, or OOM
+  exclusion;
+- copy a skip between Hopper, datacenter Blackwell, RTX Blackwell, Ada, or
+  between frameworks without independent selector and runtime evidence;
+- weaken coverage, repetitions, graph boundaries, or failure accounting to
+  make a run green;
+- change the backend away from the pinned framework's production selector;
+- add a private kernel patch, process-per-shape workaround, or retry loop
+  without explicit user approval;
+- use a failure percentage as an artifact acceptance threshold under any
+  approval; percentages are investigation signals only;
+- resume across a plan/runtime fingerprint mismatch, relabel old measurements,
+  or call a structurally complete artifact valid before kernel-path validation;
+  or
+- modify another framework, SDK schema, consumer lookup, or data publication
+  as an incidental fix for a scoped collector failure.
+
+## Future migration order
+
+This section describes follow-up Collector-core work; the current
+Collector-pruning scope does not yet implement the generic checkpoint or
+finalization changes below. Until the corresponding acceptance prerequisite is
+implemented for an operation, do not relax its broad filters merely because
+this design defaults to attempted execution.
+
+Simplify without a flag-day schema rewrite:
+
+1. Add the central acceptance gate, plan/outcome manifest, and checkpoint
+   fingerprint with zero case-plan delta for operations that already have
+   complete per-leaf accounting. Mark grouped operations non-certifiable until
+   their inner accounting exists.
+2. Inventory and classify existing filters mechanically, preserving task IDs.
+3. Migrate one-case/one-measurement operations such as GEMM and attention
+   before grouped inner-sweep collectors.
+4. Add inner-point accounting to grouped collectors before relaxing their
+   skips or exception handling. Treat MoE as grouped while a task carries a
+   token list or can emit/skip multiple rows; apply the same rule to DSV4, GDN,
+   mHC, MLA-module, and similar collectors.
+5. Re-evaluate ordinary and version-sensitive exclusions one exact framework,
+   version, backend, and platform at a time. For failure-derived compatibility
+   policy, retain only proven not-applicable cases, exact known-unsafe
+   quarantines, and pre-run expected-failure contracts. Keep separately
+   reviewed out-of-scope release coverage unchanged.
+6. Keep already accepted artifacts bound to their original source manifest and
+   plan. A later broader plan creates a new artifact contract rather than
+   retroactively making the old artifact incomplete.
+
 ## Safe deduplication rules
 
 1. Never change a downstream consumer to make a Collector case appear useful.
@@ -379,6 +612,9 @@ When adding or changing a model profile:
    inherit unrelated default profiles.
 7. Keep a synthetic default point when an unchanged consumer still queries it,
    even if the current model metadata would choose a different value.
+8. Classify every omitted case as out-of-scope, not-applicable, or known-unsafe;
+   record exact invocation scope for the latter and do not inherit it across a
+   version, backend, or GPU-path change without a fresh boundary probe.
 
 ## Validation
 

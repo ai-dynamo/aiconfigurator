@@ -5,6 +5,13 @@ description: Upgrade or run one AIC/aiconfigurator GPU performance collector for
 
 # AIC Auto Collect
 
+## Start with the project playbook
+
+Resolve the repository root with `git rev-parse --show-toplevel`, then read
+[`docs/perf_database/collector-upgrade-playbook.md`](../../../docs/perf_database/collector-upgrade-playbook.md)
+before changing collector code or launching GPU work. Treat it as the canonical
+project workflow; use this skill to execute it and keep a concise run record.
+
 ## Goal
 
 Upgrade or run one AIC GPU performance collector for one exact framework
@@ -122,6 +129,99 @@ artifact/model coverage; dtype counts; and SM exception counts. Verify every
 required model produces executable cases. Preserve checkpoint-native
 quantization identities when they change the invoked kernel.
 
+## Separate population from failure policy
+
+Before adding or retaining a case filter, read the coverage/failure policy in
+[`collector-v2-population-design.md`](../../../docs/perf_database/collector-v2-population-design.md).
+Classify the case as exactly one of:
+
+- `out_of_scope`: intentionally omitted coverage, without claiming the point
+  is unsupported;
+- `not_applicable`: no valid measurement exists because of model mathematics,
+  artifact/quantization identity, pinned-runtime capability, or an
+  unrepresentable database key;
+- `known_unsafe`: the exact invocation repeatedly poisons the CUDA context,
+  aborts its process, or creates systemic fatal-worker churn;
+- `attempted`: execute it and retain either a valid row or an explicit failure.
+
+Treat `expected_failed` as a pre-approved outcome of `attempted`, not a
+population state. Define its exact error class/signature before execution. Do
+not retroactively relabel an unexpected failure; a later success records
+`passed` and makes the expectation stale.
+
+Prune only proven `not_applicable` cases; fail population instead when pruning
+would hide conflicting invocations behind one database key. Keep coverage
+policy separate from compatibility. Preserve the identity and evidence for
+quarantined `known_unsafe` cases. Leave ordinary runtime errors, isolated OOMs,
+low-priority TP sizes, and backend/version-sensitive failures in `attempted` by
+default; worker recycling and checkpoint accounting are designed to contain
+them.
+
+Never encode a backend failure as a bare TP, EP, model, or SM exclusion. Bind a
+safety or compatibility rule to the exact framework version, GPU/SM,
+model/artifact, quantization, resolved backend/kernel, phase, TP/EP, and shape
+that proved it. A framework upgrade, backend-selection change, or new GPU path
+invalidates that classification until the failing boundary and nearby success
+are reprobed. Record raw, out-of-scope, not-applicable, quarantined, attempted,
+passed, and failed counts separately.
+
+### Gate every filter change
+
+Before editing any filter, record its exact invocation scope, classification,
+current rule owner, and full framework/platform blast radius. Produce canonical
+before/after set diffs, counts, and hashes for every decision class, benchmark
+invocation IDs, task IDs, physical keys, and expected-failure contract
+IDs/signatures. Reverse-test untouched consumers of a shared input and state
+whether checkpoint or artifact identity changes. Add the corresponding
+platform-ledger entry first when that project maintains one.
+
+Apply classification-specific evidence:
+
+- for `out_of_scope`, require an explicit user/release-owner coverage decision;
+- for `not_applicable`, require mathematical, artifact, authoritative source,
+  or database-schema proof; and
+- for `known_unsafe` or `attempted` with a pre-run expected-failure contract,
+  require selector/source evidence, clean-GPU reproduction, an exact error
+  signature, post-failure state, and nearest successful controls; keep the
+  population classification as `attempted`.
+
+If any evidence is missing, stop at diagnosis. Do not:
+
+- modify a shared base/model axis for one framework/backend failure;
+- add broad TP/EP/SM/model/dtype/OOM skips or copy another platform's rule;
+- weaken coverage, benchmark boundaries, repetitions, or failure accounting;
+- switch away from the pinned framework's production backend;
+- add a private kernel, retry loop, or process-per-shape workaround without
+  explicit user approval;
+- use a failure percentage as an artifact acceptance rule; percentages are
+  investigation signals only;
+- reuse a checkpoint across framework/version/SM/plan identity changes or
+  relabel measurements from an older source snapshot; or
+- change another framework, SDK/consumer schema, or published data as an
+  incidental fix.
+
+Keep one decision owner: stable facts and release coverage in base/model YAML;
+mathematical/artifact/key not-applicability in population; pinned-runtime
+not-applicability and exact invocation resolution in the framework getter;
+known-unsafe quarantine and pre-run expected-failure contracts in the decision
+catalog; per-point outcomes in the runtime/checkpoint; and publication
+acceptance in the validator. Every non-attempted case must emit a decision
+record; no getter may silently drop it. Do not add another selector language or
+use index/range/string/case-ID selectors as durable policy.
+
+Before relaxing broad filters, require one central acceptance gate: unresolved
+unexpected failures must remain visible after resume, prevent parquet
+finalization, and cause a nonzero command exit. Bind checkpoints to exact
+framework image digest, package version/source, collector code/config manifest,
+GPU product/SM, model/full-plan scope, decision-catalog digest, benchmark
+contract, and canonical expanded leaf-invocation fingerprint. Maintain
+append-only attempts plus one terminal leaf status; resolve an unexpected
+failure only by a successful same-fingerprint retry or by fresh execution under
+a new manifest/namespace after an exact contract was approved; the new error
+must match that contract. Ensure grouped collectors report every inner point
+and persistence failures cannot mark tasks done. Treat MoE as grouped while one
+task can emit multiple token rows.
+
 ## Validate progressively
 
 For each operation:
@@ -169,6 +269,7 @@ For every failure group, record:
 - op, model/artifact, dtype, SM, TP/EP, and shape;
 - exact exception and selected framework path;
 - GPU/container state;
+- same-family successful controls at the nearest boundary, dtype, and TP/EP;
 - classification and evidence;
 - action and rerun result.
 
@@ -186,8 +287,59 @@ Use these thresholds as heuristics:
 
 Do not hide failures with broad skips, retries, generic OOM labels, reduced
 coverage, synthetic rows, or weakened benchmarks. Keep predicates narrow and
-source-backed. Record a failed result before resetting a worker after a fatal
-CUDA error.
+source-backed, and prove that they preserve the recorded successful controls.
+Record a failed result before resetting a worker after a fatal CUDA error.
+
+## Preserve cross-platform change reversals
+
+When Hopper and Blackwell work are stacked, keep one tracked, append-only
+alignment ledger. Before changing execution code, identify the affected ledger
+entry. Record every add, revert, and reapply chronologically, even if the final
+Git history will be squashed. Each transition must include:
+
+- the introducing/dropping commit or exact uncommitted snapshot identity;
+- why the previous state was rejected;
+- the exact failing cases and nearest successful controls;
+- the target-platform result and reverse untouched-platform result;
+- the getter/key-count delta and selected framework execution path.
+
+Record a design reversal even when review catches it before code is changed.
+Label the superseded state as `proposal only / not executed`, so a later agent
+does not mistake it for a reverted product snapshot or measured artifact. If
+the reversal changes benchmark boundaries (for example, one graph around all
+chunks versus one graph per chunk), record what the latency does and does not
+represent and require a bounded comparison before accepting new data.
+
+Do not infer causality from a branch name or ancestor relationship. Diff the
+affected execution path, registry wiring, base-op YAML, model-case YAML, cached
+model config, and other shared inputs actually consumed by the plan. Then label
+the transition as `introduced by Blackwell work`,
+`inherited / not introduced by Blackwell`, or `unknown`. Record a zero-line
+execution-path diff as explicit negative evidence, but never use it to ignore
+an input-plan delta. If a prior implementation predates the pinned framework
+or lacks attributable
+hardware artifacts, call the next attempt new diagnostic behavior rather than
+a restore or reapply.
+
+When one persisted latency aggregates multiple chunks, record the benchmark
+boundary (one graph around the sequence, one graph per chunk, or eager), what
+setup is excluded, and whether power is meaningful. Do not mix graph and eager
+chunk measurements inside one row. Either require one declared mode and fail
+closed, or persist separate, reviewable contracts. A chunked-vs-unchunked
+oracle proves value parity and quantifies boundary cost; it does not prove
+end-to-end serving equivalence.
+
+Never replace an earlier failure with only the final green result. A later
+platform pass updates the same entry so it can distinguish a real hardware
+difference from a repeated integration mistake. After any execution-code
+change, freeze a new read-only source manifest before accepting more GPU rows;
+do not relabel data produced by an older snapshot.
+
+Bind status words such as `current`, `pending`, `unmeasured`, and `still fails`
+to a named snapshot, commit, or dated checkpoint. When a proposal is later
+implemented or measured, append the product identity and result to the same
+ledger entry and qualify the earlier state as historical; do not leave a
+superseded present-tense status for a later platform agent to misread.
 
 ## Accept artifacts fail-closed
 
@@ -201,6 +353,18 @@ For every completed op, verify:
   modeled zero, and valid power when collected;
 - no malformed rows, unintended duplicates, or partial writes;
 - container exit and final GPU state.
+
+Treat row/count/schema validators as structural evidence only unless they also
+bind the framework selector and executed backend/kernel path. A complete CSV
+produced by a disputed backend remains unaccepted and must be labeled with the
+candidate snapshot and pending selector audit rather than called green.
+Treat optional-argument presence as part of that selector contract: an all-zero
+tensor is not equivalent to an omitted optional when the kernel dispatches on
+`None`/presence. Test the actual leaf-kernel branch, not only output shapes and
+metadata values.
+Also bind physical score/logit stride and framework page/block rounding; equal
+logical lengths with different padding can benchmark a different memory-access
+contract even when values and row counts agree.
 
 Preserve separate stage summaries. Disclose accepted capacity failures exactly;
 do not call a staged run globally green when one stage exited nonzero.
