@@ -41,6 +41,7 @@ import sys
 import tempfile
 import traceback
 from collections.abc import Iterable
+from fractions import Fraction
 from importlib.metadata import version as get_version
 
 import torch
@@ -549,6 +550,181 @@ def _tp_load_model_patch(tp_size: int):
         ModelRunner.load_model = orig_load
 
 
+def _effective_prefill_chunk_size(model_runner) -> int:
+    """Return the query-token limit enforced by this collector path."""
+    runtime_chunk = _runtime_chunk_size(model_runner)
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    smem_optin = int(properties.shared_memory_per_block_optin)
+    sched_meta_max_queries = (smem_optin // 4 - 1) // 5
+    if sched_meta_max_queries <= 0:
+        raise RuntimeError(f"invalid sched-meta query limit from shared_memory_per_block_optin={smem_optin}")
+    return min(runtime_chunk, sched_meta_max_queries)
+
+
+def _derive_csa_context_pool_cap(
+    model_runner,
+    shapes: Iterable[tuple[int, int, int]],
+) -> tuple[int, int, int]:
+    """Derive a DSV4 CSA-context pool cap while reserving its logits output."""
+    from sglang.srt.environ import envs
+    from sglang.srt.model_executor.pool_configurator import (
+        DSV4PoolConfigurator,
+        create_memory_pool_configurator,
+    )
+
+    sm_major, sm_minor = torch.cuda.get_device_capability(model_runner.device)
+    sm_version = sm_major * 10 + sm_minor
+    if sm_version == 120:
+        # Exact SGLang 0.5.14 forces a Torch logits leaf on SM120.  That leaf
+        # materializes additional FP32 gather/BMM intermediates, so the
+        # DeepGEMM output-workspace formula below is not its memory contract.
+        raise RuntimeError(
+            "DSV4 CSA context on SM120 uses the Torch indexer and needs a separately "
+            "validated workspace policy; the SM90/100/103 DeepGEMM formula is disabled"
+        )
+    if sm_version not in {90, 100, 103}:
+        raise RuntimeError(
+            "DSV4 CSA context pool derivation supports the DeepGEMM indexer on "
+            f"SM90/100/103; SM{sm_version} needs a separately validated workspace policy"
+        )
+
+    alternate_indexers = {
+        "tilelang": envs.SGLANG_OPT_USE_TILELANG_INDEXER.get(),
+        "aiter": envs.SGLANG_OPT_USE_AITER_INDEXER.get(),
+        "torch": envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.get(),
+    }
+    selected_alternates = [name for name, enabled in alternate_indexers.items() if enabled]
+    if selected_alternates:
+        raise RuntimeError(
+            "DSV4 CSA context pool derivation is not validated for indexer leaf/leaves " + ",".join(selected_alternates)
+        )
+    if bool(getattr(model_runner.server_args, "enable_deepseek_v4_fp4_indexer", False)):
+        raise RuntimeError("DSV4 CSA context pool derivation is not validated for the FP4 indexer")
+
+    configurator = create_memory_pool_configurator(model_runner)
+    if not isinstance(configurator, DSV4PoolConfigurator):
+        raise TypeError(f"expected SGLang 0.5.14 DSV4PoolConfigurator, got {type(configurator).__name__}")
+
+    page_size = int(model_runner.server_args.page_size)
+    if page_size != _DSV4_CUDA_PAGE_SIZE:
+        raise RuntimeError(f"expected DSV4 CUDA page_size={_DSV4_CUDA_PAGE_SIZE}, got {page_size}")
+    window_size = int(model_runner.model_config.window_size)
+    if window_size <= 0:
+        raise RuntimeError(f"invalid DSV4 SWA window_size={window_size}")
+
+    effective_chunk = _effective_prefill_chunk_size(model_runner)
+    chunk_eligible_shapes = [
+        (int(batch_size), int(seq_len), int(prefix_len))
+        for batch_size, seq_len, prefix_len in shapes
+        if required_prefill_extend_tokens(int(batch_size), int(seq_len)) <= effective_chunk
+    ]
+    if not chunk_eligible_shapes:
+        raise RuntimeError(f"DSV4 CSA context pool derivation has no shape within effective_chunk={effective_chunk}")
+
+    profiled_bytes = int(model_runner._profile_available_bytes(model_runner.pre_model_load_memory))
+    profiled_config = configurator.calculate_pool_sizes(profiled_bytes, page_size)
+    compress_ratio = ATTN_KIND_TO_COMPRESS_RATIO["csa"]
+    if page_size % compress_ratio != 0:
+        raise RuntimeError(f"page_size={page_size} is not divisible by CSA ratio={compress_ratio}")
+    c4_page_size = page_size // compress_ratio
+    # sgl-deep-gemm 0.1.3 aligns the FP8 logits stride to split_kv=256 on
+    # architecture major 9/10 (csrc/apis/attention.hpp).
+    logits_alignment = 256
+    fp32_bytes = 4
+    eligible_shapes = []
+    source_capacity_excluded = 0
+    workspace_shape = None
+    workspace_bytes = 0
+    required_full_tokens = 0
+    required_swa_tokens = 0
+    for batch_size, seq_len, prefix_len in chunk_eligible_shapes:
+        full_tokens = required_kv_alloc_tokens(
+            batch_size,
+            seq_len,
+            prefix_len,
+            page_size,
+            is_prefill=True,
+        )
+        swa_tokens = required_swa_kv_alloc_tokens(
+            batch_size,
+            seq_len,
+            prefix_len,
+            page_size,
+            window_size,
+            is_prefill=True,
+        )
+        if (
+            full_tokens > profiled_config.full_max_total_num_tokens
+            or swa_tokens > profiled_config.swa_max_total_num_tokens
+        ):
+            source_capacity_excluded += 1
+            continue
+
+        raw_c4_width = ((prefix_len + seq_len + page_size - 1) // page_size) * c4_page_size
+        logits_stride = ((raw_c4_width + logits_alignment - 1) // logits_alignment) * logits_alignment
+        shape_workspace_bytes = batch_size * seq_len * logits_stride * fp32_bytes
+        if shape_workspace_bytes > workspace_bytes:
+            workspace_shape = (batch_size, seq_len, prefix_len)
+            workspace_bytes = shape_workspace_bytes
+        eligible_shapes.append((batch_size, seq_len, prefix_len))
+        required_full_tokens = max(required_full_tokens, full_tokens)
+        required_swa_tokens = max(required_swa_tokens, swa_tokens)
+
+    if not eligible_shapes:
+        raise RuntimeError(
+            "DSV4 CSA context pool derivation has no shape within the framework-profiled "
+            f"full/SWA capacities {profiled_config.full_max_total_num_tokens}/"
+            f"{profiled_config.swa_max_total_num_tokens}"
+        )
+
+    swa_ratio = Fraction(str(configurator.swa_ratio))
+    if not 0 < swa_ratio <= 1:
+        raise RuntimeError(f"invalid DSV4 swa_full_tokens_ratio={configurator.swa_ratio}")
+    required_from_swa = (required_swa_tokens * swa_ratio.denominator + swa_ratio.numerator - 1) // swa_ratio.numerator
+    required_cap = max(required_full_tokens, required_from_swa)
+    required_cap = ((required_cap + page_size - 1) // page_size) * page_size
+    required_config = configurator.calculate_pool_sizes_from_max_tokens(required_cap, page_size)
+    if (
+        required_config.full_max_total_num_tokens < required_full_tokens
+        or required_config.swa_max_total_num_tokens < required_swa_tokens
+    ):
+        raise RuntimeError(
+            "SGLang DSV4 configurator could not preserve the retained full/SWA requirements: "
+            f"required_full={required_full_tokens}, configured_full="
+            f"{required_config.full_max_total_num_tokens}, required_swa={required_swa_tokens}, "
+            f"configured_swa={required_config.swa_max_total_num_tokens}"
+        )
+
+    if workspace_bytes >= profiled_bytes:
+        raise RuntimeError(
+            f"DSV4 CSA logits workspace={workspace_bytes} leaves no pool budget from "
+            f"profiled_bytes={profiled_bytes}; shape={workspace_shape}"
+        )
+    workspace_config = configurator.calculate_pool_sizes(profiled_bytes - workspace_bytes, page_size)
+    workspace_cap = int(workspace_config.max_total_num_tokens)
+    if required_cap > workspace_cap:
+        raise RuntimeError(
+            "one DSV4 CSA context worker cannot preserve all framework-feasible cells and "
+            f"reserve its maximum logits workspace: required_cap={required_cap}, "
+            f"workspace_cap={workspace_cap}; split only the measured Pareto-distinct groups"
+        )
+
+    print(
+        "[dsv4-collector] CSA context derived pool: "
+        f"sm={sm_version}, indexer_leaf=deep_gemm, page_size={page_size}, "
+        f"swa_ratio={float(swa_ratio)}, effective_chunk={effective_chunk}, "
+        f"eligible_shapes={len(eligible_shapes)}, source_capacity_excluded={source_capacity_excluded}, "
+        f"profiled_bytes={profiled_bytes}, "
+        f"profiled_full={profiled_config.full_max_total_num_tokens}, "
+        f"profiled_swa={profiled_config.swa_max_total_num_tokens}, "
+        f"workspace_bytes={workspace_bytes}, workspace_shape={workspace_shape}, "
+        f"bytes_per_full_token={configurator.bytes_per_full_token:.6f}, "
+        f"workspace_cap={workspace_cap}, required_full={required_full_tokens}, "
+        f"required_swa={required_swa_tokens}, final_cap={required_cap}"
+    )
+    return required_cap, required_full_tokens, required_swa_tokens
+
+
 def _load_model_runner(
     model_path: str,
     *,
@@ -561,6 +737,7 @@ def _load_model_runner(
     gemm_type: str = "bfloat16",
     tp_size: int = 1,
     max_total_tokens: int | None = None,
+    csa_context_shapes: Iterable[tuple[int, int, int]] | None = None,
 ):
     from sglang.srt.configs.model_config import ModelConfig
     from sglang.srt.entrypoints.engine import _set_envs_and_config
@@ -594,13 +771,10 @@ def _load_model_runner(
     #   * mem_fraction_static=None -> derived from GPU memory in __post_init__
     #   * chunked_prefill_size=None -> derived from GPU memory
     #   * max_prefill_tokens         -> sglang default (16384)
-    # The ONE sizing knob we DO pass is ``max_total_tokens``, computed by the
-    # caller from the actual swept (bs, sl, prefix) cases via required_kv_tokens
-    # (+~5% headroom).  This caps the KV pool to what the sweep needs instead of
-    # letting sglang fill all of GPU memory, exactly like collect_mla_module.py.
-    # The derived KV pool is still honored downstream by the
-    # ``_kv_pool_capacity_tokens`` SKIP path, so over-large shapes are skipped
-    # rather than hardcoded around.
+    # An explicit ``max_total_tokens`` is reserved for direct diagnostics.  The
+    # normal CSA-context path starts with None and, after model load, derives a
+    # workspace-aware bound through SGLang's live DSV4PoolConfigurator.  HCA and
+    # generation keep the framework-derived None path.
 
     server_args = ServerArgs(
         model_path=local_model_path,
@@ -626,9 +800,9 @@ def _load_model_runner(
         # only sizing knob the collector must override (per-cell request slots
         # for the bs sweep); all memory/token knobs come from sglang.
         max_running_requests=1100,
-        # Case-sized KV pool cap from the caller (None -> sglang default sizing).
-        # mem_fraction_static / chunked_prefill_size stay unset -> derived by
-        # ServerArgs.__post_init__ from sglang.
+        # None -> SGLang default sizing.  mem_fraction_static and
+        # chunked_prefill_size also stay unset and are derived by
+        # ServerArgs.__post_init__.
         max_total_tokens=max_total_tokens,
     )
     # gemm_type controls projection GEMM dispatch.  "fp8_block" → DeepGEMM
@@ -642,7 +816,7 @@ def _load_model_runner(
         f"mem_fraction_static={server_args.mem_fraction_static} (sglang-derived), "
         f"chunked_prefill_size={server_args.chunked_prefill_size} (sglang-derived), "
         f"max_prefill_tokens={server_args.max_prefill_tokens} (sglang-derived), "
-        f"max_total_tokens={server_args.max_total_tokens} (case-sized), "
+        f"max_total_tokens_input={server_args.max_total_tokens}, "
         f"shrink_unused_moe={shrink_unused_moe}, "
         f"disable_weight_quant={disable_weight_quant}, gemm_type={gemm_type}, "
         f"quantization={server_args.quantization}, tp_size={tp_size}, nccl_port={nccl_port}"
@@ -665,8 +839,27 @@ def _load_model_runner(
             nccl_port=nccl_port,
             server_args=server_args,
         )
+    derived_requirements = None
+    if csa_context_shapes is not None:
+        if max_total_tokens is not None:
+            raise RuntimeError("CSA context live pool derivation cannot be combined with an explicit token cap")
+        derived_requirements = _derive_csa_context_pool_cap(
+            model_runner,
+            csa_context_shapes,
+        )
+        model_runner.server_args.max_total_tokens = derived_requirements[0]
     # SGLang 0.5.14 separates model construction from serving-state setup.
     model_runner.alloc_memory_pool()
+    if derived_requirements is not None:
+        _, required_full_tokens, required_swa_tokens = derived_requirements
+        actual_full_tokens = int(model_runner.full_max_total_num_tokens)
+        actual_swa_tokens = int(model_runner.swa_max_total_num_tokens)
+        if actual_full_tokens < required_full_tokens or actual_swa_tokens < required_swa_tokens:
+            raise RuntimeError(
+                "SGLang DSV4 pool shrank below the derived retained-case requirements: "
+                f"actual_full={actual_full_tokens}, required_full={required_full_tokens}, "
+                f"actual_swa={actual_swa_tokens}, required_swa={required_swa_tokens}"
+            )
     model_runner.init_attention_backends()
     # --- AIC proper init (env-gated) -------------------------------------
     # Dummy load uses uniform(-1e-3, 1e-3) (sglang initialize_dummy_weights).
@@ -1037,41 +1230,43 @@ def run_dsv4_mla_module(
     if any(p > 0 for p in prefix_values) and not is_prefill:
         raise ValueError("prefix_len is only supported for context/extend collection")
 
+    case_shapes = [
+        (batch_size, seq_len, cur_prefix)
+        for cur_prefix in prefix_values
+        for batch_size in batch_sizes
+        for seq_len in (
+            seq_lens_by_prefix.get(cur_prefix, default_seq_lens) if seq_lens_by_prefix is not None else default_seq_lens
+        )
+    ]
+
     # SGLang derives compressed-pool sizes from max_total_tokens. Direct
     # probes with an explicit value must account for both the full pool and
     # the smaller page-rounded SWA tail pool before ModelRunner construction.
     if max_total_tokens is not None:
         max_full_alloc = 0
         max_swa_alloc = 0
-        for cur_prefix in prefix_values:
-            seq_lens_for_prefix = (
-                seq_lens_by_prefix.get(cur_prefix, default_seq_lens)
-                if seq_lens_by_prefix is not None
-                else default_seq_lens
+        for batch_size, seq_len, cur_prefix in case_shapes:
+            max_full_alloc = max(
+                max_full_alloc,
+                required_kv_alloc_tokens(
+                    batch_size,
+                    seq_len,
+                    cur_prefix,
+                    _DSV4_CUDA_PAGE_SIZE,
+                    is_prefill=is_prefill,
+                ),
             )
-            for batch_size in batch_sizes:
-                for seq_len in seq_lens_for_prefix:
-                    max_full_alloc = max(
-                        max_full_alloc,
-                        required_kv_alloc_tokens(
-                            batch_size,
-                            seq_len,
-                            cur_prefix,
-                            _DSV4_CUDA_PAGE_SIZE,
-                            is_prefill=is_prefill,
-                        ),
-                    )
-                    max_swa_alloc = max(
-                        max_swa_alloc,
-                        required_swa_kv_alloc_tokens(
-                            batch_size,
-                            seq_len,
-                            cur_prefix,
-                            _DSV4_CUDA_PAGE_SIZE,
-                            _DSV4_SWA_WINDOW_SIZE,
-                            is_prefill=is_prefill,
-                        ),
-                    )
+            max_swa_alloc = max(
+                max_swa_alloc,
+                required_swa_kv_alloc_tokens(
+                    batch_size,
+                    seq_len,
+                    cur_prefix,
+                    _DSV4_CUDA_PAGE_SIZE,
+                    _DSV4_SWA_WINDOW_SIZE,
+                    is_prefill=is_prefill,
+                ),
+            )
         max_total_tokens = max(max_total_tokens, max_full_alloc, max_swa_alloc * _DSV4_SWA_TO_FULL_SCALE)
         max_total_tokens = (
             (max_total_tokens + _DSV4_CUDA_PAGE_SIZE - 1) // _DSV4_CUDA_PAGE_SIZE
@@ -1091,6 +1286,7 @@ def run_dsv4_mla_module(
         gemm_type=gemm_type,
         tp_size=tp_size,
         max_total_tokens=max_total_tokens,
+        csa_context_shapes=(case_shapes if is_prefill and attn_kind == "csa" and max_total_tokens is None else None),
     )
 
     attention_module = model_runner.model.model.layers[layer_id].self_attn
@@ -1115,21 +1311,10 @@ def run_dsv4_mla_module(
         kv_page_size = _kv_pool_page_size(model_runner)
         swa_capacity = _swa_kv_pool_capacity_tokens(model_runner)
         swa_window_size = getattr(getattr(model_runner, "model_config", None), "window_size", None)
-        runtime_chunk = _runtime_chunk_size(model_runner) if is_prefill else None
-        if is_prefill and runtime_chunk is not None:
-            # FlashMLA's get_decoding_sched_meta kernel allocates dynamic shared
-            # memory proportional to the forward's query-token count b (it does
-            # cudaFuncSetAttribute(MaxDynamicSharedMemorySize, 4*(b*5+1))). For a
-            # DSV4 context module forward, b == fresh_tokens (bs*seq_len). SGLang's
-            # derived chunked_prefill_size can exceed what the device's per-block
-            # shared memory can hold (e.g. 16384 > the ~11.6k that a 227KB optin
-            # cap allows), so cudaFuncSetAttribute returns invalid argument and the
-            # subprocess crashes. Cap the effective prefill chunk to the smaller of
-            # SGLang's chunk and the sched-meta shared-memory limit (read from the
-            # device, not hardcoded).
-            _smem_optin = torch.cuda.get_device_properties(torch.cuda.current_device()).shared_memory_per_block_optin
-            _sched_meta_max_b = (_smem_optin // 4 - 1) // 5
-            runtime_chunk = min(runtime_chunk, _sched_meta_max_b)
+        # The current 0.5.14 collector preserves its existing sched-meta limit.
+        # Use the same live value for pool derivation and execution so shapes
+        # that are later skipped cannot inflate the reserved workspace.
+        runtime_chunk = _effective_prefill_chunk_size(model_runner) if is_prefill else None
         for cur_prefix in prefix_values:
             seq_lens_for_prefix = (
                 seq_lens_by_prefix.get(cur_prefix, default_seq_lens)
@@ -1332,7 +1517,7 @@ def run_dsv4_mla_module(
         skipped_str = ", ".join(f"(bs={b},sl={s},prefix={p},reason={r})" for b, s, p, r in skipped_shapes)
         print(f"[WARN] dsv4-flash {sweep_label}: skipped or errored shapes: {skipped_str}")
     print(f"[dsv4-collector] {sweep_label}: {summary}")
-    if error_count > 0 or (ok_count == 0 and skip_count == 0):
+    if ok_count == 0 or error_count > 0:
         raise RuntimeError(f"dsv4-flash {sweep_label}: {summary}")
     return results
 
@@ -1355,6 +1540,7 @@ def _run_subprocess(
     tp_size: int = 1,
     prefix_len: int = 0,
     prefix_lens: Iterable[int] | None = None,
+    smoke: bool = False,
 ):
     """Run one (attn_kind, tp, gemm, bs) subprocess that sweeps valid sl/prefix.
 
@@ -1391,6 +1577,7 @@ def _run_subprocess(
         f"    tp_size={tp_size!r},\n"
         f"    prefix_len={prefix_len!r},\n"
         f"    prefix_lens={prefix_lens_arg!r},\n"
+        f"    smoke={smoke!r},\n"
         f")\n"
     )
 
@@ -1467,14 +1654,15 @@ def _subprocess_entry(
     tp_size: int = 1,
     prefix_len: int = 0,
     prefix_lens: Iterable[int] | None = None,
+    smoke: bool = False,
 ):
     """In-subprocess runner: build model once for fixed bs, sweep valid sl/prefix."""
     _, sl_grid = _expand_grid()
-    if "--smoke" in sys.argv:
+    if smoke:
         sl_grid = [sl for sl in sl_grid if sl in (1, 128)]
 
     prefix_values = list(prefix_lens) if prefix_lens is not None else [prefix_len]
-    if mode == "context" and "--smoke" in sys.argv:
+    if mode == "context" and smoke:
         prefix_values = [p for p in prefix_values if p in (0, 512)]
     elif mode != "context":
         prefix_values = [0]
@@ -1495,10 +1683,11 @@ def _subprocess_entry(
         seq_lens_by_prefix[cur_prefix] = sorted({sl for _, sl in pairs}, reverse=True)
 
     if not seq_lens_by_prefix:
-        print(f"[dsv4-flash] no valid prefix/sl values for mode={mode}, bs={batch_size}")
-        return
+        raise RuntimeError(
+            f"dsv4-flash mode={mode} bs={batch_size}: no valid prefix/sl values; ok=0 error=0 skip=0 total=0"
+        )
 
-    # Let SGLang derive a realizable hybrid KV pool, then use the live full/SWA
+    # Let SGLang derive its full/SWA/DSV4 auxiliary pools, then use the live
     # allocator capacities and page size to skip over-capacity cells.
     max_total_tokens = None
 
@@ -1553,9 +1742,7 @@ def run_dsv4_attn_worker(
 
     is_prefill = "context" in perf_filename
     mode = "context" if is_prefill else "generation"
-    # The SDK consumer resolves only zero-prefix persisted keys, so context
-    # collection must not emit nonzero-prefix rows.
-    prefix_lens = [p for p in _PREFIX_LENGTHS if p == 0] if is_prefill else None
+    prefix_lens = list(_PREFIX_LENGTHS) if is_prefill else None
 
     device_str = str(device)
     gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
@@ -1568,6 +1755,7 @@ def run_dsv4_attn_worker(
 
     output_path = os.path.dirname(perf_filename) or os.getcwd()
     kv_dtype_sglang = _kv_dtype_db_to_sglang(kv_cache_dtype)
+    smoke = "--smoke" in sys.argv
 
     _run_subprocess(
         mode=mode,
@@ -1581,6 +1769,7 @@ def run_dsv4_attn_worker(
         tp_size=tp_size,
         prefix_len=0,
         prefix_lens=prefix_lens,
+        smoke=smoke,
     )
 
 
