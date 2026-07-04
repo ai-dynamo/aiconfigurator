@@ -769,7 +769,6 @@ def run_mla_module(
         num_warmups=warming_up,
         num_runs=test_ite,
         repeat_n=1,
-        allow_graph_fail=True,
         use_cuda_graph=use_cuda_graph,
     ) as results:
         pass

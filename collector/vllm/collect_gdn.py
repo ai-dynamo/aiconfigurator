@@ -180,7 +180,11 @@ def run_gdn_context_benchmark(
                 num_warmups=num_warmups,
                 num_runs=num_runs,
                 repeat_n=1,
-                allow_graph_fail=True,
+                # vLLM 0.24's packed prefill convolution performs a metadata
+                # copy that CUDA graph capture rejects. Every SM90 full-run
+                # point therefore used eager execution; make that method
+                # explicit instead of silently falling back at runtime.
+                use_cuda_graph=False,
             ) as results:
                 log_perf(
                     item_list=[{**common_log_data, "latency": results["latency_ms"]}],
@@ -273,7 +277,6 @@ def run_gdn_context_benchmark(
                 num_warmups=num_warmups,
                 num_runs=num_runs,
                 repeat_n=1,
-                allow_graph_fail=True,
             ) as results:
                 log_perf(
                     item_list=[{**common_log_data, "latency": results["latency_ms"]}],
@@ -374,7 +377,6 @@ def run_gdn_generation_benchmark(
             num_warmups=num_warmups,
             num_runs=num_runs,
             repeat_n=1,
-            allow_graph_fail=True,
         ) as results:
             log_perf(
                 item_list=[{**common_log_data, "latency": results["latency_ms"]}],
@@ -451,7 +453,6 @@ def run_gdn_generation_benchmark(
             num_warmups=num_warmups,
             num_runs=num_runs,
             repeat_n=1,
-            allow_graph_fail=True,
         ) as results:
             log_perf(
                 item_list=[{**common_log_data, "latency": results["latency_ms"]}],
