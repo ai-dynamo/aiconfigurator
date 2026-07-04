@@ -3,6 +3,7 @@
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,15 @@ from collector.case_generator import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _load_collector_function(name, namespace):
+    source_path = REPO_ROOT / "collector" / "sglang" / "collect_attn.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    loaded = dict(namespace)
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), loaded)
+    return loaded[name]
 
 
 def _model_configs(monkeypatch, model_path, sm_version, phase):
@@ -231,6 +241,74 @@ def test_sglang_attention_runtime_fields_are_not_persisted_dimensions():
     assert "runtime_window_size" not in row_fields
     source_kw = next(keyword.value for keyword in log_perf.keywords if keyword.arg == "kernel_source")
     assert isinstance(source_kw, ast.Name) and source_kw.id == "attn_backend_name"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("sm_version", "num_heads", "num_kv_heads", "head_dim", "max_kv_elements"),
+    [
+        (100, 8, 2, 128, 1_000_000),
+        # KV storage remains below the declared budget while the old broad
+        # SM120 Q/O predicate would have removed this backend-specific case.
+        (120, 8, 1, 2, 100),
+    ],
+)
+def test_blackwell_context_cases_are_not_silently_removed(
+    sm_version,
+    num_heads,
+    num_kv_heads,
+    head_dim,
+    max_kv_elements,
+):
+    sweep = {
+        "batch_sizes": [1],
+        "sequence_lengths": [10],
+        "max_tokens_self_attention": 1_000_000,
+        "max_tokens_grouped_query_attention": 1_000_000,
+        "max_batch_size_self_attention": 1_000,
+        "max_kv_elements": max_kv_elements,
+        "precision_cases": [{"fp8_kv_cache": True, "fp8_context_fmha": True}],
+    }
+    head = SimpleNamespace(
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        window_size=0,
+        v_head_dim=head_dim,
+        runtime_window_size=-1,
+        attention_chunk_size=None,
+        has_attention_sink=False,
+        scaling=None,
+        kernel_source="triton",
+        architecture="TestForCausalLM",
+    )
+    getter = _load_collector_function(
+        "get_context_attention_test_cases",
+        {
+            "_int_list": lambda values: [int(value) for value in values],
+            "get_sm_version": lambda: sm_version,
+            "get_attention_context_shape_sweeps": lambda _backend: [sweep],
+            "get_attention_head_configs": lambda *_args, **_kwargs: [head],
+        },
+    )
+
+    cases = getter()
+
+    assert len(cases) == 1
+    assert cases[0][5:7] == [True, True]
+
+
+@pytest.mark.unit
+def test_fp8_live_attention_rejects_backends_that_only_accept_bfloat16_inputs():
+    source_path = REPO_ROOT / "collector" / "sglang" / "collect_attn.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_attention_torch"
+    )
+    source = ast.get_source_segment(source_path.read_text(encoding="utf-8"), function)
+
+    assert 'attn_backend_name in {"flashinfer", "trtllm_mha"}' in source
+    assert 'attn_backend_name != "trtllm_mha"' not in source
 
 
 @pytest.mark.parametrize(

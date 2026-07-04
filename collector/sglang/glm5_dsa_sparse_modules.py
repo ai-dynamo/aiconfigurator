@@ -252,7 +252,7 @@ def _bench_glm5_mqa(M, past_kv, isl, *, index_n_heads, index_head_dim, device): 
             )
         return logits
 
-    return _bench_cuda_graph(kernel_fn, allow_graph_fail=True, device=device)
+    return _bench_cuda_graph(kernel_fn, allow_graph_fail=False, device=device)
 
 
 def _glm5_fuse_topk_enabled() -> bool:
@@ -464,7 +464,7 @@ def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
     results = []
     for mode in ("flat", "top_last"):
         score = _make_glm5_topk_scores(mode, lengths, max_seqlen_k, device, generator, topk)
-        r = _bench_cuda_graph(make_fn(score), allow_graph_fail=True, device=device)
+        r = _bench_cuda_graph(make_fn(score), allow_graph_fail=False, device=device)
         results.append((mode, round(r["latency_ms"], 6)))
     return results, kernel_src
 
@@ -496,7 +496,7 @@ def _bench_glm5_dsa_attn(M, past_kv, isl, *, native_heads, d_qk, d_v, topk, devi
     def kernel_fn():
         return flash_mla_sparse_fwd(q=q, kv=kv, indices=indices, sm_scale=sm_scale, d_v=d_v)
 
-    return _bench_cuda_graph(kernel_fn, allow_graph_fail=True, device=device)
+    return _bench_cuda_graph(kernel_fn, allow_graph_fail=False, device=device)
 
 
 def _bench_glm5_sparse_kernel_shape(kernel, prefix, isl, bs, sc, device):
@@ -696,20 +696,22 @@ def run_glm5_dsa_sparse_kernel_worker(
     device_name = torch.cuda.get_device_name(device)
     print(f"[{label}-sparse {kernel} bs={bs_only}] {len(shapes)} shapes -> {perf_path}")
     n_ok = 0
+    failures = []
     for prefix, isl, bs in shapes:
-        out = _guarded_bench(
+        shape_label = f"bs={bs} isl={isl} past_kv={prefix}"
+        out, error = _guarded_bench(
             lambda: _bench_glm5_sparse_kernel_shape(kernel, prefix, isl, bs, sc, device),
-            f"bs={bs} isl={isl} past_kv={prefix}",
+            shape_label,
         )
-        if out is None:
+        if error is not None:
+            failures.append(f"{shape_label}: {type(error).__name__}: {error}")
             continue
         kernel_source, results = out
         expected_modes = {"flat", "top_last"} if kernel == "topk" else {None}
         if len(results) != len(expected_modes) or {score_mode for score_mode, _ in results} != expected_modes:
-            print(
-                f"  incomplete result at bs={bs} isl={isl} past_kv={prefix}: "
-                f"expected score modes {expected_modes}, got {results}"
-            )
+            message = f"expected score modes {expected_modes}, got {results}"
+            print(f"  incomplete result at {shape_label}: {message}")
+            failures.append(f"{shape_label}: RuntimeError: {message}")
             continue
         for score_mode, latency_ms in results:
             _write_row(
@@ -729,11 +731,12 @@ def run_glm5_dsa_sparse_kernel_worker(
                 op_name_map=op_name_map,
             )
         n_ok += 1
-    error_count = len(shapes) - n_ok
+    error_count = len(failures)
     summary = f"ok={n_ok} error={error_count} skip=0 total={len(shapes)}"
     print(f"  {kernel}: {summary}")
-    if not n_ok or error_count > 0:
-        raise RuntimeError(f"{label}-sparse {kernel} bs={bs_only}: {summary}")
+    if not n_ok or failures:
+        details = "\n- ".join(failures) if failures else "no inner shapes produced a row"
+        raise RuntimeError(f"{label}-sparse {kernel} bs={bs_only}: {summary}; failures:\n- {details}")
 
 
 def _glm5_sparse_kernel_cases(kernel):

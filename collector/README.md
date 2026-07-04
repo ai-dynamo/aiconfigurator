@@ -418,8 +418,10 @@ This collects the stock SGLang ops, including:
 - MoE (Mixture of Experts) operations
 - Normal attention operations
 
-WideEP ops remain pinned to their separate SGLang 0.5.10 image and are not part
-of the stock model plans. Request them explicitly in a separate run.
+The retained `wideep_moe` op remains pinned to its separate SGLang 0.5.10 image
+and is not part of the stock model plans. Request it explicitly in a separate
+run. WideEP MLA is not registered because its legacy wrapper now reaches the
+stock 0.5.14-only module implementation.
 
 ### DeepEP multi-node collector
 For **DeepSeek V3** models with DeepEP MoE, inter-node communication data requires a separate multi-node setup:

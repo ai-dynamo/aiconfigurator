@@ -68,8 +68,6 @@ try:
     from collector.sglang.runtime_limits import (
         dsa_indexer_prefill_shape_is_supported,
         dsa_indexer_total_kv_tokens_supported,
-        dsa_indexer_workspace_bytes,
-        dsa_indexer_workspace_limit_bytes,
         kv_pool_page_size,
         required_kv_alloc_tokens,
         required_kv_tokens,
@@ -92,8 +90,6 @@ except ModuleNotFoundError:
     from runtime_limits import (
         dsa_indexer_prefill_shape_is_supported,
         dsa_indexer_total_kv_tokens_supported,
-        dsa_indexer_workspace_bytes,
-        dsa_indexer_workspace_limit_bytes,
         kv_pool_page_size,
         required_kv_alloc_tokens,
         required_kv_tokens,
@@ -618,8 +614,6 @@ def _build_module_test_cases(attn_type: str, mode: str):
     perf_filename is supplied by collect.py via functools.partial as a keyword
     argument, so it is not included in the test case tuple.
     """
-    if attn_type == "dsa" and _skip_sm120_deepgemm_attention_modules():
-        return []
     model_specs = get_mla_module_model_specs(attention_type=attn_type)
     if get_sm_version() not in _NATIVE_NVFP4_SMS:
         model_specs = [spec for spec in model_specs if _model_native_gemm_quant(spec.model_path) != "nvfp4"]
@@ -659,18 +653,14 @@ def _build_module_test_cases(attn_type: str, mode: str):
                 batch_sizes = sweep.context_batch_sizes if attn_type == "dsa" and mode == "context" else [0]
                 for batch_size in batch_sizes:
                     if attn_type == "dsa" and kv_dtype == "fp8":
-                        # Mirrors SGLang 0.5.14's major-based selector. The
-                        # exact image has a runnable TRTLLM-GEN path on SM100,
-                        # but its own capability test rejects SM103 even though
-                        # the selector chooses the same name there. SM120 is
-                        # excluded above and must not be inferred from this
-                        # branch; see _skip_sm120_deepgemm_attention_modules.
+                        # Mirrors SGLang 0.5.14
+                        # server_args.py:_set_default_dsa_backends: FP8 KV uses
+                        # flashmla_kv on Hopper and trtllm when major >= 10.
+                        # The bundled capability test rejects SM103 even though
+                        # the selector chooses trtllm there; registry maturity
+                        # markers park SM103/SM120 pending hardware validation.
                         default_backend = "trtllm" if get_sm_version() >= 100 else "flashmla_kv"
-                        dsa_backends = (
-                            ("flashmla_kv", "trtllm")
-                            if mode == "context" and get_sm_version() >= 100
-                            else (default_backend,)
-                        )
+                        dsa_backends = (default_backend,)
                     else:
                         dsa_backends = (None,)
                     for dsa_backend in dsa_backends:
@@ -1122,9 +1112,9 @@ def load_model_runner(
     # Match SGLang 0.5.14's configured FP8-KV dispatch. Hopper uses
     # flashmla_kv; the exact image has a runnable TRTLLM-GEN path on SM100.
     # SGLang's major-based selector also names TRT-LLM on SM103, but the
-    # bundled capability test rejects that target; SM120 is skipped by the
-    # case builder. BF16 KV stays on the runtime default because flashmla_kv
-    # rejects BF16.
+    # bundled capability test rejects that target. Registry maturity markers
+    # park SM103/SM120 before this worker is queued. BF16 KV stays on the
+    # runtime default because flashmla_kv rejects BF16.
     if attention_backend == "dsa" and sglang_kv_dtype == "fp8_e4m3":
         if dsa_prefill_backend is None:
             dsa_prefill_backend = "trtllm" if get_sm_version() >= 100 else "flashmla_kv"
@@ -1788,6 +1778,16 @@ def _run_prefill(
             else:
                 attention_module.next_skip_topk = True  # return the producer topk from warmup[0]
 
+        executed_dsa_source = None
+        if attn_type == "dsa":
+            dsa_backend = model_runner.attn_backend
+            if dsa_backend.use_mha:
+                dense_leaf = "trtllm_ragged" if dsa_backend.device_sm_major >= 10 else "fa3"
+                executed_dsa_source = f"sglang_dsa_dense_mha_{dense_leaf}"
+            else:
+                indexer_mode = "skip_indexer" if _skip_indexer else "indexer"
+                executed_dsa_source = f"sglang_dsa_{indexer_mode}_{dsa_backend.dsa_prefill_impl}"
+
         def _skip_kwargs():
             # Once a real topk index is captured, bypass the indexer for all
             # subsequent (timed) forwards by forcing skip_topk + reusing it.
@@ -1942,9 +1942,7 @@ def _run_prefill(
                 # _skip_indexer suffix) is what distinguishes skip rows. No extra column.
                 perf_fname = f"{attn_type}_context_module_perf.txt"
                 op_name = f"{attn_type}_context_module{_skip_sfx}"
-                kernel_source = f"{attn_type}_{backend_name}"
-                if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
-                    kernel_source = f"{kernel_source}_trtllm"
+                kernel_source = executed_dsa_source or f"{attn_type}_{backend_name}"
             perf_filename = _resolve_perf_path(output_path, perf_fname)
             if not log_perf(
                 item_list=[
@@ -2045,6 +2043,7 @@ def _run_decode(
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
     from sglang.srt.mem_cache.chunk_cache import ChunkCache
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+    from sglang.srt.model_executor.runner import model_capture_mode
     from sglang.srt.sampling.sampling_params import SamplingParams
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
     from sglang.srt.utils import BumpAllocator
@@ -2113,6 +2112,10 @@ def _run_decode(
         if use_module_cuda_graph or _env_flag("AIC_ENABLE_MODULE_CUDA_GRAPH"):
             _patch_nsa_indexer_compile_for_module_cuda_graph(attention_module)
 
+        use_benchmark_cuda_graph = not (
+            attn_type == "dsa" and not _generation_cuda_graph_enabled_for_tokens(model_runner, batch_size)
+        )
+
         # skip_indexer (see _run_prefill): obtain the real producer-layer topk
         # through SGLang's next_skip_topk return contract, then reuse it so the
         # timed runs (and any captured CUDA graph) exclude the per-layer indexer.
@@ -2128,6 +2131,11 @@ def _run_decode(
             attention_module.skip_topk = False
             attention_module.next_skip_topk = True
 
+        executed_dsa_source = None
+        if attn_type == "dsa":
+            indexer_mode = "skip_indexer" if _skip_indexer else "indexer"
+            executed_dsa_source = f"sglang_dsa_{indexer_mode}_{model_runner.attn_backend.dsa_decode_impl}"
+
         def _skip_kwargs():
             if _skip_indexer and _skip_state["prev_topk"] is not None:
                 attention_module.skip_topk = True
@@ -2135,7 +2143,13 @@ def _run_decode(
             return {}
 
         def kernel_func():
-            with forward_context(forward_context_type(attn_backend=model_runner.attn_backend)):
+            # SGLang's DecodeCudaGraphRunner wraps capture in
+            # model_capture_mode(); DSA uses that state to select its
+            # production dual-stream indexer path.
+            from contextlib import nullcontext
+
+            capture_context = model_capture_mode() if use_benchmark_cuda_graph else nullcontext()
+            with capture_context, forward_context(forward_context_type(attn_backend=model_runner.attn_backend)):
                 return attention_module(
                     positions=decode_positions,
                     hidden_states=decode_hidden,
@@ -2173,9 +2187,6 @@ def _run_decode(
             if _skip_indexer:
                 attention_module.next_skip_topk = original_next_skip_topk
 
-        use_benchmark_cuda_graph = not (
-            attn_type == "dsa" and not _generation_cuda_graph_enabled_for_tokens(model_runner, batch_size)
-        )
         print(f"  Decode module CUDA graph: {use_benchmark_cuda_graph} (tokens={batch_size})")
 
         with benchmark_with_power(
@@ -2213,9 +2224,7 @@ def _run_decode(
                 # full + skip share ONE perf file; op_name (with _skip_indexer) tags skip.
                 perf_fname = f"{attn_type}_generation_module_perf.txt"
                 op_name = f"{attn_type}_generation_module{_skip_sfx}"
-                kernel_source = f"{attn_type}_{backend_name}"
-                if attn_type == "dsa" and dsa_prefill_backend == "trtllm":
-                    kernel_source = f"{kernel_source}_trtllm"
+                kernel_source = executed_dsa_source or f"{attn_type}_{backend_name}"
                 log_isl = 1
                 log_step = seq_length
             perf_filename = _resolve_perf_path(output_path, perf_fname)
@@ -2470,6 +2479,12 @@ def run_mla_module(
                 f"chunked_prefill_size={_chunk_cap} (oversized one-shot forward crashes FlashMLA)"
             )
 
+    if not cases:
+        raise RuntimeError(
+            f"{attn_type.upper()} module {phase_name.lower()} has no runnable cases; "
+            f"model={model_path}, heads={head_num}, kv={kv_cache_dtype}, gemm={gemm_type}"
+        )
+
     max_total_tokens = None
     if cases:
         max_total_tokens = max(
@@ -2534,31 +2549,14 @@ def run_mla_module(
                 if skipped:
                     print(f"[DSA] Dropped {skipped} context cases beyond actual KV pool capacity={kv_capacity} tokens")
 
-            if sglang_dsa_mqa_logits_chunking_supported():
-                print("[DSA] SGLang MQA logits chunk path detected; skipping collector indexer workspace pre-filter")
-            else:
-                free_mem, total_mem = torch.cuda.mem_get_info()
-                workspace_limit = dsa_indexer_workspace_limit_bytes(free_mem, total_mem)
-                before = len(cases)
-                cases = [
-                    (bs, seq_len, ip, prefix_len)
-                    for (bs, seq_len, ip, prefix_len) in cases
-                    if dsa_indexer_workspace_bytes(
-                        bs,
-                        seq_len,
-                        prefix_len,
-                        head_num,
-                        target_tp_size,
-                        is_prefill=True,
-                    )
-                    <= workspace_limit
-                ]
-                skipped = before - len(cases)
-                if skipped:
-                    print(
-                        f"[DSA] Dropped {skipped} context cases beyond estimated indexer "
-                        f"workspace limit={workspace_limit} bytes (free={free_mem}, total={total_mem})"
-                    )
+            sglang_dsa_mqa_logits_chunking_supported()
+            print("[DSA] SGLang MQA logits chunk path detected; no heuristic workspace pre-filter")
+
+        if not cases:
+            raise RuntimeError(
+                f"{attn_type.upper()} module {phase_name.lower()} has no runnable cases after runtime checks; "
+                f"model={model_path}, heads={head_num}, kv={kv_cache_dtype}, gemm={gemm_type}"
+            )
 
         logged_count = run_attention_torch(
             model_runner=model_runner,
@@ -2578,6 +2576,11 @@ def run_mla_module(
             use_module_cuda_graph=use_module_cuda_graph,
             dsa_prefill_backend=dsa_prefill_backend,
         )
+        if logged_count == 0:
+            raise RuntimeError(
+                f"{attn_type.upper()} module {phase_name.lower()} persisted no rows; "
+                f"model={model_path}, heads={head_num}, kv={kv_cache_dtype}, gemm={gemm_type}"
+            )
         error_count = len(cases) - logged_count
         summary = f"ok={logged_count} error={error_count} skip=0 total={len(cases)}"
         print(f"[{attn_type.upper()}] {phase_name.lower()} {summary}")
@@ -2647,16 +2650,15 @@ def _run_mla_subprocess(
         stdout, _ = proc.communicate(timeout=subprocess_timeout)
         if stdout:
             print(stdout.decode("utf-8", errors="replace"))
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         proc.kill()
         proc.wait()
-        print(
-            f"  WARNING: {attn_type.upper()} module {phase} subprocess timed out "
+        raise RuntimeError(
+            f"{attn_type.upper()} module {phase} subprocess timed out "
             f"after {subprocess_timeout}s "
             f"(heads={head_num}, model={model_path}, kv={kv_cache_dtype}, "
-            f"gemm={gemm_type}, target_tp={target_tp_size}) — skipping"
-        )
-        return  # Skip this config instead of raising
+            f"gemm={gemm_type}, target_tp={target_tp_size})"
+        ) from exc
 
     if proc.returncode != 0:
         # Include last lines of subprocess output in the error so the cause
@@ -2731,8 +2733,9 @@ def run_mla_module_worker(
     # The case builder records configured backend buckets, not every leaf
     # kernel selected by an individual shape: flashmla_kv on Hopper and
     # trtllm on validated SM100. SM103 mirrors an upstream selector whose
-    # bundled TRTLLM-GEN kernel is unavailable; SM120 is excluded. BF16 leaves
-    # the sub-backend unset so SGLang applies its serving default.
+    # bundled TRTLLM-GEN kernel is unavailable; registry maturity markers park
+    # SM103/SM120. BF16 leaves the sub-backend unset so SGLang applies its
+    # serving default.
     _run_mla_subprocess(
         attn_type=attn_type,
         head_num=num_heads,

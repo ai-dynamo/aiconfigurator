@@ -8,6 +8,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 
 def test_mhc_sweep_fails_closed_after_an_inner_error(monkeypatch):
     torch = ModuleType("torch")
@@ -22,9 +24,17 @@ def test_mhc_sweep_fails_closed_after_an_inner_error(monkeypatch):
 
     parallel_state = ModuleType("sglang.srt.distributed.parallel_state")
     parallel_state.destroy_model_parallel = lambda: None
+    environ = ModuleType("sglang.srt.environ")
+    enabled = SimpleNamespace(get=lambda: True)
+    environ.envs = SimpleNamespace(
+        SGLANG_OPT_USE_TILELANG_MHC_PRE=enabled,
+        SGLANG_OPT_DEEPGEMM_HC_PRENORM=enabled,
+        SGLANG_OPT_USE_TILELANG_MHC_POST=enabled,
+    )
     for name in ("sglang", "sglang.srt", "sglang.srt.distributed"):
         monkeypatch.setitem(sys.modules, name, ModuleType(name))
     monkeypatch.setitem(sys.modules, parallel_state.__name__, parallel_state)
+    monkeypatch.setitem(sys.modules, environ.__name__, environ)
 
     module_path = Path("collector/sglang/collect_mhc_module.py")
     spec = importlib.util.spec_from_file_location("mhc_fail_closed_target", module_path)

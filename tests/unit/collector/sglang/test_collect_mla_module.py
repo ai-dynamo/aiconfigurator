@@ -239,11 +239,15 @@ class TestDsaSkipIndexer:
         assert '_skip_state["prev_topk"] = warmup_output[1].detach()' in prefill
         assert "attention_module.skip_topk = _skip_uses_dense_mha" in prefill
         assert 'not _skip_uses_dense_mha and _skip_state["prev_topk"] is None' in prefill
+        assert "sglang_dsa_dense_mha_" in prefill
+        assert "dsa_backend.dsa_prefill_impl" in prefill
 
         decode = functions["_run_decode"]
         assert "attention_module.next_skip_topk = True" in decode
         assert '_skip_state["prev_topk"] = warmup_output[1].detach()' in decode
         assert "return attention_module(" in decode
+        assert "model_capture_mode() if use_benchmark_cuda_graph" in decode
+        assert "model_runner.attn_backend.dsa_decode_impl" in decode
 
         assert "register_forward_hook" not in prefill
         assert "register_forward_hook" not in decode
@@ -345,11 +349,11 @@ class TestBuildModuleTestCases:
                 assert case[9] in {1, 2, 4, 8}
                 assert case[10] == ("flashmla_kv" if case[3] == "fp8" else None)
 
-    def test_blackwell_context_keeps_both_consumer_backends(self):
+    def test_blackwell_context_uses_0514_default_backend(self):
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=100):
             cases = mod._build_module_test_cases("dsa", "context")
-        assert {case[10] for case in cases if case[3] == "fp8"} == {"flashmla_kv", "trtllm"}
+        assert {case[10] for case in cases if case[3] == "fp8"} == {"trtllm"}
 
     def test_blackwell_generation_uses_0514_default_backend(self):
         mod = _import_module()
@@ -573,3 +577,90 @@ class TestBuildWideepMlaTestCases:
                 assert case[3] == "bfloat16"  # kv_cache_dtype
                 assert case[4] == "bfloat16"  # compute_dtype
                 assert case[5] == "bfloat16"  # gemm_type
+
+
+@pytest.mark.unit
+class TestFailClosedOrchestration:
+    def test_empty_case_list_raises_before_model_load(self, monkeypatch):
+        mod = _import_module()
+        monkeypatch.setattr(mod, "get_context_test_cases", lambda _attn_type: [])
+        monkeypatch.setattr(mod, "_filter_cases_from_env", lambda cases, **_kwargs: cases)
+        monkeypatch.setattr(
+            mod,
+            "load_model_runner",
+            lambda **_kwargs: pytest.fail("empty sweep must fail before loading a model"),
+        )
+
+        with pytest.raises(RuntimeError, match=r"MLA module context has no runnable cases"):
+            mod.run_mla_module(
+                "mla",
+                8,
+                "deepseek-ai/DeepSeek-V3",
+                "bfloat16",
+                "bfloat16",
+                "bfloat16",
+                True,
+                0,
+                attention_backend="fa3",
+            )
+
+    def test_zero_logged_rows_raises(self, monkeypatch):
+        mod = _import_module()
+        test_case = [128, 1, 8, "bfloat16", "bfloat16", "bfloat16"]
+        monkeypatch.setattr(mod, "get_context_test_cases", lambda _attn_type: [test_case])
+        monkeypatch.setattr(mod, "_filter_cases_from_env", lambda cases, **_kwargs: cases)
+        monkeypatch.setattr(mod, "cleanup_distributed", lambda: None)
+        monkeypatch.setattr(mod, "load_model_runner", lambda **_kwargs: object())
+        monkeypatch.setattr(mod, "run_attention_torch", lambda **_kwargs: 0)
+
+        with pytest.raises(RuntimeError, match=r"MLA module context persisted no rows"):
+            mod.run_mla_module(
+                "mla",
+                8,
+                "deepseek-ai/DeepSeek-V3",
+                "bfloat16",
+                "bfloat16",
+                "bfloat16",
+                True,
+                0,
+                attention_backend="fa3",
+            )
+
+    def test_configured_subprocess_timeout_raises(self, monkeypatch):
+        mod = _import_module()
+
+        class TimedOutProcess:
+            returncode = None
+            killed = False
+            waited = False
+
+            def communicate(self, timeout=None):
+                assert timeout == 7
+                raise mod.subprocess.TimeoutExpired(cmd="mla-collector", timeout=timeout)
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self):
+                self.waited = True
+                self.returncode = -9
+
+        process = TimedOutProcess()
+        monkeypatch.setenv("AIC_MLA_MODULE_SUBPROCESS_TIMEOUT_SEC", "7")
+        monkeypatch.setattr(mod.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+        with pytest.raises(RuntimeError, match=r"MLA module context subprocess timed out after 7s"):
+            mod._run_mla_subprocess(
+                "mla",
+                8,
+                "deepseek-ai/DeepSeek-V3",
+                "bfloat16",
+                "bfloat16",
+                "bfloat16",
+                True,
+                0,
+                attention_backend="fa3",
+            )
+
+        assert process.killed
+        assert process.waited

@@ -59,6 +59,9 @@ REGISTRY: list[OpEntry] = [
         get_func="get_moe_test_cases",
         run_func="run_moe_torch",
         perf_filename=PerfFile.MOE,
+        # TODO(SM120 bring-up): audit every 0.5.14 artifact/backend on real
+        # hardware before enabling the complete, unfiltered MoE population.
+        unverified_sms=(120,),
     ),
     OpEntry(
         op="attention_context",
@@ -87,6 +90,9 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsa_context_module_test_cases",
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_CONTEXT_MODULE,
+        # SM103's bundled TRTLLM-GEN capability check rejects the target;
+        # SM120 has no hardware validation for the selected 0.5.14 path.
+        unverified_sms=(103, 120),
     ),
     OpEntry(
         op="dsa_generation_module",
@@ -94,6 +100,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsa_generation_module_test_cases",
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_GENERATION_MODULE,
+        unverified_sms=(103, 120),
     ),
     # GLM-5.2 skip-indexer layers (index_topk_freq>1): same shapes as the full
     # DSA module, but the per-layer indexer (mqa+topk+index-K store) is patched
@@ -106,6 +113,9 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsa_context_module_skip_indexer_test_cases",
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_CONTEXT_MODULE_SKIP_INDEXER,
+        # The only registered GLM-5.2 artifact is NVFP4 (SM100+); the exact
+        # reuse-layer path is currently hardware-validated only on SM100.
+        unverified_sms=(90, 103, 120),
     ),
     OpEntry(
         op="dsa_generation_module_skip_indexer",
@@ -113,6 +123,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsa_generation_module_skip_indexer_test_cases",
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_GENERATION_MODULE_SKIP_INDEXER,
+        unverified_sms=(90, 103, 120),
     ),
     # DeepSeek-V4 module-level data (csa/hca x ctx/gen = 4 ops, 1 file each).
     OpEntry(

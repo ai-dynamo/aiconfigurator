@@ -6,7 +6,7 @@
 Builds lightweight RadixAttention/ForwardBatch mocks to benchmark context and
 generation attention without launching a full SGLang server. Shared attention
 shape intent should live in YAML; this file owns SGLang backend construction,
-KV-cache setup, SM-specific skips, and perf logging for the SGLang runtime.
+KV-cache setup, backend dispatch, and perf logging for the SGLang runtime.
 """
 
 __compat__ = "sglang==0.5.14"
@@ -232,21 +232,10 @@ def get_context_attention_test_cases():
                             continue
                     if b * s * num_kv_heads * head_dim * 2 >= max_kv_elements:
                         continue
-                    # SGLang's SM120 Triton context attention path uses
-                    # 32-bit indexing for large Q/O tensors.  Shapes at or
-                    # above this element boundary crash with an illegal
-                    # memory access and poison the worker CUDA context.
-                    if sm_version >= 120 and b * s * n * head_dim >= max_kv_elements:
-                        continue
-
                     for precision_case in shape_sweep["precision_cases"]:
                         use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
                         use_fp8_context_fmha = bool(precision_case["fp8_context_fmha"])
                         if skip_fp8 and use_fp8_kv_cache:
-                            continue
-                        # Blackwell accepts an FP8 KV pool but plans live Q/K/V
-                        # from BF16; do not persist a fake FP8-attn label.
-                        if sm_version in {100, 103, 120} and use_fp8_context_fmha:
                             continue
                         test_cases.append(
                             [
@@ -617,16 +606,21 @@ def run_attention_torch(
     with forward_context(ForwardContext(attn_backend=attn_backend)):
         attn_backend.init_forward_metadata(forward_batch)
 
-        # FP8 KV cache controls storage. TRTLLM MHA takes BF16 live Q/K/V
-        # for both logical FMHA modes and converts inside the backend.
-        if is_context_phase and use_fp8_context_fmha and attn_backend_name != "trtllm_mha":
-            if attn_backend_name == "flashinfer":
-                raise ValueError("SGLang 0.5.14 FlashInfer has no FP8 live-activation prefill path")
+        # FP8 KV cache controls storage independently from live Q/K/V. Do not
+        # label a BF16-input backend as FP8 attention merely because its cache
+        # is FP8.
+        if is_context_phase and use_fp8_context_fmha:
+            if attn_backend_name in {"flashinfer", "trtllm_mha"}:
+                raise ValueError(f"SGLang 0.5.14 {attn_backend_name} has no FP8 live-activation prefill path")
             q = q.to(kvtype)
             k = k.to(kvtype)
             v = v.to(kvtype)
 
         def run_iter():
+            # FIXME(kernel-limit): 37826f10 observed an SM120 illegal-memory
+            # access for large Q/O tensors on SGLang 0.5.10 Triton. That is not
+            # proof for every 0.5.14 backend; keep the cases attempted until an
+            # SM120 source/hardware audit can replace or remove this note.
             layer(q, k, v, forward_batch, sinks=sinks)
 
         with benchmark_with_power(
@@ -649,7 +643,7 @@ def run_attention_torch(
         step = input_len
         op_name = "generation_attention"
 
-    log_perf(
+    if not log_perf(
         item_list=[
             {
                 "batch_size": batch_size,
@@ -672,6 +666,7 @@ def run_attention_torch(
         kernel_source=attn_backend_name,
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
-    )
+    ):
+        raise RuntimeError(f"Failed to persist SGLang attention performance row to {perf_filename}")
 
     return Timing(latency * 1e-3)

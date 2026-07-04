@@ -305,12 +305,18 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
         finally:
             torch.cuda.nvtx.range_pop()
 
-        kernel_source = "sglang"
+        kernel_source = {
+            "bfloat16": "sglang_torch_linear",
+            "fp8": "sglang_sgl_kernel_fp8_scaled_mm",
+            "fp8_block": "sglang_deepgemm_gemm_nt_f8f8bf16",
+        }.get(gemm_type)
         if gemm_type == "nvfp4":
             kernel_source = (
                 "sglang_flashinfer_cutedsl_nvfp4" if fp4_backend == "cute-dsl" else "sglang_flashinfer_cutlass_nvfp4"
             )
-        log_perf(
+        if kernel_source is None:
+            raise RuntimeError(f"No SGLang kernel source resolved for GEMM type {gemm_type!r}")
+        if not log_perf(
             item_list=[
                 {"gemm_dtype": gemm_type, "m": M, "n": N, "k": K, "latency": results["latency_ms"] / len(op_list)}
             ],
@@ -321,7 +327,8 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
             kernel_source=kernel_source,
             perf_filename=perf_filename,
             power_stats=results["power_stats"],
-        )
+        ):
+            raise RuntimeError(f"Failed to persist SGLang GEMM performance row to {perf_filename}")
     finally:
         op_list.clear()
         torch.cuda.empty_cache()

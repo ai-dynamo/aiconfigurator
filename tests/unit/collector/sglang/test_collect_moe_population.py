@@ -72,6 +72,8 @@ def _populate_gptoss_cases(
     module_config=None,
     resolved_backend=None,
 ):
+    from collector.case_generator import get_moe_quantization_modes
+
     allowed_modes = {allowed_mode} if isinstance(allowed_mode, str) else set(allowed_mode)
     loaded = _load_functions(
         "get_moe_test_cases",
@@ -79,6 +81,7 @@ def _populate_gptoss_cases(
             "itertools": itertools,
             "get_sm_version": lambda: sm_version,
             "get_common_moe_test_cases": lambda: cases,
+            "get_moe_quantization_modes": get_moe_quantization_modes,
             "moe_model_allows_quantization": (lambda _backend, _model, mode: mode in allowed_modes),
             "get_moe_quantization_module_config": lambda *_args, **_kwargs: module_config or {},
             "get_sglang_moe_backend": lambda _case, mode, sm: (
@@ -93,7 +96,6 @@ def _populate_gptoss_cases(
                     else "triton"
                 )
             ),
-            "_SM120_NEMOTRON_NVFP4_MODELS": set(),
         },
     )
     return loaded["get_moe_test_cases"]()
@@ -126,7 +128,7 @@ def _glm5_case(model_name: str):
     )
 
 
-def test_glm52_nvfp4_replaces_consumer_equivalent_glm5_moe_cases():
+def test_glm_nvfp4_artifacts_deduplicate_on_the_moe_consumer_key():
     populated = _populate_gptoss_cases(
         [
             _glm5_case("nvidia/GLM-5-NVFP4"),
@@ -136,7 +138,8 @@ def test_glm52_nvfp4_replaces_consumer_equivalent_glm5_moe_cases():
     )
 
     assert populated
-    assert {case[8] for case in populated} == {"nvidia/GLM-5.2-NVFP4"}
+    assert len(populated) == 1
+    assert {case[8] for case in populated} == {"nvidia/GLM-5-NVFP4"}
 
 
 def test_kimi_int4_population_restores_all_hopper_ep_slices():
@@ -161,7 +164,7 @@ def test_kimi_int4_population_restores_all_hopper_ep_slices():
     )
 
 
-def test_fp8_block_population_uses_tp_local_intermediate_alignment():
+def test_fp8_block_population_keeps_runtime_alignment_failures_attempted():
     invalid = _glm5_case("example/fp8")
     invalid.hidden_size = 128
     invalid.inter_size = 384
@@ -171,11 +174,11 @@ def test_fp8_block_population_uses_tp_local_intermediate_alignment():
     valid = SimpleNamespace(**vars(invalid))
     valid.inter_size = 512
 
-    assert not _populate_gptoss_cases([invalid], sm_version=90, allowed_mode="fp8_block")
+    assert len(_populate_gptoss_cases([invalid], sm_version=90, allowed_mode="fp8_block")) == 1
     assert len(_populate_gptoss_cases([valid], sm_version=90, allowed_mode="fp8_block")) == 1
 
 
-def test_gemma_gelu_population_restores_platform_vector_alignment():
+def test_gemma_gelu_population_keeps_runtime_vector_failures_attempted():
     invalid = _gptoss_case(tp=16, ep=1)
     invalid.model_name = "google/gemma-4-26B-A4B"
     invalid.hidden_size = 2816
@@ -185,16 +188,16 @@ def test_gemma_gelu_population_restores_platform_vector_alignment():
     valid = SimpleNamespace(**vars(invalid))
     valid.tp = 8
 
-    assert not _populate_gptoss_cases([invalid], sm_version=90, allowed_mode="bfloat16")
+    assert len(_populate_gptoss_cases([invalid], sm_version=90, allowed_mode="bfloat16")) == 1
     assert len(_populate_gptoss_cases([valid], sm_version=90, allowed_mode="bfloat16")) == 1
 
     blackwell_valid = SimpleNamespace(**vars(invalid))
     blackwell_valid.tp = 4
-    assert not _populate_gptoss_cases([valid], sm_version=100, allowed_mode="bfloat16")
+    assert len(_populate_gptoss_cases([valid], sm_version=100, allowed_mode="bfloat16")) == 1
     assert len(_populate_gptoss_cases([blackwell_valid], sm_version=100, allowed_mode="bfloat16")) == 1
 
 
-def test_bfloat16_flashinfer_cutlass_population_uses_tp_local_inter_alignment():
+def test_bfloat16_flashinfer_cutlass_population_keeps_runtime_failures_attempted():
     invalid = _gptoss_case(tp=16, ep=1)
     invalid.model_name = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
     invalid.hidden_size = 2688
@@ -209,8 +212,13 @@ def test_bfloat16_flashinfer_cutlass_population_uses_tp_local_inter_alignment():
     ultra.hidden_size = 8192
     ultra.inter_size = 5120
 
-    assert not _populate_gptoss_cases(
-        [invalid], sm_version=90, allowed_mode="bfloat16", resolved_backend="flashinfer_cutlass"
+    assert (
+        len(
+            _populate_gptoss_cases(
+                [invalid], sm_version=90, allowed_mode="bfloat16", resolved_backend="flashinfer_cutlass"
+            )
+        )
+        == 1
     )
     assert (
         len(
@@ -230,7 +238,7 @@ def test_bfloat16_flashinfer_cutlass_population_uses_tp_local_inter_alignment():
     )
 
 
-def test_dsv4_w4a16_population_uses_sm90_fp4_expert_alignment():
+def test_dsv4_fp4_population_keeps_runtime_limits_attempted():
     invalid = _gptoss_case(tp=16, ep=1)
     invalid.model_name = "deepseek-ai/DeepSeek-V4-Pro"
     invalid.architecture = "DeepseekV4ForCausalLM"
@@ -241,7 +249,7 @@ def test_dsv4_w4a16_population_uses_sm90_fp4_expert_alignment():
     valid = SimpleNamespace(**vars(invalid))
     valid.tp = 8
 
-    assert not _populate_gptoss_cases([invalid], sm_version=90, allowed_mode="w4a16_mxfp4")
+    assert len(_populate_gptoss_cases([invalid], sm_version=90, allowed_mode="w4a16_mxfp4")) == 1
     populated = _populate_gptoss_cases([valid], sm_version=90, allowed_mode="w4a16_mxfp4")
     assert len(populated) == 1
     assert populated[0][-1] is True
@@ -249,6 +257,37 @@ def test_dsv4_w4a16_population_uses_sm90_fp4_expert_alignment():
     blackwell = _populate_gptoss_cases([valid], sm_version=100, allowed_mode="w4a8_mxfp4_mxfp8")
     assert len(blackwell) == 1
     assert blackwell[0][0] == "w4a8_mxfp4_mxfp8"
+
+    runtime_limited = SimpleNamespace(**vars(valid))
+    runtime_limited.ep = 2
+    runtime_limited.tp = 16
+    runtime_limited.num_tokens_list = [16384]
+    attempted = _populate_gptoss_cases(
+        [runtime_limited],
+        sm_version=100,
+        allowed_mode="w4a8_mxfp4_mxfp8",
+    )
+    assert len(attempted) == 1
+    assert attempted[0][1:8] == [16384, 7168, 3072, 6, 384, 16, 2]
+
+
+def test_sm120_shared_memory_predictions_do_not_remove_moe_cases():
+    case = _gptoss_case(tp=32, ep=1)
+    case.model_name = "mistralai/Mixtral-8x7B-v0.1"
+    case.hidden_size = 4096
+    case.inter_size = 14336
+    case.topk = 2
+    case.num_experts = 8
+    case.num_tokens_list = [16]
+
+    populated = _populate_gptoss_cases(
+        [case],
+        sm_version=120,
+        allowed_mode="fp8_block",
+        resolved_backend="triton",
+    )
+
+    assert len(populated) == 1
 
 
 def test_sm90_population_excludes_nvfp4_instead_of_using_marlin():
@@ -292,6 +331,7 @@ def test_case_generator_preserves_representative_sglang_moe_runtime_contracts():
         1.702,
         7.0,
     )
+    assert get_sglang_moe_backend(gpt_oss, "w4a16_mxfp4", 90) == "triton"
 
     kimi = model_case("moonshotai/Kimi-K2.5")
     assert get_sglang_moe_backend(kimi, "int4_wo", 90) == "marlin"
@@ -306,6 +346,7 @@ def test_case_generator_preserves_representative_sglang_moe_runtime_contracts():
 
     dsv4 = model_case("deepseek-ai/DeepSeek-V4-Pro")
     assert (dsv4.sglang_moe_scoring_func, dsv4.sglang_moe_has_correction_bias) == ("sqrtsoftplus", True)
+    assert get_sglang_moe_backend(dsv4, "w4a16_mxfp4", 90) == "triton"
 
     llama4 = model_case("meta-llama/Llama-4-Scout-17B-16E-Instruct")
     assert (
@@ -343,7 +384,7 @@ def test_gptoss_mxfp4_population_retains_tp_and_ep_buckets(tp, ep):
         ("nvfp4", 103, "flashinfer_trtllm"),
         ("nvfp4", 120, "flashinfer_cutlass"),
         ("int4_wo", 90, "marlin"),
-        ("w4a16_mxfp4", 90, "flashinfer_mxfp4"),
+        ("w4a16_mxfp4", 90, "triton"),
         ("w4a8_mxfp4_mxfp8", 100, "flashinfer_mxfp4"),
     ],
 )
@@ -374,13 +415,13 @@ def test_sm90_nvfp4_has_no_backend():
     ("moe_type", "moe_backend", "model_name", "sm_version", "kernel_source"),
     [
         ("int4_wo", "marlin", "moonshotai/Kimi-K2.5", 90, "sglang_marlin_moe"),
-        ("w4a16_mxfp4", "flashinfer_mxfp4", "openai/gpt-oss-120b", 90, "sglang_flashinfer_mxfp4_moe"),
+        ("w4a16_mxfp4", "triton", "openai/gpt-oss-120b", 90, "sglang_fused_moe_triton"),
         (
             "w4a8_mxfp4_mxfp8",
             "flashinfer_mxfp4",
             "openai/gpt-oss-120b",
             100,
-            "sglang_flashinfer_mxfp4_moe",
+            "sglang_flashinfer_trtllm_moe",
         ),
     ],
 )
@@ -408,7 +449,7 @@ def test_quantized_moe_uses_framework_path_and_fails_closed(
 
     def framework_benchmark(**kwargs):
         framework_calls.append(kwargs)
-        return 1.25, {"power": 100.0}, moe_backend
+        return 1.25, {"power": 100.0}, kernel_source
 
     run = _load_functions(
         "run_moe_torch",
@@ -517,6 +558,7 @@ def test_raw_moe_case_cleans_gpu_state_and_fails_closed():
     ("moe_type", "hidden_size", "inter_size", "tp", "is_gated", "error"),
     [
         ("fp8_block", 128, 384, 2, True, "fp8_block.*local_inter_size"),
+        ("int4_wo", 128, 80, 1, True, "INT4-WO.*group_size"),
     ],
 )
 def test_runtime_rejects_misaligned_quantized_cases(moe_type, hidden_size, inter_size, tp, is_gated, error):
@@ -526,7 +568,11 @@ def test_runtime_rejects_misaligned_quantized_cases(moe_type, hidden_size, inter
     )
     run = _load_functions(
         "run_moe_torch",
-        namespace={"torch": fake_torch, "get_sm_version": lambda: 90},
+        namespace={
+            "torch": fake_torch,
+            "get_sm_version": lambda: 90,
+            "get_moe_quantization_module_config": lambda *_args, **_kwargs: {"group_size": 32},
+        },
     )["run_moe_torch"]
 
     with pytest.raises(ValueError, match=error):
@@ -627,3 +673,24 @@ def test_framework_int4_builds_grouped_compressed_tensors_config():
     assert "CompressedTensorsConfig.from_config" in source
     assert '"strategy": "group"' in source
     assert '"group_size": int4_group_size' in source
+
+
+def test_framework_moe_source_comes_from_the_constructed_quant_method():
+    source_text = SOURCE_PATH.read_text()
+    tree = ast.parse(source_text)
+    functions = {
+        node.name: ast.get_source_segment(source_text, node) for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+    framework_bench = functions["_benchmark_framework_quantized_moe"]
+    run_moe = functions["run_moe_torch"]
+
+    for method_name in (
+        "Mxfp4MoEMethod",
+        "Mxfp4FlashinferCutlassMoEMethod",
+        "Mxfp4FlashinferTrtllmMoEMethod",
+        "CompressedTensorsWNA16MoE",
+        "ModelOptNvFp4FusedMoEMethod",
+    ):
+        assert method_name in framework_bench
+    assert 'return results["latency_ms"] / len(logits), results["power_stats"], kernel_source' in framework_bench
+    assert 'model_name == "deepseek-ai/DeepSeek-V4-Pro"' not in run_moe

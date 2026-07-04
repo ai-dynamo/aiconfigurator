@@ -9,6 +9,8 @@ import sys
 from itertools import pairwise
 from pathlib import Path
 
+import pytest
+
 from collector.case_generator import (
     get_attention_head_configs,
     get_moe_quantization_specs,
@@ -295,6 +297,9 @@ def test_moe_model_quantization_policy_is_yaml_backed():
     assert not moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "bfloat16")
     assert not moe_model_allows_quantization("sglang", "Qwen/Qwen3-235B-A22B", "w4a8_mxfp4_mxfp8")
     assert moe_model_allows_quantization("sglang", "nvidia/GLM-5.2-NVFP4", "nvfp4")
+    assert not moe_model_allows_quantization("sglang", "nvidia/GLM-5.2-NVFP4", "bfloat16")
+    assert moe_model_allows_quantization("sglang", "zai-org/GLM-5-FP8", "fp8_block")
+    assert not moe_model_allows_quantization("sglang", "zai-org/GLM-5-FP8", "nvfp4")
 
     assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a16_mxfp4")
     assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a8_mxfp4_mxfp8")
@@ -384,13 +389,23 @@ def test_sglang_marlin_is_declared_only_for_int4_wo():
     assert marlin_modes == {"int4_wo"}
 
 
-def test_sm90_drops_glm52_skip_indexer_until_a_non_nvfp4_artifact_is_registered():
+@pytest.mark.unit
+def test_sglang_registry_marks_unvalidated_dsa_and_moe_platforms_explicitly():
+    from collector.sglang.registry import REGISTRY
+
     sm90 = build_collection_case_plan(backend="sglang", full=True, sm_version=90)
     sm100 = build_collection_case_plan(backend="sglang", full=True, sm_version=100)
+    entries = {entry.op: entry for entry in REGISTRY}
 
     for op in ("dsa_context_module_skip_indexer", "dsa_generation_module_skip_indexer"):
-        assert op not in sm90.op_cases
-        assert op in sm100.op_cases
+        assert op in sm90.selected_ops
+        assert op in sm100.selected_ops
+        assert entries[op].unverified_sms == (90, 103, 120)
+
+    for op in ("dsa_context_module", "dsa_generation_module"):
+        assert entries[op].unverified_sms == (103, 120)
+
+    assert entries["moe"].unverified_sms == (120,)
 
 
 def test_deepseek_minimax_and_nemotron_moe_quantization_is_artifact_specific():
@@ -567,8 +582,6 @@ def test_mla_collectors_dedupe_on_loader_physical_keys(monkeypatch):
             "KV_LORA_RANK": 512,
             "QK_NOPE_HEAD_DIM": 128,
             "QK_ROPE_HEAD_DIM": 64,
-            "MLA_PAGE_SIZE": 64,
-            "MAX_KV_LOC": ((2**31 - 1) // (512 + 64)) - 64,
         },
     )
     trtllm_adapter = _load_mla_adapter(
@@ -600,6 +613,19 @@ def test_mla_collectors_dedupe_on_loader_physical_keys(monkeypatch):
         assert len(generation_cases) == len(physical_keys(generation_cases))
         assert 1 in {case[4] // case[6] for case in context_cases}
         assert 1 in {case[4] // case[6] for case in generation_cases}
+
+    large_generation_spec = SimpleNamespace(
+        model_name="large-generation-regression",
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        num_heads=128,
+        batch_size=1024,
+        input_len=4096,
+        is_context_phase=False,
+    )
+    assert sglang_adapter([large_generation_spec], dtype_list=("bf16",), tp_sizes=(1,), backend="fa3")
 
 
 def test_kimi_mla_plan_includes_generation_bmm_helpers():

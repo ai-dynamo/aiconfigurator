@@ -88,7 +88,7 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, *, perf
     ) as results:
         pass
 
-    log_perf(
+    if not log_perf(
         item_list=[
             {
                 "bmm_dtype": dtype,
@@ -101,10 +101,11 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, *, perf
         version=pkg_resources.get_distribution("sglang").version,
         device_name=torch.cuda.get_device_name(device),
         op_name="mla_gen_pre",
-        kernel_source="default",
+        kernel_source="sglang_sgl_kernel_bmm_fp8" if dtype == "fp8" else "sglang_torch_bmm",
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
-    )
+    ):
+        raise RuntimeError(f"Failed to persist SGLang MLA generation pre-BMM performance row to {perf_filename}")
 
 
 def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, *, perf_filename, device="cuda:0"):
@@ -171,7 +172,7 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, *, per
     ) as results:
         pass
 
-    log_perf(
+    if not log_perf(
         item_list=[
             {
                 "bmm_dtype": dtype,
@@ -184,7 +185,8 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, *, per
         version=pkg_resources.get_distribution("sglang").version,
         device_name=torch.cuda.get_device_name(device),
         op_name="mla_gen_post",
-        kernel_source="default",
+        kernel_source="sglang_sgl_kernel_bmm_fp8" if dtype == "fp8" else "sglang_torch_bmm",
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
-    )
+    ):
+        raise RuntimeError(f"Failed to persist SGLang MLA generation post-BMM performance row to {perf_filename}")

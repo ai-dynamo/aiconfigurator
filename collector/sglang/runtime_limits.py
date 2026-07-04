@@ -123,42 +123,6 @@ def required_swa_kv_alloc_tokens(
     return batch_size * (rounded_tail + rounded_total - rounded_past)
 
 
-def dsa_indexer_workspace_bytes(
-    batch_size: int,
-    seq_len: int,
-    prefix_len: int,
-    num_heads: int,
-    target_tp_size: int,
-    *,
-    is_prefill: bool,
-) -> int:
-    """Estimate DSA indexer temporary logits workspace in bytes.
-
-    SGLang's NSA indexer builds an MQA logits workspace over q tokens and KV
-    tokens before top-k selection.  With synthetic reduced-TP module collection,
-    the reduced-head paths can materialize a per-head logits workspace; this
-    catches shapes that fit the KV pool but cannot fit the indexer workspace.
-    """
-    if is_prefill:
-        q_tokens = required_prefill_extend_tokens(batch_size, seq_len)
-        kv_tokens = required_kv_tokens(batch_size, seq_len, prefix_len, is_prefill=True)
-    else:
-        q_tokens = batch_size
-        kv_tokens = required_kv_tokens(batch_size, seq_len, prefix_len, is_prefill=False)
-
-    head_factor = max(1, int(num_heads)) if target_tp_size > 1 else 1
-    return q_tokens * kv_tokens * head_factor * 4
-
-
-def dsa_indexer_workspace_limit_bytes(free_mem: int, total_mem: int) -> int:
-    """Return a conservative per-process DSA indexer workspace limit."""
-    # The NSA indexer can hit illegal memory accesses before allocator OOM when
-    # its temporary logits workspace gets close to the currently free memory.
-    # Keep this intentionally conservative so unsupported long-prefix probes are
-    # skipped before launching kernels.
-    return int(min(free_mem * 0.30, total_mem * 0.15))
-
-
 def sglang_dsa_mqa_logits_chunking_supported() -> bool:
     """Return whether the imported SGLang DSA/NSA indexer chunks MQA logits."""
     candidates = (
@@ -187,7 +151,7 @@ def sglang_dsa_mqa_logits_chunking_supported() -> bool:
         has_chunk_kernel = "logits_chunk" in source
         if has_chunk_decision and has_chunk_loop and has_chunk_kernel:
             return True
-    return False
+    raise RuntimeError("SGLang DSA MQA-logits chunking source contract was not detected")
 
 
 def dsa_indexer_prefill_shape_is_supported(batch_size: int, seq_len: int) -> bool:

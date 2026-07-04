@@ -34,3 +34,14 @@ def test_dsv4_worker_fails_closed_when_phase_has_no_valid_shapes():
             batch_size=1,
             output_path="unused",
         )
+
+
+def test_dsv4_generation_enters_sglang_model_capture_mode():
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(SOURCE_PATH))
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_dsv4_mla_module"
+    )
+    function_source = ast.get_source_segment(source, function)
+
+    assert "model_capture_mode() if not is_prefill" in function_source

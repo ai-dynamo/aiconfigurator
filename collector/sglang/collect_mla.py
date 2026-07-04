@@ -6,7 +6,7 @@
 Builds standalone RadixAttention/ForwardBatch mocks for MLA context and
 generation kernels without starting a server. Shared MLA cases come from YAML;
 this file owns SGLang MLA backend choice, paged KV-cache setup, DP-attention
-mocking, SM-specific skips, and perf logging.
+mocking, runtime dispatch, and perf logging.
 """
 
 __compat__ = "sglang==0.5.14"
@@ -47,8 +47,6 @@ QK_NOPE_HEAD_DIM = 128  # DeepSeek configs
 QK_ROPE_HEAD_DIM = 64
 # Scaling follows production: 1 / sqrt(qk_nope + qk_rope)
 MLA_SCALING = 1 / math.sqrt(QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM)
-INT32_MAX = 2**31 - 1
-MAX_KV_LOC = INT32_MAX // (KV_LORA_RANK + QK_ROPE_HEAD_DIM)
 
 # We only cover deepseek v3 in this collector script.
 
@@ -243,11 +241,10 @@ def get_generation_mla_test_cases():
         dtype_list=dtype_list,
         tp_sizes=(1, 2, 4, 8, 16, 32, 64),
         backend=backend,
-        sm_version=sm_version,
     )
 
 
-def _build_mla_test_cases(case_specs, *, dtype_list, tp_sizes, backend=None, sm_version=None):
+def _build_mla_test_cases(case_specs, *, dtype_list, tp_sizes, backend=None):
     """Adapt the shared YAML MLA catalog to SGLang's legacy run tuple.
 
     The perf DB key does not contain a model name, so model aliases that resolve
@@ -259,7 +256,6 @@ def _build_mla_test_cases(case_specs, *, dtype_list, tp_sizes, backend=None, sm_
 
     cases_by_physical_key = {}
     page_size = 64 if backend == "trtllm_mla" else 1
-    max_kv_loc = MAX_KV_LOC - page_size
     expected_geometry = (KV_LORA_RANK, QK_NOPE_HEAD_DIM, QK_ROPE_HEAD_DIM, 128)
     for spec in case_specs:
         geometry = (spec.kv_lora_rank, spec.qk_nope_head_dim, spec.qk_rope_head_dim, spec.v_head_dim)
@@ -268,19 +264,6 @@ def _build_mla_test_cases(case_specs, *, dtype_list, tp_sizes, backend=None, sm_
         for dtype in dtype_list:
             for tp_size in tp_sizes:
                 if spec.num_heads % tp_size:
-                    continue
-                if (
-                    not spec.is_context_phase
-                    and backend == "trtllm_mla"
-                    and sm_version == 120
-                    and spec.num_heads // tp_size != 128
-                ):
-                    # XQA MLA kernel has head_group_ratio=128 hardcoded; it always reads
-                    # 128 Q heads from the q tensor regardless of the runtime head count.
-                    # local_heads != 128 causes out-of-bounds GPU memory reads and crashes.
-                    continue
-                if not spec.is_context_phase and (spec.batch_size * (spec.input_len + 1)) + page_size > max_kv_loc:
-                    # Guard against int32 overflow in the legacy flashmla kernel path.
                     continue
 
                 case = (
@@ -605,7 +588,7 @@ def run_mla(
         step = input_len
 
     str_type = "bfloat16" if kv_cache_dtype == torch.bfloat16 else "fp8"
-    log_perf(
+    if not log_perf(
         item_list=[
             {
                 "mla_dtype": "bfloat16",
@@ -625,7 +608,8 @@ def run_mla(
         kernel_source=kernel_source,
         perf_filename=perf_filename,
         power_stats=power_stats,
-    )
+    ):
+        raise RuntimeError(f"Failed to persist SGLang MLA performance row to {perf_filename}")
 
 
 if __name__ == "__main__":

@@ -31,11 +31,13 @@ docker run -itd --shm-size 32g --gpus all --ipc=host --network=host --name sglan
 
 ## Execution Modes
 
-The wideep collectors support two execution modes:
+Stock diagnostics and the independent WideEP MoE collector use these modes:
 
-### Mode 1: Direct Execution
+### Mode 1: Direct Diagnostic Execution
 
-Run scripts directly with command-line arguments for single GPU collection:
+Run scripts directly with command-line arguments for single GPU diagnostics.
+The MLA command exercises the stock 0.5.14 module implementation; it is not a
+registered or accepted WideEP MLA collector:
 
 ```bash
 # Attention (MLA/DSA Module)
@@ -65,11 +67,11 @@ python collect.py --backend sglang --ops dsa_context_module dsa_generation_modul
 # Run the retained WideEP MoE operator separately in the v0.5.10 container
 python collect.py --backend sglang --ops wideep_moe
 
-# Mixed: kernel-level + module-level (all run in parallel across GPUs)
+# Mixed: operations run in order; cases within each operation use the GPU pool
 python collect.py --backend sglang --ops mla_bmm_gen_pre dsa_context_module
 ```
 
-**Available operators (`wideep_moe` requires its separate v0.5.10 run):**
+**Selected operators (`wideep_moe` requires its separate v0.5.10 run):**
 
 | Category | Operator | Description |
 |----------|----------|-------------|
@@ -85,17 +87,24 @@ python collect.py --backend sglang --ops mla_bmm_gen_pre dsa_context_module
 | Module | `dsa_generation_module` | DSA module decode (DeepSeek-V3.2, GLM-5) |
 | Wideep | `wideep_moe` | Wideep MOE |
 
-**Note:** All operators run in parallel across multiple GPUs. Module-level operators use subprocess-based GPU isolation (via `CUDA_VISIBLE_DEVICES`) to prevent NCCL/distributed initialization conflicts.
+**Note:** Requested operators run sequentially. Cases within one operator are
+distributed across the selected GPU workers. Module-level operators use
+subprocess-based GPU isolation (via `CUDA_VISIBLE_DEVICES`) to prevent
+NCCL/distributed initialization conflicts.
 
 ## General Configuration
 
 All scripts save results to the same output directory. Modify `output_path` in each script to your desired location:
 ```python
-output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
+output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.14/"
 ```
 
 
-## 1. Attention Module Collection (collect_mla_module.py)
+## 1. Stock Attention Module Diagnostics (`collect_mla_module.py`)
+
+This direct script retains historical `wideep_*` output filenames for local
+diagnostics, but those files are not supported WideEP 0.5.10 artifacts. Use the
+registered stock MLA/DSA ops through `collect.py` for accepted collection.
 
 ### Features
 - Unified MLA (DeepSeek-V3) and DSA (DeepSeek-V3.2, GLM-5) benchmarking
@@ -131,7 +140,7 @@ The script automatically tests the following configuration combinations:
 - Sequence lengths: 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384
 
 ### Output
-Results are saved to:
+Direct diagnostic results use the historical filenames:
 - `wideep_context_mla_perf.txt` / `dsa_context_module_perf.txt`: Prefill phase performance data
 - `wideep_generation_mla_perf.txt` / `dsa_generation_module_perf.txt`: Decode phase performance data
 

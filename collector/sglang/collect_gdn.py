@@ -68,8 +68,6 @@ except ModuleNotFoundError:
     )
 
 aic_debug = int(os.getenv("aic_gdn_debug", "0"))  # noqa: SIM112
-MAX_GDN_CONTEXT_TOKENS = 262_144
-MAX_GDN_CONTEXT_VALUE_ELEMENTS = 1_073_741_824
 
 
 def get_gdn_test_cases():
@@ -156,23 +154,10 @@ def run_gdn_context_benchmark(
     conv_weight = torch.randn(conv_channels, d_conv, dtype=dtype, device=device)
     successful_points = 0
     failed_points = 0
-    skipped_points = 0
 
     for batch_size in batch_size_list:
         for seq_len in seq_len_list:
             total_tokens = batch_size * seq_len
-            value_elements = total_tokens * value_dim
-            if total_tokens > MAX_GDN_CONTEXT_TOKENS or value_elements > MAX_GDN_CONTEXT_VALUE_ELEMENTS:
-                skipped_points += 1
-                if aic_debug:
-                    print(
-                        f"  Skipping batch_size={batch_size}, seq_len={seq_len}: "
-                        f"total_tokens={total_tokens}, value_elements={value_elements} exceed "
-                        "the SGLang 0.5.14 GDN context limits "
-                        f"({MAX_GDN_CONTEXT_TOKENS} tokens, "
-                        f"{MAX_GDN_CONTEXT_VALUE_ELEMENTS} value elements)"
-                    )
-                continue
             if aic_debug:
                 print(f"  Benchmarking batch_size={batch_size}, seq_len={seq_len}")
 
@@ -252,7 +237,6 @@ def run_gdn_context_benchmark(
                     num_warmups=num_warmups,
                     num_runs=num_runs,
                     repeat_n=1,
-                    allow_graph_fail=True,
                 ) as results:
                     if not log_perf(
                         item_list=[{**common_log_data, "latency": results["latency_ms"]}],
@@ -286,7 +270,6 @@ def run_gdn_context_benchmark(
                     num_warmups=num_warmups,
                     num_runs=num_runs,
                     repeat_n=1,
-                    allow_graph_fail=True,
                 ) as results:
                     if not log_perf(
                         item_list=[{**common_log_data, "latency": results["latency_ms"]}],
@@ -320,9 +303,9 @@ def run_gdn_context_benchmark(
                 if cleanup_errors:
                     raise RuntimeError(f"SGLang GDN context cleanup failed: {'; '.join(cleanup_errors)}")
 
-    summary = f"ok={successful_points} error={failed_points} skip={skipped_points}"
+    summary = f"ok={successful_points} error={failed_points} skip=0"
     print(f"GDN context summary: {summary}")
-    if failed_points or (successful_points == 0 and skipped_points == 0):
+    if failed_points or successful_points == 0:
         raise RuntimeError(f"SGLang GDN context collection failed strict completeness: {summary}")
 
 
@@ -434,7 +417,6 @@ def run_gdn_generation_benchmark(
                 num_warmups=num_warmups,
                 num_runs=num_runs,
                 repeat_n=1,
-                allow_graph_fail=True,
             ) as results:
                 if not log_perf(
                     item_list=[{**common_log_data, "latency": results["latency_ms"]}],
@@ -468,7 +450,6 @@ def run_gdn_generation_benchmark(
                 num_warmups=num_warmups,
                 num_runs=num_runs,
                 repeat_n=1,
-                allow_graph_fail=True,
             ) as results:
                 if not log_perf(
                     item_list=[{**common_log_data, "latency": results["latency_ms"]}],

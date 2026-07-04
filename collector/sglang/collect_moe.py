@@ -79,28 +79,10 @@ from sglang.srt.layers.quantization.modelopt_quant import ModelOptFp4Config, Mod
 from sglang.srt.layers.quantization.mxfp4 import Mxfp4Config
 from sglang.srt.utils import is_hip
 
-# SGLang 0.5.14: fused_experts_impl uses @torch.compile on moe_sum_reduce_torch_compile
-# for tokens_in_chunk <= 32 and topk > 2.  torch.compile's JIT compilation can hang
-# during CUDA graph capture or in headless benchmark contexts.  Replace the compiled
-# function with an eager equivalent so benchmarks don't stall.
-try:
-    try:
-        import sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe as _fmoe_mod
-    except ImportError:
-        import sglang.srt.layers.moe.fused_moe_triton.fused_moe as _fmoe_mod
-
-    def _eager_moe_sum_reduce(x, out, routed_scaling_factor):
-        torch.sum(x, dim=1, out=out)
-        out.mul_(routed_scaling_factor)
-
-    if hasattr(_fmoe_mod, "moe_sum_reduce_torch_compile"):
-        _fmoe_mod.moe_sum_reduce_torch_compile = _eager_moe_sum_reduce
-except Exception:
-    pass
-
 try:
     from case_generator import (
         get_common_moe_test_cases,
+        get_moe_quantization_modes,
         get_moe_quantization_module_config,
         get_sglang_moe_backend,
         moe_model_allows_quantization,
@@ -122,6 +104,7 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from case_generator import (
         get_common_moe_test_cases,
+        get_moe_quantization_modes,
         get_moe_quantization_module_config,
         get_sglang_moe_backend,
         moe_model_allows_quantization,
@@ -139,10 +122,6 @@ except ModuleNotFoundError:
 
 
 _is_hip = is_hip()
-_SM120_NEMOTRON_NVFP4_MODELS = {
-    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
-    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
-}
 
 
 def _mxfp4_activation_precision(moe_type: str) -> str:
@@ -177,474 +156,25 @@ def _ensure_writable_flashinfer_cubin_dir() -> None:
 
 
 def get_moe_test_cases():
-    # fp8_block MOE requires SM90+ due to shared memory requirements
-    # L40S (SM89) has 100KB shared memory, fp8_block kernel needs ~144KB
     sm_version = get_sm_version()
-    if sm_version < 90:
-        moe_list = ["bfloat16"]
-    elif sm_version < 100:
-        moe_list = ["bfloat16", "fp8_block", "int4_wo", "w4a16_mxfp4"]
-    elif sm_version in (100, 103):
-        moe_list = [
-            "bfloat16",
-            "fp8_block",
-            "nvfp4",
-            "w4a16_mxfp4",
-            "w4a8_mxfp4_mxfp8",
-        ]
-    else:
-        # TODO(SM120 bring-up): Re-audit the Nemotron-only NVFP4 gate retained
-        # from f027123f/c3ef575c on real SM120 hardware. Pinned SGLang 0.5.14
-        # (49e384ce) selects flashinfer_cutlass for ordinary modelopt_fp4 on
-        # SM120 (EP=1 or EP=TP). Its GPT-OSS/DeepSeek-V4 MXFP4 Marlin W4A16
-        # repack is not an MXFP4 measurement and remains rejected here. Probe
-        # every registered artifact before expanding population; SM100 results
-        # are not SM120 evidence.
-        moe_list = ["bfloat16", "fp8_block"]
+    moe_list = get_moe_quantization_modes("sglang", sm_version=sm_version)
 
     common_cases = get_common_moe_test_cases()
-    # When both GLM-5-NVFP4 and GLM-5.2-NVFP4 are present, collect only
-    # GLM-5.2-NVFP4 (identical MoE; GLM-5.2 is the longest-context one).
-    _present = {tc.model_name for tc in common_cases}
-    _drop_models = {"nvidia/GLM-5-NVFP4"} if {"nvidia/GLM-5-NVFP4", "nvidia/GLM-5.2-NVFP4"} <= _present else set()
-
     test_cases = []
     seen_physical_cases = {}
 
     for common_moe_testcase in common_cases:
         model_name = common_moe_testcase.model_name
-        if model_name in _drop_models:
-            continue
+        num_tokens_list = common_moe_testcase.num_tokens_list
 
-        model_moe_list = moe_list
-        if model_name == "zai-org/GLM-5":
-            model_moe_list = ["bfloat16"]
-        elif model_name == "zai-org/GLM-5-FP8":
-            model_moe_list = ["fp8_block"]
-        elif model_name in ("nvidia/GLM-5-NVFP4", "nvidia/GLM-5.2-NVFP4"):
-            # nvfp4 MoE; sweep the full EP/TP grid like DeepSeek-V4 (the EP/TP
-            # validity is already bounded by get_common_moe_test_cases via
-            # tp*ep==gpu / ep<=num_experts / num_experts%ep==0 / inter%tp==0).
-            # (Previously hard-pinned to ep==1 & tp<32 as an nvfp4-EP>1 workaround.)
-            model_moe_list = ["nvfp4"] if "nvfp4" in moe_list else []
-        elif sm_version >= 120 and model_name in _SM120_NEMOTRON_NVFP4_MODELS:
-            model_moe_list = [*model_moe_list, "nvfp4"]
-
-        num_tokens_list = [num_tokens for num_tokens in common_moe_testcase.num_tokens_list if num_tokens <= 20480]
-
-        for moe_type, num_tokens in itertools.product(model_moe_list, num_tokens_list):
+        for moe_type, num_tokens in itertools.product(moe_list, num_tokens_list):
             if not moe_model_allows_quantization("sglang", model_name, moe_type):
                 continue
-            module_config = get_moe_quantization_module_config("sglang", moe_type, model_name=model_name)
+            is_fp4_experts = common_moe_testcase.architecture == "DeepseekV4ForCausalLM" and moe_type in {
+                "w4a16_mxfp4",
+                "w4a8_mxfp4_mxfp8",
+            }
             moe_backend = get_sglang_moe_backend(common_moe_testcase, moe_type, sm_version)
-            is_native_dsv4 = common_moe_testcase.architecture == "DeepseekV4ForCausalLM"
-            is_dsv4_pro = model_name == "deepseek-ai/DeepSeek-V4-Pro"
-            is_fp4_experts = is_native_dsv4 and moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
-            activation_vector_size = 16 if sm_version >= 100 else 8
-            if (
-                moe_type == "bfloat16"
-                and moe_backend == "flashinfer_cutlass"
-                and (
-                    common_moe_testcase.hidden_size % 8 != 0
-                    or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 8 != 0
-                )
-            ):
-                continue
-            if (
-                moe_backend == "triton"
-                and common_moe_testcase.sglang_moe_is_gated
-                and common_moe_testcase.sglang_moe_activation == "gelu"
-                and (common_moe_testcase.inter_size // common_moe_testcase.tp) % activation_vector_size != 0
-            ):
-                continue
-            if is_native_dsv4 and moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}:
-                if moe_type == "w4a16_mxfp4" and not (is_dsv4_pro and sm_version == 90):
-                    continue
-                if moe_type == "w4a8_mxfp4_mxfp8" and sm_version not in {100, 103}:
-                    continue
-                # The validated standalone FP4-expert path is single-EP; the
-                # TRT-LLM generated Blackwell method is additionally bounded
-                # to production prefill chunks and TP<=8.
-                if common_moe_testcase.ep != 1 or num_tokens > 8192:
-                    continue
-                if moe_type == "w4a8_mxfp4_mxfp8" and common_moe_testcase.tp > 8:
-                    continue
-                if (
-                    moe_type == "w4a16_mxfp4"
-                    and sm_version == 90
-                    and (
-                        common_moe_testcase.hidden_size % 128 != 0
-                        or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 128 != 0
-                    )
-                ):
-                    continue
-            if (
-                sm_version >= 120
-                and moe_type == "nvfp4"
-                and model_name in _SM120_NEMOTRON_NVFP4_MODELS
-                and common_moe_testcase.ep == 1
-                and (common_moe_testcase.inter_size // common_moe_testcase.tp) % 32 != 0
-            ):
-                # The SGLang 0.5.14 EP=1 NVFP4 path uses FlashInfer's TRTLLM
-                # BF16xFP4 routed kernel, which requires the local intermediate
-                # size to be divisible by 32. Keep non-divisible Nemotron
-                # slices out of generated collection plans.
-                continue
-            # Triton fp8_block quantizes the TP-local expert matrices in 128x128
-            # blocks. FlashInfer paths own their padding and are checked by the
-            # framework layer instead.
-            if (
-                moe_type == "fp8_block"
-                and moe_backend == "triton"
-                and (
-                    common_moe_testcase.hidden_size % 128 != 0
-                    or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 128 != 0
-                )
-            ):
-                continue
-            if (
-                moe_type == "fp8_block"
-                and sm_version >= 120
-                and common_moe_testcase.hidden_size == 4096
-                and common_moe_testcase.inter_size == 14336
-                and common_moe_testcase.topk == 2
-                and common_moe_testcase.num_experts == 8
-                and common_moe_testcase.tp == 32
-                and (
-                    num_tokens >= 16
-                    or (common_moe_testcase.ep == 2 and num_tokens >= 8)
-                    or (common_moe_testcase.ep == 4 and num_tokens >= 4)
-                    or (common_moe_testcase.ep == 8 and num_tokens >= 2)
-                )
-            ):
-                # SGLang 0.5.14 uses the default Triton fp8 block MoE config for
-                # Mixtral on SM120 at this TP slice. These token counts require
-                # 144 KiB shared memory, above the 99 KiB runtime limit.
-                continue
-            if (
-                moe_type == "fp8_block"
-                and sm_version >= 120
-                and common_moe_testcase.hidden_size == 4096
-                and common_moe_testcase.inter_size == 2688
-                and common_moe_testcase.topk == 22
-                and common_moe_testcase.num_experts == 512
-                and (
-                    (common_moe_testcase.tp == 2 and num_tokens >= 768)
-                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 2 and num_tokens >= 320)
-                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 4 and num_tokens >= 160)
-                    or (common_moe_testcase.tp == 4 and common_moe_testcase.ep == 2 and num_tokens >= 320)
-                    or (common_moe_testcase.tp == 4 and common_moe_testcase.ep == 4 and num_tokens >= 160)
-                    or (common_moe_testcase.tp == 4 and common_moe_testcase.ep == 8 and num_tokens >= 80)
-                    or (common_moe_testcase.tp == 4 and common_moe_testcase.ep == 16 and num_tokens >= 48)
-                    or (common_moe_testcase.tp == 4 and common_moe_testcase.ep == 32 and num_tokens >= 32)
-                    or (common_moe_testcase.tp == 4 and common_moe_testcase.ep == 64 and num_tokens >= 16)
-                    or (common_moe_testcase.tp == 4 and num_tokens >= 768)
-                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 2 and num_tokens >= 320)
-                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 4 and num_tokens >= 160)
-                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 8 and num_tokens >= 80)
-                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 16 and num_tokens >= 48)
-                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 32 and num_tokens >= 32)
-                    or (common_moe_testcase.tp == 8 and num_tokens >= 768)
-                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 8 and num_tokens >= 80)
-                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 16 and num_tokens >= 48)
-                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 32 and num_tokens >= 32)
-                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 64)
-                    or (common_moe_testcase.tp == 2 and common_moe_testcase.ep == 128)
-                    or (common_moe_testcase.tp == 16 and num_tokens >= 768)
-                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 2 and num_tokens >= 320)
-                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 4 and num_tokens >= 160)
-                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 8 and num_tokens >= 80)
-                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 16 and num_tokens >= 48)
-                    or (common_moe_testcase.tp == 32 and num_tokens >= 768)
-                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 2 and num_tokens >= 320)
-                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 4 and num_tokens >= 160)
-                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 8 and num_tokens >= 80)
-                )
-            ):
-                # SGLang 0.5.14 falls back to the default Triton fp8 block MoE
-                # config for Nemotron-3 Super on SM120 for these TP/EP slices.
-                # That config requires 144 KiB shared memory, above the 99 KiB
-                # runtime limit.
-                continue
-            if (
-                moe_type == "fp8_block"
-                and sm_version >= 120
-                and common_moe_testcase.hidden_size == 2048
-                and common_moe_testcase.inter_size == 768
-                and common_moe_testcase.topk == 8
-                and common_moe_testcase.num_experts == 128
-                and common_moe_testcase.tp == 4
-                and (
-                    num_tokens >= 160
-                    or (common_moe_testcase.ep == 2 and num_tokens >= 80)
-                    or (common_moe_testcase.ep == 4 and num_tokens >= 48)
-                    or (common_moe_testcase.ep == 8 and num_tokens >= 32)
-                    or (common_moe_testcase.ep == 16 and num_tokens >= 16)
-                    or (common_moe_testcase.ep == 32 and num_tokens >= 8)
-                    or (common_moe_testcase.ep == 64 and num_tokens >= 8)
-                )
-            ):
-                # SGLang 0.5.14 also uses the default Triton fp8 block MoE config
-                # for Qwen3-30B-A3B on SM120. For these larger token counts that
-                # config requires 144 KiB shared memory, above the 99 KiB limit.
-                continue
-            if (
-                moe_type == "fp8_block"
-                and sm_version >= 120
-                and common_moe_testcase.hidden_size == 4096
-                and common_moe_testcase.inter_size == 1536
-                and common_moe_testcase.topk == 8
-                and common_moe_testcase.num_experts == 128
-                and (
-                    (
-                        common_moe_testcase.tp == 8
-                        and (
-                            num_tokens >= 160
-                            or (common_moe_testcase.ep == 2 and num_tokens >= 80)
-                            or (common_moe_testcase.ep == 4 and num_tokens >= 48)
-                            or (common_moe_testcase.ep == 8 and num_tokens >= 32)
-                            or (common_moe_testcase.ep == 16 and num_tokens >= 16)
-                            or (common_moe_testcase.ep == 32 and num_tokens >= 8)
-                        )
-                    )
-                    or (
-                        common_moe_testcase.tp == 16
-                        and (
-                            num_tokens >= 160
-                            or (common_moe_testcase.ep == 2 and num_tokens >= 80)
-                            or (common_moe_testcase.ep == 4 and num_tokens >= 48)
-                            or (common_moe_testcase.ep == 8 and num_tokens >= 32)
-                            or (common_moe_testcase.ep == 16 and num_tokens >= 16)
-                        )
-                    )
-                    or (
-                        common_moe_testcase.tp == 32
-                        and (
-                            num_tokens >= 160
-                            or (common_moe_testcase.ep == 2 and num_tokens >= 80)
-                            or (common_moe_testcase.ep == 4 and num_tokens >= 48)
-                            or (common_moe_testcase.ep == 8 and num_tokens >= 32)
-                        )
-                    )
-                )
-            ):
-                # SGLang 0.5.14 uses the default Triton fp8 block MoE config for
-                # Qwen3-235B-A22B on SM120. For these token counts that config
-                # requires 144 KiB shared memory, above the 99 KiB limit.
-                continue
-            if (
-                moe_type == "fp8_block"
-                and sm_version >= 120
-                and common_moe_testcase.hidden_size == 6144
-                and common_moe_testcase.inter_size == 2560
-                and common_moe_testcase.topk == 8
-                and common_moe_testcase.num_experts == 160
-                and (
-                    (
-                        common_moe_testcase.tp == 8
-                        and (
-                            num_tokens >= 192
-                            or (common_moe_testcase.ep == 2 and num_tokens >= 96)
-                            or (common_moe_testcase.ep == 4 and num_tokens >= 48)
-                            or (common_moe_testcase.ep == 8 and num_tokens >= 32)
-                            or (common_moe_testcase.ep == 16 and num_tokens >= 16)
-                            or (common_moe_testcase.ep == 32 and num_tokens >= 8)
-                        )
-                    )
-                    or (
-                        common_moe_testcase.tp == 16
-                        and (
-                            num_tokens >= 192
-                            or (common_moe_testcase.ep == 2 and num_tokens >= 96)
-                            or (common_moe_testcase.ep == 4 and num_tokens >= 48)
-                            or (common_moe_testcase.ep == 8 and num_tokens >= 32)
-                            or (common_moe_testcase.ep == 16 and num_tokens >= 16)
-                        )
-                    )
-                    or (
-                        common_moe_testcase.tp == 32
-                        and (
-                            num_tokens >= 192
-                            or (common_moe_testcase.ep == 2 and num_tokens >= 96)
-                            or (common_moe_testcase.ep == 4 and num_tokens >= 48)
-                            or (common_moe_testcase.ep == 8 and num_tokens >= 32)
-                        )
-                    )
-                )
-            ):
-                # SGLang 0.5.14 uses the default Triton fp8 block MoE config for
-                # Qwen3-Coder-480B-A35B on SM120. For these token counts that
-                # config requires 144 KiB shared memory, above the 99 KiB limit.
-                continue
-            if (
-                moe_type == "fp8_block"
-                and sm_version >= 120
-                and common_moe_testcase.hidden_size == 4096
-                and common_moe_testcase.inter_size == 1024
-                and common_moe_testcase.topk == 10
-                and common_moe_testcase.num_experts == 512
-                and (
-                    (common_moe_testcase.tp == 16 and num_tokens >= 768)
-                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 2 and num_tokens >= 320)
-                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 4 and num_tokens >= 160)
-                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 8 and num_tokens >= 80)
-                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 16 and num_tokens >= 48)
-                    or (common_moe_testcase.tp == 32 and num_tokens >= 768)
-                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 2 and num_tokens >= 320)
-                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 4 and num_tokens >= 160)
-                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 8 and num_tokens >= 80)
-                )
-            ):
-                # SGLang 0.5.14 uses the default Triton fp8 block MoE config for
-                # Qwen3.5-397B-A17B on SM120. For these token counts that config
-                # requires 144 KiB shared memory, above the 99 KiB limit.
-                continue
-            if (
-                moe_type == "fp8_block"
-                and sm_version >= 120
-                and common_moe_testcase.hidden_size == 6144
-                and common_moe_testcase.inter_size == 2048
-                and common_moe_testcase.topk == 8
-                and common_moe_testcase.num_experts == 256
-                and common_moe_testcase.tp == 32
-                and (
-                    num_tokens >= 320
-                    or (common_moe_testcase.ep == 2 and num_tokens >= 160)
-                    or (common_moe_testcase.ep == 4 and num_tokens >= 80)
-                    or (common_moe_testcase.ep == 8 and num_tokens >= 48)
-                )
-            ):
-                # SGLang 0.5.14 uses the default Triton fp8 block MoE config for
-                # GLM-5 on SM120 at this TP slice. For these token counts that
-                # config requires 144 KiB shared memory, above the 99 KiB limit.
-                continue
-            if (
-                moe_type == "fp8_block"
-                and sm_version >= 120
-                and common_moe_testcase.hidden_size == 7168
-                and common_moe_testcase.inter_size == 2048
-                and common_moe_testcase.topk == 8
-                and common_moe_testcase.num_experts == 256
-                and common_moe_testcase.tp == 32
-                and (
-                    num_tokens >= 320
-                    or (common_moe_testcase.ep == 2 and num_tokens >= 160)
-                    or (common_moe_testcase.ep == 4 and num_tokens >= 80)
-                    or (common_moe_testcase.ep == 8 and num_tokens >= 48)
-                )
-            ):
-                # SGLang 0.5.14 uses the default Triton fp8 block MoE config for
-                # DeepSeek-V3 on SM120 at this TP slice. For these token counts
-                # that config requires 144 KiB shared memory, above the 99 KiB
-                # limit.
-                continue
-            if (
-                moe_type == "fp8_block"
-                and sm_version >= 120
-                and common_moe_testcase.hidden_size == 4096
-                and common_moe_testcase.inter_size == 2048
-                and common_moe_testcase.topk == 6
-                and common_moe_testcase.num_experts == 256
-                and common_moe_testcase.tp == 32
-                and (
-                    num_tokens >= 320
-                    or (common_moe_testcase.ep == 2 and num_tokens >= 160)
-                    or (common_moe_testcase.ep == 4 and num_tokens >= 80)
-                    or (common_moe_testcase.ep == 8 and num_tokens >= 48)
-                )
-            ):
-                # SGLang 0.5.14 uses the default Triton fp8 block MoE config for
-                # DeepSeek-V4-Flash on SM120 at this TP slice. For these token
-                # counts that config requires 144 KiB shared memory, above the
-                # 99 KiB limit.
-                continue
-            if (
-                moe_type == "fp8_block"
-                and sm_version >= 120
-                and common_moe_testcase.hidden_size == 7168
-                and common_moe_testcase.inter_size == 3072
-                and common_moe_testcase.topk == 6
-                and common_moe_testcase.num_experts == 384
-                and (
-                    (common_moe_testcase.tp == 16 and num_tokens >= 512)
-                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 2 and num_tokens >= 256)
-                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 4 and num_tokens >= 128)
-                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep == 8 and num_tokens >= 64)
-                    or (common_moe_testcase.tp == 16 and common_moe_testcase.ep >= 16 and num_tokens >= 48)
-                    or (common_moe_testcase.tp == 32 and num_tokens >= 512)
-                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 2 and num_tokens >= 256)
-                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 4 and num_tokens >= 128)
-                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 8 and num_tokens >= 64)
-                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep >= 16 and num_tokens >= 48)
-                )
-            ):
-                # SGLang 0.5.14 uses the default Triton fp8 block MoE config for
-                # DeepSeek-V4-Pro on SM120 for these TP/EP slices. For these
-                # token counts that config requires 144 KiB shared memory,
-                # above the 99 KiB limit.
-                continue
-            if (
-                moe_type == "fp8_block"
-                and sm_version >= 120
-                and common_moe_testcase.hidden_size == 7168
-                and common_moe_testcase.inter_size == 2048
-                and common_moe_testcase.topk == 8
-                and common_moe_testcase.num_experts == 384
-                and common_moe_testcase.tp == 32
-                and (
-                    num_tokens >= 512
-                    or (common_moe_testcase.ep == 2 and num_tokens >= 256)
-                    or (common_moe_testcase.ep == 4 and num_tokens >= 128)
-                    or (common_moe_testcase.ep == 8 and num_tokens >= 64)
-                )
-            ):
-                # SGLang 0.5.14 uses the default Triton fp8 block MoE config for
-                # Kimi-K2 on SM120 at this TP slice. For these token counts that
-                # config requires 144 KiB shared memory, above the 99 KiB limit.
-                continue
-            if (
-                moe_type == "fp8_block"
-                and sm_version >= 120
-                and common_moe_testcase.hidden_size == 3072
-                and common_moe_testcase.inter_size == 1536
-                and common_moe_testcase.topk == 8
-                and common_moe_testcase.num_experts == 256
-                and (
-                    common_moe_testcase.tp == 16
-                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 2 and num_tokens >= 160)
-                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 4 and num_tokens >= 80)
-                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 8 and num_tokens >= 48)
-                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 16 and num_tokens >= 32)
-                    or (common_moe_testcase.tp == 8 and common_moe_testcase.ep == 32 and num_tokens >= 16)
-                    or (common_moe_testcase.tp == 8 and num_tokens >= 320)
-                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 2 and num_tokens >= 160)
-                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 4 and num_tokens >= 80)
-                    or (common_moe_testcase.tp == 32 and common_moe_testcase.ep == 8 and num_tokens >= 48)
-                    or (common_moe_testcase.tp == 32 and num_tokens >= 320)
-                )
-            ):
-                # SGLang 0.5.14 uses the default Triton fp8 block MoE config for
-                # MiniMax-M2.5 on SM120. For these token counts that config
-                # requires 144 KiB shared memory, above the 99 KiB limit.
-                continue
-
-            if moe_type == "nvfp4":
-                shard_k = common_moe_testcase.inter_size // common_moe_testcase.tp
-                # fp4_quantize requires weight dims divisible by 16 after TP sharding.
-                # CuteDSL grouped GEMM additionally requires 16-byte contiguous alignment:
-                # for fp4 (4-bit), that's 32 elements (16 * 8 // 4 = 32).
-                # See: flashinfer/cute_dsl/blockscaled_gemm.py
-                #   Sm100BlockScaledPersistentDenseGemmKernel.is_valid_tensor_alignment()
-                if shard_k % 32 != 0:
-                    continue
-
-            if moe_type == "int4_wo":
-                int4_group_size = int(module_config.get("group_size", 128))
-                if (
-                    common_moe_testcase.hidden_size % int4_group_size != 0
-                    or (common_moe_testcase.inter_size // common_moe_testcase.tp) % int4_group_size != 0
-                ):
-                    continue
             base_case = [
                 moe_type,
                 num_tokens,
@@ -880,10 +410,6 @@ def benchmark_config(
         num_warmups=5,
         num_runs=num_iters,
         repeat_n=1,
-        # SGLang 0.5.14 adds @torch.compile paths inside fused_experts_impl
-        # (moe_sum_reduce_torch_compile) that can hang during CUDA graph capture.
-        # allow_graph_fail gracefully falls back to eager execution.
-        allow_graph_fail=True,
     ) as results:
         pass
 
@@ -1066,7 +592,120 @@ def _benchmark_framework_quantized_moe(
             with torch.no_grad():
                 for name, parameter in moe_layer.named_parameters():
                     parameter.fill_(1) if "scale" in name or "alpha" in name else parameter.zero_()
-            moe_layer.quant_method.process_weights_after_loading(moe_layer)
+
+            quant_method = moe_layer.quant_method
+            quant_method_name = type(quant_method).__name__
+            source_by_backend = {
+                "triton": "sglang_fused_moe_triton",
+                "triton_kernel": "sglang_triton_kernel_moe",
+                "marlin": "sglang_marlin_moe",
+                "flashinfer_trtllm": "sglang_flashinfer_trtllm_moe",
+                "flashinfer_cutlass": "sglang_flashinfer_cutlass_moe",
+            }
+
+            if is_fp4_experts:
+                fp4_expert_sources = {
+                    "Mxfp4FlashinferCutlassMoEMethod": "sglang_flashinfer_cutlass_moe",
+                    "Mxfp4FlashinferTrtllmMoEMethod": "sglang_mxfp4_flashinfer_trtllm_moe",
+                }
+                kernel_source = fp4_expert_sources.get(quant_method_name)
+                actual_precision = getattr(quant_method, "flashinfer_mxfp4_moe_precision", None)
+                expected_precision = _mxfp4_activation_precision(moe_type)
+                if moe_backend != "flashinfer_mxfp4" or kernel_source is None or actual_precision != expected_precision:
+                    raise RuntimeError(
+                        "SGLang did not construct an MXFP4 method for DeepSeek-V4 FP4 experts: "
+                        f"requested_backend={moe_backend}, actual_method={quant_method_name}, "
+                        f"precision={actual_precision}, expected_precision={expected_precision}"
+                    )
+            elif moe_type == "int4_wo":
+                scheme = getattr(moe_layer, "scheme", None)
+                runner = getattr(scheme, "runner", None)
+                actual_backend = getattr(getattr(runner, "runner_backend", None), "value", None)
+                if (
+                    quant_method_name != "CompressedTensorsFusedMoEMethod"
+                    or type(scheme).__name__ != "CompressedTensorsWNA16MoE"
+                    or actual_backend != moe_backend
+                ):
+                    raise RuntimeError(
+                        "SGLang INT4-WO did not construct the requested Marlin path: "
+                        f"requested_backend={moe_backend}, actual_method={quant_method_name}, "
+                        f"actual_scheme={type(scheme).__name__}, actual_backend={actual_backend}"
+                    )
+                kernel_source = source_by_backend[actual_backend]
+            elif moe_type == "nvfp4":
+                runner = getattr(quant_method, "runner", None)
+                actual_backend = getattr(getattr(quant_method, "_moe_runner_backend", None), "value", None)
+                runner_backend = getattr(getattr(runner, "runner_backend", None), "value", None)
+                if (
+                    quant_method_name != "ModelOptNvFp4FusedMoEMethod"
+                    or actual_backend != moe_backend
+                    or (runner is not None and runner_backend != actual_backend)
+                ):
+                    raise RuntimeError(
+                        "SGLang NVFP4 runner does not match the requested backend: "
+                        f"requested_backend={moe_backend}, actual_method={quant_method_name}, "
+                        f"actual_backend={actual_backend}, runner_backend={runner_backend}"
+                    )
+                kernel_source = source_by_backend[actual_backend]
+            elif moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}:
+                if quant_method_name != "Mxfp4MoEMethod":
+                    raise RuntimeError(f"SGLang {moe_type} constructed {quant_method_name}, expected Mxfp4MoEMethod")
+                runner = getattr(quant_method, "runner", None)
+                if runner is not None:
+                    actual_backend = runner.runner_backend.value
+                    if actual_backend != moe_backend:
+                        raise RuntimeError(
+                            f"SGLang {moe_type} runner backend mismatch: "
+                            f"requested={moe_backend}, actual={actual_backend}"
+                        )
+                    if actual_backend == "flashinfer_mxfp4":
+                        if quant_method._fi_kernel != "cutlass_sm90":
+                            raise RuntimeError(
+                                f"SGLang {moe_type} has unexpected FlashInfer MXFP4 leaf {quant_method._fi_kernel!r}"
+                            )
+                        kernel_source = "sglang_flashinfer_cutlass_moe"
+                    else:
+                        kernel_source = source_by_backend[actual_backend]
+                elif (
+                    moe_backend == "flashinfer_mxfp4"
+                    and quant_method.use_flashinfer
+                    and quant_method._fi_kernel == "trtllm_sm100"
+                ):
+                    actual_precision = quant_method.flashinfer_mxfp4_moe_precision
+                    expected_precision = _mxfp4_activation_precision(moe_type)
+                    if actual_precision != expected_precision:
+                        raise RuntimeError(
+                            f"SGLang {moe_type} FlashInfer precision mismatch: "
+                            f"expected={expected_precision}, actual={actual_precision}"
+                        )
+                    kernel_source = "sglang_flashinfer_trtllm_moe"
+                else:
+                    raise RuntimeError(
+                        f"SGLang {moe_type} has no verified runner: "
+                        f"requested_backend={moe_backend}, fi_kernel={quant_method._fi_kernel}"
+                    )
+            else:
+                if moe_backend == "flashinfer_cutlass":
+                    uses_cutlass = quant_method_name == "Fp8MoEMethod" or bool(
+                        getattr(quant_method, "use_flashinfer_cutlass", False)
+                    )
+                    if not uses_cutlass:
+                        raise RuntimeError(
+                            "SGLang MoE did not construct the requested FlashInfer CUTLASS path: "
+                            f"actual_method={quant_method_name}"
+                        )
+                    kernel_source = source_by_backend[moe_backend]
+                else:
+                    runner = getattr(quant_method, "runner", None)
+                    actual_backend = getattr(getattr(runner, "runner_backend", None), "value", None)
+                    if actual_backend != moe_backend:
+                        raise RuntimeError(
+                            "SGLang MoE runner backend mismatch: "
+                            f"requested={moe_backend}, actual={actual_backend}, method={quant_method_name}"
+                        )
+                    kernel_source = source_by_backend[actual_backend]
+
+            quant_method.process_weights_after_loading(moe_layer)
 
             correction_bias = (
                 torch.zeros(num_experts, dtype=torch.float32, device=device) if has_correction_bias else None
@@ -1117,10 +756,9 @@ def _benchmark_framework_quantized_moe(
                 num_warmups=5,
                 num_runs=10,
                 repeat_n=1,
-                allow_graph_fail=True,
             ) as results:
                 pass
-            return results["latency_ms"] / len(logits), results["power_stats"], moe_backend
+            return results["latency_ms"] / len(logits), results["power_stats"], kernel_source
     finally:
         if moe_layer is not None:
             for parameter in moe_layer.parameters():
@@ -1324,17 +962,6 @@ def run_moe_torch(
         raise ValueError(f"Unsupported SGLang MoE backend: {moe_backend}")
     if moe_backend == "marlin" and moe_type != "int4_wo":
         raise ValueError(f"SGLang Marlin is only valid for int4_wo, got moe_type={moe_type!r}")
-    if is_fp4_experts:
-        expected_backend = {
-            "w4a16_mxfp4": "flashinfer_mxfp4",
-            "w4a8_mxfp4_mxfp8": "flashinfer_mxfp4",
-        }.get(moe_type)
-        if moe_backend != expected_backend:
-            raise ValueError(
-                f"DeepSeek-V4 FP4 moe_type={moe_type!r} requires backend={expected_backend!r}, got {moe_backend!r}"
-            )
-        if moe_ep_size != 1:
-            raise ValueError(f"DeepSeek-V4 FP4 standalone MoE requires EP=1, got moe_ep_size={moe_ep_size}")
     assert inter_size % moe_tp_size == 0, "inter_size % moe_tp_size must be 0"
     assert num_experts % moe_ep_size == 0, "num_experts must be divisible by moe_ep_size"
 
@@ -1374,6 +1001,12 @@ def run_moe_torch(
     if use_int4_w4a16:
         int4_config = get_moe_quantization_module_config("sglang", moe_type, model_name=model_name)
         int4_group_size = int(int4_config.get("group_size", 128))
+        if hidden_size % int4_group_size != 0 or local_inter_size % int4_group_size != 0:
+            raise ValueError(
+                "SGLang INT4-WO group quantization requires hidden_size and local_inter_size "
+                f"to be divisible by group_size={int4_group_size}, got "
+                f"hidden_size={hidden_size}, local_inter_size={local_inter_size}"
+            )
         block_shape = [0, int4_group_size]
     elif moe_type == "fp8_block":
         if moe_backend == "triton" and (hidden_size % 128 != 0 or local_inter_size % 128 != 0):
@@ -1398,7 +1031,7 @@ def run_moe_torch(
         or (moe_backend != "triton" and not use_int4_w4a16)
     )
     if use_framework_layer:
-        latency, power_stats, moe_backend = _benchmark_framework_quantized_moe(
+        latency, power_stats, kernel_source = _benchmark_framework_quantized_moe(
             moe_type=moe_type,
             moe_backend=moe_backend,
             num_tokens=num_tokens,
@@ -1477,14 +1110,7 @@ def run_moe_torch(
         torch.cuda.empty_cache()
 
     restart_worker = torch.cuda.memory_allocated(device) > torch.cuda.get_device_properties(device).total_memory // 4
-    if moe_backend == "flashinfer_mxfp4":
-        if moe_type == "w4a16_mxfp4" and is_fp4_experts:
-            kernel_source = "sglang_flashinfer_cutlass_moe"
-        elif model_name == "deepseek-ai/DeepSeek-V4-Pro" and moe_type == "w4a8_mxfp4_mxfp8":
-            kernel_source = "sglang_mxfp4_flashinfer_trtllm_moe"
-        else:
-            kernel_source = "sglang_flashinfer_mxfp4_moe"
-    else:
+    if not use_framework_layer:
         kernel_source = {
             "triton": "sglang_fused_moe_triton",
             "triton_kernel": "sglang_triton_kernel_moe",

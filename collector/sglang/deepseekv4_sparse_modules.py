@@ -316,9 +316,7 @@ def _bench_cuda_graph(
 
     benchmark_with_power handles warmup, CUDA-Graph capture/replay, optional
     power sampling, and graph-private-pool teardown. With ``allow_graph_fail``
-    False, CUDA-graph capture is mandatory (used_cuda_graph is asserted); set it
-    True for kernels whose graph capture may fall back to eager (e.g. the JIT
-    topk_transform whose host-side planning is done outside the timed region).
+    False, CUDA-graph capture is mandatory (used_cuda_graph is asserted).
     Returns ``{"latency_ms", "power_stats"}``.
     """
     if num_iterations < 3:
@@ -502,7 +500,7 @@ def _bench_paged_mqa_logits(
     def kernel_fn():
         return fp8_paged_mqa_logits(q, kv_in, weights, context_lens, block_table, schedule_meta, int(full_c4), False)
 
-    return _bench_cuda_graph(kernel_fn, device=device)
+    return _bench_cuda_graph(kernel_fn, allow_graph_fail=False, device=device)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -657,7 +655,7 @@ def _bench_flash_mla_sparse(
             extra_topk_length=extra_topk_lengths,
         )
 
-    return _bench_cuda_graph(kernel_fn, device=device)
+    return _bench_cuda_graph(kernel_fn, allow_graph_fail=False, device=device)
 
 
 # HCA and CSA are the SAME FlashMLA kernel (``_bench_flash_mla_sparse``) — they
@@ -752,20 +750,18 @@ def _write_row(
 
 
 def _guarded_bench(bench_fn: Callable[[], object], label: str):
-    """Run a per-shape bench, returning its result or ``None`` on OOM / any
-    error (logged, with a CUDA cache flush), so a single bad shape skips rather
-    than aborting the whole op."""
+    """Run one shape and return ``(result, exception)`` for final reporting."""
     try:
-        return bench_fn()
-    except torch.cuda.OutOfMemoryError:
-        print(f"  OOM at {label}; skipping shape")
+        return bench_fn(), None
+    except torch.cuda.OutOfMemoryError as exc:
+        print(f"  OOM at {label}; recording failure")
         torch.cuda.empty_cache()
-        return None
-    except Exception:
+        return None, exc
+    except Exception as exc:
         traceback.print_exc()
-        print(f"  failed at {label}; skipping shape")
+        print(f"  failed at {label}; recording failure")
         torch.cuda.empty_cache()
-        return None
+        return None, exc
 
 
 def _bench_sparse_kernel_shape(kernel, prefix, isl, bs, sc, device, *, topk_variant=None):
@@ -1051,11 +1047,12 @@ def run_dsv4_sparse_kernel_worker(
     device_name = torch.cuda.get_device_name(device)
     print(f"[dsv4-sparse {kernel} bs={bs_only}] {len(shapes)} shapes -> {perf_path}")
     n_ok = 0
+    failures = []
     for prefix, isl, bs, topk_variant in shapes:
         # Every module shape is benched (strict 1:1); tiny shapes run fine
-        # (K/window clamp to full_s) and a shape that OOMs is skipped by
-        # _guarded_bench rather than pre-filtered.
-        results = _guarded_bench(
+        # (K/window clamp to full_s); failed attempts are reported together.
+        label = f"bs={bs} isl={isl} past_kv={prefix}" + (f" topk_variant={topk_variant}" if topk_variant else "")
+        results, error = _guarded_bench(
             lambda: _bench_sparse_kernel_shape(
                 kernel,
                 prefix,
@@ -1065,16 +1062,16 @@ def run_dsv4_sparse_kernel_worker(
                 device,
                 topk_variant=topk_variant,
             ),
-            f"bs={bs} isl={isl} past_kv={prefix}" + (f" topk_variant={topk_variant}" if topk_variant else ""),
+            label,
         )
-        if results is None:
+        if error is not None:
+            failures.append(f"{label}: {type(error).__name__}: {error}")
             continue
         expected_modes = {f"{topk_variant}_flat", f"{topk_variant}_top_last"} if kernel == "topk" else {None}
         if len(results) != len(expected_modes) or {score_mode for score_mode, _ in results} != expected_modes:
-            print(
-                f"  incomplete result at bs={bs} isl={isl} past_kv={prefix}: "
-                f"expected score modes {expected_modes}, got {results}"
-            )
+            message = f"expected score modes {expected_modes}, got {results}"
+            print(f"  incomplete result at {label}: {message}")
+            failures.append(f"{label}: RuntimeError: {message}")
             continue
         for score_mode, latency_ms in results:
             _write_row(
@@ -1091,11 +1088,12 @@ def run_dsv4_sparse_kernel_worker(
                 score_mode=score_mode,
             )
         n_ok += 1
-    error_count = len(shapes) - n_ok
+    error_count = len(failures)
     summary = f"ok={n_ok} error={error_count} skip=0 total={len(shapes)}"
     print(f"  {kernel}: {summary}")
-    if error_count > 0:
-        raise RuntimeError(f"dsv4-sparse {kernel} bs={bs_only}: {summary}")
+    if not n_ok or failures:
+        details = "\n- ".join(failures) if failures else "no inner shapes produced a row"
+        raise RuntimeError(f"dsv4-sparse {kernel} bs={bs_only}: {summary}; failures:\n- {details}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1170,7 +1168,7 @@ def _bench_topk_512(
 
     SGLang 0.5.14 context uses v1 with ``out_raw_indices`` while normal decode
     uses planned v2. Both execute inside production CUDA graphs, so capture is
-    attempted here too with eager fallback for the JIT kernel.
+    mandatory here too.
     """
     from sglang.jit_kernel.dsv4.topk import (
         plan_topk_v2,
@@ -1213,7 +1211,7 @@ def _bench_topk_512(
                 meta,
             )
 
-    return _bench_cuda_graph(kernel_func, allow_graph_fail=True, device=device)["latency_ms"]
+    return _bench_cuda_graph(kernel_func, allow_graph_fail=False, device=device)["latency_ms"]
 
 
 def get_dsv4_topk_calib_test_cases():

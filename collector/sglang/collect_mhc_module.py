@@ -317,9 +317,10 @@ def _log_result(
     latency_ms: float,
     version: str,
     device_name: str,
+    kernel_source: str,
     power_stats: dict | None,
 ) -> None:
-    log_perf(
+    if not log_perf(
         item_list=[
             {
                 "architecture": "DeepseekV4ForCausalLM",
@@ -335,10 +336,11 @@ def _log_result(
         version=version,
         device_name=device_name,
         op_name=op,
-        kernel_source="sglang_mhc",
+        kernel_source=kernel_source,
         perf_filename=_resolve_perf_path(output_path, perf_filename),
         power_stats=power_stats,
-    )
+    ):
+        raise RuntimeError("Failed to persist SGLang mHC performance row")
 
 
 def run_mhc_module(
@@ -379,6 +381,23 @@ def run_mhc_module(
 
     try:
         for op in ops:
+            from sglang.srt.environ import envs
+
+            if op == "pre":
+                if envs.SGLANG_OPT_USE_TILELANG_MHC_PRE.get():
+                    kernel_source = "sglang_tilelang_mhc_pre"
+                elif envs.SGLANG_OPT_DEEPGEMM_HC_PRENORM.get():
+                    kernel_source = "sglang_deepgemm_mhc_pre"
+                else:
+                    kernel_source = "sglang_torch_mhc_pre"
+            elif op == "post":
+                kernel_source = (
+                    "sglang_tilelang_mhc_post"
+                    if envs.SGLANG_OPT_USE_TILELANG_MHC_POST.get()
+                    else "sglang_torch_mhc_post"
+                )
+            else:
+                raise ValueError(f"unsupported mHC op: {op}")
             for num_tokens in token_cases:
                 try:
                     residual = _make_residual(layer, num_tokens, device)
@@ -415,6 +434,7 @@ def run_mhc_module(
                     latency_ms=latency_ms,
                     version=version,
                     device_name=device_name,
+                    kernel_source=kernel_source,
                     power_stats=bench_result.get("power_stats"),
                 )
                 results.append(

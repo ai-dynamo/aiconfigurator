@@ -1404,8 +1404,15 @@ def run_dsv4_mla_module(
 
                         def kernel_func(model_runner=model_runner):
                             from sglang.srt.model_executor.forward_context import ForwardContext, forward_context
+                            from sglang.srt.model_executor.runner import model_capture_mode
 
-                            with forward_context(ForwardContext(attn_backend=model_runner.attn_backend)):
+                            # Production decode graphs enter model_capture_mode,
+                            # which selects DSV4's multi-stream overlap path.
+                            capture_context = model_capture_mode() if not is_prefill else contextlib.nullcontext()
+                            with (
+                                capture_context,
+                                forward_context(ForwardContext(attn_backend=model_runner.attn_backend)),
+                            ):
                                 return attention_module(
                                     x=hidden_states,
                                     positions=positions,

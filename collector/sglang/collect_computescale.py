@@ -57,7 +57,7 @@ def run_computescale(m, k, *, perf_filename, device="cuda:0"):
     compute_scale_latency = max(0.0, dynamic_latency - static_latency)
     version = pkg_resources.get_distribution("sglang").version
 
-    log_perf(
+    if not log_perf(
         item_list=[{"m": m, "k": k, "quant_dtype": "fp8", "latency": compute_scale_latency}],
         framework="SGLang",
         version=version,
@@ -66,8 +66,9 @@ def run_computescale(m, k, *, perf_filename, device="cuda:0"):
         kernel_source="sglang",
         perf_filename=perf_filename,
         power_stats=dynamic_results["power_stats"],
-    )
-    log_perf(
+    ):
+        raise RuntimeError(f"Failed to persist SGLang compute scale performance row to {perf_filename}")
+    if not log_perf(
         item_list=[{"m": m, "k": k, "quant_dtype": "fp8", "latency": static_latency}],
         framework="SGLang",
         version=version,
@@ -76,4 +77,5 @@ def run_computescale(m, k, *, perf_filename, device="cuda:0"):
         kernel_source="sglang",
         perf_filename="scale_matrix_perf.txt",
         power_stats=static_results["power_stats"],
-    )
+    ):
+        raise RuntimeError("Failed to persist SGLang scale matrix performance row to scale_matrix_perf.txt")
