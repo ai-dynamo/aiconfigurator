@@ -167,3 +167,50 @@ def test_grid_ragged_branch_is_dropped_not_fatal():
 def test_grid_empty_table_is_a_miss():
     with pytest.raises(InterpolationDataNotAvailableError):
         perf_interp.query(_attn_cfg(), {}, 8, 512, 1)
+
+
+# ---------------------------------------------------------------------------
+# 4-axis (DSA/CSA-like): [num_heads][prefix][seq][batch] — the past-KV axis
+# ---------------------------------------------------------------------------
+
+
+def _dsa_lat(n, p, s, b):
+    return 1e-6 * n * b * s * (s + p)  # grows with past-KV; linear per axis pair
+
+
+def _dsa_cfg():
+    return perf_interp.OpInterpConfig(
+        axes=("num_heads", "prefix", "seq_len", "batch"),
+        resolver=perf_interp.Grid(),
+        sol_fn=_dsa_lat,  # util == 1 -> holds are exact
+        value_transform=perf_interp.ValueTransform.RAW,
+    )
+
+
+def _dsa_table():
+    return {
+        n: {
+            p: {s: {b: {"latency": _dsa_lat(n, p, s, b), "energy": 0.0} for b in (1, 4)} for s in (512, 1024, 2048)}
+            for p in (0, 1024, 4096)
+        }
+        for n in (8, 16)
+    }
+
+
+def test_four_axis_exact_hit():
+    data = _dsa_table()
+    assert perf_interp.query(_dsa_cfg(), data, 8, 1024, 512, 4) is data[8][1024][512][4]
+
+
+def test_four_axis_interior_blend_across_prefix():
+    # prefix=2048 between collected 1024 and 4096; all other axes exact.
+    lat = _lat(perf_interp.query(_dsa_cfg(), _dsa_table(), 8, 2048, 512, 4))
+    lo, hi = _dsa_lat(8, 1024, 512, 4), _dsa_lat(8, 4096, 512, 4)
+    expected = lo + (hi - lo) * (2048 - 1024) / (4096 - 1024)  # RAW lerp on the prefix axis
+    assert lat == pytest.approx(expected)
+
+
+def test_four_axis_util_hold_beyond_prefix_range():
+    # prefix=16384 beyond the collected range: hold util, SOL carries growth.
+    lat = _lat(perf_interp.query(_dsa_cfg(), _dsa_table(), 8, 16384, 512, 1))
+    assert lat == pytest.approx(_dsa_lat(8, 16384, 512, 1))

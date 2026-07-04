@@ -241,6 +241,7 @@ class GEMM(Operation):
         cls._compute_scale_cache.clear()
         cls._scale_matrix_cache.clear()
         cls._compute_scale_delta_lookup_cache.clear()
+        perf_interp.clear_caches()  # engine site indexes are keyed off these tables
         query = cls.__dict__.get("query")
         if query is not None and hasattr(query, "cache_clear"):
             query.cache_clear()

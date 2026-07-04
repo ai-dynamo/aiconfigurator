@@ -153,8 +153,10 @@ class Grid:
 class OpInterpConfig:
     """Everything op-specific the shared engine needs. One record per op family."""
 
-    #: Names of the nested-dict levels, outer -> inner (maps to data[x][y][z]).
-    axes: tuple[str, str, str]
+    #: Names of the nested-dict levels, outer -> inner. Usually 3 (GEMM m/n/k;
+    #: attention heads/seq/batch) but N is supported — context DSA/CSA carries a
+    #: past-KV axis: [num_heads][prefix][seq][batch].
+    axes: tuple[str, ...]
     #: Which of the two table shapes this op is.
     resolver: ScatteredSites | Grid
     #: Analytic speed-of-light SOL(x, y, z) -> float in axes order (the op's
@@ -165,6 +167,8 @@ class OpInterpConfig:
     value_transform: ValueTransform = ValueTransform.RAW
 
     def __post_init__(self) -> None:
+        if len(self.axes) < 2:
+            raise ValueError(f"need at least 2 axes, got {self.axes}")
         if isinstance(self.resolver, ScatteredSites):
             names = set(self.axes)
             unknown = [a for a in (*self.resolver.site_axes, self.resolver.curve_axis) if a not in names]
@@ -172,6 +176,8 @@ class OpInterpConfig:
                 raise ValueError(f"resolver references unknown axes {unknown}; table axes are {self.axes}")
             if self.resolver.curve_axis in self.resolver.site_axes:
                 raise ValueError(f"curve_axis {self.resolver.curve_axis!r} cannot also be a site axis")
+            if len(self.resolver.site_axes) + 1 != len(self.axes):
+                raise ValueError("every axis must be either a site axis or the curve axis")
 
 
 # ---------------------------------------------------------------------------

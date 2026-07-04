@@ -12,6 +12,10 @@ Executes the four-step resolution declared in :mod:`config`:
                                latency = SOL(query) / util
     4. nothing to anchor on -> raise InterpolationDataNotAvailableError
 
+The engine is N-axis: tables are 3 levels (GEMM m/n/k; attention heads/seq/batch)
+or more (context DSA/CSA is [heads][prefix][seq][batch] — the past-KV axis).
+Every walk recurses on ``len(cfg.axes)``; nothing assumes 3.
+
 Conventions:
 - Bracket weights use the plain (linear) coordinate; curvature is handled by
   ``value_transform`` (raw for ~linear physics, sqrt for ~seq^2). Site
@@ -29,6 +33,7 @@ from __future__ import annotations
 import bisect
 import math
 import statistics
+from collections import OrderedDict
 
 from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
 from aiconfigurator.sdk.perf_interp.config import OpInterpConfig, ScatteredSites, ValueTransform
@@ -79,17 +84,26 @@ def _miss(cfg: OpInterpConfig, coords, reason: str) -> InterpolationDataNotAvail
 # ---------------------------------------------------------------------------
 
 
-def query(cfg: OpInterpConfig, data: dict, x, y, z):
+_MISSING = object()
+
+
+def query(cfg: OpInterpConfig, data: dict, *coords):
     """Resolve one query against a raw nested table. Returns the measured leaf
     verbatim on an exact hit, else ``{"latency", "power", "energy"}``."""
+    if len(coords) != len(cfg.axes):
+        raise ValueError(f"query has {len(coords)} coords; table axes are {cfg.axes}")
     if not data:
-        raise _miss(cfg, (x, y, z), "empty table")
-    if x in data:
-        yd = data[x]
-        if y in yd and z in yd[y]:
-            return yd[y][z]
+        raise _miss(cfg, coords, "empty table")
 
-    coords = (x, y, z)
+    node = data  # exact hit: walk the nesting verbatim
+    for c in coords:
+        if not isinstance(node, dict) or c not in node:
+            node = _MISSING
+            break
+        node = node[c]
+    if node is not _MISSING:
+        return node
+
     if isinstance(cfg.resolver, ScatteredSites):
         lat, power = _resolve_scattered(cfg, data, coords)
     else:
@@ -101,60 +115,87 @@ def query(cfg: OpInterpConfig, data: dict, x, y, z):
 # ScatteredSites: site curves + nearest-site util transfer (GEMM)
 # ---------------------------------------------------------------------------
 
-# id-keyed cache of the site index so per-query construction stays cheap.
-_SITE_INDEX_CACHE: dict[int, tuple] = {}
+# Bounded LRU of site indexes, keyed by id(data) with an identity check (the
+# strong reference keeps the id stable). Bounded so long-lived processes that
+# touch many tables (multiple databases/versions, LOO folds) can't grow it
+# without limit; evicting a live table only costs one O(N) index rebuild.
+#
+# CONTRACT: tables are immutable after load. In-place mutation of a cached
+# table keeps its id and would serve a stale index — replace the dict, or call
+# ``clear_caches()`` (op-level ``clear_cache()`` does this for you).
+_SITE_INDEX_CACHE: OrderedDict[int, tuple] = OrderedDict()
+_SITE_INDEX_CACHE_MAX = 32
+
+
+def clear_caches() -> None:
+    """Drop engine-internal caches (site indexes). Op ``clear_cache()`` calls this."""
+    _SITE_INDEX_CACHE.clear()
+
+
+def _walk_leaves(node, depth: int, n_axes: int, prefix: list, out: list) -> None:
+    if depth == n_axes:
+        out.append((tuple(prefix), node))
+        return
+    for key, sub in node.items():
+        prefix.append(key)
+        _walk_leaves(sub, depth + 1, n_axes, prefix, out)
+        prefix.pop()
 
 
 def _site_index(cfg: OpInterpConfig, data: dict):
     cached = _SITE_INDEX_CACHE.get(id(data))
     if cached is not None and cached[0] is data:
+        _SITE_INDEX_CACHE.move_to_end(id(data))
         return cached[1]
 
     res = cfg.resolver
+    n_axes = len(cfg.axes)
     curve_pos = cfg.axes.index(res.curve_axis)
     site_pos = tuple(cfg.axes.index(a) for a in res.site_axes)
+
+    leaves: list = []
+    _walk_leaves(data, 0, n_axes, [], leaves)
     sites: dict[tuple, list] = {}
-    for x, yd in data.items():
-        for y, zd in yd.items():
-            for z, leaf in zd.items():
-                c = (x, y, z)
-                sites.setdefault(tuple(c[p] for p in site_pos), []).append((c[curve_pos], leaf))
+    for c, leaf in leaves:
+        sites.setdefault(tuple(c[p] for p in site_pos), []).append((c[curve_pos], leaf))
     for curve in sites.values():
         curve.sort(key=lambda t: t[0])
     site_keys = list(sites)
     site_logs = [tuple(math.log2(max(v, 1e-12)) for v in key) for key in site_keys]
 
-    index = (sites, site_keys, site_logs, curve_pos, site_pos)
+    index = (sites, site_keys, site_logs, curve_pos, site_pos, n_axes)
     _SITE_INDEX_CACHE[id(data)] = (data, index)
+    if len(_SITE_INDEX_CACHE) > _SITE_INDEX_CACHE_MAX:
+        _SITE_INDEX_CACHE.popitem(last=False)
     return index
 
 
-def _full_coords(curve_pos: int, site_pos: tuple, curve_val, site_vals) -> tuple:
-    coords = [None, None, None]
+def _full_coords(n_axes: int, curve_pos: int, site_pos: tuple, curve_val, site_vals) -> tuple:
+    coords = [None] * n_axes
     coords[curve_pos] = curve_val
     for p, v in zip(site_pos, site_vals, strict=True):
         coords[p] = v
     return tuple(coords)
 
 
-def _hold_util(cfg: OpInterpConfig, tail, q, curve_pos, site_pos, site_vals, coords):
+def _hold_util(cfg: OpInterpConfig, tail, q, n_axes, curve_pos, site_pos, site_vals, coords):
     """util-hold: anchor on the median util/power of the boundary tail points."""
     utils, powers = [], []
     for cv, leaf in tail:
         lat = _leaf_lat(leaf)
-        sol = cfg.sol_fn(*_full_coords(curve_pos, site_pos, cv, site_vals))
+        sol = cfg.sol_fn(*_full_coords(n_axes, curve_pos, site_pos, cv, site_vals))
         if lat > 0 and sol > 0:
             utils.append(sol / lat)
             powers.append(_leaf_power(leaf))
     if not utils:
         raise _miss(cfg, coords, "no positive-util boundary anchor")
-    sol_q = cfg.sol_fn(*_full_coords(curve_pos, site_pos, q, site_vals))
+    sol_q = cfg.sol_fn(*_full_coords(n_axes, curve_pos, site_pos, q, site_vals))
     if sol_q <= 0:
         raise _miss(cfg, coords, "non-positive SOL at query")
     return sol_q / statistics.median(utils), statistics.median(powers)
 
 
-def _eval_curve(cfg: OpInterpConfig, curve: list, q, curve_pos, site_pos, site_vals, coords):
+def _eval_curve(cfg: OpInterpConfig, curve: list, q, n_axes, curve_pos, site_pos, site_vals, coords):
     """Evaluate one site's curve at coordinate ``q`` -> (latency, power)."""
     ms = [c for c, _ in curve]
     i = bisect.bisect_left(ms, q)
@@ -165,18 +206,18 @@ def _eval_curve(cfg: OpInterpConfig, curve: list, q, curve_pos, site_pos, site_v
     k_tail = cfg.resolver.k_tail
     if q < ms[0] or q > ms[-1] or len(curve) < 2:  # beyond the sweep -> util-hold
         tail = curve[:k_tail] if q < ms[0] else curve[-k_tail:]
-        return _hold_util(cfg, tail, q, curve_pos, site_pos, site_vals, coords)
+        return _hold_util(cfg, tail, q, n_axes, curve_pos, site_pos, site_vals, coords)
 
     (c_lo, leaf_lo), (c_hi, leaf_hi) = curve[i - 1], curve[i]
     w = (q - c_lo) / (c_hi - c_lo)
     lat_lo, lat_hi = _leaf_lat(leaf_lo), _leaf_lat(leaf_hi)
     if cfg.value_transform is ValueTransform.UTIL:
-        u_lo = cfg.sol_fn(*_full_coords(curve_pos, site_pos, c_lo, site_vals)) / lat_lo
-        u_hi = cfg.sol_fn(*_full_coords(curve_pos, site_pos, c_hi, site_vals)) / lat_hi
+        u_lo = cfg.sol_fn(*_full_coords(n_axes, curve_pos, site_pos, c_lo, site_vals)) / lat_lo
+        u_hi = cfg.sol_fn(*_full_coords(n_axes, curve_pos, site_pos, c_hi, site_vals)) / lat_hi
         u = u_lo + (u_hi - u_lo) * w
         if u <= 0:
             raise _miss(cfg, coords, "non-positive interpolated util")
-        lat = cfg.sol_fn(*_full_coords(curve_pos, site_pos, q, site_vals)) / u
+        lat = cfg.sol_fn(*_full_coords(n_axes, curve_pos, site_pos, q, site_vals)) / u
     else:
         vt = cfg.value_transform
         lat = _from_space(vt, _to_space(vt, lat_lo) + (_to_space(vt, lat_hi) - _to_space(vt, lat_lo)) * w)
@@ -185,13 +226,13 @@ def _eval_curve(cfg: OpInterpConfig, curve: list, q, curve_pos, site_pos, site_v
 
 
 def _resolve_scattered(cfg: OpInterpConfig, data: dict, coords):
-    sites, site_keys, site_logs, curve_pos, site_pos = _site_index(cfg, data)
+    sites, site_keys, site_logs, curve_pos, site_pos, n_axes = _site_index(cfg, data)
     res = cfg.resolver
     site_key = tuple(coords[p] for p in site_pos)
     q = coords[curve_pos]
 
     if site_key in sites:  # collected shape: its own curve answers alone
-        return _eval_curve(cfg, sites[site_key], q, curve_pos, site_pos, site_key, coords)
+        return _eval_curve(cfg, sites[site_key], q, n_axes, curve_pos, site_pos, site_key, coords)
 
     # Unknown shape: transfer util from the nearest collected sites.
     if not site_keys:
@@ -214,8 +255,8 @@ def _resolve_scattered(cfg: OpInterpConfig, data: dict, coords):
     wsum = u_acc = p_acc = 0.0
     for i in ranked[: res.nn_sites]:
         neigh = site_keys[i]
-        lat_i, p_i = _eval_curve(cfg, sites[neigh], q, curve_pos, site_pos, neigh, coords)
-        sol_i = cfg.sol_fn(*_full_coords(curve_pos, site_pos, q, neigh))
+        lat_i, p_i = _eval_curve(cfg, sites[neigh], q, n_axes, curve_pos, site_pos, neigh, coords)
+        sol_i = cfg.sol_fn(*_full_coords(n_axes, curve_pos, site_pos, q, neigh))
         if lat_i <= 0 or sol_i <= 0:
             continue
         w = 1.0 / (dist(i) ** 2 + 1e-12)

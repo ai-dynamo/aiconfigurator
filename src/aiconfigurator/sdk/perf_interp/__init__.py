@@ -16,7 +16,7 @@ from aiconfigurator.sdk.perf_interp.config import (
     gemm_config,
     generation_attention_config,
 )
-from aiconfigurator.sdk.perf_interp.engine import query
+from aiconfigurator.sdk.perf_interp.engine import clear_caches, query
 
 __all__ = [
     "OP_CONFIG_FACTORIES",
@@ -24,6 +24,7 @@ __all__ = [
     "OpInterpConfig",
     "ScatteredSites",
     "ValueTransform",
+    "clear_caches",
     "context_attention_config",
     "gemm_config",
     "generation_attention_config",
