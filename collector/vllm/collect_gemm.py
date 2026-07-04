@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# FIXME(kernel-limit): retired sm_exceptions rule (PR #1302), not verified
-# against vLLM kernel source. On SM100/103/120, vLLM block-FP8 GEMM reportedly
-# requires token_count to be divisible by 4; token counts 1/2 currently fail
-# at runtime. On the next version bump: verify, then probe-and-raise or delete
-# this note. Never move this back into YAML.
+# vLLM 0.24.0 owns block-FP8 dispatch on Blackwell: its dynamic wrapper uses
+# FlashInfer for small token counts and DeepGEMM for larger ones. Keep every
+# aligned M/N/K shape observable instead of hiding a presumed M-divisibility
+# restriction in population logic.
 
 """vLLM GEMM collector for CUDA backends.
 
@@ -84,9 +83,6 @@ def get_gemm_test_cases():
                 block_n, block_k = FP8_BLOCK_SHAPE
                 # Block-wise kernels expect dimensions that align with the block.
                 if (n % block_n) != 0 or (k % block_k) != 0:
-                    continue
-                # Blackwell block kernel currently prefers m divisible by 4.
-                if sm in BLACKWELL_SMS and (x % 4) != 0:
                     continue
 
             test_cases.append([gemm_type, x, n, k])
