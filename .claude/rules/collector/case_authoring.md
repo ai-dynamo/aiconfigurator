@@ -51,7 +51,26 @@ plan cases = dedup( expand(base sweep grid) ∪ expand(model shapes) )
   `model_aliases` = one physical case, many artifact names (shape-only ops).
   `model_paths` inside a row = one case per path (runtime-sensitive).
 
-## Running subsets (healing)
+## Legitimate shape narrowing: declare, never filter
+
+There are no selectors, so "I need fewer shapes for this model" has exactly
+one legal form: **declare the correlation and let the generator expand only
+valid combinations**. Route by who owns the fact:
+
+| The constraint belongs to | Where it goes | Existing example |
+|---|---|---|
+| the model (head count, valid TP shards, windows) | a field on its `model_case_values.<op>` row | `attention` profiles: `tensor_parallel_sizes` — the generator expands only valid shards of that tuple |
+| the op's universal math (identities, budgets) | generator constraint / base-op budget field | `tp*ep == num_gpu`; `batch*seq <= max_context_tokens` |
+| the platform (dtype floor, memory) | `capabilities.yaml` / the collector memory filter | see `layer_permissions.md` |
+| the framework (kernel limits) | probe-and-raise / `FIXME(kernel-limit)` | see `layer_permissions.md` |
+
+If the op's generator does not yet support the model-correlated field you
+need (e.g. `mla_bmm` sweeps a global head grid with no model axis), the fix
+is to extend that generator to honor a declared field — a mechanism change,
+so propose it to the human. Do NOT approximate it with any post-generation
+filtering; that is how the selector engine was born. Over-collection in the
+meantime is acceptable: extra valid points are interpolation support, and
+invalid ones fail into the classified log.
 
 Subset selection is a RUNTIME concern, never persisted to YAML:
 
