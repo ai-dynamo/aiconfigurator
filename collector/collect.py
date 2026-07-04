@@ -770,6 +770,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                         "error_type": type(e).__name__,
                         "error_message": str(e),
                         "classification": "unexpected",
+                        "group": _failure_group(task_params),
                         "traceback": traceback.format_exc(),
                         "timestamp": datetime.now().isoformat(),
                     }
