@@ -644,22 +644,17 @@ class MLABmm(Operation):
                 "mla_gen_pre" if if_pre else "mla_gen_post",
                 num_heads,
             )
-            num_left, num_right = interpolation.nearest_1d_point_helper(
-                num_tokens,
-                list(mla_bmm_dict.keys()),
-                inner_only=False,
+            # 1-D tokens curve on the raw table: RAW lerp in range (BMM is
+            # ~linear in tokens); boundary util-hold beyond it via the BMM SOL
+            # (replaces the legacy raw two-point extrapolation).
+            config = perf_interp.OpInterpConfig(
+                axes=("num_tokens",),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda t: get_sol(t, num_heads, quant_mode, if_pre)[0],
             )
-            result = interpolation.interp_1d(
-                [num_left, num_right],
-                [mla_bmm_dict[num_left], mla_bmm_dict[num_right]],
-                num_tokens,
-            )
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
+            result = perf_interp.query(config, mla_bmm_dict, num_tokens)
+            lat = interpolation.get_value(result, "latency")
+            energy = interpolation.get_value(result, "energy")
             return database._interp_pr(lat, energy=energy)
 
         return database._query_silicon_or_hybrid(
