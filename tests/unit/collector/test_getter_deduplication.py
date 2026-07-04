@@ -433,6 +433,33 @@ def test_vllm_moe_cuda_graph_fails_closed():
     assert all(keyword.arg != "allow_graph_fail" for keyword in benchmark_calls[0].keywords)
 
 
+def test_vllm_moe_resolves_dynamic_experts_inside_token_loop():
+    tree = ast.parse((REPO_ROOT / "collector/vllm/collect_moe.py").read_text())
+    run_moe = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_moe_torch")
+    token_loop = next(
+        node
+        for node in ast.walk(run_moe)
+        if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id == "num_tokens"
+    )
+
+    selected_leaf_calls = [
+        node
+        for node in ast.walk(token_loop)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_select_experts_impl"
+    ]
+    source_assignments = [
+        node
+        for node in ast.walk(token_loop)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "source" for target in node.targets)
+    ]
+
+    assert len(selected_leaf_calls) == 1
+    assert len(source_assignments) == 2
+
+
 @pytest.mark.parametrize(
     ("group_fields", "message"),
     [

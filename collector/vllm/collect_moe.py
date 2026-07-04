@@ -294,6 +294,7 @@ def run_moe_torch(
     """Benchmark the vLLM 0.24.0 model-execution MoE path."""
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.forward_context import get_forward_context, set_forward_context
+    from vllm.model_executor.layers.fused_moe.experts.fallback import FallbackExperts
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
@@ -490,12 +491,11 @@ def run_moe_torch(
         backend_name = getattr(selected_backend, "value", str(selected_backend))
         moe_kernel = getattr(quant_method, "moe_kernel", None)
         experts_impl = getattr(moe_kernel, "fused_experts", None)
-        experts_name = type(experts_impl).__name__ if experts_impl is not None else "direct"
+        wrapper_name = type(experts_impl).__name__ if experts_impl is not None else "direct"
         print(
             "vLLM MoE path:",
             type(quant_method).__name__,
             f"backend={backend_name}",
-            f"experts={experts_name}",
             f"tp={moe_module.moe_config.tp_size}",
             f"ep={moe_module.moe_config.ep_size}",
             f"routing={moe_module.router.routing_method_type}",
@@ -503,14 +503,26 @@ def run_moe_torch(
         )
 
         method_name = type(quant_method).__name__.removesuffix("Method")
-        source = f"vllm_{method_name}_{backend_name}_{experts_name}".lower()
-        source = source.replace(" ", "_").replace("-", "_")
 
         # Performance testing for each token count.
         for num_tokens in num_tokens_lists:
             print("num_tokens", num_tokens)
             print("topk", topk)
             hidden_states = torch.randn([num_tokens, hidden_size], dtype=torch.bfloat16, device=device)
+            if isinstance(experts_impl, FallbackExperts):
+                leaf_experts = experts_impl._select_experts_impl(
+                    hidden_states,
+                    routed_experts.w13_weight,
+                    routed_experts.w2_weight,
+                )
+                if leaf_experts is None:
+                    raise RuntimeError(f"vLLM MoE wrapper {wrapper_name} did not select an experts implementation")
+            else:
+                leaf_experts = experts_impl
+            experts_name = type(leaf_experts).__name__ if leaf_experts is not None else "direct"
+            print(f"vLLM MoE experts: wrapper={wrapper_name} leaf={experts_name}")
+            source = f"vllm_{method_name}_{backend_name}_{experts_name}".lower()
+            source = source.replace(" ", "_").replace("-", "_")
 
             num_iter = 5 if distributed == "power_law" else 1
             logits_dtype = router_logits_dtype or torch.bfloat16
