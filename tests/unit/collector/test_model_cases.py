@@ -81,7 +81,8 @@ def test_attention_head_configs_preserve_real_model_structures_without_cross_mix
     ):
         configs = {
             (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-            for config in get_attention_head_configs(get_shape_sweeps("sglang")[0], phase=phase)
+            for sweep in get_shape_sweeps("sglang")
+            for config in get_attention_head_configs(sweep, phase=phase)
         }
 
         assert expected_model_structures <= configs
@@ -112,10 +113,8 @@ def test_targeted_attention_profile_uses_model_topology(monkeypatch):
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "Qwen/Qwen3-32B-FP8")
     configs = {
         (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-        for config in get_attention_head_configs(
-            get_attention_context_shape_sweeps("sglang")[0],
-            phase="context",
-        )
+        for sweep in get_attention_context_shape_sweeps("sglang")
+        for config in get_attention_head_configs(sweep, phase="context")
     }
 
     assert configs == {
@@ -150,7 +149,8 @@ def test_retired_kimi_generic_attention_profile_was_redundant_for_legacy_full_gr
         ):
             configs = {
                 (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-                for config in get_attention_head_configs(get_shape_sweeps(backend)[0], phase=phase)
+                for sweep in get_shape_sweeps(backend)
+                for config in get_attention_head_configs(sweep, phase=phase)
             }
             assert retired_kimi_configs <= configs
 
@@ -176,10 +176,8 @@ def test_added_model_attention_profiles_resolve_targeted_topology(monkeypatch):
             monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
             configs = {
                 (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-                for config in get_attention_head_configs(
-                    get_attention_context_shape_sweeps("sglang")[0],
-                    phase="context",
-                )
+                for sweep in get_attention_context_shape_sweeps("sglang")
+                for config in get_attention_head_configs(sweep, phase="context")
             }
             assert configs == expected, model_path
 
@@ -206,10 +204,8 @@ def test_mimo_attention_profile_matches_aic_full_attention_window(monkeypatch):
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "XiaomiMiMo/MiMo-7B-Base")
     configs = {
         (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-        for config in get_attention_head_configs(
-            get_attention_context_shape_sweeps("vllm")[0],
-            phase="context",
-        )
+        for sweep in get_attention_context_shape_sweeps("vllm")
+        for config in get_attention_head_configs(sweep, phase="context")
     }
 
     assert configs == {
@@ -228,10 +224,8 @@ def test_qwen_vl_attention_profiles_stop_at_sdk_valid_tp16(monkeypatch):
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "Qwen/Qwen3-VL-32B-Instruct")
     configs = {
         (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-        for config in get_attention_head_configs(
-            get_attention_context_shape_sweeps("vllm")[0],
-            phase="context",
-        )
+        for sweep in get_attention_context_shape_sweeps("vllm")
+        for config in get_attention_head_configs(sweep, phase="context")
     }
 
     assert configs == {
@@ -248,10 +242,18 @@ def test_full_encoder_attention_profiles_combine_defaults_and_model_deltas(monke
 
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     for backend in ("sglang", "trtllm", "vllm"):
-        sweep = get_attention_encoder_shape_sweeps(backend)[0]
-        configs = get_attention_encoder_head_configs(sweep)
-        keys = {(config.num_heads, config.head_dim) for config in configs}
-        default_keys = {(num_heads, head_dim) for head_dim in sweep["head_dims"] for num_heads in sweep["head_counts"]}
+        sweeps = get_attention_encoder_shape_sweeps(backend)
+        keys = {
+            (config.num_heads, config.head_dim)
+            for sweep in sweeps
+            for config in get_attention_encoder_head_configs(sweep)
+        }
+        default_keys = {
+            (num_heads, head_dim)
+            for sweep in sweeps
+            for head_dim in sweep["head_dims"]
+            for num_heads in sweep["head_counts"]
+        }
 
         assert default_keys <= keys
         assert keys - default_keys == {(1, 64), (1, 72)}
@@ -260,7 +262,6 @@ def test_full_encoder_attention_profiles_combine_defaults_and_model_deltas(monke
 def test_targeted_encoder_attention_profile_is_model_exact(monkeypatch):
     from collector.case_generator import get_attention_encoder_head_configs, get_attention_encoder_shape_sweeps
 
-    sweep = get_attention_encoder_shape_sweeps("vllm")[0]
     for model_path, head_dim in (
         ("Qwen/Qwen3-VL-4B-Instruct", 64),
         ("Qwen/Qwen3-VL-32B-Instruct", 72),
@@ -269,7 +270,11 @@ def test_targeted_encoder_attention_profile_is_model_exact(monkeypatch):
         ("nvidia/Kimi-K2.5-NVFP4", 72),
     ):
         monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
-        configs = get_attention_encoder_head_configs(sweep)
+        configs = [
+            config
+            for sweep in get_attention_encoder_shape_sweeps("vllm")
+            for config in get_attention_encoder_head_configs(sweep)
+        ]
 
         assert {(config.num_heads, config.head_dim) for config in configs} == {
             (16, head_dim),
@@ -426,11 +431,16 @@ def test_sglang_mxfp4_quant_labels_select_explicit_activation_precision():
 def test_attention_shape_specs_are_yaml_backed_with_backend_overrides():
     from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
 
-    sglang_context = get_attention_context_shape_sweeps("sglang")[0]
-    trtllm_context = get_attention_context_shape_sweeps("trtllm")[0]
-    vllm_context = get_attention_context_shape_sweeps("vllm")[0]
-    vllm_xpu_context = get_attention_context_shape_sweeps("vllm_xpu")[0]
-    vllm_generation = get_attention_generation_shape_sweeps("vllm")[0]
+    def by_id(sweeps, sweep_id):
+        return next(sweep for sweep in sweeps if sweep["id"] == sweep_id)
+
+    context_id = "base_attention_context_shape_sweep"
+    generation_id = "base_attention_generation_shape_sweep"
+    sglang_context = by_id(get_attention_context_shape_sweeps("sglang"), context_id)
+    trtllm_context = by_id(get_attention_context_shape_sweeps("trtllm"), context_id)
+    vllm_context = by_id(get_attention_context_shape_sweeps("vllm"), context_id)
+    vllm_xpu_context = by_id(get_attention_context_shape_sweeps("vllm_xpu"), context_id)
+    vllm_generation = by_id(get_attention_generation_shape_sweeps("vllm"), generation_id)
 
     assert sglang_context["head_dims"] == [64, 128, 192, 256]
     assert trtllm_context["head_dims"] == [64, 128, 192, 256]
