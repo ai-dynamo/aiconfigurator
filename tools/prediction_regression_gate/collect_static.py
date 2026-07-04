@@ -21,10 +21,10 @@ The regression signal is old-vs-new: collect a snapshot on each revision
 
 Usage:
   # PR profile (latest data-carrying version per system/backend):
-  python tools/regression_v2/collect_static.py --output-dir /tmp/regv2-new
+  python tools/prediction_regression_gate/collect_static.py --output-dir /tmp/gate-new
 
   # Restrict scope while iterating:
-  python tools/regression_v2/collect_static.py --systems h200_sxm --backends trtllm --jobs 1
+  python tools/prediction_regression_gate/collect_static.py --systems h200_sxm --backends trtllm --jobs 1
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))  # make `tools.` importable when run as a script
 
-from tools.regression_v2 import grid
+from tools.prediction_regression_gate import grid
 
 CSV_HEADER = [
     "model",
@@ -187,7 +187,7 @@ def main() -> int:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("regv2_snapshot"),
+        default=Path("gate_snapshot"),
         help="Where to write combo CSVs.",
     )
     args = parser.parse_args()

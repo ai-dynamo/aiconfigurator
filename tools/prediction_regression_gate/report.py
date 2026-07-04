@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Compare two regression-v2 snapshots and produce the gate report.
+"""Compare two prediction-regression-gate snapshots and produce the gate report.
 
 Inputs are two snapshot directories (see collect_static.py / run_tier2.py):
 
@@ -32,9 +32,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))  # make `tools.` importable when run as a script
 
-from tools.regression_v2 import compare
-from tools.regression_v2.run_silicon import SILICON_FILENAME
-from tools.regression_v2.run_tier2 import TIER2_FILENAME
+from tools.accuracy_tracking.run_silicon import SILICON_FILENAME
+from tools.prediction_regression_gate import compare
+from tools.prediction_regression_gate.run_tier2 import TIER2_FILENAME
 
 CATEGORY_ORDER = ("REGRESSION", "STATUS_CHANGE", "DRIFT", "GAIN", "ROWS_ADDED", "ROWS_REMOVED")
 MAX_INLINE_DIFFS = 50
@@ -153,7 +153,7 @@ def render_markdown(results: list[compare.ComboResult], blocking: list[compare.D
         for category, count in result.counts.items():
             total_counts[category] = total_counts.get(category, 0) + count
 
-    lines = ["## AIC Regression Gate V2 (old vs new)", ""]
+    lines = ["## AIC Prediction Regression Gate (old vs new)", ""]
     rows_compared = sum(r.rows_compared for r in results)
     lines.append(f"Compared {rows_compared} rows across {len(results)} combos.")
     lines.append("")
@@ -199,7 +199,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--old", type=Path, required=True, help="Snapshot dir collected on the base revision.")
     parser.add_argument("--new", type=Path, required=True, help="Snapshot dir collected on the head revision.")
-    parser.add_argument("--report-dir", type=Path, default=Path("regv2_report"))
+    parser.add_argument("--report-dir", type=Path, default=Path("gate_report"))
     parser.add_argument("--rtol", type=float, default=compare.DEFAULT_RTOL)
     args = parser.parse_args()
 
@@ -213,8 +213,8 @@ def main() -> int:
     if not _combo_relpaths(args.old):
         stats = _snapshot_stats(args.new)
         summary = (
-            "## AIC Regression Gate V2 (old vs new)\n\n"
-            "Old side has no snapshot (base revision predates the regression-v2 harness).\n"
+            "## AIC Prediction Regression Gate (old vs new)\n\n"
+            "Old side has no snapshot (base revision predates the prediction-regression-gate harness).\n"
             f"New-side statistics: {stats}\n"
         )
         summary_path.write_text(summary)

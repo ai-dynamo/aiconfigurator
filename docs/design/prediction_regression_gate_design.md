@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# PR Regression Test V2 — old-vs-new run_static sampling + scheduling defense
+# Prediction Regression Gate — old-vs-new run_static sampling + scheduling defense
 
 **Status:** implemented on `feat/regression-gate-v2` (SDK knob, tier-1/tier-2
 collectors, comparison report, `workflow_dispatch` CI workflow). Rollout is
@@ -92,7 +92,7 @@ single-side cost (§4).
 For every `(system, backend, version)` combo with real local data, run a fixed
 point grid through `InferenceSession.run_static_latency_only` (no IFB, no rate
 matching, no Pareto search) over every bundled model x parallelism layout x
-quant variant (`tools/regression_v2/grid.py` is the single home of this
+quant variant (`tools/prediction_regression_gate/grid.py` is the single home of this
 policy). Per point, record a three-state outcome:
 
 | field | meaning |
@@ -112,7 +112,7 @@ Defends what tier 1 deliberately bypasses: IFB batching/token budgeting
 (`run_agg`), disagg rate matching + worker balancing, speculative decoding
 acceptance math, prefix caching, VL encoder path, memory/OOM checks.
 
-16 curated configs (`tools/regression_v2/tier2_configs.yaml`), roughly one
+16 curated configs (`tools/prediction_regression_gate/tier2_configs.yaml`), roughly one
 per scheduling feature x {agg, disagg}, including an OOM-boundary case whose
 *expected* outcome is an exception — the memory model is also code. Each
 side snapshots `id,status,ttft_ms,tpot_ms` via `run_tier2.py`.
@@ -197,14 +197,14 @@ Growth is linear and cheap: +1 model ≈ +0.12 s x #combos / workers per side.
 
 ## 5. Rollout: two PRs
 
-1. **PR 1 (this PR, inert):** SDK knob, `tools/regression_v2/` (grid,
-   collectors, compare, report), unit tests, and `regression-v2.yml` with
+1. **PR 1 (this PR, inert):** SDK knob, `tools/prediction_regression_gate/` (grid,
+   collectors, compare, report), unit tests, and `prediction-regression-gate.yml` with
    `workflow_dispatch` only. Nothing in PR CI changes. After merge, validate
    by dispatching the workflow manually (inputs default to old=main,
    new=dispatched ref); the ref-resolution step already handles the
    `pull_request` event.
 2. **PR 2 (trigger-only):** add the `pull_request` trigger to
-   `regression-v2.yml`; in the same PR, demote `accuracy-regression-testing`
+   `prediction-regression-gate.yml`; in the same PR, demote `accuracy-regression-testing`
    to `schedule:` and remove the dead `accuracy-regression-comment.yml`.
    The PR gates itself end-to-end (the workflow runs on its own merge ref),
    and reverting it restores the status quo without touching the harness.
@@ -218,23 +218,23 @@ to new-side statistics with exit 0.
 | piece | file(s) |
 |---|---|
 | SDK shared-layer knob | `sdk/perf_database.py` + `tests/unit/sdk/test_perf_database_shared_layer.py` |
-| Tier-1 grid policy | `tools/regression_v2/grid.py` — 9 shape points, 3 parallelism layouts per family, quant default+fp8 (+nvfp4 on Blackwell-family systems) |
-| Tier-1 collector | `tools/regression_v2/collect_static.py` — multiprocess over combos, `--output-dir`/`--systems`/`--backends`/`--versions latest\|all` |
-| Tier-2 collector | `tools/regression_v2/run_tier2.py` + `tier2_configs.yaml` (16 configs) |
-| Accuracy layer | `tools/regression_v2/make_silicon_refs.py` (curation), `silicon_refs.csv` (~35 anchors with provenance), `run_silicon.py` (predicted vs measured snapshot) |
-| Comparison + report | `tools/regression_v2/compare.py` (pure CSV diff), `tools/regression_v2/report.py` (markdown summary incl. accuracy section, drift_report.csv, exit code) |
-| Unit tests | `tests/unit/tools/test_regression_v2_compare.py`, `tests/unit/tools/test_regression_v2_report.py` |
-| CI | `.github/workflows/regression-v2.yml` — refs -> collect (matrix old/new) -> report; `workflow_dispatch` only until PR 2 |
+| Tier-1 grid policy | `tools/prediction_regression_gate/grid.py` — 9 shape points, 3 parallelism layouts per family, quant default+fp8 (+nvfp4 on Blackwell-family systems) |
+| Tier-1 collector | `tools/prediction_regression_gate/collect_static.py` — multiprocess over combos, `--output-dir`/`--systems`/`--backends`/`--versions latest\|all` |
+| Tier-2 collector | `tools/prediction_regression_gate/run_tier2.py` + `tier2_configs.yaml` (16 configs) |
+| Accuracy layer | `tools/accuracy_tracking/make_silicon_refs.py` (curation), `silicon_refs.csv` (~35 anchors with provenance), `run_silicon.py` (predicted vs measured snapshot) |
+| Comparison + report | `tools/prediction_regression_gate/compare.py` (pure CSV diff), `tools/prediction_regression_gate/report.py` (markdown summary incl. accuracy section, drift_report.csv, exit code) |
+| Unit tests | `tests/unit/tools/test_prediction_regression_gate_compare.py`, `tests/unit/tools/test_prediction_regression_gate_report.py` |
+| CI | `.github/workflows/prediction-regression-gate.yml` — refs -> collect (matrix old/new) -> report; `workflow_dispatch` only until PR 2 |
 
 Local usage (compare your branch against main):
 
 ```bash
 git worktree add /tmp/aic-old main
-(cd /tmp/aic-old && python tools/regression_v2/collect_static.py --output-dir /tmp/regv2-old --jobs 8 \
-                 && python tools/regression_v2/run_tier2.py --output-dir /tmp/regv2-old)
-python tools/regression_v2/collect_static.py --output-dir /tmp/regv2-new --jobs 8
-python tools/regression_v2/run_tier2.py --output-dir /tmp/regv2-new
-python tools/regression_v2/report.py --old /tmp/regv2-old --new /tmp/regv2-new
+(cd /tmp/aic-old && python tools/prediction_regression_gate/collect_static.py --output-dir /tmp/gate-old --jobs 8 \
+                 && python tools/prediction_regression_gate/run_tier2.py --output-dir /tmp/gate-old)
+python tools/prediction_regression_gate/collect_static.py --output-dir /tmp/gate-new --jobs 8
+python tools/prediction_regression_gate/run_tier2.py --output-dir /tmp/gate-new
+python tools/prediction_regression_gate/report.py --old /tmp/gate-old --new /tmp/gate-new
 ```
 
 ## 7. Open questions / risks

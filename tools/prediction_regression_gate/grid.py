@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tier-1 sampling grid for the regression-v2 static snapshot.
+"""Tier-1 sampling grid for the prediction-regression-gate static snapshot.
 
 Everything here is harness *policy*. Both revisions of an old-vs-new
 comparison run their own copy of this grid, so changing any list below shows

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the regression-v2 snapshot report / gate driver."""
+"""Unit tests for the prediction-regression-gate snapshot report / gate driver."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.regression_v2 import compare, grid, report
+from tools.prediction_regression_gate import compare, grid, report
 
 pytestmark = pytest.mark.unit
 

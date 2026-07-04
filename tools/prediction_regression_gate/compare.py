@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Old-vs-new snapshot comparison for the regression-v2 gate.
+"""Old-vs-new snapshot comparison for the prediction-regression-gate gate.
 
 Pure CSV diffing — no SDK imports, so the comparison itself is fast and
 testable. "Old" is the snapshot collected on the PR's base revision, "new"

@@ -31,7 +31,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))  # make `tools.` importable when run as a script
 
-from tools.regression_v2.make_silicon_refs import DISAGG_FIELDS, PARALLEL_FIELDS, REFS_PATH
+from tools.accuracy_tracking.make_silicon_refs import DISAGG_FIELDS, PARALLEL_FIELDS, REFS_PATH
 
 SILICON_FILENAME = "silicon_accuracy.csv"
 SILICON_FIELDS = [
@@ -105,7 +105,7 @@ def main() -> int:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("regv2_snapshot"),
+        default=Path("gate_snapshot"),
         help=f"Directory to write {SILICON_FILENAME} into (shared with the other collectors).",
     )
     args = parser.parse_args()

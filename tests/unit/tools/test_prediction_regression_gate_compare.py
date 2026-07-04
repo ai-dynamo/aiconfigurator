@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the regression-v2 old-vs-new comparison logic."""
+"""Unit tests for the prediction-regression-gate old-vs-new comparison logic."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.regression_v2 import compare
+from tools.prediction_regression_gate import compare
 
 pytestmark = pytest.mark.unit
 

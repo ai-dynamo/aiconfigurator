@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: "Regression Gate V2"
+name: "Prediction Regression Gate"
 
-# Old-vs-new regression gate (docs/design/regression_test_v2_design.md):
+# Old-vs-new regression gate (docs/design/prediction_regression_gate_design.md):
 # collect a run_static + scheduling snapshot on the base revision and on the
 # head revision (in parallel, each side with its own copy of the harness),
 # then diff. OK -> not-OK transitions block; drift and coverage changes are
@@ -25,7 +25,7 @@ on:
 concurrency:
   # PR runs: cancel stale runs per ref. Manual dispatches: unique group per
   # run so two concurrent validations never cancel each other.
-  group: regv2-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  group: gate-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -92,27 +92,27 @@ jobs:
 
       - name: Collect tier-1 + tier-2 snapshot
         run: |
-          mkdir -p /tmp/regv2-snapshot
-          if [ ! -f tools/regression_v2/collect_static.py ]; then
-            echo "revision has no regression-v2 harness; uploading empty snapshot"
-            touch /tmp/regv2-snapshot/NO_HARNESS.txt
+          mkdir -p /tmp/gate-snapshot
+          if [ ! -f tools/prediction_regression_gate/collect_static.py ]; then
+            echo "revision has no prediction-regression-gate harness; uploading empty snapshot"
+            touch /tmp/gate-snapshot/NO_HARNESS.txt
             exit 0
           fi
-          python tools/regression_v2/collect_static.py \
-            --output-dir /tmp/regv2-snapshot \
+          python tools/prediction_regression_gate/collect_static.py \
+            --output-dir /tmp/gate-snapshot \
             --jobs "$(nproc)"
-          python tools/regression_v2/run_tier2.py --output-dir /tmp/regv2-snapshot
-          python tools/regression_v2/run_silicon.py --output-dir /tmp/regv2-snapshot
+          python tools/prediction_regression_gate/run_tier2.py --output-dir /tmp/gate-snapshot
+          python tools/accuracy_tracking/run_silicon.py --output-dir /tmp/gate-snapshot
 
       - name: Upload snapshot
         uses: actions/upload-artifact@v7
         with:
-          name: regv2-${{ matrix.side }}
-          path: /tmp/regv2-snapshot
+          name: gate-${{ matrix.side }}
+          path: /tmp/gate-snapshot
           retention-days: 30
 
   report:
-    name: AIC Regression Gate V2
+    name: AIC Prediction Regression Gate
     needs: collect
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -127,28 +127,28 @@ jobs:
       - name: Download snapshots
         uses: actions/download-artifact@v7
         with:
-          pattern: regv2-*
+          pattern: gate-*
           path: /tmp/snapshots
 
       - name: Compare and gate
         run: |
-          python tools/regression_v2/report.py \
-            --old /tmp/snapshots/regv2-old \
-            --new /tmp/snapshots/regv2-new \
-            --report-dir /tmp/regv2-report
+          python tools/prediction_regression_gate/report.py \
+            --old /tmp/snapshots/gate-old \
+            --new /tmp/snapshots/gate-new \
+            --report-dir /tmp/gate-report
 
       - name: Add summary
         if: always()
         run: |
-          if [ -f /tmp/regv2-report/summary.md ]; then
-            cat /tmp/regv2-report/summary.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -f /tmp/gate-report/summary.md ]; then
+            cat /tmp/gate-report/summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: regression-v2-report
-          path: /tmp/regv2-report
+          name: prediction-regression-gate-report
+          path: /tmp/gate-report
           if-no-files-found: ignore
           retention-days: 30

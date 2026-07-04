@@ -16,8 +16,8 @@ silicon dump is: update silicon_sample.csv, re-run this script, review the
 diff.
 
 Usage:
-  python tools/regression_v2/make_silicon_refs.py            # rewrite refs
-  python tools/regression_v2/make_silicon_refs.py --check    # verify freshness
+  python tools/accuracy_tracking/make_silicon_refs.py            # rewrite refs
+  python tools/accuracy_tracking/make_silicon_refs.py --check    # verify freshness
 """
 
 from __future__ import annotations
@@ -30,10 +30,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))  # make `tools.` importable when run as a script
 
-from tools.regression_v2 import grid
+from tools.prediction_regression_gate import grid
 
-SAMPLE_PATH = grid.REPO_ROOT / "src" / "aiconfigurator" / "systems" / "silicon_sample.csv"
-REFS_PATH = grid.REPO_ROOT / "tools" / "regression_v2" / "silicon_refs.csv"
+SAMPLE_PATH = REPO_ROOT / "src" / "aiconfigurator" / "systems" / "silicon_sample.csv"
+REFS_PATH = Path(__file__).resolve().parent / "silicon_refs.csv"
 
 PARALLEL_FIELDS = ("tp_size", "pp_size", "attention_dp_size", "moe_tp_size", "moe_ep_size")
 DISAGG_FIELDS = tuple(
@@ -74,7 +74,7 @@ def select_refs(rows: list[dict], per_group: int) -> list[dict]:
         if _predictable(row, offline_models):
             configs.setdefault(_config_key(row), []).append(row)
 
-    from tools.regression_v2.run_silicon import predict_ref
+    from tools.accuracy_tracking.run_silicon import predict_ref
 
     refs: list[dict] = []
     groups: dict[tuple, list[tuple]] = {}

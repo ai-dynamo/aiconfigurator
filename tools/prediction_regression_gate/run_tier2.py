@@ -28,9 +28,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))  # make `tools.` importable when run as a script
 
-from tools.regression_v2 import grid
 
-CONFIGS_PATH = grid.REPO_ROOT / "tools" / "regression_v2" / "tier2_configs.yaml"
+CONFIGS_PATH = Path(__file__).resolve().parent / "tier2_configs.yaml"
 TIER2_FILENAME = "tier2.csv"
 TIER2_FIELDS = ["id", "status", "ttft_ms", "tpot_ms"]
 
@@ -63,7 +62,7 @@ def main() -> int:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("regv2_snapshot"),
+        default=Path("gate_snapshot"),
         help=f"Directory to write {TIER2_FILENAME} into (shared with collect_static.py).",
     )
     args = parser.parse_args()
