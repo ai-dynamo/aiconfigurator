@@ -93,11 +93,11 @@ native quantization becomes explicit.
 additive YAML profiles
     -> select the model/backend operations
     -> expand correlated structural tuples
-    -> resolve model/backend quantization policy
-    -> reject unreachable/backend-unsupported tuples
+    -> apply declared artifact quantization policy
+    -> apply universal mathematics and positive hardware floors
     -> derive operation-local invocation identity
     -> stable deduplication of proven-equivalent invocations
-    -> apply model and SM selectors
+    -> apply registry maturity and hang-only denylist policy
     -> benchmark queue
 ```
 
@@ -113,238 +113,97 @@ a later selector can distinguish two equivalent recipe representations, the
 getter must choose a documented canonical representative that remains
 selectable; standalone MLA uses the smallest TP for this reason.
 
-## Separate coverage, pruning, quarantine, and observed failure
+## Population, maturity, and observed outcomes
 
-Collector V2 defaults to attempting a generated case. A failed measurement is
-evidence about one exact invocation; it is not, by itself, a reason to remove
-the shape from future plans. Keep these four states distinct:
-
-1. **Out of scope** is a release coverage decision, such as collecting only
-   TP1/2/4/8. It does not claim that TP16/32 is unsupported. Record the omitted
-   axis and count as plan policy rather than as a kernel exception.
-2. **Not applicable** means no valid measurement exists by definition. Examples
-   include mathematically invalid TP/EP shards, an artifact/quantization
-   mismatch, a framework operation absent from the pinned runtime, or distinct
-   invocations that the current database key cannot represent safely. Prune
-   these cases during population, or fail population when ambiguity would be
-   hidden.
-3. **Known unsafe** means an exact invocation has repeatedly poisoned the CUDA
-   context, aborted its process, or caused enough deterministic fatal churn to
-   make a full run unsafe. Preserve the case identity, reason, failing evidence,
-   and nearest successful controls even when execution is quarantined.
-4. **Attempted** covers every other generated case. Persist either a valid
-   measurement or an explicit failed/expected-failed checkpoint result. Do not
-   manufacture a row or silently remove the case to make completion appear
-   green.
-
-`expected-failed` is an outcome of an attempted case, not a fifth population
-state. Its exact failure contract must exist in the decision catalog before the
-run and name the permitted error class/signature. A matching failure records
-`expected-failed`; a success records `passed` and makes the old expectation a
-stale contract to review. Never relabel an unexpected failure retroactively in
-the same checkpoint. A framework version, backend, GPU path, benchmark
-contract, or decision-catalog change requires a new fingerprint and namespace.
-
-These categories are a decision contract, not a requirement to introduce a
-new class hierarchy or generic rule engine. The first implementation may emit
-them through one canonical plan manifest while reusing existing structured
-selectors and checkpoints.
-
-Ordinary runtime errors, isolated OOMs, low-priority TP sizes, and failures that
-may change with a different backend or framework release remain attempted by
-default. The parallel runner records the failed task and replaces a worker
-after fatal CUDA errors or process exits; artifact validators must reject
-unexplained missing rows or partial output.
-
-A compatibility or safety rule must describe the invocation that actually
-failed:
+Collector V2 follows the repository rule introduced by PR #1302:
 
 ```text
-framework + exact version + GPU/SM + model/artifact + quantization
-+ resolved backend/kernel + phase + TP/EP + shape
+plan cases = dedup(expand(base sweeps) + expand(model shapes))
+runnable   = plan cases intersect positive hardware floors
+             minus registry-unverified operations and the hang denylist
+result     = performance rows plus classified failure records
 ```
 
-A bare rule such as `TP >= 16` is not equivalent to that identity. If the
-framework selects CUTLASS on one SM and TRT-LLM on another, those are different
-invocations even when model and TP match. Stable model mathematics may be
-shared across frameworks and platforms; kernel alignment, launch, and resource
-limits are scoped to the framework/version/SM/backend path that established
-them.
+Release coverage is declared in base/model YAML. Omitting TP16/32 there means
+only that the release does not collect those axes; it is not an unsupported
+hardware claim. Artifact `allowed_modes`, model head divisibility, and universal
+TP/EP mathematics also belong to declaration/population because they describe
+what the requested measurement is.
 
-Do not automatically carry a known-unsafe or expected-failure classification
-to a new framework version, backend selection, or GPU path. Regenerate the raw
-plan, probe the new selector, and attempt representative failing boundaries and
-nearby successes before retaining the classification. Keep raw, out-of-scope,
-not-applicable, quarantined, attempted, passed, and failed counts separately so
-that a filtered point never disappears from review.
+Ordinary runtime failures do not feed back into population. Framework-version
+gaps, backend alignment errors, isolated OOMs, and cases that may work after a
+backend or release change remain queued and become failure records. There is no
+declarative expected-failure layer and no automatic failure-to-skip loop.
 
-## Simplified ownership model
+The only operation-local pre-queue filter is memory feasibility: the getter may
+compare an operation-specific footprint with live device capacity, and must log
+the dropped count and budget. A fixed shape threshold inferred from one GPU,
+framework release, or backend is not such a filter.
 
-Collector V2 currently consumes the same YAML through both the case planner and
-operation generators, then may remove a case again in a framework getter, an SM
-exception, or an operation's inner loop. This is a migration state, not a
-license to encode the same fact in every layer. Use the following ownership
-contract for new work and migrate existing rules toward it without changing
-case IDs first:
+Registry `unverified=True` parks an operation that has not been debugged on one
+backend; `unverified_sms=(...)` parks it only on named SMs. These are operation
+maturity markers, not shape selectors. `denylist.yaml` is only for exact cases
+that hang or kill the node, with date and reason. A CUDA exception that the
+worker can record and recover from remains an ordinary attempted failure.
 
-```text
-model facts + release coverage
-    -> raw physical case
-    -> exact framework invocation resolver
-    -> exact safety quarantine
-    -> execution and per-point outcome
-    -> one central artifact acceptance gate
-```
+## Ownership model
 
 | Owner | May decide | Must not decide |
 | --- | --- | --- |
-| Base/model YAML | Stable model and artifact facts, correlated dimensions, shared workload axes, and explicit release coverage | A transient kernel failure, one framework's backend workaround, or a capacity observation from one GPU |
-| Population engine | Convert stable mathematical, model/artifact, and database-key facts into a raw invocation candidate or an explicit not-applicable decision | Framework runtime capability, backend failure history, or a silent drop with no decision record |
-| Framework getter/resolver | Convert each raw candidate into one exact invocation or an explicit pinned-runtime not-applicable decision, including resolved backend/kernel and framework-local structural constraints | Shared model truth, another framework's support, a silent `continue`, or a historical failure table used only to make a run green |
-| Exception/quarantine catalog | One evidence-backed, exactly scoped known-unsafe decision, plus a pre-run expected-failure signature over an attempted case | A second owner for not-applicable, generic TP/EP removal, failure-rate acceptance, retroactive relabeling, or an unversioned copy of another platform's exception |
-| Runtime collector | Execute the resolved invocation, fail loudly on invariant or persistence errors, and report every inner point | Silently `continue` after an unexpected error or change backend to avoid a failure |
-| Checkpoint and plan manifest | Preserve the complete decision/outcome set and bind it to the runtime and plan identity | Infer success from process exit alone or reuse state across an identity mismatch |
-| Artifact validator | Decide whether the complete result is publishable | Manufacture missing rows, accept unexplained gaps, or reinterpret rows from an older snapshot |
+| Base-op YAML | Sweep density/ranges and positive precision min-SM floors | Per-model shapes, framework gaps, or negative drop rules |
+| Model YAML | Correlated model shapes, artifact/quant policy, op activation, explicit release coverage | Historical failure rules or a second selector language |
+| Capabilities | Positive dtype/op hardware min-SM facts | Framework-version, backend, model, or shape conditions |
+| Backend registry | Version routing and whole-op maturity markers | Shape-level information |
+| Framework collector | How the framework-selected invocation runs; persistence and classified raises | Whether a queued case runs, fallback kernels, or silent `continue` |
+| Hang denylist | Exact cases that hang or kill the node | Ordinary crashes, OOMs, or expected failures |
+| Failure records | Append-only observed outcomes and group summaries | Inputs to any declaration layer |
 
-Do not add another selector language or a generic compatibility framework while
-migrating. Use existing structured named-field rules. Treat `indices`,
-`ranges`, string `contains`, and exact generated case IDs as diagnostic tools,
-not durable release policy: ordering and case-string changes can silently alter
-their meaning.
-
-Keep one source of truth for each decision. A plan-time predicate may have a
-matching runtime assertion, but both must evaluate the same narrowly named
-invariant; do not maintain two independent lists. Extract a small pure
-predicate only when the same rule is genuinely consumed in both places. Do not
-introduce a broad helper abstraction for a single filter.
-
-Capacity is a runtime property of a concrete GPU product, not just an SM. An SM
-exception file can represent an architecture capability, but it cannot prove
-that H100 and H200, or B200 and GB200, share a memory boundary. Derive capacity
-from the live runtime where possible; otherwise scope and label the observation
-to the measured product rather than promoting it to an SM-wide rule.
-
-## Central acceptance invariants
-
-The default-attempt policy is safe only when incomplete output cannot look
-complete. Before removing broad pre-execution filters, Collector core must
-enforce these invariants:
-
-1. Unexpected failed tasks remain in the final checkpoint even after resume.
-2. Any unresolved unexpected failure keeps CSV staging data for diagnosis,
-   prevents parquet finalization, and makes the command exit nonzero.
-3. Expected-failed tasks are accepted only through an exact reviewed contract;
-   the observed error class/signature must match, and a failure percentage is
-   never an acceptance rule.
-4. A checkpoint fingerprint binds the framework image digest, package version
-   and source revision; collector code/config manifest including base/model
-   YAML; GPU product and SM; model/full-plan scope; decision-catalog digest;
-   benchmark contract; and canonical expanded leaf invocation IDs. A mismatch
-   fails closed instead of silently reusing prior work.
-5. A persistence failure cannot mark a task done. Task IDs, output keys,
-   duplicate checks, and written rows must reconcile before finalization.
-6. Grouped collectors such as MoE, DSV4, GDN, mHC, and MLA-module report
-   outcomes for every inner point. An outer task cannot be green while hiding
-   unexpected inner failures.
-
-Maintain append-only attempt history and one terminal status per leaf under one
-fingerprint. An unexpected failure is resolved only by a successful retry under
-that same fingerprint, or by fresh execution in a new decision-manifest and
-checkpoint namespace after an exact failure contract was approved. In the
-second path, the new observed error must match the pre-existing contract; the
-old failure is never reused as its own approval evidence. Use the checkpoint as
-the outcome source of truth, the plan manifest as the decision source of truth,
-error logs as diagnostic detail, and validators as the publication gate. Do not
-create another independent failure ledger.
+Framework truth owns backend selection. Prefer the pinned framework's selector;
+a manual mapping needs pinned-source evidence, including SM and dtype branches.
+Record the backend/kernel that actually ran. If the selected path cannot be
+constructed, raise instead of substituting a familiar backend. An unverified
+framework kernel limit is parked as `FIXME(kernel-limit)` at the invocation
+site while the affected cases continue to produce visible failures.
 
 ## AI filter-change gate
 
-An AI agent must not add, remove, widen, or relocate a case rule before meeting
-the evidence requirements for its classification.
+Before adding, removing, widening, or relocating a population rule, record:
 
-Every change requires:
+1. exact framework/version, GPU product/SM, operation, artifact/quantization,
+   resolved backend, TP/EP, phase, and shape scope;
+2. the current owner, introducing commit, and complete framework/platform blast
+   radius;
+3. canonical before/after invocation, scheduler-task, and persisted-key sets,
+   counts, and hashes;
+4. reverse checks for every untouched consumer of a shared input;
+5. checkpoint/artifact identity consequences; and
+6. the chronological platform-ledger entry when the project maintains one.
 
-1. the exact framework/version, GPU product/SM, operation, model/artifact,
-   quantization, phase, resolved backend/kernel when one exists, TP/EP, and
-   shape in scope;
-2. one population classification and the current rule owner with its complete
-   framework/platform blast radius;
-3. canonical before/after set diffs, counts, and hashes for out-of-scope,
-   not-applicable, quarantined, and attempted decisions; benchmark invocation
-   IDs; scheduler task IDs; persisted physical keys; and expected-failure
-   contract IDs/signatures;
-4. reverse checks for every untouched framework/platform consuming a changed
-   shared input;
-5. checkpoint and existing artifact compatibility, including the new
-   fingerprint/namespace requirement; and
-6. an alignment-ledger entry naming the introducing/dropping commit or exact
-   uncommitted snapshot when the scoped project maintains such a ledger.
+Default action for a failing case is no code change: confirm the classified
+record and inspect the group. Add a denylist entry only after a clean-GPU hang
+or node-kill reproduction with exact signature, post-state, date/reason, and
+nearby successful controls. If evidence is incomplete, stop at diagnosis.
 
-Additional evidence depends on the classification:
+Never change a shared axis for one backend failure, add broad TP/EP/SM/model/
+dtype/OOM skips, switch away from framework dispatch, weaken benchmark or
+failure accounting, add retries/private kernels/process-per-shape workarounds,
+reuse a mismatched checkpoint, or touch another framework/SDK/Rust/data
+consumer as an incidental fix.
 
-- **Out of scope:** require an explicit user or release-owner coverage decision
-  and the omitted axis/set. No runtime failure is required and the decision
-  must not be described as unsupported.
-- **Not applicable:** require mathematical, model/artifact, authoritative
-  framework-source, or database-schema proof. Probe a selector or runtime leaf
-  only when one exists and is relevant.
-- **Known unsafe or attempted with an expected-failure contract:** require
-  framework selector/source evidence, clean-GPU reproduction, exact error
-  class/signature, post-failure process/GPU state, and nearest same-family
-  successes. The population classification remains attempted.
-- **Attempted:** require no exception rule; retain and report the observed
-  outcome.
+## Outcome and artifact invariants
 
-If the applicable evidence is unavailable, stop at diagnosis and leave
-execution policy unchanged. In particular, an AI agent must not:
+Every persistence failure must fail its task. Grouped collectors must expose a
+zero-row result, timeout, or inner failure rather than allowing the outer task
+to look green. Checkpoints and error summaries preserve attempted failures
+across resume and bind to the exact framework image/version, collector/config
+snapshot, GPU product/SM, model/full-plan scope, and expanded task identity.
 
-- change a shared base/model axis to fix one framework or backend;
-- encode one failure as a broad `TP >=`, `SM >=`, model-family, dtype, or OOM
-  exclusion;
-- copy a skip between Hopper, datacenter Blackwell, RTX Blackwell, Ada, or
-  between frameworks without independent selector and runtime evidence;
-- weaken coverage, repetitions, graph boundaries, or failure accounting to
-  make a run green;
-- change the backend away from the pinned framework's production selector;
-- add a private kernel patch, process-per-shape workaround, or retry loop
-  without explicit user approval;
-- use a failure percentage as an artifact acceptance threshold under any
-  approval; percentages are investigation signals only;
-- resume across a plan/runtime fingerprint mismatch, relabel old measurements,
-  or call a structurally complete artifact valid before kernel-path validation;
-  or
-- modify another framework, SDK schema, consumer lookup, or data publication
-  as an incidental fix for a scoped collector failure.
-
-## Future migration order
-
-This section describes follow-up Collector-core work; the current
-Collector-pruning scope does not yet implement the generic checkpoint or
-finalization changes below. Until the corresponding acceptance prerequisite is
-implemented for an operation, do not relax its broad filters merely because
-this design defaults to attempted execution.
-
-Simplify without a flag-day schema rewrite:
-
-1. Add the central acceptance gate, plan/outcome manifest, and checkpoint
-   fingerprint with zero case-plan delta for operations that already have
-   complete per-leaf accounting. Mark grouped operations non-certifiable until
-   their inner accounting exists.
-2. Inventory and classify existing filters mechanically, preserving task IDs.
-3. Migrate one-case/one-measurement operations such as GEMM and attention
-   before grouped inner-sweep collectors.
-4. Add inner-point accounting to grouped collectors before relaxing their
-   skips or exception handling. Treat MoE as grouped while a task carries a
-   token list or can emit/skip multiple rows; apply the same rule to DSV4, GDN,
-   mHC, MLA-module, and similar collectors.
-5. Re-evaluate ordinary and version-sensitive exclusions one exact framework,
-   version, backend, and platform at a time. For failure-derived compatibility
-   policy, retain only proven not-applicable cases, exact known-unsafe
-   quarantines, and pre-run expected-failure contracts. Keep separately
-   reviewed out-of-scope release coverage unchanged.
-6. Keep already accepted artifacts bound to their original source manifest and
-   plan. A later broader plan creates a new artifact contract rather than
-   retroactively making the old artifact incomplete.
+An isolated recorded failure or a few dozen failures in a large plan can be an
+acceptable observed gap after review. Investigate near 10% or earlier when
+failures cluster; one-third or an entire family is systemic. These percentages
+are triage signals, never rules that delete cases. Artifact review reports the
+exact failed groups alongside row/key/schema/source validation and does not
+manufacture or relabel missing measurements.
 
 ## Safe deduplication rules
 
@@ -360,8 +219,8 @@ Simplify without a flag-day schema rewrite:
    kernel. The getter deduplicates on `(dtype, local heads, batch, sequence)`
    and retains the smallest-TP representation so a later TP selector cannot
    hide that physical point.
-6. SM exclusions are pre-execution skips. They are not expected failures after
-   a case has already run.
+6. Use positive hardware floors or a whole-op registry maturity marker for SM
+   gating. Do not encode an SM-specific shape failure as population policy.
 7. Unknown or unproved equivalence is retained. It is better to prune less than
    to silently remove a useful physical point.
 8. If distinct benchmark invocations map to one persisted consumer key, fail
@@ -419,7 +278,7 @@ may multiply a recipe by dtype, TP/EP, or token lists.
 |---|---:|---:|---:|---|
 | GEMM | 35,742 | 35,742 | 35,742 | unchanged |
 | ComputeScale | 1,628 | 1,628 | 1,628 | shared recipe unchanged; V2 also activates SGLang/vLLM |
-| MoE common | 1,797 | 4,548 | 4,209 | quant-sensitive artifacts have separate recipe identity; backend policy removes invalid products before execution |
+| MoE common | 1,797 | 4,548 | 4,326 | quant-sensitive artifacts have separate recipe identity; backend policy removes invalid products before execution |
 | MLA context specs | 220 | 550 | 220 | SGLang/TRT-LLM getters each emit 1,760 unique loader keys |
 | MLA generation specs | 362 | 885 | 362 | SGLang emits 2,656 keys after its int32 KV guard; TRT-LLM emits 2,896 |
 | Mamba | 8 | 8 | 12 | four default synthetic interpolation profiles added |
@@ -429,8 +288,8 @@ may multiply a recipe by dtype, TP/EP, or token lists.
 
 With `COLLECTOR_MODEL_PATH` unset, the SM100 raw public-getter audit separates
 candidate getter tasks from actual invocation identity. These counts are
-measured after artifact quantization policy, before model/SM/version plan
-selectors, and before expanding each task's token list:
+measured after artifact quantization policy, before registry maturity and
+runtime subset selection, and before expanding each task's token list:
 
 | Backend | Raw getter tasks before dedupe | Raw getter tasks now | Duplicate tasks removed | Unique invocation/key loss |
 |---|---:|---:|---:|---:|
@@ -438,8 +297,8 @@ selectors, and before expanding each task's token list:
 | vLLM | 2,799 | 2,352 | 447 | 0 |
 
 The vLLM audit enables the `per_block_fp8`, `nvfp4`, and `mxfp4` runtime
-features. Full model plans may filter these raw tasks later, so the table is not
-a post-selector or token-expanded queue count.
+features. Full model plans may narrow these raw tasks later, so the table is not
+a post-plan or token-expanded queue count.
 
 Artifact-exact policy is a separate pruning stage, not part of the dedupe row
 above. Relative to the pre-review population, the reviewed DeepSeek V3,
@@ -488,53 +347,59 @@ SM90/SM100, the standalone getters compare as follows:
 | TRT-LLM | context | 1,760 | 1,760 | 1,760 | 1,760 | 0 |
 | TRT-LLM | generation | 2,896 | 2,896 | 2,896 | 2,896 | 0 |
 
-For a targeted Kimi TP<=8 plan, SGLang emits 1,100 context / 1,660 generation
-cases and TRT-LLM emits 1,100 / 1,810. Both retain local heads
+For a targeted Kimi TP<=8 standalone-MLA plan, SGLang emits 1,100 context /
+1,660 generation cases and TRT-LLM emits 1,100 / 1,810. Both retain local heads
 `{128, 64, 32, 16, 8}`. The 64-head YAML profile is required for the last
 targeted bucket and for `local_heads=1` in full collection; overlap with the
-128-head profile is removed only in the backend getter.
+128-head profile is removed only in the backend getter. Kimi's separate dense
+MHA profile is vLLM-only and emits no SGLang attention case.
 
 For migrated quant-sensitive MoE families, geometry and checkpoint
 quantization are separate identities. New model profiles remain additive, but
 a backend schedules only the declared artifact mode rather than taking the
 Cartesian product of every shape and every backend quant mode. DeepSeek V4
-native artifacts schedule
-`w4a8_mxfp4_mxfp8` in TRT-LLM. Pinned SGLang 0.5.10 predates the DSV4-specific
-MXFP4 method, and pinned vLLM 0.19.0 has no DSV4 MXFP4/MXFP8 implementation,
-so neither schedules a native V4 MoE case. The `sgl-project/*-FP8` artifacts
-schedule `fp8_block`.
+native artifacts schedule `w4a8_mxfp4_mxfp8` in TRT-LLM. Exact SGLang 0.5.14
+schedules the native Pro artifact as `w4a16_mxfp4` on SM90 and native
+Flash/Pro artifacts as `w4a8_mxfp4_mxfp8` on SM100/103. These are distinct
+framework-owned paths, not Marlin fallbacks; SM120 remains fail-closed until
+its native path is validated. Pinned vLLM 0.19.0 has no DSV4 MXFP4/MXFP8
+implementation and schedules no native V4 MoE case. The
+`sgl-project/*-FP8` artifacts schedule `fp8_block`.
 Kimi-K2-Instruct schedules `fp8_block`, native Kimi-K2.5 schedules
 `int4_wo` with group size 32, and NVIDIA Kimi-K2.5 schedules `nvfp4`.
 
-GPT-OSS is also backend- and hardware-specific. On SM100, SGLang and TRT-LLM
-retain `w4a16_mxfp4` and add `w4a8_mxfp4_mxfp8` because the two labels select
-distinct activation precisions. On SM103, TRT-LLM retains both modes while the
-pinned SGLang 0.5.10 path is skipped by a version exception. On SM120, pinned
-SGLang 0.5.10 is likewise skipped, and pinned TRT-LLM 1.3.0rc10 skips both
-GPT-OSS modes because its fused MoE path rejects them. TRT-LLM retains only
-`w4a16_mxfp4` on Hopper, while vLLM collects `w4a16_mxfp4`. SGLang explicitly
-selects BF16 activation precision for the W4A16 label and its runtime `default`
-selects MXFP8 activation for the W4A8 label.
-SGLang 0.5.10's generic MXFP4 method is retained for GPT-OSS W4A16/W4A8, where
-its high-level `FusedMoE + Mxfp4Config` path owns the FlashInfer API, TP
-padding, and EP-local expert layout. It is not reused for DeepSeek V4: the
-DSV4-specific method was added later and has a different top-k/clamp contract.
-A future SGLang 0.5.14 collector upgrade can enable native DSV4 W4A8 after an
-exact-version smoke instead of carrying a newer-version kernel shim here.
+GPT-OSS is also backend- and hardware-specific. Exact SGLang 0.5.14 retains
+`w4a16_mxfp4` on SM90 and retains both `w4a16_mxfp4` and
+`w4a8_mxfp4_mxfp8` on SM100/103 because the two labels select distinct
+activation precisions. Its high-level `FusedMoE + Mxfp4Config` path owns the
+FlashInfer API, TP padding, and EP-local expert layout. On SM120 the pinned
+runtime would repack these checkpoints through Marlin; that is not an MXFP4
+measurement, so the stock collector fails closed and leaves a hardware TODO.
+TRT-LLM 1.3.0rc10 retains both modes on SM100/103, skips them on SM120, and
+retains only `w4a16_mxfp4` on Hopper; vLLM collects `w4a16_mxfp4`. SGLang
+explicitly selects BF16 activation precision for the W4A16 label and its
+runtime `default` selects MXFP8 activation for the W4A8 label. GPT-OSS and
+DeepSeek V4 use separate framework methods and routing contracts; neither is
+implemented by borrowing the other's path.
 
-DSA module population retains checkpoint paths because all three backends load
-model-path-specific config. SGLang resolves native checkpoint quantization to
-reject impossible explicit GEMM combinations, but `quantization=None` may still
-auto-detect the artifact's config for a BF16-labelled module case. The getters
-therefore retain distinct paths even when those rows later project to the same
-consumer key. A physical-key collision by itself is not permission to drop a
-path-sensitive invocation. Conversely, a BF16 timed-module label does not make
-an unsupported full-model setup valid: for exact SGLang 0.5.14 on SM90, an
-NVFP4 checkpoint initializes Marlin before the module benchmark. Because
-Marlin is an INT4-WO backend in this collector contract, those checkpoint
-invocations are `not_applicable` and are filtered before canonicalization;
-ordinary GLM DSA uses the remaining BF16 artifact. SM100/103 native NVFP4
-module paths remain separate invocations.
+DSA recipes retain checkpoint paths until the backend resolves setup-time
+quantization, because all three frameworks load model-path-specific config.
+Exact SGLang 0.5.14 first rejects a checkpoint whose native quantization has no
+valid backend on the target SM. It then canonicalizes candidates with the same
+persisted `(architecture, timed-module GEMM type)` identity to the
+longest-context remaining checkpoint; a targeted model run keeps its requested
+checkpoint. Block-FP8 remains separate because its DSA projections execute and
+persist as `fp8_block`. This is an explicit, operation-local equivalence proof,
+not a general rule that consumer-key collisions are interchangeable.
+
+A BF16 timed-module label still does not make an invalid full-model setup a
+measurement of another precision. On SM90, loading a GLM NVFP4 checkpoint would
+initialize Marlin before the module benchmark. Marlin is an INT4-WO backend in
+this collector contract, so the positive NVFP4 SM100 artifact floor keeps that
+checkpoint out of the SM90 runnable set; ordinary GLM DSA uses the BF16
+artifact. On SM100/103 a native NVFP4 checkpoint can be a valid setup candidate,
+but it is still canonicalized with any consumer-equivalent BF16 path during a
+full/raw run rather than producing an indistinguishable second invocation.
 
 SGLang's inner MLA/DSA module sweep reads the same YAML precision specs and SM
 gates as the population layer. In particular, Ada/Hopper expand `fp8_block`,
@@ -542,7 +407,7 @@ not `nvfp4`; any future NVFP4 module precision must be declared with a
 Blackwell `min_sm` gate in YAML.
 
 The following SM100 counts are raw tasks returned by each public getter with
-`COLLECTOR_MODEL_PATH` unset, before model/SM/version plan selectors. For
+`COLLECTOR_MODEL_PATH` unset, before registry maturity and runtime subset selection. For
 SGLang, each raw task is a subprocess group whose batch, sequence, prefix, and
 precision inner sweep is expanded later; these are not token-expanded
 invocation counts.
@@ -580,16 +445,19 @@ DeepSeek V4 has three additional population constraints:
    combines both models in one output. Targeted native and FP8 artifact paths
    remain supported.
 2. The model YAML is the source of truth for backend-specific operations.
-   SGLang schedules CSA/HCA context and generation modules, top-k calibration,
-   mHC, MoE, and WideEP MoE. vLLM's DSV4 collectors remain registry-only until
-   the declared runtime compatibility floor and prefix-aware context contract
-   are both satisfied. TRT-LLM continues to schedule only the operations its
-   registry implements.
+   Stock SGLang schedules CSA/HCA context and generation modules, top-k
+   calibration, mHC, and MoE. `wideep_moe` is not part of that stock model
+   plan; it remains an explicit, independent SGLang 0.5.10 run. WideEP MLA is
+   unregistered. vLLM's DSV4 collectors remain registry-only until the declared
+   runtime compatibility floor and prefix-aware context contract are both
+   satisfied. TRT-LLM continues to schedule only the operations its registry
+   implements.
 3. MoE artifact aliases are not merged across quantization formats. Native
    DeepSeek V4 artifacts retain only `w4a8_mxfp4_mxfp8` for TRT-LLM, while the
-   converted `sgl-project/*-FP8` artifacts retain only `fp8_block`. Pinned
-   SGLang 0.5.10 and vLLM 0.19.0 native mode lists are explicitly empty instead
-   of advertising unverified future-version paths.
+   converted `sgl-project/*-FP8` artifacts retain only `fp8_block`. Exact
+   SGLang 0.5.14 retains the native SM90 Pro W4A16 and SM100/103 Flash/Pro W4A8
+   paths described above; vLLM 0.19.0 keeps its native mode list empty instead
+   of advertising an unimplemented future-version path.
 
 The NVIDIA DeepSeek-V4 NVFP4 checkpoints are intentionally not advertised by
 this Collector-only change. The current AIC model catalog and the DSV4 module
@@ -618,9 +486,9 @@ When adding or changing a model profile:
    inherit unrelated default profiles.
 7. Keep a synthetic default point when an unchanged consumer still queries it,
    even if the current model metadata would choose a different value.
-8. Classify every omitted case as out-of-scope, not-applicable, or known-unsafe;
-   record exact invocation scope for the latter and do not inherit it across a
-   version, backend, or GPU-path change without a fresh boundary probe.
+8. Route every omitted case to its declared coverage/artifact fact, positive
+   capability floor, registry maturity marker, live-memory filter, or dated
+   hang denylist. Ordinary failures remain attempted and visible.
 
 ## Validation
 
@@ -631,8 +499,10 @@ ruff format --check collector tests/unit/collector
 git diff --check
 ```
 
-The final Collector suite reports 299 passed and 2 skipped. The unit coverage
-checks final profile expansion, per-operation recipe counts, selector narrowing,
-alias handling, hardware/precision boundaries, and operation-local physical
-deduplication. The historical key-set comparison above was a one-time read-only
-audit, not an ongoing Collector behavior or exact-count unit-test dependency.
+The final SGLang 0.5.14 validation reports 371 non-fork Collector tests and 26
+fork/parallel tests passing in separate fresh processes. The unit coverage
+checks final profile expansion, per-operation recipe counts, registry
+maturity, alias handling, hardware/precision boundaries, and operation-local
+physical deduplication. The historical key-set comparison above was a one-time
+read-only audit, not an ongoing Collector behavior or exact-count unit-test
+dependency.

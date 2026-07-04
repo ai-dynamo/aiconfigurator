@@ -943,3 +943,183 @@ median 0.9998, max 1.0083; no row is outside 0.8--1.2. Companion manifest is
 `9a2d1063...`. This closes the concern as stable cross-device/version behavior
 for this Hopper reverse check; it does not predict or validate Blackwell
 performance.
+
+### final_v1 collector-only candidate status binding (2026-07-04)
+
+This appendix rebinds present-tense status without deleting the preceding
+failure, correction, and comparison chronology. The final candidate execution
+root is `/raid/aic_sglang_0514_sm90_final_20260704`; its clean execution-code
+HEAD is `1b37712659554e834ac520a18eb1c0620a0e16df`, and the read-only
+`source_final_v1/code_snapshot` manifest-file SHA256 is
+`2c53ee9d73c1364c471024ca8ee94b6e5578ce7444c6c4a99f55a72f0c50f3bc`.
+It uses stock SGLang 0.5.14 from image digest
+`sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3`.
+
+The execution platform is eight NVIDIA H20-3e GPUs at SM90. `h200_sxm` is
+only the existing plan selector. This bundle contains no H200, SM100, SM103,
+SM120, or SM89 execution result, and no H20 row may be published or relabeled
+as H200 or Blackwell data. Blackwell behavior in this candidate remains
+source-derived and hardware-unvalidated.
+
+The MoE chronology is now explicitly
+`114,105 pre-alignment -> 113,376 alignment-pruned -> 92,883 final target`.
+The 113,376-row CSV `3de99f97...` and manifest `0ac52de9...` passed their
+then-current structural validator, but the later precision/backend identity
+audit found 20,493 NVFP4 rows and every one used `sglang_marlin_moe`. Marlin
+is an INT4-WO backend in this collector contract, so that entire artifact is
+semantically rejected and retained only as historical diagnostic evidence.
+Filtering it in place cannot create an accepted final artifact; the 92,883
+target requires a fresh run from this final snapshot.
+
+At this dated transition, fresh evidence from `final_v1` is accepted for:
+
+- dense attention: 50,901 context, 40,468 generation, and 7,679 encoder rows;
+- DSA modules: 264 context tasks / 46,688 rows and 24 generation tasks /
+  3,568 rows, with no skip-indexer rows;
+- GLM sparse: 3,025 MQA, 6,050 PAGED top-k, and 3,025 DSA-attention rows for
+  BF16 `zai-org/GLM-5`; and
+- a 64-row MoE smoke spanning BF16, FP8-block, W4A16-MXFP4, and INT4-WO,
+  with Marlin only on INT4-WO and no NVFP4 row.
+
+The three listed full stages have zero failed and zero expected-failed tasks
+and pass their exact task/key/source validators. At this transition the fresh 92,883-row
+MoE full run is in progress and acceptance remains pending; changing partial
+progress is intentionally not recorded as evidence. A later appendix must
+bind its final checkpoint, row and key counts, source/quantization contracts,
+artifact hashes, and clean postflight before calling the H20/SM90 `final_v1`
+bundle current.
+
+### PR #1302 rebase transition (2026-07-04)
+
+The preceding `final_v1` status is now historical. At the user's request, the
+collector-only branch was rebased from base `9ce84ebb` onto upstream PR #1302
+head `4c6cfebdc5bfbfd28f15ebad4aa9d17199f94b3a`. The first rebased SGLang
+head is `28c283cd`. PR #1302 retires the selector/`sm_exceptions` mechanism,
+adds positive hardware capability floors and hang-only denylisting, makes
+ordinary failures observable data, and binds checkpoints to framework/SM
+identity. Those are execution and population changes, not documentation-only
+rules, so no row from `source_final_v1` validates the rebased product.
+
+The in-flight `final_v1` MoE run was stopped by stopping only its task-owned
+container. Its preserved rejected namespace is
+`runs/moe_full_pre_pr1302_stale_20260704T211655`: 7,116/92,883 tasks done,
+7,137 partial rows, zero failed/expected-failed tasks before interruption,
+Docker/runner exit 137, and validation exit 1. GPUs 0--6 returned clean; the
+unrelated GPU-7 process was not touched. The namespace is chronology only and
+must not be resumed, filtered, finalized, or published.
+
+Conflict resolution follows the new policy:
+
+- `sm90_exceptions.yaml` and `sm100_exceptions.yaml` remain deleted; none of
+  the old shape selectors was restored;
+- expected-failure prediction, version-specific executor switches, OOM
+  prediction, and per-failure cleanup from the old worker patch were dropped;
+- the only retained worker delta converts an operation's successful integer
+  `EXIT_CODE_RESTART` return into PR #1302's existing explicit restart path,
+  preserving GDN/MoE persistence-before-recycle without changing whether a
+  case runs or how failures are classified; and
+- relative to PR #1302 head, the rebased branch has no direct diff under
+  `collector/vllm`, `collector/trtllm`, `src`, or `rust`.
+
+Dense, DSA, and GLM full results above remain accepted evidence only for frozen
+snapshot `1b377126...`/manifest `2c53ee9d...`; they are not post-rebase passes.
+Before any new GPU acceptance, the rebased state requires host tests, canonical
+plan/task/key diffs under the new capability model, backend/source review,
+fresh smoke, and a new read-only source manifest. Blackwell remains
+hardware-unvalidated.
+
+### Post-#1302 rule audit proposal (2026-07-04; not yet executed)
+
+This entry records the decision boundary before changing the rebased product.
+The comparison snapshot is `28c283cd`; the local backup ref is
+`backup/sglang-0514-post-pr1302-pre-rule-audit-20260704`. Canonical SM90,
+SM100, SM103, and SM120 plan counts and hashes are being frozen under
+`post_pr1302_pre_rule_audit_plan` before implementation. Until a later entry
+binds those artifacts and a new commit, every item below is a proposal only.
+
+The audit found four SGLang-owned ways that an attempted point could disappear
+or succeed without data:
+
+- `f9c1e29c` added fixed GDN context token/value thresholds. They are not a
+  live-memory feasibility calculation or a framework limit, and can make a
+  grouped task succeed after silently omitting inner points. The proposed
+  change removes only those thresholds; outer GDN task IDs are unchanged and
+  every inner point either persists both rows or contributes to a failing
+  group summary.
+- `f9c1e29c` drops every Blackwell FP8-live-attention point by SM before the
+  resolved backend is considered. The proposed change keeps those cases in
+  the plan: SGLang 0.5.14 TRTLLM-MHA and FlashInfer paths raise rather than log
+  a false FP8 live-activation row, while the Triton/FA3 paths retain their real
+  FP8 input behavior. The older SM120 large-Q/O predicate is source evidence
+  from the 0.5.10 Triton path, not proof for every 0.5.14 backend; it is to be
+  parked as `FIXME(kernel-limit)` at invocation instead of silently filtering.
+- `fa65531a`/`f9c1e29c` added MoE alignment, DSV4 FP4 EP/TP/token/SM, and
+  backend-limit filters even though the invocation already raises, or can let
+  the framework report the failure. These predicates are to be removed from
+  generation. Stable artifact `allowed_modes`, universal MoE mathematics,
+  and physical-key dedup remain. The shared Qwen `max_tp_exclusive` declaration
+  is intentionally unchanged because changing it here would alter TRT-LLM and
+  vLLM population; the user's low-priority TP16/32 coverage decision remains a
+  separate shared-plan review.
+- the inherited `37826f10` SM120 DeepGEMM-module early return is a broad getter
+  skip. Stock DSA is to use the #1302 registry maturity marker on hardware that
+  has not been validated, while the getter itself remains executable for a
+  future targeted bring-up. GLM-5.2 skip-indexer is likewise explicit at the
+  registry on SM90, where the only registered checkpoint is NVFP4 and is
+  removed by the positive SM100 capability floor.
+
+This proposal changes no vLLM, TRT-LLM, SDK, Rust, packaged-data, executor,
+case-ID, or failure-classification behavior. SM90 execution remains the reverse
+gate; SM100 is retained for the dependent B200 continuation. SM103 and SM120
+remain source-derived/hardware-unvalidated and are not advertised as supported
+by this transition. Exact before/after invocation and key-set deltas, focused
+tests, and the resulting product identity must be appended before any new
+collection artifact is accepted.
+
+### Post-#1302 rule-audit implementation checkpoint (2026-07-04; uncommitted, no GPU evidence)
+
+Upstream PR #1302 still resolves to `4c6cfebdc5bfbfd28f15ebad4aa9d17199f94b3a`,
+which is an ancestor of rebased head `28c283cd`. The current worktree has no
+frozen product identity yet. No GPU row produced by this worktree is accepted.
+
+The collector-only changes that do not alter executor or case-generation
+mechanisms are now implemented for review:
+
+- standalone SM90 MLA generation no longer applies the old FlashMLA int32
+  bound to FA3 cases;
+- DSA and DSV4 decode graph benchmarks enter SGLang 0.5.14
+  `model_capture_mode`, selecting the same dual-/multi-stream branch as serving;
+- GEMM, encoder attention, compute-scale, MLA-BMM, dense attention, MLA, mHC,
+  GDN, and MoE persistence paths fail when `log_perf` does not write a row;
+- GLM/DSV4 sparse benchmarks no longer fall back silently from CUDA Graph to
+  eager, and grouped failures retain each inner shape plus its original error;
+- GEMM, MLA-BMM, and mHC rows name their invoked SGLang/Torch/TileLang path
+  instead of the generic `sglang`/`default` label; and
+- DSA module rows derive a composite source from the initialized framework
+  backend (`use_mha`, `dsa_prefill_impl`, or `dsa_decode_impl`), distinguishing
+  dense FA3/TRTLLM-ragged, full indexer, and true skip-indexer paths instead of
+  repeating the configured outer `dsa` label; and
+- framework-layer MoE validates the constructed quant method/runner before
+  timing and derives provenance from that object. In particular, DSV4
+  `w4a16_mxfp4` on SM90 currently constructs `Fp8MoEMethod` under the generic
+  Triton request, so it now fails before timing instead of persisting FP8 work
+  under an MXFP4 label. GPT-OSS SM90 MXFP4 remains the real Triton MXFP4 path;
+  Kimi INT4-WO remains Marlin; SM100/103 NVFP4 and MXFP4 remain source-derived
+  FlashInfer paths pending their own hardware validation.
+
+Focused exact-image tests pass 58/58 after these changes. Worktree-wide
+non-parallel and fresh-process parallel checks pass 386/386 and 26/26 on the
+same current files. Ruff and `git diff --check` also pass.
+
+The audit also found a mechanism boundary that this checkpoint deliberately
+does not cross. DSA context has 264 grouped outer tasks: its worker currently
+reduces 70,224 structurally admitted inner candidates to 46,688 attempts using
+a fixed `2^25` condition and runtime chunk/pool filters. DSV4 CSA and HCA each
+reduce 56,936 inner candidates to 20,296, mostly through the serving chunk
+size. Moving model/phase structure and live-memory feasibility before queueing
+requires a deterministic grouped-inner manifest/task fingerprint; representing
+long prompts by actual serving chunks changes the benchmark boundary. PR #1302
+classifies both as mechanism decisions requiring explicit owner approval. Until
+that decision is recorded, do not run or claim complete DSA/DSV4 context data,
+do not convert the filters into YAML/capability/denylist rules, and do not copy
+Hopper chunk or capacity values to Blackwell.

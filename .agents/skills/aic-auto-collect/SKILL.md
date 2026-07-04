@@ -65,6 +65,14 @@ Clean only task-owned workers and containers. Never kill or restart another
 container, restart Docker, or run a global prune. If another workload blocks
 the run, report it.
 
+When the runtime root is read-only, mount every framework JIT/cache location
+that the selected path may create, not only the generic XDG cache. This can
+include DeepGEMM (`~/.deep_gemm` or `DG_JIT_CACHE_DIR`), TensorRT-LLM,
+TileLang, Triton/TorchInductor, CUDA, and FlashInfer caches. A family-wide
+`EROFS` failure while creating one of these directories is runner plumbing,
+not evidence that its shapes or kernel are unsupported. Preserve the rejected
+attempt, fix only the task runner, and rerun in a fresh namespace.
+
 Treat an OOM as unclassified until the same case fails on a clean GPU. Check
 for stale workers, retained weights, descriptor/JIT caches, and oversized dummy
 allocations before adding a capacity rule.
@@ -128,7 +136,7 @@ Full collection means this complete retained plan after intentional pruning.
 It is not the raw registry run with no model-case flags.
 
 Before GPU work, record per-op raw, retained, and unique physical counts;
-artifact/model coverage; dtype counts; and SM exception counts. Verify every
+artifact/model coverage; dtype counts; and capability/maturity drops. Verify every
 required model produces executable cases. Preserve checkpoint-native
 quantization identities when they change the invoked kernel. Do not equate
 checkpoint compatibility with execution-precision support: a backend that
@@ -141,61 +149,55 @@ framework would repack its weights into Marlin merely because the timed module
 itself has a BF16 key. This statement covers the stock collector; audit a
 special/WideEP runtime separately instead of inheriting the conclusion.
 
-## Separate population from failure policy
+## Separate population from observed failure
 
-Before adding or retaining a case filter, read the coverage/failure policy in
+Before changing case population, read the repository-owned collector rules and
 [`collector-v2-population-design.md`](../../../docs/perf_database/collector-v2-population-design.md).
-Classify the case as exactly one of:
+The governing model is intentionally small:
 
-- `out_of_scope`: intentionally omitted coverage, without claiming the point
-  is unsupported;
-- `not_applicable`: no valid measurement exists because of model mathematics,
-  artifact/quantization identity, pinned-runtime capability, or an
-  unrepresentable database key;
-- `known_unsafe`: the exact invocation repeatedly poisons the CUDA context,
-  aborts its process, or creates systemic fatal-worker churn;
-- `attempted`: execute it and retain either a valid row or an explicit failure.
+```text
+plan cases = dedup(base sweep cases + declared model shapes)
+runnable   = plan cases intersect positive hardware floors
+             minus registry-unverified operations and the hang denylist
+result     = performance rows plus classified failure records
+```
 
-Treat `expected_failed` as a pre-approved outcome of `attempted`, not a
-population state. Define its exact error class/signature before execution. Do
-not retroactively relabel an unexpected failure; a later success records
-`passed` and makes the expectation stale.
+Base/model YAML owns release coverage, correlated model shapes, artifact
+quantization, and universal mathematics. `capabilities.yaml` owns only positive
+hardware min-SM floors. Registry `unverified`/`unverified_sms` markers park an
+entire operation that has not been debugged on a backend or SM. The denylist is
+reserved for exact cases that hang or kill the node.
 
-Prune only proven `not_applicable` cases; fail population instead when pruning
-would hide conflicting invocations behind one database key. Keep coverage
-policy separate from compatibility. Preserve the identity and evidence for
-quarantined `known_unsafe` cases. Leave ordinary runtime errors, isolated OOMs,
-low-priority TP sizes, and backend/version-sensitive failures in `attempted` by
-default; worker recycling and checkpoint accounting are designed to contain
-them.
+A queued case has only two legal collector outcomes: execute it, or raise. A
+framework-version gap, backend/kernel alignment failure, isolated OOM, or
+low-priority TP size is observed failure data; it is not a reason to add a
+silent `continue`, expected-failure rule, retry, or fallback backend. The one
+exception is a generation-time memory-feasibility filter derived from live
+device capacity and an operation-specific footprint formula; it must log the
+dropped count and memory budget.
 
-Never encode a backend failure as a bare TP, EP, model, or SM exclusion. Bind a
-safety or compatibility rule to the exact framework version, GPU/SM,
-model/artifact, quantization, resolved backend/kernel, phase, TP/EP, and shape
-that proved it. A framework upgrade, backend-selection change, or new GPU path
-invalidates that classification until the failing boundary and nearby success
-are reprobed. Record raw, out-of-scope, not-applicable, quarantined, attempted,
-passed, and failed counts separately.
+Framework dispatch decides how an attempted case runs. Prefer the framework's
+own selector; any manual mapping needs pinned-source proof and must record the
+executed `kernel_source`. If construction or invocation fails, expose that
+failure instead of substituting a different kernel. Park an unverified claimed
+kernel limit as `FIXME(kernel-limit)` at the invocation site until the next
+version/platform audit.
 
 ### Gate every filter change
 
-Before editing any filter, record its exact invocation scope, classification,
-current rule owner, and full framework/platform blast radius. Produce canonical
-before/after set diffs, counts, and hashes for every decision class, benchmark
-invocation IDs, task IDs, physical keys, and expected-failure contract
-IDs/signatures. Reverse-test untouched consumers of a shared input and state
-whether checkpoint or artifact identity changes. Add the corresponding
-platform-ledger entry first when that project maintains one.
+Before editing any filter, record its exact invocation scope, current owner,
+introducing commit, and full framework/platform blast radius. Produce canonical
+before/after counts, sets, and hashes for benchmark invocations, scheduler task
+IDs, and persisted physical keys. Reverse-test every untouched consumer of a
+shared input and state whether checkpoint or artifact identity changes. Add the
+corresponding platform-ledger entry first when that project maintains one.
 
-Apply classification-specific evidence:
-
-- for `out_of_scope`, require an explicit user/release-owner coverage decision;
-- for `not_applicable`, require mathematical, artifact, authoritative source,
-  or database-schema proof; and
-- for `known_unsafe` or `attempted` with a pre-run expected-failure contract,
-  require selector/source evidence, clean-GPU reproduction, an exact error
-  signature, post-failure state, and nearest successful controls; keep the
-  population classification as `attempted`.
+For release coverage, require an explicit user/release-owner decision and never
+describe omitted TP/EP sizes as unsupported. For mathematical or artifact
+impossibility, require model/artifact/schema proof and keep the fact in its
+declaration owner. For a hang or node-kill denylist entry, require a clean-GPU
+reproduction, exact signature, post-failure state, date/reason, and nearest
+successful controls. Ordinary failures require no exception rule.
 
 If any evidence is missing, stop at diagnosis. Do not:
 
@@ -212,27 +214,13 @@ If any evidence is missing, stop at diagnosis. Do not:
 - change another framework, SDK/consumer schema, or published data as an
   incidental fix.
 
-Keep one decision owner: stable facts and release coverage in base/model YAML;
-mathematical/artifact/key not-applicability in population; pinned-runtime
-not-applicability and exact invocation resolution in the framework getter;
-known-unsafe quarantine and pre-run expected-failure contracts in the decision
-catalog; per-point outcomes in the runtime/checkpoint; and publication
-acceptance in the validator. Every non-attempted case must emit a decision
-record; no getter may silently drop it. Do not add another selector language or
-use index/range/string/case-ID selectors as durable policy.
-
-Before relaxing broad filters, require one central acceptance gate: unresolved
-unexpected failures must remain visible after resume, prevent parquet
-finalization, and cause a nonzero command exit. Bind checkpoints to exact
-framework image digest, package version/source, collector code/config manifest,
-GPU product/SM, model/full-plan scope, decision-catalog digest, benchmark
-contract, and canonical expanded leaf-invocation fingerprint. Maintain
-append-only attempts plus one terminal leaf status; resolve an unexpected
-failure only by a successful same-fingerprint retry or by fresh execution under
-a new manifest/namespace after an exact contract was approved; the new error
-must match that contract. Ensure grouped collectors report every inner point
-and persistence failures cannot mark tasks done. Treat MoE as grouped while one
-task can emit multiple token rows.
+Keep one owner for every fact. Do not add another selector language or use
+index/range/string/case-ID selectors as durable policy. Ensure persistence
+failures cannot mark tasks done and grouped collectors expose every inner-point
+failure in their task result. Bind resume checkpoints to the exact framework
+image/version, collector/config snapshot, GPU product/SM, model/full-plan scope,
+and canonical expanded task fingerprint. A different identity starts a new
+namespace; old measurements remain historical evidence only.
 
 ## Validate progressively
 
@@ -357,7 +345,7 @@ superseded present-tense status for a later platform agent to misread.
 
 For every completed op, verify:
 
-- requested/done/failed/expected-failed checkpoint counts;
+- requested, done, failed, and registry-unverified counts;
 - output row count, schema, and unique persisted keys;
 - task-key versus output-key coverage;
 - framework version, architecture, dtype, quant, and kernel provenance;
@@ -374,6 +362,12 @@ Treat optional-argument presence as part of that selector contract: an all-zero
 tensor is not equivalent to an omitted optional when the kernel dispatches on
 `None`/presence. Test the actual leaf-kernel branch, not only output shapes and
 metadata values.
+Keep planned backend counts and persisted `kernel_source` counts as separate
+contracts. One backend may dispatch to or repack through a different measured
+leaf for a subset of tasks. Reconstruct the persisted consumer key and source
+from each checkpoint task ID, require exact task/output key-set equality, and
+compare the per-key reconstructed source with the CSV instead of copying
+backend totals into the source validator.
 Also bind physical score/logit stride and framework page/block rounding; equal
 logical lengths with different padding can benchmark a different memory-access
 contract even when values and row counts agree.
