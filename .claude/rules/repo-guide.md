@@ -24,8 +24,9 @@ unless the task actually targets `src/aiconfigurator/generator/`.
 
 - Editing `src/aiconfigurator/generator/**` → generator rules auto-load; entry
   point `.claude/rules/generator-development.md`.
-- Editing `collector/**` → collector rules auto-load; entry point
-  `.claude/rules/collector/layer_permissions.md`.
+- Editing `collector/**` → collector rules auto-load; read
+  `.claude/rules/collector/layer_permissions.md` AND `failure_handling.md`;
+  for case YAML work also `case_authoring.md`.
 
 ## Reviews are governed too
 
