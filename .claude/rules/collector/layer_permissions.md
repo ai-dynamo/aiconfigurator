@@ -23,7 +23,7 @@ result     = perf rows  +  classified failure records   (failure is DATA, not a 
 | `<backend>/registry.py` | version routing (`VersionRoute`); `unverified=True` maturity marker (op × backend) | any shape-level information |
 | `collect_*.py` collector code | **dispatch**: pick kernel path by SM/version, record `kernel_source`; runtime probe → **raise a classified exception** | silent `continue`/skip of a case; case filtering; patching code so one shape passes |
 | `cases/denylist.yaml` | cases that HANG or kill the node (dated, with reason) | ordinary crashes — those belong to the failure log |
-| executor (`collect.py`) | — mechanism is off-limits during case-fixing tasks | changing breaker/checkpoint/case-ID/classification logic to make a case pass |
+| executor (`collect.py`) | — mechanism is off-limits during case-fixing tasks | changing checkpoint/case-ID/failure-classification logic to make a case pass |
 | failure records (`errors_*.json`, summary) | append-only observation | feeding failures back into ANY declaration layer as new rules |
 
 ## The dispatch/skip discriminator

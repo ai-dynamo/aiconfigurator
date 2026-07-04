@@ -69,12 +69,12 @@ def _task_fn(label, behavior, device):
     # "normal": return silently
 
 
-class _BreakerCase:
-    """Fake case for circuit-breaker tests.
+class _GroupedCase:
+    """Fake case for failure-group aggregation tests.
 
-    Carries ``model_name``/``dtype`` attributes so ``_breaker_key`` groups it,
-    and unpacks (via ``func(*task)``) into ``_task_fn`` args that always raise.
-    Module-level so fork'd workers can unpickle it.
+    Carries ``model_name``/``dtype`` attributes so ``_failure_group`` labels
+    it, and unpacks (via ``func(*task)``) into ``_task_fn`` args that always
+    raise. Module-level so fork'd workers can unpickle it.
     """
 
     def __init__(self, label, model_name="test/always-fails", dtype="fp8"):
@@ -86,7 +86,7 @@ class _BreakerCase:
         return iter((self.label, "error"))
 
     def __str__(self):
-        return f"_BreakerCase({self.label}, model={self.model_name}, dtype={self.dtype})"
+        return f"_GroupedCase({self.label}, model={self.model_name}, dtype={self.dtype})"
 
 
 # ---------------------------------------------------------------------------
@@ -155,17 +155,11 @@ def _load_failed_ids(tmp_path, module_name, backend="unknown"):
     return set(data.get("failed", []))
 
 
-def _load_skipped_ids(tmp_path, module_name, backend="unknown"):
-    data = _load_checkpoint_data(tmp_path, module_name, backend=backend)
-    return set(data.get("skipped", []))
-
-
 def _assert_all_tasks_attempted(tasks, tmp_path, module_name):
     expected = {task["id"] for task in tasks}
     done = _load_done_ids(tmp_path, module_name)
     failed = _load_failed_ids(tmp_path, module_name)
-    skipped = _load_skipped_ids(tmp_path, module_name)
-    attempted = done | failed | skipped
+    attempted = done | failed
     missing = expected - attempted
     extra = attempted - expected
     assert attempted == expected, f"attempted mismatch: missing={missing}, extra={extra}"
@@ -305,52 +299,29 @@ class TestTaskExceptions:
         task_errors = [e for e in errors if e.get("error_type") == "ValueError"]
         assert len(task_errors) == 1
         assert task_errors[0]["classification"] == "unexpected"
-        # Plain tuple tasks carry no model/dtype attributes: breaker disabled.
-        assert task_errors[0]["breaker_group"] is None
+        # Plain tuple tasks carry no model/dtype attributes: no group label.
+        assert task_errors[0]["group"] is None
 
 
-class TestCircuitBreaker:
-    """Repeated failures of one (model, dtype) group trip the breaker."""
+class TestFailureGroups:
+    """Systemic (model, dtype) group failures are all run and all labeled."""
 
-    def test_breaker_skips_group_after_threshold(self, tmp_path):
-        n_tasks = 12
-        threshold = _collect_mod.BREAKER_THRESHOLD
-        assert n_tasks > threshold
-        tasks = [{"id": f"bk{i}", "params": _BreakerCase(f"bk{i}")} for i in range(n_tasks)]
+    def test_failing_group_runs_every_case_and_labels_each_failure(self, tmp_path):
+        n_tasks = 8
+        tasks = [{"id": f"gr{i}", "params": _GroupedCase(f"gr{i}")} for i in range(n_tasks)]
 
-        errors = _run(tasks, 1, tmp_path, module_name="breaker_group")
+        errors = _run(tasks, 1, tmp_path, module_name="failure_group")
 
-        _assert_all_tasks_attempted(tasks, tmp_path, "breaker_group")
-
-        breaker_summaries = [e for e in errors if e.get("classification") == "breaker_skipped"]
-        assert len(breaker_summaries) == 1
-        assert breaker_summaries[0]["error_type"] == "CircuitBreakerSkipped"
-        assert "test/always-fails|fp8" in breaker_summaries[0]["error_message"]
+        _assert_all_tasks_attempted(tasks, tmp_path, "failure_group")
 
         task_failures = [e for e in errors if e.get("error_type") == "ValueError"]
-        # Single worker: exactly BREAKER_THRESHOLD consecutive failures open
-        # the breaker, everything after is skipped, not run.
-        assert len(task_failures) == threshold
+        # No breaker: every case runs, every failure is recorded and labeled.
+        assert len(task_failures) == n_tasks
         assert all(e["classification"] == "unexpected" for e in task_failures)
-        assert all(e["breaker_group"] == "test/always-fails|fp8" for e in task_failures)
+        assert all(e["group"] == "test/always-fails|fp8" for e in task_failures)
 
-        assert _load_done_ids(tmp_path, "breaker_group") == set()
-        assert _load_failed_ids(tmp_path, "breaker_group") == {f"bk{i}" for i in range(threshold)}
-        assert _load_skipped_ids(tmp_path, "breaker_group") == {f"bk{i}" for i in range(threshold, n_tasks)}
-
-    def test_distinct_groups_do_not_share_breaker_counts(self, tmp_path):
-        threshold = _collect_mod.BREAKER_THRESHOLD
-        # Interleave two failing groups; each stays below the threshold.
-        tasks = []
-        for i in range(threshold - 1):
-            tasks.append({"id": f"a{i}", "params": _BreakerCase(f"a{i}", model_name="test/model-a")})
-            tasks.append({"id": f"b{i}", "params": _BreakerCase(f"b{i}", model_name="test/model-b")})
-
-        errors = _run(tasks, 1, tmp_path, module_name="breaker_two_groups")
-
-        assert [e for e in errors if e.get("classification") == "breaker_skipped"] == []
-        assert len([e for e in errors if e.get("error_type") == "ValueError"]) == len(tasks)
-        assert _load_skipped_ids(tmp_path, "breaker_two_groups") == set()
+        assert _load_done_ids(tmp_path, "failure_group") == set()
+        assert _load_failed_ids(tmp_path, "failure_group") == {f"gr{i}" for i in range(n_tasks)}
 
 
 class TestMixedFailureModes:

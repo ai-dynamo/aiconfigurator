@@ -9,10 +9,10 @@ runnable   = plan cases ∩ hardware capability floors  −  hang denylist
 ```
 
 There is intentionally no per-case selector or exception rule engine. Cases
-that cannot run on some framework version fail at runtime, are recorded with a
-classification in the failure log, and the circuit breaker stops repeated
-failures of one (model, dtype) group. See
-`.claude/rules/collector/failure_handling.md` for the escalation rules.
+that cannot run on some framework version fail at runtime and are recorded
+with a classification and a (model, dtype) group label in the failure log; a
+whole group failing is surfaced in the collection summary as a fix-me signal.
+See `.claude/rules/collector/failure_handling.md` for the escalation rules.
 
 ## File Layout
 
@@ -178,7 +178,7 @@ here — they are runtime observations.
 ## Denylist
 
 `denylist.yaml` is for cases that hang or kill the node — the only failure
-mode that fail-fast + failure log + breaker cannot handle:
+mode that fail-fast + failure log cannot handle:
 
 ```yaml
 entries:

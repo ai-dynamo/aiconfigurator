@@ -95,9 +95,6 @@ from helper import (
 logger = None
 RESUME_SCHEMA_VERSION = "collector-resume-v2"
 STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before stall bailout
-# Consecutive failures of one (model, dtype) group within an op before the
-# circuit breaker skips the rest of that group.
-BREAKER_THRESHOLD = 5
 
 
 def _require_torch():
@@ -162,7 +159,6 @@ class ResumeCheckpoint:
         }
         self._done: set[str] = set()
         self._failed: set[str] = set()
-        self._skipped: set[str] = set()
 
         safe_name = module_name.replace("/", "_").replace(":", "_")
         self._path = Path(checkpoint_dir).expanduser().resolve() / backend / f"{safe_name}.json"
@@ -192,11 +188,7 @@ class ResumeCheckpoint:
 
         self._done = set(data.get("done", []))
         self._failed = set(data.get("failed", []))
-        self._skipped = set(data.get("skipped", []))
-        logger.info(
-            f"{self.module_name}: loaded checkpoint — {len(self._done)} passed, "
-            f"{len(self._failed)} failed, {len(self._skipped)} skipped"
-        )
+        logger.info(f"{self.module_name}: loaded checkpoint — {len(self._done)} passed, {len(self._failed)} failed")
 
     # -- public API -------------------------------------------------------
 
@@ -206,19 +198,17 @@ class ResumeCheckpoint:
         By default, skips both passed and failed tasks. With retry_failed=True,
         previously failed tasks are retried.
         """
-        skip_set = self._done if retry_failed else (self._done | self._failed | self._skipped)
+        skip_set = self._done if retry_failed else (self._done | self._failed)
         runnable = [t for t in task_infos if t["id"] not in skip_set]
         skipped_done = sum(1 for t in task_infos if t["id"] in self._done)
         skipped_failed = sum(1 for t in task_infos if t["id"] in self._failed)
-        skipped_breaker = sum(1 for t in task_infos if t["id"] in self._skipped)
-        retrying = sum(1 for t in runnable if t["id"] in (self._failed | self._skipped)) if retry_failed else 0
-        if skipped_done or skipped_failed or skipped_breaker or retrying:
+        retrying = sum(1 for t in runnable if t["id"] in self._failed) if retry_failed else 0
+        if skipped_done or skipped_failed or retrying:
             parts = [f"skipping {skipped_done} passed"]
             if retry_failed:
-                parts.append(f"retrying {retrying} previously failed/skipped")
+                parts.append(f"retrying {retrying} previously failed")
             else:
                 parts.append(f"skipping {skipped_failed} failed")
-                parts.append(f"skipping {skipped_breaker} breaker-skipped")
             parts.append(f"running {len(runnable)}")
             logger.info(f"{self.module_name}: {', '.join(parts)}")
         return runnable
@@ -227,20 +217,12 @@ class ResumeCheckpoint:
         """Mark a task as successfully completed. Skipped on resume."""
         self._done.add(task_id)
         self._failed.discard(task_id)  # if it was previously failed, it passed now
-        self._skipped.discard(task_id)
         self._dirty = True
         self.flush()
 
     def mark_failed(self, task_id: str):
         """Mark a task as attempted but failed."""
         self._failed.add(task_id)
-        self._dirty = True
-        self.flush()
-
-    def mark_skipped(self, task_id: str):
-        """Mark a task the circuit breaker skipped after repeated group failures."""
-        self._skipped.add(task_id)
-        self._failed.discard(task_id)
         self._dirty = True
         self.flush()
 
@@ -259,7 +241,6 @@ class ResumeCheckpoint:
             "updated_at": datetime.now().isoformat(),
             "done": sorted(self._done),
             "failed": sorted(self._failed),
-            "skipped": sorted(self._skipped),
         }
         tmp_path = self._path.with_suffix(".json.tmp")
         with open(tmp_path, "w") as f:
@@ -351,12 +332,14 @@ class ProfilerContext:
         logger.info(f"Full profile saved to: {profile_file}")
 
 
-def _breaker_key(task) -> str | None:
-    """Group key for the circuit breaker: one (model, dtype) family within an op.
+def _failure_group(task) -> str | None:
+    """Group label for failure aggregation: one (model, dtype) family within an op.
 
-    Returns None when the task carries neither a model nor a dtype attribute
-    (e.g. positional tuple cases) — the breaker is disabled for such cases
-    rather than lumping unrelated cases into one group.
+    A whole group failing is the signal that something needs FIXING (collector
+    bug, unverified combo, framework gap) — the summary aggregates failures by
+    this label so systemic groups are visible at a glance. Returns None when
+    the task carries neither a model nor a dtype attribute (e.g. positional
+    tuple cases).
     """
     from collector.capabilities import case_dtypes
 
@@ -442,11 +425,9 @@ def worker(
     error_queue=None,
     done_tasks=None,
     failed_tasks=None,
-    skipped_tasks=None,
     module_name="unknown",
     current_task_ids=None,
     consumed_sentinel=None,
-    breaker_counts=None,
 ):
     """worker with automatic logging setup"""
 
@@ -490,27 +471,6 @@ def worker(
         if current_task_ids is not None:
             current_task_ids[device_id] = task_id
 
-        # Circuit breaker: skip the rest of a (model, dtype) group after
-        # repeated consecutive failures.  Skips are recorded (checkpoint +
-        # summary), never silent.
-        breaker_group = _breaker_key(task)
-        if (
-            breaker_counts is not None
-            and breaker_group is not None
-            and breaker_counts.get(breaker_group, 0) >= BREAKER_THRESHOLD
-        ):
-            worker_logger.warning(f"Circuit breaker open for group {breaker_group!r}; skipping task {task_id}")
-            if skipped_tasks is not None:
-                try:
-                    skipped_tasks[task_id] = breaker_group
-                except Exception:
-                    pass
-            if current_task_ids is not None:
-                current_task_ids[device_id] = None
-            with lock:
-                progress_value.value += 1
-            continue
-
         try:
             worker_logger.debug(f"Starting task {task_id}")
             func(*task, device=device)
@@ -520,11 +480,6 @@ def worker(
             if done_tasks is not None:
                 try:
                     done_tasks[task_id] = True
-                except Exception:
-                    pass
-            if breaker_counts is not None and breaker_group is not None:
-                try:
-                    breaker_counts[breaker_group] = 0
                 except Exception:
                     pass
             # Clear task ID on success so crash handler knows it completed
@@ -552,16 +507,10 @@ def worker(
                 "error_type": type(e).__name__,
                 "error_message": str(e),
                 "classification": "unexpected",
-                "breaker_group": breaker_group,
+                "group": _failure_group(task),
                 "traceback": traceback.format_exc(),
                 "timestamp": datetime.now().isoformat(),
             }
-
-            if breaker_counts is not None and breaker_group is not None:
-                try:
-                    breaker_counts[breaker_group] = breaker_counts.get(breaker_group, 0) + 1
-                except Exception:
-                    pass
 
             # Report error to queue BEFORE any exit
             if error_queue:
@@ -625,7 +574,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             task_id = create_test_case_id(task, func_name, module_name)
             task_params = task
         raw_task_infos.append({"id": task_id, "params": task_params, "index": i})
-    task_info_by_id = {task_info["id"]: task_info for task_info in raw_task_infos}
 
     checkpoint_dir = (
         resume_options.get("checkpoint_dir", ".collector_checkpoint") if resume_options else ".collector_checkpoint"
@@ -670,9 +618,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     # a worker is killed by a signal on a subsequent task.
     done_tasks = manager.dict()
     failed_tasks = manager.dict()
-    skipped_tasks = manager.dict()
-    # Consecutive-failure counters per (model, dtype) group for the breaker.
-    breaker_counts = manager.dict()
 
     def start_process(device_id):
         p = mp.Process(
@@ -686,11 +631,9 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 error_queue,
                 done_tasks,
                 failed_tasks,
-                skipped_tasks,
                 module_name,
                 current_task_ids,
                 consumed_sentinel,
-                breaker_counts,
             ),
         )
         p.start()
@@ -727,8 +670,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             "timestamp": datetime.now().isoformat(),
         }
 
-    skipped_summary = Counter()
-
     def sync_done_to_checkpoint():
         for task_id in list(done_tasks.keys()):
             resume_tracker.mark_passed(task_id)
@@ -740,13 +681,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             resume_tracker.mark_failed(task_id)
             try:
                 del failed_tasks[task_id]
-            except KeyError:
-                pass
-        for task_id in list(skipped_tasks.keys()):
-            resume_tracker.mark_skipped(task_id)
-            skipped_summary[skipped_tasks.get(task_id, "unknown")] += 1
-            try:
-                del skipped_tasks[task_id]
             except KeyError:
                 pass
 
@@ -856,20 +790,10 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
 
                     # Mark active task as failed if the process died while running it
                     if active_task_id is not None and active_task_id not in done_tasks:
-                        task_info = task_info_by_id.get(active_task_id)
                         try:
                             failed_tasks[active_task_id] = True
                         except Exception:
                             pass
-                        # A signal crash never reaches the worker's except
-                        # block, so count it toward the breaker group here.
-                        if task_info is not None:
-                            crash_group = _breaker_key(task_info["params"])
-                            if crash_group is not None:
-                                try:
-                                    breaker_counts[crash_group] = breaker_counts.get(crash_group, 0) + 1
-                                except Exception:
-                                    pass
                         current_task_ids[i] = None
                         with lock:
                             progress_value.value += 1
@@ -922,21 +846,12 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     # Shutdown manager to clean up resources (semaphores, etc.)
     manager.shutdown()
 
-    # Report breaker skips explicitly — skipped work must never look collected.
-    if skipped_summary:
-        total_skipped = sum(skipped_summary.values())
-        groups = ", ".join(f"{group} ({count})" for group, count in sorted(skipped_summary.items()))
-        logger.warning(f"{module_name}: circuit breaker skipped {total_skipped} tasks — groups: {groups}")
-        errors.append(
-            {
-                "module": module_name,
-                "task_id": "circuit_breaker",
-                "error_type": "CircuitBreakerSkipped",
-                "error_message": f"skipped {total_skipped} tasks after repeated group failures: {groups}",
-                "classification": "breaker_skipped",
-                "timestamp": datetime.now().isoformat(),
-            }
-        )
+    # Surface systemic failure groups — a whole (model, dtype) family failing
+    # is a fix-me signal, not something to tolerate.
+    group_counts = Counter(error["group"] for error in errors if error.get("group"))
+    for group, count in sorted(group_counts.items()):
+        if count >= 5:
+            logger.warning(f"{module_name}: failure group {group!r} failed {count} times — needs fixing")
 
     # Log summary
     if errors:
@@ -1257,6 +1172,7 @@ def generate_collection_summary(all_errors, backend, version):
         "total_errors": len(all_errors),
         "errors_by_module": {},
         "errors_by_type": {},
+        "errors_by_group": {},
     }
 
     for error in all_errors:
@@ -1265,6 +1181,10 @@ def generate_collection_summary(all_errors, backend, version):
 
         summary["errors_by_module"][module] = summary["errors_by_module"].get(module, 0) + 1
         summary["errors_by_type"][error_type] = summary["errors_by_type"].get(error_type, 0) + 1
+        group = error.get("group")
+        if group:
+            group_key = f"{module}:{group}"
+            summary["errors_by_group"][group_key] = summary["errors_by_group"].get(group_key, 0) + 1
 
     log_dir = os.environ.get("COLLECTOR_LOG_DIR", "")
 
@@ -1288,6 +1208,11 @@ def generate_collection_summary(all_errors, backend, version):
         logger.info("\nErrors by type:")
         for error_type, count in sorted(summary["errors_by_type"].items()):
             logger.info(f"  {error_type}: {count}")
+
+    if summary["errors_by_group"]:
+        logger.info("\nErrors by (model, dtype) group — whole groups failing need fixing:")
+        for group, count in sorted(summary["errors_by_group"].items(), key=lambda item: -item[1]):
+            logger.info(f"  {group}: {count}")
 
     logger.info(f"\nDetailed error report saved to: {summary_file}")
 

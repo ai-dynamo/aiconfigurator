@@ -103,11 +103,11 @@ intersected with hardware capability floors and minus the hang denylist.
 ## Failure philosophy: observe, don't predict
 
 There is no declarative expected-failure layer. A case that cannot run on the
-current framework version fails fast, is recorded in `errors_<module>.json`
-and `collection_summary_<backend>.json` with a classification, and the circuit
-breaker skips the rest of a (model, dtype) group after 5 consecutive failures
-(recorded as `skipped` in the checkpoint and as one `breaker_skipped` summary
-entry — skipped work never looks collected). Missing points are tolerated
+current framework version fails fast and is recorded in `errors_<module>.json`
+and `collection_summary_<backend>.json` with a classification and a
+(model, dtype) group label. The summary aggregates failures by group: a whole
+group failing is a fix-me signal (collector bug, unverified combo, framework
+gap), not something to tolerate or auto-skip. Missing points are tolerated
 downstream by interpolation and fallback. Escalation rules — when a failure
 deserves a denylist entry, a registry `unverified` marker, or a capability
 floor — live in `.claude/rules/collector/failure_handling.md`.
@@ -390,10 +390,9 @@ python3 collect.py --backend trtllm --resume
 python3 collect.py --backend trtllm --resume --checkpoint-dir /path/to/checkpoints
 ```
 
-A task is marked **done** once it is attempted (passed, failed, or skipped by
-the circuit breaker). Only tasks that never finished are re-queued on
-`--resume`; `--resume-retry-failed` additionally re-runs failed and
-breaker-skipped tasks.
+A task is marked **done** once it is attempted (success or failure).
+Only tasks that never finished are re-queued on `--resume`;
+`--resume-retry-failed` additionally re-runs previously failed tasks.
 Running without `--resume` always starts fresh (overwrites old checkpoint).
 
 ## For SGLang

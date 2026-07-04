@@ -4,18 +4,16 @@ Core doctrine: **observe, don't predict.** A failing case costs seconds and is
 recorded automatically with a classification. A prediction rule costs
 maintenance forever, rots when the framework fixes the bug, and depends on
 fragile matching contracts. The system therefore has NO declarative
-expected-failure layer; it has a failure log and a circuit breaker.
+expected-failure layer — and deliberately no auto-skip either: if a whole
+group is failing, it should be FIXED, not silently tolerated.
 
 ## What happens automatically (no action needed)
 
 - Every worker failure is recorded in `errors_<module>.json` and
   `collection_summary_<backend>.json` with `classification: "unexpected"`,
-  the case parameters, exception type/message, and its breaker group.
-- After `BREAKER_THRESHOLD` (5) consecutive failures of one
-  `(model, dtype)` group within an op, the breaker skips the rest of that
-  group: skips land in the resume checkpoint as `skipped` and in the summary
-  as one `classification: "breaker_skipped"` entry. Skipped work is never
-  silently dropped and never looks collected.
+  the case parameters, exception type/message, and a `(model, dtype)` group
+  label. The summary aggregates `errors_by_group`; a group with many failures
+  is logged as a fix-me warning.
 - CUDA-fatal errors reset the worker process; the task is already recorded
   before the reset.
 - Missing data points are tolerated downstream: the SDK interpolates,
@@ -37,9 +35,11 @@ case failed
 ```
 
 Framework-version gaps (an rc that crashes on some shape, a backend that has
-no SM120 recipe yet) deliberately have NO home in YAML. They fail, the breaker
-contains them, the log explains them, and the next version bump re-tests them
-for free.
+no SM120 recipe yet) deliberately have NO home in YAML. They fail, the log
+explains them grouped by (model, dtype), and the next version bump re-tests
+them for free. A fully-failing group burns some GPU time — that cost is the
+intended pressure to actually fix it (mark unverified, fix the collector, or
+accept the gap knowingly).
 
 ## Triage thresholds (from collection-campaign experience)
 
