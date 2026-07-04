@@ -193,7 +193,33 @@ gone: raw-linear extrapolations that could undershoot launch-overhead floors
 or go negative below the smallest collected size (NCCL/allreduce message
 sizes, MoE token underflow, DSV4 decode below min `s_total`).
 
-### 5.6 Contracts deliberately preserved
+### 5.6 The DSV4 sparse-kernel helper (the last scipy consumer)
+
+`_lookup_sparse_kernel` (DSV4 CP kernel-DELTA correction: `paged_mqa_logits` /
+`hca_attn`) was the final holdout — it looked like it "had no natural SOL". It
+does: the kernel scores (past + isl/2) KV pairs per query token per sequence,
+so `SOL = b * (past * isl + isl^2/2)` follows from the code's own stated
+premises (the `x bs/bp` batch contract and the CP path's "super-linear
+sub-kernels" comment). The migration is a bug fix, not a risk trade:
+
+- the sparse sweep collects isl <= 8k while the CP path queries `mqa_full` at
+  the FULL sequence length (128k+), so isl extrapolation is the *common case*;
+- measured `latency/isl^2` flattens for isl >= 2048 (the kernel is genuinely
+  ~quadratic in isl), and a hold-out at the isl=8192 frontier scores legacy
+  linear-trend at **-58%**, flat-hold at -86%, and util-hold under the
+  pair-count SOL at **~0%**;
+- the legacy largest-lower-batch x `bs/bp` scaling is replaced by measured
+  batch brackets — the old robust-lookup comments themselves called linear
+  batch scaling the worse estimate ("simply scaling the lower batch can
+  nearly double latency").
+
+With it gone the scipy interp family (`interp_1d/2d/3d`, griddata wrappers,
+nearest-point helpers, the `_extracted_metrics_cache` plumbing) lost its last
+consumer and was deleted; `interpolation.py` now holds only the structured-miss
+error class and the `get_value` leaf accessor, and **scipy is no longer a
+dependency of the wheel**.
+
+### 5.7 Contracts deliberately preserved
 
 Not everything old was defensive cruft — some behaviors are deliberate and
 test-locked, and survive unchanged at op level:
@@ -209,13 +235,15 @@ test-locked, and survive unchanged at op level:
 
 ## 6. Current state and remaining work
 
-- All op families resolve through `perf_interp`; `interpolation.py`'s
-  interp family has exactly one remaining consumer, `_lookup_sparse_kernel`
-  (the DSV4 CP kernel-DELTA correction helper, which has no natural SOL).
-  Retiring it — and with it the scipy `griddata` dependency — requires either
-  a validated proxy SOL for the sparse kernels or acceptance of a behavior
-  change in its batch-scaling fallback; parked as an explicit decision.
+- **Every query path resolves through `perf_interp`.** The scipy interp
+  family is deleted (see 5.6) and `interpolation.py` is down to the error
+  class + `get_value`; scipy is out of the dependency list.
 - The DeepEP `sms` axis has no scaling story (only sm=20 is collected);
   off-grid `sms` snaps to the nearest collected value until data exists.
 - Frontier-tail accuracy (min-side extrapolation) is the main quality
   follow-up; medians are single-digit everywhere.
+- CP note: `_lookup_sparse_kernel`'s SOL is CP-agnostic by design — the CP
+  model lives entirely in the caller (`_query_cp`), which queries the base at
+  `per_card = ceil(isl/cp)` tokens and swaps the super-linear sub-kernels as
+  `full/cp - per_card`. The helper only ever sees already-resolved token
+  counts; the `/cp` division *is* the perfect-parallelism assumption.

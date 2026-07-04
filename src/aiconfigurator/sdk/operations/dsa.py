@@ -19,9 +19,8 @@ extrapolation only. The legacy ``__init__`` loaded DSA twice (once near
 the MLA/Mamba block, once after); both loads are consolidated into a
 single ``load_data`` call per class.
 
-DSA-specific helpers (``_is_dsa_interpolation_miss``,
-``_format_dsa_unavailable_message``) also move here as module-level
-functions. ``DSA_MODEL_DIMS`` and ``DEFAULT_DSA_ARCHITECTURE`` stay on
+The DSA-specific helper ``_format_dsa_unavailable_message`` also moves
+here as a module-level function. ``DSA_MODEL_DIMS`` and ``DEFAULT_DSA_ARCHITECTURE`` stay on
 ``perf_database.py`` as module-level constants for now — the cleanup PR
 revisits their home.
 """
@@ -144,19 +143,6 @@ def _cache_key(database: PerfDatabase) -> tuple:
         database.backend,
         database.version,
         database.enable_shared_layer,
-    )
-
-
-def _is_dsa_interpolation_miss(error: Exception) -> bool:
-    """Recognize the ``ValueError`` patterns raised by
-    ``interpolation.nearest_1d_point_helper`` when DSA shape is outside
-    the sampled grid. Lifted verbatim from
-    ``PerfDatabase._is_dsa_interpolation_miss``."""
-    message = str(error)
-    return isinstance(error, ValueError) and (
-        "x is not equal to the only value in the list" in message
-        or "x is less than the smallest value in the list" in message
-        or "x is greater than the largest value in the list" in message
     )
 
 

@@ -58,18 +58,15 @@ def test_query_gemm_empirical_raises_without_data(stub_perf_db):
 
 
 def test_query_gemm_exact_match_skips_3d_interpolation(comprehensive_perf_db, monkeypatch):
-    """Exact GEMM hits should bypass both 1D and 3D interpolation."""
+    """Exact GEMM hits return the measured leaf before any resolver runs."""
     quant_mode = common.GEMMQuantMode.bfloat16
     m, n, k = 16, 128, 128
 
-    def _fail_interp_3d(*args, **kwargs):
-        raise AssertionError("_interp_3d should not be used for exact GEMM matches")
+    def _fail_resolver(*args, **kwargs):
+        raise AssertionError("resolvers should not run for exact GEMM matches")
 
-    def _fail_interp_1d(*args, **kwargs):
-        raise AssertionError("_interp_1d should not be used for exact GEMM matches")
-
-    monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", _fail_interp_3d)
-    monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_1d", _fail_interp_1d)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_interp.engine._resolve_scattered", _fail_resolver)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_interp.engine._resolve_grid", _fail_resolver)
 
     observed = comprehensive_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SILICON)
     expected = 0.1 + m * 0.001 + n * 0.0001 + k * 0.00001

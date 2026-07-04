@@ -194,8 +194,8 @@ class CustomAllReduce(Operation):
             # The loader returns a 4-deep defaultdict, so chained indexing silently
             # synthesizes empty dicts for missing (quant_mode, tp_size, strategy)
             # combinations. Validate explicitly so upstream callers see a structured
-            # PerfDataNotAvailableError instead of an internal AssertionError from
-            # _nearest_1d_point_helper when the CSV has no rows for this bucket.
+            # PerfDataNotAvailableError instead of an opaque empty-table miss when
+            # the CSV has no rows for this bucket.
             effective_tp = min(tp_size, database.system_spec["node"]["num_gpus_per_node"])
             by_tp = data_wrapper.get(quant_mode, {})
             strategy_dict = by_tp.get(effective_tp, {})
