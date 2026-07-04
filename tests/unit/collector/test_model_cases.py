@@ -9,6 +9,8 @@ import sys
 from itertools import pairwise
 from pathlib import Path
 
+import pytest
+
 from collector.case_generator import (
     get_attention_head_configs,
     get_moe_quantization_specs,
@@ -20,6 +22,8 @@ from collector.model_cases import (
     default_architecture_cases_path,
     load_yaml_file,
 )
+
+pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SUPPORT_MATRIX_ROOT = REPO_ROOT / "src" / "aiconfigurator" / "systems" / "support_matrix"

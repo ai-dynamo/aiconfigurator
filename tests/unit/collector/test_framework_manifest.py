@@ -15,6 +15,8 @@ from collector.vllm.registry import REGISTRY as VLLM_REGISTRY
 from collector.wideep.sglang.registry import REGISTRY as WIDEEP_SGLANG_REGISTRY
 from collector.wideep.trtllm.registry import REGISTRY as WIDEEP_TRTLLM_REGISTRY
 
+pytestmark = pytest.mark.unit
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 COLLECTOR_ROOT = REPO_ROOT / "collector"
 

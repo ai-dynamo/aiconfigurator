@@ -36,6 +36,13 @@ def _return_self(self, *_args, **_kwargs):
     return self
 
 
+def _real_torch_or_skip():
+    torch = pytest.importorskip("torch")
+    if not isinstance(getattr(torch, "Tensor", None), type):
+        pytest.skip("requires a real torch module")
+    return torch
+
+
 class FakeTensor:
     ndim = 5
     __getitem__ = contiguous = permute = to = transpose = _return_self
@@ -186,7 +193,7 @@ def test_generation_uses_total_runtime_length_and_production_call_order(use_fp8_
 
 @pytest.mark.parametrize("randomize_blocks", [False, True])
 def test_dense_kv_cache_history_slots_follow_block_table(randomize_blocks):
-    torch = pytest.importorskip("torch")
+    torch = _real_torch_or_skip()
 
     namespace = {
         "torch": torch,
@@ -234,7 +241,7 @@ def test_dense_kv_cache_history_slots_follow_block_table(randomize_blocks):
 
 
 def test_mla_fp8_history_uses_framework_cache_writer():
-    torch = pytest.importorskip("torch")
+    torch = _real_torch_or_skip()
     calls = []
 
     class Ops:
