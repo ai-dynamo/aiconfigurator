@@ -55,9 +55,10 @@ model_case_values:
           allowed_modes: [nvfp4]
         vllm:
           allowed_modes: []
-    # Ultra's 8192-wide profiles remain available to SGLang/TRT-LLM. vLLM
-    # 0.24 prunes them in its getter because FusedMoE uses moe_latent_size=2048.
+    # Ultra uses its outer hidden width in SGLang/TRT-LLM, while vLLM routes
+    # experts through moe_latent_size=2048. Declare that geometry directly.
     - model_path: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
+      frameworks: [sglang, trtllm]
       hidden_size: 8192
       inter_size: 5120
       topk: 22
@@ -67,21 +68,17 @@ model_case_values:
           allowed_modes: [bfloat16]
         trtllm:
           allowed_modes: [bfloat16]
-        vllm:
-          allowed_modes: [bfloat16]
     - model_path: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
+      frameworks: [vllm]
       hidden_size: 2048
       inter_size: 5120
       topk: 22
       num_experts: 512
       framework_quantization:
-        sglang:
-          allowed_modes: [bfloat16]
-        trtllm:
-          allowed_modes: [bfloat16]
         vllm:
           allowed_modes: [bfloat16]
     - model_path: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8
+      frameworks: [sglang, trtllm]
       hidden_size: 8192
       inter_size: 5120
       topk: 22
@@ -90,22 +87,18 @@ model_case_values:
         sglang:
           allowed_modes: []
         trtllm:
-          allowed_modes: [fp8]
-        vllm:
           allowed_modes: [fp8]
     - model_path: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8
+      frameworks: [vllm]
       hidden_size: 2048
       inter_size: 5120
       topk: 22
       num_experts: 512
       framework_quantization:
-        sglang:
-          allowed_modes: []
-        trtllm:
-          allowed_modes: [fp8]
         vllm:
           allowed_modes: [fp8]
     - model_path: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+      frameworks: [sglang, trtllm]
       hidden_size: 8192
       inter_size: 5120
       topk: 22
@@ -115,18 +108,13 @@ model_case_values:
           allowed_modes: [nvfp4]
         trtllm:
           allowed_modes: [nvfp4]
-        vllm:
-          allowed_modes: []
     - model_path: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+      frameworks: [vllm]
       hidden_size: 2048
       inter_size: 5120
       topk: 22
       num_experts: 512
       framework_quantization:
-        sglang:
-          allowed_modes: [nvfp4]
-        trtllm:
-          allowed_modes: [nvfp4]
         vllm:
           allowed_modes: []
   mamba2:

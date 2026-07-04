@@ -270,7 +270,7 @@ def test_vllm_moe_getter_dedupes_equal_resolved_invocations(monkeypatch):
         "model-a": {"activation": "silu", "has_bias": False},
         "model-b": {"activation": "silu", "has_bias": False},
     }
-    monkeypatch.setattr(module, "get_common_moe_test_cases", lambda: common_cases)
+    monkeypatch.setattr(module, "get_common_moe_test_cases", lambda **_kwargs: common_cases)
     monkeypatch.setattr(module, "get_moe_quantization_modes", lambda *_args, **_kwargs: ["w4a16_mxfp4"])
     monkeypatch.setattr(module, "moe_model_allows_quantization", lambda *_args: True)
     monkeypatch.setattr(module, "moe_shape_satisfies_constraints", lambda *_args, **_kwargs: True)
@@ -304,7 +304,7 @@ def test_vllm_moe_getter_rejects_consumer_key_collision(monkeypatch):
         "model-a": {"activation": "silu", "has_bias": False},
         "model-c": {"activation": "swigluoai", "has_bias": True},
     }
-    monkeypatch.setattr(module, "get_common_moe_test_cases", lambda: common_cases)
+    monkeypatch.setattr(module, "get_common_moe_test_cases", lambda **_kwargs: common_cases)
     monkeypatch.setattr(module, "get_moe_quantization_modes", lambda *_args, **_kwargs: ["w4a16_mxfp4"])
     monkeypatch.setattr(module, "moe_model_allows_quantization", lambda *_args: True)
     monkeypatch.setattr(module, "moe_shape_satisfies_constraints", lambda *_args, **_kwargs: True)
@@ -418,6 +418,25 @@ def test_vllm_nemotron_topk22_nvfp4_artifacts_are_not_scheduled(monkeypatch, mod
     module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
 
     assert module.get_moe_test_cases() == []
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+    ],
+)
+def test_nemotron_ultra_declares_backend_specific_moe_geometry(monkeypatch, model_path):
+    from collector.case_generator import get_common_moe_test_cases
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+
+    assert {case.hidden_size for case in get_common_moe_test_cases()} == {2048, 8192}
+    assert {case.hidden_size for case in get_common_moe_test_cases(backend="vllm")} == {2048}
+    assert {case.hidden_size for case in get_common_moe_test_cases(backend="sglang")} == {8192}
+    assert {case.hidden_size for case in get_common_moe_test_cases(backend="trtllm")} == {8192}
 
 
 def test_vllm_moe_cuda_graph_fails_closed():

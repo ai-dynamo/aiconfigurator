@@ -899,6 +899,12 @@ def _model_moe_backend_quantization(model_name: str, backend: str) -> dict[str, 
     for model_case in _model_case_values("moe", apply_model_filter=False):
         if not _model_case_matches_path(model_case, model_name):
             continue
+        raw_frameworks = model_case.get("frameworks")
+        if raw_frameworks is not None and backend not in _as_str_list(
+            raw_frameworks,
+            field_name="model_case_values.moe.frameworks",
+        ):
+            continue
         framework_quantization = model_case.get("framework_quantization", {})
         if not isinstance(framework_quantization, dict):
             raise TypeError("model_case_values.moe.framework_quantization must be a mapping")
@@ -1170,7 +1176,7 @@ def get_moe_backend_test_cases(backend: str) -> list[MoeCommonTestCase]:
     return test_cases
 
 
-def get_common_moe_test_cases():
+def get_common_moe_test_cases(*, backend: str | None = None):
     moe_sweep = _required_base_common_case_values("moe")
     num_tokens = _as_int_list(moe_sweep.get("token_counts"), field_name="moe.token_counts")
     tp_list = _as_int_list(moe_sweep.get("tensor_parallel_sizes"), field_name="moe.tensor_parallel_sizes")
@@ -1178,7 +1184,14 @@ def get_common_moe_test_cases():
     num_gpu_list = _as_int_list(moe_sweep.get("gpu_counts"), field_name="moe.gpu_counts")
     token_distributions = _moe_token_expert_distributions(moe_sweep)
 
-    model_config_list = _model_case_values("moe")
+    model_config_list = []
+    for model_config in _model_case_values("moe"):
+        raw_frameworks = model_config.get("frameworks")
+        if raw_frameworks is not None:
+            frameworks = _as_str_list(raw_frameworks, field_name="model_case_values.moe.frameworks")
+            if backend is not None and backend not in frameworks:
+                continue
+        model_config_list.append(model_config)
 
     test_cases: list[MoeCommonTestCase] = []
 

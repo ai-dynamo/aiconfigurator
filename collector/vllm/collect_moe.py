@@ -208,18 +208,8 @@ def get_moe_test_cases():
     seen = set()
     consumer_key_owners = {}
 
-    for common_moe_testcase in get_common_moe_test_cases():
+    for common_moe_testcase in get_common_moe_test_cases(backend="vllm"):
         model_name = common_moe_testcase.model_name
-
-        if common_moe_testcase.hidden_size == 8192 and model_name in {
-            "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
-            "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
-            "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
-        }:
-            # vLLM 0.24 NemotronHMoE constructs FusedMoE with the 2048-wide
-            # moe_latent_size. The outer 8192 width belongs to its projection
-            # layers and is not a routed-expert invocation.
-            continue
 
         # vllm does not support TP when EP is enabled.
         if common_moe_testcase.tp > 1 and common_moe_testcase.ep > 1:

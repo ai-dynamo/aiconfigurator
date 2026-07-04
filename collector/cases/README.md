@@ -149,6 +149,12 @@ narrows that list with `framework_quantization.<backend>.allowed_modes`.
 Quant-sensitive checkpoint artifacts use separate model rows even when all
 geometry fields are identical.
 
+When frameworks invoke different routed-expert geometry for the same artifact,
+a MoE model row may positively declare `frameworks: [vllm]` (or another list).
+Omitting the field means all frameworks. `get_common_moe_test_cases()` without
+a backend retains the legacy union during collector migrations; upgraded
+collectors pass their backend so geometry and quantization remain separate facts.
+
 `include_base: true` means "include the small universal base set" declared by
 base-file `model_ops` (currently dense attention and GEMM). Use an explicit
 model `base_ops` list for auxiliary recipes, `framework_specific_base_ops` for
