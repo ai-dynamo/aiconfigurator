@@ -14,6 +14,9 @@ description: >
 model_case_values:
   attention:
     - id: gpt_oss_attention
+      # SGLang's exact global/SWA runtime contracts are kept below. Other
+      # collectors retain this profile's historical shape order.
+      frameworks: [trtllm, vllm]
       model_path: openai/gpt-oss-120b
       model_aliases:
         - openai/gpt-oss-20b
@@ -87,6 +90,33 @@ model_case_values:
         vllm_xpu:
           sweep: full
           activation: swigluoai
+
+framework_specific_model_case_values:
+  sglang:
+    attention:
+      - id: gpt_oss_global_attention
+        architecture: GptOssForCausalLM
+        model_path: openai/gpt-oss-120b
+        model_aliases: [openai/gpt-oss-20b]
+        num_attention_heads: 64
+        num_key_value_heads: 8
+        head_dim: 64
+        window_size: 0
+        sglang_has_attention_sink: true
+        sglang_backends: {90: fa3, 100: trtllm_mha, 103: trtllm_mha, 120: triton}
+        tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
+      - id: gpt_oss_swa_attention
+        architecture: GptOssForCausalLM
+        model_path: openai/gpt-oss-120b
+        model_aliases: [openai/gpt-oss-20b]
+        num_attention_heads: 64
+        num_key_value_heads: 8
+        head_dim: 64
+        window_size: 128
+        sglang_runtime_window_size: 127
+        sglang_has_attention_sink: true
+        sglang_backends: {90: fa3, 100: trtllm_mha, 103: trtllm_mha, 120: triton}
+        tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
 
 all_frameworks_op_cases:
   moe:

@@ -98,6 +98,9 @@ For each affected per-model path:
 Keep `framework default`, `collector simulation`, and `persisted key` distinct.
 A benchmark that successfully invokes the wrong model class or backend is
 invalid.
+Treat provenance columns separately from consumer keys. Recording an executed
+`kernel_source` does not authorize changing Python/Rust loaders, lookup keys,
+or EngineSpec; make any consumer-schema migration a separate reviewed effort.
 
 Use this platform priority unless the user changes it:
 

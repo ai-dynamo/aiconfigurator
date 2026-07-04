@@ -18,14 +18,21 @@ model_case_values:
       num_attention_heads: 64
       num_key_value_heads: 4
       head_dim: 192
+      v_head_dim: 128
       window_size: 0
+      # TRTLLM MHA treats V as qk_head_dim=192; use the source-correct Triton
+      # qk_head_dim=192/v_head_dim=128 path on Blackwell (hardware-unvalidated).
+      sglang_backends: {90: fa3, 100: triton, 103: triton, 120: triton}
       tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
     - id: mimo_v2_swa_attention
       model_path: XiaomiMiMo/MiMo-V2-Flash
       num_attention_heads: 64
       num_key_value_heads: 8
       head_dim: 192
+      v_head_dim: 128
       window_size: 128
+      sglang_has_attention_sink: true
+      sglang_backends: {90: fa3, 100: triton, 103: triton, 120: triton}
       tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
   moe:
     - model_path: XiaomiMiMo/MiMo-V2-Flash

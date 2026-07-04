@@ -21,6 +21,7 @@ description: >
 model_case_values:
   attention:
     - id: kimi_k25_vllm_attention
+      frameworks: [vllm]
       model_path: moonshotai/Kimi-K2.5
       model_aliases:
         - moonshotai/Kimi-K2-Instruct

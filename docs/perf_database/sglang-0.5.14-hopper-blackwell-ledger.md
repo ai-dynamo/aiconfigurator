@@ -123,6 +123,35 @@ is changed for SM90, SM100/103, SM120, or SM89.
 | `DSV4-OLD-GATE-HIDDEN-GAPS` | Frozen snapshot `cdfca0b9...` used the first uncommitted one-third inner-failure gate, so an outer task with a few failed shapes was written done. Post-DSA snapshot `3f58b147...` deliberately fails every unexpected inner error. The old June 28 context files must therefore be re-read at key level rather than treated as a clean baseline or copied into Blackwell expectations. | Current static enumeration has 20,392 CSA and 20,392 HCA context keys. Each old file has 96 logged `KVPoolCapacity` omissions, but old CSA additionally misses 1,295 runtime-error cells (860 OOM, 363 `InternalError`, 72 `AcceleratorError`) across 83/88 outer tasks; old HCA additionally misses 72 `AcceleratorError` cells across 72/88 tasks. The three old failed CSA batch-1024 outer tasks cover only 75 cells, leaving 1,220 extra unapproved CSA gaps hidden behind the gate. Therefore old headline counts 19,001 and 20,224 are evidence of the former behavior, not acceptance targets. The strict `3f58b147...` rerun subsequently completed: CSA is 5/88 done, 83/88 failed, and 19,073/20,392; HCA is 88/88 and 20,296/20,392 with only the 96 source-backed omissions. These later results append to rather than erase the old hidden state. | Never make B200/SM103/SM120 reproduce Hopper's old row counts or checkpoint status. Regenerate the platform's 20,392-key-equivalent plan, separate static/source-backed skips from runtime errors, and compare exact missing keys and selected leaves. Any capacity predicate or pool-budget change must reverse-test the same H20 failures and nearby successes under strict accounting; do not restore a percentage gate to make either platform green. |
 | `DSV4-DERIVED-POOL-WORKSPACE` | Chronology is `864b987d` (pre-Blackwell full-module collector with fixed `mem_fraction_static=0.7` and `GLOBAL_MAX_PAIR * 16`, i.e. 16M tokens) → `57ba6e3c` (Blackwell extension with zero pool/prefix-setting delta; its old cleanup/error handling could preserve partial rows) → `299aaea9` (renamed/reworked full-module collector, inherited the fixed cap, and consumed the 28-value prefix list) → `f027123f` (exact zero diff in `collect_dsv4_attn.py` and the DeepSeek-V4 model input; its B200 SGLang-0.5.10 parquet has only 765 `step=0` rows and therefore no nonzero-prefix pool evidence) → `50f12ed1` (per-worker swept-KV maximum plus 5%, still pinned to SGLang 0.5.10) → independent `max_total_tokens=None` introductions on divergent `c8c00f42` and `9a5fe012`; `9a5fe012` separately regressed context to prefix zero → current work restores all 28 YAML prefix values without changing that YAML list, yielding immutable failing `None` snapshot `3f58b147...`. This is inherited/not introduced by Blackwell. The earlier bounded implementations predate pinned 0.5.14 or lack comparable full-prefix evidence, so a workspace-aware cap is new diagnostic behavior, not a proven last-good reapplication. Snapshot `3f58b147...` and current worktree have identical collector SHA256 `9d9776c4...`. Source re-audit also corrects an earlier shorthand: exact SGLang 0.5.14 uses `ReqToTokenPool`, `SWATokenToKVPoolAllocator`, `DeepSeekV4TokenToKVPool`, and `DSV4PoolConfigurator`, not `HybridReqToTokenPool`. | In the completed strict H20 run, TP1/BF16 CSA bs8, 16, and 32 reproduce the old June 28 failures 9/9. The exact `(isl,prefix)` triples are bs8 `(1024,524288),(1024,1000000),(512,1000000)`; bs16 `(512,524288),(512,1000000),(256,1000000)`; bs32 `(256,524288),(256,1000000),(128,1000000)`. SGLang derives `mem_fraction_static=0.907`, leaves `max_total_tokens=None`, allocates roughly 134.3–134.8 GiB across its full/SWA/C4/C128/state pools, and then the real C4 logits path requests 4.01, 7.64, or 3.82 GiB with only 0.67–3.81 GiB free. Matching half-workspace neighbors and the same 8,192 fresh tokens at prefix 262,144 pass. This is a collector static-pool/workspace budget mismatch, not an accepted H20 capacity limit. No bounded-pool candidate has been applied or measured yet; any implementation requires a new frozen snapshot and separate namespace. | Do not convert these points into an SM90 or Blackwell skip. First rerun the exact failures and neighboring successes with one explicit, workspace-aware bound that still lets SGLang's DSV4 configurator derive the full/SWA/C4/C128/state pools on H20; only a value-correct, complete sweep can justify changing the collector. Then repeat pool capacity, free-workspace, selected DSV4 leaf, and exact-key checks on SM100/103. SM120 has a different whole-module path and must not inherit either the pool formula or the skip set. Any adjustment requires a new source snapshot and a reverse run of the original `None` state so the add/revert history remains visible. |
 
+### Dense-attention collector-only reversal (2026-07-04)
+
+The `c8c00f42` proposal that promoted dense-attention `kernel_source`,
+`v_head_dim`, and `attention_chunk_size` into Python/Rust lookup keys and
+EngineSpec v2 is rejected for this collector-only effort. The release-owner
+decision is:
+
+- `kernel_source` remains producer provenance and is not consumed by queries;
+- V-head, runtime-window, chunk, sink, and scaling values configure the exact
+  SGLang 0.5.14 invocation but do not become database dimensions; and
+- SDK, Rust, EngineSpec, and untouched framework collectors remain unchanged.
+
+Population deduplicates on the historical attention key plus source and fails
+closed if that pair requires different effective runtime semantics. For global
+Llama-4 attention, chunk 8192 is retained in the real model invocation but is
+not an effective leaf-kernel distinction when `window_size == 0`; this removes
+the 357 duplicate H20 context rows produced by the superseded snapshot. The
+old 51,258-row context artifact has only 50,901 unique historical-key/source
+rows and is execution evidence, not an accepted artifact for this design.
+Generation remains 40,468 rows. A fresh collector-only snapshot and smoke are
+required before either count is attached to a product commit.
+
+SM100/103 currently contain cross-source overlaps under the historical query
+key. Raw source provenance may be collected, but those Blackwell artifacts are
+not consumer-ready until a separate, explicitly authorized consumer contract
+is designed. This reversal does not alter the historical chronology recorded
+in `ATTN-VARIANT-KEY-0514` or `ENGINE-SPEC-V2-ATTENTION`; it supersedes their
+present-tense product status for this branch.
+
 ### DSV4 context exact historical sets
 
 The H20 static context plan is 20,392 rows per attention kind. The historical

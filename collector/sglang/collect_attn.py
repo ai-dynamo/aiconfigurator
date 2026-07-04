@@ -42,34 +42,43 @@ class Timing(NamedTuple):
 
 # Mock objects to satisfy RadixAttention dependencies
 class MockModelConfig:
-    def __init__(self, num_attention_heads, num_key_value_heads, head_dim, window_size):
+    def __init__(
+        self,
+        num_attention_heads,
+        num_key_value_heads,
+        head_dim,
+        v_head_dim,
+        architecture,
+        runtime_window_size,
+        attention_chunk_size,
+    ):
         self.is_encoder_decoder = False
         self.context_len = 32768
         self.attention_arch = AttentionArch.MHA
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
         self.head_dim = head_dim
-        self.v_head_dim = head_dim
+        self.v_head_dim = v_head_dim
         self.swa_head_dim = head_dim
-        self.swa_v_head_dim = head_dim
-        self.sliding_window_size = window_size or None
-        self.attention_chunk_size = None
-        self.is_hybrid_swa = window_size > 0
+        self.swa_v_head_dim = v_head_dim
+        self.sliding_window_size = runtime_window_size if runtime_window_size >= 0 else None
+        self.attention_chunk_size = attention_chunk_size
+        self.is_hybrid_swa = runtime_window_size >= 0 or attention_chunk_size is not None
         self.swa_attention_layer_ids = [0] if self.is_hybrid_swa else []
         self.full_attention_layer_ids = [] if self.is_hybrid_swa else [0]
         self.is_multimodal = False
         self.hidden_size = num_attention_heads * head_dim
-        self.is_local_attention_model = False
+        self.is_local_attention_model = attention_chunk_size is not None
 
         class MockHFConfig:
-            def __init__(self, *, num_attention_heads, num_key_value_heads, head_dim):
-                self.architectures = ["LlamaForCausalLM"]
+            def __init__(self, *, num_attention_heads, num_key_value_heads, head_dim, v_head_dim, architecture):
+                self.architectures = [architecture or "LlamaForCausalLM"]
                 self.num_attention_heads = num_attention_heads
                 self.num_key_value_heads = num_key_value_heads
                 self.head_dim = head_dim
-                self.v_head_dim = head_dim
+                self.v_head_dim = v_head_dim
                 self.swa_head_dim = head_dim
-                self.swa_v_head_dim = head_dim
+                self.swa_v_head_dim = v_head_dim
                 self.hidden_size = num_attention_heads * head_dim
                 self.attn_logit_softcapping = None
 
@@ -77,6 +86,8 @@ class MockModelConfig:
             num_attention_heads=num_attention_heads,
             num_key_value_heads=num_key_value_heads,
             head_dim=head_dim,
+            v_head_dim=v_head_dim,
+            architecture=architecture,
         )
         self.hf_text_config = self.hf_config
         self.dtype = torch.bfloat16
@@ -122,7 +133,10 @@ class MockModelRunner:
         num_heads=None,
         num_kv_heads=None,
         head_dim=None,
-        window_size=0,
+        v_head_dim=None,
+        architecture=None,
+        runtime_window_size=-1,
+        attention_chunk_size=None,
     ):
         self.device = device
         self.req_to_token_pool = None
@@ -132,11 +146,21 @@ class MockModelRunner:
         self.attn_cp_size = 1  # Context parallelism size; required by FlashAttentionBackend in sglang >=0.5.10
         self.is_draft_worker = False
         self.model_is_mrope = False
-        self.sliding_window_size = window_size or None
-        self.attention_chunk_size = None
+        self.sliding_window_size = attention_chunk_size
+        if self.sliding_window_size is None and runtime_window_size >= 0:
+            self.sliding_window_size = runtime_window_size
+        self.attention_chunk_size = attention_chunk_size
         # Initialized after the KV pool is created.
         self.token_to_kv_pool_allocator = None
-        self.model_config = MockModelConfig(num_heads, num_kv_heads, head_dim, window_size)
+        self.model_config = MockModelConfig(
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            v_head_dim,
+            architecture,
+            runtime_window_size,
+            attention_chunk_size,
+        )
         self.kv_cache_dtype = kv_cache_dtype  # Default
         self.page_size = page_size
         self.tp_size = 1
@@ -188,11 +212,11 @@ def get_context_attention_test_cases():
         max_batch_size_self_attention = int(shape_sweep["max_batch_size_self_attention"])
         max_kv_elements = int(shape_sweep["max_kv_elements"])
 
-        # Defer profiles that need sinks, asymmetric V heads, or chunk semantics.
         for head_config in get_attention_head_configs(
             shape_sweep,
             phase="context",
-            include_model_profiles=False,
+            backend="sglang",
+            sm_version=sm_version,
         ):
             n = head_config.num_heads
             num_kv_heads = head_config.num_kv_heads
@@ -235,6 +259,13 @@ def get_context_attention_test_cases():
                                 use_fp8_context_fmha,
                                 True,
                                 window_size,
+                                head_config.v_head_dim,
+                                head_config.runtime_window_size,
+                                head_config.attention_chunk_size,
+                                head_config.has_attention_sink,
+                                head_config.scaling,
+                                head_config.kernel_source,
+                                head_config.architecture,
                             ]
                         )
 
@@ -277,7 +308,8 @@ def get_generation_attention_test_cases():
         for head_config in get_attention_head_configs(
             shape_sweep,
             phase="generation",
-            include_model_profiles=False,
+            backend="sglang",
+            sm_version=sm_version,
         ):
             n = head_config.num_heads
             n_kv = head_config.num_kv_heads
@@ -305,7 +337,26 @@ def get_generation_attention_test_cases():
                         use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
                         if skip_fp8 and use_fp8_kv_cache:
                             continue
-                        test_cases.append([b, s, n, n_kv, head_dim, use_fp8_kv_cache, False, False, window_size])
+                        test_cases.append(
+                            [
+                                b,
+                                s,
+                                n,
+                                n_kv,
+                                head_dim,
+                                use_fp8_kv_cache,
+                                False,
+                                False,
+                                window_size,
+                                head_config.v_head_dim,
+                                head_config.runtime_window_size,
+                                head_config.attention_chunk_size,
+                                head_config.has_attention_sink,
+                                head_config.scaling,
+                                head_config.kernel_source,
+                                head_config.architecture,
+                            ]
+                        )
     return test_cases
 
 
@@ -327,6 +378,13 @@ def run_attention_torch(
     use_fp8_context_fmha,
     is_context_phase,
     window_size=0,
+    v_head_dim=None,
+    runtime_window_size=None,
+    attention_chunk_size=None,
+    has_attention_sink=False,
+    scaling=None,
+    attn_backend_name=None,
+    architecture=None,
     *,
     perf_filename,
     device="cuda:0",
@@ -339,20 +397,29 @@ def run_attention_torch(
     torch_device = torch.device(device)
     device_str = str(torch_device)
 
-    sm_version = get_sm_version()
-    if head_dim == 192:
-        raise ValueError("head_dim=192 requires a model-specific SGLang attention contract")
-    if sm_version in {80, 86, 89}:
-        # SGLang's Triton backend is the 0.5.14 fallback for pre-Hopper CUDA.
-        attn_backend_name = "triton"
-    elif sm_version == 90:
-        attn_backend_name = "fa3"
-    elif sm_version in {100, 103}:
-        attn_backend_name = "trtllm_mha"
-    elif sm_version == 120:
-        attn_backend_name = "flashinfer"
-    else:
-        raise ValueError(f"No SGLang 0.5.14 attention backend mapping for SM{sm_version}")
+    explicit_v_head_dim = v_head_dim is not None
+    if head_dim == 192 and (
+        not explicit_v_head_dim or architecture != "MiMoV2FlashForCausalLM" or attn_backend_name is None
+    ):
+        raise ValueError("head_dim=192 requires the explicit MiMo-V2 SGLang attention contract")
+
+    v_head_dim = head_dim if v_head_dim is None else v_head_dim
+    if runtime_window_size is None:
+        runtime_window_size = window_size or -1
+
+    if attn_backend_name is None:
+        sm_version = get_sm_version()
+        attn_backend_name = {
+            80: "triton",
+            86: "triton",
+            89: "triton",
+            90: "fa3",
+            100: "trtllm_mha",
+            103: "trtllm_mha",
+            120: "flashinfer",
+        }.get(sm_version)
+        if attn_backend_name is None:
+            raise ValueError(f"No SGLang 0.5.14 attention backend mapping for SM{sm_version}")
     if page_size is None:
         page_size = 64 if attn_backend_name == "trtllm_mha" else 1
 
@@ -363,7 +430,10 @@ def run_attention_torch(
         num_heads=num_heads,
         num_kv_heads=num_key_value_heads,
         head_dim=head_dim,
-        window_size=window_size,
+        v_head_dim=v_head_dim,
+        architecture=architecture,
+        runtime_window_size=runtime_window_size,
+        attention_chunk_size=attention_chunk_size,
     )
     model_runner.kv_cache_dtype = kvtype
 
@@ -390,7 +460,7 @@ def run_attention_torch(
         dtype=kvtype,
         head_num=num_key_value_heads,
         head_dim=head_dim,
-        v_head_dim=head_dim,
+        v_head_dim=v_head_dim,
         layer_num=1,
         device=device_str,
         enable_memory_saver=False,
@@ -423,13 +493,18 @@ def run_attention_torch(
     layer = RadixAttention(
         num_heads=num_heads,
         head_dim=head_dim,
-        scaling=head_dim**-0.5,
+        scaling=head_dim**-0.5 if scaling is None else scaling,
         num_kv_heads=num_key_value_heads,
         layer_id=0,
-        v_head_dim=head_dim,
-        sliding_window_size=window_size or -1,
-        use_irope=False,
+        v_head_dim=v_head_dim,
+        sliding_window_size=runtime_window_size,
+        use_irope=attention_chunk_size is not None and window_size > 0,
     ).to(torch_device)
+
+    sinks = None
+    if has_attention_sink:
+        sinks_dtype = torch.float32 if attn_backend_name == "trtllm_mha" else torch.bfloat16
+        sinks = torch.randn(num_heads, device=torch_device, dtype=sinks_dtype)
 
     seqlen_q = input_len if is_context_phase else 1
     q = torch.randn(
@@ -454,7 +529,7 @@ def run_attention_torch(
         v = torch.randn(
             batch_size * input_len,
             num_key_value_heads,
-            head_dim,
+            v_head_dim,
             device=torch_device,
             dtype=torch.bfloat16,
         )
@@ -495,7 +570,7 @@ def run_attention_torch(
         v = torch.randn(
             batch_size,
             num_key_value_heads,
-            head_dim,
+            v_head_dim,
             device=torch_device,
             dtype=torch.bfloat16,
         )
@@ -523,7 +598,7 @@ def run_attention_torch(
             cache_v = torch.randn(
                 history_loc.numel(),
                 num_key_value_heads,
-                head_dim,
+                v_head_dim,
                 device=torch_device,
                 dtype=torch.bfloat16,
             )
@@ -552,7 +627,7 @@ def run_attention_torch(
             v = v.to(kvtype)
 
         def run_iter():
-            layer(q, k, v, forward_batch)
+            layer(q, k, v, forward_batch, sinks=sinks)
 
         with benchmark_with_power(
             device=torch_device,
@@ -574,7 +649,6 @@ def run_attention_torch(
         step = input_len
         op_name = "generation_attention"
 
-    kernel_source = "flash_attention" if attn_backend_name == "fa3" else attn_backend_name
     log_perf(
         item_list=[
             {
@@ -595,7 +669,7 @@ def run_attention_torch(
         version=pkg_resources.get_distribution("sglang").version,
         device_name=torch.cuda.get_device_name(device),
         op_name=op_name,
-        kernel_source=kernel_source,
+        kernel_source=attn_backend_name,
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
     )

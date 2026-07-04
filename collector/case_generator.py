@@ -110,12 +110,19 @@ def get_attention_encoder_shape_sweeps(backend: str) -> list[dict[str, object]]:
 
 @dataclasses.dataclass(frozen=True)
 class AttentionHeadConfig:
-    """One structural attention lookup key before the batch/sequence sweep."""
+    """One existing attention lookup key plus collector-only runtime metadata."""
 
     num_heads: int
     num_kv_heads: int
     head_dim: int
     window_size: int
+    v_head_dim: int | None = None
+    runtime_window_size: int | None = None
+    attention_chunk_size: int | None = None
+    has_attention_sink: bool = False
+    scaling: float | None = None
+    kernel_source: str | None = None
+    architecture: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -163,40 +170,177 @@ def _head_profiles(
     return [*base_profiles, *model_profiles]
 
 
+def _sglang_attention_profiles(
+    shape_sweep: dict[str, object],
+    *,
+    include_model_profiles: bool,
+) -> list[dict[str, object]]:
+    """Select SGLang profiles without changing other collectors' population."""
+
+    raw_profiles = shape_sweep.get("head_profiles")
+    if raw_profiles is None:
+        base_profiles = [shape_sweep]
+    else:
+        if not isinstance(raw_profiles, list) or not all(isinstance(profile, dict) for profile in raw_profiles):
+            raise TypeError("attention.head_profiles must be a list of mappings")
+        base_profiles = raw_profiles
+
+    model_profiles = _model_case_values("attention") if include_model_profiles else []
+    framework_model_profiles = (
+        _framework_specific_model_case_values("attention", "sglang") if include_model_profiles else []
+    )
+    selected_model_profiles = []
+    for profile in model_profiles:
+        frameworks = profile.get("frameworks")
+        if frameworks is not None:
+            if not isinstance(frameworks, list):
+                raise TypeError("model_case_values.attention.frameworks must be a list")
+            if "sglang" not in {str(value) for value in frameworks}:
+                continue
+        selected_model_profiles.append(profile)
+
+    selected_model_profiles.extend(framework_model_profiles)
+
+    # Targeted collection uses only the requested model's topology when one is
+    # declared. A framework-filtered profile (for example Kimi's vLLM-only MHA)
+    # must not fall back to the broad SGLang compatibility grid.
+    if _get_model_path_filter() and selected_model_profiles:
+        return selected_model_profiles
+    if _get_model_path_filter() and (model_profiles or framework_model_profiles):
+        return []
+
+    # Model profiles come first so their runtime contract wins physical-key
+    # deduplication against the legacy rectangular interpolation grid.
+    return [*selected_model_profiles, *base_profiles]
+
+
 def get_attention_head_configs(
     shape_sweep: dict[str, object],
     *,
     phase: str,
     include_model_profiles: bool = True,
+    backend: str | None = None,
+    sm_version: int | None = None,
 ) -> list[AttentionHeadConfig]:
     """Expand only valid ``(q, kv, head_dim, window)`` structural tuples.
 
-    Profiles may either describe a default rectangular sub-grid or one native
+    Profiles may either describe a legacy rectangular sub-grid or one native
     model topology plus its valid tensor-parallel sizes. The latter preserves
     correlations between query heads, KV heads, head dimension, and window.
     """
 
     if phase not in {"context", "generation"}:
         raise ValueError(f"Unknown attention phase: {phase}")
+    if backend not in {None, "sglang"}:
+        raise ValueError("backend is only accepted for the SGLang-specific attention collector")
+    if backend == "sglang" and sm_version is None:
+        raise ValueError("SGLang attention collection requires an explicit SM version")
 
     configs: list[AttentionHeadConfig] = []
-    seen: set[AttentionHeadConfig] = set()
+    seen: dict[tuple[int, int, int, int, str | None], AttentionHeadConfig] = {}
 
-    def append(num_heads: int, num_kv_heads: int, head_dim: int, window_size: int) -> None:
+    def append(
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        window_size: int,
+        *,
+        profile: dict[str, object],
+        kernel_source: str | None,
+    ) -> None:
         if num_heads <= 0 or num_kv_heads <= 0 or head_dim <= 0 or window_size < 0:
             return
         if num_kv_heads > num_heads or num_heads % num_kv_heads != 0:
             return
-        config = AttentionHeadConfig(num_heads, num_kv_heads, head_dim, window_size)
-        if config not in seen:
-            seen.add(config)
-            configs.append(config)
+        if kernel_source == "unsupported":
+            raise ValueError("SGLang attention profile resolves to an unsupported backend")
 
-    for profile in _head_profiles(
-        shape_sweep,
-        "attention",
-        include_model_profiles=include_model_profiles,
-    ):
+        config = AttentionHeadConfig(
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            window_size=window_size,
+        )
+        if backend == "sglang":
+            attention_chunk_size = profile.get("sglang_attention_chunk_size")
+            if attention_chunk_size is not None:
+                attention_chunk_size = int(attention_chunk_size)
+            config = dataclasses.replace(
+                config,
+                v_head_dim=int(profile.get("v_head_dim", head_dim)),
+                runtime_window_size=int(profile.get("sglang_runtime_window_size", window_size or -1)),
+                attention_chunk_size=attention_chunk_size,
+                has_attention_sink=bool(profile.get("sglang_has_attention_sink", False)),
+                scaling=float(profile["sglang_scaling"]) if profile.get("sglang_scaling") is not None else None,
+                kernel_source=kernel_source,
+                architecture=str(profile["architecture"]) if profile.get("architecture") else None,
+            )
+        # Source is recorded by the collector for provenance. The SDK keeps
+        # its historical query key and does not consume this distinction.
+        population_key = (num_heads, num_kv_heads, head_dim, window_size, kernel_source)
+        previous = seen.get(population_key)
+        if previous is None:
+            seen[population_key] = config
+            configs.append(config)
+            return
+
+        if backend == "sglang":
+            previous_signature = (
+                previous.v_head_dim,
+                previous.runtime_window_size,
+                previous.attention_chunk_size if previous.window_size > 0 else None,
+                previous.has_attention_sink,
+                previous.scaling,
+            )
+            current_signature = (
+                config.v_head_dim,
+                config.runtime_window_size,
+                config.attention_chunk_size if config.window_size > 0 else None,
+                config.has_attention_sink,
+                config.scaling,
+            )
+            if previous_signature == current_signature:
+                return
+            raise ValueError(
+                "SGLang attention profiles share one legacy-key/source pair but require "
+                f"different runtime semantics: {population_key=}, previous={previous_signature}, "
+                f"current={current_signature}"
+            )
+
+    profiles = (
+        _sglang_attention_profiles(
+            shape_sweep,
+            include_model_profiles=include_model_profiles,
+        )
+        if backend == "sglang"
+        else _head_profiles(
+            shape_sweep,
+            "attention",
+            include_model_profiles=include_model_profiles,
+        )
+    )
+    for profile in profiles:
+        kernel_source = None
+        if backend == "sglang":
+            raw_backends = profile.get("sglang_backends")
+            if raw_backends is not None:
+                if not isinstance(raw_backends, dict):
+                    raise TypeError("model_case_values.attention.sglang_backends must be a mapping")
+                kernel_source = raw_backends.get(sm_version, raw_backends.get(str(sm_version)))
+            if kernel_source is None:
+                kernel_source = {
+                    80: "triton",
+                    86: "triton",
+                    89: "triton",
+                    90: "fa3",
+                    100: "trtllm_mha",
+                    103: "trtllm_mha",
+                    120: "flashinfer",
+                }.get(sm_version)
+            if kernel_source is None:
+                raise ValueError(f"No SGLang 0.5.14 attention backend mapping for SM{sm_version}")
+            kernel_source = str(kernel_source)
+
         head_dims = _profile_int_values(
             profile,
             "head_dims",
@@ -229,7 +373,14 @@ def get_attention_head_configs(
                 num_kv_heads = (native_num_kv_heads + tp_size - 1) // tp_size
                 for head_dim in head_dims:
                     for window_size in window_sizes:
-                        append(num_heads, num_kv_heads, head_dim, window_size)
+                        append(
+                            num_heads,
+                            num_kv_heads,
+                            head_dim,
+                            window_size,
+                            profile=profile,
+                            kernel_source=kernel_source,
+                        )
             continue
 
         if phase == "context":
@@ -251,7 +402,14 @@ def get_attention_head_configs(
                         if num_kv_heads != num_heads and (num_kv_heads >= num_heads or num_heads % num_kv_heads != 0):
                             continue
                         for window_size in window_sizes:
-                            append(num_heads, num_kv_heads, head_dim, window_size)
+                            append(
+                                num_heads,
+                                num_kv_heads,
+                                head_dim,
+                                window_size,
+                                profile=profile,
+                                kernel_source=kernel_source,
+                            )
             continue
 
         mha_query_head_counts = _profile_int_values(
@@ -277,7 +435,14 @@ def get_attention_head_configs(
         for head_dim in head_dims:
             for num_heads in sorted(mha_query_head_counts, reverse=True):
                 for window_size in window_sizes:
-                    append(num_heads, num_heads, head_dim, window_size)
+                    append(
+                        num_heads,
+                        num_heads,
+                        head_dim,
+                        window_size,
+                        profile=profile,
+                        kernel_source=kernel_source,
+                    )
             for num_heads in sorted(xqa_query_head_counts, reverse=True):
                 for num_kv_heads in kv_head_counts:
                     if num_kv_heads > num_heads or (num_kv_heads == num_heads and not allow_xqa_mha):
@@ -285,7 +450,14 @@ def get_attention_head_configs(
                     if require_divisible and num_heads % num_kv_heads != 0:
                         continue
                     for window_size in window_sizes:
-                        append(num_heads, num_kv_heads, head_dim, window_size)
+                        append(
+                            num_heads,
+                            num_kv_heads,
+                            head_dim,
+                            window_size,
+                            profile=profile,
+                            kernel_source=kernel_source,
+                        )
     return configs
 
 
