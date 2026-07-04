@@ -282,8 +282,11 @@ class TestDeepSeekV4AttentionModule:
         assert result["latency"] == pytest.approx(10.5)
         assert result["energy"] == pytest.approx(105.0)
 
-    def test_generation_silicon_extrapolates_query_below_min_sampled_s_total(self, mutable_comprehensive_perf_db):
-        """Full-query regression for generated query b=1, s_total=1, tp=8."""
+    def test_generation_silicon_below_min_sampled_s_total_holds_boundary_util(self, mutable_comprehensive_perf_db):
+        """b=1, s_total=1 sits below the min sampled s_total=2: the engine holds
+        the boundary util and lets the decode SOL carry the (tiny) difference,
+        instead of the legacy raw-linear downward extrapolation (which halved
+        the latency straight through the launch-overhead floor)."""
         db = mutable_comprehensive_perf_db
         # SCHEME A silicon data is {head}{cr}{b}{s_total} — no tp level. The shared
         # grid is {tp}{b}{s_total} (for the direct _dsv4_robust_3d_lookup test);
@@ -307,7 +310,15 @@ class TestDeepSeekV4AttentionModule:
             database_mode=common.DatabaseMode.SILICON,
         )
 
-        expected = 0.20 + (0.50 - 0.20) * (1 - 2) / (5 - 2)
+        def sol(b, s_total):
+            return float(
+                db.query_generation_deepseek_v4_attention_module(
+                    **{**kwargs, "b": b, "s": s_total, "num_heads": 8},
+                    database_mode=common.DatabaseMode.SOL,
+                )
+            )
+
+        expected = 0.20 * sol(1, 1) / sol(1, 2)  # boundary util held at s_total=2
         assert float(result) == pytest.approx(expected)
         assert result.energy == pytest.approx(expected * 10.0)
 

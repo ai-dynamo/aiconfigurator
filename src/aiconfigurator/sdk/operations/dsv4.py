@@ -31,7 +31,6 @@ Cache key matches every other migrated op:
 
 from __future__ import annotations
 
-import copy
 import logging
 import os
 from collections import defaultdict
@@ -40,7 +39,7 @@ from typing import TYPE_CHECKING, ClassVar, Optional
 
 import numpy as np
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common, interpolation, perf_interp
 from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
@@ -872,11 +871,9 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             ]
             cls._data_cache[key] = _load_dsv4_split(ctx_split)
             ctx_merged = cls._data_cache[key]
-            cls._raw_data_cache[key] = (
-                LoadedOpData(copy.deepcopy(ctx_merged.data), ctx_merged.op_name_enum, ctx_merged.filepath)
-                if ctx_merged is not None
-                else None
-            )
+            # perf_interp resolves on the raw merged table directly; the raw
+            # wrapper is kept as a plain alias for backward compatibility.
+            cls._raw_data_cache[key] = ctx_merged
 
             def _load_sparse(filename_enum):
                 primary_path = os.path.join(data_dir, filename_enum.value)
@@ -1216,16 +1213,26 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 )
 
             # SCHEME A: cr_dict is prefix-resolved -> {prefix: {s: {b: leaf}}}.
-            # Look the measured silicon up at the requested prefix (interpolating
-            # over the prefix axis when the exact prefix was not benched).
-            result = _dsv4_lookup_prefix_resolved(database, cr_dict, prefix, s, b)
-            if result is None:
+            # RAW 3-axis grid: the CSA leave-one-out (gb200) showed plain linear
+            # crossing at 1.72% median (regime-aware 1.92%; knee-just-above plain
+            # +0.57% vs regime -2.94%), so no regime special-casing. A prefix
+            # beyond the collected range is util-hold — the prefix-aware SOL
+            # carries the effect (the empirical path anchors the same way) —
+            # replacing the legacy clamp-at-boundary.
+            config = perf_interp.OpInterpConfig(
+                axes=("prefix", "seq_len", "batch"),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda p_v, s_v, b_v: get_sol(b_v, s_v, p_v)[0],
+            )
+            try:
+                result = perf_interp.query(config, cr_dict, prefix, s, b)
+            except interpolation.InterpolationDataNotAvailableError as exc:
                 raise PerfDataNotAvailableError(
                     f"DeepSeek-V4 prefix-resolved context attention module data not available for "
                     f"{b=}, {s=}, {prefix=}, {num_heads=}, {compress_ratio=}."
-                )
-            latency = float(result["latency"])
-            energy = float(result.get("energy", 0.0))
+                ) from exc
+            latency = float(interpolation.get_value(result, "latency"))
+            energy = float(interpolation.get_value(result, "energy"))
 
             # SCHEME A: for CSA (compress_ratio==4) ONLY, subtract the measured
             # topK DELTA = flat_ms - top_last_ms (degenerate collector topK vs
@@ -1581,12 +1588,17 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     f"No DeepSeek-V4 generation attention silicon data for num_heads={num_heads}, "
                     f"compress_ratio={compress_ratio}, loaded cr keys={list(quant_data[head_axis].keys())}."
                 )
-            # SCHEME A generation dict is {head}{cr}{b}{s_total}; wrap with the
-            # head key and let the robust lookup walk (head -> b -> s_total).
-            wrapped = {head_axis: deepseek_v4_dict}
-            result = _dsv4_robust_3d_lookup(database, wrapped, head_axis, b, s, batch_axis="y")
-            latency = float(result["latency"])
-            energy = float(result.get("energy", 0.0))
+            # SCHEME A generation dict is {b: {s_total: leaf}} after head/cr
+            # slicing -> 2-axis RAW grid (decode ~linear in s_total); beyond the
+            # collected range is util-hold via the decode SOL.
+            config = perf_interp.OpInterpConfig(
+                axes=("batch", "seq_len"),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda b_v, s_v: get_sol(b_v, s_v)[0],
+            )
+            result = perf_interp.query(config, deepseek_v4_dict, b, s)
+            latency = float(interpolation.get_value(result, "latency"))
+            energy = float(interpolation.get_value(result, "energy"))
 
             # SCHEME A: subtract the topK DELTA for CSA (cr==4) only. Decode is
             # q_len=1 with past_kv = s_total - 1.

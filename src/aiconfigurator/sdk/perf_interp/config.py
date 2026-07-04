@@ -162,7 +162,7 @@ class OpInterpConfig:
     #: Analytic speed-of-light SOL(x, y, z) -> float in axes order (the op's
     #: existing roofline, max(compute, mem)). Required: util-hold extrapolation
     #: and cross-site transfer are built on it.
-    sol_fn: Callable[[float, float, float], float]
+    sol_fn: Callable[..., float]
     #: In-slice interpolation space (see module docstring).
     value_transform: ValueTransform = ValueTransform.RAW
     #: Curvature is PER-AXIS, not per-table: attention is ~seq^2 along seq but
