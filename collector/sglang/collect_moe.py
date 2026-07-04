@@ -13,12 +13,10 @@ __compat__ = "sglang==0.5.14"
 
 import gc
 import importlib
-import inspect
 import itertools
-import json
 import os
 import tempfile
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TypedDict
@@ -65,9 +63,9 @@ except ImportError:
         get_default_config,
         get_moe_configs,
     )
+from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.moe_runner.base import MoeRunnerConfig
 from sglang.srt.layers.moe.topk import (
-    BypassedTopKOutput,
     StandardTopKOutput,
     TopK,
     TopKConfig,
@@ -75,18 +73,11 @@ from sglang.srt.layers.moe.topk import (
     select_experts,
 )
 from sglang.srt.layers.moe.utils import MoeRunnerBackend, RoutingMethodType
+from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import CompressedTensorsConfig
 from sglang.srt.layers.quantization.fp8 import Fp8Config
-from sglang.srt.layers.quantization.modelopt_quant import ModelOptFp4Config
+from sglang.srt.layers.quantization.modelopt_quant import ModelOptFp4Config, ModelOptFp8Config
+from sglang.srt.layers.quantization.mxfp4 import Mxfp4Config
 from sglang.srt.utils import is_hip
-
-try:
-    import sglang.srt.layers.quantization.mxfp4 as _mxfp4_mod
-    from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
-    from sglang.srt.layers.quantization.mxfp4 import Mxfp4Config
-
-    _HAS_SGLANG_MXFP4 = True
-except ImportError:
-    _HAS_SGLANG_MXFP4 = False
 
 # SGLang 0.5.14: fused_experts_impl uses @torch.compile on moe_sum_reduce_torch_compile
 # for tokens_in_chunk <= 32 and topk > 2.  torch.compile's JIT compilation can hang
@@ -108,40 +99,15 @@ except Exception:
     pass
 
 try:
-    from sglang.srt.layers.moe.flashinfer_cutedsl_moe import (
-        flashinfer_cutedsl_moe_masked,
-    )
-
-    HAS_FLASHINFER_CUTE = True
-except ImportError:
-    HAS_FLASHINFER_CUTE = False
-
-try:
-    from sglang.jit_kernel.nvfp4 import scaled_fp4_quant as _scaled_fp4_quant
-
-    _HAS_SCALED_FP4_QUANT = True
-except ImportError:
-    _HAS_SCALED_FP4_QUANT = False
-
-# Marlin int4 MoE kernel (W4A16) — much faster than the Triton GPTQ/AWQ path.
-_HAS_MARLIN_MOE = False
-try:
-    from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import fused_marlin_moe
-    from sglang.srt.layers.quantization.gptq import gptq_marlin_moe_repack
-    from sglang.srt.layers.quantization.marlin_utils import marlin_moe_permute_scales
-
-    _HAS_MARLIN_MOE = True
-except ImportError:
-    pass
-
-try:
     from case_generator import (
         get_common_moe_test_cases,
         get_moe_quantization_module_config,
+        get_sglang_moe_backend,
         moe_model_allows_quantization,
     )
 
     from helper import (
+        EXIT_CODE_RESTART,
         balanced_logits,
         benchmark_with_power,
         build_rank0_local_workload,
@@ -157,10 +123,12 @@ except ModuleNotFoundError:
     from case_generator import (
         get_common_moe_test_cases,
         get_moe_quantization_module_config,
+        get_sglang_moe_backend,
         moe_model_allows_quantization,
     )
 
     from helper import (
+        EXIT_CODE_RESTART,
         balanced_logits,
         benchmark_with_power,
         build_rank0_local_workload,
@@ -171,25 +139,10 @@ except ModuleNotFoundError:
 
 
 _is_hip = is_hip()
-_MOE_RUNNER_CONFIG_PARAMS = set(inspect.signature(MoeRunnerConfig).parameters)
-_NON_GATED_MOE_MODEL_PATTERNS = ("Nemotron-3", "nemotron-ultra", "Nemotron-H")
 _SM120_NEMOTRON_NVFP4_MODELS = {
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
     "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
 }
-
-
-def _make_moe_runner_config(swiglu_limit: float | None = None) -> MoeRunnerConfig:
-    kwargs = {}
-    if "swiglu_limit" in _MOE_RUNNER_CONFIG_PARAMS:
-        kwargs["swiglu_limit"] = swiglu_limit
-    elif "gemm1_clamp_limit" in _MOE_RUNNER_CONFIG_PARAMS:
-        kwargs["gemm1_clamp_limit"] = swiglu_limit
-    return MoeRunnerConfig(**kwargs)
-
-
-def _uses_relu2_moe_activation(model_name: str) -> bool:
-    return any(pattern in model_name for pattern in _NON_GATED_MOE_MODEL_PATTERNS)
 
 
 def _mxfp4_activation_precision(moe_type: str) -> str:
@@ -223,27 +176,6 @@ def _ensure_writable_flashinfer_cubin_dir() -> None:
     os.environ["FLASHINFER_CUBIN_DIR"] = str(target)
 
 
-def _resolve_framework_moe_backend(moe_type: str, sm_version: int) -> str:
-    """Pinned SGLang 0.5.14 backend map for quantized framework paths."""
-    if moe_type == "nvfp4":
-        if sm_version == 90:
-            return "marlin"
-        if sm_version in {100, 103}:
-            return "flashinfer_trtllm"
-        if sm_version == 120:
-            return "flashinfer_cutlass"
-    if moe_type == "w4a8_mxfp4_mxfp8" and sm_version in {100, 103}:
-        return "flashinfer_mxfp4"
-    if moe_type == "w4a16_mxfp4" and sm_version == 90:
-        # DeepSeek-V4 FP4 experts: the 0.5.14 flashinfer_mxfp4 selector
-        # resolves to Mxfp4FlashinferCutlassMoEMethod on Hopper.
-        return "flashinfer_mxfp4"
-    raise ValueError(f"No SGLang 0.5.14 backend for moe_type={moe_type!r}, sm={sm_version}")
-
-
-_MODEL_CONFIG_DIR = Path(__file__).resolve().parents[2] / "src" / "aiconfigurator" / "model_configs"
-
-
 def get_moe_test_cases():
     # fp8_block MOE requires SM90+ due to shared memory requirements
     # L40S (SM89) has 100KB shared memory, fp8_block kernel needs ~144KB
@@ -251,7 +183,7 @@ def get_moe_test_cases():
     if sm_version < 90:
         moe_list = ["bfloat16"]
     elif sm_version < 100:
-        moe_list = ["bfloat16", "fp8_block", "nvfp4", "w4a16_mxfp4"]
+        moe_list = ["bfloat16", "fp8_block", "int4_wo", "nvfp4", "w4a16_mxfp4"]
     elif sm_version in (100, 103):
         moe_list = [
             "bfloat16",
@@ -273,6 +205,7 @@ def get_moe_test_cases():
     _drop_models = {"nvidia/GLM-5-NVFP4"} if {"nvidia/GLM-5-NVFP4", "nvidia/GLM-5.2-NVFP4"} <= _present else set()
 
     test_cases = []
+    seen_physical_cases = {}
 
     for common_moe_testcase in common_cases:
         model_name = common_moe_testcase.model_name
@@ -298,11 +231,28 @@ def get_moe_test_cases():
         for moe_type, num_tokens in itertools.product(model_moe_list, num_tokens_list):
             if not moe_model_allows_quantization("sglang", model_name, moe_type):
                 continue
-            if _uses_relu2_moe_activation(model_name) and moe_type in {"bfloat16", "fp8_block"}:
-                # Non-gated ReLU2 models remain on the model-aware NVFP4 path.
-                continue
+            module_config = get_moe_quantization_module_config("sglang", moe_type, model_name=model_name)
+            moe_backend = get_sglang_moe_backend(common_moe_testcase, moe_type, sm_version)
             is_native_dsv4 = common_moe_testcase.architecture == "DeepseekV4ForCausalLM"
             is_dsv4_pro = model_name == "deepseek-ai/DeepSeek-V4-Pro"
+            is_fp4_experts = is_native_dsv4 and moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
+            activation_vector_size = 16 if sm_version >= 100 else 8
+            if (
+                moe_type == "bfloat16"
+                and moe_backend == "flashinfer_cutlass"
+                and (
+                    common_moe_testcase.hidden_size % 8 != 0
+                    or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 8 != 0
+                )
+            ):
+                continue
+            if (
+                moe_backend == "triton"
+                and common_moe_testcase.sglang_moe_is_gated
+                and common_moe_testcase.sglang_moe_activation == "gelu"
+                and (common_moe_testcase.inter_size // common_moe_testcase.tp) % activation_vector_size != 0
+            ):
+                continue
             if is_native_dsv4 and moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}:
                 if moe_type == "w4a16_mxfp4" and not (is_dsv4_pro and sm_version == 90):
                     continue
@@ -314,6 +264,15 @@ def get_moe_test_cases():
                 if common_moe_testcase.ep != 1 or num_tokens > 8192:
                     continue
                 if moe_type == "w4a8_mxfp4_mxfp8" and common_moe_testcase.tp > 8:
+                    continue
+                if (
+                    moe_type == "w4a16_mxfp4"
+                    and sm_version == 90
+                    and (
+                        common_moe_testcase.hidden_size % 128 != 0
+                        or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 128 != 0
+                    )
+                ):
                     continue
             if (
                 sm_version >= 120
@@ -327,9 +286,16 @@ def get_moe_test_cases():
                 # size to be divisible by 32. Keep non-divisible Nemotron
                 # slices out of generated collection plans.
                 continue
-            # fp8_block requires hidden_size divisible by block group_size (128)
-            if moe_type == "fp8_block" and (
-                common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0
+            # Triton fp8_block quantizes the TP-local expert matrices in 128x128
+            # blocks. FlashInfer paths own their padding and are checked by the
+            # framework layer instead.
+            if (
+                moe_type == "fp8_block"
+                and moe_backend == "triton"
+                and (
+                    common_moe_testcase.hidden_size % 128 != 0
+                    or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 128 != 0
+                )
             ):
                 continue
             if (
@@ -660,6 +626,11 @@ def get_moe_test_cases():
 
             if moe_type == "nvfp4":
                 shard_k = common_moe_testcase.inter_size // common_moe_testcase.tp
+                marlin_inter_alignment = 64 if common_moe_testcase.sglang_moe_is_gated else 128
+                if moe_backend == "marlin" and (
+                    common_moe_testcase.hidden_size % 128 != 0 or shard_k % marlin_inter_alignment != 0
+                ):
+                    continue
                 # fp4_quantize requires weight dims divisible by 16 after TP sharding.
                 # CuteDSL grouped GEMM additionally requires 16-byte contiguous alignment:
                 # for fp4 (4-bit), that's 32 elements (16 * 8 // 4 = 32).
@@ -669,28 +640,12 @@ def get_moe_test_cases():
                     continue
 
             if moe_type == "int4_wo":
-                int4_group_size = int(
-                    get_moe_quantization_module_config("sglang", moe_type, model_name=model_name).get("group_size", 128)
-                )
+                int4_group_size = int(module_config.get("group_size", 128))
                 if (
                     common_moe_testcase.hidden_size % int4_group_size != 0
                     or (common_moe_testcase.inter_size // common_moe_testcase.tp) % int4_group_size != 0
                 ):
                     continue
-            if moe_type == "int4_wo" and common_moe_testcase.topk > (
-                common_moe_testcase.num_experts // common_moe_testcase.ep
-            ):
-                # The SGLang int4 MoE path benchmarks the rank-0 local expert
-                # slice. Cases where global top-k exceeds local experts fail
-                # routing before kernel timing and are not valid single-rank
-                # collector inputs.
-                continue
-
-            swiglu_limit = None
-            # DeepSeek-V4 uses swiglu_limit=10
-            if "DeepSeek-V4" in common_moe_testcase.model_name:
-                swiglu_limit = 10
-
             base_case = [
                 moe_type,
                 num_tokens,
@@ -703,9 +658,63 @@ def get_moe_test_cases():
                 common_moe_testcase.model_name,
                 common_moe_testcase.token_expert_distribution,
                 common_moe_testcase.power_law_alpha,
-                swiglu_limit,
+                common_moe_testcase.sglang_moe_swiglu_limit,
+                moe_backend,
+                common_moe_testcase.sglang_moe_activation,
+                common_moe_testcase.sglang_moe_is_gated,
+                common_moe_testcase.sglang_moe_has_bias,
+                common_moe_testcase.sglang_moe_gemm1_alpha,
+                common_moe_testcase.sglang_moe_gemm1_clamp_limit,
+                common_moe_testcase.sglang_moe_scoring_func,
+                common_moe_testcase.sglang_moe_routing_method_type,
+                common_moe_testcase.sglang_moe_routed_scaling_factor,
+                common_moe_testcase.sglang_moe_renormalize,
+                common_moe_testcase.sglang_moe_has_correction_bias,
+                common_moe_testcase.sglang_moe_num_expert_group,
+                common_moe_testcase.sglang_moe_topk_group,
+                common_moe_testcase.sglang_moe_apply_router_weight_on_input,
+                is_fp4_experts,
             ]
-            test_cases.append(base_case)
+            physical_key = (
+                moe_type,
+                num_tokens,
+                common_moe_testcase.hidden_size,
+                common_moe_testcase.inter_size,
+                common_moe_testcase.topk,
+                common_moe_testcase.num_experts,
+                common_moe_testcase.tp,
+                common_moe_testcase.ep,
+                common_moe_testcase.token_expert_distribution,
+                common_moe_testcase.power_law_alpha,
+            )
+            execution_signature = (
+                moe_backend,
+                common_moe_testcase.sglang_moe_activation,
+                common_moe_testcase.sglang_moe_is_gated,
+                common_moe_testcase.sglang_moe_has_bias,
+                common_moe_testcase.sglang_moe_gemm1_alpha,
+                common_moe_testcase.sglang_moe_gemm1_clamp_limit,
+                common_moe_testcase.sglang_moe_swiglu_limit,
+                common_moe_testcase.sglang_moe_scoring_func,
+                common_moe_testcase.sglang_moe_routing_method_type,
+                common_moe_testcase.sglang_moe_routed_scaling_factor,
+                common_moe_testcase.sglang_moe_renormalize,
+                common_moe_testcase.sglang_moe_has_correction_bias,
+                common_moe_testcase.sglang_moe_num_expert_group,
+                common_moe_testcase.sglang_moe_topk_group,
+                common_moe_testcase.sglang_moe_apply_router_weight_on_input,
+                is_fp4_experts,
+            )
+            previous_signature = seen_physical_cases.get(physical_key)
+            if previous_signature is not None and previous_signature != execution_signature:
+                raise ValueError(
+                    "SGLang MoE cases share one perf DB key but require different "
+                    f"execution semantics: key={physical_key}, first={previous_signature}, "
+                    f"current={execution_signature}, model={model_name}"
+                )
+            if previous_signature is None:
+                seen_physical_cases[physical_key] = execution_signature
+                test_cases.append(base_case)
 
     return test_cases
 
@@ -730,543 +739,134 @@ def benchmark_config(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
-    use_nvfp4: bool = False,
-    use_trtllm_bf16_fp4: bool = False,
-    use_int4_w4a16: bool = False,
-    use_mxfp4_w4a16: bool = False,
-    use_mxfp4_w4a8: bool = False,
     block_shape: list[int] | None = None,
     num_iters: int = 10,
     distributed: str = "power_law",
     power_law_alpha: float = 0,
     workloads: list["Rank0Workload"] | None = None,
     swiglu_limit: float | None = None,
-    moe_tp_size: int = 1,
-    moe_ep_size: int = 1,
-    model_name: str = "",
-) -> float:
+    activation: str = "silu",
+    is_gated: bool = True,
+    gemm1_alpha: float | None = None,
+    gemm1_clamp_limit: float | None = None,
+) -> tuple[float, dict]:
     device = torch.device("cuda")
-    use_mxfp4_moe = use_mxfp4_w4a16 or use_mxfp4_w4a8
+    expert_intermediate_size = shard_intermediate_size // (2 if is_gated else 1)
     if workloads is not None:
         num_iters = len(workloads)
         num_tokens = max(workload["hidden_states"].shape[0] for workload in workloads)
 
-    # 1. Gating Output Generation (not needed for Marlin int4 path which builds its own)
-    if not (use_int4_w4a16 and _HAS_MARLIN_MOE):
-        if workloads is not None:
-            gating_output = None
-        elif distributed == "uniform":
-            gating_output = torch.randn(num_iters, num_tokens, num_experts, dtype=torch.float32, device=device)
-        elif distributed == "balanced":
-            gating_output = [balanced_logits(num_tokens, num_experts, topk).to(device) for _ in range(num_iters)]
-        elif distributed == "power_law":
-            gating_output = [
-                power_law_logits_v3(num_tokens, num_experts, topk, 1, power_law_alpha).to(device)
-                for _ in range(num_iters)
-            ]
+    # 1. Gating Output Generation
+    if workloads is not None:
+        gating_output = None
+    elif distributed == "uniform":
+        gating_output = torch.randn(num_iters, num_tokens, num_experts, dtype=torch.float32, device=device)
+    elif distributed == "balanced":
+        gating_output = [balanced_logits(num_tokens, num_experts, topk).to(device) for _ in range(num_iters)]
+    elif distributed == "power_law":
+        gating_output = [
+            power_law_logits_v3(num_tokens, num_experts, topk, 1, power_law_alpha).to(device) for _ in range(num_iters)
+        ]
+    else:
+        raise ValueError(f"Unsupported distributed mode: {distributed}")
+
+    # 2. Set up the raw Triton BF16/FP8 path.
+    init_dtype = torch.bfloat16 if use_fp8_w8a8 else dtype
+    x = None if workloads is not None else torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    if use_int8_w8a16 or use_int8_w8a8:
+        w1 = torch.randint(
+            -127, 127, (num_experts, shard_intermediate_size, hidden_size), dtype=torch.int8, device=device
+        )
+        w2 = torch.randint(
+            -127, 127, (num_experts, hidden_size, expert_intermediate_size), dtype=torch.int8, device=device
+        )
+    else:
+        w1 = torch.randn(num_experts, shard_intermediate_size, hidden_size, dtype=init_dtype, device=device)
+        w2 = torch.randn(num_experts, hidden_size, expert_intermediate_size, dtype=init_dtype, device=device)
+
+    w1_scale = w2_scale = a1_scale = a2_scale = None
+    if use_int8_w8a16:
+        w1_scale = torch.randn((num_experts, 2 * shard_intermediate_size), dtype=torch.float32, device=device)
+        w2_scale = torch.randn((hidden_size, num_experts), dtype=torch.float32, device=device)
+    elif use_fp8_w8a8 or use_int8_w8a8:
+        if use_int8_w8a8 and block_shape is None:
+            w1_scale = torch.randn(num_experts, shard_intermediate_size, dtype=torch.float32, device=device)
+            w2_scale = torch.randn(num_experts, hidden_size, dtype=torch.float32, device=device)
+        elif block_shape is None:
+            w1_scale = torch.randn(num_experts, dtype=torch.float32, device=device)
+            w2_scale = torch.randn(num_experts, dtype=torch.float32, device=device)
+            a1_scale = torch.randn(1, dtype=torch.float32, device=device)
+            a2_scale = torch.randn(1, dtype=torch.float32, device=device)
         else:
-            raise ValueError(f"Unsupported distributed mode: {distributed}")
+            bn, bk = block_shape
+            w1_scale = torch.rand(
+                (num_experts, (shard_intermediate_size + bn - 1) // bn, (hidden_size + bk - 1) // bk),
+                dtype=torch.float32,
+                device=device,
+            )
+            w2_scale = torch.rand(
+                (num_experts, (hidden_size + bn - 1) // bn, (expert_intermediate_size + bk - 1) // bk),
+                dtype=torch.float32,
+                device=device,
+            )
 
-    # 2. Setup based on Path
-    if use_int4_w4a16 and _HAS_MARLIN_MOE:
-        # Marlin int4 MoE path: repack GPTQ weights into Marlin tile layout
-        # and call fused_marlin_moe which uses optimized CUDA kernels.
-        num_bits = 4
-        pack_factor = 8  # 32-bit int packs 8 x int4
-        group_size = block_shape[1] if block_shape else 128
+    if use_fp8_w8a8:
+        f8_type = torch.float8_e4m3fnuz if _is_hip else torch.float8_e4m3fn
+        w1, w2 = w1.to(f8_type), w2.to(f8_type)
 
-        # GPTQ-packed weights: (E, K // pack_factor, N) as int32
-        w1_packed = torch.randint(
-            -(2**31),
-            2**31 - 1,
-            (num_experts, hidden_size // pack_factor, shard_intermediate_size),
-            dtype=torch.int32,
-            device=device,
-        )
-        w2_packed = torch.randint(
-            -(2**31),
-            2**31 - 1,
-            (num_experts, (shard_intermediate_size // 2) // pack_factor, hidden_size),
-            dtype=torch.int32,
-            device=device,
-        )
-        empty_perm = torch.empty((num_experts, 0), dtype=torch.int32, device=device)
+    topk_output = (
+        None
+        if workloads is not None
+        else select_experts(x, torch.randn(num_tokens, num_experts, device=device), TopKConfig(top_k=topk))
+    )
 
-        # Repack to Marlin layout: (E, K // 16, N * (num_bits // 2))
-        w1_marlin = gptq_marlin_moe_repack(
-            w1_packed,
-            empty_perm,
-            hidden_size,
-            shard_intermediate_size,
-            num_bits,
-        )
-        w2_marlin = gptq_marlin_moe_repack(
-            w2_packed,
-            empty_perm,
-            shard_intermediate_size // 2,
-            hidden_size,
-            num_bits,
-        )
-        del w1_packed, w2_packed
-
-        # Per-group scales: (E, K // group_size, N) — then permute for Marlin
-        w1_scale = torch.randn(
-            (num_experts, hidden_size // group_size, shard_intermediate_size),
-            dtype=dtype,
-            device=device,
-        )
-        w2_scale = torch.randn(
-            (num_experts, (shard_intermediate_size // 2) // group_size, hidden_size),
-            dtype=dtype,
-            device=device,
-        )
-        w1_scale = marlin_moe_permute_scales(w1_scale, hidden_size, shard_intermediate_size, group_size)
-        w2_scale = marlin_moe_permute_scales(w2_scale, shard_intermediate_size // 2, hidden_size, group_size)
-
-        x = None if workloads is not None else torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    def run_op(i):
+        from sglang.srt.layers.moe.fused_moe_triton import override_config
 
         if workloads is None:
-            if distributed == "power_law":
-                gating_list = [
-                    power_law_logits_v3(num_tokens, num_experts, topk, 1, power_law_alpha).to(device)
-                    for _ in range(num_iters)
-                ]
-            elif distributed == "balanced":
-                gating_list = [balanced_logits(num_tokens, num_experts, topk).to(device) for _ in range(num_iters)]
-            else:
-                gating_list = [
-                    torch.randn(num_tokens, num_experts, dtype=torch.float32, device=device) for _ in range(num_iters)
-                ]
-
-        def run_op(i):
-            if workloads is not None:
-                current_hidden_states = workloads[i % num_iters]["hidden_states"]
-                current_topk = workloads[i % num_iters]["topk_output"]
-                # fused_marlin_moe asserts gating_output.shape[0] == hidden_states.shape[0],
-                # but only uses topk_weights/topk_ids for routing. Provide a dummy.
-                dummy_gating = torch.zeros(
-                    current_hidden_states.shape[0],
-                    num_experts,
-                    device=current_hidden_states.device,
-                    dtype=torch.float32,
-                )
-                # build_rank0_local_workload sets remote expert IDs to -1
-                # and their weights to 0.  The Marlin CUDA kernel
-                # (moe_wna16_marlin_gemm) indexes weight tensors by expert
-                # ID without masking, so -1 causes illegal memory access.
-                # Clamp to 0; the zero weight ensures no contribution.
-                safe_topk_ids = current_topk.topk_ids.clamp(min=0)
-                fused_marlin_moe(
-                    current_hidden_states,
-                    w1_marlin,
-                    w2_marlin,
-                    w1_scale,
-                    w2_scale,
-                    dummy_gating,
-                    current_topk.topk_weights,
-                    safe_topk_ids,
-                    num_bits=num_bits,
-                    is_k_full=True,
-                )
-            else:
-                gating = gating_list[i % num_iters]
-                new_topk = select_experts(x, gating, TopKConfig(top_k=topk))
-                fused_marlin_moe(
-                    x,
-                    w1_marlin,
-                    w2_marlin,
-                    w1_scale,
-                    w2_scale,
-                    gating,
-                    new_topk.topk_weights,
-                    new_topk.topk_ids,
-                    num_bits=num_bits,
-                    is_k_full=True,
-                )
-
-    elif use_nvfp4 and use_trtllm_bf16_fp4 and workloads is None:
-        from flashinfer.fused_moe import ActivationType, trtllm_fp4_block_scale_routed_moe
-        from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import quantize_hidden_states_fp4
-
-        try:
-            from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import _pack_topk_for_flashinfer_routed
-        except ImportError:
-            # Newer sglang (glm52 dev image) dropped this helper from
-            # flashinfer_trtllm; the same trtllm routed-MoE pack
-            # ((expert_id<<16)|bf16_weight, bit-identical) now lives as
-            # fused_pack_topk. Without this the trtllm BF16xFP4 MoE kernel can't
-            # be collected on the dev image (ImportError) and only the slower
-            # cutedsl path survives, making AIC over-predict MoE.
-            from sglang.jit_kernel.trtllm_lora_temp.topk_pack import (
-                fused_pack_topk as _pack_topk_for_flashinfer_routed,
-            )
-
-        if hidden_size % 32 != 0 or (shard_intermediate_size // 2) % 32 != 0:
-            raise ValueError(
-                "FlashInfer TRTLLM BF16xFP4 MoE requires hidden and intermediate dimensions "
-                f"to be divisible by 32, got hidden_size={hidden_size} and "
-                f"intermediate_size={shard_intermediate_size // 2}"
-            )
-
-        intermediate_size = shard_intermediate_size // 2
-        x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
-        router_logits_list = (
-            gating_output
-            if isinstance(gating_output, list)
-            else [gating_output[i] for i in range(gating_output.shape[0])]
-        )
-
-        # Match GLM-5's ModelOpt FP4 + FlashInfer TRTLLM routed path. That path
-        # quantizes activations to FP4 before invoking the routed MoE kernel;
-        # passing BF16 activations directly selects a much slower BF16xFP4 path.
-        w13_weight = torch.randint(
-            0,
-            256,
-            (num_experts, shard_intermediate_size, hidden_size // 2),
-            dtype=torch.uint8,
-            device=device,
-        )
-        w2_weight = torch.randint(
-            0,
-            256,
-            (num_experts, hidden_size, intermediate_size // 2),
-            dtype=torch.uint8,
-            device=device,
-        )
-        sf_block_size = 16
-        w13_scale = torch.ones(
-            (num_experts, shard_intermediate_size, hidden_size // sf_block_size),
-            dtype=torch.float8_e4m3fn,
-            device=device,
-        )
-        w2_scale = torch.ones(
-            (num_experts, hidden_size, intermediate_size // sf_block_size),
-            dtype=torch.float8_e4m3fn,
-            device=device,
-        )
-
-        output = torch.empty(num_tokens, hidden_size, dtype=dtype, device=device)
-        tune_max_num_tokens = max(1, 1 << (num_tokens - 1).bit_length())
-        scale_ones = torch.ones(num_experts, dtype=torch.float32, device=device)
-        input_scale_quant = torch.ones((), dtype=torch.float32, device=device)
-        activation_type = ActivationType.Relu2 if _uses_relu2_moe_activation(model_name) else ActivationType.Swiglu
-        topk_config = TopKConfig(
-            top_k=topk,
-            renormalize=True,
-            scoring_func="sigmoid",
-            routed_scaling_factor=1.0,
-        )
-        packed_topk_list = []
-        for logits in router_logits_list:
-            topk_output = select_experts(x, logits, topk_config)
-            packed_topk_list.append(
-                _pack_topk_for_flashinfer_routed(
-                    topk_output.topk_ids,
-                    topk_output.topk_weights,
-                )
-            )
-        torch.cuda.synchronize()
-
-        def run_op(i):
-            x_fp4, x_scale = quantize_hidden_states_fp4(x, input_scale_quant)
-            packed_topk = packed_topk_list[i % len(packed_topk_list)]
-            trtllm_fp4_block_scale_routed_moe(
-                topk_ids=packed_topk,
-                routing_bias=None,
-                hidden_states=x_fp4,
-                hidden_states_scale=x_scale,
-                gemm1_weights=w13_weight,
-                gemm1_weights_scale=w13_scale,
-                gemm1_bias=None,
-                gemm1_alpha=None,
-                gemm1_beta=None,
-                gemm1_clamp_limit=None,
-                gemm2_weights=w2_weight,
-                gemm2_weights_scale=w2_scale,
-                gemm2_bias=None,
-                output1_scale_scalar=scale_ones,
-                output1_scale_gate_scalar=scale_ones,
-                output2_scale_scalar=scale_ones,
-                num_experts=num_experts,
-                top_k=packed_topk.shape[1],
-                n_group=0,
-                topk_group=0,
-                intermediate_size=intermediate_size,
-                local_expert_offset=0,
-                local_num_experts=num_experts,
-                routed_scaling_factor=None,
-                routing_method_type=1,
-                do_finalize=True,
-                activation_type=activation_type,
-                output=output,
-                tune_max_num_tokens=tune_max_num_tokens,
-            )
-
-    elif use_nvfp4:
-        if not HAS_FLASHINFER_CUTE:
-            raise ImportError("FlashInfer CuteDSL not available")
-        if not _HAS_SCALED_FP4_QUANT:
-            raise ImportError(
-                "scaled_fp4_quant not available (sglang.jit_kernel.nvfp4); "
-                "NVFP4 MoE benchmarking requires this for correct weight layout"
-            )
-
-        # Global scales and Alpha
-        input_gs = torch.ones(num_experts, device=device, dtype=torch.float32)
-        w1_gs = torch.ones(num_experts, device=device, dtype=torch.float32)
-        a2_gs = torch.ones(num_experts, device=device, dtype=torch.float32)
-        w2_gs = torch.ones(num_experts, device=device, dtype=torch.float32)
-        w1_alpha = torch.ones(num_experts, device=device, dtype=torch.float32)
-        w2_alpha = torch.ones(num_experts, device=device, dtype=torch.float32)
-
-        # Weight quantization
-        w1_bf16 = torch.randn(num_experts, shard_intermediate_size, hidden_size, device=device, dtype=dtype)
-        w2_bf16 = torch.randn(num_experts, hidden_size, shard_intermediate_size // 2, device=device, dtype=dtype)
-
-        # Quantize weights per-expert using scaled_fp4_quant which produces
-        # swizzled blockscales and maintains (num_experts, N, K//2) layout.
-        w1_list_q, w1_list_bs = [], []
-        for e in range(num_experts):
-            q, bs = _scaled_fp4_quant(w1_bf16[e], w1_gs[e])
-            w1_list_q.append(q)
-            w1_list_bs.append(bs)
-        w1 = torch.stack(w1_list_q)
-        w1_bs = torch.stack(w1_list_bs)
-
-        w2_list_q, w2_list_bs = [], []
-        for e in range(num_experts):
-            q, bs = _scaled_fp4_quant(w2_bf16[e], w2_gs[e])
-            w2_list_q.append(q)
-            w2_list_bs.append(bs)
-        w2 = torch.stack(w2_list_q)
-        w2_bs = torch.stack(w2_list_bs)
-
-        def get_masked_m(logits):
-            _, topk_idx = torch.topk(torch.softmax(logits, dim=1), topk, dim=-1)
-            counts = [(topk_idx.view(-1) == i).sum() for i in range(num_experts)]
-            return torch.tensor(counts, dtype=torch.int32, device=device)
-
-        masked_m_list = (
-            [workload["masked_m"] for workload in workloads]
-            if workloads is not None
-            else [get_masked_m(logits) for logits in gating_output]
-        )
-
-        # Calculate the maximum tokens any single expert will handle across all iterations
-        max_m = 0
-        for counts in masked_m_list:
-            max_m = max(max_m, counts.max().item())
-        # Align to 128 for kernel efficiency and safety
-        max_m = (max_m + 127) // 128 * 128
-
-        x_dispatched = torch.randn(num_experts, max_m, hidden_size, device=device, dtype=dtype)
-
-        def run_op(i):
-            flashinfer_cutedsl_moe_masked(
-                hidden_states=(x_dispatched, None),
-                input_global_scale=input_gs,
-                w1=w1,
-                w1_blockscale=w1_bs,
-                w1_alpha=w1_alpha,
-                w2=w2,
-                a2_global_scale=a2_gs,
-                w2_blockscale=w2_bs,
-                w2_alpha=w2_alpha,
-                masked_m=masked_m_list[i % num_iters],
-            )
-    elif use_mxfp4_moe:
-        # Reuse SGLang 0.5.14's production Mxfp4Config/FusedMoE path. It owns
-        # the exact FlashInfer API, weight layout, TP padding, and EP-local
-        # expert mapping for both W4A16 and W4A8.
-        if not _HAS_SGLANG_MXFP4:
-            raise ImportError("SGLang MXFP4 MoE support is not available")
-        if workloads is not None:
-            raise ValueError("MXFP4 benchmarking uses full-router logits, not rank-local workloads")
-
-        previous_backend = _moe_utils.MOE_RUNNER_BACKEND
-        server_args = _server_args_module._global_server_args
-        previous_precision = server_args.flashinfer_mxfp4_moe_precision
-        _moe_utils.MOE_RUNNER_BACKEND = MoeRunnerBackend.FLASHINFER_MXFP4
-        server_args.flashinfer_mxfp4_moe_precision = _mxfp4_activation_precision(
-            "w4a16_mxfp4" if use_mxfp4_w4a16 else "w4a8_mxfp4_mxfp8"
-        )
-        try:
-            intermediate_size = shard_intermediate_size // 2 * moe_tp_size
-            mxfp4_config_kwargs = {}
-            if "is_checkpoint_mxfp4_serialized" in inspect.signature(Mxfp4Config).parameters:
-                mxfp4_config_kwargs["is_checkpoint_mxfp4_serialized"] = True
-            quant_config = Mxfp4Config(**mxfp4_config_kwargs)
-            moe_layer = FusedMoE(
-                num_experts=num_experts,
-                hidden_size=hidden_size,
-                intermediate_size=intermediate_size,
-                layer_id=0,
-                top_k=topk,
-                params_dtype=dtype,
-                reduce_results=False,
-                quant_config=quant_config,
-                prefix="aic_sglang_mxfp4_moe",
-            ).to(device)
-        finally:
-            _moe_utils.MOE_RUNNER_BACKEND = previous_backend
-            server_args.flashinfer_mxfp4_moe_precision = previous_precision
-
-        with torch.no_grad():
-            moe_layer.w13_weight.zero_()
-            moe_layer.w2_weight.zero_()
-            moe_layer.w13_weight_scale.copy_(
-                torch.ones_like(moe_layer.w13_weight_scale, dtype=torch.float8_e4m3fn).view(torch.uint8)
-            )
-            moe_layer.w2_weight_scale.copy_(
-                torch.ones_like(moe_layer.w2_weight_scale, dtype=torch.float8_e4m3fn).view(torch.uint8)
-            )
-            moe_layer.w13_weight_bias.zero_()
-            moe_layer.w2_weight_bias.zero_()
-        moe_layer.quant_method.process_weights_after_loading(moe_layer)
-
-        x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
-        if distributed == "uniform":
-            router_logits_list = [
-                torch.randn(num_tokens, num_experts, dtype=torch.float32, device=device) for _ in range(num_iters)
-            ]
-        elif distributed == "balanced":
-            router_logits_list = [balanced_logits(num_tokens, num_experts, topk).to(device) for _ in range(num_iters)]
-        elif distributed == "power_law":
-            router_logits_list = [
-                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(device)
-                for _ in range(num_iters)
-            ]
+            input_gating = gating_output[i % num_iters]
+            new_topk = select_experts(x, input_gating, TopKConfig(top_k=topk))
+            topk_output.topk_weights.copy_(new_topk.topk_weights)
+            topk_output.topk_ids.copy_(new_topk.topk_ids)
+            topk_output.router_logits.copy_(new_topk.router_logits)
+            current_hidden_states = x
+            current_topk_output = topk_output
         else:
-            raise ValueError(f"Unsupported distributed mode: {distributed}")
+            current_hidden_states = workloads[i % num_iters]["hidden_states"]
+            current_topk_output = workloads[i % num_iters]["topk_output"]
+            # build_rank0_local_workload sets remote expert IDs to -1
+            # and their weights to 0. The Triton fused_moe kernel indexes
+            # weight tensors by expert ID without masking, so clamp -1 to 0;
+            # the zero weight still ensures no contribution.
+            current_topk_output = StandardTopKOutput(
+                topk_weights=current_topk_output.topk_weights,
+                topk_ids=current_topk_output.topk_ids.clamp(min=0),
+                router_logits=current_topk_output.router_logits,
+            )
 
-        def run_op(i):
-            moe_layer(
-                x,
-                BypassedTopKOutput(
-                    hidden_states=x,
-                    router_logits=router_logits_list[i % num_iters],
-                    topk_config=TopKConfig(top_k=topk),
+        with override_config(config):
+            fused_moe(
+                current_hidden_states,
+                w1,
+                w2,
+                current_topk_output,
+                moe_runner_config=MoeRunnerConfig(
+                    activation=activation,
+                    is_gated=is_gated,
+                    gemm1_alpha=gemm1_alpha,
+                    gemm1_clamp_limit=gemm1_clamp_limit,
+                    swiglu_limit=swiglu_limit,
                 ),
+                use_fp8_w8a8=use_fp8_w8a8,
+                use_int8_w8a8=use_int8_w8a8,
+                use_int8_w8a16=use_int8_w8a16,
+                use_int4_w4a16=False,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                a1_scale=a1_scale,
+                a2_scale=a2_scale,
+                block_shape=block_shape,
             )
-    else:
-        init_dtype = torch.bfloat16 if use_fp8_w8a8 else dtype
-        x = None if workloads is not None else torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
-        if use_int8_w8a16 or use_int8_w8a8:
-            w1 = torch.randint(
-                -127, 127, (num_experts, shard_intermediate_size, hidden_size), dtype=torch.int8, device=device
-            )
-            w2 = torch.randint(
-                -127, 127, (num_experts, hidden_size, shard_intermediate_size // 2), dtype=torch.int8, device=device
-            )
-        elif use_int4_w4a16:
-            # W4A16: 2 int4 values packed per int8 byte — K dimension halved.
-            # w1 shape: (E, N=shard_inter, K_packed=hidden//2)
-            # w2 shape: (E, N=hidden, K_packed=shard_inter//4)
-            w1 = torch.randint(
-                0, 127, (num_experts, shard_intermediate_size, hidden_size // 2), dtype=torch.int8, device=device
-            )
-            w2 = torch.randint(
-                0, 127, (num_experts, hidden_size, shard_intermediate_size // 4), dtype=torch.int8, device=device
-            )
-        else:
-            w1 = torch.randn(num_experts, shard_intermediate_size, hidden_size, dtype=init_dtype, device=device)
-            w2 = torch.randn(num_experts, hidden_size, shard_intermediate_size // 2, dtype=init_dtype, device=device)
-
-        w1_scale = w2_scale = a1_scale = a2_scale = None
-        if use_int8_w8a16:
-            w1_scale = torch.randn((num_experts, 2 * shard_intermediate_size), dtype=torch.float32, device=device)
-            w2_scale = torch.randn((hidden_size, num_experts), dtype=torch.float32, device=device)
-        elif use_int4_w4a16:
-            # Per-group scales along K. The GPTQ kernel receives K = A.shape[1]
-            # (unpacked hidden size), so scale groups are hidden_size // group_size,
-            # NOT (hidden_size // 2) // group_size (the packed size).
-            # w2's K is shard_intermediate_size // 2 (post silu_and_mul, unpacked).
-            group_size = block_shape[1] if block_shape else 128
-            w1_scale = torch.randn(
-                (num_experts, shard_intermediate_size, hidden_size // group_size),
-                dtype=torch.float32,
-                device=device,
-            )
-            w2_scale = torch.randn(
-                (num_experts, hidden_size, (shard_intermediate_size // 2) // group_size),
-                dtype=torch.float32,
-                device=device,
-            )
-        elif use_fp8_w8a8 or use_int8_w8a8:
-            if use_int8_w8a8 and block_shape is None:
-                w1_scale = torch.randn(num_experts, shard_intermediate_size, dtype=torch.float32, device=device)
-                w2_scale = torch.randn(num_experts, hidden_size, dtype=torch.float32, device=device)
-            elif block_shape is None:
-                w1_scale = torch.randn(num_experts, dtype=torch.float32, device=device)
-                w2_scale = torch.randn(num_experts, dtype=torch.float32, device=device)
-                a1_scale = torch.randn(1, dtype=torch.float32, device=device)
-                a2_scale = torch.randn(1, dtype=torch.float32, device=device)
-            else:
-                bn, bk = block_shape
-                w1_scale = torch.rand(
-                    (num_experts, (shard_intermediate_size + bn - 1) // bn, (hidden_size + bk - 1) // bk),
-                    dtype=torch.float32,
-                    device=device,
-                )
-                w2_scale = torch.rand(
-                    (num_experts, (hidden_size + bn - 1) // bn, (shard_intermediate_size // 2 + bk - 1) // bk),
-                    dtype=torch.float32,
-                    device=device,
-                )
-
-        if use_fp8_w8a8:
-            f8_type = torch.float8_e4m3fnuz if _is_hip else torch.float8_e4m3fn
-            w1, w2 = w1.to(f8_type), w2.to(f8_type)
-
-        topk_output = (
-            None
-            if workloads is not None
-            else select_experts(x, torch.randn(num_tokens, num_experts, device=device), TopKConfig(top_k=topk))
-        )
-
-        def run_op(i):
-            from sglang.srt.layers.moe.fused_moe_triton import override_config
-
-            if workloads is None:
-                input_gating = gating_output[i % num_iters]
-                new_topk = select_experts(x, input_gating, TopKConfig(top_k=topk))
-                topk_output.topk_weights.copy_(new_topk.topk_weights)
-                topk_output.topk_ids.copy_(new_topk.topk_ids)
-                topk_output.router_logits.copy_(new_topk.router_logits)
-                current_hidden_states = x
-                current_topk_output = topk_output
-            else:
-                current_hidden_states = workloads[i % num_iters]["hidden_states"]
-                current_topk_output = workloads[i % num_iters]["topk_output"]
-                # build_rank0_local_workload sets remote expert IDs to -1
-                # and their weights to 0.  The Triton fused_moe kernel
-                # indexes weight tensors by expert ID without masking,
-                # so -1 causes illegal memory access.
-                # Clamp to 0; the zero weight ensures no contribution.
-                current_topk_output = StandardTopKOutput(
-                    topk_weights=current_topk_output.topk_weights,
-                    topk_ids=current_topk_output.topk_ids.clamp(min=0),
-                    router_logits=current_topk_output.router_logits,
-                )
-
-            with override_config(config):
-                moe_runner_config = _make_moe_runner_config(swiglu_limit=swiglu_limit)
-                fused_moe(
-                    current_hidden_states,
-                    w1,
-                    w2,
-                    current_topk_output,
-                    moe_runner_config=moe_runner_config,
-                    use_fp8_w8a8=use_fp8_w8a8,
-                    use_int8_w8a8=use_int8_w8a8,
-                    use_int8_w8a16=use_int8_w8a16,
-                    use_int4_w4a16=use_int4_w4a16,
-                    w1_scale=w1_scale,
-                    w2_scale=w2_scale,
-                    a1_scale=a1_scale,
-                    a2_scale=a2_scale,
-                    block_shape=block_shape,
-                )
 
     # 3. Unified Execution Loop
     outside_loop_count = 5  # Repeat ops within kernel_func to increase accuracy for fast kernels
@@ -1289,39 +889,6 @@ def benchmark_config(
         pass
 
     return results["latency_ms"] / outside_loop_count, results["power_stats"]
-
-
-@contextmanager
-def _patch_mxfp4_single_process_parallel(*, moe_tp_size: int, moe_ep_size: int):
-    """Temporarily patch SGLang distributed helpers for a rank-0 MoE benchmark."""
-
-    missing = object()
-    originals = []
-
-    def replace(module, name, value):
-        originals.append((module, name, getattr(module, name, missing)))
-        setattr(module, name, value)
-
-    try:
-        for module in (_moe_layer_mod, _std_dispatch_mod, _mxfp4_mod):
-            if hasattr(module, "get_tp_group"):
-                replace(module, "get_tp_group", lambda: None)
-            if hasattr(module, "is_allocation_symmetric"):
-                replace(module, "is_allocation_symmetric", lambda: False)
-        replace(_moe_layer_mod, "get_moe_expert_parallel_world_size", lambda: moe_ep_size)
-        replace(_moe_layer_mod, "get_moe_expert_parallel_rank", lambda: 0)
-        replace(_moe_layer_mod, "get_moe_tensor_parallel_world_size", lambda: moe_tp_size)
-        replace(_moe_layer_mod, "get_moe_tensor_parallel_rank", lambda: 0)
-        replace(_moe_layer_mod, "create_kt_config_from_server_args", lambda _server_args, _layer_id: None)
-        replace(_std_dispatch_mod, "get_moe_expert_parallel_world_size", lambda: moe_ep_size)
-        replace(_std_dispatch_mod, "get_moe_expert_parallel_rank", lambda: 0)
-        yield
-    finally:
-        for module, name, original in reversed(originals):
-            if original is missing:
-                delattr(module, name)
-            else:
-                setattr(module, name, original)
 
 
 @contextmanager
@@ -1382,57 +949,10 @@ def _patch_framework_moe_parallel(*, moe_tp_size: int, moe_ep_size: int):
                 setattr(module, name, original)
 
 
-def _framework_routing(model_name: str):
-    """Read production router semantics from the bundled model config.
-
-    ``text_config`` overrides the outer multimodal config (Kimi-K2.5). The
-    only architecture fallback is Nemotron-H's SGLang-defined sigmoid router;
-    every numeric scaling factor and grouping value still comes from config.
-    """
-    config_path = _MODEL_CONFIG_DIR / f"{model_name.replace('/', '--')}_config.json"
-    if not config_path.exists():
-        raise FileNotFoundError(f"missing local MoE routing config for {model_name!r}: {config_path}")
-    with config_path.open() as config_file:
-        outer = json.load(config_file)
-    config = dict(outer)
-    if isinstance(outer.get("text_config"), dict):
-        config.update(outer["text_config"])
-
-    architecture = (outer.get("architectures") or [None])[0]
-    activation = str(config.get("mlp_hidden_act") or config.get("hidden_act") or "silu")
-    is_gated = activation != "relu2"
-    scoring_func = config.get("scoring_func")
-    if scoring_func is None and architecture == "NemotronHForCausalLM":
-        scoring_func = "sigmoid"
-    scoring_func = str(scoring_func or "softmax")
-    topk_method = config.get("topk_method")
-    if topk_method == "noaux_tc" or architecture == "NemotronHForCausalLM":
-        routing_method = RoutingMethodType.DeepSeekV3
-    elif architecture == "Qwen3MoeForCausalLM":
-        routing_method = RoutingMethodType.Renormalize
-    else:
-        routing_method = None
-    routed_scale = config.get("routed_scaling_factor")
-    routed_scale = float(routed_scale) if routed_scale is not None else None
-    num_expert_group = config.get("n_group")
-    topk_group = config.get("topk_group")
-    return SimpleNamespace(
-        activation=activation,
-        is_gated=is_gated,
-        scoring_func=scoring_func,
-        routing_method=routing_method,
-        routed_scale=routed_scale,
-        renormalize=bool(config.get("norm_topk_prob", True)),
-        has_correction_bias=scoring_func == "sigmoid" or bool(config.get("use_routing_bias", False)),
-        num_expert_group=int(num_expert_group) if num_expert_group is not None else None,
-        topk_group=int(topk_group) if topk_group is not None else None,
-        topk_method=topk_method,
-    )
-
-
 def _benchmark_framework_quantized_moe(
     *,
     moe_type: str,
+    moe_backend: str,
     num_tokens: int,
     hidden_size: int,
     inter_size: int,
@@ -1443,18 +963,64 @@ def _benchmark_framework_quantized_moe(
     model_name: str,
     distributed: str,
     power_law_alpha: float,
+    activation: str,
+    is_gated: bool,
+    has_bias: bool,
+    gemm1_alpha: float | None,
+    gemm1_clamp_limit: float | None,
     swiglu_limit: float | None,
+    scoring_func: str,
+    routing_method_type: str | None,
+    routed_scaling_factor: float | None,
+    renormalize: bool,
+    has_correction_bias: bool,
+    num_expert_group: int | None,
+    topk_group: int | None,
+    apply_router_weight_on_input: bool,
+    is_fp4_experts: bool,
+    int4_group_size: int,
     device: str,
 ) -> tuple[float, dict, str]:
-    """Benchmark NVFP4 and DSV4 MXFP4 through SGLang 0.5.14 FusedMoE."""
-    sm_version = get_sm_version()
-    backend = _resolve_framework_moe_backend(moe_type, sm_version)
-    if backend.startswith("flashinfer"):
+    """Benchmark model-aware paths through SGLang 0.5.14 FusedMoE."""
+    if moe_backend.startswith("flashinfer"):
         _ensure_writable_flashinfer_cubin_dir()
 
-    routing = _framework_routing(model_name)
-    is_fp4_experts = moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"} and "DeepSeek-V4" in model_name
-    if moe_type == "nvfp4":
+    routing_method = None if routing_method_type is None else RoutingMethodType[routing_method_type]
+    if moe_type == "bfloat16":
+        quant_config = None
+    elif moe_type == "int4_wo":
+        quant_config = CompressedTensorsConfig.from_config(
+            {
+                "config_groups": {
+                    "group_0": {
+                        "targets": ["Linear"],
+                        "weights": {
+                            "num_bits": 4,
+                            "type": "int",
+                            "symmetric": True,
+                            "strategy": "group",
+                            "group_size": int4_group_size,
+                            "dynamic": False,
+                        },
+                        "input_activations": None,
+                        "output_activations": None,
+                    }
+                },
+                "format": "pack-quantized",
+                "ignore": [],
+            }
+        )
+    elif moe_type == "fp8_block":
+        quant_config = (
+            ModelOptFp8Config(is_checkpoint_fp8_serialized=True)
+            if moe_backend == "flashinfer_cutlass"
+            else Fp8Config(
+                is_checkpoint_fp8_serialized=True,
+                activation_scheme="dynamic",
+                weight_block_size=[128, 128],
+            )
+        )
+    elif moe_type == "nvfp4":
         quant_config = ModelOptFp4Config(is_checkpoint_nvfp4_serialized=True, group_size=16)
     elif is_fp4_experts:
         quant_config = Fp8Config(
@@ -1463,14 +1029,16 @@ def _benchmark_framework_quantized_moe(
             weight_block_size=[128, 128],
             is_fp4_experts=True,
         )
+    elif moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}:
+        quant_config = Mxfp4Config(is_checkpoint_mxfp4_serialized=True)
     else:
         raise ValueError(f"Unsupported framework quantized MoE case: {moe_type=} {model_name=}")
 
     previous_backend = _moe_utils.MOE_RUNNER_BACKEND
     server_args = _server_args_module._global_server_args
     previous_precision = server_args.flashinfer_mxfp4_moe_precision
-    _moe_utils.MOE_RUNNER_BACKEND = MoeRunnerBackend(backend)
-    if backend == "flashinfer_mxfp4":
+    _moe_utils.MOE_RUNNER_BACKEND = MoeRunnerBackend(moe_backend)
+    if moe_backend == "flashinfer_mxfp4":
         server_args.flashinfer_mxfp4_moe_precision = _mxfp4_activation_precision(moe_type)
 
     moe_layer = None
@@ -1486,52 +1054,59 @@ def _benchmark_framework_quantized_moe(
                 reduce_results=False,
                 quant_config=quant_config,
                 prefix="aic_sglang_moe",
-                activation=routing.activation,
-                is_gated=routing.is_gated,
+                activation=activation,
+                is_gated=is_gated,
+                with_bias=has_bias,
+                gemm1_alpha=gemm1_alpha,
+                gemm1_clamp_limit=gemm1_clamp_limit,
                 swiglu_limit=swiglu_limit,
-                routing_method_type=routing.routing_method,
-                routed_scaling_factor=routing.routed_scale,
+                routing_method_type=routing_method,
+                routed_scaling_factor=routed_scaling_factor,
+                apply_router_weight_on_input=apply_router_weight_on_input,
             ).to(device)
             with torch.no_grad():
                 for name, parameter in moe_layer.named_parameters():
                     parameter.fill_(1) if "scale" in name or "alpha" in name else parameter.zero_()
             moe_layer.quant_method.process_weights_after_loading(moe_layer)
 
-            # Collector logits encode the persisted balanced/power-law expert
-            # load. Production grouped routing can intentionally discard some
-            # of those selected groups, changing the measured rank-local load;
-            # keep grouping disabled here so the label remains true. A zero
-            # correction bias likewise exercises the noaux TopK API without
-            # changing the synthetic rankings.
             correction_bias = (
-                torch.zeros(num_experts, dtype=torch.float32, device=device) if routing.has_correction_bias else None
+                torch.zeros(num_experts, dtype=torch.float32, device=device) if has_correction_bias else None
             )
             topk_layer = TopK(
                 top_k=topk,
                 layer_id=0,
-                use_grouped_topk=False,
-                num_expert_group=None,
-                topk_group=None,
-                renormalize=routing.renormalize,
-                scoring_func=routing.scoring_func,
+                use_grouped_topk=num_expert_group is not None and topk_group is not None,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+                renormalize=renormalize,
+                scoring_func=scoring_func,
                 correction_bias=correction_bias,
-                output_format=TopKOutputFormat.STANDARD if routing.routing_method is None else None,
-                routed_scaling_factor=routing.routed_scale,
+                output_format=(
+                    TopKOutputFormat.STANDARD
+                    if routing_method_type is None and moe_backend not in {"flashinfer_mxfp4", "triton_kernel"}
+                    else None
+                ),
+                routed_scaling_factor=routed_scaling_factor,
                 apply_routed_scaling_factor_on_output=(
-                    routing.routed_scale is not None and moe_layer.should_fuse_routed_scaling_factor_in_topk
+                    routed_scaling_factor is not None and moe_layer.should_fuse_routed_scaling_factor_in_topk
                 ),
                 is_fp4_experts=is_fp4_experts,
             )
             hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=device)
             if distributed == "balanced":
-                logits = [balanced_logits(num_tokens, num_experts, topk).to(device) for _ in range(5)]
+                logits = [
+                    balanced_logits(num_tokens, num_experts, topk).to(device=device, dtype=torch.float32)
+                    for _ in range(5)
+                ]
             elif distributed == "power_law":
                 logits = [
-                    power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(device)
+                    power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(
+                        device=device, dtype=torch.float32
+                    )
                     for _ in range(5)
                 ]
             else:
-                logits = [torch.randn(num_tokens, num_experts, device=device) for _ in range(5)]
+                logits = [torch.randn(num_tokens, num_experts, dtype=torch.float32, device=device) for _ in range(5)]
 
             def kernel_func():
                 for router_logits in logits:
@@ -1546,7 +1121,7 @@ def _benchmark_framework_quantized_moe(
                 allow_graph_fail=True,
             ) as results:
                 pass
-            return results["latency_ms"] / len(logits), results["power_stats"], backend
+            return results["latency_ms"] / len(logits), results["power_stats"], moe_backend
     finally:
         if moe_layer is not None:
             for parameter in moe_layer.parameters():
@@ -1570,75 +1145,32 @@ def benchmark(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
-    use_nvfp4: bool = False,
-    use_trtllm_bf16_fp4: bool = False,
-    use_int4_w4a16: bool = False,
-    use_mxfp4_w4a16: bool = False,
-    use_mxfp4_w4a8: bool = False,
     block_shape: list[int] | None = None,
     distributed: str = "power_law",
     power_law_alpha: float = 0,
     workloads: list["Rank0Workload"] | None = None,
     swiglu_limit: float | None = None,
-    moe_tp_size: int = 1,
-    moe_ep_size: int = 1,
-    model_name: str = "",
-) -> tuple[dict[str, int], float]:
+    activation: str = "silu",
+    is_gated: bool = True,
+    gemm1_alpha: float | None = None,
+    gemm1_clamp_limit: float | None = None,
+) -> tuple[float, dict]:
     torch.cuda.manual_seed_all(0)
     benchmark_num_tokens = (
         max(workload["hidden_states"].shape[0] for workload in workloads) if workloads is not None else num_tokens
     )
-    use_mxfp4_moe = use_mxfp4_w4a16 or use_mxfp4_w4a8
-
-    if use_nvfp4 or use_mxfp4_moe or (use_int4_w4a16 and _HAS_MARLIN_MOE):
-        # NVFP4 uses FlashInfer CuteDSL; MXFP4 uses SGLang's high-level
-        # FlashInfer runner; INT4_W4A16 uses Marlin. None need Triton tuning.
-        # MXFP4 reads the patched helpers during forward, so keep them scoped
-        # through setup, warmup, and timing rather than only layer construction.
-        parallel_context = (
-            _patch_mxfp4_single_process_parallel(moe_tp_size=moe_tp_size, moe_ep_size=moe_ep_size)
-            if use_mxfp4_moe and _HAS_SGLANG_MXFP4
-            else nullcontext()
-        )
-        with parallel_context:
-            kernel_time, power_stats = benchmark_config(
-                None,
-                benchmark_num_tokens,
-                num_experts,
-                shard_intermediate_size,
-                hidden_size,
-                topk,
-                dtype,
-                use_fp8_w8a8,
-                use_int8_w8a8,
-                use_int8_w8a16,
-                use_nvfp4,
-                use_trtllm_bf16_fp4,
-                use_int4_w4a16,
-                use_mxfp4_w4a16,
-                use_mxfp4_w4a8,
-                block_shape,
-                distributed=distributed,
-                power_law_alpha=power_law_alpha,
-                workloads=workloads,
-                swiglu_limit=swiglu_limit,
-                moe_tp_size=moe_tp_size,
-                moe_ep_size=moe_ep_size,
-                model_name=model_name,
-            )
-        return kernel_time, power_stats
-
     dtype_str = get_config_dtype_str(
         dtype,
         use_int8_w8a16=use_int8_w8a16,
-        use_int4_w4a16=use_int4_w4a16,
+        use_int4_w4a16=False,
         use_fp8_w8a8=use_fp8_w8a8,
     )
     # NOTE(woosuk): The current naming convention uses w2.shape[2], which
     # is the intermediate size after silu_and_mul.
     block_n = block_shape[0] if block_shape else 0
     block_k = block_shape[1] if block_shape else 0
-    op_config = get_moe_configs(num_experts, shard_intermediate_size // 2, dtype_str, block_n, block_k)
+    expert_intermediate_size = shard_intermediate_size // (2 if is_gated else 1)
+    op_config = get_moe_configs(num_experts, expert_intermediate_size, dtype_str, block_n, block_k)
     if op_config is None:
         config = get_default_config(
             benchmark_num_tokens,
@@ -1663,19 +1195,15 @@ def benchmark(
         use_fp8_w8a8,
         use_int8_w8a8,
         use_int8_w8a16,
-        use_nvfp4,
-        False,
-        use_int4_w4a16,
-        use_mxfp4_w4a16,
-        use_mxfp4_w4a8,
         block_shape,
         distributed=distributed,
         power_law_alpha=power_law_alpha,
         workloads=workloads,
         swiglu_limit=swiglu_limit,
-        moe_tp_size=moe_tp_size,
-        moe_ep_size=moe_ep_size,
-        model_name=model_name,
+        activation=activation,
+        is_gated=is_gated,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
     return kernel_time, power_stats
 
@@ -1756,6 +1284,21 @@ def run_moe_torch(
     distributed="power_law",
     power_law_alpha=0,
     swiglu_limit=None,
+    moe_backend="triton",
+    activation="silu",
+    is_gated=True,
+    has_bias=False,
+    gemm1_alpha=None,
+    gemm1_clamp_limit=None,
+    scoring_func="softmax",
+    routing_method_type=None,
+    routed_scaling_factor=None,
+    renormalize=True,
+    has_correction_bias=False,
+    num_expert_group=None,
+    topk_group=None,
+    apply_router_weight_on_input=False,
+    is_fp4_experts=False,
     *,
     perf_filename,
     device="cuda:0",
@@ -1771,12 +1314,104 @@ def run_moe_torch(
         "int4_wo",
         "w4a16_mxfp4",
     ], "only support moe type = fp8_block, bfloat16, nvfp4, int4_wo, w4a16_mxfp4, or w4a8_mxfp4_mxfp8"
+    if moe_backend not in {
+        "triton",
+        "triton_kernel",
+        "marlin",
+        "flashinfer_trtllm",
+        "flashinfer_cutlass",
+        "flashinfer_mxfp4",
+    }:
+        raise ValueError(f"Unsupported SGLang MoE backend: {moe_backend}")
+    if is_fp4_experts:
+        expected_backend = {
+            "w4a16_mxfp4": "flashinfer_mxfp4",
+            "w4a8_mxfp4_mxfp8": "flashinfer_mxfp4",
+        }.get(moe_type)
+        if moe_backend != expected_backend:
+            raise ValueError(
+                f"DeepSeek-V4 FP4 moe_type={moe_type!r} requires backend={expected_backend!r}, got {moe_backend!r}"
+            )
+        if moe_ep_size != 1:
+            raise ValueError(f"DeepSeek-V4 FP4 standalone MoE requires EP=1, got moe_ep_size={moe_ep_size}")
     assert inter_size % moe_tp_size == 0, "inter_size % moe_tp_size must be 0"
     assert num_experts % moe_ep_size == 0, "num_experts must be divisible by moe_ep_size"
 
-    if moe_type == "nvfp4" or (moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"} and "DeepSeek-V4" in model_name):
+    num_local_experts = num_experts // moe_ep_size
+    local_inter_size = inter_size // moe_tp_size
+    sm_version = get_sm_version()
+    if (
+        moe_type == "bfloat16"
+        and moe_backend == "flashinfer_cutlass"
+        and (hidden_size % 8 != 0 or local_inter_size % 8 != 0)
+    ):
+        raise ValueError(
+            "SGLang FlashInfer CUTLASS BF16 MoE requires hidden_size and local_inter_size "
+            f"to be divisible by 8, got hidden_size={hidden_size}, local_inter_size={local_inter_size}"
+        )
+    activation_vector_size = 16 if sm_version >= 100 else 8
+    if moe_backend == "triton" and is_gated and activation == "gelu" and local_inter_size % activation_vector_size != 0:
+        raise ValueError(
+            "SGLang Triton gated BF16 GELU requires local_inter_size "
+            f"to be divisible by {activation_vector_size}, got local_inter_size={local_inter_size}"
+        )
+    if (
+        moe_type == "w4a16_mxfp4"
+        and is_fp4_experts
+        and moe_backend == "flashinfer_mxfp4"
+        and sm_version == 90
+        and (hidden_size % 128 != 0 or local_inter_size % 128 != 0)
+    ):
+        raise ValueError(
+            "SGLang SM90 DeepSeek-V4 W4A16 FP4 experts require hidden_size and local_inter_size "
+            f"to be divisible by 128, got hidden_size={hidden_size}, local_inter_size={local_inter_size}"
+        )
+    marlin_inter_alignment = 64 if is_gated else 128
+    if (
+        moe_type == "nvfp4"
+        and moe_backend == "marlin"
+        and (hidden_size % 128 != 0 or local_inter_size % marlin_inter_alignment != 0)
+    ):
+        raise ValueError(
+            "SGLang NVFP4 Marlin requires hidden_size to be divisible by 128 "
+            f"and local_inter_size to be divisible by {marlin_inter_alignment}, "
+            f"got hidden_size={hidden_size}, local_inter_size={local_inter_size}"
+        )
+
+    use_int4_w4a16 = moe_type == "int4_wo"
+    if use_int4_w4a16 and moe_backend != "marlin":
+        raise ValueError(f"SGLang SM90 int4_wo requires the Marlin backend, got {moe_backend}")
+    int4_group_size = 128
+    if use_int4_w4a16:
+        int4_config = get_moe_quantization_module_config("sglang", moe_type, model_name=model_name)
+        int4_group_size = int(int4_config.get("group_size", 128))
+        block_shape = [0, int4_group_size]
+    elif moe_type == "fp8_block":
+        if moe_backend == "triton" and (hidden_size % 128 != 0 or local_inter_size % 128 != 0):
+            raise ValueError(
+                "SGLang Triton fp8_block requires hidden_size and local_inter_size "
+                f"to be divisible by 128, got hidden_size={hidden_size}, local_inter_size={local_inter_size}"
+            )
+        block_shape = [128, 128]
+    else:
+        block_shape = None
+
+    use_framework_layer = (
+        moe_type in {"int4_wo", "nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
+        or scoring_func != "softmax"
+        or routing_method_type is not None
+        or routed_scaling_factor is not None
+        or not renormalize
+        or has_correction_bias
+        or num_expert_group is not None
+        or topk_group is not None
+        or apply_router_weight_on_input
+        or (moe_backend != "triton" and not use_int4_w4a16)
+    )
+    if use_framework_layer:
         latency, power_stats, moe_backend = _benchmark_framework_quantized_moe(
             moe_type=moe_type,
+            moe_backend=moe_backend,
             num_tokens=num_tokens,
             hidden_size=hidden_size,
             inter_size=inter_size,
@@ -1787,130 +1422,88 @@ def run_moe_torch(
             model_name=model_name,
             distributed=distributed,
             power_law_alpha=power_law_alpha,
+            activation=activation,
+            is_gated=is_gated,
+            has_bias=has_bias,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_clamp_limit=gemm1_clamp_limit,
             swiglu_limit=swiglu_limit,
+            scoring_func=scoring_func,
+            routing_method_type=routing_method_type,
+            routed_scaling_factor=routed_scaling_factor,
+            renormalize=renormalize,
+            has_correction_bias=has_correction_bias,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            is_fp4_experts=is_fp4_experts,
+            int4_group_size=int4_group_size,
             device=device,
         )
-        if moe_backend == "flashinfer_mxfp4":
-            if moe_type == "w4a16_mxfp4":
-                kernel_source = "sglang_flashinfer_cutlass_moe"
-            elif model_name == "deepseek-ai/DeepSeek-V4-Pro":
-                kernel_source = "sglang_mxfp4_flashinfer_trtllm_moe"
-            else:
-                kernel_source = "sglang_flashinfer_mxfp4_moe"
+    else:
+        rank0_workloads: list[Rank0Workload] | None = None
+        if moe_ep_size > 1 and distributed in ("power_law", "balanced"):
+            rank0_workloads = build_rank0_workloads(
+                num_workloads=5,
+                num_tokens=num_tokens,
+                hidden_size=hidden_size,
+                topk=topk,
+                num_experts=num_experts,
+                moe_ep_size=moe_ep_size,
+                distributed=distributed,
+                power_law_alpha=power_law_alpha if distributed == "power_law" else None,
+                dtype=torch.bfloat16,
+                device=torch.device(device),
+            )
+        try:
+            latency, power_stats = benchmark(
+                num_tokens,
+                num_local_experts,
+                (2 if is_gated else 1) * local_inter_size,
+                hidden_size,
+                topk,
+                torch.bfloat16,
+                moe_type == "fp8_block",
+                False,
+                False,
+                block_shape=block_shape,
+                distributed=distributed,
+                power_law_alpha=power_law_alpha,
+                workloads=rank0_workloads,
+                swiglu_limit=swiglu_limit,
+                activation=activation,
+                is_gated=is_gated,
+                gemm1_alpha=gemm1_alpha,
+                gemm1_clamp_limit=gemm1_clamp_limit,
+            )
+        except Exception:
+            _fmoe_kernels_mod._B_DESC_CACHE.clear()
+            gc.collect()
+            torch.cuda.empty_cache()
+            raise
+
+    if not use_framework_layer:
+        _fmoe_kernels_mod._B_DESC_CACHE.clear()
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    restart_worker = torch.cuda.memory_allocated(device) > torch.cuda.get_device_properties(device).total_memory // 4
+    if moe_backend == "flashinfer_mxfp4":
+        if moe_type == "w4a16_mxfp4" and is_fp4_experts:
+            kernel_source = "sglang_flashinfer_cutlass_moe"
+        elif model_name == "deepseek-ai/DeepSeek-V4-Pro" and moe_type == "w4a8_mxfp4_mxfp8":
+            kernel_source = "sglang_mxfp4_flashinfer_trtllm_moe"
         else:
-            kernel_source = {
-                "marlin": "sglang_marlin_moe",
-                "flashinfer_trtllm": "sglang_flashinfer_trtllm_moe",
-                "flashinfer_cutlass": "sglang_flashinfer_cutlass_moe",
-            }[moe_backend]
-        log_perf(
-            item_list=[
-                {
-                    "moe_dtype": moe_type,
-                    "num_tokens": num_tokens,
-                    "hidden_size": hidden_size,
-                    "inter_size": inter_size,
-                    "topk": topk,
-                    "num_experts": num_experts,
-                    "moe_tp_size": moe_tp_size,
-                    "moe_ep_size": moe_ep_size,
-                    "distribution": "power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed,
-                    "latency": latency,
-                }
-            ],
-            framework="SGLang",
-            version=pkg_resources.get_distribution("sglang").version,
-            device_name=torch.cuda.get_device_name(device),
-            op_name="moe",
-            kernel_source=kernel_source,
-            perf_filename=perf_filename,
-            power_stats=power_stats,
-        )
-        return None
-
-    num_local_experts = num_experts // moe_ep_size
-    use_int4_w4a16 = moe_type == "int4_wo"
-    # GPT-OSS can use BF16 or MXFP8 activations with MXFP4 weights. Both labels
-    # run through SGLang's version-matched high-level FlashInfer backend.
-    use_mxfp4_w4a16 = moe_type == "w4a16_mxfp4"
-    use_mxfp4_w4a8 = moe_type == "w4a8_mxfp4_mxfp8"
-    use_mxfp4_moe = use_mxfp4_w4a16 or use_mxfp4_w4a8
-    use_nvfp4_kernel = moe_type == "nvfp4"
-    use_trtllm_bf16_fp4 = moe_type == "nvfp4" and moe_ep_size == 1
-    if use_int4_w4a16:
-        int4_config = get_moe_quantization_module_config("sglang", moe_type, model_name=model_name)
-        block_shape = [0, int(int4_config.get("group_size", 128))]
-    elif moe_type == "fp8_block" and (inter_size // moe_tp_size) % 128 == 0 and hidden_size % 128 == 0:
-        block_shape = [128, 128]
+            kernel_source = "sglang_flashinfer_mxfp4_moe"
     else:
-        block_shape = None
-
-    rank0_workloads: list[Rank0Workload] | None = None
-    if moe_ep_size > 1 and distributed in ("power_law", "balanced") and not use_mxfp4_moe:
-        rank0_workloads = build_rank0_workloads(
-            num_workloads=5,
-            num_tokens=num_tokens,
-            hidden_size=hidden_size,
-            topk=topk,
-            num_experts=num_experts,
-            moe_ep_size=moe_ep_size,
-            distributed=distributed,
-            power_law_alpha=power_law_alpha if distributed == "power_law" else None,
-            dtype=torch.bfloat16,
-            device=torch.device(device),
-        )
-
-    if rank0_workloads is not None:
-        latency, power_stats = benchmark(
-            num_tokens,
-            num_local_experts,
-            2 * inter_size // moe_tp_size,
-            hidden_size,
-            topk,
-            torch.bfloat16,
-            moe_type == "fp8_block",
-            False,
-            False,
-            use_nvfp4=use_nvfp4_kernel,
-            use_trtllm_bf16_fp4=use_trtllm_bf16_fp4,
-            use_int4_w4a16=use_int4_w4a16,
-            use_mxfp4_w4a16=False,
-            use_mxfp4_w4a8=False,
-            block_shape=block_shape,
-            distributed=distributed,
-            power_law_alpha=power_law_alpha,
-            workloads=rank0_workloads,
-            swiglu_limit=swiglu_limit,
-            moe_tp_size=moe_tp_size,
-            moe_ep_size=moe_ep_size,
-            model_name=model_name,
-        )
-    else:
-        latency, power_stats = benchmark(
-            num_tokens,
-            num_experts if use_mxfp4_moe else num_local_experts,
-            2 * inter_size // moe_tp_size,
-            hidden_size,
-            topk,
-            torch.bfloat16,
-            moe_type == "fp8_block",
-            False,
-            False,
-            use_nvfp4=use_nvfp4_kernel,
-            use_trtllm_bf16_fp4=use_trtllm_bf16_fp4,
-            use_int4_w4a16=use_int4_w4a16,
-            use_mxfp4_w4a16=use_mxfp4_w4a16,
-            use_mxfp4_w4a8=use_mxfp4_w4a8,
-            block_shape=block_shape,
-            distributed=distributed,
-            power_law_alpha=power_law_alpha,
-            swiglu_limit=swiglu_limit,
-            moe_tp_size=moe_tp_size,
-            moe_ep_size=moe_ep_size,
-            model_name=model_name,
-        )
-
-    log_perf(
+        kernel_source = {
+            "triton": "sglang_fused_moe_triton",
+            "triton_kernel": "sglang_triton_kernel_moe",
+            "marlin": "sglang_marlin_moe",
+            "flashinfer_trtllm": "sglang_flashinfer_trtllm_moe",
+            "flashinfer_cutlass": "sglang_flashinfer_cutlass_moe",
+        }[moe_backend]
+    persisted = log_perf(
         item_list=[
             {
                 "moe_dtype": moe_type,
@@ -1929,20 +1522,14 @@ def run_moe_torch(
         version=pkg_resources.get_distribution("sglang").version,
         device_name=torch.cuda.get_device_name(device),
         op_name="moe",
-        kernel_source=(
-            "sglang_flashinfer_trtllm_bf16_fp4_moe"
-            if use_trtllm_bf16_fp4
-            else "sglang_flashinfer_cutedsl_moe"
-            if use_nvfp4_kernel
-            else "sglang_marlin_moe"
-            if moe_type == "int4_wo" and _HAS_MARLIN_MOE
-            else "sglang_flashinfer_mxfp4_moe"
-            if moe_type in {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
-            else "sglang_fused_moe_triton"
-        ),
+        kernel_source=kernel_source,
         perf_filename=perf_filename,
         power_stats=power_stats,
     )
+    if not persisted:
+        raise RuntimeError("Failed to persist SGLang MoE performance row")
+    if restart_worker:
+        return EXIT_CODE_RESTART
 
 
 if __name__ == "__main__":

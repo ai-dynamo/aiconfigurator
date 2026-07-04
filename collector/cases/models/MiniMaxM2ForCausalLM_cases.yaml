@@ -37,6 +37,11 @@ model_case_values:
       inter_size: 1536
       topk: 8
       num_experts: 256
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_backends:
+        fp8_block: {default: triton}
       wideep: true
       framework_quantization:
         sglang:
@@ -52,6 +57,9 @@ model_case_values:
       inter_size: 1536
       topk: 8
       num_experts: 256
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
       wideep: true
       framework_quantization:
         sglang:

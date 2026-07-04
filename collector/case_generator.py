@@ -792,6 +792,21 @@ class MoeCommonTestCase:
     token_expert_distribution: str
     power_law_alpha: Optional[float]
     architecture: str = ""  # config-derived (cases-YAML architecture); for model-family checks
+    sglang_moe_backends: dict[str, object] = dataclasses.field(default_factory=dict)
+    sglang_moe_activation: str = "silu"
+    sglang_moe_is_gated: bool = True
+    sglang_moe_has_bias: bool = False
+    sglang_moe_gemm1_alpha: Optional[float] = None
+    sglang_moe_gemm1_clamp_limit: Optional[float] = None
+    sglang_moe_swiglu_limit: Optional[float] = None
+    sglang_moe_scoring_func: str = "softmax"
+    sglang_moe_routing_method_type: Optional[str] = None
+    sglang_moe_routed_scaling_factor: Optional[float] = None
+    sglang_moe_renormalize: bool = True
+    sglang_moe_has_correction_bias: bool = False
+    sglang_moe_num_expert_group: Optional[int] = None
+    sglang_moe_topk_group: Optional[int] = None
+    sglang_moe_apply_router_weight_on_input: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -801,6 +816,7 @@ class MoeQuantizationSpec:
     name: str
     min_sm: Optional[int]
     min_sm_exclusive: Optional[int]
+    max_sm_exclusive: Optional[int]
     requires_runtime_feature: Optional[str]
     requires_model_quantization_config: bool
     allowed_model_paths: tuple[str, ...]
@@ -850,6 +866,9 @@ def get_moe_quantization_specs(backend: str) -> list[MoeQuantizationSpec]:
                 min_sm_exclusive=(
                     None if raw_mode.get("min_sm_exclusive") is None else int(raw_mode["min_sm_exclusive"])
                 ),
+                max_sm_exclusive=(
+                    None if raw_mode.get("max_sm_exclusive") is None else int(raw_mode["max_sm_exclusive"])
+                ),
                 requires_runtime_feature=(
                     None
                     if raw_mode.get("requires_runtime_feature") is None
@@ -884,10 +903,38 @@ def get_moe_quantization_modes(
             continue
         if spec.min_sm_exclusive is not None and sm_version <= spec.min_sm_exclusive:
             continue
+        if spec.max_sm_exclusive is not None and sm_version >= spec.max_sm_exclusive:
+            continue
         if spec.requires_runtime_feature and not features.get(spec.requires_runtime_feature, False):
             continue
         modes.append(spec.name)
     return modes
+
+
+def get_sglang_moe_backend(test_case: MoeCommonTestCase, moe_type: str, sm_version: int) -> str:
+    """Resolve SGLang's target-version MoE backend from YAML metadata."""
+
+    base_backends = _moe_backend_values("sglang").get("backends", {})
+    if not isinstance(base_backends, dict):
+        raise TypeError("common_case_values.moe_sglang.backends must be a mapping")
+
+    model_backends = test_case.sglang_moe_backends
+    for backend_map in (
+        model_backends.get(moe_type),
+        model_backends.get("default"),
+        base_backends.get(moe_type),
+        base_backends.get("default"),
+    ):
+        if backend_map is None:
+            continue
+        if isinstance(backend_map, str):
+            return backend_map
+        if not isinstance(backend_map, dict):
+            raise TypeError("SGLang MoE backend entries must be strings or mappings")
+        backend = backend_map.get(sm_version, backend_map.get(str(sm_version), backend_map.get("default")))
+        if backend is not None:
+            return str(backend)
+    raise ValueError(f"No SGLang MoE backend for moe_type={moe_type!r}, sm_version={sm_version}")
 
 
 def _model_moe_backend_quantization(model_name: str, backend: str) -> dict[str, object]:
@@ -1223,6 +1270,51 @@ def get_common_moe_test_cases():
                 token_expert_distribution=token_distribution,
                 power_law_alpha=power_law_alpha,
                 architecture=str(model_config.get("architecture") or ""),
+                sglang_moe_backends=dict(model_config.get("sglang_moe_backends") or {}),
+                sglang_moe_activation=str(model_config.get("sglang_moe_activation", "silu")),
+                sglang_moe_is_gated=bool(model_config.get("sglang_moe_is_gated", True)),
+                sglang_moe_has_bias=bool(model_config.get("sglang_moe_has_bias", False)),
+                sglang_moe_gemm1_alpha=(
+                    None
+                    if model_config.get("sglang_moe_gemm1_alpha") is None
+                    else float(model_config["sglang_moe_gemm1_alpha"])
+                ),
+                sglang_moe_gemm1_clamp_limit=(
+                    None
+                    if model_config.get("sglang_moe_gemm1_clamp_limit") is None
+                    else float(model_config["sglang_moe_gemm1_clamp_limit"])
+                ),
+                sglang_moe_swiglu_limit=(
+                    None
+                    if model_config.get("sglang_moe_swiglu_limit") is None
+                    else float(model_config["sglang_moe_swiglu_limit"])
+                ),
+                sglang_moe_scoring_func=str(model_config.get("sglang_moe_scoring_func", "softmax")),
+                sglang_moe_routing_method_type=(
+                    None
+                    if model_config.get("sglang_moe_routing_method_type") is None
+                    else str(model_config["sglang_moe_routing_method_type"])
+                ),
+                sglang_moe_routed_scaling_factor=(
+                    None
+                    if model_config.get("sglang_moe_routed_scaling_factor") is None
+                    else float(model_config["sglang_moe_routed_scaling_factor"])
+                ),
+                sglang_moe_renormalize=bool(model_config.get("sglang_moe_renormalize", True)),
+                sglang_moe_has_correction_bias=bool(model_config.get("sglang_moe_has_correction_bias", False)),
+                sglang_moe_num_expert_group=(
+                    None
+                    if model_config.get("sglang_moe_num_expert_group") is None
+                    else int(model_config["sglang_moe_num_expert_group"])
+                ),
+                sglang_moe_topk_group=(
+                    None
+                    if model_config.get("sglang_moe_topk_group") is None
+                    else int(model_config["sglang_moe_topk_group"])
+                ),
+                sglang_moe_apply_router_weight_on_input=bool(
+                    model_config.get("sglang_moe_apply_router_weight_on_input", False)
+                ),
             )
         )
 

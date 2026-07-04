@@ -346,9 +346,16 @@ def test_kimi_moe_quantization_is_artifact_specific():
     for backend in ("sglang", "trtllm", "vllm"):
         available_modes = {spec.name for spec in get_moe_quantization_specs(backend)}
         for model_path, expected in expected_by_artifact.items():
-            expected = set() if backend == "sglang" and model_path == "moonshotai/Kimi-K2.5" else expected
             allowed = {mode for mode in available_modes if moe_model_allows_quantization(backend, model_path, mode)}
             assert allowed == expected, (backend, model_path)
+
+    from collector.case_generator import get_moe_quantization_modes, get_moe_quantization_module_config
+
+    assert get_moe_quantization_module_config("sglang", "int4_wo", model_name="moonshotai/Kimi-K2.5") == {
+        "group_size": 32
+    }
+    assert "int4_wo" in get_moe_quantization_modes("sglang", sm_version=90)
+    assert "int4_wo" not in get_moe_quantization_modes("sglang", sm_version=100)
 
 
 def test_deepseek_minimax_and_nemotron_moe_quantization_is_artifact_specific():

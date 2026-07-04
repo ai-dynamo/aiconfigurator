@@ -35,11 +35,23 @@ model_case_values:
       inter_size: 8192
       topk: 1
       num_experts: 16
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: Llama4
+      sglang_moe_renormalize: false
+      sglang_moe_apply_router_weight_on_input: true
+      sglang_moe_backends:
+        fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
     - model_path: meta-llama/Llama-4-Maverick-17B-128E-Instruct
       hidden_size: 5120
       inter_size: 8192
       topk: 1
       num_experts: 128
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: Llama4
+      sglang_moe_renormalize: false
+      sglang_moe_apply_router_weight_on_input: true
+      sglang_moe_backends:
+        fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
 
 all_frameworks_op_cases:
   moe:

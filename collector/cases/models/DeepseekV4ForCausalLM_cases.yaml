@@ -24,6 +24,14 @@ model_case_values:
       inter_size: 2048
       topk: 6
       num_experts: 256
+      sglang_moe_swiglu_limit: 10.0
+      sglang_moe_scoring_func: sqrtsoftplus
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 1.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_backends:
+        w4a8_mxfp4_mxfp8: {100: flashinfer_mxfp4, 103: flashinfer_mxfp4}
       wideep: true
       framework_quantization:
         sglang:
@@ -41,6 +49,12 @@ model_case_values:
       inter_size: 2048
       topk: 6
       num_experts: 256
+      sglang_moe_swiglu_limit: 10.0
+      sglang_moe_scoring_func: sqrtsoftplus
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 1.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
       wideep: true
       framework_quantization:
         sglang:
@@ -57,6 +71,15 @@ model_case_values:
       inter_size: 3072
       topk: 6
       num_experts: 384
+      sglang_moe_swiglu_limit: 10.0
+      sglang_moe_scoring_func: sqrtsoftplus
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_backends:
+        w4a16_mxfp4: {90: flashinfer_mxfp4}
+        w4a8_mxfp4_mxfp8: {100: flashinfer_mxfp4, 103: flashinfer_mxfp4}
       wideep: true
       framework_quantization:
         sglang:
@@ -73,6 +96,12 @@ model_case_values:
       inter_size: 3072
       topk: 6
       num_experts: 384
+      sglang_moe_swiglu_limit: 10.0
+      sglang_moe_scoring_func: sqrtsoftplus
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
       wideep: true
       framework_quantization:
         sglang:

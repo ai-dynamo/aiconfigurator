@@ -45,16 +45,28 @@ model_case_values:
       inter_size: 512
       topk: 8
       num_experts: 256
+      sglang_moe_routing_method_type: RenormalizeNaive
+      sglang_moe_backends:
+        bfloat16: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+        fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
     - model_path: Qwen/Qwen3.5-122B-A10B
       hidden_size: 3072
       inter_size: 1024
       topk: 8
       num_experts: 256
+      sglang_moe_routing_method_type: RenormalizeNaive
+      sglang_moe_backends:
+        bfloat16: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+        fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
     - model_path: Qwen/Qwen3.5-397B-A17B
       hidden_size: 4096
       inter_size: 1024
       topk: 10
       num_experts: 512
+      sglang_moe_routing_method_type: RenormalizeNaive
+      sglang_moe_backends:
+        bfloat16: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+        fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
   gdn:
     - model_path: Qwen/Qwen3.5-35B-A3B
       d_model: 2048

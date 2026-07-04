@@ -28,6 +28,10 @@ model_case_values:
       inter_size: 2880
       topk: 4
       num_experts: 128
+      sglang_moe_activation: silu
+      sglang_moe_has_bias: true
+      sglang_moe_gemm1_alpha: 1.702
+      sglang_moe_gemm1_clamp_limit: 7.0
       framework_quantization:
         sglang:
           allowed_modes:
@@ -56,6 +60,10 @@ model_case_values:
       inter_size: 2880
       topk: 4
       num_experts: 32
+      sglang_moe_activation: silu
+      sglang_moe_has_bias: true
+      sglang_moe_gemm1_alpha: 1.702
+      sglang_moe_gemm1_clamp_limit: 7.0
       framework_quantization:
         sglang:
           allowed_modes:

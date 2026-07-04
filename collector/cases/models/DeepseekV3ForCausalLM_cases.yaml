@@ -26,6 +26,16 @@ model_case_values:
       inter_size: 2048
       topk: 8
       num_experts: 256
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_num_expert_group: 8
+      sglang_moe_topk_group: 4
+      sglang_moe_backends:
+        bfloat16: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+        fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
       wideep: true
       framework_quantization:
         sglang:
@@ -39,6 +49,13 @@ model_case_values:
       inter_size: 2048
       topk: 8
       num_experts: 256
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_num_expert_group: 8
+      sglang_moe_topk_group: 4
       wideep: true
       framework_quantization:
         sglang:

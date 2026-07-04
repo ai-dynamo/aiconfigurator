@@ -75,8 +75,23 @@ common_case_values:
     - inter_size % tensor_parallel_size == 0
     - tensor_parallel_size < max_tp_exclusive when max_tp_exclusive is set
   moe_sglang:
+    backends:
+      default: {default: triton}
+      bfloat16: {default: triton}
+      fp8_block: {default: triton}
+      int4_wo: {90: marlin}
+      nvfp4: {90: marlin, 100: flashinfer_trtllm, 103: flashinfer_trtllm, 120: flashinfer_cutlass}
+      w4a16_mxfp4: {90: flashinfer_mxfp4, 100: flashinfer_mxfp4, 103: flashinfer_mxfp4}
+      w4a8_mxfp4_mxfp8: {100: flashinfer_mxfp4, 103: flashinfer_mxfp4}
     quantization_modes:
     - name: bfloat16
+    - name: int4_wo
+      min_sm: 90
+      max_sm_exclusive: 100
+      allowed_model_paths:
+      - moonshotai/Kimi-K2.5
+      module_config:
+        group_size: 32
     - name: fp8_block
       min_sm: 90
     - name: nvfp4

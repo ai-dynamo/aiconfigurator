@@ -36,6 +36,7 @@ model_case_values:
       inter_size: 704
       topk: 8
       num_experts: 128
+      sglang_moe_activation: gelu
 
 all_frameworks_op_cases:
   moe:
