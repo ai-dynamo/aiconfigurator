@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import torch
+from vllm.model_executor.kernels.mhc.tilelang import mhc_post_tilelang, mhc_pre_tilelang
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from collector.case_generator import get_common_mhc_test_cases
@@ -98,16 +99,18 @@ def _make_mhc_tensors(num_tokens: int, hidden_size: int, hc_mult: int, *, device
 
 
 def _mhc_pre(residual, fn, base, scale):
-    post, comb, layer_input = torch.ops.vllm.mhc_pre(
-        residual=residual,
-        fn=fn,
-        hc_scale=scale,
-        hc_base=base,
-        rms_eps=MHC_EPS,
-        hc_pre_eps=MHC_EPS,
-        hc_sinkhorn_eps=MHC_EPS,
-        hc_post_mult_value=2.0,
-        sinkhorn_repeat=MHC_SINKHORN_ITERS,
+    # vLLM 0.24's NVIDIA DeepSeek-V4 model calls this TileLang wrapper
+    # directly; it retains vLLM's internal DeepGEMM prenorm dispatch.
+    post, comb, layer_input = mhc_pre_tilelang(
+        residual,
+        fn,
+        scale,
+        base,
+        MHC_EPS,
+        MHC_EPS,
+        MHC_EPS,
+        2.0,
+        MHC_SINKHORN_ITERS,
     )
     return layer_input, post, comb
 
@@ -124,8 +127,6 @@ def run_mhc_module(
     num_warmup: int = 5,
     num_iterations: int = 10,
 ) -> list[dict]:
-    import vllm.model_executor.layers.mhc  # noqa: F401
-
     _init_cuda(device)
     hidden_size = int(hidden_size)
     hc_mult = int(hc_mult)
@@ -156,10 +157,7 @@ def run_mhc_module(
 
                 def kernel_func(post_inputs=post_inputs):
                     with torch.no_grad():
-                        return [
-                            torch.ops.vllm.mhc_post(x, residual, post, comb)
-                            for (x, post, comb), residual in post_inputs
-                        ]
+                        return [mhc_post_tilelang(x, residual, post, comb) for (x, post, comb), residual in post_inputs]
 
             with benchmark_with_power(
                 device=torch.device(device),
@@ -188,7 +186,7 @@ def run_mhc_module(
                 version=get_version("vllm"),
                 device_name=torch.cuda.get_device_name(device),
                 op_name=op,
-                kernel_source="vllm_mhc",
+                kernel_source=f"vllm.model_executor.kernels.mhc.tilelang.mhc_{op}_tilelang",
                 perf_filename=_resolve_perf_path(output_path, perf_filename or PerfFile.MHC_MODULE.value),
                 power_stats=result.get("power_stats"),
             )
