@@ -568,6 +568,7 @@ def _create_kv_cache_and_metadata(
         common_attn_metadata=common_attn_metadata,
         randomize_blocks=False,
         kv_cache_dtype=kv_cache_dtype_str,
+        scale=attn_layer._k_scale,
     )
 
     builder_cls = backend_cls.get_builder_cls()

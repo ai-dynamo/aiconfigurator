@@ -325,7 +325,10 @@ def create_and_prepopulate_kv_cache_mla(
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
-    use_fp8_ds_mla = kv_cache_dtype == "fp8_ds_mla"
+    cache_dtype_str = kv_cache_dtype or "auto"
+    use_fp8_ds_mla = cache_dtype_str == "fp8_ds_mla"
+    scale_tensor = scale if isinstance(scale, torch.Tensor) else torch.tensor(scale, dtype=torch.float32, device=device)
+    scale_tensor = scale_tensor.to(device=device, dtype=torch.float32)
 
     if use_fp8_ds_mla:
         if not kv_c_contexts:
@@ -334,14 +337,9 @@ def create_and_prepopulate_kv_cache_mla(
         rope_dim = k_pe_contexts[0].shape[-1]
         entry_size = kv_lora_rank + 4 * 4 + 2 * rope_dim
         kv_cache = torch.zeros(num_blocks, block_size, entry_size, dtype=torch.uint8, device=device)
-        scale_tensor = (
-            scale if isinstance(scale, torch.Tensor) else torch.tensor(scale, dtype=torch.float32, device=device)
-        )
-        scale_tensor = scale_tensor.to(device=device, dtype=torch.float32)
     else:
         # Create MLA KV cache: (num_blocks, block_size, head_size)
         kv_cache = torch.empty(num_blocks, block_size, head_size, dtype=dtype, device=device)
-        kv_cache_flat = kv_cache.view(-1, head_size)
 
     # Populate the cache with the context tokens
     # Start from block_id=1 since block_id=0 is considered the null block
@@ -355,20 +353,18 @@ def create_and_prepopulate_kv_cache_mla(
 
         start = start_block_idx * block_size
 
-        if use_fp8_ds_mla:
-            slots = torch.arange(context_len, device=device, dtype=torch.long) + start
-            ops.concat_and_cache_mla(
-                kv_c_context,
-                k_pe_context.squeeze(1),
-                kv_cache,
-                slots,
-                kv_cache_dtype="fp8_ds_mla",
-                scale=scale_tensor,
-            )
-        else:
-            kv_context = torch.cat([kv_c_context, k_pe_context.squeeze(1)], dim=-1)
-            end = start + kv_context.shape[0]
-            kv_cache_flat[start:end, ...] = kv_context
+        # This is the production MLAAttentionImpl cache writer. Standard FP8
+        # cache storage is uint8, so direct tensor assignment would perform an
+        # integer cast instead of writing encoded FP8 bytes.
+        slots = torch.arange(context_len, device=device, dtype=torch.long) + start
+        ops.concat_and_cache_mla(
+            kv_c_context,
+            k_pe_context.squeeze(1),
+            kv_cache,
+            slots,
+            kv_cache_dtype=cache_dtype_str,
+            scale=scale_tensor,
+        )
 
         # Stay block aligned and allocate enough blocks for the new tokens
         start_block_idx += cdiv(int(seq_lens[i]), block_size)

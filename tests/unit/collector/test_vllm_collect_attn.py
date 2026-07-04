@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import os
+import typing
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -227,6 +228,58 @@ def test_dense_kv_cache_history_slots_follow_block_table(randomize_blocks):
         int(metadata.block_table_tensor[1, 0]) * 64 + 4,
     ]
     assert history_slots.tolist() == expected_history_slots
+
+
+def test_mla_fp8_history_uses_framework_cache_writer():
+    torch = pytest.importorskip("torch")
+    calls = []
+
+    class Ops:
+        @staticmethod
+        def concat_and_cache_mla(kv_c, k_pe, kv_cache, slots, *, kv_cache_dtype, scale):
+            calls.append((kv_c, k_pe, slots.clone(), kv_cache_dtype, scale.clone()))
+            kv_cache.view(-1, kv_cache.shape[-1])[slots] = 17
+
+    namespace = {
+        "torch": torch,
+        "ops": Ops,
+        "CommonAttentionMetadata": object,
+        "Optional": typing.Optional,
+        "Union": typing.Union,
+        "cdiv": lambda value, divisor: (value + divisor - 1) // divisor,
+    }
+    create_cache = _load_function(UTILS_SOURCE, "create_and_prepopulate_kv_cache_mla", namespace)
+    metadata = SimpleNamespace(
+        seq_lens_cpu=torch.tensor([3], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        num_computed_tokens_cpu=torch.tensor([2], dtype=torch.int32),
+        block_table_tensor=torch.full((1, 1), -1, dtype=torch.int32),
+        slot_mapping=torch.full((1,), -1, dtype=torch.long),
+    )
+    kv_c = torch.full((2, 4), 1.5, dtype=torch.bfloat16)
+    k_pe = torch.full((2, 1, 2), -1.5, dtype=torch.bfloat16)
+
+    cache = create_cache(
+        kv_c_contexts=[kv_c],
+        k_pe_contexts=[k_pe],
+        block_size=64,
+        head_size=6,
+        dtype=torch.uint8,
+        device=torch.device("cpu"),
+        num_blocks=4,
+        common_attn_metadata=metadata,
+        randomize_blocks=False,
+        kv_cache_dtype="fp8",
+        scale=2.0,
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] is kv_c
+    assert torch.equal(calls[0][1], k_pe.squeeze(1))
+    assert calls[0][2].tolist() == [64, 65]
+    assert calls[0][3] == "fp8"
+    assert calls[0][4].item() == 2.0
+    assert torch.equal(cache[1, :2], torch.full((2, 6), 17, dtype=torch.uint8))
 
 
 @pytest.mark.parametrize(
