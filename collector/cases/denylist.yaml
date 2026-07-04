@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Hang denylist. The ONLY cases that belong here are ones that hang the
+# collector or kill the node, so they cannot be handled by fail-fast +
+# failure log + circuit breaker.
+#
+# Ordinary crashes (illegal memory access, asserts, OOM) do NOT belong
+# here: they fail in seconds, are recorded in the failure log with a
+# classification, and the circuit breaker skips the rest of a failing
+# (op, model, dtype) group automatically.
+#
+# Entry format (substring match against str(test_case)):
+#   entries:
+#     - contains: "tp=32, ep=16"
+#       reason: "sglang wideep_moe tp=32 deadlocks in NCCL init on <version>"
+#       added: 2026-07-04
+#
+# Keep entries dated. Re-audit on every framework version bump and delete
+# entries that no longer reproduce.
+
+schema_version: 1
+
+entries: []

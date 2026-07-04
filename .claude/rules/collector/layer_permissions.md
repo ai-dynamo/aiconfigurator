@@ -1,0 +1,55 @@
+# Collector Layer Permissions
+
+Which layer of the collector may hold which kind of rule. This is the single
+most important reference when "fixing" a failing case: pick the layer first,
+then act. Violating these boundaries is how the retired sm_exceptions rule
+engine grew to 1400 lines of shape-sniping rules.
+
+## The one-line architecture
+
+```text
+plan cases = dedup( expand(base_ops sweep grids) ∪ expand(model_case_values shapes) )
+runnable   = plan cases ∩ hardware capability floors  −  hang denylist
+result     = perf rows  +  classified failure records   (failure is DATA, not a defect)
+```
+
+## Permission table
+
+| Layer | Allowed | Forbidden |
+|---|---|---|
+| `cases/base_ops/*.yaml` | sweep density/ranges; axis-level `min_sm` on quant/precision modes | per-model special cases; shape exclusion rules |
+| `cases/models/*_cases.yaml` | model structural shapes, correlated tuples, artifact/quant policy, op activation (`cases: all`) | selectors, match rules, a second generator recipe |
+| `cases/capabilities.yaml` | positive dtype/op → min-SM floors (hardware facts only) | negative "drop" rules; shape axes; framework-version conditions; per-backend nesting |
+| `<backend>/registry.py` | version routing (`VersionRoute`); `unverified=True` maturity marker (op × backend) | any shape-level information |
+| `collect_*.py` collector code | **dispatch**: pick kernel path by SM/version, record `kernel_source`; runtime probe → **raise a classified exception** | silent `continue`/skip of a case; case filtering; patching code so one shape passes |
+| `cases/denylist.yaml` | cases that HANG or kill the node (dated, with reason) | ordinary crashes — those belong to the failure log |
+| executor (`collect.py`) | — mechanism is off-limits during case-fixing tasks | changing breaker/checkpoint/case-ID/classification logic to make a case pass |
+| failure records (`errors_*.json`, summary) | append-only observation | feeding failures back into ANY declaration layer as new rules |
+
+## The dispatch/skip discriminator
+
+> A legal branch changes HOW a case runs. An illegal branch changes WHETHER it runs.
+
+- Legal: `if sm >= 100: use kernel A else kernel B` — both sides produce a data
+  point (and record which kernel).
+- Illegal: `if sm < 90: continue` — the case vanishes with no data and no
+  failure record.
+
+A collector has exactly two legal responses to a queued case: **execute it, or
+raise**. "Whether it runs" is decided only outside the collector, in three
+auditable places: capability floors (generation time), registry `unverified`
+markers, and the hang denylist.
+
+## Meta rules
+
+1. **Default action for a failing case is NO CHANGE.** Confirm it is recorded
+   and classified in the failure log, then stop. Escalate only per the decision
+   tree in `failure_handling.md`.
+2. **Mechanism changes need explicit human approval.** The executor, case
+   generator engine, failure classification, and case-ID format are mechanism.
+   Propose changes; do not fold them into a "fix this case" task.
+3. **Inexpressibility is the guardrail.** The YAML schemas here deliberately
+   cannot express shape conditions or version predicates. Do not extend the
+   schemas to allow them.
+4. **A test that only works with `-m unit` unmarked is invisible to CI.** Mark
+   new collector tests `pytest.mark.unit`.

@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Positive hardware capability floors, applied as a generation-time
+# intersection: a case whose dtype (or op) floor is above the target SM is
+# never queued.
+#
+# This file is intentionally flat. Allowed content:
+#   - dtype_min_sm: canonical dtype/quant name -> minimum SM version
+#   - op_min_sm:    op name -> minimum SM version
+#
+# NOT allowed here (by design -- see .claude/rules/collector/):
+#   - shape conditions (batch/seq/token/feature axes)
+#   - framework version conditions
+#   - per-backend nesting
+# Framework-version gaps and shape-level kernel bugs are runtime observations:
+# they fail, get classified in the failure log, and the circuit breaker stops
+# repeated failures. They must not be encoded here.
+
+schema_version: 1
+
+dtype_min_sm:
+  float16: 0
+  bfloat16: 0
+  int8: 0
+  int4_wo: 0
+  fp8: 89
+  fp8_static: 89
+  fp8_block: 90
+  nvfp4: 100
+  w4a16_mxfp4: 89
+  w4a8_mxfp4_mxfp8: 100
+
+op_min_sm:
+  # DSA/NSA module collectors depend on SM90+ kernel libraries on all backends.
+  dsa_context_module: 90
+  dsa_generation_module: 90
+  # compute_scale measures FP8 quantization overhead.
+  compute_scale: 89

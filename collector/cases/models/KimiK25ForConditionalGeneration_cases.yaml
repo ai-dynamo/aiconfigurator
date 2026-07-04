@@ -104,53 +104,21 @@ all_frameworks_op_cases:
 framework_specific_op_cases:
   trtllm:
     mla_context:
-      rules:
-        - fields: [input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase]
-          match:
-            tp_size:
-              in: [1, 2, 4, 8]
+      cases: all
     mla_generation:
-      rules:
-        - fields: [input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase]
-          match:
-            tp_size:
-              in: [1, 2, 4, 8]
+      cases: all
     mla_bmm_gen_pre:
-      rules:
-        - fields: [num_tokens, num_heads, dtype, num_warmups, num_runs]
-          match:
-            num_heads:
-              in: [64, 32, 16, 8]
+      cases: all
     mla_bmm_gen_post:
-      rules:
-        - fields: [num_tokens, num_heads, dtype, num_warmups, num_runs]
-          match:
-            num_heads:
-              in: [64, 32, 16, 8]
+      cases: all
     trtllm_moe_wideep:
       cases: all
   sglang:
     mla_context:
-      rules:
-        - fields: [input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase]
-          match:
-            tp_size:
-              in: [1, 2, 4, 8]
+      cases: all
     mla_generation:
-      rules:
-        - fields: [input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase]
-          match:
-            tp_size:
-              in: [1, 2, 4, 8]
+      cases: all
     mla_bmm_gen_pre:
-      rules:
-        - fields: [num_tokens, num_heads, dtype, num_warmups, num_runs]
-          match:
-            num_heads:
-              in: [64, 32, 16, 8]
+      cases: all
     mla_bmm_gen_post:
-      rules:
-        - fields: [num_tokens, num_heads, dtype, num_warmups, num_runs]
-          match:
-            num_heads:
-              in: [64, 32, 16, 8]
+      cases: all

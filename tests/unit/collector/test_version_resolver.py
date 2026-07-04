@@ -241,8 +241,9 @@ class TestBuildCollections:
     def test_output_dict_shape(self):
         colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.17.0", ops=["gemm"])
         c = colls[0]
-        assert set(c.keys()) == {"name", "type", "module", "get_func", "run_func", "perf_filename"}
+        assert set(c.keys()) == {"name", "type", "module", "get_func", "run_func", "perf_filename", "unverified"}
         assert c["name"] == "vllm"
+        assert c["unverified"] is False
 
     def test_perf_filename_propagated(self):
         colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.17.0", ops=["gemm"])
@@ -355,7 +356,7 @@ class TestRegistryIntegrity:
         return {
             node.name
             for node in ast.iter_child_nodes(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
         }
 
     def test_module_exports_declared_functions(self, registry):

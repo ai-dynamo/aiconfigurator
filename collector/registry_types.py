@@ -101,6 +101,10 @@ class OpEntry:
     perf_filename: str
     module: str | None = None
     versions: tuple[VersionRoute, ...] = field(default_factory=tuple)
+    # Maturity marker: True means this collector has not been debugged on this
+    # backend yet.  collect.py skips the op with an explicit summary entry
+    # instead of spraying failures.  Flip to False in the PR that debugs it.
+    unverified: bool = False
 
     def __post_init__(self) -> None:
         if not self.module and not self.versions:

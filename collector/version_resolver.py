@@ -167,6 +167,7 @@ def build_collections(
                 "get_func": entry.get_func,
                 "run_func": entry.run_func,
                 "perf_filename": entry.perf_filename,
+                "unverified": entry.unverified,
             }
         )
 
