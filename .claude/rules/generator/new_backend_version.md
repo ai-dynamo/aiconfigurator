@@ -1,3 +1,10 @@
+---
+description: >
+  Coordinated changes for adding a new backend engine version to the generator.
+paths:
+  - "src/aiconfigurator/generator/**"
+---
+
 # Adding a New Backend Version Reference
 
 Adding a new backend version is one of the most frequent generator tasks. It involves
