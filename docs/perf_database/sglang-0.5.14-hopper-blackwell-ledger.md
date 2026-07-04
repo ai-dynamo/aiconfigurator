@@ -1123,3 +1123,92 @@ classifies both as mechanism decisions requiring explicit owner approval. Until
 that decision is recorded, do not run or claim complete DSA/DSV4 context data,
 do not convert the filters into YAML/capability/denylist rules, and do not copy
 Hopper chunk or capacity values to Blackwell.
+
+### DSV4 context hidden-state feasibility checkpoint (2026-07-04; uncommitted, no GPU execution)
+
+The release owner has now approved one narrow part of the grouped-inner
+mechanism: filter a DSV4 context inner shape before queueing when the mandatory
+BF16 input hidden state alone exceeds the live device-capacity budget.  The
+exact lower bound is `batch_size * sequence_length * hidden_size * 2` bytes, where
+`hidden_size` comes from the selected model config and the budget is 80% of the
+smallest visible CUDA device's reported total memory.  Equality is retained.
+The remaining 20% is reserved for the loaded layer, KV pools, graph state, and
+other mandatory tensors.  This is deliberately not a fixed H20, SM90, model,
+sequence, chunk, or free-memory threshold.
+
+The source batch/sequence axes remain owned by
+`DeepseekV4ForCausalLM_cases.yaml`.  Grouped DSV4 module collection and its
+inner sequence expansion originate in `299aaea9`; the current SGLang 0.5.14
+chunk/pool alignment is carried by `f9c1e29c` and `cfd933a7`.  Those serving
+chunk and live KV-pool decisions are outside this change.  The implementation
+must attach each getter-retained inner sequence manifest to the outer task so
+the scheduler ID and resume checkpoint change exactly when the executable
+inner set changes.  It must log raw, retained, and dropped expanded-inner
+counts together with the device budget and formula.
+
+Scope is stock SGLang 0.5.14 DSV4 CSA/HCA context only.  Generation allocates
+one hidden row per request rather than `batch_size * sequence_length` rows and
+is unchanged.  DSA, GLM sparse, MoE, WideEP, vLLM, TRT-LLM, SDK/Rust consumers,
+database keys, and packaged data are unchanged.  The same capacity-derived
+rule may run on SM90/100/103/120, but only the platform on which the getter is
+executed supplies the budget; no H20 capacity result may be copied to
+Blackwell.  Canonical before/after task and expanded-inner counts/hashes,
+boundary tests, untouched-framework reverse checks, and the final commit must
+be appended before accepting GPU data from this transition.
+
+The uncommitted implementation now attaches a canonical
+`((prefix, (sequence_lengths...)), ...)` manifest to every retained context
+outer task.  A private pure function in `case_generator.py` owns the unchanged
+model-position admission; the SGLang getter applies only the memory predicate
+afterward.  The subprocess consumes that manifest instead of rebuilding the
+source/model grid.  On the recorded eight-H20-3e capacity of
+150,110,011,392 bytes
+per device, the 80% budget is 120,088,009,113 bytes.  An exact-image static
+reconstruction gives the following; this is plan evidence only because another
+task currently owns the GPUs:
+
+| Op | Before outer/task SHA | After outer/task SHA | Before expanded/hash | After expanded/hash |
+| --- | --- | --- | --- | --- |
+| CSA context | 88 / `2b1f7fad...` | 88 / `8e6be3c8...` | 56,936 / `a239748e...` | 52,432 / `06e27170...` |
+| HCA context | 88 / `55b4d7bf...` | 88 / `b5c7fad6...` | 56,936 / `e12d0c52...` | 52,432 / `60823950...` |
+
+Each context op therefore drops 4,504 expanded inner cells (7.91%) before
+queueing.  The canonical Flash-FP8 batch-1024 prefix-zero manifest retains
+sequence lengths through 12,288 and omits 16,384 and above; the result is
+derived from its config `hidden_size=4096`, not from a sequence constant.
+Before the memory predicate, the YAML axes expand to 61,600 cells and the
+pre-existing max-position rule structurally admits 56,936, disclosing 4,664
+structural omissions separately from the 4,504 memory drops.
+Sorted unique task IDs and expanded `(outer-case, prefix, sequence)` records,
+each LF-terminated, define the hashes above.
+
+CSA/HCA generation remain 88 tasks with unchanged hashes `74358772...` and
+`1c71cc62...`.  No shared YAML input or central public getter output changed,
+and no vLLM/TRT-LLM file changed.
+Context smoke generation now binds its own 352-cell manifest instead of
+shrinking a full manifest in the worker: CSA/HCA smoke task hashes are
+`c6a17d19...` and `9585e225...`.  This fixes context smoke/full resume identity;
+generation's older worker-expanded smoke identity remains outside this filter
+change and must use a separate checkpoint namespace.
+Focused no-GPU exact-image tests pass 75/75, including equality-at-budget,
+minimum-visible-device capacity, deterministic task-identity change, direct
+manifest consumption, and generation isolation.  The complete non-fork
+Collector suite passes 390/390 and the fresh-process parallel suite passes
+26/26 in the same image.  Existing runtime
+chunk/KV-pool `continue` paths remain separate debt and are not reclassified as
+this filter; the manifest is therefore the exact getter-retained,
+memory-admitted set, not yet a claim that every cell produces a row.  The
+manual CLI path also retains its historical worker-side grid and is outside
+this registry/getter guarantee.  Any old DSV4 context checkpoint has a
+different task identity and must not be resumed into the new plan; use a fresh
+namespace because the executor does not migrate or discard the old failed IDs.
+On 2026-07-05, a live getter probe in the pinned image on one H20-3e reported
+SM90 and 150,110,011,392 bytes, then reproduced 88 outer tasks, 52,432 retained
+inner cells, and a batch-1024 prefix-zero ceiling of 12,288 for both CSA and
+HCA.  The immediately following benchmark smoke is rejected: its preflight was
+clean, but an unrelated vLLM container started afterward and occupied all eight
+GPUs, including the selected GPU 0.  Only the task-owned SGLang container was
+stopped; the external container was untouched, and the partial row is not
+accepted or resumable.  The release owner explicitly allowed the code commit
+to proceed without waiting for another smoke.  An uncontaminated smoke in a
+fresh namespace remains required before an accepted full collection begins.

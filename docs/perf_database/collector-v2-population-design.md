@@ -140,6 +140,16 @@ compare an operation-specific footprint with live device capacity, and must log
 the dropped count and budget. A fixed shape threshold inferred from one GPU,
 framework release, or backend is not such a filter.
 
+For a grouped collector, the getter must attach its exact retained inner-shape
+manifest to the queued outer case. The worker consumes that manifest instead
+of silently rebuilding and filtering a larger grid, so task IDs and resume
+checkpoints bind the work that can produce rows. SGLang 0.5.14 DSV4 context is
+the first use: it retains a cell only when the mandatory BF16 hidden-state
+lower bound `batch_size * sequence_length * hidden_size * 2` is at most 80% of
+the smallest visible device's total memory. The model config owns
+`hidden_size`; generation and chunked sparse-score collectors have different
+footprints and do not inherit this formula.
+
 Registry `unverified=True` parks an operation that has not been debugged on one
 backend; `unverified_sms=(...)` parks it only on named SMs. These are operation
 maturity markers, not shape selectors. `denylist.yaml` is only for exact cases

@@ -2200,6 +2200,26 @@ def _dsv4_module_filter_pairs(mode: str, batch_sizes, seq_lens):
     return pairs
 
 
+def _dsv4_context_structural_manifest(
+    batch_size: int,
+    seq_lens,
+    prefix_lens,
+    max_position_embeddings: int,
+):
+    """Expand the model-position-valid DSV4 context inner grid."""
+    manifest = []
+    for prefix_len in prefix_lens:
+        retained = tuple(
+            seq_len
+            for seq_len in seq_lens
+            if _dsv4_module_is_valid_shape("context", batch_size, seq_len, prefix_len)
+            and prefix_len + seq_len <= max_position_embeddings
+        )
+        if retained:
+            manifest.append((int(prefix_len), retained))
+    return tuple(manifest)
+
+
 def _build_dsv4_module_test_cases(mode: str, attn_kinds=DSV4_ATTN_KINDS):
     """One case per ``(attn_kind, tp_size, gemm_type, batch_size)``.
 

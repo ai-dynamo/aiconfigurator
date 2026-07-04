@@ -130,6 +130,7 @@ try:
     from collector.case_generator import (
         DSV4_ATTN_KINDS as ATTN_KINDS,
     )
+    from collector.case_generator import _dsv4_context_structural_manifest
     from collector.case_generator import (
         _dsv4_module_filter_pairs as _filter_pairs,
     )
@@ -157,6 +158,7 @@ except ModuleNotFoundError:
     from case_generator import (
         DSV4_ATTN_KINDS as ATTN_KINDS,
     )
+    from case_generator import _dsv4_context_structural_manifest
     from case_generator import (
         _dsv4_module_filter_pairs as _filter_pairs,
     )
@@ -174,21 +176,96 @@ def _expand_grid():
     return list(_BATCH_SIZES), list(_SEQ_LENGTHS)
 
 
-def _dsv4_max_position_embeddings(model_path: str) -> int:
-    """Read the context boundary from the selected model config."""
+def _load_dsv4_model_config(model_path: str) -> dict:
     try:
         from collector.sglang.deepseekv4_sparse_modules import _dsv4_model_config
     except ModuleNotFoundError:
         from deepseekv4_sparse_modules import _dsv4_model_config
 
-    value = _dsv4_model_config(model_path).get("max_position_embeddings")
+    return _dsv4_model_config(model_path)
+
+
+def _dsv4_max_position_embeddings(model_path: str) -> int:
+    """Read the context boundary from the selected model config."""
+    value = _load_dsv4_model_config(model_path).get("max_position_embeddings")
     if value in (None, "") or int(value) <= 0:
         raise ValueError(f"invalid max_position_embeddings={value!r} for {model_path!r}")
     return int(value)
 
 
+def _attach_dsv4_context_memory_manifest(cases: list[list], attn_kind: str) -> list[list]:
+    """Bind context inner shapes whose mandatory BF16 input fits the device budget."""
+    if not cases:
+        return []
+
+    device_count = torch.cuda.device_count()
+    if device_count <= 0:
+        raise RuntimeError("DSV4 context memory filtering requires a live CUDA device")
+    total_memory = min(int(torch.cuda.get_device_properties(device).total_memory) for device in range(device_count))
+    if total_memory <= 0:
+        raise RuntimeError(f"invalid CUDA total memory for DSV4 context filtering: {total_memory}")
+    # Leave 20% for the loaded layer, KV pools, graph state, and other mandatory
+    # tensors.  This is one device-capacity factor, not a model/SM shape limit.
+    budget_bytes = total_memory * 4 // 5
+
+    filtered = []
+    source_count = 0
+    raw_count = 0
+    retained_count = 0
+    smoke = "--smoke" in sys.argv
+    for case in cases:
+        batch_size = int(case[1])
+        model_path = str(case[6])
+        config = _load_dsv4_model_config(model_path)
+        hidden_size = config.get("hidden_size")
+        max_position_embeddings = config.get("max_position_embeddings")
+        if hidden_size in (None, "") or int(hidden_size) <= 0:
+            raise ValueError(f"invalid hidden_size={hidden_size!r} for {model_path!r}")
+        if max_position_embeddings in (None, "") or int(max_position_embeddings) <= 0:
+            raise ValueError(f"invalid max_position_embeddings={max_position_embeddings!r} for {model_path!r}")
+        hidden_size = int(hidden_size)
+        max_position_embeddings = int(max_position_embeddings)
+
+        seq_lens = sorted(
+            {seq_len for _, seq_len in _filter_pairs("context", [batch_size], _SEQ_LENGTHS)},
+            reverse=True,
+        )
+        if smoke:
+            seq_lens = [seq_len for seq_len in seq_lens if seq_len in (1, 128)]
+        prefix_lens = [prefix_len for prefix_len in _PREFIX_LENGTHS if not smoke or prefix_len in (0, 512)]
+        source_count += len(seq_lens) * len(prefix_lens)
+        structural_manifest = _dsv4_context_structural_manifest(
+            batch_size,
+            seq_lens,
+            prefix_lens,
+            max_position_embeddings,
+        )
+        manifest = []
+        for prefix_len, raw_seq_lens in structural_manifest:
+            retained_seq_lens = tuple(
+                seq_len for seq_len in raw_seq_lens if batch_size * seq_len * hidden_size * 2 <= budget_bytes
+            )
+            raw_count += len(raw_seq_lens)
+            retained_count += len(retained_seq_lens)
+            if retained_seq_lens:
+                manifest.append((int(prefix_len), retained_seq_lens))
+        if manifest:
+            filtered.append([*case, tuple(manifest)])
+
+    dropped_count = raw_count - retained_count
+    print(
+        f"[dsv4-memory-filter] {attn_kind} context structurally_admitted={raw_count}/{source_count} "
+        f"structural_dropped={source_count - raw_count}/{source_count} "
+        f"retained={retained_count}/{raw_count} memory_dropped={dropped_count}/{raw_count} "
+        f"outer_tasks={len(filtered)}/{len(cases)} "
+        f"budget_bytes={budget_bytes} total_memory_bytes={total_memory} devices={device_count} "
+        "formula=batch_size*sequence_length*hidden_size*2 (BF16 hidden-state lower bound, 80% budget)"
+    )
+    return filtered
+
+
 def get_dsv4_csa_context_test_cases():
-    return _get_dsv4_csa_context_test_cases_impl()
+    return _attach_dsv4_context_memory_manifest(_get_dsv4_csa_context_test_cases_impl(), "csa")
 
 
 def get_dsv4_csa_generation_test_cases():
@@ -196,7 +273,7 @@ def get_dsv4_csa_generation_test_cases():
 
 
 def get_dsv4_hca_context_test_cases():
-    return _get_dsv4_hca_context_test_cases_impl()
+    return _attach_dsv4_context_memory_manifest(_get_dsv4_hca_context_test_cases_impl(), "hca")
 
 
 def get_dsv4_hca_generation_test_cases():
@@ -1547,6 +1624,7 @@ def _run_subprocess(
     tp_size: int = 1,
     prefix_len: int = 0,
     prefix_lens: Iterable[int] | None = None,
+    inner_shapes: Iterable[tuple[int, Iterable[int]]] | None = None,
     smoke: bool = False,
 ):
     """Run one (attn_kind, tp, gemm, bs) subprocess that sweeps valid sl/prefix.
@@ -1570,6 +1648,11 @@ def _run_subprocess(
     env["SGLANG_OPT_FP8_WO_A_GEMM"] = "1" if gemm_type == "fp8_block" else "0"
 
     prefix_lens_arg = list(prefix_lens) if prefix_lens is not None else None
+    inner_shapes_arg = (
+        tuple((int(prefix), tuple(int(seq_len) for seq_len in seq_lens)) for prefix, seq_lens in inner_shapes)
+        if inner_shapes is not None
+        else None
+    )
     code = (
         f'import sys; sys.path.insert(0, "{os.path.dirname(os.path.abspath(__file__))}")\n'
         f"from collect_dsv4_attn import _subprocess_entry\n"
@@ -1584,6 +1667,7 @@ def _run_subprocess(
         f"    tp_size={tp_size!r},\n"
         f"    prefix_len={prefix_len!r},\n"
         f"    prefix_lens={prefix_lens_arg!r},\n"
+        f"    inner_shapes={inner_shapes_arg!r},\n"
         f"    smoke={smoke!r},\n"
         f")\n"
     )
@@ -1661,33 +1745,38 @@ def _subprocess_entry(
     tp_size: int = 1,
     prefix_len: int = 0,
     prefix_lens: Iterable[int] | None = None,
+    inner_shapes: Iterable[tuple[int, Iterable[int]]] | None = None,
     smoke: bool = False,
 ):
     """In-subprocess runner: build model once for fixed bs, sweep valid sl/prefix."""
-    _, sl_grid = _expand_grid()
-    if smoke:
-        sl_grid = [sl for sl in sl_grid if sl in (1, 128)]
+    if inner_shapes is not None:
+        seq_lens_by_prefix = {
+            int(cur_prefix): [int(seq_len) for seq_len in seq_lens] for cur_prefix, seq_lens in inner_shapes if seq_lens
+        }
+    else:
+        _, sl_grid = _expand_grid()
+        if smoke:
+            sl_grid = [sl for sl in sl_grid if sl in (1, 128)]
 
-    prefix_values = list(prefix_lens) if prefix_lens is not None else [prefix_len]
-    if mode == "context" and smoke:
-        prefix_values = [p for p in prefix_values if p in (0, 512)]
-    elif mode != "context":
-        prefix_values = [0]
+        prefix_values = list(prefix_lens) if prefix_lens is not None else [prefix_len]
+        if mode == "context" and smoke:
+            prefix_values = [p for p in prefix_values if p in (0, 512)]
+        elif mode != "context":
+            prefix_values = [0]
 
-    max_position_embeddings = _dsv4_max_position_embeddings(model_path) if mode == "context" else None
-
-    seq_lens_by_prefix: dict[int, list[int]] = {}
-    for cur_prefix in prefix_values:
-        pairs = [
-            (bs, sl)
-            for bs, sl in _filter_pairs(mode, [batch_size], sl_grid)
-            if _is_valid_shape(mode, bs, sl, cur_prefix)
-            and (max_position_embeddings is None or cur_prefix + sl <= max_position_embeddings)
-        ]
-        if not pairs:
-            print(f"[dsv4-flash] no valid sl values for mode={mode}, bs={batch_size}, prefix_len={cur_prefix}")
-            continue
-        seq_lens_by_prefix[cur_prefix] = sorted({sl for _, sl in pairs}, reverse=True)
+        max_position_embeddings = _dsv4_max_position_embeddings(model_path) if mode == "context" else None
+        seq_lens_by_prefix: dict[int, list[int]] = {}
+        for cur_prefix in prefix_values:
+            pairs = [
+                (bs, sl)
+                for bs, sl in _filter_pairs(mode, [batch_size], sl_grid)
+                if _is_valid_shape(mode, bs, sl, cur_prefix)
+                and (max_position_embeddings is None or cur_prefix + sl <= max_position_embeddings)
+            ]
+            if not pairs:
+                print(f"[dsv4-flash] no valid sl values for mode={mode}, bs={batch_size}, prefix_len={cur_prefix}")
+                continue
+            seq_lens_by_prefix[cur_prefix] = sorted({sl for _, sl in pairs}, reverse=True)
 
     if not seq_lens_by_prefix:
         raise RuntimeError(
@@ -1710,7 +1799,7 @@ def _subprocess_entry(
         perf_filename_prefix="dsv4",
         gemm_type=gemm_type,
         tp_size=tp_size,
-        prefix_lens=seq_lens_by_prefix.keys(),
+        prefix_lens=tuple(seq_lens_by_prefix),
         seq_lens_by_prefix=seq_lens_by_prefix,
         max_total_tokens=max_total_tokens,
     )
@@ -1726,15 +1815,16 @@ def run_dsv4_attn_worker(
     model_path: str,
     attn_kind: str,
     attention_backend: str | None = None,
+    inner_shapes: Iterable[tuple[int, Iterable[int]]] | None = None,
     *,
     perf_filename: str,
     device: str = "cuda:0",
 ):
     """collect.py-compatible worker — runs ONE (kind, tp, gemm, bs) test case.
 
-    Test case tuple is 9 elements (``perf_filename`` is bound by collect.py
-    via OpEntry, NOT in the tuple).  Worker spawns a subprocess that builds
-    a fresh ``ModelRunner`` for that bs and sweeps every valid sl internally.
+    Context test cases carry a tenth element containing the getter-retained
+    ``(prefix, sequence_lengths)`` manifest. ``perf_filename`` is bound by
+    collect.py via OpEntry, not in the tuple.
 
     ``tp_size`` triggers single-process TP simulation in the spawned subprocess
     via ``collect_dsv4_mla_module._tp_load_model_patch``: ColumnParallel /
@@ -1749,7 +1839,13 @@ def run_dsv4_attn_worker(
 
     is_prefill = "context" in perf_filename
     mode = "context" if is_prefill else "generation"
-    prefix_lens = list(_PREFIX_LENGTHS) if is_prefill else None
+    if is_prefill and inner_shapes is None:
+        raise RuntimeError("DSV4 context worker requires the getter-retained inner-shape manifest")
+    if inner_shapes is not None:
+        inner_shapes = tuple(
+            (int(prefix), tuple(int(seq_len) for seq_len in seq_lens)) for prefix, seq_lens in inner_shapes
+        )
+    prefix_lens = tuple(prefix for prefix, _ in inner_shapes) if inner_shapes is not None else None
 
     device_str = str(device)
     gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
@@ -1776,6 +1872,7 @@ def run_dsv4_attn_worker(
         tp_size=tp_size,
         prefix_len=0,
         prefix_lens=prefix_lens,
+        inner_shapes=inner_shapes,
         smoke=smoke,
     )
 

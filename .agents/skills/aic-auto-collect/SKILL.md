@@ -176,6 +176,12 @@ exception is a generation-time memory-feasibility filter derived from live
 device capacity and an operation-specific footprint formula; it must log the
 dropped count and memory budget.
 
+When the collector groups inner shapes under one scheduler task, generate the
+exact retained inner manifest in the public getter and include it in the task
+parameters. The worker must consume that manifest rather than reconstructing a
+larger grid and filtering it at runtime; otherwise task IDs and resume state do
+not identify the measurements they claim to cover.
+
 Framework dispatch decides how an attempted case runs. Prefer the framework's
 own selector; any manual mapping needs pinned-source proof and must record the
 executed `kernel_source`. If construction or invocation fails, expose that
