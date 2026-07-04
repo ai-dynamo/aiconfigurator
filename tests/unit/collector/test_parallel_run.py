@@ -62,6 +62,8 @@ def _task_fn(label, behavior, device):
     """Dispatch based on *behavior* encoded in each task's params."""
     if behavior == "exit_restart":
         sys.exit(EXIT_CODE_RESTART)
+    elif behavior == "return_restart":
+        return EXIT_CODE_RESTART
     elif behavior == "sigabrt":
         os.kill(os.getpid(), signal.SIGABRT)
     elif behavior == "error":
@@ -249,6 +251,14 @@ class TestExitCodeRestart:
         tasks = _tasks([(f"t{i}", "exit_restart") for i in range(6)])
         errors = _run_and_assert_all_done(tasks, 2, tmp_path, module_name="restart_all")
         assert _crash_errors(errors) == []
+
+    def test_returned_restart_signal_uses_the_same_success_path(self, tmp_path):
+        tasks = _tasks([(f"t{i}", "return_restart") for i in range(6)])
+        errors = _run_and_assert_all_done(tasks, 2, tmp_path, module_name="return_restart_all")
+
+        assert _crash_errors(errors) == []
+        assert _load_done_ids(tmp_path, "return_restart_all") == {f"t{i}" for i in range(6)}
+        assert _load_failed_ids(tmp_path, "return_restart_all") == set()
 
     def test_interleaved_restart_and_normal(self, tmp_path):
         tasks = _tasks(

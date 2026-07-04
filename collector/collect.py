@@ -493,7 +493,9 @@ def worker(
 
         try:
             worker_logger.debug(f"Starting task {task_id}")
-            func(*task, device=device)
+            result = func(*task, device=device)
+            if isinstance(result, int) and result == EXIT_CODE_RESTART:
+                raise SystemExit(EXIT_CODE_RESTART)
             worker_logger.debug(f"Completed task {task_id}")
 
             # Mark done ONLY on success — failed tasks should be retried on resume
