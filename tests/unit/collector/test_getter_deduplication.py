@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
 import importlib.util
 import sys
 import types
@@ -417,3 +418,16 @@ def test_vllm_nemotron_topk22_nvfp4_artifacts_are_not_scheduled(monkeypatch, mod
     module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
 
     assert module.get_moe_test_cases() == []
+
+
+def test_vllm_moe_cuda_graph_fails_closed():
+    tree = ast.parse((REPO_ROOT / "collector/vllm/collect_moe.py").read_text())
+    run_moe = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_moe_torch")
+    benchmark_calls = [
+        node
+        for node in ast.walk(run_moe)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "benchmark_with_power"
+    ]
+
+    assert len(benchmark_calls) == 1
+    assert all(keyword.arg != "allow_graph_fail" for keyword in benchmark_calls[0].keywords)

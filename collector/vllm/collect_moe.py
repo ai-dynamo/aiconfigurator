@@ -519,7 +519,6 @@ def run_moe_torch(
                     num_warmups=num_warmups,
                     num_runs=num_runs,
                     repeat_n=1,
-                    allow_graph_fail=True,
                 ) as results,
             ):
                 pass
