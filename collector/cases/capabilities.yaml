@@ -27,7 +27,11 @@ dtype_min_sm:
   int4_wo: 0
   fp8: 89
   fp8_static: 89
-  fp8_block: 90
+  # Block-scaled fp8 is a software layout over the same fp8 tensor cores that
+  # exist from SM89 (Ada): vLLM 0.24.0 dispatches it below SM90 through the
+  # Marlin/Triton tiers of _POSSIBLE_FP8_BLOCK_KERNELS (model_executor/
+  # kernels/linear/__init__.py:319-330), verified end-to-end on L40S.
+  fp8_block: 89
   nvfp4: 100
   w4a16_mxfp4: 89
   w4a8_mxfp4_mxfp8: 100

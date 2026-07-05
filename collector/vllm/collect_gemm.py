@@ -56,14 +56,19 @@ _NVFP4_QUANT_ARGS = {
 def get_gemm_test_cases():
     sm = get_sm_version()
 
-    # Open floors matching cases/capabilities.yaml (fp8: 89, fp8_block: 90,
+    # Open floors matching cases/capabilities.yaml (fp8: 89, fp8_block: 89,
     # nvfp4: 100) — a closed SM whitelist here would silently drop unlisted
     # SMs (e.g. SM101/SM121) with no logged reason.
     gemm_list = ["bfloat16"]
     if sm >= 89:
         gemm_list += ["fp8"]
-    # Blockwise FP8 kernels are available on Hopper/Blackwell+
-    if sm >= 90:
+    # Blockwise FP8 runs on fp8 hardware from SM89 (Ada): below SM90 the
+    # DeepGEMM/cutlass tiers of vLLM's block-scale dispatch are unavailable
+    # and _POSSIBLE_FP8_BLOCK_KERNELS falls through to the Marlin/Triton
+    # tiers (model_executor/kernels/linear/__init__.py:319-330 @0.24.0);
+    # verified end-to-end on L40S (SM89), with kernel_source recording the
+    # actually-selected kernel per row.
+    if sm >= 89:
         gemm_list += ["fp8_block"]
 
     if sm >= 100:
