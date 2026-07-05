@@ -34,6 +34,7 @@ The live ``rust_engine_step.py`` helpers build on this path.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 import aiconfigurator_core
@@ -572,6 +573,38 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
 # --------------------------------------------------------------------------- #
 
 
+def _compute_perf_db_sources(database: Any) -> dict:
+    """Resolve the shared-layer (sibling/cross-version) source list per op file
+    from the Python ``database``, so the Rust core can load the SAME rows Python
+    does under SILICON/HYBRID.
+
+    Returns ``{op_file_basename: [[abs_path, [kernel_sources] | None], ...]}``.
+    ``_build_op_sources`` returns just ``[(primary, None)]`` when the shared
+    layer is off or an op has no inheritable siblings, so the Rust side falls
+    back to its primary ``data_root`` behaviour for those. Returns ``{}`` when a
+    database is unavailable or introspection fails (Rust then uses its
+    single-``data_root`` default). Discovery stays here (single source of truth)
+    rather than being reimplemented in Rust.
+    """
+    if database is None:
+        return {}
+    try:
+        from aiconfigurator.sdk.common import PerfDataFilename
+
+        system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+        data_dir = os.path.join(system_data_root, database.backend, database.version)
+        out: dict[str, list] = {}
+        for filename_enum in PerfDataFilename:
+            primary_path = os.path.join(data_dir, filename_enum.value)
+            sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
+            out[filename_enum.value] = [
+                [os.path.abspath(path), (sorted(ks) if ks is not None else None)] for path, ks in sources
+            ]
+        return out
+    except Exception:
+        return {}
+
+
 def _engine_config_dict(
     *,
     model: Any,
@@ -583,6 +616,7 @@ def _engine_config_dict(
     systems_path: str | None,
     nextn: int,
     nextn_accept_rates: list[float] | None,
+    database: Any = None,
 ) -> dict:
     """Build the ``EngineConfig`` JSON (matches the Rust modularised struct).
 
@@ -624,6 +658,10 @@ def _engine_config_dict(
         "moe_dtype": _rust_moe_quant_to_dtype(getattr(cfg, "moe_quant_mode", None)),
         "activation_dtype": _rust_quant_to_dtype(getattr(cfg, "fmha_quant_mode", None)),
         "kv_cache_dtype": _rust_quant_to_dtype(getattr(cfg, "kvcache_quant_mode", None)),
+        # Shared-layer (sibling/cross-version) per-op perf-data sources, resolved
+        # in Python so the Rust core inherits the same rows. Empty/absent = Rust
+        # uses its single-``data_root`` default (back-compat with old specs).
+        "perf_db_sources": _compute_perf_db_sources(database),
         "extra": {},
     }
     # SpeculativeConfig (flattened, Option<>): emit nextn/nextn_accept_rates at
@@ -762,6 +800,7 @@ def build_engine_spec_json(
             systems_path=systems_path,
             nextn=nextn,
             nextn_accept_rates=nextn_accept_rates,
+            database=database,
         ),
         "context_ops": context_ops,
         "generation_ops": generation_ops,

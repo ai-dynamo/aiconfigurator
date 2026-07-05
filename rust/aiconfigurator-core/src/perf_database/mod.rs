@@ -14,6 +14,40 @@ use std::path::{Path, PathBuf};
 
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
+use crate::config::{PerfDbSources, PerfSource};
+
+/// Resolve the ordered source list for one op-file basename: the Python-supplied
+/// shared-layer sources when present, else a single primary `data_root/<basename>`
+/// with no `kernel_source` filter (identical to the pre-shared-layer default).
+pub(crate) fn resolve_op_sources(
+    perf_db_sources: &PerfDbSources,
+    basename: &str,
+    data_root: &Path,
+) -> Vec<PerfSource> {
+    match perf_db_sources.get(basename) {
+        Some(sources) if !sources.is_empty() => sources.clone(),
+        _ => vec![PerfSource(data_root.join(basename), None)],
+    }
+}
+
+/// Whether a row's `kernel_source` passes a source's filter, mirroring Python
+/// `_read_filtered_rows`: `None` admits every row; a `Some` allowlist keeps only
+/// rows whose `kernel_source` value is in the set (a row missing the column is
+/// dropped, since Python's `row.get("kernel_source") in ks_filter` is `False`
+/// for `None`). Shared by every op table's multi-source loader.
+pub(crate) fn kernel_source_ok(
+    filter: Option<&[String]>,
+    ks_col: Option<usize>,
+    row: &parquet_loader::PerfRow,
+) -> Result<bool, AicError> {
+    match filter {
+        None => Ok(true),
+        Some(allow) => match row.str_optional(ks_col)? {
+            Some(ks) => Ok(allow.iter().any(|a| a == ks)),
+            None => Ok(false),
+        },
+    }
+}
 
 pub mod attention;
 pub mod communication;
@@ -82,6 +116,23 @@ impl PerfDatabase {
         backend: &str,
         version: &str,
     ) -> Result<Self, AicError> {
+        Self::load_with_sources(systems_root, system, backend, version, &PerfDbSources::default())
+    }
+
+    /// Like [`PerfDatabase::load`], but honours the shared-layer
+    /// (sibling/cross-version) `perf_db_sources` resolved in Python
+    /// (`sdk/engine.py::_compute_perf_db_sources`). For op files present in the
+    /// map, the ordered source list (with per-source `kernel_source` filters) is
+    /// used instead of the single primary file so Rust inherits the same rows
+    /// Python does under SILICON/HYBRID. Op files absent from the map fall back
+    /// to the primary `data_root` (identical to [`PerfDatabase::load`]).
+    pub fn load_with_sources(
+        systems_root: &Path,
+        system: &str,
+        backend: &str,
+        version: &str,
+        perf_db_sources: &PerfDbSources,
+    ) -> Result<Self, AicError> {
         let system_yaml = systems_root.join(format!("{system}.yaml"));
         let spec = SystemSpec::load(&system_yaml)?;
         let system_data_root = systems_root.join(&spec.data_dir);
@@ -112,19 +163,29 @@ impl PerfDatabase {
             system: system.to_string(),
             backend: backend.to_string(),
             version: version.to_string(),
-            gemm: GemmTable::new(data_root.clone(), spec.clone()),
-            attention: AttentionTable::new(data_root.clone(), spec.clone()),
+            // Every op table resolves its own file basenames from
+            // `perf_db_sources` via `with_sources` (shared-layer aware); an
+            // absent basename falls back to the primary `data_root` file.
+            // NCCL/OneCCL are framework-agnostic and never inherit siblings, so
+            // their roots stay as the direct system-wide dirs.
+            gemm: GemmTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
+            attention: AttentionTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
             system_spec: spec,
-            mla: MlaTable::new(data_root.clone()),
-            moe: MoeTable::new(data_root.clone()),
-            communication: CommunicationTable::new(data_root.clone(), nccl_root, oneccl_root),
-            dsa: DsaTable::new(data_root.clone()),
-            dsv4: Dsv4Table::new(data_root.clone()),
-            mhc: MhcTable::new(data_root.clone()),
-            wideep: WideEpTable::new(data_root.clone()),
-            wideep_mla: WideEpMlaTable::new(data_root.clone()),
-            wideep_moe: WideEpMoeTable::new(data_root.clone()),
-            state_space: StateSpaceTable::new(data_root.clone()),
+            mla: MlaTable::with_sources(data_root.clone(), perf_db_sources),
+            moe: MoeTable::with_sources(data_root.clone(), perf_db_sources),
+            communication: CommunicationTable::with_sources(
+                data_root.clone(),
+                nccl_root,
+                oneccl_root,
+                perf_db_sources,
+            ),
+            dsa: DsaTable::with_sources(data_root.clone(), perf_db_sources),
+            dsv4: Dsv4Table::with_sources(data_root.clone(), perf_db_sources),
+            mhc: MhcTable::with_sources(data_root.clone(), perf_db_sources),
+            wideep: WideEpTable::with_sources(data_root.clone(), perf_db_sources),
+            wideep_mla: WideEpMlaTable::with_sources(data_root.clone(), perf_db_sources),
+            wideep_moe: WideEpMoeTable::with_sources(data_root.clone(), perf_db_sources),
+            state_space: StateSpaceTable::with_sources(data_root.clone(), perf_db_sources),
             data_root,
         })
     }

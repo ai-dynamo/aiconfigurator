@@ -570,6 +570,7 @@ mod tests {
                 nextn: Some(1),
                 nextn_accept_rates: Some(vec![0.85, 0.3, 0.0, 0.0, 0.0]),
             }),
+            perf_db_sources: Default::default(),
             extra: BTreeMap::new(),
         }
     }

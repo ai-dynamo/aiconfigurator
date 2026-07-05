@@ -164,11 +164,12 @@ impl Engine {
         // The spec's own `systems_path` wins when present; otherwise fall back
         // to the `systems_root` argument.
         let systems_root = spec.engine.systems_path.as_deref().unwrap_or(systems_root);
-        let db = PerfDatabase::load(
+        let db = PerfDatabase::load_with_sources(
             systems_root,
             &spec.engine.system_name,
             spec.engine.backend.as_str(),
             version,
+            &spec.engine.perf_db_sources,
         )?;
         Engine::build(spec, Arc::new(db))
     }
@@ -604,6 +605,7 @@ mod tests {
                 nextn: Some(n),
                 nextn_accept_rates: None,
             }),
+            perf_db_sources: Default::default(),
             extra: BTreeMap::new(),
         }
     }

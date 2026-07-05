@@ -105,6 +105,7 @@ fn fixture_engine_config() -> EngineConfig {
             kv_cache_dtype: None,
         },
         speculative: None,
+        perf_db_sources: Default::default(),
         extra: BTreeMap::new(),
     }
 }

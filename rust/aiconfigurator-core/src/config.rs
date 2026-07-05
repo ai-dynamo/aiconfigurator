@@ -54,8 +54,40 @@ pub struct EngineConfig {
     #[serde(flatten)]
     pub speculative: Option<SpeculativeConfig>,
 
+    /// Shared-layer (sibling/cross-version) perf-data sources per op-file
+    /// basename (e.g. `gemm_perf.parquet`), resolved in Python
+    /// (`sdk/engine.py::_compute_perf_db_sources`) so the Rust core inherits the
+    /// SAME rows Python does under SILICON/HYBRID. Each entry is
+    /// `(abs_path, Option<kernel_source_allowlist>)` in priority order — the
+    /// first source containing a shape wins (mirrors Python
+    /// `_read_filtered_rows` + skip-on-key-conflict). Absent/empty = fall back
+    /// to the single primary `data_root` (back-compat with pre-shared-layer
+    /// specs).
+    #[serde(default)]
+    pub perf_db_sources: PerfDbSources,
+
     #[serde(default)]
     pub extra: BTreeMap<String, String>,
+}
+
+/// Per-op-file ordered source list, keyed by op-file basename. See
+/// [`EngineConfig::perf_db_sources`].
+pub type PerfDbSources = BTreeMap<String, Vec<PerfSource>>;
+
+/// One perf-data source: an absolute file path plus an optional
+/// `kernel_source` allowlist. `None` admits every row (the primary source);
+/// `Some(set)` keeps only rows whose `kernel_source` is in the set (sibling
+/// inheritance). Wire form is a 2-element JSON array `[path, [ks...] | null]`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PerfSource(pub PathBuf, pub Option<Vec<String>>);
+
+impl PerfSource {
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+    pub fn kernel_sources(&self) -> Option<&[String]> {
+        self.1.as_deref()
+    }
 }
 
 /// Parallelism layout. Flattened into [`EngineConfig`] so the flat wire keys
