@@ -147,6 +147,39 @@ def _get_precision_combos(phase: str, attn_type: str):
     ]
 
 
+# MLA cache layout of every model this module collects (DeepSeek-family
+# checkpoints: kv_lora_rank 512 + qk_rope_head_dim 64). Used only as a lower
+# bound by the memory-feasibility filter below.
+_MLA_KV_ENTRY_ELEMS = 512 + 64
+
+_MEMORY_BUDGET_SAFETY_FACTOR = 0.9
+
+
+def _device_total_memory_bytes():
+    """Live device memory for the generation-time memory-feasibility filter."""
+    try:
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_properties(0).total_memory
+    except Exception:
+        pass
+    return None
+
+
+def _generation_kv_footprint_bytes(total_tokens: int, kv_cache_dtype: str) -> int:
+    """Lower bound of a generation case's peak device footprint.
+
+    run_mla_module materializes the per-request context KV inputs and the
+    paged cache they are copied into (utils.create_and_prepopulate_kv_cache_mla),
+    i.e. two allocations of ~total_tokens x 576 elements each. fp8 layouts use
+    at least one byte per element (the packed fp8_ds_mla entry is 656 B/token,
+    still above this bound). Module weights and workspace are deliberately
+    excluded so the estimate stays a provable lower bound: a case this filter
+    drops cannot fit on the device, on any platform.
+    """
+    bytes_per_elem = 1 if "fp8" in kv_cache_dtype else 2
+    return 2 * total_tokens * _MLA_KV_ENTRY_ELEMS * bytes_per_elem
+
+
 def get_context_test_cases(attn_type: str):
     """Context-phase test cases.
 
@@ -177,13 +210,32 @@ def get_generation_test_cases(attn_type: str):
     """
     cases = []
     sweep = get_mla_module_sweep_spec("vllm")
+    # Generation-time memory-feasibility filter (the one sanctioned
+    # in-collector filter, layer_permissions.md): the largest declared
+    # kv_cache_len x batch_size points are arithmetically infeasible on
+    # smaller devices (e.g. 32768 x 1024 bf16 needs 2 x 36 GiB of KV alone;
+    # reproduced as OOM in isolation on L40S 46 GB). Size-vs-capacity only,
+    # queried live; drops are counted and logged below.
+    total_memory = _device_total_memory_bytes()
+    budget = None if total_memory is None else int(total_memory * _MEMORY_BUDGET_SAFETY_FACTOR)
+    considered = 0
+    dropped = 0
     for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation", attn_type):
         for num_heads in sweep.inner_sweep_head_counts:
             for b in sweep.generation_batch_sizes:
                 for s in sweep.generation_sequence_lengths:
                     if b * s > sweep.generation_max_tokens:
                         continue
+                    considered += 1
+                    if budget is not None and _generation_kv_footprint_bytes(b * s, kv_dtype) > budget:
+                        dropped += 1
+                        continue
                     cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
+    if dropped:
+        print(
+            f"{attn_type}_generation_module: dropped {dropped}/{considered} cases "
+            f"(memory budget, device={total_memory / 2**30:.0f}GiB)"
+        )
     return cases
 
 
