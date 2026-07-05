@@ -148,12 +148,15 @@ def _planner_config_payload(
     # SLA-based scaling drives the planner off ttft+itl; an e2e-only SLA can't seed
     # them (the planner has no e2e scaling target), so reject it up front rather than
     # silently scaling with no SLA. (The goodput SLA the evaluator uses is separate.)
-    if optimization_target == "sla" and planner_sla is not None:
-        if planner_sla.ttft_ms is None or planner_sla.itl_ms is None:
-            raise ValueError(
-                "SLA-based planner scaling (optimization_target='sla') requires both ttft_ms "
-                "and itl_ms; an e2e-only SLA cannot drive the planner's scaling target"
-            )
+    if (
+        optimization_target == "sla"
+        and planner_sla is not None
+        and (planner_sla.ttft_ms is None or planner_sla.itl_ms is None)
+    ):
+        raise ValueError(
+            "SLA-based planner scaling (optimization_target='sla') requires both ttft_ms "
+            "and itl_ms; an e2e-only SLA cannot drive the planner's scaling target"
+        )
 
     payload: dict[str, Any] = {"mode": sample["deployment_mode"], "optimization_target": optimization_target}
     # Spica consumes the trace_report directly and sweeps many candidates, so turn

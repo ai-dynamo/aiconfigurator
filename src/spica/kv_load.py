@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache
 from typing import Any
 
 from .config import Workload
@@ -28,7 +28,7 @@ class KVLoadResolution:
     role_capacity_tokens: dict[str, int]
 
 
-@lru_cache(maxsize=None)
+@cache
 def _per_rank_capacity_tokens(
     shape: ParallelShape,
     *,
