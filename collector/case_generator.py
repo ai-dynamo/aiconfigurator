@@ -521,6 +521,10 @@ class MLAModulePrecisionSpec:
     gemm_type: str
     phases: tuple[str, ...]
     min_sm: int
+    attention_types: tuple[str, ...] = ("mla", "dsa")
+
+
+_MLA_MODULE_ATTENTION_TYPES = ("mla", "dsa")
 
 
 def get_mla_module_model_specs(
@@ -630,8 +634,14 @@ def get_mla_module_precision_specs(
     *,
     phase: str | None = None,
     sm_version: int | None = None,
+    attention_type: str | None = None,
 ) -> list[MLAModulePrecisionSpec]:
     """Return YAML-backed precision combos for module collectors."""
+
+    if attention_type is not None and attention_type not in _MLA_MODULE_ATTENTION_TYPES:
+        raise ValueError(
+            f"mla_module attention_type must be one of {_MLA_MODULE_ATTENTION_TYPES}, got {attention_type!r}"
+        )
 
     values = _merged_mla_module_values(backend)
     raw_precision_combos = values.get("module_precision_combos")
@@ -650,10 +660,26 @@ def get_mla_module_precision_specs(
         elif not isinstance(phases, tuple):
             raise TypeError("mla_module.module_precision_combos phases must be a string or list")
 
+        attention_types = combo.get("attention_types", _MLA_MODULE_ATTENTION_TYPES)
+        if isinstance(attention_types, str):
+            attention_types = (attention_types,)
+        elif isinstance(attention_types, list):
+            attention_types = tuple(str(item) for item in attention_types)
+        elif not isinstance(attention_types, tuple):
+            raise TypeError("mla_module.module_precision_combos attention_types must be a string or list")
+        invalid_attention_types = [item for item in attention_types if item not in _MLA_MODULE_ATTENTION_TYPES]
+        if invalid_attention_types:
+            raise ValueError(
+                "mla_module.module_precision_combos attention_types entries must be in "
+                f"{_MLA_MODULE_ATTENTION_TYPES}, got {invalid_attention_types!r}"
+            )
+
         min_sm = int(combo.get("min_sm", 0))
         if phase is not None and phase not in phases:
             continue
         if sm_version is not None and sm_version < min_sm:
+            continue
+        if attention_type is not None and attention_type not in attention_types:
             continue
         precision_specs.append(
             MLAModulePrecisionSpec(
@@ -662,6 +688,7 @@ def get_mla_module_precision_specs(
                 gemm_type=str(combo["gemm_type"]),
                 phases=phases,
                 min_sm=min_sm,
+                attention_types=attention_types,
             )
         )
     return precision_specs

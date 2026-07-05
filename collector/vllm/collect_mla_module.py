@@ -133,12 +133,17 @@ def _resolve_model_path(model_name: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _get_precision_combos(phase: str):
+def _get_precision_combos(phase: str, attn_type: str):
     """Return YAML-backed (compute_dtype, kv_cache_dtype, gemm_type) triples."""
 
     return [
         (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
-        for spec in get_mla_module_precision_specs("vllm", phase=phase, sm_version=get_sm_version())
+        for spec in get_mla_module_precision_specs(
+            "vllm",
+            phase=phase,
+            sm_version=get_sm_version(),
+            attention_type=attn_type,
+        )
     ]
 
 
@@ -150,7 +155,7 @@ def get_context_test_cases(attn_type: str):
     """
     cases = []
     sweep = get_mla_module_sweep_spec("vllm")
-    for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context"):
+    for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context", attn_type):
         for num_heads in sweep.inner_sweep_head_counts:
             for b in sweep.context_batch_sizes:
                 for s in sweep.context_sequence_lengths:
@@ -172,7 +177,7 @@ def get_generation_test_cases(attn_type: str):
     """
     cases = []
     sweep = get_mla_module_sweep_spec("vllm")
-    for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation"):
+    for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation", attn_type):
         for num_heads in sweep.inner_sweep_head_counts:
             for b in sweep.generation_batch_sizes:
                 for s in sweep.generation_sequence_lengths:

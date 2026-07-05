@@ -783,6 +783,32 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("bfloat16", "fp8", "fp8_block"),
     ]
 
+    # vLLM 0.24.0 FP8 prefill-query compute is declared for the dense-MLA
+    # prefill path only: the sparse DSA builders have no prefill-query
+    # quantization concept, so the fp8 compute combos are scoped
+    # attention_types: [mla] and a DSA plan must not expand them.
+    assert [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100, attention_type="dsa")
+    ] == [
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+        ("bfloat16", "bfloat16", "nvfp4"),
+        ("bfloat16", "fp8", "nvfp4"),
+    ]
+    assert [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100, attention_type="mla")
+    ] == [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100)
+    ]
+
+    with pytest.raises(ValueError, match="attention_type"):
+        get_mla_module_precision_specs("vllm", phase="context", sm_version=100, attention_type="dense")
+
     assert {spec.model_path for spec in dsa_specs} == {
         "deepseek-ai/DeepSeek-V3.2",
         "zai-org/GLM-5",
