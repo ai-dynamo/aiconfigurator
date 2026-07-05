@@ -1450,3 +1450,67 @@ GLM top-k scale audit after the SM90 rerun, full MoE (still deliberately
 last), and fresh-namespace full collections for every op family. No GPU data
 from this pass is published as campaign data; all artifacts live under the
 node-local probe directory and this entry records the durable facts.
+
+### Affected-op full collection on B200 (2026-07-05, post-review head e849c8c5)
+
+After the PR review round (all threads addressed and resolved), the ops whose
+execution path changed in this continuation ran ONE full B200 collection from
+head `e849c8c5` in fresh namespace `b200_full_20260705` (same node/image as
+the probe round; artifacts are node-local evidence, not published data):
+
+- `mhc_module`: 4/4 tasks, 140/140 rows (`sglang_tilelang_mhc_pre/post`),
+  zero errors — the first full mHC pass that sequences multiple tasks through
+  one worker, validating the completed teardown on hardware. The resolved
+  env line printed `resolved_deepgemm_hc_prenorm=True`.
+- MoE, native DSV4 w4a8 slices: Flash 2,835 rows + 324 failures, Pro 2,349
+  rows + 729 failures; every persisted row carries the verified
+  `sglang_mxfp4_flashinfer_trtllm_moe` provenance and every failure is the
+  new classified 128-alignment guard, exactly at the probed boundary
+  (Flash tp=32 only; Pro tp=16 [405] and tp=32 [324]). Zero unexpected
+  failures.
+- Dense attention: context 42,255 rows (trtllm_mha 30,185 / triton 9,486 /
+  flashinfer 2,584), generation 46,936 (34,746 / 8,620 / 3,570). 16,408
+  errors, of which 16,389 are the designed FP8 live-activation fail-closed
+  raises (trtllm_mha 15,097, flashinfer 1,292, all context). The remaining
+  19 are one cluster: Gemma-4 SWA profiles (head_dim 256, window 1024) on
+  trtllm_mha with 1/2/4 local heads (TP32/64 shards), both phases,
+  asynchronous illegal access. Fresh blocking single-shape reruns of
+  representative failing cells PASS, so this is a configuration-dependent
+  within-sweep state defect (the same class as the H20 GLM/DSA
+  ordered-sweep findings), not a standalone shape limit; the failures stay
+  classified, no skip, and the ordered-sweep reverse test transfers to this
+  row for both platforms.
+- DSV4 context: HCA completed 88/88 with 23,728 unique rows and zero errors
+  — the first complete B200 HCA context artifact. CSA completed 48/88
+  (batches 1..32) with 21,896 unique rows; all 40 failed outer tasks are
+  batches >= 64 (x tp 1/2/4/8 x bf16/fp8_block), each dying at its first
+  attempted cell that combines the sparse-prefill branch with a large paged
+  span. Worker-side ChunkedPrefillSize/KVPoolCapacity skips remain the
+  separately tracked mechanism debt (logged, 54,961 lines across both ops).
+
+CSA root cause (isolated, deterministic, exact-image source): a cell enters
+SGLang 0.5.14 `_forward_prefill_sparse` when fresh tokens exceed
+`_LARGE_INDEXER_QUERY_THRESHOLD` = 11,673. That branch dequantizes the whole
+c4-compressed span (`cache.c4_flat_token_ids`, deepseek_v4_backend.py:1534)
+through `dequantize_k_cache_paged` (dsv4/dequant_k_cache.py), whose Triton
+kernel computes `out_row_base = token_id * output_stride_0` from the int32
+`tl.program_id(0)` (the page-table `loc` is cast `.to(tl.int64)`, the row
+base is not). With out rows of 512 bf16 elements, offsets overflow int32
+once the dequant span crosses ~2^22 c4 tokens (~2^24 raw KV tokens),
+producing the illegal access. Fresh single-cell blocking probes on a clean
+GPU: (bs=128, prefix=131,072, sl=96 -> fresh 12,288) FAILS deterministically;
+(sl=91 -> fresh 11,648, below the branch threshold) PASSES; (sl=90) PASSES;
+(prefix=0, sl=96) PASSES; earlier bs=1 prefix-0 cells at 12,288/16,384
+PASSED. So the boundary is (fresh > 11,673) AND (dequant span above the
+int32/stride limit) — a stock-framework defect that B200 serving (derived
+chunk 16,384, long context) would also hit; H20's derived 8,192 chunk never
+enters the branch, which is why SM90 never saw it. The chunk-cap removal is
+therefore NOT reverted: it admits exactly what production admits, and the
+failing cells are classified observations. Upstream-facing minimal repro and
+an int64-cast fix suggestion (mirror the `loc` cast on `token_id`) are the
+follow-up; a collector-side classified guard would need the exact
+`n_compressed` predicate from the framework and is deferred to that report.
+No skip, denylist entry, or capability floor is added. Reverse notes: any
+future fix must rerun the B200 cells above plus the passing controls, and
+the SM90 side needs no action (branch unreachable at its chunk) beyond
+keeping the 8,192-chunk fact recorded.
