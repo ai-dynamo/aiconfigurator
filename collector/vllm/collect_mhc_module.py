@@ -99,8 +99,22 @@ def _make_mhc_tensors(num_tokens: int, hidden_size: int, hc_mult: int, *, device
 
 
 def _mhc_pre(residual, fn, base, scale):
-    # vLLM 0.24's NVIDIA DeepSeek-V4 model calls this TileLang wrapper
-    # directly; it retains vLLM's internal DeepGEMM prenorm dispatch.
+    # KNOWN GAP vs vLLM 0.24 serving: the NVIDIA DeepSeek-V4 model calls
+    # mhc_pre_tilelang standalone only on the FIRST layer and always with
+    # norm_weight=attn_norm.weight (fused-RMSNorm big_fuse variant), and every
+    # subsequent layer boundary runs the fused mhc_fused_post_pre_tilelang
+    # (vllm/models/deepseek_v4/nvidia/model.py:854-890 @0.24.0). This
+    # collector measures the norm_weight=None variant because the SDK's
+    # DeepSeekV4 model composes mhc_pre + attn_norm (ElementWise) + mhc_post
+    # as separate per-layer ops (src/aiconfigurator/sdk/models/deepseek_v4.py)
+    # — fusing the norm here would double-count it downstream.
+    # Measured impact (H20, hc_mult=4, hidden=4096, T=1k/8k, 2026-07):
+    # fused(post+pre+norm) matches pre(no-norm)+post within 1-2%, and the
+    # fused norm adds only 2-3% to pre — so this decomposition tracks the
+    # fused serving path closely; the SDK's separately-billed attn_norm is
+    # the only (small) over-count. Aligning row semantics with the fused
+    # serving path is a coordinated producer+consumer contract change; do
+    # not switch variants unilaterally.
     post, comb, layer_input = mhc_pre_tilelang(
         residual,
         fn,

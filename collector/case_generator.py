@@ -23,6 +23,10 @@ COLLECTOR_ROOT = Path(__file__).resolve().parent
 BASE_OP_CASES_DIR = COLLECTOR_ROOT / "cases" / "base_ops"
 MODEL_CASES_DIR = COLLECTOR_ROOT / "cases" / "models"
 
+# Backend names a model_case_values row may target via `frameworks:`. A typo
+# here would otherwise silently exclude the row from its intended backend.
+_KNOWN_CASE_FRAMEWORKS = frozenset({"sglang", "trtllm", "vllm", "wideep"})
+
 
 def _load_yaml_mapping(path: Path) -> dict:
     with open(path, encoding="utf-8") as f:
@@ -560,14 +564,29 @@ def get_mla_module_model_specs(
     if backend == "vllm" and apply_model_filter and model_path_filter is None:
         # vLLM 0.24 builds every module with the case's explicit precision and
         # head count, so checkpoint aliases no longer change the invocation.
-        # MLA has one architecture-less consumer table; DSA is keyed by
-        # architecture. Stable first-wins keeps DeepSeek-V3 and each DSA
-        # architecture canonical while targeted artifact runs remain exact.
+        # MLA has one architecture-less consumer table (the perf rows carry no
+        # lora/rope geometry key, so distinct-geometry models could not be
+        # represented anyway); DSA is keyed by architecture. Stable first-wins
+        # keeps DeepSeek-V3 and each DSA architecture canonical while targeted
+        # artifact runs remain exact. Revisit if an MLA model with different
+        # q_lora/kv_lora/rope geometry is declared — that first needs a new
+        # consumer key dimension (a contract change).
         canonical_specs = {}
+        collapsed: dict[tuple, list[str]] = {}
         for spec in specs:
             key = (spec.attention_type, spec.architecture if spec.attention_type == "dsa" else None)
-            canonical_specs.setdefault(key, spec)
+            if key in canonical_specs:
+                collapsed.setdefault(key, []).append(spec.model_path)
+            else:
+                canonical_specs[key] = spec
         specs = list(canonical_specs.values())
+        for key, dropped_paths in sorted(collapsed.items()):
+            canonical = canonical_specs[key]
+            print(
+                f"mla_module: collapsed {len(dropped_paths)} declared spec(s) into canonical "
+                f"{canonical.model_path!r} for {key[0]} (architecture-less consumer table): "
+                f"{', '.join(dropped_paths)}"
+            )
 
     return specs
 
@@ -1164,6 +1183,12 @@ def get_common_moe_test_cases(*, backend: str | None = None):
         raw_frameworks = model_config.get("frameworks")
         if raw_frameworks is not None:
             frameworks = _as_str_list(raw_frameworks, field_name="model_case_values.moe.frameworks")
+            unknown_frameworks = sorted(set(frameworks) - _KNOWN_CASE_FRAMEWORKS)
+            if unknown_frameworks:
+                raise ValueError(
+                    f"model_case_values.moe row {model_config.get('model_path')!r} declares unknown "
+                    f"frameworks {unknown_frameworks}; known: {sorted(_KNOWN_CASE_FRAMEWORKS)}"
+                )
             if backend is not None and backend not in frameworks:
                 continue
         model_config_list.append(model_config)

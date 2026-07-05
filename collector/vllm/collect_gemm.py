@@ -39,9 +39,9 @@ from collector.vllm.utils import setup_distributed, with_exit_stack
 
 FP8_BLOCK_SHAPE = (128, 128)
 
-# NVFP4 is source-supported by vLLM 0.24.0 on datacenter and RTX Blackwell.
-# These SM100/SM103/SM120 paths remain hardware-unvalidated in this effort.
-BLACKWELL_SMS = (100, 103, 120)
+# NVFP4 is source-supported by vLLM 0.24.0 on datacenter and RTX Blackwell
+# (SM100+). The SM100/SM103/SM120 paths remain hardware-unvalidated in this
+# effort.
 
 _NVFP4_QUANT_ARGS = {
     "num_bits": 4,
@@ -56,14 +56,17 @@ _NVFP4_QUANT_ARGS = {
 def get_gemm_test_cases():
     sm = get_sm_version()
 
+    # Open floors matching cases/capabilities.yaml (fp8: 89, fp8_block: 90,
+    # nvfp4: 100) — a closed SM whitelist here would silently drop unlisted
+    # SMs (e.g. SM101/SM121) with no logged reason.
     gemm_list = ["bfloat16"]
-    if sm in (89, 90, *BLACKWELL_SMS):
+    if sm >= 89:
         gemm_list += ["fp8"]
     # Blockwise FP8 kernels are available on Hopper/Blackwell+
-    if sm in (90, *BLACKWELL_SMS):
+    if sm >= 90:
         gemm_list += ["fp8_block"]
 
-    if sm in BLACKWELL_SMS:
+    if sm >= 100:
         gemm_list += ["nvfp4"]
 
     test_cases = []
@@ -81,6 +84,13 @@ def get_gemm_test_cases():
 @with_exit_stack
 def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
     setup_distributed(device)
+
+    if envs.VLLM_BATCH_INVARIANT:
+        # Batch-invariant mode reroutes bf16 linears to linear_batch_invariant
+        # (vllm/model_executor/layers/linear.py:224-226 @0.24.0) and per-tensor
+        # fp8 to a BF16-dequant F.linear path (fp8.py:453-487), so the
+        # kernel_source values recorded below would not be ground truth.
+        raise RuntimeError("VLLM_BATCH_INVARIANT is set; gemm kernel_source recording assumes default dispatch")
 
     dtype = torch.bfloat16
     torch.set_default_dtype(dtype)

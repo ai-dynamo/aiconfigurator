@@ -394,18 +394,27 @@ def run_gdn_generation_benchmark(
         torch.cuda.empty_cache()
 
         # vLLM 0.24.0's packed recurrent kernel launches grid-y as
-        # batch_size * num_v_heads; CUDA limits grid-y to 65,535. Keep the
-        # valid convolution measurement above, then surface the unsupported
-        # recurrent point to Collector V2 instead of silently dropping it.
+        # batch_size * num_v_heads (`grid = (NV, B * HV)`,
+        # vllm/model_executor/layers/fla/ops/fused_recurrent.py:449 @0.24.0);
+        # CUDA limits grid-y to 65,535. Keep the valid convolution measurement
+        # above, then surface the unsupported recurrent point to Collector V2
+        # instead of silently dropping it.
         if batch_size * num_v_heads > 65_535:
             raise RuntimeError(
-                "vLLM 0.24.0 packed recurrent GDN exceeds CUDA grid-y limit: "
+                "vLLM 0.24.0 packed recurrent GDN exceeds CUDA grid-y limit "
+                "(fla/ops/fused_recurrent.py:449 launches grid-y = batch * num_v_heads): "
                 f"batch_size={batch_size}, num_v_heads={num_v_heads}, "
                 f"grid_y={batch_size * num_v_heads} > 65535"
             )
 
         # The production non-spec decode fast path feeds packed convolution
-        # output directly to this recurrent kernel.
+        # output directly to this recurrent kernel: GDN decode routes to
+        # _forward_core_decode_non_spec, which calls
+        # fused_recurrent_gated_delta_rule_packed_decode with
+        # scale=head_k_dim**-0.5 and use_qk_l2norm_in_kernel=True
+        # (vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py:1286,
+        # :1684 @0.24.0), gated by VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
+        # which defaults to True (vllm/envs.py:115).
         a = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
         b = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
         gdn_state = torch.randn(
