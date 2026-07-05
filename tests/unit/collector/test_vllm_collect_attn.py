@@ -363,8 +363,23 @@ def test_mla_backend_name_records_actually_invoked_backend(attn_type, is_context
         attn_backend=SimpleNamespace(get_name=lambda: "DECODE_BACKEND"),
         prefill_backend=SimpleNamespace(get_name=lambda: "PREFILL_BACKEND"),
     )
+    metadata = SimpleNamespace(num_prefills=num_prefills)
 
-    assert backend_name(mla_layer, attn_type, is_context, num_prefills) == expected
+    assert backend_name(mla_layer, attn_type, is_context, metadata) == expected
+
+
+def test_mla_backend_name_never_reads_num_prefills_off_the_mla_context_branch():
+    """Sparse DSA metadata (FlashMLASparseMetadata @0.24.0) has no top-level
+    ``num_prefills``; the helper must not read it for DSA or generation rows."""
+    backend_name = _load_function(MLA_ATTN_SOURCE, "_mla_backend_name", {})
+    mla_layer = SimpleNamespace(
+        attn_backend=SimpleNamespace(get_name=lambda: "DECODE_BACKEND"),
+        prefill_backend=SimpleNamespace(get_name=lambda: "PREFILL_BACKEND"),
+    )
+    sparse_metadata = SimpleNamespace()  # no num_prefills attribute
+
+    assert backend_name(mla_layer, "dsa", True, sparse_metadata) == "DECODE_BACKEND"
+    assert backend_name(mla_layer, "mla", False, sparse_metadata) == "DECODE_BACKEND"
 
 
 @pytest.mark.parametrize(

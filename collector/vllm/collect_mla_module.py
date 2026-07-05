@@ -225,14 +225,19 @@ def get_dsa_generation_module_test_cases():
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _mla_backend_name(mla_layer, attn_type, is_context, num_prefills):
+def _mla_backend_name(mla_layer, attn_type, is_context, attn_metadata):
     """Ground-truth backend for the perf row.
 
     MLA prefill runs mla_layer.prefill_backend; everything else — DSA, decode,
     and "context" batches that vLLM classified entirely as decodes
     (num_prefills == 0, e.g. s=1) — runs mla_layer.attn_backend.
+
+    ``num_prefills`` must only be read on the MLA-context branch: sparse DSA
+    metadata (FlashMLASparseMetadata / FlashInferMLASparseMetadata @0.24.0)
+    does not carry that attribute at the top level, so an eager read breaks
+    every DSA row.
     """
-    if attn_type == "dsa" or not is_context or num_prefills == 0:
+    if attn_type == "dsa" or not is_context or attn_metadata.num_prefills == 0:
         return mla_layer.attn_backend.get_name()
     return mla_layer.prefill_backend.get_name()
 
@@ -296,13 +301,16 @@ def _create_attention_module(
         model_path: HuggingFace model path (e.g. "deepseek-ai/DeepSeek-V3.2").
         attn_type: Attention type ("mla" or "dsa").
         use_prefill_fp8: When True, opt in to FP8 prefill query compute via
-            ``attention_config.use_prefill_query_quantization``. vLLM honors
-            it only with an FP8 KV cache on the SM100 family with a
-            FLASHINFER/TRTLLM_RAGGED prefill backend
-            (determine_prefill_query_data_type +
+            ``attention_config.use_prefill_query_quantization`` plus an
+            explicit ``attention_config.mla_prefill_backend`` pin. vLLM honors
+            the quantization flag only with an FP8 KV cache on the SM100
+            family with a FLASHINFER/TRTLLM_RAGGED/TOKENSPEED_MLA prefill
+            backend (determine_prefill_query_data_type +
             backend_supports_prefill_query_quantization,
-            mla_attention.py:1372-1396,1453-1493 @0.24.0); the metadata probe
-            in _create_kv_cache_and_metadata fails closed if the decision
+            mla_attention.py:1371-1396,1453-1493 @0.24.0), and the SM100 auto
+            selector always picks FLASH_ATTN instead
+            (prefill/selector.py:60-66); the metadata probe in
+            _create_kv_cache_and_metadata fails closed if the decision
             does not match the case label.
         gemm_type: Precision for linear-layer GEMMs — "bfloat16",
             "fp8_block", or "nvfp4".
@@ -357,7 +365,35 @@ def _create_attention_module(
     # Opt in to FP8 prefill query compute before the module (and later the
     # metadata builder) reads the attention config.
     if use_prefill_fp8:
+        from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
+
         vllm_config.attention_config.use_prefill_query_quantization = True
+        # The quantization flag alone never engages on Blackwell: the auto
+        # selector ranks FLASH_ATTN first on SM100 (prefill/selector.py:60-66
+        # @0.24.0) and FLASH_ATTN is always eligible there, but FP8 query
+        # compute requires a FLASHINFER/TRTLLM_RAGGED/TOKENSPEED_MLA prefill
+        # backend (backend_supports_prefill_query_quantization,
+        # mla_attention.py:1371-1396 @0.24.0). The FP8-prefill serving
+        # configuration therefore also pins attention_config
+        # .mla_prefill_backend; TRTLLM_RAGGED is the framework's own
+        # highest-priority Blackwell backend among the supporting set
+        # (prefill/selector.py:60-66). get_mla_prefill_backend validates the
+        # explicit selection and raises when it is invalid, and the metadata
+        # probe below still fails closed on the resolved q_data_type.
+        vllm_config.attention_config.mla_prefill_backend = MLAPrefillBackendEnum.TRTLLM_RAGGED
+
+    # backend_supports_prefill_query_quantization() is a zero-argument
+    # functools.cache that reads the *current* vllm config on first call
+    # (mla_attention.py:1371 @0.24.0). Serving processes hold one config, but
+    # collector workers build many per process, so a value cached from a
+    # previous case (e.g. bf16-prefill, FLASH_ATTN) would silently redirect
+    # this case's q_data_type decision. Clear it so vLLM re-decides from this
+    # case's config, exactly as a fresh serving process would.
+    from vllm.model_executor.layers.attention.mla_attention import (
+        backend_supports_prefill_query_quantization,
+    )
+
+    backend_supports_prefill_query_quantization.cache_clear()
 
     # Override just the layer-local dimensions we sweep in the collector.
     hf_config = vllm_config.model_config.hf_text_config
@@ -851,7 +887,7 @@ def run_mla_module(
     hf_cfg = vllm_config.model_config.hf_config
     architecture = getattr(hf_cfg, "architectures", [getattr(hf_cfg, "model_type", "unknown")])[0]
     mla_layer = attn_module.mla_attn.mla_attn
-    backend_name = _mla_backend_name(mla_layer, attn_type, is_context, attn_metadata.num_prefills)
+    backend_name = _mla_backend_name(mla_layer, attn_type, is_context, attn_metadata)
     actual_kv_cache_dtype = "fp8" if mla_layer.kv_cache_dtype.startswith("fp8") else "bfloat16"
 
     log_perf(
