@@ -75,11 +75,15 @@ def get_gemm_test_cases():
         n = gemm_common_testcase.n
         k = gemm_common_testcase.k
         for gemm_type in gemm_list:
+            # FIXME(kernel-limit, 2026-07-05): inherited pre-#1302 claim that
+            # DeepGEMM fp8_block (128x128 block scales) and the FlashInfer
+            # NVFP4 layout cannot represent n<128 or k<128. Removing it adds
+            # 6,216 (n,k,x) specs per affected mode on BOTH platforms (SM90
+            # fp8_block included), so it is a shared coverage-contract change
+            # that must not ride along a Blackwell fix; re-verify against
+            # framework source on the next version bump and either convert to
+            # a probe-and-raise or delete.
             if (gemm_type == "nvfp4" or gemm_type == "fp8_block") and (n < 128 or k < 128):
-                continue
-            if gemm_type == "nvfp4" and (n % 128 != 0 or k % 64 != 0):
-                # The 0.5.14 FlashInfer path uses the modelopt 128x4
-                # block-scale layout without synthetic padding.
                 continue
 
             test_cases.append([gemm_type, x, n, k])
@@ -152,6 +156,23 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
     if gemm_type == "nvfp4":
         if not HAS_FLASHINFER_FP4:
             raise RuntimeError("SGLang NVFP4 GEMM requires FlashInfer FP4 quantization support")
+        if N % 128 != 0 or K % 64 != 0:
+            # The 0.5.14 FlashInfer path consumes the modelopt 128x4
+            # block-scale layout without synthetic padding; misaligned weights
+            # cannot be quantized into that layout. The current shared sweep
+            # contains no such shape (B200 audit 2026-07-05: 0/483 unique
+            # (n,k) misaligned), so this guard exists to classify rather than
+            # silently drop any future misaligned case.
+            raise ValueError(
+                f"SGLang NVFP4 dense GEMM requires n % 128 == 0 and k % 64 == 0 "
+                f"for the modelopt block-scale layout, got n={N}, k={K}"
+            )
+        # Mirrors SGLang 0.5.14 initialize_fp4_gemm_config
+        # (python/sglang/srt/layers/quantization/fp4_utils.py:148-161 at image
+        # source 49e384ce): "auto" resolves to flashinfer_cutedsl (mm_fp4
+        # backend "cute-dsl") when is_sm100_supported() (major 10 -> SM100 and
+        # SM103), marlin on SM80-89, and flashinfer_cutlass (mm_fp4 backend
+        # "cutlass") otherwise, which is the SM120 path.
         if sm_version in {100, 103}:
             fp4_backend = "cute-dsl"
         elif sm_version == 120:

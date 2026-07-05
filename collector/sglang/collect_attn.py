@@ -398,10 +398,17 @@ def run_attention_torch(
 
     if attn_backend_name is None:
         sm_version = get_sm_version()
-        # Mirrors SGLang 0.5.14 server_args._get_default_attn_backend (MHA):
-        # SM90 Hopper+CUDA>=12.3 -> fa3; SM100/103 -> trtllm_mha; other
+        # Mirrors SGLang 0.5.14 server_args._get_default_attn_backend (MHA),
+        # python/sglang/srt/server_args.py:4407-4455 at image source 49e384ce:
+        # SM90 Hopper+CUDA>=12.3 -> fa3 (line 4437); SM100/103 -> trtllm_mha
+        # (is_sm100_supported() matches major 10, lines 4438-4446); other
         # supported CUDA SMs -> flashinfer unless the model has attention
-        # sinks (FlashInfer rejects sinks) -> triton. SM80/86 are outside the
+        # sinks (FlashInfer rejects sinks, lines 4451-4454) -> triton.
+        # Per-model deviations (Qwen3.5 hybrid-GDN -> triton on SM100,
+        # server_args.py:4188-4211; NemotronH -> flashinfer,
+        # arg_groups/nemotron_h_hook.py:60-62) arrive through the profile's
+        # sglang_backends map as an explicit attn_backend_name, never through
+        # this default table. SM80/86 are outside the
         # supported platform set {89, 90, 100, 103, 120} and fail closed below.
         attn_backend_name = {
             89: "triton" if has_attention_sink else "flashinfer",
