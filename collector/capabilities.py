@@ -52,7 +52,13 @@ def _load_denylist() -> tuple[tuple[str, str], ...]:
     entries = []
     for entry in data.get("entries") or []:
         contains = str(entry["contains"])
-        reason = str(entry.get("reason", ""))
+        # Hang suppression must stay auditable: every entry needs a reason and
+        # a date so the next version bump can re-audit and prune it (see the
+        # denylist.yaml header and failure_handling.md).
+        reason = str(entry.get("reason") or "").strip()
+        added = str(entry.get("added") or "").strip()
+        if not reason or not added:
+            raise ValueError(f"denylist entry {contains!r} must carry non-empty 'reason' and 'added' fields")
         entries.append((contains, reason))
     return tuple(entries)
 

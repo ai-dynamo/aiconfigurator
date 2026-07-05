@@ -606,11 +606,19 @@ def run_moe_torch(
 
 
 if __name__ == "__main__":
+    import traceback
+
     from collector.registry_types import PerfFile
 
     test_cases = get_moe_test_cases()
     print(f"Total test cases: {len(test_cases)}")
 
+    # Standalone debug entrypoint: report each failing case and keep going,
+    # like the collect.py worker path does, instead of aborting the sweep.
     for test_case in test_cases[:4]:
         print(f"Running test case: {test_case}")
-        run_moe_torch(*test_case, perf_filename=PerfFile.MOE)
+        try:
+            run_moe_torch(*test_case, perf_filename=PerfFile.MOE)
+        except Exception as error:
+            traceback.print_exc()
+            print(f"Test case failed ({type(error).__name__}): {test_case}")

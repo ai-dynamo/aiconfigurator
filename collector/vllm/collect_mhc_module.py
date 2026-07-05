@@ -17,15 +17,26 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import torch
-from vllm.model_executor.kernels.mhc.tilelang import mhc_post_tilelang, mhc_pre_tilelang
-from vllm.v1.worker.workspace import init_workspace_manager
 
 from collector.case_generator import get_common_mhc_test_cases
 from collector.helper import benchmark_with_power, log_perf
 from collector.registry_types import PerfFile
-from collector.vllm.utils import setup_distributed
 
 __compat__ = "vllm==0.24.0"
+
+# vLLM imports stay lazy in this module so that a mismatched install fails
+# inside collect.py's per-op error handling (after the __compat__ gate can
+# label it) rather than at module import.
+_MHC_TILELANG_KERNELS: tuple | None = None
+
+
+def _mhc_tilelang_kernels():
+    global _MHC_TILELANG_KERNELS
+    if _MHC_TILELANG_KERNELS is None:
+        from vllm.model_executor.kernels.mhc.tilelang import mhc_post_tilelang, mhc_pre_tilelang
+
+        _MHC_TILELANG_KERNELS = (mhc_pre_tilelang, mhc_post_tilelang)
+    return _MHC_TILELANG_KERNELS
 
 
 DEFAULT_HIDDEN_SIZE = 4096
@@ -52,6 +63,10 @@ def _resolve_perf_path(output_path: str | None, filename: str | None) -> str:
 
 
 def _init_cuda(device: str) -> None:
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    from collector.vllm.utils import setup_distributed
+
     setup_distributed(device)
     torch.cuda.set_device(device)
     init_workspace_manager(torch.device(device))
@@ -115,6 +130,7 @@ def _mhc_pre(residual, fn, base, scale):
     # the only (small) over-count. Aligning row semantics with the fused
     # serving path is a coordinated producer+consumer contract change; do
     # not switch variants unilaterally.
+    mhc_pre_tilelang, _ = _mhc_tilelang_kernels()
     post, comb, layer_input = mhc_pre_tilelang(
         residual,
         fn,
@@ -163,13 +179,14 @@ def run_mhc_module(
                         return [_mhc_pre(residual, fn, base, scale) for residual, fn, base, scale in site_inputs]
 
             else:
+                _, mhc_post_tilelang = _mhc_tilelang_kernels()
                 with torch.no_grad():
                     post_inputs = [
                         (_mhc_pre(residual, fn, base, scale), residual) for residual, fn, base, scale in site_inputs
                     ]
                 torch.cuda.synchronize()
 
-                def kernel_func(post_inputs=post_inputs):
+                def kernel_func(post_inputs=post_inputs, mhc_post_tilelang=mhc_post_tilelang):
                     with torch.no_grad():
                         return [mhc_post_tilelang(x, residual, post, comb) for (x, post, comb), residual in post_inputs]
 

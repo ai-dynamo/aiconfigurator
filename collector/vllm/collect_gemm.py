@@ -201,10 +201,11 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
             selected_kernel = op.quant_method.fp8_linear
             if isinstance(selected_kernel, FlashInferFp8DeepGEMMDynamicBlockScaledKernel):
                 # vLLM 0.24's custom op selects the same two leaf objects at
-                # scaled_mm/flashinfer.py:301-315.
-                selected_kernel = (
-                    selected_kernel.fallback if envs.VLLM_BATCH_INVARIANT or m >= 32 else selected_kernel.base
-                )
+                # scaled_mm/flashinfer.py:301-315: DeepGEMM for m >= 32,
+                # FlashInfer swap-AB below. Its batch-invariant branch is
+                # unreachable here — run_gemm raises on VLLM_BATCH_INVARIANT
+                # at entry — so the label depends on m alone.
+                selected_kernel = selected_kernel.fallback if m >= 32 else selected_kernel.base
             kernel_sources.add(type(selected_kernel).__name__)
     elif gemm_type == "nvfp4":
         kernel_sources = {type(op.scheme.kernel).__name__ for op in op_list}

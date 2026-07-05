@@ -885,6 +885,22 @@ def test_model_cases_path_can_infer_model_path():
     }.isdisjoint(plan.selected_ops)
 
 
+def test_plan_rejects_model_declared_ops_unknown_to_backend_registry(tmp_path):
+    """A typo in a model-declared op name must fail plan building loudly, not
+    silently collect nothing for the intended benchmark."""
+    case_file = tmp_path / "FakeArchForCausalLM_cases.yaml"
+    case_file.write_text(
+        "architecture: FakeArchForCausalLM\n"
+        "model_path: fake/model\n"
+        "model_ops:\n"
+        "  - attention_context\n"
+        "  - attention_contxt_typo\n"
+    )
+
+    with pytest.raises(ValueError, match="attention_contxt_typo"):
+        build_collection_case_plan(backend="vllm", model_cases_path=str(case_file))
+
+
 def test_dsv4_plan_only_uses_backend_specific_case_plan():
     model_path = "deepseek-ai/DeepSeek-V4-Pro"
     expected_ops = build_collection_case_plan(backend="sglang", model_path=model_path).ops

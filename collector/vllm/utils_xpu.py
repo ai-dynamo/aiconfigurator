@@ -614,8 +614,11 @@ def create_and_prepopulate_kv_cache(
 
 @functools.cache  # only run once per process
 def setup_distributed(device):
-    # Each process needs to use a different port.
+    # Each process needs to use a different port. Bare device strings
+    # ("xpu"/"cuda") carry no ordinal, so default to device 0.
     device_idx = torch.device(device).index
+    if device_idx is None:
+        device_idx = 0
     port = 8889 + device_idx
     print(device, device_idx, port)
 

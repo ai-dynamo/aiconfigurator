@@ -104,3 +104,45 @@ def test_denylist_reason_defaults_to_matched_substring(monkeypatch):
     reason = capabilities.denylist_reason(FakeCase(label="hangs"))
 
     assert reason == "denylisted (contains 'label=hangs')"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"contains": "tp=32"},  # neither field
+        {"contains": "tp=32", "reason": "deadlocks in NCCL init"},  # missing added
+        {"contains": "tp=32", "added": "2026-07-04"},  # missing reason
+        {"contains": "tp=32", "reason": " ", "added": "2026-07-04"},  # blank reason
+    ],
+)
+def test_denylist_loader_requires_dated_reason(monkeypatch, tmp_path, entry):
+    """Hang suppression must stay auditable: entries without a reason+date fail loudly."""
+    import yaml
+
+    (tmp_path / "denylist.yaml").write_text(yaml.safe_dump({"schema_version": 1, "entries": [entry]}))
+    monkeypatch.setattr(capabilities, "_CASES_DIR", tmp_path)
+    capabilities._load_denylist.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="'reason' and 'added'"):
+            capabilities._load_denylist()
+    finally:
+        capabilities._load_denylist.cache_clear()
+
+
+def test_denylist_loader_accepts_dated_reason(monkeypatch, tmp_path):
+    import yaml
+
+    (tmp_path / "denylist.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "entries": [{"contains": "tp=32", "reason": "deadlocks in NCCL init", "added": "2026-07-04"}],
+            }
+        )
+    )
+    monkeypatch.setattr(capabilities, "_CASES_DIR", tmp_path)
+    capabilities._load_denylist.cache_clear()
+    try:
+        assert capabilities._load_denylist() == (("tp=32", "deadlocks in NCCL init"),)
+    finally:
+        capabilities._load_denylist.cache_clear()
