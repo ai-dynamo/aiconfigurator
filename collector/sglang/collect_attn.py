@@ -619,12 +619,21 @@ def run_attention_torch(
             k = k.to(kvtype)
             v = v.to(kvtype)
 
+        # Mirror the serving call contract: only sink-carrying models pass the
+        # ``sinks`` kwarg (e.g. gpt_oss.py), and SGLang 0.5.14
+        # FlashInferAttnBackend.forward_extend/forward_decode do not accept it
+        # at all — passing ``sinks=None`` unconditionally breaks every
+        # flashinfer-routed case (first seen on SM100 NemotronH; flashinfer is
+        # never the selected dense backend on SM90). A sink profile routed to
+        # flashinfer still fails closed with the framework's own TypeError.
+        layer_kwargs = {"sinks": sinks} if has_attention_sink else {}
+
         def run_iter():
             # FIXME(kernel-limit): 37826f10 observed an SM120 illegal-memory
             # access for large Q/O tensors on SGLang 0.5.10 Triton. That is not
             # proof for every 0.5.14 backend; keep the cases attempted until an
             # SM120 source/hardware audit can replace or remove this note.
-            layer(q, k, v, forward_batch, sinks=sinks)
+            layer(q, k, v, forward_batch, **layer_kwargs)
 
         with benchmark_with_power(
             device=torch_device,

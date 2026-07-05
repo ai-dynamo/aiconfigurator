@@ -262,7 +262,25 @@ def test_sglang_attention_runtime_fields_are_not_persisted_dimensions():
 
     assert "v_head_dim" in {keyword.arg for keyword in pool.keywords}
     assert {"v_head_dim", "sliding_window_size", "use_irope"} <= {keyword.arg for keyword in radix.keywords}
-    assert "sinks" in {keyword.arg for keyword in layer_call.keywords}
+    # The serving call contract passes ``sinks`` only for sink-carrying models
+    # (SGLang 0.5.14 FlashInferAttnBackend accepts no ``sinks`` kwarg at all),
+    # so the layer call must expand a conditional kwargs dict instead of
+    # passing ``sinks=None`` unconditionally.
+    assert {keyword.arg for keyword in layer_call.keywords} == {None}
+    kwargs_expansion = next(keyword.value for keyword in layer_call.keywords if keyword.arg is None)
+    assert isinstance(kwargs_expansion, ast.Name) and kwargs_expansion.id == "layer_kwargs"
+    layer_kwargs_assign = next(
+        node
+        for node in ast.walk(run)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "layer_kwargs" for target in node.targets)
+    )
+    conditional = layer_kwargs_assign.value
+    assert isinstance(conditional, ast.IfExp)
+    assert isinstance(conditional.test, ast.Name) and conditional.test.id == "has_attention_sink"
+    assert isinstance(conditional.body, ast.Dict)
+    assert {key.value for key in conditional.body.keys if isinstance(key, ast.Constant)} == {"sinks"}
+    assert isinstance(conditional.orelse, ast.Dict) and not conditional.orelse.keys
 
     item_list = next(keyword.value for keyword in log_perf.keywords if keyword.arg == "item_list")
     row = item_list.elts[0]
