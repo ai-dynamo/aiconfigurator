@@ -36,7 +36,6 @@ from __future__ import annotations
 __compat__ = "sglang==0.5.14"
 
 import functools
-import importlib.util
 import json
 import os
 import sys
@@ -82,20 +81,14 @@ def _dsv4_sparse_kernel_cases(kernel):
 
 
 def get_dsv4_paged_mqa_logits_test_cases():
-    if not _dsv4_sparse_kernel_supported("paged_mqa_logits"):
-        return []
     return _dsv4_sparse_kernel_cases("paged_mqa_logits")
 
 
 def get_dsv4_hca_attn_test_cases():
-    if not _dsv4_sparse_kernel_supported("hca_attn"):
-        return []
     return _dsv4_sparse_kernel_cases("hca_attn")
 
 
 def get_dsv4_csa_attn_test_cases():
-    if not _dsv4_sparse_kernel_supported("csa_attn"):
-        return []
     return _dsv4_sparse_kernel_cases("csa_attn")
 
 
@@ -277,24 +270,6 @@ KERNEL_TO_COMPRESS_RATIO = {
 # matching how the SDK consumes them (keyed by shape, not tp) — no per-tp
 # expansion. (topk additionally emits two phase-qualified score_mode rows per
 # shape.)
-
-
-def _dsv4_sparse_kernel_supported(kernel: str) -> bool:
-    """Return True when the active runtime can execute a DSV4 sparse kernel."""
-    if os.environ.get("COLLECTOR_FORCE_DSV4_SPARSE") == "1":
-        return True
-    if torch.cuda.is_available():
-        major, minor = torch.cuda.get_device_capability()
-        sm_version = major * 10 + minor
-        # The pinned DeepGEMM/FlashMLA sparse APIs cover Hopper and datacenter
-        # Blackwell. SM120 has a different API and pre-Hopper lacks the kernels.
-        if sm_version not in {90, 100, 103}:
-            return False
-    if kernel in ("hca_attn", "csa_attn"):
-        return importlib.util.find_spec("flash_mla") is not None
-    if kernel == "paged_mqa_logits":
-        return importlib.util.find_spec("deep_gemm") is not None
-    raise ValueError(f"unknown DSV4 sparse kernel: {kernel}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1041,8 +1016,9 @@ def run_dsv4_sparse_kernel_worker(
     # this task owns one bs (collect.py distributes bs across GPU workers)
     shapes = [(prefix, isl, bs, variant) for (prefix, isl, bs, variant) in shapes if bs == bs_only]
     if not shapes:
-        print(f"[dsv4-sparse {kernel} bs={bs_only}] no shapes; skipping.")
-        return
+        # A queued (kernel, bs) task with no derivable shapes is a case-plan
+        # inconsistency, not a clean completion: fail closed so it is recorded.
+        raise RuntimeError(f"dsv4-sparse {kernel} bs={bs_only}: queued task resolved no shapes")
 
     device_name = torch.cuda.get_device_name(device)
     print(f"[dsv4-sparse {kernel} bs={bs_only}] {len(shapes)} shapes -> {perf_path}")
@@ -1110,24 +1086,6 @@ def run_dsv4_sparse_kernel_worker(
 #
 # topK is CSA-only (compress_ratio=4) and, like the other sparse kernels,
 # TP-independent (per-token causal scan): one variant-qualified pair per shape.
-
-
-def _dsv4_topk_kernel_supported() -> bool:
-    """True when the Hopper/datacenter-Blackwell topk indexer is available."""
-    if os.environ.get("COLLECTOR_FORCE_DSV4_SPARSE") == "1":
-        return True
-    if torch.cuda.is_available():
-        major, minor = torch.cuda.get_device_capability()
-        # SM100/103 use the same context-v1/decode-v2 split as SM90. SM120
-        # selects v1 for both phases, but its whole DSV4 module path is not yet
-        # validated, so keep it out of this collector instead of guessing rows.
-        if major * 10 + minor not in {90, 100, 103}:
-            return False
-    try:
-        # find_spec raises (not returns None) when a PARENT package is absent.
-        return importlib.util.find_spec("sglang.jit_kernel.dsv4.topk") is not None
-    except ModuleNotFoundError:
-        return False
 
 
 def _make_topk_scores(
@@ -1215,9 +1173,7 @@ def _bench_topk_512(
 
 
 def get_dsv4_topk_calib_test_cases():
-    """topk_512 DELTA calibration cases (gated on kernel availability)."""
-    if not _dsv4_topk_kernel_supported():
-        return []
+    """topk_512 DELTA calibration cases."""
     return _dsv4_sparse_kernel_cases("topk")
 
 

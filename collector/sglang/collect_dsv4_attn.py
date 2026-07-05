@@ -1783,8 +1783,15 @@ def _subprocess_entry(
                 and (max_position_embeddings is None or cur_prefix + sl <= max_position_embeddings)
             ]
             if not pairs:
-                print(f"[dsv4-flash] no valid sl values for mode={mode}, bs={batch_size}, prefix_len={cur_prefix}")
-                continue
+                # Silently continuing would let the task succeed with partial
+                # prefix coverage — runtime filtering by another name. Admission
+                # belongs to the getter-retained manifest; on this worker-side
+                # grid path (generation / manual CLI) an unresolvable prefix
+                # group fails the task so it is classified.
+                raise RuntimeError(
+                    f"dsv4-flash mode={mode} bs={batch_size} prefix_len={cur_prefix}: "
+                    "no valid sl values for a requested prefix group"
+                )
             seq_lens_by_prefix[cur_prefix] = sorted({sl for _, sl in pairs}, reverse=True)
 
     if not seq_lens_by_prefix:

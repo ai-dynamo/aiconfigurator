@@ -164,13 +164,24 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsv4_paged_mqa_logits_test_cases",
         run_func="run_dsv4_sparse_kernel_worker",
         perf_filename=PerfFile.DSV4_PAGED_MQA_LOGITS_MODULE,
+        # SM120 selects the Torch/v1 indexer paths and its whole DSV4 module
+        # family is source-derived, hardware-unvalidated; pre-Hopper is
+        # excluded by the op_min_sm=90 capability floor.
+        unverified_sms=(120,),
     ),
+    # The standalone HCA/CSA FMLA sub-kernel collectors require the
+    # ``flash_mla`` package, which the pinned 0.5.14 image does not ship (the
+    # serving path uses the bundled sgl-kernel FlashMLA instead); no platform
+    # has ever produced rows for them. Keep them parked as unverified until a
+    # wired backend exists, instead of letting the getter silently enumerate
+    # zero cases.
     OpEntry(
         op="dsv4_hca_attn_module",
         module="collector.sglang.deepseekv4_sparse_modules",
         get_func="get_dsv4_hca_attn_test_cases",
         run_func="run_dsv4_sparse_kernel_worker",
         perf_filename=PerfFile.DSV4_HCA_ATTN_MODULE,
+        unverified=True,
     ),
     OpEntry(
         op="dsv4_csa_attn_module",
@@ -178,6 +189,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsv4_csa_attn_test_cases",
         run_func="run_dsv4_sparse_kernel_worker",
         perf_filename=PerfFile.DSV4_CSA_ATTN_MODULE,
+        unverified=True,
     ),
     # CSA topk_512 DELTA calibration (flat vs top_last) — feeds the
     # degenerate->representative topK correction in perf_database.
@@ -187,15 +199,24 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsv4_topk_calib_test_cases",
         run_func="run_dsv4_sparse_kernel_worker",
         perf_filename=PerfFile.DSV4_CSA_TOPK_CALIB,
+        # SM120 disables topk v2 and its module path is unvalidated (see
+        # DSV4-TOPK-PHASE-AND-SM120); pre-Hopper is excluded by the
+        # op_min_sm=90 capability floor.
+        unverified_sms=(120,),
     ),
     # GLM-5 DSA sparse sub-kernels (mqa / topk / dsa_attn) — GLM-5 analogue of
     # the DSV4 sparse family; shapes 1:1 from the GLM-5 DSA module CSV.
+    # GLM-5 sparse sub-kernels share the DeepGEMM fp8_mqa_logits / FlashMLA
+    # sparse family: pre-Hopper is excluded by the op_min_sm=90 capability
+    # floors; SM120 has a different indexer API and no hardware validation,
+    # so it is parked by the maturity markers below.
     OpEntry(
         op="glm5_mqa_logits_module",
         module="collector.sglang.glm5_dsa_sparse_modules",
         get_func="get_glm5_mqa_test_cases",
         run_func="run_glm5_dsa_sparse_kernel_worker",
         perf_filename=PerfFile.GLM5_MQA_LOGITS_MODULE,
+        unverified_sms=(120,),
     ),
     OpEntry(
         op="glm5_topk_module",
@@ -203,6 +224,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_glm5_topk_test_cases",
         run_func="run_glm5_dsa_sparse_kernel_worker",
         perf_filename=PerfFile.GLM5_TOPK_MODULE,
+        unverified_sms=(120,),
     ),
     OpEntry(
         op="glm5_dsa_attn_module",
@@ -210,6 +232,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_glm5_dsa_attn_test_cases",
         run_func="run_glm5_dsa_sparse_kernel_worker",
         perf_filename=PerfFile.GLM5_DSA_ATTN_MODULE,
+        unverified_sms=(120,),
     ),
     OpEntry(
         op="gdn",

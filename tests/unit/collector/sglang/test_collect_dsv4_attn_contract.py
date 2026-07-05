@@ -26,7 +26,9 @@ def test_dsv4_worker_fails_closed_when_phase_has_no_valid_shapes():
     }
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(SOURCE_PATH), "exec"), namespace)
 
-    with pytest.raises(RuntimeError, match=r"no valid prefix/sl values; ok=0 error=0 skip=0 total=0"):
+    # The worker-side grid path fails closed on the FIRST unresolvable prefix
+    # group instead of silently continuing to a partial sweep.
+    with pytest.raises(RuntimeError, match=r"no valid sl values for a requested prefix group"):
         namespace["_subprocess_entry"](
             mode="generation",
             attn_kind="csa",

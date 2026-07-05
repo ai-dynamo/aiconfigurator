@@ -688,8 +688,9 @@ def run_glm5_dsa_sparse_kernel_worker(
     # this task owns one bs (collect.py distributes bs across GPU workers)
     shapes = [(prefix, isl, bs) for (prefix, isl, bs) in shapes if bs == bs_only]
     if not shapes:
-        print(f"[{label}-sparse {kernel} bs={bs_only}] no shapes; skipping.")
-        return
+        # A queued (kernel, bs) task with no derivable shapes is a case-plan
+        # inconsistency, not a clean completion: fail closed so it is recorded.
+        raise RuntimeError(f"{label}-sparse {kernel} bs={bs_only}: queued task resolved no shapes")
     if "--smoke" in sys.argv and len(shapes) > 8:
         sample_indices = sorted({round(i * (len(shapes) - 1) / 7) for i in range(8)})
         shapes = [shapes[index] for index in sample_indices]
@@ -740,8 +741,11 @@ def run_glm5_dsa_sparse_kernel_worker(
 
 
 def _glm5_sparse_kernel_cases(kernel):
-    if get_sm_version() not in {90, 100, 103}:
-        return []
+    # Platform representation lives outside this getter: pre-Hopper is dropped
+    # by the op_min_sm=90 capability floors (the DeepGEMM fp8_mqa_logits /
+    # FlashMLA sparse family requires SM90+ kernel libraries, same rationale as
+    # the dsa_*_module floors) and SM120 is parked by the registry
+    # unverified_sms markers until its different indexer API is validated.
     # One task per (model, bs) so collect.py spreads bs across the GPU workers
     # (no single-worker cuda-graph private-pool buildup -> no 1-worker-sweep
     # deadlock). All sparse kernels run a single fixed head config: the FMLA

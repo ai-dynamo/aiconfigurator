@@ -97,17 +97,41 @@ def test_glm5_sparse_smoke_samples_each_batch_across_its_full_shape_range():
     assert "round(i * (len(shapes) - 1) / 7)" in source
 
 
-def test_glm5_sparse_plan_skips_unsupported_sm120_deepgemm_path():
-    helpers = _load_pure_helpers("_glm5_sparse_kernel_cases")
-    helpers["_selected_glm5_models"] = lambda: ["nvidia/GLM-5-NVFP4"]
-    helpers["get_sm_version"] = lambda: 120
+def test_glm5_sparse_platform_gating_lives_outside_the_getter():
+    """The getter itself carries no SM predicate: pre-Hopper is dropped by the
+    op_min_sm capability floors and SM120 is parked by registry maturity
+    markers, so both stay auditable declaration-layer decisions."""
+    from collector.capabilities import _load_capabilities
+    from collector.sglang.registry import REGISTRY
 
-    assert helpers["_glm5_sparse_kernel_cases"]("mqa") == []
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    assert "not in {90, 100, 103}" not in source
+
+    _, op_min_sm = _load_capabilities()
+    glm5_ops = ("glm5_mqa_logits_module", "glm5_topk_module", "glm5_dsa_attn_module")
+    for op in glm5_ops:
+        assert op_min_sm.get(op) == 90
+    markers = {entry.op: entry.unverified_sms for entry in REGISTRY if entry.op in glm5_ops}
+    assert markers == dict.fromkeys(glm5_ops, (120,))
 
 
-def test_glm5_sparse_plan_skips_pre_hopper_deepgemm_path():
-    helpers = _load_pure_helpers("_glm5_sparse_kernel_cases")
-    helpers["_selected_glm5_models"] = lambda: ["nvidia/GLM-5-NVFP4"]
-    helpers["get_sm_version"] = lambda: 89
+def test_dsv4_sparse_platform_gating_lives_outside_the_getter():
+    """Same contract for the DSV4 sparse sub-kernel family; the flash_mla-less
+    HCA/CSA collectors are parked whole-op unverified instead of silently
+    enumerating zero cases."""
+    from collector.capabilities import _load_capabilities
+    from collector.sglang.registry import REGISTRY
 
-    assert helpers["_glm5_sparse_kernel_cases"]("mqa") == []
+    dsv4_source = (REPO_ROOT / "collector" / "sglang" / "deepseekv4_sparse_modules.py").read_text(encoding="utf-8")
+    assert "_dsv4_sparse_kernel_supported" not in dsv4_source
+    assert "_dsv4_topk_kernel_supported" not in dsv4_source
+
+    _, op_min_sm = _load_capabilities()
+    floors = ("dsv4_paged_mqa_logits_module", "dsv4_hca_attn_module", "dsv4_csa_attn_module", "dsv4_csa_topk_calib")
+    for op in floors:
+        assert op_min_sm.get(op) == 90
+    by_op = {entry.op: entry for entry in REGISTRY}
+    assert by_op["dsv4_paged_mqa_logits_module"].unverified_sms == (120,)
+    assert by_op["dsv4_csa_topk_calib"].unverified_sms == (120,)
+    assert by_op["dsv4_hca_attn_module"].unverified is True
+    assert by_op["dsv4_csa_attn_module"].unverified is True
