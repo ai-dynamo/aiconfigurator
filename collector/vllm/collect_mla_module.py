@@ -225,6 +225,18 @@ def get_dsa_generation_module_test_cases():
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _mla_backend_name(mla_layer, attn_type, is_context, num_prefills):
+    """Ground-truth backend for the perf row.
+
+    MLA prefill runs mla_layer.prefill_backend; everything else — DSA, decode,
+    and "context" batches that vLLM classified entirely as decodes
+    (num_prefills == 0, e.g. s=1) — runs mla_layer.attn_backend.
+    """
+    if attn_type == "dsa" or not is_context or num_prefills == 0:
+        return mla_layer.attn_backend.get_name()
+    return mla_layer.prefill_backend.get_name()
+
+
 def _create_gemm_quant_config(gemm_type: str):
     """Create the vLLM QuantizationConfig for a given gemm_type.
 
@@ -797,10 +809,7 @@ def run_mla_module(
     hf_cfg = vllm_config.model_config.hf_config
     architecture = getattr(hf_cfg, "architectures", [getattr(hf_cfg, "model_type", "unknown")])[0]
     mla_layer = attn_module.mla_attn.mla_attn
-    if attn_type == "dsa" or not is_context or attn_metadata.num_prefills == 0:
-        backend_name = mla_layer.attn_backend.get_name()
-    else:
-        backend_name = mla_layer.prefill_backend.get_name()
+    backend_name = _mla_backend_name(mla_layer, attn_type, is_context, attn_metadata.num_prefills)
     actual_kv_cache_dtype = "fp8" if mla_layer.kv_cache_dtype.startswith("fp8") else "bfloat16"
 
     log_perf(

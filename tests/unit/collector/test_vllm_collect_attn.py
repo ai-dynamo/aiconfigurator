@@ -165,6 +165,7 @@ def test_generation_uses_total_runtime_length_and_production_call_order(use_fp8_
         "log_perf": lambda **kwargs: calls.setdefault("log", kwargs),
         "vllm_version": "0.24.0",
     }
+    _load_function(ATTN_SOURCE, "_dense_kernel_source", namespace)
     run = _load_function(ATTN_SOURCE, "run_attention_torch", namespace)
     with ExitStack() as stack:
         run(
@@ -312,6 +313,58 @@ def test_encoder_attention_rejects_missing_flash_attention_version():
 
     with pytest.raises(RuntimeError, match="without a concrete FA version"):
         run(1, 64, 4, 128, perf_filename="encoder_attention_perf.txt")
+
+
+class _FIPrefill:
+    pass
+
+
+class _FIDecode:
+    pass
+
+
+@pytest.mark.parametrize(
+    ("num_prefills", "prefill", "decode", "expected"),
+    [
+        (2, _FIPrefill(), None, "vllm_flashinfer__fiprefill"),
+        # s=1 "context" batches are classified entirely as decodes by
+        # FlashInfer (reorder_batch_threshold=1): prefill is None and the
+        # decode portion is the ground truth.
+        (0, None, _FIDecode(), "vllm_flashinfer__fidecode"),
+    ],
+)
+def test_dense_kernel_source_flashinfer_reads_populated_portion(num_prefills, prefill, decode, expected):
+    source = _load_function(ATTN_SOURCE, "_dense_kernel_source", {})
+    metadata = SimpleNamespace(num_prefills=num_prefills, prefill=prefill, decode=decode)
+
+    assert source("FLASHINFER", impl=None, attn_metadata=metadata) == expected
+
+
+def test_dense_kernel_source_flashinfer_raises_when_both_portions_missing():
+    source = _load_function(ATTN_SOURCE, "_dense_kernel_source", {})
+    metadata = SimpleNamespace(num_prefills=0, prefill=None, decode=None)
+
+    with pytest.raises(RuntimeError, match="neither a prefill nor a decode portion"):
+        source("FLASHINFER", impl=None, attn_metadata=metadata)
+
+
+@pytest.mark.parametrize(
+    ("attn_type", "is_context", "num_prefills", "expected"),
+    [
+        ("mla", True, 2, "PREFILL_BACKEND"),
+        ("mla", True, 0, "DECODE_BACKEND"),  # s=1 context batch: all decodes
+        ("mla", False, 0, "DECODE_BACKEND"),
+        ("dsa", True, 2, "DECODE_BACKEND"),  # DSA always runs attn_backend
+    ],
+)
+def test_mla_backend_name_records_actually_invoked_backend(attn_type, is_context, num_prefills, expected):
+    backend_name = _load_function(MLA_ATTN_SOURCE, "_mla_backend_name", {})
+    mla_layer = SimpleNamespace(
+        attn_backend=SimpleNamespace(get_name=lambda: "DECODE_BACKEND"),
+        prefill_backend=SimpleNamespace(get_name=lambda: "PREFILL_BACKEND"),
+    )
+
+    assert backend_name(mla_layer, attn_type, is_context, num_prefills) == expected
 
 
 @pytest.mark.parametrize(

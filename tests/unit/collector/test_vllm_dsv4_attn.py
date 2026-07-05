@@ -209,6 +209,25 @@ def test_sparse_worker_observes_short_shapes(dsv4_module, monkeypatch, kernel):
     assert calls["past_kv"] == 0
 
 
+def test_sparse_worker_raises_beyond_max_position_embeddings(dsv4_module, monkeypatch):
+    monkeypatch.setattr(dsv4_module, "_init_cuda", lambda device: None)
+    monkeypatch.setattr(
+        dsv4_module, "_bench_sparse_kernel_shape", lambda **kwargs: pytest.fail("must raise before benchmarking")
+    )
+
+    over_limit = dsv4_module._DSV4_SPARSE_MAX_FULL_S + 1
+    with pytest.raises(ValueError, match="max_position_embeddings"):
+        dsv4_module.run_dsv4_sparse_kernel_worker(
+            1,
+            1,
+            over_limit,
+            1,
+            "paged_mqa_logits",
+            "model",
+            perf_filename="perf.txt",
+        )
+
+
 @pytest.mark.parametrize(
     ("mode", "seq_len", "prefix_len", "metadata_seq_len", "query_len", "logged_isl", "logged_step"),
     [
@@ -307,6 +326,9 @@ def test_bench_uses_total_cache_length_and_fresh_query_length(
     row = calls["log"]["item_list"][0]
     assert row["isl"] == logged_isl
     assert row["step"] == logged_step
+    # kernel_source must be the registered layer's actual backend, not an
+    # assumed name.
+    assert calls["log"]["kernel_source"] == "FAKE_BACKEND"
 
 
 @pytest.mark.parametrize(("mode", "expected_prefix"), [("context", 128), ("generation", 0)])

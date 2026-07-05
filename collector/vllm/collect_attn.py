@@ -51,6 +51,29 @@ class MockAttentionLayer:
 # support MHA GQA MQA bfloat16 tensor and bfloat16/fp8 kv cache
 
 
+def _dense_kernel_source(backend_name_str, impl, attn_metadata):
+    """Ground-truth kernel_source for the dense attention row."""
+    if backend_name_str == "FLASH_ATTN":
+        fa_version = impl.vllm_flash_attn_version
+        if fa_version is None:
+            raise RuntimeError("vLLM selected FlashAttention without a concrete FA version")
+        return f"vllm_flash_attn_fa{fa_version}"
+    if backend_name_str == "FLASHINFER":
+        # FlashInfer classifies requests by query length, not by the
+        # collector's phase label: with query_len <= reorder_batch_threshold
+        # (1, flashinfer.py:563 @0.24.0) an s=1 "context" batch is entirely
+        # decodes and metadata.prefill is None (flashinfer.py:540-546), so
+        # read the portion vLLM actually populated.
+        if attn_metadata.num_prefills > 0:
+            phase_metadata = attn_metadata.prefill
+        else:
+            phase_metadata = attn_metadata.decode
+        if phase_metadata is None:
+            raise RuntimeError("vLLM FlashInfer metadata has neither a prefill nor a decode portion")
+        return f"vllm_flashinfer_{type(phase_metadata).__name__}".lower()
+    return f"vllm_{backend_name_str}".lower()
+
+
 @with_exit_stack
 def run_attention_torch(
     exit_stack,
@@ -210,8 +233,6 @@ def run_attention_torch(
     else:
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
-        if backend_name_str == "FLEX_ATTENTION":
-            builder.direct_build = True
         # FA3's metadata builder auto-detects sliding_window by walking registered
         # Attention layers; the collector doesn't register any, so the auto-detect
         # finds nothing and aot_sliding_window stays at (-1, -1). Then FA3's
@@ -307,18 +328,7 @@ def run_attention_torch(
 
     kv_cache_dtype_str = "bfloat16" if not use_fp8_kv_cache else "fp8"
     dtype_str = "bfloat16"
-    if backend_name_str == "FLASH_ATTN":
-        fa_version = impl.vllm_flash_attn_version
-        if fa_version is None:
-            raise RuntimeError("vLLM selected FlashAttention without a concrete FA version")
-        kernel_source = f"vllm_flash_attn_fa{fa_version}"
-    elif backend_name_str == "FLASHINFER":
-        phase_metadata = attn_metadata.prefill if is_context_phase else attn_metadata.decode
-        if phase_metadata is None:
-            raise RuntimeError("vLLM FlashInfer metadata is missing the active attention phase")
-        kernel_source = f"vllm_flashinfer_{type(phase_metadata).__name__}".lower()
-    else:
-        kernel_source = f"vllm_{backend_name_str}".lower()
+    kernel_source = _dense_kernel_source(backend_name_str, impl, attn_metadata)
 
     log_perf(
         item_list=[
