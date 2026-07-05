@@ -3,7 +3,7 @@
 
 """Run the planner load-predictor sweep on a mooncake trace and print results.
 
-python tools/run_load_predictor_sweep.py --trace traffic.jsonl --policies throughput_180_5
+python tools/spica/run_load_predictor_sweep.py --trace traffic.jsonl --policies throughput_180_5
 """
 
 from __future__ import annotations
