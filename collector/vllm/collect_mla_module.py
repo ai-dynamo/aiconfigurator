@@ -819,6 +819,15 @@ def run_mla_module(
     #    set_current_vllm_config — needed by quantised layers and RoPE.
     #    set_forward_context — provides attn_metadata + kv_cache to the
     #    MLAAttention.forward() path (it calls get_forward_context()).
+    # FIXME(kernel-limit): on SM100, FlashInfer's trtllm-gen sparse-MLA decode
+    # ships kernels only for tileSizeQ >= 8. DSA cases whose per-rank head
+    # count is 1/2/4 (tileSizeQ = heads for q_len 1) raise "Missing TRTLLM-GEN
+    # kernel (decode)" (flashinfer csrc/trtllm_fmha_kernel_launcher.cu:272,
+    # flashinfer 0.6.12) whenever vLLM selects FLASHINFER_MLA_SPARSE — always
+    # for FP8 KV, and for BF16 KV at heads <= 16 (platforms/cuda.py:98-116
+    # @0.24.0). Heads 8..128 pass; boundary measured on B200. Serving fails
+    # identically, so the affected cases stay observed runtime failures.
+    # Re-verify on the next vLLM/FlashInfer bump.
     exit_stack.enter_context(set_current_vllm_config(vllm_config))
     attn_metadata_dict = {attn_layer_name: attn_metadata}
     if indexer_metadata is not None:
