@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Packaging boundary checks for the lower SDK/core wheel."""
+"""Layering checks for the SDK/core portion of the AIC package."""
 
 from __future__ import annotations
 

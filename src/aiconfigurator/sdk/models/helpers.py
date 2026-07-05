@@ -35,6 +35,16 @@ _MOE_MODEL_FAMILIES = {
     "MINIMAXM3",
 }
 
+# DeepSeek-V3 / Kimi-K2.5 context attention (MLA prefill) has no fp8 FMHA perf
+# data — only bf16. The generation (decode) path keeps fp8. This mirrors the
+# role-aware rule in ``task_v2.Task._resolve_quant_modes`` so the single-point
+# CLI estimate path resolves quant modes the same way the sweep (task_v2)
+# already does. See NVBug 6401867.
+_CONTEXT_FP8_FMHA_UNSUPPORTED_ARCHS = (
+    "DeepseekV3ForCausalLM",
+    "KimiK25ForConditionalGeneration",
+)
+
 
 @cache
 def _get_model_info(model_path: str) -> dict:
@@ -317,6 +327,56 @@ def _apply_model_quant_defaults(
             model_config.fmha_quant_mode,
             model_config.comm_quant_mode,
         )
+
+
+def resolve_context_fmha_compat(
+    model_config: config.ModelConfig,
+    model_path: str,
+    *,
+    is_context_role: bool,
+) -> None:
+    """Apply the DeepSeek-V3 / Kimi context-role FMHA compatibility rule.
+
+    Must be called BEFORE ``get_model`` so the downgrade lands before the model
+    (and its attention ops) are built. ``_apply_model_quant_defaults`` cannot own
+    this rule because it is role-agnostic: decode/generation attention keeps fp8,
+    only context attention (agg / prefill / static_ctx) must fall back to bf16.
+
+    Behavior (mirrors ``task_v2``):
+    * Non-context roles, or non-V3/Kimi architectures: no-op.
+    * fmha auto-inferred to fp8 → downgrade to bfloat16 (unblocks the estimate).
+    * fmha explicitly set to fp8 by the user → raise a concise ``ValueError``
+      instead of letting a missing-perf-data traceback surface downstream.
+
+    Args:
+        model_config: ModelConfig whose ``fmha_quant_mode`` may be adjusted
+            in place. A non-None value is treated as a user-explicit request.
+        model_path: HF model path used to resolve architecture and quant config.
+        is_context_role: True for context-attention roles (agg, prefill,
+            static, static_ctx, AFD prefill); False for generation-only roles.
+    """
+    if not is_context_role:
+        return
+
+    info = _get_model_info(model_path)
+    architecture = info.get("architecture")
+    if architecture not in _CONTEXT_FP8_FMHA_UNSUPPORTED_ARCHS:
+        return
+
+    explicit = model_config.fmha_quant_mode is not None
+    if explicit:
+        if model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
+            raise ValueError(
+                f"{architecture} context attention (MLA prefill) does not support fp8 FMHA. "
+                "Use --fmha-quant-mode bfloat16, or omit --fmha-quant-mode to auto-select it."
+            )
+        return
+
+    # Not user-explicit: mirror what get_model would infer, and downgrade only
+    # when that inference would pick fp8 (bf16 checkpoints need no change).
+    inferred = _infer_quant_modes_from_raw_config(info.get("raw_config", {}), architecture)
+    if inferred.get("fmha_quant_mode") == common.FMHAQuantMode.fp8:
+        model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
 
 
 def get_model_family(model_path: str) -> str:

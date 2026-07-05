@@ -106,6 +106,63 @@ def test_sweep_agg_classifies_no_result_outcomes(monkeypatch, memory_states, exp
         )
 
 
+def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch):
+    """Regression for NVBug 6401839: the agg per-batch RuntimeConfig must carry
+    every multimodal field from the base runtime_config. The old field-by-field
+    construction dropped image_height/width, num_images_per_request, and
+    num_image_tokens, zeroing the image encoder workload in agg while disagg
+    (which deep-copies) stayed correct."""
+    captured: list[config.RuntimeConfig] = []
+
+    def _record(*, runtime_config, **_kwargs):
+        captured.append(runtime_config)
+        summary = MagicMock()
+        summary.check_oom.return_value = False
+        summary.check_kv_cache_oom.return_value = False
+        summary.get_result_dict.return_value = {"ttft": 1.0, "tpot": 1.0}
+        summary.get_per_ops_source.return_value = {}
+        return summary
+
+    monkeypatch.setattr(sweep, "get_backend", lambda _backend_name: MagicMock())
+    monkeypatch.setattr(sweep, "get_model", lambda **_kwargs: MagicMock())
+    monkeypatch.setattr(sweep, "predict_agg_worker", _record)
+
+    base_rt = config.RuntimeConfig(
+        isl=256,
+        osl=256,
+        ttft=1e9,
+        tpot=1e9,
+        image_height=1024,
+        image_width=1024,
+        num_images_per_request=2,
+        num_image_tokens=333,
+        seq_imbalance_correction_scale=1.5,
+        engine_step_backend="rust",
+    )
+
+    sweep.sweep_agg(
+        model_path="test-model",
+        runtime_config=base_rt,
+        database=MagicMock(),
+        backend_name="trtllm",
+        model_config=config.ModelConfig(),
+        parallel_config_list=[(1, 1, 1, 1, 1, 1)],
+        max_batch_size=1,
+        ctx_stride=1024,
+    )
+
+    assert captured, "expected at least one agg point to be evaluated"
+    for point_rt in captured:
+        assert point_rt.image_height == 1024
+        assert point_rt.image_width == 1024
+        assert point_rt.num_images_per_request == 2
+        assert point_rt.num_image_tokens == 333
+        # Non-multimodal fields must survive too (the deep-copy carries them all).
+        assert point_rt.seq_imbalance_correction_scale == 1.5
+        assert point_rt.engine_step_backend == "rust"
+        assert point_rt.batch_size == 1
+
+
 # ---------------------------------------------------------------------------
 # sweep_disagg validation
 # ---------------------------------------------------------------------------

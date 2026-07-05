@@ -283,7 +283,6 @@ def _sweep_one_parallel_agg(
     osl = runtime_config.osl
     ttft_target = runtime_config.ttft
     tpot_target = runtime_config.tpot
-    prefix = runtime_config.prefix
 
     b_list = [b for b in _DEFAULT_AGG_BATCH_SCHEDULE if b <= max_batch_size]
     ctx_tokens_list = _agg_ctx_tokens_list(isl, ctx_stride, enable_chunked_prefill)
@@ -310,14 +309,13 @@ def _sweep_one_parallel_agg(
                     continue
                 capped_b.append(gen_tokens)
 
-            point_rt = config.RuntimeConfig(
-                batch_size=b,
-                isl=isl,
-                osl=osl,
-                prefix=prefix,
-                seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
-                engine_step_backend=runtime_config.engine_step_backend,
-            )
+            # Deep-copy the full runtime_config (mirrors the disagg path below) so
+            # every field is preserved per batch point. Explicit field-by-field
+            # construction silently dropped multimodal fields (image_height/width,
+            # num_images_per_request, num_image_tokens), zeroing the image encoder
+            # workload in agg while disagg stayed correct (NVBug 6401839).
+            point_rt = copy.deepcopy(runtime_config)
+            point_rt.batch_size = b
 
             backend_kwargs: dict[str, Any] = {}
             if max_seq_len is not None:

@@ -12,14 +12,14 @@ import pytest
 # sdk.memory (transitively) needs the compiled aiconfigurator_core extension.
 pytest.importorskip("aiconfigurator.sdk.memory")
 
-from spica.kv_estimate import (  # noqa: E402
+from spica.kv_estimate import (
     NoPerfDatabase,
     estimate_kv_tokens,
     feasible_shape_tokens,
     memory_fraction_kind,
     resolve_backend_version,
 )
-from spica.parallel_enum import ParallelShape  # noqa: E402
+from spica.parallel_enum import ParallelShape
 
 _COMMON = dict(model_name="m", hardware_sku="hw", backend="trtllm", backend_version="v")
 

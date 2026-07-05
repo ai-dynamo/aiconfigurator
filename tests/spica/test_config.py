@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from spica import OptimizationTarget, SmartSearchConfig
 from spica.config import OptimizationGoal, SearchSpace, SLATarget, SweepConfig, Workload
 
-EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "smart_sweep.yaml"
+EXAMPLE = Path(__file__).resolve().parents[2] / "docs" / "spica" / "examples" / "smart_sweep.yaml"
 
 
 def test_example_yaml_loads():
@@ -251,14 +251,14 @@ def test_parallel_configs_shape_matches_mode():
             search_space=_search_space(deployment_mode=["disagg"], parallel_configs=[{"tp": 4}]),
             workload={"isl": 1, "osl": 1, "concurrency": 1, "num_request_ratio": 1},
         )
-    with pytest.raises(ValidationError, match="prefill.*dict"):
+    with pytest.raises(ValidationError, match=r"prefill.*dict"):
         SmartSearchConfig(
             search_space=_search_space(
                 deployment_mode=["disagg"], parallel_configs=[{"prefill": 1, "decode": {"tp": 1}}]
             ),
             workload={"isl": 1, "osl": 1, "concurrency": 1, "num_request_ratio": 1},
         )
-    with pytest.raises(ValidationError, match="decode.*'tp' field"):
+    with pytest.raises(ValidationError, match=r"decode.*'tp' field"):
         SmartSearchConfig(
             search_space=_search_space(
                 deployment_mode=["disagg"], parallel_configs=[{"prefill": {"tp": 1}, "decode": {"replicas": 1}}]
@@ -383,7 +383,7 @@ def test_concurrency_is_always_scalar():
 
 
 def test_kv_load_ratio_range_only_under_pareto():
-    with pytest.raises(ValidationError, match="ranged workload.kv_load_ratio"):
+    with pytest.raises(ValidationError, match=r"ranged workload.kv_load_ratio"):
         SmartSearchConfig(
             search_space=_search_space(),
             workload={"isl": 1024, "osl": 1024, "kv_load_ratio": [0.0, 1.0], "num_request_ratio": 10},

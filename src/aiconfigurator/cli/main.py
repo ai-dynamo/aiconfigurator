@@ -96,7 +96,12 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
         type=str.upper,
         default=None,
         choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
-        help=("Set the minimum log level. Priority: --log-level > AICONFIGURATOR_LOG_LEVEL > INFO."),
+        help=("Set the minimum log level. Priority: --log-level > AICONFIGURATOR_LOG_LEVEL > --debug > INFO."),
+    )
+    common_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Deprecated alias for --log-level DEBUG, kept for backward compatibility.",
     )
     common_parser.add_argument(
         "--no-color",
@@ -2255,7 +2260,7 @@ def _run_estimate_mode(args):
 
 
 def _resolve_cli_log_level(args) -> int:
-    """Pick the log level with priority: --log-level > AICONFIGURATOR_LOG_LEVEL > INFO."""
+    """Pick the log level with priority: --log-level > AICONFIGURATOR_LOG_LEVEL > --debug > INFO."""
     cli_level = getattr(args, "log_level", None)
     if cli_level:
         return getattr(logging, cli_level)
@@ -2264,6 +2269,8 @@ def _resolve_cli_log_level(args) -> int:
         resolved = env_level.strip().upper()
         if resolved in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
             return getattr(logging, resolved)
+    if getattr(args, "debug", False):
+        return logging.DEBUG
     return logging.INFO
 
 

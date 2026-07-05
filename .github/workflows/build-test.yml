@@ -156,6 +156,12 @@ jobs:
           uv pip install --python .venv/bin/python \
             --editable ./dynamo-src \
             --requirement ./dynamo-src/container/deps/requirements.planner.txt
+      - name: Run Spica test suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}/dynamo-src/components/src:${{ github.workspace }}/dynamo-src/lib/bindings/python/src
+        run: |
+          "${GITHUB_WORKSPACE}/.venv/bin/pytest" \
+            tests/spica -vv --tb=short --maxfail=1 --timeout=600
       - name: Run real Spica thorough sweeps
         env:
           AIC_RUN_SPICA_THOROUGH_E2E: 'true'
