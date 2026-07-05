@@ -845,6 +845,23 @@ def run_mla_module(
     # @0.24.0). Heads 8..128 pass; boundary measured on B200. Serving fails
     # identically, so the affected cases stay observed runtime failures.
     # Re-verify on the next vLLM/FlashInfer bump.
+    # FIXME(kernel-limit): on SM120, vLLM's dense-MLA decode backend is
+    # TRITON_MLA (platforms/cuda.py:130-134 @0.24.0) and its grouped decode
+    # kernel requests 102400B of shared memory with an FP8 KV cache — above
+    # SM120's 101376B/SM limit, so Triton raises OutOfResources for every
+    # fp8-KV MLA decode case (bf16-KV passes). vLLM's overflow guard only
+    # drops num_stages when BLOCK_DMODEL >= 1024, which the MLA Lk=576 path
+    # (BLOCK_DMODEL=512) never reaches (triton_decode_attention.py:490-532
+    # @0.24.0). Measured on RTX PRO 6000 Blackwell; serving fails
+    # identically. Re-verify on the next vLLM bump.
+    # FIXME(kernel-limit): on SM120, every DSA case fails: the CUDA sparse
+    # attention indexer hard-requires DeepGEMM (sparse_attn_indexer.py:468-472
+    # @0.24.0), whose fp8 MQA-logits kernels ship for SM90/SM100 only
+    # (vllm/third_party/deep_gemm .../impls/sm{90,100}_fp8_mqa_logits.cuh) and
+    # assert "Unsupported architecture" (deepgemm csrc/apis/attention.hpp:184);
+    # cases with fp8_block linears die even earlier in DeepGEMM's scale-factor
+    # layout transform ("Unknown SF transformation", layout.hpp:59). Serving
+    # fails identically. Re-verify on the next vLLM/DeepGEMM bump.
     exit_stack.enter_context(set_current_vllm_config(vllm_config))
     attn_metadata_dict = {attn_layer_name: attn_metadata}
     if indexer_metadata is not None:
