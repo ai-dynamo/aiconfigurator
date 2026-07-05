@@ -648,6 +648,38 @@ def test_runtime_rejects_misaligned_sm90_dsv4_w4a16_case():
         )
 
 
+def test_runtime_rejects_misaligned_sm100_dsv4_w4a8_case():
+    # B200 hardware probe 2026-07-05: SGLang 0.5.14 flashinfer_mxfp4 W4A8
+    # weight shuffle asserts M % 128 == 0 and the TRTLLM-gen batched GEMM has
+    # no config for misaligned local widths; local_inter 128/384/768/1536/3072
+    # pass while 64/96/192 fail. The guard converts those framework errors
+    # into one classified message without removing the cases from the plan.
+    fake_torch = SimpleNamespace(
+        set_default_device=lambda _device: None,
+        cuda=SimpleNamespace(set_device=lambda _device: None),
+    )
+    run = _load_functions(
+        "run_moe_torch",
+        namespace={"torch": fake_torch, "get_sm_version": lambda: 100},
+    )["run_moe_torch"]
+
+    with pytest.raises(ValueError, match=r"SM100/103 DeepSeek-V4 W4A8.*local_inter_size"):
+        run(
+            "w4a8_mxfp4_mxfp8",
+            128,
+            7168,
+            3072,
+            6,
+            384,
+            32,
+            1,
+            "deepseek-ai/DeepSeek-V4-Pro",
+            moe_backend="flashinfer_mxfp4",
+            is_fp4_experts=True,
+            perf_filename="moe.csv",
+        )
+
+
 def test_framework_moe_router_logits_are_explicitly_float32():
     source = ast.get_source_segment(
         SOURCE_PATH.read_text(),

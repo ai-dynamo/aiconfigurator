@@ -994,6 +994,25 @@ def run_moe_torch(
             "SGLang SM90 DeepSeek-V4 W4A16 FP4 experts require hidden_size and local_inter_size "
             f"to be divisible by 128, got hidden_size={hidden_size}, local_inter_size={local_inter_size}"
         )
+    if (
+        moe_type == "w4a8_mxfp4_mxfp8"
+        and is_fp4_experts
+        and moe_backend == "flashinfer_mxfp4"
+        and sm_version in (100, 103)
+        and (hidden_size % 128 != 0 or local_inter_size % 128 != 0)
+    ):
+        # SGLang 0.5.14 Mxfp4FlashinferTrtllmMoEMethod.process_weights_after_loading
+        # shuffles expert weights through flashinfer
+        # get_shuffle_matrix_sf_a_row_indices, which asserts M % 128 == 0
+        # (flashinfer/utils.py), and the TRTLLM-gen batched GEMM has no config
+        # for misaligned local widths (getValidConfigIndices). B200 probe
+        # 2026-07-05: local_inter 128/384/768/1536/3072 pass, 64/96/192 fail.
+        # SM103 shares the exact flashinfer_mxfp4 code path but remains
+        # hardware-unvalidated.
+        raise ValueError(
+            "SGLang SM100/103 DeepSeek-V4 W4A8 FP4 experts require hidden_size and local_inter_size "
+            f"to be divisible by 128, got hidden_size={hidden_size}, local_inter_size={local_inter_size}"
+        )
     use_int4_w4a16 = moe_type == "int4_wo"
     if use_int4_w4a16 and moe_backend != "marlin":
         raise ValueError(f"SGLang SM90 int4_wo requires the Marlin backend, got {moe_backend}")
