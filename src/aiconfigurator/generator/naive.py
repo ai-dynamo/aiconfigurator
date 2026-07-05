@@ -420,6 +420,7 @@ def build_naive_generator_params(
     }
     node_config = {
         "num_gpus_per_node": gpus_per_node,
+        "system_name": system_name,
     }
     model_config = {
         "is_moe": is_moe,
@@ -510,6 +511,12 @@ def build_naive_generator_params(
         )
 
     params["ModelConfig"] = model_config
+    # collect_generator_params rebuilds NodeConfig with only num_gpus_per_node,
+    # dropping system_name (and any NodeConfig override). Merge the full
+    # node_config back so the system identity survives; run.sh reads
+    # NodeConfig.system_name to pick the device env var (e.g. B60 needs
+    # ONEAPI_DEVICE_SELECTOR instead of CUDA_VISIBLE_DEVICES).
+    params["NodeConfig"] = _deep_merge_dicts(params.get("NodeConfig", {}), node_config)
     if llmd_config:
         params["LlmdConfig"] = llmd_config
     params["backend"] = backend_name
