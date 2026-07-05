@@ -897,10 +897,13 @@ def run_mla_module(
     # @0.24.0). Heads 8..128 pass; boundary measured on B200. Serving fails
     # identically, so the affected cases stay observed runtime failures.
     # Re-verify on the next vLLM/FlashInfer bump.
-    # FIXME(kernel-limit): on SM120, vLLM's dense-MLA decode backend is
-    # TRITON_MLA (platforms/cuda.py:130-134 @0.24.0). Two measured limits
-    # (RTX PRO 6000 Blackwell; serving fails identically; re-verify on the
-    # next vLLM bump):
+    # FIXME(kernel-limit): on SM120 and SM89, vLLM's dense-MLA decode backend
+    # is TRITON_MLA (SM120: platforms/cuda.py:130-134; SM89: the else-branch
+    # priority list at cuda.py:135-142, where FLASH_ATTN_MLA/FLASHMLA/
+    # FLASHINFER_MLA all reject major != 9/10 and TRITON_MLA is the only
+    # eligible backend @0.24.0). Two measured limits (RTX PRO 6000
+    # Blackwell; serving fails identically; re-verify on the next vLLM
+    # bump):
     # 1. FP8 KV + q-heads >= 2 routes to the grouped decode kernel, which
     #    requests 102400B shared memory vs SM120's 101376B limit ->
     #    OutOfResources (heads == 1 takes the non-grouped kernel and
@@ -915,7 +918,10 @@ def run_mla_module(
     #    smallest failing = 4.19M, bracketing 2^31 / 576 elements = 3.73M
     #    — consistent with int32 offset overflow in the Triton decode
     #    kernel's KV indexing. Affects both KV dtypes (fp8 only at
-    #    heads == 1, where limit 1 does not fire first).
+    #    heads == 1, where limit 1 does not fire first). Same family on
+    #    SM89 (L40S): 33/400 sampled generation cases, smallest failing
+    #    batch*seq again 4.19M tokens (bf16 KV; fp8-KV combos are not
+    #    declared below SM90).
     # FIXME(kernel-limit): on SM120, every DSA case fails: the CUDA sparse
     # attention indexer hard-requires DeepGEMM (sparse_attn_indexer.py:468-472
     # @0.24.0), whose fp8 MQA-logits kernels ship for SM90/SM100 only

@@ -47,7 +47,7 @@ def _load_assignment(path: Path, name: str):
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id == name:
                     expr = ast.fix_missing_locations(ast.Expression(node.value))
-                    return eval(compile(expr, str(path), "eval"), {})  # noqa: S307 — our own source
+                    return eval(compile(expr, str(path), "eval"), {})  # our own source
     raise AssertionError(f"{name} not found in {path}")
 
 

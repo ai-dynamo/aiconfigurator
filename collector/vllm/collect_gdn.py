@@ -263,9 +263,13 @@ def run_gdn_context_benchmark(
             # @0.24.0) at its largest num_tokens sub-points (~1M total
             # tokens; smaller sub-points record normally) — reproduced in
             # isolation on a clean RTX PRO 6000 Blackwell GPU; all 8 Qwen3.5
-            # GDN model groups affected (SM90/SM100 pass). Generation passes
-            # apart from the grid-y limit below. Serving fails identically.
-            # Re-verify on the next vLLM bump.
+            # GDN model groups affected (SM90/SM100 pass). Same family on
+            # SM89 (L40S): 6 of 8 context groups IMA (reproduced in
+            # isolation on a clean GPU, rows through 1.05M tokens recorded
+            # first); the two smallest-model groups (0.8B, 2B) instead hit
+            # device-capacity OOM at their largest sub-points on 46 GB.
+            # Generation passes apart from the grid-y limit below. Serving
+            # fails identically. Re-verify on the next vLLM bump.
             def run_gdn_scan(_q=q, _k=k, _v=v, _g=g, _beta=beta, _state=gdn_state):
                 chunk_gdn(
                     q=_q,
