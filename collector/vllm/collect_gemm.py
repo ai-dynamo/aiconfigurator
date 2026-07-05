@@ -107,6 +107,17 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
             weight_block_size=None,
         )
     elif gemm_type == "fp8_block":
+        # FIXME(kernel-limit): on SM120, vLLM 0.24.0's default block-fp8
+        # linear dispatch is broken end to end: support_deep_gemm claims the
+        # 12x family (platforms/cuda.py:663-669) so DeepGEMM takes shapes
+        # with N%64==0 and K%128==0 (should_use_deepgemm_for_fp8_linear,
+        # utils/deep_gemm.py:700-720) and asserts "Unknown SF transformation"
+        # (deepgemm csrc/apis/layout.hpp:59); the remaining shapes go to
+        # cutlass c3x which fails "Invalid status" (cutlass_gemm_caller.cuh
+        # :51). 29/30 sampled fp8_block shapes failed on RTX PRO 6000
+        # Blackwell; module collectors with fp8_block linears (mla/dsa/dsv4/
+        # moe) inherit the same failure at build time. Serving fails
+        # identically. Re-verify on the next vLLM/DeepGEMM bump.
         qc = Fp8Config(
             is_checkpoint_fp8_serialized=True,
             activation_scheme="dynamic",
