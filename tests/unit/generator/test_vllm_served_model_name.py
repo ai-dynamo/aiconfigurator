@@ -90,3 +90,24 @@ def test_served_model_name_appears_once_per_worker():
     assert run_script.count("--served-model-name") == 1
     # Sanity: the run script is shell-parseable.
     shlex.split(run_script.split("python3 -m dynamo.vllm", 1)[0])
+
+
+def test_empty_served_model_name_omits_flag():
+    # An empty served_model_name must NOT emit `--served-model-name ""` (which
+    # vLLM treats as an explicit empty alias -> 404), matching the k8s builder's
+    # `if served_model_name` guard. Both the k8s worker args and run.sh must
+    # fall back to `--model` only.
+    params = copy.deepcopy(_PARAMS)
+    params["ServiceConfig"]["served_model_name"] = ""
+
+    artifacts = generate_backend_artifacts(
+        params, "vllm", backend_version=_BACKEND_VERSION, deployment_target="dynamo-j2"
+    )
+
+    k8s = yaml.safe_load(artifacts["k8s_deploy.yaml"])
+    services = k8s["spec"]["services"]
+    worker = next(svc for name, svc in services.items() if name != "Frontend")
+    assert "--served-model-name" not in worker["extraPodSpec"]["mainContainer"]["args"]
+
+    run_script = next(v for k, v in artifacts.items() if k.startswith("run_") and k.endswith(".sh"))
+    assert "--served-model-name" not in run_script
