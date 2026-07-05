@@ -398,14 +398,17 @@ def run_attention_torch(
 
     if attn_backend_name is None:
         sm_version = get_sm_version()
+        # Mirrors SGLang 0.5.14 server_args._get_default_attn_backend (MHA):
+        # SM90 Hopper+CUDA>=12.3 -> fa3; SM100/103 -> trtllm_mha; other
+        # supported CUDA SMs -> flashinfer unless the model has attention
+        # sinks (FlashInfer rejects sinks) -> triton. SM80/86 are outside the
+        # supported platform set {89, 90, 100, 103, 120} and fail closed below.
         attn_backend_name = {
-            80: "triton",
-            86: "triton",
-            89: "triton",
+            89: "triton" if has_attention_sink else "flashinfer",
             90: "fa3",
             100: "trtllm_mha",
             103: "trtllm_mha",
-            120: "flashinfer",
+            120: "triton" if has_attention_sink else "flashinfer",
         }.get(sm_version)
         if attn_backend_name is None:
             raise ValueError(f"No SGLang 0.5.14 attention backend mapping for SM{sm_version}")

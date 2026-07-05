@@ -576,9 +576,10 @@ def run_gdn_torch(
     # for-loop from completing more than one case when run standalone.
     #
     # The sys.exit has been moved outside the loop in __main__ so that all
-    # test cases run in sequence.  When invoked via collect.py the worker
-    # process no longer restarts between GDN tasks; if GPU OOM is observed in
-    # that path, restoring per-task process recycling here would fix it.
+    # test cases run in sequence.  When invoked via collect.py, the worker
+    # honors this returned sentinel (collect.py raises SystemExit on it after
+    # marking the task done), so per-task process recycling still happens on
+    # that path.
     return EXIT_CODE_RESTART
 
 

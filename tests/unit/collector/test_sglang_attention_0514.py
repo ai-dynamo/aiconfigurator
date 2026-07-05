@@ -138,6 +138,37 @@ def test_sglang_source_is_recordable_without_becoming_an_sdk_key(monkeypatch):
     assert [config.kernel_source for config in configs] == ["fa3", "triton"]
 
 
+def test_sglang_default_backend_map_follows_0514_serving_selection(monkeypatch):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "test/model")
+
+    def _sources(sm_version, *, sink=False):
+        profile = _profile()
+        del profile["sglang_backends"]
+        if sink:
+            profile["sglang_has_attention_sink"] = True
+        configs = get_attention_head_configs(
+            _profiles(profile),
+            phase="context",
+            backend="sglang",
+            sm_version=sm_version,
+        )
+        return {config.kernel_source for config in configs}
+
+    # server_args._get_default_attn_backend (MHA): non-Hopper/non-SM100 CUDA
+    # defaults to flashinfer unless the model has attention sinks.
+    assert _sources(90) == {"fa3"}
+    assert _sources(100) == {"trtllm_mha"}
+    assert _sources(103) == {"trtllm_mha"}
+    assert _sources(89) == {"flashinfer"}
+    assert _sources(120) == {"flashinfer"}
+    assert _sources(89, sink=True) == {"triton"}
+    assert _sources(120, sink=True) == {"triton"}
+
+    for unsupported_sm in (80, 86):
+        with pytest.raises(ValueError, match=r"No SGLang 0\.5\.14 attention backend mapping"):
+            _sources(unsupported_sm)
+
+
 def test_sglang_sm90_full_structural_population_is_stable(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 

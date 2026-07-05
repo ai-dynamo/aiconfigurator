@@ -328,14 +328,19 @@ def get_attention_head_configs(
                     raise TypeError("model_case_values.attention.sglang_backends must be a mapping")
                 kernel_source = raw_backends.get(sm_version, raw_backends.get(str(sm_version)))
             if kernel_source is None:
+                # Mirrors SGLang 0.5.14 server_args._get_default_attn_backend
+                # (MHA): SM90 Hopper+CUDA>=12.3 -> fa3; SM100/103 -> trtllm_mha;
+                # other supported CUDA SMs -> flashinfer unless the model has
+                # attention sinks (FlashInfer rejects sinks) -> triton. SM80/86
+                # are outside the supported platform set {89, 90, 100, 103, 120}
+                # and fail closed below.
+                sink = bool(profile.get("sglang_has_attention_sink", False))
                 kernel_source = {
-                    80: "triton",
-                    86: "triton",
-                    89: "triton",
+                    89: "triton" if sink else "flashinfer",
                     90: "fa3",
                     100: "trtllm_mha",
                     103: "trtllm_mha",
-                    120: "flashinfer",
+                    120: "triton" if sink else "flashinfer",
                 }.get(sm_version)
             if kernel_source is None:
                 raise ValueError(f"No SGLang 0.5.14 attention backend mapping for SM{sm_version}")
