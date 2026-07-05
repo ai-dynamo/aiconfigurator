@@ -89,6 +89,15 @@ common_case_values:
     - name: bfloat16
     - name: int4_wo
       min_sm: 90
+      # TODO(B200 bring-up): max_sm_exclusive hides Kimi INT4 from SM100/103,
+      # but pinned SGLang 0.5.14 serving supports it there (server_args.py:3736
+      # auto-selects flashinfer_trtllm for Kimi K2/K2.5 thinking INT4, which
+      # resolves to CompressedTensorsMxInt4MoE). Re-evaluate on Blackwell
+      # hardware: either add int4_wo backends {100/103: flashinfer_trtllm}
+      # and drop this gate, or decide INT4 stays unsupported on Blackwell and
+      # record that decision (this negative gate is also not a sanctioned home
+      # for a framework-gap rule per layer_permissions.md). Source-derived,
+      # hardware-unvalidated.
       max_sm_exclusive: 100
       allowed_model_paths:
       - moonshotai/Kimi-K2.5
