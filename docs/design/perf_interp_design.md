@@ -54,7 +54,7 @@ adding a config, not a code path.
 | Resolver | Table shape | Handling |
 |---|---|---|
 | `ScatteredSites(site_axes, curve_axis)` | GEMM: scattered `(n,k)` sites, each owning an m-curve | exact site answers from its **own** curve; an uncollected shape borrows **util** from the nearest collected shapes (log-space IDW, filtered to sites whose curve covers the query m, 2.0-octave miss gate) |
-| `Grid()` | everything else, 1..N axes | per level: exact key collapses; otherwise bracket + blend; a ragged branch is dropped and weight renormalized; past the staircase frontier = ordinary out-of-range util-hold |
+| `Grid()` | everything else, 1..N axes | per level: exact key collapses; otherwise bracket + blend; a ragged branch is dropped -- and when only one branch survives, its value is **SOL-ratio-corrected along the dropped axis** (util held), never clamped; past the staircase frontier = ordinary out-of-range util-hold |
 
 The engine is N-axis: context DSA/CSA carries a past-KV axis
 (`[heads][prefix][seq][batch]`), and the same op can be 4-axis in new
@@ -113,7 +113,7 @@ Data: h100_sxm sglang 0.5.10 / vllm 0.19.0, gb200 sglang 0.5.10.
 | context attention seq-row holdout: sqrt vs raw | **3.21% vs 5.99%** | — |
 | context attention global-sqrt vs per-axis sqrt (interior) | 9.44% -> **2.00%** | — |
 | context MLA interior / frontier | 2.19% / 5.47% | 10.0% / 45% |
-| context DSA, **4-axis engine path** interior / frontier | **0.84% / 2.45%** | 10.9% / 14.1% (0 misses) |
+| context DSA, 4-axis leaf holdout, interior / frontier | 5.4% / 10.8% | 27% / 52% (0 misses; the s-grid is sparse around the top-k knee, and holding out a knee anchor is worst-case -- the signed knee fold below shows no systematic bias) |
 | CSA (gb200) plain crossing vs regime-aware | **1.72% vs 1.92%** | 4.3% / 4.3% |
 | CSA knee-just-above, signed | plain **+0.57%** vs regime −2.94% | — |
 
@@ -121,10 +121,28 @@ Notable robustness result: 1705 ragged queries across four op families on the
 raw (un-expanded) tables produced **zero crashes and zero Qhull errors** —
 the corner-truncated frontier is fully absorbed by util-hold.
 
-Known weakness (tracked): frontier *tails* are fat (p90 up to ~45-49% for
-attention/MLA min-side edges) — extrapolating *below* the smallest collected
-sizes is overhead-dominated and the SOL ratio overshoots. Median behaviour is
-single-digit everywhere.
+### 4.1 Final validation campaign (pre-ready)
+
+Run before the PR left draft; all folds vs measured latency on real tables.
+
+| Fold | Result |
+|---|---|
+| **Corner truncation** (delete the upper-right large-seq x large-batch triangle of every [s][b] plane, query the deleted points) | attention median 5.7% near the cut edge / 9.9% deep; MLA 4.8%; **0 misses in 620 queries** — the staircase fallback absorbs arbitrary corner loss |
+| **Knee capture** (DSA top-k @ 2048; hold out knee-adjacent points, signed, h100+gb200, both archs, 118 folds) | knee-adjacent median **+1.0%** vs control +1.2% — no systematic over/under-shoot from linear crossing; p10 -40% reflects that deleting the knee anchor itself is unrecoverable by ANY interpolant (production tables collect the knee) |
+| **Prefix / past-KV axis** (dsv4 sparse table, 26 past_kv values: hold out an entire past_kv row) | interior-row blend median **2.5%** p90 12%; 0 misses in 476 folds |
+| **One-sided coverage** (hold a seq row, query its large batches where only ONE bracket side has coverage) | survivor-clamp scored **-41%/-44% signed median** (attention/MLA) -> SOL-ratio correction lands at **10.7%/8.3%** — this fold motivated the single-survivor semantic |
+| generation attention / generation MLA leaf LOO | interior 1.1% / 1.2%; frontier 9.7% / 2.4% |
+| **Task-level equivalence** (`aic default`, full agg+disagg sweep) | pareto rows match old engine at median 0.3% / max 2.1%; wall time 26-29s -> **~5-6s** |
+
+Corner-tail attribution: the >100% corner errors concentrate in n<=2-head
+slices with tiny absolute latencies (0.01-0.09 ms) — severely overhead-
+dominated kernels where the SOL ratio over-predicts (the conservative
+direction). Medians are single-digit everywhere else.
+
+Known weakness (tracked): frontier *tails* are fat (p90 up to ~45-52% for
+attention/MLA/DSA min-side edges) — extrapolating *below* the smallest
+collected sizes is overhead-dominated and the SOL ratio overshoots. Median
+behaviour is single-digit everywhere.
 
 ## 5. Defensive machinery this design retires
 
