@@ -24,6 +24,9 @@ def test_mhc_sweep_fails_closed_after_an_inner_error(monkeypatch):
 
     parallel_state = ModuleType("sglang.srt.distributed.parallel_state")
     parallel_state.destroy_model_parallel = lambda: None
+    parallel_state.destroy_distributed_environment = lambda: None
+    expert_location = ModuleType("sglang.srt.eplb.expert_location")
+    expert_location._global_expert_location_metadata = None
     environ = ModuleType("sglang.srt.environ")
     enabled = SimpleNamespace(get=lambda: True)
     environ.envs = SimpleNamespace(
@@ -31,9 +34,10 @@ def test_mhc_sweep_fails_closed_after_an_inner_error(monkeypatch):
         SGLANG_OPT_DEEPGEMM_HC_PRENORM=enabled,
         SGLANG_OPT_USE_TILELANG_MHC_POST=enabled,
     )
-    for name in ("sglang", "sglang.srt", "sglang.srt.distributed"):
+    for name in ("sglang", "sglang.srt", "sglang.srt.distributed", "sglang.srt.eplb"):
         monkeypatch.setitem(sys.modules, name, ModuleType(name))
     monkeypatch.setitem(sys.modules, parallel_state.__name__, parallel_state)
+    monkeypatch.setitem(sys.modules, expert_location.__name__, expert_location)
     monkeypatch.setitem(sys.modules, environ.__name__, environ)
 
     module_path = Path("collector/sglang/collect_mhc_module.py")

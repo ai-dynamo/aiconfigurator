@@ -359,27 +359,43 @@ def run_mhc_module(
         raise ValueError("num_iterations must be at least 3")
 
     token_cases = [int(num_tokens) for num_tokens in (num_tokens_cases or _default_num_tokens(model_path))]
-    model_runner = _load_one_layer_runner(
-        model_path,
-        device=device,
-        mem_fraction_static=mem_fraction_static,
-    )
-
-    layer = model_runner.model.model.layers[0]
-    hidden_size = _hidden_size(layer)
-    version = get_version("sglang")
-    device_name = torch.cuda.get_device_name(device)
     results: list[dict[str, float]] = []
     error_count = 0
-
-    print(
-        "[mhc-collector] "
-        f"hc_mult={layer.hc_mult}, hidden_size={hidden_size}, "
-        f"tilelang_pre={os.environ.get('SGLANG_OPT_USE_TILELANG_MHC_PRE', 'default')}, "
-        f"tilelang_post={os.environ.get('SGLANG_OPT_USE_TILELANG_MHC_POST', 'default')}"
-    )
+    model_runner = None
 
     try:
+        # Load inside the guarded region: a mid-init failure (e.g. after
+        # SGLang created its TP/world groups but before finishing) must still
+        # reach the teardown below, or the next task in this worker inherits
+        # half-initialized module globals.
+        model_runner = _load_one_layer_runner(
+            model_path,
+            device=device,
+            mem_fraction_static=mem_fraction_static,
+        )
+
+        layer = model_runner.model.model.layers[0]
+        hidden_size = _hidden_size(layer)
+        version = get_version("sglang")
+        device_name = torch.cuda.get_device_name(device)
+
+        # Print the RESOLVED kernel-selection env values, not only the raw
+        # process environment: MHC-PRENORM-ENV history shows the module-level
+        # default and the central collect_sglang() setdefault can disagree, and
+        # the H20 log that omitted the resolved prenorm value could not prove
+        # which kernel won.
+        from sglang.srt.environ import envs as _envs
+
+        print(
+            "[mhc-collector] "
+            f"hc_mult={layer.hc_mult}, hidden_size={hidden_size}, "
+            f"tilelang_pre={os.environ.get('SGLANG_OPT_USE_TILELANG_MHC_PRE', 'default')}, "
+            f"tilelang_post={os.environ.get('SGLANG_OPT_USE_TILELANG_MHC_POST', 'default')}, "
+            f"resolved_tilelang_pre={_envs.SGLANG_OPT_USE_TILELANG_MHC_PRE.get()}, "
+            f"resolved_tilelang_post={_envs.SGLANG_OPT_USE_TILELANG_MHC_POST.get()}, "
+            f"resolved_deepgemm_hc_prenorm={_envs.SGLANG_OPT_DEEPGEMM_HC_PRENORM.get()}"
+        )
+
         for op in ops:
             from sglang.srt.environ import envs
 
@@ -451,11 +467,26 @@ def run_mhc_module(
                 gc.collect()
     finally:
         del model_runner
-        from sglang.srt.distributed.parallel_state import destroy_model_parallel
+        from sglang.srt.distributed.parallel_state import (
+            destroy_distributed_environment,
+            destroy_model_parallel,
+        )
+        from sglang.srt.eplb import expert_location as _expert_location
 
+        # Mirror SGLang 0.5.14 cleanup_dist_env_and_memory: destroying only the
+        # torch process group leaves parallel_state._WORLD pointing at a dead
+        # group, so the NEXT task in the same worker fails ModelRunner init
+        # with "not initialized in the world group map". H20 never sequenced
+        # two mHC tasks through one worker (4 tasks over 8 GPU workers); the
+        # single-worker B200 smoke exposed it. Teardown errors still propagate
+        # and fail the worker rather than hiding retained groups.
         destroy_model_parallel()
-        if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
+        destroy_distributed_environment()
+        # SGLang has no public reset for this module global (its serving
+        # process never re-creates a ModelRunner); set_global_... asserts None,
+        # so a second in-worker task fails init unless it is returned to the
+        # module's pre-init state here.
+        _expert_location._global_expert_location_metadata = None
         torch.cuda.empty_cache()
         gc.collect()
     summary = f"ok={len(results)} error={error_count} skip=0 total={len(results) + error_count}"
