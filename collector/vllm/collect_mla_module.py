@@ -846,14 +846,23 @@ def run_mla_module(
     # identically, so the affected cases stay observed runtime failures.
     # Re-verify on the next vLLM/FlashInfer bump.
     # FIXME(kernel-limit): on SM120, vLLM's dense-MLA decode backend is
-    # TRITON_MLA (platforms/cuda.py:130-134 @0.24.0) and its grouped decode
-    # kernel requests 102400B of shared memory with an FP8 KV cache — above
-    # SM120's 101376B/SM limit, so Triton raises OutOfResources for every
-    # fp8-KV MLA decode case (bf16-KV passes). vLLM's overflow guard only
-    # drops num_stages when BLOCK_DMODEL >= 1024, which the MLA Lk=576 path
-    # (BLOCK_DMODEL=512) never reaches (triton_decode_attention.py:490-532
-    # @0.24.0). Measured on RTX PRO 6000 Blackwell; serving fails
-    # identically. Re-verify on the next vLLM bump.
+    # TRITON_MLA (platforms/cuda.py:130-134 @0.24.0). Two measured limits
+    # (RTX PRO 6000 Blackwell; serving fails identically; re-verify on the
+    # next vLLM bump):
+    # 1. FP8 KV + q-heads >= 2 routes to the grouped decode kernel, which
+    #    requests 102400B shared memory vs SM120's 101376B limit ->
+    #    OutOfResources (heads == 1 takes the non-grouped kernel and
+    #    passes; bf16 KV passes). vLLM's overflow guard only drops
+    #    num_stages at BLOCK_DMODEL >= 1024, which the MLA Lk=576 path
+    #    (BLOCK_DMODEL=512) never reaches (triton_decode_attention.py
+    #    :490-532 @0.24.0).
+    # 2. Decode batches whose total cached tokens exceed ~2^31/576 raise
+    #    a deterministic illegal memory access (reproduced in isolation
+    #    on a clean GPU): largest passing batch*seq = 2.10M tokens,
+    #    smallest failing = 4.19M, bracketing 2^31 / 576 elements = 3.73M
+    #    — consistent with int32 offset overflow in the Triton decode
+    #    kernel's KV indexing. Affects both KV dtypes (fp8 only at
+    #    heads == 1, where limit 1 does not fire first).
     # FIXME(kernel-limit): on SM120, every DSA case fails: the CUDA sparse
     # attention indexer hard-requires DeepGEMM (sparse_attn_indexer.py:468-472
     # @0.24.0), whose fp8 MQA-logits kernels ship for SM90/SM100 only

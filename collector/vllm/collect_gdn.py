@@ -256,6 +256,14 @@ def run_gdn_context_benchmark(
                 device=device,
             )
 
+            # FIXME(kernel-limit): on SM120, every GDN context case raises a
+            # deterministic illegal memory access inside vLLM's chunked
+            # gated-delta-rule prefill kernel (fla/ops/chunk.py:61 ->
+            # chunk_delta_h.py:347 -> index.py:36 prepare_chunk_offsets
+            # @0.24.0) — reproduced in isolation on a clean RTX PRO 6000
+            # Blackwell GPU for all 8 Qwen3.5 GDN model groups (SM90/SM100
+            # pass). Generation passes apart from the grid-y limit below.
+            # Serving fails identically. Re-verify on the next vLLM bump.
             def run_gdn_scan(_q=q, _k=k, _v=v, _g=g, _beta=beta, _state=gdn_state):
                 chunk_gdn(
                     q=_q,
