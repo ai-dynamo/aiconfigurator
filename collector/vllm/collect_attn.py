@@ -285,6 +285,14 @@ def run_attention_torch(
     # Output buffer is always BF16 — the impl dequantises internally.
     output = torch.empty_like(query_vllm)
 
+    # FIXME(kernel-limit): on SM100/SM110 the FA4 CuTe kernel rejects
+    # (head_dim, head_dim_v)=(192, 192): _validate_head_dims allows 8..128,
+    # DeepSeek (192, 128), or hd256 (vllm_flash_attn/cute/interface.py:104
+    # @0.24.0), while vLLM's FlashAttentionBackend.supports_head_size claims
+    # any head_size <= 256 (flash_attn.py:173-179), so the selector still
+    # routes BF16-KV head-dim-192 shapes to FLASH_ATTN there and forward
+    # raises. Observed on B200; serving would fail identically. Re-verify on
+    # the next vLLM bump.
     def run():
         if not backend_cls.forward_includes_kv_cache_update:
             impl.do_kv_cache_update(
