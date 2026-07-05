@@ -117,7 +117,10 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
         # :51). 29/30 sampled fp8_block shapes failed on RTX PRO 6000
         # Blackwell; module collectors with fp8_block linears (mla/dsa/dsv4/
         # moe) inherit the same failure at build time. Serving fails
-        # identically. Re-verify on the next vLLM/DeepGEMM bump.
+        # identically. Upstream: vllm#47436/#47130 (open, same assertion),
+        # DeepGEMM#318 (SM120 support PR, open); the Triton block-fp8 kernel
+        # works on SM120 (verified) and vllm#40929/#41834 move DSV4-on-SM120
+        # onto that fallback. Re-verify on the next vLLM/DeepGEMM bump.
         qc = Fp8Config(
             is_checkpoint_fp8_serialized=True,
             activation_scheme="dynamic",

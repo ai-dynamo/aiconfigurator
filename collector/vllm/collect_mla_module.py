@@ -855,7 +855,8 @@ def run_mla_module(
     #    passes; bf16 KV passes). vLLM's overflow guard only drops
     #    num_stages at BLOCK_DMODEL >= 1024, which the MLA Lk=576 path
     #    (BLOCK_DMODEL=512) never reaches (triton_decode_attention.py
-    #    :490-532 @0.24.0).
+    #    :490-532 @0.24.0). Upstream fix in flight: vllm#46728 (open PR,
+    #    num_stages=1 fallback for exactly this tile, fixes vllm#46721).
     # 2. Decode batches whose total cached tokens exceed ~2^31/576 raise
     #    a deterministic illegal memory access (reproduced in isolation
     #    on a clean GPU): largest passing batch*seq = 2.10M tokens,
@@ -870,7 +871,10 @@ def run_mla_module(
     # assert "Unsupported architecture" (deepgemm csrc/apis/attention.hpp:184);
     # cases with fp8_block linears die even earlier in DeepGEMM's scale-factor
     # layout transform ("Unknown SF transformation", layout.hpp:59). Serving
-    # fails identically. Re-verify on the next vLLM/DeepGEMM bump.
+    # fails identically. Upstream: vllm#45317 (gap report), TRITON_MLA_SPARSE
+    # backend for SM8x/11x/12x in vllm#38476/#47629 (open PRs), sparse decode
+    # in vllm#47527; DeepGEMM SM120 support in DeepGEMM#318 (open PR).
+    # Re-verify on the next vLLM/DeepGEMM bump.
     exit_stack.enter_context(set_current_vllm_config(vllm_config))
     attn_metadata_dict = {attn_layer_name: attn_metadata}
     if indexer_metadata is not None:
