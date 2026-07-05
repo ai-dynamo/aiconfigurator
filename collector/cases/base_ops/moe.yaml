@@ -143,7 +143,11 @@ common_case_values:
     - name: fp8
       min_sm_exclusive: 86
     - name: fp8_block
-      min_sm: 90
+      # Same floor as the fp8_block dtype in capabilities.yaml: vLLM's fused
+      # MoE dispatches block-fp8 below SM90 to Triton experts (the DeepGEMM/
+      # cutlass/flashinfer tiers are SM90/SM100+), verified on L40S with
+      # kernel_source=vllm_fp8moe_triton_tritonexperts recorded per row.
+      min_sm: 89
       requires_runtime_feature: per_block_fp8
     - name: nvfp4
       min_sm: 100
