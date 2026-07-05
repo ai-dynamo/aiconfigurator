@@ -34,26 +34,11 @@ from collector.helper import (
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 _MODEL_CONFIG_ROOT = Path(__file__).resolve().parents[2] / "src/aiconfigurator/model_configs"
-_MODEL_CONFIG_ALIASES = {
-    # These use the same vLLM model class and MoE routing fields as the local
-    # packaged config named on the right.
-    "Qwen/Qwen3.5-122B-A10B": "Qwen/Qwen3.5-397B-A17B",
-}
 
 
 def _load_model_moe_config(model_name: str) -> dict:
     """Load the checked-in HF config used to derive vLLM's FusedMoE args."""
-    if model_name.startswith("mistralai/Mixtral-"):
-        # vLLM's MixtralSparseMoeBlock is the standard renormalized softmax,
-        # gated-SiLU FusedMoE path and the repository has no packaged config.
-        return {
-            "model_type": "mixtral",
-            "hidden_act": "silu",
-            "norm_topk_prob": True,
-        }
-
-    resolved_name = _MODEL_CONFIG_ALIASES.get(model_name, model_name)
-    config_path = _MODEL_CONFIG_ROOT / f"{resolved_name.replace('/', '--')}_config.json"
+    config_path = _MODEL_CONFIG_ROOT / f"{model_name.replace('/', '--')}_config.json"
     if not config_path.exists():
         raise FileNotFoundError(f"missing packaged model config for vLLM MoE case {model_name!r}: {config_path}")
 
@@ -80,6 +65,17 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
         "glm_moe_dsa",
         "nemotron_h",
     }
+    declares_grouped_routing = (
+        model_config.get("n_group") is not None
+        or model_config.get("topk_group") is not None
+        or model_config.get("topk_method") == "noaux_tc"
+    )
+    if declares_grouped_routing and not use_grouped_topk:
+        raise ValueError(
+            f"vLLM MoE model {model_name!r} (model_type={model_type!r}) declares grouped/noaux_tc "
+            "routing fields but is not a recognized grouped-topk model type; verify how vLLM 0.24 "
+            "routes this model and extend the mapping instead of silently benchmarking non-grouped routing"
+        )
     use_routing_bias = (
         model_config.get("topk_method") == "noaux_tc"
         or bool(model_config.get("use_routing_bias", False))
@@ -206,13 +202,17 @@ def get_moe_test_cases():
     test_cases = []
     seen = set()
     consumer_key_owners = {}
+    quant_policy_drops = {}
+    models_with_cases = set()
 
     for common_moe_testcase in get_common_moe_test_cases(backend="vllm"):
         model_name = common_moe_testcase.model_name
 
         for moe_type in enabled_moe_types:
             if not moe_model_allows_quantization("vllm", model_name, moe_type):
+                quant_policy_drops[model_name] = quant_policy_drops.get(model_name, 0) + 1
                 continue
+            models_with_cases.add(model_name)
 
             execution_key = _moe_execution_key(common_moe_testcase, moe_type)
             if execution_key in seen:
@@ -248,6 +248,16 @@ def get_moe_test_cases():
                 ]
             )
 
+    # Zero-case expansions must be explainable from logged drops
+    # (case_authoring.md): name every planned model whose declared vllm quant
+    # policy excluded all of its moe cases.
+    fully_dropped = sorted(set(quant_policy_drops) - models_with_cases)
+    if fully_dropped:
+        print(
+            f"moe: dropped all cases for {len(fully_dropped)} model(s) by declared vllm "
+            f"quantization policy (allowed_modes): {', '.join(fully_dropped)}"
+        )
+
     return test_cases
 
 
@@ -276,6 +286,7 @@ def run_moe_torch(
         CompressedTensorsConfig,
     )
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8Config
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
     from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -327,11 +338,31 @@ def run_moe_torch(
 
     if moe_type == "bfloat16":
         quant_config = None
-    elif moe_type in ("fp8", "fp8_block"):
+    elif moe_type == "fp8":
+        # Per-tensor "fp8" rows are anchored on ModelOpt static checkpoints
+        # (e.g. Nemotron Ultra FP8). Serving loads those via
+        # ModelOptFp8MoEMethod: static/static quant keys
+        # (vllm/model_executor/layers/quantization/modelopt.py:749-771
+        # @0.24.0) and non-gated-aware weight sizing (w13_num_shards = 2 if
+        # is_act_and_mul else 1, modelopt.py:812). Fp8Config/Fp8MoEMethod
+        # would diverge on both: activation_scheme="dynamic" resolves
+        # kFp8DynamicTensorSym and selects a different backend than serving
+        # (fp8.py:514-533), and its create_weights hardcodes gated 2x w13
+        # (fp8.py:580) which breaks non-gated models like Nemotron.
+        quant_config = ModelOptFp8Config(
+            quant_method="FP8",
+            is_checkpoint_fp8_serialized=True,
+            kv_cache_quant_method=None,
+            exclude_modules=[],
+        )
+    elif moe_type == "fp8_block":
+        # Block-FP8 serving (DeepSeek-style checkpoints) is per-128-block
+        # weights with dynamic per-group activations; Fp8Config rejects
+        # static for block quant (fp8.py:130-134).
         quant_config = Fp8Config(
             is_checkpoint_fp8_serialized=True,
             activation_scheme="dynamic",
-            weight_block_size=[128, 128] if moe_type == "fp8_block" else None,
+            weight_block_size=[128, 128],
         )
     elif moe_type == "w4a16_mxfp4":
         quant_config = Mxfp4Config()
