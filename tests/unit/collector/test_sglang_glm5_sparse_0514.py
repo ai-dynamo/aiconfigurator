@@ -4,6 +4,10 @@
 import ast
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SOURCE_PATH = REPO_ROOT / "collector" / "sglang" / "glm5_dsa_sparse_modules.py"
 
