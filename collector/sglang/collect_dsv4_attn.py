@@ -628,14 +628,23 @@ def _tp_load_model_patch(tp_size: int):
 
 
 def _effective_prefill_chunk_size(model_runner) -> int:
-    """Return the query-token limit enforced by this collector path."""
-    runtime_chunk = _runtime_chunk_size(model_runner)
-    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
-    smem_optin = int(properties.shared_memory_per_block_optin)
-    sched_meta_max_queries = (smem_optin // 4 - 1) // 5
-    if sched_meta_max_queries <= 0:
-        raise RuntimeError(f"invalid sched-meta query limit from shared_memory_per_block_optin={smem_optin}")
-    return min(runtime_chunk, sched_meta_max_queries)
+    """Return the query-token limit enforced by this collector path.
+
+    This is SGLang's own serving chunk (``chunked_prefill_size``), nothing
+    less. The retired extra bound ``(shared_memory_per_block_optin//4 - 1)//5``
+    modeled the deep_gemm sched-meta kernel's SMEM limit, but exact SGLang
+    0.5.14 does not expose prefill to that kernel: ``PagedIndexerMetadata``
+    builds its metadata through the JIT path whenever
+    ``SGLANG_OPT_USE_JIT_INDEXER_METADATA`` is set (default ``True``,
+    ``environ.py:789``; only HIP disables it), and even with the env off it
+    switches to the JIT path above ``_LARGE_INDEXER_QUERY_THRESHOLD`` = 11,673
+    query rows (``layers/attention/dsv4/metadata.py``). On H20 the derived
+    chunk (8,192) sat below the old bound (11,622), so removing it changes
+    nothing on SM90; on B200 the derived chunk is 16,384 and a probe
+    (2026-07-05, bs=1, prefix=0) executed 8,192/12,288/16,384 fresh-token CSA
+    context cells through the JIT metadata path with zero errors.
+    """
+    return _runtime_chunk_size(model_runner)
 
 
 def _derive_csa_context_pool_cap(
