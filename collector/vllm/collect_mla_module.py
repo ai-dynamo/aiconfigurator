@@ -370,22 +370,34 @@ def _create_attention_module(
     # Opt in to FP8 prefill query compute before the module (and later the
     # metadata builder) reads the attention config.
     if use_prefill_fp8:
-        from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
+        from vllm.platforms import current_platform
 
         vllm_config.attention_config.use_prefill_query_quantization = True
-        # The quantization flag alone never engages on Blackwell: the auto
-        # selector ranks FLASH_ATTN first on SM100 (prefill/selector.py:60-66
-        # @0.24.0) and FLASH_ATTN is always eligible there, but FP8 query
-        # compute requires a FLASHINFER/TRTLLM_RAGGED/TOKENSPEED_MLA prefill
-        # backend (backend_supports_prefill_query_quantization,
-        # mla_attention.py:1371-1396 @0.24.0). The FP8-prefill serving
-        # configuration therefore also pins attention_config
-        # .mla_prefill_backend; TRTLLM_RAGGED is the framework's own
-        # highest-priority Blackwell backend among the supporting set
-        # (prefill/selector.py:60-66). get_mla_prefill_backend validates the
-        # explicit selection and raises when it is invalid, and the metadata
-        # probe below still fails closed on the resolved q_data_type.
-        vllm_config.attention_config.mla_prefill_backend = MLAPrefillBackendEnum.TRTLLM_RAGGED
+        if current_platform.is_device_capability_family(100):
+            from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
+
+            # The quantization flag alone never engages on SM100: the auto
+            # selector ranks FLASH_ATTN first (prefill/selector.py:60-66
+            # @0.24.0) and FLASH_ATTN is always eligible there, but FP8 query
+            # compute requires a FLASHINFER/TRTLLM_RAGGED/TOKENSPEED_MLA
+            # prefill backend (backend_supports_prefill_query_quantization,
+            # mla_attention.py:1371-1396 @0.24.0). The FP8-prefill serving
+            # configuration therefore also pins attention_config
+            # .mla_prefill_backend; TRTLLM_RAGGED is the framework's own
+            # highest-priority SM100 backend among the supporting set
+            # (prefill/selector.py:60-66). get_mla_prefill_backend validates
+            # the explicit selection and raises when it is invalid, and the
+            # metadata probe below still fails closed on the resolved
+            # q_data_type.
+            vllm_config.attention_config.mla_prefill_backend = MLAPrefillBackendEnum.TRTLLM_RAGGED
+        # Outside the SM100 family the pin has no source proof: vLLM gates
+        # FP8 prefill query quantization to that family outright
+        # (backend_supports_prefill_query_quantization returns False when
+        # not is_device_capability_family(100), mla_attention.py:1385-1386
+        # @0.24.0), and TRTLLM_RAGGED fails its own capability validation
+        # (e.g. "compute capability 12.0 not supported" on SM120). Leave the
+        # auto selector in charge so the q_data_type probe below raises the
+        # accurate classified error for the unsupported fp8 label.
 
     # backend_supports_prefill_query_quantization() is a zero-argument
     # functools.cache that reads the *current* vllm config on first call
