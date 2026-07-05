@@ -173,9 +173,54 @@ def test_grid_ragged_branch_is_dropped_not_fatal():
     assert math.isfinite(lat) and lat > 0
 
 
+def test_grid_single_survivor_gets_sol_ratio_correction():
+    """When one bracket branch drops, the survivor's value is re-scaled by the
+    SOL ratio along the dropped axis (util held across it) -- a plain clamp
+    measured -41% median on one-sided seq-row LOO folds (seq^2 physics).
+
+    seq=1536 at batch=8: 2048 branch lacks b=8 -> survivor is the 1024 branch
+    (exact leaf), corrected by SOL(8,1536,8)/SOL(8,1024,8). The fixture's SOL
+    equals its latency (util == 1), so the correction reproduces the formula
+    exactly at the un-collected seq.
+    """
+    lat = _lat(perf_interp.query(_attn_cfg(), _attn_table(), 8, 1536, 8))
+    assert lat == pytest.approx(_attn_lat(8, 1024, 8) * _attn_lat(8, 1536, 8) / _attn_lat(8, 1024, 8))
+    assert lat == pytest.approx(_attn_lat(8, 1536, 8))
+
+
 def test_grid_empty_table_is_a_miss():
     with pytest.raises(InterpolationDataNotAvailableError):
         perf_interp.query(_attn_cfg(), {}, 8, 512, 1)
+
+
+def test_config_rejects_bad_transform_axis_and_k_tail():
+    with pytest.raises(ValueError, match="transform_axis"):
+        perf_interp.OpInterpConfig(
+            axes=("num_heads", "seq_len", "batch"),
+            resolver=perf_interp.Grid(),
+            sol_fn=_attn_lat,
+            value_transform=perf_interp.ValueTransform.SQRT,
+            transform_axis="seq",  # typo of "seq_len" -- must fail loudly, not silently no-op
+        )
+    with pytest.raises(ValueError, match="k_tail"):
+        perf_interp.OpInterpConfig(
+            axes=("num_heads", "seq_len", "batch"),
+            resolver=perf_interp.Grid(k_tail=0),
+            sol_fn=_attn_lat,
+        )
+    with pytest.raises(ValueError, match="duplicate"):
+        perf_interp.OpInterpConfig(
+            axes=("seq_len", "seq_len", "batch"),
+            resolver=perf_interp.Grid(),
+            sol_fn=_attn_lat,
+        )
+    with pytest.raises(ValueError, match="UTIL"):
+        perf_interp.OpInterpConfig(
+            axes=("num_heads", "seq_len", "batch"),
+            resolver=perf_interp.Grid(),
+            sol_fn=_attn_lat,
+            value_transform=perf_interp.ValueTransform.UTIL,
+        )
 
 
 # ---------------------------------------------------------------------------

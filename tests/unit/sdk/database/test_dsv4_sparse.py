@@ -440,12 +440,12 @@ def test_lookup_sparse_kernel_brackets_batch_and_drops_ragged_isl_branch():
     """bs=3 at isl=2682 on the batch-capped grid.
 
     The isl brackets are {2048, 4096}; the 4096 row is batch-capped at b=2 so
-    it cannot cover bs=3 and is dropped (weight renormalised onto 2048). The
-    2048 row brackets b in {2, 4}: 4.8 + (8.0-4.8)/2 = 6.4.
-    (The legacy path instead picked the b=2 curve and scaled x3/2 linearly --
-    the old robust-lookup comments themselves flagged batch scaling as the
-    worse estimate: "simply scaling the lower batch can nearly double
-    latency".)
+    it cannot cover bs=3 and is dropped. The surviving 2048 row brackets
+    b in {2, 4} (4.8 + (8.0-4.8)/2 = 6.4), then the dropped isl axis is
+    corrected by the pair-count SOL ratio at the query's other coordinates:
+    6.4 * SOL(0,2682,3)/SOL(0,2048,3). A plain survivor clamp measured -41%
+    median on one-sided seq-row LOO folds; the SOL-ratio correction is the
+    engine's single-survivor contract.
     """
     db = _make_sparse_db_from_grid({0: _sparse_sampled_batch_caps_grid()})
     val = ContextDeepSeekV4AttentionModule._lookup_sparse_kernel(
@@ -458,8 +458,11 @@ def test_lookup_sparse_kernel_brackets_batch_and_drops_ragged_isl_branch():
         native_heads=_FLASH_NATIVE_HEADS,
     )
 
-    b3_at_2048 = 4.80 + (8.00 - 4.80) * (3 - 2) / (4 - 2)
-    assert val == pytest.approx(b3_at_2048)  # 6.4
+    def sol(p, i, b):
+        return b * (p * i + i * i / 2.0)
+
+    b3_at_2048 = 4.80 + (8.00 - 4.80) * (3 - 2) / (4 - 2)  # 6.4
+    assert val == pytest.approx(b3_at_2048 * sol(0, 2682, 3) / sol(0, 2048, 3))
 
 
 def test_lookup_sparse_kernel_holds_util_beyond_all_batches():
@@ -493,7 +496,9 @@ def test_lookup_sparse_kernel_brackets_batch_within_covering_isl_row():
 
     The isl brackets are {1024, 2048}; the 2048 row is capped at b=4 so it
     drops, and the 1024 row bracket-blends b in {4, 8}: 6 + (12-6)/4 = 7.5 --
-    a measured bracket instead of the legacy x5/4 linear batch scaling.
+    a measured bracket instead of the legacy x5/4 linear batch scaling --
+    then the dropped isl axis is SOL-ratio corrected (single-survivor
+    contract): 7.5 * SOL(0,1565.2,5)/SOL(0,1024,5).
     """
     isl = 1565.2
     db = _make_sparse_db_from_grid({0: _sparse_sampled_batch_caps_grid()})
@@ -507,16 +512,22 @@ def test_lookup_sparse_kernel_brackets_batch_within_covering_isl_row():
         native_heads=_FLASH_NATIVE_HEADS,
     )
 
-    b5_at_1024 = 6.00 + (12.00 - 6.00) * (5 - 4) / (8 - 4)
-    assert val == pytest.approx(b5_at_1024)  # 7.5
+    def sol(p, i, b):
+        return b * (p * i + i * i / 2.0)
+
+    b5_at_1024 = 6.00 + (12.00 - 6.00) * (5 - 4) / (8 - 4)  # 7.5
+    assert val == pytest.approx(b5_at_1024 * sol(0, isl, 5) / sol(0, 1024, 5))
 
 
 def test_lookup_sparse_kernel_blends_past_kv_branches():
     """past_kv=2048 midway between two collected grids blends both branches.
 
     Each past_kv branch resolves like the covering-isl-row case above
-    (b in {4, 8} bracket at isl=1024: 7.5 and offset+4 -> 11.5), then the
-    past_kv bracket blends them at weight 1/2: (7.5 + 11.5)/2 = 9.5.
+    (b in {4, 8} bracket at isl=1024: 7.5 and offset+4 -> 11.5), each gets
+    the single-survivor SOL-ratio correction along the dropped isl axis
+    (the ratio is evaluated at the QUERY's coordinates, past=2048, so it is
+    common to both branches and factors out of the blend), then the past_kv
+    bracket blends at weight 1/2: 9.5 * SOL(2048,1565.2,5)/SOL(2048,1024,5).
     """
     isl = 1565.2
     db = _make_sparse_db_from_grid(
@@ -535,10 +546,14 @@ def test_lookup_sparse_kernel_blends_past_kv_branches():
         native_heads=_FLASH_NATIVE_HEADS,
     )
 
+    def sol(p, i, b):
+        return b * (p * i + i * i / 2.0)
+
     b5_at_1024 = 6.00 + (12.00 - 6.00) * (5 - 4) / (8 - 4)
     at_past_0 = b5_at_1024
     at_past_4096 = b5_at_1024 + 4.0
-    assert val == pytest.approx((at_past_0 + at_past_4096) / 2)  # 9.5
+    blend = (at_past_0 + at_past_4096) / 2  # 9.5
+    assert val == pytest.approx(blend * sol(2048, isl, 5) / sol(2048, 1024, 5))
 
 
 def test_lookup_sparse_kernel_missing_returns_none():

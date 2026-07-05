@@ -155,12 +155,13 @@ def _walk_leaves(node, depth: int, n_axes: int, prefix: list, out: list) -> None
 
 
 def _site_index(cfg: OpInterpConfig, data: dict):
-    cached = _SITE_INDEX_CACHE.get(id(data))
+    res = cfg.resolver
+    key = (id(data), cfg.axes, res.site_axes, res.curve_axis)
+    cached = _SITE_INDEX_CACHE.get(key)
     if cached is not None and cached[0] is data:
-        _SITE_INDEX_CACHE.move_to_end(id(data))
+        _SITE_INDEX_CACHE.move_to_end(key)
         return cached[1]
 
-    res = cfg.resolver
     n_axes = len(cfg.axes)
     curve_pos = cfg.axes.index(res.curve_axis)
     site_pos = tuple(cfg.axes.index(a) for a in res.site_axes)
@@ -176,7 +177,7 @@ def _site_index(cfg: OpInterpConfig, data: dict):
     site_logs = [tuple(math.log2(max(v, 1e-12)) for v in key) for key in site_keys]
 
     index = (sites, site_keys, site_logs, curve_pos, site_pos, n_axes)
-    _SITE_INDEX_CACHE[id(data)] = (data, index)
+    _SITE_INDEX_CACHE[key] = (data, index)
     if len(_SITE_INDEX_CACHE) > _SITE_INDEX_CACHE_MAX:
         _SITE_INDEX_CACHE.popitem(last=False)
     return index
@@ -224,10 +225,12 @@ def _eval_curve(cfg: OpInterpConfig, curve: list, q, n_axes, curve_pos, site_pos
     w = (q - c_lo) / (c_hi - c_lo)
     lat_lo, lat_hi = _leaf_lat(leaf_lo), _leaf_lat(leaf_hi)
     if cfg.value_transform is ValueTransform.UTIL:
+        if lat_lo <= 0 or lat_hi <= 0:
+            raise _miss(cfg, coords, "non-positive latency anchor for util interpolation")
         u_lo = cfg.sol_fn(*_full_coords(n_axes, curve_pos, site_pos, c_lo, site_vals)) / lat_lo
         u_hi = cfg.sol_fn(*_full_coords(n_axes, curve_pos, site_pos, c_hi, site_vals)) / lat_hi
         u = u_lo + (u_hi - u_lo) * w
-        if u <= 0:
+        if not math.isfinite(u) or u <= 0:
             raise _miss(cfg, coords, "non-positive interpolated util")
         lat = cfg.sol_fn(*_full_coords(n_axes, curve_pos, site_pos, q, site_vals)) / u
     else:
@@ -261,15 +264,20 @@ def _resolve_scattered(cfg: OpInterpConfig, data: dict, coords):
             candidates = covering
 
     ranked = sorted(candidates, key=dist)
-    if res.max_site_distance is not None and dist(ranked[0]) > res.max_site_distance:
-        raise _miss(cfg, coords, f"nearest site {site_keys[ranked[0]]} beyond max_site_distance")
+    if res.max_site_distance is not None:
+        ranked = [i for i in ranked if dist(i) <= res.max_site_distance]
+        if not ranked:
+            raise _miss(cfg, coords, "no site within max_site_distance")
 
     wsum = u_acc = p_acc = 0.0
     for i in ranked[: res.nn_sites]:
         neigh = site_keys[i]
-        lat_i, p_i = _eval_curve(cfg, sites[neigh], q, n_axes, curve_pos, site_pos, neigh, coords)
+        try:
+            lat_i, p_i = _eval_curve(cfg, sites[neigh], q, n_axes, curve_pos, site_pos, neigh, coords)
+        except InterpolationDataNotAvailableError:  # one bad neighbour must not poison the query
+            continue
         sol_i = cfg.sol_fn(*_full_coords(n_axes, curve_pos, site_pos, q, neigh))
-        if lat_i <= 0 or sol_i <= 0:
+        if not (math.isfinite(lat_i) and lat_i > 0 and math.isfinite(sol_i) and sol_i > 0):
             continue
         w = 1.0 / (dist(i) ** 2 + 1e-12)
         u_acc += w * (sol_i / lat_i)
@@ -327,7 +335,20 @@ def _grid_interior(cfg: OpInterpConfig, node, coords, depth: int):
             raise _OutOfRangeError()
         raise _miss(cfg, coords, f"no usable branch at axis {cfg.axes[depth]!r}")
     if len(results) == 1:
-        return results[0][1]
+        # One bracket branch dropped (ragged table). Returning the survivor
+        # verbatim would CLAMP this axis with no correction -- measured -41%
+        # median on one-sided seq-row folds (seq^2 physics, surviving anchor
+        # a whole bracket step away). Keep the survivor's resolved value (it
+        # carries the measured inner-axis structure) and re-scale along THIS
+        # axis by the SOL ratio, i.e. hold the survivor's util across the
+        # dropped axis. LOO: 41% -> ~10% median; unlike a full _grid_hold
+        # escalation it keeps the max tail bounded (52.9% vs 104.4%).
+        k_surv, (lat, p) = results[0]
+        snapped = tuple(k_surv if j == depth else coords[j] for j in range(len(coords)))
+        sol_q, sol_s = cfg.sol_fn(*coords), cfg.sol_fn(*snapped)
+        if math.isfinite(sol_q) and math.isfinite(sol_s) and sol_q > 0 and sol_s > 0:
+            return lat * (sol_q / sol_s), p
+        return lat, p
 
     (_, (lat_lo, p_lo)), (_, (lat_hi, p_hi)) = results
     w = (c - k_lo) / (k_hi - k_lo)

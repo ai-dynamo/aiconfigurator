@@ -175,6 +175,14 @@ class OpInterpConfig:
     def __post_init__(self) -> None:
         if len(self.axes) < 1:
             raise ValueError(f"need at least 1 axis, got {self.axes}")
+        if len(set(self.axes)) != len(self.axes):
+            raise ValueError(f"duplicate axis names in {self.axes}")
+        if self.transform_axis is not None and self.transform_axis not in self.axes:
+            raise ValueError(f"transform_axis {self.transform_axis!r} is not one of the table axes {self.axes}")
+        if self.resolver.k_tail < 1:
+            raise ValueError(f"k_tail must be >= 1, got {self.resolver.k_tail}")
+        if isinstance(self.resolver, Grid) and self.value_transform is ValueTransform.UTIL:
+            raise ValueError("in-slice UTIL transform is not wired for Grid (no op has won LOO with it)")
         if isinstance(self.resolver, ScatteredSites):
             names = set(self.axes)
             unknown = [a for a in (*self.resolver.site_axes, self.resolver.curve_axis) if a not in names]
@@ -182,6 +190,8 @@ class OpInterpConfig:
                 raise ValueError(f"resolver references unknown axes {unknown}; table axes are {self.axes}")
             if self.resolver.curve_axis in self.resolver.site_axes:
                 raise ValueError(f"curve_axis {self.resolver.curve_axis!r} cannot also be a site axis")
+            if len(set(self.resolver.site_axes)) != len(self.resolver.site_axes):
+                raise ValueError(f"duplicate site axes in {self.resolver.site_axes}")
             if len(self.resolver.site_axes) + 1 != len(self.axes):
                 raise ValueError("every axis must be either a site axis or the curve axis")
 
