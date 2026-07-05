@@ -15,9 +15,9 @@ gpu:
 node:
   num_gpus_per_node: 8 # check your # cards with sycl-ls
   inter_node_bw: 50000000000 # Byte/s per GPU, single direction, 1:1 CX7 per node, 50GB/s
-  intra_node_bw: 32000000000    # PCIe bw without NVLink, Byte/s per GPU, single direction
+  intra_node_bw: 28400000000    # PCIe bw without NVLink, Byte/s per GPU, single direction, limited by line rate and TLP header
   pcie_bw: 32000000000  # Byte/s, single direction, pcie 5.0 (4GB/s) x8 (8 lane for b60)
-  p2p_latency: 0.00001  # 10us some nonofficial correction based on observations, you should try to modify based on your own observations
+  p2p_latency: 0.000002  # 2us PCIe round-trip latency measured on B60 operated by GPU kernels
 
 # TODO fix this with oneccl, use for memory usage computation
 misc:

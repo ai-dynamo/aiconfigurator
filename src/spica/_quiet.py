@@ -3,8 +3,8 @@
 
 """Silence the jax / equinox / jaxopt import noise that Vizier's GP-bandit pulls in.
 
-Vizier's GP optimizer runs on JAX. The default ``search`` extra is CPU-only; the optional
-``search-gpu`` extra installs the CUDA plugin for large sweeps. So we:
+Vizier's GP optimizer runs on JAX. The default ``spica`` extra is CPU-only; users can
+install the matching JAX CUDA plugin separately for large sweeps. So we:
 
 - pin ``JAX_PLATFORMS=cpu`` only when no CUDA plugin is installed, skipping jax's noisy
   *"An NVIDIA GPU may be present ... but a CUDA-enabled jaxlib is not installed. Falling back

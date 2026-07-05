@@ -315,23 +315,105 @@ gpu_budget, backend)`:
 ### Parallel search projection
 
 Vizier searches model-visible latent dimensions and projects every suggestion onto the valid
-parallel-config pool. There is no opaque config-index path.
+parallel-config pool. There is no opaque config-index path. These dimensions are **internal
+Vizier parameters**, not fields accepted under `search_space:`. Users constrain them through
+the model, hardware, backend, GPU budget, context length, and optional `parallel_configs` pool.
 
-| branch | Vizier dimensions | default |
-|---|---|---|
-| agg | `used_gpu_ratio`, `agg_num_gpus_per_engine_target`, attention mode, MoE FFN mode | max GPU ratio, log-center engine size, attention TP, FFN EP |
-| disagg | `used_gpu_ratio`, `prefill_gpu_share`, per-role engine-size target, attention mode, MoE FFN mode | max GPU ratio, 0.5 prefill share, log-center engine size, attention TP, FFN EP |
+#### Internal Vizier parameters
 
-Engine-size targets are numeric discrete parameters with log scale. The sampler hard-filters
-the valid pool by backend, prefers exact attention/FFN modes, then chooses the config with the
-smallest normalized distance in GPU ratio, prefill share, and log2 engine size. The actual
-replica counts and parallel fields remain derived from that valid config. Requested and actual
-features are recorded in Vizier trial metadata as `spica_projection`.
+The projector defines up to three aggregate features, plus `agg_ffn_mode` when the valid pool
+contains MoE TP or EP:
+
+| parameter | Vizier type | actual value encoded from a valid config | range / feasible values | default |
+|---|---|---|---|---|
+| `used_gpu_ratio` | continuous float | `(gpus_per_worker * replicas) / gpu_budget` | minimum to maximum ratio present in the branch pool | `1.0`, clipped to the range |
+| `agg_num_gpus_per_engine_target` | numeric discrete, log scale | `tp * pp * attention_dp` | sorted distinct worker sizes present in the pool; a subset of `{1, 2, 4, 8, 16}` | feasible value nearest the geometric center |
+| `agg_attention_mode` | categorical | `dp` when `attention_dp > 1`, otherwise `tp` | modes present in the pool, ordered `tp`, `dp` | `tp` if present, otherwise `dp` |
+| `agg_ffn_mode` | categorical; MoE only | `ep` when `moe_ep > 1`, otherwise `tp` | modes present in the pool, ordered `ep`, `tp` | `ep` if present, otherwise `tp` |
+
+It defines up to six disaggregated features, plus one FFN-mode feature per role when the valid
+pool contains MoE TP or EP:
+
+| parameter | Vizier type | actual value encoded from a valid config | range / feasible values | default |
+|---|---|---|---|---|
+| `used_gpu_ratio` | continuous float | `(prefill_total_gpus + decode_total_gpus) / gpu_budget` | minimum to maximum ratio present in the branch pool | `1.0`, clipped to the range |
+| `prefill_gpu_share` | continuous float | `prefill_total_gpus / (prefill_total_gpus + decode_total_gpus)` | minimum to maximum share present in the branch pool | `0.5`, clipped to the range |
+| `prefill_num_gpus_per_engine_target` | numeric discrete, log scale | prefill `tp * pp * attention_dp` | sorted distinct prefill worker sizes in the pool | feasible value nearest the geometric center |
+| `decode_num_gpus_per_engine_target` | numeric discrete, log scale | decode `tp * pp * attention_dp` | sorted distinct decode worker sizes in the pool | feasible value nearest the geometric center |
+| `prefill_attention_mode` | categorical | prefill `tp` or `dp` | modes present in the prefill pool, ordered `tp`, `dp` | first present mode |
+| `decode_attention_mode` | categorical | decode `tp` or `dp` | modes present in the decode pool, ordered `tp`, `dp` | first present mode |
+| `prefill_ffn_mode` | categorical; MoE only | prefill `ep` or `tp` | modes present in the prefill pool, ordered `ep`, `tp` | first present mode |
+| `decode_ffn_mode` | categorical; MoE only | decode `ep` or `tp` | modes present in the decode pool, ordered `ep`, `tp` | first present mode |
+
+Here `prefill_total_gpus = prefill_gpus_per_engine * prefill_replicas`, with the analogous
+definition for decode. A one-GPU shape is canonicalized as attention `tp` and FFN `tp`.
+`*_ffn_mode` is omitted when the pool has no MoE shape. Any single-valued feature is also
+omitted from Vizier and injected as a constant. A one-config pool bypasses projection entirely.
+
+The geometric-center default for an engine-size dimension is the feasible value closest in
+log space to `sqrt(min_size * max_size)`; a tie picks the smaller value. For example,
+`{1, 2, 4, 8, 16}` defaults to `4`. The ranges and defaults are rebuilt for every deployment
+mode from that branch's union of valid configs across its viable backends. With multiple
+backends, a value may therefore exist in the study-wide range but not for the backend selected
+by a particular trial. Projection handles that case instead of marking the trial infeasible.
+
+#### Projection onto a valid config
+
+For latent request `z` and its selected backend, `ParallelConfigProjector.project` applies the
+following deterministic steps:
+
+1. **Backend filter.** Remove every config that is not legal and KV-feasible for the selected
+   backend. GPU-budget and shape validity were already enforced when this pool was built.
+2. **Mode match.** For every remaining config, count mismatches across all requested
+   attention and FFN modes. Keep only configs with the minimum mismatch count. Consequently,
+   an exact mode combination always wins over a numerically closer config with a different
+   mode. If no config realizes all requested modes, the least-mismatched mode combination is
+   used and trial metadata records `mode_projected: true`.
+3. **Numeric distance.** Among the mode survivors, minimize the sum of squared normalized
+   deltas over `used_gpu_ratio`, `prefill_gpu_share` when applicable, and every per-engine GPU
+   target. Ratios and shares use their linear value; engine sizes use `log2(size)`. Each delta
+   is divided by that feature's min-to-max span **within the selected backend's pool**:
+
+   ```text
+   R_j = max_c T_j(actual(c)) - min_c T_j(actual(c))
+   distance(c, z) = sum_{j: R_j > 0} ((T_j(actual(c)) - T_j(z)) / R_j)^2
+
+   T_j(x) = log2(x)  for *_num_gpus_per_engine_target
+          = x        for used_gpu_ratio and prefill_gpu_share
+   ```
+
+   A feature with zero span for that backend contributes zero. All non-constant numeric
+   features otherwise have equal weight after normalization.
+4. **Stable tie-break.** Equal distances use a deterministic lexicographic shape-and-replica
+   key, so projection never depends on evaluation history.
+
+Replica count, concrete `tp` / `attention_dp` / `moe_tp` / `moe_ep`, and total GPU usage are
+not independent Vizier knobs. They come from the selected valid config. This preserves useful
+numeric and categorical structure for Vizier while guaranteeing replay never receives an
+illegal parallel combination.
+
+For example, consider a 32-GPU disagg branch containing these two valid configs for one
+backend:
+
+| config | prefill | decode | used ratio | prefill share | decode FFN mode |
+|---|---|---|---:|---:|---|
+| A | 2 replicas x 4 GPUs | 1 replica x 8 GPUs | `16/32 = 0.5` | `8/16 = 0.5` | `ep` |
+| B | 1 replica x 4 GPUs | 3 replicas x 8 GPUs | `28/32 = 0.875` | `4/28 = 0.143` | `tp` |
+
+A request for A's numeric values (`used_gpu_ratio=0.5`, `prefill_gpu_share=0.5`, engine sizes
+`4 + 8`), the modes shared by both configs, but decode FFN mode `tp` projects to B. Mode
+matching removes A before numeric distance is considered, so B's actual ratios become `0.875`
+and `0.143`; its concrete replica counts `1 + 3` are carried into replay.
+
+Requested features, actual features, numeric distance, whether a mode fallback occurred, and
+the full selected parallel config are recorded in Vizier trial metadata under
+`spica_projection`.
 
 Different latent requests may project to the same full sample. Spica reuses the successful
-replay measurement, tells every Vizier trial, and requests replacements so
-`candidates_per_round` counts unique successful replay configurations. It never changes the
-projection to the nearest *untested* config, which would make the objective history-dependent.
+replay result and makes bounded replacement asks; only unique successful samples count toward
+`candidates_per_round`. After `11 * candidates_per_round` attempts, the branch may stop early.
+Projection never changes to the nearest *untested* config, which would make it
+history-dependent.
 
 **Derived, not settable:** `strategy` (`tp` / `tep` / `dep` / `dtp`, computed by
 `ParallelShape.strategy`; it also has a `mixed` fallback that enumeration never emits) and

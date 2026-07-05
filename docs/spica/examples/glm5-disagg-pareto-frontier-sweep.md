@@ -143,7 +143,7 @@ after round 53 consumed about 4 hours 39 minutes for 1.05% additional hypervolum
 
 ```bash
 cd aiconfigurator/spica
-python -m spica --config examples/glm5-disagg-pareto-frontier.yaml
+python -m spica --config docs/spica/examples/glm5-disagg-pareto-frontier.yaml
 ```
 
 The AIC perf model needs the `aic-forward-pass` binding. Dynamo must include the

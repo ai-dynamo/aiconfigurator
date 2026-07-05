@@ -24,8 +24,8 @@ import pytest
 
 pytest.importorskip("dynamo.mocker")
 
-import dynamo._core as _core  # noqa: E402
-import dynamo.replay.main as _replay_main  # noqa: E402
+import dynamo._core as _core
+import dynamo.replay.main as _replay_main
 
 if not hasattr(_core, "RustEnginePerfModel"):
     pytest.skip(
@@ -40,15 +40,18 @@ if not hasattr(_replay_main, "SyntheticWorkload"):
         allow_module_level=True,
     )
 
-from spica.config import SmartSearchConfig, SLATarget  # noqa: E402
-from spica.deploy import build_deployment  # noqa: E402
-from spica.evaluator import ReplayEvaluator  # noqa: E402
-from spica.kv_estimate import resolve_backend_version  # noqa: E402
-from spica.sample import unroll_sample  # noqa: E402
-from spica.score import objective_value  # noqa: E402
-from spica.search import run_smart_search  # noqa: E402
-from spica.search_space import enumerate_branches  # noqa: E402
-from spica.config import OptimizationTarget  # noqa: E402
+from spica.config import (
+    OptimizationTarget,
+    SLATarget,
+    SmartSearchConfig,
+)
+from spica.deploy import build_deployment
+from spica.evaluator import ReplayEvaluator
+from spica.kv_estimate import resolve_backend_version
+from spica.sample import unroll_sample
+from spica.score import objective_value
+from spica.search import run_smart_search
+from spica.search_space import enumerate_branches
 
 TRACE = str(Path(__file__).parent / "data" / "mooncake_tiny.jsonl")
 
