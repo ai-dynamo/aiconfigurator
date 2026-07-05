@@ -89,7 +89,7 @@ try:
     )
 
     from helper import (
-        EXIT_CODE_RESTART,
+        WORKER_RESTART,
         balanced_logits,
         benchmark_with_power,
         build_rank0_local_workload,
@@ -111,7 +111,7 @@ except ModuleNotFoundError:
     )
 
     from helper import (
-        EXIT_CODE_RESTART,
+        WORKER_RESTART,
         balanced_logits,
         benchmark_with_power,
         build_rank0_local_workload,
@@ -1163,7 +1163,7 @@ def run_moe_torch(
     if not persisted:
         raise RuntimeError("Failed to persist SGLang MoE performance row")
     if restart_worker:
-        return EXIT_CODE_RESTART
+        return WORKER_RESTART
 
 
 if __name__ == "__main__":

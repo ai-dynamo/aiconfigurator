@@ -49,7 +49,7 @@ import torch
 try:
     from collector.case_generator import get_common_gdn_test_cases
     from collector.helper import (
-        EXIT_CODE_RESTART,
+        WORKER_RESTART,
         benchmark_with_power,
         get_sm_version,
         log_perf,
@@ -61,7 +61,7 @@ except ModuleNotFoundError:
     from case_generator import get_common_gdn_test_cases
 
     from helper import (
-        EXIT_CODE_RESTART,
+        WORKER_RESTART,
         benchmark_with_power,
         get_sm_version,
         log_perf,
@@ -580,7 +580,7 @@ def run_gdn_torch(
     # honors this returned sentinel (collect.py raises SystemExit on it after
     # marking the task done), so per-task process recycling still happens on
     # that path.
-    return EXIT_CODE_RESTART
+    return WORKER_RESTART
 
 
 if __name__ == "__main__":

@@ -35,7 +35,9 @@ MOE_RUNTIME_DEFAULTS = {
 def _load_functions(*names: str, namespace: dict | None = None) -> dict:
     tree = ast.parse(SOURCE_PATH.read_text(), filename=str(SOURCE_PATH))
     selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
-    loaded = dict(namespace or {})
+    from collector.helper import WORKER_RESTART
+
+    loaded = {"WORKER_RESTART": WORKER_RESTART, **(namespace or {})}
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(SOURCE_PATH), "exec"), loaded)
     return loaded
 
@@ -481,14 +483,16 @@ def test_quantized_moe_uses_framework_path_and_fails_closed(
         model_name,
     )
     if persisted:
-        assert (
+        from collector.helper import WorkerRestartSignal
+
+        assert isinstance(
             run(
                 *args,
                 distributed="balanced",
                 moe_backend=moe_backend,
                 perf_filename="moe.csv",
-            )
-            == 10
+            ),
+            WorkerRestartSignal,
         )
     else:
         with pytest.raises(RuntimeError, match="Failed to persist SGLang MoE performance row"):

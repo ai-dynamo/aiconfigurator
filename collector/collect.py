@@ -84,6 +84,7 @@ from pathlib import Path
 
 from helper import (
     EXIT_CODE_RESTART,
+    WorkerRestartSignal,
     create_test_case_id,
     finalize_perf_files,
     find_perf_csv_outputs,
@@ -494,7 +495,10 @@ def worker(
         try:
             worker_logger.debug(f"Starting task {task_id}")
             result = func(*task, device=device)
-            if isinstance(result, int) and result == EXIT_CODE_RESTART:
+            # Only the dedicated sentinel requests a recycle: entrypoints also
+            # return plain ints (row counts), which must never be mistaken for
+            # EXIT_CODE_RESTART.
+            if isinstance(result, WorkerRestartSignal):
                 raise SystemExit(EXIT_CODE_RESTART)
             worker_logger.debug(f"Completed task {task_id}")
 

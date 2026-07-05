@@ -63,6 +63,12 @@ def _task_fn(label, behavior, device):
     if behavior == "exit_restart":
         sys.exit(EXIT_CODE_RESTART)
     elif behavior == "return_restart":
+        from helper import WORKER_RESTART
+
+        return WORKER_RESTART
+    elif behavior == "return_restart_int":
+        # A plain int equal to EXIT_CODE_RESTART is an ordinary result (e.g. a
+        # logged-row count) and must NOT trigger a worker recycle.
         return EXIT_CODE_RESTART
     elif behavior == "sigabrt":
         os.kill(os.getpid(), signal.SIGABRT)
@@ -259,6 +265,16 @@ class TestExitCodeRestart:
         assert _crash_errors(errors) == []
         assert _load_done_ids(tmp_path, "return_restart_all") == {f"t{i}" for i in range(6)}
         assert _load_failed_ids(tmp_path, "return_restart_all") == set()
+
+    def test_plain_int_result_equal_to_exit_code_is_not_a_restart(self, tmp_path):
+        """A task returning the int 10 (e.g. a logged-row count) completes
+        normally without recycling its worker."""
+        tasks = _tasks([("count_a", "return_restart_int"), ("count_b", "normal")])
+        errors = _run_and_assert_all_done(tasks, 1, tmp_path, module_name="int_result_not_restart")
+
+        assert _crash_errors(errors) == []
+        assert _load_done_ids(tmp_path, "int_result_not_restart") == {"count_a", "count_b"}
+        assert _load_failed_ids(tmp_path, "int_result_not_restart") == set()
 
     def test_interleaved_restart_and_normal(self, tmp_path):
         tasks = _tasks(

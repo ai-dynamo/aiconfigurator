@@ -35,6 +35,19 @@ import numpy as np
 # Exit codes
 EXIT_CODE_RESTART = 10  # Exit code to indicate restart is needed
 
+
+class WorkerRestartSignal:
+    """Return-value sentinel: task finished, recycle the worker process.
+
+    Collector entrypoints legitimately return plain ints (row counts), so the
+    executor must never interpret an int as a restart request — a task that
+    logged exactly EXIT_CODE_RESTART rows would silently recycle its worker.
+    Return WORKER_RESTART (or sys.exit(EXIT_CODE_RESTART)) instead.
+    """
+
+
+WORKER_RESTART = WorkerRestartSignal()
+
 # Global NVML state per worker process
 _NVML_INITIALIZED = False
 _NVML_LOCK = threading.Lock()
