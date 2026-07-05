@@ -1251,3 +1251,202 @@ Pro-FP8 `fp8_block` stays 3,078 on all three; DSV4-Flash rows are unchanged
 w4a8-only sglang policy.  Only case generation is affected; no collector
 execution path, trtllm/vllm row, or SDK/Rust consumer changes.  The decision
 lands in the same commit as this entry.
+
+### B200 continuation pass, first hardware round (2026-07-05)
+
+Execution context: a 4x B200 node (SM100, `total_memory` 191,495,471,104
+bytes per device) running the pinned runtime directly; sglang reports
+`0.5.14` and the in-image source checkout is exactly `49e384ce`. Branch base
+for this pass is `604f5608`. Host baseline before any change: 391 + 26
+collector tests, Ruff check/format, and `git diff --check` all pass.
+Environment caveat recorded for replay: a login shell without `CUDA_HOME`
+makes TileLang JIT resolve the pip `nvidia/cu13` toolchain, whose nvcc lacks
+the CUDA-13 `include/cccl` headers, so every sm_100a TileLang compile fails
+with `fatal error: cuda/atomic: No such file or directory`. B200 mHC (and any
+future TileLang-leaf) runs must export `CUDA_HOME=/usr/local/cuda`; DeepGEMM,
+FlashInfer, and Triton JIT paths did not need it.
+
+Static SM100 enumeration on this node matches every recorded count: MoE
+145,071 (the post-`604f5608` plan), DSA context/generation 264/24, skip
+variants 88/8, GLM-5 sparse 11 per op, GDN 16, mHC 4, DSV4 88 outer tasks per
+op. The DSV4 context memory filter derived its budget from this platform
+(80% of 191,495,471,104 = 153,196,376,883 bytes; structural 56,936, retained
+53,712, memory-dropped 3,224), confirming no H20 capacity value is copied.
+`dsv4_hca_attn_module` and `dsv4_csa_attn_module` enumerate zero cases in
+this image because `flash_mla` is not installed; that gate returns an
+unlogged empty list on SM90 and SM100 alike and is recorded here as shared
+population-visibility debt, not fixed in this pass.
+
+Row updates (positive B200 evidence; the SM90 reverse gate for each code
+change below is the host contract suite — 392 + 26 after this pass — plus
+the explicit no-op arguments given per row; H20 hardware reruns remain owned
+by the SM90 side):
+
+- `ATTN-PER-MODEL-ROUTING` / `ATTN-VARIANT-KEY-0514`: B200 execution probes
+  ran the declared SM100 routes end to end — default MHA (Qwen3) and Gemma-4
+  / GPT-OSS / Llama-4 on `trtllm_mha` (sinks, window 128/1024/8192 rows
+  persisted), MiMo-V2 dense+SWA on `triton` with QK192/V128 and FP8 KV,
+  Qwen3.5 on `triton`, NemotronH on `flashinfer`, Kimi refused at plan level.
+  Source audit: `server_args._get_default_attn_backend` returns `trtllm_mha`
+  on `is_sm100_supported()` (major 10, so SM103 mirrors SM100), the Qwen3.5
+  arch hook defaults hybrid-GDN to `triton` on SM100, and
+  `apply_nemotron_h_defaults` sets `flashinfer`; a direct B200 probe of
+  `trtllm_mha` with QK192/V128 fails in-kernel
+  (`shape '[-1, 64, 1, 192]' is invalid`), proving the MiMo Triton pin is the
+  only runnable 0.5.14 path. One collector defect found and fixed: the layer
+  call passed `sinks=None` unconditionally while SGLang 0.5.14
+  `FlashInferAttnBackend.forward_extend/forward_decode` accept no `sinks`
+  kwarg, so every flashinfer-routed dense case failed with TypeError (first
+  seen: NemotronH SM100 smoke, 6/8 errors). The fix passes `sinks` only when
+  `has_attention_sink`, mirroring the serving call sites; SM90 is unaffected
+  because its dense routes (fa3/triton) accept `sinks=None` with identical
+  semantics. The AST contract test now locks the conditional-kwargs form.
+  Post-fix smokes: NemotronH 6 rows + 2 expected FP8 fail-closed raises; all
+  other models unchanged. The FP8 live-activation raises fired exactly where
+  designed (trtllm_mha/flashinfer prefill) and were classified.
+
+- `MOE-ONE-RUNTIME-TRUTH` / `MOE-BACKEND-ARTIFACT`: high-level FusedMoE
+  smokes on B200, all with verified constructed-method provenance —
+  DSV3 fp8_block, GLM-5.2 NVFP4, Nemotron-Super NVFP4, Qwen3.5 bf16+fp8_block
+  via `sglang_flashinfer_trtllm_moe`; GPT-OSS w4a16/w4a8 via `Mxfp4MoEMethod`
+  `trtllm_sm100` leaf (`sglang_flashinfer_trtllm_moe`); DSV4-Pro w4a8 via
+  `Mxfp4FlashinferTrtllmMoEMethod` (`sglang_mxfp4_flashinfer_trtllm_moe`);
+  Gemma-4 BF16 GELU on raw Triton. Kimi-K2.5 INT4 enumerates zero SM100 MoE
+  cases by declaration (`int4_wo` `max_sm_exclusive: 100`), preserving the
+  zero-population contract. No `f027123f` private patch was revived.
+
+- `DSV4-W4A16-ALIGN` (extended to the W4A8 sibling): the requested B200
+  TP regeneration ran TP1..32 for native Pro (inter 3,072) and Flash (inter
+  2,048) w4a8. local_inter 3,072/1,536/768/384/128 pass; 192 fails inside the
+  TRTLLM-gen batched GEMM (`getValidConfigIndices: No valid config`), and
+  96/64 fail the FlashInfer weight-shuffle `assert M % 128 == 0`
+  (`Mxfp4FlashinferTrtllmMoEMethod.process_weights_after_loading`). A new
+  classified guard raises for SM100/103 `w4a8_mxfp4_mxfp8` +
+  `flashinfer_mxfp4` when hidden or local_inter is not 128-aligned — same
+  layer and form as the existing SM90 W4A16 guard, cases stay in the plan,
+  and the raise cites the framework sites; SM103 is marked source-derived.
+  Unit test `test_runtime_rejects_misaligned_sm100_dsv4_w4a8_case` locks it.
+  SM90 W4A16 guard and its test are untouched.
+
+- `GEMMA-GELU-ALIGN`: the SM100 vector-width-16 predicate fired live on B200
+  (`local_inter_size=44` rejected with the width-16 message; a valid BF16
+  case persisted on raw Triton). Width selection by `sm_version >= 100` is
+  now hardware-exercised on SM100; SM120 remains source-derived.
+
+- `DSV4-B200-SPARSE-PREFILL-CHUNK` (code change, ledger-directed): the
+  ordered B200 probe ran. This node derives `chunked_prefill_size=16384`;
+  the old collector bound evaluated to 11,622. A task-local uncapped run and
+  then the committed collector both executed bs=1 prefix=0 CSA context cells
+  of 8,192/12,288/16,384 fresh tokens with zero errors (latencies
+  3.48/5.19/7.10 ms). Decisive source fact: stock 0.5.14 defaults
+  `SGLANG_OPT_USE_JIT_INDEXER_METADATA=True` (`environ.py:789`; only HIP
+  disables it), so `PagedIndexerMetadata` builds JIT metadata for every
+  prefill — the instrumented probe observed `metadata_path=jit` even at
+  8,192 — and with the env off the framework still switches to JIT above its
+  own 11,673 threshold. The deep_gemm sched-meta SMEM formula therefore
+  modeled a kernel production never exposes prefill to; the collector cap is
+  removed and `_effective_prefill_chunk_size` now returns SGLang's serving
+  chunk. SM90 no-op proof: H20 derives 8,192, already below the old bound,
+  so plan, pool derivation, and worker skips are numerically identical; only
+  chunk-above-11,622 platforms change. The `ChunkedPrefillSize` skip
+  mechanism itself is unchanged and remains the separately tracked debt.
+
+- `DSV4-DECODE-MULTISTREAM-PARITY`: the requested B200 boundary probe ran
+  under the collector's real `model_capture_mode` decode path with MQALayer
+  branch instrumentation: batches 64 and 128 took
+  `_forward_prepare_multi_stream` (6/6 invocations), batch 129 took the
+  sequential `_forward_prepare` (6/6), matching
+  `_multi_stream_bs_limit = 128 if is_blackwell_supported()`. All three runs
+  persisted rows with zero errors. The SM90 64/65 reverse boundary remains
+  owned by the H20 side.
+
+- DSV4 module coverage: unpatched-collector B200 cells persisted for CSA
+  context (8,192/12,288/16,384), HCA context (8,192/16,384 at prefix 0 and
+  4,096 at prefix 512), CSA generation (bs 64/128/129), and HCA generation
+  (bs 8), all zero-error. `dsv4_paged_mqa_logits_module` enumerates 11 tasks;
+  `dsv4_csa_topk_calib` 11.
+
+- `DSA-SUBBACKEND-SELECTOR` / `DSA-PREFILL-GRAPH-BOUNDARY`: B200 smokes of
+  the full DSA module ops completed with zero errors and composite
+  provenance: generation rows are uniformly `sglang_dsa_indexer_trtllm`
+  (TRTLLM-GEN is the runnable SM100 decode bucket, as the source predicted),
+  context rows split `sglang_dsa_dense_mha_trtllm_ragged` /
+  `sglang_dsa_indexer_flashmla_sparse` / `sglang_dsa_indexer_trtllm`. The
+  skip-indexer ops produced their `sglang_dsa_skip_*` analogues on SM100 —
+  the first hardware exercise of the `next_skip_topk` reuse path on the only
+  registry-supported platform.
+
+- `DSV32-SM100-REDUCED-HEAD-DECODE`: the four boundary families ran on B200
+  in the real pipeline (DeepSeek-V3.2, TP2 -> 64 local heads and TP4 -> 32,
+  kv steps 128 and 256, BF16 and FP8 KV, batches through 1,024): 4/4 outer
+  tasks done, 592 rows, zero errors, all `sglang_dsa_indexer_trtllm`. The
+  old `f027123f` SM100 exclusion (`head_num <= 32` and `kv_len >= 256`) does
+  not reproduce on the exact 0.5.14 selector; the add-then-remove cycle
+  closes on the removed side for this runtime. SM103/SM120 remain separate.
+
+- `GLM-SPARSE-EXTREME` / `GLM-MQA-RAGGED-PAGED-BOUNDARY`: B200 smokes of
+  `glm5_mqa_logits_module` (32 rows, `deep_gemm.fp8_mqa_logits`),
+  `glm5_topk_module` (64 rows, `fast_topk_transform_fused`), and
+  `glm5_dsa_attn_module` (32 rows, `flash_mla_sparse_fwd`) completed with
+  zero errors. This is smoke-depth evidence only; the SM100 paged-selector,
+  stride, and lifetime audit at scale stays open until the SM90 top-k
+  recollection closes, and the 4 GiB fused-accessor ordered sweeps
+  (`DSA-FUSED-KS-4G-OFFSET`, `GLM52-*-CEILING`) remain full-campaign work
+  that this pass deliberately did not run.
+
+- `MHC-PRENORM-ENV` (code change): the collector now prints the RESOLVED
+  `SGLANG_OPT_USE_TILELANG_MHC_PRE/POST` and `SGLANG_OPT_DEEPGEMM_HC_PRENORM`
+  values next to the raw environment. First B200 evidence:
+  `resolved_deepgemm_hc_prenorm=True` (with `tilelang_pre=1`), closing this
+  row's "log did not print the resolved value" gap on the Blackwell side.
+
+- `MHC-TEARDOWN-AND-PARTIAL` (code change): the B200 smoke exposed that H20
+  never validated two mHC tasks through ONE worker (its 4 tasks spread over
+  8 GPU workers). On a single-GPU worker, task N+1 failed ModelRunner init
+  with "Process group ... is not initialized in the world group map" because
+  teardown destroyed the torch group but left `parallel_state._WORLD` set,
+  and then with the `set_global_expert_location_metadata` assert because
+  that module global also survives. Fixes, mirroring SGLang's own
+  `cleanup_dist_env_and_memory`: teardown now calls `destroy_model_parallel`
+  plus `destroy_distributed_environment` and returns
+  `expert_location._global_expert_location_metadata` to its pre-init state;
+  the model load moved inside the guarded region so a mid-init failure still
+  reaches teardown (the old `del model_runner` in `finally` raised
+  UnboundLocalError and masked cleanup when load failed). Teardown errors
+  still propagate and fail the worker. Post-fix B200 smoke: 4/4 tasks,
+  140/140 rows (the H20-equivalent full count), both
+  `sglang_tilelang_mhc_pre` and `sglang_tilelang_mhc_post`. The H20 result
+  is not invalidated (its per-task fresh workers never hit this), but the
+  SM90 full-campaign rerun should confirm same-worker sequencing once.
+
+- `GDN-DECODE-BS1024` and `WORKER-FATAL-RECYCLE`: a full B200 GDN run for
+  Qwen3.5-122B-A10B recorded the actual SM100 selector — Triton
+  `fused_recurrent_gated_delta_rule_packed_decode`, not a FlashInfer
+  auto-selection, for this config — and reproduced the exact H20 failure:
+  `batch_size=1024: Triton Error [CUDA]: invalid argument` (the grid-Y
+  boundary), classified and disclosed, generation otherwise ok=10. No skip
+  added. The same run validated the fatal-recycle contract in the real
+  pipeline: the context task hit a fatal CUDA error, was recorded failed,
+  the worker exited to reset the GPU context, and a fresh worker completed
+  the following generation task with exact done/failed accounting.
+
+- NEW observation `GDN-CONTEXT-256K-SM100`: B200 GDN context fails with
+  `Triton Error [CUDA]: an illegal memory access` at total fresh tokens
+  262,144 (2^18) and above — (bs=8, sl=32768), (16, 16384), (16, 32768),
+  (64, 32768) all fail in fresh `CUDA_LAUNCH_BLOCKING=1` single-shape
+  processes, and the failure precedes the first `causal_conv1d_fn` row, so
+  the conv1d prefill leaf (not the chunk scan) is the failing component.
+  Nearest successes: (8, 16384) and (4, 32768), both 131,072 tokens, persist
+  conv1d + `chunk_gated_delta_rule` rows. H20 persisted all GDN context rows
+  for the same grid, so this is SM100-specific framework-kernel behavior in
+  the pinned image. Per failure doctrine it stays in the classified failure
+  log — no denylist entry (it does not hang), no capability floor, no skip —
+  and it needs an upstream-facing minimal repro plus SM103 comparison before
+  any collector change is justified.
+
+Deferred to the full B200 campaign: complete ordered DSA/GLM ceiling sweeps
+(stock and safe-offset comparators), the accepted-complete CSA decision,
+GLM top-k scale audit after the SM90 rerun, full MoE (still deliberately
+last), and fresh-namespace full collections for every op family. No GPU data
+from this pass is published as campaign data; all artifacts live under the
+node-local probe directory and this entry records the durable facts.
