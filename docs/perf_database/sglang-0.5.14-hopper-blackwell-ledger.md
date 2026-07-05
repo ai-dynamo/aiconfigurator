@@ -1514,3 +1514,27 @@ No skip, denylist entry, or capability floor is added. Reverse notes: any
 future fix must rerun the B200 cells above plus the passing controls, and
 the SM90 side needs no action (branch unreachable at its chunk) beyond
 keeping the 8,192-chunk fact recorded.
+
+#### CSA sparse-prefill boundary refinement (2026-07-05, same day, append-only)
+
+The span-only boundary stated above ("overflow once the dequant span crosses
+~2^22 c4 tokens / ~2^24 raw") is contradicted by a same-span control and is
+retracted as the controlling variable; the earlier fail/pass cells all stand.
+New controls from the completed bs=32 task log: (bs=32, prefix=524,288,
+sl=512 — fresh 16,384, aggregate 16.79M raw tokens, the SAME total span as
+the failing bs=128/prefix=131,072 cell) PASSES at 45.7 ms, and (bs=32,
+prefix=1,000,000, sl=512 — aggregate 32M raw tokens, double the failing
+span) PASSES at 85.9 ms; the whole bs=32 TP1 BF16 task is 244 ok / 0 error /
+401 logged skips. Combined matrix: every batch <= 32 cell passes through
+aggregate 32M tokens; every batch >= 64 task dies at its first
+sparse-branch cell from ~16.8M aggregate. So the defect requires the
+fresh > 11,673 sparse-prefill branch AND batch >= 64, not aggregate span
+alone; the int32 row-offset arithmetic in `dequantize_k_cache_paged`
+remains the suspect mechanism, but the batch-linked driver (per-request SWA
+slice sizing, page-table width, or c4 workspace layout) is not isolated.
+The upstream minimal repro must therefore vary batch at fixed aggregate
+span (32 vs 64 at 16.8M) and include the bs=32/32M passing control.
+Practical exposure note for consumers: B200 serving impact is limited to
+prefill batches of >= 64 requests whose chunk exceeds 11,673 tokens; CSA
+context data for batches <= 32 is complete on B200 through 1M-token
+prefixes.
