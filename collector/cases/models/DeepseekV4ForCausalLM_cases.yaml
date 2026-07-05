@@ -82,9 +82,16 @@ model_case_values:
       wideep: true
       framework_quantization:
         sglang:
+          # Owner decision (2026-07-05): do not collect the native-FP4 Pro
+          # artifact as w4a16_mxfp4. The shared SM90 w4a16 backend map is
+          # triton (GPT-OSS truth), under which SGLang 0.5.14 constructs plain
+          # Fp8MoEMethod for is_fp4_experts and every case fails closed;
+          # SM100/103 production scheduling uses the w4a8 TRTLLM-gen path
+          # kept below. To restore support, re-add w4a16_mxfp4 here and pin
+          # sglang_moe_backends w4a16_mxfp4 {90: flashinfer_mxfp4} (the native
+          # cutlass mixed-input path, FlashInfer #3084).
           allowed_modes:
             - w4a8_mxfp4_mxfp8
-            - w4a16_mxfp4
         trtllm:
           allowed_modes:
             - w4a8_mxfp4_mxfp8

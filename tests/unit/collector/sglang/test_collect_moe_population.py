@@ -346,7 +346,9 @@ def test_case_generator_preserves_representative_sglang_moe_runtime_contracts():
 
     dsv4 = model_case("deepseek-ai/DeepSeek-V4-Pro")
     assert (dsv4.sglang_moe_scoring_func, dsv4.sglang_moe_has_correction_bias) == ("sqrtsoftplus", True)
-    assert get_sglang_moe_backend(dsv4, "w4a16_mxfp4", 90) == "triton"
+    # w4a16_mxfp4 is no longer in the Pro artifact's allowed_modes (owner
+    # decision 2026-07-05); the retained native-FP4 plan is the w4a8 path.
+    assert get_sglang_moe_backend(dsv4, "w4a8_mxfp4_mxfp8", 100) == "flashinfer_mxfp4"
 
     llama4 = model_case("meta-llama/Llama-4-Scout-17B-16E-Instruct")
     assert (

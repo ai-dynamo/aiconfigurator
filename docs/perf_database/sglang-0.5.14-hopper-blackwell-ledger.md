@@ -1212,3 +1212,42 @@ stopped; the external container was untouched, and the partial row is not
 accepted or resumable.  The release owner explicitly allowed the code commit
 to proceed without waiting for another smoke.  An uncontaminated smoke in a
 fresh namespace remains required before an accepted full collection begins.
+
+### DSV4-Pro w4a16 non-support decision (2026-07-05)
+
+Symptom: after `65505157` aligned the shared `w4a16_mxfp4` SM90 backend map to
+the GPT-OSS truth (`90: triton`), every enumerated
+`deepseek-ai/DeepSeek-V4-Pro` `w4a16_mxfp4` case — exactly 3,078 on SM90 —
+constructed plain `Fp8MoEMethod` under the Triton request (pinned
+`fp8.py:284-305`, `is_fp4_experts=True`) and failed closed before timing.
+The parent state `28c283cd` resolved those cases to `flashinfer_mxfp4`; the
+FP4/INT4 identity-reversal count above (6,051 SM90 MXFP4 including DSV4-Pro)
+therefore no longer described the plan after `65505157`.
+
+Decision (release owner, 2026-07-05): do not support the native-FP4 Pro
+artifact as `w4a16_mxfp4`.  This is new deliberate behavior, not a restored
+contract: the mode is removed from the artifact's sglang `allowed_modes` in
+`DeepseekV4ForCausalLM_cases.yaml`, matching the trtllm row that was already
+w4a8-only and the SM90 NVFP4 treatment (absent from plan, not
+expected-failure).  Hopper deployments of DSV4-Pro model via the converted
+`sgl-project/DeepSeek-V4-Pro-FP8` artifact.  The pinned image does provide a
+native SM90 MXFP4 path — `--moe-runner-backend flashinfer_mxfp4` constructs
+`Mxfp4FlashinferCutlassMoEMethod` (FlashInfer #3084 cutlass mixed-input;
+serving default remains Marlin, which the identity contract rejects) — so
+restoration is a per-model
+`sglang_moe_backends: w4a16_mxfp4: {90: flashinfer_mxfp4}` pin plus re-adding
+the mode; the YAML comment at the artifact row records that path.
+
+Exact-image getter-count deltas (static enumeration, no GPU run required for
+this plan-only change): SM90 110,970 -> 107,892 (-3,078, all DSV4-Pro
+`w4a16_mxfp4`); SM100 and SM103 each 148,149 -> 145,071 (-3,078, the same
+artifact's `w4a16_mxfp4` slice); SM120 unchanged (MoE parked by registry
+maturity markers).  Reverse untouched controls, re-measured in the same
+image: GPT-OSS `w4a16_mxfp4` stays 5,751 on SM90/100/103; native Pro
+`w4a8_mxfp4_mxfp8` stays 3,078 on SM100/103 with `flashinfer_mxfp4`; converted
+Pro-FP8 `fp8_block` stays 3,078 on all three; DSV4-Flash rows are unchanged
+(native Flash was already w4a8-only, SM90-absent by declaration).
+`test_dsv4_moe_quantization_policy_prunes_unrelated_modes` locks the
+w4a8-only sglang policy.  Only case generation is affected; no collector
+execution path, trtllm/vllm row, or SDK/Rust consumer changes.  The decision
+lands in the same commit as this entry.
