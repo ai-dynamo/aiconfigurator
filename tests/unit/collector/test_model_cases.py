@@ -757,10 +757,13 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
     ] == [
         ("bfloat16", "bfloat16", "bfloat16"),
         ("bfloat16", "fp8", "bfloat16"),
+        ("fp8", "fp8", "bfloat16"),
         ("bfloat16", "bfloat16", "fp8_block"),
         ("bfloat16", "fp8", "fp8_block"),
+        ("fp8", "fp8", "fp8_block"),
         ("bfloat16", "bfloat16", "nvfp4"),
         ("bfloat16", "fp8", "nvfp4"),
+        ("fp8", "fp8", "nvfp4"),
     ]
     assert get_mla_module_sweep_spec("sglang").context_sequence_lengths[-2:] == [8192, 16384]
 

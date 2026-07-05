@@ -279,6 +279,7 @@ def _create_attention_module(
     use_fp8_kv_cache: bool,
     max_seq_len: int,
     max_batch_size: int,
+    use_prefill_fp8: bool = False,
     gemm_type: str = "bfloat16",
     device: str = "cuda:0",
     is_context: bool = True,
@@ -294,6 +295,15 @@ def _create_attention_module(
     Args:
         model_path: HuggingFace model path (e.g. "deepseek-ai/DeepSeek-V3.2").
         attn_type: Attention type ("mla" or "dsa").
+        use_prefill_fp8: When True, opt in to FP8 prefill query compute via
+            ``attention_config.use_prefill_query_quantization``. vLLM honors
+            it only with an FP8 KV cache on the SM100 family with a
+            FLASHINFER/TRTLLM_RAGGED prefill backend
+            (determine_prefill_query_data_type +
+            backend_supports_prefill_query_quantization,
+            mla_attention.py:1372-1396,1453-1493 @0.24.0); the metadata probe
+            in _create_kv_cache_and_metadata fails closed if the decision
+            does not match the case label.
         gemm_type: Precision for linear-layer GEMMs — "bfloat16",
             "fp8_block", or "nvfp4".
     """
@@ -343,6 +353,11 @@ def _create_attention_module(
     # must always set quant_config explicitly: None for bf16,
     # Fp8Config (blockwise) for fp8_block, ModelOptNvFp4Config for nvfp4.
     vllm_config.quant_config = _create_gemm_quant_config(gemm_type)
+
+    # Opt in to FP8 prefill query compute before the module (and later the
+    # metadata builder) reads the attention config.
+    if use_prefill_fp8:
+        vllm_config.attention_config.use_prefill_query_quantization = True
 
     # Override just the layer-local dimensions we sweep in the collector.
     hf_config = vllm_config.model_config.hf_text_config
@@ -503,6 +518,7 @@ def _create_kv_cache_and_metadata(
     seq_len: int,
     is_context: bool,
     prefix_len: int = 0,
+    compute_dtype: str = "bfloat16",
     device: str = "cuda:0",
 ):
     """Create KV cache and attention metadata for benchmarking."""
@@ -587,6 +603,26 @@ def _create_kv_cache_and_metadata(
 
     layer_names = [attn_layer_name]
     builder = builder_cls(kv_cache_spec, layer_names, vllm_config, torch.device(device))
+
+    # Fail closed on the framework's own prefill query dtype decision:
+    # vLLM silently falls back to the model dtype when FP8 prefill query
+    # quantization is requested but unsupported (fp8 KV cache + SM100 family
+    # + FLASHINFER/TRTLLM_RAGGED prefill backend required —
+    # determine_prefill_query_data_type, mla_attention.py:1453-1493 @0.24.0).
+    # A silently-bf16 run must not be recorded as an mla_dtype=fp8 row.
+    if is_context:
+        from vllm.platforms import current_platform
+
+        model_dtype = vllm_config.model_config.dtype
+        expected_q_dtype = current_platform.fp8_dtype() if compute_dtype == "fp8" else model_dtype
+        actual_q_dtype = getattr(builder, "q_data_type", model_dtype)
+        if actual_q_dtype != expected_q_dtype:
+            raise RuntimeError(
+                f"vLLM selected prefill query dtype {actual_q_dtype} but the case is labeled "
+                f"compute_dtype={compute_dtype!r}; refusing to record a mislabeled row "
+                "(see determine_prefill_query_data_type @0.24.0 for the support conditions)"
+            )
+
     attn_metadata = builder.build(
         common_prefix_len=prefix_len,
         common_attn_metadata=common_attn_metadata,
@@ -649,10 +685,13 @@ def run_mla_module(
         raise ValueError(f"unsupported vLLM attention type: {attn_type!r}")
     if kv_cache_dtype not in {"bfloat16", "fp8"}:
         raise ValueError(f"unsupported vLLM MLA KV-cache dtype: {kv_cache_dtype!r}")
-    if compute_dtype != "bfloat16":
+    if compute_dtype not in {"bfloat16", "fp8"}:
+        raise ValueError(f"unsupported vLLM MLA query compute dtype: {compute_dtype!r}")
+    if compute_dtype == "fp8" and kv_cache_dtype != "fp8":
         raise ValueError(
-            "vLLM 0.24.0's default MLA prefill selector does not use FP8 "
-            f"query compute; got compute_dtype={compute_dtype!r}"
+            "vLLM FP8 MLA prefill query compute requires an FP8 KV cache "
+            "(determine_prefill_query_data_type, mla_attention.py:1462-1466 "
+            f"@0.24.0); got kv_cache_dtype={kv_cache_dtype!r}"
         )
 
     setup_distributed(device)
@@ -662,6 +701,7 @@ def run_mla_module(
     init_workspace_manager(torch.device(device))
 
     use_fp8_kv_cache = kv_cache_dtype == "fp8"
+    use_prefill_fp8 = compute_dtype == "fp8"
     is_context = "context" in perf_filename
     prefix_len = int(prefix_len) if is_context else 0
     phase = "context" if is_context else "generation"
@@ -678,6 +718,7 @@ def run_mla_module(
         attn_type=attn_type,
         num_heads=num_heads,
         use_fp8_kv_cache=use_fp8_kv_cache,
+        use_prefill_fp8=use_prefill_fp8,
         max_seq_len=prefix_len + seq_len,
         max_batch_size=batch_size,
         gemm_type=gemm_type,
@@ -697,6 +738,7 @@ def run_mla_module(
             seq_len=seq_len,
             is_context=is_context,
             prefix_len=prefix_len,
+            compute_dtype=compute_dtype,
             device=device,
         )
 

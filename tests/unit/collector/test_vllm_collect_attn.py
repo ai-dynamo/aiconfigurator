@@ -373,6 +373,8 @@ def test_mla_backend_name_records_actually_invoked_backend(attn_type, is_context
         ("bfloat16", "bfloat16", "unknown", "attention type"),
         ("float16", "bfloat16", "mla", "KV-cache dtype"),
         ("bfloat16", "float16", "mla", "query compute"),
+        # FP8 prefill query compute is only honored with an FP8 KV cache.
+        ("bfloat16", "fp8", "mla", "requires an FP8 KV cache"),
     ],
 )
 def test_mla_module_rejects_unknown_runtime_inputs(kv_cache_dtype, compute_dtype, attn_type, message):
