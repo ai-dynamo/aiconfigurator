@@ -307,13 +307,13 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
             volume_mounts = [{"name": "model-cache", "mountPath": model_cache_mount}]
 
         args: list[str] = ["--model", str(svc_cfg.get("model_path"))]
-        # served-model-name: the vllm cli_args templates now emit
-        # `--served-model-name <ServiceConfig.served_model_name>` as the FIRST
-        # cli_args token (guarded on a non-empty value), so extending with
-        # cli_args_list places it directly after --model — same relative
-        # placement as the sglang worker script. Do NOT also insert it here:
-        # cli_args_list is the rendered template output, and an explicit
-        # insertion would duplicate the flag.
+        # served-model-name: emit it here (directly after --model), matching the
+        # sglang/trtllm workers. The vllm cli_args templates do NOT emit this
+        # service-level flag, so without this the deployed model advertises only
+        # the HF model id and requests using the configured alias 404.
+        served_model_name = svc_cfg.get("served_model_name")
+        if served_model_name:
+            args.extend(["--served-model-name", str(served_model_name)])
         args.extend(cli_args_list or [])
         if enable_router:
             port = svc_cfg.get("dyn_vllm_kv_event_port") or 20081
