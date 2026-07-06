@@ -17,7 +17,7 @@ TPOT (Time per Output Token), optimizing throughput at a given latency becomes e
 `aiconfigurator` helps you find a strong starting configuration for disaggregated serving. Given your model, GPU
 count, and GPU type, it searches the configuration space and generates configuration files you can use for deployment with Dynamo or llm-d.
 
-For a technical deep dive into the design and methodology of AIConfigurator, please refer to our paper:  
+For a technical deep dive into the design and methodology of AIConfigurator, please refer to our paper:
 [**AIConfigurator: Lightning-Fast Configuration Optimization for Multi-Framework LLM Serving**](https://arxiv.org/abs/2601.06288).
 
 The tool models LLM inference using collected data for a target machine and framework. It evaluates thousands of
@@ -28,6 +28,12 @@ Let's get started.
 ## Build and Install
 
 ### Install from PyPI
+
+> **Supported platform: Linux x86-64 only.** The published `aiconfigurator` wheel
+> bundles a native (Rust/PyO3) extension and is built for `linux_x86_64`. macOS,
+> Windows, and other architectures (including Linux aarch64) are **not supported**
+> and have no published release wheels — `pip3 install aiconfigurator` will not
+> find a compatible wheel there. Please install from source for non-Linux platforms.
 
 ```bash
 pip3 install aiconfigurator
@@ -43,7 +49,7 @@ compatibility package that installs the matching `aiconfigurator` version.
 ```bash
 # 1. Install Git LFS
 apt-get install git-lfs  # (Linux)
-# brew install git-lfs   # (macOS)
+brew install git-lfs   # (macOS)
 
 # 2. Clone the repo
 git clone https://github.com/ai-dynamo/aiconfigurator.git
@@ -101,12 +107,12 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 - Use `-h` for more options and customization.
 - SLA constraints:
   - `--ttft` and `--tpot` filter configurations that exceed either bound; omit a flag to leave that constraint unset.
-  - `--request-latency` applies an end-to-end per-request limit. The CLI searches for all configurations whose estimated 
-  latency stays within that budget, optionally honoring a provided `--ttft`. 
+  - `--request-latency` applies an end-to-end per-request limit. The CLI searches for all configurations whose estimated
+  latency stays within that budget, optionally honoring a provided `--ttft`.
   When this flag is set, `--tpot` becomes implicit and is ignored.
 
-Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).  
-For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP8`) or a local model directory containing those files.  
+Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).
+For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP8`) or a local model directory containing those files.
 Any quantization set via `profiles` or YAML `config` overrides the HF defaults.
 
 For a full end-to-end walkthrough (support check, sweep, deploy, benchmark), see the [CLI User Guide -- End-to-End Workflow](docs/cli_user_guide.md#end-to-end-workflow).
@@ -147,7 +153,7 @@ agg, disagg = cli_support(model_path="Qwen/Qwen3-32B-FP8", system="h200_sxm")
 print(f"Agg supported: {agg}, Disagg supported: {disagg}")
 ```
 
-An example here, 
+An example here,
 ```bash
 aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --isl 4000 --osl 500 --prefix 500 --ttft 300 --tpot 10
 ```
@@ -199,8 +205,8 @@ aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --sys
       │                                                                •       │
    0.0┤                                                                        │
       └┬─────────────────┬─────────────────┬────────────────┬─────────────────┬┘
-       0                60                120              180              240 
-tokens/s/gpu_cluster                 tokens/s/user                              
+       0                60                120              180              240
+tokens/s/gpu_cluster                 tokens/s/user
 
   ----------------------------------------------------------------------------
   Deployment Details:
@@ -241,7 +247,7 @@ You will get different results.
 
 ### Customized Configuration for aiconfigurator
 
-The `default` mode will create two experiments, one is `agg` and another one is `disagg` and then compare the results.  
+The `default` mode will create two experiments, one is `agg` and another one is `disagg` and then compare the results.
 To further customize (including the search space and per-component quantization), parameters are defined in a YAML file.
 Built-in YAML files are under `src/aiconfigurator/cli/example.yaml` and `src/aiconfigurator/cli/exps/*.yaml`
 Refer to the YAML file and modify as needed. Pass your customized YAML file to `exp` mode:
@@ -249,8 +255,8 @@ Refer to the YAML file and modify as needed. Pass your customized YAML file to `
 ```bash
 aiconfigurator cli exp --yaml-path customized_config.yaml
 ```
-We can use `exp` mode to compare multiple results, including disagg vs. agg, homegenous vs. heterogenous, and more than 2 experiments. 
-We've crafted several examples in `src/aiconfigurator/cli/exps/*.yaml`  
+We can use `exp` mode to compare multiple results, including disagg vs. agg, homegenous vs. heterogenous, and more than 2 experiments.
+We've crafted several examples in `src/aiconfigurator/cli/exps/*.yaml`
 For the full guide, refer to [CLI User Guide](docs/cli_user_guide.md).
 
 ### Deploying to llm-d Platform
@@ -346,7 +352,7 @@ results/QWEN3_32B_FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 │   │   │   ├── bench_run.sh          # aiperf benchmark sweep script (bare-metal)
 │   │   │   ├── k8s_bench.yaml        # aiperf benchmark sweep Job (Kubernetes)
 │   │   │   ├── k8s_deploy.yaml
-│   │   │   └── node_0_run.sh 
+│   │   │   └── node_0_run.sh
 │   │   └── generator_config.yaml
 │   ...
 ├── disagg
@@ -392,7 +398,7 @@ Use `--generator-config path/to/file.yaml` to load a YAML payload with `ServiceC
 - `--generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8`
 - `--generator-set K8sConfig.k8s_namespace=dynamo \`
 
-Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`. 
+Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`.
 
 ## Tuning with Advanced Features
 
