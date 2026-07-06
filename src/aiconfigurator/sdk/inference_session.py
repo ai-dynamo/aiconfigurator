@@ -1851,10 +1851,12 @@ class AFDInferenceSession:
             "tokens/s/gpu": round(tokens_per_s_per_gpu, 2),
             "tokens/s/user": round(tokens_per_s_per_user, 2),
             "seq/s": round(seq_per_s, 3),
+            "request_rate": round(seq_per_s, 3),
             # ``a_batch_size`` is the total in-flight batch per A-Worker;
             # latency is evaluated on the derived microbatch, while the
             # user-visible concurrency remains the total in-flight batch.
             "concurrency": b_total,
+            "parallel": (f"a{cfg.n_a_nodes}n-tp{cfg.tp_a}+f{cfg.n_f_nodes}n-ep{cfg.f_moe_ep_size}"),
             "pipeline_model": cfg.pipeline_model,
             "num_microbatches": num_microbatches,
             "combined_with_pd": bool(cfg.combined_with_pd),

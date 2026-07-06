@@ -13,14 +13,52 @@ import plotext
 from aiconfigurator.logging_utils import use_plain_cli_output
 from aiconfigurator.sdk import config
 from aiconfigurator.sdk.backends.factory import get_backend
-from aiconfigurator.sdk.common import ColumnsAgg
+from aiconfigurator.sdk.common import ColumnsAFD, ColumnsAgg
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
-from aiconfigurator.sdk.inference_session import DisaggInferenceSession, InferenceSession
-from aiconfigurator.sdk.models import get_model
+from aiconfigurator.sdk.inference_session import (
+    AFDInferenceSession,
+    DisaggInferenceSession,
+    InferenceSession,
+)
+from aiconfigurator.sdk.models import check_is_moe, get_model, resolve_context_fmha_compat
 from aiconfigurator.sdk.perf_database import PerfDatabase
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, strip_unicode_to_ascii
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# AFD rate-matching calibration constants
+# ---------------------------------------------------------------------------
+
+# AFD rate-matching degradation factors.
+# Prefill: identical to disagg — same static-pool pipeline-bubble overhead.
+_AFD_PREFILL_DEGRADATION = 0.9
+# Decode: A/F ping-pong pipeline bubble + microbatch scheduling overhead.
+# Slightly less than disagg's 0.92 (decode-slot under-saturation) because
+# AFD decode has a different bottleneck — A↔F transfer overlap efficiency.
+_AFD_DECODE_DEGRADATION = 0.95
+# TTFT correction for concurrent prefill queueing (same pool structure as disagg).
+_AFD_TTFT_CORRECTION_FACTOR = 1.8
+_AFD_PREFILL_BATCH_SIZE_LIST = [1, 2, 4, 8, 16, 32]
+_AFD_PREFILL_MAX_CANDIDATES = 256
+_AFD_PREFILL_CANDIDATE_OVERFLOW = "error"
+_AFD_LOW_LATENCY_BATCH_SIZE_LIST = [1, 2, 4]
+
+
+def _normalize_positive_int_list(name: str, values: list[int] | tuple[int, ...] | None) -> list[int]:
+    if values is None:
+        return []
+    if not isinstance(values, (list, tuple)):
+        raise TypeError(f"{name} must be a list of positive integers.")
+    normalized: list[int] = []
+    for value in values:
+        if isinstance(value, bool) or int(value) != value:
+            raise ValueError(f"{name} entries must be positive integers, got {value!r}.")
+        int_value = int(value)
+        if int_value < 1:
+            raise ValueError(f"{name} entries must be positive integers, got {value!r}.")
+        normalized.append(int_value)
+    return list(dict.fromkeys(normalized))
 
 
 def agg_pareto(
@@ -331,6 +369,1127 @@ def disagg_pareto(
     )
 
     return summary.get_summary_df()
+
+
+def _enumerate_afd_prefill_options(
+    model_path: str,
+    runtime_config: config.RuntimeConfig,
+    database: PerfDatabase,
+    backend_name: str,
+    gpus_per_node: int,
+    base_model_config: config.ModelConfig | None = None,
+    quant_modes: dict | None = None,
+    *,
+    prefill_database: PerfDatabase | None = None,
+    prefill_backend_name: str | None = None,
+    prefill_model_config: config.ModelConfig | None = None,
+    prefill_parallel_config_list: list[tuple[int, int, int, int, int]] | None = None,
+    prefill_batch_size_list: list[int] | tuple[int, ...] | None = None,
+    prefill_system_name: str | None = None,
+    prefill_backend_version: str | None = None,
+    total_gpus: int | None = None,
+    max_prefill_gpus: int | None = None,
+    max_candidates: int = _AFD_PREFILL_MAX_CANDIDATES,
+    candidate_overflow: str = _AFD_PREFILL_CANDIDATE_OVERFLOW,
+) -> list[dict]:
+    """Estimate static prefill worker options for AFD combined-with-PD sweeps.
+
+    AFD models the decode phase; the prefill phase runs on a separate
+    static pool. The static prefill estimate depends on the prefill
+    worker's own parallelism and batch size, so this search is computed
+    once and shared across all AFD decode candidates.
+
+    ``base_model_config`` carries the resolved model/backend semantics
+    from the owning task. ``prefill_model_config`` overrides it when
+    AFD is configured with a separate prefill worker config. ``quant_modes``
+    is kept for compatibility with older direct callers.
+
+    Returns a list of dicts with prefill parallelism, per-worker GPU
+    count, batch size, TTFT, ``seq_s`` (per-worker), memory and power.
+    """
+    is_moe = check_is_moe(model_path)
+    effective_database = prefill_database or database
+    effective_backend_name = prefill_backend_name or backend_name
+    backend = get_backend(effective_backend_name)
+    quant_modes = dict(quant_modes or {})
+    base_model_config = copy.deepcopy(
+        prefill_model_config if prefill_model_config is not None else base_model_config
+    ) if (prefill_model_config is not None or base_model_config is not None) else config.ModelConfig()
+    for key, value in quant_modes.items():
+        if value is not None:
+            setattr(base_model_config, key, value)
+
+    batch_size_list = _normalize_positive_int_list(
+        "prefill_batch_size_list",
+        prefill_batch_size_list or _AFD_PREFILL_BATCH_SIZE_LIST,
+    )
+    if not batch_size_list:
+        batch_size_list = list(_AFD_PREFILL_BATCH_SIZE_LIST)
+
+    if prefill_parallel_config_list is None:
+        tp_candidates = sorted({tp for tp in (1, 2, 4, 8) if tp <= max(gpus_per_node, 1)})
+        prefill_parallel_config_list = [
+            (tp, 1, 1, 1 if is_moe else tp, tp if is_moe else 1) for tp in tp_candidates
+        ]
+
+    if max_candidates < 1:
+        raise ValueError(f"afd_config.prefill_search.max_candidates must be >= 1, got {max_candidates}.")
+    if candidate_overflow not in {"error", "truncate"}:
+        raise ValueError("afd_config.prefill_search.candidate_overflow must be 'error' or 'truncate'.")
+
+    candidates: list[tuple[int, int, int, int, int, int, int, int]] = []
+    for parallel_config in prefill_parallel_config_list:
+        values = [int(value) for value in parallel_config]
+        if len(values) == 5:
+            tp, pp, dp, moe_tp, moe_ep = values
+            cp = 1
+        elif len(values) == 6:
+            tp, pp, dp, moe_tp, moe_ep, cp = values
+        else:
+            raise ValueError(
+                "afd_config.prefill_search.parallel_config_list entries must contain "
+                f"5 or 6 integers, got {len(values)}: {parallel_config!r}."
+            )
+        num_gpus = tp * pp * dp * cp
+        if total_gpus is not None and total_gpus > 0 and num_gpus > total_gpus:
+            continue
+        if max_prefill_gpus is not None and max_prefill_gpus > 0 and num_gpus > max_prefill_gpus:
+            continue
+        for batch_size in batch_size_list:
+            candidates.append((tp, pp, dp, moe_tp, moe_ep, cp, num_gpus, batch_size))
+
+    if len(candidates) > max_candidates:
+        message = (
+            f"AFD static prefill search produced {len(candidates)} candidates, exceeding "
+            f"afd_config.prefill_search.max_candidates={max_candidates}."
+        )
+        if candidate_overflow == "truncate":
+            logger.warning("%s Truncating deterministically to the first %d candidates.", message, max_candidates)
+            candidates = candidates[:max_candidates]
+        else:
+            raise ValueError(f"{message} Reduce afd_config.prefill_search or set candidate_overflow='truncate'.")
+
+    options: list[dict] = []
+    for tp, pp, dp, moe_tp, moe_ep, cp, num_gpus, batch_size in candidates:
+        try:
+            model_config = copy.deepcopy(base_model_config)
+            model_config.tp_size = tp
+            model_config.pp_size = pp
+            model_config.attention_dp_size = dp
+            model_config.moe_tp_size = moe_tp
+            model_config.moe_ep_size = moe_ep
+            model_config.cp_size = cp
+            # AFD static prefill pool runs context attention (static_ctx); align with
+            # disagg prefill (cli/api.py) by downgrading fp8 fmha -> bfloat16 for
+            # DeepSeek-V3/Kimi so sglang context_mla (which lacks the fp8 slice) is hit.
+            resolve_context_fmha_compat(model_config, model_path, is_context_role=True)
+            model = get_model(model_path, model_config, effective_backend_name)
+            sess = InferenceSession(model=model, database=effective_database, backend=backend)
+            prefill_runtime_config = copy.deepcopy(runtime_config)
+            prefill_runtime_config.batch_size = batch_size
+            summary = sess.run_static(runtime_config=prefill_runtime_config, mode="static_ctx")
+            if summary.check_oom():
+                continue
+            result_dict = summary.get_result_dict()
+            ttft = float(result_dict.get("ttft", 0.0) or 0.0)
+            seq_s = float(result_dict.get("seq/s", 0.0) or 0.0)
+            if ttft <= 0.0 or seq_s <= 0.0:
+                continue
+            option_num_gpus = int(result_dict.get("num_total_gpus", num_gpus) or num_gpus)
+            if total_gpus is not None and total_gpus > 0 and option_num_gpus > total_gpus:
+                continue
+            if max_prefill_gpus is not None and max_prefill_gpus > 0 and option_num_gpus > max_prefill_gpus:
+                continue
+            options.append(
+                {
+                    "tp": tp,
+                    "pp": pp,
+                    "dp": dp,
+                    "moe_tp": moe_tp,
+                    "moe_ep": moe_ep,
+                    "cp": cp,
+                    "batch_size": batch_size,
+                    "num_gpus": option_num_gpus,
+                    "ttft": ttft,
+                    "seq_s": seq_s,
+                    "memory": float(result_dict.get("memory", 0.0) or 0.0),
+                    "power_w": float(result_dict.get("power_w", 0.0) or 0.0),
+                    "system": result_dict.get("system", prefill_system_name),
+                    "backend": result_dict.get("backend", effective_backend_name),
+                    "version": result_dict.get("version", prefill_backend_version),
+                }
+            )
+        except Exception:
+            logger.debug(
+                "AFD prefill option tp=%d pp=%d dp=%d moe_tp=%d ep=%d cp=%d bs=%d failed, skipping",
+                tp,
+                pp,
+                dp,
+                moe_tp,
+                moe_ep,
+                cp,
+                batch_size,
+                exc_info=True,
+            )
+            continue
+    return options
+
+
+def _combine_afd_row_with_static_prefill(
+    row: dict,
+    prefill_options: list[dict],
+    *,
+    target_ttft: float | None = None,
+    target_request_latency: float | None = None,
+    total_gpus: int | None = None,
+    max_prefill_gpus: int | None = None,
+    max_prefill_workers: int | None = None,
+    prefill_degradation: float = _AFD_PREFILL_DEGRADATION,
+    decode_degradation: float = _AFD_DECODE_DEGRADATION,
+    ttft_correction_factor: float = _AFD_TTFT_CORRECTION_FACTOR,
+) -> dict | None:
+    """Merge an AFD decode row with a rate-matched static prefill pool.
+
+    Picks the feasible prefill option that minimizes the prefill GPU count
+    needed to keep up with the AFD decode rate, then merges TTFT/TPOT,
+    throughput, GPU budget, and memory into a single combined row.  Applies
+    degradation factors and TTFT correction symmetrically with the disagg
+    rate-matching path.
+
+    Returns ``None`` when no prefill option satisfies the hard TTFT/request
+    latency constraints.
+    """
+    if not prefill_options:
+        return None
+
+    decode_seq_s = float(row.get("seq/s", 0.0) or 0.0)
+    if decode_seq_s <= 0.0:
+        return None
+
+    osl = int(row.get("osl", 1) or 1)
+    tpot = float(row.get("tpot", 0.0) or 0.0)
+    decode_time = tpot * max(osl - 1, 0)
+    decode_gpus = int(row.get("num_total_gpus", 0) or 0)
+    best_key = None
+    best_option = None
+    best_workers = 0
+    for option in prefill_options:
+        # Apply prefill degradation to per-worker throughput for rate-matching
+        effective_per_worker = option["seq_s"] * prefill_degradation
+        if effective_per_worker <= 0.0:
+            continue
+        num_workers = max(1, math.ceil(decode_seq_s * decode_degradation / effective_per_worker))
+        if max_prefill_workers is not None and max_prefill_workers > 0 and num_workers > max_prefill_workers:
+            continue
+        prefill_gpus = num_workers * option["num_gpus"]
+        if max_prefill_gpus is not None and max_prefill_gpus > 0 and prefill_gpus > max_prefill_gpus:
+            continue
+        num_total_gpus = decode_gpus + prefill_gpus
+        if total_gpus is not None and total_gpus > 0 and num_total_gpus > total_gpus:
+            continue
+        # TTFT check uses corrected TTFT (concurrent queueing)
+        corrected_ttft = option["ttft"] * ttft_correction_factor
+        if target_ttft is not None and target_ttft > 0 and corrected_ttft > target_ttft:
+            continue
+        request_latency = corrected_ttft + decode_time
+        if (
+            target_request_latency is not None
+            and target_request_latency > 0
+            and request_latency > target_request_latency
+        ):
+            continue
+        key = (num_total_gpus, prefill_gpus, corrected_ttft)
+        if best_key is None or key < best_key:
+            best_key = key
+            best_option = option
+            best_workers = num_workers
+
+    if best_option is None:
+        return None
+
+    ttft = best_option["ttft"] * ttft_correction_factor
+    # Rate-matched throughput with degradation factors
+    effective_prefill_seq_s = best_workers * best_option["seq_s"] * prefill_degradation
+    effective_decode_seq_s = decode_seq_s * decode_degradation
+    seq_s = min(effective_decode_seq_s, effective_prefill_seq_s)
+    tokens_s = seq_s * osl
+    request_latency = ttft + decode_time
+    num_total_gpus = decode_gpus + best_workers * best_option["num_gpus"]
+    decode_power = float(row.get("power_w", 0.0) or 0.0)
+    power_w = (
+        (best_option["power_w"] * ttft + decode_power * decode_time) / request_latency if request_latency > 0.0 else 0.0
+    )
+
+    combined = dict(row)
+    combined.update(
+        {
+            "ttft": round(ttft, 3),
+            "tpot": round(tpot, 3),
+            "request_latency": round(request_latency, 3),
+            "seq/s": round(seq_s, 3),
+            "request_rate": round(seq_s, 3),
+            "tokens/s": round(tokens_s, 2),
+            "tokens/s/gpu": round(tokens_s / num_total_gpus, 2) if num_total_gpus > 0 else 0.0,
+            "tokens/s/user": round(1000.0 / tpot, 2) if tpot > 0.0 else 0.0,
+            "num_total_gpus": num_total_gpus,
+            "memory": round(max(float(row.get("memory", 0.0) or 0.0), best_option["memory"]), 2),
+            "power_w": round(power_w, 3),
+            "combined_with_pd": True,
+            "(p)workers": best_workers,
+            "(p)tp": best_option["tp"],
+            "(p)pp": best_option.get("pp", 1),
+            "(p)dp": best_option.get("dp", 1),
+            "(p)moe_tp": best_option.get("moe_tp", best_option["tp"]),
+            "(p)ep": best_option.get("moe_ep", 1),
+            "(p)bs": best_option.get("batch_size", 1),
+            "(p)num_gpus": best_option["num_gpus"],
+            "(p)system": best_option.get("system"),
+            "(p)backend": best_option.get("backend"),
+            "(p)version": best_option.get("version"),
+            "(p)impl": "static_ctx",
+            "(d)impl": "afd",
+        }
+    )
+    return combined
+
+
+def _analytical_max_batch_size(
+    backend,
+    model,
+    database: PerfDatabase,
+    partition_ops,
+    *,
+    isl: int,
+    osl: int,
+    prefix: int,
+    max_seq_len: int | None,
+    include_kvcache: bool,
+    kvcache_multiplier: int = 1,
+    free_gpu_memory_fraction: float | None = None,
+    align_to: int = 8,
+) -> int:
+    """Compute the maximum batch_size that fits in GPU HBM analytically.
+
+    The memory model is linear in ``batch_size``:
+    ``total = fixed + batch_size * marginal``.  This function samples
+    ``get_partition_memory_usage`` at two reference points to extract
+    the linear coefficients, then solves for the largest ``batch_size``
+    satisfying both the absolute HBM capacity and the KV-cache fraction
+    budget.  The result is aligned down to ``align_to``.
+
+    Using two-point sampling (rather than replicating the formula) keeps
+    the function automatically compatible with backend-specific overrides
+    (SGLang overhead fracs, MoE workspace, MTP correction, etc.).
+    """
+    effective_max_seq_len = max_seq_len if max_seq_len is not None else isl + osl
+
+    def _sample(bs: int) -> dict[str, float]:
+        return backend.get_partition_memory_usage(
+            model,
+            database,
+            partition_ops=partition_ops,
+            batch_size=bs,
+            beam_width=1,
+            isl=isl,
+            osl=osl,
+            num_tokens=bs,
+            prefix=prefix,
+            max_seq_len=effective_max_seq_len,
+            include_kvcache=include_kvcache,
+            kvcache_multiplier=kvcache_multiplier,
+        )
+
+    _BS_LO, _BS_HI = 128, 256
+    try:
+        mem_lo = _sample(_BS_LO)
+        mem_hi = _sample(_BS_HI)
+    except Exception:
+        logger.debug("_analytical_max_batch_size: sampling failed", exc_info=True)
+        return 0
+
+    delta_bs = _BS_HI - _BS_LO
+    marginal_gib = (mem_hi["total"] - mem_lo["total"]) / delta_bs
+    fixed_gib = mem_lo["total"] - marginal_gib * _BS_LO
+
+    gpu_cap_gib = database.system_spec["gpu"]["mem_capacity"] / (1 << 30)
+
+    if marginal_gib <= 0:
+        max_bs = 10000
+    else:
+        max_bs = int((gpu_cap_gib - fixed_gib) / marginal_gib)
+
+    if free_gpu_memory_fraction is not None and include_kvcache:
+        reserved, tolerance = backend.get_kv_cache_memory_check_params()
+        frac = free_gpu_memory_fraction * (1.0 - reserved) * (1.0 - tolerance)
+        kv_marginal = (mem_hi["kvcache"] - mem_lo["kvcache"]) / delta_bs
+        act_marginal = marginal_gib - kv_marginal
+        denom = kv_marginal + frac * act_marginal
+        if denom > 0:
+            max_bs_kv = int(frac * (gpu_cap_gib - fixed_gib) / denom)
+            max_bs = min(max_bs, max_bs_kv)
+
+    max_bs = max(max_bs, 0)
+    if align_to > 1:
+        max_bs = (max_bs // align_to) * align_to
+    return max_bs
+
+
+def _derive_a_batch_size(
+    model_path: str,
+    a_model_config: config.ModelConfig,
+    backend: object,
+    database: PerfDatabase,
+    *,
+    num_microbatches: int,
+    boundary_on_attn: bool,
+    isl: int,
+    osl: int,
+    prefix: int,
+    max_seq_len: int | None,
+    free_gpu_memory_fraction: float | None,
+) -> tuple[int, object, object]:
+    """Derive ``a_batch_size`` from A-pool KV-cache capacity.
+
+    Analytically computes the maximum batch size whose A-pool memory
+    fits within the GPU HBM budget (both absolute capacity and KV-cache
+    fraction constraints).  The result is aligned down to a multiple of
+    8, capped at 256, and floored at 32.
+
+    Falls back to 32 when the analytical result is below 32; the caller's
+    per-candidate OOM check will then skip that topology naturally.
+
+    Returns (batch_size, a_model, a_partition) so the caller can reuse
+    the already-constructed model and partition for the balance-ratio probe.
+    """
+    from aiconfigurator.sdk.afd_partition import build_afd_ops_partition
+
+    a_model = get_model(model_path, a_model_config, backend.name.value)
+    a_partition = build_afd_ops_partition(a_model, phase="generation", boundary_on_attn=boundary_on_attn)
+
+    kvcache_multiplier = max(int(num_microbatches or 1), 1)
+
+    max_bs = _analytical_max_batch_size(
+        backend,
+        a_model,
+        database,
+        a_partition.attn_ops,
+        isl=isl,
+        osl=osl,
+        prefix=prefix,
+        max_seq_len=max_seq_len,
+        include_kvcache=True,
+        kvcache_multiplier=kvcache_multiplier,
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+        align_to=8,
+    )
+
+    return max(min(max_bs, 256), 32), a_model, a_partition
+
+
+_AFD_BALANCE_RATIO_THRESHOLD = 0.3
+
+
+def _quick_balance_ratio(
+    a_ops,
+    f_ops,
+    database: PerfDatabase,
+    *,
+    batch_size: int,
+    seq_len: int,
+    runtime_config,
+    a_model,
+    f_model,
+) -> float:
+    """Single-point latency probe to estimate A/F balance ratio cheaply."""
+    kwargs_base = {
+        "batch_size": batch_size,
+        "beam_width": 1,
+        "s": seq_len,
+        "prefix": runtime_config.prefix,
+        "gen_seq_imbalance_correction_scale": runtime_config.gen_seq_imbalance_correction_scale,
+    }
+    t_a = sum(
+        float(op.query(database, x=batch_size, model_name=getattr(a_model, "model_name", ""), **kwargs_base))
+        for op in a_ops
+    )
+    t_f = sum(
+        float(op.query(database, x=batch_size, model_name=getattr(f_model, "model_name", ""), **kwargs_base))
+        for op in f_ops
+    )
+    return min(t_a, t_f) / max(t_a, t_f, 1e-9)
+
+
+def _afd_runtime_configs_for_sla(runtime_config: config.RuntimeConfig) -> list[config.RuntimeConfig]:
+    runtime_configs: list[config.RuntimeConfig] = []
+    if runtime_config.request_latency is not None and runtime_config.request_latency > 0:
+        ttft_tpot_constraints = enumerate_ttft_tpot_constraints(
+            runtime_config.osl,
+            runtime_config.request_latency,
+            runtime_config.ttft,
+        )
+        for ttft_constraint, tpot_constraint in ttft_tpot_constraints:
+            overwritten_runtime_config = copy.deepcopy(runtime_config)
+            overwritten_runtime_config.ttft = ttft_constraint
+            overwritten_runtime_config.tpot = tpot_constraint
+            runtime_configs.append(overwritten_runtime_config)
+        return runtime_configs
+
+    tpot_values = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
+    for tpot in tpot_values:
+        overwritten_runtime_config = copy.deepcopy(runtime_config)
+        overwritten_runtime_config.tpot = tpot
+        runtime_configs.append(overwritten_runtime_config)
+    return runtime_configs
+
+
+def _apply_afd_decode_latency_correction(row: dict, decode_latency_correction: float) -> None:
+    if decode_latency_correction == 1.0:
+        return
+    tpot = float(row.get("tpot", 0.0) or 0.0) * decode_latency_correction
+    row["tpot"] = tpot
+    osl = int(row.get("osl", 1) or 1)
+    ttft = float(row.get("ttft", 0.0) or 0.0)
+    row["request_latency"] = round(ttft + tpot * max(osl - 1, 0), 3)
+    row["tokens/s/user"] = round(1000.0 / tpot, 2) if tpot > 0.0 else 0.0
+
+
+def _afd_sla_rejection_reason(
+    row: dict,
+    runtime_config: config.RuntimeConfig,
+    *,
+    require_ttft: bool,
+) -> str | None:
+    target_tpot = runtime_config.tpot
+    if target_tpot is not None and float(row.get("tpot", 0.0) or 0.0) > float(target_tpot):
+        return "tpot"
+
+    target_ttft = runtime_config.ttft
+    if (
+        require_ttft
+        and target_ttft is not None
+        and target_ttft > 0
+        and float(row.get("ttft", 0.0) or 0.0) > float(target_ttft)
+    ):
+        return "ttft"
+
+    target_request_latency = runtime_config.request_latency
+    if (
+        target_request_latency is not None
+        and target_request_latency > 0
+        and float(row.get("request_latency", 0.0) or 0.0) > float(target_request_latency)
+    ):
+        return "request_latency"
+
+    return None
+
+
+def _format_afd_rejection_summary(rejection_counts: dict[str, int]) -> str:
+    return ", ".join(f"{key}={value}" for key, value in rejection_counts.items() if value)
+
+
+def afd_pareto(
+    model_path: str,
+    runtime_config: config.RuntimeConfig,
+    database: PerfDatabase,
+    backend_name: str,
+    afd_parallel_config_list: list[tuple[int, int, int, int, int, str]],
+    gpus_per_node: int,
+    *,
+    model_config: config.ModelConfig | None = None,
+    total_gpus: int | None = None,
+    total_batch_size: int | None = None,
+    combined_with_pd: bool = True,
+    comm_overhead_factor: float = 1.0,
+    boundary_on_attn: bool = True,
+    target_ttft: float | None = None,
+    free_gpu_memory_fraction: float | None = None,
+    max_seq_len: int | None = None,
+    quant_modes: dict | None = None,
+    prefill_database: PerfDatabase | None = None,
+    prefill_backend_name: str | None = None,
+    prefill_model_config: config.ModelConfig | None = None,
+    prefill_parallel_config_list: list[tuple[int, int, int, int, int]] | None = None,
+    prefill_batch_size_list: list[int] | None = None,
+    prefill_system_name: str | None = None,
+    prefill_backend_version: str | None = None,
+    prefill_max_candidates: int = _AFD_PREFILL_MAX_CANDIDATES,
+    prefill_candidate_overflow: str = _AFD_PREFILL_CANDIDATE_OVERFLOW,
+    max_prefill_gpus: int | None = None,
+    max_prefill_workers: int | None = None,
+    prefill_degradation: float = _AFD_PREFILL_DEGRADATION,
+    decode_degradation: float = _AFD_DECODE_DEGRADATION,
+    ttft_correction_factor: float = _AFD_TTFT_CORRECTION_FACTOR,
+    decode_latency_correction: float = 1.0,
+) -> pd.DataFrame:
+    """Sweep AFD candidate topologies and collect per-candidate estimates.
+
+    Each candidate is a ``(n_a_nodes, n_f_nodes, tp_a, f_moe_ep_size,
+    num_microbatches, pipeline_model)`` tuple (see
+    ``task.build_afd_parallel_lists``).  ``a_batch_size`` is derived
+    per-candidate from the A-pool KV-cache capacity via
+    :func:`_derive_a_batch_size` instead of being enumerated unless
+    ``total_batch_size`` is provided.  Fixed total batch mode requires
+    exact divisibility by the candidate's A-worker count and evaluates
+    that one exact batch size without lowering it.  For each candidate
+    the AFD decode phase is estimated via
+    :class:`AFDInferenceSession`; when ``combined_with_pd`` is set, the
+    result is merged with a rate-matched static prefill pool so the row
+    carries end-to-end TTFT + TPOT and the full GPU budget.
+
+    ``model_config`` carries the fully resolved model/backend semantics
+    from the owning task. A/F candidates and the static prefill pool
+    deep-copy it and only override candidate parallelism fields.
+    ``quant_modes`` is kept for compatibility with older direct callers.
+
+    OOM candidates and per-candidate failures are skipped. Returns a
+    DataFrame with :data:`common.ColumnsAFD` columns sorted by
+    ``tokens/s/gpu``.
+    """
+    from aiconfigurator.sdk.afd_partition import build_afd_ops_partition
+    from aiconfigurator.sdk.config import AFDConfig
+
+    fixed_total_batch_size = None
+    if total_batch_size is not None:
+        if isinstance(total_batch_size, bool) or not isinstance(total_batch_size, int):
+            raise ValueError(f"total_batch_size must be a positive integer, got {total_batch_size!r}.")
+        fixed_total_batch_size = total_batch_size
+        if fixed_total_batch_size < 1:
+            raise ValueError(f"total_batch_size must be a positive integer, got {total_batch_size!r}.")
+
+    backend = get_backend(backend_name)
+    quant_modes = dict(quant_modes or {})
+    base_model_config = copy.deepcopy(model_config) if model_config is not None else config.ModelConfig()
+    for key, value in quant_modes.items():
+        if value is not None:
+            setattr(base_model_config, key, value)
+
+    prefill_options: list[dict] = []
+    if combined_with_pd:
+        prefill_options = _enumerate_afd_prefill_options(
+            model_path=model_path,
+            runtime_config=runtime_config,
+            database=database,
+            backend_name=backend_name,
+            gpus_per_node=gpus_per_node,
+            base_model_config=base_model_config,
+            quant_modes=quant_modes,
+            prefill_database=prefill_database,
+            prefill_backend_name=prefill_backend_name,
+            prefill_model_config=prefill_model_config,
+            prefill_parallel_config_list=prefill_parallel_config_list,
+            prefill_batch_size_list=prefill_batch_size_list,
+            prefill_system_name=prefill_system_name,
+            prefill_backend_version=prefill_backend_version,
+            total_gpus=total_gpus,
+            max_prefill_gpus=max_prefill_gpus,
+            max_candidates=prefill_max_candidates,
+            candidate_overflow=prefill_candidate_overflow,
+        )
+        if not prefill_options:
+            raise NoFeasibleConfigError(
+                "AFD combined_with_pd=True requires at least one feasible static prefill option. "
+                "No static prefill option satisfied the estimate, so no decode-only AFD row was returned."
+            )
+
+    base_runtime_config = copy.deepcopy(runtime_config)
+    if target_ttft is not None:
+        base_runtime_config.ttft = target_ttft
+    runtime_configs_to_evaluate = _afd_runtime_configs_for_sla(base_runtime_config)
+    if not runtime_configs_to_evaluate:
+        raise NoFeasibleConfigError(
+            "No AFD SLA constraint pairs could be derived for "
+            f"request_latency={runtime_config.request_latency}."
+        )
+
+    rows: list[dict] = []
+    rejection_counts = {
+        "oom": 0,
+        "fixed_batch": 0,
+        "tpot": 0,
+        "ttft": 0,
+        "request_latency": 0,
+        "prefill_combine": 0,
+        "gpu_budget": 0,
+        "balance": 0,
+        "low_batch_oom": 0,
+    }
+    exceptions: list[Exception] = []
+    # Track topologies that OOMed at a given microbatch count; higher counts
+    # use a larger KV-cache multiplier and can be pruned for the same topology.
+    _oom_at_mb: dict[tuple[int, int, int, int], int] = {}
+    for eval_runtime_config in runtime_configs_to_evaluate:
+        target_tpot = eval_runtime_config.tpot
+        for candidate in afd_parallel_config_list:
+            n_a_nodes, n_f_nodes, tp_a, f_moe_ep_size, num_microbatches, pipeline_model = candidate
+            topo_key = (int(n_a_nodes), int(n_f_nodes), int(tp_a), int(f_moe_ep_size))
+            oom_mb = _oom_at_mb.get(topo_key)
+            if oom_mb is not None and int(num_microbatches) >= oom_mb:
+                rejection_counts["oom"] += 1
+                continue
+
+            try:
+                # --- Topology-level checks (independent of a_batch_size) ---
+                tp_f = int(n_f_nodes) * int(gpus_per_node)
+                if int(f_moe_ep_size) <= 0 or tp_f % int(f_moe_ep_size) != 0:
+                    continue
+                f_moe_tp = tp_f // int(f_moe_ep_size)
+                n_a_workers = (int(n_a_nodes) * int(gpus_per_node)) // int(tp_a)
+
+                a_model_config = copy.deepcopy(base_model_config)
+                a_model_config.tp_size = int(tp_a)
+                a_model_config.pp_size = 1
+                a_model_config.moe_tp_size = int(tp_a)
+                a_model_config.moe_ep_size = 1
+                a_model_config.attention_dp_size = 1
+
+                f_model_config = copy.deepcopy(base_model_config)
+                f_model_config.tp_size = tp_f
+                f_model_config.pp_size = 1
+                f_model_config.moe_tp_size = f_moe_tp
+                f_model_config.moe_ep_size = int(f_moe_ep_size)
+                f_model_config.attention_dp_size = 1
+
+                # --- A-Worker: analytical max batch_size ---
+                if fixed_total_batch_size is None:
+                    derived_bs, a_model, a_partition = _derive_a_batch_size(
+                        model_path,
+                        a_model_config,
+                        backend,
+                        database,
+                        num_microbatches=num_microbatches,
+                        boundary_on_attn=boundary_on_attn,
+                        isl=eval_runtime_config.isl,
+                        osl=eval_runtime_config.osl,
+                        prefix=eval_runtime_config.prefix or 0,
+                        max_seq_len=max_seq_len,
+                        free_gpu_memory_fraction=free_gpu_memory_fraction,
+                    )
+                else:
+                    if n_a_workers <= 0 or fixed_total_batch_size % n_a_workers != 0:
+                        rejection_counts["fixed_batch"] += 1
+                        logger.debug(
+                            "AFD candidate a%dxf%d tp_a=%d ep=%d mb=%d pipe=%s: "
+                            "total_batch_size=%d is not exactly divisible by n_a_workers=%d, skipping",
+                            n_a_nodes,
+                            n_f_nodes,
+                            tp_a,
+                            f_moe_ep_size,
+                            num_microbatches,
+                            pipeline_model,
+                            fixed_total_batch_size,
+                            n_a_workers,
+                        )
+                        continue
+                    fixed_a_batch_size = fixed_total_batch_size // n_a_workers
+                    if fixed_a_batch_size < 1:
+                        rejection_counts["fixed_batch"] += 1
+                        logger.debug(
+                            "AFD candidate a%dxf%d tp_a=%d ep=%d mb=%d pipe=%s: "
+                            "derived fixed a_batch_size=%d < 1, skipping",
+                            n_a_nodes,
+                            n_f_nodes,
+                            tp_a,
+                            f_moe_ep_size,
+                            num_microbatches,
+                            pipeline_model,
+                            fixed_a_batch_size,
+                        )
+                        continue
+                    a_model = get_model(model_path, a_model_config, backend.name.value)
+                    a_partition = build_afd_ops_partition(
+                        a_model,
+                        phase="generation",
+                        boundary_on_attn=boundary_on_attn,
+                    )
+                    derived_bs = _analytical_max_batch_size(
+                        backend,
+                        a_model,
+                        database,
+                        a_partition.attn_ops,
+                        isl=eval_runtime_config.isl,
+                        osl=eval_runtime_config.osl,
+                        prefix=eval_runtime_config.prefix or 0,
+                        max_seq_len=max_seq_len,
+                        include_kvcache=True,
+                        kvcache_multiplier=max(int(num_microbatches or 1), 1),
+                        free_gpu_memory_fraction=free_gpu_memory_fraction,
+                        align_to=1,
+                    )
+
+                # --- F-Worker: analytical max batch_size ---
+                f_model = get_model(model_path, f_model_config, backend.name.value)
+                f_partition = build_afd_ops_partition(
+                    f_model,
+                    phase="generation",
+                    boundary_on_attn=boundary_on_attn,
+                )
+
+                max_bs_f_micro = _analytical_max_batch_size(
+                    backend,
+                    f_model,
+                    database,
+                    f_partition.ffn_ops,
+                    isl=eval_runtime_config.isl,
+                    osl=eval_runtime_config.osl,
+                    prefix=eval_runtime_config.prefix or 0,
+                    max_seq_len=max_seq_len,
+                    include_kvcache=False,
+                    kvcache_multiplier=1,
+                    free_gpu_memory_fraction=None,
+                    align_to=1,
+                )
+                nm = max(int(num_microbatches or 1), 1)
+                if n_a_workers > 0 and max_bs_f_micro > 0:
+                    max_bs_f = (max_bs_f_micro // n_a_workers) * nm
+                else:
+                    max_bs_f = 0
+
+                candidate_rows: list[dict] = []
+                if fixed_total_batch_size is not None:
+                    a_batch_size = fixed_a_batch_size
+                    if derived_bs < a_batch_size or max_bs_f < a_batch_size:
+                        rejection_counts["oom"] += 1
+                        logger.debug(
+                            "AFD candidate a%dxf%d tp_a=%d ep=%d mb=%d pipe=%s: "
+                            "fixed a_batch_size=%d exceeds analytical capacity (A=%d, F=%d), skipping",
+                            n_a_nodes,
+                            n_f_nodes,
+                            tp_a,
+                            f_moe_ep_size,
+                            num_microbatches,
+                            pipeline_model,
+                            a_batch_size,
+                            derived_bs,
+                            max_bs_f,
+                        )
+                        continue
+
+                    afd_config = AFDConfig(
+                        n_a_nodes=int(n_a_nodes),
+                        n_f_nodes=int(n_f_nodes),
+                        gpus_per_node=int(gpus_per_node),
+                        tp_a=int(tp_a),
+                        f_moe_ep_size=int(f_moe_ep_size),
+                        a_batch_size=a_batch_size,
+                        num_microbatches=int(num_microbatches),
+                        pipeline_model=str(pipeline_model),
+                        comm_overhead_factor=float(comm_overhead_factor),
+                        phase="decode",
+                        combined_with_pd=bool(combined_with_pd),
+                        boundary_on_attn=bool(boundary_on_attn),
+                    )
+                    candidate_runtime_config = copy.deepcopy(eval_runtime_config)
+                    candidate_runtime_config.batch_size = afd_config.n_a_workers * afd_config.a_batch_size
+
+                    session = AFDInferenceSession(
+                        model_path=model_path,
+                        a_model_config=a_model_config,
+                        f_model_config=f_model_config,
+                        database=database,
+                        backend=backend,
+                        afd_config=afd_config,
+                    )
+                    summary = session.run_afd(
+                        candidate_runtime_config,
+                        phase="decode",
+                        free_gpu_memory_fraction=free_gpu_memory_fraction,
+                        max_seq_len=max_seq_len,
+                    )
+                    if summary.check_oom():
+                        rejection_counts["oom"] += 1
+                        continue
+
+                    best_row = dict(summary.get_result_dict())
+                    _apply_afd_decode_latency_correction(best_row, decode_latency_correction)
+                    row_tpot = float(best_row.get("tpot", 0.0) or 0.0)
+                    if target_tpot is not None and row_tpot > float(target_tpot):
+                        rejection_counts["tpot"] += 1
+                        logger.debug(
+                            "AFD candidate a%dxf%d tp_a=%d ep=%d mb=%d pipe=%s fixed bs=%d "
+                            "TPOT=%.1fms > %.1fms, skipping",
+                            n_a_nodes,
+                            n_f_nodes,
+                            tp_a,
+                            f_moe_ep_size,
+                            num_microbatches,
+                            pipeline_model,
+                            a_batch_size,
+                            row_tpot,
+                            target_tpot,
+                        )
+                        best_row = None
+                    if best_row is not None:
+                        candidate_rows.append(best_row)
+                else:
+                    best_row = None
+                    candidate_rejected_by_tpot = False
+
+                    raw_combined_max_bs = min(derived_bs, max_bs_f) if max_bs_f > 0 else derived_bs
+                    combined_max_bs = (raw_combined_max_bs // 8) * 8
+                    low_latency_batch_sizes = [
+                        batch_size
+                        for batch_size in _AFD_LOW_LATENCY_BATCH_SIZE_LIST
+                        if batch_size <= raw_combined_max_bs
+                    ]
+                    max_probe_batch_size = max([combined_max_bs, *low_latency_batch_sizes], default=0)
+                    if max_probe_batch_size < 1:
+                        rejection_counts["oom"] += 1
+                        if topo_key not in _oom_at_mb:
+                            _oom_at_mb[topo_key] = int(num_microbatches)
+                        logger.debug(
+                            "AFD candidate a%dxf%d tp_a=%d ep=%d mb=%d pipe=%s: "
+                            "analytical max_bs=%d (A=%d, F=%d) < 1, skipping",
+                            n_a_nodes,
+                            n_f_nodes,
+                            tp_a,
+                            f_moe_ep_size,
+                            num_microbatches,
+                            pipeline_model,
+                            raw_combined_max_bs,
+                            derived_bs,
+                            max_bs_f,
+                        )
+                        continue
+
+                    # --- Quick balance_ratio pre-filter ---
+                    probe_bs = min(32, max_probe_batch_size)
+                    probe_s = eval_runtime_config.isl + (eval_runtime_config.osl // 2)
+                    quick_ratio = _quick_balance_ratio(
+                        a_partition.attn_ops,
+                        f_partition.ffn_ops,
+                        database,
+                        batch_size=probe_bs,
+                        seq_len=probe_s,
+                        runtime_config=eval_runtime_config,
+                        a_model=a_model,
+                        f_model=f_model,
+                    )
+                    if quick_ratio < _AFD_BALANCE_RATIO_THRESHOLD:
+                        rejection_counts["balance"] += 1
+                        logger.debug(
+                            "AFD candidate a%dxf%d tp_a=%d ep=%d mb=%d pipe=%s: "
+                            "balance_ratio=%.3f < %.1f, pruned",
+                            n_a_nodes,
+                            n_f_nodes,
+                            tp_a,
+                            f_moe_ep_size,
+                            num_microbatches,
+                            pipeline_model,
+                            quick_ratio,
+                            _AFD_BALANCE_RATIO_THRESHOLD,
+                        )
+                        continue
+
+                    def _evaluate_auto_batch(a_batch_size: int) -> tuple[dict | None, str | None]:
+                        afd_config = AFDConfig(
+                            n_a_nodes=int(n_a_nodes),
+                            n_f_nodes=int(n_f_nodes),
+                            gpus_per_node=int(gpus_per_node),
+                            tp_a=int(tp_a),
+                            f_moe_ep_size=int(f_moe_ep_size),
+                            a_batch_size=a_batch_size,
+                            num_microbatches=int(num_microbatches),
+                            pipeline_model=str(pipeline_model),
+                            comm_overhead_factor=float(comm_overhead_factor),
+                            phase="decode",
+                            combined_with_pd=bool(combined_with_pd),
+                            boundary_on_attn=bool(boundary_on_attn),
+                        )
+
+                        candidate_runtime_config = copy.deepcopy(eval_runtime_config)
+                        candidate_runtime_config.batch_size = afd_config.n_a_workers * afd_config.a_batch_size
+
+                        session = AFDInferenceSession(
+                            model_path=model_path,
+                            a_model_config=a_model_config,
+                            f_model_config=f_model_config,
+                            database=database,
+                            backend=backend,
+                            afd_config=afd_config,
+                        )
+                        summary = session.run_afd(
+                            candidate_runtime_config,
+                            phase="decode",
+                            free_gpu_memory_fraction=free_gpu_memory_fraction,
+                            max_seq_len=max_seq_len,
+                        )
+
+                        if summary.check_oom():
+                            return None, "oom"
+
+                        row = dict(summary.get_result_dict())
+                        _apply_afd_decode_latency_correction(row, decode_latency_correction)
+
+                        row_tpot = float(row.get("tpot", 0.0) or 0.0)
+                        if target_tpot is not None and row_tpot > float(target_tpot):
+                            return row, "tpot"
+                        return row, None
+
+                    # Binary search for the largest batch size (aligned to 8) that
+                    # satisfies TPOT SLA.  TPOT is monotonically increasing with bs,
+                    # so binary search finds the optimum in ~5 run_afd() calls instead
+                    # of the old halving approach which could skip valid intermediate
+                    # values.
+                    if combined_max_bs >= 32:
+                        bs_align = 8
+                        bs_min = 32
+                        lo = bs_min
+                        hi = combined_max_bs
+
+                        while lo <= hi:
+                            mid = ((lo + hi) // 2 // bs_align) * bs_align
+                            if mid < bs_min:
+                                mid = bs_min
+                            a_batch_size = mid
+
+                            row, rejection_reason = _evaluate_auto_batch(a_batch_size)
+                            if rejection_reason == "oom":
+                                hi = mid - bs_align
+                                continue
+
+                            if rejection_reason == "tpot":
+                                rejection_counts["tpot"] += 1
+                                candidate_rejected_by_tpot = True
+                                hi = mid - bs_align
+                                row_tpot = float(row.get("tpot", 0.0) or 0.0) if row is not None else 0.0
+                                logger.debug(
+                                    "AFD candidate a%dxf%d tp_a=%d ep=%d mb=%d pipe=%s bs=%d "
+                                    "TPOT=%.1fms > %.1fms, searching lower",
+                                    n_a_nodes,
+                                    n_f_nodes,
+                                    tp_a,
+                                    f_moe_ep_size,
+                                    num_microbatches,
+                                    pipeline_model,
+                                    a_batch_size,
+                                    row_tpot,
+                                    target_tpot,
+                                )
+                                continue
+
+                            # Passed OOM + TPOT — record and search higher for a better bs.
+                            best_row = row
+                            lo = mid + bs_align
+
+                    if best_row is not None:
+                        candidate_rows.append(best_row)
+                    elif combined_max_bs >= 32 and not candidate_rejected_by_tpot:
+                        rejection_counts["oom"] += 1
+
+                    existing_batch_sizes = {
+                        int(row.get("(a)bs", 0) or 0)
+                        for row in candidate_rows
+                    }
+                    for a_batch_size in low_latency_batch_sizes:
+                        if a_batch_size in existing_batch_sizes:
+                            continue
+                        row, rejection_reason = _evaluate_auto_batch(a_batch_size)
+                        if rejection_reason == "oom":
+                            rejection_counts["low_batch_oom"] += 1
+                            continue
+                        if rejection_reason == "tpot":
+                            rejection_counts["tpot"] += 1
+                            continue
+                        if row is not None:
+                            candidate_rows.append(row)
+                            existing_batch_sizes.add(a_batch_size)
+
+                    if not candidate_rows and combined_max_bs < 32 and not low_latency_batch_sizes:
+                        rejection_counts["oom"] += 1
+
+                accepted_candidate = False
+                for candidate_row in candidate_rows:
+                    best_row = candidate_row
+                    if combined_with_pd and prefill_options:
+                        combined = _combine_afd_row_with_static_prefill(
+                            best_row,
+                            prefill_options,
+                            target_ttft=eval_runtime_config.ttft,
+                            target_request_latency=eval_runtime_config.request_latency,
+                            total_gpus=total_gpus,
+                            max_prefill_gpus=max_prefill_gpus,
+                            max_prefill_workers=max_prefill_workers,
+                            prefill_degradation=prefill_degradation,
+                            decode_degradation=decode_degradation,
+                            ttft_correction_factor=ttft_correction_factor,
+                        )
+                        if combined is not None:
+                            best_row = combined
+                        else:
+                            rejection_counts["prefill_combine"] += 1
+                            best_row = None
+
+                    if best_row is not None:
+                        sla_reason = _afd_sla_rejection_reason(
+                            best_row,
+                            eval_runtime_config,
+                            require_ttft=bool(combined_with_pd),
+                        )
+                        if sla_reason is not None:
+                            rejection_counts[sla_reason] += 1
+                            best_row = None
+
+                    if (
+                        best_row is not None
+                        and total_gpus is not None
+                        and total_gpus > 0
+                        and int(best_row.get("num_total_gpus", 0)) > total_gpus
+                    ):
+                        rejection_counts["gpu_budget"] += 1
+                        best_row = None
+
+                    if best_row is not None:
+                        rows.append(best_row)
+                        accepted_candidate = True
+
+                if not accepted_candidate:
+                    logger.debug(
+                        "AFD candidate a%dxf%d tp_a=%d ep=%d mb=%d pipe=%s: "
+                        "no batch size satisfied OOM+SLA, skipping",
+                        n_a_nodes,
+                        n_f_nodes,
+                        tp_a,
+                        f_moe_ep_size,
+                        num_microbatches,
+                        pipeline_model,
+                    )
+            except Exception as e:
+                logger.debug(
+                    "AFD candidate a%sxf%s tp_a=%s ep=%s mb=%s pipe=%s failed, skipping",
+                    n_a_nodes,
+                    n_f_nodes,
+                    tp_a,
+                    f_moe_ep_size,
+                    num_microbatches,
+                    pipeline_model,
+                    exc_info=True,
+                )
+                exceptions.append(e)
+                continue
+
+    if not rows:
+        rejection_summary = _format_afd_rejection_summary(rejection_counts) or "none"
+        if exceptions and not any(rejection_counts.values()):
+            raise RuntimeError(
+                f"No AFD results found for any candidate topology. Showing last exception: {exceptions[-1]}"
+            ) from exceptions[-1]
+        if fixed_total_batch_size is not None:
+            raise NoFeasibleConfigError(
+                f"No AFD results found for total_batch_size={fixed_total_batch_size}: no candidate topology "
+                "could use the fixed batch exactly while satisfying memory and SLA constraints. "
+                f"Rejections: {rejection_summary}."
+            )
+        raise NoFeasibleConfigError(
+            "No AFD results found for any candidate topology. No configuration satisfied "
+            "the memory, GPU budget, or SLA constraints. "
+            f"Rejections: {rejection_summary}."
+        )
+
+    results_df = pd.DataFrame(rows, columns=ColumnsAFD)
+    dedupe_cols = [c for c in results_df.columns if c != "_per_ops_source"]
+    results_df = results_df.drop_duplicates(subset=dedupe_cols, ignore_index=True)
+    results_df = results_df.sort_values(by="tokens/s/gpu", ascending=False).reset_index(drop=True)
+    return results_df
 
 
 def get_pareto_front(

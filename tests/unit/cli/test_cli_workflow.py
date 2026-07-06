@@ -123,6 +123,31 @@ class TestCLIIntegration:
         assert save_kwargs["tasks"] == {"agg": mock_task_config}
         assert save_kwargs["save_dir"] == sample_cli_args_with_save_dir.save_dir
 
+    @patch("aiconfigurator.cli.main._execute_tasks")
+    @patch("aiconfigurator.cli.main.build_default_tasks")
+    def test_cli_main_forwards_serving_mode_to_default_builder(
+        self,
+        mock_build_default,
+        mock_execute,
+        cli_args_factory,
+    ):
+        mock_task_config = MagicMock(name="TaskConfig")
+        mock_build_default.return_value = {"afd": mock_task_config}
+        mock_execute.return_value = (
+            "afd",
+            {"afd": MagicMock(name="BestConfigDF")},
+            {"afd": MagicMock(name="ResultsDF")},
+            {"afd": 123.4},
+            {"afd": {"ttft": 100.0, "tpot": 10.0, "request_latency": 1000.0}},
+        )
+
+        args = cli_args_factory(mode="default", extra_args=["--serving-mode", "afd"])
+        cli_main(args)
+
+        mock_build_default.assert_called_once()
+        assert mock_build_default.call_args.kwargs["serving_mode"] == "afd"
+        mock_execute.assert_called_once()
+
     @patch("aiconfigurator.cli.main.save_results")
     @patch("aiconfigurator.cli.main._execute_tasks")
     @patch("aiconfigurator.cli.main.build_experiment_tasks")
