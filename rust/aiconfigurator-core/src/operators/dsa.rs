@@ -89,6 +89,7 @@ impl DsaModuleOp {
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
         let latency = db.dsa.query_generation(
+            &db.system_spec,
             batch_size,
             s,
             self.num_heads,

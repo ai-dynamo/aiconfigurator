@@ -21,7 +21,9 @@ use std::sync::OnceLock;
 
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
+use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
+use super::gemm::tc_flops_for_compute;
 use super::{kernel_source_ok, resolve_op_sources};
 use super::interpolation::{
     interp_1d, interp_2d_1d_grid_extrapolate_inner, interp_2d_1d_grid_strict,
@@ -163,6 +165,7 @@ impl DsaTable {
     /// from the CSV; query interpolates over (num_heads, batch, seq).
     pub fn query_generation(
         &self,
+        spec: &SystemSpec,
         b: u32,
         sequence_tokens: u32,
         num_heads: u32,
@@ -183,11 +186,51 @@ impl DsaTable {
             .get(&key)
             .ok_or_else(|| missing("generation DSA module", &self.data_root, format!("{key:?}")))?;
         // Grid axis order: outer = num_heads, middle = seq_tokens, inner = batch.
-        // Uses the extrapolating variant because Python pre-extends both
-        // axes via `_extrapolate` before interpolation; linear extrapolation
-        // here from the boundary pair gives the same numeric result for the
-        // out-of-envelope queries that show up on sparser backend tables
-        // (e.g. SGLang DSv32 at low num_heads).
+        //
+        // Boundary-utilization reconstruction (mirrors Python
+        // `_query_generation_dsa_module_table::boundary_util_value` — the SILICON
+        // out-of-envelope path added alongside the hybrid/empirical rework): for
+        // the EXACT (num_heads, b) slice,
+        // when the requested sequence is OUTSIDE the measured envelope, freeze the
+        // boundary row's SOL utilization instead of extrapolating latency:
+        //   latency = boundary_latency * SOL(b, s) / SOL(b, boundary_s)
+        // The decode measurement grid is sparse on the seq axis for small batch
+        // (e.g. SGLang DeepSeek-V3.2 b=1 collects only up to step 128), so a
+        // production decode at s = isl + step lands out-of-envelope and a plain
+        // latency extrapolation drifts from Python.
+        if let Some(head_slice) = grid.get(&num_heads) {
+            let mut curve: Vec<(u32, f64)> = head_slice
+                .iter()
+                .filter_map(|(&seq, by_batch)| by_batch.get(&b).map(|&lat| (seq, lat)))
+                .collect();
+            if !curve.is_empty() {
+                curve.sort_by_key(|&(seq, _)| seq);
+                let (min_s, min_lat) = curve[0];
+                let (max_s, max_lat) = *curve.last().unwrap();
+                if sequence_tokens < min_s || sequence_tokens > max_s {
+                    let (boundary_s, boundary_lat) = if sequence_tokens < min_s {
+                        (min_s, min_lat)
+                    } else {
+                        (max_s, max_lat)
+                    };
+                    if boundary_lat > 0.0 {
+                        let dims = dsa_model_dims(architecture);
+                        let kv_mem = kv_quant.mapping().memory;
+                        let gq = gemm_quant.mapping();
+                        let sol_q = generation_dsa_sol(
+                            spec, &dims, b, sequence_tokens, num_heads, kv_mem, gq.compute, gq.memory,
+                        );
+                        let sol_b = generation_dsa_sol(
+                            spec, &dims, b, boundary_s, num_heads, kv_mem, gq.compute, gq.memory,
+                        );
+                        if sol_q > 0.0 && sol_b > 0.0 {
+                            return Ok(boundary_lat * sol_q / sol_b);
+                        }
+                    }
+                }
+            }
+        }
+        // In-envelope (or missing exact slice): fall back to grid interpolation.
         interp_2d_1d_grid_extrapolate_inner(grid, num_heads, sequence_tokens, b)
     }
 
@@ -465,6 +508,114 @@ fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
 
 fn clone_err(err: &AicError) -> AicError {
     AicError::PerfDatabase(err.to_string())
+}
+
+/// Per-architecture DSA model dimensions. Mirrors Python
+/// `sdk/operations/dsa.py::DSA_MODEL_DIMS`. Only the fields the generation
+/// SOL formula needs are carried.
+struct DsaDims {
+    hidden_size: f64,
+    q_lora_rank: f64,
+    kv_lora_rank: f64,
+    qk_nope_head_dim: f64,
+    qk_rope_head_dim: f64,
+    v_head_dim: f64,
+    index_topk: f64,
+    index_head_dim: f64,
+    index_n_heads: f64,
+}
+
+/// Look up DSA dims by architecture, defaulting to DeepSeek-V3.2 (matches
+/// Python `DEFAULT_DSA_ARCHITECTURE`).
+fn dsa_model_dims(architecture: &str) -> DsaDims {
+    match architecture {
+        "GlmMoeDsaForCausalLM" => DsaDims {
+            hidden_size: 6144.0,
+            q_lora_rank: 2048.0,
+            kv_lora_rank: 512.0,
+            qk_nope_head_dim: 192.0,
+            qk_rope_head_dim: 64.0,
+            v_head_dim: 256.0,
+            index_topk: 2048.0,
+            index_head_dim: 128.0,
+            index_n_heads: 32.0,
+        },
+        // "DeepseekV32ForCausalLM" and default.
+        _ => DsaDims {
+            hidden_size: 7168.0,
+            q_lora_rank: 1536.0,
+            kv_lora_rank: 512.0,
+            qk_nope_head_dim: 128.0,
+            qk_rope_head_dim: 64.0,
+            v_head_dim: 128.0,
+            index_topk: 2048.0,
+            index_head_dim: 128.0,
+            index_n_heads: 64.0,
+        },
+    }
+}
+
+/// Bytes per token in the FP8 indexer KV cache, including one scale per 128
+/// values. Mirrors Python `common.indexer_cache_entry_bytes`.
+fn indexer_cache_entry_bytes(index_head_dim: f64) -> f64 {
+    let d = index_head_dim;
+    d + ((d + 127.0) / 128.0).floor() * 4.0
+}
+
+/// Speed-of-light latency (ms) for the generation DSA module at one decode
+/// step. Mirrors Python `_query_generation_dsa_module_table::get_sol`
+/// (1 token per request; indexer uses FP8 flops, sparse attention uses BF16).
+/// `gemm_compute`/`gemm_memory` come from the GEMM quant mapping; `kv_memory`
+/// from the KV-cache quant mapping.
+#[allow(clippy::too_many_arguments)]
+fn generation_dsa_sol(
+    spec: &SystemSpec,
+    dims: &DsaDims,
+    b: u32,
+    s: u32,
+    num_heads: u32,
+    kv_memory: f64,
+    gemm_compute: f64,
+    gemm_memory: f64,
+) -> f64 {
+    let tokens = b as f64;
+    let s_f = s as f64;
+    let nh = num_heads as f64;
+    let qk_head_dim = dims.qk_nope_head_dim + dims.qk_rope_head_dim;
+    let attn_head_dim = dims.kv_lora_rank + dims.qk_rope_head_dim;
+    let proj_out = dims.q_lora_rank + dims.kv_lora_rank + dims.qk_rope_head_dim + dims.index_head_dim;
+    let effective_kv = s_f.min(dims.index_topk);
+
+    let gemm_group_ops = 2.0 * tokens * dims.hidden_size * proj_out
+        + 2.0 * tokens * dims.q_lora_rank * nh * qk_head_dim
+        + 2.0 * tokens * dims.q_lora_rank * dims.index_n_heads * dims.index_head_dim
+        + 2.0 * tokens * dims.hidden_size * dims.index_n_heads
+        + 2.0 * tokens * nh * dims.v_head_dim * dims.hidden_size
+        + 2.0 * nh * tokens * dims.qk_nope_head_dim * dims.kv_lora_rank
+        + 2.0 * nh * tokens * dims.kv_lora_rank * dims.v_head_dim;
+    let indexer_logits_ops = 2.0 * tokens * dims.index_n_heads * dims.index_head_dim * s_f;
+    let sparse_attn_ops = 2.0 * tokens * nh * (attn_head_dim + dims.kv_lora_rank) * effective_kv;
+
+    let gemm_weight_bytes = (dims.hidden_size * proj_out
+        + dims.q_lora_rank * nh * qk_head_dim
+        + dims.q_lora_rank * dims.index_n_heads * dims.index_head_dim
+        + dims.hidden_size * dims.index_n_heads
+        + nh * dims.v_head_dim * dims.hidden_size)
+        * gemm_memory;
+    let indexer_cache_bytes = tokens * s_f * indexer_cache_entry_bytes(dims.index_head_dim);
+    let kv_cache_bytes = tokens * effective_kv * attn_head_dim * kv_memory;
+    let total_mem = gemm_weight_bytes + indexer_cache_bytes + kv_cache_bytes;
+
+    let gemm_flops = tc_flops_for_compute(spec, gemm_compute);
+    let indexer_fp8_flops = tc_flops_for_compute(spec, 2.0); // FP8
+    let attn_flops = tc_flops_for_compute(spec, 1.0); // BF16
+
+    let sol_math = (gemm_group_ops / gemm_flops
+        + indexer_logits_ops / indexer_fp8_flops
+        + sparse_attn_ops / attn_flops)
+        * 1000.0;
+    let sol_mem = total_mem / spec.gpu.mem_bw * 1000.0;
+    sol_math.max(sol_mem)
 }
 
 #[cfg(test)]

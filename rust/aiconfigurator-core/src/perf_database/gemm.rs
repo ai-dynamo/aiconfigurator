@@ -246,7 +246,7 @@ pub(crate) fn gemm_sol_latency_ms(
     sol_math.max(sol_mem)
 }
 
-fn tc_flops_for_compute(spec: &SystemSpec, compute_factor: f64) -> f64 {
+pub(crate) fn tc_flops_for_compute(spec: &SystemSpec, compute_factor: f64) -> f64 {
     let bf16 = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
     let direct = match compute_factor as u32 {
         1 => spec.gpu.bfloat16_tc_flops,
