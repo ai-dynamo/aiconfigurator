@@ -95,6 +95,7 @@ fn request(tolerance_fraction: Option<f64>) -> KvCacheEstimateRequest {
                 attention_dp_size: Some(1),
                 moe_tp_size: None,
                 moe_ep_size: None,
+                cp_size: None,
             },
             quantization: QuantizationConfig {
                 weight_dtype: None,
@@ -103,6 +104,7 @@ fn request(tolerance_fraction: Option<f64>) -> KvCacheEstimateRequest {
                 kv_cache_dtype: None,
             },
             speculative: None,
+            perf_db_sources: BTreeMap::new(),
             extra: BTreeMap::new(),
         },
         max_num_tokens: 8192,
