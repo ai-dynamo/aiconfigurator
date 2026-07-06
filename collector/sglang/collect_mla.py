@@ -129,6 +129,16 @@ class MockServerArgs:
         self.triton_attention_split_tile_size = None
         # sglang >=0.5.10: FlashAttentionBackend.__init__ reads disable_cuda_graph
         self.disable_cuda_graph = True
+        # SGLang 0.5.14 TritonAttnBackend.__init__ (the SM120 MLA default)
+        # calls cuda_graph_fully_disabled() -> check_cuda_graph_backend(),
+        # which reads global server_args.cuda_graph_config
+        # (cuda_graph_config.py:142-156) because run_mla installs this mock
+        # as the scheduler-global args. None makes that check return False,
+        # the same answer serving gets with its default (non-DISABLED)
+        # cuda graph config, so allow_bidirectional_attention_in_extend
+        # stays off exactly as in production (triton_backend.py:214-217).
+        # The SM90 fa3 / SM100 trtllm_mla init paths never read this field.
+        self.cuda_graph_config = None
 
 
 class MockModelRunner:

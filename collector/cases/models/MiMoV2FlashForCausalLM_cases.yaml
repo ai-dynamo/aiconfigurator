@@ -20,8 +20,12 @@ model_case_values:
       head_dim: 192
       v_head_dim: 128
       window_size: 0
-      # TRTLLM MHA treats V as qk_head_dim=192; use the source-correct Triton
-      # qk_head_dim=192/v_head_dim=128 path on Blackwell (hardware-unvalidated).
+      # TRTLLM MHA treats V as qk_head_dim=192 (B200 probe 2026-07-05:
+      # in-kernel failure), and the SM120 default flashinfer rejects the
+      # asymmetric K/V pool in both phases (RTX 6000 Pro probe 2026-07-05:
+      # prefill reshape '[-1, 4, 192]' on the 128-wide V pool, decode paged
+      # K/V stride check 768 vs 512). Triton is the only runnable 0.5.14
+      # QK192/V128 path on Blackwell; SM103 remains source-derived.
       sglang_backends: {90: fa3, 100: triton, 103: triton, 120: triton}
       tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
     - id: mimo_v2_swa_attention
