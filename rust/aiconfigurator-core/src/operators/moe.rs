@@ -30,6 +30,12 @@ pub struct MoeOp {
     pub num_experts: u32,
     pub moe_tp_size: u32,
     pub moe_ep_size: u32,
+    /// Attention data-parallel size. sglang all-gathers the DP-sharded tokens
+    /// before the MoE, so the compute sees `num_tokens * attention_dp_size`
+    /// tokens (mirrors Python `MoE.query`: `x = x * attention_dp_size`).
+    /// Absent in pre-existing specs -> treated as 1.
+    #[serde(default)]
+    pub attention_dp_size: u32,
     pub quant_mode: MoeQuantMode,
     pub workload_distribution: String,
     /// Gated FFN (SwiGLU) when true; non-gated (Relu²) when false.
@@ -60,6 +66,7 @@ impl MoeOp {
             num_experts,
             moe_tp_size,
             moe_ep_size,
+            attention_dp_size: 1,
             quant_mode,
             workload_distribution: workload_distribution.into(),
             is_gated: true,
@@ -67,6 +74,12 @@ impl MoeOp {
     }
 
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
+        // sglang all-gathers the attention-DP-sharded tokens before the MoE,
+        // so the compute processes the full global token count. Mirror Python
+        // `MoE.query` (`operations/moe.py`): `x = x * attention_dp_size`. Do
+        // this first so the overflow/interpolation logic below keys off the
+        // scaled token count.
+        let num_tokens = num_tokens.saturating_mul(self.attention_dp_size.max(1));
         // SOL-anchored overflow: when `num_tokens` exceeds the largest
         // recorded token point for this (quant, distribution, topology),
         // Python switches to a utilization-anchored estimate instead of

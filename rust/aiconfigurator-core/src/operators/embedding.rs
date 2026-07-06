@@ -23,6 +23,10 @@ pub struct EmbeddingOp {
     pub vocab_size: u32,
     pub hidden_size: u32,
     pub quant_mode: GemmQuantMode,
+    /// CP sequence-shard factor (Python's `_seq_split`, = `cp_size`): the
+    /// per-rank token count is `ceil(num_tokens / seq_split)`. Defaults to 1.
+    #[serde(default = "crate::operators::gemm::default_seq_split")]
+    pub seq_split: u32,
 }
 
 impl EmbeddingOp {
@@ -38,12 +42,14 @@ impl EmbeddingOp {
             vocab_size,
             hidden_size,
             quant_mode,
+            seq_split: 1,
         }
     }
 
     /// Per-token embedding lookup: each token loads one row of size
     /// `hidden_size * dtype_memory` bytes.
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
+        let num_tokens = num_tokens.div_ceil(self.seq_split.max(1)); // CP: busiest rank
         let bytes = (num_tokens as f64)
             * (self.hidden_size as f64)
             * self.quant_mode.mapping().memory;

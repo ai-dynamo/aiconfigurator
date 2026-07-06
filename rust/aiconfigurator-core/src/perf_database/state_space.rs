@@ -16,11 +16,18 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::common::error::AicError;
+use crate::config::{PerfDbSources, PerfSource};
+use super::{kernel_source_ok, resolve_op_sources};
 use super::interpolation::{interp_1d, nearest_neighbors};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct StateSpaceTable {
     data_root: PathBuf,
+    /// Ordered, priority-sorted sources for each state-space perf file
+    /// (shared-layer aware; see [`PerfSource`]). Single-primary, no-filter by
+    /// default (`StateSpaceTable::new`).
+    mamba2_sources: Vec<PerfSource>,
+    gdn_sources: Vec<PerfSource>,
     mamba2: OnceLock<Result<Mamba2Grids, AicError>>,
     gdn: OnceLock<Result<GdnGrids, AicError>>,
 }
@@ -67,9 +74,24 @@ struct GdnKey {
 }
 
 impl StateSpaceTable {
+    /// Construct an empty table for the given data directory. No I/O. Each
+    /// perf file is sourced solely from `data_root/<basename>` with no
+    /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
+        Self::with_sources(data_root, &PerfDbSources::default())
+    }
+
+    /// Construct with shared-layer (sibling/cross-version) sources resolved from
+    /// `perf_db_sources` (Python-supplied). Each state-space file falls back to
+    /// its primary `data_root/<basename>` when absent from the map. No I/O.
+    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
+        let mamba2_sources =
+            resolve_op_sources(perf_db_sources, "mamba2_perf.parquet", &data_root);
+        let gdn_sources = resolve_op_sources(perf_db_sources, "gdn_perf.parquet", &data_root);
         Self {
             data_root,
+            mamba2_sources,
+            gdn_sources,
             mamba2: OnceLock::new(),
             gdn: OnceLock::new(),
         }
@@ -205,14 +227,14 @@ impl StateSpaceTable {
     fn load_mamba2(&self) -> Result<&Mamba2Grids, AicError> {
         let cell = self
             .mamba2
-            .get_or_init(|| load_mamba2_parquet(&self.data_root.join("mamba2_perf.parquet")));
+            .get_or_init(|| load_mamba2_parquet(&self.mamba2_sources));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_gdn(&self) -> Result<&GdnGrids, AicError> {
         let cell = self
             .gdn
-            .get_or_init(|| load_gdn_parquet(&self.data_root.join("gdn_perf.parquet")));
+            .get_or_init(|| load_gdn_parquet(&self.gdn_sources));
         cell.as_ref().map_err(clone_err)
     }
 }
@@ -289,89 +311,124 @@ fn bs_seq_interp(
     )))
 }
 
-fn load_mamba2_parquet(path: &Path) -> Result<Mamba2Grids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let kernel_source_col = reader.col("kernel_source")?;
-    let phase_col = reader.col("phase")?;
-    let batch_size_col = reader.col("batch_size")?;
-    let seq_len_col = reader.col("seq_len")?;
-    let d_model_col = reader.col("d_model")?;
-    let d_state_col = reader.col("d_state")?;
-    let d_conv_col = reader.col("d_conv")?;
-    let nheads_col = reader.col("nheads")?;
-    let head_dim_col = reader.col("head_dim")?;
-    let n_groups_col = reader.col("n_groups")?;
-    let chunk_size_col = reader.col("chunk_size")?;
-    let latency_col = reader.col("latency")?;
-
+/// Load the Mamba2 table from an ordered, priority-sorted source list. Sources
+/// are read in order; the first source containing a `(key, bs, seq)` wins
+/// (`or_insert`), mirroring Python's `_read_filtered_rows` concatenation +
+/// `load_mamba2_data` skip-on-key-conflict. Missing files are skipped (a sibling
+/// declared in the manifest need not exist for every system); an error is
+/// returned only when no source yields rows.
+fn load_mamba2_parquet(sources: &[PerfSource]) -> Result<Mamba2Grids, AicError> {
     let mut by_keys: BTreeMap<Mamba2Key, BTreeMap<(u32, u32), f64>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = Mamba2Key {
-            kernel_source: row.str_owned(kernel_source_col)?,
-            phase: row.str_owned(phase_col)?,
-            d_model: row.u32(d_model_col)?,
-            d_state: row.u32(d_state_col)?,
-            d_conv: row.u32(d_conv_col)?,
-            nheads: row.u32(nheads_col)?,
-            head_dim: row.u32(head_dim_col)?,
-            n_groups: row.u32(n_groups_col)?,
-            chunk_size: row.u32(chunk_size_col)?,
-        };
-        // First-wins parity with Python `load_mamba2_data`.
-        by_keys
-            .entry(key)
-            .or_default()
-            .entry((row.u32(batch_size_col)?, row.u32(seq_len_col)?))
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let kernel_source_col = reader.col("kernel_source")?;
+        let phase_col = reader.col("phase")?;
+        let batch_size_col = reader.col("batch_size")?;
+        let seq_len_col = reader.col("seq_len")?;
+        let d_model_col = reader.col("d_model")?;
+        let d_state_col = reader.col("d_state")?;
+        let d_conv_col = reader.col("d_conv")?;
+        let nheads_col = reader.col("nheads")?;
+        let head_dim_col = reader.col("head_dim")?;
+        let n_groups_col = reader.col("n_groups")?;
+        let chunk_size_col = reader.col("chunk_size")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = Mamba2Key {
+                kernel_source: row.str_owned(kernel_source_col)?,
+                phase: row.str_owned(phase_col)?,
+                d_model: row.u32(d_model_col)?,
+                d_state: row.u32(d_state_col)?,
+                d_conv: row.u32(d_conv_col)?,
+                nheads: row.u32(nheads_col)?,
+                head_dim: row.u32(head_dim_col)?,
+                n_groups: row.u32(n_groups_col)?,
+                chunk_size: row.u32(chunk_size_col)?,
+            };
+            // First-wins parity with Python `load_mamba2_data`, extended across
+            // shared-layer sources (earlier source wins).
+            by_keys
+                .entry(key)
+                .or_default()
+                .entry((row.u32(batch_size_col)?, row.u32(seq_len_col)?))
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if by_keys.is_empty() {
+    if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no Mamba2 rows loaded from {}",
-            path.display()
+            "no Mamba2 rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     Ok(Mamba2Grids { by_keys })
 }
 
-fn load_gdn_parquet(path: &Path) -> Result<GdnGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let kernel_source_col = reader.col("kernel_source")?;
-    let phase_col = reader.col("phase")?;
-    let batch_size_col = reader.col("batch_size")?;
-    let seq_len_col = reader.col("seq_len")?;
-    let d_model_col = reader.col("d_model")?;
-    let d_conv_col = reader.col("d_conv")?;
-    let num_k_heads_col = reader.col("num_k_heads")?;
-    let head_k_dim_col = reader.col("head_k_dim")?;
-    let num_v_heads_col = reader.col("num_v_heads")?;
-    let head_v_dim_col = reader.col("head_v_dim")?;
-    let latency_col = reader.col("latency")?;
-
+/// Load the GDN table from an ordered, priority-sorted source list. Same
+/// first-wins-across-sources + missing-file-skip semantics as
+/// [`load_mamba2_parquet`].
+fn load_gdn_parquet(sources: &[PerfSource]) -> Result<GdnGrids, AicError> {
     let mut by_keys: BTreeMap<GdnKey, BTreeMap<(u32, u32), f64>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = GdnKey {
-            kernel_source: row.str_owned(kernel_source_col)?,
-            phase: row.str_owned(phase_col)?,
-            d_model: row.u32(d_model_col)?,
-            d_conv: row.u32(d_conv_col)?,
-            num_k_heads: row.u32(num_k_heads_col)?,
-            head_k_dim: row.u32(head_k_dim_col)?,
-            num_v_heads: row.u32(num_v_heads_col)?,
-            head_v_dim: row.u32(head_v_dim_col)?,
-        };
-        // First-wins parity with Python `load_gdn_data`.
-        by_keys
-            .entry(key)
-            .or_default()
-            .entry((row.u32(batch_size_col)?, row.u32(seq_len_col)?))
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let kernel_source_col = reader.col("kernel_source")?;
+        let phase_col = reader.col("phase")?;
+        let batch_size_col = reader.col("batch_size")?;
+        let seq_len_col = reader.col("seq_len")?;
+        let d_model_col = reader.col("d_model")?;
+        let d_conv_col = reader.col("d_conv")?;
+        let num_k_heads_col = reader.col("num_k_heads")?;
+        let head_k_dim_col = reader.col("head_k_dim")?;
+        let num_v_heads_col = reader.col("num_v_heads")?;
+        let head_v_dim_col = reader.col("head_v_dim")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = GdnKey {
+                kernel_source: row.str_owned(kernel_source_col)?,
+                phase: row.str_owned(phase_col)?,
+                d_model: row.u32(d_model_col)?,
+                d_conv: row.u32(d_conv_col)?,
+                num_k_heads: row.u32(num_k_heads_col)?,
+                head_k_dim: row.u32(head_k_dim_col)?,
+                num_v_heads: row.u32(num_v_heads_col)?,
+                head_v_dim: row.u32(head_v_dim_col)?,
+            };
+            // First-wins parity with Python `load_gdn_data`, extended across
+            // shared-layer sources (earlier source wins).
+            by_keys
+                .entry(key)
+                .or_default()
+                .entry((row.u32(batch_size_col)?, row.u32(seq_len_col)?))
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if by_keys.is_empty() {
+    if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no GDN rows loaded from {}",
-            path.display()
+            "no GDN rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     Ok(GdnGrids { by_keys })

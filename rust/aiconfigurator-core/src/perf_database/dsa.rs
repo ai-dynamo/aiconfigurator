@@ -21,6 +21,10 @@ use std::sync::OnceLock;
 
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
+use crate::common::system_spec::SystemSpec;
+use crate::config::{PerfDbSources, PerfSource};
+use super::gemm::tc_flops_for_compute;
+use super::{kernel_source_ok, resolve_op_sources};
 use super::interpolation::{
     interp_1d, interp_2d_1d_grid_extrapolate_inner, interp_2d_1d_grid_strict,
     interp_context_topk_piecewise, nearest_neighbors, Grid3,
@@ -29,6 +33,11 @@ use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct DsaTable {
     data_root: PathBuf,
+    /// Ordered, priority-sorted sources for the context/generation DSA perf
+    /// files (shared-layer aware; see [`PerfSource`]). Single-primary,
+    /// no-filter by default (`DsaTable::new`).
+    context_sources: Vec<PerfSource>,
+    generation_sources: Vec<PerfSource>,
     context: OnceLock<Result<DsaGrids, AicError>>,
     generation: OnceLock<Result<DsaGrids, AicError>>,
     /// Lazy per-`(DsaKey, prefix)` Grid3 caches with the exact shape
@@ -63,9 +72,28 @@ pub struct DsaKey {
 }
 
 impl DsaTable {
+    /// Construct an empty table for the given data directory. No I/O. Each
+    /// perf file is sourced solely from `data_root/<basename>` with no
+    /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
+        Self::with_sources(data_root, &PerfDbSources::default())
+    }
+
+    /// Construct with shared-layer (sibling/cross-version) sources resolved from
+    /// `perf_db_sources` (Python-supplied). Each DSA file falls back to its
+    /// primary `data_root/<basename>` when absent from the map. No I/O.
+    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
+        let context_sources =
+            resolve_op_sources(perf_db_sources, "dsa_context_module_perf.parquet", &data_root);
+        let generation_sources = resolve_op_sources(
+            perf_db_sources,
+            "dsa_generation_module_perf.parquet",
+            &data_root,
+        );
         Self {
             data_root,
+            context_sources,
+            generation_sources,
             context: OnceLock::new(),
             generation: OnceLock::new(),
             context_prefix_grids: OnceLock::new(),
@@ -137,6 +165,7 @@ impl DsaTable {
     /// from the CSV; query interpolates over (num_heads, batch, seq).
     pub fn query_generation(
         &self,
+        spec: &SystemSpec,
         b: u32,
         sequence_tokens: u32,
         num_heads: u32,
@@ -157,11 +186,51 @@ impl DsaTable {
             .get(&key)
             .ok_or_else(|| missing("generation DSA module", &self.data_root, format!("{key:?}")))?;
         // Grid axis order: outer = num_heads, middle = seq_tokens, inner = batch.
-        // Uses the extrapolating variant because Python pre-extends both
-        // axes via `_extrapolate` before interpolation; linear extrapolation
-        // here from the boundary pair gives the same numeric result for the
-        // out-of-envelope queries that show up on sparser backend tables
-        // (e.g. SGLang DSv32 at low num_heads).
+        //
+        // Boundary-utilization reconstruction (mirrors Python
+        // `_query_generation_dsa_module_table::boundary_util_value` — the SILICON
+        // out-of-envelope path added alongside the hybrid/empirical rework): for
+        // the EXACT (num_heads, b) slice,
+        // when the requested sequence is OUTSIDE the measured envelope, freeze the
+        // boundary row's SOL utilization instead of extrapolating latency:
+        //   latency = boundary_latency * SOL(b, s) / SOL(b, boundary_s)
+        // The decode measurement grid is sparse on the seq axis for small batch
+        // (e.g. SGLang DeepSeek-V3.2 b=1 collects only up to step 128), so a
+        // production decode at s = isl + step lands out-of-envelope and a plain
+        // latency extrapolation drifts from Python.
+        if let Some(head_slice) = grid.get(&num_heads) {
+            let mut curve: Vec<(u32, f64)> = head_slice
+                .iter()
+                .filter_map(|(&seq, by_batch)| by_batch.get(&b).map(|&lat| (seq, lat)))
+                .collect();
+            if !curve.is_empty() {
+                curve.sort_by_key(|&(seq, _)| seq);
+                let (min_s, min_lat) = curve[0];
+                let (max_s, max_lat) = *curve.last().unwrap();
+                if sequence_tokens < min_s || sequence_tokens > max_s {
+                    let (boundary_s, boundary_lat) = if sequence_tokens < min_s {
+                        (min_s, min_lat)
+                    } else {
+                        (max_s, max_lat)
+                    };
+                    if boundary_lat > 0.0 {
+                        let dims = dsa_model_dims(architecture);
+                        let kv_mem = kv_quant.mapping().memory;
+                        let gq = gemm_quant.mapping();
+                        let sol_q = generation_dsa_sol(
+                            spec, &dims, b, sequence_tokens, num_heads, kv_mem, gq.compute, gq.memory,
+                        );
+                        let sol_b = generation_dsa_sol(
+                            spec, &dims, b, boundary_s, num_heads, kv_mem, gq.compute, gq.memory,
+                        );
+                        if sol_q > 0.0 && sol_b > 0.0 {
+                            return Ok(boundary_lat * sol_q / sol_b);
+                        }
+                    }
+                }
+            }
+        }
+        // In-envelope (or missing exact slice): fall back to grid interpolation.
         interp_2d_1d_grid_extrapolate_inner(grid, num_heads, sequence_tokens, b)
     }
 
@@ -175,14 +244,14 @@ impl DsaTable {
     fn load_context(&self) -> Result<&DsaGrids, AicError> {
         let cell = self
             .context
-            .get_or_init(|| load_dsa_parquet(&self.data_root.join("dsa_context_module_perf.parquet")));
+            .get_or_init(|| load_dsa_parquet(&self.context_sources));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_generation(&self) -> Result<&DsaGrids, AicError> {
         let cell = self
             .generation
-            .get_or_init(|| load_dsa_parquet(&self.data_root.join("dsa_generation_module_perf.parquet")));
+            .get_or_init(|| load_dsa_parquet(&self.generation_sources));
         cell.as_ref().map_err(clone_err)
     }
 
@@ -367,45 +436,64 @@ fn lookup_at_batch(
     Some(interp_1d(sl as f64, sr as f64, left, right, isl as f64))
 }
 
-fn load_dsa_parquet(path: &Path) -> Result<DsaGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let arch_col = reader.col("architecture")?;
-    let mla_dtype_col = reader.col("mla_dtype")?;
-    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
-    let gemm_type_col = reader.col("gemm_type")?;
-    let num_heads_col = reader.col("num_heads")?;
-    let batch_size_col = reader.col("batch_size")?;
-    let isl_col = reader.col("isl")?;
-    let step_col = reader.col("step")?;
-    let latency_col = reader.col("latency")?;
-
+/// Load a DSA module table from an ordered, priority-sorted source list. Sources
+/// are read in order; the first source containing a key wins (`or_insert`),
+/// mirroring Python's `_read_filtered_rows` concatenation + `load_dsa_module_data`
+/// skip-on-key-conflict. Missing files are skipped (a sibling declared in the
+/// manifest need not exist for every system); an error is returned only when no
+/// source yields rows. Shared by both the context and generation DSA files.
+fn load_dsa_parquet(sources: &[PerfSource]) -> Result<DsaGrids, AicError> {
     let mut by_keys: BTreeMap<DsaKey, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, f64>>>>> =
         BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = DsaKey {
-            architecture: row.str_owned(arch_col)?,
-            fmha_quant: row.str_owned(mla_dtype_col)?,
-            kv_quant: row.str_owned(kv_cache_dtype_col)?,
-            gemm_quant: row.str_owned(gemm_type_col)?,
-        };
-        // First-wins parity with Python `load_dsa_module_data`.
-        by_keys
-            .entry(key)
-            .or_default()
-            .entry(row.u32(num_heads_col)?)
-            .or_default()
-            .entry(row.u32(step_col)?)
-            .or_default()
-            .entry(row.u32(isl_col)?)
-            .or_default()
-            .entry(row.u32(batch_size_col)?)
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let arch_col = reader.col("architecture")?;
+        let mla_dtype_col = reader.col("mla_dtype")?;
+        let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+        let gemm_type_col = reader.col("gemm_type")?;
+        let num_heads_col = reader.col("num_heads")?;
+        let batch_size_col = reader.col("batch_size")?;
+        let isl_col = reader.col("isl")?;
+        let step_col = reader.col("step")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = DsaKey {
+                architecture: row.str_owned(arch_col)?,
+                fmha_quant: row.str_owned(mla_dtype_col)?,
+                kv_quant: row.str_owned(kv_cache_dtype_col)?,
+                gemm_quant: row.str_owned(gemm_type_col)?,
+            };
+            // First-wins parity with Python `load_dsa_module_data`, extended
+            // across shared-layer sources (earlier source wins).
+            by_keys
+                .entry(key)
+                .or_default()
+                .entry(row.u32(num_heads_col)?)
+                .or_default()
+                .entry(row.u32(step_col)?)
+                .or_default()
+                .entry(row.u32(isl_col)?)
+                .or_default()
+                .entry(row.u32(batch_size_col)?)
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if by_keys.is_empty() {
+    if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no DSA module rows loaded from {}",
-            path.display()
+            "no DSA module rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     Ok(DsaGrids { by_keys })
@@ -420,6 +508,114 @@ fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
 
 fn clone_err(err: &AicError) -> AicError {
     AicError::PerfDatabase(err.to_string())
+}
+
+/// Per-architecture DSA model dimensions. Mirrors Python
+/// `sdk/operations/dsa.py::DSA_MODEL_DIMS`. Only the fields the generation
+/// SOL formula needs are carried.
+struct DsaDims {
+    hidden_size: f64,
+    q_lora_rank: f64,
+    kv_lora_rank: f64,
+    qk_nope_head_dim: f64,
+    qk_rope_head_dim: f64,
+    v_head_dim: f64,
+    index_topk: f64,
+    index_head_dim: f64,
+    index_n_heads: f64,
+}
+
+/// Look up DSA dims by architecture, defaulting to DeepSeek-V3.2 (matches
+/// Python `DEFAULT_DSA_ARCHITECTURE`).
+fn dsa_model_dims(architecture: &str) -> DsaDims {
+    match architecture {
+        "GlmMoeDsaForCausalLM" => DsaDims {
+            hidden_size: 6144.0,
+            q_lora_rank: 2048.0,
+            kv_lora_rank: 512.0,
+            qk_nope_head_dim: 192.0,
+            qk_rope_head_dim: 64.0,
+            v_head_dim: 256.0,
+            index_topk: 2048.0,
+            index_head_dim: 128.0,
+            index_n_heads: 32.0,
+        },
+        // "DeepseekV32ForCausalLM" and default.
+        _ => DsaDims {
+            hidden_size: 7168.0,
+            q_lora_rank: 1536.0,
+            kv_lora_rank: 512.0,
+            qk_nope_head_dim: 128.0,
+            qk_rope_head_dim: 64.0,
+            v_head_dim: 128.0,
+            index_topk: 2048.0,
+            index_head_dim: 128.0,
+            index_n_heads: 64.0,
+        },
+    }
+}
+
+/// Bytes per token in the FP8 indexer KV cache, including one scale per 128
+/// values. Mirrors Python `common.indexer_cache_entry_bytes`.
+fn indexer_cache_entry_bytes(index_head_dim: f64) -> f64 {
+    let d = index_head_dim;
+    d + ((d + 127.0) / 128.0).floor() * 4.0
+}
+
+/// Speed-of-light latency (ms) for the generation DSA module at one decode
+/// step. Mirrors Python `_query_generation_dsa_module_table::get_sol`
+/// (1 token per request; indexer uses FP8 flops, sparse attention uses BF16).
+/// `gemm_compute`/`gemm_memory` come from the GEMM quant mapping; `kv_memory`
+/// from the KV-cache quant mapping.
+#[allow(clippy::too_many_arguments)]
+fn generation_dsa_sol(
+    spec: &SystemSpec,
+    dims: &DsaDims,
+    b: u32,
+    s: u32,
+    num_heads: u32,
+    kv_memory: f64,
+    gemm_compute: f64,
+    gemm_memory: f64,
+) -> f64 {
+    let tokens = b as f64;
+    let s_f = s as f64;
+    let nh = num_heads as f64;
+    let qk_head_dim = dims.qk_nope_head_dim + dims.qk_rope_head_dim;
+    let attn_head_dim = dims.kv_lora_rank + dims.qk_rope_head_dim;
+    let proj_out = dims.q_lora_rank + dims.kv_lora_rank + dims.qk_rope_head_dim + dims.index_head_dim;
+    let effective_kv = s_f.min(dims.index_topk);
+
+    let gemm_group_ops = 2.0 * tokens * dims.hidden_size * proj_out
+        + 2.0 * tokens * dims.q_lora_rank * nh * qk_head_dim
+        + 2.0 * tokens * dims.q_lora_rank * dims.index_n_heads * dims.index_head_dim
+        + 2.0 * tokens * dims.hidden_size * dims.index_n_heads
+        + 2.0 * tokens * nh * dims.v_head_dim * dims.hidden_size
+        + 2.0 * nh * tokens * dims.qk_nope_head_dim * dims.kv_lora_rank
+        + 2.0 * nh * tokens * dims.kv_lora_rank * dims.v_head_dim;
+    let indexer_logits_ops = 2.0 * tokens * dims.index_n_heads * dims.index_head_dim * s_f;
+    let sparse_attn_ops = 2.0 * tokens * nh * (attn_head_dim + dims.kv_lora_rank) * effective_kv;
+
+    let gemm_weight_bytes = (dims.hidden_size * proj_out
+        + dims.q_lora_rank * nh * qk_head_dim
+        + dims.q_lora_rank * dims.index_n_heads * dims.index_head_dim
+        + dims.hidden_size * dims.index_n_heads
+        + nh * dims.v_head_dim * dims.hidden_size)
+        * gemm_memory;
+    let indexer_cache_bytes = tokens * s_f * indexer_cache_entry_bytes(dims.index_head_dim);
+    let kv_cache_bytes = tokens * effective_kv * attn_head_dim * kv_memory;
+    let total_mem = gemm_weight_bytes + indexer_cache_bytes + kv_cache_bytes;
+
+    let gemm_flops = tc_flops_for_compute(spec, gemm_compute);
+    let indexer_fp8_flops = tc_flops_for_compute(spec, 2.0); // FP8
+    let attn_flops = tc_flops_for_compute(spec, 1.0); // BF16
+
+    let sol_math = (gemm_group_ops / gemm_flops
+        + indexer_logits_ops / indexer_fp8_flops
+        + sparse_attn_ops / attn_flops)
+        * 1000.0;
+    let sol_mem = total_mem / spec.gpu.mem_bw * 1000.0;
+    sol_math.max(sol_mem)
 }
 
 #[cfg(test)]

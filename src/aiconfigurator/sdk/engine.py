@@ -34,6 +34,7 @@ The live ``rust_engine_step.py`` helpers build on this path.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 import aiconfigurator_core
@@ -123,6 +124,7 @@ def _gemm(op: GEMM) -> dict:
         "quant_mode": _quant_name(op._quant_mode),
         "scale_num_tokens": op._scale_num_tokens,
         "low_precision_input": op._low_precision_input,
+        "seq_split": op._seq_split,
     }
 
 
@@ -136,6 +138,7 @@ def _embedding(op: Embedding) -> dict:
         # query ignores it (memory-only op). Bfloat16 is the neutral value the
         # Rust builders use for embeddings.
         "quant_mode": "bfloat16",
+        "seq_split": op._seq_split,
     }
 
 
@@ -149,6 +152,7 @@ def _elementwise(op: ElementWise) -> dict:
         "name": op._name,
         "scale_factor": op._scale_factor,
         "bytes_per_token": float(bytes_per_token),
+        "seq_split": op._seq_split,
     }
 
 
@@ -163,6 +167,7 @@ def _context_attention(op: ContextAttention) -> dict:
         "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
         "use_qk_norm": op._use_qk_norm,
+        "cp_size": op._cp_size,
     }
 
 
@@ -195,6 +200,7 @@ def _context_mla(op: ContextMLA) -> dict:
         "num_heads": op._num_heads,
         "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
+        "cp_size": op._cp_size,
     }
 
 
@@ -238,6 +244,7 @@ def _moe(op: MoE) -> dict:
         "num_experts": op._num_experts,
         "moe_tp_size": op._moe_tp_size,
         "moe_ep_size": op._moe_ep_size,
+        "attention_dp_size": op._attention_dp_size,
         "quant_mode": _quant_name(op._quant_mode),
         "workload_distribution": op._workload_distribution,
         "is_gated": op._is_gated,
@@ -282,6 +289,8 @@ def _moe_dispatch(op: MoEDispatch, *, backend: str) -> dict:
         "flavor": _dispatch_flavor(backend),
         "comm_quant": "half",
         "moe_quant": _quant_name(quant) if quant is not None else "bfloat16",
+        "attn_cp_size": op._attn_cp_size,
+        "is_context": op._is_context,
     }
 
 
@@ -292,6 +301,7 @@ def _custom_all_reduce(op: CustomAllReduce) -> dict:
         "hidden_size": op._h,
         "tp_size": op._tp_size,
         "quant": "half",
+        "seq_split": op._seq_split,
     }
 
 
@@ -303,6 +313,7 @@ def _nccl(op: NCCL) -> dict:
         "num_gpus": op._num_gpus,
         "dtype": "half",
         "operation": op._nccl_op,
+        "seq_split": op._seq_split,
     }
 
 
@@ -312,6 +323,7 @@ def _p2p(op: P2P) -> dict:
         "scale_factor": op._scale_factor,
         "pp_size": op._pp_size,
         "hidden_size": op._h,
+        "seq_split": op._seq_split,
     }
 
 
@@ -563,6 +575,38 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
 # --------------------------------------------------------------------------- #
 
 
+def _compute_perf_db_sources(database: Any) -> dict:
+    """Resolve the shared-layer (sibling/cross-version) source list per op file
+    from the Python ``database``, so the Rust core can load the SAME rows Python
+    does under SILICON/HYBRID.
+
+    Returns ``{op_file_basename: [[abs_path, [kernel_sources] | None], ...]}``.
+    ``_build_op_sources`` returns just ``[(primary, None)]`` when the shared
+    layer is off or an op has no inheritable siblings, so the Rust side falls
+    back to its primary ``data_root`` behaviour for those. Returns ``{}`` when a
+    database is unavailable or introspection fails (Rust then uses its
+    single-``data_root`` default). Discovery stays here (single source of truth)
+    rather than being reimplemented in Rust.
+    """
+    if database is None:
+        return {}
+    try:
+        from aiconfigurator.sdk.common import PerfDataFilename
+
+        system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+        data_dir = os.path.join(system_data_root, database.backend, database.version)
+        out: dict[str, list] = {}
+        for filename_enum in PerfDataFilename:
+            primary_path = os.path.join(data_dir, filename_enum.value)
+            sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
+            out[filename_enum.value] = [
+                [os.path.abspath(path), (sorted(ks) if ks is not None else None)] for path, ks in sources
+            ]
+        return out
+    except Exception:
+        return {}
+
+
 def _engine_config_dict(
     *,
     model: Any,
@@ -574,6 +618,7 @@ def _engine_config_dict(
     systems_path: str | None,
     nextn: int,
     nextn_accept_rates: list[float] | None,
+    database: Any = None,
 ) -> dict:
     """Build the ``EngineConfig`` JSON (matches the Rust modularised struct).
 
@@ -609,11 +654,16 @@ def _engine_config_dict(
         "attention_dp_size": _opt_int(getattr(cfg, "attention_dp_size", None)),
         "moe_tp_size": _opt_int(getattr(cfg, "moe_tp_size", None)),
         "moe_ep_size": _opt_int(getattr(cfg, "moe_ep_size", None)),
+        "cp_size": _opt_int(getattr(cfg, "cp_size", None)),
         # QuantizationConfig (flattened)
         "weight_dtype": _rust_quant_to_dtype(getattr(cfg, "gemm_quant_mode", None)),
         "moe_dtype": _rust_moe_quant_to_dtype(getattr(cfg, "moe_quant_mode", None)),
         "activation_dtype": _rust_quant_to_dtype(getattr(cfg, "fmha_quant_mode", None)),
         "kv_cache_dtype": _rust_quant_to_dtype(getattr(cfg, "kvcache_quant_mode", None)),
+        # Shared-layer (sibling/cross-version) per-op perf-data sources, resolved
+        # in Python so the Rust core inherits the same rows. Empty/absent = Rust
+        # uses its single-``data_root`` default (back-compat with old specs).
+        "perf_db_sources": _compute_perf_db_sources(database),
         "extra": {},
     }
     # SpeculativeConfig (flattened, Option<>): emit nextn/nextn_accept_rates at
@@ -752,6 +802,7 @@ def build_engine_spec_json(
             systems_path=systems_path,
             nextn=nextn,
             nextn_accept_rates=nextn_accept_rates,
+            database=database,
         ),
         "context_ops": context_ops,
         "generation_ops": generation_ops,
