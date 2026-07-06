@@ -1124,8 +1124,17 @@ def get_sglang_moe_backend(test_case: MoeCommonTestCase, moe_type: str, sm_versi
             if backend is None:
                 continue
             backend = str(backend)
-        if backend == "marlin" and moe_type != "int4_wo":
-            raise ValueError(f"SGLang Marlin is only valid for int4_wo, got moe_type={moe_type!r}")
+        # Marlin is a weight-only (bf16-activation) runner, so it is a valid
+        # identity only for weight-only modes: INT4-WO, and MXFP4 w4a16 where
+        # SGLang 0.5.14 serving itself selects Marlin on SM120
+        # (server_args.py:3876-3887; mxfp4.py:520-521 asserts SM90-or-SM120).
+        # NVFP4 and mxfp8-activation modes measured through a Marlin repack
+        # would be mislabeled rows (MoE FP4/INT4 identity reversal) and stay
+        # rejected.
+        if backend == "marlin" and moe_type not in ("int4_wo", "w4a16_mxfp4"):
+            raise ValueError(
+                f"SGLang Marlin is only valid for the weight-only modes int4_wo/w4a16_mxfp4, got moe_type={moe_type!r}"
+            )
         return backend
     raise ValueError(f"No SGLang MoE backend for moe_type={moe_type!r}, sm_version={sm_version}")
 

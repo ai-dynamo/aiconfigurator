@@ -369,6 +369,23 @@ def test_case_generator_preserves_representative_sglang_moe_runtime_contracts():
     assert "num_expert_group=num_expert_group" in source
 
 
+def test_sm120_population_gates_w4a8_and_keeps_w4a16_marlin():
+    # w4a8_mxfp4_mxfp8 is SM100/103-only (max_sm_exclusive: 120): SGLang
+    # 0.5.14 has no SM120 mxfp8-activation MXFP4 path (mxfp4.py:344-360), and
+    # SM120 serving routes MXFP4 checkpoints to weight-only Marlin instead
+    # (server_args.py:3876-3887). The w4a16_mxfp4 slice therefore populates
+    # on SM120 while the w4a8 slice must not.
+    populated = _populate_gptoss_cases(
+        [_gptoss_case(tp=1, ep=1)],
+        sm_version=120,
+        allowed_mode={"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"},
+        resolved_backend="marlin",
+    )
+
+    assert {case[0] for case in populated} == {"w4a16_mxfp4"}
+    assert all(case[12] == "marlin" for case in populated)
+
+
 @pytest.mark.parametrize(("tp", "ep"), [(4, 8), (32, 1), (32, 8)])
 def test_gptoss_mxfp4_population_retains_tp_and_ep_buckets(tp, ep):
     populated = _populate_gptoss_cases([_gptoss_case(tp=tp, ep=ep)])
@@ -389,6 +406,7 @@ def test_gptoss_mxfp4_population_retains_tp_and_ep_buckets(tp, ep):
         ("nvfp4", 120, "flashinfer_cutlass"),
         ("int4_wo", 90, "marlin"),
         ("w4a16_mxfp4", 90, "triton"),
+        ("w4a16_mxfp4", 120, "marlin"),
         ("w4a8_mxfp4_mxfp8", 100, "flashinfer_mxfp4"),
     ],
 )
@@ -398,13 +416,22 @@ def test_yaml_backend_map_matches_sglang_0514(mode, sm_version, expected):
     assert get_sglang_moe_backend(SimpleNamespace(sglang_moe_backends={}), mode, sm_version) == expected
 
 
-@pytest.mark.parametrize("mode", ["nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"])
+@pytest.mark.parametrize("mode", ["nvfp4", "w4a8_mxfp4_mxfp8"])
 def test_fp4_modes_reject_marlin_backend(mode):
     from collector.case_generator import get_sglang_moe_backend
 
     test_case = SimpleNamespace(sglang_moe_backends={mode: {90: "marlin"}})
-    with pytest.raises(ValueError, match="Marlin is only valid for int4_wo"):
+    with pytest.raises(ValueError, match="Marlin is only valid for the weight-only modes"):
         get_sglang_moe_backend(test_case, mode, 90)
+
+
+def test_w4a16_mxfp4_accepts_marlin_backend():
+    # SGLang 0.5.14 serving itself selects Marlin for MXFP4 w4a16 on SM120
+    # (server_args.py:3876-3887); weight-only identity is preserved.
+    from collector.case_generator import get_sglang_moe_backend
+
+    test_case = SimpleNamespace(sglang_moe_backends={})
+    assert get_sglang_moe_backend(test_case, "w4a16_mxfp4", 120) == "marlin"
 
 
 def test_sm90_nvfp4_has_no_backend():
@@ -598,7 +625,7 @@ def test_runtime_rejects_misaligned_quantized_cases(moe_type, hidden_size, inter
         )
 
 
-@pytest.mark.parametrize("moe_type", ["nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"])
+@pytest.mark.parametrize("moe_type", ["nvfp4", "w4a8_mxfp4_mxfp8"])
 def test_runtime_rejects_fp4_modes_on_marlin(moe_type):
     fake_torch = SimpleNamespace(
         set_default_device=lambda _device: None,
@@ -609,7 +636,7 @@ def test_runtime_rejects_fp4_modes_on_marlin(moe_type):
         namespace={"torch": fake_torch, "get_sm_version": lambda: 90},
     )["run_moe_torch"]
 
-    with pytest.raises(ValueError, match="Marlin is only valid for int4_wo"):
+    with pytest.raises(ValueError, match="Marlin is only valid for the weight-only modes"):
         run(
             moe_type,
             128,

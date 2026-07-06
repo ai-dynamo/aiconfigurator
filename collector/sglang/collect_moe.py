@@ -960,8 +960,14 @@ def run_moe_torch(
         "flashinfer_mxfp4",
     }:
         raise ValueError(f"Unsupported SGLang MoE backend: {moe_backend}")
-    if moe_backend == "marlin" and moe_type != "int4_wo":
-        raise ValueError(f"SGLang Marlin is only valid for int4_wo, got moe_type={moe_type!r}")
+    # Marlin is a weight-only (bf16-activation) runner: valid for INT4-WO, and
+    # for MXFP4 w4a16 where SGLang 0.5.14 serving itself selects Marlin on
+    # SM120 (server_args.py:3876-3887; mxfp4.py:520-521 asserts SM90-or-SM120).
+    # NVFP4/mxfp8-activation modes stay rejected (FP4/INT4 identity reversal).
+    if moe_backend == "marlin" and moe_type not in ("int4_wo", "w4a16_mxfp4"):
+        raise ValueError(
+            f"SGLang Marlin is only valid for the weight-only modes int4_wo/w4a16_mxfp4, got moe_type={moe_type!r}"
+        )
     assert inter_size % moe_tp_size == 0, "inter_size % moe_tp_size must be 0"
     assert num_experts % moe_ep_size == 0, "num_experts must be divisible by moe_ep_size"
 
