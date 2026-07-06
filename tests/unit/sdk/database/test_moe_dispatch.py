@@ -485,5 +485,69 @@ class TestSGLangNonDeepEPAttentionTpDp:
         db.query_custom_allreduce.assert_not_called()
 
 
+@pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
+class TestWideEpDeepEpLlNodeNumFallback:
+    """node_num fallback in _query_wideep_deepep_ll_table.
+
+    Prefer measured data for the requested node_num; if that (node_num, hidden,
+    topk, experts) has no rows, fall back to node_num=1 with the same EP config.
+    """
+
+    @staticmethod
+    def _leaf(latency):
+        return {128: {"latency": latency, "power": 0.0, "energy": 0.0}}
+
+    def _db_with_ll_data(self):
+        db = MagicMock()
+        # node_num=1 -> 100us, node_num=2 -> 200us for (hidden=7168, topk=8, experts=256)
+        db._wideep_deepep_ll_data = {
+            1: {7168: {8: {256: self._leaf(100.0)}}},
+            2: {7168: {8: {256: self._leaf(200.0)}}},
+        }
+        db._default_database_mode = common.DatabaseMode.SILICON
+        # _interp_pr(lat, energy=...) -> echo the latency so tests can assert which bucket was used
+        db._interp_pr = lambda lat, energy=0.0: PerformanceResult(lat)
+        return db
+
+    def _query(self, db, node_num, num_experts=256):
+        return MoEDispatch._query_wideep_deepep_ll_table(
+            db,
+            node_num=node_num,
+            num_tokens=128,
+            num_experts=num_experts,
+            topk=8,
+            hidden_size=7168,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+    def test_exact_node_num_used(self, monkeypatch):
+        """Requested node_num present -> uses it, no fallback."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        res = self._query(db, node_num=2)
+        assert float(res) == pytest.approx(0.2)  # 200us/1000, node_num=2 bucket
+
+    def test_fallback_to_node_num_1(self, monkeypatch):
+        """Requested node_num missing but node_num=1 present -> falls back to node_num=1."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        res = self._query(db, node_num=4)  # 4 not collected
+        assert float(res) == pytest.approx(0.1)  # 100us/1000, node_num=1 fallback
+
+    def test_node_num_1_no_fallback(self, monkeypatch):
+        """node_num=1 uses its own data directly."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        res = self._query(db, node_num=1)
+        assert float(res) == pytest.approx(0.1)
+
+    def test_neither_present_raises(self, monkeypatch):
+        """Neither the exact node_num nor node_num=1 has the shape -> not-available (as before)."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        with pytest.raises(AssertionError):
+            self._query(db, node_num=4, num_experts=999)  # experts=999 absent at every node_num
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

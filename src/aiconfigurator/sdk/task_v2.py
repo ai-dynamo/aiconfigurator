@@ -720,12 +720,15 @@ class Task:
         # V3/Kimi context downgrade must NOT fire on an EXPLICIT fp8 -- v1 keeps it
         # (its `not explicit_fmha_mode` guard) and lets validate fail fast.
         fmha_explicit: dict[str, bool] = {}
+        kv_explicit: dict[str, bool] = {}
         for role in roles:
             for key in _QUANT_ENUM_TABLES:
                 explicit = self._role_attr(role, key)
                 from_hf = base.get(key)
                 if key == "fmha_quant_mode":
                     fmha_explicit[role] = explicit is not None
+                if key == "kvcache_quant_mode":
+                    kv_explicit[role] = explicit is not None
                 # DeepSeek-V4-Pro on sglang uses arch-specific MoE kernels. This acts at
                 # the HF-base layer so an explicit field still overrides it. Skip megamoe,
                 # which keys its own quant table. Mirrors legacy V1 dsv4pro-moe-arch.
@@ -753,13 +756,29 @@ class Task:
         for role in roles:
             backend_name = self._role_attr(role, "backend_name")
             fmha = self._role_attr(role, "fmha_quant_mode")
+            is_deepseek_mla = self._architecture in (
+                "DeepseekV3ForCausalLM",
+                "KimiK25ForConditionalGeneration",
+            )
+            # WideEP routes DeepSeek/Kimi attention through the wideep_*_mla tables,
+            # which the collector records from a bf16 run but LABELS fp8_block (fmha) /
+            # fp8 (kv) -- see collect_mla_module.py: _build_wideep_mla_test_cases runs
+            # bfloat16, then the log_* overrides tag the rows fp8_block/fp8. The SDK
+            # must query with those same labels, so resolve fmha->fp8_block (context
+            # roles) and kvcache->fp8 (all roles) instead of the narrow-EP bf16 values.
+            is_wideep = backend_name == "sglang" and self.moe_backend == "deepep_moe"
+            if is_wideep and is_deepseek_mla:
+                if role != "decode" and not fmha_explicit.get(role, False):
+                    self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.fp8_block)
+                if not kv_explicit.get(role, False):
+                    self._set_role_attr(role, "kvcache_quant_mode", common.KVCacheQuantMode.fp8)
             # DeepSeek-V3/Kimi context attention (MLA prefill) does not support fp8 FMHA,
             # so downgrade to bfloat16 -- but ONLY for context-attention roles (agg, prefill).
             # The decode role uses generation attention, which keeps fp8.
-            if (
+            elif (
                 role != "decode"
                 and not fmha_explicit.get(role, False)
-                and self._architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
+                and is_deepseek_mla
                 and fmha == common.FMHAQuantMode.fp8
             ):
                 self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)

@@ -1155,19 +1155,69 @@ def collect_sglang(
         logger.exception("SGLang is not installed")
         return
 
-    registry = _registry_with_requested_wideep(REGISTRY, "sglang", ops, case_plan)
-    collections = build_collections(registry, "sglang", version, ops, logger=logger)
-    all_errors = collect_ops(
-        num_processes,
-        collections,
-        version,
-        limit=limit,
-        shuffle=shuffle,
-        backend="sglang",
-        resume_options=resume_options,
-        model_path=model_path,
-        case_plan=case_plan,
-    )
+    # DeepEP LL and normal are single collective NCCL/DeepEP jobs that must own
+    # every GPU at once, so they cannot go through the per-GPU worker pool in
+    # collect_ops. Intercept them here and run each directly; collect.py's
+    # finalize step then converts the produced wideep_deepep_*_perf.txt files to
+    # parquet. These ops only run when explicitly requested (never as part of a
+    # collect-all with ops=None).
+    fullnode_ops = ("deepep_ll", "deepep_normal")
+    run_deepep_ll = bool(ops) and "deepep_ll" in ops
+    run_deepep_normal = bool(ops) and "deepep_normal" in ops
+    run_any_fullnode = run_deepep_ll or run_deepep_normal
+    ops_for_pool = [op for op in ops if op not in fullnode_ops] if run_any_fullnode else ops
+
+    all_errors = []
+    if ops_for_pool or not run_any_fullnode:
+        registry = _registry_with_requested_wideep(REGISTRY, "sglang", ops_for_pool, case_plan)
+        collections = build_collections(registry, "sglang", version, ops_for_pool, logger=logger)
+        all_errors = collect_ops(
+            num_processes,
+            collections,
+            version,
+            limit=limit,
+            shuffle=shuffle,
+            backend="sglang",
+            resume_options=resume_options,
+            model_path=model_path,
+            case_plan=case_plan,
+        )
+
+    if run_deepep_ll:
+        from collector.registry_types import PerfFile
+        from collector.wideep.sglang.collect_deepep_ll import run_deepep_ll_fullnode
+
+        logger.info("Running DeepEP LL full-node collection (bypassing per-GPU worker pool)")
+        try:
+            run_deepep_ll_fullnode(perf_filename=PerfFile.WIDEEP_DEEPEP_LL, limit=limit)
+        except Exception as e:
+            logger.exception("DeepEP LL collection failed")
+            all_errors.append(
+                {
+                    "module": "collector.wideep.sglang.collect_deepep_ll.deepep_ll",
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+
+    if run_deepep_normal:
+        from collector.registry_types import PerfFile
+        from collector.wideep.sglang.collect_deepep_normal import run_deepep_normal_fullnode
+
+        logger.info("Running DeepEP normal full-node collection (bypassing per-GPU worker pool)")
+        try:
+            run_deepep_normal_fullnode(perf_filename=PerfFile.WIDEEP_DEEPEP_NORMAL, limit=limit)
+        except Exception as e:
+            logger.exception("DeepEP normal collection failed")
+            all_errors.append(
+                {
+                    "module": "collector.wideep.sglang.collect_deepep_normal.deepep_normal",
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "traceback": traceback.format_exc(),
+                }
+            )
 
     generate_collection_summary(all_errors, "sglang", version)
 
