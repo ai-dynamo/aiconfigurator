@@ -27,7 +27,7 @@ from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.errors import (
     NoFeasibleConfigError,
     UnsupportedWideepConfigError,
-    is_expected_no_result_cause,
+    is_expected_cli_error,
 )
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task_v2 import Task
@@ -1525,8 +1525,14 @@ def build_experiment_tasks(
         try:
             task_config = {**exp_config, "database_mode": database_mode}
             tasks[exp_name] = Task.from_yaml(task_config, **overrides)
-        except Exception:
-            logger.exception("Failed to build Task for experiment '%s'", exp_name)
+        except Exception as exc:
+            if is_expected_cli_error(exc):
+                # Expected config/compatibility rejection (e.g. MegaMoE requires a
+                # Blackwell system): report cleanly and keep the traceback at DEBUG.
+                logger.log(logging.ERROR, "Failed to build Task for experiment '%s': %s", exp_name, exc)
+                logger.debug("Traceback for experiment %s", exp_name, exc_info=True)
+            else:
+                logger.exception("Failed to build Task for experiment '%s'", exp_name)
 
     return tasks
 
@@ -1602,10 +1608,13 @@ def _execute_tasks(
             logger.warning(msg)
             failure_messages.append(msg)
         except Exception as exc:
-            if is_expected_no_result_cause(exc) or perf_database.has_perf_data_not_available_cause(exc):
-                # Expected failure (no feasible config / OOM / KV-cache capacity, or
-                # a per-op perf-data miss): report cleanly without a scary traceback.
+            if is_expected_cli_error(exc):
+                # Expected failure (no feasible config / OOM / KV-cache capacity,
+                # a per-op perf-data miss, or an unsupported quant/compatibility
+                # config): report cleanly. Keep the traceback at DEBUG for
+                # diagnosis via --log-level DEBUG.
                 logger.log(logging.ERROR, "Error running experiment %s: %s", exp_name, exc)
+                logger.debug("Traceback for experiment %s", exp_name, exc_info=True)
             else:
                 logger.exception("Error running experiment %s", exp_name)
             failure_messages.append(f"Experiment {exp_name} failed: {exc}")
@@ -2321,14 +2330,19 @@ def main(args):
 
     # Handle estimate mode separately (single-point estimation)
     if args.mode == "estimate":
-        # Invalid sizing/parameters surface as ValueError from the SDK
-        # validation path (e.g. AFD f_moe_ep_size not dividing f_tp_size).
-        # Convert to a concise CLI error instead of a full traceback,
-        # matching the set_systems_paths convention above.
+        # Expected user errors surface from the SDK as ValueError (invalid
+        # sizing/parameters, unsupported quant/compatibility) or as a perf-data
+        # coverage miss (PerfDataNotAvailableError / EmpiricalNotImplementedError).
+        # Convert them to a concise CLI error instead of a full traceback; keep
+        # the traceback at DEBUG (--log-level DEBUG) and let genuine bugs
+        # (KeyError, OOM RuntimeError, …) propagate unchanged.
         try:
             _run_estimate_mode(args)
-        except ValueError as exc:
-            raise SystemExit("Error: " + str(exc)) from exc
+        except Exception as exc:
+            if is_expected_cli_error(exc):
+                logger.debug("Traceback for estimate mode", exc_info=True)
+                raise SystemExit("Error: " + str(exc)) from exc
+            raise
         return
 
     if args.mode == "default":
