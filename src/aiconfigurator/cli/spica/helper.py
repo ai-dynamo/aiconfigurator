@@ -1743,14 +1743,50 @@ def _spica_extra_input_lines(config: Any, config_path: str | None) -> list[str]:
     return lines
 
 
+def _format_spica_validation_error(exc) -> str:
+    """Render a Pydantic ValidationError as a concise ``loc: msg`` summary."""
+    parts = []
+    for err in exc.errors():
+        loc = ".".join(str(item) for item in err.get("loc", ()))
+        msg = err.get("msg", "")
+        parts.append(f"{loc}: {msg}" if loc else msg)
+    return "; ".join(parts) if parts else str(exc)
+
+
 def _load_spica_config(args, smart_search_config_cls):
+    # A missing/malformed --thorough-config file, or a config that fails schema
+    # validation, is an expected user error. Convert the underlying OSError /
+    # yaml.YAMLError / pydantic.ValidationError into a concise CLI message
+    # instead of leaking a raw Python/Pydantic traceback; keep the stack at
+    # DEBUG (--log-level DEBUG) for diagnosis. Applies to both the native
+    # --thorough-config path and the CLI-derived config path.
+    import pydantic
+
     config_path = getattr(args, "thorough_config", None)
     if config_path:
-        return smart_search_config_cls.from_yaml(config_path), config_path
+        try:
+            return smart_search_config_cls.from_yaml(config_path), config_path
+        except OSError as exc:
+            logger.debug("Could not read Spica config %s", config_path, exc_info=True)
+            raise SystemExit(f"Error: could not read Spica config {config_path}: {exc}") from None
+        except yaml.YAMLError as exc:
+            logger.debug("Malformed Spica YAML %s", config_path, exc_info=True)
+            raise SystemExit(f"Error: malformed Spica YAML {config_path}: {exc}") from None
+        except pydantic.ValidationError as exc:
+            logger.debug("Invalid Spica config %s", config_path, exc_info=True)
+            raise SystemExit(
+                f"Error: invalid Spica config {config_path}: {_format_spica_validation_error(exc)}"
+            ) from None
 
     backends = [backend.value for backend in common.BackendName] if args.backend == "auto" else [args.backend]
     config_data = _build_spica_thorough_config_data(args, backends)
-    return smart_search_config_cls.model_validate(config_data), None
+    try:
+        return smart_search_config_cls.model_validate(config_data), None
+    except pydantic.ValidationError as exc:
+        logger.debug("Invalid Spica config derived from CLI arguments", exc_info=True)
+        raise SystemExit(
+            f"Error: invalid Spica config derived from CLI arguments: {_format_spica_validation_error(exc)}"
+        ) from None
 
 
 def _install_dynamo_planner_bridge_compat() -> None:
