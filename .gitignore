@@ -33,6 +33,7 @@ Cargo.lock
 .scan-probe.log
 scan-pareto*.log
 scan-pareto.log.*
+planner_reports/
 
 # maturin-built Rust extension (compiled locally / shipped in wheel)
 src/aiconfigurator_core/*.so

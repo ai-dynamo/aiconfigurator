@@ -121,7 +121,7 @@ class OptimizationGoal(BaseModel):
         return self.target is OptimizationTarget.PARETO
 
     @model_validator(mode="after")
-    def _validate_goal(self) -> "OptimizationGoal":
+    def _validate_goal(self) -> OptimizationGoal:
         # pareto_objectives only applies to a pareto target.
         if not self.is_pareto and self.pareto_objectives is not None:
             raise ValueError("pareto_objectives is only valid when target is 'pareto'")
@@ -247,7 +247,7 @@ class Workload(BaseModel):
         return 1.0
 
     @model_validator(mode="after")
-    def _validate_workload(self) -> "Workload":
+    def _validate_workload(self) -> Workload:
         synthetic_only = ("isl", "osl", "request_rate", "concurrency", "num_request_ratio")
         if self.trace_path is not None:
             set_syn = [n for n in synthetic_only if getattr(self, n) is not None]
@@ -335,7 +335,7 @@ SEARCH_CHOICES: dict[str, tuple] = {
 # value a preset doesn't offer). A dict entry must be self-contained: its keys are
 # exactly that composite's unrolled field names (no partial/merge). The legality of
 # the values (perfect-square fpm bucket, interval > 0, etc.) is validated downstream
-# by dynamo's PlannerConfig; here we only gate the key set. See docs/search-space.md.
+# by dynamo's PlannerConfig; here we only gate the key set. See docs/spica/search-space.md.
 COMPOSITE_DICT_KEYS: dict[str, frozenset[str]] = {
     "planner_scaling_policy": frozenset(
         {
@@ -445,7 +445,7 @@ class SearchSpace(BaseModel):
     no_admission_control: bool = False
 
     # planner: composite knobs — each entry is a preset id (str) OR a dict pinning
-    # the unrolled fields directly (see COMPOSITE_DICT_KEYS / docs/search-space.md).
+    # the unrolled fields directly (see COMPOSITE_DICT_KEYS / docs/spica/search-space.md).
     # "disabled" = planner not enabled (no autoscaling, static replica count).
     planner_scaling_policy: list[str | dict[str, Any]] = [
         "disabled",
@@ -477,7 +477,7 @@ class SearchSpace(BaseModel):
     ]
 
     @model_validator(mode="after")
-    def _validate_search_choices(self) -> "SearchSpace":
+    def _validate_search_choices(self) -> SearchSpace:
         """Each swept dimension is a non-empty list whose entries are valid: a string
         must be one of the listed choices; a dict (only on a composite knob) must have
         exactly that composite's unrolled field names (value legality is checked
@@ -502,14 +502,14 @@ class SearchSpace(BaseModel):
                     if missing:
                         raise ValueError(
                             f"{field_name} dict is missing required keys {sorted(missing)}; "
-                            f"a dict entry must be self-contained (see docs/search-space.md)"
+                            f"a dict entry must be self-contained (see docs/spica/search-space.md)"
                         )
                 elif v not in allowed:
                     raise ValueError(f"{field_name} has invalid choice {v!r}; allowed: {list(allowed)}")
         return self
 
     @model_validator(mode="after")
-    def _validate_gpu_budget(self) -> "SearchSpace":
+    def _validate_gpu_budget(self) -> SearchSpace:
         """When ``min_gpu_budget`` is set it must be a positive value not exceeding
         ``gpu_budget``. ``min_endpoint`` is carried into scaling candidates as a planner
         runtime floor; its detailed feasibility is validated by the planner."""
@@ -521,7 +521,7 @@ class SearchSpace(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _validate_kv_offload_replay_sizing(self) -> "SearchSpace":
+    def _validate_kv_offload_replay_sizing(self) -> SearchSpace:
         """Require deterministic transfer sizing whenever G2 offload is enabled.
 
         Dynamo can try to infer this value from model metadata, but inference may
@@ -534,7 +534,7 @@ class SearchSpace(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _validate_router_admission_replay_support(self) -> "SearchSpace":
+    def _validate_router_admission_replay_support(self) -> SearchSpace:
         """Reject admission-control pins until Dynamo replay can model them.
 
         Generated deployments support these frontend flags, but the pinned replay
@@ -560,7 +560,7 @@ class SearchSpace(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _validate_parallel_configs(self) -> "SearchSpace":
+    def _validate_parallel_configs(self) -> SearchSpace:
         """A pinned ``parallel_configs`` (non-empty) must match a single deployment
         mode and have the right shape: an agg entry is a flat shape dict (needs
         ``tp``); a disagg entry nests ``prefill`` + ``decode`` shape dicts. Full
@@ -636,7 +636,7 @@ class SmartSearchConfig(BaseModel):
     sweep: SweepConfig = Field(default_factory=SweepConfig)
 
     @model_validator(mode="after")
-    def _validate_concurrency_sweep(self) -> "SmartSearchConfig":
+    def _validate_concurrency_sweep(self) -> SmartSearchConfig:
         """A list-valued ``workload.concurrency`` is the swept Pareto dimension, so it is
         only allowed under a ``pareto`` goal; every other goal needs a single concurrency."""
         if self.workload.concurrency_choices is not None and not self.goal.is_pareto:
@@ -647,7 +647,7 @@ class SmartSearchConfig(BaseModel):
         return self
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "SmartSearchConfig":
+    def from_yaml(cls, path: str | Path) -> SmartSearchConfig:
         """Load + validate one YAML file into the nested config."""
         data = yaml.safe_load(Path(path).read_text())
         return cls.model_validate(data)

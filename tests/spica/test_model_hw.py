@@ -10,9 +10,9 @@ import pytest
 
 pytest.importorskip("aiconfigurator")
 
-import spica.model_hw as mh_mod  # noqa: E402
-from spica.kv_estimate import NoPerfDatabase  # noqa: E402
-from spica.model_hw import (  # noqa: E402
+import spica.model_hw as mh_mod
+from spica.kv_estimate import NoPerfDatabase
+from spica.model_hw import (
     NoViableParallelConfig,
     parallel_configs_for,
     resolve_model_hardware,
@@ -49,7 +49,7 @@ def test_max_seq_len_defaults_to_model_context(monkeypatch):
 
     def fake_feasible(shapes, *, max_seq_len, **kwargs):
         seen["max_seq_len"] = max_seq_len
-        return {s: 10_000_000 for s in dict.fromkeys(shapes)}
+        return dict.fromkeys(shapes, 10_000_000)
 
     monkeypatch.setattr(mh_mod, "feasible_shape_tokens", fake_feasible)
     parallel_configs_for(DEEPSEEK, "gb200", gpu_budget=16, deployment_mode="agg", backend="trtllm")

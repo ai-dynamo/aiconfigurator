@@ -8,11 +8,11 @@ import pytest
 
 pytest.importorskip("aiconfigurator")
 
-from spica.config import SmartSearchConfig  # noqa: E402
-from spica.kv_estimate import NoPerfDatabase  # noqa: E402
-from spica.model_hw import NoViableParallelConfig  # noqa: E402
-from spica.parallel_enum import ParallelShape, ReplicaParallelConfig  # noqa: E402
-from spica.search_space import branch_knob_choices, enumerate_branches  # noqa: E402
+from spica.config import SmartSearchConfig
+from spica.kv_estimate import NoPerfDatabase
+from spica.model_hw import NoViableParallelConfig
+from spica.parallel_enum import ParallelShape, ReplicaParallelConfig
+from spica.search_space import branch_knob_choices, enumerate_branches
 
 
 def _config(**ss_overrides) -> SmartSearchConfig:

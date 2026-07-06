@@ -40,8 +40,7 @@ source .venv/bin/activate
 ### 4. Install Development Dependencies
 
 ```bash
-# Install the lower modeling/Rust package first, then the upper package with dev dependencies
-pip install -e src/aiconfigurator-core
+# Install the package in editable mode with dev dependencies
 pip install -e ".[dev]"
 ```
 
@@ -53,7 +52,7 @@ pre-commit install
 
 This installs:
 - The `aiconfigurator` package in editable mode
-- The `aiconfigurator-core` package in editable mode
+- The SDK, performance data, and native `aiconfigurator_core` extension
 - All runtime dependencies
 - Development tools: `ruff`, `pre-commit`, `pytest` and related plugins
 
