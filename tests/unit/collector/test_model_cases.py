@@ -367,7 +367,7 @@ def test_kimi_moe_quantization_is_artifact_specific():
     assert "nvfp4" in get_moe_quantization_modes("sglang", sm_version=100)
 
 
-def test_sglang_marlin_is_declared_only_for_int4_wo():
+def test_sglang_marlin_is_declared_only_for_weight_only_modes():
     def backend_maps(value):
         if isinstance(value, dict):
             if "sglang_moe_backends" in value:
@@ -386,7 +386,12 @@ def test_sglang_marlin_is_declared_only_for_int4_wo():
     marlin_modes = {
         mode for backends in maps for mode, mapping in backends.items() if "marlin" in json.dumps(mapping).lower()
     }
-    assert marlin_modes == {"int4_wo"}
+    # Marlin is a weight-only (bf16-activation) runner: INT4-WO everywhere it
+    # is declared, plus MXFP4 w4a16 on SM120 where SGLang 0.5.14 serving
+    # itself selects Marlin (server_args.py:3876-3887). NVFP4 and
+    # mxfp8-activation modes must never declare it (FP4/INT4 identity
+    # reversal).
+    assert marlin_modes == {"int4_wo", "w4a16_mxfp4"}
 
 
 @pytest.mark.unit
@@ -405,7 +410,37 @@ def test_sglang_registry_marks_unvalidated_dsa_and_moe_platforms_explicitly():
     for op in ("dsa_context_module", "dsa_generation_module"):
         assert entries[op].unverified_sms == (103, 120)
 
-    assert entries["moe"].unverified_sms == (120,)
+    # The SM120 MoE bring-up audit (RTX 6000 Pro, 2026-07-05) cleared the moe
+    # maturity marker: every planned (quant mode x backend) family was probed
+    # on hardware with verified constructed-method provenance.
+    assert entries["moe"].unverified_sms == ()
+
+    # SM120 sparse-round audit (RTX 6000 Pro, 2026-07-06): the framework
+    # itself rejects the DSA/GLM-5 sparse family on SM120 (TRTLLM-GEN
+    # fmhaRunner "Unsupported architecture"; DeepGEMM attention.hpp:184;
+    # sgl-kernel sparse attention SM90a/SM100f-only), the CSA context pool
+    # derivation is fail-closed pending an SM120 Torch-indexer workspace
+    # policy, and the topk-calib producer is not yet SM120-variant-aware.
+    for op in (
+        "dsv4_csa_context_module",
+        "dsv4_csa_topk_calib",
+        "dsv4_paged_mqa_logits_module",
+        "glm5_mqa_logits_module",
+        "glm5_topk_module",
+        "glm5_dsa_attn_module",
+    ):
+        assert entries[op].unverified_sms == (120,)
+
+    # Probed clean on SM120 with only classified failure tails (GDN int32
+    # kernel-limit raises, mHC/CSA-generation top-cell OOMs): no markers.
+    for op in (
+        "gdn",
+        "mhc_module",
+        "dsv4_hca_context_module",
+        "dsv4_hca_generation_module",
+        "dsv4_csa_generation_module",
+    ):
+        assert entries[op].unverified_sms == ()
 
 
 def test_deepseek_minimax_and_nemotron_moe_quantization_is_artifact_specific():

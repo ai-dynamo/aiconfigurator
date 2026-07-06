@@ -59,9 +59,13 @@ REGISTRY: list[OpEntry] = [
         get_func="get_moe_test_cases",
         run_func="run_moe_torch",
         perf_filename=PerfFile.MOE,
-        # TODO(SM120 bring-up): audit every 0.5.14 artifact/backend on real
-        # hardware before enabling the complete, unfiltered MoE population.
-        unverified_sms=(120,),
+        # SM120 bring-up audit completed on RTX 6000 Pro (2026-07-05): every
+        # (quant mode x backend) family in the SM120 plan was probed on
+        # hardware with verified constructed-method provenance — bf16/triton,
+        # bf16/flashinfer_cutlass (NemotronH), fp8_block/triton,
+        # nvfp4/flashinfer_cutlass, w4a16_mxfp4/marlin (GPT-OSS) — and the
+        # framework-auto NVFP4 trtllm-gen path was shown in-kernel broken on
+        # SM120. See the SM120 entry in the Hopper/Blackwell ledger.
     ),
     OpEntry(
         op="attention_context",
@@ -90,8 +94,11 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsa_context_module_test_cases",
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_CONTEXT_MODULE,
-        # SM103's bundled TRTLLM-GEN capability check rejects the target;
-        # SM120 has no hardware validation for the selected 0.5.14 path.
+        # SM103's bundled TRTLLM-GEN capability check rejects the target.
+        # SM120 stays parked: the RTX 6000 Pro probe (2026-07-06) confirmed
+        # 0.5.14 forces the TRTLLM-GEN sub-backend there and every case
+        # raises "Unsupported architecture" (fmhaRunner.cuh:37) — hardware
+        # confirmation of the ledger's DSA-SUBBACKEND-SELECTOR row.
         unverified_sms=(103, 120),
     ),
     OpEntry(
@@ -115,6 +122,8 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.DSA_CONTEXT_MODULE_SKIP_INDEXER,
         # The only registered GLM-5.2 artifact is NVFP4 (SM100+); the exact
         # reuse-layer path is currently hardware-validated only on SM100.
+        # SM120 shares the full-module TRTLLM-GEN "Unsupported architecture"
+        # raise (RTX 6000 Pro probe 2026-07-06).
         unverified_sms=(90, 103, 120),
     ),
     OpEntry(
@@ -132,6 +141,12 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsv4_csa_context_test_cases",
         run_func="run_dsv4_attn_worker",
         perf_filename=PerfFile.DSV4_CSA_CONTEXT_MODULE,
+        # RTX 6000 Pro probe 2026-07-06: every SM120 case raises the
+        # collector's own fail-closed guard (_derive_csa_context_pool_cap —
+        # SM120 forces a Torch logits leaf whose memory contract is not the
+        # SM90/100/103 DeepGEMM workspace formula). Park the SM until that
+        # workspace policy is separately validated.
+        unverified_sms=(120,),
     ),
     OpEntry(
         op="dsv4_hca_context_module",
@@ -166,7 +181,11 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.DSV4_PAGED_MQA_LOGITS_MODULE,
         # SM120 selects the Torch/v1 indexer paths and its whole DSV4 module
         # family is source-derived, hardware-unvalidated; pre-Hopper is
-        # excluded by the op_min_sm=90 capability floor.
+        # excluded by the op_min_sm=90 capability floor.  The 2026-07 RTX
+        # 6000 Pro bring-up left this marker in place: the op is
+        # experimental-only (no default-plan scheduling, no SDK call-site —
+        # see DeepseekV4ForCausalLM_cases.yaml), so there is nothing to
+        # hardware-validate through the sanctioned plan.
         unverified_sms=(120,),
     ),
     # The standalone HCA/CSA FMLA sub-kernel collectors require the
@@ -199,17 +218,27 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsv4_topk_calib_test_cases",
         run_func="run_dsv4_sparse_kernel_worker",
         perf_filename=PerfFile.DSV4_CSA_TOPK_CALIB,
-        # SM120 disables topk v2 and its module path is unvalidated (see
-        # DSV4-TOPK-PHASE-AND-SM120); pre-Hopper is excluded by the
-        # op_min_sm=90 capability floor.
+        # SM120 serving disables topk v2 and takes v1 for both phases (see
+        # DSV4-TOPK-PHASE-AND-SM120). The RTX 6000 Pro probe (2026-07-06)
+        # showed the un-reviewed producer emits v2 rows on SM120 anyway
+        # (309/310 launched; one v2 shape fails a jit_kernel runtime check) —
+        # wrong-variant rows for that platform. Keep SM120 parked until the
+        # producer is made variant-aware and the whole-module CSA path is
+        # validated; pre-Hopper is excluded by the op_min_sm=90 capability
+        # floor.
         unverified_sms=(120,),
     ),
     # GLM-5 DSA sparse sub-kernels (mqa / topk / dsa_attn) — GLM-5 analogue of
     # the DSV4 sparse family; shapes 1:1 from the GLM-5 DSA module CSV.
     # GLM-5 sparse sub-kernels share the DeepGEMM fp8_mqa_logits / FlashMLA
     # sparse family: pre-Hopper is excluded by the op_min_sm=90 capability
-    # floors; SM120 has a different indexer API and no hardware validation,
-    # so it is parked by the maturity markers below.
+    # floors. SM120 stays parked after the RTX 6000 Pro probe (2026-07-06):
+    # mqa raises DeepGEMM "Unsupported architecture" (attention.hpp:184) and
+    # dsa_attn raises "Sparse Attention Forward Kernel is only supported on
+    # SM90a and SM100f", so the GLM-5 DSA serving family is unrunnable on
+    # SM120 at 0.5.14. The topk kernel itself ran clean (32/32 smoke points,
+    # fast_topk_transform_fused), but rows for a family serving can never run
+    # there would be non-serving data — park all three together.
     OpEntry(
         op="glm5_mqa_logits_module",
         module="collector.sglang.glm5_dsa_sparse_modules",
