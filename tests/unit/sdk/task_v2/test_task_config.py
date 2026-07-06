@@ -688,6 +688,24 @@ def test_wideep_deepseek_resolves_fp8_block_mla_labels():
     assert t_narrow.fmha_quant_mode == common.FMHAQuantMode.bfloat16
 
 
+def test_narrow_ep_deepep_moe_does_not_resolve_wideep_mla_labels():
+    """moe_backend='deepep_moe' alone does NOT imply WideEP: intra-node DeepEP (ep 1-8,
+    NVLink) is a valid narrow-EP config on sglang with enable_wideep=False (see
+    _resolve_agg_search's "Intra-node DeepEP" branch). It must keep the narrow-EP bf16
+    downgrade / regular MLA tables, not get mislabeled with WideEP's fp8_block/fp8 tags."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        moe_backend="deepep_moe",
+        total_gpus=8,
+    )
+    assert t.enable_wideep is False
+    assert t.moe_backend == "deepep_moe"
+    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+
+
 def test_enable_wideep_normalizes_moe_backend():
     """enable_wideep implies the deepep_moe MoE backend (mirrors v1 __init__), so DB
     validation selects the wideep_*_moe ops."""

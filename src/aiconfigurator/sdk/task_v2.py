@@ -766,7 +766,17 @@ class Task:
             # bfloat16, then the log_* overrides tag the rows fp8_block/fp8. The SDK
             # must query with those same labels, so resolve fmha->fp8_block (context
             # roles) and kvcache->fp8 (all roles) instead of the narrow-EP bf16 values.
-            is_wideep = backend_name == "sglang" and self.moe_backend == "deepep_moe"
+            # NOTE: moe_backend=="deepep_moe" alone does NOT imply WideEP -- it is also
+            # used for narrow, intra-node EP (see _resolve_agg_search's "Intra-node
+            # DeepEP (ep 1-8, NVLink)" branch, reachable with enable_wideep=False). That
+            # path queries the regular (non-wideep) MLA tables, so gate this resolution
+            # on the actual enable_wideep flag as well, or a narrow-EP deepep_moe config
+            # gets mislabeled with WideEP's fp8_block/fp8 tags.
+            is_wideep = (
+                backend_name == "sglang"
+                and self.moe_backend == "deepep_moe"
+                and bool(self._role_attr(role, "enable_wideep"))
+            )
             if is_wideep and is_deepseek_mla:
                 if role != "decode" and not fmha_explicit.get(role, False):
                     self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.fp8_block)
