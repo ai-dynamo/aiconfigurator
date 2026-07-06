@@ -25,6 +25,12 @@ pub struct ElementwiseOp {
     /// Bytes touched per input token. The query multiplies this by the
     /// runtime token count.
     pub bytes_per_token: f64,
+    /// CP sequence-shard factor (Python's `_seq_split`, = `cp_size`): the
+    /// per-rank token count is `ceil(num_tokens / seq_split)`. Defaults to 1.
+    /// (Python's `scale_num_tokens` is folded into `bytes_per_token` by the
+    /// serializer; `seq_split` is applied here to the token count.)
+    #[serde(default = "crate::operators::gemm::default_seq_split")]
+    pub seq_split: u32,
 }
 
 impl ElementwiseOp {
@@ -33,10 +39,12 @@ impl ElementwiseOp {
             name: name.into(),
             scale_factor: 1.0,
             bytes_per_token,
+            seq_split: 1,
         }
     }
 
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
+        let num_tokens = num_tokens.div_ceil(self.seq_split.max(1)); // CP: busiest rank
         let bytes = self.bytes_per_token * (num_tokens as f64);
         let latency = mem_op_latency_ms(&db.system_spec, bytes);
         Ok(PerformanceResult::new(latency, Source::Empirical).scaled(self.scale_factor))

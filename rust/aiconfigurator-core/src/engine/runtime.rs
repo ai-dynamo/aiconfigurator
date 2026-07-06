@@ -164,11 +164,12 @@ impl Engine {
         // The spec's own `systems_path` wins when present; otherwise fall back
         // to the `systems_root` argument.
         let systems_root = spec.engine.systems_path.as_deref().unwrap_or(systems_root);
-        let db = PerfDatabase::load(
+        let db = PerfDatabase::load_with_sources(
             systems_root,
             &spec.engine.system_name,
             spec.engine.backend.as_str(),
             version,
+            &spec.engine.perf_db_sources,
         )?;
         Engine::build(spec, Arc::new(db))
     }
@@ -530,6 +531,7 @@ mod tests {
                 name: "rmsnorm".into(),
                 scale_factor: 1.0,
                 bytes_per_token: 8192.0,
+                seq_split: 1,
             }),
             Op::Gemm(GemmOp {
                 name: "qkv_gemm".into(),
@@ -539,6 +541,7 @@ mod tests {
                 quant_mode: GemmQuantMode::Fp8Block,
                 scale_num_tokens: 0,
                 low_precision_input: false,
+                seq_split: 1,
             }),
             Op::ContextAttention(ContextAttentionOp {
                 name: "context_attention".into(),
@@ -550,6 +553,7 @@ mod tests {
                 kv_cache_dtype: KvCacheQuantMode::Fp8,
                 fmha_quant_mode: FmhaQuantMode::Bfloat16,
                 use_qk_norm: false,
+                cp_size: 1,
             }),
         ]
     }
@@ -560,6 +564,7 @@ mod tests {
                 name: "rmsnorm".into(),
                 scale_factor: 1.0,
                 bytes_per_token: 8192.0,
+                seq_split: 1,
             }),
             Op::GenerationAttention(GenerationAttentionOp {
                 name: "generation_attention".into(),
@@ -588,6 +593,7 @@ mod tests {
                 attention_dp_size: Some(1),
                 moe_tp_size: Some(1),
                 moe_ep_size: Some(8),
+                cp_size: None,
             },
             quantization: QuantizationConfig {
                 weight_dtype: None,
@@ -599,6 +605,7 @@ mod tests {
                 nextn: Some(n),
                 nextn_accept_rates: None,
             }),
+            perf_db_sources: Default::default(),
             extra: BTreeMap::new(),
         }
     }

@@ -32,6 +32,13 @@ pub struct ContextMlaOp {
     pub num_heads: u32,
     pub kv_cache_dtype: KvCacheQuantMode,
     pub fmha_quant_mode: FmhaQuantMode,
+    /// Context-parallel factor (Python `ContextMLA._cp_size`). When `>1`,
+    /// prefill MLA is modeled as SGLang AllGather rank-0's two zigzag chunks:
+    /// `ctx(c, prefix) + ctx(c, prefix + isl - c)` with `c = ceil(isl / 2cp)`,
+    /// mirroring `operators/attention.rs::ContextAttentionOp`. Absent in
+    /// pre-CP specs -> 1 (no sharding).
+    #[serde(default = "crate::operators::gemm::default_seq_split")]
+    pub cp_size: u32,
 }
 
 impl ContextMlaOp {
@@ -47,6 +54,7 @@ impl ContextMlaOp {
             num_heads,
             kv_cache_dtype,
             fmha_quant_mode,
+            cp_size: 1,
         }
     }
 
@@ -57,15 +65,28 @@ impl ContextMlaOp {
         isl: u32,
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
-        let full_s = isl + prefix;
-        let raw = db.mla.query_context(
-            batch_size,
-            full_s,
-            self.num_heads,
-            self.kv_cache_dtype,
-            self.fmha_quant_mode,
-        )?;
-        let latency = raw * prefix_correction(full_s, prefix);
+        // ctx(s, pfx): the un-sharded context-MLA query for a sequence chunk of
+        // length `s` at prefix `pfx`, with the prefix correction applied.
+        let ctx = |s: u32, pfx: u32| -> Result<f64, AicError> {
+            let full_s = s + pfx;
+            let raw = db.mla.query_context(
+                batch_size,
+                full_s,
+                self.num_heads,
+                self.kv_cache_dtype,
+                self.fmha_quant_mode,
+            )?;
+            Ok(raw * prefix_correction(full_s, pfx))
+        };
+        // Context parallelism (SGLang AllGather / zigzag): model rank 0's two
+        // balanced chunks, c = ceil(isl / 2cp). Mirrors Python
+        // `ContextMLA.query` and `operators/attention.rs::ContextAttentionOp`.
+        let latency = if self.cp_size > 1 {
+            let c = isl.div_ceil(2 * self.cp_size).max(1);
+            ctx(c, prefix)? + ctx(c, prefix + isl - c)?
+        } else {
+            ctx(isl, prefix)?
+        };
         Ok(PerformanceResult::new(latency, Source::Silicon)
             .clamp_non_negative()
             .scaled(self.scale_factor))
