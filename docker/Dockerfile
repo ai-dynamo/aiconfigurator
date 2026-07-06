@@ -38,7 +38,14 @@ RUN set -e; \
         echo "Run 'git lfs install && git lfs pull' in the source tree before building." >&2; \
         exit 1; \
     fi
+# Build the native `aiconfigurator-core` wheel AND an sdist. The wheel is
+# linux_x86_64-only (native PyO3 extension); the sdist is the fallback that lets
+# `pip install` build from source on other platforms (macOS, Linux aarch64) when
+# a Rust toolchain is present. Without it, ARM64/macOS users cannot install AIC
+# via the documented pip command. The upper `aiconfigurator` wheel is
+# py3-none-any, so it needs no sdist.
 RUN cd src/aiconfigurator-core && uv build --wheel --out-dir /workspace/dist && \
+    uv build --sdist --out-dir /workspace/dist && \
     cd /workspace && uv build --wheel --out-dir /workspace/dist
 
 FROM base AS runtime

@@ -28,6 +28,15 @@ Let's get started.
 
 ### Install from PyPI
 
+> **Supported platforms.** Pre-built binary wheels are published for **Linux x86-64
+> only** — `aiconfigurator-core` ships a native (Rust/PyO3) extension. On other
+> platforms (macOS, Linux aarch64), `pip` falls back to the `aiconfigurator-core`
+> **source distribution**, which builds the extension from source and therefore
+> requires a **Rust toolchain** and a C compiler (see
+> [Build and Install from Source](#build-and-install-from-source) for
+> prerequisites). Without those tools, install on non-Linux-x86-64 platforms will
+> fail.
+
 ```bash
 pip3 install aiconfigurator
 ```
@@ -47,7 +56,12 @@ git lfs pull
 # 3. Create and activate a virtual environment
 python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.9 or later)
 
-# 4. Install aiconfigurator-core, then aiconfigurator
+# 4. Install a Rust toolchain + C compiler (needed to build the aiconfigurator-core
+#    native extension from source; required on macOS and Linux aarch64, and for any
+#    source/sdist install). Skip if you already have `cargo` and a C linker.
+#    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # then restart your shell
+
+# 5. Install aiconfigurator-core, then aiconfigurator
 pip3 install ./src/aiconfigurator-core
 pip3 install .
 ```
