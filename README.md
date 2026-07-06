@@ -255,7 +255,7 @@ Refer to the YAML file and modify as needed. Pass your customized YAML file to `
 ```bash
 aiconfigurator cli exp --yaml-path customized_config.yaml
 ```
-We can use `exp` mode to compare multiple results, including disagg vs. agg, homegenous vs. heterogenous, and more than 2 experiments.
+We can use `exp` mode to compare multiple results, including disagg vs. agg, homogeneous vs. heterogeneous, and more than 2 experiments.
 We've crafted several examples in `src/aiconfigurator/cli/exps/*.yaml`
 For the full guide, refer to [CLI User Guide](docs/cli_user_guide.md).
 
