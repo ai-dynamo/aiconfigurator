@@ -396,6 +396,8 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "moe_tp_size": _optional_int(getattr(model_config, "moe_tp_size", None)),
         "moe_ep_size": _optional_int(getattr(model_config, "moe_ep_size", None)),
         "attention_dp_size": _optional_int(getattr(model_config, "attention_dp_size", None)),
+        # Part of the engine identity so cp variants get distinct cached handles.
+        "cp_size": _optional_int(getattr(model_config, "cp_size", None)),
         "weight_dtype": _quant_to_dtype(getattr(model_config, "gemm_quant_mode", None)),
         "moe_dtype": _moe_quant_to_dtype(getattr(model_config, "moe_quant_mode", None)),
         "activation_dtype": _quant_to_dtype(getattr(model_config, "fmha_quant_mode", None)),

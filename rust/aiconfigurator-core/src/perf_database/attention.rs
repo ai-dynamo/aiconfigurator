@@ -29,6 +29,8 @@ use std::sync::OnceLock;
 use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
+use crate::config::{PerfDbSources, PerfSource};
+use super::{kernel_source_ok, resolve_op_sources};
 use super::interpolation::{
     interp_1d, interp_2d_1d_grid, interp_2d_1d_grid_strict, nearest_neighbors, Grid3,
 };
@@ -37,6 +39,12 @@ use crate::perf_database::parquet_loader::PerfReader;
 pub struct AttentionTable {
     data_root: PathBuf,
     system_spec: SystemSpec,
+    /// Ordered, priority-sorted sources for each attention perf file
+    /// (shared-layer aware; see [`PerfSource`]). Single-primary, no-filter by
+    /// default (`AttentionTable::new`).
+    context_sources: Vec<PerfSource>,
+    generation_sources: Vec<PerfSource>,
+    encoder_sources: Vec<PerfSource>,
     context: OnceLock<Result<ContextGrids, AicError>>,
     generation: OnceLock<Result<GenerationGrids, AicError>>,
     encoder: OnceLock<Result<EncoderGrids, AicError>>,
@@ -78,10 +86,36 @@ struct EncoderKey {
 }
 
 impl AttentionTable {
+    /// Construct an empty table for the given data directory. No I/O. Each
+    /// perf file is sourced solely from `data_root/<basename>` with no
+    /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
+        Self::with_sources(data_root, system_spec, &PerfDbSources::default())
+    }
+
+    /// Construct with shared-layer (sibling/cross-version) sources resolved from
+    /// `perf_db_sources` (Python-supplied). Each attention file falls back to
+    /// its primary `data_root/<basename>` when absent from the map. No I/O.
+    pub fn with_sources(
+        data_root: PathBuf,
+        system_spec: SystemSpec,
+        perf_db_sources: &PerfDbSources,
+    ) -> Self {
+        let context_sources =
+            resolve_op_sources(perf_db_sources, "context_attention_perf.parquet", &data_root);
+        let generation_sources = resolve_op_sources(
+            perf_db_sources,
+            "generation_attention_perf.parquet",
+            &data_root,
+        );
+        let encoder_sources =
+            resolve_op_sources(perf_db_sources, "encoder_attention_perf.parquet", &data_root);
         Self {
             data_root,
             system_spec,
+            context_sources,
+            generation_sources,
+            encoder_sources,
             context: OnceLock::new(),
             generation: OnceLock::new(),
             encoder: OnceLock::new(),
@@ -187,16 +221,14 @@ impl AttentionTable {
 
     fn load_context(&self) -> Result<&ContextGrids, AicError> {
         let cell = self.context.get_or_init(|| {
-            load_context_parquet(&self.data_root.join("context_attention_perf.parquet"))
+            load_context_parquet(&self.context_sources)
         });
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_generation(&self) -> Result<&GenerationGrids, AicError> {
         let cell = self.generation.get_or_init(|| {
-            let mut grids = load_generation_parquet(
-                &self.data_root.join("generation_attention_perf.parquet"),
-            )?;
+            let mut grids = load_generation_parquet(&self.generation_sources)?;
             // Mirror Python `GenerationAttention.load_data` order:
             //   1. clamp to SOL (`_correct_sol`)
             //   2. densify the grid (`_extrapolate` -> `extrapolate_data_grid`)
@@ -215,7 +247,7 @@ impl AttentionTable {
 
     fn load_encoder(&self) -> Result<&EncoderGrids, AicError> {
         let cell = self.encoder.get_or_init(|| {
-            load_encoder_parquet(&self.data_root.join("encoder_attention_perf.parquet"))
+            load_encoder_parquet(&self.encoder_sources)
         });
         cell.as_ref().map_err(clone_err)
     }
@@ -230,92 +262,125 @@ fn normalize_kv(n: u32, n_kv: u32) -> u32 {
     }
 }
 
-fn load_context_parquet(path: &Path) -> Result<ContextGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let batch_size_col = reader.col("batch_size")?;
-    let isl_col = reader.col("isl")?;
-    let num_heads_col = reader.col("num_heads")?;
-    let num_kv_col = reader.col("num_key_value_heads")?;
-    let head_dim_col = reader.col("head_dim")?;
-    let attn_dtype_col = reader.col("attn_dtype")?;
-    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
-    let latency_col = reader.col("latency")?;
-    let window_size_col = reader.col_optional("window_size");
-
+/// Load the context-attention table from an ordered, priority-sorted source
+/// list. Sources are read in order; the first source containing a key wins
+/// (`or_insert`). Missing files are skipped; an error is returned only when no
+/// source yields rows.
+fn load_context_parquet(sources: &[PerfSource]) -> Result<ContextGrids, AicError> {
     let mut by_keys: BTreeMap<ContextKey, Grid3<f64>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let num_heads = row.u32(num_heads_col)?;
-        let num_kv = row.u32(num_kv_col)?;
-        let key = ContextKey {
-            fmha_quant: row.str_owned(attn_dtype_col)?,
-            kv_quant: row.str_owned(kv_cache_dtype_col)?,
-            n_kv_lookup: normalize_kv(num_heads, num_kv),
-            head_size: row.u32(head_dim_col)?,
-            window_size: row.u32_optional(window_size_col)?.unwrap_or(0),
-        };
-        // First-wins parity with Python `load_context_attention_data`.
-        by_keys
-            .entry(key)
-            .or_default()
-            .entry(num_heads)
-            .or_default()
-            .entry(row.u32(isl_col)?)
-            .or_default()
-            .entry(row.u32(batch_size_col)?)
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let batch_size_col = reader.col("batch_size")?;
+        let isl_col = reader.col("isl")?;
+        let num_heads_col = reader.col("num_heads")?;
+        let num_kv_col = reader.col("num_key_value_heads")?;
+        let head_dim_col = reader.col("head_dim")?;
+        let attn_dtype_col = reader.col("attn_dtype")?;
+        let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+        let latency_col = reader.col("latency")?;
+        let window_size_col = reader.col_optional("window_size");
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let num_heads = row.u32(num_heads_col)?;
+            let num_kv = row.u32(num_kv_col)?;
+            let key = ContextKey {
+                fmha_quant: row.str_owned(attn_dtype_col)?,
+                kv_quant: row.str_owned(kv_cache_dtype_col)?,
+                n_kv_lookup: normalize_kv(num_heads, num_kv),
+                head_size: row.u32(head_dim_col)?,
+                window_size: row.u32_optional(window_size_col)?.unwrap_or(0),
+            };
+            // First-wins parity with Python `load_context_attention_data`,
+            // extended across shared-layer sources (earlier source wins).
+            by_keys
+                .entry(key)
+                .or_default()
+                .entry(num_heads)
+                .or_default()
+                .entry(row.u32(isl_col)?)
+                .or_default()
+                .entry(row.u32(batch_size_col)?)
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if by_keys.is_empty() {
+    if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no context-attention rows loaded from {}",
-            path.display()
+            "no context-attention rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     Ok(ContextGrids { by_keys })
 }
 
-fn load_generation_parquet(path: &Path) -> Result<GenerationGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let batch_size_col = reader.col("batch_size")?;
-    let isl_col = reader.col("isl")?;
-    let num_heads_col = reader.col("num_heads")?;
-    let num_kv_col = reader.col("num_key_value_heads")?;
-    let head_dim_col = reader.col("head_dim")?;
-    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
-    let step_col = reader.col("step")?;
-    let latency_col = reader.col("latency")?;
-    let window_size_col = reader.col_optional("window_size");
-
+/// Load the generation-attention table from an ordered, priority-sorted source
+/// list. Same first-wins-across-sources + missing-file-skip semantics as
+/// [`load_context_parquet`].
+fn load_generation_parquet(sources: &[PerfSource]) -> Result<GenerationGrids, AicError> {
     let mut by_keys: BTreeMap<GenerationKey, Grid3<f64>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let num_heads = row.u32(num_heads_col)?;
-        let num_kv = row.u32(num_kv_col)?;
-        let key = GenerationKey {
-            kv_quant: row.str_owned(kv_cache_dtype_col)?,
-            n_kv_lookup: normalize_kv(num_heads, num_kv),
-            head_size: row.u32(head_dim_col)?,
-            window_size: row.u32_optional(window_size_col)?.unwrap_or(0),
-        };
-        let sequence_tokens = row.u32(isl_col)? + row.u32(step_col)?;
-        // First-wins parity with Python `load_generation_attention_data`.
-        // Grid axis order is `[n][b][s]` to match Python's `interp_3d(n, b, s)`
-        // (1-D over n, bilinear over (b, s)). Nesting: num_heads -> batch_size
-        // -> sequence_tokens.
-        by_keys
-            .entry(key)
-            .or_default()
-            .entry(num_heads)
-            .or_default()
-            .entry(row.u32(batch_size_col)?)
-            .or_default()
-            .entry(sequence_tokens)
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let batch_size_col = reader.col("batch_size")?;
+        let isl_col = reader.col("isl")?;
+        let num_heads_col = reader.col("num_heads")?;
+        let num_kv_col = reader.col("num_key_value_heads")?;
+        let head_dim_col = reader.col("head_dim")?;
+        let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+        let step_col = reader.col("step")?;
+        let latency_col = reader.col("latency")?;
+        let window_size_col = reader.col_optional("window_size");
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let num_heads = row.u32(num_heads_col)?;
+            let num_kv = row.u32(num_kv_col)?;
+            let key = GenerationKey {
+                kv_quant: row.str_owned(kv_cache_dtype_col)?,
+                n_kv_lookup: normalize_kv(num_heads, num_kv),
+                head_size: row.u32(head_dim_col)?,
+                window_size: row.u32_optional(window_size_col)?.unwrap_or(0),
+            };
+            let sequence_tokens = row.u32(isl_col)? + row.u32(step_col)?;
+            // First-wins parity with Python `load_generation_attention_data`,
+            // extended across shared-layer sources.
+            // Grid axis order is `[n][b][s]` to match Python's `interp_3d(n, b, s)`
+            // (1-D over n, bilinear over (b, s)). Nesting: num_heads -> batch_size
+            // -> sequence_tokens.
+            by_keys
+                .entry(key)
+                .or_default()
+                .entry(num_heads)
+                .or_default()
+                .entry(row.u32(batch_size_col)?)
+                .or_default()
+                .entry(sequence_tokens)
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if by_keys.is_empty() {
+    if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no generation-attention rows loaded from {}",
-            path.display()
+            "no generation-attention rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     Ok(GenerationGrids { by_keys })
@@ -537,37 +602,53 @@ fn kv_cache_quant_by_name(name: &str) -> Option<KvCacheQuantMode> {
     })
 }
 
-fn load_encoder_parquet(path: &Path) -> Result<EncoderGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let batch_size_col = reader.col("batch_size")?;
-    let isl_col = reader.col("isl")?;
-    let num_heads_col = reader.col("num_heads")?;
-    let head_dim_col = reader.col("head_dim")?;
-    let attn_dtype_col = reader.col("attn_dtype")?;
-    let latency_col = reader.col("latency")?;
-
+/// Load the encoder-attention table from an ordered, priority-sorted source
+/// list. Same first-wins-across-sources + missing-file-skip semantics as
+/// [`load_context_parquet`].
+fn load_encoder_parquet(sources: &[PerfSource]) -> Result<EncoderGrids, AicError> {
     let mut by_keys: BTreeMap<EncoderKey, Grid3<f64>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = EncoderKey {
-            fmha_quant: row.str_owned(attn_dtype_col)?,
-            head_size: row.u32(head_dim_col)?,
-        };
-        // First-wins parity with Python `load_encoder_attention_data`.
-        by_keys
-            .entry(key)
-            .or_default()
-            .entry(row.u32(num_heads_col)?)
-            .or_default()
-            .entry(row.u32(isl_col)?)
-            .or_default()
-            .entry(row.u32(batch_size_col)?)
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let batch_size_col = reader.col("batch_size")?;
+        let isl_col = reader.col("isl")?;
+        let num_heads_col = reader.col("num_heads")?;
+        let head_dim_col = reader.col("head_dim")?;
+        let attn_dtype_col = reader.col("attn_dtype")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = EncoderKey {
+                fmha_quant: row.str_owned(attn_dtype_col)?,
+                head_size: row.u32(head_dim_col)?,
+            };
+            // First-wins parity with Python `load_encoder_attention_data`,
+            // extended across shared-layer sources.
+            by_keys
+                .entry(key)
+                .or_default()
+                .entry(row.u32(num_heads_col)?)
+                .or_default()
+                .entry(row.u32(isl_col)?)
+                .or_default()
+                .entry(row.u32(batch_size_col)?)
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if by_keys.is_empty() {
+    if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no encoder-attention rows loaded from {}",
-            path.display()
+            "no encoder-attention rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     Ok(EncoderGrids { by_keys })
@@ -760,17 +841,22 @@ mod tests {
     }
 
     #[test]
-    fn encoder_attention_absent_on_vllm_b200_errors_clearly() {
-        // vLLM b200 doesn't ship encoder_attention_perf.txt; expect a clear
-        // IO error from the lazy loader.
+    fn encoder_attention_loads_on_vllm_b200() {
+        // b200_sxm/vllm/0.19.0 ships encoder_attention_perf.parquet (added in
+        // #1210, "add non causal attention data"), so the lazy loader resolves
+        // the table and the query returns a real latency. (This case used to
+        // assert a clean error back when the file was absent; the fixture now
+        // exercises the encoder load path instead. The missing-data error path
+        // is covered by `gemm_missing_data_root_errors_on_query` and
+        // `compute_scale_absent_on_vllm_b200_errors_clearly`.)
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
-        let err = table
+        let latency = table
             .query_encoder(1, 1024, 16, 64, FmhaQuantMode::Bfloat16)
-            .unwrap_err();
-        match err {
-            AicError::Io { .. } | AicError::PerfDatabase(_) => {}
-            other => panic!("unexpected error variant: {other:?}"),
-        }
+            .expect("encoder query must succeed once encoder data is present");
+        assert!(
+            latency > 0.0,
+            "expected a positive encoder latency, got {latency}"
+        );
     }
 
     #[test]
