@@ -1538,3 +1538,118 @@ Practical exposure note for consumers: B200 serving impact is limited to
 prefill batches of >= 64 requests whose chunk exceeds 11,673 tokens; CSA
 context data for batches <= 32 is complete on B200 through 1M-token
 prefixes.
+
+### SM120 (RTX PRO 6000 Blackwell SE) bring-up probe rounds (2026-07-05/06)
+
+Two node-local probe rounds ran on an 8x RTX PRO 6000 node from the
+`sm120-pass` working tree (head `9b53108a` + the uncommitted fixes this entry
+accompanies); artifacts live under `6000pro_l40s/sm120_probe_20260705/` and
+are evidence, not published campaign data. All probes used `--smoke`
+(4 sampled cases per op) through the real `collect.py` executor except where
+a diagnostic is explicitly noted.
+
+Round 1 (2026-07-05) — dense/encoder/GEMM/MLA/MoE:
+
+- Per-model dense attention routing (Qwen3, Qwen3.5 dense/MoE, Gemma-4,
+  GPT-OSS, Llama-4, MiMo, MiMo-V2, NemotronH) plus Qwen3-VL encoder attention
+  and the full GEMM/compute_scale sweep all produced rows; the only errors
+  are the designed FP8 live-activation fail-closed raises.
+- MiMo-V2 QK192/V128: the SM120 default flashinfer rejects the asymmetric
+  K/V pool in both phases (prefill reshape `[-1, 4, 192]` on the 128-wide V
+  pool; decode paged K/V stride check 768 vs 512). Triton is the only
+  runnable 0.5.14 path on Blackwell; the yaml pin comment now carries the
+  hardware citation (SM103 stays source-derived).
+- MLA: SM120's default MLA backend is TritonAttnBackend, whose 0.5.14 init
+  reads global `server_args.cuda_graph_config` through
+  `cuda_graph_fully_disabled()`; the collector's MockServerArgs gained
+  `cuda_graph_config = None` (same answer serving gets with its default
+  config; the SM90 fa3 / SM100 trtllm_mla init paths never read the field).
+  Post-fix MLA context/generation completed with zero errors.
+- MoE audit: 61 OK probe cases across bf16/triton, bf16/flashinfer_cutlass
+  (Nemotron), fp8_block/triton, nvfp4/flashinfer_cutlass, plus Marlin
+  w4a16_mxfp4 GPT-OSS rows (`sglang_marlin_moe`, tp=1/2) after
+  `case_generator.py`/`collect_moe.py` accept Marlin for the weight-only
+  modes (serving itself selects Marlin on SM120: server_args.py:3876-3887;
+  mxfp4.py:520-521 asserts SM90-or-SM120). The framework-auto NVFP4
+  trtllm-gen path was shown in-kernel broken on SM120
+  (`trtllm_batched_gemm_runner.cu:286`), so the flashinfer_cutlass pin is
+  the serving truth. Remaining probe failures are the designed alignment
+  fail-closed raises at extreme TP plus the upstream flashinfer_cutlass
+  gated-activation padding assertion (2 models, tp=32) — all classified.
+  The `moe` SM120 registry maturity marker is lifted;
+  `w4a8_mxfp4_mxfp8` is declared SM100/103-only (`max_sm_exclusive: 120`,
+  no SM120 mxfp8-activation MXFP4 path in 0.5.14).
+
+Round 2 (2026-07-06) — DSV4 / DSA / GLM sparse / GDN / mHC:
+
+- DSV4 modules (`sgl-project/DeepSeek-V4-Flash-FP8`): HCA context 12 rows
+  and HCA generation 8 rows, zero errors — first SM120 HCA rows
+  (`compressed_flashmla` family label). CSA generation collected its small
+  batches (4 rows) with bs=256 failing as real OOM on the 96 GB card
+  (recorded). CSA context fails closed on every case by the collector's own
+  guard: `_derive_csa_context_pool_cap` raises because exact 0.5.14 forces a
+  Torch logits leaf on SM120 whose memory contract is not the SM90/100/103
+  DeepGEMM workspace formula. `dsv4_csa_context_module` now carries
+  `unverified_sms=(120,)` until that workspace policy is separately
+  validated.
+- mHC (`mhc_module`): 34/35 per direction; the single failure per direction
+  is the 524,288-token top sweep cell, a real OOM on 96 GB (B200 completed
+  the same cell in its 140/140). Platform dispatch fact recorded by
+  provenance: SM120 resolves pre-norm to the Torch leaf
+  (`sglang_torch_mhc_pre`, `resolved_tilelang_pre=False`,
+  `resolved_deepgemm_hc_prenorm=False`) while post-norm stays tilelang —
+  unlike B200's tilelang/tilelang with DeepGEMM prenorm.
+- GDN root cause and guard: the first probe aborted both Qwen3.5 sweeps with
+  an async illegal access. Bisection plus compute-sanitizer memcheck pinned
+  it to the stock 0.5.14 `_causal_conv1d_fwd_kernel` int32 token-offset
+  arithmetic (`(sequence_start_index + token_offset + idx_token) *
+  stride_o_token`, causal_conv1d_triton.py:373-379 at image source
+  `49e384ce`): the invalid 4-byte global write lands ~3.8 GB BEFORE the
+  nearest allocation (negative int32 wrap) at the first cell where
+  `total_tokens * conv_channels` reaches 2^31 elements — 262,144 tokens for
+  both Qwen3.5 conv widths (10,240 dense / 12,288 MoE); the 131,072-token
+  cells pass and the isolated crossing cell fails deterministically. This is
+  the same defect class as `DSA-FUSED-KS-4G-OFFSET` and is platform-neutral
+  arithmetic; H20's full GDN run never executed these cells because the
+  removed `f9c1e29c` silent thresholds pruned them — the fail-loud policy
+  surfaced a real stock-kernel defect on first hardware contact. A verified
+  kernel-limit guard now raises a classified error before launching the
+  corrupting kernel (collect_gdn.py, with a source-anchored contract test);
+  the guarded rerun collects 102/112 context cells on BOTH models (204 rows
+  each, all batch groups 1..64, max collected cell 131,072 tokens) with
+  exactly the 10 crossing cells as classified failures. Generation confirms
+  the known `GDN-DECODE-BS1024` grid-Y=65,536 boundary on SM120 (MoE HV=64
+  fails at bs=1024 with Triton "invalid argument"; dense HV=48 passes
+  11/11).
+- DSA modules (DSV3.2 and GLM-5.2-NVFP4, full + skip_indexer): every case
+  raises `TllmGenFmhaRunner ... Unsupported architecture`
+  (fmhaRunner.cuh:37) — hardware confirmation of the
+  `DSA-SUBBACKEND-SELECTOR` row (SM120 forced toward TRTLLM-GEN with no
+  bundled FlashMLA target). The `(103, 120)` / `(90, 103, 120)` markers
+  stay, now probe-backed rather than source-derived.
+- GLM-5 sparse sub-kernels (probed under the SM100+ artifact identity
+  `nvidia/GLM-5.2-NVFP4`; the `zai-org/GLM-5` filter correctly yields zero
+  cases by the declared artifact policy): `glm5_mqa_logits_module` raises
+  DeepGEMM "Unsupported architecture" (attention.hpp:184) on all 32 smoke
+  points; `glm5_dsa_attn_module` raises "Sparse Attention Forward Kernel is
+  only supported on SM90a and SM100f architectures" on all 32;
+  `glm5_topk_module` alone ran clean (64 rows, `fast_topk_transform_fused`).
+  Since serving can never run the SM120 GLM-5 DSA family at 0.5.14, all
+  three keep `unverified_sms=(120,)` — the topk result is recorded here so a
+  future framework bump only needs the other two kernels.
+- `dsv4_csa_topk_calib`: 309/310 smoke sweep points launched (1,510 rows);
+  the single failure is a v2 shape hitting a jit_kernel runtime check. But
+  the rows include `topk_transform_v2` variants that SM120 serving never
+  takes (`DSV4-TOPK-PHASE-AND-SM120`: SM120 is v1 for both phases), so the
+  un-reviewed producer emits wrong-variant rows on this platform; the
+  `(120,)` marker stays until the producer is variant-aware and the
+  whole-module CSA path is validated. `dsv4_paged_mqa_logits_module` was
+  not probed: it is experimental-only (no default-plan scheduling, no SDK
+  call-site) and keeps its marker.
+
+Registry deltas from this pass: `moe` SM120 marker lifted (Round 1);
+`dsv4_csa_context_module` gains `(120,)`; every other sparse-family marker
+is retained with probe-backed comments. Worker-fatal recycle, classified
+failure records, and kernel provenance behaved as designed throughout —
+including recording the Torch pre-norm leaf on mHC and surviving the GDN
+illegal-access worker resets.
