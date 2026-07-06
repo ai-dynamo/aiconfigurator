@@ -38,6 +38,8 @@ def test_main(
     rank: int,
     buffer: deep_ep.Buffer,
     group: dist.ProcessGroup,
+    do_check: bool = True,
+    metrics_out: list | None = None,
 ):
     # Settings
     num_tokens, hidden = args.num_tokens, args.hidden
@@ -112,7 +114,7 @@ def test_main(
             assert (check_x[check_start:check_end, :].int() - i).sum().item() == 0
             check_start = check_end
 
-    for previous_mode in (False, True):
+    for previous_mode in (False, True) if do_check else ():
         for async_mode in (False, True):
             for current_x in filter(lambda elem: elem is not None, (x_pure_rand, x, x_e4m3)):
                 for with_topk in (False, True):
@@ -255,9 +257,27 @@ def test_main(
     if local_rank == 0:
         print("", flush=True)
 
+    if not do_check:
+        # When correctness checks are skipped (perf collection), the big loop
+        # above never ran, so establish the `handle` and NVL byte counters that
+        # the tuning loops below need via a single throwaway dispatch.
+        recv_x, _, _, _, handle, _ = buffer.dispatch(
+            x=x,
+            num_tokens_per_rank=num_tokens_per_rank,
+            is_token_in_rank=is_token_in_rank,
+            num_tokens_per_expert=num_tokens_per_expert,
+            config=config,
+        )
+        recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
+        dispatch_bf16_nvl_recv_bytes = recv_x.numel() * 2
+        combine_bf16_nvl_send_bytes = dispatch_bf16_nvl_recv_bytes
+
     # Tune dispatch performance
     best_dispatch_results = None
     fp8_factor = (1 + 4 / 128) / 2
+    # Best dispatch (transmit_us, sms) recorded for metrics_out; the first
+    # current_x is FP8 when the build supports it, matching extract_data.py.
+    dispatch_metric = None
     for current_x in filter(lambda elem: elem is not None, (x_e4m3, x)):
         best_time, best_results = 1e10, None
         nvl_recv_bytes = (
@@ -292,6 +312,10 @@ def test_main(
                 flush=True,
             )
             print("", flush=True)
+
+        if dispatch_metric is None and best_results is not None:
+            # transmit_us, dispatch_sms (intranode dispatch has no RDMA notify)
+            dispatch_metric = (best_time * 1e6, best_results[0])
 
         # Gather the best config from rank 0 and the first test setting
         if best_dispatch_results is None:
@@ -341,6 +365,23 @@ def test_main(
             flush=True,
         )
         print("", flush=True)
+        if metrics_out is not None and dispatch_metric is not None and best_results is not None:
+            # Intranode normal-mode dispatch/combine run entirely over NVLink, so
+            # the RDMA "notify" phase is 0 us (matching extract_data.py output).
+            metrics_out.append(
+                {
+                    "num_tokens": num_tokens,
+                    "hidden": hidden,
+                    "num_experts": num_experts,
+                    "num_topk": num_topk,
+                    "dispatch_sms": dispatch_metric[1],
+                    "dispatch_transmit_us": dispatch_metric[0],
+                    "dispatch_notify_us": 0.0,
+                    "combine_sms": best_results[0],
+                    "combine_transmit_us": best_time * 1e6,
+                    "combine_notify_us": 0.0,
+                }
+            )
 
 
 # noinspection PyUnboundLocalVariable,PyShadowingNames

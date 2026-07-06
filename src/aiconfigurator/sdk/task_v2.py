@@ -759,12 +759,15 @@ class Task:
         # data-driven fallback below must NOT fire on an EXPLICIT fp8 -- explicit
         # values are the user's contract and validate fails fast on them.
         fmha_explicit: dict[str, bool] = {}
+        kv_explicit: dict[str, bool] = {}
         for role in roles:
             for key in _QUANT_ENUM_TABLES:
                 explicit = self._role_attr(role, key)
                 from_hf = base.get(key)
                 if key == "fmha_quant_mode":
                     fmha_explicit[role] = explicit is not None
+                if key == "kvcache_quant_mode":
+                    kv_explicit[role] = explicit is not None
                 # Native DeepSeek-V4 on sglang uses arch-specific MoE kernels; the
                 # shared helper (also called on the cli estimate path) returns the
                 # dedicated perf-DB quant mode. Acts at the HF-base layer so an
@@ -785,6 +788,28 @@ class Task:
                 resolved = from_hf if from_hf is not None else fallback
                 self._set_role_attr(role, key, resolved)
 
+        # WideEP DeepSeek/Kimi remaps FMHA/KV labels to match collector tagging on
+        # the wideep_*_mla tables (see collect_mla_module.py). Must run before the
+        # data-driven fp8->bf16 fallback so those roles are not downgraded.
+        for role in roles:
+            backend_name = self._role_attr(role, "backend_name")
+            is_deepseek_mla = self._architecture in (
+                "DeepseekV3ForCausalLM",
+                "KimiK25ForConditionalGeneration",
+            )
+            # WideEP routes DeepSeek/Kimi attention through the wideep_*_mla tables,
+            # which the collector records from a bf16 run but LABELS fp8_block (fmha) /
+            # fp8 (kv) -- see collect_mla_module.py: _build_wideep_mla_test_cases runs
+            # bfloat16, then the log_* overrides tag the rows fp8_block/fp8. The SDK
+            # must query with those same labels, so resolve fmha->fp8_block (context
+            # roles) and kvcache->fp8 (all roles) instead of the narrow-EP bf16 values.
+            is_wideep = backend_name == "sglang" and self.moe_backend == "deepep_moe"
+            if is_wideep and is_deepseek_mla:
+                if role != "decode" and not fmha_explicit.get(role, False):
+                    self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.fp8_block)
+                if not kv_explicit.get(role, False):
+                    self._set_role_attr(role, "kvcache_quant_mode", common.KVCacheQuantMode.fp8)
+
         # Data-driven FMHA resolution: if an inferred fp8 has no fp8 slice in
         # the role's fmha-keyed context-attention table, fall back to bfloat16
         # with a warning instead of failing validate later.  bf16-as-fp8 is
@@ -800,7 +825,8 @@ class Task:
         # compute dtype follows the kv-cache dtype; the generation MLA module
         # loader drops the degenerate mla_dtype column), so an fp8 label is
         # inert on decode -- and validate likewise checks fmha only for
-        # context-using roles.
+        # context-using roles. WideEP DeepSeek/Kimi above already remapped to
+        # fp8_block, so this fp8->bf16 path does not touch those roles.
         for role in roles:
             if role == "decode":
                 continue

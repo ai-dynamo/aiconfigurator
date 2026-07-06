@@ -39,6 +39,8 @@ class PerfFile(str, Enum):
     WIDEEP_GENERATION_MLA = "wideep_generation_mla_perf.txt"
     WIDEEP_CONTEXT_MOE = "wideep_context_moe_perf.txt"
     WIDEEP_GENERATION_MOE = "wideep_generation_moe_perf.txt"
+    WIDEEP_DEEPEP_LL = "wideep_deepep_ll_perf.txt"
+    WIDEEP_DEEPEP_NORMAL = "wideep_deepep_normal_perf.txt"
     MLA_CONTEXT_MODULE = "mla_context_module_perf.txt"
     MLA_GENERATION_MODULE = "mla_generation_module_perf.txt"
     DSA_CONTEXT_MODULE = "dsa_context_module_perf.txt"
