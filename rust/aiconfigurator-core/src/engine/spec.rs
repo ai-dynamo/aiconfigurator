@@ -220,6 +220,7 @@ mod tests {
             num_heads: 128,
             kv_cache_dtype: KvCacheQuantMode::Bfloat16,
             fmha_quant_mode: FmhaQuantMode::Bfloat16,
+            cp_size: 1,
         }
     }
 

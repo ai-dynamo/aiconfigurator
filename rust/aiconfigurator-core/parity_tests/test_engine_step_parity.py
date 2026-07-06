@@ -971,6 +971,24 @@ CP_CASES = [
         ),
         id="qwen3-235b-a22b-b200-sglang-0510-cp4",
     ),
+    # MLA context-parallelism: Kimi is MLA with bfloat16 FMHA (collected on
+    # sglang), so it exercises the ContextMLA cp zigzag sharding. (DeepSeek-R1
+    # would need the uncollected fp8-FMHA context-MLA slice; DSA/dsv4 CP need
+    # uncollected sparse mqa/topk tables — both out of scope until collected.)
+    pytest.param(
+        EngineStepParityCase(
+            model_path="moonshotai/Kimi-K2.5",
+            system_name="b200_sxm",
+            backend_name="sglang",
+            backend_version="0.5.10",
+            tp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=8,
+            moe_ep_size=1,
+            cp_size=8,
+        ),
+        id="kimi-k25-b200-sglang-0510-cp8",
+    ),
 ]
 
 

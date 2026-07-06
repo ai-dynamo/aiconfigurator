@@ -200,6 +200,7 @@ def _context_mla(op: ContextMLA) -> dict:
         "num_heads": op._num_heads,
         "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
+        "cp_size": op._cp_size,
     }
 
 
