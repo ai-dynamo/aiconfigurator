@@ -275,8 +275,25 @@ def task_config_to_generator_config(
     )
 
     params = _deep_merge(params, overrides.get("Params"))
-    # Expose SDK's system identifier to templates via NodeConfig.system_name
-    params.setdefault("NodeConfig", {})["system_name"] = task_config.system_name
+    # Expose SDK's system identifier to templates via NodeConfig.system_name.
+    # Use primary_system_name: for disagg, the shared top-level system_name is
+    # empty (phase-specific prefill/decode systems carry the value), so reading
+    # system_name here would blank NodeConfig and drop all hardware facts.
+    #
+    # NodeConfig.system_name (and the hardware facts derived from it) is global,
+    # while disagg prefill/decode can request different systems. Heterogeneous
+    # placement is out of scope here, so fail fast rather than silently applying
+    # the prefill system's node selectors/env to both workers.
+    system_name = task_config.primary_system_name
+    if task_config.serving_mode == "disagg":
+        prefill_system = getattr(task_config, "prefill_system_name", system_name)
+        decode_system = getattr(task_config, "decode_system_name", system_name)
+        if prefill_system != decode_system:
+            raise ValueError(
+                "Generator artifacts currently require matching prefill/decode systems; "
+                f"got prefill={prefill_system!r}, decode={decode_system!r}"
+            )
+    params.setdefault("NodeConfig", {})["system_name"] = system_name
     rule_name = overrides.get("rule")
     if rule_name:
         params["rule"] = rule_name
