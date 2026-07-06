@@ -31,6 +31,59 @@ DGD_API_VERSION = "nvidia.com/v1alpha1"
 DGD_KIND = "DynamoGraphDeployment"
 
 
+# Strings that a YAML 1.1 parser (used by Kubernetes' YAML->JSON conversion)
+# resolves to a boolean. PyYAML's SafeDumper already quotes most of these
+# because its own resolver treats them as booleans, but it leaves the bare
+# `y`/`Y`/`n`/`N` forms unquoted. Kubernetes then unmarshals `value: y` as a
+# bool and the DGD admission webhook rejects the manifest because
+# `EnvVar.value` must be a string. Force-quote the full YAML 1.1 boolean set so
+# every emitted scalar keeps its string type regardless of PyYAML version.
+_YAML_BOOLISH_STRINGS = frozenset(
+    {
+        "y",
+        "Y",
+        "yes",
+        "Yes",
+        "YES",
+        "n",
+        "N",
+        "no",
+        "No",
+        "NO",
+        "true",
+        "True",
+        "TRUE",
+        "false",
+        "False",
+        "FALSE",
+        "on",
+        "On",
+        "ON",
+        "off",
+        "Off",
+        "OFF",
+    }
+)
+
+
+class _K8sSafeDumper(yaml.SafeDumper):
+    """SafeDumper that keeps Kubernetes-sensitive strings as strings."""
+
+
+def _represent_str(dumper: yaml.SafeDumper, data: str):
+    if data in _YAML_BOOLISH_STRINGS:
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style='"')
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+
+
+_K8sSafeDumper.add_representer(str, _represent_str)
+
+
+def _dump_k8s_yaml(data: Any) -> str:
+    """Serialize a k8s document, quoting YAML 1.1 boolean-like strings."""
+    return yaml.dump(data, Dumper=_K8sSafeDumper, sort_keys=False)
+
+
 def _put(out: dict[str, Any], key: str, value: Any) -> None:
     """Insert ``key`` only when the typed field is actually set (non-None)."""
     if value is not None:
@@ -221,7 +274,7 @@ class DGD:
         return out
 
     def to_yaml(self) -> str:
-        return yaml.safe_dump(self.to_dict(), sort_keys=False)
+        return _dump_k8s_yaml(self.to_dict())
 
 
 @dataclass
@@ -268,7 +321,7 @@ class ConfigMapDoc:
         return out
 
     def to_yaml(self) -> str:
-        return yaml.safe_dump(self.to_dict(), sort_keys=False)
+        return _dump_k8s_yaml(self.to_dict())
 
 
 @dataclass
@@ -327,7 +380,7 @@ class ComputeDomainDoc:
         return out
 
     def to_yaml(self) -> str:
-        return yaml.safe_dump(self.to_dict(), sort_keys=False)
+        return _dump_k8s_yaml(self.to_dict())
 
 
 def dgd_documents_to_yaml(docs: list[Any]) -> str:
