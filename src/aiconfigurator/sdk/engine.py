@@ -243,6 +243,7 @@ def _moe(op: MoE) -> dict:
         "num_experts": op._num_experts,
         "moe_tp_size": op._moe_tp_size,
         "moe_ep_size": op._moe_ep_size,
+        "attention_dp_size": op._attention_dp_size,
         "quant_mode": _quant_name(op._quant_mode),
         "workload_distribution": op._workload_distribution,
         "is_gated": op._is_gated,

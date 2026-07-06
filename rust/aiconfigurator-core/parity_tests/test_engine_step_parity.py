@@ -279,6 +279,22 @@ SMOKE_CASES = [
         ),
         id="deepseek-v32-b200-sglang-0510-isl1024-osl2",
     ),
+    # Attention-DP coverage: sglang all-gathers the DP-sharded tokens before
+    # the MoE, so MoE compute scales by attention_dp_size. Every other MoE case
+    # runs at attention_dp=1, which left the Rust MoE token scaling untested;
+    # this Qwen3-235B config (tp1 dp8 etp4 ep2) exercises attention_dp>1.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-235B-A22B",
+            backend_name="sglang",
+            backend_version="0.5.10",
+            tp_size=1,
+            attention_dp_size=8,
+            moe_tp_size=4,
+            moe_ep_size=2,
+        ),
+        id="qwen3-235b-b200-sglang-0510-adp8-etp4ep2",
+    ),
     # Phase 4 D7-G: shape-variation coverage. All previous cases run at
     # `(batch=1, isl=1024, osl=2)` (plus one prefix variant). The four
     # cases below sweep the four parity-sensitive shape directions, each

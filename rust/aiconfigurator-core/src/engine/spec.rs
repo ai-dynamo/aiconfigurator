@@ -263,6 +263,7 @@ mod tests {
             num_experts: 256,
             moe_tp_size: 1,
             moe_ep_size: 8,
+            attention_dp_size: 1,
             quant_mode: MoeQuantMode::Fp8Block,
             workload_distribution: "power_law_1.2".into(),
             is_gated: true,
