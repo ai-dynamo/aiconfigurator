@@ -9,6 +9,7 @@ on:
     types:
       - opened
       - synchronize
+  workflow_dispatch:
 
 jobs:
   cargo-deny:
@@ -108,16 +109,18 @@ jobs:
 
   spica-thorough-e2e:
     name: Build and Test (Spica thorough e2e)
-    if: github.event_name == 'pull_request'
+    # Manual-only. This job builds a PINNED Dynamo (`aic-forward-pass`) against
+    # aiconfigurator-core, so it passes only when Dynamo's pinned mocker matches
+    # aic-core's current Rust API. Branches that evolve aic-core (e.g. new
+    # EngineConfig/ParallelMapping fields for context parallelism) break the
+    # pinned mocker's struct literals until Dynamo is updated and its pin bumped
+    # -- an expected failure the aiconfigurator PR cannot self-fix. Running it on
+    # every PR showed a confusing red check for that expected skew, so it is
+    # gated to manual `workflow_dispatch` runs. Trigger it from the Actions tab
+    # ("Run workflow") when validating the Dynamo replay path.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # Non-blocking: this job builds a PINNED Dynamo (`aic-forward-pass`) against
-    # aiconfigurator-core, so it can only pass when Dynamo's pinned mocker
-    # matches aic-core's current Rust API. Branches that evolve aic-core (e.g.
-    # new EngineConfig/ParallelMapping fields for context parallelism) break the
-    # pinned mocker's struct literals until Dynamo is updated and its pin bumped.
-    # Keep it running for signal, but don't gate the PR on it.
-    continue-on-error: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
