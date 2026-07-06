@@ -164,6 +164,25 @@ def run_gdn_context_benchmark(
             beta = conv_input = conv_state = cu_seqlens = g = has_initial_state = None
             k = mixed_qkv = q = recurrent_state = seq_lens_cpu = state_indices = v = None
             try:
+                # Stock SGLang 0.5.14 _causal_conv1d_fwd_kernel computes its
+                # token-major I/O offsets in int32 ("(sequence_start_index +
+                # token_offset + idx_token) * stride_o_token",
+                # causal_conv1d_triton.py:373-379 at image source 49e384ce), so
+                # a cell whose packed-conv offset total_tokens * conv_channels
+                # reaches 2**31 elements wraps negative and corrupts device
+                # memory. RTX 6000 Pro memcheck (2026-07-06) pinned the invalid
+                # global write to that store at 262,144 tokens for both Qwen3.5
+                # conv widths (10,240 and 12,288); the 131,072-token cells
+                # pass. Same defect class as the ledger's
+                # DSA-FUSED-KS-4G-OFFSET row. Raise instead of launching the
+                # corrupting kernel: the async illegal access otherwise poisons
+                # the CUDA context and aborts every remaining sweep cell.
+                if total_tokens * conv_channels >= 2**31:
+                    raise ValueError(
+                        "SGLang 0.5.14 causal_conv1d Triton kernel int32 token-offset overflow: "
+                        f"total_tokens={total_tokens} * conv_channels={conv_channels} >= 2**31 "
+                        "(causal_conv1d_triton.py:373-379)"
+                    )
                 num_warmups = 3
                 num_runs = 10
                 cu_seqlens = torch.arange(
