@@ -91,6 +91,8 @@ def _verify_main_wheel(wheel: Path, expected_payload: set[str]) -> tuple[str, se
         "aiconfigurator/sdk/common.py",
         "aiconfigurator/systems/h100_sxm.yaml",
         "aiconfigurator_core/__init__.py",
+        "aiconfigurator_core/sdk/__init__.py",
+        "aiconfigurator_core/sdk/task_v2.py",
     }
     misplaced = sorted(forbidden & payload)
     if misplaced:
@@ -119,6 +121,8 @@ def _verify_core_wheel(wheel: Path, aic_version: str, expected_payload: set[str]
         "aiconfigurator/sdk/memory.py",
         "aiconfigurator/systems/h100_sxm.yaml",
         "aiconfigurator_core/__init__.py",
+        "aiconfigurator_core/sdk/__init__.py",
+        "aiconfigurator_core/sdk/task_v2.py",
     }
     missing = sorted(required - payload)
     if missing:
