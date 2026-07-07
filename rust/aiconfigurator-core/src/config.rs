@@ -15,7 +15,13 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 1;
+// Bumped to 2 for the 0.10.0 op-payload layout change (context-parallelism +
+// perf-DB refactor added serialized fields such as `seq_split` / `cp_size` to
+// `OpSpec`). bincode op payloads are positional, so a producer/consumer skew is
+// only distinguishable by this version — `EngineSpec::from_bincode` reads and
+// checks it before decoding the op lists. Bump whenever an `OpSpec` field
+// changes; keep in lockstep with `sdk/engine.py::ENGINE_SPEC_SCHEMA_VERSION`.
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 2;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].
