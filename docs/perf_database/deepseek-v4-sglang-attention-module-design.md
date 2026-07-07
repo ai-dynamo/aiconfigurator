@@ -57,7 +57,7 @@ They are registered in:
 ```text
 collector/sglang/registry.py
 collector/registry_types.py
-src/aiconfigurator/sdk/common.py
+packages/aiconfigurator-core/src/aiconfigurator_core/sdk/common.py
 ```
 
 The four files are loaded and merged into the existing DeepSeek-V4 attention

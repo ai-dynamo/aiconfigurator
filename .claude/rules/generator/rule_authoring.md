@@ -14,10 +14,10 @@ This reference covers safe practices for writing and modifying rules.
 
 | File | Purpose |
 |---|---|
-| `src/aiconfigurator/generator/rule_plugin/*.rule` | Production rules per backend |
-| `src/aiconfigurator/generator/rule_plugin/benchmark/*.rule` | Benchmark rules per backend |
-| `src/aiconfigurator/generator/rendering/rule_engine.py` | Rule DSL evaluation engine |
-| `src/aiconfigurator/generator/config/backend_config_mapping.yaml` | Parameter backend support |
+| `packages/aiconfigurator/src/aiconfigurator/generator/rule_plugin/*.rule` | Production rules per backend |
+| `packages/aiconfigurator/src/aiconfigurator/generator/rule_plugin/benchmark/*.rule` | Benchmark rules per backend |
+| `packages/aiconfigurator/src/aiconfigurator/generator/rendering/rule_engine.py` | Rule DSL evaluation engine |
+| `packages/aiconfigurator/src/aiconfigurator/generator/config/backend_config_mapping.yaml` | Parameter backend support |
 
 ## DSL Reference
 

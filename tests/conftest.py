@@ -13,11 +13,20 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+# Collector sources intentionally live in the standalone core project but are
+# not part of its runtime wheel. Make that project root importable for collector
+# unit tests without shadowing either installed Python distribution.
+_WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+_CORE_PROJECT_ROOT = _WORKSPACE_ROOT / "packages" / "aiconfigurator-core"
+if _CORE_PROJECT_ROOT.is_dir() and str(_CORE_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_CORE_PROJECT_ROOT))
 
 from aiconfigurator.cli.main import configure_parser as configure_cli_parser
 

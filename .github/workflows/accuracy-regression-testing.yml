@@ -38,8 +38,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ./src/aiconfigurator-core
-          python -m pip install -e ".[dev]"
+          python -m pip install -e ./packages/aiconfigurator-core
+          python -m pip install -e "./packages/aiconfigurator[dev]"
 
       - name: Resolve old revision
         id: old-ref
@@ -65,15 +65,20 @@ jobs:
           # Split revisions need the payload-bearing Maturin core installed
           # before the upper root package. The conditional also supports older
           # monolithic revisions used as regression baselines.
-          if grep -q 'build-backend = "maturin"' "${OLD_ROOT}/src/aiconfigurator-core/pyproject.toml" 2>/dev/null; then
+          if grep -q 'build-backend = "maturin"' "${OLD_ROOT}/packages/aiconfigurator-core/pyproject.toml" 2>/dev/null; then
+            "${OLD_VENV}/bin/python" -m pip install -e "${OLD_ROOT}/packages/aiconfigurator-core"
+            "${OLD_VENV}/bin/python" -m pip install -e "${OLD_ROOT}/packages/aiconfigurator"
+          elif grep -q 'build-backend = "maturin"' "${OLD_ROOT}/src/aiconfigurator-core/pyproject.toml" 2>/dev/null; then
             "${OLD_VENV}/bin/python" -m pip install -e "${OLD_ROOT}/src/aiconfigurator-core"
+            "${OLD_VENV}/bin/python" -m pip install -e "${OLD_ROOT}"
+          else
+            "${OLD_VENV}/bin/python" -m pip install -e "${OLD_ROOT}"
           fi
-          "${OLD_VENV}/bin/python" -m pip install -e "${OLD_ROOT}"
 
       - name: Generate new predictions
         run: |
           mkdir -p tools/accuracy_regression_testing/results
-          PYTHONPATH=src python tools/accuracy_regression_testing/predict_silicon_sample.py \
+          python tools/accuracy_regression_testing/predict_silicon_sample.py \
             --aic-output-prefix new \
             > tools/accuracy_regression_testing/results/silicon_result_new.csv \
             2> tools/accuracy_regression_testing/results/new_predictions.log
@@ -84,8 +89,7 @@ jobs:
           OLD_VENV="${OLD_ROOT}/.venv"
           RESULTS="${{ github.workspace }}/tools/accuracy_regression_testing/results"
           cd "${OLD_ROOT}"
-          PYTHONPATH="${OLD_ROOT}/src" \
-            "${OLD_VENV}/bin/python" tools/accuracy_regression_testing/predict_silicon_sample.py \
+          "${OLD_VENV}/bin/python" tools/accuracy_regression_testing/predict_silicon_sample.py \
               "${RESULTS}/silicon_result_new.csv" \
               --aic-output-prefix old \
               > "${RESULTS}/silicon_result.csv" \

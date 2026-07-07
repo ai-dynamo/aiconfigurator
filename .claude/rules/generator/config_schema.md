@@ -15,9 +15,9 @@ covers safe practices for modifying them.
 
 | File | Purpose |
 |---|---|
-| `src/aiconfigurator/generator/config/deployment_config.yaml` | Input schema: ~54 params, defaults, constraints |
-| `src/aiconfigurator/generator/config/backend_config_mapping.yaml` | Unified param -> backend CLI flag mapping |
-| `src/aiconfigurator/generator/rendering/schemas.py` | Schema validation, default application |
+| `packages/aiconfigurator/src/aiconfigurator/generator/config/deployment_config.yaml` | Input schema: ~54 params, defaults, constraints |
+| `packages/aiconfigurator/src/aiconfigurator/generator/config/backend_config_mapping.yaml` | Unified param -> backend CLI flag mapping |
+| `packages/aiconfigurator/src/aiconfigurator/generator/rendering/schemas.py` | Schema validation, default application |
 
 ## Schema File Structures
 

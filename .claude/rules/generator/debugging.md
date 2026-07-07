@@ -61,27 +61,27 @@ Stage 1: SCHEMA LOADING (rare)
 Start at Stage 6 and work backwards:
 
 **a. TEMPLATE**: Find the template that produced the wrong output
-- Glob: `src/aiconfigurator/generator/config/backend_templates/<backend>/<artifact>*.j2`
+- Glob: `packages/aiconfigurator/src/aiconfigurator/generator/config/backend_templates/<backend>/<artifact>*.j2`
 - Find the exact version template used (check `backend_version_matrix.yaml`)
 - Read the template, identify which variable is wrong
 
 **b. CONTEXT**: Check what value the variable had in the rendering context
-- Read `src/aiconfigurator/generator/rendering/engine.py:make_worker_context()`
+- Read `packages/aiconfigurator/src/aiconfigurator/generator/rendering/engine.py:make_worker_context()`
 - Trace how the variable gets into the context dict
 
 **c. RULE**: Check if a rule computed the wrong value
-- Read `src/aiconfigurator/generator/rule_plugin/<backend>.rule`
+- Read `packages/aiconfigurator/src/aiconfigurator/generator/rule_plugin/<backend>.rule`
 - Find the rule for this variable
 - Check scope prefix (agg vs prefill vs decode)
 - Evaluate the expression manually with known inputs
 
 **d. MAPPING**: Check if the mapping is correct
-- Read `src/aiconfigurator/generator/config/backend_config_mapping.yaml`
+- Read `packages/aiconfigurator/src/aiconfigurator/generator/config/backend_config_mapping.yaml`
 - Verify the param_key -> backend flag mapping
 - Check for value transformations
 
 **e. DEFAULT**: Check if the default was applied correctly
-- Read `src/aiconfigurator/generator/config/deployment_config.yaml` for the parameter
+- Read `packages/aiconfigurator/src/aiconfigurator/generator/config/deployment_config.yaml` for the parameter
 - Evaluate the default expression
 - Check `backend_defaults` if applicable
 

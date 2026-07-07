@@ -3,11 +3,12 @@
 
 """Build a minimal legacy wheel for deterministic package-migration tests.
 
-AIConfigurator 0.9 owned both upper-layer and core-layer paths in the
-``aiconfigurator`` distribution. The 0.10 split transfers the latter paths to
-``aiconfigurator-core``. This fixture deliberately records representative paths
-from both layers so pip's install-before-uninstall upgrade behavior can be
-tested without downloading the historical release artifact.
+AIConfigurator 0.9 owned both upper-layer and estimator paths in the
+``aiconfigurator`` distribution. The split keeps the historical import paths as
+upper-wheel compatibility facades while moving canonical implementations and
+resources to ``aiconfigurator-core``. This fixture records representative old
+paths so the in-place upgrade can be tested without downloading a historical
+release artifact.
 """
 
 from __future__ import annotations
@@ -25,13 +26,15 @@ DIST_INFO = f"aiconfigurator-{VERSION}.dist-info"
 WHEEL_NAME = f"aiconfigurator-{VERSION}-py3-none-any.whl"
 
 PAYLOAD_SOURCES = {
-    "aiconfigurator/__init__.py": "src/aiconfigurator/__init__.py",
-    "aiconfigurator/sdk/common.py": "src/aiconfigurator/sdk/common.py",
-    "aiconfigurator/systems/h100_sxm.yaml": "src/aiconfigurator/systems/h100_sxm.yaml",
-    "aiconfigurator/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json": (
-        "src/aiconfigurator/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json"
+    "aiconfigurator/__init__.py": "packages/aiconfigurator/src/aiconfigurator/__init__.py",
+    "aiconfigurator/sdk/common.py": "packages/aiconfigurator-core/src/aiconfigurator_core/sdk/common.py",
+    "aiconfigurator/systems/h100_sxm.yaml": (
+        "packages/aiconfigurator-core/src/aiconfigurator_core/systems/h100_sxm.yaml"
     ),
-    "aiconfigurator_core/__init__.py": "src/aiconfigurator_core/__init__.py",
+    "aiconfigurator/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json": (
+        "packages/aiconfigurator-core/src/aiconfigurator_core/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json"
+    ),
+    "aiconfigurator_core/__init__.py": ("packages/aiconfigurator-core/src/aiconfigurator_core/__init__.py"),
 }
 
 METADATA = f"""Metadata-Version: 2.4

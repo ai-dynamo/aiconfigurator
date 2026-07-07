@@ -16,7 +16,7 @@ Unit tests are added for `query_moe` SILICON path (within-range interpolation, o
 
 #### Details:
 
-- **`src/aiconfigurator/sdk/perf_database.py`**
+- **`packages/aiconfigurator-core/src/aiconfigurator_core/sdk/perf_database.py`**
   - `query_moe`: Introduce `num_gemms = 3 if is_gated else 2` and use it in the inner `get_sol` (ops and mem_bytes) so SOL and overflow extrapolation use the correct roofline for gated (SwiGLU) vs non-gated (Relu2) MoE.
   - `_estimate_overflow_with_last_token_util`: No longer returns `None`; callers only invoke it when `query_tokens > token_points[-1]`. Removed in-function check and `sol_last <= 0` branch per domain assumptions.
   - Call sites (tensorrt_llm, trtllm, vllm): If `num_tokens > token_points[-1]`, return `_estimate_overflow_with_last_token_util(...)`; else use 1D interpolation and return that result.
@@ -35,7 +35,7 @@ Unit tests are added for `query_moe` SILICON path (within-range interpolation, o
 
 #### Where should the reviewer start?
 
-1. **`src/aiconfigurator/sdk/perf_database.py`** — `query_moe` and `num_gemms` / `get_sol` / `_estimate_overflow_with_last_token_util` and the three backend branches (sglang, trtllm, vllm) that decide extrapolation vs interpolation.
+1. **`packages/aiconfigurator-core/src/aiconfigurator_core/sdk/perf_database.py`** — `query_moe` and `num_gemms` / `get_sol` / `_estimate_overflow_with_last_token_util` and the three backend branches (sglang, trtllm, vllm) that decide extrapolation vs interpolation.
 2. **`tests/unit/sdk/database/test_moe_mla.py`** — New MoE SILICON tests and `TestMLABMM` class.
 3. **`collector/trtllm/collect_moe.py`** — Current TRT-LLM MoE collector implementation.
 

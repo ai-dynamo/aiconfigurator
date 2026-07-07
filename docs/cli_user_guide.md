@@ -711,16 +711,16 @@ Use `--generator-config path/to/file.yaml` to provide ServiceConfig/K8sConfig/Dy
 - `--generator-set K8sConfig.k8s_namespace=dynamo \`
 
 #### Rule Plugin Selection
-You can switch the generator rule set via `--generator-set rule=benchmark`. This selects a rule plugin folder under `src/aiconfigurator/generator/rule_plugin/`.
+You can switch the generator rule set via `--generator-set rule=benchmark`. This selects a rule plugin folder under `packages/aiconfigurator/src/aiconfigurator/generator/rule_plugin/`.
 
 - **Default (production)**: if `rule` is not provided, the generator uses the default production rules. These are tuned for deployment (e.g., adjusted max batch size and CUDA graph batch sizes).
 - **Benchmark**: `--generator-set rule=benchmark` enables rules designed to align generated configs with AIC sdk results, including:
   - wider CUDA graph batch size coverage to match simulated results
   - stricter max batch size that follows the simulated batch size
 
-You can also define your own rule sets by adding a new folder under `src/aiconfigurator/generator/rule_plugin/` and selecting it with `--generator-set rule=<folder_name>`.
+You can also define your own rule sets by adding a new folder under `packages/aiconfigurator/src/aiconfigurator/generator/rule_plugin/` and selecting it with `--generator-set rule=<folder_name>`.
 
-Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`. 
+Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `packages/aiconfigurator/src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`.
 
 The `--generator-help` command supports three section options:
 - `--generator-help` or `--generator-help all` (default): Shows both the full deployment schema and the backend parameter mappings
@@ -942,7 +942,7 @@ config = {
 result = cli_exp(config=config)
 ```
 
-See `src/aiconfigurator/cli/exps/database_mode_comparison.yaml` for an example comparing different database modes.
+See `packages/aiconfigurator/src/aiconfigurator/cli/exps/database_mode_comparison.yaml` for an example comparing different database modes.
 
 ### Benchmark Artifacts
 
@@ -970,7 +970,7 @@ aiconfigurator cli exp --yaml-path example.yaml
 ```
 > **YAML format:** Experiment YAML uses the flat `Task` schema — every key maps
 > 1:1 to a `Task` field, with no `mode:` selector and no `config:` /
-> `worker_config:` nesting. See [`example.yaml`](../src/aiconfigurator/cli/example.yaml)
+> `worker_config:` nesting. See [`example.yaml`](../packages/aiconfigurator/src/aiconfigurator/cli/example.yaml)
 > for the annotated template.
 >
 > The legacy V1 nested format (`mode` / `config` / `worker_config` /
@@ -978,10 +978,10 @@ aiconfigurator cli exp --yaml-path example.yaml
 > compatibility shim remains: V1 YAML still loads, but it is auto-converted to V2
 > with a `DeprecationWarning`, and any field with no V2 equivalent is rejected
 > (not silently dropped). See
-> [`example_v1_deprecated.yaml`](../src/aiconfigurator/cli/example_v1_deprecated.yaml)
+> [`example_v1_deprecated.yaml`](../packages/aiconfigurator/src/aiconfigurator/cli/example_v1_deprecated.yaml)
 > for the old shape. Write all new configs in the flat V2 format below.
 
-An example YAML file looks like this; see the [annotated experiment template](../src/aiconfigurator/cli/example.yaml).  
+An example YAML file looks like this; see the [annotated experiment template](../packages/aiconfigurator/src/aiconfigurator/cli/example.yaml).
 Let's split the yaml file into several sections.  
 1. exps
 ```yaml
@@ -1086,7 +1086,7 @@ Everything omitted falls back to defaults / HF inference.
 
 Let's go through some pre-defined experiments for reference.
 1. homegeneous vs. heterogenous  
-The example [yaml](../src/aiconfigurator/cli/exps/hetero_disagg.yaml)
+The example [yaml](../packages/aiconfigurator/src/aiconfigurator/cli/exps/hetero_disagg.yaml)
 ```yaml
 exps:
   - exp_h200_h200
@@ -1125,7 +1125,7 @@ We defined two experiments. `exp_h200_h200` uses H200 for both prefill and decod
 **Note**: You can also compare different backends by setting different `backend_name` values (trtllm, vllm, sglang) in your experiments.
 
 2. use a specific quantization  
-The example [yaml](../src/aiconfigurator/cli/exps/qwen3_32b_pertensor.yaml)
+The example [yaml](../packages/aiconfigurator/src/aiconfigurator/cli/exps/qwen3_32b_pertensor.yaml)
 ```yaml
 exps:
   - exp_agg
@@ -1174,7 +1174,7 @@ exp_disagg:
 ```
 Here we override the quantization of Qwen/Qwen3-32B-FP8: the default is blockwise FP8 for GEMM, and we set per-tensor FP8 explicitly via the `*_quant_mode` fields. (The deprecated V1 way was `profiles: ["fp8"]`, which expanded to exactly these fields.)
 
-You can refer to [src/aiconfigurator/cli/exps](../src/aiconfigurator/cli/exps) to find more reference yaml files.
+You can refer to [packages/aiconfigurator/src/aiconfigurator/cli/exps](../packages/aiconfigurator/src/aiconfigurator/cli/exps) to find more reference YAML files.
 
 Use `exp` mode for flexible experiments, `default` mode for convenient agg vs disagg comparison with SLA optimization, and `generate` mode for quick config generation without sweeping. All modes support generating configs for frameworks automatically by `--save-dir DIR`.
 

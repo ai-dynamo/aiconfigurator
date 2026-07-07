@@ -4,7 +4,7 @@
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-COLLECTOR_ROOT = REPO_ROOT / "collector"
+COLLECTOR_ROOT = REPO_ROOT / "packages" / "aiconfigurator-core" / "collector"
 NETWORK_ROOT = COLLECTOR_ROOT / "network"
 
 

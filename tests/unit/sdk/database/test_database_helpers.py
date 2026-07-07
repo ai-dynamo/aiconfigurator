@@ -13,40 +13,39 @@ pytestmark = pytest.mark.unit
 def _find_repo_root(start: Path) -> Path:
     """Find repository root.
 
-    In the Docker test image we copy `src/` and `tests/` into `/workspace/` but do
-    not copy `pyproject.toml`, so we detect the repo root via `src/aiconfigurator/`.
+    Detect the workspace root via the standalone core package source tree.
     """
     start = start.resolve()
     for parent in [start, *start.parents]:
-        if (parent / "src" / "aiconfigurator").is_dir():
+        if (parent / "packages" / "aiconfigurator-core" / "src" / "aiconfigurator_core").is_dir():
             return parent
-    raise RuntimeError("Cannot find repository root (expected src/aiconfigurator/)")
+    raise RuntimeError("Cannot find repository root (expected packages/aiconfigurator-core/)")
 
 
 @pytest.fixture(scope="module")
 def perf_database():
     """
-    Import the local aiconfigurator.sdk.perf_database module from src/,
+    Import the local ``aiconfigurator_core.sdk.perf_database`` module,
     ensuring it takes precedence over any installed package.
     """
     project_root = _find_repo_root(Path(__file__))
-    src_path = project_root / "src"
+    src_path = project_root / "packages" / "aiconfigurator-core" / "src"
     sys.path.insert(0, str(src_path))
 
-    saved_aiconfigurator_modules = {}
+    saved_core_modules = {}
 
     # Purge already-imported site-packages version if present
     for key in list(sys.modules.keys()):
-        if key == "aiconfigurator" or key.startswith("aiconfigurator."):
-            saved_aiconfigurator_modules[key] = sys.modules.pop(key)
+        if key == "aiconfigurator_core" or key.startswith("aiconfigurator_core."):
+            saved_core_modules[key] = sys.modules.pop(key)
 
-    import aiconfigurator.sdk.perf_database as perf_database
+    import aiconfigurator_core.sdk.perf_database as perf_database
 
     importlib.reload(perf_database)
     yield perf_database
 
-    # Restore aiconfigurator modules after the tests in this file finish.
-    sys.modules.update(saved_aiconfigurator_modules)
+    # Restore any previously imported core modules after this test module finishes.
+    sys.modules.update(saved_core_modules)
 
 
 @pytest.fixture
@@ -232,7 +231,7 @@ def test_set_systems_paths_invalid_entry_raises(temp_systems_dir: Path, perf_dat
 
 def test_estimate_only_database_can_load_without_perf_files(perf_database):
     """SOL/EMPIRICAL modes can instantiate from system specs without silicon files."""
-    from aiconfigurator.sdk import common
+    from aiconfigurator_core.sdk import common
 
     db = perf_database.get_database("h100_pcie", "trtllm", "estimate", allow_missing_data=True)
 
@@ -427,7 +426,7 @@ def test_empirical_and_silicon_views_use_distinct_shared_layer_templates(perf_da
 
 
 def test_database_view_configuration_is_isolated_and_same_key_is_reused(perf_database):
-    from aiconfigurator.sdk import common
+    from aiconfigurator_core.sdk import common
 
     template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
     template.set_default_database_mode(common.DatabaseMode.SILICON)
@@ -484,7 +483,7 @@ def test_database_view_configuration_is_isolated_and_same_key_is_reused(perf_dat
 def test_configured_view_cache_normalizes_keys_and_separates_roots(perf_database):
     import copy
 
-    from aiconfigurator.sdk import common
+    from aiconfigurator_core.sdk import common
 
     template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
     template.clear_runtime_caches()
@@ -512,7 +511,7 @@ def test_configured_view_cache_normalizes_keys_and_separates_roots(perf_database
 
 
 def test_clearing_template_runtime_caches_refreshes_configured_copy(perf_database):
-    from aiconfigurator.sdk import common
+    from aiconfigurator_core.sdk import common
 
     template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
     template.clear_runtime_caches()
@@ -539,7 +538,7 @@ def test_clearing_template_runtime_caches_refreshes_configured_copy(perf_databas
 
 
 def test_configured_view_rejects_incompatible_shared_layer_template(perf_database):
-    from aiconfigurator.sdk import common
+    from aiconfigurator_core.sdk import common
 
     silicon_template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
 
@@ -550,8 +549,8 @@ def test_configured_view_rejects_incompatible_shared_layer_template(perf_databas
 def test_transfer_policy_and_mode_change_clear_global_grid_cache(perf_database):
     """In-place mode/policy mutation eagerly drops stale/unreachable grids,
     while no-op setter calls preserve the cache."""
-    from aiconfigurator.sdk import common
-    from aiconfigurator.sdk.operations import util_empirical
+    from aiconfigurator_core.sdk import common
+    from aiconfigurator_core.sdk.operations import util_empirical
 
     db = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="HYBRID")
 

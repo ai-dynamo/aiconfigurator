@@ -15,26 +15,17 @@
 /.github/CODEOWNERS @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
 
 # Runtime, SDK, backends, systems, model configs, and UI
-/src/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
-/src/aiconfigurator/sdk/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
-/src/aiconfigurator/sdk/backends/sglang_backend.py @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
-/src/aiconfigurator/sdk/backends/trtllm_backend.py @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
-/src/aiconfigurator/sdk/backends/vllm_backend.py @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
-/src/aiconfigurator/systems/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
-/src/aiconfigurator/model_configs/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
-/src/aiconfigurator/webapp/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
+/packages/aiconfigurator-core/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
+/packages/aiconfigurator/src/aiconfigurator/sdk/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
+/packages/aiconfigurator/src/aiconfigurator/webapp/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 
 # Config generation, CLI, eval, and automation tooling
-/src/aiconfigurator/generator/ @ai-dynamo/aiconfigurator-generators @ai-dynamo/maintainers-aiconfigurator
-/src/aiconfigurator/cli/ @ai-dynamo/aiconfigurator-generators @ai-dynamo/maintainers-aiconfigurator
-/src/aiconfigurator/eval/ @ai-dynamo/aiconfigurator-generators @ai-dynamo/maintainers-aiconfigurator
+/packages/aiconfigurator/src/aiconfigurator/generator/ @ai-dynamo/aiconfigurator-generators @ai-dynamo/maintainers-aiconfigurator
+/packages/aiconfigurator/src/aiconfigurator/cli/ @ai-dynamo/aiconfigurator-generators @ai-dynamo/maintainers-aiconfigurator
+/packages/aiconfigurator/src/aiconfigurator/eval/ @ai-dynamo/aiconfigurator-generators @ai-dynamo/maintainers-aiconfigurator
 
 # Profiling and data collectors
-/collector/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
-/collector/deep_collector/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
-/collector/sglang/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
-/collector/trtllm/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
-/collector/vllm/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
+/packages/aiconfigurator-core/collector/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 
 # Documentation
 /docs/ @ai-dynamo/maintainers-aiconfigurator

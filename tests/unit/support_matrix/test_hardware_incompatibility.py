@@ -185,13 +185,15 @@ def test_run_single_test_propagates_hardware_preflight_failures(monkeypatch):
             "vllm",
             "0.19.0",
             "File does not exist at "
-            "src/aiconfigurator/systems/data/rtx_pro_6000_server/vllm/0.19.0/dsa_context_module_perf.txt",
+            "packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/rtx_pro_6000_server/"
+            "vllm/0.19.0/dsa_context_module_perf.txt",
         ),
         (
             "Qwen/Qwen3-Coder-480B-A35B-Instruct",
             "vllm",
             "0.19.0",
-            "File does not exist at src/aiconfigurator/systems/data/rtx_pro_6000_server/nccl/2.28.9/nccl_perf.txt",
+            "File does not exist at packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/"
+            "rtx_pro_6000_server/nccl/2.28.9/nccl_perf.txt",
         ),
         (
             "google/gemma-4-26B-A4B",

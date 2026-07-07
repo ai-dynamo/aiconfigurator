@@ -14,7 +14,16 @@ def _write_perf_csv(path: Path, latency: float = 1.25) -> None:
 
 def test_find_perf_csv_outputs_is_non_recursive_by_default(tmp_path):
     top_level = tmp_path / "gemm_perf.txt"
-    nested = tmp_path / "src" / "aiconfigurator" / "systems" / "data" / "gemm_perf.txt"
+    nested = (
+        tmp_path
+        / "packages"
+        / "aiconfigurator-core"
+        / "src"
+        / "aiconfigurator_core"
+        / "systems"
+        / "data"
+        / "gemm_perf.txt"
+    )
     incomplete = tmp_path / "INCOMPLETE.txt"
 
     _write_perf_csv(top_level)
@@ -28,7 +37,16 @@ def test_find_perf_csv_outputs_is_non_recursive_by_default(tmp_path):
 
 def test_finalize_perf_outputs_does_not_recurse_into_checked_in_assets(tmp_path):
     top_level = tmp_path / "gemm_perf.txt"
-    nested = tmp_path / "src" / "aiconfigurator" / "systems" / "data" / "gemm_perf.txt"
+    nested = (
+        tmp_path
+        / "packages"
+        / "aiconfigurator-core"
+        / "src"
+        / "aiconfigurator_core"
+        / "systems"
+        / "data"
+        / "gemm_perf.txt"
+    )
 
     _write_perf_csv(top_level)
     nested.parent.mkdir(parents=True)

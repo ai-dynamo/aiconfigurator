@@ -27,7 +27,7 @@ failures that only surface when users try the new version.
 
 ### 2. Update Version Matrix
 
-File: `src/aiconfigurator/generator/config/backend_version_matrix.yaml`
+File: `packages/aiconfigurator/src/aiconfigurator/generator/config/backend_version_matrix.yaml`
 
 - Add new Dynamo version entry (or update existing)
 - Map to new backend version
@@ -69,7 +69,7 @@ Only create new version templates if the backend CLI interface changed.
 
 ### 4. Update Parameter Mapping (if needed)
 
-File: `src/aiconfigurator/generator/config/backend_config_mapping.yaml`
+File: `packages/aiconfigurator/src/aiconfigurator/generator/config/backend_config_mapping.yaml`
 
 If new parameters were added:
 - Add `param_key` entry
@@ -81,7 +81,7 @@ If parameters were renamed:
 
 ### 5. Update Deployment Config (if needed)
 
-File: `src/aiconfigurator/generator/config/deployment_config.yaml`
+File: `packages/aiconfigurator/src/aiconfigurator/generator/config/deployment_config.yaml`
 
 If new user-facing parameters were added:
 - Add schema entry with section, default, required status
@@ -89,8 +89,8 @@ If new user-facing parameters were added:
 
 ### 6. Update Rule Files (if needed)
 
-Files: `src/aiconfigurator/generator/rule_plugin/<backend>.rule` (production)
-and `src/aiconfigurator/generator/rule_plugin/benchmark/<backend>.rule` (benchmark)
+Files: `packages/aiconfigurator/src/aiconfigurator/generator/rule_plugin/<backend>.rule` (production)
+and `packages/aiconfigurator/src/aiconfigurator/generator/rule_plugin/benchmark/<backend>.rule` (benchmark)
 
 If parameter computation logic changed:
 - Update expressions

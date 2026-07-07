@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from aiconfigurator.sdk import common
+from aiconfigurator_core.sdk import common
 
 pytestmark = pytest.mark.unit
 
@@ -22,14 +22,13 @@ pytestmark = pytest.mark.unit
 def _find_repo_root(start: Path) -> Path:
     """Find repository root.
 
-    In the Docker test image we copy `src/` and `tests/` into `/workspace/` but do
-    not copy `pyproject.toml`, so we detect the repo root via `src/aiconfigurator/`.
+    Detect the workspace root via the standalone core package source tree.
     """
     start = start.resolve()
     for parent in [start, *start.parents]:
-        if (parent / "src" / "aiconfigurator").is_dir():
+        if (parent / "packages" / "aiconfigurator-core" / "src" / "aiconfigurator_core").is_dir():
             return parent
-    raise RuntimeError("Cannot find repository root (expected src/aiconfigurator/)")
+    raise RuntimeError("Cannot find repository root (expected packages/aiconfigurator-core/)")
 
 
 class TestSupportedSystems:
@@ -44,7 +43,7 @@ class TestSupportedSystems:
     def test_supported_systems_matches_yaml_files_and_folders(self):
         """Test that SupportedSystems set matches the YAML files and data folders in systems directory."""
         repo_root = _find_repo_root(Path(__file__))
-        systems_dir = repo_root / "src" / "aiconfigurator" / "systems"
+        systems_dir = repo_root / "packages" / "aiconfigurator-core" / "src" / "aiconfigurator_core" / "systems"
         data_dir = systems_dir / "data"
 
         # Get all YAML files in the systems directory (excluding subdirectories)
@@ -117,7 +116,7 @@ class TestSupportMatrix:
     def test_support_matrix_files_are_split_by_system(self):
         """Each split support matrix CSV should contain rows for exactly one system."""
         repo_root = _find_repo_root(Path(__file__))
-        systems_dir = repo_root / "src" / "aiconfigurator" / "systems"
+        systems_dir = repo_root / "packages" / "aiconfigurator-core" / "src" / "aiconfigurator_core" / "systems"
         split_dir = systems_dir / "support_matrix"
 
         assert split_dir.is_dir()
@@ -134,7 +133,16 @@ class TestSupportMatrix:
     def test_support_matrix_index_uses_display_order(self):
         """The static support-matrix manifest should keep the preferred system order."""
         repo_root = _find_repo_root(Path(__file__))
-        index_path = repo_root / "src" / "aiconfigurator" / "systems" / "support_matrix" / "index.json"
+        index_path = (
+            repo_root
+            / "packages"
+            / "aiconfigurator-core"
+            / "src"
+            / "aiconfigurator_core"
+            / "systems"
+            / "support_matrix"
+            / "index.json"
+        )
 
         with index_path.open() as f:
             files = json.load(f)["files"]

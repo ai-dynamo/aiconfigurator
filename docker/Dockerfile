@@ -16,32 +16,33 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV MPLCONFIGDIR=/tmp/matplotlib
 
 FROM base AS build
-# The standalone `aiconfigurator-core` wheel owns the Rust extension and the
-# SDK/data payload. The upper `aiconfigurator` wheel owns CLI/generator/webapp/
-# Spica and depends on the exact matching core version. Maturin needs the Rust
+# The standalone `aiconfigurator-core` wheel owns the canonical Python SDK,
+# Rust extension, and estimator data under `aiconfigurator_core`. The upper
+# `aiconfigurator` wheel owns CLI/generator/webapp/Spica plus compatibility
+# facades under `aiconfigurator.sdk`, and depends on the exact matching core
+# version. Maturin needs the Rust
 # crate sources, a C linker (gcc), and ca-certificates so cargo can fetch crates
 # from crates.io over TLS. Rust itself is bootstrapped by maturin's build backend.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
     rm -rf /var/lib/apt/lists/*
-COPY src/ /workspace/src/
-COPY rust/ /workspace/rust/
-COPY LICENSE pyproject.toml README.md /workspace/
+COPY packages/ /workspace/packages/
+COPY pyproject.toml /workspace/
 COPY tools/verify_release_wheels.py /workspace/tools/verify_release_wheels.py
 COPY tools/verify_installed_package_layers.py /workspace/tools/verify_installed_package_layers.py
 COPY tools/build_legacy_monolith_fixture.py /workspace/tools/build_legacy_monolith_fixture.py
 # Fail fast if Git LFS content wasn't materialized before the build — otherwise
 # the wheel ships pointer stubs in place of perf data (see DYN-2725).
 RUN set -e; \
-    bad=$(grep -rlE "^version https://git-lfs" /workspace/src/aiconfigurator/systems 2>/dev/null || true); \
+    bad=$(grep -rlE "^version https://git-lfs" /workspace/packages/aiconfigurator-core/src/aiconfigurator_core/systems 2>/dev/null || true); \
     if [ -n "$bad" ]; then \
         echo "ERROR: Unmaterialized Git LFS pointer files found:" >&2; \
         echo "$bad" >&2; \
         echo "Run 'git lfs install && git lfs pull' in the source tree before building." >&2; \
         exit 1; \
     fi
-RUN cd src/aiconfigurator-core && uv build --wheel --out-dir /workspace/dist && \
-    cd /workspace && uv build --wheel --out-dir /workspace/dist && \
+RUN cd packages/aiconfigurator-core && uv build --wheel --out-dir /workspace/dist && \
+    cd /workspace/packages/aiconfigurator && uv build --wheel --out-dir /workspace/dist && \
     cd /workspace && python tools/verify_release_wheels.py /workspace/dist
 
 # Exercise the real wheel boundary outside the checkout: core-only (including
@@ -76,10 +77,10 @@ RUN uv venv --python 3.12 /tmp/aic-upper-install-test && \
     cd /tmp && /tmp/aic-upper-install-test/bin/python \
         /workspace/tools/verify_installed_package_layers.py --expect full
 
-# Pip installs dependencies before dependents, so crossing from a monolithic
-# 0.9 wheel requires removing the old payload owner first. A minimal local 0.9
-# fixture records representative upper/core paths and makes this ownership
-# transfer deterministic without relying on the historical wheel bootstrap.
+# Exercise both a clean migration and an in-place upgrade from the historical
+# monolithic 0.9 wheel. Core now owns only `aiconfigurator_core/**`, while the
+# upper distribution continues to own `aiconfigurator/**`, so dependency-first
+# installation no longer transfers files between distributions.
 RUN python tools/build_legacy_monolith_fixture.py /tmp/legacy-dist && \
     LEGACY_WHL=$(ls /tmp/legacy-dist/aiconfigurator-0.9.0-*.whl) && \
     CORE_WHL=$(ls /workspace/dist/aiconfigurator_core-*.whl) && \
@@ -90,16 +91,10 @@ RUN python tools/build_legacy_monolith_fixture.py /tmp/legacy-dist && \
     /tmp/aic-pip-migration/bin/pip install "${CORE_WHL}" "${AIC_WHL}" && \
     cd /tmp && /tmp/aic-pip-migration/bin/python \
         /workspace/tools/verify_installed_package_layers.py --expect full --exercise-engine && \
-    python -m venv /tmp/aic-pip-repair && \
-    /tmp/aic-pip-repair/bin/pip install "${LEGACY_WHL}" && \
-    /tmp/aic-pip-repair/bin/pip install --upgrade "${CORE_WHL}" "${AIC_WHL}" && \
-    if cd /tmp && /tmp/aic-pip-repair/bin/python \
-        /workspace/tools/verify_installed_package_layers.py --expect full; then \
-        echo "ERROR: naive monolith-to-split pip upgrade unexpectedly preserved core files" >&2; \
-        exit 1; \
-    fi && \
-    /tmp/aic-pip-repair/bin/pip install --force-reinstall --no-deps "${CORE_WHL}" && \
-    cd /tmp && /tmp/aic-pip-repair/bin/python \
+    python -m venv /tmp/aic-pip-upgrade && \
+    /tmp/aic-pip-upgrade/bin/pip install "${LEGACY_WHL}" && \
+    /tmp/aic-pip-upgrade/bin/pip install --upgrade "${CORE_WHL}" "${AIC_WHL}" && \
+    cd /tmp && /tmp/aic-pip-upgrade/bin/python \
         /workspace/tools/verify_installed_package_layers.py --expect full --exercise-engine
 
 FROM base AS runtime
@@ -119,6 +114,5 @@ RUN AIC_WHL=$(ls /wheelhouse/aiconfigurator-*.whl) && \
 COPY pytest.ini /workspace/
 COPY tests/ /workspace/tests/
 COPY docs/spica/examples/ /workspace/docs/spica/examples/
-COPY src/ /workspace/src/
+COPY packages/ /workspace/packages/
 COPY tools/ /workspace/tools/
-COPY collector/ /workspace/collector/

@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install and run cargo-deny
-        working-directory: rust/aiconfigurator-core
+        working-directory: packages/aiconfigurator-core/rust/aiconfigurator-core
         # Default log level (warn) surfaces "license inferred from file" notes
         # so any crate that may need a [[licenses.clarify]] entry is named.
         # --show-stats prints a per-license usage summary at the end.
@@ -39,7 +39,7 @@ jobs:
       matrix:
         suite:
           - name: unit
-            paths: tests/unit
+            paths: tests/unit tests/cross_package
             workers: "-n 2"
           - name: e2e
             paths: tests/e2e
@@ -71,7 +71,7 @@ jobs:
           echo "Changed files:"
           printf '%s\n' "${changed_files}"
 
-          if printf '%s\n' "${changed_files}" | grep -Eq '^(src/aiconfigurator/generator/|tests/golden/generator/)'; then
+          if printf '%s\n' "${changed_files}" | grep -Eq '^(packages/aiconfigurator/src/aiconfigurator/generator/|tests/golden/generator/)'; then
             echo "run_golden=true" >> "${GITHUB_OUTPUT}"
           else
             echo "run_golden=false" >> "${GITHUB_OUTPUT}"
@@ -214,7 +214,8 @@ jobs:
           fetch-depth: 0
       - name: Git LFS Pull
         # The parity suite reads the collected perf parquet tables under
-        # src/aiconfigurator/systems/data (stored via Git LFS).
+        # packages/aiconfigurator-core/src/aiconfigurator_core/systems/data
+        # (stored via Git LFS).
         run: git lfs pull
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
@@ -229,12 +230,12 @@ jobs:
         # The AICONFIGURATOR_RUST_CORE_AUTOBUILD env var is a no-op; the compiled
         # aiconfigurator_core extension must be built explicitly with maturin so
         # the parity suite exercises the current Rust source. The Maturin project
-        # is the standalone core wheel under src/aiconfigurator-core.
+        # is the standalone core wheel under packages/aiconfigurator-core.
         run: |
-          cd src/aiconfigurator-core
+          cd packages/aiconfigurator-core
           VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" \
             "${GITHUB_WORKSPACE}/.venv/bin/maturin" develop --release
       - name: Run Rust/Python engine-step parity suite
         run: |
           "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx \
-            rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py
+            tests/integration/cross_package/test_engine_step_parity.py

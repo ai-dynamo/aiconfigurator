@@ -28,11 +28,14 @@ from collector.model_cases import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SUPPORT_MATRIX_ROOT = REPO_ROOT / "src" / "aiconfigurator" / "systems" / "support_matrix"
+CORE_PROJECT_ROOT = REPO_ROOT / "packages" / "aiconfigurator-core"
+COLLECTOR_ROOT = CORE_PROJECT_ROOT / "collector"
+SYSTEMS_ROOT = CORE_PROJECT_ROOT / "src" / "aiconfigurator_core" / "systems"
+SUPPORT_MATRIX_ROOT = SYSTEMS_ROOT / "support_matrix"
 
 
 def _load_mla_adapter(module_path: str, globals_dict: dict):
-    source_path = REPO_ROOT / module_path
+    source_path = CORE_PROJECT_ROOT / module_path
     tree = ast.parse(source_path.read_text(), filename=str(source_path))
     function = next(
         node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_build_mla_test_cases"
@@ -401,7 +404,7 @@ def test_gptoss_mxfp4_modes_are_additive_on_blackwell():
 
 
 def test_sglang_mxfp4_quant_labels_select_explicit_activation_precision():
-    source_path = REPO_ROOT / "collector/sglang/collect_moe.py"
+    source_path = COLLECTOR_ROOT / "sglang" / "collect_moe.py"
     tree = ast.parse(source_path.read_text(), filename=str(source_path))
     helper = next(
         node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_mxfp4_activation_precision"
@@ -897,7 +900,7 @@ def test_dsv4_plan_only_uses_backend_specific_case_plan():
             model_path,
             "--plan-only",
         ],
-        cwd=REPO_ROOT,
+        cwd=CORE_PROJECT_ROOT,
         check=True,
         capture_output=True,
         text=True,
@@ -1026,7 +1029,7 @@ def test_full_mode_unions_model_selectors_instead_of_last_model_wins():
 
 def test_support_matrix_models_have_model_case_aliases():
     case_aliases = set()
-    for path in (REPO_ROOT / "collector" / "cases" / "models").glob("*_cases.yaml"):
+    for path in (COLLECTOR_ROOT / "cases" / "models").glob("*_cases.yaml"):
         data = path.read_text(encoding="utf-8")
         for line in data.splitlines():
             stripped = line.strip()
@@ -1189,7 +1192,7 @@ framework_specific_op_exceptions:
 
 
 def test_sm_exception_files_list_matching_gpu_types():
-    systems_dir = REPO_ROOT / "src" / "aiconfigurator" / "systems"
+    systems_dir = SYSTEMS_ROOT
     expected_gpu_types_by_sm = {}
     for system_path in sorted(systems_dir.glob("*.yaml")):
         system_data = load_yaml_file(system_path)
@@ -1221,7 +1224,7 @@ def test_collector_case_yaml_numeric_lists_are_sorted():
                 yield from walk_numeric_lists(nested, (*path, str(index)))
 
     violations = []
-    for path in sorted((REPO_ROOT / "collector" / "cases").glob("**/*.yaml")):
+    for path in sorted((COLLECTOR_ROOT / "cases").glob("**/*.yaml")):
         for yaml_path, values in walk_numeric_lists(load_yaml_file(path), ()):
             adjacent_values = list(pairwise(values))
             ascending = all(left <= right for left, right in adjacent_values)

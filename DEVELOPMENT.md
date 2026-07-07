@@ -41,8 +41,8 @@ source .venv/bin/activate
 
 ```bash
 # Install the standalone core and upper package in editable mode
-pip install -e ./src/aiconfigurator-core
-pip install -e ".[dev]"
+pip install -e ./packages/aiconfigurator-core
+pip install -e "./packages/aiconfigurator[dev]"
 ```
 
 ### 5. Install Pre-Commit Hooks
@@ -117,7 +117,7 @@ pytest -m "unit or build"
 
 Data collection is typically not required for development. The repository includes pre-collected performance databases for supported systems.
 
-If you need to collect new data for a new GPU type or framework version, refer to the [Collector README](collector/README.md).
+If you need to collect new data for a new GPU type or framework version, refer to the [Collector README](packages/aiconfigurator-core/collector/README.md).
 
 ## Contributing
 

@@ -201,7 +201,9 @@ def test_l40s_sglang_fp8_attention_gap_is_hardware_incompatible(monkeypatch):
 def test_l40s_sglang_dsa_missing_data_gap_is_hardware_incompatible(monkeypatch):
     def fake_run_mode(**_kwargs):
         raise RuntimeError(
-            "File does not exist at src/aiconfigurator/systems/data/l40s/sglang/0.5.10/dsa_context_module_perf.parquet"
+            "File does not exist at "
+            "packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/l40s/sglang/0.5.10/"
+            "dsa_context_module_perf.parquet"
         )
 
     monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))

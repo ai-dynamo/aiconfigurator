@@ -172,7 +172,7 @@ class TestCLIExpUnit:
     def test_cli_exp_dict_config_equivalent_to_example_yaml(self, mock_build, mock_execute):
         """cli_exp with dict config should work correctly (mocked).
 
-        Equivalent to exp_agg_simplified from src/aiconfigurator/cli/example.yaml:
+        Equivalent to exp_agg_simplified from packages/aiconfigurator/src/aiconfigurator/cli/example.yaml:
             exp_agg_simplified:
               mode: "patch"
               serving_mode: "agg"

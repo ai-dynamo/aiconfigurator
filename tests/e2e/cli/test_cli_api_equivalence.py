@@ -152,7 +152,7 @@ class TestCLIExpEquivalence:
     """Tests that cli_exp API produces same results as CLI command."""
 
     # Path to a smaller example YAML file to speed up tests
-    EXAMPLE_YAML_PATH = "src/aiconfigurator/cli/exps/qwen3_32b_disagg.yaml"
+    EXAMPLE_YAML_PATH = "packages/aiconfigurator/src/aiconfigurator/cli/exps/qwen3_32b_disagg.yaml"
 
     def test_cli_exp_api_vs_command_with_example_yaml(self, tmp_path):
         """cli_exp API should produce same results as running CLI command."""

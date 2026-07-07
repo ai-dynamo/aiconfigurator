@@ -4,22 +4,28 @@ A workflow for comparing AIC TTFT/TPOT predictions between two revisions.
 
 ## 1. Generate predictions
 
-Run the prediction wrapper once per AIC revision. The prefix controls the output
-column names.
+Run the prediction wrapper once per AIC revision. Use a separate environment for
+each revision so both the Python packages and the compiled core extension come
+from that revision. The prefix controls the output column names.
 
 ```bash
-# From the incoming/current branch
-PYTHONPATH=src python tools/accuracy_regression_testing/predict_silicon_sample.py \
+# From an environment installed from the incoming/current branch
+python tools/accuracy_regression_testing/predict_silicon_sample.py \
   --aic-output-prefix new \
   > tools/accuracy_regression_testing/results/silicon_result_new.csv
 
-# Still run from this incoming/current checkout. Only PYTHONPATH points to the old src.
-# The script and CSV paths below are relative to the current worktree, not the old checkout.
-PYTHONPATH=/path/to/old/aiconfigurator/src python tools/accuracy_regression_testing/predict_silicon_sample.py \
-  tools/accuracy_regression_testing/results/silicon_result_new.csv \
+# From a separate worktree and environment installed from the old revision.
+# Use absolute paths so the old script writes into the incoming worktree.
+/path/to/old/aiconfigurator/.venv/bin/python \
+  /path/to/old/aiconfigurator/tools/accuracy_regression_testing/predict_silicon_sample.py \
+  /path/to/incoming/aiconfigurator/tools/accuracy_regression_testing/results/silicon_result_new.csv \
   --aic-output-prefix old \
-  > tools/accuracy_regression_testing/results/silicon_result.csv
+  > /path/to/incoming/aiconfigurator/tools/accuracy_regression_testing/results/silicon_result.csv
 ```
+
+The CI workflow installs `packages/aiconfigurator-core` and
+`packages/aiconfigurator` into each revision's environment before running these
+commands. Older monolithic revisions are installed from their repository root.
 
 The final `silicon_result.csv` should contain both `old_predicted_*` and
 `new_predicted_*` columns.

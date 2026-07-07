@@ -8,7 +8,7 @@ In aiconfigurator, the end-to-end latency estimation depends on operation-level 
 
 ### 1. Break Down the Model into Operations
 
-The model is broken down into operations, as shown in the source file [`models.py`](../src/aiconfigurator/sdk/models.py). A model is composed of operations such as GEMM and MoE defined in [`operations.py`](../src/aiconfigurator/sdk/operations.py).
+The model is broken down into operations by the canonical core modules under [`models/`](../packages/aiconfigurator-core/src/aiconfigurator_core/sdk/models/). A model is composed of operations such as GEMM and MoE defined under [`operations/`](../packages/aiconfigurator-core/src/aiconfigurator_core/sdk/operations/).
 
 ### 2. Get Operation Latency Estimation
 
@@ -26,7 +26,7 @@ class Operation(object):
     def get_weights(self, **kwargs):
         raise NotImplementedError
 ```
-The query method will then call the [`PerfDatabase`](../src/aiconfigurator/sdk/perf_database.py) corresponding method. Taking the MoE operation as an example:
+The query method will then call the corresponding [`PerfDatabase`](../packages/aiconfigurator-core/src/aiconfigurator_core/sdk/perf_database.py) method. Taking the MoE operation as an example:
 
 ```python
 def query(self, database: PerfDatabase, **kwargs):
@@ -49,13 +49,13 @@ The database contains the function **query_moe** which defines how we estimate t
 
 ### 3. Collect Data for the Operation
 
-Taking MoE for TensorRT-LLM as an example, the current collector lives in `collector/trtllm/collect_moe.py`, while shared model/op case values live under `collector/cases/`.
+Taking MoE for TensorRT-LLM as an example, the current collector lives in `packages/aiconfigurator-core/collector/trtllm/collect_moe.py`, while shared model/op case values live under `packages/aiconfigurator-core/collector/cases/`.
 
 #### 3.1 Adding New Test Cases
 
-If the MoE operation you want is not covered by the current inherited [database](../src/aiconfigurator/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt), you need to add the test case in the relevant YAML case file and collect your own data.
+If the MoE operation you want is not covered by the current inherited [database](../packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt), you need to add the test case in the relevant YAML case file and collect your own data.
 
-For example, if you want to cover a new model with `num_experts=1024, topk=16`, you should extend the model's `*_cases.yaml` under `collector/cases/models/` or the shared MoE cases under `collector/cases/base_ops/` when the case is common across models.
+For example, if you want to cover a new model with `num_experts=1024, topk=16`, you should extend the model's `*_cases.yaml` under `packages/aiconfigurator-core/collector/cases/models/` or the shared MoE cases under `packages/aiconfigurator-core/collector/cases/base_ops/` when the case is common across models.
 
 #### 3.2 Update Database
 
@@ -70,7 +70,7 @@ Now let's revisit how to add a new model in aiconfigurator. There are 3 situatio
 
 If the model is a simple variant of an existing architecture (for example, it's similar to Qwen3 32B and only has slight differences, such as different positional embedding, different q/k/v heads of GQA, different number of layers, different hidden size), these are treated as **simple variants**.
 
-In this case, you just need to ensure the architecture is supported in **ARCHITECTURE_TO_MODEL_FAMILY** in [`common.py`](../src/aiconfigurator/sdk/common.py):
+In this case, you just need to ensure the architecture is supported in **ARCHITECTURE_TO_MODEL_FAMILY** in [`common.py`](../packages/aiconfigurator-core/src/aiconfigurator_core/sdk/common.py):
 
 ```python
 "YourModelForCausalLM": "LLAMA",  # or "MOE", "DEEPSEEK", etc.
@@ -80,7 +80,7 @@ AIConfigurator will automatically download the model's `config.json` from Huggin
 
 **Note**: If the architecture already exists in `ARCHITECTURE_TO_MODEL_FAMILY` (e.g., `LlamaForCausalLM`, `Qwen3ForCausalLM`, `MixtralForCausalLM`), no changes are needed - just use the model directly.
 
-Here 'LLAMA', 'MOE', 'DEEPSEEK' are the model families defined in **ModelFamily** in [`common.py`](../src/aiconfigurator/sdk/common.py)
+Here 'LLAMA', 'MOE', 'DEEPSEEK' are the model families defined in **ModelFamily** in [`common.py`](../packages/aiconfigurator-core/src/aiconfigurator_core/sdk/common.py)
 
 
 ### Situation 2: Model Requires Additional Performance Data
@@ -89,9 +89,9 @@ This typically refers to a MoE model, as the MoE operation of a new model usuall
 
 You need to follow several steps:
 
-1. Define a new MoE operation test case in the relevant collector YAML case file and follow the collector [README](../collector/README.md) to collect the MoE data points for your model.
+1. Define a new MoE operation test case in the relevant collector YAML case file and follow the collector [README](../packages/aiconfigurator-core/collector/README.md) to collect the MoE data points for your model.
 
-2. Update the inherited database such as `src/aiconfigurator/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt` with the `moe_perf.txt` file you get in step 1.
+2. Update the inherited database such as `packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt` with the `moe_perf.txt` file you get in step 1.
 
 3. Ensure the architecture mapping exists in **ARCHITECTURE_TO_MODEL_FAMILY** (see **Situation 1**).
 
@@ -103,17 +103,17 @@ Today, we don't support the Mamba model yet. By looking at the Mamba model, it r
 
 Steps required:
 
-1. **Define a new Operation `Conv`** in `operations.py`
-2. **Define a new method `query_conv`** in `perf_database.py`
-3. **Define the data collection process** in collector by referring to existing operations' collection code, such as `collect_gemm.py`
-4. **Collect data for conv** and add the data file to systems in `src/aiconfigurator/systems/`
-5. **Add data loading code** in `perf_database.py` to load your data, which is leveraged by the method `query_conv`
-6. **Add new model definition** in `models.py` to build your model with new operation. A new model class is mapping to a new model family.  
-update your model in ModelFamily dict defined in [`common.py`](../src/aiconfigurator/sdk/common.py)
+1. **Define a new Operation `Conv`** under `packages/aiconfigurator-core/src/aiconfigurator_core/sdk/operations/`
+2. **Define a new method `query_conv`** in `packages/aiconfigurator-core/src/aiconfigurator_core/sdk/perf_database.py`
+3. **Define the data collection process** under `packages/aiconfigurator-core/collector/` by referring to existing operations' collection code, such as `collect_gemm.py`
+4. **Collect data for conv** and add the data file to systems in `packages/aiconfigurator-core/src/aiconfigurator_core/systems/`
+5. **Add data loading code** in the core `perf_database.py` to load your data, which is leveraged by the method `query_conv`
+6. **Add a new model definition** under the core `models/` package to build your model with the new operation. A new model class maps to a new model family.
+Update your model in the ModelFamily mapping defined in [`common.py`](../packages/aiconfigurator-core/src/aiconfigurator_core/sdk/common.py).
 
 ### AFD Operation Partitioning Compatibility
 
-Attention-FFN Disaggregated (AFD) estimate mode has one additional maintenance contract beyond the normal aggregated and P/D-disaggregated paths. [`sdk/afd_partition.py`](../src/aiconfigurator/sdk/afd_partition.py) splits a model's `context_ops` / `generation_ops` into A-worker and F-worker pools by operation name. When adding a new model family or new operation, make sure the generated operation names can be classified by the AFD partitioner.
+Attention-FFN Disaggregated (AFD) estimate mode has one additional maintenance contract beyond the normal aggregated and P/D-disaggregated paths. [`sdk/afd_partition.py`](../packages/aiconfigurator-core/src/aiconfigurator_core/sdk/afd_partition.py) splits a model's `context_ops` / `generation_ops` into A-worker and F-worker pools by operation name. When adding a new model family or new operation, make sure the generated operation names can be classified by the AFD partitioner.
 
 The current AFD partitioning contract is:
 
@@ -151,7 +151,7 @@ flowchart TD
     C --> j
     j --> |YES|K([Some common cases in which you will need to collect new data])
     K --> L[/• You haved defined new operations<br/> • <i><b>MoE</b></i> with different <i><b>num_experts</b></i> or <i><b>topk</b></i> from existing ones<br/>• New <i><b>attention</b></i> variant, such as <b><i>attention</b></i> with <b><i>head_size</b></i> other than 64 or 128/]
-    L --> M[Add new test cases to the relevant collector files under aiconfigurator/collector/]
+    L --> M[Add new test cases under packages/aiconfigurator-core/collector/]
     M --> N[Collect data using <i><b>collect.py</b></i> and generate <i><b>XX_XX_perf.txt</b></i> data files]
     N --> Z
     j --> |NO|Z[<i><b>Good news, you are now all set</b></i>]

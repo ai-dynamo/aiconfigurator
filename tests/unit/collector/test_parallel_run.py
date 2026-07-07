@@ -34,7 +34,7 @@ pytestmark_fork = pytest.mark.skipif(
 # Bootstrap: mock torch so collect.py can be imported without CUDA.
 # Must happen BEFORE collect.py is imported.
 # ---------------------------------------------------------------------------
-_COLLECTOR_DIR = str(Path(__file__).resolve().parents[3] / "collector")
+_COLLECTOR_DIR = str(Path(__file__).resolve().parents[3] / "packages" / "aiconfigurator-core" / "collector")
 if _COLLECTOR_DIR not in sys.path:
     sys.path.insert(0, _COLLECTOR_DIR)
 
@@ -45,7 +45,6 @@ if "torch" not in sys.modules:
 
 import collect as _collect_mod
 from collect import parallel_run
-
 from collector.model_cases import CaseSelector, OpCasePlan
 
 _collect_mod.logger = logging.getLogger("test_parallel_run")

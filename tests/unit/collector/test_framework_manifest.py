@@ -7,7 +7,6 @@ import copy
 from pathlib import Path
 
 import pytest
-
 from collector.framework_manifest import get_collector_runtime, load_manifest, validate_manifest
 from collector.sglang.registry import REGISTRY as SGLANG_REGISTRY
 from collector.trtllm.registry import REGISTRY as TRTLLM_REGISTRY
@@ -15,7 +14,7 @@ from collector.wideep.sglang.registry import REGISTRY as WIDEEP_SGLANG_REGISTRY
 from collector.wideep.trtllm.registry import REGISTRY as WIDEEP_TRTLLM_REGISTRY
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-COLLECTOR_ROOT = REPO_ROOT / "collector"
+COLLECTOR_ROOT = REPO_ROOT / "packages" / "aiconfigurator-core" / "collector"
 
 
 def test_manifest_exposes_current_framework_versions_and_images():

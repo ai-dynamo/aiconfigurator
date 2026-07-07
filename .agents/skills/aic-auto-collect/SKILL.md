@@ -91,8 +91,8 @@ docker run --rm -it --gpus all --ipc=host --network host \
 export PYTHONPATH=/workspace
 export COLLECTOR_LOG_DIR=/workspace/collector_logs/<backend>/<version>/<op>
 mkdir -p "$COLLECTOR_LOG_DIR"
-python collector/collect.py --backend <backend> --ops <op> --smoke
-python collector/collect.py --backend <backend> --ops <op> \
+python packages/aiconfigurator-core/collector/collect.py --backend <backend> --ops <op> --smoke
+python packages/aiconfigurator-core/collector/collect.py --backend <backend> --ops <op> \
   --checkpoint-dir "$COLLECTOR_CHECKPOINT_DIR/<backend>/<version>/<op>" --resume
 ```
 
@@ -115,9 +115,9 @@ Update the draft PR body whenever scope changes or a meaningful checkpoint lands
 
 If the system is new or incomplete:
 
-1. Add `src/aiconfigurator/systems/<system>.yaml`.
-2. Add `<system>` to `SupportedSystems` in `src/aiconfigurator/sdk/common.py`.
-3. Create `src/aiconfigurator/systems/data/<system>/`.
+1. Add `packages/aiconfigurator-core/src/aiconfigurator_core/systems/<system>.yaml`.
+2. Add `<system>` to `SupportedSystems` in `packages/aiconfigurator-core/src/aiconfigurator_core/sdk/common.py`.
+3. Create `packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/<system>/`.
 4. Populate YAML with conservative, documented values:
    - `gpu.mem_bw`
    - `gpu.mem_capacity`
@@ -142,7 +142,7 @@ pytest tests/unit/sdk/test_common.py -q
 Before collecting a new framework version or a new GPU SM target, check whether collector code matches the runtime. This avoids spending hours on known-bad grids.
 
 1. Record the exact runtime package version from inside the container. Do not trust only the image tag.
-2. Inspect `collector/<backend>/registry.py` for version routes and the concrete `collect_xx.py` files registered for this version.
+2. Inspect `packages/aiconfigurator-core/collector/<backend>/registry.py` for version routes and the concrete `collect_xx.py` files registered for this version.
 3. Read the top of each relevant `collect_xx.py` file: docstring, `__compat__`, version notes, SM gates, and known unsupported filters.
 4. Compare against the framework source for the exact version/tag when there is any sign of API or kernel churn:
    - SGLang: attention backends, DeepGEMM, FlashInfer, DeepSeek/DSV module code, MoE runner paths.
@@ -191,10 +191,10 @@ For each backend/version, enumerate registry ops and create a tracking table wit
 For each op:
 
 ```bash
-python3 collector/collect.py --backend <backend> --ops <op> --smoke
-python3 collector/collect.py --backend <backend> --ops <op> --shuffle --limit 20
-python3 collector/collect.py --backend <backend> --ops <op> --shuffle --limit 100
-python3 collector/collect.py --backend <backend> --ops <op> \
+python3 packages/aiconfigurator-core/collector/collect.py --backend <backend> --ops <op> --smoke
+python3 packages/aiconfigurator-core/collector/collect.py --backend <backend> --ops <op> --shuffle --limit 20
+python3 packages/aiconfigurator-core/collector/collect.py --backend <backend> --ops <op> --shuffle --limit 100
+python3 packages/aiconfigurator-core/collector/collect.py --backend <backend> --ops <op> \
   --checkpoint-dir "$COLLECTOR_CHECKPOINT_DIR/<backend>/<version>/<op>" --resume
 ```
 
@@ -226,7 +226,7 @@ For very long runs, commit and push safe progress periodically:
 
 ```bash
 git status --short
-git add collector tests src/aiconfigurator/systems
+git add collector tests packages/aiconfigurator-core/src/aiconfigurator_core/systems
 git commit --signoff -m "<backend>: <op family> progress"
 git push
 ```
@@ -260,8 +260,8 @@ Classify each error group:
 Fix policy:
 
 - For API/import/signature errors:
-  1. Read `collector/<backend>/registry.py` to map the failing op to its collector module.
-  2. Read the failing `collector/<backend>/collect_*.py`.
+  1. Read `packages/aiconfigurator-core/collector/<backend>/registry.py` to map the failing op to its collector module.
+  2. Read the failing `packages/aiconfigurator-core/collector/<backend>/collect_*.py`.
   3. Search the framework source checkout for the missing class, function, import path, or attribute.
   4. Verify the real API in source. Do not trust Python's "Did you mean" suggestions blindly.
   5. Patch the collector with a minimal compatibility-preserving change.
@@ -274,7 +274,7 @@ Fix policy:
 - Keep older backend versions working.
 - Keep shared test-case generators deterministic when unit tests depend on them. Put runtime availability probes in backend collector wrappers when the skip is caused by a partially installed framework package.
 - Guard `importlib.util.find_spec("a.b.c")` with `try/except ModuleNotFoundError`; partial packages can make `find_spec` raise instead of return `None`.
-- If a collector route only exists for future framework versions, use `VersionRoute` in `collector/<backend>/registry.py` and add a wrapper module with an explicit `__compat__`.
+- If a collector route only exists for future framework versions, use `VersionRoute` in `packages/aiconfigurator-core/collector/<backend>/registry.py` and add a wrapper module with an explicit `__compat__`.
 - If a collector helper silently returns `None` after a dry-run or subprocess failure, make it raise or record the skip explicitly so failed coverage is visible.
 - If a valid production-like case fails in the framework kernel, file or prepare an upstream bug for SGLang, vLLM, or TRT-LLM with exact image/version, SM, minimal repro, and traceback. Link it in the PR or failure ledger.
 - If the case is not production-like or the runtime explicitly does not support that SM/path, skip it in `collect_xx.py` before execution with a clear comment and a narrow predicate.
@@ -283,9 +283,9 @@ After a fix:
 
 ```bash
 pytest tests/unit/collector -q
-python3 collector/collect.py --backend <backend> --ops <op> --smoke
-python3 collector/collect.py --backend <backend> --ops <op> --shuffle --limit 100
-python3 collector/collect.py --backend <backend> --ops <op> \
+python3 packages/aiconfigurator-core/collector/collect.py --backend <backend> --ops <op> --smoke
+python3 packages/aiconfigurator-core/collector/collect.py --backend <backend> --ops <op> --shuffle --limit 100
+python3 packages/aiconfigurator-core/collector/collect.py --backend <backend> --ops <op> \
   --checkpoint-dir "$COLLECTOR_CHECKPOINT_DIR/<backend>/<version>/<op>" --resume
 ```
 
@@ -311,7 +311,7 @@ SGLang:
 
 - DeepGEMM, FlashInfer, DSV4, MHC, and MLA paths can be present in source but unavailable for the active SM or installed package set.
 - MLA prefill/generation may have hard-coded head/group constraints on new architectures. Restrict to verified safe shapes rather than allowing fatal CUDA crashes.
-- If `sglang` is partially installed in a unit-test image, `sglang.srt...` probes can raise. Runtime skip checks belong in `collector/sglang/collect_*.py` wrappers, not necessarily in `collector/common_test_cases.py`.
+- If `sglang` is partially installed in a unit-test image, `sglang.srt...` probes can raise. Runtime skip checks belong in `packages/aiconfigurator-core/collector/sglang/collect_*.py` wrappers, not necessarily in `packages/aiconfigurator-core/collector/common_test_cases.py`.
 - For DSV4/MHC, distinguish "case grid exists" from "runtime module exists"; unit tests may assert the former while the collector should enforce the latter.
 
 vLLM:
@@ -326,7 +326,7 @@ vLLM:
 
 Accept a perf file only when:
 
-- It exists under `src/aiconfigurator/systems/data/<system>/<backend>/<version>/`.
+- It exists under `packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/<system>/<backend>/<version>/`.
 - It is not empty and has the expected CSV header.
 - Rows contain the expected framework, version, and device name.
 - Latency values are finite and plausible. They should usually be positive; allow zero only for documented modeled-overhead files such as compute-scale where the collector intentionally clamps negative overhead to zero.
@@ -339,11 +339,11 @@ Accept a perf file only when:
 Useful checks:
 
 ```bash
-find src/aiconfigurator/systems/data/<system>/<backend>/<version> -maxdepth 1 -type f -name '*_perf.txt' -print
+find packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/<system>/<backend>/<version> -maxdepth 1 -type f -name '*_perf.txt' -print
 python3 - <<'PY'
 from pathlib import Path
 import csv, math
-root = Path("src/aiconfigurator/systems/data/<system>/<backend>/<version>")
+root = Path("packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/<system>/<backend>/<version>")
 for path in sorted(root.glob("*_perf.txt")):
     with path.open() as f:
         rows = list(csv.DictReader(f))

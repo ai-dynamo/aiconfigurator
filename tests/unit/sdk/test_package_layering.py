@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Layering checks for the SDK/core portion of the AIC package."""
+"""Layering checks for the standalone ``aiconfigurator_core`` SDK."""
 
 from __future__ import annotations
 
@@ -10,15 +10,8 @@ from pathlib import Path
 
 import pytest
 
-SDK_ROOT = Path(__file__).parents[3] / "src" / "aiconfigurator" / "sdk"
-UPPER_MODULES = {
-    "aiconfigurator.cli",
-    "aiconfigurator.generator",
-    "aiconfigurator.logging_utils",
-    "aiconfigurator.main",
-    "aiconfigurator.webapp",
-    "spica",
-}
+SDK_ROOT = Path(__file__).parents[3] / "packages" / "aiconfigurator-core" / "src" / "aiconfigurator_core" / "sdk"
+UPPER_MODULES = {"aiconfigurator", "spica"}
 
 
 def _is_cli_child(name: str) -> bool:
@@ -30,7 +23,7 @@ def _is_absolute_cli_import(name: str) -> bool:
 
 
 def _sdk_package_parts(path: Path) -> tuple[str, ...]:
-    return ("aiconfigurator", "sdk", *path.parent.parts)
+    return ("aiconfigurator_core", "sdk", *path.parent.parts)
 
 
 def _resolve_import_from_module(node: ast.ImportFrom, package_parts: tuple[str, ...]) -> str | None:
@@ -55,11 +48,7 @@ def _is_upper_import_from(node: ast.ImportFrom, package_parts: tuple[str, ...]) 
     resolved_module = _resolve_import_from_module(node, package_parts)
     if resolved_module is None:
         return False
-    if _is_upper_module(resolved_module):
-        return True
-    if resolved_module == "aiconfigurator":
-        return any(_is_upper_module(f"aiconfigurator.{alias.name}") for alias in node.names)
-    return False
+    return _is_upper_module(resolved_module)
 
 
 def _upper_import_offenders(path: Path, source: str, root: Path | None = None) -> list[str]:
@@ -121,11 +110,12 @@ def test_sdk_modules_do_not_import_upper_layer() -> None:
 @pytest.mark.parametrize(
     ("path", "source"),
     [
+        (Path("memory.py"), "import aiconfigurator\n"),
         (Path("memory.py"), "import aiconfigurator.generator\n"),
         (Path("memory.py"), "from aiconfigurator.logging_utils import setup_logging\n"),
         (Path("memory.py"), "from aiconfigurator import webapp\n"),
-        (Path("memory.py"), "from .. import main\n"),
-        (Path("subpkg/module.py"), "from ...generator import api\n"),
+        (Path("memory.py"), "from aiconfigurator import main\n"),
+        (Path("subpkg/module.py"), "from aiconfigurator.generator import api\n"),
         (Path("memory.py"), "import spica\n"),
     ],
 )
@@ -141,11 +131,6 @@ def test_upper_import_offenders_flags_upper_packages(path: Path, source: str) ->
         (Path("memory.py"), "from aiconfigurator import cli\n"),
         (Path("memory.py"), "from aiconfigurator.cli import api\n"),
         (Path("memory.py"), "from aiconfigurator.cli.api import cli_estimate\n"),
-        (Path("memory.py"), "from .. import cli\n"),
-        (Path("memory.py"), "from ..cli import api\n"),
-        (Path("memory.py"), "from ..cli.api import cli_estimate\n"),
-        (Path("subpkg/module.py"), "from ... import cli\n"),
-        (Path("subpkg/module.py"), "from ...cli.api import cli_estimate\n"),
     ],
 )
 def test_cli_import_offenders_flags_absolute_and_relative_cli_imports(path: Path, source: str) -> None:
@@ -155,8 +140,8 @@ def test_cli_import_offenders_flags_absolute_and_relative_cli_imports(path: Path
 @pytest.mark.parametrize(
     ("path", "source"),
     [
-        (Path("memory.py"), "import aiconfigurator.sdk.memory\n"),
-        (Path("memory.py"), "from aiconfigurator import sdk\n"),
+        (Path("memory.py"), "import aiconfigurator_core.sdk.memory\n"),
+        (Path("memory.py"), "from aiconfigurator_core import sdk\n"),
         (Path("memory.py"), "from . import cli\n"),
         (Path("subpkg/module.py"), "from .. import cli\n"),
         (Path("subpkg/module.py"), "from ..cli import api\n"),

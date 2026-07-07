@@ -13,7 +13,7 @@ git config diff.parquet.textconv 'uv run python tools/perf_database/parquet_text
 After that, regular git commands show parquet files as CSV-like text:
 
 ```bash
-git diff origin/main...HEAD -- src/aiconfigurator/systems/data
+git diff origin/main...HEAD -- packages/aiconfigurator-core/src/aiconfigurator_core/systems/data
 ```
 
 For PR review summaries, run:

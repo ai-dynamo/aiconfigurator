@@ -5,7 +5,7 @@ This file adds an explicit guard for generator rule edits.
 ## Required First Step
 
 Before making any change under:
-- `src/aiconfigurator/generator/**`
+- `packages/aiconfigurator/src/aiconfigurator/generator/**`
 
 MUST read:
 - `.claude/rules/generator-development.md`
@@ -13,16 +13,16 @@ MUST read:
 ## Required Collector First Step
 
 Before adding a Collector operation or changing Collector case population under:
-- `collector/cases/**`
-- `collector/case_generator.py`
-- `collector/model_cases.py`
-- `collector/collect.py`
-- `collector/registry_types.py`
-- `collector/framework_manifest.yaml`
-- `collector/*/registry.py`
-- `collector/*/collect_*.py`
-- `collector/wideep/*/registry.py`
-- `collector/wideep/*/collect_*.py`
+- `packages/aiconfigurator-core/collector/cases/**`
+- `packages/aiconfigurator-core/collector/case_generator.py`
+- `packages/aiconfigurator-core/collector/model_cases.py`
+- `packages/aiconfigurator-core/collector/collect.py`
+- `packages/aiconfigurator-core/collector/registry_types.py`
+- `packages/aiconfigurator-core/collector/framework_manifest.yaml`
+- `packages/aiconfigurator-core/collector/*/registry.py`
+- `packages/aiconfigurator-core/collector/*/collect_*.py`
+- `packages/aiconfigurator-core/collector/wideep/*/registry.py`
+- `packages/aiconfigurator-core/collector/wideep/*/collect_*.py`
 
 MUST read and follow:
 - `.agents/skills/aic-collector-op-development/SKILL.md`
@@ -41,7 +41,7 @@ AIConfigurator is a Python CLI/SDK tool for optimizing LLM inference deployment 
 Dependencies are managed via `uv` with a `uv.lock` lockfile. The virtual environment lives at `.venv/`. All commands below assume `.venv/bin/` is on PATH or you prefix with `.venv/bin/`.
 
 - **Install/refresh deps:** `python3 -m uv sync --extra dev`
-- **Git LFS:** The performance database files under `src/aiconfigurator/systems/data/**/*.txt` are tracked with Git LFS. Run `git lfs pull` after cloning. If LFS pull fails (e.g., `github-cloud.githubusercontent.com` is blocked), the CLI `generate` and `support` modes still work. The `default` mode requires real LFS data.
+- **Git LFS:** The performance database files under `packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/**/*.txt` are tracked with Git LFS. Run `git lfs pull` after cloning. If LFS pull fails (e.g., `github-cloud.githubusercontent.com` is blocked), the CLI `generate` and `support` modes still work. The `default` mode requires real LFS data.
 
 ### Lint / Test / Run
 

@@ -10,6 +10,8 @@ from jinja2 import Environment, FileSystemLoader
 
 _TEMPLATE_DIR = (
     Path(__file__).resolve().parents[3]
+    / "packages"
+    / "aiconfigurator"
     / "src"
     / "aiconfigurator"
     / "generator"

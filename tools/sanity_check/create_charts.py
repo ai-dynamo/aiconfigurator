@@ -241,7 +241,8 @@ def get_changed_files(base_ref: str, head_ref: str) -> list[str]:
             check=True,
         )
         changed_files = [f.strip() for f in result.stdout.split("\n") if f.strip()]
-        return [f for f in changed_files if f.startswith("src/aiconfigurator/systems/")]
+        systems_prefix = "packages/aiconfigurator-core/src/aiconfigurator_core/systems/"
+        return [f for f in changed_files if f.startswith(systems_prefix)]
     except subprocess.CalledProcessError as e:
         print(f"Error getting changed files: {e}", file=sys.stderr)
         return []
@@ -263,6 +264,7 @@ def get_csv_to_parquet_conversion_files(base_ref: str, head_ref: str) -> set[str
     added_parquet: set[str] = set()
     deleted_legacy_as_parquet: set[str] = set()
     renamed_legacy_as_parquet: set[str] = set()
+    systems_prefix = "packages/aiconfigurator-core/src/aiconfigurator_core/systems/"
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
@@ -271,17 +273,17 @@ def get_csv_to_parquet_conversion_files(base_ref: str, head_ref: str) -> set[str
         paths = parts[1:]
         if status.startswith("A") and paths:
             path = paths[-1]
-            if path.startswith("src/aiconfigurator/systems/") and path.endswith("_perf.parquet"):
+            if path.startswith(systems_prefix) and path.endswith("_perf.parquet"):
                 added_parquet.add(path)
         elif status.startswith("D") and paths:
             path = paths[0]
-            if path.startswith("src/aiconfigurator/systems/") and path.endswith("_perf.txt"):
+            if path.startswith(systems_prefix) and path.endswith("_perf.txt"):
                 deleted_legacy_as_parquet.add(f"{os.path.splitext(path)[0]}.parquet")
         elif status.startswith("R") and len(paths) == 2:
             old_path, new_path = paths
             if (
-                old_path.startswith("src/aiconfigurator/systems/")
-                and new_path.startswith("src/aiconfigurator/systems/")
+                old_path.startswith(systems_prefix)
+                and new_path.startswith(systems_prefix)
                 and old_path.endswith("_perf.txt")
                 and new_path.endswith("_perf.parquet")
                 and os.path.splitext(old_path)[0] == os.path.splitext(new_path)[0]
@@ -482,7 +484,7 @@ def main():
             continue
 
         # remove prefix
-        changed_file = changed_file.replace("src/aiconfigurator/systems/", "")
+        changed_file = changed_file.replace("packages/aiconfigurator-core/src/aiconfigurator_core/systems/", "")
         # split by /
         parts = changed_file.split("/")
 

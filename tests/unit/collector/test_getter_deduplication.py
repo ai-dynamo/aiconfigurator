@@ -8,12 +8,12 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-
 from collector.case_generator import MoeCommonTestCase
 
 pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+CORE_PROJECT_ROOT = REPO_ROOT / "packages" / "aiconfigurator-core"
 
 
 class _Dummy:
@@ -35,7 +35,7 @@ def _stub_module(monkeypatch, name: str, **attrs):
 
 def _load_collector(monkeypatch, module_name: str, relative_path: str):
     monkeypatch.delitem(sys.modules, module_name, raising=False)
-    spec = importlib.util.spec_from_file_location(module_name, REPO_ROOT / relative_path)
+    spec = importlib.util.spec_from_file_location(module_name, CORE_PROJECT_ROOT / relative_path)
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, module_name, module)
     spec.loader.exec_module(module)

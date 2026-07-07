@@ -3,9 +3,19 @@
 
 import sys
 import types
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+_COLLECT_MLA_MODULE = (
+    Path(__file__).resolve().parents[4]
+    / "packages"
+    / "aiconfigurator-core"
+    / "collector"
+    / "sglang"
+    / "collect_mla_module.py"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -42,7 +52,7 @@ def _import_module():
         return sys.modules[mod_name]
     spec = importlib.util.spec_from_file_location(
         mod_name,
-        "collector/sglang/collect_mla_module.py",
+        _COLLECT_MLA_MODULE,
     )
     mod = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = mod

@@ -288,7 +288,17 @@ def test_release_1_2_0_backend_version_matrix():
 
 
 def test_sglang_0_5_11_cli_template_is_version_specific():
-    template_dir = _REPO_ROOT / "src" / "aiconfigurator" / "generator" / "config" / "backend_templates" / "sglang"
+    template_dir = (
+        _REPO_ROOT
+        / "packages"
+        / "aiconfigurator"
+        / "src"
+        / "aiconfigurator"
+        / "generator"
+        / "config"
+        / "backend_templates"
+        / "sglang"
+    )
     selected = _select_versioned_template(
         list(template_dir.glob("cli_args*.j2")),
         "cli_args",

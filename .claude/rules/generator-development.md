@@ -5,7 +5,7 @@ description: >
   discipline. Applies to all generator work including templates, rules,
   config schemas, and rendering logic.
 paths:
-  - "src/aiconfigurator/generator/**"
+  - "packages/aiconfigurator/src/aiconfigurator/generator/**"
 ---
 
 Rules and workflows for safely modifying the aiconfigurator generator module.
@@ -35,10 +35,10 @@ before changing them:
 
 | File | Risk | Why |
 |---|---|---|
-| `src/aiconfigurator/generator/rendering/engine.py` | High | Context building + template rendering; changes affect ALL backends and versions |
-| `src/aiconfigurator/generator/rendering/rule_engine.py` | High | Rule DSL evaluator; bugs here corrupt ALL computed parameters silently |
-| `src/aiconfigurator/generator/rendering/schemas.py` | High | Default application; wrong defaults propagate through every downstream stage |
-| `src/aiconfigurator/generator/module_bridge.py` | Medium | SDK/profiler bridge; field name mismatches break the profiler -> generator flow |
+| `packages/aiconfigurator/src/aiconfigurator/generator/rendering/engine.py` | High | Context building + template rendering; changes affect ALL backends and versions |
+| `packages/aiconfigurator/src/aiconfigurator/generator/rendering/rule_engine.py` | High | Rule DSL evaluator; bugs here corrupt ALL computed parameters silently |
+| `packages/aiconfigurator/src/aiconfigurator/generator/rendering/schemas.py` | High | Default application; wrong defaults propagate through every downstream stage |
+| `packages/aiconfigurator/src/aiconfigurator/generator/module_bridge.py` | Medium | SDK/profiler bridge; field name mismatches break the profiler -> generator flow |
 
 ## Universal Rules
 
@@ -65,12 +65,12 @@ See `.claude/rules/generator/guard_rails.md` for the full catalog of constraints
 
 Before implementing a generator change, check whether it affects:
 
-- **CLI** (`src/aiconfigurator/cli/`) -- new params need CLI arg registration
-- **SDK/profiler bridge** (`src/aiconfigurator/generator/module_bridge.py`) -- field name changes break the bridge
+- **CLI** (`packages/aiconfigurator/src/aiconfigurator/cli/`) -- new params need CLI arg registration
+- **SDK/profiler bridge** (`packages/aiconfigurator/src/aiconfigurator/generator/module_bridge.py`) -- field name changes break the bridge
 - **Dynamo profiler** (https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/profiler) -- profiler feeds data that generator consumes; schema changes propagate
 - **Generator validator** (`tools/generator_validator/`) -- new flags need validator updates
 - **Support matrix** (`tools/support_matrix/`) -- new backends/models may need matrix updates
-- **Collector** (`collector/`) -- performance data collection may reference generator params
+- **Collector** (`packages/aiconfigurator-core/collector/`) -- performance data collection may reference generator params
 
 See `.claude/rules/generator/cross_module_impact.md` for the detailed dependency map.
 
@@ -126,7 +126,7 @@ forgetting the others (PR #579: MoE TP rule missing from SGLang).
 - Each backend has versioned templates (e.g., `cli_args.0.16.0.j2`)
 - The renderer picks the HIGHEST version <= requested version (floor match)
 - When fixing or updating versioned templates, check
-  `src/aiconfigurator/generator/config/backend_version_matrix.yaml` to identify
+  `packages/aiconfigurator/src/aiconfigurator/generator/config/backend_version_matrix.yaml` to identify
   active versions. Generally only modify templates for the **latest 5 Dynamo versions**
   and their associated backend versions. If the change requires touching more than 5
   versions, confirm with the developer before proceeding.

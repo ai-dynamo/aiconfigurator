@@ -14,12 +14,12 @@ covers safe practices for adding and modifying Jinja2 templates.
 
 | File | Purpose |
 |---|---|
-| `src/aiconfigurator/generator/config/backend_templates/<backend>/` | Jinja2 templates |
-| `src/aiconfigurator/generator/config/backend_config_mapping.yaml` | Param name mapping |
-| `src/aiconfigurator/generator/config/deployment_config.yaml` | Input schema + defaults |
-| `src/aiconfigurator/generator/config/backend_version_matrix.yaml` | Version compatibility |
-| `src/aiconfigurator/generator/rendering/engine.py` | Template rendering + context building |
-| `src/aiconfigurator/generator/rule_plugin/*.rule` | Rule DSL files |
+| `packages/aiconfigurator/src/aiconfigurator/generator/config/backend_templates/<backend>/` | Jinja2 templates |
+| `packages/aiconfigurator/src/aiconfigurator/generator/config/backend_config_mapping.yaml` | Param name mapping |
+| `packages/aiconfigurator/src/aiconfigurator/generator/config/deployment_config.yaml` | Input schema + defaults |
+| `packages/aiconfigurator/src/aiconfigurator/generator/config/backend_version_matrix.yaml` | Version compatibility |
+| `packages/aiconfigurator/src/aiconfigurator/generator/rendering/engine.py` | Template rendering + context building |
+| `packages/aiconfigurator/src/aiconfigurator/generator/rule_plugin/*.rule` | Rule DSL files |
 | `tools/generator_validator/` | Post-generation validation |
 
 ## Template Types by Backend

@@ -5,7 +5,8 @@
 """
 Full support-matrix Rust-vs-Python parity scan.
 
-Iterates every PASS row in `src/aiconfigurator/systems/support_matrix/*.csv`
+Iterates every PASS row in
+`packages/aiconfigurator-core/src/aiconfigurator_core/systems/support_matrix/*.csv`
 and verifies the Rust engine-step backend matches the Python reference within
 tolerance. Results land in a single SQLite file so the run is resumable
 across crashes, SIGINTs, or multi-day wall-clock budgets.
@@ -38,7 +39,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(_REPO_ROOT / "src"))
+sys.path.insert(0, str(_REPO_ROOT / "packages" / "aiconfigurator" / "src"))
+sys.path.insert(0, str(_REPO_ROOT / "packages" / "aiconfigurator-core" / "src"))
+sys.path.insert(0, str(_REPO_ROOT / "packages" / "aiconfigurator-core"))
 sys.path.insert(0, str(_REPO_ROOT))
 
 from tools.support_matrix.support_matrix import (
@@ -55,8 +58,12 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_BASELINE_DIR = _REPO_ROOT / "src" / "aiconfigurator" / "systems" / "support_matrix"
-DEFAULT_DB_PATH = _REPO_ROOT / "rust" / "aiconfigurator-core" / "parity_tests" / "scan.sqlite"
+DEFAULT_BASELINE_DIR = (
+    _REPO_ROOT / "packages" / "aiconfigurator-core" / "src" / "aiconfigurator_core" / "systems" / "support_matrix"
+)
+DEFAULT_DB_PATH = (
+    _REPO_ROOT / "packages" / "aiconfigurator-core" / "rust" / "aiconfigurator-core" / "parity_tests" / "scan.sqlite"
+)
 
 SCAN_MODE_PROBE = "probe_only"
 SCAN_MODE_PARETO = "pareto_only"

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Integration: ``aiconfigurator.sdk.memory`` capacity estimate over a REAL perf DB.
+"""Integration: ``aiconfigurator_core.sdk.memory`` capacity estimate over a REAL perf DB.
 
 Exercises the NATIVE path end-to-end (the full ``_get_memory_usage`` backend
 memory model + the OfFree/OfTotal budget math), which the unit tests in
@@ -9,7 +9,8 @@ memory model + the OfFree/OfTotal budget math), which the unit tests in
 breakdown. This is NOT a Python-vs-Rust parity test: the Rust
 ``estimate_kv_cache`` is a pure forwarder into this same Python code, so there is
 no independent Rust implementation to compare against -- that round-trip is
-covered separately by ``rust/aiconfigurator-core/tests/memory_round_trip.rs``.
+covered separately by
+``packages/aiconfigurator-core/rust/aiconfigurator-core/tests/memory_round_trip.rs``.
 
 Native cases (Qwen3-32B on h200_sxm, TRT-LLM OfFree and vLLM OfTotal), asserting:
 
@@ -20,7 +21,7 @@ Native cases (Qwen3-32B on h200_sxm, TRT-LLM OfFree and vLLM OfTotal), asserting
   scheduler_block_size)``, using the tolerance-adjusted token count when set.
 
 Requires the perf DB (LFS) for the SystemSpec capacity used by the native path,
-plus ``aiconfigurator_core`` importable (transitively, via ``sdk.memory``).
+plus ``aiconfigurator_core`` importable.
 Soft-skips when the import or the native breakdown is unavailable (e.g. no
 ``git lfs pull``) so bare runs stay green.
 """
@@ -35,7 +36,7 @@ pytestmark = pytest.mark.integration
 
 # `sdk.memory` (transitively) needs the compiled `aiconfigurator_core` extension,
 # so it must be importable; skip rather than error when it is not built.
-memory = pytest.importorskip("aiconfigurator.sdk.memory")
+memory = pytest.importorskip("aiconfigurator_core.sdk.memory")
 
 
 # (model, system, backend, backend_version, memory_fraction_kind) — the

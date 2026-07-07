@@ -39,36 +39,38 @@ Let's get started.
 pip3 install aiconfigurator
 ```
 
-The upper `aiconfigurator` wheel contains the CLI, generator, webapp, and Spica.
-It depends on the exact matching `aiconfigurator-core` wheel, which independently
-owns the SDK, model/system data, and native extension. Installing
+The upper `aiconfigurator` wheel contains the CLI, generator, webapp, Spica,
+service-level search APIs, and compatibility facades for historical SDK import
+paths. It depends on the exact matching `aiconfigurator-core` wheel, which
+independently owns the canonical estimator SDK under `aiconfigurator_core`,
+model/system data, and native extension. Installing
 `aiconfigurator` therefore installs the complete product, while core-only
 consumers can install `aiconfigurator-core` without pulling in the upper layer.
 
-The core wheel also exposes a core-namespaced alias for the user-facing SDK
-task. Both imports resolve to the same class:
+Public core APIs remain accessible through both the canonical and historical
+paths after installing `aiconfigurator`; both imports resolve to the same
+object:
 
 ```python
-from aiconfigurator_core.sdk.task_v2 import Task
-# Equivalent to: from aiconfigurator.sdk.task_v2 import Task
+from aiconfigurator_core.sdk.engine import EngineHandle
+from aiconfigurator.sdk.engine import EngineHandle as LegacyEngineHandle
+
+assert LegacyEngineHandle is EngineHandle
 ```
+
+Search and deployment orchestration such as
+`from aiconfigurator.sdk.task_v2 import Task` remains upper-layer API and is not
+part of the standalone core.
 
 #### Upgrading from 0.9
 
-Version 0.9 shipped core files inside `aiconfigurator`. Package installers cannot
-safely transfer those same paths to the new dependency during a normal in-place
-upgrade because dependencies are installed before dependents. Remove the old
-owner first when crossing this package boundary:
+Version 0.9 shipped estimator implementations inside `aiconfigurator`. The new
+layout keeps that distribution as the owner of every historical
+`aiconfigurator.*` path and adds `aiconfigurator_core.*` through its dependency,
+so a normal in-place upgrade is supported:
 
 ```bash
-python3 -m pip uninstall -y aiconfigurator aiconfigurator-core
-python3 -m pip install 'aiconfigurator==0.10.0'
-```
-
-If a normal upgrade was already attempted, repair the core payload with:
-
-```bash
-python3 -m pip install --force-reinstall --no-deps 'aiconfigurator-core==0.10.0'
+python3 -m pip install --upgrade 'aiconfigurator==0.10.0'
 ```
 
 ### Build and Install from Source
@@ -87,8 +89,8 @@ git lfs pull
 python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.10 or later)
 
 # 4. Install the standalone core, then the upper package
-pip3 install ./src/aiconfigurator-core
-pip3 install .
+pip3 install ./packages/aiconfigurator-core
+pip3 install ./packages/aiconfigurator
 ```
 
 ### Build with Docker
@@ -277,14 +279,14 @@ You will get different results.
 
 The `default` mode will create two experiments, one is `agg` and another one is `disagg` and then compare the results.
 To further customize (including the search space and per-component quantization), parameters are defined in a YAML file.
-Built-in YAML files are under `src/aiconfigurator/cli/example.yaml` and `src/aiconfigurator/cli/exps/*.yaml`
+Built-in YAML files are under `packages/aiconfigurator/src/aiconfigurator/cli/example.yaml` and `packages/aiconfigurator/src/aiconfigurator/cli/exps/*.yaml`
 Refer to the YAML file and modify as needed. Pass your customized YAML file to `exp` mode:
 
 ```bash
 aiconfigurator cli exp --yaml-path customized_config.yaml
 ```
 We can use `exp` mode to compare multiple results, including disagg vs. agg, homogeneous vs. heterogeneous, and more than 2 experiments.
-We've crafted several examples in `src/aiconfigurator/cli/exps/*.yaml`
+We've crafted several examples in `packages/aiconfigurator/src/aiconfigurator/cli/exps/*.yaml`
 For the full guide, refer to [CLI User Guide](docs/cli_user_guide.md).
 
 ### Deploying to llm-d Platform
@@ -426,7 +428,7 @@ Use `--generator-config path/to/file.yaml` to load a YAML payload with `ServiceC
 - `--generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8`
 - `--generator-set K8sConfig.k8s_namespace=dynamo \`
 
-Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`.
+Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `packages/aiconfigurator/src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`.
 
 ## Tuning with Advanced Features
 
@@ -496,9 +498,9 @@ To estimate performance, we take the following steps:
 Data collection is a standalone process for building the database used by aiconfigurator. By default, you do not need to collect data yourself.
 Small changes to the database may not materially change performance estimates. For example, you can use 1.0.0rc3 data of `trtllm` on `h200_sxm` and deploy the generated configuration with Dynamo and a `trtllm` 1.0.0rc4 worker.
 
-To go through the process, refer to the [guidance](collector/README.md) under the `collector` folder.
+To go through the process, refer to the [guidance](packages/aiconfigurator-core/collector/README.md) under the core package's `collector` folder.
 
-**New:** The collector now supports optional GPU power monitoring during kernel execution. Use the `--measure_power` flag to collect power consumption data alongside performance metrics. See the [collector README](collector/README.md#power-monitoring-optional) for details.
+**New:** The collector now supports optional GPU power monitoring during kernel execution. Use the `--measure_power` flag to collect power consumption data alongside performance metrics. See the [collector README](packages/aiconfigurator-core/collector/README.md#power-monitoring-optional) for details.
 
 ### System Data Support Matrix
 
@@ -520,7 +522,7 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 
 For a comprehensive, interactive view of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, visit the **[Support Matrix on GitHub Pages](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)**. The page fetches the split support matrix CSV files directly from GitHub at load time and supports filtering by system, mode, model search, and switching between branches.
 
-The raw data is also available as [per-system CSV files](src/aiconfigurator/systems/support_matrix).
+The raw data is also available as [per-system CSV files](packages/aiconfigurator-core/src/aiconfigurator_core/systems/support_matrix).
 
 You can also check support via the CLI:
 ```bash

@@ -3,12 +3,12 @@
 > **YAML format:** Experiment YAML uses the flat `Task` schema — every key maps
 > 1:1 to a `Task` field, with no `mode:` selector and no `config:` /
 > `worker_config:` nesting. The examples below are in this format; see
-> [`example.yaml`](../src/aiconfigurator/cli/example.yaml) for the full template.
+> [`example.yaml`](../packages/aiconfigurator/src/aiconfigurator/cli/example.yaml) for the full template.
 >
 > The legacy V1 nested format is **deprecated** and kept only behind a limited
 > compatibility shim: it auto-converts to V2 with a `DeprecationWarning`, and
 > any field with no V2 equivalent is rejected rather than silently dropped. See
-> [`example_v1_deprecated.yaml`](../src/aiconfigurator/cli/example_v1_deprecated.yaml)
+> [`example_v1_deprecated.yaml`](../packages/aiconfigurator/src/aiconfigurator/cli/example_v1_deprecated.yaml)
 > for the old shape.
 
 In aiconfigurator, the inference framework and serving modeling is relatively complicated compared with the most simplified CLI entrypoint.  
@@ -23,7 +23,7 @@ The optional params of cli contains the definition of ISL, OSL, TTFT and TPOT wh
 ```bash
 aiconfigurator cli exp --yaml-path example.yaml
 ```
-The example.yaml is defined [here](../src/aiconfigurator/cli/example.yaml).  
+The example.yaml is defined [here](../packages/aiconfigurator/src/aiconfigurator/cli/example.yaml).
 Let's take a look at example.yaml
 ```yaml
 # agg_full: aggregated, full control. Use as a template.
