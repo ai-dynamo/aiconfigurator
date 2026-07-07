@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import importlib
-import sys
 from pathlib import Path
 
 import pytest
@@ -10,42 +9,13 @@ import yaml
 pytestmark = pytest.mark.unit
 
 
-def _find_repo_root(start: Path) -> Path:
-    """Find repository root.
-
-    Detect the workspace root via the standalone core package source tree.
-    """
-    start = start.resolve()
-    for parent in [start, *start.parents]:
-        if (parent / "packages" / "aiconfigurator-core" / "src" / "aiconfigurator_core").is_dir():
-            return parent
-    raise RuntimeError("Cannot find repository root (expected packages/aiconfigurator-core/)")
-
-
 @pytest.fixture(scope="module")
 def perf_database():
-    """
-    Import the local ``aiconfigurator_core.sdk.perf_database`` module,
-    ensuring it takes precedence over any installed package.
-    """
-    project_root = _find_repo_root(Path(__file__))
-    src_path = project_root / "packages" / "aiconfigurator-core" / "src"
-    sys.path.insert(0, str(src_path))
-
-    saved_core_modules = {}
-
-    # Purge already-imported site-packages version if present
-    for key in list(sys.modules.keys()):
-        if key == "aiconfigurator_core" or key.startswith("aiconfigurator_core."):
-            saved_core_modules[key] = sys.modules.pop(key)
+    """Reload the active core distribution's perf-database module."""
 
     import aiconfigurator_core.sdk.perf_database as perf_database
 
-    importlib.reload(perf_database)
-    yield perf_database
-
-    # Restore any previously imported core modules after this test module finishes.
-    sys.modules.update(saved_core_modules)
+    return importlib.reload(perf_database)
 
 
 @pytest.fixture
