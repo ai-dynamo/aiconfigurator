@@ -26,8 +26,8 @@ model × system × backend × version matrix.
 This report is that gate's evidence: the coverage swept, the methodology, the
 results, and every parity bug found and fixed along the way.
 
-- Plan: [`rust/aiconfigurator-core/docs/phase-2-python-dedup-plan.md`](../docs/phase-2-python-dedup-plan.md)
-- Scan runbook: [`rust/aiconfigurator-core/docs/phase-2-parity-scan-runbook.md`](../docs/phase-2-parity-scan-runbook.md)
+- Plan: [`packages/aiconfigurator-core/rust/aiconfigurator-core/docs/phase-2-python-dedup-plan.md`](../../../packages/aiconfigurator-core/rust/aiconfigurator-core/docs/phase-2-python-dedup-plan.md)
+- Scan runbook: [`packages/aiconfigurator-core/rust/aiconfigurator-core/docs/phase-2-parity-scan-runbook.md`](../../../packages/aiconfigurator-core/rust/aiconfigurator-core/docs/phase-2-parity-scan-runbook.md)
 - Harness: `tools/support_matrix/scan_rust_parity.py`
 
 ## 2. Coverage

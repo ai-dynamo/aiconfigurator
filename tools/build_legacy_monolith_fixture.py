@@ -3,12 +3,13 @@
 
 """Build a minimal legacy wheel for deterministic package-migration tests.
 
-AIConfigurator 0.9 owned both upper-layer and estimator paths in the
-``aiconfigurator`` distribution. The split keeps the historical import paths as
-upper-wheel compatibility facades while moving canonical implementations and
-resources to ``aiconfigurator-core``. This fixture records representative old
-paths so the in-place upgrade can be tested without downloading a historical
-release artifact.
+AIConfigurator 0.9 owned both upper-layer and estimator paths under the
+``aiconfigurator`` namespace. It did not yet ship the ``aiconfigurator_core``
+namespace. The split keeps the historical imports as upper-wheel compatibility
+facades while moving canonical implementations and resources to
+``aiconfigurator-core``. This fixture records representative old paths so the
+in-place upgrade can be tested without downloading a historical release
+artifact.
 """
 
 from __future__ import annotations
@@ -34,7 +35,6 @@ PAYLOAD_SOURCES = {
     "aiconfigurator/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json": (
         "packages/aiconfigurator-core/src/aiconfigurator_core/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json"
     ),
-    "aiconfigurator_core/__init__.py": ("packages/aiconfigurator-core/src/aiconfigurator_core/__init__.py"),
 }
 
 METADATA = f"""Metadata-Version: 2.4

@@ -874,7 +874,7 @@ def _prepare_rust_core(monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip(
         "aiconfigurator_core",
         reason="maturin-built aiconfigurator_core extension is required "
-        "(`uv run maturin develop -m rust/aiconfigurator-core/Cargo.toml`)",
+        "(`uv run maturin develop -m packages/aiconfigurator-core/rust/aiconfigurator-core/Cargo.toml`)",
     )
     rust_engine_step._engine_handle_cache_clear()
 
