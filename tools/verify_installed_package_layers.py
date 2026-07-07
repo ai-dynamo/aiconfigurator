@@ -44,10 +44,23 @@ def _verify_core(*, exercise_engine: bool) -> str:
     core_version = _distribution_version("aiconfigurator-core")
     if core_version is None:
         raise RuntimeError("aiconfigurator-core distribution is not installed")
+    _require_distribution_files(
+        "aiconfigurator-core",
+        (
+            "aiconfigurator/sdk/task_v2.py",
+            "aiconfigurator_core/sdk/__init__.py",
+            "aiconfigurator_core/sdk/task_v2.py",
+        ),
+    )
 
     core = importlib.import_module("aiconfigurator_core")
     if core._build_smoke() != 1:
         raise RuntimeError("native core extension returned an unexpected schema version")
+
+    core_namespaced_task = importlib.import_module("aiconfigurator_core.sdk.task_v2").Task
+    canonical_task = importlib.import_module("aiconfigurator.sdk.task_v2").Task
+    if core_namespaced_task is not canonical_task:
+        raise RuntimeError("aiconfigurator_core.sdk.task_v2.Task is not the canonical SDK Task class")
 
     for module in (
         "aiconfigurator.sdk.engine",
@@ -117,7 +130,10 @@ def main() -> int:
             raise RuntimeError("core-only install unexpectedly contains the aiconfigurator distribution")
         for module in ("aiconfigurator.cli", "aiconfigurator.generator", "aiconfigurator.webapp", "spica"):
             _forbid_module(module)
-        print(f"Verified standalone aiconfigurator-core {core_version}")
+        print(
+            f"Verified standalone aiconfigurator-core {core_version}, including "
+            "from aiconfigurator_core.sdk.task_v2 import Task"
+        )
         return 0
 
     if args.expect == "full":
@@ -125,7 +141,10 @@ def main() -> int:
         aic_version = _verify_upper(import_runtime=True)
         if core_version != aic_version:
             raise RuntimeError(f"upper/core version mismatch: {aic_version=} {core_version=}")
-        print(f"Verified full aiconfigurator {aic_version} with standalone core")
+        print(
+            f"Verified full aiconfigurator {aic_version} with standalone core, including "
+            "from aiconfigurator.sdk.task_v2 import Task"
+        )
         return 0
 
     aic_version = _verify_upper(import_runtime=False)
