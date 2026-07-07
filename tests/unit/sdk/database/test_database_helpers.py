@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-import importlib
 from pathlib import Path
 
 import pytest
@@ -11,11 +10,11 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(scope="module")
 def perf_database():
-    """Reload the active core distribution's perf-database module."""
+    """Return the active core distribution's perf-database module."""
 
     import aiconfigurator_core.sdk.perf_database as perf_database
 
-    return importlib.reload(perf_database)
+    return perf_database
 
 
 @pytest.fixture

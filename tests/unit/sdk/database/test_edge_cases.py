@@ -334,7 +334,7 @@ class TestDatabaseCache:
                 "p2p_latency": 0.000001,
             },
         }
-        monkeypatch.setattr("yaml.load", lambda f, **kwargs: system_spec)
+        monkeypatch.setattr("yaml.load", lambda f, *args, **kwargs: system_spec)
         monkeypatch.setattr("os.path.exists", lambda path: True)
         monkeypatch.setattr("builtins.open", lambda *args, **kwargs: MagicMock())
         (tmp_path / "sys1.yaml").write_text("dummy")
@@ -374,7 +374,7 @@ class TestDatabaseCache:
                 "p2p_latency": 0.000001,
             },
         }
-        monkeypatch.setattr("yaml.load", lambda f, **kwargs: system_spec)
+        monkeypatch.setattr("yaml.load", lambda f, *args, **kwargs: system_spec)
         monkeypatch.setattr("builtins.open", lambda *args, **kwargs: MagicMock())
         (tmp_path / "sys1.yaml").write_text("dummy")
 
