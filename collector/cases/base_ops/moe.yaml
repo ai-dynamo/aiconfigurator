@@ -94,8 +94,11 @@ common_case_values:
       # SM120 serving explicitly selects Marlin ("trtllm-gen only supports
       # SM100", server_args.py:3876-3887 at image source 49e384ce), and the
       # MXFP4 Marlin repack path itself asserts SM90-or-SM120
-      # (mxfp4.py:520-521).
-      w4a16_mxfp4: {90: triton, 100: flashinfer_mxfp4, 103: flashinfer_mxfp4, 120: marlin}
+      # (mxfp4.py:520-521). SM89 also stays on auto (no mxfp4 branch fires
+      # at server_args.py:3876-3898; Mxfp4Config.get_min_capability() is 80)
+      # and resolves to the same Triton default as SM90; the L40S probe
+      # 2026-07-07 ran the GPT-OSS w4a16 Triton case on SM89 hardware.
+      w4a16_mxfp4: {89: triton, 90: triton, 100: flashinfer_mxfp4, 103: flashinfer_mxfp4, 120: marlin}
       w4a8_mxfp4_mxfp8: {100: flashinfer_mxfp4, 103: flashinfer_mxfp4}
     quantization_modes:
     - name: bfloat16
@@ -131,7 +134,14 @@ common_case_values:
       - Qwen/Qwen3-235B-A22B
       - nvidia/Qwen3-235B-A22B-NVFP4
     - name: w4a16_mxfp4
-      min_sm: 90
+      # Weight-only MXFP4 follows the FP8-era hardware floor, not SM90:
+      # serving accepts mxfp4 checkpoints from SM80 up
+      # (mxfp4.py get_min_capability() == 80) and SM89 auto resolves to the
+      # same Triton runner as SM90 (no server_args special-case below
+      # SM100). L40S probe 2026-07-07: the GPT-OSS w4a16 Triton case runs
+      # on SM89 hardware. The dtype floor stays the capabilities.yaml
+      # w4a16_mxfp4: 89 hardware fact.
+      min_sm: 89
       allowed_model_paths:
       - deepseek-ai/DeepSeek-V4-Pro
       - openai/gpt-oss-20b

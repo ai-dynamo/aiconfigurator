@@ -422,7 +422,6 @@ def test_sglang_registry_marks_unvalidated_dsa_and_moe_platforms_explicitly():
     # derivation is fail-closed pending an SM120 Torch-indexer workspace
     # policy, and the topk-calib producer is not yet SM120-variant-aware.
     for op in (
-        "dsv4_csa_context_module",
         "dsv4_csa_topk_calib",
         "dsv4_paged_mqa_logits_module",
         "glm5_mqa_logits_module",
@@ -431,16 +430,26 @@ def test_sglang_registry_marks_unvalidated_dsa_and_moe_platforms_explicitly():
     ):
         assert entries[op].unverified_sms == (120,)
 
-    # Probed clean on SM120 with only classified failure tails (GDN int32
-    # kernel-limit raises, mHC/CSA-generation top-cell OOMs): no markers.
+    # SM89 bring-up round 2 (L40S, 2026-07-07): stock 0.5.14 cannot run
+    # DSV4 on SM89 at all — the server_args DeepseekV4 hook leaves
+    # SGLANG_OPT_DEEPGEMM_HC_PRENORM default-True on non-SM120/non-HIP
+    # platforms while deep_gemm is unimported (NameError in both mHC
+    # directions), the compressed FlashMLA family has no SM89 target
+    # (in-kernel CUDA InternalError on every HCA/CSA-generation case), and
+    # the CSA context pool derivation is fail-closed below SM90.
+    assert entries["dsv4_csa_context_module"].unverified_sms == (89, 120)
     for op in (
-        "gdn",
         "mhc_module",
         "dsv4_hca_context_module",
         "dsv4_hca_generation_module",
         "dsv4_csa_generation_module",
     ):
-        assert entries[op].unverified_sms == ()
+        assert entries[op].unverified_sms == (89,)
+
+    # Probed clean on SM120 and SM89 with only classified failure tails
+    # (GDN int32 kernel-limit raises, decode grid-Y boundary, top-cell
+    # OOMs): no markers.
+    assert entries["gdn"].unverified_sms == ()
 
 
 def test_deepseek_minimax_and_nemotron_moe_quantization_is_artifact_specific():

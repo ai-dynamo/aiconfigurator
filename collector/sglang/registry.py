@@ -145,8 +145,14 @@ REGISTRY: list[OpEntry] = [
         # collector's own fail-closed guard (_derive_csa_context_pool_cap —
         # SM120 forces a Torch logits leaf whose memory contract is not the
         # SM90/100/103 DeepGEMM workspace formula). Park the SM until that
-        # workspace policy is separately validated.
-        unverified_sms=(120,),
+        # workspace policy is separately validated. L40S probe 2026-07-07:
+        # SM89 hits the same guard (named in its raise), and stock 0.5.14
+        # serving cannot reach DSV4 attention on SM89 at all — the
+        # server_args DeepseekV4 hook (server_args.py:3786-3810) disables
+        # SGLANG_OPT_DEEPGEMM_HC_PRENORM only on SM120/HIP, so SM89 keeps
+        # the default-True flag (environ.py:781) while ENABLE_JIT_DEEPGEMM
+        # is False and mHC crashes with NameError first.
+        unverified_sms=(89, 120),
     ),
     OpEntry(
         op="dsv4_hca_context_module",
@@ -154,6 +160,11 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsv4_hca_context_test_cases",
         run_func="run_dsv4_attn_worker",
         perf_filename=PerfFile.DSV4_HCA_CONTEXT_MODULE,
+        # L40S probe 2026-07-07: every SM89 case dies in-kernel (CUDA
+        # InternalError at the first shape) — the sgl-kernel compressed
+        # FlashMLA family has no SM89 target, and serving is blocked earlier
+        # by the mHC prenorm NameError (see the CSA context entry).
+        unverified_sms=(89,),
     ),
     OpEntry(
         op="dsv4_csa_generation_module",
@@ -161,6 +172,10 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsv4_csa_generation_test_cases",
         run_func="run_dsv4_attn_worker",
         perf_filename=PerfFile.DSV4_CSA_GENERATION_MODULE,
+        # L40S probe 2026-07-07: same SM89 in-kernel CUDA InternalError as
+        # the HCA modules (no SM89 FlashMLA target; serving blocked by the
+        # mHC prenorm NameError regardless).
+        unverified_sms=(89,),
     ),
     OpEntry(
         op="dsv4_hca_generation_module",
@@ -168,6 +183,8 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsv4_hca_generation_test_cases",
         run_func="run_dsv4_attn_worker",
         perf_filename=PerfFile.DSV4_HCA_GENERATION_MODULE,
+        # L40S probe 2026-07-07: see dsv4_hca_context_module — SM89 parked.
+        unverified_sms=(89,),
     ),
     # DeepSeek-V4 currently models CSA/HCA through full attention-module data
     # above.  Keep these kernel-level collectors as supporting data for future
@@ -276,5 +293,14 @@ REGISTRY: list[OpEntry] = [
         get_func="get_mhc_module_test_cases",
         run_func="run_mhc_module_worker",
         perf_filename=PerfFile.MHC_MODULE,
+        # L40S probe 2026-07-07: both directions crash in stock 0.5.14 —
+        # the server_args DeepseekV4 hook (server_args.py:3786-3810) turns
+        # SGLANG_OPT_DEEPGEMM_HC_PRENORM off only for SM120/HIP, so SM89
+        # keeps the default True (environ.py:781) and the pre/post paths
+        # call deep_gemm.tf32_hc_prenorm_gemm with deep_gemm never imported
+        # (ENABLE_JIT_DEEPGEMM=False on SM89) -> NameError at
+        # deep_gemm_wrapper/entrypoint.py:197. Serving crashes identically;
+        # park SM89 until a framework fix ships.
+        unverified_sms=(89,),
     ),
 ]
