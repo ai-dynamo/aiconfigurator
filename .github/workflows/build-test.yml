@@ -95,8 +95,11 @@ jobs:
           echo "Running pytest paths: ${test_paths[*]}"
 
           docker build -f docker/Dockerfile -t aiconfigurator:test --target test .
+          # Exercise the installed wheels; the source checkout copied into the
+          # image is available for test fixtures but must not shadow them.
           docker run --name aic aiconfigurator:test \
             pytest \
+            -o pythonpath=. \
             "${test_paths[@]}" \
             -m "unit or build" \
             -v --tb=short --maxfail=1 --timeout=600 \
