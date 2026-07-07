@@ -98,16 +98,30 @@ impl EngineSpec {
     }
 
     /// Deserialize from the bincode wire format produced by [`Self::to_bincode`].
+    ///
+    /// The `schema_version` prefix is read and validated **before** the
+    /// variable-layout op payloads are decoded. bincode is not self-describing,
+    /// so a producer/consumer op-layout skew (e.g. a newer producer that added
+    /// serialized fields to an `OpSpec`) would otherwise fail deep inside the
+    /// payload with a generic `bincode decode: io error`, masking the real
+    /// cause. Reading the leading version first lets a version mismatch surface
+    /// as a clear [`AicError::UnsupportedSchemaVersion`] instead.
     pub fn from_bincode(bytes: &[u8]) -> Result<Self, AicError> {
-        let wire: BincodeWire = bincode::deserialize(bytes)
-            .map_err(|e| AicError::EngineSpec(format!("bincode decode: {e}")))?;
-        if wire.schema_version != ENGINE_SPEC_SCHEMA_VERSION {
+        // `schema_version` is the first field of `BincodeWire`, so it is the
+        // first value in the byte stream. Decode just it and gate on it before
+        // touching the op lists (which is where a layout skew would fail).
+        let mut cursor = std::io::Cursor::new(bytes);
+        let schema_version: u32 = bincode::deserialize_from(&mut cursor)
+            .map_err(|e| AicError::EngineSpec(format!("bincode decode schema version: {e}")))?;
+        if schema_version != ENGINE_SPEC_SCHEMA_VERSION {
             return Err(AicError::UnsupportedSchemaVersion {
                 kind: "EngineSpec",
-                got: wire.schema_version,
+                got: schema_version,
                 expected: ENGINE_SPEC_SCHEMA_VERSION,
             });
         }
+        let wire: BincodeWire = bincode::deserialize(bytes)
+            .map_err(|e| AicError::EngineSpec(format!("bincode decode: {e}")))?;
         let engine: EngineConfig = serde_json::from_str(&wire.engine_json)
             .map_err(|e| AicError::EngineSpec(format!("engine JSON decode: {e}")))?;
         Ok(Self {
@@ -624,5 +638,42 @@ mod tests {
         let bytes = spec.to_bincode().expect("to_bincode");
         let decoded = EngineSpec::from_bincode(&bytes).expect("from_bincode");
         assert_eq!(spec, decoded);
+    }
+
+    /// A version skew combined with an op-layout change must surface as a clear
+    /// [`AicError::UnsupportedSchemaVersion`], NOT a generic bincode I/O error.
+    ///
+    /// This reproduces the cross-version failure mode: a producer at a different
+    /// schema version emits op payloads whose layout the consumer cannot decode.
+    /// We simulate it by stamping a foreign version into the leading prefix and
+    /// truncating the op payload. `from_bincode` must read + reject the version
+    /// *before* it attempts to decode the (now-undecodable) op lists.
+    #[test]
+    fn version_skew_reports_unsupported_before_payload_decode() {
+        let spec = EngineSpec::new(
+            sample_engine_config(),
+            vec![OpSpec::Gemm(gemm()), OpSpec::ContextAttention(context_attention())],
+            vec![OpSpec::GenerationAttention(generation_attention())],
+        );
+        let mut bytes = spec.to_bincode().expect("to_bincode");
+
+        // Overwrite the 4-byte little-endian `schema_version` prefix with a
+        // version this consumer does not speak.
+        let foreign = ENGINE_SPEC_SCHEMA_VERSION + 1;
+        bytes[..4].copy_from_slice(&foreign.to_le_bytes());
+        // Corrupt the op payload so a decode-first implementation fails there
+        // with a generic bincode I/O error instead of reaching the version gate.
+        bytes.truncate(bytes.len() - 8);
+
+        match EngineSpec::from_bincode(&bytes) {
+            Err(AicError::UnsupportedSchemaVersion { kind, got, expected }) => {
+                assert_eq!(kind, "EngineSpec");
+                assert_eq!(got, foreign);
+                assert_eq!(expected, ENGINE_SPEC_SCHEMA_VERSION);
+            }
+            other => panic!(
+                "expected UnsupportedSchemaVersion before payload decode, got {other:?}"
+            ),
+        }
     }
 }
