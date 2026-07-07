@@ -1714,4 +1714,88 @@ markers. Environment note for later rounds: on this image sgl_kernel
 resolves its "SM89 (precise math for compatibility)" flavor to
 `sm100/common_ops.abi3.so`; both probed kernel families ran correctly, but
 new-op bring-up should re-confirm the loaded library actually carries the
-SM89 code path before trusting a novel failure signature.
+SM89 code path before trusting a novel failure signature. (Confirmed from
+`load_utils` source in round 2: every non-SM90 arch loads the `sm100/`
+precise-math compatibility flavor by design.)
+
+### SM89 (L40S) bring-up round 2 (2026-07-07)
+
+Second SM89 pass, same 8x L40S node, from head `30b8ee29` plus the fixes
+this entry accompanies. Artifacts live under
+`6000pro_l40s/l40s_probe_20260707/` (smoke probes through `collect.py
+--gpu l40s` except where a driver is noted); the post-fix static plan is
+`6000pro_l40s/sm89_enum_after_round2.log`.
+
+Dense attention / encoder / GEMM (14 collect.py smoke probes):
+
+- Per-model routing (Qwen3, Qwen3.5 dense/MoE, Gemma-4, GPT-OSS, Llama-4,
+  MiMo, MiMo-V2, NemotronH), Qwen3-VL encoder attention, and the
+  gemm/compute_scale smoke all produced rows. 11 of the 13 attention
+  errors are the designed FP8 live-activation prefill fail-closed raises.
+- The one novel dense-attention failure: Gemma-4 generation bs=8/isl=7/
+  heads=1/head_dim=512 with FP8 KV on flashinfer dies in-kernel
+  ("FlashInfer Internal Error: Invalid configuration", prefill.cuh:2978,
+  NUM_MMA_D_QK=32) — a classified runtime failure. SM120's smoke never
+  sampled this cell, so cross-platform status is unknown; no rule added.
+- MiMo-V2 QK192/V128: the SM89 default flashinfer rejects the asymmetric
+  K/V pool exactly like SM120 (prefill reshape `[-1, 1, 192]` /
+  `[-1, 2, 192]` on the 128-wide V pool; decode paged K/V stride checks
+  384 vs 256 and 192 vs 128 — head-count-scaled variants of the SM120
+  768-vs-512 signature). The yaml pin gains `89: triton` with this
+  hardware citation; the pinned rerun collects 4+4 rows, all
+  `kernel_source=triton`, BF16 and FP8-KV both phases, zero errors.
+
+MoE audit (family driver, one smallest + largest-TP case per
+(mode, backend, model) group):
+
+- 30/32 OK across the bf16/triton families (fp8_block and nvfp4 are
+  correctly floor-dropped on SM89). The 2 failures are classified: the
+  designed Triton gated-BF16 alignment raise at tp=32 (Gemma-4
+  local_inter_size=22) and a real 40 GiB weight-alloc OOM for
+  Nemotron-3-Ultra-550B at tp=1 on the 46 GB card.
+- GPT-OSS w4a16_mxfp4 was silently absent: the base-op axis carried
+  `min_sm: 90`, contradicting serving — on SM89 the mxfp4 auto-selection
+  falls through every special case (server_args.py:3876-3898) to the same
+  default Triton runner as SM90, and `Mxfp4Config.get_min_capability()`
+  is 80 (mxfp4.py). An adversarial single-case probe ran the SM90-identity
+  GPT-OSS w4a16 Triton case on SM89 hardware successfully. The axis floor
+  is corrected to 89 with an `89: triton` backends entry; the SM89 moe
+  plan grows 46,413 -> 52,164 cases, and the `collect.py --smoke` GPT-OSS
+  rerun collects rows with `kernel_source=sglang_fused_moe_triton`, zero
+  errors.
+
+DSV4 / mHC — stock 0.5.14 cannot run DeepSeek-V4 on SM89:
+
+- Root blocker (mhc_module, both directions): the server_args DeepseekV4
+  hook disables `SGLANG_OPT_DEEPGEMM_HC_PRENORM` only for SM120 and HIP
+  (server_args.py:3786-3810), so SM89 keeps the default True
+  (environ.py:781) while `ENABLE_JIT_DEEPGEMM` is False and `deep_gemm`
+  is never imported — both mHC directions crash with `NameError` at
+  deep_gemm_wrapper/entrypoint.py:197. Serving crashes identically.
+- dsv4_csa_context_module: every case raises the collector's own
+  fail-closed pool-cap guard (`_derive_csa_context_pool_cap` names SM89 in
+  its message). CSA generation and HCA context/generation die in-kernel
+  (CUDA InternalError at the first shape) — the sgl-kernel compressed
+  FlashMLA family has no SM89 target.
+- Registry: `dsv4_csa_context_module` -> `unverified_sms=(89, 120)`;
+  `dsv4_hca_context_module`, `dsv4_hca_generation_module`,
+  `dsv4_csa_generation_module`, `mhc_module` -> `(89,)`. DSA/GLM-5 sparse
+  families were not run: op_min_sm=90 drops them with logged reasons
+  (verified in round 1).
+
+GDN — third-platform confirmation of the platform-neutral boundaries:
+
+- Context: 102/112 cells on BOTH Qwen3.5 models with exactly the 10
+  conv1d int32 crossing-cell guard raises per model (collector.log shows
+  10x "int32 token-offset overflow", conv widths 10,240 and 12,288, first
+  crossing at 262,144 tokens) — the stock-kernel defect guarded in
+  88b10123 behaves identically on Ada.
+- Generation: dense HV=48 passes 11/11; MoE HV=64 fails only bs=1024
+  ("Triton Error [CUDA]: invalid argument") — the known
+  `GDN-DECODE-BS1024` grid-Y=65,536 boundary.
+
+Registry deltas from this pass: SM89 markers on the four DSV4 modules and
+mhc_module (serving-blocking stock gaps); no other markers. The two yaml
+serving-truth corrections (MiMo-V2 SM89 triton pin, w4a16_mxfp4 SM89
+axis + backend) carry hardware citations from this round's probes and are
+pinned by the updated registry-marker contract test.
