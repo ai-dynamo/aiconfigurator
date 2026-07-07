@@ -34,8 +34,12 @@ dtype_min_sm:
 
 op_min_sm:
   # DSA/NSA module collectors depend on SM90+ kernel libraries on all backends.
+  # The skip-indexer variants still run the same sparse attention kernel
+  # family (SM90a/SM100f+), so they share the floor.
   dsa_context_module: 90
   dsa_generation_module: 90
+  dsa_context_module_skip_indexer: 90
+  dsa_generation_module_skip_indexer: 90
   # The DSV4/GLM-5 sparse sub-kernel collectors depend on the same SM90+
   # kernel libraries (DeepGEMM fp8_mqa_logits, FlashMLA sparse, jit topk).
   dsv4_paged_mqa_logits_module: 90

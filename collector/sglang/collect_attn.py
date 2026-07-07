@@ -200,9 +200,14 @@ def _int_list(values):
 def get_context_attention_test_cases():
     test_cases = []
 
-    # FP8 attention requires SM90+ (Hopper)
+    # FP8 KV-cache cases follow the FP8 hardware floor (SM89+, Ada — see
+    # cases/capabilities.yaml dtype_min_sm.fp8). SGLang 0.5.14 puts no SM
+    # gate on --kv-cache-dtype fp8_e4m3 (server_args.py:596-600) and the
+    # flashinfer backend passes kv_cache_dtype straight into its plan calls
+    # (flashinfer_backend.py:1151, 1377-1397); any backend-level rejection
+    # surfaces as a classified runtime failure, not a generation-time skip.
     sm_version = get_sm_version()
-    skip_fp8 = sm_version < 90
+    skip_fp8 = sm_version < 89
 
     for shape_sweep in get_attention_context_shape_sweeps("sglang"):
         batch_sizes = _int_list(shape_sweep["batch_sizes"])
@@ -286,9 +291,10 @@ def _generation_target_sequence_lengths(batch_sizes, sequence_lengths, num_heads
 def get_generation_attention_test_cases():
     test_cases = []
 
-    # FP8 attention requires SM90+ (Hopper)
+    # FP8 KV-cache cases follow the FP8 hardware floor (SM89+, Ada); see the
+    # context getter for the framework citations.
     sm_version = get_sm_version()
-    skip_fp8 = sm_version < 90
+    skip_fp8 = sm_version < 89
 
     for shape_sweep in get_attention_generation_shape_sweeps("sglang"):
         batch_sizes = _int_list(shape_sweep["batch_sizes"])

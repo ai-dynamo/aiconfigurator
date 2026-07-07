@@ -766,18 +766,20 @@ def get_wideep_mla_generation_test_cases():
 
 
 def get_dsa_context_module_test_cases():
-    """collect.py entrypoint for DSA context module collection."""
-    # DSA (NSA) requires SM >= 90.
-    if get_sm_version() < 90:
-        return []
+    """collect.py entrypoint for DSA context module collection.
+
+    The SM90+ requirement lives in cases/capabilities.yaml (op_min_sm) so
+    sub-SM90 platforms drop these cases with a logged reason instead of a
+    silent empty enumeration.
+    """
     return _build_module_test_cases(attn_type="dsa", mode="context")
 
 
 def get_dsa_generation_module_test_cases():
-    """collect.py entrypoint for DSA generation module collection."""
-    # DSA (NSA) requires SM >= 90.
-    if get_sm_version() < 90:
-        return []
+    """collect.py entrypoint for DSA generation module collection.
+
+    SM90+ floor: cases/capabilities.yaml op_min_sm (see context getter).
+    """
     return _build_module_test_cases(attn_type="dsa", mode="generation")
 
 
@@ -790,17 +792,18 @@ def get_dsa_context_module_skip_indexer_test_cases():
     cases for models that actually share the index across layers
     (index_topk_freq > 1); for freq==1 models the skip layer == full layer, so
     a separate file would just duplicate dsa_context_module.
+
+    SM90+ floor: cases/capabilities.yaml op_min_sm (see full-module getter).
     """
-    if get_sm_version() < 90:
-        return []
     return [c for c in _build_module_test_cases(attn_type="dsa", mode="context") if _model_shares_dsa_index(c[6])]
 
 
 def get_dsa_generation_module_skip_indexer_test_cases():
     """collect.py entrypoint for DSA generation module collection with the
-    indexer patched out (see context variant)."""
-    if get_sm_version() < 90:
-        return []
+    indexer patched out (see context variant).
+
+    SM90+ floor: cases/capabilities.yaml op_min_sm (see full-module getter).
+    """
     return [c for c in _build_module_test_cases(attn_type="dsa", mode="generation") if _model_shares_dsa_index(c[6])]
 
 

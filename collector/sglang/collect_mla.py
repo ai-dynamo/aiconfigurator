@@ -66,7 +66,14 @@ def _select_default_mla_backend() -> str:
         return "trtllm_mla"
     if sm_version == 90 and _cuda_version_at_least(12, 3):
         return "fa3"
-    if sm_version in {90, 100, 103, 120}:
+    if sm_version in {89, 90, 100, 103, 120}:
+        # server_args.py _get_default_attn_backend MLA branch (0.5.14,
+        # lines 4457-4472): is_hopper_with_cuda_12_3 only matches major 9
+        # (utils/common.py:265-269) and is_sm100_supported only matches
+        # major 10 (utils/common.py:282-286), so SM89 and SM120 fall through
+        # to the final ``return "triton"``. The DeepSeek V3/R1 trtllm_mla
+        # special-case (server_args.py:3641-3650) is likewise gated on
+        # is_sm100_supported and never fires on SM89/SM120.
         return "triton"
     raise ValueError(f"No SGLang 0.5.14 MLA backend mapping for SM{sm_version}")
 
@@ -219,11 +226,9 @@ def benchmark_layer(layer, forward_batch, q, k, v, q_rope, k_rope, **kwargs):
 
 
 def get_context_mla_test_cases():
-    # This collector covers the CUDA MLA backends used by SGLang defaults on SM90+.
-    sm_version = get_sm_version()
-    if sm_version < 90:
-        return []
-
+    # Covers the audited 0.5.14 platform set {89, 90, 100, 103, 120};
+    # _select_default_mla_backend fails closed below it. No silent [] here:
+    # zero cases must be explainable from logged drops or a loud raise.
     backend = _select_default_mla_backend()
     dtype_list = [torch.bfloat16] if backend == "triton" else [torch.bfloat16, torch.float8_e4m3fn]
     return _build_mla_test_cases(
@@ -235,11 +240,8 @@ def get_context_mla_test_cases():
 
 
 def get_generation_mla_test_cases():
-    # This collector covers the CUDA MLA backends used by SGLang defaults on SM90+.
-    sm_version = get_sm_version()
-    if sm_version < 90:
-        return []
-
+    # Covers the audited 0.5.14 platform set {89, 90, 100, 103, 120};
+    # _select_default_mla_backend fails closed below it (see context getter).
     backend = _select_default_mla_backend()
     if backend == "triton":
         # SGLang's Triton MLA path stores BF16 MLA KV cache.
