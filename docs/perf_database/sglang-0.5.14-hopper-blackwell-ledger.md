@@ -1653,3 +1653,65 @@ is retained with probe-backed comments. Worker-fatal recycle, classified
 failure records, and kernel provenance behaved as designed throughout —
 including recording the Torch pre-norm leaf on mHC and surviving the GDN
 illegal-access worker resets.
+
+### SM89 (L40S) bring-up round 1 (2026-07-06)
+
+First SM89 pass, on an 8x L40S node (46 GB, driver 595.58.03) from the
+`sm120-pass` working tree (head `b002b86a`, in sync with
+`origin/codex/sglang-0514-collector-only`, plus the fixes this entry
+accompanies). Artifacts live under `6000pro_l40s/sm89_enum*.log` and
+`6000pro_l40s/l40s_probe_20260706/`; they are evidence, not published
+campaign data.
+
+Static plan truthing — three collector claims contradicted 0.5.14 serving
+or hid drops, and are fixed:
+
+- MLA family: the `collect_mla` getters silently returned `[]` below SM90
+  and `_select_default_mla_backend` had no SM89 mapping, while serving
+  itself routes MLA architectures on SM89 to Triton
+  (`server_args._get_default_attn_backend` MLA branch, lines 4457-4472:
+  `is_hopper_with_cuda_12_3` matches only major 9, utils/common.py:265-269;
+  `is_sm100_supported` only major 10, utils/common.py:282-286; the DeepSeek
+  V3/R1 `trtllm_mla` special-case at server_args.py:3641-3650 is
+  sm100-gated). The selector now maps 89 -> triton and the getters fail
+  closed below the audited set `{89, 90, 100, 103, 120}` instead of
+  returning a silent empty plan. SM89 plan after the fix: 880 context +
+  1,448 generation cases, BF16 MLA KV only on the Triton path.
+- Dense attention FP8: the generation-time `skip_fp8 = sm < 90` ("FP8
+  attention requires SM90+") contradicted the FP8 hardware floor
+  (capabilities.yaml `dtype_min_sm.fp8: 89`; Ada has FP8 tensor cores) and
+  silently halved the SM89 grid (generation 20,234 of 40,468; context
+  16,967 of 50,901). Serving has no SM gate on fp8_e4m3 KV cache
+  (server_args.py:596-600) and the flashinfer backend passes
+  `kv_cache_dtype` straight into its plan calls
+  (flashinfer_backend.py:1151, 1377-1397). The floor is corrected to
+  `< 89`; backend-level rejections stay classified runtime failures.
+- DSA family: the four module getters also early-returned `[]` below SM90,
+  hiding the `op_min_sm: 90` drops, and the skip-indexer variants had no
+  capability floor at all (only the silent guard kept them off sub-SM90
+  plans). The guards are removed and `dsa_*_skip_indexer` gain
+  `op_min_sm: 90` (they run the same SM90a/SM100f sparse attention kernel
+  family as the full modules). SM89 enumeration now logs 132 context + 12
+  generation capability drops instead of a silent zero.
+
+Probe evidence (all through the collector's own paths):
+
+- MLA smoke (`collect.py --smoke --gpu l40s`, deepseek-ai/DeepSeek-V3):
+  `mla_context`, `mla_generation`, `mla_bmm_gen_pre`, `mla_bmm_gen_post`
+  completed with zero errors; every row records `kernel_source=triton`,
+  `kv_cache_dtype=bfloat16` — first SM89 MLA rows.
+- Attention deterministic probe (9 hand-picked SM89 plan cases driven
+  through `run_attention_torch`, one subprocess per case): BF16 and FP8-KV
+  rows collected on both routed backends — flashinfer (non-sink) and
+  triton (sink profile, MiMoV2Flash) — in both phases. The single failure
+  is the designed FP8 live-activation prefill fail-closed raise on
+  flashinfer (collect_attn.py:630), the same designed-raise class recorded
+  in SM120 Round 1.
+
+Registry deltas from this pass: none — no SM89 maturity markers existed
+and the probes validate the serving-truth mappings rather than lift
+markers. Environment note for later rounds: on this image sgl_kernel
+resolves its "SM89 (precise math for compatibility)" flavor to
+`sm100/common_ops.abi3.so`; both probed kernel families ran correctly, but
+new-op bring-up should re-confirm the loaded library actually carries the
+SM89 code path before trusting a novel failure signature.
