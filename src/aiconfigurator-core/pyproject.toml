@@ -37,6 +37,7 @@ abi3 = true
 features = ["pyo3/extension-module"]
 include = [
     "aiconfigurator_core/__init__.py",
+    "aiconfigurator_core/sdk/**/*.py",
     "aiconfigurator/sdk/**/*.py",
     "aiconfigurator/sdk/**/*.md",
     "aiconfigurator/systems/*.yaml",

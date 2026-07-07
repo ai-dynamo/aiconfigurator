@@ -44,8 +44,9 @@ RUN cd src/aiconfigurator-core && uv build --wheel --out-dir /workspace/dist && 
     cd /workspace && uv build --wheel --out-dir /workspace/dist && \
     cd /workspace && python tools/verify_release_wheels.py /workspace/dist
 
-# Exercise the real wheel boundary outside the checkout: core-only, full install,
-# upper uninstall (core survives), and core uninstall (upper files survive).
+# Exercise the real wheel boundary outside the checkout: core-only (including
+# the aiconfigurator_core.sdk import contract), full install, upper uninstall
+# (core survives), and core uninstall (upper files survive).
 RUN uv venv --python 3.12 /tmp/aic-wheel-test && \
     CORE_WHL=$(ls /workspace/dist/aiconfigurator_core-*.whl) && \
     AIC_WHL=$(ls /workspace/dist/aiconfigurator-*.whl) && \
@@ -63,6 +64,17 @@ RUN uv venv --python 3.12 /tmp/aic-wheel-test && \
     uv pip uninstall --python /tmp/aic-wheel-test/bin/python aiconfigurator-core && \
     cd /tmp && /tmp/aic-wheel-test/bin/python \
         /workspace/tools/verify_installed_package_layers.py --expect upper
+
+# Start from another empty environment and install only the upper wheel argument.
+# Dependency resolution must pull the matching core wheel from the wheelhouse,
+# after which the canonical aiconfigurator.sdk import contract must work.
+RUN uv venv --python 3.12 /tmp/aic-upper-install-test && \
+    AIC_WHL=$(ls /workspace/dist/aiconfigurator-*.whl) && \
+    uv pip install --python /tmp/aic-upper-install-test/bin/python \
+        --find-links /workspace/dist "${AIC_WHL}" && \
+    uv pip check --python /tmp/aic-upper-install-test/bin/python && \
+    cd /tmp && /tmp/aic-upper-install-test/bin/python \
+        /workspace/tools/verify_installed_package_layers.py --expect full
 
 # Pip installs dependencies before dependents, so crossing from a monolithic
 # 0.9 wheel requires removing the old payload owner first. A minimal local 0.9
