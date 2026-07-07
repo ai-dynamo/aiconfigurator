@@ -830,6 +830,8 @@ def _get_model_config_path():
     """
     Get the model config path
     """
+    if configured := os.environ.get("AICONFIGURATOR_MODEL_CONFIGS_PATH"):
+        return Path(configured)
     return pkg_resources.files("aiconfigurator") / "model_configs"
 
 

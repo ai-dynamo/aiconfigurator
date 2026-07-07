@@ -70,7 +70,8 @@ fn parse_mode(mode: &str) -> PyResult<StaticMode> {
 /// a `model_configs` root: `compile_engine` (the only thing that needs model
 /// configs) runs in Python, so the Rust side only loads the perf database.
 /// Precedence: explicit `systems_path` arg → `AICONFIGURATOR_SYSTEMS_PATH` env
-/// → repo-relative `src/aiconfigurator/systems`.
+/// → the installed core wheel's SDK resource path → repo-relative
+/// `src/aiconfigurator/systems`.
 fn resolve_systems_root(systems_path: Option<&str>) -> PyResult<PathBuf> {
     if let Some(p) = systems_path {
         return Ok(PathBuf::from(p));
@@ -78,10 +79,21 @@ fn resolve_systems_root(systems_path: Option<&str>) -> PyResult<PathBuf> {
     if let Some(p) = std::env::var_os("AICONFIGURATOR_SYSTEMS_PATH") {
         return Ok(PathBuf::from(p));
     }
+    let installed_root = Python::with_gil(|py| -> PyResult<Option<PathBuf>> {
+        let Ok(perf_database) = py.import("aiconfigurator.sdk.perf_database") else {
+            return Ok(None);
+        };
+        let paths: Vec<String> = perf_database.call_method0("get_systems_paths")?.extract()?;
+        Ok(paths.into_iter().next().map(PathBuf::from))
+    })?;
+    if let Some(p) = installed_root {
+        return Ok(p);
+    }
     crate::repo_relative("src/aiconfigurator/systems").ok_or_else(|| {
         PyValueError::new_err(
             "could not resolve systems path: pass systems_path, set \
-             AICONFIGURATOR_SYSTEMS_PATH, or run from an AIC checkout",
+             AICONFIGURATOR_SYSTEMS_PATH, install aiconfigurator-core, or run \
+             from an AIC checkout",
         )
     })
 }
@@ -365,6 +377,14 @@ fn compile_engine_from_flat(
     kv_block_size: Option<u32>,
     systems_path: Option<&str>,
 ) -> Result<Engine, AicError> {
+    let systems_root = resolve_systems_root(systems_path)
+        .map_err(|e| AicError::DataRoot(format!("resolve systems path: {e}")))?;
+    let systems_root_str = systems_root.to_str().ok_or_else(|| {
+        AicError::DataRoot(format!(
+            "systems path is not valid UTF-8: {}",
+            systems_root.display()
+        ))
+    })?;
     let spec_bytes: Vec<u8> = Python::with_gil(|py| -> PyResult<Vec<u8>> {
         let engine_mod = py.import("aiconfigurator.sdk.engine")?;
         let kwargs = pyo3::types::PyDict::new(py);
@@ -382,7 +402,7 @@ fn compile_engine_from_flat(
         kwargs.set_item("nextn", nextn)?;
         kwargs.set_item("nextn_accept_rates", nextn_accept_rates)?;
         kwargs.set_item("kv_block_size", kv_block_size)?;
-        kwargs.set_item("systems_path", systems_path)?;
+        kwargs.set_item("systems_path", systems_root_str)?;
         engine_mod
             .call_method(
                 "compile_engine",
@@ -398,17 +418,6 @@ fn compile_engine_from_flat(
     // is NOT fallback-safe) so they surface instead of silently degrading.
     .map_err(|e| AicError::UnsupportedModel(format!("compile_engine: {e}")))?;
 
-    let systems_root: PathBuf = match systems_path {
-        Some(p) => PathBuf::from(p),
-        None => std::env::var_os("AICONFIGURATOR_SYSTEMS_PATH")
-            .map(PathBuf::from)
-            .or_else(|| crate::repo_relative("src/aiconfigurator/systems"))
-            .ok_or_else(|| {
-                AicError::DataRoot(
-                    "set AICONFIGURATOR_SYSTEMS_PATH or pass systems_path".to_string(),
-                )
-            })?,
-    };
     Engine::from_spec_bytes(&spec_bytes, systems_root.as_path() as &Path)
 }
 

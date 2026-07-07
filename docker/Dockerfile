@@ -15,8 +15,10 @@ RUN mkdir /opt/aiconfigurator && \
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV MPLCONFIGDIR=/tmp/matplotlib
 
-# The `aiconfigurator` wheel (Rust extension + SDK/data payload + CLI, generator,
-# webapp, Spica) is built in the PyPA manylinux_2_28 image so the native PyO3
+# The standalone `aiconfigurator-core` wheel owns the Rust extension and the
+# SDK/data payload. The upper `aiconfigurator` wheel owns CLI/generator/webapp/
+# Spica and depends on the exact matching core version. Core is built in the
+# PyPA manylinux_2_28 image so the native PyO3
 # `.so` links glibc 2.28 and maturin's auditwheel stamps the portable
 # `manylinux_2_28_<arch>` tag. We add `uv` and a rustup toolchain so cargo can
 # fetch crates over TLS.
@@ -42,11 +44,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-connrefused --retry-d
 
 # Pin to the image's CPython 3.12 so uv/maturin never fetch a standalone one.
 ENV UV_PYTHON=/opt/python/cp312-cp312/bin/python3
-
 COPY src/ /workspace/src/
 COPY rust/ /workspace/rust/
 COPY LICENSE pyproject.toml README.md /workspace/
 COPY tools/verify_release_wheels.py /workspace/tools/verify_release_wheels.py
+COPY tools/verify_installed_package_layers.py /workspace/tools/verify_installed_package_layers.py
+COPY tools/build_legacy_monolith_fixture.py /workspace/tools/build_legacy_monolith_fixture.py
 # Fail fast if Git LFS content wasn't materialized before the build — otherwise
 # the wheel ships pointer stubs in place of perf data (see DYN-2725).
 RUN set -e; \
@@ -61,8 +64,55 @@ RUN set -e; \
 # off`; MATURIN_PEP517_ARGS overrides it to stamp the manylinux_2_28 tag (maturin
 # appends it last, so it wins). `python` isn't on PATH here -> verify via UV_PYTHON.
 RUN MATURIN_PEP517_ARGS="--compatibility manylinux_2_28" \
-        uv build --wheel --out-dir /workspace/dist && \
-    "${UV_PYTHON}" tools/verify_release_wheels.py /workspace/dist
+        uv build --project src/aiconfigurator-core --wheel --out-dir /workspace/dist && \
+    cd /workspace && uv build --wheel --out-dir /workspace/dist && \
+    cd /workspace && "${UV_PYTHON}" tools/verify_release_wheels.py /workspace/dist
+
+# Exercise the real wheel boundary outside the checkout: core-only, full install,
+# upper uninstall (core survives), and core uninstall (upper files survive).
+RUN uv venv --python 3.12 /tmp/aic-wheel-test && \
+    CORE_WHL=$(ls /workspace/dist/aiconfigurator_core-*.whl) && \
+    AIC_WHL=$(ls /workspace/dist/aiconfigurator-*.whl) && \
+    uv pip install --python /tmp/aic-wheel-test/bin/python "${CORE_WHL}" && \
+    cd /tmp && /tmp/aic-wheel-test/bin/python \
+        /workspace/tools/verify_installed_package_layers.py --expect core --exercise-engine && \
+    uv pip install --python /tmp/aic-wheel-test/bin/python --find-links /workspace/dist "${AIC_WHL}" && \
+    uv pip check --python /tmp/aic-wheel-test/bin/python && \
+    cd /tmp && /tmp/aic-wheel-test/bin/python \
+        /workspace/tools/verify_installed_package_layers.py --expect full && \
+    uv pip uninstall --python /tmp/aic-wheel-test/bin/python aiconfigurator && \
+    cd /tmp && /tmp/aic-wheel-test/bin/python \
+        /workspace/tools/verify_installed_package_layers.py --expect core && \
+    uv pip install --python /tmp/aic-wheel-test/bin/python --find-links /workspace/dist "${AIC_WHL}" && \
+    uv pip uninstall --python /tmp/aic-wheel-test/bin/python aiconfigurator-core && \
+    cd /tmp && /tmp/aic-wheel-test/bin/python \
+        /workspace/tools/verify_installed_package_layers.py --expect upper
+
+# Pip installs dependencies before dependents, so crossing from a monolithic
+# 0.9 wheel requires removing the old payload owner first. A minimal local 0.9
+# fixture records representative upper/core paths and makes this ownership
+# transfer deterministic without relying on the historical wheel bootstrap.
+RUN python tools/build_legacy_monolith_fixture.py /tmp/legacy-dist && \
+    LEGACY_WHL=$(ls /tmp/legacy-dist/aiconfigurator-0.9.0-*.whl) && \
+    CORE_WHL=$(ls /workspace/dist/aiconfigurator_core-*.whl) && \
+    AIC_WHL=$(ls /workspace/dist/aiconfigurator-*.whl) && \
+    python -m venv /tmp/aic-pip-migration && \
+    /tmp/aic-pip-migration/bin/pip install "${LEGACY_WHL}" && \
+    /tmp/aic-pip-migration/bin/pip uninstall -y aiconfigurator aiconfigurator-core && \
+    /tmp/aic-pip-migration/bin/pip install "${CORE_WHL}" "${AIC_WHL}" && \
+    cd /tmp && /tmp/aic-pip-migration/bin/python \
+        /workspace/tools/verify_installed_package_layers.py --expect full --exercise-engine && \
+    python -m venv /tmp/aic-pip-repair && \
+    /tmp/aic-pip-repair/bin/pip install "${LEGACY_WHL}" && \
+    /tmp/aic-pip-repair/bin/pip install --upgrade "${CORE_WHL}" "${AIC_WHL}" && \
+    if cd /tmp && /tmp/aic-pip-repair/bin/python \
+        /workspace/tools/verify_installed_package_layers.py --expect full; then \
+        echo "ERROR: naive monolith-to-split pip upgrade unexpectedly preserved core files" >&2; \
+        exit 1; \
+    fi && \
+    /tmp/aic-pip-repair/bin/pip install --force-reinstall --no-deps "${CORE_WHL}" && \
+    cd /tmp && /tmp/aic-pip-repair/bin/python \
+        /workspace/tools/verify_installed_package_layers.py --expect full --exercise-engine
 
 FROM base AS runtime
 COPY --from=build /workspace/dist /wheelhouse
@@ -71,8 +121,8 @@ RUN uv pip install /wheelhouse/aiconfigurator-*.whl && \
 
 FROM runtime AS test
 
-# The `aiconfigurator_core` extension and all Python packages ship inside the
-# main wheel, so the test stage only adds that wheel's dev extras and sources.
+# Runtime already installed both payload-owning wheels. Add the upper wheel's
+# development extras before copying the test sources.
 COPY --from=build /workspace/dist /wheelhouse
 RUN AIC_WHL=$(ls /wheelhouse/aiconfigurator-*.whl) && \
     uv pip install "${AIC_WHL}[dev]" && \

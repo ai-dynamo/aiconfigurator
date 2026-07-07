@@ -10,12 +10,12 @@ import numpy as np
 import pandas as pd
 import plotext
 
-from aiconfigurator.logging_utils import use_plain_cli_output
 from aiconfigurator.sdk import config
 from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.common import ColumnsAgg
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.inference_session import DisaggInferenceSession, InferenceSession
+from aiconfigurator.sdk.logging_utils import use_plain_cli_output
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, strip_unicode_to_ascii
