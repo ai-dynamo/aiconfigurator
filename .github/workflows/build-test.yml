@@ -228,9 +228,10 @@ jobs:
       - name: Build the aiconfigurator_core Rust extension
         # The AICONFIGURATOR_RUST_CORE_AUTOBUILD env var is a no-op; the compiled
         # aiconfigurator_core extension must be built explicitly with maturin so
-        # the parity suite exercises the current Rust source. The maturin project
-        # is the repo root (see root pyproject.toml [tool.maturin]).
+        # the parity suite exercises the current Rust source. The Maturin project
+        # is the standalone core wheel under src/aiconfigurator-core.
         run: |
+          cd src/aiconfigurator-core
           VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" \
             "${GITHUB_WORKSPACE}/.venv/bin/maturin" develop --release
       - name: Run Rust/Python engine-step parity suite

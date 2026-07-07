@@ -306,7 +306,7 @@ class KVCacheEstimator:
         apply_nextn(model_config, nextn, nextn_accept_rates)
         model = get_model(model_path, model_config, backend)
         backend_obj = get_backend(backend)
-        database = perf_database.get_database(system, backend, backend_version)
+        database = perf_database.get_database(system, backend, backend_version, systems_paths=systems_path)
 
         # num_tokens = max_num_tokens -> activations track BuildConfig.max_num_tokens
         # (TRT-LLM `_memory_usage_kwargs_for_agg`). With num_tokens > 0 passed

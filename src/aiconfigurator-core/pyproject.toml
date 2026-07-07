@@ -7,17 +7,43 @@ version = "0.10.0"
 authors = [
     { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
 ]
-description = "Compatibility package for AIConfigurator's bundled core"
-readme = { text = "Compatibility package for the core functionality bundled in AIConfigurator.", content-type = "text/markdown" }
+description = "Standalone core modeling, data, and Rust estimators for AIConfigurator"
+readme = { text = "Standalone core modeling, data, and Rust estimators for AIConfigurator.", content-type = "text/markdown" }
 license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = [
-    "aiconfigurator==0.10.0",
+    "packaging>=20.0",
+    "matplotlib>=3.9.4",
+    "numpy~=1.26.4",
+    "pandas>=2.2.3",
+    "plotext>=5.3.2",
+    "pyarrow>=15.0.0",
+    "pyyaml>=6.0",
+    "scipy>=1.13.1",
+    "tqdm>=4.0.0",
+    "nvidia-ml-py",
+    "munch>=4.0.0",
 ]
 
 [build-system]
-requires = ["setuptools>=69", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.12,<2"]
+build-backend = "maturin"
 
-[tool.setuptools]
-packages = []
+[tool.maturin]
+manifest-path = "../../rust/aiconfigurator-core/Cargo.toml"
+module-name = "aiconfigurator_core._aiconfigurator_core"
+python-source = ".."
+abi3 = true
+features = ["pyo3/extension-module"]
+include = [
+    "aiconfigurator_core/__init__.py",
+    "aiconfigurator/sdk/**/*.py",
+    "aiconfigurator/sdk/**/*.md",
+    "aiconfigurator/systems/*.yaml",
+    "aiconfigurator/systems/*.csv",
+    "aiconfigurator/systems/**/*.csv",
+    "aiconfigurator/systems/**/*.json",
+    "aiconfigurator/systems/**/*.txt",
+    "aiconfigurator/systems/**/*.parquet",
+    "aiconfigurator/model_configs/*.json",
+]

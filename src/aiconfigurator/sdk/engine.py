@@ -814,7 +814,7 @@ def _maybe_load_database(system: str, backend: str, backend_version: str | None,
     try:
         from aiconfigurator.sdk import perf_database
 
-        return perf_database.get_database(system, backend, backend_version)
+        return perf_database.get_database(system, backend, backend_version, systems_paths=systems_path)
     except Exception:
         return None
 
