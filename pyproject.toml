@@ -40,6 +40,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 
 dependencies = [
+    "aiconfigurator-core==0.10.0",
     "jinja2>=3.1.0",
     "packaging>=20.0",
     "matplotlib>=3.9.4",
@@ -97,38 +98,28 @@ GitHub = "https://github.com/ai-dynamo/aiconfigurator"
 Repository = "https://github.com/ai-dynamo/aiconfigurator.git"
 
 [build-system]
-requires = ["maturin>=1.5,<2"]
-build-backend = "maturin"
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project.scripts]
 aiconfigurator = "aiconfigurator.main:main"
 spica = "spica.__main__:main"
 
-[tool.maturin]
-manifest-path = "rust/aiconfigurator-core/Cargo.toml"
-module-name = "aiconfigurator_core._aiconfigurator_core"
-python-source = "src"
-python-packages = ["aiconfigurator", "spica"]
-abi3 = true
-features = ["pyo3/extension-module"]
-include = [
-    "aiconfigurator/cli/*.yaml",
-    "aiconfigurator/cli/exps/*.yaml",
-    "aiconfigurator/generator/config/**/*.yaml",
-    "aiconfigurator/generator/config/backend_templates/**/*.j2",
-    "aiconfigurator/generator/rule_plugin/**/*.rule",
-    "aiconfigurator/generator/facts/**/*.yaml",
-    "aiconfigurator/generator/environment/*.yaml",
-    "aiconfigurator/systems/*.yaml",
-    "aiconfigurator/systems/*.csv",
-    "aiconfigurator/systems/**/*.csv",
-    "aiconfigurator/systems/**/*.json",
-    "aiconfigurator/systems/**/*.txt",
-    "aiconfigurator/systems/**/*.parquet",
-    "aiconfigurator/model_configs/*.json",
-    "aiconfigurator/webapp/components/profiling/styles.css",
-    "aiconfigurator/webapp/components/profiling/js/*.js",
-]
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.package-data]
+"aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
+"aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule", "facts/**/*.yaml", "environment/*.yaml"]
+"aiconfigurator.webapp.components.profiling" = ["styles.css", "js/*.js", "standalone/*.json"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["aiconfigurator", "aiconfigurator.cli*", "aiconfigurator.generator*", "aiconfigurator.webapp*", "spica*"]
+exclude = ["aiconfigurator.sdk*", "aiconfigurator.systems*", "aiconfigurator.model_configs*", "aiconfigurator_core*"]
+
+[tool.uv.sources]
+aiconfigurator-core = { path = "src/aiconfigurator-core", editable = true }
 
 [tool.ruff]
 line-length = 120

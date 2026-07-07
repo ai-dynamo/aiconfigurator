@@ -29,20 +29,39 @@ Let's get started.
 
 ### Install from PyPI
 
-> **Supported platform: Linux x86-64 only.** The published `aiconfigurator` wheel
-> bundles a native (Rust/PyO3) extension and is built for `linux_x86_64`. macOS,
-> Windows, and other architectures (including Linux aarch64) are **not supported**
-> and have no published release wheels — `pip3 install aiconfigurator` will not
-> find a compatible wheel there. Please install from source for non-Linux platforms.
+> **Supported platform: Linux x86-64 only.** The required `aiconfigurator-core`
+> wheel bundles a native Rust/PyO3 extension and is built for `linux_x86_64`.
+> macOS, Windows, and other architectures (including Linux aarch64) are **not
+> supported** and have no published core wheels. Please install from source for
+> non-Linux platforms.
 
 ```bash
 pip3 install aiconfigurator
 ```
 
-The `aiconfigurator` wheel is self-contained: it includes the CLI, SDK, model
-and system data, Spica, and the native core extension. The
-`aiconfigurator-core` distribution remains available as a payload-free
-compatibility package that installs the matching `aiconfigurator` version.
+The upper `aiconfigurator` wheel contains the CLI, generator, webapp, and Spica.
+It depends on the exact matching `aiconfigurator-core` wheel, which independently
+owns the SDK, model/system data, and native extension. Installing
+`aiconfigurator` therefore installs the complete product, while core-only
+consumers can install `aiconfigurator-core` without pulling in the upper layer.
+
+#### Upgrading from 0.9
+
+Version 0.9 shipped core files inside `aiconfigurator`. Package installers cannot
+safely transfer those same paths to the new dependency during a normal in-place
+upgrade because dependencies are installed before dependents. Remove the old
+owner first when crossing this package boundary:
+
+```bash
+python3 -m pip uninstall -y aiconfigurator aiconfigurator-core
+python3 -m pip install 'aiconfigurator==0.10.0'
+```
+
+If a normal upgrade was already attempted, repair the core payload with:
+
+```bash
+python3 -m pip install --force-reinstall --no-deps 'aiconfigurator-core==0.10.0'
+```
 
 ### Build and Install from Source
 
@@ -59,14 +78,15 @@ git lfs pull
 # 3. Create and activate a virtual environment
 python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.10 or later)
 
-# 4. Install aiconfigurator
+# 4. Install the standalone core, then the upper package
+pip3 install ./src/aiconfigurator-core
 pip3 install .
 ```
 
 ### Build with Docker
 
 ```bash
-# This creates the self-contained AIC wheel and a compatibility metapackage wheel
+# This creates disjoint upper AIC and standalone core wheels
 docker build -f docker/Dockerfile --no-cache --target build -t aiconfigurator:latest .
 docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist dist/ && docker rm aic
 ```

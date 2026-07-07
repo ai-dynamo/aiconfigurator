@@ -43,7 +43,6 @@
 //! (matching the Python integration test in `tests/integration/test_memory_estimation.py`).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use aiconfigurator_core::{
     estimate_kv_cache, BackendKind, EngineConfig, EstimateSource, KvCacheEstimateOptions,
@@ -54,10 +53,6 @@ use pyo3::prelude::*;
 
 const TEST_MODEL: &str = "Qwen/Qwen3-32B";
 const TOLERANCE: f64 = 0.05;
-
-fn systems_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src/aiconfigurator/systems")
-}
 
 /// Soft-skip guard: true only when the embedded interpreter can import
 /// `aiconfigurator.sdk.memory` (which transitively imports the maturin-built
@@ -85,7 +80,7 @@ fn request(tolerance_fraction: Option<f64>) -> KvCacheEstimateRequest {
             schema_version: ENGINE_CONFIG_SCHEMA_VERSION,
             model_name: TEST_MODEL.to_string(),
             system_name: "h200_sxm".to_string(),
-            systems_path: systems_root().to_str().map(PathBuf::from),
+            systems_path: None,
             backend: BackendKind::Trtllm,
             backend_version: Some("1.3.0rc10".to_string()),
             kv_block_size: None,
