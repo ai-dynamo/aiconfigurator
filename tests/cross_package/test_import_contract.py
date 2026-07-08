@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib
 import importlib.resources
 import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -117,6 +118,23 @@ def test_models_package_delegates_private_registry() -> None:
     canonical_models = importlib.import_module("aiconfigurator_core.sdk.models")
 
     assert legacy_models._MODEL_REGISTRY is canonical_models._MODEL_REGISTRY
+
+
+@pytest.mark.parametrize(
+    ("package_suffix", "attribute"),
+    [
+        ("models", "_get_model_info"),
+        ("operations", "clear_all_op_caches"),
+    ],
+)
+def test_legacy_package_patch_updates_canonical_package(package_suffix: str, attribute: str) -> None:
+    """Patching a legacy package attribute must affect canonical code."""
+    canonical_package = importlib.import_module(f"aiconfigurator_core.sdk.{package_suffix}")
+
+    with patch(f"aiconfigurator.sdk.{package_suffix}.{attribute}") as mocked:
+        assert getattr(canonical_package, attribute) is mocked
+
+    assert getattr(canonical_package, attribute) is not mocked
 
 
 def test_representative_from_imports_return_canonical_objects() -> None:

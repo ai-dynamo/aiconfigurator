@@ -16,13 +16,18 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV MPLCONFIGDIR=/tmp/matplotlib
 
 FROM base AS build
+COPY --from=rust:1.88.0-slim-bookworm /usr/local/cargo /usr/local/cargo
+COPY --from=rust:1.88.0-slim-bookworm /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
 # The standalone `aiconfigurator-core` wheel owns the canonical Python SDK,
 # Rust extension, and estimator data under `aiconfigurator_core`. The upper
 # `aiconfigurator` wheel owns CLI/generator/webapp/Spica plus compatibility
 # facades under `aiconfigurator.sdk`, and depends on the exact matching core
 # version. Maturin needs the Rust
 # crate sources, a C linker (gcc), and ca-certificates so cargo can fetch crates
-# from crates.io over TLS. Rust itself is bootstrapped by maturin's build backend.
+# from crates.io over TLS. The pinned Rust toolchain above supplies cargo/rustc.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
     rm -rf /var/lib/apt/lists/*

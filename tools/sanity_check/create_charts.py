@@ -23,6 +23,8 @@ os.environ["MPLBACKEND"] = "agg"
 import matplotlib.pyplot as plt
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+SYSTEMS_PREFIX = "packages/aiconfigurator-core/src/aiconfigurator_core/systems/"
+LEGACY_SYSTEMS_PREFIX = "src/aiconfigurator/systems/"
 
 # Import validate_database.ipynb jupyter notebook
 old_cwd = os.getcwd()
@@ -51,8 +53,10 @@ OPTIONAL_CHART_ERROR_SNIPPETS = (
 def _data_dir(system: str, backend: str, backend_version: str) -> str:
     return os.path.join(
         REPO_ROOT,
+        "packages",
+        "aiconfigurator-core",
         "src",
-        "aiconfigurator",
+        "aiconfigurator_core",
         "systems",
         "data",
         system,
@@ -232,17 +236,39 @@ def should_run_cli_smoke_test(system: str, backend: str, backend_version: str) -
 
 
 def get_changed_files(base_ref: str, head_ref: str) -> list[str]:
-    """Get list of files changed between base and head refs."""
+    """Get added or modified systems files, excluding path-only moves."""
     try:
         result = subprocess.run(
-            ["git", "diff", "--name-only", f"{base_ref}...{head_ref}"],
+            ["git", "diff", "--name-status", "--find-renames=100%", f"{base_ref}...{head_ref}"],
             capture_output=True,
             text=True,
             check=True,
         )
-        changed_files = [f.strip() for f in result.stdout.split("\n") if f.strip()]
-        systems_prefix = "packages/aiconfigurator-core/src/aiconfigurator_core/systems/"
-        return [f for f in changed_files if f.startswith(systems_prefix)]
+        changed_files: list[str] = []
+        for line in result.stdout.splitlines():
+            parts = line.split("\t")
+            status = parts[0]
+            paths = parts[1:]
+            if status.startswith("D") or not paths:
+                continue
+
+            new_path = paths[-1]
+            if not new_path.startswith(SYSTEMS_PREFIX):
+                continue
+
+            if status.startswith("R") and len(paths) == 2:
+                old_path = paths[0]
+                old_relative = (
+                    old_path.removeprefix(LEGACY_SYSTEMS_PREFIX)
+                    if old_path.startswith(LEGACY_SYSTEMS_PREFIX)
+                    else old_path.removeprefix(SYSTEMS_PREFIX)
+                )
+                new_relative = new_path.removeprefix(SYSTEMS_PREFIX)
+                if status == "R100" and old_relative == new_relative:
+                    continue
+
+            changed_files.append(new_path)
+        return changed_files
     except subprocess.CalledProcessError as e:
         print(f"Error getting changed files: {e}", file=sys.stderr)
         return []
@@ -264,7 +290,6 @@ def get_csv_to_parquet_conversion_files(base_ref: str, head_ref: str) -> set[str
     added_parquet: set[str] = set()
     deleted_legacy_as_parquet: set[str] = set()
     renamed_legacy_as_parquet: set[str] = set()
-    systems_prefix = "packages/aiconfigurator-core/src/aiconfigurator_core/systems/"
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
@@ -273,17 +298,17 @@ def get_csv_to_parquet_conversion_files(base_ref: str, head_ref: str) -> set[str
         paths = parts[1:]
         if status.startswith("A") and paths:
             path = paths[-1]
-            if path.startswith(systems_prefix) and path.endswith("_perf.parquet"):
+            if path.startswith(SYSTEMS_PREFIX) and path.endswith("_perf.parquet"):
                 added_parquet.add(path)
         elif status.startswith("D") and paths:
             path = paths[0]
-            if path.startswith(systems_prefix) and path.endswith("_perf.txt"):
+            if path.startswith(SYSTEMS_PREFIX) and path.endswith("_perf.txt"):
                 deleted_legacy_as_parquet.add(f"{os.path.splitext(path)[0]}.parquet")
         elif status.startswith("R") and len(paths) == 2:
             old_path, new_path = paths
             if (
-                old_path.startswith(systems_prefix)
-                and new_path.startswith(systems_prefix)
+                old_path.startswith(SYSTEMS_PREFIX)
+                and new_path.startswith(SYSTEMS_PREFIX)
                 and old_path.endswith("_perf.txt")
                 and new_path.endswith("_perf.parquet")
                 and os.path.splitext(old_path)[0] == os.path.splitext(new_path)[0]
@@ -484,7 +509,7 @@ def main():
             continue
 
         # remove prefix
-        changed_file = changed_file.replace("packages/aiconfigurator-core/src/aiconfigurator_core/systems/", "")
+        changed_file = changed_file.removeprefix(SYSTEMS_PREFIX)
         # split by /
         parts = changed_file.split("/")
 
@@ -520,7 +545,10 @@ def main():
 
     # Only create comment file if there are files to process
     if not system_backend_version_to_changed_files:
-        print("No matching perf data files found to process. Skipping chart generation.")
+        print("No new or modified perf data files found to process.")
+        with open(args.output_md_file, "w") as f:
+            f.write("## Sanity Check Chart Generation Report\n\n")
+            f.write("No new or modified perf data files were detected. Path-only relocations are ignored.\n")
         return 0
 
     with open(args.output_md_file, "w") as f:
@@ -534,7 +562,7 @@ def main():
             perf data vs SOL (theoretical max performance).
 
             Below is a report of whether the chart generation was successful for each op.
-            If doesn't validate whether the perf data itself is sane.
+            It does not validate whether the perf data itself is sane.
         """)
         )
 
