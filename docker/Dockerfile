@@ -45,8 +45,12 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 ENV RUSTUP_HOME=/opt/rust/rustup \
     CARGO_HOME=/opt/rust/cargo \
     PATH=/opt/rust/cargo/bin:${PATH}
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --profile minimal --default-toolchain stable
+# Download to disk (not `curl | sh`, which hides a failed download behind sh's
+# exit status); pin the toolchain for reproducible release wheels.
+RUN curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-connrefused --retry-delay 2 \
+        https://sh.rustup.rs -o /tmp/rustup-init.sh \
+    && sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.96.0 \
+    && rm /tmp/rustup-init.sh
 
 # Pin the build interpreter to the image's CPython 3.12 so uv/maturin never fetch
 # a standalone one. abi3 (abi3-py310) means the single wheel serves CPython >=3.10.
