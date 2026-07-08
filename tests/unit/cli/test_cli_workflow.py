@@ -761,7 +761,7 @@ class TestCLIIntegration:
         assert planner_config["prefill_engine_num_gpu"] == 1
         assert planner_config["decode_engine_num_gpu"] == 2
 
-    @pytest.mark.parametrize("deployment_target", ["dynamo-python", "llm-d-helm", "llm-d-kustomize"])
+    @pytest.mark.parametrize("deployment_target", ["dynamo-python", "llm-d-helm", "llm-d-kustomize", "fpm"])
     def test_spica_artifacts_fail_closed_when_target_drops_native_features(self, deployment_target):
         generator_config = {
             "DynConfig": {

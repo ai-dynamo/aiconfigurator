@@ -99,9 +99,9 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
 - `--model` is an alias for `--model-path` in the CLI.
 - Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
-- Use `--deployment-target` to specify the deployment platform: `dynamo-j2` (default, Jinja2 templates), `dynamo-python` (Dynamo Python config modifiers), or `llm-d` (llm-d Helm values). Backends vllm and sglang support llm-d; trtllm is Dynamo-only.
+- Use `--deployment-target` to specify the artifact platform: `dynamo-j2` (default, typed Dynamo manifests), `dynamo-python`, `llm-d-helm`, `llm-d-kustomize`, or `fpm`. FPM V1 is limited to a single-node, single-worker vLLM agg launch and emits a reusable resource Pod plus `run.sh`; see the [Generator overview](docs/generator_overview.md#fpm-v1-target).
 - Use `exp`, pass in exp.yaml by `--yaml-path` to customize your experiments and even a heterogenous one.
-- Use `--save-dir DIR` to generate deployment configuration files (Dynamo K8s manifests or llm-d Helm values, depending on `--deployment-target`).
+- Use `--save-dir DIR` to generate deployment artifacts for the selected target (Dynamo manifests, llm-d values/overlays, or FPM Pod + script).
 - Use `--database-mode` to control performance estimation mode: `SILICON` (default, uses collected silicon data), `HYBRID` (uses silicon data when available, otherwise SOL+empirical), `EMPIRICAL` (SOL+empirical for all), or `SOL` (speed-of-light only). Please be careful, only `SILICON` mode's result is reproducible. Other modes are for research purpose
 - Use `--systems-paths` to override where system YAMLs and data are loaded from (comma-separated; `default` maps to the built-in systems path). First match wins for identical system/backend/version.
 - Use `-h` for more options and customization.

@@ -10,7 +10,7 @@ flowchart TD
   C --> D[<b>Rule plugins</b><br/>rule_plugin/*.rule]
   D --> E[<b>Parameter mapping</b><br/>config/backend_config_mapping.yaml]
   E --> F[<b>Template rendering</b><br/>config/backend_templates/backend/...]
-  F --> G[<b>Generated artifacts</b><br/>k8s_deploy.yaml OR llm-d-values.yaml,<br/>run_*.sh,<br/>engine configs/cli args]
+  F --> G[<b>Generated artifacts</b><br/>k8s_deploy.yaml OR llm-d-values.yaml,<br/>run_*.sh OR FPM run.sh,<br/>engine configs/cli args]
 ```
 
 ### Key Components
@@ -93,7 +93,7 @@ You can use the generator in two ways: AIConfigurator CLI or standalone (code/CL
     --save-dir ./results
   ```
   Notes:
-  - Use `--deployment-target` to choose the orchestration platform: `dynamo-j2` (default, Jinja2 templates), `dynamo-python` (Python config modifiers), or `llm-d` (Helm values).
+  - Use `--deployment-target` to choose the orchestration platform: `dynamo-j2` (default, typed Dynamo manifests), `dynamo-python` (Python config modifiers), `llm-d-helm`/`llm-d-kustomize`, or `fpm` (a reusable resource Pod plus `run.sh`).
   - For Dynamo deployments: Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag. If not provided, defaults to `1.0.0`.
   - For llm-d deployments: Container image versions are specified via `LlmdConfig.vllm_image` or `LlmdConfig.sglang_image` (defaults to `latest` tags).
   - If `--generated-config-version` is provided, it overrides the generated backend version for any deployment target.
@@ -173,9 +173,35 @@ You can use the generator in two ways: AIConfigurator CLI or standalone (code/CL
 - Deployment manifests:
   - **Dynamo**: Kubernetes manifest (`k8s_deploy.yaml`) with images, namespace, volumes, engine args (inline or ConfigMap), and role-specific settings.
   - **llm-d**: Helm values (`llm-d-values.yaml`) for the llm-d-modelservice chart with model artifacts, parallelism, and container configurations.
-- Benchmark helpers:
-  - `bench_run.sh` and `k8s_bench.yaml` are generated alongside deployment artifacts for running `aiperf` benchmarks.
+  - **FPM V1**: exactly `k8s_deploy.yaml` and `run.sh`; see [FPM V1 Target](#fpm-v1-target).
+- Benchmark helpers (non-FPM targets):
+  - `bench_run.sh` and `k8s_bench.yaml` are generated alongside normal deployment artifacts for running `aiperf` benchmarks. The FPM target emits neither helper.
   - `concurrency_array` is built from a base list (`1 2 8 16 32 64 128`) plus `BenchConfig.estimated_concurrency` and its +/-5% neighbors when the estimate is available.
+
+### FPM V1 Target
+
+`--deployment-target fpm` is intentionally limited to vLLM, aggregated mode, one worker, and one node. Router/planner configurations and unsupported combinations fail instead of being silently omitted or falling back to another target. Other deployment targets keep their existing behavior.
+
+The FPM overlay accepts `Workers.agg.extra_cli_args` as a `list[str]` and concrete `K8sConfig.extra_env` entries in `{name, value}` form. Rules, mappings, and versioned templates still produce the base vLLM command; `extra_cli_args` are appended to that resolved command. `valueFrom` and Secret-derived environment values are not supported in V1.
+
+The target emits only:
+
+```text
+artifacts/
+├── k8s_deploy.yaml   # standard keepalive Pod; resources and mounts only
+└── run.sh            # exports plus the complete resolved vLLM command
+```
+
+The Pod contains no engine arguments or engine/FPM environment variables. An agent applies it once, waits for it to become ready, and can execute generated scripts repeatedly:
+
+```bash
+kubectl apply -f artifacts/k8s_deploy.yaml
+kubectl exec -i <pod> -- bash -s < artifacts/run.sh
+```
+
+Each `run.sh` invocation starts and stops its own engine, so the model is still loaded on every run. The script refuses to overwrite its resolved benchmark output path (for example, `DYN_FPM_BENCHMARK_OUTPUT_PATH`); use a distinct path for each run. Reusing the Pod avoids re-requesting resources, but V1 does not provide a persistent engine or in-GPU model reuse.
+
+The current vLLM template matrix tops out at `0.20.1`. Flags required only by the reference `0.24.0` runtime can be passed through as tokens, but their runtime compatibility is not yet validated by the generator.
 
 ### TRT-LLM Deployment Notes
 When deploying with TRT-LLM, the generated run scripts (`run_x.sh`) reference engine config files at `/workspace/engine_configs/`. Before executing the run scripts, you must:

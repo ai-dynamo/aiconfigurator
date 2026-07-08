@@ -15,7 +15,7 @@ These flags are shared across modes (a few are sweep-only, as noted):
 - `--save-dir DIR`: Directory to write results and generated deployment artifacts. (`default`, `exp`, `generate`, `estimate`)
 - `--top-n N`: Number of top configurations to output — per experiment in `exp` mode, or per serving mode (agg/disagg) in `default` mode. Default: `5`. (`default`, `exp`, `generate`, `estimate`)
 - `--systems-paths`: System search paths (comma-separated). Use `default` for the built-in systems path; the first match wins for an identical system/backend/version. (`default`, `exp`, `generate`, `estimate`)
-- `--deployment-target`: Generated-artifact platform — `dynamo-j2` (default), `dynamo-python`, or `llm-d`. See [Deployment Target Selection](#default-mode). (`default`, `exp`, `generate`, `estimate`)
+- `--deployment-target`: Generated-artifact platform — `dynamo-j2` (default), `dynamo-python`, `llm-d-helm`, `llm-d-kustomize`, or `fpm`. See [Deployment Target Selection](#deployment-target-selection). (`default`, `exp`, `generate`, `estimate`)
 - `--engine-step-backend`: Experimental static-latency backend — `python` (default) or `rust` (routes static step estimates through the Rust FPM estimator). (`default`, `exp`, `generate`, `estimate`)
 
 The `support` mode accepts only `--log-level`, `--debug`, and `--no-color` from this list. Generator-artifact flags (`--generator-config`, `--generator-set`, `--generator-help`, `--generator-help-backend`, `--generated-config-version`, `--generator-dynamo-version`) are documented under [Default mode](#default-mode).
@@ -686,6 +686,7 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_90449
 By default, we output the top 5 configs we have found. You can get the configs and scripts to deploy under each experiment's folder. The generated files depend on your `--deployment-target`:
 - **Dynamo** (default): `k8s_deploy.yaml` for Kubernetes deployment, plus engine configs (`agg_config.yaml`, `prefill_config.yaml`, `decode_config.yaml`) and run scripts (`node_0_run.sh`)
 - **llm-d**: `llm-d-values.yaml` for Helm deployment with the llm-d-modelservice chart
+- **FPM V1**: exactly `k8s_deploy.yaml` (a reusable keepalive Pod) and `run.sh` (the complete vLLM launch)
 
 For benchmarking, see the [Benchmark Artifacts](#benchmark-artifacts) section below. Refer to [deployment guide](dynamo_deployment_guide.md) for Dynamo deployments or the [README llm-d section](../README.md#deploying-to-llm-d-platform) for llm-d deployments.
 
@@ -694,11 +695,59 @@ For benchmarking, see the [Benchmark Artifacts](#benchmark-artifacts) section be
 **Deployment Target Selection**
 
 Use `--deployment-target` to choose which orchestration platform to deploy to:
-- `dynamo-j2` (default): Generates Dynamo Kubernetes manifests using Jinja2 templates
+- `dynamo-j2` (default): Generates typed Dynamo Kubernetes manifests
 - `dynamo-python`: Generates Dynamo Kubernetes manifests using Dynamo's Python config modifiers (requires `dynamo` package)
-- `llm-d`: Generates Helm values for the llm-d-modelservice chart
+- `llm-d-helm`: Generates Helm values for the llm-d-modelservice chart
+- `llm-d-kustomize`: Generates Kustomize overlays for llm-d modelserver guides
+- `fpm`: Generates a reusable Kubernetes resource Pod and a complete FPM launch script, `run.sh`
 
-The backend (`--backend trtllm/vllm/sglang`) and deployment target are orthogonal choices. Note that TRT-LLM only supports Dynamo platforms, while vLLM and SGLang support all three options.
+The backend (`--backend trtllm/vllm/sglang`) and deployment target are generally orthogonal choices. Note that TRT-LLM only supports Dynamo platforms. FPM V1 is the exception: it supports only vLLM, aggregated mode, one worker, and one node; router/planner configurations and unsupported combinations fail instead of being silently omitted or falling back to another target.
+
+#### FPM V1 resource Pod and run script
+
+Use `--deployment-target fpm` when an agent should reserve Kubernetes resources once and run one or more generated FPM launches in that same Pod. A generator config can add tokenized vLLM arguments and concrete environment variables:
+
+```yaml
+WorkerConfig:
+  agg_workers: 1
+Workers:
+  agg:
+    extra_cli_args:
+      - --scheduler-cls
+      - InstrumentedScheduler
+      - --benchmark-mode
+      - agg
+K8sConfig:
+  extra_env:
+    - name: FPM_RUN_ID
+      value: glm52-example
+    - name: DYN_FPM_BENCHMARK_OUTPUT_PATH
+      value: /results/glm52-example.json
+```
+
+`Workers.agg.extra_cli_args` must be a `list[str]`. `K8sConfig.extra_env` accepts concrete `{name, value}` entries only; `valueFrom`, `envFrom`, and Secret-derived values are not supported. The normal rule, mapping, and versioned-template pipeline still builds the base command before the extra arguments are appended. If both `--benchmark-output-path` and `DYN_FPM_BENCHMARK_OUTPUT_PATH` are supplied, they must be identical.
+
+The generated artifact directory contains only:
+
+```text
+artifacts/
+├── k8s_deploy.yaml
+└── run.sh
+```
+
+`k8s_deploy.yaml` is a standard keepalive Pod that contains the requested image, GPU/custom resources, volumes, and mounts, but no engine arguments or engine/FPM environment variables. It mounts Pod-local `emptyDir` storage at `/results`. `run.sh` contains the environment `export` statements and the complete resolved `python3 -m dynamo.vllm ...` command.
+
+Apply the Pod once, wait for it to become ready, and stream the script into it. The final command can be repeated with newly generated scripts without recreating the Pod:
+
+```bash
+kubectl apply -f artifacts/k8s_deploy.yaml
+kubectl wait --for=condition=Ready pod/<pod> --timeout=10m
+kubectl exec -i <pod> -- bash -s < artifacts/run.sh
+```
+
+Every execution still starts a new engine and reloads the model. `run.sh` refuses to overwrite its resolved benchmark output path (the example uses `DYN_FPM_BENCHMARK_OUTPUT_PATH`), so each run must use a new path. Results in `/results` remain only for the lifetime of the Pod. FPM V1 does not keep the engine or GPU-resident model alive between executions. Selecting any other deployment target preserves the existing generator output and behavior.
+
+The current vLLM template matrix tops out at `0.20.1`. You may pass reference `0.24.0`-only flags through `extra_cli_args`, but the generator has not yet validated those flags against a `0.24.0` runtime image.
 
 **Generator Dynamo version** (applies to Dynamo deployments only)
 - Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
@@ -946,7 +995,7 @@ See `src/aiconfigurator/cli/exps/database_mode_comparison.yaml` for an example c
 
 ### Benchmark Artifacts
 
-When `--save-dir` is used, each `topN` directory includes two benchmark helpers alongside the deployment artifacts:
+For non-FPM deployment targets, each `topN` directory includes two benchmark helpers alongside the deployment artifacts when `--save-dir` is used. The FPM target emits only `k8s_deploy.yaml` and `run.sh`, so it does not include these helpers.
 
 - **`bench_run.sh`** -- A shell script for bare-metal benchmarking. It loops over a concurrency array and calls [`aiperf profile`](https://github.com/ai-dynamo/aiperf) for each level. Before running it, make sure the deployed service is reachable at the endpoint printed in the script, and that `aiperf` is installed (`pip install aiperf`). Usage:
   ```bash

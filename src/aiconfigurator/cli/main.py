@@ -137,11 +137,11 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
     common_parser.add_argument(
         "--deployment-target",
         type=str,
-        choices=["dynamo-j2", "dynamo-python", "llm-d-helm", "llm-d-kustomize"],
+        choices=["dynamo-j2", "dynamo-python", "llm-d-helm", "llm-d-kustomize", "fpm"],
         default="dynamo-j2",
-        help="Deployment target platform. Options: dynamo-j2 (default, Jinja2 templates), "
+        help="Deployment target platform. Options: dynamo-j2 (default, typed Dynamo manifests), "
         "dynamo-python (Dynamo Python config modifiers), llm-d-helm (llm-d Helm values), "
-        "llm-d-kustomize (llm-d Kustomize overlays).",
+        "llm-d-kustomize (llm-d Kustomize overlays), fpm (reusable resource Pod + run.sh).",
     )
     common_parser.add_argument(
         "--engine-step-backend",

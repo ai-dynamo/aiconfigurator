@@ -1,6 +1,6 @@
 # Dynamo Deployment with Aiconfigurator Guide
 
-> **Note:** This guide covers Dynamo platform deployments (`--deployment-target dynamo-j2` or `dynamo-python`). For llm-d platform deployments, see the [llm-d deployment examples in the README](../README.md#deploying-to-llm-d-platform).
+> **Note:** This guide covers Dynamo platform deployments (`--deployment-target dynamo-j2` or `dynamo-python`). For llm-d platform deployments, see the [llm-d deployment examples in the README](../README.md#deploying-to-llm-d-platform). The separate FPM V1 resource-Pod workflow is summarized in [Section 6](#6-fpm-v1-resource-pod-workflow).
 
 This guide walks through   
 - installing aiconfigurator
@@ -485,3 +485,29 @@ Use `--generator-set K8sConfig.<field>=value` (or place the same keys inside `--
 
 
 ---
+
+## 6. FPM V1 Resource Pod Workflow
+
+`--deployment-target fpm` is a separate, deliberately small target for vLLM aggregated deployments with one worker on one node. Router/planner configurations and unsupported combinations fail instead of being silently omitted or falling back to another target. It does not change the output of `dynamo-j2`, `dynamo-python`, or llm-d targets.
+
+FPM V1 emits exactly two artifacts:
+
+```text
+artifacts/
+├── k8s_deploy.yaml   # standard keepalive Pod
+└── run.sh            # environment exports and complete vLLM command
+```
+
+The Pod requests the generated image, GPU/custom resources, volumes, and mounts, but contains no engine arguments or engine/FPM environment variables. Add tokenized launch arguments through `Workers.agg.extra_cli_args: list[str]` and concrete `{name, value}` environment entries through `K8sConfig.extra_env`; the generator places both in `run.sh`. `valueFrom`, `envFrom`, and Secret-derived environment values are not supported in V1.
+
+An agent can create the resource Pod once and execute multiple generated scripts in it:
+
+```bash
+kubectl apply -f artifacts/k8s_deploy.yaml
+kubectl wait --for=condition=Ready pod/<pod> --timeout=10m
+kubectl exec -i <pod> -- bash -s < artifacts/run.sh
+```
+
+Each invocation still starts a new engine, reloads the model, and stops the engine after collection; only the Pod and its local filesystem remain available. `run.sh` refuses to overwrite its resolved benchmark output path (for example, `DYN_FPM_BENCHMARK_OUTPUT_PATH`), so use a unique path for every run. The generated Pod mounts `/results` from `emptyDir`, and those results disappear when the Pod is deleted. Persistent engines and reuse of a GPU-resident model are outside the V1 scope. See the [CLI User Guide](cli_user_guide.md#fpm-v1-resource-pod-and-run-script) for the input example.
+
+The current vLLM template matrix tops out at `0.20.1`; reference `0.24.0`-only flags may be passed through, but their runtime compatibility is not yet validated by the generator.
