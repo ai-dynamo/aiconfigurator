@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Verify that release wheels have one owner for the complete AIC payload."""
+"""Verify the self-contained AIC release wheel."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def _source_payload() -> set[str]:
     return expected
 
 
-def _verify_main_wheel(wheel: Path) -> str:
+def _verify_main_wheel(wheel: Path) -> None:
     names, metadata = _wheel_files(wheel)
     required = {
         "aiconfigurator/cli/main.py",
@@ -82,29 +82,10 @@ def _verify_main_wheel(wheel: Path) -> str:
 
     requirements = metadata.get_all("Requires-Dist", [])
     if any(requirement.lower().startswith("aiconfigurator-core") for requirement in requirements):
-        raise RuntimeError(f"{wheel.name}: must not depend on the compatibility metapackage")
+        raise RuntimeError(f"{wheel.name}: must not depend on the removed aiconfigurator-core distribution")
 
-    version = metadata.get("Version")
-    if not version:
+    if not metadata.get("Version"):
         raise RuntimeError(f"{wheel.name}: missing distribution version")
-    return version
-
-
-def _verify_core_metapackage(wheel: Path, aic_version: str) -> None:
-    names, metadata = _wheel_files(wheel)
-    payload = sorted(name for name in names if ".dist-info/" not in name)
-    if payload:
-        raise RuntimeError(f"{wheel.name}: compatibility wheel must not own payload files: {payload}")
-
-    if metadata.get("Version") != aic_version:
-        raise RuntimeError(
-            f"{wheel.name}: version {metadata.get('Version')!r} does not match aiconfigurator {aic_version!r}"
-        )
-
-    requirements = metadata.get_all("Requires-Dist", [])
-    expected = f"aiconfigurator=={aic_version}"
-    if expected not in requirements:
-        raise RuntimeError(f"{wheel.name}: expected Requires-Dist {expected!r}, found {requirements}")
 
 
 def main() -> int:
@@ -113,10 +94,12 @@ def main() -> int:
     args = parser.parse_args()
 
     main_wheel = _one_wheel(args.dist_dir, "aiconfigurator-*.whl")
-    core_wheel = _one_wheel(args.dist_dir, "aiconfigurator_core-*.whl")
-    aic_version = _verify_main_wheel(main_wheel)
-    _verify_core_metapackage(core_wheel, aic_version)
-    print(f"Verified self-contained {main_wheel.name} and payload-free {core_wheel.name}")
+    removed_core_wheels = sorted(args.dist_dir.glob("aiconfigurator_core-*.whl"))
+    if removed_core_wheels:
+        raise RuntimeError(f"unexpected aiconfigurator-core wheel: {[path.name for path in removed_core_wheels]}")
+
+    _verify_main_wheel(main_wheel)
+    print(f"Verified self-contained {main_wheel.name}")
     return 0
 
 

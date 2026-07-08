@@ -61,9 +61,9 @@ jobs:
           OLD_VENV="${OLD_ROOT}/.venv"
           python -m venv "${OLD_VENV}"
           "${OLD_VENV}/bin/python" -m pip install --upgrade pip
-          # Split-era revisions need the payload-bearing Maturin core installed
-          # first. Newer revisions keep this path only as a compatibility
-          # metapackage, which must not be installed ahead of the root package.
+          # Split-era revisions need the historical payload-bearing Maturin core
+          # installed first. Current revisions have no separate Python core
+          # project, but regression tests still need to install old baselines.
           if grep -q 'build-backend = "maturin"' "${OLD_ROOT}/src/aiconfigurator-core/pyproject.toml" 2>/dev/null; then
             "${OLD_VENV}/bin/python" -m pip install -e "${OLD_ROOT}/src/aiconfigurator-core"
           fi
