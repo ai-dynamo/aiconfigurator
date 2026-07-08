@@ -568,9 +568,16 @@ groups:
   - op_file: wideep_deepep_ll_perf.parquet
     kernel_source: 'deepep'
     tier: shared
-    systems: [h100_sxm, h200_sxm]
+    systems: [b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm]
     frameworks: [sglang]
-    total_raw_rows: 190
+    total_raw_rows: 1054
+    within_framework_dedup_rows: 0
+  - op_file: wideep_deepep_normal_perf.parquet
+    kernel_source: 'deepep'
+    tier: shared
+    systems: [b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm]
+    frameworks: [sglang]
+    total_raw_rows: 13524
     within_framework_dedup_rows: 0
   - op_file: wideep_generation_mla_perf.parquet
     kernel_source: 'fa3'

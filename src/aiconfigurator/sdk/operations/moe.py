@@ -1001,6 +1001,10 @@ class MoEDispatch(Operation):
 
     _normal_data_cache: ClassVar[dict] = {}
     _ll_data_cache: ClassVar[dict] = {}
+    # Tables whose node_num=1 single-node fallback has already been logged this
+    # process. The fallback fires once per swept parallel config (thousands of
+    # times), so we emit the INFO only once per table. Cleared in clear_cache.
+    _wideep_fallback_logged: ClassVar[set] = set()
 
     def __init__(
         self,
@@ -1091,6 +1095,7 @@ class MoEDispatch(Operation):
     def clear_cache(cls) -> None:
         cls._normal_data_cache.clear()
         cls._ll_data_cache.clear()
+        cls._wideep_fallback_logged.clear()
 
     # ------------------------------------------------------------------
     # Query tables (formerly PerfDatabase.query_wideep_deepep_normal /
@@ -1128,7 +1133,37 @@ class MoEDispatch(Operation):
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0, source="empirical")
         else:
-            data = database._wideep_deepep_ll_data[node_num][hidden_size][topk][num_experts]
+            # Prefer measured data for the requested node scale; fall back to
+            # single-node (node_num=1) data with the SAME (hidden, topk,
+            # num_experts) when the exact node_num was not collected. This keeps
+            # the EP config identical and only relaxes the all-to-all node scale,
+            # so multi-node WideEP configs can use single-node collected data.
+            # Note: node_num=1 is a smaller all-to-all than a real multi-node run,
+            # so this under-estimates dispatch/combine latency at large EP.
+            # Read via .get() chains so a miss does not auto-vivify the nested
+            # defaultdict with empty entries.
+            # TODO(perf enhancement): extrapolate single-node -> multi-node.
+            # The node_num=1 fallback below is only a rough approximation for real
+            # multi-node WideEP: it reuses single-node (NVLink-only) numbers and
+            # ignores the cross-node RDMA all-to-all cost, so it under-estimates
+            # dispatch/combine latency and is notably inaccurate at large batch /
+            # token sizes. This data is NOT directly usable for accurate multi-node
+            # sizing; a follow-up PR should either collect true multi-node data
+            # (test_internode) or fit a node-scaling extrapolation model.
+            data_by_node = database._wideep_deepep_ll_data
+            data = data_by_node.get(node_num, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
+            if not data and node_num != 1:
+                fallback = data_by_node.get(1, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
+                if fallback:
+                    if "ll" not in cls._wideep_fallback_logged:
+                        cls._wideep_fallback_logged.add("ll")
+                        logger.warning(
+                            "wideep_deepep_ll: multi-node (node_num>1) configs reuse node_num=1 "
+                            "single-node data (APPROXIMATION: ignores cross-node all-to-all, "
+                            "under-estimates latency at large batch -- see TODO perf enhancement). "
+                            "Logged once per run."
+                        )
+                    data = fallback
             num_left, num_right = interpolation.nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
             result = interpolation.interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
             lat = result["latency"] if isinstance(result, dict) else result
@@ -1169,8 +1204,41 @@ class MoEDispatch(Operation):
                 get_empirical(num_tokens, num_experts, topk, hidden_size), energy=0.0, source="empirical"
             )
         else:
-            if node_num == 1 and sms == 20:  # only collect sm=20 for now
-                data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
+            # Prefer measured data for the requested node scale; fall back to
+            # single-node (node_num=1) data with the SAME (hidden, topk,
+            # num_experts) when the exact node_num was not collected. This keeps
+            # the EP config identical and only relaxes the all-to-all node scale,
+            # so multi-node WideEP configs can use single-node collected data.
+            # Note: node_num=1 is a smaller all-to-all than a real multi-node run,
+            # so this under-estimates dispatch/combine latency at large EP.
+            # Read via .get() chains so a miss does not auto-vivify the nested
+            # defaultdict with empty entries.
+            # TODO(perf enhancement): extrapolate single-node -> multi-node.
+            # The node_num=1 fallback below is only a rough approximation for real
+            # multi-node WideEP: it reuses single-node (NVLink-only) numbers and
+            # ignores the cross-node RDMA all-to-all cost, so it under-estimates
+            # dispatch/combine latency and is notably inaccurate at large batch /
+            # token sizes. This data is NOT directly usable for accurate multi-node
+            # sizing; a follow-up PR should either collect true multi-node data
+            # (test_internode) or fit a node-scaling extrapolation model.
+            data_by_node = database._wideep_deepep_normal_data
+            lookup_node = node_num
+            node_data = data_by_node.get(node_num, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
+            if not node_data and node_num != 1:
+                fallback = data_by_node.get(1, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
+                if fallback:
+                    if "normal" not in cls._wideep_fallback_logged:
+                        cls._wideep_fallback_logged.add("normal")
+                        logger.warning(
+                            "wideep_deepep_normal: multi-node (node_num>1) configs reuse node_num=1 "
+                            "single-node data (APPROXIMATION: ignores cross-node all-to-all, "
+                            "under-estimates latency at large batch -- see TODO perf enhancement). "
+                            "Logged once per run."
+                        )
+                    lookup_node = 1
+                    node_data = fallback
+            if lookup_node == 1 and sms == 20:  # only collect sm=20 for now
+                data = node_data[sms]
                 num_left, num_right = interpolation.nearest_1d_point_helper(
                     num_tokens, list(data.keys()), inner_only=False
                 )
@@ -1178,7 +1246,7 @@ class MoEDispatch(Operation):
                 lat = result["latency"] if isinstance(result, dict) else result
                 energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
             else:
-                data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
+                data = node_data
                 result = interpolation.interp_2d_linear(sms, num_tokens, data, database._extracted_metrics_cache)
                 lat = result["latency"] if isinstance(result, dict) else result
                 energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0

@@ -642,8 +642,9 @@ def test_sglang_agg_default_moe_ep_search():
 
 
 def test_run_validates_by_default():
-    """run() validates first (v1 fail-fast); validate=False skips it. SGLang WideEP DeepSeek
-    has no wideep_context_mla data for fp8/bf16 -> validate raises."""
+    """run() validates first (v1 fail-fast); validate=False skips it. An EXPLICIT fmha
+    quant the WideEP MLA table lacks (it only carries the fp8_block label) makes validate
+    raise -- the explicit value is preserved (not auto-resolved) so it fails fast."""
     from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
 
     t = Task(
@@ -653,9 +654,38 @@ def test_run_validates_by_default():
         backend_name="sglang",
         enable_wideep=True,
         total_gpus=64,
+        fmha_quant_mode=common.FMHAQuantMode.fp8,
     )
     with pytest.raises(UnsupportedWideepConfigError):
         t.run()  # default validate=True
+
+
+def test_wideep_deepseek_resolves_fp8_block_mla_labels():
+    """WideEP DeepSeek/Kimi query the wideep_*_mla tables, which the collector labels
+    fp8_block (fmha) / fp8 (kv) even though physically a bf16 run (collect_mla_module.py).
+    The task must resolve those labels so DB validation matches -- NOT the narrow-EP bf16
+    downgrade that applies without WideEP."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        enable_wideep=True,
+        total_gpus=64,
+    )
+    assert t.moe_backend == "deepep_moe"
+    assert t.fmha_quant_mode == common.FMHAQuantMode.fp8_block
+    assert t.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+
+    # Without WideEP the same model keeps the narrow-EP bf16 downgrade.
+    t_narrow = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        total_gpus=8,
+    )
+    assert t_narrow.fmha_quant_mode == common.FMHAQuantMode.bfloat16
 
 
 def test_enable_wideep_normalizes_moe_backend():

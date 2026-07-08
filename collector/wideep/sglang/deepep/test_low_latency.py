@@ -30,6 +30,8 @@ def test_main(
     buffer: deep_ep.Buffer,
     use_logfmt: bool = False,
     seed: int = 0,
+    do_check: bool = True,
+    metrics_out: list | None = None,
 ):
     torch.manual_seed(seed + rank)
     random.seed(seed + rank)
@@ -60,7 +62,6 @@ def test_main(
         topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
 
     # Check dispatch correctness
-    do_check = True
     hash_value, num_times = 0, 0
     for current_x in x_list:
         for return_recv_hook in (False, True):
@@ -254,6 +255,19 @@ def test_main(
                     f"avg_t={combine_t * 1e6:.2f} us",
                     flush=True,
                 )
+                if metrics_out is not None:
+                    metrics_out.append(
+                        {
+                            "num_tokens": num_tokens,
+                            "hidden": hidden,
+                            "num_experts": num_experts,
+                            "num_topk": num_topk,
+                            "dispatch_avg_t_us": dispatch_t * 1e6,
+                            "dispatch_bandwidth_gbps": num_dispatch_comm_bytes / 1e9 / dispatch_t,
+                            "combine_avg_t_us": combine_t * 1e6,
+                            "combine_bandwidth_gbps": num_combine_comm_bytes / 1e9 / combine_t,
+                        }
+                    )
         else:
             if rank == 0:
                 print(
