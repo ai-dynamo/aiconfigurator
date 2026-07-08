@@ -15,26 +15,14 @@ RUN mkdir /opt/aiconfigurator && \
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV MPLCONFIGDIR=/tmp/matplotlib
 
-# The `aiconfigurator` wheel owns the Rust extension, SDK/data payload, CLI,
-# generator, webapp, and Spica packages. It is built inside the PyPA
-# manylinux_2_28 image so the native (Rust/PyO3) `_aiconfigurator_core.*.so`
-# links against glibc 2.28; maturin's built-in auditwheel then checks the
-# manylinux_2_28 policy, bundles any non-whitelisted shared libs (the abi3
-# extension needs only glibc/libgcc, so none), and stamps the portable
-# `manylinux_2_28_<arch>` tag. The small `aiconfigurator-core` wheel built
-# afterward is a pure-Python compatibility metapackage and needs no repair.
+# The `aiconfigurator` wheel (Rust extension + SDK/data payload + CLI, generator,
+# webapp, Spica) is built in the PyPA manylinux_2_28 image so the native PyO3
+# `.so` links glibc 2.28 and maturin's auditwheel stamps the portable
+# `manylinux_2_28_<arch>` tag; `aiconfigurator-core` is a pure-Python metapackage.
+# We add `uv` and a rustup toolchain so cargo can fetch crates over TLS.
 #
-# The manylinux image already ships auditwheel, patchelf, a gcc toolset, and
-# ca-certificates; we add the static `uv` build frontend and a rustup toolchain
-# so maturin's cargo build can fetch crates from crates.io over TLS.
-#
-# The base is selected per target architecture: BuildKit populates TARGETARCH
-# (amd64/arm64) from `--platform` (default: the build host's arch), and only the
-# matching stage below is built. Build an aarch64 wheel with:
-#   docker build -f docker/Dockerfile --platform linux/arm64 --target build .
-# natively on ARM, or via QEMU emulation / `docker buildx` on an x86 host. The
-# crate is architecture-agnostic (no target_arch code); the parquet data payload
-# is identical across arches.
+# TARGETARCH (amd64/arm64) selects the base per `--platform`; only the matching
+# stage builds. aarch64: `docker build --platform linux/arm64 --target build .`.
 FROM quay.io/pypa/manylinux_2_28_x86_64 AS manylinux-amd64
 FROM quay.io/pypa/manylinux_2_28_aarch64 AS manylinux-arm64
 ARG TARGETARCH
@@ -52,8 +40,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-connrefused --retry-d
     && sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.96.0 \
     && rm /tmp/rustup-init.sh
 
-# Pin the build interpreter to the image's CPython 3.12 so uv/maturin never fetch
-# a standalone one. abi3 (abi3-py310) means the single wheel serves CPython >=3.10.
+# Pin to the image's CPython 3.12 so uv/maturin never fetch a standalone one.
 ENV UV_PYTHON=/opt/python/cp312-cp312/bin/python3
 
 COPY src/ /workspace/src/
@@ -70,14 +57,9 @@ RUN set -e; \
         echo "Run 'git lfs install && git lfs pull' in the source tree before building." >&2; \
         exit 1; \
     fi
-# Build the main wheel. Under a frontend like `uv build`, maturin's PEP517
-# backend injects `--compatibility off` (plain linux) by default, and that CLI
-# flag overrides `[tool.maturin] compatibility`. MATURIN_PEP517_ARGS re-asserts
-# the manylinux_2_28 target -- maturin appends it after the injected `off`, so it
-# wins -- which drives maturin's built-in auditwheel to check the 2_28 policy and
-# stamp the `manylinux_2_28_<arch>` tag. The `aiconfigurator-core` metapackage is
-# pure-Python. `python` is not on PATH in the manylinux image, so the verifier
-# runs via ${UV_PYTHON}.
+# `uv build` runs maturin's PEP517 backend, which defaults to `--compatibility
+# off`; MATURIN_PEP517_ARGS overrides it to stamp the manylinux_2_28 tag (maturin
+# appends it last, so it wins). `python` isn't on PATH here -> verify via UV_PYTHON.
 RUN MATURIN_PEP517_ARGS="--compatibility manylinux_2_28" \
         uv build --wheel --out-dir /workspace/dist && \
     ( cd src/aiconfigurator-core && uv build --wheel --out-dir /workspace/dist ) && \
