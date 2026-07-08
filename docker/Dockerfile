@@ -17,10 +17,9 @@ ENV MPLCONFIGDIR=/tmp/matplotlib
 
 FROM base AS build
 # The `aiconfigurator` wheel owns the Rust extension, SDK/data payload, CLI,
-# generator, webapp, and Spica packages. The small `aiconfigurator-core` wheel
-# built afterward is only a compatibility metapackage. Maturin needs the Rust
-# crate sources, a C linker (gcc), and ca-certificates so cargo can fetch crates
-# from crates.io over TLS. Rust itself is bootstrapped by maturin's build backend.
+# generator, webapp, and Spica packages. Maturin needs the Rust crate sources,
+# a C linker (gcc), and ca-certificates so cargo can fetch crates from crates.io
+# over TLS. Rust itself is bootstrapped by maturin's build backend.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
     rm -rf /var/lib/apt/lists/*
@@ -39,12 +38,11 @@ RUN set -e; \
         exit 1; \
     fi
 RUN uv build --wheel --out-dir /workspace/dist && \
-    cd src/aiconfigurator-core && uv build --wheel --out-dir /workspace/dist && \
-    cd /workspace && python tools/verify_release_wheels.py /workspace/dist
+    python tools/verify_release_wheels.py /workspace/dist
 
 FROM base AS runtime
 COPY --from=build /workspace/dist /wheelhouse
-RUN uv pip install /wheelhouse/*.whl && \
+RUN uv pip install /wheelhouse/aiconfigurator-*.whl && \
     rm -rf /wheelhouse
 
 FROM runtime AS test
