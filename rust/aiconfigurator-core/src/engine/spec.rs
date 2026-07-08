@@ -691,4 +691,106 @@ mod tests {
             ),
         }
     }
+
+    /// Canonical valid spec used by the handshake tests below.
+    fn handshake_spec() -> EngineSpec {
+        EngineSpec::new(
+            sample_engine_config(),
+            vec![OpSpec::Gemm(gemm()), OpSpec::ContextAttention(context_attention())],
+            vec![OpSpec::GenerationAttention(generation_attention())],
+        )
+    }
+
+    /// Round-trip preserves the stamped schema version end to end.
+    #[test]
+    fn from_bincode_round_trips_and_preserves_version() {
+        let spec = handshake_spec();
+        let decoded =
+            EngineSpec::from_bincode(&spec.to_bincode().expect("to_bincode")).expect("from_bincode");
+        assert_eq!(decoded, spec);
+        assert_eq!(decoded.schema_version, ENGINE_SPEC_SCHEMA_VERSION);
+    }
+
+    /// A buffer too short to even hold the 4-byte version prefix must fail at the
+    /// prefix stage, not deep in the (absent) payload.
+    #[test]
+    fn from_bincode_rejects_empty_buffer() {
+        match EngineSpec::from_bincode(&[]) {
+            Err(AicError::EngineSpec(msg)) => {
+                assert!(
+                    msg.contains("schema_version prefix"),
+                    "message should name the prefix stage, got: {msg}"
+                );
+            }
+            other => panic!("expected EngineSpec prefix error, got {other:?}"),
+        }
+    }
+
+    /// The version gate fires even when the op payload is fully intact — the
+    /// rejection is driven by the version alone, not by a decode failure.
+    #[test]
+    fn from_bincode_version_gate_fires_with_intact_payload() {
+        let mut bytes = handshake_spec().to_bincode().expect("to_bincode");
+        let foreign = ENGINE_SPEC_SCHEMA_VERSION + 7;
+        bytes[..4].copy_from_slice(&foreign.to_le_bytes()); // only the prefix changes
+
+        match EngineSpec::from_bincode(&bytes) {
+            Err(AicError::UnsupportedSchemaVersion { kind, got, expected }) => {
+                assert_eq!(kind, "EngineSpec");
+                assert_eq!(got, foreign);
+                assert_eq!(expected, ENGINE_SPEC_SCHEMA_VERSION);
+            }
+            other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
+        }
+    }
+
+    /// A correct version but an undecodable op payload is NOT a version skew: it
+    /// must surface as an op-payload-stage `EngineSpec` error (op-layout drift
+    /// within a version, or corruption), naming the stage and the version.
+    #[test]
+    fn from_bincode_matching_version_corrupt_ops_names_op_payload_stage() {
+        let mut bytes = handshake_spec().to_bincode().expect("to_bincode");
+        // Leave the version prefix intact; corrupt the trailing op payload.
+        bytes.truncate(bytes.len() - 8);
+
+        match EngineSpec::from_bincode(&bytes) {
+            Err(AicError::EngineSpec(msg)) => {
+                assert!(
+                    msg.contains("op payloads"),
+                    "message should name the op-payload stage, got: {msg}"
+                );
+                assert!(
+                    msg.contains(&ENGINE_SPEC_SCHEMA_VERSION.to_string()),
+                    "message should cite the matching version, got: {msg}"
+                );
+            }
+            other => panic!("expected EngineSpec op-payload error, got {other:?}"),
+        }
+    }
+
+    /// A well-formed wire buffer whose embedded `engine_json` is not valid JSON
+    /// must fail at the engine-JSON stage (after the version gate and op decode
+    /// both pass), naming that stage.
+    #[test]
+    fn from_bincode_invalid_engine_json_names_json_stage() {
+        // Hand-build a wire buffer with the current version, empty op lists, and
+        // a deliberately malformed `engine_json`.
+        let wire = BincodeWire {
+            schema_version: ENGINE_SPEC_SCHEMA_VERSION,
+            engine_json: "this is not json".to_string(),
+            context_ops: vec![],
+            generation_ops: vec![],
+        };
+        let bytes = bincode::serialize(&wire).expect("serialize wire");
+
+        match EngineSpec::from_bincode(&bytes) {
+            Err(AicError::EngineSpec(msg)) => {
+                assert!(
+                    msg.contains("engine JSON"),
+                    "message should name the engine-JSON stage, got: {msg}"
+                );
+            }
+            other => panic!("expected EngineSpec engine-JSON error, got {other:?}"),
+        }
+    }
 }
