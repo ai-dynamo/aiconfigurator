@@ -111,8 +111,13 @@ impl EngineSpec {
         // first value in the byte stream. Decode just it and gate on it before
         // touching the op lists (which is where a layout skew would fail).
         let mut cursor = std::io::Cursor::new(bytes);
-        let schema_version: u32 = bincode::deserialize_from(&mut cursor)
-            .map_err(|e| AicError::EngineSpec(format!("bincode decode schema version: {e}")))?;
+        let schema_version: u32 = bincode::deserialize_from(&mut cursor).map_err(|e| {
+            AicError::EngineSpec(format!(
+                "bincode decode of the leading schema_version prefix failed \
+                 (payload is {} bytes; too short or not an EngineSpec wire buffer): {e}",
+                bytes.len()
+            ))
+        })?;
         if schema_version != ENGINE_SPEC_SCHEMA_VERSION {
             return Err(AicError::UnsupportedSchemaVersion {
                 kind: "EngineSpec",
@@ -120,10 +125,20 @@ impl EngineSpec {
                 expected: ENGINE_SPEC_SCHEMA_VERSION,
             });
         }
-        let wire: BincodeWire = bincode::deserialize(bytes)
-            .map_err(|e| AicError::EngineSpec(format!("bincode decode: {e}")))?;
-        let engine: EngineConfig = serde_json::from_str(&wire.engine_json)
-            .map_err(|e| AicError::EngineSpec(format!("engine JSON decode: {e}")))?;
+        let wire: BincodeWire = bincode::deserialize(bytes).map_err(|e| {
+            AicError::EngineSpec(format!(
+                "bincode decode of the op payloads failed at matching \
+                 schema_version {schema_version} — this indicates op-layout drift \
+                 within the same version (an OpSpec changed without a \
+                 ENGINE_SPEC_SCHEMA_VERSION bump) or a corrupt payload, not a \
+                 version skew: {e}"
+            ))
+        })?;
+        let engine: EngineConfig = serde_json::from_str(&wire.engine_json).map_err(|e| {
+            AicError::EngineSpec(format!(
+                "engine JSON decode failed at schema_version {schema_version}: {e}"
+            ))
+        })?;
         Ok(Self {
             schema_version: wire.schema_version,
             engine,
