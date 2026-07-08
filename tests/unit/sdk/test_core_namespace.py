@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -87,3 +88,34 @@ def test_symlinked_leaf_imports_are_separate_module_objects() -> None:
 
     assert aic_errors is not core_errors
     assert aic_path.read_bytes() == core_path.read_bytes() == source_path.read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("setup_namespace", "read_namespace"),
+    [
+        ("aiconfigurator.sdk", "aiconfigurator_core.sdk"),
+        ("aiconfigurator_core.sdk", "aiconfigurator.sdk"),
+    ],
+)
+def test_no_color_formatter_state_crosses_namespaces(
+    monkeypatch: pytest.MonkeyPatch,
+    setup_namespace: str,
+    read_namespace: str,
+) -> None:
+    """Formatter state must not depend on cross-namespace class identity."""
+    setup_logging = importlib.import_module(f"{setup_namespace}.logging_utils")
+    read_logging = importlib.import_module(f"{read_namespace}.logging_utils")
+    root_logger = logging.getLogger()
+    previous_handlers = root_logger.handlers[:]
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(setup_logging.ColoredFormatter("%(message)s", force_no_color=True))
+    monkeypatch.setattr(read_logging, "_stdout_env_suggests_plain", lambda: False)
+
+    try:
+        root_logger.handlers.clear()
+        root_logger.addHandler(handler)
+        assert read_logging.use_plain_cli_output() is True
+    finally:
+        root_logger.handlers.clear()
+        root_logger.handlers.extend(previous_handlers)

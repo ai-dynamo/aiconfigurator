@@ -33,7 +33,7 @@ def use_plain_cli_output() -> bool:
     # Check if the root logger was configured with setup_logging and no_color=True
     for handler in logging.getLogger().handlers:
         fmt = getattr(handler, "formatter", None)
-        if isinstance(fmt, ColoredFormatter) and fmt.force_no_color:
+        if getattr(fmt, "force_no_color", False):
             return True
 
     return _stdout_env_suggests_plain()
