@@ -384,23 +384,109 @@ def test_sweep_disagg_require_same_tp_sglang_non_wideep():
     assert mk("trtllm")["require_same_tp"] is False
 
 
-def test_deepseek_decode_keeps_fp8_fmha_prefill_downgrades():
-    """DeepSeek context attention (prefill) downgrades fp8 FMHA to bf16; decode
-    (generation attention) keeps fp8. Matches v1, which gates this on validate_context.
+def test_deepseek_prefill_and_decode_fmha_downgrade_to_bf16(caplog):
+    """DeepSeek context attention (prefill) downgrades fp8 FMHA to bf16 via the
+    V3/Kimi capability rule; decode is downgraded by the data-driven fallback
+    (the MLA perf tables carry no fp8 fmha slice), so the resolved config and
+    the queried data slices agree.  Known-capability downgrades stay silent
+    (debug, not warning) -- a V3 run must not warn on every task.
     """
+    import logging
+
     from aiconfigurator.sdk import common
 
-    t = Task(
-        serving_mode="disagg",
-        prefill_model_path="deepseek-ai/DeepSeek-V3",
-        prefill_system_name="h200_sxm",
-        prefill_backend_name="sglang",
-        decode_model_path="deepseek-ai/DeepSeek-V3",
-        decode_system_name="h200_sxm",
-        decode_backend_name="sglang",
-    )
+    with caplog.at_level(logging.WARNING):
+        t = Task(
+            serving_mode="disagg",
+            prefill_model_path="deepseek-ai/DeepSeek-V3",
+            prefill_system_name="h200_sxm",
+            prefill_backend_name="sglang",
+            decode_model_path="deepseek-ai/DeepSeek-V3",
+            decode_system_name="h200_sxm",
+            decode_backend_name="sglang",
+        )
+    assert t.prefill_fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert t.decode_fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert not any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
+
+
+def test_fmha_data_fallback_unknown_arch_downgrades_with_warning(caplog):
+    """A checkpoint-inferred fp8 FMHA on a platform whose context-attention table
+    has no fp8 slice (a100: no fp8 hardware) falls back to bfloat16 with a warning,
+    instead of leaving a mode that validate would reject.  The same model on a
+    platform WITH fp8 data (h200) keeps fp8 and does not warn.
+    """
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    with caplog.at_level(logging.WARNING):
+        t = Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+            system_name="a100_sxm",
+            backend_name="sglang",
+        )
+    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        t2 = Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+        )
+    assert t2.fmha_quant_mode == common.FMHAQuantMode.fp8
+    assert not any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
+
+
+def test_fmha_data_fallback_skips_generation_only_decode(caplog):
+    """A generic-attention decode role never reads fmha data (generation tables
+    key on kv dtype; validate checks fmha only for context roles), so the
+    fallback must not warn about or downgrade decode even on a system whose
+    context table lacks fp8.  The prefill role on the same system DOES fall back.
+    """
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    with caplog.at_level(logging.WARNING):
+        t = Task(
+            serving_mode="disagg",
+            prefill_model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+            prefill_system_name="a100_sxm",
+            prefill_backend_name="sglang",
+            decode_model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+            decode_system_name="a100_sxm",
+            decode_backend_name="sglang",
+        )
     assert t.prefill_fmha_quant_mode == common.FMHAQuantMode.bfloat16
     assert t.decode_fmha_quant_mode == common.FMHAQuantMode.fp8
+    fallback_msgs = [r.message for r in caplog.records if "falling back to bfloat16 FMHA" in r.message]
+    assert len(fallback_msgs) == 1 and fallback_msgs[0].startswith("prefill ")
+
+
+def test_fmha_data_fallback_without_bf16_slice_left_untouched(monkeypatch, caplog):
+    """When the context table has fmha data but neither fp8 nor bf16 slices
+    (e.g. wideep tables carry only fp8_block), the fallback must leave the
+    inferred fp8 alone -- there is nothing safe to fall back to, so validate
+    reports the gap instead."""
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    monkeypatch.setattr(Task, "_context_fmha_supported_modes", lambda self, role: ["fp8_block"])
+    with caplog.at_level(logging.WARNING):
+        t = Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+            system_name="a100_sxm",
+            backend_name="sglang",
+        )
+    assert t.fmha_quant_mode == common.FMHAQuantMode.fp8
+    assert not any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
 
 
 def test_deepseek_v32_v4_downgrade_fmha_all_roles():
