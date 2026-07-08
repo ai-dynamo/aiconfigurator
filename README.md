@@ -41,9 +41,8 @@ pip3 install aiconfigurator
 ```
 
 The `aiconfigurator` wheel is self-contained: it includes the CLI, SDK, model
-and system data, Spica, and the native core extension. The
-`aiconfigurator-core` distribution remains available as a payload-free
-compatibility package that installs the matching `aiconfigurator` version.
+and system data, Spica, and the native core extension. No separate Python core
+distribution is required.
 
 ### Build and Install from Source
 
@@ -67,7 +66,7 @@ pip3 install .
 ### Build with Docker
 
 ```bash
-# This creates the self-contained AIC wheel and a compatibility metapackage wheel
+# This creates the self-contained AIC wheel
 docker build -f docker/Dockerfile --no-cache --target build -t aiconfigurator:latest .
 docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist dist/ && docker rm aic
 ```

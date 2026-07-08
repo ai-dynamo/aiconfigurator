@@ -18,8 +18,8 @@ ENV MPLCONFIGDIR=/tmp/matplotlib
 # The `aiconfigurator` wheel (Rust extension + SDK/data payload + CLI, generator,
 # webapp, Spica) is built in the PyPA manylinux_2_28 image so the native PyO3
 # `.so` links glibc 2.28 and maturin's auditwheel stamps the portable
-# `manylinux_2_28_<arch>` tag; `aiconfigurator-core` is a pure-Python metapackage.
-# We add `uv` and a rustup toolchain so cargo can fetch crates over TLS.
+# `manylinux_2_28_<arch>` tag. We add `uv` and a rustup toolchain so cargo can
+# fetch crates over TLS.
 #
 # TARGETARCH (amd64/arm64) selects the base per `--platform`; only the matching
 # stage builds. aarch64: `docker build --platform linux/arm64 --target build .`.
@@ -62,12 +62,11 @@ RUN set -e; \
 # appends it last, so it wins). `python` isn't on PATH here -> verify via UV_PYTHON.
 RUN MATURIN_PEP517_ARGS="--compatibility manylinux_2_28" \
         uv build --wheel --out-dir /workspace/dist && \
-    ( cd src/aiconfigurator-core && uv build --wheel --out-dir /workspace/dist ) && \
     "${UV_PYTHON}" tools/verify_release_wheels.py /workspace/dist
 
 FROM base AS runtime
 COPY --from=build /workspace/dist /wheelhouse
-RUN uv pip install /wheelhouse/*.whl && \
+RUN uv pip install /wheelhouse/aiconfigurator-*.whl && \
     rm -rf /wheelhouse
 
 FROM runtime AS test
