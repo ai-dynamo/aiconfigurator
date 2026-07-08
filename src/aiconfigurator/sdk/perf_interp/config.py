@@ -131,7 +131,10 @@ class ScatteredSites:
     #: covers it, fall back to nearest sites with per-site curve-end util-hold.
     require_curve_coverage: bool = True
     #: Boundary-util anchor = median of the last k_tail curve points (sawtooth-
-    #: robust). 1 = plain boundary point.
+    #: robust). 1 = plain boundary point. A curve with fewer than k_tail points
+    #: anchors on the median of what exists (degrading to the plain boundary
+    #: point) — k_tail is a robustness knob, not a data-sufficiency gate; a
+    #: genuine miss is raised only when NO positive-util anchor exists.
     k_tail: int = 3
 
 
@@ -146,6 +149,8 @@ class Grid:
 
     #: Boundary-util anchor = median of the last k_tail points along the
     #: innermost axis. 1 = plain boundary point (grids have no sawtooth).
+    #: Fewer than k_tail collected points -> median of what exists, same as
+    #: ScatteredSites (never a miss on its own).
     k_tail: int = 1
 
 
