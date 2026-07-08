@@ -85,7 +85,11 @@ from aiconfigurator.sdk.rust_engine_step import (
 
 # Schema versions must match the Rust crate constants
 # (`ENGINE_SPEC_SCHEMA_VERSION` / `ENGINE_CONFIG_SCHEMA_VERSION` in `lib.rs`).
-ENGINE_SPEC_SCHEMA_VERSION = 1
+# ENGINE_SPEC bumped to 2 for the 0.10.0 op-payload layout change (CP + perf-DB
+# refactor added serialized `OpSpec` fields); the Rust consumer gates on this
+# version before decoding the positional op lists. Keep in lockstep with the
+# Rust `ENGINE_SPEC_SCHEMA_VERSION`.
+ENGINE_SPEC_SCHEMA_VERSION = 2
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 

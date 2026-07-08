@@ -98,18 +98,47 @@ impl EngineSpec {
     }
 
     /// Deserialize from the bincode wire format produced by [`Self::to_bincode`].
+    ///
+    /// The `schema_version` prefix is read and validated **before** the
+    /// variable-layout op payloads are decoded. bincode is not self-describing,
+    /// so a producer/consumer op-layout skew (e.g. a newer producer that added
+    /// serialized fields to an `OpSpec`) would otherwise fail deep inside the
+    /// payload with a generic `bincode decode: io error`, masking the real
+    /// cause. Reading the leading version first lets a version mismatch surface
+    /// as a clear [`AicError::UnsupportedSchemaVersion`] instead.
     pub fn from_bincode(bytes: &[u8]) -> Result<Self, AicError> {
-        let wire: BincodeWire = bincode::deserialize(bytes)
-            .map_err(|e| AicError::EngineSpec(format!("bincode decode: {e}")))?;
-        if wire.schema_version != ENGINE_SPEC_SCHEMA_VERSION {
+        // `schema_version` is the first field of `BincodeWire`, so it is the
+        // first value in the byte stream. Decode just it and gate on it before
+        // touching the op lists (which is where a layout skew would fail).
+        let mut cursor = std::io::Cursor::new(bytes);
+        let schema_version: u32 = bincode::deserialize_from(&mut cursor).map_err(|e| {
+            AicError::EngineSpec(format!(
+                "bincode decode of the leading schema_version prefix failed \
+                 (payload is {} bytes; too short or not an EngineSpec wire buffer): {e}",
+                bytes.len()
+            ))
+        })?;
+        if schema_version != ENGINE_SPEC_SCHEMA_VERSION {
             return Err(AicError::UnsupportedSchemaVersion {
                 kind: "EngineSpec",
-                got: wire.schema_version,
+                got: schema_version,
                 expected: ENGINE_SPEC_SCHEMA_VERSION,
             });
         }
-        let engine: EngineConfig = serde_json::from_str(&wire.engine_json)
-            .map_err(|e| AicError::EngineSpec(format!("engine JSON decode: {e}")))?;
+        let wire: BincodeWire = bincode::deserialize(bytes).map_err(|e| {
+            AicError::EngineSpec(format!(
+                "bincode decode of the op payloads failed at matching \
+                 schema_version {schema_version} — this indicates op-layout drift \
+                 within the same version (an OpSpec changed without a \
+                 ENGINE_SPEC_SCHEMA_VERSION bump) or a corrupt payload, not a \
+                 version skew: {e}"
+            ))
+        })?;
+        let engine: EngineConfig = serde_json::from_str(&wire.engine_json).map_err(|e| {
+            AicError::EngineSpec(format!(
+                "engine JSON decode failed at schema_version {schema_version}: {e}"
+            ))
+        })?;
         Ok(Self {
             schema_version: wire.schema_version,
             engine,
@@ -624,5 +653,144 @@ mod tests {
         let bytes = spec.to_bincode().expect("to_bincode");
         let decoded = EngineSpec::from_bincode(&bytes).expect("from_bincode");
         assert_eq!(spec, decoded);
+    }
+
+    /// A version skew combined with an op-layout change must surface as a clear
+    /// [`AicError::UnsupportedSchemaVersion`], NOT a generic bincode I/O error.
+    ///
+    /// This reproduces the cross-version failure mode: a producer at a different
+    /// schema version emits op payloads whose layout the consumer cannot decode.
+    /// We simulate it by stamping a foreign version into the leading prefix and
+    /// truncating the op payload. `from_bincode` must read + reject the version
+    /// *before* it attempts to decode the (now-undecodable) op lists.
+    #[test]
+    fn version_skew_reports_unsupported_before_payload_decode() {
+        let spec = EngineSpec::new(
+            sample_engine_config(),
+            vec![OpSpec::Gemm(gemm()), OpSpec::ContextAttention(context_attention())],
+            vec![OpSpec::GenerationAttention(generation_attention())],
+        );
+        let mut bytes = spec.to_bincode().expect("to_bincode");
+
+        // Overwrite the 4-byte little-endian `schema_version` prefix with a
+        // version this consumer does not speak.
+        let foreign = ENGINE_SPEC_SCHEMA_VERSION + 1;
+        bytes[..4].copy_from_slice(&foreign.to_le_bytes());
+        // Corrupt the op payload so a decode-first implementation fails there
+        // with a generic bincode I/O error instead of reaching the version gate.
+        bytes.truncate(bytes.len() - 8);
+
+        match EngineSpec::from_bincode(&bytes) {
+            Err(AicError::UnsupportedSchemaVersion { kind, got, expected }) => {
+                assert_eq!(kind, "EngineSpec");
+                assert_eq!(got, foreign);
+                assert_eq!(expected, ENGINE_SPEC_SCHEMA_VERSION);
+            }
+            other => panic!(
+                "expected UnsupportedSchemaVersion before payload decode, got {other:?}"
+            ),
+        }
+    }
+
+    /// Canonical valid spec used by the handshake tests below.
+    fn handshake_spec() -> EngineSpec {
+        EngineSpec::new(
+            sample_engine_config(),
+            vec![OpSpec::Gemm(gemm()), OpSpec::ContextAttention(context_attention())],
+            vec![OpSpec::GenerationAttention(generation_attention())],
+        )
+    }
+
+    /// Round-trip preserves the stamped schema version end to end.
+    #[test]
+    fn from_bincode_round_trips_and_preserves_version() {
+        let spec = handshake_spec();
+        let decoded =
+            EngineSpec::from_bincode(&spec.to_bincode().expect("to_bincode")).expect("from_bincode");
+        assert_eq!(decoded, spec);
+        assert_eq!(decoded.schema_version, ENGINE_SPEC_SCHEMA_VERSION);
+    }
+
+    /// A buffer too short to even hold the 4-byte version prefix must fail at the
+    /// prefix stage, not deep in the (absent) payload.
+    #[test]
+    fn from_bincode_rejects_empty_buffer() {
+        match EngineSpec::from_bincode(&[]) {
+            Err(AicError::EngineSpec(msg)) => {
+                assert!(
+                    msg.contains("schema_version prefix"),
+                    "message should name the prefix stage, got: {msg}"
+                );
+            }
+            other => panic!("expected EngineSpec prefix error, got {other:?}"),
+        }
+    }
+
+    /// The version gate fires even when the op payload is fully intact — the
+    /// rejection is driven by the version alone, not by a decode failure.
+    #[test]
+    fn from_bincode_version_gate_fires_with_intact_payload() {
+        let mut bytes = handshake_spec().to_bincode().expect("to_bincode");
+        let foreign = ENGINE_SPEC_SCHEMA_VERSION + 7;
+        bytes[..4].copy_from_slice(&foreign.to_le_bytes()); // only the prefix changes
+
+        match EngineSpec::from_bincode(&bytes) {
+            Err(AicError::UnsupportedSchemaVersion { kind, got, expected }) => {
+                assert_eq!(kind, "EngineSpec");
+                assert_eq!(got, foreign);
+                assert_eq!(expected, ENGINE_SPEC_SCHEMA_VERSION);
+            }
+            other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
+        }
+    }
+
+    /// A correct version but an undecodable op payload is NOT a version skew: it
+    /// must surface as an op-payload-stage `EngineSpec` error (op-layout drift
+    /// within a version, or corruption), naming the stage and the version.
+    #[test]
+    fn from_bincode_matching_version_corrupt_ops_names_op_payload_stage() {
+        let mut bytes = handshake_spec().to_bincode().expect("to_bincode");
+        // Leave the version prefix intact; corrupt the trailing op payload.
+        bytes.truncate(bytes.len() - 8);
+
+        match EngineSpec::from_bincode(&bytes) {
+            Err(AicError::EngineSpec(msg)) => {
+                assert!(
+                    msg.contains("op payloads"),
+                    "message should name the op-payload stage, got: {msg}"
+                );
+                assert!(
+                    msg.contains(&ENGINE_SPEC_SCHEMA_VERSION.to_string()),
+                    "message should cite the matching version, got: {msg}"
+                );
+            }
+            other => panic!("expected EngineSpec op-payload error, got {other:?}"),
+        }
+    }
+
+    /// A well-formed wire buffer whose embedded `engine_json` is not valid JSON
+    /// must fail at the engine-JSON stage (after the version gate and op decode
+    /// both pass), naming that stage.
+    #[test]
+    fn from_bincode_invalid_engine_json_names_json_stage() {
+        // Hand-build a wire buffer with the current version, empty op lists, and
+        // a deliberately malformed `engine_json`.
+        let wire = BincodeWire {
+            schema_version: ENGINE_SPEC_SCHEMA_VERSION,
+            engine_json: "this is not json".to_string(),
+            context_ops: vec![],
+            generation_ops: vec![],
+        };
+        let bytes = bincode::serialize(&wire).expect("serialize wire");
+
+        match EngineSpec::from_bincode(&bytes) {
+            Err(AicError::EngineSpec(msg)) => {
+                assert!(
+                    msg.contains("engine JSON"),
+                    "message should name the engine-JSON stage, got: {msg}"
+                );
+            }
+            other => panic!("expected EngineSpec engine-JSON error, got {other:?}"),
+        }
     }
 }
