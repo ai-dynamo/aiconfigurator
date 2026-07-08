@@ -57,6 +57,36 @@ This installs:
 - All runtime dependencies
 - Development tools: `ruff`, `pre-commit`, `pytest` and related plugins
 
+### SDK Symlink Layout
+
+The SDK's real source directory is `src/aiconfigurator/sdk`. Do all SDK edits
+there. `src/aiconfigurator_core/sdk` must remain the checked-in relative
+symbolic link `../aiconfigurator/sdk`; do not replace it with a second source
+copy. You can verify the checkout with:
+
+```bash
+test "$(readlink src/aiconfigurator_core/sdk)" = "../aiconfigurator/sdk"
+```
+
+The core wheel build follows this link and writes ordinary files under both
+`aiconfigurator/sdk/**` and `aiconfigurator_core/sdk/**`. Consequently, the two
+installed namespaces execute the same source under different module names.
+Their module objects, classes, registries, and caches can have different
+identities and state. Tests and applications should use one namespace
+consistently rather than exchange objects between them.
+
+Git symlinks require special attention on Windows. Enable Git's symlink support
+and Windows Developer Mode before checkout; a checkout that replaces the link
+with a regular text file cannot build the intended wheel. The wheel itself is
+portable with respect to the link because it contains regular copied entries,
+not a symbolic link.
+
+The upper package declares an exact dependency on the matching core version.
+When testing an upgrade from the monolithic 0.9 package, uninstall the old
+package before installing 0.10 or force-reinstall core after the upgrade. A
+normal dependency-first pip upgrade can remove the newly installed core-owned
+`aiconfigurator/sdk` files while uninstalling the old monolith.
+
 ### Optional: Install Ruff Extension
 
 If you are using VS Code or one of its forks (e.g. Cursor), you can install the [Ruff extension](https://marketplace.visualstudio.com/items?itemName=charliermarsh.ruff) which will highlight linting issues in your editor. You can also configure your editor to auto-apply formatting when saving files using the instructions [here](https://marketplace.visualstudio.com/items?itemName=charliermarsh.ruff#:~:text=Taken%20together%2C%20you%20can%20configure%20Ruff%20to%20format%2C%20fix%2C%20and%20organize%20imports%20on%2Dsave%20via%20the%20following%20settings.json%3A).
@@ -111,6 +141,9 @@ pytest tests/e2e
 
 # GitHub PR / build subset (unit + a small stable E2E subset)
 pytest -m "unit or build"
+
+# Match container CI when validating installed wheels instead of source paths
+pytest -o pythonpath=. -m "unit or build"
 ```
 
 ## Data Collection (Advanced)

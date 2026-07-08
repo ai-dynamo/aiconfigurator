@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import stat
 import zipfile
 from email import message_from_bytes
 from email.message import Message
@@ -14,6 +15,7 @@ from pathlib import Path
 
 PAYLOAD_SUFFIXES = {".css", ".csv", ".j2", ".js", ".json", ".md", ".parquet", ".py", ".rule", ".txt", ".yaml"}
 CORE_AIC_DIRS = {"model_configs", "sdk", "systems"}
+SDK_PREFIXES = ("aiconfigurator/sdk/", "aiconfigurator_core/sdk/")
 
 
 def _wheel_files(wheel: Path) -> tuple[set[str], Message]:
@@ -87,18 +89,16 @@ def _verify_main_wheel(wheel: Path, expected_payload: set[str]) -> tuple[str, se
     if missing_source:
         raise RuntimeError(f"{wheel.name}: missing upper source-tree payload: {missing_source}")
 
-    forbidden = {
-        "aiconfigurator/sdk/common.py",
-        "aiconfigurator/systems/h100_sxm.yaml",
-        "aiconfigurator_core/__init__.py",
-        "aiconfigurator_core/sdk/__init__.py",
-        "aiconfigurator_core/sdk/task_v2.py",
-    }
-    misplaced = sorted(forbidden & payload)
+    misplaced = sorted(
+        name
+        for name in payload
+        if name.startswith(SDK_PREFIXES)
+        or name.startswith("aiconfigurator/systems/")
+        or name.startswith("aiconfigurator/model_configs/")
+        or name.startswith("aiconfigurator_core/")
+    )
     if misplaced:
         raise RuntimeError(f"{wheel.name}: upper wheel must not own core payload: {misplaced}")
-    if any(name.startswith("aiconfigurator_core/_aiconfigurator_core.") for name in payload):
-        raise RuntimeError(f"{wheel.name}: upper wheel must not own the native core extension")
 
     version = metadata.get("Version")
     if not version:
@@ -110,6 +110,53 @@ def _verify_main_wheel(wheel: Path, expected_payload: set[str]) -> tuple[str, se
     return version, payload
 
 
+def _verify_materialized_sdk_mirrors(wheel: Path) -> None:
+    """Require byte-identical, regular-file SDK trees under both import names."""
+    prefixes = {
+        "aiconfigurator": "aiconfigurator/sdk/",
+        "aiconfigurator_core": "aiconfigurator_core/sdk/",
+    }
+    trees: dict[str, dict[str, bytes]] = {}
+
+    with zipfile.ZipFile(wheel) as archive:
+        for label, prefix in prefixes.items():
+            tree: dict[str, bytes] = {}
+            non_regular: list[str] = []
+            for info in archive.infolist():
+                if not info.filename.startswith(prefix) or not info.filename.endswith(".py"):
+                    continue
+                relative = info.filename.removeprefix(prefix)
+                mode = (info.external_attr >> 16) & 0xFFFF
+                if not stat.S_ISREG(mode):
+                    non_regular.append(info.filename)
+                tree[relative] = archive.read(info)
+            if non_regular:
+                raise RuntimeError(
+                    f"{wheel.name}: SDK aliases must be materialized as regular files, found {non_regular}"
+                )
+            if not tree:
+                raise RuntimeError(f"{wheel.name}: missing Python SDK payload under {prefix}")
+            trees[label] = tree
+
+    canonical_paths = set(trees["aiconfigurator"])
+    core_paths = set(trees["aiconfigurator_core"])
+    if canonical_paths != core_paths:
+        canonical_only = sorted(canonical_paths - core_paths)
+        core_only = sorted(core_paths - canonical_paths)
+        raise RuntimeError(
+            f"{wheel.name}: SDK mirror leaf sets differ: "
+            f"aiconfigurator-only={canonical_only}, aiconfigurator_core-only={core_only}"
+        )
+
+    content_mismatches = sorted(
+        relative
+        for relative in canonical_paths
+        if trees["aiconfigurator"][relative] != trees["aiconfigurator_core"][relative]
+    )
+    if content_mismatches:
+        raise RuntimeError(f"{wheel.name}: SDK mirror contents differ: {content_mismatches}")
+
+
 def _verify_core_wheel(wheel: Path, aic_version: str, expected_payload: set[str]) -> set[str]:
     names, metadata = _wheel_files(wheel)
     payload = _payload_files(names)
@@ -119,9 +166,13 @@ def _verify_core_wheel(wheel: Path, aic_version: str, expected_payload: set[str]
         "aiconfigurator/sdk/engine.py",
         "aiconfigurator/sdk/logging_utils.py",
         "aiconfigurator/sdk/memory.py",
+        "aiconfigurator/sdk/task_v2.py",
         "aiconfigurator/systems/h100_sxm.yaml",
         "aiconfigurator_core/__init__.py",
-        "aiconfigurator_core/sdk/__init__.py",
+        "aiconfigurator_core/sdk/common.py",
+        "aiconfigurator_core/sdk/engine.py",
+        "aiconfigurator_core/sdk/logging_utils.py",
+        "aiconfigurator_core/sdk/memory.py",
         "aiconfigurator_core/sdk/task_v2.py",
     }
     missing = sorted(required - payload)
@@ -131,6 +182,8 @@ def _verify_core_wheel(wheel: Path, aic_version: str, expected_payload: set[str]
     missing_source = sorted(expected_payload - payload)
     if missing_source:
         raise RuntimeError(f"{wheel.name}: missing core source-tree payload: {missing_source}")
+
+    _verify_materialized_sdk_mirrors(wheel)
 
     checks = {
         "native core extension": any(

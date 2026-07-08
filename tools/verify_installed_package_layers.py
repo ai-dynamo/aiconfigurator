@@ -35,6 +35,50 @@ def _require_distribution_files(name: str, required: tuple[str, ...]) -> None:
         raise RuntimeError(f"distribution {name!r} is missing installed files: {missing}")
 
 
+def _distribution_file_names(name: str) -> set[str]:
+    distribution = importlib.metadata.distribution(name)
+    return {str(path).replace("\\", "/") for path in distribution.files or ()}
+
+
+def _require_distribution_sdk_mirrors(name: str) -> None:
+    """Require the core distribution to own complete files under both SDK names."""
+    distribution = importlib.metadata.distribution(name)
+    files = {str(path).replace("\\", "/"): path for path in distribution.files or ()}
+    prefixes = ("aiconfigurator/sdk/", "aiconfigurator_core/sdk/")
+    trees: list[dict[str, object]] = []
+
+    for prefix in prefixes:
+        tree = {
+            filename.removeprefix(prefix): package_path
+            for filename, package_path in files.items()
+            if filename.startswith(prefix) and filename.endswith(".py")
+        }
+        if not tree:
+            raise RuntimeError(f"distribution {name!r} owns no Python SDK files under {prefix}")
+        missing = [
+            f"{prefix}{relative}"
+            for relative, package_path in tree.items()
+            if not distribution.locate_file(package_path).is_file()
+        ]
+        if missing:
+            raise RuntimeError(f"distribution {name!r} is missing installed SDK files: {missing}")
+        trees.append(tree)
+
+    if set(trees[0]) != set(trees[1]):
+        canonical_only = sorted(set(trees[0]) - set(trees[1]))
+        core_only = sorted(set(trees[1]) - set(trees[0]))
+        raise RuntimeError(
+            f"distribution {name!r} has different SDK leaf sets: "
+            f"aiconfigurator-only={canonical_only}, aiconfigurator_core-only={core_only}"
+        )
+
+
+def _forbid_distribution_prefixes(name: str, prefixes: tuple[str, ...]) -> None:
+    misplaced = sorted(path for path in _distribution_file_names(name) if path.startswith(prefixes))
+    if misplaced:
+        raise RuntimeError(f"distribution {name!r} must not own files under {prefixes}: {misplaced}")
+
+
 def _forbid_module(name: str) -> None:
     if importlib.util.find_spec(name) is not None:
         raise RuntimeError(f"module {name!r} belongs to an uninstalled layer")
@@ -47,27 +91,37 @@ def _verify_core(*, exercise_engine: bool) -> str:
     _require_distribution_files(
         "aiconfigurator-core",
         (
+            "aiconfigurator/sdk/common.py",
+            "aiconfigurator/sdk/engine.py",
+            "aiconfigurator/sdk/memory.py",
             "aiconfigurator/sdk/task_v2.py",
-            "aiconfigurator_core/sdk/__init__.py",
+            "aiconfigurator_core/sdk/common.py",
+            "aiconfigurator_core/sdk/engine.py",
+            "aiconfigurator_core/sdk/memory.py",
             "aiconfigurator_core/sdk/task_v2.py",
         ),
     )
+    _require_distribution_sdk_mirrors("aiconfigurator-core")
 
     core = importlib.import_module("aiconfigurator_core")
     if core._build_smoke() != 1:
         raise RuntimeError("native core extension returned an unexpected schema version")
 
-    core_namespaced_task = importlib.import_module("aiconfigurator_core.sdk.task_v2").Task
-    canonical_task = importlib.import_module("aiconfigurator.sdk.task_v2").Task
-    if core_namespaced_task is not canonical_task:
-        raise RuntimeError("aiconfigurator_core.sdk.task_v2.Task is not the canonical SDK Task class")
-
-    for module in (
-        "aiconfigurator.sdk.engine",
-        "aiconfigurator.sdk.memory",
-        "aiconfigurator.sdk.pareto_analysis",
-    ):
-        importlib.import_module(module)
+    # The wheel materializes the symlinked source under two import names. Both
+    # APIs must work, but Python may create distinct module and class objects.
+    # Deliberately do not impose an identity contract between the namespaces.
+    for namespace in ("aiconfigurator.sdk", "aiconfigurator_core.sdk"):
+        engine_module = importlib.import_module(f"{namespace}.engine")
+        memory_module = importlib.import_module(f"{namespace}.memory")
+        importlib.import_module(f"{namespace}.pareto_analysis")
+        task_module = importlib.import_module(f"{namespace}.task_v2")
+        for module, public_name in (
+            (engine_module, "EngineHandle"),
+            (memory_module, "estimate_kv_cache"),
+            (task_module, "Task"),
+        ):
+            if not hasattr(module, public_name):
+                raise RuntimeError(f"{module.__name__} is missing public API {public_name}")
 
     resources = importlib.resources.files("aiconfigurator")
     required_resources = (
@@ -111,6 +165,10 @@ def _verify_upper(*, import_runtime: bool) -> str:
             "aiconfigurator/webapp/main.py",
             "spica/config.py",
         ),
+    )
+    _forbid_distribution_prefixes(
+        "aiconfigurator",
+        ("aiconfigurator/sdk/", "aiconfigurator_core/sdk/"),
     )
     if import_runtime:
         for module in ("aiconfigurator.cli.main", "aiconfigurator.generator.api", "spica.config"):

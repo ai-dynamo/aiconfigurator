@@ -16,8 +16,10 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV MPLCONFIGDIR=/tmp/matplotlib
 
 FROM base AS build
-# The standalone `aiconfigurator-core` wheel owns the Rust extension and the
-# SDK/data payload. The upper `aiconfigurator` wheel owns CLI/generator/webapp/
+# The standalone `aiconfigurator-core` wheel owns the Rust extension, data, and
+# both SDK import namespaces. The real source is `src/aiconfigurator/sdk`; the
+# relative `src/aiconfigurator_core/sdk` symlink is materialized as ordinary
+# wheel entries. The upper `aiconfigurator` wheel owns CLI/generator/webapp/
 # Spica and depends on the exact matching core version. Maturin needs the Rust
 # crate sources, a C linker (gcc), and ca-certificates so cargo can fetch crates
 # from crates.io over TLS. Rust itself is bootstrapped by maturin's build backend.
@@ -51,6 +53,8 @@ RUN uv venv --python 3.12 /tmp/aic-wheel-test && \
     CORE_WHL=$(ls /workspace/dist/aiconfigurator_core-*.whl) && \
     AIC_WHL=$(ls /workspace/dist/aiconfigurator-*.whl) && \
     uv pip install --python /tmp/aic-wheel-test/bin/python "${CORE_WHL}" && \
+    cd /tmp && /tmp/aic-wheel-test/bin/python -c \
+        "from aiconfigurator.sdk.task_v2 import Task as AICConfiguratorTask; from aiconfigurator_core.sdk.task_v2 import Task as CoreTask; assert AICConfiguratorTask.__name__ == CoreTask.__name__ == 'Task'" && \
     cd /tmp && /tmp/aic-wheel-test/bin/python \
         /workspace/tools/verify_installed_package_layers.py --expect core --exercise-engine && \
     uv pip install --python /tmp/aic-wheel-test/bin/python --find-links /workspace/dist "${AIC_WHL}" && \
@@ -66,8 +70,8 @@ RUN uv venv --python 3.12 /tmp/aic-wheel-test && \
         /workspace/tools/verify_installed_package_layers.py --expect upper
 
 # Start from another empty environment and install only the upper wheel argument.
-# Dependency resolution must pull the matching core wheel from the wheelhouse,
-# after which the canonical aiconfigurator.sdk import contract must work.
+# Dependency resolution must pull the exact matching core wheel from the
+# wheelhouse, after which both SDK import namespaces must work.
 RUN uv venv --python 3.12 /tmp/aic-upper-install-test && \
     AIC_WHL=$(ls /workspace/dist/aiconfigurator-*.whl) && \
     uv pip install --python /tmp/aic-upper-install-test/bin/python \
@@ -76,10 +80,11 @@ RUN uv venv --python 3.12 /tmp/aic-upper-install-test && \
     cd /tmp && /tmp/aic-upper-install-test/bin/python \
         /workspace/tools/verify_installed_package_layers.py --expect full
 
-# Pip installs dependencies before dependents, so crossing from a monolithic
-# 0.9 wheel requires removing the old payload owner first. A minimal local 0.9
-# fixture records representative upper/core paths and makes this ownership
-# transfer deterministic without relying on the historical wheel bootstrap.
+# Pip installs dependencies before dependents. Crossing from the monolithic 0.9
+# wheel transfers `aiconfigurator/sdk` ownership to core, so uninstalling the old
+# upper wheel can delete files that core just installed. Exercise both supported
+# recovery paths: uninstall-first and a core force-reinstall after the expected
+# normal-upgrade failure.
 RUN python tools/build_legacy_monolith_fixture.py /tmp/legacy-dist && \
     LEGACY_WHL=$(ls /tmp/legacy-dist/aiconfigurator-0.9.0-*.whl) && \
     CORE_WHL=$(ls /workspace/dist/aiconfigurator_core-*.whl) && \

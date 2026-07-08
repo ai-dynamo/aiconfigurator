@@ -45,27 +45,51 @@ owns the SDK, model/system data, and native extension. Installing
 `aiconfigurator` therefore installs the complete product, while core-only
 consumers can install `aiconfigurator-core` without pulling in the upper layer.
 
-The core wheel also exposes a core-namespaced alias for the user-facing SDK
-task. Both imports resolve to the same class:
+#### SDK namespace layout and caveats
+
+The SDK has one real source tree at `src/aiconfigurator/sdk`. The relative
+`src/aiconfigurator_core/sdk -> ../aiconfigurator/sdk` symbolic link exposes the
+same sources under the core namespace. When `aiconfigurator-core` is built,
+Maturin follows that source link and materializes both `aiconfigurator/sdk/**`
+and `aiconfigurator_core/sdk/**` as regular files in the wheel. The installed
+wheel does not contain a symbolic link.
+
+Both import styles are supported:
 
 ```python
-from aiconfigurator_core.sdk.task_v2 import Task
-# Equivalent to: from aiconfigurator.sdk.task_v2 import Task
+from aiconfigurator.sdk.task_v2 import Task as AICConfiguratorTask
+from aiconfigurator_core.sdk.task_v2 import Task as CoreTask
 ```
+
+> **Important:** these are two import namespaces over the same source, not
+> Python module aliases. Python loads them under different qualified names, so
+> corresponding modules and classes are not identical and module-level caches
+> or registries can diverge. Choose one namespace for an application and use it
+> consistently; do not mix objects imported from both namespaces.
+
+The repository link is stored by Git as a relative symbolic link. Unix-like
+checkouts preserve it normally. Windows contributors must enable Git symlink
+support (and typically Windows Developer Mode); otherwise Git may check out a
+plain file containing the link target, which cannot be used to build the core
+wheel.
 
 #### Upgrading from 0.9
 
-Version 0.9 shipped core files inside `aiconfigurator`. Package installers cannot
-safely transfer those same paths to the new dependency during a normal in-place
-upgrade because dependencies are installed before dependents. Remove the old
-owner first when crossing this package boundary:
+Version 0.9 shipped core files inside the monolithic `aiconfigurator`
+distribution. Version 0.10 transfers ownership of `aiconfigurator/sdk`, system
+data, and model data to `aiconfigurator-core`. Package installers cannot safely
+transfer those same paths during a normal in-place upgrade because dependencies
+are installed before dependents: uninstalling the old monolith can remove files
+that the new core wheel just installed. Remove the old owner first when crossing
+this package boundary:
 
 ```bash
 python3 -m pip uninstall -y aiconfigurator aiconfigurator-core
 python3 -m pip install 'aiconfigurator==0.10.0'
 ```
 
-If a normal upgrade was already attempted, repair the core payload with:
+If a normal upgrade was already attempted, force-reinstall the core payload
+after the upper package upgrade:
 
 ```bash
 python3 -m pip install --force-reinstall --no-deps 'aiconfigurator-core==0.10.0'
@@ -94,7 +118,7 @@ pip3 install .
 ### Build with Docker
 
 ```bash
-# This creates disjoint upper AIC and standalone core wheels
+# This creates wheels with disjoint distribution ownership
 docker build -f docker/Dockerfile --no-cache --target build -t aiconfigurator:latest .
 docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist dist/ && docker rm aic
 ```

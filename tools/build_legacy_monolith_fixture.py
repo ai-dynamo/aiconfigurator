@@ -3,11 +3,13 @@
 
 """Build a minimal legacy wheel for deterministic package-migration tests.
 
-AIConfigurator 0.9 owned both upper-layer and core-layer paths in the
-``aiconfigurator`` distribution. The 0.10 split transfers the latter paths to
-``aiconfigurator-core``. This fixture deliberately records representative paths
-from both layers so pip's install-before-uninstall upgrade behavior can be
-tested without downloading the historical release artifact.
+AIConfigurator 0.9 owned both upper-layer and core-layer paths under the
+``aiconfigurator`` namespace; it did not ship ``aiconfigurator_core``. The 0.10
+split transfers SDK/data ownership to ``aiconfigurator-core`` while retaining
+the historical ``aiconfigurator.sdk`` import path. This fixture records
+representative shared paths so pip's dependency-first ownership transition and
+the required uninstall-first or force-reinstall recovery can be tested without
+downloading a historical release artifact.
 """
 
 from __future__ import annotations
@@ -31,7 +33,6 @@ PAYLOAD_SOURCES = {
     "aiconfigurator/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json": (
         "src/aiconfigurator/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json"
     ),
-    "aiconfigurator_core/__init__.py": "src/aiconfigurator_core/__init__.py",
 }
 
 METADATA = f"""Metadata-Version: 2.4
