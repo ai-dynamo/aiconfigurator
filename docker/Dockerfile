@@ -15,15 +15,33 @@ RUN mkdir /opt/aiconfigurator && \
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV MPLCONFIGDIR=/tmp/matplotlib
 
-FROM base AS build
 # The `aiconfigurator` wheel owns the Rust extension, SDK/data payload, CLI,
-# generator, webapp, and Spica packages. The small `aiconfigurator-core` wheel
-# built afterward is only a compatibility metapackage. Maturin needs the Rust
-# crate sources, a C linker (gcc), and ca-certificates so cargo can fetch crates
-# from crates.io over TLS. Rust itself is bootstrapped by maturin's build backend.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
-    rm -rf /var/lib/apt/lists/*
+# generator, webapp, and Spica packages. It is built inside the PyPA
+# manylinux_2_28 image so the native (Rust/PyO3) `_aiconfigurator_core.*.so`
+# links against glibc 2.28; maturin's built-in auditwheel (driven by
+# `[tool.maturin] compatibility = "manylinux_2_28"` in pyproject.toml) then
+# checks the manylinux_2_28 policy, bundles any non-whitelisted shared libs
+# (the abi3 extension needs only glibc/libgcc, so none), and stamps the portable
+# `manylinux_2_28_x86_64` tag. The small `aiconfigurator-core` wheel built
+# afterward is a pure-Python compatibility metapackage and needs no repair.
+#
+# The manylinux image already ships auditwheel, patchelf, a gcc toolset, and
+# ca-certificates; we add the static `uv` build frontend and a rustup toolchain
+# so maturin's cargo build can fetch crates from crates.io over TLS.
+FROM quay.io/pypa/manylinux_2_28_x86_64 AS build
+WORKDIR /workspace
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+ENV RUSTUP_HOME=/opt/rust/rustup \
+    CARGO_HOME=/opt/rust/cargo \
+    PATH=/opt/rust/cargo/bin:${PATH}
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain stable
+
+# Pin the build interpreter to the image's CPython 3.12 so uv/maturin never fetch
+# a standalone one. abi3 (abi3-py310) means the single wheel serves CPython >=3.10.
+ENV UV_PYTHON=/opt/python/cp312-cp312/bin/python3
+
 COPY src/ /workspace/src/
 COPY rust/ /workspace/rust/
 COPY LICENSE pyproject.toml README.md /workspace/
@@ -38,9 +56,18 @@ RUN set -e; \
         echo "Run 'git lfs install && git lfs pull' in the source tree before building." >&2; \
         exit 1; \
     fi
-RUN uv build --wheel --out-dir /workspace/dist && \
-    cd src/aiconfigurator-core && uv build --wheel --out-dir /workspace/dist && \
-    cd /workspace && python tools/verify_release_wheels.py /workspace/dist
+# Build the main wheel. Under a frontend like `uv build`, maturin's PEP517
+# backend injects `--compatibility off` (plain linux) by default, and that CLI
+# flag overrides `[tool.maturin] compatibility`. MATURIN_PEP517_ARGS re-asserts
+# the manylinux_2_28 target -- maturin appends it after the injected `off`, so it
+# wins -- which drives maturin's built-in auditwheel to check the 2_28 policy and
+# stamp the `manylinux_2_28_x86_64` tag. The `aiconfigurator-core` metapackage is
+# pure-Python. `python` is not on PATH in the manylinux image, so the verifier
+# runs via ${UV_PYTHON}.
+RUN MATURIN_PEP517_ARGS="--compatibility manylinux_2_28" \
+        uv build --wheel --out-dir /workspace/dist && \
+    ( cd src/aiconfigurator-core && uv build --wheel --out-dir /workspace/dist ) && \
+    "${UV_PYTHON}" tools/verify_release_wheels.py /workspace/dist
 
 FROM base AS runtime
 COPY --from=build /workspace/dist /wheelhouse
