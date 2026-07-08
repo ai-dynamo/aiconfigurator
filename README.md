@@ -30,10 +30,11 @@ Let's get started.
 ### Install from PyPI
 
 > **Supported platform: Linux x86-64 only.** The published `aiconfigurator` wheel
-> bundles a native (Rust/PyO3) extension and is built for `linux_x86_64`. macOS,
-> Windows, and other architectures (including Linux aarch64) are **not supported**
-> and have no published release wheels — `pip3 install aiconfigurator` will not
-> find a compatible wheel there. Please install from source for non-Linux platforms.
+> bundles a native (Rust/PyO3) extension and is built as a `manylinux_2_28_x86_64`
+> wheel (Linux x86-64, glibc >= 2.28). macOS, Windows, and other architectures
+> (including Linux aarch64) are **not supported** and have no published release
+> wheels — `pip3 install aiconfigurator` will not find a compatible wheel there.
+> Please install from source for non-Linux platforms.
 
 ```bash
 pip3 install aiconfigurator
