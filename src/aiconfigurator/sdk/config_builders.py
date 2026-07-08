@@ -3,8 +3,8 @@
 
 """Shared ModelConfig construction helpers.
 
-These helpers are used by both the upper CLI layer and lower modeling/engine
-paths. Keeping them in ``sdk`` prevents the core wheel from importing CLI code.
+These helpers are used by both the CLI layer and lower modeling/engine paths.
+Keeping them in ``sdk`` prevents lower-level code from importing CLI code.
 """
 
 from __future__ import annotations
