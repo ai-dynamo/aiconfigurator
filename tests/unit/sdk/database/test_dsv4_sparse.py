@@ -370,21 +370,24 @@ def test_lookup_sparse_kernel_past_kv_linear_interp(tmp_path):
 
 
 def test_lookup_sparse_kernel_uses_requested_native_heads(tmp_path):
+    # Head-key selection contract; uses paged_mqa_logits because the helper's
+    # quadratic pair-count SOL is scoped to that kernel (windowed hca_attn
+    # rows would need window-capped physics -- see the guard below).
     rows = [
-        _sparse_row(kernel="hca_attn", bs=1, isl=8192, past_kv=0, tp=1, cr=128, lat=0.4, model=_FLASH_MODEL),
-        _sparse_row(kernel="hca_attn", bs=1, isl=8192, past_kv=0, tp=1, cr=128, lat=0.9, model=_PRO_MODEL),
+        _sparse_row(kernel="paged_mqa_logits", bs=1, isl=8192, past_kv=0, tp=1, cr=4, lat=0.4, model=_FLASH_MODEL),
+        _sparse_row(kernel="paged_mqa_logits", bs=1, isl=8192, past_kv=0, tp=1, cr=4, lat=0.9, model=_PRO_MODEL),
     ]
-    path = _write_csv(tmp_path / "hca_models.txt", _SPARSE_HEADER, rows)
+    path = _write_csv(tmp_path / "mqa_models.txt", _SPARSE_HEADER, rows)
     data = load_dsv4_sparse_kernel_data(path)
 
     class _DB:
         _dsv4_sparse_kernel_data: ClassVar[dict] = {
-            "hca_attn": LoadedOpData(data, None, path),
+            "paged_mqa_logits": LoadedOpData(data, None, path),
         }
 
     val = ContextDeepSeekV4AttentionModule._lookup_sparse_kernel(
         _DB(),
-        kernel="hca_attn",
+        kernel="paged_mqa_logits",
         bs=1,
         isl=8192,
         past_kv=0,
@@ -392,6 +395,22 @@ def test_lookup_sparse_kernel_uses_requested_native_heads(tmp_path):
         native_heads=_PRO_NATIVE_HEADS,
     )
     assert val == pytest.approx(0.9)
+
+
+def test_lookup_sparse_kernel_rejects_unscoped_kernels():
+    """The quadratic pair-count SOL is only valid for paged_mqa_logits; a
+    windowed kernel (hca_attn) must not silently inherit it (PR #1303
+    review pt.5)."""
+    with pytest.raises(ValueError, match="paged_mqa_logits"):
+        ContextDeepSeekV4AttentionModule._lookup_sparse_kernel(
+            object(),
+            kernel="hca_attn",
+            bs=1,
+            isl=8192,
+            past_kv=0,
+            tp_size=1,
+            native_heads=_FLASH_NATIVE_HEADS,
+        )
 
 
 def test_lookup_sparse_kernel_holds_util_on_isolated_leaves():

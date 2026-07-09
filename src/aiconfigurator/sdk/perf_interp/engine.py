@@ -31,6 +31,7 @@ Conventions:
 from __future__ import annotations
 
 import bisect
+import logging
 import math
 import statistics
 from collections import OrderedDict
@@ -87,6 +88,8 @@ def _miss(cfg: OpInterpConfig, coords, reason: str) -> InterpolationDataNotAvail
 # Public entry point
 # ---------------------------------------------------------------------------
 
+
+logger = logging.getLogger(__name__)
 
 _MISSING = object()
 
@@ -205,7 +208,16 @@ def _hold_util(cfg: OpInterpConfig, tail, q, n_axes, curve_pos, site_pos, site_v
     sol_q = cfg.sol_fn(*_full_coords(n_axes, curve_pos, site_pos, q, site_vals))
     if sol_q <= 0:
         raise _miss(cfg, coords, "non-positive SOL at query")
-    return sol_q / statistics.median(utils), statistics.median(powers)
+    anchor_util = statistics.median(utils)
+    if logger.isEnabledFor(logging.DEBUG):
+        boundary = tail[-1][0] if q > tail[-1][0] else tail[0][0]
+        logger.debug(
+            "perf_interp util-hold (curve): coords=%s anchor_util=%.4g distance=%.2fx",
+            dict(zip(cfg.axes, coords, strict=True)),
+            anchor_util,
+            q / boundary if boundary else float("inf"),
+        )
+    return sol_q / anchor_util, statistics.median(powers)
 
 
 def _eval_curve(cfg: OpInterpConfig, curve: list, q, n_axes, curve_pos, site_pos, site_vals, coords):
@@ -400,4 +412,15 @@ def _grid_hold(cfg: OpInterpConfig, data: dict, coords):
     sol_q = cfg.sol_fn(*coords)
     if sol_q <= 0:
         raise _miss(cfg, coords, "non-positive SOL at query")
-    return sol_q / statistics.median(utils), statistics.median(powers)
+    anchor_util = statistics.median(utils)
+    if logger.isEnabledFor(logging.DEBUG):
+        c_last = coords[-1]
+        edge = keys[-1] if c_last > keys[-1] else keys[0]
+        logger.debug(
+            "perf_interp util-hold (grid): coords=%s snapped=%s anchor_util=%.4g inner_distance=%.2fx",
+            dict(zip(cfg.axes, coords, strict=True)),
+            snapped,
+            anchor_util,
+            (c_last / edge) if edge else float("inf"),
+        )
+    return sol_q / anchor_util, statistics.median(powers)

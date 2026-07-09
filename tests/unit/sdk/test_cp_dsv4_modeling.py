@@ -45,11 +45,15 @@ def test_query_cp_csa_composition(monkeypatch):
         "_module_base",
         lambda self, db, bb, s, prefix: 4300.0 if s == per_card else pytest.fail("base must query per_card"),
     )
-    sparse = {isl: 1600.0, per_card: 25.0}
+    # Chunked decomposition (chunk = 8192): mqa_full = mqa(8192, past=0)
+    # + mqa(8192, past=8192); mqa_perc = mqa(2048, past=0). Keyed by
+    # (isl, past) so the test locks the in-grid chunk walk, not a single
+    # full-isl extrapolated lookup (review pt.1: pair count is additive).
+    sparse = {(8192, 0): 900.0, (8192, 8192): 700.0, (per_card, 0): 25.0}
     monkeypatch.setattr(
         ContextDeepSeekV4AttentionModule,
         "_lookup_sparse_kernel",
-        lambda self, db, kernel, bs, isl_q, prefix, tp_size, native_heads, **kw: sparse[isl_q],
+        classmethod(lambda cls, db, kernel, bs, isl_q, past, tp_size, native_heads: sparse[(isl_q, past)]),
     )
     topk = {isl: 800.0, per_card: 100.0}
     monkeypatch.setattr(
@@ -62,6 +66,7 @@ def test_query_cp_csa_composition(monkeypatch):
 
     res = m._query_cp(db, b=b, isl=isl, prefix=0)
 
+    # mqa_full = 900 + 700 = 1600 (two in-grid chunks); mqa_perc = 25
     # delta_mqa  = 1600/8 - 25  = 175
     # delta_topk = 800/8  - 100 = 0
     # latency = base 4300 + 175 + 0 + ag(indexer) 50 + ag(compressed) 50 = 4575
@@ -99,7 +104,7 @@ def test_query_cp_fails_loud_without_sparse_tables(monkeypatch):
     monkeypatch.setattr(
         ContextDeepSeekV4AttentionModule,
         "_lookup_sparse_kernel",
-        lambda self, db, kernel, bs, isl_q, prefix, tp_size, native_heads, **kw: None,
+        classmethod(lambda cls, db, kernel, bs, isl_q, past, tp_size, native_heads: None),
     )
     monkeypatch.setattr(
         ContextDeepSeekV4AttentionModule,

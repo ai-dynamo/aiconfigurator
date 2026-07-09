@@ -713,10 +713,22 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         sub-kernels", linear in batch), and it is what the data shows: util
         under isl^2 flattens from isl~2048, and holding it predicts the held-
         out isl=8192 point at -0% where the old raw-linear isl trend was -58%
-        (flat clamp -86%). CP queries live far beyond the collected isl sweep
-        (8192), so the extrapolation direction is the common case, not the
-        edge. Returns None when the kernel table is absent or has no anchor.
+        (flat clamp -86%). Returns None when the kernel table is absent or
+        has no anchor.
+
+        SCOPE: the quadratic pair-count SOL is valid ONLY for
+        ``paged_mqa_logits`` (causal indexer logits). The sidecar dict also
+        carries ``hca_attn`` -- a WINDOWED kernel whose work is window-capped
+        (linear beyond the window); a quadratic SOL would badly over-predict
+        any beyond-range resolve for it. Guard so the next caller does not
+        inherit the wrong physics silently (review: PR #1303).
         """
+        if kernel != "paged_mqa_logits":
+            raise ValueError(
+                f"_lookup_sparse_kernel: kernel {kernel!r} is not supported -- the "
+                "quadratic pair-count SOL is only valid for 'paged_mqa_logits'; "
+                "windowed kernels (hca_attn) need their own record."
+            )
         all_data = getattr(database, "_dsv4_sparse_kernel_data", None)
         if all_data is None or kernel not in all_data:
             return None
@@ -1014,6 +1026,30 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
     # ------------------------------------------------------------------
     _csa_topk_abs_cache: ClassVar[dict] = {}
 
+    # Production chunked-prefill executes mqa as a chunk sequence; the pair
+    # count is additive over chunks, so full-isl mqa decomposes EXACTLY into
+    # in-grid lookups (isl <= sweep max 8192, past_kv collected to ~1M):
+    #   mqa(isl, past) = sum_k mqa(chunk_k, past + offset_k)
+    # This replaces the previous 16x util-hold extrapolation of a single
+    # full-isl lookup (review: PR #1303 pt.1) and matches what the runtime
+    # actually launches.
+    _MQA_CHUNK_TOKENS = 8192
+
+    @classmethod
+    def _mqa_chunked(
+        cls, database: PerfDatabase, b: int, isl: int, past0: int, tp_size: int, native_heads: int
+    ) -> Optional[float]:
+        total = 0.0
+        for offset in range(0, isl, cls._MQA_CHUNK_TOKENS):
+            clen = min(cls._MQA_CHUNK_TOKENS, isl - offset)
+            part = cls._lookup_sparse_kernel(
+                database, "paged_mqa_logits", b, clen, past0 + offset, tp_size, native_heads
+            )
+            if part is None:
+                return None
+            total += part
+        return total
+
     def _query_cp(self, database: PerfDatabase, b: int, isl: int, prefix: int) -> PerformanceResult:
         cp = self._cp_size
         per_card = max(1, -(-isl // cp))  # ceil: busiest CP rank = critical path
@@ -1032,12 +1068,18 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             # Look up at the REAL batch b (paged_mqa_logits interpolates the bs
             # axis; csa_topk keeps every collected bs), so the delta matches the
             # batch-b base WITHOUT an external x b linearity assumption.
-            mqa_full = self._lookup_sparse_kernel(
-                database, "paged_mqa_logits", b, isl, prefix, self._tp_size, self._native_heads
-            )
-            mqa_perc = self._lookup_sparse_kernel(
-                database, "paged_mqa_logits", b, per_card, prefix, self._tp_size, self._native_heads
-            )
+            if not _TOPK_CORRECTION_ENABLED:
+                # The CP composition subtracts top_last(per_card) against a base
+                # whose standard module query already had the flat-vs-top_last
+                # DELTA removed; with the correction disabled the result keeps a
+                # flat(per_card) - top_last(per_card) over-estimate.
+                logger.warning(
+                    "AIC_DSV4_TOPK_CORRECTION=0 with cp_size>1: the CP composition "
+                    "assumes the topk DELTA correction is applied to the base; "
+                    "disabling it leaves a per-card flat-vs-top_last over-estimate."
+                )
+            mqa_full = self._mqa_chunked(database, b, isl, prefix, self._tp_size, self._native_heads)
+            mqa_perc = self._mqa_chunked(database, b, per_card, prefix, self._tp_size, self._native_heads)
             tl_full = self._csa_topk_top_last(database, isl, prefix, self._native_heads, b)
             tl_perc = self._csa_topk_top_last(database, per_card, prefix, self._native_heads, b)
             # Fail loud (like GLM-5 ContextDSAModule._query_cp): the CSA CP deltas

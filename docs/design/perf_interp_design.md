@@ -220,18 +220,23 @@ so `SOL = b * (past * isl + isl^2/2)` follows from the code's own stated
 premises (the `x bs/bp` batch contract and the CP path's "super-linear
 sub-kernels" comment). The migration is a bug fix, not a risk trade:
 
-- the sparse sweep collects isl <= 8k while the CP path queries `mqa_full` at
-  the FULL sequence length (128k+), so isl extrapolation is the *common case*;
-- measured `latency/isl^2` flattens for isl >= 2048 (the kernel is genuinely
-  ~quadratic in isl). Hold-out A/B across all 288 collected slices
-  (gb200/gb300/b200/b300, every heads/tp/past_kv/batch): predicting the
-  frontier point from a table truncated to `max_isl/4` (a 4x extrapolation —
-  still *short* of the 16x the CP path actually asks for) scores legacy
-  linear-trend at median **-49%** (p10 -70%), flat-hold at **-86%**, and
-  util-hold under the pair-count SOL at **-1%** (p10/p90 -20%/+25%). At short
-  range (hold out only the frontier point) the gap narrows (-17% / -45% /
-  -12%) — the linear-trend error *grows with extrapolation distance*, and CP
-  lives at the far end;
+- the sparse sweep collects isl <= 8k while the CP path needs `mqa_full` at
+  the FULL sequence length (128k+). The CP composition resolves this with an
+  IN-GRID CHUNK DECOMPOSITION (`_mqa_chunked`): the pair count is additive
+  over prefill chunks, `mqa(isl, past) = sum_k mqa(chunk, past + k*chunk)`,
+  which is exactly the kernel sequence chunked prefill launches and keeps
+  every lookup inside the collected grid (isl <= 8192, past_kv collected to
+  ~1M) — no extrapolation at all (review credit: PR #1303).
+- for the residual beyond-range case (direct sparse-helper queries past the
+  sweep, no production caller after the decomposition): hold-out A/B on all
+  288 slices, truncate to `max_isl/4`, predict the frontier, SIGNED and
+  STRATIFIED BY STEP — legacy linear-trend median -66%..-21% per stratum;
+  util-hold under the pair-count SOL: **step=0 +25.6%** (n=12, anchors
+  UNSATURATED — util still climbing at the boundary), 0<step<4096 +10.2%,
+  step>=4096 **-8.1%** (the saturated regime). The earlier pooled "-1%" was
+  these strata cancelling — a pooled median hid real structure, which is why
+  this table is stratified. Guarding unsaturated anchors (util-slope
+  threshold before holding) is tracked as follow-up;
 - the legacy largest-lower-batch x `bs/bp` scaling is replaced by measured
   batch brackets — the old robust-lookup comments themselves called linear
   batch scaling the worse estimate ("simply scaling the lower batch can
