@@ -261,6 +261,7 @@ mod tests {
             moe_ep_size: 8,
             quant_mode: MoeQuantMode::Fp8Block,
             workload_distribution: "power_law_1.2".into(),
+            attention_dp_size: 1,
             is_gated: true,
         }
     }

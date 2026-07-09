@@ -31,11 +31,24 @@ pub struct MoeOp {
     pub moe_ep_size: u32,
     pub quant_mode: MoeQuantMode,
     pub workload_distribution: String,
+    /// Attention data-parallel size. With attention-dp, every dp rank's
+    /// tokens funnel into the SHARED expert pool, so the MoE compute op
+    /// sees `num_tokens * attention_dp_size` tokens -- mirrors Python
+    /// `MoE.query` (`x = kwargs["x"] * self._attention_dp_size`,
+    /// operations/moe.py). The dispatch op has always carried this field;
+    /// the compute op dropping it under-predicted MoE latency ~4.7x on
+    /// dp=8 DeepSeek configs. serde default = 1 keeps old specs parsing.
+    #[serde(default = "default_attention_dp_size")]
+    pub attention_dp_size: u32,
     /// Gated FFN (SwiGLU) when true; non-gated (Relu²) when false.
     /// Mirrors Python's `MoE._is_gated`. The TRT-LLM small-token
     /// `moe_torch_flow_min_latency` kernel is only valid for gated nvfp4
     /// MoE; non-gated paths (e.g. NemotronH) must skip it.
     pub is_gated: bool,
+}
+
+fn default_attention_dp_size() -> u32 {
+    1
 }
 
 impl MoeOp {
@@ -49,10 +62,12 @@ impl MoeOp {
         moe_ep_size: u32,
         quant_mode: MoeQuantMode,
         workload_distribution: impl Into<String>,
+        attention_dp_size: u32,
     ) -> Self {
         Self {
             name: name.into(),
             scale_factor: 1.0,
+            attention_dp_size,
             hidden_size,
             inter_size,
             topk,
@@ -66,6 +81,9 @@ impl MoeOp {
     }
 
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
+        // Attention-dp scales up the total input tokens (all dp ranks share
+        // one expert pool) -- mirrors Python MoE.query.
+        let num_tokens = num_tokens.saturating_mul(self.attention_dp_size.max(1));
         // The roofline SOL the perf-DB engine anchors its beyond-range
         // util-hold on (Python `_resolve_tokens` passes the same closure).
         // Coordinates arriving from the engine are always integral (table
@@ -162,5 +180,52 @@ impl MoeOp {
         let sol_math = (ops as f64) / (tc_flops * self.quant_mode.mapping().compute) * 1000.0;
         let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
         sol_math.max(sol_mem)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn b200_vllm_db() -> PerfDatabase {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("src/aiconfigurator/systems");
+        PerfDatabase::load(&root, "b200_sxm", "vllm", "0.19.0").expect("db loads")
+    }
+
+    fn op(attention_dp_size: u32) -> MoeOp {
+        MoeOp {
+            name: "moe".into(),
+            scale_factor: 1.0,
+            hidden_size: 7168,
+            inter_size: 2048,
+            topk: 8,
+            num_experts: 256,
+            moe_tp_size: 1,
+            moe_ep_size: 8,
+            quant_mode: MoeQuantMode::Fp8Block,
+            workload_distribution: "power_law_1.2".into(),
+            attention_dp_size,
+            is_gated: true,
+        }
+    }
+
+    /// With attention-dp, all dp ranks' tokens funnel into the shared expert
+    /// pool: query(dp=4, t) must equal query(dp=1, 4t). Dropping the
+    /// multiplier under-predicted MoE latency ~4.7x on dp=8 DeepSeek configs
+    /// (python/rust engine-step divergence, per-op accounted at 81.1 vs
+    /// 378.8 ms on the h200 DSV3 tp1/dp8/moe_tp8 case).
+    #[test]
+    fn moe_query_scales_tokens_by_attention_dp() {
+        let db = b200_vllm_db();
+        let with_dp = op(4).query(&db, 1000).expect("dp=4 query");
+        let equivalent = op(1).query(&db, 4000).expect("dp=1 query");
+        assert!(
+            (with_dp.latency_ms - equivalent.latency_ms).abs() < 1e-12,
+            "dp=4 @ 1000 tokens ({}) must equal dp=1 @ 4000 tokens ({})",
+            with_dp.latency_ms,
+            equivalent.latency_ms
+        );
+        assert!(with_dp.latency_ms > op(1).query(&db, 1000).unwrap().latency_ms);
     }
 }
