@@ -8,8 +8,6 @@ import inspect
 from collections.abc import Callable
 from contextlib import contextmanager
 
-import torch
-
 DSA_INDEXER_TOTAL_KV_TOKEN_LIMIT = 1 << 25
 
 
@@ -186,6 +184,8 @@ def runtime_chunk_size(model_runner) -> int:
 
 def chunked_alloc_extend(orig_alloc_extend: Callable, chunk_size: int) -> Callable:
     """Wrap ``alloc_extend`` using SGLang's runtime chunk size."""
+    # Lazy: keep this module importable in torch-free unit-test environments.
+    import torch
 
     def wrapped(prefix_lens, prefix_lens_cpu, seq_lens, seq_lens_cpu, last_loc, extend_num_tokens):
         bs = prefix_lens.shape[0]
@@ -254,6 +254,9 @@ def temporarily_chunked_alloc_extend(model_runner, extend_num_tokens: int):
 
 def alloc_prefix_indices(model_runner, batch_size: int, prefix_len: int) -> list:
     """Allocate per-request prefix KV indices using SGLang's runtime chunk size."""
+    # Lazy: see chunked_alloc_extend.
+    import torch
+
     device = getattr(model_runner, "device", "cuda")
     if prefix_len <= 0:
         return [torch.empty((0,), dtype=torch.int64, device=device) for _ in range(batch_size)]
