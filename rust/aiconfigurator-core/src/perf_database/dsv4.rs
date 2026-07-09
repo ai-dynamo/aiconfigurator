@@ -34,7 +34,7 @@
 //! collected only on TRT-LLM / SGLang today; loaders surface a clean error for
 //! backends without DSV4 data.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -44,6 +44,7 @@ use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
+use super::dsa::{bs_slice, lookup_2d, SparseGrid};
 use super::perf_interp::{self, Node, OpInterpConfig};
 use super::{kernel_source_ok, resolve_op_sources};
 use crate::perf_database::parquet_loader::PerfReader;
@@ -58,7 +59,7 @@ impl AttnKind {
     /// The compress_ratio each split file was collected at. Python keeps
     /// compress_ratio as a dict key inside one merged table; the Rust port
     /// keeps the files separate, so the kind IS the ratio.
-    fn compress_ratio(self) -> i64 {
+    pub(crate) fn compress_ratio(self) -> i64 {
         match self {
             AttnKind::Csa => 4,
             AttnKind::Hca => 128,
@@ -84,8 +85,6 @@ type ByStep = BTreeMap<u32, ByIsl>;
 type ByNative = BTreeMap<u32, ByStep>;
 
 pub struct Dsv4Table {
-    // Used by the topk-calib guard (and kept for error context).
-    data_root: PathBuf,
     /// Ordered, priority-sorted sources for each of the four DSV4 module perf
     /// files (shared-layer aware; see [`PerfSource`]). Single-primary,
     /// no-filter by default (`Dsv4Table::new`).
@@ -93,10 +92,22 @@ pub struct Dsv4Table {
     hca_context_sources: Vec<PerfSource>,
     csa_generation_sources: Vec<PerfSource>,
     hca_generation_sources: Vec<PerfSource>,
+    /// CSA topk DELTA calibration (`dsv4_csa_topk_calib_perf.parquet`).
+    /// Same source resolution as the module files; an absent file loads as
+    /// `None` and the correction is a no-op (Python parity).
+    topk_calib_sources: Vec<PerfSource>,
+    /// Sparse-kernel table (`dsv4_paged_mqa_logits_module_perf.parquet`) for
+    /// the CP prefill composition's mqa full/per-card deltas. Same source
+    /// resolution as the module files (Python `_load_sparse` runs the file
+    /// through `database._build_op_sources` too); an absent file loads as
+    /// `None` and the operator fails loud.
+    paged_mqa_sources: Vec<PerfSource>,
     csa_context: OnceLock<Result<ModuleNodes, AicError>>,
     hca_context: OnceLock<Result<ModuleNodes, AicError>>,
     csa_generation: OnceLock<Result<ModuleNodes, AicError>>,
     hca_generation: OnceLock<Result<ModuleNodes, AicError>>,
+    topk_calib: OnceLock<Result<Option<TopkCalib>, AicError>>,
+    paged_mqa: OnceLock<Result<Option<SparseKernelNodes>, AicError>>,
 }
 
 /// Raw per-key nested grids straight from the parquet (loader output).
@@ -128,18 +139,18 @@ struct ModuleKey {
 /// the SOL only enters as a ratio (util-hold / single-survivor correction),
 /// so measured-range resolution is unaffected; only beyond-grid ratios for
 /// Flash would drift.
-struct Dsv4Dims {
-    hidden_size: i64,
-    q_lora_rank: i64,
-    o_lora_rank: i64,
-    head_dim: i64,
-    rope_head_dim: i64,
-    index_n_heads: i64,
-    index_head_dim: i64,
-    index_topk: i64,
-    window_size: i64,
-    o_groups: i64,
-    native_heads: i64,
+pub(crate) struct Dsv4Dims {
+    pub(crate) hidden_size: i64,
+    pub(crate) q_lora_rank: i64,
+    pub(crate) o_lora_rank: i64,
+    pub(crate) head_dim: i64,
+    pub(crate) rope_head_dim: i64,
+    pub(crate) index_n_heads: i64,
+    pub(crate) index_head_dim: i64,
+    pub(crate) index_topk: i64,
+    pub(crate) window_size: i64,
+    pub(crate) o_groups: i64,
+    pub(crate) native_heads: i64,
 }
 
 const DSV4_PRO_DIMS: Dsv4Dims = Dsv4Dims {
@@ -156,7 +167,7 @@ const DSV4_PRO_DIMS: Dsv4Dims = Dsv4Dims {
     native_heads: 128,
 };
 
-fn dsv4_dims(_architecture: &str) -> &'static Dsv4Dims {
+pub(crate) fn dsv4_dims(_architecture: &str) -> &'static Dsv4Dims {
     // Only DeepseekV4ForCausalLM exists today; see the Pro-vs-Flash note on
     // `Dsv4Dims`.
     &DSV4_PRO_DIMS
@@ -188,16 +199,26 @@ impl Dsv4Table {
             "dsv4_hca_generation_module_perf.parquet",
             &data_root,
         );
+        let topk_calib_sources =
+            resolve_op_sources(perf_db_sources, "dsv4_csa_topk_calib_perf.parquet", &data_root);
+        let paged_mqa_sources = resolve_op_sources(
+            perf_db_sources,
+            "dsv4_paged_mqa_logits_module_perf.parquet",
+            &data_root,
+        );
         Self {
-            data_root,
             csa_context_sources,
             hca_context_sources,
             csa_generation_sources,
             hca_generation_sources,
+            topk_calib_sources,
+            paged_mqa_sources,
             csa_context: OnceLock::new(),
             hca_context: OnceLock::new(),
             csa_generation: OnceLock::new(),
             hca_generation: OnceLock::new(),
+            topk_calib: OnceLock::new(),
+            paged_mqa: OnceLock::new(),
         }
     }
 
@@ -212,23 +233,6 @@ impl Dsv4Table {
     /// collapses that level exactly and `prefix>0` is out-of-range util-hold
     /// with the prefix-aware SOL carrying the effect (matching Python).
     #[allow(clippy::too_many_arguments)]
-    /// Guard: Python applies the CSA topk DELTA correction (flat vs
-    /// top_last, `AIC_DSV4_TOPK_CORRECTION`) to CSA module queries whenever
-    /// `dsv4_csa_topk_calib_perf.parquet` is present. That correction is NOT
-    /// ported here, so the moment calib data ships the two engines would
-    /// silently diverge (measured dummy-flat bias ~ half the per-layer CSA
-    /// time). Fail loud instead; the port is tracked in issue #1333 and is
-    /// ordered after the topk data/collection redesign.
-    fn reject_unported_topk_calib(&self, attn_kind: AttnKind) -> Result<(), AicError> {
-        if attn_kind == AttnKind::Csa && self.data_root.join("dsv4_csa_topk_calib_perf.parquet").exists() {
-            return Err(AicError::PerfDatabase(
-                "dsv4_csa_topk_calib data is present but the CSA topk DELTA correction is not                  ported to the compiled engine; use --engine-step-backend python for DSV4 CSA                  until it is (tracked in issue #1333)."
-                    .to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     pub fn query_context(
         &self,
         spec: &SystemSpec,
@@ -242,7 +246,6 @@ impl Dsv4Table {
         architecture: &str,
         prefix: u32,
     ) -> Result<f64, AicError> {
-        self.reject_unported_topk_calib(attn_kind)?;
         let grids = match attn_kind {
             AttnKind::Csa => self.load_csa_context()?,
             AttnKind::Hca => self.load_hca_context()?,
@@ -270,7 +273,15 @@ impl Dsv4Table {
             )
         };
         let cfg = OpInterpConfig::grid(&["prefix", "seq_len", "batch"], &sol);
-        perf_interp::query(&cfg, node, &[prefix as f64, isl as f64, b as f64])
+        let latency = perf_interp::query(&cfg, node, &[prefix as f64, isl as f64, b as f64])?;
+        // Mirrors Python `ContextDeepSeekV4AttentionModule` get_silicon
+        // (operations/dsv4.py): for CSA (compress_ratio==4) ONLY, subtract the
+        // measured topK DELTA = flat_ms - top_last_ms at the ORIGINAL query
+        // point (prefix, s, b) and clamp at 0. HCA (cr==128) is left untouched.
+        if attn_kind == AttnKind::Csa {
+            return self.topk_corrected(latency, prefix, isl, b);
+        }
+        Ok(latency)
     }
 
     /// Generation-DSV4 latency. `sequence_tokens = isl + step` (absolute KV
@@ -294,7 +305,6 @@ impl Dsv4Table {
         gemm_quant: GemmQuantMode,
         architecture: &str,
     ) -> Result<f64, AicError> {
-        self.reject_unported_topk_calib(attn_kind)?;
         let grids = match attn_kind {
             AttnKind::Csa => self.load_csa_generation()?,
             AttnKind::Hca => self.load_hca_generation()?,
@@ -322,7 +332,15 @@ impl Dsv4Table {
             )
         };
         let cfg = OpInterpConfig::grid(&["batch", "seq_len"], &sol);
-        perf_interp::query(&cfg, node, &[b as f64, sequence_tokens as f64])
+        let latency = perf_interp::query(&cfg, node, &[b as f64, sequence_tokens as f64])?;
+        // Mirrors Python `GenerationDeepSeekV4AttentionModule` get_silicon
+        // (operations/dsv4.py): subtract the topK DELTA for CSA (cr==4) only.
+        // Decode is q_len=1 with past_kv = s_total - 1, so the DELTA keys at
+        // (prefix = max(s_total - 1, 0), isl = 1, bs = b).
+        if attn_kind == AttnKind::Csa {
+            return self.topk_corrected(latency, sequence_tokens.saturating_sub(1), 1, b);
+        }
+        Ok(latency)
     }
 
     fn load_csa_context(&self) -> Result<&ModuleNodes, AicError> {
@@ -348,6 +366,119 @@ impl Dsv4Table {
             load_module_parquet(&self.hca_generation_sources).map(generation_nodes)
         });
         cell.as_ref().map_err(clone_err)
+    }
+
+    /// Apply the CSA topK DELTA correction to a module latency, mirroring the
+    /// Python apply sites in `operations/dsv4.py` (context and generation
+    /// `get_silicon`): `latency = max(0, latency - DELTA(prefix, isl, bs))`.
+    /// No-op when the correction is disabled (`AIC_DSV4_TOPK_CORRECTION=0`)
+    /// or when no calibration file exists — Python gates the calib LOAD behind
+    /// the env var too, so keep the load lazy-skipped when disabled.
+    fn topk_corrected(&self, latency: f64, prefix: u32, isl: u32, bs: u32) -> Result<f64, AicError> {
+        if !topk_correction_enabled() {
+            return Ok(latency);
+        }
+        Ok(apply_topk_delta(latency, self.load_topk_calib()?, prefix, isl, bs))
+    }
+
+    /// Lazy-load the topK DELTA calibration (Python `_get_dsv4_topk_calib`,
+    /// which caches on the database object). `Ok(None)` when every source
+    /// file is absent or no usable rows exist.
+    fn load_topk_calib(&self) -> Result<Option<&TopkCalib>, AicError> {
+        let cell = self
+            .topk_calib
+            .get_or_init(|| load_topk_calib_parquet(&self.topk_calib_sources));
+        match cell {
+            Ok(calib) => Ok(calib.as_ref()),
+            Err(err) => Err(clone_err(err)),
+        }
+    }
+
+    /// Lazy-load the paged_mqa_logits sparse-kernel table (Python
+    /// `load_dsv4_sparse_kernel_data` under the `"paged_mqa_logits"` key of
+    /// `_dsv4_sparse_kernel_data`). `Ok(None)` when every source file is
+    /// absent (Python: `_read_filtered_rows` -> None).
+    fn load_paged_mqa(&self) -> Result<Option<&SparseKernelNodes>, AicError> {
+        let cell = self
+            .paged_mqa
+            .get_or_init(|| load_sparse_kernel_parquet(&self.paged_mqa_sources));
+        match cell {
+            Ok(nodes) => Ok(nodes.as_ref()),
+            Err(err) => Err(clone_err(err)),
+        }
+    }
+
+    /// Sparse-kernel latency at `(b, isl, past_kv)` on the paged_mqa_logits
+    /// table. Mirror of Python
+    /// `ContextDeepSeekV4AttentionModule._lookup_sparse_kernel` with the
+    /// kernel FIXED to `"paged_mqa_logits"` — the quadratic pair-count SOL
+    /// below is valid only for the causal indexer logits; the windowed
+    /// sidecars (hca_attn / csa_attn) must NOT route here (Python raises on
+    /// any other kernel name; Rust simply has no other entry point).
+    ///
+    /// Table shape `[native_heads][tp][past_kv][isl][bs]`; `tp` falls back to
+    /// 1 (the kernel is collected at tp=1 only and its work is
+    /// TP-independent). Resolves on the perf_interp 3-axis Grid
+    /// `(past_kv, seq_len, batch)` with SOL `b * (past * isl + isl^2 / 2)`.
+    /// `Ok(None)` when the table/slice is absent or the engine cannot anchor
+    /// (Python catches `InterpolationDataNotAvailableError` -> None) or the
+    /// resolved value is non-finite.
+    pub fn query_paged_mqa_logits(
+        &self,
+        b: u32,
+        isl: u32,
+        past_kv: u32,
+        tp_size: u32,
+        native_heads: u32,
+    ) -> Result<Option<f64>, AicError> {
+        let Some(nodes) = self.load_paged_mqa()? else {
+            return Ok(None);
+        };
+        let Some(per_tp) = nodes.by_heads.get(&native_heads) else {
+            return Ok(None);
+        };
+        let Some(node) = per_tp.get(&tp_size).or_else(|| per_tp.get(&1)) else {
+            return Ok(None);
+        };
+        let sol = |c: &[f64]| c[2] * (c[0] * c[1] + c[1] * c[1] / 2.0);
+        let cfg = OpInterpConfig::grid(&["past_kv", "seq_len", "batch"], &sol);
+        match perf_interp::query(&cfg, node, &[past_kv as f64, isl as f64, b as f64]) {
+            Ok(latency) if latency.is_finite() => Ok(Some(latency)),
+            Ok(_) | Err(_) => Ok(None),
+        }
+    }
+
+    /// Absolute top_last topk latency at `(isl, step)` for batch `b`. CP
+    /// composition only — reads the RAW top_last rows the calib loader
+    /// retains alongside the DELTA pairs (Python `_csa_topk_top_last` /
+    /// `_load_csa_topk_top_last`; single load, no re-read of the parquet).
+    /// The num_heads filter applies only when the CSV carries the column
+    /// (Python: `df[df["num_heads"] == native_heads] if "num_heads" in df`).
+    /// Missing calib / head slice / batch grid -> `Ok(None)` (the operator
+    /// fails loud); an `isl` beyond the collected grid errors via
+    /// [`lookup_2d`] — same fail-loud as Python, which reuses
+    /// `ContextDSAModule._lookup_2d` here.
+    pub fn csa_topk_top_last(
+        &self,
+        isl: u32,
+        step: u32,
+        native_heads: u32,
+        b: u32,
+    ) -> Result<Option<f64>, AicError> {
+        let Some(calib) = self.load_topk_calib()? else {
+            return Ok(None);
+        };
+        let Some(grid) = calib
+            .top_last
+            .get(&Some(native_heads))
+            .or_else(|| calib.top_last.get(&None))
+        else {
+            return Ok(None);
+        };
+        let Some(bs_grid) = bs_slice(grid, b) else {
+            return Ok(None);
+        };
+        lookup_2d(bs_grid, isl, step)
     }
 }
 
@@ -393,6 +524,247 @@ fn generation_nodes(grids: ModuleGrids) -> ModuleNodes {
         }
     }
     ModuleNodes { by_keys }
+}
+
+// ---------------------------------------------------------------------------
+// DSV4 CSA topk DELTA calibration — port of Python `operations/dsv4.py`
+// (`_TOPK_CORRECTION_ENABLED`, `_get_dsv4_topk_calib`,
+// `_build_topk_calib_from_rows`, `_dsv4_interp_1d_from_points`,
+// `_dsv4_topk_delta_ms`).
+//
+// The CSA context-module collector runs the topK kernel on DEGENERATE scores
+// (near-constant logits -> the Small topK path's O(n^2) tie-break), inflating
+// the measured module latency vs real silicon. The calibration file stores two
+// rows (score_mode = flat | top_last) per (step, isl, batch_size) shape;
+// DELTA = flat.latency - top_last.latency. At query time the DELTA is
+// SUBTRACTED from the CSA (compress_ratio==4) module latency only.
+// Gate: AIC_DSV4_TOPK_CORRECTION (default on; set "0" to disable).
+// ---------------------------------------------------------------------------
+
+/// Python `_TOPK_CORRECTION_ENABLED = os.environ.get("AIC_DSV4_TOPK_CORRECTION", "1") != "0"`
+/// — evaluated once at module import; mirrored here with a process-wide
+/// OnceLock so both engines toggle together.
+fn topk_correction_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        parse_topk_correction_env(std::env::var("AIC_DSV4_TOPK_CORRECTION").ok().as_deref())
+    })
+}
+
+/// Enabled unless the value is exactly `"0"` (Python `!= "0"`; unset -> on).
+fn parse_topk_correction_env(value: Option<&str>) -> bool {
+    value != Some("0")
+}
+
+/// The paired topK DELTA table: `(step, isl, batch_size) -> max(0, flat - top_last)`.
+/// Python keeps a `by_pi` sibling in the calib dict, but only `exact` is read
+/// by `_dsv4_topk_delta_ms`, so only `exact` is ported.
+struct TopkCalib {
+    exact: BTreeMap<(u32, u32, u32), f64>,
+    /// RAW top_last rows for the CP composition (Python
+    /// `_load_csa_topk_top_last` reads the same parquet; here they are
+    /// retained in the ONE calib load pass instead of a second read). Keyed
+    /// by the row's `num_heads` (`None` when the CSV lacks the column) ->
+    /// `{bs -> {(isl, step) -> top_last latency}}`.
+    top_last: BTreeMap<Option<u32>, SparseGrid>,
+}
+
+/// Python apply formula shared by both apply sites:
+/// `corrected = max(0.0, latency - _dsv4_topk_delta_ms(calib, prefix, isl, bs))`,
+/// with a missing calib meaning DELTA = 0 (no-op).
+fn apply_topk_delta(latency: f64, calib: Option<&TopkCalib>, prefix: u32, isl: u32, bs: u32) -> f64 {
+    match calib {
+        Some(calib) => (latency - topk_delta_ms(calib, prefix, isl, bs)).max(0.0),
+        None => latency,
+    }
+}
+
+/// Load `dsv4_csa_topk_calib_perf.parquet` from an ordered source list and
+/// pair the flat/top_last rows into the DELTA table, ALSO retaining the raw
+/// top_last rows for the CP composition (`csa_topk_top_last`) — one load
+/// pass serves both consumers.
+///
+/// Mirrors Python `load_dsv4_sparse_op_data(sources, _TOPK_CALIB_KEYS)` +
+/// `_build_topk_calib_from_rows`: rows nest under
+/// `(step, isl, batch_size, score_mode)` with last-write-wins per leaf; a
+/// shape missing either mode is skipped; `DELTA = max(0, flat - top_last)`.
+/// The retained top_last grid mirrors `_load_csa_topk_top_last`'s
+/// `{bs: {(isl, step): latency}}` with the same last-row-wins overwrite.
+/// Returns `Ok(None)` when every source file is absent (Python: rows is
+/// None) or no usable row exists (no DELTA pair AND no top_last row —
+/// behaviourally identical to Python's two separate None/{} outcomes).
+fn load_topk_calib_parquet(sources: &[PerfSource]) -> Result<Option<TopkCalib>, AicError> {
+    let mut by_mode: BTreeMap<(u32, u32, u32), BTreeMap<String, f64>> = BTreeMap::new();
+    let mut top_last: BTreeMap<Option<u32>, SparseGrid> = BTreeMap::new();
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let step_col = reader.col("step")?;
+        let isl_col = reader.col("isl")?;
+        let batch_size_col = reader.col("batch_size")?;
+        let score_mode_col = reader.col("score_mode")?;
+        let latency_col = reader.col("latency")?;
+        let num_heads_col = reader.col_optional("num_heads");
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let (step, isl, bs) =
+                (row.u32(step_col)?, row.u32(isl_col)?, row.u32(batch_size_col)?);
+            let mode = row.str_owned(score_mode_col)?;
+            let latency = row.f64(latency_col)?;
+            if mode == "top_last" {
+                top_last
+                    .entry(row.u32_optional(num_heads_col)?)
+                    .or_default()
+                    .entry(bs)
+                    .or_default()
+                    .insert((isl, step), latency);
+            }
+            by_mode.entry((step, isl, bs)).or_default().insert(mode, latency);
+        }
+    }
+    if !any_source {
+        return Ok(None);
+    }
+    let mut exact = BTreeMap::new();
+    for (key, modes) in by_mode {
+        let (Some(flat), Some(tl)) = (modes.get("flat"), modes.get("top_last")) else {
+            continue;
+        };
+        exact.insert(key, (flat - tl).max(0.0));
+    }
+    if exact.is_empty() && top_last.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(TopkCalib { exact, top_last }))
+}
+
+/// Paged-mqa-logits sparse-kernel table: `[native_heads][tp]` -> engine Node
+/// `[past_kv(step)][isl][batch]` (Python `load_dsv4_sparse_kernel_data`'s
+/// `_SPARSE_KERNEL_KEYS = (num_heads, tp_size, step, isl, batch_size)`).
+struct SparseKernelNodes {
+    by_heads: BTreeMap<u32, BTreeMap<u32, Node>>,
+}
+
+/// Load one sparse-kernel parquet. Rows are nested with plain overwrite in
+/// read order — within a file the LAST row wins, and across shared-layer
+/// sources a later source overwrites an earlier one at a shared cell,
+/// matching Python (`_read_filtered_rows` concatenates sources in order and
+/// `load_dsv4_sparse_op_data` does a per-row dict overwrite; the module
+/// loader above follows the same policy). `Ok(None)` only when every source
+/// file is absent.
+fn load_sparse_kernel_parquet(sources: &[PerfSource]) -> Result<Option<SparseKernelNodes>, AicError> {
+    let mut by_heads: BTreeMap<u32, BTreeMap<u32, Node>> = BTreeMap::new();
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let num_heads_col = reader.col("num_heads")?;
+        let tp_size_col = reader.col("tp_size")?;
+        let step_col = reader.col("step")?;
+        let isl_col = reader.col("isl")?;
+        let batch_size_col = reader.col("batch_size")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            by_heads
+                .entry(row.u32(num_heads_col)?)
+                .or_default()
+                .entry(row.u32(tp_size_col)?)
+                .or_insert_with(Node::branch)
+                .insert(
+                    &[row.u32(step_col)?, row.u32(isl_col)?, row.u32(batch_size_col)?],
+                    row.f64(latency_col)?,
+                );
+        }
+    }
+    if !any_source {
+        return Ok(None);
+    }
+    Ok(Some(SparseKernelNodes { by_heads }))
+}
+
+/// Python `_dsv4_interp_1d_from_points`: linear interpolation with
+/// nearest-value extrapolation; duplicate coordinates are mean-merged.
+fn topk_interp_1d(points: &[(u32, f64)], x: u32) -> Option<f64> {
+    if points.is_empty() {
+        return None;
+    }
+    let mut merged: BTreeMap<u32, (f64, u32)> = BTreeMap::new();
+    for &(coord, value) in points {
+        let entry = merged.entry(coord).or_insert((0.0, 0));
+        entry.0 += value;
+        entry.1 += 1;
+    }
+    let vals: BTreeMap<u32, f64> =
+        merged.into_iter().map(|(k, (sum, n))| (k, sum / n as f64)).collect();
+    if let Some(&v) = vals.get(&x) {
+        return Some(v);
+    }
+    let (&first_x, &first_v) = vals.iter().next().unwrap();
+    let (&last_x, &last_v) = vals.iter().next_back().unwrap();
+    if vals.len() == 1 || x <= first_x {
+        return Some(first_v);
+    }
+    if x >= last_x {
+        return Some(last_v);
+    }
+    let (&left_x, &left_v) = vals.range(..x).next_back().unwrap();
+    let (&right_x, &right_v) = vals.range(x + 1..).next().unwrap();
+    let t = (x as f64 - left_x as f64) / (right_x as f64 - left_x as f64);
+    Some(left_v * (1.0 - t) + right_v * t)
+}
+
+/// Python `_dsv4_topk_delta_ms`: exact `(prefix, isl, bs)` rows are preferred;
+/// off-grid shapes are interpolated prefix-first within a fixed `(isl, bs)`,
+/// then isl, then bs. Returns 0.0 when nothing resolves.
+fn topk_delta_ms(calib: &TopkCalib, prefix: u32, isl: u32, bs: u32) -> f64 {
+    let exact = &calib.exact;
+    if let Some(&direct) = exact.get(&(prefix, isl, bs)) {
+        return direct.max(0.0);
+    }
+    let prefix_interp = |query_prefix: u32, anchor_isl: u32, anchor_bs: u32| -> Option<f64> {
+        let points: Vec<(u32, f64)> = exact
+            .iter()
+            .filter(|(&(_, i, b), _)| i == anchor_isl && b == anchor_bs)
+            .map(|(&(p, _, _), &d)| (p, d))
+            .collect();
+        topk_interp_1d(&points, query_prefix)
+    };
+    let isl_interp = |query_prefix: u32, query_isl: u32, anchor_bs: u32| -> Option<f64> {
+        let isl_values: BTreeSet<u32> =
+            exact.keys().filter(|(_, _, b)| *b == anchor_bs).map(|(_, i, _)| *i).collect();
+        let points: Vec<(u32, f64)> = isl_values
+            .into_iter()
+            .filter_map(|i| prefix_interp(query_prefix, i, anchor_bs).map(|v| (i, v)))
+            .collect();
+        topk_interp_1d(&points, query_isl)
+    };
+    let bs_values: BTreeSet<u32> = exact.keys().map(|(_, _, b)| *b).collect();
+    let points: Vec<(u32, f64)> = bs_values
+        .into_iter()
+        .filter_map(|b| isl_interp(prefix, isl, b).map(|v| (b, v)))
+        .collect();
+    match topk_interp_1d(&points, bs) {
+        Some(interpolated) => interpolated.max(0.0),
+        None => 0.0,
+    }
 }
 
 /// Resolve the `(quant, architecture)` key, then resolve the model's rank-LOCAL
@@ -918,5 +1290,411 @@ mod tests {
             )
             .expect("DSV4 context lookup must resolve fp8_e4m3 kv_cache_dtype as fp8");
         assert!(latency.is_finite() && latency > 0.0, "unexpected latency: {latency}");
+    }
+
+    // ------------------------------------------------------------------
+    // CSA topk DELTA calibration (port of Python operations/dsv4.py:
+    // _get_dsv4_topk_calib / _build_topk_calib_from_rows / _dsv4_topk_delta_ms)
+    // ------------------------------------------------------------------
+
+    use parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int64Type};
+    use parquet::file::properties::WriterProperties;
+    use parquet::file::writer::{SerializedFileWriter, SerializedRowGroupWriter};
+    use parquet::schema::parser::parse_message_type;
+    use std::fs::File;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    fn write_column<T: parquet::data_type::DataType>(
+        rg: &mut SerializedRowGroupWriter<'_, File>,
+        values: &[T::T],
+    ) {
+        let mut col = rg.next_column().unwrap().unwrap();
+        col.typed::<T>().write_batch(values, None, None).unwrap();
+        col.close().unwrap();
+    }
+
+    /// Rows are `(score_mode, step, isl, batch_size, latency)` — the calib
+    /// columns the loader reads (collector writes more; extras are ignored).
+    fn write_calib_parquet(path: &Path, rows: &[(&str, i64, i64, i64, f64)]) {
+        let schema = Arc::new(
+            parse_message_type(
+                "message calib {
+                    REQUIRED BYTE_ARRAY score_mode (UTF8);
+                    REQUIRED INT64 step;
+                    REQUIRED INT64 isl;
+                    REQUIRED INT64 batch_size;
+                    REQUIRED DOUBLE latency;
+                }",
+            )
+            .unwrap(),
+        );
+        let file = File::create(path).unwrap();
+        let mut writer =
+            SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+                .unwrap();
+        let mut rg = writer.next_row_group().unwrap();
+        let modes: Vec<ByteArray> = rows.iter().map(|r| ByteArray::from(r.0)).collect();
+        write_column::<ByteArrayType>(&mut rg, &modes);
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.1).collect::<Vec<_>>());
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.2).collect::<Vec<_>>());
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.3).collect::<Vec<_>>());
+        write_column::<DoubleType>(&mut rg, &rows.iter().map(|r| r.4).collect::<Vec<_>>());
+        rg.close().unwrap();
+        writer.close().unwrap();
+    }
+
+    /// Rows are `(num_heads, batch_size, isl, step, latency)` under the fixed
+    /// (DeepseekV4ForCausalLM, bfloat16, fp8, fp8_block) key the tests query.
+    fn write_module_parquet(path: &Path, rows: &[(i64, i64, i64, i64, f64)]) {
+        let schema = Arc::new(
+            parse_message_type(
+                "message module {
+                    REQUIRED BYTE_ARRAY architecture (UTF8);
+                    REQUIRED BYTE_ARRAY mla_dtype (UTF8);
+                    REQUIRED BYTE_ARRAY kv_cache_dtype (UTF8);
+                    REQUIRED BYTE_ARRAY gemm_type (UTF8);
+                    REQUIRED INT64 num_heads;
+                    REQUIRED INT64 batch_size;
+                    REQUIRED INT64 isl;
+                    REQUIRED INT64 step;
+                    REQUIRED DOUBLE latency;
+                }",
+            )
+            .unwrap(),
+        );
+        let file = File::create(path).unwrap();
+        let mut writer =
+            SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+                .unwrap();
+        let mut rg = writer.next_row_group().unwrap();
+        let n = rows.len();
+        write_column::<ByteArrayType>(&mut rg, &vec![ByteArray::from("DeepseekV4ForCausalLM"); n]);
+        write_column::<ByteArrayType>(&mut rg, &vec![ByteArray::from("bfloat16"); n]);
+        write_column::<ByteArrayType>(&mut rg, &vec![ByteArray::from("fp8"); n]);
+        write_column::<ByteArrayType>(&mut rg, &vec![ByteArray::from("fp8_block"); n]);
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.0).collect::<Vec<_>>());
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.1).collect::<Vec<_>>());
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.2).collect::<Vec<_>>());
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.3).collect::<Vec<_>>());
+        write_column::<DoubleType>(&mut rg, &rows.iter().map(|r| r.4).collect::<Vec<_>>());
+        rg.close().unwrap();
+        writer.close().unwrap();
+    }
+
+    /// Loader + delta parity against a Python oracle. Oracle generated with
+    /// `PYTHONPATH=src python3` by feeding the SAME rows through
+    /// `_build_topk_calib_from_rows` + `_dsv4_topk_delta_ms`
+    /// (operations/dsv4.py); values below are the printed reprs.
+    #[test]
+    fn topk_calib_loader_and_delta_match_python_oracle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dsv4_csa_topk_calib_perf.parquet");
+        write_calib_parquet(
+            &path,
+            &[
+                ("flat", 0, 512, 1, 1.0),
+                ("top_last", 0, 512, 1, 0.4),
+                ("flat", 0, 512, 4, 2.0),
+                ("top_last", 0, 512, 4, 0.9),
+                ("flat", 0, 2048, 1, 3.0),
+                ("top_last", 0, 2048, 1, 1.0),
+                ("flat", 0, 2048, 4, 5.0),
+                ("top_last", 0, 2048, 4, 2.2),
+                ("flat", 1024, 512, 1, 1.5),
+                ("top_last", 1024, 512, 1, 0.7),
+                ("flat", 1024, 512, 4, 2.5),
+                ("top_last", 1024, 512, 4, 1.0),
+                ("flat", 4096, 512, 1, 0.5),
+                ("top_last", 4096, 512, 1, 0.9), // flat < top_last -> DELTA clamps to 0
+                ("flat", 8192, 512, 1, 9.9),     // no top_last -> shape skipped
+            ],
+        );
+        let calib = load_topk_calib_parquet(&[PerfSource(path, None)])
+            .unwrap()
+            .expect("calib must load");
+        // Pairing (Python _build_topk_calib_from_rows): DELTA = max(0, flat - top_last).
+        let expected_exact = [
+            ((0u32, 512u32, 1u32), 0.6),
+            ((0, 512, 4), 1.1),
+            ((0, 2048, 1), 2.0),
+            ((0, 2048, 4), 2.8),
+            ((1024, 512, 1), 0.8),
+            ((1024, 512, 4), 1.5),
+            ((4096, 512, 1), 0.0),
+        ];
+        assert_eq!(calib.exact.len(), expected_exact.len());
+        for (key, want) in expected_exact {
+            let got = calib.exact[&key];
+            assert!((got - want).abs() < 1e-12, "exact[{key:?}] = {got} vs {want}");
+        }
+        let oracle = [
+            ((0u32, 512u32, 1u32), 0.6),          // exact hit
+            ((512, 512, 1), 0.7),                 // prefix interp
+            ((2048, 512, 1), 0.5333333333333334), // prefix interp across the clamped-0 anchor
+            ((99999, 512, 4), 1.5),               // prefix extrapolation clamps to nearest
+            ((8192, 512, 1), 0.0),                // skipped shape resolves via prefix clamp
+            ((0, 1024, 1), 1.0666666666666667),   // isl interp
+            ((0, 512, 2), 0.7666666666666667),    // bs interp
+            ((512, 1024, 2), 1.3555555555555556), // prefix+isl+bs all off-grid
+            ((384, 1, 16), 1.25),                 // generation-shaped: isl below range, bs above
+            ((0, 512, 4), 1.1),                   // second exact hit
+        ];
+        for ((prefix, isl, bs), want) in oracle {
+            let got = topk_delta_ms(&calib, prefix, isl, bs);
+            let tol = if want == 0.0 { 1e-12 } else { want * 1e-9 };
+            assert!(
+                (got - want).abs() <= tol,
+                "delta({prefix},{isl},{bs}) = {got} vs python {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn topk_calib_absent_file_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("dsv4_csa_topk_calib_perf.parquet");
+        let calib = load_topk_calib_parquet(&[PerfSource(missing, None)]).unwrap();
+        assert!(calib.is_none(), "absent file must load as None");
+        // Missing calib -> DELTA machinery is a no-op (Python
+        // `_dsv4_topk_delta_ms(None, ...) == 0.0`).
+        assert_eq!(apply_topk_delta(1.25, None, 0, 512, 8), 1.25);
+    }
+
+    #[test]
+    fn topk_correction_env_gate_matches_python() {
+        // Python: os.environ.get("AIC_DSV4_TOPK_CORRECTION", "1") != "0" —
+        // ONLY the literal "0" disables; anything else (or unset) enables.
+        assert!(parse_topk_correction_env(None));
+        assert!(parse_topk_correction_env(Some("1")));
+        assert!(parse_topk_correction_env(Some("")));
+        assert!(parse_topk_correction_env(Some("false")));
+        assert!(!parse_topk_correction_env(Some("0")));
+    }
+
+    #[test]
+    fn topk_delta_clamps_corrected_latency_at_zero() {
+        let mut exact = BTreeMap::new();
+        exact.insert((0u32, 512u32, 8u32), 0.12);
+        let calib = TopkCalib { exact, top_last: BTreeMap::new() };
+        // Python: corrected = max(0.0, latency - delta).
+        assert_eq!(apply_topk_delta(0.05, Some(&calib), 0, 512, 8), 0.0);
+        assert!((apply_topk_delta(1.0, Some(&calib), 0, 512, 8) - 0.88).abs() < 1e-12);
+    }
+
+    /// End-to-end apply-site check on synthetic module + calib parquets:
+    /// context CSA subtracts the DELTA at the ORIGINAL query point
+    /// (prefix, isl, b); generation CSA keys at (s_total - 1, isl=1, b); HCA
+    /// is untouched; the same root WITHOUT the calib file returns the
+    /// uncorrected leaves (absent-file no-op).
+    #[test]
+    fn dsv4_query_applies_topk_delta_end_to_end() {
+        if !topk_correction_enabled() {
+            return; // suite launched with AIC_DSV4_TOPK_CORRECTION=0
+        }
+        let spec = b200_sxm_spec();
+        // (num_heads, batch_size, isl, step, latency)
+        let csa_ctx_rows = [(64, 8, 512, 0, 1.0)];
+        let hca_ctx_rows = [(64, 8, 512, 0, 0.7)];
+        let csa_gen_rows = [(64, 16, 1, 384, 0.5)]; // s_total = 385
+        let calib_rows = [
+            ("flat", 0, 512, 8, 0.30),
+            ("top_last", 0, 512, 8, 0.18), // context DELTA = 0.12
+            ("flat", 384, 1, 16, 0.05),
+            ("top_last", 384, 1, 16, 0.02), // generation DELTA = 0.03
+        ];
+        let make_root = |with_calib: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            write_module_parquet(&dir.path().join("dsv4_csa_context_module_perf.parquet"), &csa_ctx_rows);
+            write_module_parquet(&dir.path().join("dsv4_hca_context_module_perf.parquet"), &hca_ctx_rows);
+            write_module_parquet(
+                &dir.path().join("dsv4_csa_generation_module_perf.parquet"),
+                &csa_gen_rows,
+            );
+            if with_calib {
+                write_calib_parquet(&dir.path().join("dsv4_csa_topk_calib_perf.parquet"), &calib_rows);
+            }
+            dir
+        };
+        let q_ctx = |table: &Dsv4Table, kind| {
+            table
+                .query_context(
+                    &spec, kind, 8, 512, 64, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", 0,
+                )
+                .unwrap()
+        };
+        let q_gen = |table: &Dsv4Table, kind| {
+            table
+                .query_generation(
+                    &spec, kind, 16, 385, 64, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
+                )
+                .unwrap()
+        };
+
+        let root = make_root(true);
+        let table = Dsv4Table::new(root.path().to_path_buf());
+        assert!((q_ctx(&table, AttnKind::Csa) - 0.88).abs() < 1e-12); // 1.0 - 0.12
+        assert!((q_gen(&table, AttnKind::Csa) - 0.47).abs() < 1e-12); // 0.5 - 0.03
+        assert!((q_ctx(&table, AttnKind::Hca) - 0.7).abs() < 1e-12); // HCA untouched
+
+        let bare_root = make_root(false);
+        let table = Dsv4Table::new(bare_root.path().to_path_buf());
+        assert!((q_ctx(&table, AttnKind::Csa) - 1.0).abs() < 1e-12);
+        assert!((q_gen(&table, AttnKind::Csa) - 0.5).abs() < 1e-12);
+    }
+
+    // ------------------------------------------------------------------
+    // CP sparse-kernel table (paged_mqa_logits) + raw top_last calib rows
+    // (DeepSeek-V4 sparse-CP prefill composition)
+    // ------------------------------------------------------------------
+
+    /// Rows are `(num_heads, batch_size, isl, tp_size, step, latency)` — the
+    /// sparse-kernel columns the loader reads (collector writes more; extras
+    /// are ignored).
+    fn write_sparse_kernel_parquet(path: &Path, rows: &[(i64, i64, i64, i64, i64, f64)]) {
+        let schema = Arc::new(
+            parse_message_type(
+                "message sparse {
+                    REQUIRED INT64 num_heads;
+                    REQUIRED INT64 batch_size;
+                    REQUIRED INT64 isl;
+                    REQUIRED INT64 tp_size;
+                    REQUIRED INT64 step;
+                    REQUIRED DOUBLE latency;
+                }",
+            )
+            .unwrap(),
+        );
+        let file = File::create(path).unwrap();
+        let mut writer =
+            SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+                .unwrap();
+        let mut rg = writer.next_row_group().unwrap();
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.0).collect::<Vec<_>>());
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.1).collect::<Vec<_>>());
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.2).collect::<Vec<_>>());
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.3).collect::<Vec<_>>());
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.4).collect::<Vec<_>>());
+        write_column::<DoubleType>(&mut rg, &rows.iter().map(|r| r.5).collect::<Vec<_>>());
+        rg.close().unwrap();
+        writer.close().unwrap();
+    }
+
+    /// Like `write_calib_parquet` but with the optional `num_heads` column,
+    /// exercising the Python `df[df["num_heads"] == native_heads]` filter.
+    /// Rows are `(score_mode, step, isl, batch_size, num_heads, latency)`.
+    fn write_calib_parquet_with_heads(path: &Path, rows: &[(&str, i64, i64, i64, i64, f64)]) {
+        let schema = Arc::new(
+            parse_message_type(
+                "message calib {
+                    REQUIRED BYTE_ARRAY score_mode (UTF8);
+                    REQUIRED INT64 step;
+                    REQUIRED INT64 isl;
+                    REQUIRED INT64 batch_size;
+                    REQUIRED INT64 num_heads;
+                    REQUIRED DOUBLE latency;
+                }",
+            )
+            .unwrap(),
+        );
+        let file = File::create(path).unwrap();
+        let mut writer =
+            SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+                .unwrap();
+        let mut rg = writer.next_row_group().unwrap();
+        let modes: Vec<ByteArray> = rows.iter().map(|r| ByteArray::from(r.0)).collect();
+        write_column::<ByteArrayType>(&mut rg, &modes);
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.1).collect::<Vec<_>>());
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.2).collect::<Vec<_>>());
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.3).collect::<Vec<_>>());
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.4).collect::<Vec<_>>());
+        write_column::<DoubleType>(&mut rg, &rows.iter().map(|r| r.5).collect::<Vec<_>>());
+        rg.close().unwrap();
+        writer.close().unwrap();
+    }
+
+    /// Mirrors Python `_lookup_sparse_kernel` resolution: exact grid hit; tp
+    /// falls back to 1 when the requested tp is uncollected (paged_mqa_logits
+    /// is collected at tp=1 only); missing head slice -> None; absent file ->
+    /// None (the operator's fail-loud happens on top).
+    #[test]
+    fn paged_mqa_lookup_exact_tp_fallback_and_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        write_sparse_kernel_parquet(
+            &dir.path().join("dsv4_paged_mqa_logits_module_perf.parquet"),
+            &[
+                (64, 1, 8192, 1, 0, 0.2),
+                (64, 1, 8192, 1, 8192, 0.3),
+                (64, 1, 2048, 1, 0, 0.05),
+            ],
+        );
+        let table = Dsv4Table::new(dir.path().to_path_buf());
+        // Exact 3-axis hits.
+        assert_eq!(table.query_paged_mqa_logits(1, 8192, 0, 1, 64).unwrap(), Some(0.2));
+        assert_eq!(table.query_paged_mqa_logits(1, 8192, 8192, 1, 64).unwrap(), Some(0.3));
+        // tp=8 not collected -> falls back to the tp=1 slice.
+        assert_eq!(table.query_paged_mqa_logits(1, 8192, 0, 8, 64).unwrap(), Some(0.2));
+        // Missing head slice -> None.
+        assert_eq!(table.query_paged_mqa_logits(1, 8192, 0, 1, 32).unwrap(), None);
+        // Absent file -> None.
+        let empty = tempfile::tempdir().unwrap();
+        let bare = Dsv4Table::new(empty.path().to_path_buf());
+        assert_eq!(bare.query_paged_mqa_logits(1, 8192, 0, 1, 64).unwrap(), None);
+    }
+
+    /// Raw top_last retention + lookup (Python `_load_csa_topk_top_last` +
+    /// `ContextDSAModule._lookup_2d`): top_last rows resolve by (isl, step)
+    /// at the bs slice; flat rows stay out of the grid (they only feed the
+    /// DELTA, which coexists in the same single load); an isl beyond the
+    /// collected grid fails loud via `lookup_2d`; absent calib -> None.
+    #[test]
+    fn csa_topk_top_last_raw_rows_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dsv4_csa_topk_calib_perf.parquet");
+        write_calib_parquet(
+            &path,
+            &[
+                ("top_last", 0, 16384, 1, 800.0),
+                ("top_last", 0, 2048, 1, 100.0),
+                ("flat", 0, 2048, 1, 130.0),
+            ],
+        );
+        let table = Dsv4Table::new(dir.path().to_path_buf());
+        // num_heads column absent -> no filter (any native_heads resolves).
+        assert_eq!(table.csa_topk_top_last(16384, 0, 64, 1).unwrap(), Some(800.0));
+        // flat row (130.0) must not shadow the top_last value.
+        assert_eq!(table.csa_topk_top_last(2048, 0, 64, 1).unwrap(), Some(100.0));
+        // The DELTA table coexists in the same load: (0, 2048, 1) pairs up.
+        let calib = table.load_topk_calib().unwrap().expect("calib must load");
+        assert!((topk_delta_ms(calib, 0, 2048, 1) - 30.0).abs() < 1e-12);
+        // isl beyond the collected grid -> fail loud (dsa::lookup_2d contract).
+        let err = table.csa_topk_top_last(32768, 0, 64, 1).unwrap_err();
+        assert!(err.to_string().contains("exceeds the collected"), "unexpected: {err}");
+        // Absent calib -> None (operator fails loud on top).
+        let empty = tempfile::tempdir().unwrap();
+        let bare = Dsv4Table::new(empty.path().to_path_buf());
+        assert_eq!(bare.csa_topk_top_last(2048, 0, 64, 1).unwrap(), None);
+    }
+
+    /// num_heads filter parity: when the calib file carries the column,
+    /// only rows matching the queried native_heads resolve (Python
+    /// `df[df["num_heads"] == native_heads]`); a head count with no rows
+    /// yields None (-> operator fail-loud), never another head's latency.
+    #[test]
+    fn csa_topk_top_last_filters_num_heads_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        write_calib_parquet_with_heads(
+            &dir.path().join("dsv4_csa_topk_calib_perf.parquet"),
+            &[
+                ("top_last", 0, 2048, 1, 64, 42.0),
+                ("top_last", 0, 2048, 1, 128, 77.0),
+            ],
+        );
+        let table = Dsv4Table::new(dir.path().to_path_buf());
+        assert_eq!(table.csa_topk_top_last(2048, 0, 64, 1).unwrap(), Some(42.0));
+        assert_eq!(table.csa_topk_top_last(2048, 0, 128, 1).unwrap(), Some(77.0));
+        assert_eq!(table.csa_topk_top_last(2048, 0, 32, 1).unwrap(), None);
     }
 }

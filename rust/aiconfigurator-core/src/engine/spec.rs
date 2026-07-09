@@ -377,6 +377,7 @@ mod tests {
             gemm_quant_mode: GemmQuantMode::Fp8Block,
             architecture: "DeepseekV32ForCausalLM".into(),
             index_topk: 2048,
+            cp_size: 1,
         }
     }
 
@@ -392,6 +393,8 @@ mod tests {
             fmha_quant_mode: FmhaQuantMode::Fp8,
             gemm_quant_mode: GemmQuantMode::Fp8Block,
             architecture: "DeepseekV4ForCausalLM".into(),
+            cp_size: 1,
+            window_size: None,
         }
     }
 

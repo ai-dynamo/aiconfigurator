@@ -97,28 +97,6 @@ class OpConversionError(RuntimeError):
     """Raised when an ``Operation`` cannot be converted to an ``OpSpec``."""
 
 
-def _reject_cp(op: Any) -> None:
-    """Refuse to compile SPARSE-attention context-parallel modules (DSA/DSV4).
-
-    Dense-GQA/MoE CP is modeled by the compiled engine (Phase 1, PR #1313:
-    the specs carry cp_size and the runtime divides prefill tokens per card).
-    The SPARSE CP model however (``_query_cp``: per-card base + full/cp swap
-    of the super-linear sparse sub-kernels + CP all-gathers) is not ported,
-    and the sparse-kernel tables it needs are not loaded there. Without this
-    guard the Rust engine silently evaluates the NON-CP composition for
-    cp_size > 1 configs (measured: it returned a number where Python
-    fail-louds on missing sparse tables). Fail loud instead, like Python
-    does; use the python engine-step backend for sparse-CP sweeps.
-    """
-    cp = getattr(op, "_cp_size", 1) or 1
-    if cp > 1:
-        raise OpConversionError(
-            f"op '{getattr(op, '_name', type(op).__name__)}' has cp_size={cp}: "
-            "sparse-attention context-parallel prefill is not modeled by the compiled engine; "
-            "use --engine-step-backend python for cp_size > 1 configs."
-        )
-
-
 # --------------------------------------------------------------------------- #
 # Per-op conversion: Python Operation -> externally-tagged OpSpec dict.
 #
@@ -354,7 +332,6 @@ def _p2p(op: P2P) -> dict:
 
 
 def _dsa_module(op: ContextDSAModule | GenerationDSAModule, *, architecture: str) -> dict:
-    _reject_cp(op)
     # GenerationDSAModule stores `_kv_cache_dtype`; ContextDSAModule stores
     # `_kvcache_quant_mode` + `_fmha_quant_mode`. The Rust `DsaModuleOp` carries
     # both quant fields for either phase; fill the missing one with bfloat16
@@ -371,6 +348,7 @@ def _dsa_module(op: ContextDSAModule | GenerationDSAModule, *, architecture: str
         "name": op._name,
         "scale_factor": op._scale_factor,
         "num_heads": op._num_heads,
+        "cp_size": getattr(op, "_cp_size", 1) or 1,
         "kv_cache_dtype": _quant_name(kv),
         "fmha_quant_mode": _quant_name(fmha) if fmha is not None else "bfloat16",
         "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
@@ -391,7 +369,6 @@ def _dsv4_module(
     *,
     architecture: str,
 ) -> dict:
-    _reject_cp(op)
     kv = getattr(op, "_kvcache_quant_mode", None) or getattr(op, "_kv_cache_dtype", None)
     fmha = getattr(op, "_fmha_quant_mode", None)
     return {
@@ -399,6 +376,8 @@ def _dsv4_module(
         "scale_factor": op._scale_factor,
         "attn_kind": _attn_kind_for_ratio(op._compress_ratio),
         "num_heads": op._num_heads,
+        "cp_size": getattr(op, "_cp_size", 1) or 1,
+        "window_size": getattr(op, "_window_size", None),
         # native_heads (model total head count) selects the table slice;
         # tp_size is the table's primary interpolation axis. See
         # `perf_database::dsv4` / `load_context_dsv4_kind_module_data`.

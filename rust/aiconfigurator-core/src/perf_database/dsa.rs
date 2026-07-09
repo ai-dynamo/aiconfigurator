@@ -26,7 +26,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
@@ -51,6 +51,41 @@ pub struct DsaTable {
     /// Engine-ready per-`DsaKey` generation tables with the Python v2 axis
     /// order `[num_heads][batch][seq = isl + step]`, built once at load.
     generation_nodes: OnceLock<Result<NodeCache, AicError>>,
+    /// Shared-layer source map retained for the lazily-resolved CP sparse
+    /// sub-kernel files (`<prefix>_{mqa_logits,topk,dsa_attn}_module_perf.parquet`,
+    /// prefix = glm5 / dsv32 by architecture). Python reads these primary-only
+    /// (`_load_glm5_sparse` -> `pd.read_parquet(data_dir/<fn>)`); the default
+    /// (empty-map) resolution here is exactly that single primary file.
+    perf_db_sources: PerfDbSources,
+    /// CP sparse sub-kernel tables keyed by (file_prefix, num_heads) — the
+    /// Rust mirror of Python `ContextDSAModule._glm5_sparse_cache`.
+    sparse: Mutex<BTreeMap<(String, u32), Arc<DsaSparseTables>>>,
+}
+
+/// One CP sparse sub-kernel grid: `bs -> {(isl, step) -> latency_ms}`.
+/// Mirrors the Python `_load_glm5_sparse` `out2d` entries (bs-keyed so
+/// `_query_cp` looks the deltas up at the REAL measured batch).
+pub type SparseGrid = BTreeMap<u32, BTreeMap<(u32, u32), f64>>;
+
+/// DSA sparse sub-kernel tables (mqa / topk / dsa_attn) for the CP prefill
+/// composition. An absent parquet leaves its grid empty — the operator's
+/// missing-tables check fails loud, mirroring Python (`_read` -> None -> `{}`).
+#[derive(Debug, Default, PartialEq)]
+pub struct DsaSparseTables {
+    pub mqa: SparseGrid,
+    pub topk_last: SparseGrid,
+    pub topk_flat: SparseGrid,
+    /// Optional (not used by the CP delta; DSV3.2 only collects mqa + topk).
+    pub dsa_attn: SparseGrid,
+}
+
+/// DSA sparse sub-kernel data-file prefix per architecture. Mirrors Python
+/// `operations.dsa._dsa_sparse_file_prefix` (defaults to glm5 for back-compat).
+pub fn dsa_sparse_file_prefix(architecture: &str) -> &'static str {
+    match architecture {
+        "DeepseekV32ForCausalLM" => "dsv32",
+        _ => "glm5",
+    }
 }
 
 struct NodeCache {
@@ -73,16 +108,16 @@ pub struct DsaKey {
 /// Per-architecture structural dims. Mirrors Python
 /// `operations.dsa.DSA_MODEL_DIMS`; unknown architectures fall back to the
 /// DeepSeek-V3.2 dims (Python `DSA_MODEL_DIMS.get(arch, DSA_MODEL_DIMS[DEFAULT])`).
-struct DsaDims {
-    hidden_size: i64,
-    q_lora_rank: i64,
-    kv_lora_rank: i64,
-    qk_nope_head_dim: i64,
-    qk_rope_head_dim: i64,
-    v_head_dim: i64,
-    index_topk: i64,
-    index_head_dim: i64,
-    index_n_heads: i64,
+pub(crate) struct DsaDims {
+    pub(crate) hidden_size: i64,
+    pub(crate) q_lora_rank: i64,
+    pub(crate) kv_lora_rank: i64,
+    pub(crate) qk_nope_head_dim: i64,
+    pub(crate) qk_rope_head_dim: i64,
+    pub(crate) v_head_dim: i64,
+    pub(crate) index_topk: i64,
+    pub(crate) index_head_dim: i64,
+    pub(crate) index_n_heads: i64,
 }
 
 const DSV32_DIMS: DsaDims = DsaDims {
@@ -109,7 +144,7 @@ const GLM_MOE_DSA_DIMS: DsaDims = DsaDims {
     index_n_heads: 32,
 };
 
-fn dsa_dims(architecture: &str) -> &'static DsaDims {
+pub(crate) fn dsa_dims(architecture: &str) -> &'static DsaDims {
     match architecture {
         "GlmMoeDsaForCausalLM" => &GLM_MOE_DSA_DIMS,
         _ => &DSV32_DIMS,
@@ -143,7 +178,77 @@ impl DsaTable {
             generation: OnceLock::new(),
             context_nodes: OnceLock::new(),
             generation_nodes: OnceLock::new(),
+            perf_db_sources: perf_db_sources.clone(),
+            sparse: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Load the DSA CP sparse sub-kernel tables (mqa / topk / dsa_attn) for
+    /// `architecture` filtered to `num_heads`. Mirror of Python
+    /// `ContextDSAModule._load_glm5_sparse`: architecture selects the file
+    /// prefix (glm5 / dsv32); a missing parquet leaves its grid empty (the
+    /// operator's missing-tables check then fails loud); within one file the
+    /// last row wins for duplicate coordinates (pandas `iterrows` overwrite).
+    /// Results are cached per (file_prefix, num_heads).
+    pub fn load_cp_sparse(
+        &self,
+        architecture: &str,
+        num_heads: u32,
+    ) -> Result<Arc<DsaSparseTables>, AicError> {
+        let file_prefix = dsa_sparse_file_prefix(architecture);
+        let key = (file_prefix.to_string(), num_heads);
+        if let Some(tables) = self.sparse.lock().expect("dsa sparse cache poisoned").get(&key) {
+            return Ok(Arc::clone(tables));
+        }
+        let mut tables = DsaSparseTables::default();
+        // mqa logits: every row goes to `mqa`.
+        load_sparse_parquet(
+            &resolve_op_sources(
+                &self.perf_db_sources,
+                &format!("{file_prefix}_mqa_logits_module_perf.parquet"),
+                &self.data_root,
+            ),
+            num_heads,
+            |_| SparseKind::Mqa,
+            &mut tables,
+        )?;
+        // topk: split by `score_mode` — "flat" -> topk_flat, else topk_last
+        // (Python: `"topk_flat" if str(r.get("score_mode","")) == "flat" else "topk_last"`).
+        load_sparse_parquet(
+            &resolve_op_sources(
+                &self.perf_db_sources,
+                &format!("{file_prefix}_topk_module_perf.parquet"),
+                &self.data_root,
+            ),
+            num_heads,
+            |score_mode| {
+                if score_mode == Some("flat") {
+                    SparseKind::TopkFlat
+                } else {
+                    SparseKind::TopkLast
+                }
+            },
+            &mut tables,
+        )?;
+        // dsa_attn: optional, not used by the CP delta.
+        load_sparse_parquet(
+            &resolve_op_sources(
+                &self.perf_db_sources,
+                &format!("{file_prefix}_dsa_attn_module_perf.parquet"),
+                &self.data_root,
+            ),
+            num_heads,
+            |_| SparseKind::DsaAttn,
+            &mut tables,
+        )?;
+        let arc = Arc::new(tables);
+        Ok(Arc::clone(
+            self.sparse
+                .lock()
+                .expect("dsa sparse cache poisoned")
+                .entry(key)
+                .or_insert(arc),
+        ))
     }
 
     /// Context-DSA module latency for the sparse-attention block.
@@ -617,6 +722,161 @@ fn load_dsa_parquet(sources: &[PerfSource]) -> Result<DsaGrids, AicError> {
     Ok(DsaGrids { by_keys })
 }
 
+/// Destination grid selector for one CP sparse parquet row, decided from the
+/// row's `score_mode` (present only in the topk file).
+enum SparseKind {
+    Mqa,
+    TopkLast,
+    TopkFlat,
+    DsaAttn,
+}
+
+/// Load one CP sparse sub-kernel parquet into `tables`. Mirrors Python
+/// `_load_glm5_sparse`'s per-file body:
+/// - missing file => no-op (grid stays empty; fail-loud happens at the
+///   composition's missing-tables check);
+/// - `num_heads` filter only when the column exists
+///   (`df[df["num_heads"] == num_heads] if "num_heads" in df else df`);
+/// - within a source, LAST row wins for duplicate `(bs, isl, step)`
+///   coordinates (pandas `iterrows` overwrite); across shared-layer sources
+///   the earlier (higher-priority) source wins, like every other multi-source
+///   loader here (Python reads primary-only, which the default single-source
+///   resolution reproduces exactly).
+fn load_sparse_parquet(
+    sources: &[PerfSource],
+    num_heads: u32,
+    kind_of: impl Fn(Option<&str>) -> SparseKind,
+    tables: &mut DsaSparseTables,
+) -> Result<(), AicError> {
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        let reader = PerfReader::open(path)?;
+        let batch_size_col = reader.col("batch_size")?;
+        let isl_col = reader.col("isl")?;
+        let step_col = reader.col("step")?;
+        let latency_col = reader.col("latency")?;
+        let num_heads_col = reader.col_optional("num_heads");
+        let score_mode_col = reader.col_optional("score_mode");
+        let ks_col = reader.col_optional("kernel_source");
+        // Phase 1: collapse this source with last-row-wins (plain insert).
+        let mut source_values: BTreeMap<(u8, u32, u32, u32), f64> = BTreeMap::new();
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            if let Some(col) = num_heads_col {
+                if row.u32(col)? != num_heads {
+                    continue;
+                }
+            }
+            let kind = kind_of(row.str_optional(score_mode_col)?);
+            source_values.insert(
+                (
+                    kind as u8,
+                    row.u32(batch_size_col)?,
+                    row.u32(isl_col)?,
+                    row.u32(step_col)?,
+                ),
+                row.f64(latency_col)?,
+            );
+        }
+        // Phase 2: merge with first-source-wins (earlier source outranks).
+        for ((kind, bs, isl, step), latency) in source_values {
+            let grid = match kind {
+                k if k == SparseKind::Mqa as u8 => &mut tables.mqa,
+                k if k == SparseKind::TopkLast as u8 => &mut tables.topk_last,
+                k if k == SparseKind::TopkFlat as u8 => &mut tables.topk_flat,
+                _ => &mut tables.dsa_attn,
+            };
+            grid.entry(bs)
+                .or_default()
+                .entry((isl, step))
+                .or_insert(latency);
+        }
+    }
+    Ok(())
+}
+
+/// Pick the collected-batch slice nearest to `b` from a bs-keyed sparse grid.
+/// Mirror of Python `ContextDSAModule._bs_slice`: exact match when collected
+/// (the common case), otherwise the nearest collected batch. `None` for an
+/// empty grid (Python returns `{}`; `lookup_2d` on it yields `None`). On an
+/// exact-distance tie the SMALLER collected batch wins (ascending iteration,
+/// strict `<`; Python's tie order follows file row order and is not defined).
+pub fn bs_slice(by_bs: &SparseGrid, b: u32) -> Option<&BTreeMap<(u32, u32), f64>> {
+    if let Some(exact) = by_bs.get(&b) {
+        return Some(exact);
+    }
+    let mut best: Option<(u64, &BTreeMap<(u32, u32), f64>)> = None;
+    for (&bs, grid) in by_bs {
+        let dist = (i64::from(bs) - i64::from(b)).unsigned_abs();
+        if best.map_or(true, |(d, _)| dist < d) {
+            best = Some((dist, grid));
+        }
+    }
+    best.map(|(_, grid)| grid)
+}
+
+/// Lookup a `{(isl, step) -> latency}` sparse grid at a fixed isl (exact grid
+/// value, else nearest collected isl), linear interp on step (clamped at the
+/// collected step range). Mirror of Python `ContextDSAModule._lookup_2d`,
+/// including the fail-loud contract: an `isl` beyond the collected grid RAISES
+/// (mqa/topk scale super-linearly with isl — clamping would silently
+/// under-estimate). Empty table => `Ok(None)`.
+pub fn lookup_2d(
+    table: &BTreeMap<(u32, u32), f64>,
+    isl: u32,
+    step: u32,
+) -> Result<Option<f64>, AicError> {
+    if table.is_empty() {
+        return Ok(None);
+    }
+    let max_isl = table.keys().map(|&(i, _)| i).max().expect("non-empty");
+    if isl > max_isl {
+        return Err(AicError::PerfDatabase(format!(
+            "DSA CP: isl={isl} exceeds the collected sparse-kernel grid \
+             (max isl={max_isl}); mqa/topk scale super-linearly with isl, so \
+             clamping the isl axis would silently under-estimate. Re-collect with \
+             AIC_CHUNKED_PREFILL_SIZE >= {isl} \
+             (docs/CONTEXT_PARALLEL_DSA_MODELING.md \u{a7}9.1)."
+        )));
+    }
+    // Nearest collected isl; ties pick the smaller (Python `min` over the
+    // sorted isl list keeps the first == smaller candidate).
+    let mut use_isl = None;
+    for &(i, _) in table.keys() {
+        let dist = (i64::from(i) - i64::from(isl)).unsigned_abs();
+        if use_isl.map_or(true, |(d, _)| dist < d) {
+            use_isl = Some((dist, i));
+        }
+    }
+    let use_isl = use_isl.expect("non-empty").1;
+    if let Some(&exact) = table.get(&(use_isl, step)) {
+        return Ok(Some(exact));
+    }
+    let steps: Vec<u32> = table
+        .range((use_isl, u32::MIN)..=(use_isl, u32::MAX))
+        .map(|(&(_, st), _)| st)
+        .collect();
+    let Some((&first, &last)) = steps.first().zip(steps.last()) else {
+        return Ok(None);
+    };
+    let lo = steps.iter().rev().find(|&&st| st <= step).copied().unwrap_or(first);
+    let hi = steps.iter().find(|&&st| st >= step).copied().unwrap_or(last);
+    if lo == hi {
+        return Ok(Some(table[&(use_isl, lo)]));
+    }
+    let a = table[&(use_isl, lo)];
+    let b = table[&(use_isl, hi)];
+    Ok(Some(
+        a + (b - a) * f64::from(step - lo) / f64::from(hi - lo),
+    ))
+}
+
 fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
     AicError::PerfDatabase(format!(
         "{table} data missing for {descriptor} at {}",
@@ -799,6 +1059,192 @@ mod tests {
         approx_rel(q(1, 65536, 0, 128, dsv32), 89.56218926395842);
         // prefix util-hold beyond the 128 step frontier
         approx_rel(q(1, 2048, 4096, 128, dsv32), 3.2580009866421995);
+    }
+
+    // ------------------------------------------------------------------
+    // CP sparse sub-kernel tables (GLM-5/DSA sparse-CP prefill model)
+    // ------------------------------------------------------------------
+
+    fn grid(rows: &[(u32, u32, u32, f64)]) -> SparseGrid {
+        let mut g = SparseGrid::new();
+        for &(bs, isl, step, lat) in rows {
+            g.entry(bs).or_default().insert((isl, step), lat);
+        }
+        g
+    }
+
+    /// Mirrors Python
+    /// `tests/unit/sdk/test_cp_dsa_modeling.py::test_lookup_2d_exact_and_step_interp`.
+    #[test]
+    fn cp_lookup_2d_exact_step_interp_clamp_and_empty() {
+        let t = grid(&[(1, 4096, 0, 100.0), (1, 4096, 1024, 200.0), (1, 8192, 0, 400.0)]);
+        let t = &t[&1];
+        assert_eq!(lookup_2d(t, 4096, 0).unwrap(), Some(100.0)); // exact grid point
+        assert_eq!(lookup_2d(t, 4096, 512).unwrap(), Some(150.0)); // step interp
+        assert_eq!(lookup_2d(t, 4096, 4096).unwrap(), Some(200.0)); // step clamp to max
+        assert_eq!(lookup_2d(&BTreeMap::new(), 4096, 0).unwrap(), None); // empty table
+    }
+
+    /// Mirrors Python `test_lookup_2d_fails_loud_on_out_of_grid_isl`: isl
+    /// beyond the collected grid must RAISE, not silently clamp.
+    #[test]
+    fn cp_lookup_2d_fails_loud_on_out_of_grid_isl() {
+        let t = grid(&[(1, 4096, 0, 100.0), (1, 8192, 0, 400.0)]);
+        let err = lookup_2d(&t[&1], 16384, 0).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DSA CP: isl=16384 exceeds the collected sparse-kernel grid")
+                && msg.contains("max isl=8192")
+                && msg.contains("AIC_CHUNKED_PREFILL_SIZE >= 16384"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    /// Python `_bs_slice`: exact match, else nearest collected batch; empty -> {}.
+    #[test]
+    fn cp_bs_slice_exact_nearest_and_empty() {
+        let g = grid(&[(1, 2048, 0, 25.0), (8, 2048, 0, 90.0)]);
+        assert_eq!(bs_slice(&g, 8).unwrap()[&(2048, 0)], 90.0); // exact
+        assert_eq!(bs_slice(&g, 6).unwrap()[&(2048, 0)], 90.0); // nearest: |6-8| < |6-1|
+        assert_eq!(bs_slice(&g, 3).unwrap()[&(2048, 0)], 25.0); // nearest: |3-1| < |3-8|
+        assert!(bs_slice(&SparseGrid::new(), 1).is_none()); // empty grid
+    }
+
+    /// Absent sparse parquets => empty tables (Python `_read` -> None ->
+    /// grids stay `{}`); the operator's missing-tables check fails loud on top.
+    #[test]
+    fn cp_sparse_absent_files_load_empty() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let table = DsaTable::new(tmp.path().to_path_buf());
+        let sparse = table
+            .load_cp_sparse("GlmMoeDsaForCausalLM", 64)
+            .expect("absent files are not a load error");
+        assert_eq!(*sparse, DsaSparseTables::default());
+    }
+
+    /// Write one synthetic CP sparse parquet with the collector's column set
+    /// (`num_heads, batch_size, isl, step, latency[, score_mode]`).
+    fn write_sparse_parquet(path: &Path, with_score_mode: bool, rows: &[(i64, i64, i64, i64, f64, &str)]) {
+        use parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int64Type};
+        use parquet::file::properties::WriterProperties;
+        use parquet::file::writer::SerializedFileWriter;
+        use parquet::schema::parser::parse_message_type;
+
+        let schema = if with_score_mode {
+            "message schema {
+                REQUIRED INT64 num_heads;
+                REQUIRED INT64 batch_size;
+                REQUIRED INT64 isl;
+                REQUIRED INT64 step;
+                REQUIRED DOUBLE latency;
+                REQUIRED BINARY score_mode (UTF8);
+            }"
+        } else {
+            "message schema {
+                REQUIRED INT64 num_heads;
+                REQUIRED INT64 batch_size;
+                REQUIRED INT64 isl;
+                REQUIRED INT64 step;
+                REQUIRED DOUBLE latency;
+            }"
+        };
+        let schema = Arc::new(parse_message_type(schema).expect("schema must parse"));
+        let file = std::fs::File::create(path).expect("create parquet");
+        let mut writer =
+            SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+                .expect("writer");
+        let mut rg = writer.next_row_group().expect("row group");
+        let int_cols: [Vec<i64>; 4] = [
+            rows.iter().map(|r| r.0).collect(),
+            rows.iter().map(|r| r.1).collect(),
+            rows.iter().map(|r| r.2).collect(),
+            rows.iter().map(|r| r.3).collect(),
+        ];
+        for values in &int_cols {
+            let mut col = rg.next_column().expect("next col").expect("int col");
+            col.typed::<Int64Type>().write_batch(values, None, None).expect("write ints");
+            col.close().expect("close col");
+        }
+        let latencies: Vec<f64> = rows.iter().map(|r| r.4).collect();
+        let mut col = rg.next_column().expect("next col").expect("latency col");
+        col.typed::<DoubleType>().write_batch(&latencies, None, None).expect("write latency");
+        col.close().expect("close col");
+        if with_score_mode {
+            let modes: Vec<ByteArray> = rows.iter().map(|r| ByteArray::from(r.5)).collect();
+            let mut col = rg.next_column().expect("next col").expect("score col");
+            col.typed::<ByteArrayType>().write_batch(&modes, None, None).expect("write score");
+            col.close().expect("close col");
+        }
+        rg.close().expect("close row group");
+        writer.close().expect("close writer");
+    }
+
+    /// Loader parity with Python `ContextDSAModule._load_glm5_sparse` on the
+    /// same synthetic rows: num_heads filter, last-row-wins within a file,
+    /// score_mode "flat" -> topk_flat (else topk_last), bs-keyed grids,
+    /// absent dsa_attn file -> empty grid. Expectation generated with:
+    ///
+    /// ```text
+    /// PYTHONPATH=src python3 -c "
+    /// import tempfile, os, types
+    /// import pandas as pd
+    /// from aiconfigurator.sdk.operations.dsa import ContextDSAModule
+    /// tmp = tempfile.mkdtemp()
+    /// data_dir = os.path.join(tmp, 'data', 'vllm', '1.0'); os.makedirs(data_dir)
+    /// pd.DataFrame([
+    ///     dict(num_heads=64, batch_size=1, isl=2048, step=0, latency=25.0),
+    ///     dict(num_heads=64, batch_size=1, isl=16384, step=0, latency=1600.0),
+    ///     dict(num_heads=64, batch_size=1, isl=16384, step=0, latency=1601.5),
+    ///     dict(num_heads=32, batch_size=1, isl=2048, step=0, latency=99.0),
+    ///     dict(num_heads=64, batch_size=2, isl=2048, step=128, latency=30.0),
+    /// ]).to_parquet(os.path.join(data_dir, 'glm5_mqa_logits_module_perf.parquet'))
+    /// pd.DataFrame([
+    ///     dict(num_heads=64, batch_size=1, isl=16384, step=0, latency=800.0, score_mode='top_last'),
+    ///     dict(num_heads=64, batch_size=1, isl=2048, step=0, latency=190.0, score_mode='top_last'),
+    ///     dict(num_heads=64, batch_size=1, isl=2048, step=0, latency=100.0, score_mode='flat'),
+    /// ]).to_parquet(os.path.join(data_dir, 'glm5_topk_module_perf.parquet'))
+    /// db = types.SimpleNamespace(systems_root=tmp, system_spec={'data_dir': 'data'},
+    ///     system='testsys', backend='vllm', version='1.0', enable_shared_layer=False)
+    /// print(ContextDSAModule._load_glm5_sparse(db, 'GlmMoeDsaForCausalLM', 64)['_2d'])"
+    /// # -> mqa       = {1: {(2048, 0): 25.0, (16384, 0): 1601.5}, 2: {(2048, 128): 30.0}}
+    /// #    topk_last = {1: {(16384, 0): 800.0, (2048, 0): 190.0}}
+    /// #    topk_flat = {1: {(2048, 0): 100.0}}
+    /// #    dsa_attn  = {}
+    /// ```
+    #[test]
+    fn cp_sparse_loader_matches_python_loader() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_sparse_parquet(
+            &tmp.path().join("glm5_mqa_logits_module_perf.parquet"),
+            false,
+            &[
+                (64, 1, 2048, 0, 25.0, ""),
+                (64, 1, 16384, 0, 1600.0, ""),
+                (64, 1, 16384, 0, 1601.5, ""), // duplicate coordinate: LAST row wins
+                (32, 1, 2048, 0, 99.0, ""),    // filtered out (num_heads != 64)
+                (64, 2, 2048, 128, 30.0, ""),  // second bs slice
+            ],
+        );
+        write_sparse_parquet(
+            &tmp.path().join("glm5_topk_module_perf.parquet"),
+            true,
+            &[
+                (64, 1, 16384, 0, 800.0, "top_last"),
+                (64, 1, 2048, 0, 190.0, "top_last"),
+                (64, 1, 2048, 0, 100.0, "flat"),
+            ],
+        );
+        let table = DsaTable::new(tmp.path().to_path_buf());
+        let sparse = table
+            .load_cp_sparse("GlmMoeDsaForCausalLM", 64)
+            .expect("sparse tables must load");
+        assert_eq!(
+            sparse.mqa,
+            grid(&[(1, 2048, 0, 25.0), (1, 16384, 0, 1601.5), (2, 2048, 128, 30.0)])
+        );
+        assert_eq!(sparse.topk_last, grid(&[(1, 16384, 0, 800.0), (1, 2048, 0, 190.0)]));
+        assert_eq!(sparse.topk_flat, grid(&[(1, 2048, 0, 100.0)]));
+        assert!(sparse.dsa_attn.is_empty());
     }
 
     /// Generation parity: exact / interior seq / interior batch / seq
