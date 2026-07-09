@@ -622,15 +622,38 @@ def run_attention_torch(
     with forward_context(ForwardContext(attn_backend=attn_backend)):
         attn_backend.init_forward_metadata(forward_batch)
 
-        # FP8 KV cache controls storage independently from live Q/K/V. Do not
-        # label a BF16-input backend as FP8 attention merely because its cache
-        # is FP8.
-        if is_context_phase and use_fp8_context_fmha:
-            if attn_backend_name in {"flashinfer", "trtllm_mha"}:
-                raise ValueError(f"SGLang 0.5.14 {attn_backend_name} has no FP8 live-activation prefill path")
-            q = q.to(kvtype)
-            k = k.to(kvtype)
-            v = v.to(kvtype)
+        # Label prefill rows by the compute dtype the backend actually uses in
+        # SGLang 0.5.14 — the input dtype is an API contract, not the compute
+        # dtype:
+        #   - fa3 (SM90): whenever the KV cache is FP8 and head_dim <= 256 it
+        #     casts Q to the KV dtype itself (flashattention_backend.py:857-872),
+        #     so FP8-KV prefill IS FP8 FMHA compute.
+        #   - trtllm_mha (TRTLLM-GEN on SM100/103): requires BF16 inputs and
+        #     quantizes Q internally via scaled_fp8_quant when the KV cache is
+        #     FP8 (trtllm_mha_backend.py:154-158, 291-301). Feed BF16 and let
+        #     the backend quantize; an external FP8 cast would break its input
+        #     contract without changing the (already FP8) compute.
+        #   - flashinfer: BF16 Q reads the FP8 KV cache with descales; there is
+        #     no FP8 prefill compute path, so an fp8-labeled row would be a lie.
+        # Consequence: on fa3/trtllm_mha a "BF16-compute prefill on FP8 KV"
+        # combo does not exist — the backend force-quantizes Q — so collecting
+        # it would record FP8 compute under a bfloat16 label. Fail closed.
+        if is_context_phase:
+            if use_fp8_context_fmha:
+                if attn_backend_name == "flashinfer":
+                    raise ValueError("SGLang 0.5.14 flashinfer has no FP8 prefill compute path")
+                if attn_backend_name != "trtllm_mha":
+                    q = q.to(kvtype)
+                    k = k.to(kvtype)
+                    v = v.to(kvtype)
+            elif use_fp8_kv_cache and (
+                attn_backend_name == "trtllm_mha" or (attn_backend_name == "fa3" and head_dim <= 256)
+            ):
+                raise ValueError(
+                    f"SGLang 0.5.14 {attn_backend_name} quantizes Q to FP8 internally when the KV cache "
+                    "is FP8, so a BF16-compute prefill on an FP8 KV cache does not exist; this "
+                    "combination is the fp8_context_fmha case"
+                )
 
         # Mirror the serving call contract: only sink-carrying models pass the
         # ``sinks`` kwarg (e.g. gpt_oss.py), and SGLang 0.5.14

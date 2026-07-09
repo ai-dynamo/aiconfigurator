@@ -347,17 +347,48 @@ def test_blackwell_context_cases_are_not_silently_removed(
     assert cases[0][5:7] == [True, True]
 
 
-@pytest.mark.unit
-def test_fp8_live_attention_rejects_backends_that_only_accept_bfloat16_inputs():
+def _run_attention_torch_source() -> str:
     source_path = REPO_ROOT / "collector" / "sglang" / "collect_attn.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
     function = next(
         node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_attention_torch"
     )
-    source = ast.get_source_segment(source_path.read_text(encoding="utf-8"), function)
+    return ast.get_source_segment(source_path.read_text(encoding="utf-8"), function)
 
-    assert 'attn_backend_name in {"flashinfer", "trtllm_mha"}' in source
-    assert 'attn_backend_name != "trtllm_mha"' not in source
+
+@pytest.mark.unit
+def test_fp8_prefill_labels_follow_backend_compute_dtype():
+    """FP8 prefill labeling mirrors SGLang 0.5.14 per-backend compute truth.
+
+    flashinfer has no FP8 prefill compute path at all (BF16 Q reads the FP8 KV
+    cache with descales) and must reject the fp8_context_fmha case. trtllm_mha
+    (TRTLLM-GEN) requires BF16 inputs but quantizes Q internally via
+    scaled_fp8_quant (trtllm_mha_backend.py:154-158, 291-301), so its
+    fp8_context_fmha case runs WITHOUT an external cast — the FP8 compute
+    happens inside the backend.
+    """
+    source = _run_attention_torch_source()
+
+    assert 'attn_backend_name == "flashinfer"' in source
+    assert "has no FP8 prefill compute path" in source
+    # trtllm_mha must be exempt from the external cast, not rejected.
+    assert 'attn_backend_name != "trtllm_mha"' in source
+    assert 'attn_backend_name in {"flashinfer", "trtllm_mha"}' not in source
+
+
+@pytest.mark.unit
+def test_bf16_prefill_on_fp8_kv_fails_closed_on_internally_quantizing_backends():
+    """A BF16-compute prefill on an FP8 KV cache does not exist on fa3/trtllm_mha.
+
+    fa3 casts Q to the KV dtype whenever the cache is FP8 and head_dim <= 256
+    (flashattention_backend.py:857-872); TRTLLM-GEN always quantizes Q when the
+    cache is FP8. Collecting that combination would record FP8 compute under a
+    bfloat16 attn_dtype label, so it must raise instead.
+    """
+    source = _run_attention_torch_source()
+
+    assert 'attn_backend_name == "trtllm_mha" or (attn_backend_name == "fa3" and head_dim <= 256)' in source
+    assert "quantizes Q to FP8 internally" in source
 
 
 @pytest.mark.parametrize(

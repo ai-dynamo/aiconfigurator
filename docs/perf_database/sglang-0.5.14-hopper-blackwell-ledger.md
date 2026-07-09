@@ -1799,3 +1799,48 @@ mhc_module (serving-blocking stock gaps); no other markers. The two yaml
 serving-truth corrections (MiMo-V2 SM89 triton pin, w4a16_mxfp4 SM89
 axis + backend) carry hardware citations from this round's probes and are
 pinned by the updated registry-marker contract test.
+
+### FP8 prefill compute-dtype relabel: fa3/trtllm_mha internal Q quantization (2026-07-09)
+
+Host-level contract correction, no new GPU evidence in this entry. The
+`use_fp8_context_fmha` axis previously modeled "FP8 live-activation inputs"
+and rejected flashinfer AND trtllm_mha; source audit shows the input dtype is
+an API contract, not the compute dtype:
+
+- trtllm_mha, TRTLLM-GEN impl (SM100/103): requires BF16 Q input and
+  quantizes Q internally via `scaled_fp8_quant` whenever the KV cache is FP8
+  (`trtllm_mha_backend.py:154-158` — "TRTLLM-GEN: KV fp8: q_type = fp8" —
+  and `_maybe_quantize_q`, lines 291-301; descales feed BMM1/BMM2, lines
+  279-284). FP8-KV prefill on Blackwell IS FP8 FMHA compute.
+- fa3 (SM90): casts Q to the KV dtype itself whenever the KV cache is FP8,
+  head_dim <= 256, and fa_impl_ver != 4
+  (`flashattention_backend.py:857-872`). Same coupling as TRTLLM-GEN.
+- flashinfer (SM89/120): BF16 Q reads the FP8 KV cache with descales; no FP8
+  prefill compute path exists. The XQA impl of trtllm_mha (SM90/120) also
+  keeps Q BF16, but the collector never routes trtllm_mha on those SMs.
+
+Collector consequence (collect_attn.py, both fixed in this entry):
+
+1. `(kv=fp8, fmha=fp8)` on trtllm_mha no longer raises: the case feeds BF16
+   per the serving contract and lets the backend quantize; the row keeps the
+   fp8 attn_dtype label because the compute is FP8. The old raise was a
+   false negative that left Blackwell with no fp8 context FMHA rows.
+2. `(kv=fp8, fmha=bf16)` context on trtllm_mha, and on fa3 when
+   head_dim <= 256, now fails closed: the backend force-quantizes Q, so a
+   BF16-compute prefill on an FP8 KV cache does not exist there — collecting
+   it recorded FP8 compute under a bfloat16 label.
+
+Existing-artifact impact: any previously collected `(kv=fp8,
+attn_dtype=bfloat16)` context rows on fa3-routed (SM90) or
+trtllm_mha-routed (SM100/103) plans measured FP8 compute and are mislabeled;
+they must be dropped or recollected before the affected files are published.
+Generation rows are unaffected in substance — decode with FP8 KV also
+quantizes Q on these backends, but decode has no separate compute-dtype
+case; its `attn_dtype` column is vestigial for generation and must not be
+read as the decode compute dtype.
+
+Required follow-up probes: one SM100 smoke case per phase confirming the
+trtllm_mha fp8_context_fmha path collects rows (and that the
+`(fp8, bf16)` context raise fires), and an SM90 fa3 recheck that
+`(kv=fp8, fmha=bf16)` raises for head_dim <= 256 while head_dim > 256
+profiles (if any enter the plan) still execute.
