@@ -84,9 +84,7 @@ type ByStep = BTreeMap<u32, ByIsl>;
 type ByNative = BTreeMap<u32, ByStep>;
 
 pub struct Dsv4Table {
-    // dsv4 errors key off the per-source path, not data_root, so the field is
-    // retained for struct parity with the other perf tables but not read here.
-    #[allow(dead_code)]
+    // Used by the topk-calib guard (and kept for error context).
     data_root: PathBuf,
     /// Ordered, priority-sorted sources for each of the four DSV4 module perf
     /// files (shared-layer aware; see [`PerfSource`]). Single-primary,
@@ -214,6 +212,23 @@ impl Dsv4Table {
     /// collapses that level exactly and `prefix>0` is out-of-range util-hold
     /// with the prefix-aware SOL carrying the effect (matching Python).
     #[allow(clippy::too_many_arguments)]
+    /// Guard: Python applies the CSA topk DELTA correction (flat vs
+    /// top_last, `AIC_DSV4_TOPK_CORRECTION`) to CSA module queries whenever
+    /// `dsv4_csa_topk_calib_perf.parquet` is present. That correction is NOT
+    /// ported here, so the moment calib data ships the two engines would
+    /// silently diverge (measured dummy-flat bias ~ half the per-layer CSA
+    /// time). Fail loud instead; the port is tracked in issue #1333 and is
+    /// ordered after the topk data/collection redesign.
+    fn reject_unported_topk_calib(&self, attn_kind: AttnKind) -> Result<(), AicError> {
+        if attn_kind == AttnKind::Csa && self.data_root.join("dsv4_csa_topk_calib_perf.parquet").exists() {
+            return Err(AicError::PerfDatabase(
+                "dsv4_csa_topk_calib data is present but the CSA topk DELTA correction is not                  ported to the compiled engine; use --engine-step-backend python for DSV4 CSA                  until it is (tracked in issue #1333)."
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn query_context(
         &self,
         spec: &SystemSpec,
@@ -227,6 +242,7 @@ impl Dsv4Table {
         architecture: &str,
         prefix: u32,
     ) -> Result<f64, AicError> {
+        self.reject_unported_topk_calib(attn_kind)?;
         let grids = match attn_kind {
             AttnKind::Csa => self.load_csa_context()?,
             AttnKind::Hca => self.load_hca_context()?,
@@ -278,6 +294,7 @@ impl Dsv4Table {
         gemm_quant: GemmQuantMode,
         architecture: &str,
     ) -> Result<f64, AicError> {
+        self.reject_unported_topk_calib(attn_kind)?;
         let grids = match attn_kind {
             AttnKind::Csa => self.load_csa_generation()?,
             AttnKind::Hca => self.load_hca_generation()?,
