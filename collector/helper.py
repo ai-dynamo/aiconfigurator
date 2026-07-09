@@ -466,6 +466,18 @@ _LOGGING_CONFIGURED = False
 _LOG_DIR = None
 
 
+def log_scope_dirname(scope) -> str:
+    """Join the op scope for the log-directory name, capped for the filesystem.
+
+    A long --ops list must not crash logging setup: filenames are limited to
+    255 bytes on common filesystems, so summarize past the cap.
+    """
+    name = "+".join(scope)
+    if len(name) > 80:
+        name = f"{scope[0]}+{len(scope) - 1}ops"
+    return name
+
+
 def setup_logging(scope=["all"], debug=False, worker_id=None):
     """
     Setup structured logging - auto-configures based on process type
@@ -550,7 +562,7 @@ def setup_logging(scope=["all"], debug=False, worker_id=None):
 
     # Create log directory
     time_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    _LOG_DIR = Path(f"{'+'.join(scope)}_{time_stamp}")
+    _LOG_DIR = Path(f"{log_scope_dirname(scope)}_{time_stamp}")
     if not _LOG_DIR.is_dir():
         _LOG_DIR.mkdir()
 
