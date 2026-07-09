@@ -386,10 +386,10 @@ def test_sweep_disagg_require_same_tp_sglang_non_wideep():
 
 def test_deepseek_prefill_downgrades_decode_keeps_fp8_fmha(caplog):
     """DeepSeek context attention (prefill) downgrades fp8 FMHA to bf16 via the
-    V3/Kimi capability rule.  Decode keeps the checkpoint-inferred fp8 label:
-    no generation table keys on fmha (the generation MLA module table has no
-    fmha axis), so the label is inert for decode modeling and the data-driven
-    fallback skips decode roles -- no warning either way.
+    data fallback (the packaged context_mla tables carry no fp8 slice), with
+    one warning for the task.  Decode keeps the checkpoint-inferred fp8 label:
+    no generation table keys on fmha, so the label is inert for decode modeling
+    and the fallback skips decode roles.
     """
     import logging
 
@@ -407,7 +407,8 @@ def test_deepseek_prefill_downgrades_decode_keeps_fp8_fmha(caplog):
         )
     assert t.prefill_fmha_quant_mode == common.FMHAQuantMode.bfloat16
     assert t.decode_fmha_quant_mode == common.FMHAQuantMode.fp8
-    assert not any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
+    fallback_msgs = [r.message for r in caplog.records if "falling back to bfloat16 FMHA" in r.message]
+    assert len(fallback_msgs) == 1 and fallback_msgs[0].startswith("prefill ")
 
 
 def test_fmha_data_fallback_unknown_arch_downgrades_with_warning(caplog):
@@ -489,10 +490,11 @@ def test_fmha_data_fallback_without_bf16_slice_left_untouched(monkeypatch, caplo
     assert not any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
 
 
-def test_deepseek_v32_v4_downgrade_fmha_all_roles():
-    """DeepSeek-V3.2 / V4 use bf16 FMHA on EVERY role incl. decode (DSA / compressed
-    attention perf tables only carry bf16). Mirrors v1 _apply_model_quant_defaults,
-    which is unconditional (unlike the context-only V3/Kimi rule).
+def test_deepseek_v32_v4_context_fmha_downgrade_is_data_driven():
+    """DeepSeek-V3.2 / V4 context fmha resolves bf16 on sglang b200 because the
+    dsa/dsv4 context module tables there carry only bf16 slices -- decided by
+    the data fallback, not a hand-written model rule.  Decode keeps the fp8
+    label (no generation table keys on fmha).
     """
     from aiconfigurator.sdk import common
 
@@ -507,7 +509,7 @@ def test_deepseek_v32_v4_downgrade_fmha_all_roles():
             decode_backend_name="sglang",
         )
         assert t.prefill_fmha_quant_mode == common.FMHAQuantMode.bfloat16
-        assert t.decode_fmha_quant_mode == common.FMHAQuantMode.bfloat16
+        assert t.decode_fmha_quant_mode == common.FMHAQuantMode.fp8
 
 
 def test_nextn_default_respects_hf_then_family_fallback():
@@ -955,8 +957,9 @@ def test_run_dispatches_to_sweep_agg(monkeypatch):
     )
     result = t.run(validate=False)  # this test isolates dispatch; validate() is covered separately
     assert result == "agg-result"
-    # DB loaded for the (system, backend, version) triple
-    assert captured["dbs"] == [("h200_sxm", t.backend_name, t.backend_version)]
+    # DB loaded for the (system, backend, version) triple (the resolve-time
+    # fmha fallback loads the same view earlier; dispatch adds one more).
+    assert set(captured["dbs"]) == {("h200_sxm", t.backend_name, t.backend_version)}
     assert captured["agg_kwargs"]["model_path"] == "deepseek-ai/DeepSeek-V3"
     assert captured["agg_kwargs"]["database"] == f"db-h200_sxm-{t.backend_name}-{t.backend_version}"
 

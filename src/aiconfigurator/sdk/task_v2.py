@@ -38,6 +38,7 @@ from typing import Any, Literal
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.models import (
     _infer_quant_modes_from_raw_config,
+    attention_op_keys,
     check_is_moe,
     get_model_family,
 )
@@ -717,8 +718,8 @@ class Task:
                 self._set_role_attr(role, "moe_quant_mode", common.MoEQuantMode.w4a8_mxfp4_mxfp8)
 
         # Track whether fmha came from an explicit field (vs HF/fallback): the
-        # V3/Kimi context downgrade must NOT fire on an EXPLICIT fp8 -- v1 keeps it
-        # (its `not explicit_fmha_mode` guard) and lets validate fail fast.
+        # data-driven fallback below must NOT fire on an EXPLICIT fp8 -- explicit
+        # values are the user's contract and validate fails fast on them.
         fmha_explicit: dict[str, bool] = {}
         for role in roles:
             for key in _QUANT_ENUM_TABLES:
@@ -747,53 +748,16 @@ class Task:
                 resolved = from_hf if from_hf is not None else fallback
                 self._set_role_attr(role, key, resolved)
 
-        # Backend / architecture FMHA fp8->bf16 fixups (mirror v1: the V3/Kimi rule
-        # lives in validate_context => context-only; the V3.2/GLM-DSA, V4 and vLLM
-        # rules live in _apply_model_quant_defaults => every role incl. decode).
-        # These encode KERNEL CAPABILITY facts -- the deployed engine runs bf16
-        # FMHA for these arch/backend combos regardless of checkpoint quant -- so
-        # they apply even when no perf DB is packaged (synthetic what-if systems).
-        # Unknown models do NOT need a new rule here: the data-driven fallback
-        # below downgrades any remaining inferred fp8 that has no perf data.
-        # The explicit-fp8 asymmetry is deliberate: only the V3/Kimi rule spares
-        # an explicit fp8 (v1's `not explicit_fmha_mode` guard); the DSA/V4/vLLM
-        # rules override even an explicit fp8, keeping v1 profile YAMLs
-        # (`profiles: [fp8]`) deployable on these combos.
-        for role in roles:
-            backend_name = self._role_attr(role, "backend_name")
-            # DeepSeek-V3/Kimi context attention (MLA prefill) does not support fp8 FMHA,
-            # so downgrade to bfloat16 -- but ONLY for context-attention roles (agg, prefill).
-            # The decode role uses generation attention, which keeps fp8.
-            if (
-                role != "decode"
-                and not fmha_explicit.get(role, False)
-                and self._architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
-                and self._role_attr(role, "fmha_quant_mode") == common.FMHAQuantMode.fp8
-            ):
-                self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
-            # DSA module (DeepSeek-V3.2 / GLM-5): DSA perf tables only carry bf16 FMHA.
-            if (
-                self._architecture in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM")
-                and backend_name in ("trtllm", "sglang")
-                and self._role_attr(role, "fmha_quant_mode") == common.FMHAQuantMode.fp8
-            ):
-                self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
-            # DeepSeek-V4 compressed attention is recorded as bf16 in the perf tables.
-            if (
-                self._architecture == "DeepseekV4ForCausalLM"
-                and self._role_attr(role, "fmha_quant_mode") == common.FMHAQuantMode.fp8
-            ):
-                self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
-            # vLLM perf tables only include bf16 FMHA.
-            if backend_name == "vllm" and self._role_attr(role, "fmha_quant_mode") == common.FMHAQuantMode.fp8:
-                self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
-
-        # Data-driven fallback for whatever inferred fp8 remains: if the role's
-        # perf DB has no fp8 slice in its fmha-keyed context-attention table,
-        # fall back to bfloat16 with a warning instead of failing validate
-        # later.  bf16-as-fp8 is conservative: same kv-cache dtype, attention
-        # math modeled at bf16 throughput.  Explicit user fp8 is never
-        # overridden by this tier -- validate stays fail-fast for it.
+        # Data-driven FMHA resolution: if an inferred fp8 has no fp8 slice in
+        # the role's fmha-keyed context-attention table, fall back to bfloat16
+        # with a warning instead of failing validate later.  bf16-as-fp8 is
+        # conservative: same kv-cache dtype, attention math modeled at bf16
+        # throughput.  The data IS the capability statement -- there are no
+        # per-model downgrade rules; when fp8 slices land for a combo (e.g.
+        # DSA on Blackwell vLLM), the inference survives and uses them.
+        # Explicit user fp8 is never overridden -- validate stays fail-fast
+        # for it (including v1 profile-derived values).  Systems with no
+        # packaged data keep the checkpoint inference untouched.
         #
         # Context-using roles only: NO generation table keys on fmha (decode
         # compute dtype follows the kv-cache dtype; the generation MLA module
@@ -827,18 +791,13 @@ class Task:
     def _attention_op_keys(self, role: str) -> tuple[str, str]:
         """(context_op, generation_op) support-matrix keys for this role's model
         family / backend / wideep combination (shared by the resolve-time FMHA
-        fallback and ``_check_role_against_db``)."""
-        backend = self._role_attr(role, "backend_name")
-        fam = self._model_family
-        if fam == "DEEPSEEKV4":
-            return "deepseek_v4_context_module", "deepseek_v4_generation_module"
-        if fam == "DEEPSEEKV32":
-            return "dsa_context_module", "dsa_generation_module"
-        if fam in ("DEEPSEEK", "KIMIK25") and backend != "vllm":
-            if backend == "sglang" and bool(self._role_attr(role, "enable_wideep")):
-                return "wideep_context_mla", "wideep_generation_mla"
-            return "context_mla", "generation_mla"
-        return "context_attention", "generation_attention"
+        fallback and ``_check_role_against_db``; mapping lives in
+        ``models.attention_op_keys``)."""
+        return attention_op_keys(
+            self._model_family,
+            self._role_attr(role, "backend_name"),
+            bool(self._role_attr(role, "enable_wideep")),
+        )
 
     def _try_load_role_database(self, role: str):
         """Load the role's perf DB, returning None when the perf data is

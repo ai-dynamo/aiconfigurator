@@ -35,15 +35,25 @@ _MOE_MODEL_FAMILIES = {
     "MINIMAXM3",
 }
 
-# DeepSeek-V3 / Kimi-K2.5 context attention (MLA prefill) has no fp8 FMHA perf
-# data — only bf16. The generation (decode) path keeps fp8. This mirrors the
-# role-aware rule in ``task_v2.Task._resolve_quant_modes`` so the single-point
-# CLI estimate path resolves quant modes the same way the sweep (task_v2)
-# already does. See NVBug 6401867.
-_CONTEXT_FP8_FMHA_UNSUPPORTED_ARCHS = (
-    "DeepseekV3ForCausalLM",
-    "KimiK25ForConditionalGeneration",
-)
+
+def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool = False) -> tuple[str, str]:
+    """(context_op, generation_op) support-matrix keys for a model family /
+    backend / wideep combination.
+
+    Single source of truth shared by ``task_v2.Task`` (resolve-time FMHA
+    fallback + validate) and the estimate-path FMHA guard
+    (:func:`resolve_context_fmha_by_data`). Every context op keys on fmha at
+    the top level; every generation op keys on kv dtype.
+    """
+    if model_family == "DEEPSEEKV4":
+        return "deepseek_v4_context_module", "deepseek_v4_generation_module"
+    if model_family == "DEEPSEEKV32":
+        return "dsa_context_module", "dsa_generation_module"
+    if model_family in ("DEEPSEEK", "KIMIK25") and backend_name != "vllm":
+        if backend_name == "sglang" and enable_wideep:
+            return "wideep_context_mla", "wideep_generation_mla"
+        return "context_mla", "generation_mla"
+    return "context_attention", "generation_attention"
 
 
 @cache
@@ -329,54 +339,67 @@ def _apply_model_quant_defaults(
         )
 
 
-def resolve_context_fmha_compat(
+def resolve_context_fmha_by_data(
     model_config: config.ModelConfig,
     model_path: str,
+    database,
+    backend_name: str,
     *,
     is_context_role: bool,
 ) -> None:
-    """Apply the DeepSeek-V3 / Kimi context-role FMHA compatibility rule.
+    """Data-driven context-FMHA guard for the estimate path (no Task involved).
 
-    Must be called BEFORE ``get_model`` so the downgrade lands before the model
-    (and its attention ops) are built. ``_apply_model_quant_defaults`` cannot own
-    this rule because it is role-agnostic: decode/generation attention keeps fp8,
-    only context attention (agg / prefill / static_ctx) must fall back to bf16.
+    Must be called BEFORE ``get_model`` so the resolution lands before the
+    model (and its attention ops) are built. Mirrors the resolve-time fallback
+    in ``task_v2.Task._resolve_quant_modes``, driven by the perf DB's
+    fmha-keyed context table instead of a hand-written architecture list:
 
-    Behavior (mirrors ``task_v2``):
-    * Non-context roles, or non-V3/Kimi architectures: no-op.
-    * fmha auto-inferred to fp8 → downgrade to bfloat16 (unblocks the estimate).
-    * fmha explicitly set to fp8 by the user → raise a concise ``ValueError``
-      instead of letting a missing-perf-data traceback surface downstream.
+    * Generation-only roles: no-op (no generation table keys on fmha).
+    * fp8 slice present, or no DB information for the op: no-op.
+    * fmha explicitly set to fp8 with no fp8 slice: raise a concise
+      ``ValueError`` instead of a missing-perf-data traceback downstream.
+    * fmha auto-inferred to fp8 with no fp8 slice but a bf16 one: downgrade
+      to bfloat16 with a warning (predictions are conservative if the
+      deployed engine runs fp8 FMHA).
 
     Args:
         model_config: ModelConfig whose ``fmha_quant_mode`` may be adjusted
             in place. A non-None value is treated as a user-explicit request.
-        model_path: HF model path used to resolve architecture and quant config.
+        model_path: HF model path used to resolve family and quant config.
+        database: the role's loaded perf database (its
+            ``supported_quant_mode`` is consulted).
+        backend_name: backend the estimate targets (selects the context op).
         is_context_role: True for context-attention roles (agg, prefill,
             static, static_ctx, AFD prefill); False for generation-only roles.
     """
     if not is_context_role:
         return
 
-    info = _get_model_info(model_path)
-    architecture = info.get("architecture")
-    if architecture not in _CONTEXT_FP8_FMHA_UNSUPPORTED_ARCHS:
+    ctx_op, _ = attention_op_keys(get_model_family(model_path), backend_name)
+    supported = (getattr(database, "supported_quant_mode", {}) or {}).get(ctx_op, []) or []
+    if not supported or common.FMHAQuantMode.fp8.name in supported:
         return
 
-    explicit = model_config.fmha_quant_mode is not None
-    if explicit:
+    if model_config.fmha_quant_mode is not None:
         if model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
             raise ValueError(
-                f"{architecture} context attention (MLA prefill) does not support fp8 FMHA. "
+                f"fmha_quant_mode=fp8 has no {ctx_op!r} perf data for this system/backend/version. "
                 "Use --fmha-quant-mode bfloat16, or omit --fmha-quant-mode to auto-select it."
             )
         return
 
     # Not user-explicit: mirror what get_model would infer, and downgrade only
     # when that inference would pick fp8 (bf16 checkpoints need no change).
-    inferred = _infer_quant_modes_from_raw_config(info.get("raw_config", {}), architecture)
-    if inferred.get("fmha_quant_mode") == common.FMHAQuantMode.fp8:
+    info = _get_model_info(model_path)
+    inferred = _infer_quant_modes_from_raw_config(info.get("raw_config", {}), info.get("architecture"))
+    if inferred.get("fmha_quant_mode") == common.FMHAQuantMode.fp8 and common.FMHAQuantMode.bfloat16.name in supported:
         model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
+        logger.warning(
+            "fmha_quant_mode=fp8 (inferred from the model checkpoint) has no %r perf data; "
+            "falling back to bfloat16 FMHA data. Predictions are conservative if the deployed "
+            "engine runs fp8 FMHA; set fmha_quant_mode explicitly to override.",
+            ctx_op,
+        )
 
 
 def get_model_family(model_path: str) -> str:
