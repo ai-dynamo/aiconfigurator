@@ -309,7 +309,9 @@ mod tests {
             .query(&db, 32, 2, 1.0)
             .expect("gen attention query must succeed");
         assert!(
-            (result.latency_ms - 0.008644266923268636).abs() < 1e-9,
+            // Python v2 engine value (raw table, no densified lattice); the
+            // pre-perf_interp expectation was 0.008644266923268636.
+            (result.latency_ms - 0.008451361751014535).abs() < 1e-9,
             "expected 5-sample-averaged gen latency, got {}",
             result.latency_ms
         );
