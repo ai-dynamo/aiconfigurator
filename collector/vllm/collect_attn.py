@@ -556,6 +556,12 @@ def get_generation_attention_test_cases():
                 # On SM100 (Blackwell), vLLM uses FlashInfer which routes
                 # decode to trtllm_batch_decode_with_kv_cache. That kernel
                 # only supports GQA ratios up to 16.
+                # FIXME(kernel-limit): pre-existing generation-time skip
+                # encoding a framework kernel limit (also mirrored by a
+                # retired sm_exceptions rule, PR #1302). Not verified against
+                # the vLLM backend-selector source. On the next version bump:
+                # verify, then convert to probe-and-raise per
+                # .claude/rules/collector/layer_permissions.md, or delete.
                 if get_sm_version() >= 100 and n // n_kv > 16:
                     continue
                 for s in target_s_list:

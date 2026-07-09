@@ -101,6 +101,14 @@ class OpEntry:
     perf_filename: str
     module: str | None = None
     versions: tuple[VersionRoute, ...] = field(default_factory=tuple)
+    # Maturity markers.  An unverified collector's real risk is not a crash
+    # but silently wrong data (successfully benchmarking the wrong kernel
+    # path), so collect.py skips it with an explicit summary entry instead of
+    # running it.  Remove the marker in the PR that debugs the collector.
+    #   unverified=True        — not debugged on this backend at all
+    #   unverified_sms=(120,)  — debugged elsewhere, not validated on these SMs
+    unverified: bool = False
+    unverified_sms: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.module and not self.versions:

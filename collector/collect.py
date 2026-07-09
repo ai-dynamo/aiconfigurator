@@ -93,8 +93,11 @@ from helper import (
 )
 
 logger = None
-RESUME_SCHEMA_VERSION = "collector-resume-v1"
-STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before stall bailout
+RESUME_SCHEMA_VERSION = "collector-resume-v2"
+STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before logging a stall warning
+# Failures of one (model, dtype) group within an op before the summary flags
+# it as systemic (a fix-me warning; nothing is skipped).
+SYSTEMIC_GROUP_THRESHOLD = 5
 
 
 def _require_torch():
@@ -147,19 +150,31 @@ class ResumeCheckpoint:
 
     FLUSH_INTERVAL_SEC = 2.0
 
-    def __init__(self, backend: str, module_name: str, run_func_name: str, checkpoint_dir: str):
+    def __init__(
+        self,
+        backend: str,
+        module_name: str,
+        run_func_name: str,
+        checkpoint_dir: str,
+        framework_version: str | None = None,
+        sm_version: int | None = None,
+    ):
         self.module_name = module_name
         self._dirty = False
         self._last_flush = 0.0
+        # framework_version/sm_version bind the checkpoint to the runtime it
+        # was collected under: resuming a plan across a version bump or on a
+        # different GPU generation silently mislabels data, so it must fail.
         self._metadata = {
             "schema": RESUME_SCHEMA_VERSION,
             "backend": backend,
             "module": module_name,
             "run_func": run_func_name,
+            "framework_version": framework_version,
+            "sm_version": sm_version,
         }
         self._done: set[str] = set()
         self._failed: set[str] = set()
-        self._expected_failed: set[str] = set()
 
         safe_name = module_name.replace("/", "_").replace(":", "_")
         self._path = Path(checkpoint_dir).expanduser().resolve() / backend / f"{safe_name}.json"
@@ -179,7 +194,7 @@ class ResumeCheckpoint:
                 f"Failed to load checkpoint {self._path}: {e}. Run without --resume to start fresh."
             ) from e
 
-        for key in ("schema", "backend", "module", "run_func"):
+        for key in ("schema", "backend", "module", "run_func", "framework_version", "sm_version"):
             if data.get(key) != self._metadata[key]:
                 raise RuntimeError(
                     f"{self.module_name}: checkpoint mismatch "
@@ -189,11 +204,7 @@ class ResumeCheckpoint:
 
         self._done = set(data.get("done", []))
         self._failed = set(data.get("failed", []))
-        self._expected_failed = set(data.get("expected_failed", []))
-        logger.info(
-            f"{self.module_name}: loaded checkpoint — {len(self._done)} passed, "
-            f"{len(self._failed)} failed, {len(self._expected_failed)} expected failed"
-        )
+        logger.info(f"{self.module_name}: loaded checkpoint — {len(self._done)} passed, {len(self._failed)} failed")
 
     # -- public API -------------------------------------------------------
 
@@ -203,19 +214,13 @@ class ResumeCheckpoint:
         By default, skips both passed and failed tasks. With retry_failed=True,
         previously failed tasks are retried.
         """
-        skip_set = (
-            (self._done | self._expected_failed)
-            if retry_failed
-            else (self._done | self._failed | self._expected_failed)
-        )
+        skip_set = self._done if retry_failed else (self._done | self._failed)
         runnable = [t for t in task_infos if t["id"] not in skip_set]
         skipped_done = sum(1 for t in task_infos if t["id"] in self._done)
         skipped_failed = sum(1 for t in task_infos if t["id"] in self._failed)
-        skipped_expected = sum(1 for t in task_infos if t["id"] in self._expected_failed)
         retrying = sum(1 for t in runnable if t["id"] in self._failed) if retry_failed else 0
-        if skipped_done or skipped_failed or skipped_expected or retrying:
+        if skipped_done or skipped_failed or retrying:
             parts = [f"skipping {skipped_done} passed"]
-            parts.append(f"skipping {skipped_expected} expected failed")
             if retry_failed:
                 parts.append(f"retrying {retrying} previously failed")
             else:
@@ -228,22 +233,18 @@ class ResumeCheckpoint:
         """Mark a task as successfully completed. Skipped on resume."""
         self._done.add(task_id)
         self._failed.discard(task_id)  # if it was previously failed, it passed now
-        self._expected_failed.discard(task_id)
         self._dirty = True
         self.flush()
 
     def mark_failed(self, task_id: str):
-        """Mark a task as attempted but failed. Retried on resume."""
+        """Mark a task as attempted but failed."""
         self._failed.add(task_id)
         self._dirty = True
         self.flush()
 
-    def mark_expected_failed(self, task_id: str):
-        """Mark a task as covered by an expected SM/framework exception."""
-        self._expected_failed.add(task_id)
-        self._failed.discard(task_id)
-        self._dirty = True
-        self.flush()
+    def unresolved_failed_count(self) -> int:
+        """Number of tasks the checkpoint holds as failed and unresolved."""
+        return len(self._failed)
 
     # Keep mark_done as alias for backwards compat
     mark_done = mark_passed
@@ -260,7 +261,6 @@ class ResumeCheckpoint:
             "updated_at": datetime.now().isoformat(),
             "done": sorted(self._done),
             "failed": sorted(self._failed),
-            "expected_failed": sorted(self._expected_failed),
         }
         tmp_path = self._path.with_suffix(".json.tmp")
         with open(tmp_path, "w") as f:
@@ -352,32 +352,22 @@ class ProfilerContext:
         logger.info(f"Full profile saved to: {profile_file}")
 
 
-def _expected_failure_for_task(task, task_index, expected_failure_context):
-    if not expected_failure_context:
+def _failure_group(task) -> str | None:
+    """Group label for failure aggregation: one (model, dtype) family within an op.
+
+    A whole group failing is the signal that something needs FIXING (collector
+    bug, unverified combo, framework gap) — the summary aggregates failures by
+    this label so systemic groups are visible at a glance. Returns None when
+    the task carries neither a model nor a dtype attribute (e.g. positional
+    tuple cases).
+    """
+    from collector.capabilities import case_dtypes
+
+    model = getattr(task, "model_name", None) or getattr(task, "model_path", None) or ""
+    dtypes = ",".join(case_dtypes(task))
+    if not model and not dtypes:
         return None
-    from collector.model_cases import expected_failure_for_test_case
-
-    return expected_failure_for_test_case(
-        task,
-        plan=expected_failure_context["plan"],
-        full_module_name=expected_failure_context["full_module_name"],
-        run_func_name=expected_failure_context["run_func_name"],
-        runtime_version=expected_failure_context.get("runtime_version"),
-        index=task_index or 0,
-    )
-
-
-def _expected_failure_label(details):
-    if not details:
-        return "expected collector exception"
-    parts = [details.get("reason_type", "expected_exception")]
-    if details.get("reference_source"):
-        parts.append(f"source={details['reference_source']}")
-    if details.get("label"):
-        parts.append(f"label={details['label']}")
-    if details.get("reason"):
-        parts.append(details["reason"])
-    return "; ".join(str(part) for part in parts if part)
+    return f"{model}|{dtypes}"
 
 
 def _is_cuda_fatal_exception(exc, torch_mod) -> bool:
@@ -401,11 +391,6 @@ def _is_cuda_fatal_exception(exc, torch_mod) -> bool:
     return is_cuda_fatal
 
 
-def _summarize_expected_skips(skipped):
-    counts = Counter(item.get("reason_type", "expected_exception") for item in skipped)
-    return ", ".join(f"{reason_type}={count}" for reason_type, count in sorted(counts.items()))
-
-
 def collect_module_safe(
     module_name,
     test_type,
@@ -413,7 +398,6 @@ def collect_module_safe(
     run_func,
     num_processes,
     resume_options=None,
-    expected_failure_context=None,
 ):
     """
     Safely collect module with comprehensive error handling
@@ -436,7 +420,6 @@ def collect_module_safe(
             num_processes,
             full_name,
             resume_options=resume_options,
-            expected_failure_context=expected_failure_context,
         )
 
         return errors
@@ -462,11 +445,9 @@ def worker(
     error_queue=None,
     done_tasks=None,
     failed_tasks=None,
-    expected_failed_tasks=None,
     module_name="unknown",
     current_task_ids=None,
     consumed_sentinel=None,
-    expected_failure_context=None,
 ):
     """worker with automatic logging setup"""
 
@@ -503,11 +484,9 @@ def worker(
         if isinstance(task_info, dict):
             task_id = task_info.get("id", "unknown")
             task = task_info.get("params", task_info)
-            task_index = task_info.get("index", 0)
         else:
             task = task_info
             task_id = create_test_case_id(task, "unknown", module_name)
-            task_index = 0
 
         if current_task_ids is not None:
             current_task_ids[device_id] = task_id
@@ -539,31 +518,6 @@ def worker(
                     current_task_ids[device_id] = None
             raise  # re-raise so the worker actually exits
         except Exception as e:
-            expected_failure = _expected_failure_for_task(task, task_index, expected_failure_context)
-            if expected_failure:
-                worker_logger.warning(
-                    f"Task {task_id} hit expected collector exception "
-                    f"({_expected_failure_label(expected_failure)}); continuing"
-                )
-                if expected_failed_tasks is not None:
-                    try:
-                        expected_failed_tasks[task_id] = True
-                    except Exception:
-                        pass
-                if current_task_ids is not None:
-                    current_task_ids[device_id] = None
-                for handler in worker_logger.handlers:
-                    handler.flush()
-                if _is_cuda_fatal_exception(e, torch_mod):
-                    worker_logger.warning(
-                        f"Expected fatal {type(e).__name__} encountered on task {task_id}. "
-                        f"Worker {device_id} exiting to reset GPU context."
-                    )
-                    for handler in worker_logger.handlers:
-                        handler.flush()
-                    exit(0)
-                continue
-
             # Build comprehensive error info
             error_info = {
                 "module": module_name,
@@ -572,6 +526,8 @@ def worker(
                 "task_params": str(task),
                 "error_type": type(e).__name__,
                 "error_message": str(e),
+                "classification": "unexpected",
+                "group": _failure_group(task),
                 "traceback": traceback.format_exc(),
                 "timestamp": datetime.now().isoformat(),
             }
@@ -620,7 +576,7 @@ def worker(
                 get_device_module().empty_cache()
 
 
-def parallel_run(tasks, func, num_processes, module_name="unknown", resume_options=None, expected_failure_context=None):
+def parallel_run(tasks, func, num_processes, module_name="unknown", resume_options=None):
     """parallel runner with error collection
 
     Args:
@@ -638,7 +594,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             task_id = create_test_case_id(task, func_name, module_name)
             task_params = task
         raw_task_infos.append({"id": task_id, "params": task_params, "index": i})
-    task_info_by_id = {task_info["id"]: task_info for task_info in raw_task_infos}
 
     checkpoint_dir = (
         resume_options.get("checkpoint_dir", ".collector_checkpoint") if resume_options else ".collector_checkpoint"
@@ -648,6 +603,8 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
         module_name=module_name,
         run_func_name=func_name,
         checkpoint_dir=checkpoint_dir,
+        framework_version=resume_options.get("framework_version") if resume_options else None,
+        sm_version=resume_options.get("sm_version") if resume_options else None,
     )
 
     if resume_options and resume_options.get("resume"):
@@ -657,9 +614,32 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     else:
         task_infos = raw_task_infos
 
+    def _unresolved_failure_errors():
+        # A resumed run must not look clean while its checkpoint still holds
+        # unresolved failures: completion and acceptance are distinct.
+        if not (resume_options and resume_options.get("resume")):
+            return []
+        unresolved = resume_tracker.unresolved_failed_count()
+        if not unresolved:
+            return []
+        logger.warning(
+            f"{module_name}: checkpoint holds {unresolved} unresolved failed tasks "
+            "(skipped on resume; rerun with --resume-retry-failed to retry)"
+        )
+        return [
+            {
+                "module": module_name,
+                "task_id": "resume_unresolved",
+                "error_type": "UnresolvedFailures",
+                "error_message": f"checkpoint holds {unresolved} unresolved failed tasks",
+                "classification": "unresolved_from_checkpoint",
+                "timestamp": datetime.now().isoformat(),
+            }
+        ]
+
     if not task_infos:
         logger.info(f"{module_name}: no tasks to run")
-        return []
+        return _unresolved_failure_errors()
 
     queue = mp.Queue()
     error_queue = mp.Queue()
@@ -683,7 +663,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     # a worker is killed by a signal on a subsequent task.
     done_tasks = manager.dict()
     failed_tasks = manager.dict()
-    expected_failed_tasks = manager.dict()
 
     def start_process(device_id):
         p = mp.Process(
@@ -697,11 +676,9 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 error_queue,
                 done_tasks,
                 failed_tasks,
-                expected_failed_tasks,
                 module_name,
                 current_task_ids,
                 consumed_sentinel,
-                expected_failure_context,
             ),
         )
         p.start()
@@ -751,12 +728,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 del failed_tasks[task_id]
             except KeyError:
                 pass
-        for task_id in list(expected_failed_tasks.keys()):
-            resume_tracker.mark_expected_failed(task_id)
-            try:
-                del expected_failed_tasks[task_id]
-            except KeyError:
-                pass
 
     # Start processes
     for device_id in range(num_processes):
@@ -793,21 +764,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                     func(*task_params, device=device)
                     resume_tracker.mark_passed(task_id)
                 except Exception as e:
-                    expected_failure = _expected_failure_for_task(
-                        task_params,
-                        task_info.get("index", 0),
-                        expected_failure_context,
-                    )
-                    if expected_failure:
-                        resume_tracker.mark_expected_failed(task_id)
-                        logger.warning(
-                            f"Task {task_id} hit expected collector exception "
-                            f"({_expected_failure_label(expected_failure)}); continuing"
-                        )
-                        pbar.update(1)
-                        progress_value.value += 1
-                        resume_tracker.flush()
-                        continue
                     resume_tracker.mark_failed(task_id)
                     error_info = {
                         "module": module_name,
@@ -816,6 +772,8 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                         "task_params": str(task_params),
                         "error_type": type(e).__name__,
                         "error_message": str(e),
+                        "classification": "unexpected",
+                        "group": _failure_group(task_params),
                         "traceback": traceback.format_exc(),
                         "timestamp": datetime.now().isoformat(),
                     }
@@ -877,38 +835,16 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                         )
 
                     # Mark active task as failed if the process died while running it
-                    expected_failure = None
                     if active_task_id is not None and active_task_id not in done_tasks:
-                        task_info = task_info_by_id.get(active_task_id)
-                        if task_info is not None:
-                            expected_failure = _expected_failure_for_task(
-                                task_info["params"],
-                                task_info.get("index", 0),
-                                expected_failure_context,
-                            )
-                        if expected_failure:
-                            logger.warning(
-                                f"Task {active_task_id} exited through an expected collector exception "
-                                f"({_expected_failure_label(expected_failure)}); continuing"
-                            )
-                            try:
-                                expected_failed_tasks[active_task_id] = True
-                            except Exception:
-                                pass
-                        else:
-                            try:
-                                failed_tasks[active_task_id] = True
-                            except Exception:
-                                pass
+                        try:
+                            failed_tasks[active_task_id] = True
+                        except Exception:
+                            pass
                         current_task_ids[i] = None
                         with lock:
                             progress_value.value += 1
 
-                    crash_error = (
-                        None
-                        if active_task_id is not None and expected_failure
-                        else create_process_exit_error(i, exit_code)
-                    )
+                    crash_error = create_process_exit_error(i, exit_code)
                     if crash_error:
                         errors.append(crash_error)
                         process_stats[i]["errors"].append("process_exit")
@@ -956,6 +892,15 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     # Shutdown manager to clean up resources (semaphores, etc.)
     manager.shutdown()
 
+    # Surface systemic failure groups — a whole (model, dtype) family failing
+    # is a fix-me signal, not something to tolerate.
+    group_counts = Counter(error["group"] for error in errors if error.get("group"))
+    for group, count in sorted(group_counts.items()):
+        if count >= SYSTEMIC_GROUP_THRESHOLD:
+            logger.warning(f"{module_name}: failure group {group!r} failed {count} times — needs fixing")
+
+    errors.extend(_unresolved_failure_errors())
+
     # Log summary
     if errors:
         log_dir = os.environ.get("COLLECTOR_LOG_DIR", "")
@@ -980,6 +925,8 @@ def collect_ops(
     resume_options: dict | None = None,
     model_path: str | None = None,
     case_plan=None,
+    sm_version: int | None = None,
+    case_filters: list[str] | None = None,
 ) -> list[dict]:
     """Run collection for a list of resolved collection entries.
 
@@ -1025,9 +972,26 @@ def collect_ops(
 
     for collection in collections:
         try:
-            op_plan = case_plan.op_cases.get(collection["type"]) if case_plan is not None else None
-            if case_plan is not None and op_plan is None:
+            if case_plan is not None and not case_plan.has_op(collection["type"]):
                 logger.info(f"Skipping {collection['name']}.{collection['type']} — not in collector v2 case plan")
+                continue
+            unverified_here = collection.get("unverified") or (
+                sm_version is not None and sm_version in (collection.get("unverified_sms") or ())
+            )
+            if unverified_here:
+                scope = "this backend" if collection.get("unverified") else f"SM{sm_version}"
+                logger.warning(
+                    f"Skipping {collection['name']}.{collection['type']} — registry marks it unverified "
+                    f"on {scope}; remove the OpEntry marker once the collector is debugged there"
+                )
+                all_errors.append(
+                    {
+                        "module": f"{collection['name']}.{collection['type']}",
+                        "error_type": "UnverifiedCollector",
+                        "error_message": f"registry marks this op unverified on {scope}; collection skipped",
+                        "classification": "unverified_skipped",
+                    }
+                )
                 continue
             module_name = collection["module"]
             get_module = __import__(module_name, fromlist=[collection["get_func"]])
@@ -1057,28 +1021,15 @@ def collect_ops(
             run_func = getattr(run_module, collection["run_func"])
             run_func = functools.partial(run_func, perf_filename=collection["perf_filename"])
 
-            def get_func_with_limit(get_func=get_func):
-                cases = _get_test_cases(get_func, model_path)
-                skipped = []
-                if op_plan is not None:
-                    from collector.model_cases import filter_test_cases_with_report
+            def get_func_with_limit(get_func=get_func, op=collection["type"]):
+                from collector.capabilities import filter_cases
 
-                    full_module_name = f"{collection['name']}.{collection['type']}"
-                    run_func_name = getattr(run_func, "__name__", None) or getattr(run_func, "func", run_func).__name__
+                cases = _get_test_cases(get_func, model_path)
+                cases, _dropped = filter_cases(cases, op=op, sm_version=sm_version)
+                if case_filters:
                     before_count = len(cases)
-                    cases, skipped = filter_test_cases_with_report(
-                        cases,
-                        plan=op_plan,
-                        full_module_name=full_module_name,
-                        run_func_name=run_func_name,
-                        runtime_version=runtime_version,
-                    )
-                    message = f"{full_module_name}: collector v2 case plan kept {len(cases)}/{before_count} cases"
-                    if skipped:
-                        message += (
-                            f"; skipped {len(skipped)} expected SM exceptions ({_summarize_expected_skips(skipped)})"
-                        )
-                    logger.info(message)
+                    cases = [case for case in cases if any(fragment in str(case) for fragment in case_filters)]
+                    logger.info(f"{op}: --case-filter kept {len(cases)}/{before_count} cases")
                 if shuffle:
                     rng = random.Random(shuffle_seed)
                     rng.shuffle(cases)
@@ -1086,7 +1037,12 @@ def collect_ops(
                     cases = cases[:limit]
                 return cases
 
-            merged_resume = {**(resume_options or {}), "backend": backend}
+            merged_resume = {
+                **(resume_options or {}),
+                "backend": backend,
+                "framework_version": runtime_version,
+                "sm_version": sm_version,
+            }
             errors = collect_module_safe(
                 collection["name"],
                 collection["type"],
@@ -1094,17 +1050,6 @@ def collect_ops(
                 run_func,
                 num_processes,
                 resume_options=merged_resume,
-                expected_failure_context=(
-                    {
-                        "plan": op_plan,
-                        "full_module_name": f"{collection['name']}.{collection['type']}",
-                        "run_func_name": getattr(run_func, "__name__", None)
-                        or getattr(run_func, "func", run_func).__name__,
-                        "runtime_version": runtime_version,
-                    }
-                    if op_plan is not None
-                    else None
-                ),
             )
             all_errors.extend(errors)
 
@@ -1130,6 +1075,8 @@ def collect_sglang(
     resume_options: dict | None = None,
     model_path: str | None = None,
     case_plan=None,
+    sm_version: int | None = None,
+    case_filters: list[str] | None = None,
 ):
     """Collect performance data for SGLang with enhanced error tracking"""
     from collector.sglang.registry import REGISTRY
@@ -1167,6 +1114,8 @@ def collect_sglang(
         resume_options=resume_options,
         model_path=model_path,
         case_plan=case_plan,
+        sm_version=sm_version,
+        case_filters=case_filters,
     )
 
     generate_collection_summary(all_errors, "sglang", version)
@@ -1180,6 +1129,8 @@ def collect_vllm(
     resume_options: dict | None = None,
     model_path: str | None = None,
     case_plan=None,
+    sm_version: int | None = None,
+    case_filters: list[str] | None = None,
 ):
     """Collect performance data for vLLM"""
     from collector.version_resolver import build_collections
@@ -1211,6 +1162,8 @@ def collect_vllm(
         resume_options=resume_options,
         model_path=model_path,
         case_plan=case_plan,
+        sm_version=sm_version,
+        case_filters=case_filters,
     )
 
     generate_collection_summary(all_errors, "vllm", version)
@@ -1224,6 +1177,8 @@ def collect_trtllm(
     resume_options: dict | None = None,
     model_path: str | None = None,
     case_plan=None,
+    sm_version: int | None = None,
+    case_filters: list[str] | None = None,
 ):
     """Collect performance data for TensorRT LLM with enhanced error tracking"""
     from collector.trtllm.registry import REGISTRY
@@ -1258,6 +1213,8 @@ def collect_trtllm(
         resume_options=resume_options,
         model_path=model_path,
         case_plan=case_plan,
+        sm_version=sm_version,
+        case_filters=case_filters,
     )
 
     generate_collection_summary(all_errors, "trtllm", version)
@@ -1272,6 +1229,7 @@ def generate_collection_summary(all_errors, backend, version):
         "total_errors": len(all_errors),
         "errors_by_module": {},
         "errors_by_type": {},
+        "errors_by_group": {},
     }
 
     for error in all_errors:
@@ -1280,6 +1238,10 @@ def generate_collection_summary(all_errors, backend, version):
 
         summary["errors_by_module"][module] = summary["errors_by_module"].get(module, 0) + 1
         summary["errors_by_type"][error_type] = summary["errors_by_type"].get(error_type, 0) + 1
+        group = error.get("group")
+        if group:
+            group_key = f"{module}:{group}"
+            summary["errors_by_group"][group_key] = summary["errors_by_group"].get(group_key, 0) + 1
 
     log_dir = os.environ.get("COLLECTOR_LOG_DIR", "")
 
@@ -1303,6 +1265,11 @@ def generate_collection_summary(all_errors, backend, version):
         logger.info("\nErrors by type:")
         for error_type, count in sorted(summary["errors_by_type"].items()):
             logger.info(f"  {error_type}: {count}")
+
+    if summary["errors_by_group"]:
+        logger.info("\nErrors by (model, dtype) group — whole groups failing need fixing:")
+        for group, count in sorted(summary["errors_by_group"].items(), key=lambda item: -item[1]):
+            logger.info(f"  {group}: {count}")
 
     logger.info(f"\nDetailed error report saved to: {summary_file}")
 
@@ -1418,29 +1385,24 @@ def main():
         "--gpu",
         type=str,
         default=None,
-        help="GPU type for resolving collector v2 SM exceptions, for example b200_sxm. "
+        help="GPU type for resolving hardware capability floors, for example b200_sxm. "
         "The SM version is read from src/aiconfigurator/systems/<gpu>.yaml unless --sm is provided.",
     )
     parser.add_argument(
         "--sm",
         type=int,
         default=None,
-        help="Explicit SM version for collector v2 exceptions, for example 100. Overrides --gpu SM resolution.",
+        help="Explicit SM version for hardware capability floors, for example 100. "
+        "Overrides --gpu SM resolution; defaults to the local device capability.",
     )
     parser.add_argument(
-        "--sm-exceptions",
-        type=str,
+        "--case-filter",
+        action="append",
+        dest="case_filters",
         default=None,
-        help=(
-            "Optional path to an SM exceptions YAML file. "
-            "Defaults to collector/cases/sm_exceptions/sm<version>_exceptions.yaml."
-        ),
-    )
-    parser.add_argument(
-        "--gpu-exceptions",
-        type=str,
-        default=None,
-        help="Deprecated alias for --sm-exceptions.",
+        metavar="SUBSTR",
+        help="Run only cases whose string form contains SUBSTR (repeatable, OR semantics). "
+        "Ephemeral healing filter — never persisted to YAML.",
     )
     parser.add_argument(
         "--plan-only",
@@ -1478,7 +1440,6 @@ def main():
             gpu_type=args.gpu,
             sm_version=args.sm,
             model_cases_path=args.model_cases,
-            sm_exceptions_path=args.sm_exceptions or args.gpu_exceptions,
             full=args.model_cases_full,
         )
         if case_plan.model_path:
@@ -1532,6 +1493,20 @@ def main():
             logger.info(f"  expanded to model-specific ops: {ops}")
     elif args.model_path:
         logger.info(f"Legacy model filter active: collecting only for '{args.model_path}'")
+
+    # Hardware capability floor target: explicit --sm / --gpu wins, otherwise
+    # detect from the local device (None on XPU -> filter is permissive).
+    from collector.capabilities import detect_sm_version
+    from collector.model_cases import resolve_sm_version
+
+    sm_version = (
+        case_plan.sm_version
+        if case_plan is not None and case_plan.sm_version is not None
+        else resolve_sm_version(gpu_type=args.gpu, sm_version=args.sm)
+    )
+    if sm_version is None:
+        sm_version = detect_sm_version()
+    logger.info(f"Hardware capability floors target SM version: {sm_version}")
 
     resume_options = {
         "resume": args.resume,
@@ -1599,36 +1574,18 @@ def main():
 
     # Use profiling context manager
     with ProfilerContext(args.backend, enabled=args.profile):
-        if args.backend == "trtllm":
-            collect_trtllm(
-                num_processes,
-                ops,
-                limit=limit,
-                shuffle=shuffle,
-                resume_options=resume_options,
-                model_path=case_plan.model_path if case_plan is not None else None,
-                case_plan=case_plan,
-            )
-        elif args.backend == "sglang":
-            collect_sglang(
-                num_processes,
-                ops,
-                limit=limit,
-                shuffle=shuffle,
-                resume_options=resume_options,
-                model_path=case_plan.model_path if case_plan is not None else None,
-                case_plan=case_plan,
-            )
-        elif args.backend == "vllm":
-            collect_vllm(
-                num_processes,
-                ops,
-                limit=limit,
-                shuffle=shuffle,
-                resume_options=resume_options,
-                model_path=case_plan.model_path if case_plan is not None else None,
-                case_plan=case_plan,
-            )
+        collect_backend = {"trtllm": collect_trtllm, "sglang": collect_sglang, "vllm": collect_vllm}[args.backend]
+        collect_backend(
+            num_processes,
+            ops,
+            limit=limit,
+            shuffle=shuffle,
+            resume_options=resume_options,
+            model_path=case_plan.model_path if case_plan is not None else None,
+            case_plan=case_plan,
+            sm_version=sm_version,
+            case_filters=args.case_filters,
+        )
 
     if args.keep_csv:
         logger.info("Keeping collector CSV staging files because --keep-csv was passed")

@@ -507,9 +507,9 @@ const NODES = [
 
   // ---- L8 Collector planning + backend runners ----
   {id:'collector_plan', l:8, repo:'aic', label:'Collector V2 Case Planner', sub:'LLM + GPU/SM + framework → selected operations and concrete cases',
-   det:{file:['collector/model_cases.py','collector/case_generator.py','collector/cases/base_ops/','collector/cases/models/','collector/cases/sm_exceptions/'],
-     desc:'Builds the collection plan. It merges shared base-op cases, model-specific structural cases, and GPU/SM exceptions, then selects the operation subset and concrete benchmark shapes for the requested LLM, GPU, and framework.',
-     sym:['<code>build_collection_case_plan()</code>','base op cases + model cases + SM exceptions','plan-only inspection']}},
+   det:{file:['collector/model_cases.py','collector/case_generator.py','collector/cases/base_ops/','collector/cases/models/','collector/cases/capabilities.yaml'],
+     desc:'Builds the collection plan. It merges shared base-op cases with model-specific structural cases, applies hardware capability floors (dtype/op → min SM) as a generation-time intersection, then selects the operation subset and concrete benchmark shapes for the requested LLM, GPU, and framework.',
+     sym:['<code>build_collection_case_plan()</code>','base op cases + model cases ∩ capability floors','plan-only inspection']}},
 
   {id:'op_collectors', l:8, repo:'aic', label:'Per-backend Op Collectors', sub:'OpEntry registry → version-routed runner → real kernel benchmark',
    det:{file:['collector/collect.py','collector/registry_types.py','collector/version_resolver.py','collector/trtllm/registry.py','collector/vllm/registry.py','collector/sglang/registry.py'],
@@ -518,9 +518,9 @@ const NODES = [
 
   // ---- L9 Collection inputs / dimensions ----
   {id:'collect_gpus', l:9, repo:'aic', label:'GPUs', sub:'system YAML + live device / SM · hardware-specific exclusions',
-   det:{file:['src/aiconfigurator/systems/*.yaml','collector/cases/sm_exceptions/','collector/helper.py'],
-     desc:'The target execution hardware. <code>--gpu</code> resolves the system YAML and SM generation used to plan cases and exclusions; the live device runs the benchmark and is recorded in each output row.',
-     sym:['H100 · H200 · B200 · GB200 · A100 · L40S …','SM-specific exception plan','memory · bandwidth · compute characteristics']}},
+   det:{file:['src/aiconfigurator/systems/*.yaml','collector/cases/capabilities.yaml','collector/helper.py'],
+     desc:'The target execution hardware. <code>--gpu</code> resolves the system YAML and SM generation used to plan cases and apply hardware capability floors; the live device runs the benchmark and is recorded in each output row.',
+     sym:['H100 · H200 · B200 · GB200 · A100 · L40S …','hardware capability floors (dtype/op → min SM)','memory · bandwidth · compute characteristics']}},
 
   {id:'collect_llms', l:9, repo:'aic', label:'LLMs', sub:'HF model path + architecture · model-specific operation shapes',
    det:{file:['src/aiconfigurator/model_configs/','collector/cases/models/','collector/model_cases.py'],

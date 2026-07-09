@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# FIXME(kernel-limit): retired sm_exceptions rules (PR #1302), not verified
+# against TRT-LLM source. Reportedly: MLA-module FP8 KV-cache variants are
+# Hopper-only (fail on SM100/103/120 where Blackwell FP8-KV applies elsewhere),
+# while DSA-module FP8 KV-cache variants are Blackwell-only (fail on SM90).
+# Affected precision combos currently fail at runtime. On the next version
+# bump: verify, then probe-and-raise or delete this note. Never move this back
+# into YAML.
+
 __compat__ = ">=1.2.0rc5"
 
 """

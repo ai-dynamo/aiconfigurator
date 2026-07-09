@@ -1,3 +1,10 @@
+---
+description: >
+  Modifying deployment_config.yaml and backend_config_mapping.yaml.
+paths:
+  - "src/aiconfigurator/generator/**"
+---
+
 # Config Schema Modification Reference
 
 The generator's behavior is driven by two declarative YAML files. This reference

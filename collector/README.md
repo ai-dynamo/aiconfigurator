@@ -52,12 +52,11 @@ The generated files are nccl_perf.txt, oneccl_perf.txt, and custom_allreduce_per
 
 # Collector v2: model-centric cases
 
-Collector v2 is model-centric. A healing run should collect cases for a specific
-model/GPU pair, with hardware exceptions resolved by SM version, instead of
-running every op bucket and hoping the support matrix improves. Use
-`--model-cases-full` when you want collector v2 YAML to define a full
-model-centric run. Omitting all model-case flags runs the backend registry
-directly without a collector v2 case plan.
+Collector v2 is model-centric. A healing run collects cases for a specific
+model/GPU pair instead of running every op bucket and hoping the support
+matrix improves. Use `--model-cases-full` when you want collector v2 YAML to
+define a full model-centric run. Omitting all model-case flags runs the
+backend registry directly without a collector v2 case plan.
 
 ```bash
 # Heal one model on one GPU type.
@@ -65,7 +64,7 @@ python3 collect.py --backend sglang \
   --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
   --gpu b200_sxm
 
-# Inspect the resolved model/SM plan without collecting.
+# Inspect the resolved model plan without collecting.
 python3 collect.py --backend sglang \
   --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
   --gpu b200_sxm \
@@ -78,120 +77,51 @@ python3 collect.py --backend trtllm \
   --plan-only
 
 # Collector v2 full run: aggregate base ops plus every model case YAML file.
-# Runs only ops/cases represented in collector v2 YAML.
 python3 collect.py --backend trtllm --model-cases-full
 
 # Raw backend registry run: no collector v2 case plan.
-# Runs every op registered by the backend with each collector's default cases.
 python3 collect.py --backend trtllm
+
+# Ephemeral subset filter (healing): substring match, repeatable.
+python3 collect.py --backend trtllm --ops moe --case-filter "tp=4"
 ```
 
-Case files:
+Case files (see `cases/README.md` for the full authoring guide):
 
 ```text
-cases/base_ops/<op>.yaml             — shared common case values and op cases
-cases/models/<architecture>_cases.yaml — architecture-specific all/framework op cases
-cases/sm_exceptions/sm<version>_exceptions.yaml — SM-specific all/framework op exceptions
-model_cases.py                       — merges base op + model + SM exceptions
+cases/base_ops/<op>.yaml               — shared sweep recipes (interpolation grid)
+cases/models/<architecture>_cases.yaml — op activation + model shape values
+cases/capabilities.yaml                — positive hardware floors (dtype/op -> min SM)
+cases/denylist.yaml                    — hang/node-killer cases only
+model_cases.py                         — resolves which ops a model plan collects
+capabilities.py                        — generation-time capability/denylist filter
 ```
 
-Each model file is named after the HuggingFace architecture and lists the model
-paths that should resolve to it:
+The plan is one equation: cases = dedup(base grid ∪ model shapes), then
+intersected with hardware capability floors and minus the hang denylist.
 
-```yaml
-schema_version: 1
-architecture: Qwen3MoeForCausalLM
-model_path: Qwen/Qwen3-235B-A22B
-model_paths:
-  - Qwen/Qwen3-30B-A3B
-  - Qwen/Qwen3-235B-A22B
-include_base: true
-base_ops:
-  - attention_context
-  - attention_generation
-  - gemm
-```
+## Failure philosophy: observe, don't predict
 
-`include_base: true` selects only the universal recipes declared by base-file
-`model_ops`; it no longer means every file under `cases/base_ops/`. Use
-`base_ops` for model-required auxiliary recipes, then add model ops:
+There is no declarative expected-failure layer. A case that cannot run on the
+current framework version fails fast and is recorded in `errors_<module>.json`
+and `collection_summary_<backend>.json` with a classification and a
+(model, dtype) group label. The summary aggregates failures by group: a whole
+group failing is a fix-me signal (collector bug, unverified combo, framework
+gap), not something to tolerate or auto-skip. Missing points are tolerated
+downstream by interpolation and fallback. Escalation rules — when a failure
+deserves a denylist entry, a registry `unverified` marker, or a capability
+floor — live in `.claude/rules/collector/failure_handling.md`.
 
-```yaml
-model_ops:
-  - moe
-
-all_frameworks_op_cases:
-  moe:
-    cases: all
-
-framework_specific_op_cases:
-  sglang:
-    wideep_moe:
-      cases: all
-```
-
-SM exceptions are separate and hardware-centric:
-
-```yaml
-all_frameworks_op_exceptions:
-  attention_generation:
-    drop: true
-
-framework_specific_op_exceptions:
-  sglang:
-    wideep_moe:
-      contains:
-        - "tp=32"
-```
-
-Collector v2 applies those exception selectors before running an op, so known
-unsupported cases are skipped instead of sent to workers. The optional
-`known_exceptions` section in the same SM file is used as a runtime safety net
-for failures that happen inside a collector after top-level filtering: matching
-failures are logged and stored as `expected_failed` in the resume checkpoint
-instead of failing the full collector run.
-
-For simple common ops, `cases` can also contain exact generator specs. The base
-GEMM sweep uses `token_counts` for the GEMM M dimension, `input_feature_sizes`
-for K, and `output_feature_sizes` for N; `feature_sizes` is shorthand when K and
-N use the same explicit size list. Base attention specs use `batch_sizes`,
-`sequence_lengths`, `query_head_counts`, `kv_head_options`, and `head_dims`;
-`kv_head_options: self` means the KV head count equals the query head count.
-
-Native attention tuples live in `model_case_values.attention`. They keep query
-heads, KV heads, head dimension, window, and valid TP sizes correlated. A
-targeted model run uses its exact structural profiles instead of crossing global
-head/window axes. Full/raw runs combine the base operation's `head_profiles`
-with all model-specific profiles, then remove duplicate physical tuples before
-the batch and sequence sweeps. Mamba's synthetic full/raw shapes live under
-`common_case_values.mamba2.default_model_cases`.
-
-Within `model_case_values`, use `model_aliases` only for a shape-only synthetic
-op where the artifact cannot change either the benchmark invocation or the
-persisted key. Do not merge base/FP8/NVFP4 checkpoints merely because another
-axis also sweeps quantization. When artifacts use different real quantization
-modes, declare their allowed union in
-`framework_quantization.<backend>.allowed_modes` so unrelated backend modes are
-not multiplied into that shape. Keep `model_paths` only for path-sensitive cases
-that must be instantiated separately.
-
-For targeted support-matrix healing, a case selector can run a subset using
-exact `case_ids`, string `contains` matches, `indices`, `ranges`, or `limit`.
-These filters are applied after the op collector generates cases for the
-selected model, so every op collector gets subset support through the central
-model-case filter/resolver. Collectors that accept `model_path` receive it directly; legacy
-collectors use the same value through `COLLECTOR_MODEL_PATH` while they are
-being migrated.
+`--gpu <type>` resolves the SM version from
+`src/aiconfigurator/systems/<gpu>.yaml`; use `--sm <version>` on an
+unregistered GPU. Without either, the local device capability is detected
+automatically.
 
 To add a new architecture, create one `cases/models/<architecture>_cases.yaml`
-file. To add a new model in an existing architecture, add the model path to that
-architecture's `model_paths` list. Add shared op sweeps to the matching
+file. To add a new model in an existing architecture, add the model path to
+that architecture's `model_paths` list. Add shared op sweeps to the matching
 `cases/base_ops/<op>.yaml` file. Add a new op collector only when the existing
-ops cannot generate the needed data points. To add a new hardware exception,
-create one `cases/sm_exceptions/sm<version>_exceptions.yaml` file instead of
-editing every model case. `--gpu b200_sxm` resolves the SM version from
-`src/aiconfigurator/systems/b200_sxm.yaml`; use `--sm 100` when collecting on an
-unregistered GPU with a known SM version.
+ops cannot generate the needed data points.
 
 # Version Management
 
@@ -461,7 +391,8 @@ python3 collect.py --backend trtllm --resume --checkpoint-dir /path/to/checkpoin
 ```
 
 A task is marked **done** once it is attempted (success or failure).
-Only tasks that never finished are re-queued on `--resume`.
+Only tasks that never finished are re-queued on `--resume`;
+`--resume-retry-failed` additionally re-runs previously failed tasks.
 Running without `--resume` always starts fresh (overwrites old checkpoint).
 
 ## For SGLang
