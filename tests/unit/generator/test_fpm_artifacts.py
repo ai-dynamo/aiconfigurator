@@ -135,6 +135,20 @@ def test_fpm_render_returns_only_resource_pod_and_run_script():
     assert set(artifacts) == {"k8s_deploy.yaml", "run.sh"}
 
 
+def test_fpm_pinned_vllm_024_uses_floor_template_and_preserves_fpm_overlay():
+    artifacts = render_backend_templates(
+        copy.deepcopy(_params()),
+        "vllm",
+        version="0.24.0",
+        deployment_target="fpm",
+    )
+
+    assert yaml.safe_load(artifacts["k8s_deploy.yaml"])["kind"] == "Pod"
+    assert "--tensor-parallel-size 4" in artifacts["run.sh"]
+    assert "--scheduler-cls fpm.scheduler.InstrumentedScheduler" in artifacts["run.sh"]
+    assert "--dump-config-to /results/resolved-config-node0.json" in artifacts["run.sh"]
+
+
 def test_fpm_resource_pod_is_keepalive_only_and_preserves_resources():
     artifacts = _render()
     pod = _pod(artifacts)
@@ -162,6 +176,54 @@ def test_fpm_resource_pod_is_keepalive_only_and_preserves_resources():
     assert volumes[mounts["/results"]]["emptyDir"] == {}
     assert volumes[mounts["/dev/shm"]]["emptyDir"]["medium"] == "Memory"
     assert volumes[mounts["/dev/shm"]]["emptyDir"]["sizeLimit"] == "64Gi"
+
+
+def test_fpm_resource_overlays_preserve_requests_mount_path_shm_and_labels():
+    params = _params()
+    params["K8sConfig"].update(
+        {
+            "k8s_pvc_mount_path": "/model-cache",
+            "fpm_shared_memory_size": "200Gi",
+            "fpm_resource_labels": {
+                "fpm.nvidia.com/run-id": "glm52-fpm-a3-example",
+                "fpm.nvidia.com/stage": "probe",
+            },
+            "worker_extra_pod_spec": {
+                "mainContainer": {
+                    "resources": {
+                        "requests": {
+                            "memory": "448Gi",
+                            "ephemeral-storage": "30Gi",
+                        }
+                    }
+                }
+            },
+        }
+    )
+
+    pod = _pod(_render(params))
+    container = _main_container(pod)
+    requests = container["resources"]["requests"]
+    assert requests["memory"] == "448Gi"
+    assert requests["ephemeral-storage"] == "30Gi"
+    assert container["resources"]["limits"]["nvidia.com/gpu"] == "4"
+    assert {mount["mountPath"] for mount in container["volumeMounts"]} >= {
+        "/model-cache",
+        "/results",
+        "/dev/shm",
+    }
+    volumes = {volume["name"]: volume for volume in pod["spec"]["volumes"]}
+    assert volumes["dshm"]["emptyDir"] == {"medium": "Memory", "sizeLimit": "200Gi"}
+    assert pod["metadata"]["labels"]["fpm.nvidia.com/run-id"] == "glm52-fpm-a3-example"
+    assert pod["metadata"]["labels"]["fpm.nvidia.com/stage"] == "probe"
+
+
+def test_fpm_resource_overlay_cannot_change_resolved_gpu_count():
+    params = _params()
+    params["K8sConfig"]["worker_extra_pod_spec"] = {"mainContainer": {"resources": {"limits": {"nvidia.com/gpu": "8"}}}}
+
+    with pytest.raises(ValueError, match="per-node GPU count"):
+        _render(params)
 
 
 def test_fpm_run_script_contains_resolved_args_passthrough_and_exports():
@@ -272,7 +334,7 @@ flag = "--benchmark-output-path"
 index = sys.argv.index(flag)
 path = pathlib.Path(sys.argv[index + 1])
 path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps({"status": "ok"}))
+path.write_text(json.dumps({"schema_version": 2, "status": "passed", "config": {"dp_rank": 0}}))
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 while True:
     time.sleep(0.1)
@@ -293,7 +355,11 @@ while True:
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert json.loads(output_path.read_text()) == {"status": "ok"}
+    assert json.loads(output_path.read_text()) == {
+        "schema_version": 2,
+        "status": "passed",
+        "config": {"dp_rank": 0},
+    }
 
     repeated = subprocess.run(
         ["bash", str(script_path)],
@@ -305,6 +371,124 @@ while True:
     )
     assert repeated.returncode == 1
     assert "Refusing to overwrite" in repeated.stderr
+
+
+def test_fpm_run_script_waits_for_every_single_node_dp_result(tmp_path):
+    output_path = tmp_path / "benchmark.json"
+    params = _params()
+    params["params"]["agg"].update(
+        {
+            "tensor_parallel_size": 1,
+            "data_parallel_size": 4,
+            "gpus_per_worker": 4,
+        }
+    )
+    for entry in params["K8sConfig"]["extra_env"]:
+        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
+            entry["value"] = str(output_path)
+
+    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
+    fake_package.mkdir(parents=True)
+    (fake_package.parent / "__init__.py").write_text("")
+    (fake_package / "__init__.py").write_text("")
+    (fake_package / "__main__.py").write_text(
+        """\
+import json
+import pathlib
+import signal
+import sys
+import time
+
+output_flag = sys.argv.index("--benchmark-output-path")
+base = pathlib.Path(sys.argv[output_flag + 1])
+dp_flag = sys.argv.index("--data-parallel-size")
+dp_size = int(sys.argv[dp_flag + 1])
+base.parent.mkdir(parents=True, exist_ok=True)
+for rank in range(dp_size):
+    path = base if rank == 0 else base.with_name(f"{base.stem}_dp{rank}{base.suffix}")
+    path.write_text(json.dumps({
+        "schema_version": 2,
+        "status": "passed",
+        "config": {"dp_rank": rank},
+        "rank": rank,
+    }))
+    time.sleep(1)
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+while True:
+    time.sleep(0.1)
+"""
+    )
+    script_path = tmp_path / "run.sh"
+    script_path.write_text(_render(params)["run.sh"])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(tmp_path / "fake-package")
+
+    completed = subprocess.run(
+        ["bash", str(script_path)],
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=12,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert [
+        json.loads((output_path if rank == 0 else tmp_path / f"benchmark_dp{rank}.json").read_text())["rank"]
+        for rank in range(4)
+    ] == [0, 1, 2, 3]
+
+
+def test_fpm_run_script_rejects_terminal_failed_result(tmp_path):
+    output_path = tmp_path / "benchmark.json"
+    params = _params()
+    for entry in params["K8sConfig"]["extra_env"]:
+        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
+            entry["value"] = str(output_path)
+
+    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
+    fake_package.mkdir(parents=True)
+    (fake_package.parent / "__init__.py").write_text("")
+    (fake_package / "__init__.py").write_text("")
+    (fake_package / "__main__.py").write_text(
+        """\
+import json
+import pathlib
+import signal
+import sys
+import time
+
+index = sys.argv.index("--benchmark-output-path")
+path = pathlib.Path(sys.argv[index + 1])
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps({
+    "schema_version": 2,
+    "status": "failed",
+    "config": {"dp_rank": 0},
+    "errors": ["boom"],
+}))
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+while True:
+    time.sleep(0.1)
+"""
+    )
+    script_path = tmp_path / "run.sh"
+    script_path.write_text(_render(params)["run.sh"])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(tmp_path / "fake-package")
+
+    completed = subprocess.run(
+        ["bash", str(script_path)],
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=8,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "status='failed'" in completed.stderr
+    assert "boom" in completed.stderr
 
 
 def test_default_and_explicit_normal_targets_remain_identical():
@@ -435,13 +619,220 @@ def test_fpm_rejects_multiple_workers():
         _render(params)
 
 
-def test_fpm_rejects_multinode_worker():
+def test_fpm_multinode_worker_emits_keepalive_leaderworkerset_and_rank_aware_script():
     params = _params()
     params["WorkerConfig"]["agg_gpus_per_worker"] = 16
     params["params"]["agg"]["gpus_per_worker"] = 16
     params["params"]["agg"]["tensor_parallel_size"] = 16
 
-    with pytest.raises(ValueError):
+    artifacts = _render(params)
+    workload = yaml.safe_load(artifacts["k8s_deploy.yaml"])
+
+    assert workload["apiVersion"] == "leaderworkerset.x-k8s.io/v1"
+    assert workload["kind"] == "LeaderWorkerSet"
+    group = workload["spec"]["leaderWorkerTemplate"]
+    assert group["size"] == 2
+    for template_name in ("leaderTemplate", "workerTemplate"):
+        container = group[template_name]["spec"]["containers"][0]
+        assert container["resources"]["limits"]["nvidia.com/gpu"] == "8"
+        assert container["command"] == ["/bin/bash", "-lc"]
+        assert container["args"] == ["exec sleep infinity"]
+
+    script = artifacts["run.sh"]
+    assert 'node_rank="${LWS_WORKER_INDEX:?LWS_WORKER_INDEX is required for multinode FPM}"' in script
+    assert 'master_addr="${LWS_LEADER_ADDRESS:?LWS_LEADER_ADDRESS is required for multinode FPM}"' in script
+    assert '--nnodes "$node_count" --node-rank "$node_rank"' in script
+    assert 'exec "${engine_command[@]}" --headless' in script
+
+
+def test_fpm_multinode_dump_config_override_requires_rank_placeholder():
+    params = _params()
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 16
+    params["params"]["agg"].update({"gpus_per_worker": 16, "tensor_parallel_size": 16})
+    params["params"]["agg"]["extra_cli_args"].extend(["--dump-config-to", "/results/resolved-config.json"])
+
+    with pytest.raises(ValueError, match="node_rank"):
+        _render(params)
+
+
+def test_fpm_multinode_rejects_name_too_long_for_lws_revision_labels():
+    params = _params()
+    params["K8sConfig"]["name_prefix"] = "f" * 51
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 16
+    params["params"]["agg"].update({"gpus_per_worker": 16, "tensor_parallel_size": 16})
+
+    with pytest.raises(ValueError, match="at most 50"):
+        _render(params)
+
+
+def test_fpm_multinode_requires_lws_runtime_environment(tmp_path):
+    params = _params()
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 16
+    params["params"]["agg"].update({"gpus_per_worker": 16, "tensor_parallel_size": 16})
+    script_path = tmp_path / "run.sh"
+    script_path.write_text(_render(params)["run.sh"])
+
+    completed = subprocess.run(
+        ["bash", str(script_path)],
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "LWS_WORKER_INDEX is required" in completed.stderr
+
+
+def test_fpm_multinode_model_parallel_follower_receives_rank_and_headless(tmp_path):
+    args_path = tmp_path / "engine-args.json"
+    params = _params()
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 16
+    params["params"]["agg"].update({"gpus_per_worker": 16, "tensor_parallel_size": 16})
+
+    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
+    fake_package.mkdir(parents=True)
+    (fake_package.parent / "__init__.py").write_text("")
+    (fake_package / "__init__.py").write_text("")
+    (fake_package / "__main__.py").write_text(
+        """\
+import json
+import os
+import pathlib
+import sys
+
+pathlib.Path(os.environ["FAKE_ARGS_PATH"]).write_text(json.dumps(sys.argv[1:]))
+"""
+    )
+    script_path = tmp_path / "run.sh"
+    script_path.write_text(_render(params)["run.sh"])
+    env = dict(os.environ)
+    env.update(
+        {
+            "PYTHONPATH": str(tmp_path / "fake-package"),
+            "FAKE_ARGS_PATH": str(args_path),
+            "LWS_WORKER_INDEX": "1",
+            "LWS_LEADER_ADDRESS": "leader.example",
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", str(script_path)],
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=5,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    engine_args = json.loads(args_path.read_text())
+    assert engine_args[engine_args.index("--nnodes") + 1] == "2"
+    assert engine_args[engine_args.index("--node-rank") + 1] == "1"
+    assert engine_args[engine_args.index("--master-addr") + 1] == "leader.example"
+    assert engine_args[engine_args.index("--dump-config-to") + 1].endswith("resolved-config-node1.json")
+    assert engine_args[-1] == "--headless"
+
+
+def test_fpm_multinode_dp_rank_executes_local_result_range(tmp_path):
+    output_path = tmp_path / "run.v1" / "metrics.final.json"
+    args_path = tmp_path / "engine-args.json"
+    params = _params()
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 16
+    params["params"]["agg"].update(
+        {
+            "gpus_per_worker": 16,
+            "tensor_parallel_size": 1,
+            "data_parallel_size": 16,
+        }
+    )
+    for entry in params["K8sConfig"]["extra_env"]:
+        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
+            entry["value"] = str(output_path)
+
+    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
+    fake_package.mkdir(parents=True)
+    (fake_package.parent / "__init__.py").write_text("")
+    (fake_package / "__init__.py").write_text("")
+    (fake_package / "__main__.py").write_text(
+        """\
+import json
+import os
+import pathlib
+import signal
+import sys
+import time
+
+pathlib.Path(os.environ["FAKE_ARGS_PATH"]).write_text(json.dumps(sys.argv[1:]))
+output = pathlib.Path(sys.argv[sys.argv.index("--benchmark-output-path") + 1])
+local = int(sys.argv[sys.argv.index("--data-parallel-size-local") + 1])
+start = int(sys.argv[sys.argv.index("--data-parallel-start-rank") + 1])
+output.parent.mkdir(parents=True, exist_ok=True)
+for rank in range(start, start + local):
+    path = output if rank == 0 else output.with_name(f"{output.stem}_dp{rank}{output.suffix}")
+    path.write_text(json.dumps({
+        "schema_version": 2,
+        "status": "passed",
+        "config": {"dp_rank": rank},
+    }))
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+while True:
+    time.sleep(0.1)
+"""
+    )
+    script_path = tmp_path / "run.sh"
+    script_path.write_text(_render(params)["run.sh"])
+    env = dict(os.environ)
+    env.update(
+        {
+            "PYTHONPATH": str(tmp_path / "fake-package"),
+            "FAKE_ARGS_PATH": str(args_path),
+            "LWS_WORKER_INDEX": "1",
+            "LWS_LEADER_ADDRESS": "leader.example",
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", str(script_path)],
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=8,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    engine_args = json.loads(args_path.read_text())
+    assert engine_args[engine_args.index("--data-parallel-size-local") + 1] == "8"
+    assert engine_args[engine_args.index("--data-parallel-start-rank") + 1] == "8"
+    assert engine_args[engine_args.index("--data-parallel-address") + 1] == "leader.example"
+    assert engine_args[engine_args.index("--dump-config-to") + 1].endswith("resolved-config-node1.json")
+    assert {path.name for path in output_path.parent.glob("metrics.final_dp*.json")} == {
+        f"metrics.final_dp{rank}.json" for rank in range(8, 16)
+    }
+
+
+@pytest.mark.parametrize(
+    "flag",
+    sorted(
+        [
+            "--nnodes",
+            "--node-rank",
+            "--master-addr",
+            "--master-port",
+            "--headless",
+            "--data-parallel-size-local",
+            "--data-parallel-start-rank",
+            "--data-parallel-address",
+            "--data-parallel-rpc-port",
+        ]
+    ),
+)
+def test_fpm_rejects_passthrough_of_generator_owned_orchestration_flags(flag):
+    params = _params()
+    params["params"]["agg"]["extra_cli_args"].append(flag)
+
+    with pytest.raises(ValueError, match="owns orchestration option"):
         _render(params)
 
 
@@ -472,6 +863,36 @@ def test_fpm_rejects_env_from_environment_sources():
     }
 
     with pytest.raises(ValueError, match="envFrom"):
+        _render(params)
+
+
+def test_fpm_rejects_user_resource_claims():
+    params = _params()
+    params["K8sConfig"]["worker_extra_pod_spec"] = {
+        "resourceClaims": [
+            {
+                "name": "compute-domain-channel",
+                "resourceClaimTemplateName": "user-owned",
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="resourceClaims"):
+        _render(params)
+
+
+def test_fpm_requires_mp_data_parallel_backend():
+    params = _params()
+    params["params"]["agg"].update(
+        {
+            "tensor_parallel_size": 1,
+            "data_parallel_size": 4,
+            "gpus_per_worker": 4,
+        }
+    )
+    params["params"]["agg"]["extra_cli_args"].extend(["--data-parallel-backend", "ray"])
+
+    with pytest.raises(ValueError, match="data-parallel-backend mp"):
         _render(params)
 
 

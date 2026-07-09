@@ -226,7 +226,7 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
     model_cache_input = str(k8s.get("k8s_model_cache") or "").strip()
     use_model_cache = model_cache_input != ""
     model_cache_pvc = model_cache_input if use_model_cache else "model-cache"
-    model_cache_mount = "/workspace/model_cache"
+    model_cache_mount = str(k8s.get("k8s_pvc_mount_path") or "/workspace/model_cache")
     enable_router = bool(dyn.get("enable_router") or False)
     etcd_endpoints = k8s.get("k8s_etcd_endpoints")
     hf_home = k8s.get("k8s_hf_home")
@@ -533,7 +533,7 @@ def _populate_sglang(context: dict[str, Any], resolved_facts: Any = None) -> lis
     model_cache_input = str(k8s.get("k8s_model_cache") or "").strip()
     use_model_cache = model_cache_input != ""
     model_cache_pvc = model_cache_input if use_model_cache else "model-cache"
-    model_cache_mount = "/workspace/model_cache"
+    model_cache_mount = str(k8s.get("k8s_pvc_mount_path") or "/workspace/model_cache")
     etcd_endpoints = k8s.get("k8s_etcd_endpoints")
     hf_home = k8s.get("k8s_hf_home")
     image_pull_secret = k8s.get("k8s_image_pull_secret")
@@ -827,7 +827,7 @@ def _populate_trtllm(context: dict[str, Any], resolved_facts: Any = None) -> lis
     model_cache_input = str(k8s.get("k8s_model_cache") or "").strip()
     use_model_cache = model_cache_input != ""
     model_cache_pvc = model_cache_input if use_model_cache else "model-cache"
-    model_cache_mount = "/workspace/model_cache"
+    model_cache_mount = str(k8s.get("k8s_pvc_mount_path") or "/workspace/model_cache")
     runtime_working_dir = context.get("working_dir") or "/workspace/"
     etcd_endpoints = k8s.get("k8s_etcd_endpoints")
     hf_home = k8s.get("k8s_hf_home")
