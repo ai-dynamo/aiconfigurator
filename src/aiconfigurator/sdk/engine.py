@@ -295,6 +295,9 @@ def _moe_dispatch(op: MoEDispatch, *, backend: str) -> dict:
         "moe_quant": _quant_name(quant) if quant is not None else "bfloat16",
         "attn_cp_size": op._attn_cp_size,
         "is_context": op._is_context,
+        # DeepEP-normal dispatch SM count; the Rust table keys the sms axis
+        # and snaps off-grid values (mirrors `_query_wideep_deepep_normal_table`).
+        "sms": op._sms,
     }
 
 
@@ -387,6 +390,20 @@ def _dsv4_module(
         "fmha_quant_mode": _quant_name(fmha) if fmha is not None else "bfloat16",
         "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
         "architecture": architecture,
+        # Structural dims for the Rust-side analytic SOL (beyond-grid
+        # util-hold ratios). Python's op carries them from the model config
+        # (`_deepseek_v4_attention_sol` inputs); without them the Rust side
+        # would pin DeepSeek-V4-Pro dims and Flash's ratios would drift.
+        "hidden_size": op._hidden_size,
+        "q_lora_rank": op._q_lora_rank,
+        "o_lora_rank": op._o_lora_rank,
+        "head_dim": op._head_dim,
+        "rope_head_dim": op._rope_head_dim,
+        "index_n_heads": op._index_n_heads,
+        "index_head_dim": op._index_head_dim,
+        "index_topk": op._index_topk,
+        # Rank-LOCAL o_groups (the model pre-divides by tp).
+        "o_groups": op._o_groups,
     }
 
 
@@ -400,6 +417,10 @@ def _mhc_module(op: DeepSeekV4MHCModule, *, architecture: str) -> dict:
         "hc_mult": op._hc_mult,
         "hidden_size": op._hidden_size,
         "architecture": architecture,
+        # SOL inputs for the Rust-side mHC roofline (beyond-range util-hold
+        # anchor; mirrors `_query_mhc_table.get_sol`).
+        "sinkhorn_iters": op._sinkhorn_iters,
+        "quant_mode": _quant_name(op._quant_mode),
     }
 
 

@@ -65,6 +65,16 @@ pub struct MoEDispatchOp {
     /// in prefill; decode replicates attention across CP ranks (no comm).
     #[serde(default)]
     pub is_context: bool,
+    /// DeepEP-normal dispatch SM count (Python `MoEDispatch._sms =
+    /// kwargs.get("sms", 12)`), forwarded to the sms-keyed deepep-normal
+    /// table with nearest-snap semantics. Default 12 = Python's kwarg
+    /// default, so old opspecs keep the same query point.
+    #[serde(default = "default_sms")]
+    pub sms: u32,
+}
+
+fn default_sms() -> u32 {
+    12
 }
 
 impl MoEDispatchOp {
@@ -96,6 +106,7 @@ impl MoEDispatchOp {
             moe_quant: MoeQuantMode::Bfloat16,
             attn_cp_size: 1,
             is_context: false,
+            sms: default_sms(),
         }
     }
 
@@ -272,6 +283,8 @@ impl MoEDispatchOp {
                     num_tokens,
                     self.topk,
                     self.num_experts,
+                    // Python passes `sms=self._sms` (kwarg default 12).
+                    self.sms,
                 )?;
                 let total_us = if self.pre_dispatch {
                     point.dispatch_transmit_us + point.dispatch_notify_us

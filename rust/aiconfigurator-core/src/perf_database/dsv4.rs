@@ -129,16 +129,16 @@ struct ModuleKey {
     gemm_quant: String,
 }
 
-/// DeepSeek-V4 structural dims for the analytic SOL. Python receives these
-/// from the model config (`DeepSeekV4Config`); the Rust perf-database query
-/// only carries the architecture string, so the dims are pinned here.
+/// DeepSeek-V4 structural dims used as the DEFAULT source for the analytic
+/// SOL when the caller does not supply per-op dims. Python receives these
+/// from the model config (`DeepSeekV4Config`) via the op fields; the Rust
+/// opspec now carries them too (`Dsv4ModuleOp` -> [`Dsv4SolDims`]), so this
+/// pinned table only backs old specs and direct perf-database queries.
 ///
 /// NOTE: DeepSeek-V4-Pro and DeepSeek-V4-Flash share the architecture string
 /// `DeepseekV4ForCausalLM` but differ in shape (Flash: hidden 4096,
-/// q_lora 1024, o_groups 8, index_topk 512). The table pins the PRO dims —
-/// the SOL only enters as a ratio (util-hold / single-survivor correction),
-/// so measured-range resolution is unaffected; only beyond-grid ratios for
-/// Flash would drift.
+/// q_lora 1024, o_groups 8, index_topk 512, native heads 64). The pinned
+/// table carries the PRO dims — op-level queries override it from the spec.
 pub(crate) struct Dsv4Dims {
     pub(crate) hidden_size: i64,
     pub(crate) q_lora_rank: i64,
@@ -171,6 +171,46 @@ pub(crate) fn dsv4_dims(_architecture: &str) -> &'static Dsv4Dims {
     // Only DeepseekV4ForCausalLM exists today; see the Pro-vs-Flash note on
     // `Dsv4Dims`.
     &DSV4_PRO_DIMS
+}
+
+/// SOL-ready structural dims, matching the parameter list Python's
+/// `_deepseek_v4_attention_sol` receives from the op fields (model config).
+/// `local_o_groups` is the rank-LOCAL group count — Python's op carries it
+/// pre-divided (`max(1, o_groups // tp_size)` in `models/deepseek_v4.py`).
+#[derive(Clone, Copy, Debug)]
+pub struct Dsv4SolDims {
+    pub(crate) hidden_size: i64,
+    pub(crate) q_lora_rank: i64,
+    pub(crate) o_lora_rank: i64,
+    pub(crate) head_dim: i64,
+    pub(crate) rope_head_dim: i64,
+    pub(crate) index_n_heads: i64,
+    pub(crate) index_head_dim: i64,
+    pub(crate) index_topk: i64,
+    pub(crate) window_size: i64,
+    pub(crate) local_o_groups: i64,
+}
+
+impl Dsv4SolDims {
+    /// Resolve from the pinned per-architecture table (the pre-override
+    /// behaviour): the rank-local o_groups is derived from
+    /// `tp = native_heads / local_heads`, mirroring Python's
+    /// `max(1, o_groups // tp)` with the pinned totals.
+    pub(crate) fn from_pinned(dims: &Dsv4Dims, local_heads: i64) -> Self {
+        let tp = (dims.native_heads / local_heads.max(1)).max(1);
+        Dsv4SolDims {
+            hidden_size: dims.hidden_size,
+            q_lora_rank: dims.q_lora_rank,
+            o_lora_rank: dims.o_lora_rank,
+            head_dim: dims.head_dim,
+            rope_head_dim: dims.rope_head_dim,
+            index_n_heads: dims.index_n_heads,
+            index_head_dim: dims.index_head_dim,
+            index_topk: dims.index_topk,
+            window_size: dims.window_size,
+            local_o_groups: (dims.o_groups / tp).max(1),
+        }
+    }
 }
 
 impl Dsv4Table {
@@ -232,6 +272,10 @@ impl Dsv4Table {
     /// CSVs collected to date carry a single `step=0` anchor, so `prefix=0`
     /// collapses that level exactly and `prefix>0` is out-of-range util-hold
     /// with the prefix-aware SOL carrying the effect (matching Python).
+    /// `sol_dims`: per-op structural dims for the analytic SOL (from the
+    /// opspec, mirroring Python's op fields). `None` falls back to the pinned
+    /// per-architecture table ([`Dsv4SolDims::from_pinned`]) — the
+    /// pre-override behaviour kept for direct perf-database queries.
     #[allow(clippy::too_many_arguments)]
     pub fn query_context(
         &self,
@@ -245,6 +289,7 @@ impl Dsv4Table {
         gemm_quant: GemmQuantMode,
         architecture: &str,
         prefix: u32,
+        sol_dims: Option<Dsv4SolDims>,
     ) -> Result<f64, AicError> {
         let grids = match attn_kind {
             AttnKind::Csa => self.load_csa_context()?,
@@ -252,7 +297,8 @@ impl Dsv4Table {
         };
         let node = select_resolved(grids, architecture, fmha_quant, kv_quant, gemm_quant, local_heads)?;
 
-        let dims = dsv4_dims(architecture);
+        let dims = sol_dims
+            .unwrap_or_else(|| Dsv4SolDims::from_pinned(dsv4_dims(architecture), local_heads as i64));
         let cr = attn_kind.compress_ratio();
         let heads = local_heads as i64;
         // Engine coordinates are (prefix, seq, batch); Python's sol_fn is
@@ -260,7 +306,7 @@ impl Dsv4Table {
         let sol = move |c: &[f64]| {
             dsv4_attention_sol_ms(
                 spec,
-                dims,
+                &dims,
                 cr,
                 true,
                 kv_quant,
@@ -292,6 +338,7 @@ impl Dsv4Table {
     /// `s_total=385` measured only at some batches); the engine's
     /// single-survivor SOL-ratio correction / util-hold replaces the legacy
     /// batch-scaling fallback.
+    /// `sol_dims`: see [`Dsv4Table::query_context`].
     #[allow(clippy::too_many_arguments)]
     pub fn query_generation(
         &self,
@@ -304,6 +351,7 @@ impl Dsv4Table {
         fmha_quant: FmhaQuantMode,
         gemm_quant: GemmQuantMode,
         architecture: &str,
+        sol_dims: Option<Dsv4SolDims>,
     ) -> Result<f64, AicError> {
         let grids = match attn_kind {
             AttnKind::Csa => self.load_csa_generation()?,
@@ -311,7 +359,8 @@ impl Dsv4Table {
         };
         let node = select_resolved(grids, architecture, fmha_quant, kv_quant, gemm_quant, local_heads)?;
 
-        let dims = dsv4_dims(architecture);
+        let dims = sol_dims
+            .unwrap_or_else(|| Dsv4SolDims::from_pinned(dsv4_dims(architecture), local_heads as i64));
         let cr = attn_kind.compress_ratio();
         let heads = local_heads as i64;
         // Engine coordinates are (batch, seq); Python's sol_fn is
@@ -319,7 +368,7 @@ impl Dsv4Table {
         let sol = move |c: &[f64]| {
             dsv4_attention_sol_ms(
                 spec,
-                dims,
+                &dims,
                 cr,
                 false,
                 kv_quant,
@@ -888,14 +937,13 @@ fn compressed_context_pairs(batch: i128, query_len: i128, prefix: i128, ratio: i
 /// of Python `operations.dsv4._deepseek_v4_attention_sol` (returns only the
 /// `max(sol_math, sol_mem)` scalar the engine consumes).
 ///
-/// `local_heads` is the rank-local head count Python passes as `num_heads`;
-/// the rank-local `o_groups` Python receives from the model
-/// (`max(1, o_groups // tp)`) is derived here from
-/// `tp = native_heads / local_heads`.
+/// `local_heads` is the rank-local head count Python passes as `num_heads`.
+/// `dims.local_o_groups` is the rank-local group count Python passes as
+/// `o_groups` (see [`Dsv4SolDims`]).
 #[allow(clippy::too_many_arguments)]
 fn dsv4_attention_sol_ms(
     spec: &SystemSpec,
-    dims: &Dsv4Dims,
+    dims: &Dsv4SolDims,
     compress_ratio: i64,
     is_context: bool,
     kv_quant: KvCacheQuantMode,
@@ -906,8 +954,7 @@ fn dsv4_attention_sol_ms(
     prefix: i64,
     local_heads: i64,
 ) -> f64 {
-    let tp = (dims.native_heads / local_heads.max(1)).max(1);
-    let local_o_groups = (dims.o_groups / tp).max(1);
+    let local_o_groups = dims.local_o_groups.max(1);
 
     let (b, s, prefix) = (b as i128, s as i128, prefix as i128);
     let nh = local_heads as i128;
@@ -1135,6 +1182,7 @@ mod tests {
                 GemmQuantMode::Bfloat16,
                 "DeepseekV4ForCausalLM",
                 0,
+                None,
             )
             .unwrap_err();
         match err {
@@ -1164,7 +1212,7 @@ mod tests {
             table
                 .query_context(
                     &spec, kind, b, isl, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
-                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", prefix,
+                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", prefix, None,
                 )
                 .unwrap()
         };
@@ -1173,6 +1221,7 @@ mod tests {
                 .query_generation(
                     &spec, kind, b, s, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
                     GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
+                    None,
                 )
                 .unwrap()
         };
@@ -1223,6 +1272,7 @@ mod tests {
                 .query_generation(
                     &spec, kind, b, s, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
                     GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
+                    None,
                 )
                 .unwrap()
         };
@@ -1230,7 +1280,7 @@ mod tests {
             table
                 .query_context(
                     &spec, kind, b, isl, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
-                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", 0,
+                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", 0, None,
                 )
                 .unwrap()
         };
@@ -1287,6 +1337,7 @@ mod tests {
                 GemmQuantMode::Fp8Block,
                 "DeepseekV4ForCausalLM",
                 0, // prefix
+                None,
             )
             .expect("DSV4 context lookup must resolve fp8_e4m3 kv_cache_dtype as fp8");
         assert!(latency.is_finite() && latency > 0.0, "unexpected latency: {latency}");
@@ -1380,6 +1431,145 @@ mod tests {
         write_column::<DoubleType>(&mut rg, &rows.iter().map(|r| r.4).collect::<Vec<_>>());
         rg.close().unwrap();
         writer.close().unwrap();
+    }
+
+    /// Item 5: the analytic SOL must use the OP's structural dims (Python
+    /// sources them from the model config), not a table pinned to the
+    /// DeepSeek-V4-Pro shape — Pro and Flash share the architecture string
+    /// but differ in (hidden, q_lora, index_topk, o_groups, native heads),
+    /// so a Flash op spec must yield a DIFFERENT beyond-grid hold. Synthetic
+    /// HCA table {isl 1024: 1.0, 2048: 2.0} at (n=64, b=1, step=0); querying
+    /// isl=8192 holds at the isl=2048 anchor:
+    /// `hold = 2.0 * sol(8192) / sol(2048)`. Oracles hand-computed from the
+    /// Python formula:
+    ///
+    /// ```text
+    /// PYTHONPATH=src python3 -c "
+    /// from aiconfigurator.sdk.perf_database import PerfDatabase
+    /// from aiconfigurator.sdk.operations.dsv4 import _deepseek_v4_attention_sol
+    /// from aiconfigurator.sdk import common
+    /// db = PerfDatabase('b200_sxm','sglang','0.5.10',
+    ///                   systems_root='src/aiconfigurator/systems', database_mode='SOL')
+    /// def sol(s, hidden, q_lora, index_topk):
+    ///     return _deepseek_v4_attention_sol(db, is_context=True, b=1, s=s, prefix=0,
+    ///         num_heads=64, hidden_size=hidden, q_lora_rank=q_lora, o_lora_rank=1024,
+    ///         head_dim=512, rope_head_dim=64, index_n_heads=64, index_head_dim=128,
+    ///         index_topk=index_topk, window_size=128, compress_ratio=128, o_groups=8,
+    ///         kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+    ///         fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+    ///         gemm_quant_mode=common.GEMMQuantMode.fp8_block)[0]
+    /// for name, hidden, qlr, topk in [('flash',4096,1024,512), ('pro',7168,1536,1024)]:
+    ///     print(name, repr(2.0 * sol(8192, hidden, qlr, topk) / sol(2048, hidden, qlr, topk)))"
+    /// # -> flash 8.17467016968122 / pro 8.131309314148407
+    /// ```
+    ///
+    /// The old pinned-dims code returned the PRO hold for the Flash spec.
+    #[test]
+    fn dsv4_flash_op_spec_dims_change_beyond_grid_hold() {
+        use crate::operators::dsv4::Dsv4ModuleOp;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_module_parquet(
+            &dir.path().join("dsv4_hca_context_module_perf.parquet"),
+            &[(64, 1, 1024, 0, 1.0), (64, 1, 2048, 0, 2.0)],
+        );
+        let table = Dsv4Table::new(dir.path().to_path_buf());
+        let spec = b200_sxm_spec();
+
+        // Flash op spec: dims come through the SERDE path, like the engine.
+        let flash: Dsv4ModuleOp = serde_json::from_value(serde_json::json!({
+            "name": "context_attention",
+            "scale_factor": 1.0,
+            "attn_kind": "Hca",
+            "num_heads": 64,
+            "native_heads": 64,
+            "tp_size": 1,
+            "kv_cache_dtype": "fp8",
+            "fmha_quant_mode": "bfloat16",
+            "gemm_quant_mode": "fp8_block",
+            "architecture": "DeepseekV4ForCausalLM",
+            "window_size": 128,
+            "hidden_size": 4096,
+            "q_lora_rank": 1024,
+            "o_lora_rank": 1024,
+            "head_dim": 512,
+            "rope_head_dim": 64,
+            "index_n_heads": 64,
+            "index_head_dim": 128,
+            "index_topk": 512,
+            "o_groups": 8,
+        }))
+        .expect("Flash op spec must deserialize");
+        let q = |sol_dims, isl: u32| {
+            table
+                .query_context(
+                    &spec,
+                    AttnKind::Hca,
+                    1,
+                    isl,
+                    64,
+                    KvCacheQuantMode::Fp8,
+                    FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Fp8Block,
+                    "DeepseekV4ForCausalLM",
+                    0,
+                    sol_dims,
+                )
+                .unwrap()
+        };
+        let approx = |got: f64, want: f64| {
+            assert!(
+                ((got - want) / want).abs() < 1e-9,
+                "rust {got} vs python {want}"
+            );
+        };
+        // isl=8192 is beyond the frontier -> util-hold on the SOL ratio.
+        let flash_hold = q(Some(flash.sol_dims()), 8192);
+        let pro_hold = q(None, 8192); // pinned default (old specs / direct queries)
+        approx(flash_hold, 8.17467016968122);
+        approx(pro_hold, 8.131309314148407);
+        assert!(
+            (flash_hold - pro_hold).abs() > 1e-3,
+            "Flash dims must change the hold ({flash_hold} vs {pro_hold})"
+        );
+        // In-range resolution is SOL-free and identical for both.
+        approx(q(Some(flash.sol_dims()), 1536), 1.5);
+        approx(q(None, 1536), 1.5);
+    }
+
+    /// Old op specs carry none of the dim fields; serde must default them to
+    /// the Pro values and `sol_dims()` must reproduce the pinned derivation
+    /// (`from_pinned`) exactly, including the tp-derived local o_groups.
+    #[test]
+    fn dsv4_op_spec_dims_default_to_pinned_pro() {
+        use crate::operators::dsv4::Dsv4ModuleOp;
+
+        let old_spec: Dsv4ModuleOp = serde_json::from_value(serde_json::json!({
+            "name": "context_attention",
+            "scale_factor": 1.0,
+            "attn_kind": "Csa",
+            "num_heads": 16,
+            "native_heads": 128,
+            "tp_size": 8,
+            "kv_cache_dtype": "fp8",
+            "fmha_quant_mode": "bfloat16",
+            "gemm_quant_mode": "fp8_block",
+            "architecture": "DeepseekV4ForCausalLM",
+        }))
+        .expect("old op spec must deserialize");
+        let got = old_spec.sol_dims();
+        let want = Dsv4SolDims::from_pinned(dsv4_dims("DeepseekV4ForCausalLM"), 16);
+        assert_eq!(got.hidden_size, want.hidden_size);
+        assert_eq!(got.q_lora_rank, want.q_lora_rank);
+        assert_eq!(got.o_lora_rank, want.o_lora_rank);
+        assert_eq!(got.head_dim, want.head_dim);
+        assert_eq!(got.rope_head_dim, want.rope_head_dim);
+        assert_eq!(got.index_n_heads, want.index_n_heads);
+        assert_eq!(got.index_head_dim, want.index_head_dim);
+        assert_eq!(got.index_topk, want.index_topk);
+        assert_eq!(got.window_size, want.window_size);
+        assert_eq!(got.local_o_groups, want.local_o_groups); // 16 / (128/16) = 2
+        assert_eq!(got.local_o_groups, 2);
     }
 
     /// Loader + delta parity against a Python oracle. Oracle generated with
@@ -1520,7 +1710,7 @@ mod tests {
             table
                 .query_context(
                     &spec, kind, 8, 512, 64, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
-                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", 0,
+                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", 0, None,
                 )
                 .unwrap()
         };
@@ -1528,7 +1718,7 @@ mod tests {
             table
                 .query_generation(
                     &spec, kind, 16, 385, 64, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
-                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
+                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", None,
                 )
                 .unwrap()
         };

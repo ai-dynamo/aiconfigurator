@@ -5,13 +5,21 @@
 //!
 //! Two parquet files: `dsa_context_module_perf.parquet` and
 //! `dsa_generation_module_perf.parquet`. Both share columns: model,
-//! architecture, mla_dtype, kv_cache_dtype, gemm_type, num_heads,
-//! batch_size, isl, tp_size, step, latency. Each file loads from an
-//! ordered, shared-layer-aware source list (see [`PerfSource`]).
+//! architecture, op_name, kernel_source, mla_dtype, kv_cache_dtype,
+//! gemm_type, num_heads, batch_size, isl, tp_size, step, latency. Each file
+//! loads from an ordered, shared-layer-aware source list (see [`PerfSource`]).
 //!
 //! Data is nested by (architecture, mla_dtype, kv_cache_dtype, gemm_type)
-//! → num_heads → step → isl → batch_size → latency. The `step` axis is the
-//! "prefix value" (past-KV length).
+//! → dsa_backend → num_heads → step → isl → batch_size → latency. The
+//! `step` axis is the "prefix value" (past-KV length). Mirroring Python
+//! `load_context_dsa_module_data` / `load_generation_dsa_module_data`:
+//! - full vs GLM-5.2 skip-indexer rows share ONE file, split by `op_name`
+//!   (`*_skip_indexer` suffix); the tables here keep the FULL rows (the
+//!   default slice every Rust query path consumes — Python's op passes
+//!   `skip_indexer=False` on the paths ported here).
+//! - `dsa_backend` is derived per row from `kernel_source` (`"trtllm" if
+//!   "trtllm" in ks else "flashmla_kv"`); queries select a backend slice
+//!   with Python `_select_dsa_backend`'s fallback chain.
 //!
 //! Queries resolve on the RAW grids through the shared `perf_interp` v2
 //! engine, mirroring Python `operations/dsa.py`:
@@ -89,12 +97,35 @@ pub fn dsa_sparse_file_prefix(architecture: &str) -> &'static str {
 }
 
 struct NodeCache {
-    by_keys: BTreeMap<DsaKey, Node>,
+    /// (arch, fmha, kv, gemm) → dsa_backend → engine table.
+    by_keys: BTreeMap<DsaKey, BTreeMap<String, Node>>,
 }
 
-/// (arch, fmha, kv, gemm) → num_heads → step → isl → batch → latency.
+/// num_heads → step → isl → batch → latency.
+pub type DsaHeadGrid = BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, f64>>>>;
+
+/// (arch, fmha, kv, gemm) → dsa_backend → num_heads → step → isl → batch →
+/// latency. The `dsa_backend` level mirrors Python's
+/// `...[architecture][dsa_backend][num_heads]...` nesting.
 pub struct DsaGrids {
-    pub by_keys: BTreeMap<DsaKey, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, f64>>>>>,
+    pub by_keys: BTreeMap<DsaKey, BTreeMap<String, DsaHeadGrid>>,
+}
+
+/// Pick the per-backend slice from a backend-keyed map. Mirror of Python
+/// `_select_dsa_backend`: requested backend, else `flashmla_kv`, else
+/// `trtllm`, else the first populated slice (single-backend parquets still
+/// resolve). The derived backend values are only ever `trtllm` /
+/// `flashmla_kv`, so the final arm is a defensive mirror of Python's
+/// `next(iter(arch_dict.values()))`.
+fn select_dsa_backend<'a, T>(
+    by_backend: &'a BTreeMap<String, T>,
+    dsa_backend: &str,
+) -> Option<&'a T> {
+    by_backend
+        .get(dsa_backend)
+        .or_else(|| by_backend.get("flashmla_kv"))
+        .or_else(|| by_backend.get("trtllm"))
+        .or_else(|| by_backend.values().next())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -260,6 +291,10 @@ impl DsaTable {
     /// SOL (indexer on/off regime + sparse-KV pair count); the top-k
     /// piecewise interpolation layer that used to consume it was deleted in
     /// v2 alongside the robust-lookup/batch-scaling fallbacks.
+    ///
+    /// `dsa_backend` selects the per-backend slice with Python
+    /// `_select_dsa_backend`'s fallback chain. Python's op passes `"trtllm"`
+    /// on the plain path and `"flashmla_kv"` for the CP base.
     #[allow(clippy::too_many_arguments)]
     pub fn query_context(
         &self,
@@ -273,6 +308,7 @@ impl DsaTable {
         architecture: &str,
         prefix: u32,
         index_topk: u32,
+        dsa_backend: &str,
     ) -> Result<f64, AicError> {
         let nodes = self.load_context_nodes()?;
         let key = DsaKey {
@@ -281,9 +317,13 @@ impl DsaTable {
             kv_quant: kv_quant.name().to_string(),
             gemm_quant: gemm_quant.name().to_string(),
         };
-        let node = nodes.by_keys.get(&key).ok_or_else(|| {
-            AicError::PerfDatabase(format!("context DSA module data missing for {key:?}"))
-        })?;
+        let node = nodes
+            .by_keys
+            .get(&key)
+            .and_then(|by_backend| select_dsa_backend(by_backend, dsa_backend))
+            .ok_or_else(|| {
+                AicError::PerfDatabase(format!("context DSA module data missing for {key:?}"))
+            })?;
 
         let dims = dsa_dims(architecture);
         let topk = index_topk as i64;
@@ -318,6 +358,9 @@ impl DsaTable {
     /// batch is the MIDDLE axis (Python's generation loader nests
     /// `[num_heads][b][s]`), the derived cache here matches that order.
     /// Out-of-range seq/batch is util-hold on the decode SOL.
+    ///
+    /// `dsa_backend` selects the per-backend slice (Python's op passes the
+    /// table function default, `"trtllm"`).
     #[allow(clippy::too_many_arguments)]
     pub fn query_generation(
         &self,
@@ -329,6 +372,7 @@ impl DsaTable {
         fmha_quant: FmhaQuantMode,
         gemm_quant: GemmQuantMode,
         architecture: &str,
+        dsa_backend: &str,
     ) -> Result<f64, AicError> {
         let nodes = self.load_generation_nodes()?;
         // NOTE: Python's generation table is keyed (kv, gemm, arch) only —
@@ -344,6 +388,7 @@ impl DsaTable {
         let node = nodes
             .by_keys
             .get(&key)
+            .and_then(|by_backend| select_dsa_backend(by_backend, dsa_backend))
             .ok_or_else(|| missing("generation DSA module", &self.data_root, format!("{key:?}")))?;
 
         let dims = dsa_dims(architecture);
@@ -399,18 +444,23 @@ impl DsaTable {
     }
 }
 
-/// Materialise the per-`DsaKey` engine table for `query_context` with the
-/// raw nesting `[num_heads][step][isl][batch]` (the 4-axis grid Python v2
-/// resolves on).
+/// Materialise the per-`(DsaKey, dsa_backend)` engine table for
+/// `query_context` with the raw nesting `[num_heads][step][isl][batch]` (the
+/// 4-axis grid Python v2 resolves on).
 fn build_context_nodes(grids: &DsaGrids) -> NodeCache {
-    let mut by_keys: BTreeMap<DsaKey, Node> = BTreeMap::new();
-    for (key, by_heads) in &grids.by_keys {
-        let node = by_keys.entry(key.clone()).or_insert_with(Node::branch);
-        for (&n, by_step) in by_heads {
-            for (&step, by_isl) in by_step {
-                for (&isl, by_batch) in by_isl {
-                    for (&bb, &lat) in by_batch {
-                        node.insert(&[n, step, isl, bb], lat);
+    let mut by_keys: BTreeMap<DsaKey, BTreeMap<String, Node>> = BTreeMap::new();
+    for (key, by_backend) in &grids.by_keys {
+        let backends = by_keys.entry(key.clone()).or_default();
+        for (backend, by_heads) in by_backend {
+            let node = backends
+                .entry(backend.clone())
+                .or_insert_with(Node::branch);
+            for (&n, by_step) in by_heads {
+                for (&step, by_isl) in by_step {
+                    for (&isl, by_batch) in by_isl {
+                        for (&bb, &lat) in by_batch {
+                            node.insert(&[n, step, isl, bb], lat);
+                        }
                     }
                 }
             }
@@ -419,21 +469,27 @@ fn build_context_nodes(grids: &DsaGrids) -> NodeCache {
     NodeCache { by_keys }
 }
 
-/// Materialise the per-`DsaKey` engine table for `query_generation` with the
-/// Python v2 generation nesting `[num_heads][batch][seq = isl + step]`.
+/// Materialise the per-`(DsaKey, dsa_backend)` engine table for
+/// `query_generation` with the Python v2 generation nesting
+/// `[num_heads][batch][seq = isl + step]`.
 /// If multiple (step, isl) pairs map to the same seq the last write in
 /// BTreeMap-sorted order wins (collected files carry no such collisions;
 /// Python's per-row overwrite is file-order last-wins).
 fn build_generation_nodes(grids: &DsaGrids) -> NodeCache {
-    let mut by_keys: BTreeMap<DsaKey, Node> = BTreeMap::new();
-    for (key, by_heads) in &grids.by_keys {
-        let node = by_keys.entry(key.clone()).or_insert_with(Node::branch);
-        for (&n, by_step) in by_heads {
-            for (&step, by_isl) in by_step {
-                for (&isl, by_batch) in by_isl {
-                    let seq = isl + step;
-                    for (&bb, &lat) in by_batch {
-                        node.insert(&[n, bb, seq], lat);
+    let mut by_keys: BTreeMap<DsaKey, BTreeMap<String, Node>> = BTreeMap::new();
+    for (key, by_backend) in &grids.by_keys {
+        let backends = by_keys.entry(key.clone()).or_default();
+        for (backend, by_heads) in by_backend {
+            let node = backends
+                .entry(backend.clone())
+                .or_insert_with(Node::branch);
+            for (&n, by_step) in by_heads {
+                for (&step, by_isl) in by_step {
+                    for (&isl, by_batch) in by_isl {
+                        let seq = isl + step;
+                        for (&bb, &lat) in by_batch {
+                            node.insert(&[n, bb, seq], lat);
+                        }
                     }
                 }
             }
@@ -649,12 +705,22 @@ fn dsa_generation_sol_ms(
 ///    populated by an earlier source is skipped (`seen_coordinates` guard in
 ///    Python, `or_insert` here).
 ///
+/// Row selection and keying mirror the same Python loaders:
+/// - **op_name split** (Python `op_kind`): rows whose `op_name` contains
+///   `skip_indexer` (the GLM-5.2 reuse-layer table sharing this file) are
+///   DROPPED — this table is Python's `op_kind="full"` slice, the one every
+///   ported query path consumes (`skip_indexer=False`). A missing `op_name`
+///   column keeps every row (Python `row.get("op_name") or ""`).
+/// - **dsa_backend keying**: derived per row from `kernel_source`
+///   (`"trtllm" if "trtllm" in ks else "flashmla_kv"`; missing column →
+///   `flashmla_kv`) and made a nesting level of the grid, so trtllm and
+///   flashmla_kv measurements of the same shape never collapse into one.
+///
 /// Missing files are skipped (a sibling declared in the manifest need not
 /// exist for every system); an error is returned only when no source yields
 /// rows. Shared by both the context and generation DSA files.
 fn load_dsa_parquet(sources: &[PerfSource]) -> Result<DsaGrids, AicError> {
-    let mut by_keys: BTreeMap<DsaKey, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, f64>>>>> =
-        BTreeMap::new();
+    let mut by_keys: BTreeMap<DsaKey, BTreeMap<String, DsaHeadGrid>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -672,14 +738,36 @@ fn load_dsa_parquet(sources: &[PerfSource]) -> Result<DsaGrids, AicError> {
         let isl_col = reader.col("isl")?;
         let step_col = reader.col("step")?;
         let latency_col = reader.col("latency")?;
+        // Optional columns: legacy files may lack them (Python `row.get`).
+        let op_name_col = reader.col_optional("op_name");
         let ks_col = reader.col_optional("kernel_source");
         // Phase 1: collapse this source with last-row-wins (plain insert).
-        let mut source_values: BTreeMap<(DsaKey, u32, u32, u32, u32), f64> = BTreeMap::new();
+        let mut source_values: BTreeMap<(DsaKey, String, u32, u32, u32, u32), f64> =
+            BTreeMap::new();
         for row in reader.rows()? {
             let row = row?;
             if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
                 continue;
             }
+            // Full vs skip-indexer share one file, split by op_name (Python:
+            // `if ("skip_indexer" in (row.get("op_name") or "")) != (op_kind
+            // == "skip"): continue` with op_kind="full").
+            if row
+                .str_optional(op_name_col)?
+                .unwrap_or("")
+                .contains("skip_indexer")
+            {
+                continue;
+            }
+            let dsa_backend = if row
+                .str_optional(ks_col)?
+                .unwrap_or("")
+                .contains("trtllm")
+            {
+                "trtllm"
+            } else {
+                "flashmla_kv"
+            };
             let key = DsaKey {
                 architecture: row.str_owned(arch_col)?,
                 fmha_quant: row.str_owned(mla_dtype_col)?,
@@ -689,6 +777,7 @@ fn load_dsa_parquet(sources: &[PerfSource]) -> Result<DsaGrids, AicError> {
             source_values.insert(
                 (
                     key,
+                    dsa_backend.to_string(),
                     row.u32(num_heads_col)?,
                     row.u32(step_col)?,
                     row.u32(isl_col)?,
@@ -698,9 +787,11 @@ fn load_dsa_parquet(sources: &[PerfSource]) -> Result<DsaGrids, AicError> {
             );
         }
         // Phase 2: merge with first-source-wins (earlier source outranks).
-        for ((key, num_heads, step, isl, batch_size), latency) in source_values {
+        for ((key, dsa_backend, num_heads, step, isl, batch_size), latency) in source_values {
             by_keys
                 .entry(key)
+                .or_default()
+                .entry(dsa_backend)
                 .or_default()
                 .entry(num_heads)
                 .or_default()
@@ -937,6 +1028,7 @@ mod tests {
                 "DeepseekV32ForCausalLM",
                 0,
                 INDEX_TOPK,
+                "trtllm",
             )
             .expect("DSA context query must succeed");
         assert!(
@@ -991,6 +1083,7 @@ mod tests {
                 "DeepseekV32ForCausalLM",
                 0,
                 INDEX_TOPK,
+                "trtllm",
             )
             .expect("DSA context query must succeed");
         approx_rel(latency, 7.756);
@@ -1012,6 +1105,7 @@ mod tests {
                 "NotAnArchitecture",
                 0,
                 INDEX_TOPK,
+                "trtllm",
             )
             .unwrap_err();
         assert!(matches!(err, AicError::PerfDatabase(_)));
@@ -1042,6 +1136,7 @@ mod tests {
                     arch,
                     prefix,
                     INDEX_TOPK,
+                    "trtllm",
                 )
                 .unwrap()
         };
@@ -1266,6 +1361,7 @@ mod tests {
                     FmhaQuantMode::Bfloat16,
                     GemmQuantMode::Bfloat16,
                     "DeepseekV32ForCausalLM",
+                    "trtllm",
                 )
                 .unwrap()
         };
@@ -1277,5 +1373,163 @@ mod tests {
         approx_rel(q(24, 4097), 0.27545);
         // seq util-hold beyond the frontier (validates the decode SOL)
         approx_rel(q(16, 300000), 0.5461828075504237);
+    }
+
+    /// Write one synthetic DSA module parquet with the collector's column set
+    /// (`op_name, kernel_source, architecture, mla_dtype, kv_cache_dtype,
+    /// gemm_type, num_heads, batch_size, isl, step, latency`). Row tuple:
+    /// `(op_name, kernel_source, latency)`; the shape coordinate is fixed at
+    /// (DeepseekV32ForCausalLM, bf16/bf16/bf16, n=128, b=1, isl=1024, step=0).
+    fn write_dsa_module_parquet(path: &Path, rows: &[(&str, &str, f64)]) {
+        use parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int64Type};
+        use parquet::file::properties::WriterProperties;
+        use parquet::file::writer::SerializedFileWriter;
+        use parquet::schema::parser::parse_message_type;
+
+        let schema = "message schema {
+            REQUIRED BINARY op_name (UTF8);
+            REQUIRED BINARY kernel_source (UTF8);
+            REQUIRED BINARY architecture (UTF8);
+            REQUIRED BINARY mla_dtype (UTF8);
+            REQUIRED BINARY kv_cache_dtype (UTF8);
+            REQUIRED BINARY gemm_type (UTF8);
+            REQUIRED INT64 num_heads;
+            REQUIRED INT64 batch_size;
+            REQUIRED INT64 isl;
+            REQUIRED INT64 step;
+            REQUIRED DOUBLE latency;
+        }";
+        let schema = Arc::new(parse_message_type(schema).expect("schema must parse"));
+        let file = std::fs::File::create(path).expect("create parquet");
+        let mut writer =
+            SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+                .expect("writer");
+        let mut rg = writer.next_row_group().expect("row group");
+        let str_cols: [Vec<ByteArray>; 6] = [
+            rows.iter().map(|r| ByteArray::from(r.0)).collect(),
+            rows.iter().map(|r| ByteArray::from(r.1)).collect(),
+            rows.iter().map(|_| ByteArray::from("DeepseekV32ForCausalLM")).collect(),
+            rows.iter().map(|_| ByteArray::from("bfloat16")).collect(),
+            rows.iter().map(|_| ByteArray::from("bfloat16")).collect(),
+            rows.iter().map(|_| ByteArray::from("bfloat16")).collect(),
+        ];
+        for values in &str_cols {
+            let mut col = rg.next_column().expect("next col").expect("str col");
+            col.typed::<ByteArrayType>().write_batch(values, None, None).expect("write str");
+            col.close().expect("close col");
+        }
+        let int_cols: [Vec<i64>; 4] = [
+            rows.iter().map(|_| 128).collect(), // num_heads
+            rows.iter().map(|_| 1).collect(),   // batch_size
+            rows.iter().map(|_| 1024).collect(), // isl
+            rows.iter().map(|_| 0).collect(),   // step
+        ];
+        for values in &int_cols {
+            let mut col = rg.next_column().expect("next col").expect("int col");
+            col.typed::<Int64Type>().write_batch(values, None, None).expect("write ints");
+            col.close().expect("close col");
+        }
+        let latencies: Vec<f64> = rows.iter().map(|r| r.2).collect();
+        let mut col = rg.next_column().expect("next col").expect("latency col");
+        col.typed::<DoubleType>().write_batch(&latencies, None, None).expect("write latency");
+        col.close().expect("close col");
+        rg.close().expect("close row group");
+        writer.close().expect("close writer");
+    }
+
+    /// Item 2: one file carrying full + GLM-5.2 skip-indexer rows AND two
+    /// kernel_source backends at the SAME coordinate must NOT blend. Python
+    /// (`load_context_dsa_module_data`) splits by op_name and keys by the
+    /// derived dsa_backend; its query picks the requested backend slice with
+    /// the `_select_dsa_backend` fallback chain. Oracle generated with:
+    ///
+    /// ```text
+    /// PYTHONPATH=src python3 -c "
+    /// import pandas as pd, tempfile, os
+    /// from aiconfigurator.sdk.operations.dsa import load_context_dsa_module_data, _select_dsa_backend
+    /// from aiconfigurator.sdk import common
+    /// tmp = tempfile.mkdtemp(); f = os.path.join(tmp, 'dsa_context_module_perf.parquet')
+    /// base = dict(architecture='DeepseekV32ForCausalLM', mla_dtype='bfloat16',
+    ///             kv_cache_dtype='bfloat16', gemm_type='bfloat16',
+    ///             num_heads=128, batch_size=1, isl=1024, step=0)
+    /// pd.DataFrame([
+    ///  dict(op_name='dsa_context_module', kernel_source='trtllm_gen', latency=1.0, **base),
+    ///  dict(op_name='dsa_context_module_skip_indexer', kernel_source='trtllm_gen', latency=9.0, **base),
+    ///  dict(op_name='dsa_context_module', kernel_source='default', latency=5.0, **base),
+    /// ]).to_parquet(f)
+    /// full = load_context_dsa_module_data(f, op_kind='full')
+    /// node = full[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16]['DeepseekV32ForCausalLM']
+    /// print(_select_dsa_backend(node, 'trtllm')[128][0][1024][1])       # {'latency': 1.0, ...}
+    /// print(_select_dsa_backend(node, 'flashmla_kv')[128][0][1024][1])  # {'latency': 5.0, ...}"
+    /// ```
+    ///
+    /// The old loader (no op_name filter, no backend keying) collapsed all
+    /// three rows into one cell with last-row-wins and answered 5.0 for both
+    /// backends (and would answer 9.0 if the skip row came last).
+    #[test]
+    fn dsa_full_and_skip_indexer_rows_do_not_blend_and_backend_slices_split() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_dsa_module_parquet(
+            &tmp.path().join("dsa_context_module_perf.parquet"),
+            &[
+                ("dsa_context_module", "trtllm_gen", 1.0),
+                ("dsa_context_module_skip_indexer", "trtllm_gen", 9.0),
+                ("dsa_context_module", "default", 5.0),
+            ],
+        );
+        let table = DsaTable::new(tmp.path().to_path_buf());
+        let spec = b200_sxm_spec();
+        let q = |dsa_backend: &str| {
+            table
+                .query_context(
+                    &spec,
+                    1,
+                    1024,
+                    128,
+                    KvCacheQuantMode::Bfloat16,
+                    FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Bfloat16,
+                    "DeepseekV32ForCausalLM",
+                    0,
+                    INDEX_TOPK,
+                    dsa_backend,
+                )
+                .expect("query must succeed")
+        };
+        // Plain path default (Python `dsa_backend="trtllm"`): the trtllm
+        // full row, NOT the skip row and NOT the flashmla_kv row.
+        assert_eq!(q("trtllm"), 1.0);
+        // CP-base selection (Python `dsa_backend="flashmla_kv"`).
+        assert_eq!(q("flashmla_kv"), 5.0);
+    }
+
+    /// Item 2 (fallback): a single-backend file must resolve for ANY
+    /// requested backend via Python's `_select_dsa_backend` chain
+    /// (requested -> flashmla_kv -> trtllm -> first).
+    #[test]
+    fn dsa_backend_fallback_resolves_single_backend_files() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_dsa_module_parquet(
+            &tmp.path().join("dsa_context_module_perf.parquet"),
+            &[("dsa_context_module", "trtllm_gen", 3.5)],
+        );
+        let table = DsaTable::new(tmp.path().to_path_buf());
+        let spec = b200_sxm_spec();
+        let got = table
+            .query_context(
+                &spec,
+                1,
+                1024,
+                128,
+                KvCacheQuantMode::Bfloat16,
+                FmhaQuantMode::Bfloat16,
+                GemmQuantMode::Bfloat16,
+                "DeepseekV32ForCausalLM",
+                0,
+                INDEX_TOPK,
+                "flashmla_kv", // absent: falls back to the trtllm slice
+            )
+            .expect("query must succeed");
+        assert_eq!(got, 3.5);
     }
 }

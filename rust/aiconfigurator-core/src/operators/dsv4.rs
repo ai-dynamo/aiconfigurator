@@ -21,7 +21,7 @@ use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::communication::NcclOp;
-use crate::perf_database::dsv4::{dsv4_dims, AttnKind};
+use crate::perf_database::dsv4::{dsv4_dims, AttnKind, Dsv4SolDims};
 use crate::perf_database::PerfDatabase;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -55,15 +55,67 @@ pub struct Dsv4ModuleOp {
     #[serde(default = "default_cp_size")]
     pub cp_size: u32,
     /// HCA sliding-window size (Python `_window_size`, from the model spec).
-    /// Only the HCA CP all-gather reads it; `None`/0 falls back to `isl`
-    /// (Python `self._window_size or isl`). Serde default `None` keeps
-    /// existing opspecs valid.
+    /// Feeds the analytic SOL's window-pair count and the HCA CP all-gather
+    /// (`self._window_size or isl`). Serde default `None` keeps existing
+    /// opspecs valid (SOL then falls back to the pinned Pro window, 128).
     #[serde(default)]
     pub window_size: Option<u32>,
+    // --- Structural dims for the analytic SOL (Python op fields, sourced
+    // --- from the model config). Serde defaults = the pinned DeepSeek-V4-Pro
+    // --- values, so old opspecs resolve exactly as before; the Python
+    // --- emitter now sends the model's real dims (Flash differs: hidden
+    // --- 4096, q_lora 1024, index_topk 512).
+    #[serde(default = "default_hidden_size")]
+    pub hidden_size: u32,
+    #[serde(default = "default_q_lora_rank")]
+    pub q_lora_rank: u32,
+    #[serde(default = "default_o_lora_rank")]
+    pub o_lora_rank: u32,
+    #[serde(default = "default_head_dim")]
+    pub head_dim: u32,
+    #[serde(default = "default_rope_head_dim")]
+    pub rope_head_dim: u32,
+    #[serde(default = "default_index_n_heads")]
+    pub index_n_heads: u32,
+    #[serde(default = "default_index_head_dim")]
+    pub index_head_dim: u32,
+    #[serde(default = "default_index_topk")]
+    pub index_topk: u32,
+    /// Rank-LOCAL o_groups (Python `_o_groups` = `max(1, o_groups // tp)`,
+    /// pre-divided by the model). `None` (old specs) derives it from the
+    /// pinned Pro totals via `Dsv4SolDims::from_pinned`, byte-identical to
+    /// the pre-override behaviour.
+    #[serde(default)]
+    pub o_groups: Option<u32>,
 }
 
 fn default_cp_size() -> u32 {
     1
+}
+
+fn default_hidden_size() -> u32 {
+    7168
+}
+fn default_q_lora_rank() -> u32 {
+    1536
+}
+fn default_o_lora_rank() -> u32 {
+    1024
+}
+fn default_head_dim() -> u32 {
+    512
+}
+fn default_rope_head_dim() -> u32 {
+    64
+}
+fn default_index_n_heads() -> u32 {
+    64
+}
+fn default_index_head_dim() -> u32 {
+    128
+}
+fn default_index_topk() -> u32 {
+    1024
 }
 
 /// Production chunked-prefill executes mqa as a chunk sequence; the pair
@@ -121,6 +173,39 @@ impl Dsv4ModuleOp {
             architecture: architecture.into(),
             cp_size: 1,
             window_size: None,
+            hidden_size: default_hidden_size(),
+            q_lora_rank: default_q_lora_rank(),
+            o_lora_rank: default_o_lora_rank(),
+            head_dim: default_head_dim(),
+            rope_head_dim: default_rope_head_dim(),
+            index_n_heads: default_index_n_heads(),
+            index_head_dim: default_index_head_dim(),
+            index_topk: default_index_topk(),
+            o_groups: None,
+        }
+    }
+
+    /// SOL dims from the opspec fields (Python's op carries them from the
+    /// model config). `o_groups: None` (old specs) falls back to the pinned
+    /// per-architecture derivation; `window_size: None` falls back to the
+    /// pinned Pro window.
+    pub(crate) fn sol_dims(&self) -> Dsv4SolDims {
+        let pinned = dsv4_dims(&self.architecture);
+        let local_o_groups = match self.o_groups {
+            Some(groups) => i64::from(groups).max(1),
+            None => Dsv4SolDims::from_pinned(pinned, i64::from(self.num_heads)).local_o_groups,
+        };
+        Dsv4SolDims {
+            hidden_size: i64::from(self.hidden_size),
+            q_lora_rank: i64::from(self.q_lora_rank),
+            o_lora_rank: i64::from(self.o_lora_rank),
+            head_dim: i64::from(self.head_dim),
+            rope_head_dim: i64::from(self.rope_head_dim),
+            index_n_heads: i64::from(self.index_n_heads),
+            index_head_dim: i64::from(self.index_head_dim),
+            index_topk: i64::from(self.index_topk),
+            window_size: self.window_size.map_or(pinned.window_size, i64::from),
+            local_o_groups,
         }
     }
 
@@ -145,6 +230,7 @@ impl Dsv4ModuleOp {
             self.gemm_quant_mode,
             &self.architecture,
             prefix,
+            Some(self.sol_dims()),
         )
     }
 
@@ -260,7 +346,9 @@ impl Dsv4ModuleOp {
     ) -> Result<PerformanceResult, AicError> {
         let cp = self.cp_size;
         let per_card = isl.div_ceil(cp).max(1); // ceil: critical path = busiest CP rank
-        let dims = dsv4_dims(&self.architecture);
+        // AG element widths come from the op's own dims (Python uses
+        // `self._index_head_dim` / `self._head_dim` in `_query_cp`).
+        let (index_head_dim, head_dim) = (u64::from(self.index_head_dim), u64::from(self.head_dim));
         // Base: per-card monolithic module at (b, per_card, prefix).
         let mut latency = base(per_card)?;
         // x b throughout: mqa/topk are linear in batch and the all-gather
@@ -297,7 +385,7 @@ impl Dsv4ModuleOp {
                 let cp_f = f64::from(cp);
                 latency += (mqa_full / cp_f - mqa_perc) + (tl_full / cp_f - tl_perc);
                 // AG indexer key (mqa stage).
-                latency += ag(tokens_of(u64::from(isl) * dims.index_head_dim as u64))?;
+                latency += ag(tokens_of(u64::from(isl) * index_head_dim))?;
             }
             AttnKind::Hca => {
                 // HCA (128) / SWA: windowed dense; no indexer/topk selection.
@@ -306,14 +394,14 @@ impl Dsv4ModuleOp {
                     _ => isl, // Python `self._window_size or isl`
                 };
                 // AG windowed dense KV (the HCA "+1").
-                latency += ag(tokens_of(u64::from(isl.min(window)) * dims.head_dim as u64))?;
+                latency += ag(tokens_of(u64::from(isl.min(window)) * head_dim))?;
             }
         }
         // Compressed-KV all-gather: both CSA and HCA gather the isl//ratio
         // compressed entries (the fmha-stage KV). Python guards `if ratio:`;
         // in Rust the kind IS the ratio (4 or 128), always truthy.
         let ratio = self.attn_kind.compress_ratio() as u32;
-        latency += ag(tokens_of(u64::from(isl / ratio) * dims.head_dim as u64))?;
+        latency += ag(tokens_of(u64::from(isl / ratio) * head_dim))?;
         Ok(PerformanceResult::new(latency, Source::Estimated).scaled(self.scale_factor))
     }
 
@@ -333,6 +421,7 @@ impl Dsv4ModuleOp {
             self.fmha_quant_mode,
             self.gemm_quant_mode,
             &self.architecture,
+            Some(self.sol_dims()),
         )?;
         Ok(PerformanceResult::new(latency, Source::Silicon)
             .clamp_non_negative()
@@ -360,6 +449,15 @@ mod tests {
             architecture: "DeepseekV4ForCausalLM".into(),
             cp_size,
             window_size,
+            hidden_size: default_hidden_size(),
+            q_lora_rank: default_q_lora_rank(),
+            o_lora_rank: default_o_lora_rank(),
+            head_dim: default_head_dim(),
+            rope_head_dim: default_rope_head_dim(),
+            index_n_heads: default_index_n_heads(),
+            index_head_dim: default_index_head_dim(),
+            index_topk: default_index_topk(),
+            o_groups: None,
         }
     }
 

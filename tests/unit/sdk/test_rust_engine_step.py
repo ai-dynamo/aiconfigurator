@@ -341,6 +341,17 @@ def test_sparse_cp_ops_emit_cp_fields_in_spec():
         _tp_size = 1
         _cp_size = 2
         _window_size = 2048
+        # Structural dims the emitter forwards for the Rust-side SOL
+        # (real ops always carry these via _BaseDeepSeekV4AttentionModule).
+        _hidden_size = 7168
+        _q_lora_rank = 1536
+        _o_lora_rank = 1024
+        _head_dim = 512
+        _rope_head_dim = 64
+        _index_n_heads = 64
+        _index_head_dim = 128
+        _index_topk = 1024
+        _o_groups = 16
         from aiconfigurator.sdk import common
 
         _kvcache_quant_mode = common.KVCacheQuantMode.fp8

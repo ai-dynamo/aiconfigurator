@@ -88,7 +88,8 @@ impl DsaModuleOp {
         // `isl + prefix`. The perf-DB layer resolves one 4-axis RAW grid via
         // the perf_interp v2 engine; there is no multiplicative prefix
         // correction (it had no Python counterpart and under-counted context
-        // latency ~75%).
+        // latency ~75%). `dsa_backend="trtllm"` mirrors Python's non-CP
+        // default (`_query_context_dsa_module_table(dsa_backend="trtllm")`).
         let latency = db.dsa.query_context(
             &db.system_spec,
             batch_size,
@@ -100,6 +101,7 @@ impl DsaModuleOp {
             &self.architecture,
             prefix,
             self.index_topk,
+            "trtllm",
         )?;
         Ok(PerformanceResult::new(latency, Source::Silicon)
             .clamp_non_negative()
@@ -110,12 +112,11 @@ impl DsaModuleOp {
     ///
     /// Wires the real data dependencies and delegates to [`Self::query_cp_with`]
     /// (the verbatim mirror of Python `ContextDSAModule._query_cp`,
-    /// `skip_indexer=False` — the Rust table has no GLM-5.2 skip-indexer
-    /// split, matching the full-layer-only opspec path):
+    /// `skip_indexer=False` — the Rust table loads Python's full slice, so
+    /// this matches the full-layer-only opspec path):
     /// - base = the existing 4-axis engine query at `(b, per_card, prefix)`
-    ///   (Python passes `dsa_backend="flashmla_kv"` here; the Rust context
-    ///   table has no backend axis — a pre-existing base-table divergence,
-    ///   not introduced by the CP path);
+    ///   with `dsa_backend="flashmla_kv"`, exactly like Python's `_query_cp`
+    ///   base query;
     /// - AG = `db.query_nccl(half, cp, "all_gather", elems)` via [`NcclOp`],
     ///   which mirrors Python's fan-out cap + multi-node bandwidth scaling.
     fn query_context_cp(
@@ -138,6 +139,9 @@ impl DsaModuleOp {
                 &self.architecture,
                 prefix,
                 self.index_topk,
+                // Python `_query_cp` queries the CP base on the flashmla_kv
+                // slice (the kernel used under CP).
+                "flashmla_kv",
             )
         };
         let mut ag = |elems: u64| {
@@ -249,6 +253,8 @@ impl DsaModuleOp {
         batch_size: u32,
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
+        // `dsa_backend="trtllm"` mirrors Python's generation default
+        // (`_query_generation_dsa_module_table(dsa_backend="trtllm")`).
         let latency = db.dsa.query_generation(
             &db.system_spec,
             batch_size,
@@ -258,6 +264,7 @@ impl DsaModuleOp {
             self.fmha_quant_mode,
             self.gemm_quant_mode,
             &self.architecture,
+            "trtllm",
         )?;
         Ok(PerformanceResult::new(latency, Source::Silicon)
             .clamp_non_negative()
