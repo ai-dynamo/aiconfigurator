@@ -92,6 +92,26 @@ class OpConversionError(RuntimeError):
     """Raised when an ``Operation`` cannot be converted to an ``OpSpec``."""
 
 
+def _reject_cp(op: Any) -> None:
+    """Refuse to compile context-parallel attention modules.
+
+    The Python CP prefill model (``_query_cp``: per-card base + full/cp swap
+    of the super-linear sparse sub-kernels + CP all-gathers) is not ported to
+    the compiled engine, and the sparse-kernel tables it needs are not loaded
+    there. Without this guard the Rust engine silently evaluates the NON-CP
+    composition for cp_size > 1 configs (measured: it returned a number where
+    Python fail-louds on missing sparse tables). Fail loud instead, like
+    Python does; use the python engine-step backend for CP sweeps.
+    """
+    cp = getattr(op, "_cp_size", 1) or 1
+    if cp > 1:
+        raise OpConversionError(
+            f"op '{getattr(op, '_name', type(op).__name__)}' has cp_size={cp}: "
+            "context-parallel prefill is not modeled by the compiled engine; "
+            "use --engine-step-backend python for cp_size > 1 configs."
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Per-op conversion: Python Operation -> externally-tagged OpSpec dict.
 #
@@ -317,6 +337,7 @@ def _p2p(op: P2P) -> dict:
 
 
 def _dsa_module(op: ContextDSAModule | GenerationDSAModule, *, architecture: str) -> dict:
+    _reject_cp(op)
     # GenerationDSAModule stores `_kv_cache_dtype`; ContextDSAModule stores
     # `_kvcache_quant_mode` + `_fmha_quant_mode`. The Rust `DsaModuleOp` carries
     # both quant fields for either phase; fill the missing one with bfloat16
@@ -353,6 +374,7 @@ def _dsv4_module(
     *,
     architecture: str,
 ) -> dict:
+    _reject_cp(op)
     kv = getattr(op, "_kvcache_quant_mode", None) or getattr(op, "_kv_cache_dtype", None)
     fmha = getattr(op, "_fmha_quant_mode", None)
     return {

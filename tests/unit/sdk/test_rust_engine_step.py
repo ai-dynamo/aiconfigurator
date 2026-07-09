@@ -323,3 +323,29 @@ def test_forward_pass_perf_model_best_available_falls_back_on_bad_config() -> No
     diag = model.diagnostics()
     assert diag["source"] == "fallback_regression"
     assert diag["last_warning"] is not None
+
+
+def test_cp_size_ops_refuse_engine_compilation():
+    """cp_size > 1 attention modules must fail spec conversion LOUDLY.
+
+    The compiled engine has no CP prefill model (no per-card base + full/cp
+    sparse-kernel swap + all-gathers, no sparse tables); before this guard it
+    silently evaluated the non-CP composition. Python's own CP path fail-louds
+    on missing sparse tables -- the rust path must not be quieter than that.
+    """
+    import pytest
+
+    from aiconfigurator.sdk.engine import OpConversionError, _reject_cp
+
+    class _CpOp:
+        _name = "context_attention"
+        _cp_size = 2
+
+    with pytest.raises(OpConversionError, match="cp_size=2"):
+        _reject_cp(_CpOp())
+
+    class _NoCpOp:
+        _name = "context_attention"
+        _cp_size = 1
+
+    _reject_cp(_NoCpOp())  # cp_size == 1 passes
