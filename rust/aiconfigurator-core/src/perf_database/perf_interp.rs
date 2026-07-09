@@ -205,8 +205,14 @@ pub fn query(cfg: &OpInterpConfig, data: &Node, coords: &[f64]) -> Result<f64, A
     }
 
     match &cfg.resolver {
-        Resolver::ScatteredSites { .. } => {
-            let index = SiteIndex::build(cfg, data);
+        Resolver::ScatteredSites {
+            site_axes,
+            curve_axis,
+            ..
+        } => {
+            // Convenience path (tests / cold callers): production owners
+            // build the SiteIndex once at load and call `resolve` directly.
+            let index = SiteIndex::build(site_axes, *curve_axis, data);
             index.resolve(cfg, coords)
         }
         Resolver::Grid { .. } => resolve_grid(cfg, data, coords),
@@ -448,15 +454,7 @@ pub struct SiteIndex {
 }
 
 impl SiteIndex {
-    pub fn build(cfg: &OpInterpConfig, data: &Node) -> SiteIndex {
-        let (site_axes, curve_axis) = match &cfg.resolver {
-            Resolver::ScatteredSites {
-                site_axes,
-                curve_axis,
-                ..
-            } => (site_axes.clone(), *curve_axis),
-            Resolver::Grid { .. } => unreachable!("SiteIndex on grid resolver"),
-        };
+    pub fn build(site_axes: &[usize], curve_axis: usize, data: &Node) -> SiteIndex {
         let mut leaves: Vec<(Vec<u32>, f64)> = Vec::new();
         walk_leaves(data, &mut Vec::new(), &mut leaves);
         let mut sites: BTreeMap<Vec<u32>, Vec<(u32, f64)>> = BTreeMap::new();
@@ -480,7 +478,10 @@ impl SiteIndex {
         SiteIndex { sites, site_logs }
     }
 
-    fn resolve(&self, cfg: &OpInterpConfig, coords: &[f64]) -> Result<f64, AicError> {
+    /// Resolve one query. Exact hits are answered by the site's own curve
+    /// (exact curve point == the measured leaf), so owners with a prebuilt
+    /// index call this directly instead of `query`.
+    pub fn resolve(&self, cfg: &OpInterpConfig, coords: &[f64]) -> Result<f64, AicError> {
         let Resolver::ScatteredSites {
             site_axes,
             curve_axis,
