@@ -25,6 +25,7 @@ pub mod mhc;
 pub mod mla;
 pub mod moe;
 pub mod parquet_loader;
+pub mod perf_interp;
 pub mod state_space;
 pub mod wideep;
 pub mod wideep_mla;
