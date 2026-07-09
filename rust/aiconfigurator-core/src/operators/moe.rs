@@ -4,15 +4,14 @@
 //! MoE operator.
 //!
 //! Mirrors `aiconfigurator.sdk.operations.moe.MoE` SILICON path. The perf-DB
-//! layer already handles workload-distribution fallback to `"uniform"` and
-//! 1-D extrapolation along `num_tokens`. The SOL-anchored overflow
-//! estimation that Python applies for `num_tokens > max_recorded_tokens`
-//! is a refinement reserved for the model graph layer — at that point the
-//! model has the system spec and topology context to apply it consistently
-//! across context vs decode.
+//! layer handles workload-distribution fallback to `"uniform"` and resolves
+//! the token curve on the perf_interp v2 engine; this operator supplies the
+//! MoE roofline SOL closure the engine's beyond-range util-hold anchors on
+//! (Python v2 deleted the op-level overflow estimator — the engine's
+//! `k_tail=1`, unclamped util-hold replaces it).
 //!
 //! Weights accounting (per-expert FFN weights + router) is in the model
-//! layer too; the operator returns latency only.
+//! layer; the operator returns latency only.
 
 use serde::{Deserialize, Serialize};
 use crate::common::enums::MoeQuantMode;
@@ -67,55 +66,19 @@ impl MoeOp {
     }
 
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
-        // SOL-anchored overflow: when `num_tokens` exceeds the largest
-        // recorded token point for this (quant, distribution, topology),
-        // Python switches to a utilization-anchored estimate instead of
-        // pure linear extrapolation. The perf-DB layer extrapolates from
-        // the last two points, which for sparse tables (e.g. int4_wo MoE
-        // with only `num_tokens ∈ {1, 2, 4}`) blows up by 100-1000x at
-        // query=512. Mirrors Python `MoE._query_moe_table`'s overflow
-        // closure (`operations/moe.py:308-359`).
-        let max_point = db.moe.max_token_point(
-            self.hidden_size,
-            self.inter_size,
-            self.topk,
-            self.num_experts,
-            self.moe_tp_size,
-            self.moe_ep_size,
-            self.quant_mode,
-            &self.workload_distribution,
-        )?;
-        if let Some(max_tok) = max_point {
-            if num_tokens > max_tok {
-                let last_latency = db.moe.query(
-                    max_tok,
-                    self.hidden_size,
-                    self.inter_size,
-                    self.topk,
-                    self.num_experts,
-                    self.moe_tp_size,
-                    self.moe_ep_size,
-                    self.quant_mode,
-                    &self.workload_distribution,
-                )?;
-                let sol_last = self.sol_latency_ms(db, max_tok);
-                let sol_query = self.sol_latency_ms(db, num_tokens);
-                // Clamp MFU to (0, 1] (Python's `util = min(1.0, sol_last /
-                // last_latency); util = max(util, 1e-8)`).
-                let util = (sol_last / last_latency).min(1.0).max(1e-8);
-                let est = sol_query / util;
-                return Ok(PerformanceResult::new(est, Source::Silicon)
-                    .clamp_non_negative()
-                    .scaled(self.scale_factor));
-            }
-        }
+        // The roofline SOL the perf-DB engine anchors its beyond-range
+        // util-hold on (Python `_resolve_tokens` passes the same closure).
+        // Coordinates arriving from the engine are always integral (table
+        // keys / the u32 query), so rounding to u32 keeps the integer
+        // floor-division parity with Python's `get_sol`.
+        let sol = |t: f64| self.sol_latency_ms(db, t.round() as u32);
 
-        // In-grid query. Mirrors Python's MoE._query_moe_table TRT-LLM gate:
-        // for nvfp4 gated MoE at num_tokens <= 128, probe the
+        // Mirrors Python's MoE._query_moe_table TRT-LLM gate: for nvfp4
+        // gated MoE at num_tokens <= 128, probe the
         // `moe_torch_flow_min_latency` grid first and fall back to the
-        // default grid on miss. Other backends (vLLM, SGLang) never have
-        // `kernel_source` populated, so `low_latency_available()` returns
-        // false and this short-circuits.
+        // default grid on a shape miss. Other backends (vLLM, SGLang) never
+        // have `kernel_source` populated, so `low_latency_available()`
+        // returns false and this short-circuits.
         let latency = if num_tokens <= 128
             && self.quant_mode == MoeQuantMode::Nvfp4
             && self.is_gated
@@ -131,6 +94,7 @@ impl MoeOp {
                 self.moe_ep_size,
                 self.quant_mode,
                 &self.workload_distribution,
+                &sol,
             )? {
                 ll
             } else {
@@ -144,6 +108,7 @@ impl MoeOp {
                     self.moe_ep_size,
                     self.quant_mode,
                     &self.workload_distribution,
+                    &sol,
                 )?
             }
         } else {
@@ -157,6 +122,7 @@ impl MoeOp {
                 self.moe_ep_size,
                 self.quant_mode,
                 &self.workload_distribution,
+                &sol,
             )?
         };
         Ok(PerformanceResult::new(latency, Source::Silicon)
@@ -165,8 +131,9 @@ impl MoeOp {
     }
 
     /// SOL MoE latency (ms) mirroring Python `MoE._query_moe_table`'s
-    /// `get_sol` closure (`operations/moe.py:241`). Used only by the
-    /// overflow path; in-grid queries hit silicon perf data directly.
+    /// `get_sol` closure (`operations/moe.py:297`). Passed into the perf-DB
+    /// engine query as the util-hold roofline; in-grid resolutions never
+    /// consult it (1-axis RAW lerp / exact hit).
     fn sol_latency_ms(&self, db: &PerfDatabase, num_tokens: u32) -> f64 {
         // `num_gemms`: 3 for gated SwiGLU (gate + up + down), 2 for
         // non-gated Relu² (up + down). Matches Python `num_gemms = 3 if

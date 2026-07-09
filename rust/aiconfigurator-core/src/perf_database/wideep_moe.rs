@@ -32,7 +32,7 @@ use std::sync::OnceLock;
 
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
-use super::interpolation::{interp_1d, nearest_neighbors};
+use super::moe::query_token_curve;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct WideEpMoeTable {
@@ -74,11 +74,20 @@ impl WideEpMoeTable {
 
     /// Query WideEP MoE compute latency at `num_tokens` along the
     /// `(kernel_source, quant, distribution, topk, num_experts, hidden,
-    /// inter, num_slots, moe_tp_size, moe_ep_size)` key. Mirrors Python's
-    /// `_query_compute_table`: nearest-neighbour-with-clamp + linear
-    /// interp on the token axis. If the exact `distribution` isn't in the
-    /// table, falls back to the first distribution available under the
-    /// matched quant — same as Python.
+    /// inter, num_slots, moe_tp_size, moe_ep_size)` key. The token curve
+    /// rides the perf_interp v2 engine (1-axis Grid, RAW lerp in range,
+    /// boundary util-hold beyond it), mirroring Python's
+    /// `TrtllmWideEPMoE._query_compute_table`. If the exact `distribution`
+    /// isn't in the table, falls back to the first distribution available
+    /// under the matched quant — same as Python.
+    ///
+    /// The util-hold SOL is a LINEAR num_tokens proxy: Python anchors on
+    /// the WideEP MoE roofline (`_query_compute_table.get_sol`, num_slots-
+    /// aware), which this table layer cannot compute (no SystemSpec). The
+    /// proxy only affects beyond-range holds; in-range lerp is SOL-free and
+    /// matches Python exactly. Thread the roofline through (like
+    /// `moe.rs::MoeTable::query`) if the operator layer ever needs
+    /// beyond-range parity here.
     #[allow(clippy::too_many_arguments)]
     pub fn query_compute(
         &self,
@@ -159,18 +168,13 @@ impl WideEpMoeTable {
             }
         };
 
-        if let Some(&latency) = by_tokens.get(&num_tokens) {
-            return Ok(latency);
+        if by_tokens.is_empty() {
+            return Err(AicError::PerfDatabase(format!(
+                "WideEP MoE compute data has no token points for {exact_key:?} at {}",
+                self.data_root.display()
+            )));
         }
-        let keys: Vec<u32> = by_tokens.keys().copied().collect();
-        let (lo, hi) = nearest_neighbors(num_tokens, &keys, false)?;
-        Ok(interp_1d(
-            lo as f64,
-            hi as f64,
-            by_tokens[&lo],
-            by_tokens[&hi],
-            num_tokens as f64,
-        ))
+        query_token_curve(by_tokens, num_tokens as f64, &|t| t)
     }
 
     fn load_compute(&self) -> Result<&WideEpMoeGrids, AicError> {

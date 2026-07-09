@@ -9,10 +9,17 @@
 //! `moe_data[quant][distribution][topk][num_experts][hidden][inter][moe_tp][moe_ep]`
 //! returns a `{num_tokens -> latency_ms}` dict.
 //!
-//! Query is 1-D linear interpolation along `num_tokens` (extrapolation
-//! allowed). Any SOL-anchored overflow estimation for queries beyond the
-//! largest recorded token count is the model layer's responsibility; this
-//! raw table query simply 1-D-interpolates with extrapolation when needed.
+//! Resolution mirrors Python v2's `_resolve_tokens`: the token curve rides
+//! the shared `perf_interp` engine (1-axis Grid, RAW lerp in range; beyond
+//! the collected range the boundary util is held with `k_tail=1` and the
+//! caller-supplied MoE roofline SOL carries the growth — unclamped util,
+//! exactly like Python which deleted the hand-rolled overflow estimator).
+//! The SOL closure comes from the operator layer (`operators/moe.rs`),
+//! which owns the roofline math.
+//!
+//! Singleton-underflow contract (Python `_require_moe_token_points`): a
+//! curve with a single token point queried BELOW that point is a structured
+//! miss — one large-token row cannot define the low-token launch floor.
 //!
 //! `workload_distribution` falls back to `"uniform"` when the requested
 //! variant is absent for the given quant, matching Python's behavior.
@@ -26,8 +33,40 @@ use std::sync::OnceLock;
 
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
-use super::interpolation::{interp_1d, nearest_neighbors};
+use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
+
+/// Resolve a 1-axis `num_tokens -> latency_ms` curve on the perf_interp v2
+/// engine: exact hit / RAW lerp in range; beyond the collected range the
+/// engine holds the boundary util (`k_tail=1`) and lets `sol` carry the
+/// growth. Shared by the MoE / WideEP / mHC token-curve families.
+pub(crate) fn query_token_curve(
+    curve: &BTreeMap<u32, f64>,
+    num_tokens: f64,
+    sol: &dyn Fn(f64) -> f64,
+) -> Result<f64, AicError> {
+    let mut node = Node::branch();
+    for (&t, &lat) in curve {
+        node.insert(&[t], lat);
+    }
+    let sol_slice = |c: &[f64]| sol(c[0]);
+    let cfg = OpInterpConfig::grid(&["num_tokens"], &sol_slice);
+    perf_interp::query(&cfg, &node, &[num_tokens])
+}
+
+/// Python `_require_moe_token_points`: a singleton curve queried below its
+/// only measured point is a structured miss (it cannot define the low-token
+/// launch-overhead regime). Multi-point underflow and singleton overflow go
+/// to the engine's util-hold unchanged.
+pub(crate) fn singleton_underflow(curve: &BTreeMap<u32, f64>, num_tokens: u32) -> Option<u32> {
+    if curve.len() == 1 {
+        let &only = curve.keys().next().expect("len checked");
+        if num_tokens < only {
+            return Some(only);
+        }
+    }
+    None
+}
 
 pub struct MoeTable {
     data_root: PathBuf,
@@ -68,13 +107,17 @@ impl MoeTable {
         }
     }
 
-    /// Raw MoE latency in ms by 1-D interpolation along `num_tokens`.
+    /// Raw MoE latency in ms via the perf_interp v2 engine (1-axis token
+    /// curve): exact hit / RAW lerp in range; beyond the collected range the
+    /// boundary util is held (`k_tail=1`, unclamped) and `sol` — the
+    /// operator layer's MoE roofline — carries the growth. Mirrors Python
+    /// `MoE._query_moe_table._resolve_tokens`.
     ///
     /// Falls back to the `"uniform"` distribution if the requested
-    /// distribution is absent for the given quant mode. Extrapolates beyond
-    /// the largest recorded `num_tokens` via linear extension; operator
-    /// layer is responsible for SOL-anchored utilization correction for
-    /// overflow queries.
+    /// distribution is absent for the given quant mode. A singleton curve
+    /// queried below its only point is a structured miss (Python
+    /// `_require_moe_token_points`).
+    #[allow(clippy::too_many_arguments)]
     pub fn query(
         &self,
         num_tokens: u32,
@@ -86,6 +129,7 @@ impl MoeTable {
         moe_ep_size: u32,
         quant: MoeQuantMode,
         workload_distribution: &str,
+        sol: &dyn Fn(f64) -> f64,
     ) -> Result<f64, AicError> {
         let loaded = self.load()?;
         let grids = &loaded.default;
@@ -108,61 +152,20 @@ impl MoeTable {
                 self.data_root.display()
             ))
         })?;
-
-        // Exact hit.
-        if let Some(&latency) = by_tokens.get(&num_tokens) {
-            return Ok(latency);
-        }
-        // 1-D interpolation (extrapolation allowed).
-        let token_keys: Vec<u32> = by_tokens.keys().copied().collect();
-        if token_keys.is_empty() {
+        if by_tokens.is_empty() {
             return Err(AicError::PerfDatabase(format!(
                 "MoE data has no token points for {key:?} at {}",
                 self.data_root.display()
             )));
         }
-        let (lo, hi) = nearest_neighbors(num_tokens, &token_keys, false)?;
-        Ok(interp_1d(
-            lo as f64,
-            hi as f64,
-            by_tokens[&lo],
-            by_tokens[&hi],
-            num_tokens as f64,
-        ))
-    }
-
-    /// Largest recorded `num_tokens` for a given (quant, distribution,
-    /// topology) tuple. Used by the operator layer to decide whether to
-    /// invoke SOL-anchored overflow estimation.
-    pub fn max_token_point(
-        &self,
-        hidden_size: u32,
-        inter_size: u32,
-        topk: u32,
-        num_experts: u32,
-        moe_tp_size: u32,
-        moe_ep_size: u32,
-        quant: MoeQuantMode,
-        workload_distribution: &str,
-    ) -> Result<Option<u32>, AicError> {
-        let loaded = self.load()?;
-        let grids = &loaded.default;
-        let quant_name = quant.name();
-        let dist = self.resolve_distribution(grids, quant_name, workload_distribution);
-        let key = MoeKey {
-            quant: quant_name.to_string(),
-            distribution: dist,
-            topk,
-            num_experts,
-            hidden_size,
-            inter_size,
-            moe_tp_size,
-            moe_ep_size,
-        };
-        Ok(grids
-            .by_keys
-            .get(&key)
-            .and_then(|m| m.keys().next_back().copied()))
+        if let Some(only) = singleton_underflow(by_tokens, num_tokens) {
+            return Err(AicError::PerfDatabase(format!(
+                "MoE silicon token underflow has only one measured point; cannot infer \
+                 low-token latency from a singleton. num_tokens={num_tokens}, \
+                 measured_token={only}, key={key:?}"
+            )));
+        }
+        query_token_curve(by_tokens, num_tokens as f64, sol)
     }
 
     /// Probe the TRT-LLM low-latency NVFP4 MoE kernel table.
@@ -175,7 +178,11 @@ impl MoeTable {
     ///
     /// Mirrors Python's small-token nvfp4 gated-MoE branch in
     /// `MoE._query_moe_table`: the low-latency table is consulted with a
-    /// try/except KeyError that falls back to `_moe_data` on miss.
+    /// try/except that falls back to `_moe_data` when the SHAPE is absent
+    /// (`Ok(None)` here). A singleton-underflow on a present shape is an
+    /// `Err` (structured miss), not a fallback — in Python the guard fires
+    /// inside `_resolve_tokens`, after the ll table has been selected.
+    #[allow(clippy::too_many_arguments)]
     pub fn query_low_latency(
         &self,
         num_tokens: u32,
@@ -187,6 +194,7 @@ impl MoeTable {
         moe_ep_size: u32,
         quant: MoeQuantMode,
         workload_distribution: &str,
+        sol: &dyn Fn(f64) -> f64,
     ) -> Result<Option<f64>, AicError> {
         let loaded = self.load()?;
         let grids = &loaded.low_latency;
@@ -211,18 +219,14 @@ impl MoeTable {
         if by_tokens.is_empty() {
             return Ok(None);
         }
-        if let Some(&latency) = by_tokens.get(&num_tokens) {
-            return Ok(Some(latency));
+        if let Some(only) = singleton_underflow(by_tokens, num_tokens) {
+            return Err(AicError::PerfDatabase(format!(
+                "MoE low-latency token underflow has only one measured point; cannot infer \
+                 low-token latency from a singleton. num_tokens={num_tokens}, \
+                 measured_token={only}, key={key:?}"
+            )));
         }
-        let token_keys: Vec<u32> = by_tokens.keys().copied().collect();
-        let (lo, hi) = nearest_neighbors(num_tokens, &token_keys, false)?;
-        Ok(Some(interp_1d(
-            lo as f64,
-            hi as f64,
-            by_tokens[&lo],
-            by_tokens[&hi],
-            num_tokens as f64,
-        )))
+        query_token_curve(by_tokens, num_tokens as f64, sol).map(Some)
     }
 
     /// `true` iff the loaded low-latency grid has any rows.
@@ -343,6 +347,12 @@ mod tests {
         let _ = table.load().expect("moe_perf.parquet must load");
     }
 
+    /// Linear token proxy — fine for key-selection tests where only the
+    /// resolution path (not the extrapolated value) matters.
+    fn proxy_sol(t: f64) -> f64 {
+        t
+    }
+
     #[test]
     fn moe_distribution_falls_back_to_uniform() {
         // Pick any common smoke shape; non-existent distribution should
@@ -361,6 +371,7 @@ mod tests {
             8,
             MoeQuantMode::Bfloat16,
             "nonexistent_distribution",
+            &proxy_sol,
         );
         // Either succeeds (uniform fallback found a match) or errors
         // with a topology mismatch — but not a distribution-specific
@@ -390,6 +401,76 @@ mod tests {
         PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
             .join("src/aiconfigurator/systems/data/b200_sxm/trtllm/1.2.0rc5")
+    }
+
+    /// Cross-language parity with the Python v2 engine. Expected values from:
+    ///
+    /// ```text
+    /// PYTHONPATH=src python3 -c "
+    /// from aiconfigurator.sdk.perf_database import PerfDatabase
+    /// from aiconfigurator.sdk import common
+    /// db = PerfDatabase('b200_sxm','vllm','0.19.0',
+    ///                   systems_root='src/aiconfigurator/systems', database_mode='SOL')
+    /// for nt in [384, 4096, 7]:
+    ///     r = db.query_moe(num_tokens=nt, hidden_size=5120, inter_size=8192, topk=1,
+    ///                      num_experts=16, moe_tp_size=1, moe_ep_size=1,
+    ///                      quant_mode=common.MoEQuantMode.bfloat16,
+    ///                      workload_distribution='power_law_1.01',
+    ///                      database_mode=common.DatabaseMode.SILICON)
+    ///     print(nt, repr(float(r)))"
+    /// ```
+    ///
+    /// (`database_mode='SOL'` at construction disables the shared layer so
+    /// Python loads exactly the same primary parquet the Rust table reads.)
+    /// The collected token curve is {128, 256, 512, 1024}: nt=384 is an
+    /// interior RAW lerp; nt=4096 / nt=7 are beyond-range util-holds where
+    /// the MoE roofline SOL carries the growth (weight-load-dominated regime
+    /// — a raw linear extrapolation would give ~2.0 ms at nt=4096, the
+    /// roofline hold gives ~0.97 ms).
+    #[test]
+    fn moe_query_matches_python_v2_engine() {
+        use crate::common::system_spec::SystemSpec;
+
+        let systems_yaml = PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator/systems/b200_sxm.yaml");
+        let spec = SystemSpec::load(&systems_yaml).expect("b200_sxm.yaml must parse");
+
+        // The MoE roofline exactly as the operator layer passes it
+        // (`operators/moe.rs::sol_latency_ms`, gated => num_gemms = 3),
+        // mirroring Python `MoE._query_moe_table.get_sol` incl. its integer
+        // floor divisions.
+        let quant = MoeQuantMode::Bfloat16;
+        let (h, inter, topk, ne, ep, tp) = (5120u64, 8192u64, 1u64, 16u64, 1u64, 1u64);
+        let sol = |t: f64| -> f64 {
+            let num_gemms = 3u64;
+            let total_tokens = t.round() as u64 * topk;
+            let ops = total_tokens * h * inter * num_gemms * 2 / ep / tp;
+            let mem_bytes_int = total_tokens / ep * h * 2
+                + total_tokens / ep * inter * num_gemms / tp
+                + h * inter * num_gemms / tp * std::cmp::min(ne / ep, total_tokens / ep);
+            let mem_bytes = (mem_bytes_int as f64) * quant.mapping().memory;
+            let tc_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(1.0);
+            let sol_math = (ops as f64) / (tc_flops * quant.mapping().compute) * 1000.0;
+            let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+            sol_math.max(sol_mem)
+        };
+
+        let table = MoeTable::new(b200_vllm_data_root());
+        let cases: &[(u32, f64)] = &[
+            (384, 0.707481598854065),
+            (4096, 0.9657080651305716),
+            (7, 0.2885776182085593),
+        ];
+        for &(nt, expected) in cases {
+            let got = table
+                .query(nt, 5120, 8192, 1, 16, 1, 1, quant, "power_law_1.01", &sol)
+                .expect("query must succeed");
+            assert!(
+                ((got - expected) / expected).abs() < 1e-9,
+                "nt={nt}: rust {got} vs python {expected}"
+            );
+        }
     }
 
     #[test]

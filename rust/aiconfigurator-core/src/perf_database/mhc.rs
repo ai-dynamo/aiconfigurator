@@ -5,8 +5,16 @@
 //!
 //! CSV columns: model, architecture, op_name, num_tokens, hc_mult,
 //! hidden_size, latency. Indexed by (op_name, architecture, hc_mult,
-//! hidden_size) → num_tokens → latency. Query is 1-D interpolation along
-//! num_tokens.
+//! hidden_size) → num_tokens → latency. The token curve rides the shared
+//! perf_interp v2 engine (1-axis Grid, RAW lerp in range, boundary util-hold
+//! beyond it) — same wiring as Python `_query_mhc_table`'s silicon path.
+//!
+//! The util-hold SOL here is a LINEAR num_tokens proxy. Python anchors on
+//! the mHC roofline (`dsv4.py::_query_mhc_table.get_sol`), which this table
+//! layer cannot compute (no SystemSpec / quant / sinkhorn context); the
+//! proxy only affects beyond-range holds — in-range lerp is SOL-free and
+//! matches Python exactly. mHC latency is near-linear in tokens once past
+//! the launch floor, so the proxy ratio tracks the roofline ratio closely.
 //!
 //! `op_name` is `pre` or `post` (the two halves of the mHC decoder layer) and
 //! is part of the key: a given (arch, hc_mult, hidden_size, num_tokens) has a
@@ -18,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::common::error::AicError;
-use super::interpolation::{interp_1d, nearest_neighbors};
+use super::moe::query_token_curve;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct MhcTable {
@@ -86,18 +94,10 @@ impl MhcTable {
                 self.data_root.display()
             ))
         })?;
-        if let Some(&latency) = by_tokens.get(&num_tokens) {
-            return Ok(latency);
-        }
-        let token_keys: Vec<u32> = by_tokens.keys().copied().collect();
-        let (lo, hi) = nearest_neighbors(num_tokens, &token_keys, false)?;
-        Ok(interp_1d(
-            lo as f64,
-            hi as f64,
-            by_tokens[&lo],
-            by_tokens[&hi],
-            num_tokens as f64,
-        ))
+        // Engine 1-axis token curve; linear num_tokens proxy SOL (see the
+        // module docs for the deliberate divergence from Python's mHC
+        // roofline on beyond-range holds).
+        query_token_curve(by_tokens, num_tokens as f64, &|t| t)
     }
 
     fn load(&self) -> Result<&MhcGrids, AicError> {
@@ -152,6 +152,49 @@ fn clone_err(err: &AicError) -> AicError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cross-language parity with the Python v2 engine. Expected values from:
+    ///
+    /// ```text
+    /// PYTHONPATH=src python3 -c "
+    /// from aiconfigurator.sdk.perf_database import PerfDatabase
+    /// from aiconfigurator.sdk import common
+    /// db = PerfDatabase('b200_sxm','sglang','0.5.10',
+    ///                   systems_root='src/aiconfigurator/systems', database_mode='SOL')
+    /// for nt, op in [(3,'pre'), (3,'post'), (3,'both'), (8,'pre')]:
+    ///     r = db.query_mhc_module(num_tokens=nt, hidden_size=7168, hc_mult=4,
+    ///                             sinkhorn_iters=3, op=op,
+    ///                             database_mode=common.DatabaseMode.SILICON)
+    ///     print(nt, op, repr(float(r)))"
+    /// ```
+    ///
+    /// In-range cases only: nt=3 is an interior RAW lerp (SOL-free, so the
+    /// linear-proxy vs mHC-roofline SOL difference cannot surface), nt=8 an
+    /// exact hit, and op="both" exercises the pre+post summing. Beyond-range
+    /// holds deliberately diverge (see module docs) and are not compared.
+    #[test]
+    fn mhc_query_matches_python_v2_engine() {
+        let table = MhcTable::new(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../src/aiconfigurator/systems/data/b200_sxm/sglang/0.5.10"),
+        );
+        let arch = "DeepseekV4ForCausalLM";
+        let cases: &[(&str, u32, f64)] = &[
+            ("pre", 3, 0.025050000000000003),
+            ("post", 3, 0.01015),
+            ("both", 3, 0.0352),
+            ("pre", 8, 0.0251),
+        ];
+        for &(op, nt, expected) in cases {
+            let got = table
+                .query_module(op, nt, 4, 7168, arch)
+                .expect("query must succeed");
+            assert!(
+                ((got - expected) / expected).abs() < 1e-9,
+                "op={op}, nt={nt}: rust {got} vs python {expected}"
+            );
+        }
+    }
 
     #[test]
     fn mhc_absent_on_vllm_b200_errors_clearly() {
