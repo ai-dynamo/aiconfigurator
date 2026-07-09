@@ -117,11 +117,22 @@ jobs:
   report:
     name: AIC Prediction Regression Gate
     needs: collect
+    # Fail closed: this job is the required check (PR 2). Without if: always()
+    # a failed collect would SKIP this job, and a skipped required check counts
+    # as passing in branch protection — the gate would silently pass on exactly
+    # the PRs that break collection.
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
+      - name: Fail closed if collection failed
+        if: needs.collect.result != 'success'
+        run: |
+          echo "::error::collection did not succeed (result: ${{ needs.collect.result }}); failing the gate"
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@v5
         with:

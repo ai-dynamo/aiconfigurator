@@ -239,6 +239,12 @@ python tools/prediction_regression_gate/report.py --old /tmp/gate-old --new /tmp
 
 ## 7. Open questions / risks
 
+- **Fail-closed CI invariant (PR 2 reviewer: verify this survived).** The
+  `report` job is the required check, and GitHub treats a *skipped* required
+  check as passing. It therefore runs under `if: always()` with an explicit
+  first step that fails when `needs.collect.result != 'success'` — a broken
+  collection (the very class of PR the gate exists to block, or an infra
+  flake) must turn the check red, never skip it.
 - **2× compute per PR.** Accepted: it buys statelessness. If runner budget
   becomes a concern, the `versions latest` profile can be narrowed, or the
   old-side snapshot cached by base SHA (same artifact reused across pushes
