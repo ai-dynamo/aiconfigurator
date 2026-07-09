@@ -1075,6 +1075,7 @@ class _LazySupportMatrix:
             "context_attention",
             "generation_attention",
             "context_mla",
+            "context_mla_granular",
             "generation_mla",
             "dsa_context_module",
             "dsa_generation_module",
@@ -1094,6 +1095,7 @@ class _LazySupportMatrix:
             "context_attention",
             "generation_attention",
             "context_mla",
+            "context_mla_granular",
             "generation_mla",
             "dsa_context_module",
             "dsa_generation_module",
@@ -1108,6 +1110,7 @@ class _LazySupportMatrix:
             "context_attention",
             "generation_attention",
             "context_mla",
+            "context_mla_granular",
             "generation_mla",
             "dsa_context_module",
             "dsa_generation_module",
@@ -1196,6 +1199,15 @@ class _LazySupportMatrix:
                 getattr(db, "_context_mla_data", None),
                 getattr(db, "_context_mla_module_data", None),
             )
+
+        if key == "context_mla_granular":
+            # Granular-table-only capability: the trtllm wideep context path
+            # queries the granular context_mla table directly (no module
+            # primary), so module-only slices must not count for it.
+            from aiconfigurator.sdk.operations.mla import ContextMLA
+
+            ContextMLA.load_data(db)
+            return _enum_key_names(getattr(db, "_context_mla_data", None))
 
         if key == "generation_mla":
             from aiconfigurator.sdk.operations.mla import GenerationMLA, MLAModule
@@ -1528,6 +1540,7 @@ class PerfDatabase:
                     getattr(self, "_context_mla_data", None),
                     getattr(self, "_context_mla_module_data", None),
                 ),
+                "context_mla_granular": _enum_key_names(getattr(self, "_context_mla_data", None)),
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
@@ -1555,6 +1568,7 @@ class PerfDatabase:
                     getattr(self, "_context_mla_data", None),
                     getattr(self, "_context_mla_module_data", None),
                 ),
+                "context_mla_granular": _enum_key_names(getattr(self, "_context_mla_data", None)),
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
@@ -1577,6 +1591,7 @@ class PerfDatabase:
                     getattr(self, "_context_mla_data", None),
                     getattr(self, "_context_mla_module_data", None),
                 ),
+                "context_mla_granular": _enum_key_names(getattr(self, "_context_mla_data", None)),
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),

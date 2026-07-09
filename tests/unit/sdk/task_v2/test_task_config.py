@@ -512,6 +512,29 @@ def test_deepseek_v32_v4_context_fmha_downgrade_is_data_driven():
         assert t.decode_fmha_quant_mode == common.FMHAQuantMode.fp8
 
 
+def test_wideep_trtllm_context_fmha_capability_uses_granular_table(caplog):
+    """trtllm wideep context queries the granular context_mla table directly, so
+    the fmha fallback must key capability off the granular slices -- the merged
+    context_mla list can contain module-only fp8 rows inherited cross-framework
+    via the shared layer (gb200: vllm module data), which the wideep path can
+    never hit.  Regression for the deepseek_wideep_trtllm.yaml e2e failure.
+    """
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    with caplog.at_level(logging.WARNING):
+        t = Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="gb200",
+            backend_name="trtllm",
+            enable_wideep=True,
+        )
+    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert any("context_mla_granular" in r.message for r in caplog.records)
+
+
 def test_nextn_default_respects_hf_then_family_fallback():
     """nextn: HF num_nextn_predict_layers wins (incl. explicit 0, e.g. Kimi-K2.5);
     field absent -> family-based fallback (Qwen3.5 -> 1, DeepSeek -> 1).

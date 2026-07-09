@@ -50,8 +50,15 @@ def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool 
     if model_family == "DEEPSEEKV32":
         return "dsa_context_module", "dsa_generation_module"
     if model_family in ("DEEPSEEK", "KIMIK25") and backend_name != "vllm":
-        if backend_name == "sglang" and enable_wideep:
-            return "wideep_context_mla", "wideep_generation_mla"
+        if enable_wideep:
+            if backend_name == "sglang":
+                return "wideep_context_mla", "wideep_generation_mla"
+            # trtllm wideep context queries the granular context_mla table
+            # directly (plain ContextMLA op, no module primary), so its
+            # capability key is the granular-only slice set: the merged
+            # context_mla list may contain module-only slices (incl.
+            # cross-framework shared-layer rows) this path can never hit.
+            return "context_mla_granular", "generation_mla"
         return "context_mla", "generation_mla"
     return "context_attention", "generation_attention"
 
@@ -375,7 +382,9 @@ def resolve_context_fmha_by_data(
     if not is_context_role:
         return
 
-    ctx_op, _ = attention_op_keys(get_model_family(model_path), backend_name)
+    info = _get_model_info(model_path)
+    family = _architecture_to_model_family(info["architecture"])
+    ctx_op, _ = attention_op_keys(family, backend_name)
     supported = (getattr(database, "supported_quant_mode", {}) or {}).get(ctx_op, []) or []
     if not supported or common.FMHAQuantMode.fp8.name in supported:
         return
@@ -390,7 +399,6 @@ def resolve_context_fmha_by_data(
 
     # Not user-explicit: mirror what get_model would infer, and downgrade only
     # when that inference would pick fp8 (bf16 checkpoints need no change).
-    info = _get_model_info(model_path)
     inferred = _infer_quant_modes_from_raw_config(info.get("raw_config", {}), info.get("architecture"))
     if inferred.get("fmha_quant_mode") == common.FMHAQuantMode.fp8 and common.FMHAQuantMode.bfloat16.name in supported:
         model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
