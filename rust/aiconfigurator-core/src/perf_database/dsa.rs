@@ -416,14 +416,17 @@ impl DsaTable {
     fn load_context(&self) -> Result<&DsaGrids, AicError> {
         let cell = self
             .context
-            .get_or_init(|| load_dsa_parquet(&self.context_sources));
+            .get_or_init(|| load_dsa_parquet(&self.context_sources, false));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_generation(&self) -> Result<&DsaGrids, AicError> {
+        // Collapse (isl, step) -> seq at LOAD time, in file-row order, so
+        // same-seq ties resolve exactly like Python's generation loader
+        // (last file row wins within a source; first source wins across).
         let cell = self
             .generation
-            .get_or_init(|| load_dsa_parquet(&self.generation_sources));
+            .get_or_init(|| load_dsa_parquet(&self.generation_sources, true));
         cell.as_ref().map_err(clone_err)
     }
 
@@ -472,9 +475,10 @@ fn build_context_nodes(grids: &DsaGrids) -> NodeCache {
 /// Materialise the per-`(DsaKey, dsa_backend)` engine table for
 /// `query_generation` with the Python v2 generation nesting
 /// `[num_heads][batch][seq = isl + step]`.
-/// If multiple (step, isl) pairs map to the same seq the last write in
-/// BTreeMap-sorted order wins (collected files carry no such collisions;
-/// Python's per-row overwrite is file-order last-wins).
+/// The (isl, step) -> seq collapse happens at LOAD time in file-row order
+/// (`load_dsa_parquet` with `collapse_isl_step_to_seq`), mirroring Python's
+/// per-row overwrite; the grids reaching here carry `step = 0, isl = seq`,
+/// so `seq = isl + step` below is the identity and no tie remains to break.
 fn build_generation_nodes(grids: &DsaGrids) -> NodeCache {
     let mut by_keys: BTreeMap<DsaKey, BTreeMap<String, Node>> = BTreeMap::new();
     for (key, by_backend) in &grids.by_keys {
@@ -719,7 +723,21 @@ fn dsa_generation_sol_ms(
 /// Missing files are skipped (a sibling declared in the manifest need not
 /// exist for every system); an error is returned only when no source yields
 /// rows. Shared by both the context and generation DSA files.
-fn load_dsa_parquet(sources: &[PerfSource]) -> Result<DsaGrids, AicError> {
+/// `collapse_isl_step_to_seq` selects the generation-table coordinate:
+/// Python's `load_generation_dsa_module_data` keys rows by `s = isl + step`
+/// ("Total decode length is the canonical coordinate even if two rows
+/// decompose it into different isl/step pairs"), so both the within-source
+/// last-row-wins overwrite AND the cross-source first-wins guard operate at
+/// the COLLAPSED coordinate, and the winner among same-`s` rows is the last
+/// row in FILE order — not any sorted (step, isl) order. Collapsing here,
+/// before the phase-1 insert, reproduces both. The collapsed grid stores
+/// `step = 0, isl = s` in the shared `DsaHeadGrid` shape. Context keeps the
+/// raw `(step, isl)` coordinate (`load_context_dsa_module_data` keys on it
+/// exactly).
+fn load_dsa_parquet(
+    sources: &[PerfSource],
+    collapse_isl_step_to_seq: bool,
+) -> Result<DsaGrids, AicError> {
     let mut by_keys: BTreeMap<DsaKey, BTreeMap<String, DsaHeadGrid>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
@@ -774,13 +792,20 @@ fn load_dsa_parquet(sources: &[PerfSource]) -> Result<DsaGrids, AicError> {
                 kv_quant: row.str_owned(kv_cache_dtype_col)?,
                 gemm_quant: row.str_owned(gemm_type_col)?,
             };
+            let (step, isl) = if collapse_isl_step_to_seq {
+                // Generation: canonical coordinate is s = isl + step (see fn
+                // doc); same-`s` rows overwrite in file order below.
+                (0, row.u32(isl_col)? + row.u32(step_col)?)
+            } else {
+                (row.u32(step_col)?, row.u32(isl_col)?)
+            };
             source_values.insert(
                 (
                     key,
                     dsa_backend.to_string(),
                     row.u32(num_heads_col)?,
-                    row.u32(step_col)?,
-                    row.u32(isl_col)?,
+                    step,
+                    isl,
                     row.u32(batch_size_col)?,
                 ),
                 row.f64(latency_col)?,
@@ -1501,6 +1526,119 @@ mod tests {
         assert_eq!(q("trtllm"), 1.0);
         // CP-base selection (Python `dsa_backend="flashmla_kv"`).
         assert_eq!(q("flashmla_kv"), 5.0);
+    }
+
+    /// Write one synthetic DSA GENERATION parquet with the collector's
+    /// column set. Row tuple: `(isl, step, latency)`; the shape coordinate
+    /// is fixed at (DeepseekV32ForCausalLM, bf16 mla/kv/gemm, n=128, b=1,
+    /// op_name="dsa_generation_module", kernel_source="default").
+    fn write_dsa_generation_parquet(path: &Path, rows: &[(i64, i64, f64)]) {
+        use parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int64Type};
+        use parquet::file::properties::WriterProperties;
+        use parquet::file::writer::SerializedFileWriter;
+        use parquet::schema::parser::parse_message_type;
+
+        let schema = "message schema {
+            REQUIRED BINARY op_name (UTF8);
+            REQUIRED BINARY kernel_source (UTF8);
+            REQUIRED BINARY architecture (UTF8);
+            REQUIRED BINARY mla_dtype (UTF8);
+            REQUIRED BINARY kv_cache_dtype (UTF8);
+            REQUIRED BINARY gemm_type (UTF8);
+            REQUIRED INT64 num_heads;
+            REQUIRED INT64 batch_size;
+            REQUIRED INT64 isl;
+            REQUIRED INT64 step;
+            REQUIRED DOUBLE latency;
+        }";
+        let schema = Arc::new(parse_message_type(schema).expect("schema must parse"));
+        let file = std::fs::File::create(path).expect("create parquet");
+        let mut writer =
+            SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+                .expect("writer");
+        let mut rg = writer.next_row_group().expect("row group");
+        let str_cols: [Vec<ByteArray>; 6] = [
+            rows.iter().map(|_| ByteArray::from("dsa_generation_module")).collect(),
+            rows.iter().map(|_| ByteArray::from("default")).collect(),
+            rows.iter().map(|_| ByteArray::from("DeepseekV32ForCausalLM")).collect(),
+            rows.iter().map(|_| ByteArray::from("bfloat16")).collect(),
+            rows.iter().map(|_| ByteArray::from("bfloat16")).collect(),
+            rows.iter().map(|_| ByteArray::from("bfloat16")).collect(),
+        ];
+        for values in &str_cols {
+            let mut col = rg.next_column().expect("next col").expect("str col");
+            col.typed::<ByteArrayType>().write_batch(values, None, None).expect("write str");
+            col.close().expect("close col");
+        }
+        let int_cols: [Vec<i64>; 4] = [
+            rows.iter().map(|_| 128).collect(), // num_heads
+            rows.iter().map(|_| 1).collect(),   // batch_size
+            rows.iter().map(|r| r.0).collect(), // isl
+            rows.iter().map(|r| r.1).collect(), // step
+        ];
+        for values in &int_cols {
+            let mut col = rg.next_column().expect("next col").expect("int col");
+            col.typed::<Int64Type>().write_batch(values, None, None).expect("write ints");
+            col.close().expect("close col");
+        }
+        let latencies: Vec<f64> = rows.iter().map(|r| r.2).collect();
+        let mut col = rg.next_column().expect("next col").expect("latency col");
+        col.typed::<DoubleType>().write_batch(&latencies, None, None).expect("write latency");
+        col.close().expect("close col");
+        rg.close().expect("close row group");
+        writer.close().expect("close writer");
+    }
+
+    /// Issue #1333 item 4.7-3: two generation rows whose different
+    /// (isl, step) decompositions collapse to the SAME s_total = isl + step
+    /// must resolve to Python's winner — the LAST row in FILE order (plain
+    /// per-source dict overwrite in `load_generation_dsa_module_data`) — not
+    /// the largest-step row. The old Rust collapse iterated the
+    /// `[step][isl]` BTreeMaps ascending inside `build_generation_nodes`,
+    /// so the step=20 row always wrote last and won with 111.0 regardless
+    /// of file order. Oracle:
+    ///
+    /// ```text
+    /// PYTHONPATH=src python3 -c "
+    /// import pandas as pd, tempfile, os
+    /// from aiconfigurator.sdk.operations.dsa import load_generation_dsa_module_data
+    /// from aiconfigurator.sdk import common
+    /// tmp = tempfile.mkdtemp(); f = os.path.join(tmp, 'dsa_generation_module_perf.parquet')
+    /// base = dict(architecture='DeepseekV32ForCausalLM', mla_dtype='bfloat16',
+    ///             kv_cache_dtype='bfloat16', gemm_type='bfloat16', num_heads=128,
+    ///             batch_size=1, op_name='dsa_generation_module', kernel_source='default')
+    /// pd.DataFrame([
+    ///  dict(isl=80, step=20, latency=111.0, **base),
+    ///  dict(isl=90, step=10, latency=222.0, **base),
+    /// ]).to_parquet(f)
+    /// d = load_generation_dsa_module_data(f)
+    /// print(d[common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16]
+    ///        ['DeepseekV32ForCausalLM']['flashmla_kv'][128][1][100])
+    /// # -> {'latency': 222.0, 'power': 0.0, 'energy': 0.0}"
+    /// ```
+    #[test]
+    fn dsa_generation_same_seq_ties_resolve_last_file_row() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_dsa_generation_parquet(
+            &tmp.path().join("dsa_generation_module_perf.parquet"),
+            &[(80, 20, 111.0), (90, 10, 222.0)],
+        );
+        let table = DsaTable::new(tmp.path().to_path_buf());
+        let spec = b200_sxm_spec();
+        let got = table
+            .query_generation(
+                &spec,
+                1,   // b
+                100, // seq = isl + step
+                128, // num_heads
+                KvCacheQuantMode::Bfloat16,
+                FmhaQuantMode::Bfloat16,
+                GemmQuantMode::Bfloat16,
+                "DeepseekV32ForCausalLM",
+                "flashmla_kv",
+            )
+            .expect("query must succeed");
+        assert_eq!(got, 222.0);
     }
 
     /// Item 2 (fallback): a single-backend file must resolve for ANY
