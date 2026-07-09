@@ -1202,18 +1202,12 @@ class _LazySupportMatrix:
 
             GenerationMLA.load_data(db)
             MLAModule.load_data(db)
-            # Granular data is keyed [kv_cache]...; module data is keyed
-            # [fmha][kv_cache][gemm]... so kv modes are at the second level there.
-            kv_modes: set[str] = set()
-            granular = getattr(db, "_generation_mla_data", None)
-            if granular:
-                kv_modes.update(_enum_key_names(granular))
-            module = getattr(db, "_generation_mla_module_data", None)
-            if module:
-                for fmha_mode in module:
-                    for kv_mode in module[fmha_mode]:
-                        kv_modes.add(kv_mode.name if hasattr(kv_mode, "name") else str(kv_mode))
-            return sorted(kv_modes)
+            # Both granular and module data key on kv_cache_dtype at the top
+            # level (generation MLA has no fmha axis).
+            return _merge_key_names(
+                getattr(db, "_generation_mla_data", None),
+                getattr(db, "_generation_mla_module_data", None),
+            )
 
         if key == "dsa_context_module":
             from aiconfigurator.sdk.operations.dsa import ContextDSAModule
@@ -1487,22 +1481,13 @@ class PerfDatabase:
         def _generation_mla_kv_modes() -> list[str]:
             """Collect kv_cache_dtype names for generation MLA from both sources.
 
-            Granular data is keyed [kv_cache]... so top-level keys are kv modes.
-            Module data is keyed [fmha][kv_cache][gemm]... so kv modes are
-            at the second level.
+            Both granular and module data key on kv_cache_dtype at the top
+            level (generation MLA has no fmha axis).
             """
-            kv_modes: set[str] = set()
-            # Granular: top-level keys are kv_cache_dtype
-            granular = getattr(self, "_generation_mla_data", None)
-            if granular:
-                kv_modes.update(_enum_key_names(granular))
-            # Module: kv_cache_dtype is at the second level
-            module = getattr(self, "_generation_mla_module_data", None)
-            if module:
-                for fmha_mode in module:
-                    for kv_mode in module[fmha_mode]:
-                        kv_modes.add(kv_mode.name if hasattr(kv_mode, "name") else str(kv_mode))
-            return sorted(kv_modes)
+            return _merge_key_names(
+                getattr(self, "_generation_mla_data", None),
+                getattr(self, "_generation_mla_module_data", None),
+            )
 
         def _dsv4_megamoe_modes(data: dict | None) -> list[str]:
             """Collect MoE quant-mode names from DSv4 MegaMoE data.
@@ -2069,7 +2054,6 @@ class PerfDatabase:
         s: int,
         num_heads: int,
         kv_cache_dtype: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode = common.FMHAQuantMode.bfloat16,
         gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
@@ -2082,7 +2066,6 @@ class PerfDatabase:
             s,
             num_heads,
             kv_cache_dtype,
-            fmha_quant_mode,
             gemm_quant_mode,
             database_mode,
         )

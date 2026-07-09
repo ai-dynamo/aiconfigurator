@@ -384,12 +384,12 @@ def test_sweep_disagg_require_same_tp_sglang_non_wideep():
     assert mk("trtllm")["require_same_tp"] is False
 
 
-def test_deepseek_prefill_and_decode_fmha_downgrade_to_bf16(caplog):
+def test_deepseek_prefill_downgrades_decode_keeps_fp8_fmha(caplog):
     """DeepSeek context attention (prefill) downgrades fp8 FMHA to bf16 via the
-    V3/Kimi capability rule; decode is downgraded by the data-driven fallback
-    (the MLA perf tables carry no fp8 fmha slice), so the resolved config and
-    the queried data slices agree.  Known-capability downgrades stay silent
-    (debug, not warning) -- a V3 run must not warn on every task.
+    V3/Kimi capability rule.  Decode keeps the checkpoint-inferred fp8 label:
+    no generation table keys on fmha (the generation MLA module table has no
+    fmha axis), so the label is inert for decode modeling and the data-driven
+    fallback skips decode roles -- no warning either way.
     """
     import logging
 
@@ -406,7 +406,7 @@ def test_deepseek_prefill_and_decode_fmha_downgrade_to_bf16(caplog):
             decode_backend_name="sglang",
         )
     assert t.prefill_fmha_quant_mode == common.FMHAQuantMode.bfloat16
-    assert t.decode_fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert t.decode_fmha_quant_mode == common.FMHAQuantMode.fp8
     assert not any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
 
 

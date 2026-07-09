@@ -824,7 +824,6 @@ class MLAModule(Operation):
         s: int,
         num_heads: int,
         kv_cache_dtype: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode = common.FMHAQuantMode.bfloat16,
         gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
     ):
@@ -868,7 +867,6 @@ class MLAModule(Operation):
                 wrapper.raise_if_not_loaded()
                 return util_empirical.require_data_slice(
                     wrapper,
-                    fmha_quant_mode,
                     kv_cache_dtype,
                     gemm_quant_mode,
                 )
@@ -879,7 +877,6 @@ class MLAModule(Operation):
                     database.system,
                     database.backend,
                     database.version,
-                    fmha_quant_mode.name,
                     kv_cache_dtype.name,
                     gemm_quant_mode.name,
                 ),
@@ -908,7 +905,6 @@ class MLAModule(Operation):
             data_wrapper.raise_if_not_loaded()
             mla_dict = util_empirical.require_data_slice(
                 data_wrapper,
-                fmha_quant_mode,
                 kv_cache_dtype,
                 gemm_quant_mode,
             )
@@ -960,7 +956,6 @@ class MLAModule(Operation):
                 s=s,
                 num_heads=self._num_heads,
                 kv_cache_dtype=self._kvcache_quant_mode,
-                fmha_quant_mode=self._fmha_quant_mode,
                 gemm_quant_mode=self._gemm_quant_mode,
             )
 
@@ -1891,16 +1886,19 @@ def load_generation_mla_module_data(mla_module_file: str):
     batch_size, isl, tp_size, step, latency [, power]
 
     Dict structure:
-        data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][num_heads][b][s]
+        data[kv_cache_quant_mode][gemm_quant_mode][num_heads][b][s]
+
+    The ``mla_dtype`` column is ignored: decode MLA compute dtype follows the
+    KV cache dtype (collectors hardcode ``bfloat16`` in that column), so it is
+    not a real axis — mirroring ``load_generation_mla_data``, which likewise
+    drops it.
     """
     rows = _read_filtered_rows(mla_module_file)
     if rows is None:
         logger.debug(f"MLA generation module data file {mla_module_file} not found.")
         return None
 
-    mla_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
-    )
+    mla_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
 
     has_power = len(rows) > 0 and "power" in rows[0]
 
@@ -1912,11 +1910,10 @@ def load_generation_mla_module_data(mla_module_file: str):
         power = float(row.get("power", 0.0)) if has_power else 0.0
         energy = power * latency
 
-        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
-        mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][b][s] = {
+        mla_data[kv_dtype][gemm_mode][num_heads][b][s] = {
             "latency": latency,
             "power": power,
             "energy": energy,

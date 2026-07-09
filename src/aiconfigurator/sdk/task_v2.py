@@ -795,31 +795,27 @@ class Task:
         # math modeled at bf16 throughput.  Explicit user fp8 is never
         # overridden by this tier -- validate stays fail-fast for it.
         #
-        # Decode roles are consulted only for the (non-wideep) MLA family:
-        # its generation *module* table is the one generation table keyed on
-        # fmha.  Every other generation table keys on kv dtype, so an fp8
-        # label is inert there -- and validate likewise checks fmha only for
-        # context-using roles -- hence skipping avoids a data-gap warning
-        # about data the role never reads.  For MLA decode the context table
-        # stands proxy for capability; TODO: the generation MLA module
-        # table's top-level key IS fmha, so decode could read it directly
-        # should the context/generation labels ever diverge.
+        # Context-using roles only: NO generation table keys on fmha (decode
+        # compute dtype follows the kv-cache dtype; the generation MLA module
+        # loader drops the degenerate mla_dtype column), so an fp8 label is
+        # inert on decode -- and validate likewise checks fmha only for
+        # context-using roles.
         for role in roles:
+            if role == "decode":
+                continue
             if fmha_explicit.get(role, False):
                 continue
             if self._role_attr(role, "fmha_quant_mode") != common.FMHAQuantMode.fp8:
-                continue
-            if role == "decode" and self._attention_op_keys(role) != ("context_mla", "generation_mla"):
                 continue
             supported = self._context_fmha_supported_modes(role)
             if not supported or common.FMHAQuantMode.fp8.name in supported:
                 continue  # fp8 data present, or no DB to consult -> keep fp8
             if common.FMHAQuantMode.bfloat16.name not in supported:
-                continue  # no bf16 slice either (e.g. wideep fp8_block-only tables) -> let validate report
+                continue  # no bf16 slice either -> let validate report the gap
             self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
             ctx_op, _ = self._attention_op_keys(role)
             field = "fmha_quant_mode" if self.serving_mode == "agg" else f"{role}_fmha_quant_mode"
-            msg = (
+            logger.warning(
                 f"{role} fmha_quant_mode=fp8 (inferred from the model checkpoint) has no "
                 f"{ctx_op!r} perf data for system={self._role_attr(role, 'system_name')!r}, "
                 f"backend={self._role_attr(role, 'backend_name')!r}, "
@@ -827,13 +823,6 @@ class Task:
                 f"FMHA data. Predictions are conservative if the deployed engine runs fp8 FMHA; "
                 f"set {field} explicitly to override."
             )
-            if self._architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration"):
-                # Known capability: MLA decode tables are bf16-labeled by design
-                # (the kernel's fp8 work is captured under the kv-cache dtype), so
-                # this is an exact relabel, not a data gap worth warning about.
-                logger.debug(msg)
-            else:
-                logger.warning(msg)
 
     def _attention_op_keys(self, role: str) -> tuple[str, str]:
         """(context_op, generation_op) support-matrix keys for this role's model
