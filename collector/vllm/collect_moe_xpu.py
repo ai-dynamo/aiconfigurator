@@ -14,6 +14,7 @@ import os
 
 import torch
 import torch.nn.functional as F
+
 try:
     from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 except ImportError:
