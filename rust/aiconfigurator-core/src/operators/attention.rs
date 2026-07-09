@@ -57,6 +57,13 @@ pub struct ContextAttentionOp {
     pub kv_cache_dtype: KvCacheQuantMode,
     pub fmha_quant_mode: FmhaQuantMode,
     pub use_qk_norm: bool,
+    /// Context-parallel factor (Python's `_cp_size`, = `cp_size`). When `>1`,
+    /// prefill FMHA is modeled as rank-0's two zigzag chunks:
+    /// `ctx(c, prefix) + ctx(c, prefix + isl - c)` with `c = ceil(isl / 2cp)`.
+    /// Defaults to 1 (no CP). The fused rope/kv_write/qk_norm extras are still
+    /// added once, not per chunk.
+    #[serde(default = "crate::operators::gemm::default_seq_split")]
+    pub cp_size: u32,
 }
 
 impl ContextAttentionOp {
@@ -78,6 +85,7 @@ impl ContextAttentionOp {
             kv_cache_dtype,
             fmha_quant_mode,
             use_qk_norm: false,
+            cp_size: 1,
         }
     }
 
@@ -89,19 +97,34 @@ impl ContextAttentionOp {
         prefix: u32,
         seq_imbalance_correction_scale: f64,
     ) -> Result<PerformanceResult, AicError> {
-        let full_s = isl + prefix;
-        let table_latency = db.attention.query_context(
-            batch_size,
-            full_s,
-            self.n,
-            self.n_kv,
-            self.head_size,
-            self.window_size,
-            self.kv_cache_dtype,
-            self.fmha_quant_mode,
-        )?;
-        let prefix_factor = prefix_correction(full_s, prefix);
-        let mut latency = table_latency * prefix_factor;
+        // Mirror Python's `ContextAttention._ctx(s, pfx)`: query the table at
+        // the full sequence `s + pfx` and apply the prefix correction for
+        // `pfx`. The Rust table is keyed by the full sequence length.
+        let ctx = |s: u32, pfx: u32| -> Result<f64, AicError> {
+            let full_s = s + pfx;
+            let table = db.attention.query_context(
+                batch_size,
+                full_s,
+                self.n,
+                self.n_kv,
+                self.head_size,
+                self.window_size,
+                self.kv_cache_dtype,
+                self.fmha_quant_mode,
+            )?;
+            Ok(table * prefix_correction(full_s, pfx))
+        };
+
+        // Context parallelism (SGLang AllGather / zigzag): model rank 0's two
+        // balanced chunks. c = ceil(isl / 2cp); rank 0 owns chunk 0 (prefix
+        // unchanged) and chunk 2cp-1 (attends almost the full sequence). Only
+        // the FMHA table term is split; the fused extras below are added once.
+        let mut latency = if self.cp_size > 1 {
+            let c = isl.div_ceil(2 * self.cp_size).max(1);
+            ctx(c, prefix)? + ctx(c, prefix + isl - c)?
+        } else {
+            ctx(isl, prefix)?
+        };
 
         // Fused-op extras (qk_norm optional, rope + kv_write mandatory).
         let q_num = (self.n * self.head_size) as f64;

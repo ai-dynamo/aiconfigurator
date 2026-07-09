@@ -96,7 +96,9 @@ GitHub = "https://github.com/ai-dynamo/aiconfigurator"
 Repository = "https://github.com/ai-dynamo/aiconfigurator.git"
 
 [build-system]
-requires = ["maturin>=1.5,<2"]
+# >=1.5.1 fixed `--compatibility` under the PEP517 backend, which the
+# manylinux_2_28 wheel build relies on (see docker/Dockerfile).
+requires = ["maturin>=1.5.1,<2"]
 build-backend = "maturin"
 
 [project.scripts]

@@ -46,11 +46,22 @@ use std::sync::OnceLock;
 
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
+use crate::config::{PerfDbSources, PerfSource};
+use super::{kernel_source_ok, resolve_op_sources};
 use super::moe::{query_token_curve, singleton_underflow};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct WideEpTable {
     data_root: PathBuf,
+    /// Ordered, priority-sorted sources per distinct perf-file basename
+    /// (shared-layer aware; see [`PerfSource`]). Single-primary, no-filter by
+    /// default (`WideEpTable::new`).
+    context_moe_sources: Vec<PerfSource>,
+    generation_moe_sources: Vec<PerfSource>,
+    moe_sources: Vec<PerfSource>,
+    alltoall_sources: Vec<PerfSource>,
+    deepep_normal_sources: Vec<PerfSource>,
+    deepep_ll_sources: Vec<PerfSource>,
     context_moe: OnceLock<Result<MoeGrids, AicError>>,
     generation_moe: OnceLock<Result<MoeGrids, AicError>>,
     trtllm_wideep_moe: OnceLock<Result<MoeGrids, AicError>>,
@@ -103,9 +114,42 @@ pub struct DispatchPoint {
 }
 
 impl WideEpTable {
+    /// Construct an empty table for the given data directory. No I/O. Each
+    /// perf file is sourced solely from `data_root/<basename>` with no
+    /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
+        Self::with_sources(data_root, &PerfDbSources::default())
+    }
+
+    /// Construct with shared-layer (sibling/cross-version) sources resolved from
+    /// `perf_db_sources` (Python-supplied). Each perf file falls back to its
+    /// primary `data_root/<basename>` when absent from the map. No I/O.
+    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
+        let context_moe_sources =
+            resolve_op_sources(perf_db_sources, "wideep_context_moe_perf.parquet", &data_root);
+        let generation_moe_sources = resolve_op_sources(
+            perf_db_sources,
+            "wideep_generation_moe_perf.parquet",
+            &data_root,
+        );
+        let moe_sources = resolve_op_sources(perf_db_sources, "wideep_moe_perf.parquet", &data_root);
+        let alltoall_sources =
+            resolve_op_sources(perf_db_sources, "trtllm_alltoall_perf.parquet", &data_root);
+        let deepep_normal_sources = resolve_op_sources(
+            perf_db_sources,
+            "wideep_deepep_normal_perf.parquet",
+            &data_root,
+        );
+        let deepep_ll_sources =
+            resolve_op_sources(perf_db_sources, "wideep_deepep_ll_perf.parquet", &data_root);
         Self {
             data_root,
+            context_moe_sources,
+            generation_moe_sources,
+            moe_sources,
+            alltoall_sources,
+            deepep_normal_sources,
+            deepep_ll_sources,
             context_moe: OnceLock::new(),
             generation_moe: OnceLock::new(),
             trtllm_wideep_moe: OnceLock::new(),
@@ -271,37 +315,37 @@ impl WideEpTable {
     fn load_context_moe(&self) -> Result<&MoeGrids, AicError> {
         let cell = self
             .context_moe
-            .get_or_init(|| load_moe_parquet(&self.data_root.join("wideep_context_moe_perf.parquet")));
+            .get_or_init(|| load_moe_parquet(&self.context_moe_sources));
         cell.as_ref().map_err(clone_err)
     }
     fn load_generation_moe(&self) -> Result<&MoeGrids, AicError> {
         let cell = self
             .generation_moe
-            .get_or_init(|| load_moe_parquet(&self.data_root.join("wideep_generation_moe_perf.parquet")));
+            .get_or_init(|| load_moe_parquet(&self.generation_moe_sources));
         cell.as_ref().map_err(clone_err)
     }
     fn load_trtllm_wideep_moe(&self) -> Result<&MoeGrids, AicError> {
         let cell = self
             .trtllm_wideep_moe
-            .get_or_init(|| load_moe_parquet(&self.data_root.join("wideep_moe_perf.parquet")));
+            .get_or_init(|| load_moe_parquet(&self.moe_sources));
         cell.as_ref().map_err(clone_err)
     }
     fn load_trtllm_alltoall(&self) -> Result<&MoeGrids, AicError> {
         let cell = self
             .trtllm_alltoall
-            .get_or_init(|| load_moe_parquet(&self.data_root.join("trtllm_alltoall_perf.parquet")));
+            .get_or_init(|| load_moe_parquet(&self.alltoall_sources));
         cell.as_ref().map_err(clone_err)
     }
     fn load_deepep_normal(&self) -> Result<&DispatchGrids, AicError> {
-        let cell = self.deepep_normal.get_or_init(|| {
-            load_deepep_normal_parquet(&self.data_root.join("wideep_deepep_normal_perf.parquet"))
-        });
+        let cell = self
+            .deepep_normal
+            .get_or_init(|| load_deepep_normal_parquet(&self.deepep_normal_sources));
         cell.as_ref().map_err(clone_err)
     }
     fn load_deepep_ll(&self) -> Result<&DispatchGrids, AicError> {
         let cell = self
             .deepep_ll
-            .get_or_init(|| load_deepep_ll_parquet(&self.data_root.join("wideep_deepep_ll_perf.parquet")));
+            .get_or_init(|| load_deepep_ll_parquet(&self.deepep_ll_sources));
         cell.as_ref().map_err(clone_err)
     }
 }
@@ -424,128 +468,203 @@ fn dispatch_lookup(
     })
 }
 
-fn load_moe_parquet(path: &Path) -> Result<MoeGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let moe_dtype_col = reader.col("moe_dtype")?;
-    let num_tokens_col = reader.col("num_tokens")?;
-    let hidden_size_col = reader.col("hidden_size")?;
-    // `inter_size` / `moe_tp_size` are absent in `trtllm_alltoall_perf.parquet`;
-    // shared with the wideep_*_moe parquets which carry them. Optional lookup
-    // mirrors the prior `Option<u32>` deserialization plus `unwrap_or` default.
-    let inter_size_col = reader.col_optional("inter_size");
-    let topk_col = reader.col("topk")?;
-    let num_experts_col = reader.col("num_experts")?;
-    let moe_tp_size_col = reader.col_optional("moe_tp_size");
-    let moe_ep_size_col = reader.col("moe_ep_size")?;
-    let distribution_col = reader.col("distribution")?;
-    let latency_col = reader.col("latency")?;
-
+/// Load a MoE-shape table from an ordered, priority-sorted source list. Sources
+/// are read in order; the first source containing a `(key, num_tokens)` wins
+/// (`or_insert`), mirroring Python's `_read_filtered_rows` concatenation +
+/// `load_wideep_*_moe_data` skip-on-key-conflict. Missing files are skipped; an
+/// error is returned only when no source yields rows. Reused for the
+/// context/generation/wideep-moe/alltoall parquets.
+fn load_moe_parquet(sources: &[PerfSource]) -> Result<MoeGrids, AicError> {
     let mut by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = MoeKey {
-            quant: row.str_owned(moe_dtype_col)?,
-            distribution: row.str_owned(distribution_col)?,
-            topk: row.u32(topk_col)?,
-            num_experts: row.u32(num_experts_col)?,
-            hidden_size: row.u32(hidden_size_col)?,
-            inter_size: row.u32_optional(inter_size_col)?.unwrap_or(0),
-            moe_tp_size: row.u32_optional(moe_tp_size_col)?.unwrap_or(1),
-            moe_ep_size: row.u32(moe_ep_size_col)?,
-        };
-        // First-wins parity with Python `load_wideep_*_moe_data`.
-        by_keys
-            .entry(key)
-            .or_default()
-            .entry(row.u32(num_tokens_col)?)
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let moe_dtype_col = reader.col("moe_dtype")?;
+        let num_tokens_col = reader.col("num_tokens")?;
+        let hidden_size_col = reader.col("hidden_size")?;
+        // `inter_size` / `moe_tp_size` are absent in `trtllm_alltoall_perf.parquet`;
+        // shared with the wideep_*_moe parquets which carry them. Optional lookup
+        // mirrors the prior `Option<u32>` deserialization plus `unwrap_or` default.
+        let inter_size_col = reader.col_optional("inter_size");
+        let topk_col = reader.col("topk")?;
+        let num_experts_col = reader.col("num_experts")?;
+        let moe_tp_size_col = reader.col_optional("moe_tp_size");
+        let moe_ep_size_col = reader.col("moe_ep_size")?;
+        let distribution_col = reader.col("distribution")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = MoeKey {
+                quant: row.str_owned(moe_dtype_col)?,
+                distribution: row.str_owned(distribution_col)?,
+                topk: row.u32(topk_col)?,
+                num_experts: row.u32(num_experts_col)?,
+                hidden_size: row.u32(hidden_size_col)?,
+                inter_size: row.u32_optional(inter_size_col)?.unwrap_or(0),
+                moe_tp_size: row.u32_optional(moe_tp_size_col)?.unwrap_or(1),
+                moe_ep_size: row.u32(moe_ep_size_col)?,
+            };
+            // First-wins parity with Python `load_wideep_*_moe_data`, extended
+            // across shared-layer sources (earlier source wins).
+            by_keys
+                .entry(key)
+                .or_default()
+                .entry(row.u32(num_tokens_col)?)
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if by_keys.is_empty() {
+    if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no MoE-shape rows loaded from {}",
-            path.display()
+            "no MoE-shape rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     Ok(MoeGrids { by_keys })
 }
 
-fn load_deepep_normal_parquet(path: &Path) -> Result<DispatchGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let node_num_col = reader.col("node_num")?;
-    let hidden_size_col = reader.col("hidden_size")?;
-    let num_token_col = reader.col("num_token")?;
-    let num_topk_col = reader.col("num_topk")?;
-    let num_experts_col = reader.col("num_experts")?;
-    let dispatch_transmit_us_col = reader.col_optional("dispatch_transmit_us");
-    let dispatch_notify_us_col = reader.col_optional("dispatch_notify_us");
-    let combine_transmit_us_col = reader.col_optional("combine_transmit_us");
-    let combine_notify_us_col = reader.col_optional("combine_notify_us");
-
+/// Load the DeepEP-normal dispatch table from an ordered source list. Missing
+/// files are skipped; an error is returned only when no source yields rows.
+///
+/// Two-level merge semantics: WITHIN a source, `.insert()` keeps the LAST row
+/// for a `(key, num_token)` — byte-identical to the pre-shared-layer loader,
+/// which collapsed the `dispatch_sms` dimension (absent from `DispatchKey`) to
+/// whichever row came last. ACROSS sources, the per-source map is folded in with
+/// `or_insert`, so the FIRST (highest-priority) source wins — matching the gemm
+/// shared-layer contract and Python's concat-then-skip-on-conflict. Do not
+/// collapse to a plain per-row `or_insert`: it would flip the within-file
+/// last-wins and regress single-primary parity.
+fn load_deepep_normal_parquet(sources: &[PerfSource]) -> Result<DispatchGrids, AicError> {
     let mut by_keys: BTreeMap<DispatchKey, BTreeMap<u32, DispatchPoint>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = DispatchKey {
-            node_num: row.u32(node_num_col)?,
-            hidden_size: row.u32(hidden_size_col)?,
-            num_topk: row.u32(num_topk_col)?,
-            num_experts: row.u32(num_experts_col)?,
-        };
-        by_keys.entry(key).or_default().insert(
-            row.u32(num_token_col)?,
-            DispatchPoint {
-                dispatch_transmit_us: row.f64_optional(dispatch_transmit_us_col)?.unwrap_or(0.0),
-                dispatch_notify_us: row.f64_optional(dispatch_notify_us_col)?.unwrap_or(0.0),
-                combine_transmit_us: row.f64_optional(combine_transmit_us_col)?.unwrap_or(0.0),
-                combine_notify_us: row.f64_optional(combine_notify_us_col)?.unwrap_or(0.0),
-                combine_avg_t_us: 0.0,
-                dispatch_avg_t_us: 0.0,
-            },
-        );
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let node_num_col = reader.col("node_num")?;
+        let hidden_size_col = reader.col("hidden_size")?;
+        let num_token_col = reader.col("num_token")?;
+        let num_topk_col = reader.col("num_topk")?;
+        let num_experts_col = reader.col("num_experts")?;
+        let dispatch_transmit_us_col = reader.col_optional("dispatch_transmit_us");
+        let dispatch_notify_us_col = reader.col_optional("dispatch_notify_us");
+        let combine_transmit_us_col = reader.col_optional("combine_transmit_us");
+        let combine_notify_us_col = reader.col_optional("combine_notify_us");
+        let ks_col = reader.col_optional("kernel_source");
+        // Per-source last-wins (byte-identical to the original single-file loader).
+        let mut source_map: BTreeMap<DispatchKey, BTreeMap<u32, DispatchPoint>> = BTreeMap::new();
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = DispatchKey {
+                node_num: row.u32(node_num_col)?,
+                hidden_size: row.u32(hidden_size_col)?,
+                num_topk: row.u32(num_topk_col)?,
+                num_experts: row.u32(num_experts_col)?,
+            };
+            source_map.entry(key).or_default().insert(
+                row.u32(num_token_col)?,
+                DispatchPoint {
+                    dispatch_transmit_us: row.f64_optional(dispatch_transmit_us_col)?.unwrap_or(0.0),
+                    dispatch_notify_us: row.f64_optional(dispatch_notify_us_col)?.unwrap_or(0.0),
+                    combine_transmit_us: row.f64_optional(combine_transmit_us_col)?.unwrap_or(0.0),
+                    combine_notify_us: row.f64_optional(combine_notify_us_col)?.unwrap_or(0.0),
+                    combine_avg_t_us: 0.0,
+                    dispatch_avg_t_us: 0.0,
+                },
+            );
+        }
+        // Fold into the global map: earlier (higher-priority) source wins.
+        for (key, tokens) in source_map {
+            let dest = by_keys.entry(key).or_default();
+            for (token, point) in tokens {
+                dest.entry(token).or_insert(point);
+            }
+        }
     }
-    if by_keys.is_empty() {
+    if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no DeepEP-normal rows loaded from {}",
-            path.display()
+            "no DeepEP-normal rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     Ok(DispatchGrids { by_keys })
 }
 
-fn load_deepep_ll_parquet(path: &Path) -> Result<DispatchGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let node_num_col = reader.col("node_num")?;
-    let hidden_size_col = reader.col("hidden_size")?;
-    let num_token_col = reader.col("num_token")?;
-    let num_topk_col = reader.col("num_topk")?;
-    let num_experts_col = reader.col("num_experts")?;
-    let combine_avg_t_us_col = reader.col_optional("combine_avg_t_us");
-    let dispatch_avg_t_us_col = reader.col_optional("dispatch_avg_t_us");
-
+/// Load the DeepEP low-latency dispatch table from an ordered source list. Same
+/// two-level merge (within-file last-wins, cross-source first-wins) and
+/// missing-file-skip semantics as [`load_deepep_normal_parquet`].
+fn load_deepep_ll_parquet(sources: &[PerfSource]) -> Result<DispatchGrids, AicError> {
     let mut by_keys: BTreeMap<DispatchKey, BTreeMap<u32, DispatchPoint>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = DispatchKey {
-            node_num: row.u32(node_num_col)?,
-            hidden_size: row.u32(hidden_size_col)?,
-            num_topk: row.u32(num_topk_col)?,
-            num_experts: row.u32(num_experts_col)?,
-        };
-        by_keys.entry(key).or_default().insert(
-            row.u32(num_token_col)?,
-            DispatchPoint {
-                dispatch_transmit_us: 0.0,
-                dispatch_notify_us: 0.0,
-                combine_transmit_us: 0.0,
-                combine_notify_us: 0.0,
-                combine_avg_t_us: row.f64_optional(combine_avg_t_us_col)?.unwrap_or(0.0),
-                dispatch_avg_t_us: row.f64_optional(dispatch_avg_t_us_col)?.unwrap_or(0.0),
-            },
-        );
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let node_num_col = reader.col("node_num")?;
+        let hidden_size_col = reader.col("hidden_size")?;
+        let num_token_col = reader.col("num_token")?;
+        let num_topk_col = reader.col("num_topk")?;
+        let num_experts_col = reader.col("num_experts")?;
+        let combine_avg_t_us_col = reader.col_optional("combine_avg_t_us");
+        let dispatch_avg_t_us_col = reader.col_optional("dispatch_avg_t_us");
+        let ks_col = reader.col_optional("kernel_source");
+        // Per-source last-wins (byte-identical to the original single-file loader).
+        let mut source_map: BTreeMap<DispatchKey, BTreeMap<u32, DispatchPoint>> = BTreeMap::new();
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = DispatchKey {
+                node_num: row.u32(node_num_col)?,
+                hidden_size: row.u32(hidden_size_col)?,
+                num_topk: row.u32(num_topk_col)?,
+                num_experts: row.u32(num_experts_col)?,
+            };
+            source_map.entry(key).or_default().insert(
+                row.u32(num_token_col)?,
+                DispatchPoint {
+                    dispatch_transmit_us: 0.0,
+                    dispatch_notify_us: 0.0,
+                    combine_transmit_us: 0.0,
+                    combine_notify_us: 0.0,
+                    combine_avg_t_us: row.f64_optional(combine_avg_t_us_col)?.unwrap_or(0.0),
+                    dispatch_avg_t_us: row.f64_optional(dispatch_avg_t_us_col)?.unwrap_or(0.0),
+                },
+            );
+        }
+        // Fold into the global map: earlier (higher-priority) source wins.
+        for (key, tokens) in source_map {
+            let dest = by_keys.entry(key).or_default();
+            for (token, point) in tokens {
+                dest.entry(token).or_insert(point);
+            }
+        }
     }
-    if by_keys.is_empty() {
+    if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no DeepEP-LL rows loaded from {}",
-            path.display()
+            "no DeepEP-LL rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     Ok(DispatchGrids { by_keys })
@@ -581,6 +700,9 @@ mod tests {
     /// so `(dispatch_avg + combine_avg) / 1000` must match. nt=20 is an
     /// interior lerp (collected 16 / 24); nt=4096 is a beyond-max util-hold
     /// (collected max 2048).
+    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if
+    // this fails. `WideEpTable::new` resolves to single primary sources with no
+    // kernel_source filter, so no shared rows should join this curve.
     #[test]
     fn deepep_ll_matches_python_v2_engine() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

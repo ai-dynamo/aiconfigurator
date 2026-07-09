@@ -6,7 +6,8 @@
 //! Two parquet files: `dsa_context_module_perf.parquet` and
 //! `dsa_generation_module_perf.parquet`. Both share columns: model,
 //! architecture, mla_dtype, kv_cache_dtype, gemm_type, num_heads,
-//! batch_size, isl, tp_size, step, latency.
+//! batch_size, isl, tp_size, step, latency. Each file loads from an
+//! ordered, shared-layer-aware source list (see [`PerfSource`]).
 //!
 //! Data is nested by (architecture, mla_dtype, kv_cache_dtype, gemm_type)
 //! → num_heads → step → isl → batch_size → latency. The `step` axis is the
@@ -30,11 +31,18 @@ use std::sync::OnceLock;
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
+use crate::config::{PerfDbSources, PerfSource};
 use super::perf_interp::{self, Node, OpInterpConfig};
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct DsaTable {
     data_root: PathBuf,
+    /// Ordered, priority-sorted sources for the context/generation DSA perf
+    /// files (shared-layer aware; see [`PerfSource`]). Single-primary,
+    /// no-filter by default (`DsaTable::new`).
+    context_sources: Vec<PerfSource>,
+    generation_sources: Vec<PerfSource>,
     context: OnceLock<Result<DsaGrids, AicError>>,
     generation: OnceLock<Result<DsaGrids, AicError>>,
     /// Engine-ready per-`DsaKey` context tables with the raw shape
@@ -109,9 +117,28 @@ fn dsa_dims(architecture: &str) -> &'static DsaDims {
 }
 
 impl DsaTable {
+    /// Construct an empty table for the given data directory. No I/O. Each
+    /// perf file is sourced solely from `data_root/<basename>` with no
+    /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
+        Self::with_sources(data_root, &PerfDbSources::default())
+    }
+
+    /// Construct with shared-layer (sibling/cross-version) sources resolved from
+    /// `perf_db_sources` (Python-supplied). Each DSA file falls back to its
+    /// primary `data_root/<basename>` when absent from the map. No I/O.
+    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
+        let context_sources =
+            resolve_op_sources(perf_db_sources, "dsa_context_module_perf.parquet", &data_root);
+        let generation_sources = resolve_op_sources(
+            perf_db_sources,
+            "dsa_generation_module_perf.parquet",
+            &data_root,
+        );
         Self {
             data_root,
+            context_sources,
+            generation_sources,
             context: OnceLock::new(),
             generation: OnceLock::new(),
             context_nodes: OnceLock::new(),
@@ -239,14 +266,14 @@ impl DsaTable {
     fn load_context(&self) -> Result<&DsaGrids, AicError> {
         let cell = self
             .context
-            .get_or_init(|| load_dsa_parquet(&self.data_root.join("dsa_context_module_perf.parquet")));
+            .get_or_init(|| load_dsa_parquet(&self.context_sources));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_generation(&self) -> Result<&DsaGrids, AicError> {
         let cell = self
             .generation
-            .get_or_init(|| load_dsa_parquet(&self.data_root.join("dsa_generation_module_perf.parquet")));
+            .get_or_init(|| load_dsa_parquet(&self.generation_sources));
         cell.as_ref().map_err(clone_err)
     }
 
@@ -505,45 +532,64 @@ fn dsa_generation_sol_ms(
     sol_math.max(sol_mem)
 }
 
-fn load_dsa_parquet(path: &Path) -> Result<DsaGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let arch_col = reader.col("architecture")?;
-    let mla_dtype_col = reader.col("mla_dtype")?;
-    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
-    let gemm_type_col = reader.col("gemm_type")?;
-    let num_heads_col = reader.col("num_heads")?;
-    let batch_size_col = reader.col("batch_size")?;
-    let isl_col = reader.col("isl")?;
-    let step_col = reader.col("step")?;
-    let latency_col = reader.col("latency")?;
-
+/// Load a DSA module table from an ordered, priority-sorted source list. Sources
+/// are read in order; the first source containing a key wins (`or_insert`),
+/// mirroring Python's `_read_filtered_rows` concatenation + `load_dsa_module_data`
+/// skip-on-key-conflict. Missing files are skipped (a sibling declared in the
+/// manifest need not exist for every system); an error is returned only when no
+/// source yields rows. Shared by both the context and generation DSA files.
+fn load_dsa_parquet(sources: &[PerfSource]) -> Result<DsaGrids, AicError> {
     let mut by_keys: BTreeMap<DsaKey, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, f64>>>>> =
         BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = DsaKey {
-            architecture: row.str_owned(arch_col)?,
-            fmha_quant: row.str_owned(mla_dtype_col)?,
-            kv_quant: row.str_owned(kv_cache_dtype_col)?,
-            gemm_quant: row.str_owned(gemm_type_col)?,
-        };
-        // First-wins parity with Python `load_dsa_module_data`.
-        by_keys
-            .entry(key)
-            .or_default()
-            .entry(row.u32(num_heads_col)?)
-            .or_default()
-            .entry(row.u32(step_col)?)
-            .or_default()
-            .entry(row.u32(isl_col)?)
-            .or_default()
-            .entry(row.u32(batch_size_col)?)
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let arch_col = reader.col("architecture")?;
+        let mla_dtype_col = reader.col("mla_dtype")?;
+        let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+        let gemm_type_col = reader.col("gemm_type")?;
+        let num_heads_col = reader.col("num_heads")?;
+        let batch_size_col = reader.col("batch_size")?;
+        let isl_col = reader.col("isl")?;
+        let step_col = reader.col("step")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = DsaKey {
+                architecture: row.str_owned(arch_col)?,
+                fmha_quant: row.str_owned(mla_dtype_col)?,
+                kv_quant: row.str_owned(kv_cache_dtype_col)?,
+                gemm_quant: row.str_owned(gemm_type_col)?,
+            };
+            // First-wins parity with Python `load_dsa_module_data`, extended
+            // across shared-layer sources (earlier source wins).
+            by_keys
+                .entry(key)
+                .or_default()
+                .entry(row.u32(num_heads_col)?)
+                .or_default()
+                .entry(row.u32(step_col)?)
+                .or_default()
+                .entry(row.u32(isl_col)?)
+                .or_default()
+                .entry(row.u32(batch_size_col)?)
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if by_keys.is_empty() {
+    if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no DSA module rows loaded from {}",
-            path.display()
+            "no DSA module rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     Ok(DsaGrids { by_keys })
@@ -594,6 +640,7 @@ mod tests {
         // arch=DeepseekV32ForCausalLM mla=bfloat16 kv=bfloat16 gemm=bfloat16
         // n=128 b=1 isl=1 step=0 latency=1.0972. Exact 4-axis hit — the
         // engine returns the measured leaf verbatim.
+        // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails.
         let table = DsaTable::new(b200_vllm_data_root());
         let spec = b200_sxm_spec();
         let latency = table
@@ -644,6 +691,7 @@ mod tests {
     /// (shared layer off so both sides read the same single parquet):
     /// exact hit / interior seq / interior batch / interior prefix (GLM) /
     /// seq util-hold / prefix util-hold.
+    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails.
     #[test]
     fn dsa_context_matches_python_v2_engine() {
         let table = DsaTable::new(b200_vllm_data_root());
@@ -683,6 +731,7 @@ mod tests {
     /// Generation parity: exact / interior seq / interior batch / seq
     /// util-hold against Python
     /// `PerfDatabase.query_generation_dsa_module(..., DatabaseMode.SILICON)`.
+    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails.
     #[test]
     fn dsa_generation_matches_python_v2_engine() {
         let table = DsaTable::new(b200_vllm_data_root());

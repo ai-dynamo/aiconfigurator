@@ -29,26 +29,22 @@ pub struct MoeOp {
     pub num_experts: u32,
     pub moe_tp_size: u32,
     pub moe_ep_size: u32,
+    /// Attention data-parallel size. With attention-dp, every dp rank's
+    /// tokens all-gather into the SHARED expert pool, so the MoE compute op
+    /// sees `num_tokens * attention_dp_size` tokens (mirrors Python
+    /// `MoE.query`: `x = x * attention_dp_size`, operations/moe.py).
+    /// Dropping the multiplier under-predicted MoE latency ~4.7x on dp=8
+    /// DeepSeek configs. Absent in pre-existing specs -> 0 -> treated as 1
+    /// at the query site.
+    #[serde(default)]
+    pub attention_dp_size: u32,
     pub quant_mode: MoeQuantMode,
     pub workload_distribution: String,
-    /// Attention data-parallel size. With attention-dp, every dp rank's
-    /// tokens funnel into the SHARED expert pool, so the MoE compute op
-    /// sees `num_tokens * attention_dp_size` tokens -- mirrors Python
-    /// `MoE.query` (`x = kwargs["x"] * self._attention_dp_size`,
-    /// operations/moe.py). The dispatch op has always carried this field;
-    /// the compute op dropping it under-predicted MoE latency ~4.7x on
-    /// dp=8 DeepSeek configs. serde default = 1 keeps old specs parsing.
-    #[serde(default = "default_attention_dp_size")]
-    pub attention_dp_size: u32,
     /// Gated FFN (SwiGLU) when true; non-gated (Relu²) when false.
     /// Mirrors Python's `MoE._is_gated`. The TRT-LLM small-token
     /// `moe_torch_flow_min_latency` kernel is only valid for gated nvfp4
     /// MoE; non-gated paths (e.g. NemotronH) must skip it.
     pub is_gated: bool,
-}
-
-fn default_attention_dp_size() -> u32 {
-    1
 }
 
 impl MoeOp {
@@ -62,18 +58,17 @@ impl MoeOp {
         moe_ep_size: u32,
         quant_mode: MoeQuantMode,
         workload_distribution: impl Into<String>,
-        attention_dp_size: u32,
     ) -> Self {
         Self {
             name: name.into(),
             scale_factor: 1.0,
-            attention_dp_size,
             hidden_size,
             inter_size,
             topk,
             num_experts,
             moe_tp_size,
             moe_ep_size,
+            attention_dp_size: 1,
             quant_mode,
             workload_distribution: workload_distribution.into(),
             is_gated: true,
@@ -81,14 +76,18 @@ impl MoeOp {
     }
 
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
-        // Attention-dp scales up the total input tokens (all dp ranks share
-        // one expert pool) -- mirrors Python MoE.query.
+        // Attention-dp scales up the total input tokens (all dp ranks
+        // all-gather into one shared expert pool) -- mirrors Python
+        // `MoE.query` (`x = x * attention_dp_size`). Applied exactly once,
+        // before the perf-DB resolution keys off the token count.
         let num_tokens = num_tokens.saturating_mul(self.attention_dp_size.max(1));
         // The roofline SOL the perf-DB engine anchors its beyond-range
         // util-hold on (Python `_resolve_tokens` passes the same closure).
         // Coordinates arriving from the engine are always integral (table
         // keys / the u32 query), so rounding to u32 keeps the integer
-        // floor-division parity with Python's `get_sol`.
+        // floor-division parity with Python's `get_sol`. This replaces the
+        // deleted op-level SOL-anchored overflow estimator (the engine's
+        // `k_tail=1` util-hold handles beyond-range queries).
         let sol = |t: f64| self.sol_latency_ms(db, t.round() as u32);
 
         // Mirrors Python's MoE._query_moe_table TRT-LLM gate: for nvfp4

@@ -17,6 +17,10 @@
 //!   level is absent — generation MLA doesn't tunnel through the fmha
 //!   dispatch path the way context does.)
 //!
+//! Each perf file loads from an ordered, shared-layer-aware source list (see
+//! [`PerfSource`]); `WideEpMlaTable::new` degrades to the single primary
+//! `data_root/<basename>` with no `kernel_source` filter.
+//!
 //! Query semantics from Python (perf_interp v2):
 //!
 //! - Context: `perf_interp.context_grid_config` — Grid resolver over
@@ -41,6 +45,8 @@ use std::sync::OnceLock;
 use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
+use crate::config::{PerfDbSources, PerfSource};
+use super::{kernel_source_ok, resolve_op_sources};
 use super::interpolation::Grid3;
 use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
@@ -55,6 +61,11 @@ const GENERATION_AXES: &[&str] = &["num_heads", "batch", "seq_len"];
 pub struct WideEpMlaTable {
     data_root: PathBuf,
     system_spec: SystemSpec,
+    /// Ordered, priority-sorted sources for each WideEP MLA perf file
+    /// (shared-layer aware; see [`PerfSource`]). Single-primary, no-filter by
+    /// default (`WideEpMlaTable::new`).
+    context_sources: Vec<PerfSource>,
+    generation_sources: Vec<PerfSource>,
     context: OnceLock<Result<WideEpContextMlaGrids, AicError>>,
     generation: OnceLock<Result<WideEpGenerationMlaGrids, AicError>>,
 }
@@ -86,10 +97,33 @@ pub struct GenerationKey {
 }
 
 impl WideEpMlaTable {
+    /// Construct an empty table for the given data directory. No I/O. Each
+    /// perf file is sourced solely from `data_root/<basename>` with no
+    /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
+        Self::with_sources(data_root, system_spec, &PerfDbSources::default())
+    }
+
+    /// Construct with shared-layer (sibling/cross-version) sources resolved from
+    /// `perf_db_sources` (Python-supplied). Each WideEP MLA file falls back to
+    /// its primary `data_root/<basename>` when absent from the map. No I/O.
+    pub fn with_sources(
+        data_root: PathBuf,
+        system_spec: SystemSpec,
+        perf_db_sources: &PerfDbSources,
+    ) -> Self {
+        let context_sources =
+            resolve_op_sources(perf_db_sources, "wideep_context_mla_perf.parquet", &data_root);
+        let generation_sources = resolve_op_sources(
+            perf_db_sources,
+            "wideep_generation_mla_perf.parquet",
+            &data_root,
+        );
         Self {
             data_root,
             system_spec,
+            context_sources,
+            generation_sources,
             context: OnceLock::new(),
             generation: OnceLock::new(),
         }
@@ -185,16 +219,16 @@ impl WideEpMlaTable {
     }
 
     fn load_context(&self) -> Result<&WideEpContextMlaGrids, AicError> {
-        let cell = self.context.get_or_init(|| {
-            load_context_parquet(&self.data_root.join("wideep_context_mla_perf.parquet"))
-        });
+        let cell = self
+            .context
+            .get_or_init(|| load_context_parquet(&self.context_sources));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_generation(&self) -> Result<&WideEpGenerationMlaGrids, AicError> {
-        let cell = self.generation.get_or_init(|| {
-            load_generation_parquet(&self.data_root.join("wideep_generation_mla_perf.parquet"))
-        });
+        let cell = self
+            .generation
+            .get_or_init(|| load_generation_parquet(&self.generation_sources));
         cell.as_ref().map_err(clone_err)
     }
 }
@@ -345,38 +379,57 @@ fn grid3_to_node(grid: &Grid3<f64>) -> Node {
     node
 }
 
-fn load_context_parquet(path: &Path) -> Result<WideEpContextMlaGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let kernel_source_col = reader.col("kernel_source")?;
-    let mla_dtype_col = reader.col("mla_dtype")?;
-    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
-    let num_heads_col = reader.col("num_heads")?;
-    let batch_size_col = reader.col("batch_size")?;
-    let isl_col = reader.col("isl")?;
-    let latency_col = reader.col("latency")?;
-
+/// Load the WideEP context MLA table from an ordered, priority-sorted source
+/// list. Sources are read in order; the first source containing a shape wins
+/// (`or_insert`), mirroring Python's `_read_filtered_rows` concatenation +
+/// `load_wideep_context_mla_data` skip-on-key-conflict. Missing files are
+/// skipped (a sibling declared in the manifest need not exist for every
+/// system); an error is returned only when no source yields rows.
+fn load_context_parquet(sources: &[PerfSource]) -> Result<WideEpContextMlaGrids, AicError> {
     let mut raw: BTreeMap<ContextKey, Grid3<f64>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = ContextKey {
-            kernel_source: row.str_owned(kernel_source_col)?,
-            fmha_quant: row.str_owned(mla_dtype_col)?,
-            kv_quant: row.str_owned(kv_cache_dtype_col)?,
-        };
-        // First-wins parity with Python `load_wideep_context_mla_data`.
-        raw.entry(key)
-            .or_default()
-            .entry(row.u32(num_heads_col)?)
-            .or_default()
-            .entry(row.u32(isl_col)?)
-            .or_default()
-            .entry(row.u32(batch_size_col)?)
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let kernel_source_col = reader.col("kernel_source")?;
+        let mla_dtype_col = reader.col("mla_dtype")?;
+        let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+        let num_heads_col = reader.col("num_heads")?;
+        let batch_size_col = reader.col("batch_size")?;
+        let isl_col = reader.col("isl")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = ContextKey {
+                kernel_source: row.str_owned(kernel_source_col)?,
+                fmha_quant: row.str_owned(mla_dtype_col)?,
+                kv_quant: row.str_owned(kv_cache_dtype_col)?,
+            };
+            // First-wins parity with Python `load_wideep_context_mla_data`,
+            // extended across shared-layer sources (earlier source wins).
+            raw.entry(key)
+                .or_default()
+                .entry(row.u32(num_heads_col)?)
+                .or_default()
+                .entry(row.u32(isl_col)?)
+                .or_default()
+                .entry(row.u32(batch_size_col)?)
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if raw.is_empty() {
+    if !any_source || raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no WideEP context MLA rows loaded from {}",
-            path.display()
+            "no WideEP context MLA rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     let by_keys = raw
@@ -386,38 +439,54 @@ fn load_context_parquet(path: &Path) -> Result<WideEpContextMlaGrids, AicError> 
     Ok(WideEpContextMlaGrids { by_keys })
 }
 
-fn load_generation_parquet(path: &Path) -> Result<WideEpGenerationMlaGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let kernel_source_col = reader.col("kernel_source")?;
-    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
-    let num_heads_col = reader.col("num_heads")?;
-    let batch_size_col = reader.col("batch_size")?;
-    let isl_col = reader.col("isl")?;
-    let step_col = reader.col("step")?;
-    let latency_col = reader.col("latency")?;
-
+/// Load the WideEP generation MLA table from an ordered source list. Same
+/// first-wins-across-sources + missing-file-skip semantics as
+/// [`load_context_parquet`].
+fn load_generation_parquet(sources: &[PerfSource]) -> Result<WideEpGenerationMlaGrids, AicError> {
     let mut raw: BTreeMap<GenerationKey, Grid3<f64>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = GenerationKey {
-            kernel_source: row.str_owned(kernel_source_col)?,
-            kv_quant: row.str_owned(kv_cache_dtype_col)?,
-        };
-        // Python collapses `s = isl + step` into the seq axis.
-        let seq = row.u32(isl_col)? + row.u32(step_col)?;
-        raw.entry(key)
-            .or_default()
-            .entry(row.u32(num_heads_col)?)
-            .or_default()
-            .entry(row.u32(batch_size_col)?)
-            .or_default()
-            .entry(seq)
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let kernel_source_col = reader.col("kernel_source")?;
+        let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+        let num_heads_col = reader.col("num_heads")?;
+        let batch_size_col = reader.col("batch_size")?;
+        let isl_col = reader.col("isl")?;
+        let step_col = reader.col("step")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = GenerationKey {
+                kernel_source: row.str_owned(kernel_source_col)?,
+                kv_quant: row.str_owned(kv_cache_dtype_col)?,
+            };
+            // Python collapses `s = isl + step` into the seq axis.
+            let seq = row.u32(isl_col)? + row.u32(step_col)?;
+            // First-wins parity, extended across shared-layer sources.
+            raw.entry(key)
+                .or_default()
+                .entry(row.u32(num_heads_col)?)
+                .or_default()
+                .entry(row.u32(batch_size_col)?)
+                .or_default()
+                .entry(seq)
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if raw.is_empty() {
+    if !any_source || raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no WideEP generation MLA rows loaded from {}",
-            path.display()
+            "no WideEP generation MLA rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     let by_keys = raw
@@ -511,6 +580,11 @@ mod tests {
     /// `prefix=0`, `fmha=fp8_block`, `kv=fp8`,
     /// `attention_backend='flashinfer'`. Cases: exact hit, interior interp,
     /// beyond-range util-hold.
+    ///
+    /// NOTE(shared-layer merge): oracle generated pre-shared-layer;
+    /// regenerate if this fails (Python's default `get_database` now merges
+    /// shared-layer rows, which can add points to these curves; the Rust
+    /// side here uses the single-primary `new` constructor).
     #[test]
     fn wideep_mla_queries_match_python_v2_engine() {
         let table = WideEpMlaTable::new(h200_sglang_data_root(), load_spec("h200_sxm"));

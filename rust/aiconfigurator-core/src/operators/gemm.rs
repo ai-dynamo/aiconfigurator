@@ -29,6 +29,14 @@ pub struct GemmOp {
     pub quant_mode: GemmQuantMode,
     pub scale_num_tokens: u32,
     pub low_precision_input: bool,
+    /// Context-parallel sequence-shard factor (Python's `_seq_split`, = `cp_size`).
+    /// The per-rank token count is `ceil(m / seq_split)`. Defaults to 1 (no CP).
+    #[serde(default = "default_seq_split")]
+    pub seq_split: u32,
+}
+
+pub(crate) fn default_seq_split() -> u32 {
+    1
 }
 
 impl GemmOp {
@@ -43,6 +51,7 @@ impl GemmOp {
             quant_mode,
             scale_num_tokens: 1,
             low_precision_input: false,
+            seq_split: 1,
         }
     }
 
@@ -62,6 +71,8 @@ impl GemmOp {
         quant_override: Option<GemmQuantMode>,
     ) -> Result<PerformanceResult, AicError> {
         let m = x / self.scale_num_tokens.max(1);
+        // CP: per-rank token count = ceil(m / seq_split) (busiest rank).
+        let m = m.div_ceil(self.seq_split.max(1));
         let quant = quant_override.unwrap_or(self.quant_mode);
 
         let mut latency = db.gemm.query(quant, m, self.n, self.k)?;
@@ -132,6 +143,7 @@ mod tests {
             quant_mode: GemmQuantMode::Bfloat16,
             scale_num_tokens: 1,
             low_precision_input: false,
+            seq_split: 1,
         };
         let result = op.query(&db, 32768, None).expect("query must succeed");
         assert!(
@@ -153,6 +165,7 @@ mod tests {
             quant_mode: GemmQuantMode::Bfloat16,
             scale_num_tokens: 2,
             low_precision_input: false,
+            seq_split: 1,
         };
         let result = op.query(&db, 65536, None).expect("query must succeed");
         assert!(

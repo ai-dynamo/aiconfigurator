@@ -77,14 +77,13 @@ class EmpiricalNotImplementedError(RuntimeError):
     """
 
 
-def is_expected_no_result_cause(error: BaseException) -> bool:
-    """Return True when ``error`` or its effective chain has a NoResultsError.
+def _chain_has(error: BaseException, types: tuple[type[BaseException], ...]) -> bool:
+    """Return True when ``error`` or its effective chain contains one of ``types``.
 
     Follows an explicit ``__cause__`` or an unsuppressed ``__context__`` so a
-    generic wrapper such as
-    ``RuntimeError(...) from InsufficientMemoryError(...)`` is recognized as an
-    expected no-result outcome, while a wrapper around a genuine bug (e.g. an
-    unexpected ``KeyError``) returns False and keeps its traceback.
+    generic wrapper such as ``RuntimeError(...) from InsufficientMemoryError(...)``
+    is classified by the underlying cause, while a wrapper around a genuine bug
+    (e.g. an unexpected ``KeyError``) is not matched and keeps its traceback.
     """
     seen: set[int] = set()
     stack: list[BaseException] = [error]
@@ -92,7 +91,7 @@ def is_expected_no_result_cause(error: BaseException) -> bool:
         current = stack.pop()
         if id(current) in seen:
             continue
-        if isinstance(current, NoResultsError):
+        if isinstance(current, types):
             return True
         seen.add(id(current))
         if current.__cause__ is not None:
@@ -100,3 +99,34 @@ def is_expected_no_result_cause(error: BaseException) -> bool:
         elif not current.__suppress_context__ and current.__context__ is not None:
             stack.append(current.__context__)
     return False
+
+
+def is_expected_no_result_cause(error: BaseException) -> bool:
+    """Return True when ``error`` or its effective chain has a NoResultsError."""
+    return _chain_has(error, (NoResultsError,))
+
+
+def is_expected_cli_error(error: BaseException) -> bool:
+    """Return True when ``error`` is an *expected*, user-actionable CLI failure.
+
+    Expected = the user's inputs/environment can't be served and the message
+    already says why: SLA-infeasible / OOM / KV-cache (``NoResultsError``), a
+    perf-data coverage gap (``PerfDataNotAvailableError`` /
+    ``EmpiricalNotImplementedError``), or a configuration / compatibility
+    rejection (``ValueError`` — the whole SDK raises this by convention for
+    unsupported quant modes, invalid parallelism, hardware requirements, etc.).
+
+    Such errors should be reported as a concise ``Error: <message>`` line, not a
+    Python traceback. Genuine programming defects (``KeyError``,
+    ``AttributeError``, ``TypeError``, ``RuntimeError`` such as OOM, …) are NOT
+    matched and keep their traceback so real bugs stay visible. Callers should
+    still emit the full traceback at DEBUG level (``exc_info=True``) so
+    ``--log-level DEBUG`` can recover it when diagnosing.
+
+    Walks the exception chain, so a wrapper raised ``from`` an expected cause is
+    still recognized.
+    """
+    return _chain_has(
+        error,
+        (NoResultsError, PerfDataNotAvailableError, EmpiricalNotImplementedError, ValueError),
+    )

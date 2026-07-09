@@ -14,6 +14,10 @@
 //! `get_sol`). Module-level data is collected as a fused unit (MLA + RoPE +
 //! BMM together) and indexed by an extra `gemm_quant` axis.
 //!
+//! Each perf file loads from an ordered, shared-layer-aware source list (see
+//! [`PerfSource`]); `MlaTable::new` degrades to the single primary
+//! `data_root/<basename>` with no `kernel_source` filter.
+//!
 //! Caller passes `full_seq_tokens` for context queries (= `isl + prefix`);
 //! the prefix-correction multiplier is applied by the operator layer, and the
 //! context SOL is therefore evaluated at `prefix = 0` exactly like the
@@ -30,6 +34,8 @@ use std::sync::OnceLock;
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
+use crate::config::{PerfDbSources, PerfSource};
+use super::{kernel_source_ok, resolve_op_sources};
 use super::interpolation::Grid3;
 use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
@@ -44,6 +50,14 @@ const BMM_AXES: &[&str] = &["num_tokens"];
 pub struct MlaTable {
     data_root: PathBuf,
     system_spec: SystemSpec,
+    /// Ordered, priority-sorted sources for each MLA-family perf file
+    /// (shared-layer aware; see [`PerfSource`]). Single-primary, no-filter by
+    /// default (`MlaTable::new`).
+    context_mla_sources: Vec<PerfSource>,
+    generation_mla_sources: Vec<PerfSource>,
+    mla_bmm_sources: Vec<PerfSource>,
+    mla_context_module_sources: Vec<PerfSource>,
+    mla_generation_module_sources: Vec<PerfSource>,
     context: OnceLock<Result<ContextMlaGrids, AicError>>,
     generation: OnceLock<Result<GenerationMlaGrids, AicError>>,
     bmm: OnceLock<Result<BmmGrids, AicError>>,
@@ -95,10 +109,42 @@ struct BmmKey {
 }
 
 impl MlaTable {
+    /// Construct an empty table for the given data directory. No I/O. Each
+    /// perf file is sourced solely from `data_root/<basename>` with no
+    /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
+        Self::with_sources(data_root, system_spec, &PerfDbSources::default())
+    }
+
+    /// Construct with shared-layer (sibling/cross-version) sources resolved from
+    /// `perf_db_sources` (Python-supplied). Each MLA-family file falls back to
+    /// its primary `data_root/<basename>` when absent from the map. No I/O.
+    pub fn with_sources(
+        data_root: PathBuf,
+        system_spec: SystemSpec,
+        perf_db_sources: &PerfDbSources,
+    ) -> Self {
+        let context_mla_sources =
+            resolve_op_sources(perf_db_sources, "context_mla_perf.parquet", &data_root);
+        let generation_mla_sources =
+            resolve_op_sources(perf_db_sources, "generation_mla_perf.parquet", &data_root);
+        let mla_bmm_sources =
+            resolve_op_sources(perf_db_sources, "mla_bmm_perf.parquet", &data_root);
+        let mla_context_module_sources =
+            resolve_op_sources(perf_db_sources, "mla_context_module_perf.parquet", &data_root);
+        let mla_generation_module_sources = resolve_op_sources(
+            perf_db_sources,
+            "mla_generation_module_perf.parquet",
+            &data_root,
+        );
         Self {
             data_root,
             system_spec,
+            context_mla_sources,
+            generation_mla_sources,
+            mla_bmm_sources,
+            mla_context_module_sources,
+            mla_generation_module_sources,
             context: OnceLock::new(),
             generation: OnceLock::new(),
             bmm: OnceLock::new(),
@@ -271,34 +317,34 @@ impl MlaTable {
     fn load_context(&self) -> Result<&ContextMlaGrids, AicError> {
         let cell = self
             .context
-            .get_or_init(|| load_op_parquet(&self.data_root.join("context_mla_perf.parquet"), true));
+            .get_or_init(|| load_op_parquet(&self.context_mla_sources, true));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_generation(&self) -> Result<&GenerationMlaGrids, AicError> {
-        let cell = self.generation.get_or_init(|| {
-            load_op_gen_parquet(&self.data_root.join("generation_mla_perf.parquet"))
-        });
+        let cell = self
+            .generation
+            .get_or_init(|| load_op_gen_parquet(&self.generation_mla_sources));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_bmm(&self) -> Result<&BmmGrids, AicError> {
         let cell = self
             .bmm
-            .get_or_init(|| load_bmm_parquet(&self.data_root.join("mla_bmm_perf.parquet")));
+            .get_or_init(|| load_bmm_parquet(&self.mla_bmm_sources));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_context_module(&self) -> Result<&ModuleGrids, AicError> {
         let cell = self.context_module.get_or_init(|| {
-            load_module_parquet(&self.data_root.join("mla_context_module_perf.parquet"), true)
+            load_module_parquet(&self.mla_context_module_sources, true)
         });
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_generation_module(&self) -> Result<&ModuleGrids, AicError> {
         let cell = self.generation_module.get_or_init(|| {
-            load_module_parquet(&self.data_root.join("mla_generation_module_perf.parquet"), false)
+            load_module_parquet(&self.mla_generation_module_sources, false)
         });
         cell.as_ref().map_err(clone_err)
     }
@@ -444,39 +490,58 @@ fn curve_to_node(curve: &BTreeMap<u32, f64>) -> Node {
     node
 }
 
-fn load_op_parquet(path: &Path, is_context: bool) -> Result<ContextMlaGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let mla_dtype_col = reader.col("mla_dtype")?;
-    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
-    let num_heads_col = reader.col("num_heads")?;
-    let batch_size_col = reader.col("batch_size")?;
-    let isl_col = reader.col("isl")?;
-    let step_col = reader.col("step")?;
-    let latency_col = reader.col("latency")?;
-
+/// Load the op-level context MLA table from an ordered, priority-sorted
+/// source list. Sources are read in order; the first source containing a
+/// shape wins (`or_insert`), mirroring Python's `_read_filtered_rows`
+/// concatenation + `load_mla_data` skip-on-key-conflict. Missing files are
+/// skipped (a sibling declared in the manifest need not exist for every
+/// system); an error is returned only when no source yields rows.
+fn load_op_parquet(sources: &[PerfSource], is_context: bool) -> Result<ContextMlaGrids, AicError> {
     let mut raw: BTreeMap<ContextKey, Grid3<f64>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = ContextKey {
-            fmha_quant: row.str_owned(mla_dtype_col)?,
-            kv_quant: row.str_owned(kv_cache_dtype_col)?,
-        };
-        let isl = row.u32(isl_col)?;
-        let y_axis = if is_context { isl } else { isl + row.u32(step_col)? };
-        // First-wins parity with Python `load_mla_data` (context branch).
-        raw.entry(key)
-            .or_default()
-            .entry(row.u32(num_heads_col)?)
-            .or_default()
-            .entry(y_axis)
-            .or_default()
-            .entry(row.u32(batch_size_col)?)
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let mla_dtype_col = reader.col("mla_dtype")?;
+        let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+        let num_heads_col = reader.col("num_heads")?;
+        let batch_size_col = reader.col("batch_size")?;
+        let isl_col = reader.col("isl")?;
+        let step_col = reader.col("step")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = ContextKey {
+                fmha_quant: row.str_owned(mla_dtype_col)?,
+                kv_quant: row.str_owned(kv_cache_dtype_col)?,
+            };
+            let isl = row.u32(isl_col)?;
+            let y_axis = if is_context { isl } else { isl + row.u32(step_col)? };
+            // First-wins parity with Python `load_mla_data` (context branch),
+            // extended across shared-layer sources (earlier source wins).
+            raw.entry(key)
+                .or_default()
+                .entry(row.u32(num_heads_col)?)
+                .or_default()
+                .entry(y_axis)
+                .or_default()
+                .entry(row.u32(batch_size_col)?)
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if raw.is_empty() {
+    if !any_source || raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no MLA op rows loaded from {}",
-            path.display()
+            "no MLA op rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     let by_keys = raw
@@ -486,37 +551,52 @@ fn load_op_parquet(path: &Path, is_context: bool) -> Result<ContextMlaGrids, Aic
     Ok(ContextMlaGrids { by_keys })
 }
 
-fn load_op_gen_parquet(path: &Path) -> Result<GenerationMlaGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
-    let num_heads_col = reader.col("num_heads")?;
-    let batch_size_col = reader.col("batch_size")?;
-    let isl_col = reader.col("isl")?;
-    let step_col = reader.col("step")?;
-    let latency_col = reader.col("latency")?;
-
+/// Load the op-level generation MLA table from an ordered source list. Same
+/// first-wins-across-sources + missing-file-skip semantics as
+/// [`load_op_parquet`].
+fn load_op_gen_parquet(sources: &[PerfSource]) -> Result<GenerationMlaGrids, AicError> {
     let mut raw: BTreeMap<KvOnlyKey, Grid3<f64>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = KvOnlyKey {
-            kv_quant: row.str_owned(kv_cache_dtype_col)?,
-        };
-        let sequence_tokens = row.u32(isl_col)? + row.u32(step_col)?;
-        // Python uses (num_heads, b, s) axis order for generation MLA.
-        // First-wins parity with Python `load_mla_data` (generation branch).
-        raw.entry(key)
-            .or_default()
-            .entry(row.u32(num_heads_col)?)
-            .or_default()
-            .entry(row.u32(batch_size_col)?)
-            .or_default()
-            .entry(sequence_tokens)
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+        let num_heads_col = reader.col("num_heads")?;
+        let batch_size_col = reader.col("batch_size")?;
+        let isl_col = reader.col("isl")?;
+        let step_col = reader.col("step")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = KvOnlyKey {
+                kv_quant: row.str_owned(kv_cache_dtype_col)?,
+            };
+            let sequence_tokens = row.u32(isl_col)? + row.u32(step_col)?;
+            // Python uses (num_heads, b, s) axis order for generation MLA.
+            // First-wins parity with Python `load_mla_data` (generation branch).
+            raw.entry(key)
+                .or_default()
+                .entry(row.u32(num_heads_col)?)
+                .or_default()
+                .entry(row.u32(batch_size_col)?)
+                .or_default()
+                .entry(sequence_tokens)
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if raw.is_empty() {
+    if !any_source || raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no generation MLA rows loaded from {}",
-            path.display()
+            "no generation MLA rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     let by_keys = raw
@@ -526,66 +606,78 @@ fn load_op_gen_parquet(path: &Path) -> Result<GenerationMlaGrids, AicError> {
     Ok(GenerationMlaGrids { by_keys })
 }
 
-fn load_module_parquet(path: &Path, is_context: bool) -> Result<ModuleGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let mla_dtype_col = reader.col("mla_dtype")?;
-    let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
-    let gemm_type_col = reader.col("gemm_type")?;
-    let num_heads_col = reader.col("num_heads")?;
-    let batch_size_col = reader.col("batch_size")?;
-    let isl_col = reader.col("isl")?;
-    let step_col = reader.col("step")?;
-    let latency_col = reader.col("latency")?;
-
+fn load_module_parquet(sources: &[PerfSource], is_context: bool) -> Result<ModuleGrids, AicError> {
     let mut raw: BTreeMap<ModuleKey, Grid3<f64>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = ModuleKey {
-            fmha_quant: row.str_owned(mla_dtype_col)?,
-            kv_quant: row.str_owned(kv_cache_dtype_col)?,
-            gemm_quant: row.str_owned(gemm_type_col)?,
-        };
-        let num_heads = row.u32(num_heads_col)?;
-        let batch_size = row.u32(batch_size_col)?;
-        let isl = row.u32(isl_col)?;
-        let latency = row.f64(latency_col)?;
-        // Last-wins parity with Python `load_context_mla_module_data`
-        // (`operations/mla.py:1804`) and `load_generation_mla_module_data`
-        // (`operations/mla.py:1847`). Unlike the legacy CSV loaders and every
-        // other Python perf-DB loader (GEMM, attention, MoE, MHC, DSA, wideep)
-        // which guard with `try/except KeyError` for first-wins semantics,
-        // these two MLA-module parquet loaders use direct assignment and
-        // therefore last-wins. Some perf-DB parquet shards (notably
-        // b300_sxm/vllm/0.19.0 `mla_generation_module_perf.parquet`) contain
-        // duplicate (num_heads, batch_size, sequence_tokens) rows; first-wins
-        // here caused a constant +0.247ms/step decode drift on b300 because
-        // Rust picked the slightly-higher latency for ~184 affected keys.
-        if is_context {
-            let inner = raw
-                .entry(key)
-                .or_default()
-                .entry(num_heads)
-                .or_default()
-                .entry(isl)
-                .or_default();
-            inner.insert(batch_size, latency);
-        } else {
-            // Generation module: (num_heads, b, s) axis order.
-            let sequence_tokens = isl + row.u32(step_col)?;
-            let inner = raw
-                .entry(key)
-                .or_default()
-                .entry(num_heads)
-                .or_default()
-                .entry(batch_size)
-                .or_default();
-            inner.insert(sequence_tokens, latency);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let mla_dtype_col = reader.col("mla_dtype")?;
+        let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+        let gemm_type_col = reader.col("gemm_type")?;
+        let num_heads_col = reader.col("num_heads")?;
+        let batch_size_col = reader.col("batch_size")?;
+        let isl_col = reader.col("isl")?;
+        let step_col = reader.col("step")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = ModuleKey {
+                fmha_quant: row.str_owned(mla_dtype_col)?,
+                kv_quant: row.str_owned(kv_cache_dtype_col)?,
+                gemm_quant: row.str_owned(gemm_type_col)?,
+            };
+            let num_heads = row.u32(num_heads_col)?;
+            let batch_size = row.u32(batch_size_col)?;
+            let isl = row.u32(isl_col)?;
+            let latency = row.f64(latency_col)?;
+            // Last-wins parity with Python `load_context_mla_module_data`
+            // (`operations/mla.py:1804`) and `load_generation_mla_module_data`
+            // (`operations/mla.py:1847`). Unlike the legacy CSV loaders and every
+            // other Python perf-DB loader (GEMM, attention, MoE, MHC, DSA, wideep)
+            // which guard with `try/except KeyError` for first-wins semantics,
+            // these two MLA-module parquet loaders use direct assignment and
+            // therefore last-wins. Some perf-DB parquet shards (notably
+            // b300_sxm/vllm/0.19.0 `mla_generation_module_perf.parquet`) contain
+            // duplicate (num_heads, batch_size, sequence_tokens) rows; first-wins
+            // here caused a constant +0.247ms/step decode drift on b300 because
+            // Rust picked the slightly-higher latency for ~184 affected keys.
+            if is_context {
+                let inner = raw
+                    .entry(key)
+                    .or_default()
+                    .entry(num_heads)
+                    .or_default()
+                    .entry(isl)
+                    .or_default();
+                inner.insert(batch_size, latency);
+            } else {
+                // Generation module: (num_heads, b, s) axis order.
+                let sequence_tokens = isl + row.u32(step_col)?;
+                let inner = raw
+                    .entry(key)
+                    .or_default()
+                    .entry(num_heads)
+                    .or_default()
+                    .entry(batch_size)
+                    .or_default();
+                inner.insert(sequence_tokens, latency);
+            }
         }
     }
-    if raw.is_empty() {
+    if !any_source || raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no MLA module rows loaded from {}",
-            path.display()
+            "no MLA module rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     let by_keys = raw
@@ -595,33 +687,45 @@ fn load_module_parquet(path: &Path, is_context: bool) -> Result<ModuleGrids, Aic
     Ok(ModuleGrids { by_keys })
 }
 
-fn load_bmm_parquet(path: &Path) -> Result<BmmGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let op_name_col = reader.col("op_name")?;
-    let bmm_dtype_col = reader.col("bmm_dtype")?;
-    let num_tokens_col = reader.col("num_tokens")?;
-    let num_heads_col = reader.col("num_heads")?;
-    let latency_col = reader.col("latency")?;
-
+fn load_bmm_parquet(sources: &[PerfSource]) -> Result<BmmGrids, AicError> {
     let mut raw: BTreeMap<BmmKey, BTreeMap<u32, BTreeMap<u32, f64>>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = BmmKey {
-            bmm_quant: row.str_owned(bmm_dtype_col)?,
-            pre_or_post: row.str_owned(op_name_col)?,
-        };
-        // First-wins parity with Python `load_mla_bmm_data`.
-        raw.entry(key)
-            .or_default()
-            .entry(row.u32(num_heads_col)?)
-            .or_default()
-            .entry(row.u32(num_tokens_col)?)
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let op_name_col = reader.col("op_name")?;
+        let bmm_dtype_col = reader.col("bmm_dtype")?;
+        let num_tokens_col = reader.col("num_tokens")?;
+        let num_heads_col = reader.col("num_heads")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = BmmKey {
+                bmm_quant: row.str_owned(bmm_dtype_col)?,
+                pre_or_post: row.str_owned(op_name_col)?,
+            };
+            // First-wins parity with Python `load_mla_bmm_data`.
+            raw.entry(key)
+                .or_default()
+                .entry(row.u32(num_heads_col)?)
+                .or_default()
+                .entry(row.u32(num_tokens_col)?)
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if raw.is_empty() {
+    if !any_source || raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no MLA BMM rows loaded from {}",
-            path.display()
+            "no MLA BMM rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     let by_keys = raw
@@ -754,6 +858,11 @@ mod tests {
     /// loads exactly the primary parquet this table reads) and per-query
     /// `database_mode=DatabaseMode.SILICON`. Three resolution paths per
     /// query: exact hit, interior interp, beyond-range util-hold.
+    ///
+    /// NOTE(shared-layer merge): oracle generated pre-shared-layer;
+    /// regenerate if this fails (Python's default `get_database` now merges
+    /// shared-layer rows, which can add points to these curves; the Rust
+    /// side here uses the single-primary `new` constructor).
     #[test]
     fn mla_queries_match_python_v2_engine() {
         let table = MlaTable::new(gb200_trtllm_data_root(), load_spec("gb200"));

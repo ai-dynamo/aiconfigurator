@@ -28,11 +28,13 @@
 //! `perf_database::wideep`, `wideep_mla`, and `wideep_moe`.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
+use crate::config::{PerfDbSources, PerfSource};
+use super::{kernel_source_ok, resolve_op_sources};
 use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
 
@@ -70,6 +72,10 @@ pub(crate) fn singleton_underflow(curve: &BTreeMap<u32, f64>, num_tokens: u32) -
 
 pub struct MoeTable {
     data_root: PathBuf,
+    /// Ordered, priority-sorted sources for the MoE perf file (shared-layer
+    /// aware; see [`PerfSource`]). Single-primary, no-filter by default
+    /// (`MoeTable::new`).
+    moe_sources: Vec<PerfSource>,
     moe: OnceLock<Result<LoadedMoeGrids, AicError>>,
 }
 
@@ -100,9 +106,21 @@ struct MoeKey {
 }
 
 impl MoeTable {
+    /// Construct an empty table for the given data directory. No I/O. The MoE
+    /// perf file is sourced solely from `data_root/moe_perf.parquet` with no
+    /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
+        Self::with_sources(data_root, &PerfDbSources::default())
+    }
+
+    /// Construct with shared-layer (sibling/cross-version) sources resolved from
+    /// `perf_db_sources` (Python-supplied). The MoE file falls back to its
+    /// primary `data_root/moe_perf.parquet` when absent from the map. No I/O.
+    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
+        let moe_sources = resolve_op_sources(perf_db_sources, "moe_perf.parquet", &data_root);
         Self {
             data_root,
+            moe_sources,
             moe: OnceLock::new(),
         }
     }
@@ -262,61 +280,80 @@ impl MoeTable {
     fn load(&self) -> Result<&LoadedMoeGrids, AicError> {
         let cell = self
             .moe
-            .get_or_init(|| load_moe_parquet(&self.data_root.join("moe_perf.parquet")));
+            .get_or_init(|| load_moe_parquet(&self.moe_sources));
         cell.as_ref().map_err(clone_err)
     }
 }
 
-fn load_moe_parquet(path: &Path) -> Result<LoadedMoeGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let moe_dtype_col = reader.col("moe_dtype")?;
-    let num_tokens_col = reader.col("num_tokens")?;
-    let hidden_size_col = reader.col("hidden_size")?;
-    let inter_size_col = reader.col("inter_size")?;
-    let topk_col = reader.col("topk")?;
-    let num_experts_col = reader.col("num_experts")?;
-    let moe_tp_size_col = reader.col("moe_tp_size")?;
-    let moe_ep_size_col = reader.col("moe_ep_size")?;
-    let distribution_col = reader.col("distribution")?;
-    let latency_col = reader.col("latency")?;
-    // Optional in older perf-DB versions; when absent every row falls into
-    // the `default` grid (matching the pre-split behavior).
-    let kernel_source_col = reader.col_optional("kernel_source");
-
+/// Load the MoE table from an ordered, priority-sorted source list. Sources are
+/// read in order; the first source containing a `(shape, num_tokens)` tuple wins
+/// (`or_insert`), mirroring Python's `_read_filtered_rows` concatenation +
+/// `load_moe_data` skip-on-key-conflict. Missing files are skipped (a sibling
+/// declared in the manifest need not exist for every system); an error is
+/// returned only when no source yields rows.
+fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> {
     let mut default_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
     let mut low_latency_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let key = MoeKey {
-            quant: row.str_owned(moe_dtype_col)?,
-            distribution: row.str_owned(distribution_col)?,
-            topk: row.u32(topk_col)?,
-            num_experts: row.u32(num_experts_col)?,
-            hidden_size: row.u32(hidden_size_col)?,
-            inter_size: row.u32(inter_size_col)?,
-            moe_tp_size: row.u32(moe_tp_size_col)?,
-            moe_ep_size: row.u32(moe_ep_size_col)?,
-        };
-        let kernel_source = row.str_optional(kernel_source_col)?.unwrap_or("");
-        let target = if kernel_source == "moe_torch_flow_min_latency" {
-            &mut low_latency_keys
-        } else {
-            &mut default_keys
-        };
-        // Python's `load_moe_data` wraps the leaf insert in a try/except KeyError
-        // and skips on conflict, i.e. it keeps the FIRST occurrence of each
-        // (shape, num_tokens) tuple. Some perf files contain duplicate rows
-        // (same kernel_source, same shape) — preserving first-wins parity here.
-        target
-            .entry(key)
-            .or_default()
-            .entry(row.u32(num_tokens_col)?)
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let moe_dtype_col = reader.col("moe_dtype")?;
+        let num_tokens_col = reader.col("num_tokens")?;
+        let hidden_size_col = reader.col("hidden_size")?;
+        let inter_size_col = reader.col("inter_size")?;
+        let topk_col = reader.col("topk")?;
+        let num_experts_col = reader.col("num_experts")?;
+        let moe_tp_size_col = reader.col("moe_tp_size")?;
+        let moe_ep_size_col = reader.col("moe_ep_size")?;
+        let distribution_col = reader.col("distribution")?;
+        let latency_col = reader.col("latency")?;
+        // Optional in older perf-DB versions; when absent every row falls into
+        // the `default` grid (matching the pre-split behavior). The same column
+        // gates the per-source shared-layer `kernel_source` allowlist.
+        let kernel_source_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), kernel_source_col, &row)? {
+                continue;
+            }
+            let key = MoeKey {
+                quant: row.str_owned(moe_dtype_col)?,
+                distribution: row.str_owned(distribution_col)?,
+                topk: row.u32(topk_col)?,
+                num_experts: row.u32(num_experts_col)?,
+                hidden_size: row.u32(hidden_size_col)?,
+                inter_size: row.u32(inter_size_col)?,
+                moe_tp_size: row.u32(moe_tp_size_col)?,
+                moe_ep_size: row.u32(moe_ep_size_col)?,
+            };
+            let kernel_source = row.str_optional(kernel_source_col)?.unwrap_or("");
+            let target = if kernel_source == "moe_torch_flow_min_latency" {
+                &mut low_latency_keys
+            } else {
+                &mut default_keys
+            };
+            // Python's `load_moe_data` wraps the leaf insert in a try/except KeyError
+            // and skips on conflict, i.e. it keeps the FIRST occurrence of each
+            // (shape, num_tokens) tuple. Some perf files contain duplicate rows
+            // (same kernel_source, same shape) — preserving first-wins parity here,
+            // extended across shared-layer sources (earlier source wins).
+            target
+                .entry(key)
+                .or_default()
+                .entry(row.u32(num_tokens_col)?)
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if default_keys.is_empty() && low_latency_keys.is_empty() {
+    if !any_source || (default_keys.is_empty() && low_latency_keys.is_empty()) {
         return Err(AicError::PerfDatabase(format!(
-            "no MoE rows loaded from {}",
-            path.display()
+            "no rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     Ok(LoadedMoeGrids {
@@ -427,6 +464,9 @@ mod tests {
     /// the MoE roofline SOL carries the growth (weight-load-dominated regime
     /// — a raw linear extrapolation would give ~2.0 ms at nt=4096, the
     /// roofline hold gives ~0.97 ms).
+    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if
+    // this fails. `MoeTable::new` resolves to the single primary source with no
+    // kernel_source filter, so no shared rows should join this curve.
     #[test]
     fn moe_query_matches_python_v2_engine() {
         use crate::common::system_spec::SystemSpec;

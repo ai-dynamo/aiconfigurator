@@ -29,6 +29,10 @@ pub struct CustomAllReduceOp {
     pub hidden_size: u32,
     pub tp_size: u32,
     pub quant: CommQuantMode,
+    /// CP sequence-shard factor (Python's `_seq_split`, = `cp_size`): the
+    /// per-rank payload is `ceil(num_tokens / seq_split)`. Defaults to 1.
+    #[serde(default = "crate::operators::gemm::default_seq_split")]
+    pub seq_split: u32,
 }
 
 impl CustomAllReduceOp {
@@ -44,6 +48,7 @@ impl CustomAllReduceOp {
             hidden_size,
             tp_size,
             quant: CommQuantMode::Half,
+            seq_split: 1,
         }
     }
 
@@ -60,7 +65,8 @@ impl CustomAllReduceOp {
         if self.tp_size <= 1 {
             return Ok(PerformanceResult::zero());
         }
-        let message_size = (num_tokens as u64) * (self.hidden_size as u64);
+        let per_rank_tokens = num_tokens.div_ceil(self.seq_split.max(1)); // CP: busiest rank
+        let message_size = (per_rank_tokens as u64) * (self.hidden_size as u64);
         let spec = &db.system_spec;
         let per_node = spec.node.num_gpus_per_node;
         let effective_tp = self.tp_size.min(per_node);
@@ -85,17 +91,26 @@ impl CustomAllReduceOp {
 pub struct NcclOp {
     pub name: String,
     pub scale_factor: f64,
-    pub hidden_size: u32,
+    /// Elements moved per token (Python's `_num_elements_per_token`). This is a
+    /// float, not an integer: the CP KV all-gather sizes it as
+    /// `kvcache_bytes_per_token / comm_bytes`, which can be fractional.
+    pub hidden_size: f64,
     pub num_gpus: u32,
     pub dtype: CommQuantMode,
     pub operation: String,
+    /// CP sequence-shard factor (Python's `_seq_split`, = `cp_size`): the
+    /// per-rank payload is `ceil(num_tokens / seq_split)`. Defaults to 1.
+    /// Note the CP KV all-gather (`context_cp_all_gather`) itself keeps
+    /// `seq_split=1` (it moves the full per-token KV), so this is per-op.
+    #[serde(default = "crate::operators::gemm::default_seq_split")]
+    pub seq_split: u32,
 }
 
 impl NcclOp {
     pub fn new(
         name: impl Into<String>,
         scale_factor: f64,
-        hidden_size: u32,
+        hidden_size: f64,
         num_gpus: u32,
         operation: impl Into<String>,
     ) -> Self {
@@ -106,6 +121,7 @@ impl NcclOp {
             num_gpus,
             dtype: CommQuantMode::Half,
             operation: operation.into(),
+            seq_split: 1,
         }
     }
 
@@ -117,7 +133,9 @@ impl NcclOp {
         if self.num_gpus <= 1 {
             return Ok(PerformanceResult::zero());
         }
-        let message_size = (num_tokens as u64) * (self.hidden_size as u64);
+        let per_rank_tokens = num_tokens.div_ceil(self.seq_split.max(1)); // CP: busiest rank
+        // Python: message_size = ceil(x/seq_split) * num_elements_per_token (float).
+        let message_size = ((per_rank_tokens as f64) * self.hidden_size) as u64;
         let max_recorded = db
             .communication
             .nccl_max_num_gpus(self.dtype, &self.operation)?
@@ -149,6 +167,10 @@ pub struct P2POp {
     pub scale_factor: f64,
     pub pp_size: u32,
     pub hidden_size: u32,
+    /// CP sequence-shard factor (Python's `_seq_split`, = `cp_size`): the
+    /// per-rank payload is `ceil(x / seq_split)`. Defaults to 1.
+    #[serde(default = "crate::operators::gemm::default_seq_split")]
+    pub seq_split: u32,
 }
 
 impl P2POp {
@@ -158,6 +180,7 @@ impl P2POp {
             scale_factor: 1.0,
             pp_size,
             hidden_size,
+            seq_split: 1,
         }
     }
 
@@ -166,7 +189,8 @@ impl P2POp {
             return Ok(PerformanceResult::zero());
         }
         let spec = &db.system_spec;
-        let bytes = (x as f64) * (self.hidden_size as f64) * 2.0;
+        let per_rank_tokens = x.div_ceil(self.seq_split.max(1)); // CP: busiest rank
+        let bytes = (per_rank_tokens as f64) * (self.hidden_size as f64) * 2.0;
         let inter_bw = spec.node.inter_node_bw.max(1.0);
         let latency = (bytes / inter_bw + spec.node.p2p_latency) * 1000.0;
         Ok(PerformanceResult::new(latency, Source::Empirical)

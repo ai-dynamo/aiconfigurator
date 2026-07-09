@@ -252,7 +252,27 @@ def task_config_to_generator_config(
         "tpot": _safe_float(_series_val(result_df, "tpot", task_config.tpot), task_config.tpot),
     }
     sla_cfg = _deep_merge(sla_cfg, overrides.get("SlaConfig"))
-    bench_cfg = overrides.get("BenchConfig")
+
+    # Seed BenchConfig from the Task's multimodal image workload so image args
+    # reach bench_run.sh / k8s_bench.yaml. Without this, image_batch_size falls
+    # back to the schema default 0 and the templates emit a text-only benchmark
+    # even for image workloads. Explicit BenchConfig overrides win via merge.
+    image_height = getattr(task_config, "image_height", 0) or 0
+    image_width = getattr(task_config, "image_width", 0) or 0
+    # Default only a missing/None image count to 1. A deliberate
+    # num_images_per_request=0 ("disable the image encoder", used with 448x448
+    # dimensions by the web UI) must survive so the templates omit image args.
+    image_batch_size = getattr(task_config, "num_images_per_request", None)
+    if image_batch_size is None:
+        image_batch_size = 1
+    bench_cfg: dict[str, Any] = {}
+    if image_height > 0 and image_width > 0:
+        bench_cfg = {
+            "image_batch_size": image_batch_size,
+            "image_width_mean": image_width,
+            "image_height_mean": image_height,
+        }
+    bench_cfg = _deep_merge(bench_cfg, overrides.get("BenchConfig"))
 
     params = collect_generator_params(
         service=service_cfg,
@@ -275,14 +295,38 @@ def task_config_to_generator_config(
     )
 
     params = _deep_merge(params, overrides.get("Params"))
-    # Expose SDK's system identifier to templates via NodeConfig.system_name
-    params.setdefault("NodeConfig", {})["system_name"] = task_config.system_name
+    # Expose SDK's system identifier to templates via NodeConfig.system_name.
+    # Use primary_system_name: for disagg, the shared top-level system_name is
+    # empty (phase-specific prefill/decode systems carry the value), so reading
+    # system_name here would blank NodeConfig and drop all hardware facts.
+    #
+    # NodeConfig.system_name (and the hardware facts derived from it) is global,
+    # while disagg prefill/decode can request different systems. Heterogeneous
+    # placement is out of scope here, so fail fast rather than silently applying
+    # the prefill system's node selectors/env to both workers.
+    system_name = task_config.primary_system_name
+    if task_config.serving_mode == "disagg":
+        prefill_system = getattr(task_config, "prefill_system_name", system_name)
+        decode_system = getattr(task_config, "decode_system_name", system_name)
+        if prefill_system != decode_system:
+            raise ValueError(
+                "Generator artifacts currently require matching prefill/decode systems; "
+                f"got prefill={prefill_system!r}, decode={decode_system!r}"
+            )
+    params.setdefault("NodeConfig", {})["system_name"] = system_name
     rule_name = overrides.get("rule")
     if rule_name:
         params["rule"] = rule_name
     if "preserve_engine_limits" in overrides:
         params["preserve_engine_limits"] = bool(overrides["preserve_engine_limits"])
     params["ModelConfig"] = model_cfg
+    # Preserve LlmdConfig overrides (e.g. vllm_image, kustomize_base_path) so the
+    # llm-d artifacts honor them. The bridge handles the other config sections
+    # explicitly but omitted this one, so the llm-d templates fell back to their
+    # defaults. Matches the naive generator's behavior.
+    llmd_config = copy.deepcopy(overrides.get("LlmdConfig") or {})
+    if llmd_config:
+        params["LlmdConfig"] = llmd_config
     return params
 
 

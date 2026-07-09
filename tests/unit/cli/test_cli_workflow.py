@@ -32,6 +32,7 @@ from aiconfigurator.cli.spica.helper import (
     _build_spica_thorough_config_data,
     _build_spica_trace_result_bundle,
     _build_spica_trace_search_space,
+    _load_spica_config,
     _save_spica_trace_artifacts,
     _spica_candidates_to_result_df,
     _spica_extra_input_lines,
@@ -1621,3 +1622,63 @@ class TestInclusiveTpot:
         df = self._make_df(ttft=500.0, tpot=20.0, osl=1)
         result = _apply_inclusive_tpot(df)
         assert abs(result["tpot"].iloc[0] - 500.0) < 1e-9
+
+
+class TestLoadSpicaConfigErrorHandling:
+    """--thorough-config file errors surface as concise CLI errors, not tracebacks.
+
+    The fake SmartSearchConfig mirrors Spica's real ``from_yaml`` (read_text ->
+    yaml.safe_load -> model_validate) so the test exercises the actual exception
+    types (OSError / yaml.YAMLError / pydantic.ValidationError) that
+    ``_load_spica_config`` must catch.
+    """
+
+    @staticmethod
+    def _fake_config_cls():
+        import pydantic
+
+        class _FakeSmartSearchConfig(pydantic.BaseModel):
+            hardware_sku: str
+
+            @classmethod
+            def from_yaml(cls, path):
+                from pathlib import Path
+
+                data = yaml.safe_load(Path(path).read_text())
+                return cls.model_validate(data)
+
+        return _FakeSmartSearchConfig
+
+    def test_missing_config_file_raises_concise_error(self, tmp_path):
+        args = argparse.Namespace(thorough_config=str(tmp_path / "does_not_exist.yaml"))
+        with pytest.raises(SystemExit) as excinfo:
+            _load_spica_config(args, self._fake_config_cls())
+        message = str(excinfo.value)
+        assert "could not read Spica config" in message
+        assert "Traceback" not in message
+        assert excinfo.value.__cause__ is None
+
+    def test_malformed_yaml_raises_concise_error(self, tmp_path):
+        config_path = tmp_path / "malformed.yaml"
+        config_path.write_text("hardware_sku: [unterminated\n")
+        args = argparse.Namespace(thorough_config=str(config_path))
+        with pytest.raises(SystemExit) as excinfo:
+            _load_spica_config(args, self._fake_config_cls())
+        message = str(excinfo.value)
+        assert "malformed Spica YAML" in message
+        assert "Traceback" not in message
+        assert excinfo.value.__cause__ is None
+
+    def test_missing_required_field_raises_concise_error(self, tmp_path):
+        # Valid YAML, but omits the required field -> ValidationError.
+        config_path = tmp_path / "invalid.yaml"
+        config_path.write_text("some_other_field: 1\n")
+        args = argparse.Namespace(thorough_config=str(config_path))
+        with pytest.raises(SystemExit) as excinfo:
+            _load_spica_config(args, self._fake_config_cls())
+        message = str(excinfo.value)
+        assert "invalid Spica config" in message
+        assert "hardware_sku" in message  # the concise loc: msg reason is preserved
+        assert "Field required" in message
+        assert "Traceback" not in message
+        assert excinfo.value.__cause__ is None

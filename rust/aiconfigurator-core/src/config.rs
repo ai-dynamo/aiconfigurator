@@ -15,7 +15,13 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 1;
+// Bumped to 2 for the 0.10.0 op-payload layout change (context-parallelism +
+// perf-DB refactor added serialized fields such as `seq_split` / `cp_size` to
+// `OpSpec`). bincode op payloads are positional, so a producer/consumer skew is
+// only distinguishable by this version — `EngineSpec::from_bincode` reads and
+// checks it before decoding the op lists. Bump whenever an `OpSpec` field
+// changes; keep in lockstep with `sdk/engine.py::ENGINE_SPEC_SCHEMA_VERSION`.
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 2;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].
@@ -54,8 +60,40 @@ pub struct EngineConfig {
     #[serde(flatten)]
     pub speculative: Option<SpeculativeConfig>,
 
+    /// Shared-layer (sibling/cross-version) perf-data sources per op-file
+    /// basename (e.g. `gemm_perf.parquet`), resolved in Python
+    /// (`sdk/engine.py::_compute_perf_db_sources`) so the Rust core inherits the
+    /// SAME rows Python does under SILICON/HYBRID. Each entry is
+    /// `(abs_path, Option<kernel_source_allowlist>)` in priority order — the
+    /// first source containing a shape wins (mirrors Python
+    /// `_read_filtered_rows` + skip-on-key-conflict). Absent/empty = fall back
+    /// to the single primary `data_root` (back-compat with pre-shared-layer
+    /// specs).
+    #[serde(default)]
+    pub perf_db_sources: PerfDbSources,
+
     #[serde(default)]
     pub extra: BTreeMap<String, String>,
+}
+
+/// Per-op-file ordered source list, keyed by op-file basename. See
+/// [`EngineConfig::perf_db_sources`].
+pub type PerfDbSources = BTreeMap<String, Vec<PerfSource>>;
+
+/// One perf-data source: an absolute file path plus an optional
+/// `kernel_source` allowlist. `None` admits every row (the primary source);
+/// `Some(set)` keeps only rows whose `kernel_source` is in the set (sibling
+/// inheritance). Wire form is a 2-element JSON array `[path, [ks...] | null]`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PerfSource(pub PathBuf, pub Option<Vec<String>>);
+
+impl PerfSource {
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+    pub fn kernel_sources(&self) -> Option<&[String]> {
+        self.1.as_deref()
+    }
 }
 
 /// Parallelism layout. Flattened into [`EngineConfig`] so the flat wire keys
@@ -70,6 +108,12 @@ pub struct ParallelMapping {
     pub moe_tp_size: Option<u32>,
     #[serde(default)]
     pub moe_ep_size: Option<u32>,
+    /// Context-parallel size. Part of the engine identity so cp variants get
+    /// distinct compiled handles. `None`/1 means no CP. The per-op CP math is
+    /// carried on the ops themselves (seq_split / cp_size / attn_cp_size), not
+    /// re-derived from this field.
+    #[serde(default)]
+    pub cp_size: Option<u32>,
 }
 
 /// Precision/quantization dtypes. Flattened into [`EngineConfig`]. Field

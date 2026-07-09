@@ -21,6 +21,8 @@ use std::sync::OnceLock;
 use crate::common::enums::GemmQuantMode;
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
+use crate::config::{PerfDbSources, PerfSource};
+use super::{kernel_source_ok, resolve_op_sources};
 use super::interpolation::Grid3;
 use super::perf_interp::{self, Node, OpInterpConfig, Resolver, SiteIndex, ValueTransform};
 use crate::perf_database::parquet_loader::PerfReader;
@@ -37,6 +39,12 @@ use crate::perf_database::parquet_loader::PerfReader;
 pub struct GemmTable {
     data_root: PathBuf,
     system_spec: SystemSpec,
+    /// Ordered, priority-sorted sources for each of the three GEMM-family perf
+    /// files (shared-layer aware; see [`PerfSource`]). Single-primary,
+    /// no-filter by default (`GemmTable::new`).
+    gemm_sources: Vec<PerfSource>,
+    compute_scale_sources: Vec<PerfSource>,
+    scale_matrix_sources: Vec<PerfSource>,
     gemm: OnceLock<Result<GemmEngineGrids, AicError>>,
     compute_scale: OnceLock<Result<TwoDGrids, AicError>>,
     scale_matrix: OnceLock<Result<TwoDGrids, AicError>>,
@@ -59,11 +67,32 @@ struct TwoDGrids {
 }
 
 impl GemmTable {
-    /// Construct an empty table for the given data directory. No I/O.
+    /// Construct an empty table for the given data directory. No I/O. Each
+    /// perf file is sourced solely from `data_root/<basename>` with no
+    /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
+        Self::with_sources(data_root, system_spec, &PerfDbSources::default())
+    }
+
+    /// Construct with shared-layer (sibling/cross-version) sources resolved from
+    /// `perf_db_sources` (Python-supplied). Each GEMM-family file falls back to
+    /// its primary `data_root/<basename>` when absent from the map. No I/O.
+    pub fn with_sources(
+        data_root: PathBuf,
+        system_spec: SystemSpec,
+        perf_db_sources: &PerfDbSources,
+    ) -> Self {
+        let gemm_sources = resolve_op_sources(perf_db_sources, "gemm_perf.parquet", &data_root);
+        let compute_scale_sources =
+            resolve_op_sources(perf_db_sources, "computescale_perf.parquet", &data_root);
+        let scale_matrix_sources =
+            resolve_op_sources(perf_db_sources, "scale_matrix_perf.parquet", &data_root);
         Self {
             data_root,
             system_spec,
+            gemm_sources,
+            compute_scale_sources,
+            scale_matrix_sources,
             gemm: OnceLock::new(),
             compute_scale: OnceLock::new(),
             scale_matrix: OnceLock::new(),
@@ -143,7 +172,7 @@ impl GemmTable {
 
     fn load_gemm(&self) -> Result<&GemmEngineGrids, AicError> {
         let cell = self.gemm.get_or_init(|| {
-            let mut grids = load_gemm_parquet(&self.data_root.join("gemm_perf.parquet"))?;
+            let mut grids = load_gemm_parquet(&self.gemm_sources)?;
             // Mirror Python `GEMM._correct_sol`: clamp every stored grid
             // entry to `>= SOL`. SOL is deterministic from the system spec
             // and (m, n, k, quant); on currently-aligned surfaces this is
@@ -172,16 +201,16 @@ impl GemmTable {
     }
 
     fn load_compute_scale(&self) -> Result<&TwoDGrids, AicError> {
-        let cell = self.compute_scale.get_or_init(|| {
-            load_two_d_parquet(&self.data_root.join("computescale_perf.parquet"))
-        });
+        let cell = self
+            .compute_scale
+            .get_or_init(|| load_two_d_parquet(&self.compute_scale_sources));
         cell.as_ref().map_err(|err| clone_err(err))
     }
 
     fn load_scale_matrix(&self) -> Result<&TwoDGrids, AicError> {
-        let cell = self.scale_matrix.get_or_init(|| {
-            load_two_d_parquet(&self.data_root.join("scale_matrix_perf.parquet"))
-        });
+        let cell = self
+            .scale_matrix
+            .get_or_init(|| load_two_d_parquet(&self.scale_matrix_sources));
         cell.as_ref().map_err(|err| clone_err(err))
     }
 }
@@ -214,7 +243,7 @@ pub(crate) fn gemm_sol_latency_ms(
     sol_math.max(sol_mem)
 }
 
-fn tc_flops_for_compute(spec: &SystemSpec, compute_factor: f64) -> f64 {
+pub(crate) fn tc_flops_for_compute(spec: &SystemSpec, compute_factor: f64) -> f64 {
     let bf16 = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
     let direct = match compute_factor as u32 {
         1 => spec.gpu.bfloat16_tc_flops,
@@ -373,66 +402,101 @@ fn query_scale_table(
     }
 }
 
-fn load_gemm_parquet(path: &Path) -> Result<GemmGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let gemm_dtype_col = reader.col("gemm_dtype")?;
-    let m_col = reader.col("m")?;
-    let n_col = reader.col("n")?;
-    let k_col = reader.col("k")?;
-    let latency_col = reader.col("latency")?;
-
+/// Load the GEMM table from an ordered, priority-sorted source list. Sources are
+/// read in order; the first source containing a shape wins (`or_insert`),
+/// mirroring Python's `_read_filtered_rows` concatenation + `load_gemm_data`
+/// skip-on-key-conflict. Missing files are skipped (a sibling declared in the
+/// manifest need not exist for every system); an error is returned only when no
+/// source yields rows.
+fn load_gemm_parquet(sources: &[PerfSource]) -> Result<GemmGrids, AicError> {
     let mut by_quant: BTreeMap<String, Grid3<f64>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        let dtype = row.str(gemm_dtype_col)?;
-        // Skip quant modes AIC does not model in the perf path (matches the
-        // legacy perf.rs behavior).
-        if dtype == "awq" || dtype == "gptq" {
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
             continue;
         }
-        let dtype = dtype.to_string();
-        // First-wins parity with Python's `load_gemm_data` try/except KeyError.
-        by_quant
-            .entry(dtype)
-            .or_default()
-            .entry(row.u32(m_col)?)
-            .or_default()
-            .entry(row.u32(n_col)?)
-            .or_default()
-            .entry(row.u32(k_col)?)
-            .or_insert(row.f64(latency_col)?);
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let gemm_dtype_col = reader.col("gemm_dtype")?;
+        let m_col = reader.col("m")?;
+        let n_col = reader.col("n")?;
+        let k_col = reader.col("k")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let dtype = row.str(gemm_dtype_col)?;
+            // Skip quant modes AIC does not model in the perf path (matches the
+            // legacy perf.rs behavior).
+            if dtype == "awq" || dtype == "gptq" {
+                continue;
+            }
+            let dtype = dtype.to_string();
+            // First-wins parity with Python's `load_gemm_data` try/except
+            // KeyError, extended across shared-layer sources (earlier source wins).
+            by_quant
+                .entry(dtype)
+                .or_default()
+                .entry(row.u32(m_col)?)
+                .or_default()
+                .entry(row.u32(n_col)?)
+                .or_default()
+                .entry(row.u32(k_col)?)
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if by_quant.is_empty() {
+    if !any_source || by_quant.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no GEMM rows loaded from {}",
-            path.display()
+            "no GEMM rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     Ok(GemmGrids { by_quant })
 }
 
-fn load_two_d_parquet(path: &Path) -> Result<TwoDGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let quant_dtype_col = reader.col("quant_dtype")?;
-    let m_col = reader.col("m")?;
-    let k_col = reader.col("k")?;
-    let latency_col = reader.col("latency")?;
-
+/// Load a 2-D (compute_scale / scale_matrix) table from an ordered source list.
+/// Same first-wins-across-sources + missing-file-skip semantics as
+/// [`load_gemm_parquet`].
+fn load_two_d_parquet(sources: &[PerfSource]) -> Result<TwoDGrids, AicError> {
     let mut raw: BTreeMap<String, BTreeMap<u32, BTreeMap<u32, f64>>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        // First-wins parity (compute_scale / scale_matrix tables in Python).
-        raw.entry(row.str_owned(quant_dtype_col)?)
-            .or_default()
-            .entry(row.u32(m_col)?)
-            .or_default()
-            .entry(row.u32(k_col)?)
-            .or_insert(row.f64(latency_col)?);
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let quant_dtype_col = reader.col("quant_dtype")?;
+        let m_col = reader.col("m")?;
+        let k_col = reader.col("k")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            // First-wins parity (compute_scale / scale_matrix tables in Python),
+            // extended across shared-layer sources.
+            raw.entry(row.str_owned(quant_dtype_col)?)
+                .or_default()
+                .entry(row.u32(m_col)?)
+                .or_default()
+                .entry(row.u32(k_col)?)
+                .or_insert(row.f64(latency_col)?);
+        }
     }
-    if raw.is_empty() {
+    if !any_source || raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no rows loaded from {}",
-            path.display()
+            "no rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     let by_quant = raw
@@ -476,6 +540,79 @@ mod tests {
         SystemSpec::load(&systems_yaml).expect("b200_sxm.yaml must parse")
     }
 
+    fn b200_gemm_parquet(backend: &str, version: &str) -> PathBuf {
+        PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join(format!(
+                "src/aiconfigurator/systems/data/b200_sxm/{backend}/{version}/gemm_perf.parquet"
+            ))
+    }
+
+    fn gemm_shape_count(grids: &GemmGrids) -> usize {
+        grids
+            .by_quant
+            .values()
+            .flat_map(|by_m| by_m.values())
+            .flat_map(|by_n| by_n.values())
+            .map(|by_k| by_k.len())
+            .sum()
+    }
+
+    /// Shared-layer sibling merge: sources are read in priority order, later
+    /// sources only add shapes the earlier ones lack (first-wins), and a
+    /// per-source `kernel_source` allowlist gates which sibling rows are
+    /// admitted. Mirrors Python `_read_filtered_rows` + `load_gemm_data`.
+    #[test]
+    fn shared_layer_merges_siblings_with_kernel_source_filter_and_first_wins() {
+        // trtllm 1.3.0rc10 primary + 1.2.0rc5 sibling — the real shape Python's
+        // `_compute_perf_db_sources` emits for this backend.
+        let primary = b200_gemm_parquet("trtllm", "1.3.0rc10");
+        let sibling = b200_gemm_parquet("trtllm", "1.2.0rc5");
+
+        let primary_only = load_gemm_parquet(&[PerfSource(primary.clone(), None)]).unwrap();
+
+        // Sibling admitted unfiltered: never drops a primary shape, only adds.
+        let merged =
+            load_gemm_parquet(&[PerfSource(primary.clone(), None), PerfSource(sibling.clone(), None)])
+                .unwrap();
+        assert!(
+            gemm_shape_count(&merged) >= gemm_shape_count(&primary_only),
+            "unfiltered sibling must not drop shapes"
+        );
+
+        // First-wins: every primary (quant,m,n,k) keeps the PRIMARY latency even
+        // though the sibling also carries rows.
+        for (q, by_m) in &primary_only.by_quant {
+            for (m, by_n) in by_m {
+                for (n, by_k) in by_n {
+                    for (k, v) in by_k {
+                        let got = merged
+                            .by_quant
+                            .get(q)
+                            .and_then(|x| x.get(m))
+                            .and_then(|x| x.get(n))
+                            .and_then(|x| x.get(k))
+                            .copied();
+                        assert_eq!(got, Some(*v), "first source must win at ({q},{m},{n},{k})");
+                    }
+                }
+            }
+        }
+
+        // A `kernel_source` allowlist that matches nothing drops every sibling
+        // row, so the merged table equals primary-only.
+        let blocked = load_gemm_parquet(&[
+            PerfSource(primary.clone(), None),
+            PerfSource(sibling.clone(), Some(vec!["__no_such_kernel_source__".to_string()])),
+        ])
+        .unwrap();
+        assert_eq!(
+            gemm_shape_count(&blocked),
+            gemm_shape_count(&primary_only),
+            "a non-matching kernel_source filter must exclude all sibling rows"
+        );
+    }
+
     #[test]
     fn gemm_exact_hit_returns_recorded_latency() {
         let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
@@ -517,6 +654,7 @@ mod tests {
     /// exact hit, m-interp on a collected (n,k) site, m util-hold beyond the
     /// sweep, and an unknown (n,k) site via neighbour util transfer. The two
     /// engines must agree because they implement the same resolution chain.
+    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails
     #[test]
     fn gemm_query_matches_python_v2_engine() {
         let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());

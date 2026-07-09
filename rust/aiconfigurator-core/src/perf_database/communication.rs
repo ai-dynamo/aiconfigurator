@@ -25,6 +25,8 @@ use std::sync::OnceLock;
 
 use crate::common::enums::CommQuantMode;
 use crate::common::error::AicError;
+use crate::config::{PerfDbSources, PerfSource};
+use super::{kernel_source_ok, resolve_op_sources};
 use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
 
@@ -42,6 +44,11 @@ pub struct CommunicationTable {
     /// when the system YAML has no `misc.oneccl_version` declared (most
     /// systems — OneCCL is the XPU fallback path).
     oneccl_root: Option<PathBuf>,
+    /// Ordered, priority-sorted sources for `custom_allreduce_perf.parquet`
+    /// (shared-layer aware; see [`PerfSource`]). Single-primary, no-filter by
+    /// default (`CommunicationTable::new`). NCCL/OneCCL remain framework-agnostic
+    /// and are loaded directly from `nccl_root` / `oneccl_root`.
+    custom_allreduce_sources: Vec<PerfSource>,
     custom_allreduce: OnceLock<Result<CustomAllReduceGrids, AicError>>,
     nccl: OnceLock<Result<NcclGrids, AicError>>,
     oneccl: OnceLock<Result<NcclGrids, AicError>>,
@@ -69,10 +76,28 @@ impl CommunicationTable {
         nccl_root: Option<PathBuf>,
         oneccl_root: Option<PathBuf>,
     ) -> Self {
+        Self::with_sources(data_root, nccl_root, oneccl_root, &PerfDbSources::default())
+    }
+
+    /// Construct with shared-layer (sibling/cross-version) sources resolved from
+    /// `perf_db_sources` (Python-supplied) for `custom_allreduce_perf.parquet`.
+    /// The file falls back to its primary `data_root/custom_allreduce_perf.parquet`
+    /// when absent from the map. NCCL/OneCCL are framework-agnostic and are NOT
+    /// shared-layer sourced — they load directly from `nccl_root` / `oneccl_root`.
+    /// No I/O.
+    pub fn with_sources(
+        data_root: PathBuf,
+        nccl_root: Option<PathBuf>,
+        oneccl_root: Option<PathBuf>,
+        perf_db_sources: &PerfDbSources,
+    ) -> Self {
+        let custom_allreduce_sources =
+            resolve_op_sources(perf_db_sources, "custom_allreduce_perf.parquet", &data_root);
         Self {
             data_root,
             nccl_root,
             oneccl_root,
+            custom_allreduce_sources,
             custom_allreduce: OnceLock::new(),
             nccl: OnceLock::new(),
             oneccl: OnceLock::new(),
@@ -166,7 +191,7 @@ impl CommunicationTable {
 
     fn load_custom_allreduce(&self) -> Result<&CustomAllReduceGrids, AicError> {
         let cell = self.custom_allreduce.get_or_init(|| {
-            load_custom_allreduce_parquet(&self.data_root.join("custom_allreduce_perf.parquet"))
+            load_custom_allreduce_parquet(&self.custom_allreduce_sources)
         });
         cell.as_ref().map_err(clone_err)
     }
@@ -229,45 +254,59 @@ fn interp_message_size(by_size: &BTreeMap<u64, f64>, message_size: u64) -> Resul
     perf_interp::query(&cfg, &node, &[message_size as f64])
 }
 
-fn load_custom_allreduce_parquet(path: &Path) -> Result<CustomAllReduceGrids, AicError> {
-    let reader = PerfReader::open(path)?;
-    let num_gpus_col = reader.col("num_gpus")?;
-    let message_size_col = reader.col("message_size")?;
-    let latency_col = reader.col("latency")?;
-    let kernel_source_col = reader.col_optional("kernel_source");
-    let backend_col = reader.col_optional("backend");
-
-    // Mirror Python/legacy: skip "_eager" kernel sources on systems other
-    // than b60. We can't see the system name from here, so apply the filter
-    // by path prefix.
-    let path_str = path.to_string_lossy();
-    let is_b60 = path_str.contains("/b60/");
-
+fn load_custom_allreduce_parquet(sources: &[PerfSource]) -> Result<CustomAllReduceGrids, AicError> {
     let mut by_keys: BTreeMap<(String, u32), BTreeMap<u64, f64>> = BTreeMap::new();
-    for row in reader.rows()? {
-        let row = row?;
-        if !is_b60 {
-            let kernel = row.str_optional(kernel_source_col)?.unwrap_or("");
-            let backend = row.str_optional(backend_col)?.unwrap_or("");
-            if kernel.ends_with("_eager") || backend.ends_with("_eager") {
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let num_gpus_col = reader.col("num_gpus")?;
+        let message_size_col = reader.col("message_size")?;
+        let latency_col = reader.col("latency")?;
+        let kernel_source_col = reader.col_optional("kernel_source");
+        let backend_col = reader.col_optional("backend");
+        let ks_col = reader.col_optional("kernel_source");
+
+        // Mirror Python/legacy: skip "_eager" kernel sources on systems other
+        // than b60. We can't see the system name from here, so apply the filter
+        // by path prefix.
+        let path_str = path.to_string_lossy();
+        let is_b60 = path_str.contains("/b60/");
+
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
                 continue;
             }
+            if !is_b60 {
+                let kernel = row.str_optional(kernel_source_col)?.unwrap_or("");
+                let backend = row.str_optional(backend_col)?.unwrap_or("");
+                if kernel.ends_with("_eager") || backend.ends_with("_eager") {
+                    continue;
+                }
+            }
+            // Match Python's `load_custom_allreduce_data`: every row is stored
+            // under `CommQuantMode.half` regardless of the CSV's
+            // `allreduce_dtype` column (Python has a `TODO` here but the
+            // behavior is stable in production).
+            // First-wins parity with Python `load_custom_allreduce_data`,
+            // extended across shared-layer sources (earlier source wins).
+            by_keys
+                .entry(("half".to_string(), row.u32(num_gpus_col)?))
+                .or_default()
+                .entry(row.u64(message_size_col)?)
+                .or_insert(row.f64(latency_col)?);
         }
-        // Match Python's `load_custom_allreduce_data`: every row is stored
-        // under `CommQuantMode.half` regardless of the CSV's
-        // `allreduce_dtype` column (Python has a `TODO` here but the
-        // behavior is stable in production).
-        // First-wins parity with Python `load_custom_allreduce_data`.
-        by_keys
-            .entry(("half".to_string(), row.u32(num_gpus_col)?))
-            .or_default()
-            .entry(row.u64(message_size_col)?)
-            .or_insert(row.f64(latency_col)?);
     }
-    if by_keys.is_empty() {
+    if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no custom_allreduce rows loaded from {}",
-            path.display()
+            "no rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
     Ok(CustomAllReduceGrids { by_keys })
