@@ -298,8 +298,9 @@ Record a failed result before resetting a worker after a fatal CUDA error.
 
 ## Preserve cross-platform change reversals
 
-When Hopper and Blackwell work are stacked, keep one tracked, append-only
-alignment ledger. Before changing execution code, identify the affected ledger
+When Hopper and Blackwell work are stacked, keep one append-only alignment
+ledger as a local campaign record (kept out of the repo; internal evidence
+paths and raw run records live there). Before changing execution code, identify the affected ledger
 entry. Record every add, revert, and reapply chronologically, even if the final
 Git history will be squashed. Each transition must include:
 

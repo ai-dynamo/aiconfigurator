@@ -168,8 +168,8 @@ Blackwell work are stacked. Distinguish restoring a lost contract from adding
 new behavior so that a platform-specific fix is not repeatedly removed and
 reintroduced by later rebases.
 
-For SGLang 0.5.14 Hopper/Blackwell continuation work, maintain the tracked
-[platform alignment ledger](sglang-0.5.14-hopper-blackwell-ledger.md) in
+For SGLang 0.5.14 Hopper/Blackwell continuation work, maintain the platform
+alignment ledger — a local campaign record kept outside the repo — in
 addition to the task-local run log.
 
 Use these escalation heuristics with judgment:

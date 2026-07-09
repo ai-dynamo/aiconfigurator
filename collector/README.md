@@ -15,7 +15,9 @@ For a framework-version or GPU-platform upgrade, follow the
 The repo-tracked [`aic-auto-collect`](../.agents/skills/aic-auto-collect/SKILL.md)
 skill applies that workflow during long, resumable collection runs.
 SGLang 0.5.14 Hopper/Blackwell follow-up work must also consult the
-[platform alignment ledger](../docs/perf_database/sglang-0.5.14-hopper-blackwell-ledger.md).
+platform alignment ledger, a local campaign record kept outside the repo
+(`docs/perf_database/sglang-0.5.14-hopper-blackwell-ledger.md` in the
+campaign workspace).
 
 # Preparation
 Before collecting the data, make sure you own the whole node and no interfierence happens.
