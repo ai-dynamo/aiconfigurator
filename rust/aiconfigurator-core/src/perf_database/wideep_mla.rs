@@ -17,21 +17,22 @@
 //!   level is absent — generation MLA doesn't tunnel through the fmha
 //!   dispatch path the way context does.)
 //!
-//! Query semantics from Python:
+//! Query semantics from Python (perf_interp v2):
 //!
-//! - Context: `interp_3d(num_heads, full_s = s + prefix, b)` then multiplied
-//!   by `prefix_correction = (full_s^2 - prefix^2) / full_s^2`. The operator
-//!   layer applies the correction; the perf-DB query just returns the raw
-//!   table value.
-//! - Generation: `interp_3d(num_heads, b, s)` — axis order (n, b, s) and no
-//!   prefix correction.
+//! - Context: `perf_interp.context_grid_config` — Grid resolver over
+//!   (num_heads, full_s = s + prefix, b) with SQRT blending on the seq axis
+//!   (latency ~ seq^2; the sqrt-on-seq Grid is the principled replacement
+//!   for the legacy `extrapolate_data_grid(sqrt_y_value=True)` load-time
+//!   pre-expansion). The query returns the raw table value; the operator
+//!   layer applies `prefix_correction = (full_s^2 - prefix^2) / full_s^2`.
+//! - Generation: `perf_interp.generation_grid_config` — Grid resolver over
+//!   (num_heads, b, s), RAW blending (~linear in s), no prefix correction.
 //!
-//! Python's `_extrapolate` calls `extrapolate_data_grid` with
-//! `sqrt_y_value=True` for context (fills the seq axis using a sqrt
-//! transform of latency before linear interp). Rust currently relies on
-//! linear extrapolation against the original boundary pair, which agrees
-//! whenever the per-d_model bucket has a single entry — true for every
-//! shipped table at the time of writing.
+//! Beyond the collected range both queries util-hold on the boundary using
+//! the WideEP DeepSeek SOL formulas ported from the Python `get_sol`
+//! closures. The Python SOLs take `tp_size` while these tables key by
+//! `num_heads`; the sol closures map `tp = 128 // num_heads` exactly as the
+//! Python `sol_fn` lambdas do (128 total heads for DeepSeek).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,28 +40,36 @@ use std::sync::OnceLock;
 
 use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
-use super::interpolation::{interp_2d_1d_grid_extrapolate_inner, Grid3};
+use crate::common::system_spec::SystemSpec;
+use super::interpolation::Grid3;
+use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
+
+/// Axes for the context table (sqrt-on-seq Grid).
+const CONTEXT_AXES: &[&str] = &["num_heads", "seq_len", "batch"];
+/// Axes for the generation table (RAW Grid; seq is innermost).
+const GENERATION_AXES: &[&str] = &["num_heads", "batch", "seq_len"];
 
 /// Owner for both WideEP MLA tables. Each side is lazily loaded on first
 /// query.
 pub struct WideEpMlaTable {
     data_root: PathBuf,
+    system_spec: SystemSpec,
     context: OnceLock<Result<WideEpContextMlaGrids, AicError>>,
     generation: OnceLock<Result<WideEpGenerationMlaGrids, AicError>>,
 }
 
 /// Context grids keyed by `(kernel_source, fmha_quant, kv_quant)`.
-/// Inner `Grid3` axes: outer = num_heads, middle = s, inner = b.
+/// Inner node axes: outer = num_heads, middle = s, inner = b.
 pub struct WideEpContextMlaGrids {
-    pub by_keys: BTreeMap<ContextKey, Grid3<f64>>,
+    pub by_keys: BTreeMap<ContextKey, Node>,
 }
 
-/// Generation grids keyed by `(kernel_source, kv_quant)`. Inner `Grid3`
+/// Generation grids keyed by `(kernel_source, kv_quant)`. Inner node
 /// axes: outer = num_heads, middle = b, inner = s. The `s` axis here is
 /// `isl + step` from the CSV (Python collapses them at load time).
 pub struct WideEpGenerationMlaGrids {
-    pub by_keys: BTreeMap<GenerationKey, Grid3<f64>>,
+    pub by_keys: BTreeMap<GenerationKey, Node>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -77,9 +86,10 @@ pub struct GenerationKey {
 }
 
 impl WideEpMlaTable {
-    pub fn new(data_root: PathBuf) -> Self {
+    pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
         Self {
             data_root,
+            system_spec,
             context: OnceLock::new(),
             generation: OnceLock::new(),
         }
@@ -88,7 +98,8 @@ impl WideEpMlaTable {
     /// Raw context WideEP MLA latency. Caller is responsible for applying
     /// the `prefix_correction = (full_s^2 - prefix^2) / full_s^2`
     /// multiplier; this matches the (non-WideEP) `MlaTable::query_context`
-    /// split.
+    /// split. The SOL is evaluated at prefix = 0 accordingly (the Python
+    /// `sol_fn` passes prefix=0; samples are prefix=0).
     pub fn query_context(
         &self,
         b: u32,
@@ -104,14 +115,24 @@ impl WideEpMlaTable {
             fmha_quant: fmha_quant.name().to_string(),
             kv_quant: kv_quant.name().to_string(),
         };
-        let grid = grids.by_keys.get(&key).ok_or_else(|| {
+        let node = grids.by_keys.get(&key).ok_or_else(|| {
             missing(
                 "WideEP context MLA",
                 &self.data_root,
                 format!("{key:?}"),
             )
         })?;
-        interp_2d_1d_grid_extrapolate_inner(grid, num_heads, full_seq_tokens, b)
+        // kv_quant keys the table slice only; the Python context SOL never
+        // reads it (memory scales by fmha.memory).
+        let _ = kv_quant;
+        let spec = &self.system_spec;
+        let sol = move |c: &[f64]| wideep_context_mla_sol_ms(spec, fmha_quant, c[0], c[1], c[2]);
+        let cfg = OpInterpConfig::grid_sqrt_axis(CONTEXT_AXES, 1, &sol);
+        perf_interp::query(
+            &cfg,
+            node,
+            &[num_heads as f64, full_seq_tokens as f64, b as f64],
+        )
     }
 
     /// Raw generation WideEP MLA latency. `sequence_tokens` is the
@@ -130,17 +151,37 @@ impl WideEpMlaTable {
             kernel_source: kernel_source.to_string(),
             kv_quant: kv_quant.name().to_string(),
         };
-        let grid = grids.by_keys.get(&key).ok_or_else(|| {
+        let node = grids.by_keys.get(&key).ok_or_else(|| {
             missing(
                 "WideEP generation MLA",
                 &self.data_root,
                 format!("{key:?}"),
             )
         })?;
-        // Python's generation query is interp_3d(num_heads, b, s) — middle
-        // axis is batch, inner axis is sequence tokens. Grid is built with
-        // that nesting on load.
-        interp_2d_1d_grid_extrapolate_inner(grid, num_heads, b, sequence_tokens)
+        // Python's generation query is (num_heads, b, s) — middle axis is
+        // batch, inner axis is sequence tokens; the node is built with that
+        // nesting on load.
+        //
+        // The Python generation SOL takes an `fmha_quant_mode` that this
+        // query surface doesn't carry (the generation table isn't keyed by
+        // it and the operator doesn't pass it down). Derive it from the KV
+        // mode the way the non-WideEP generation SOL does: fp8 KV -> fp8,
+        // else bfloat16. This is exact for every shipped configuration —
+        // the collected WideEP data is fp8-KV with fp8_block fmha, and
+        // fp8 / fp8_block share the same (memory=1, compute=2) mapping.
+        let fmha_quant = if kv_quant == KvCacheQuantMode::Fp8 {
+            FmhaQuantMode::Fp8
+        } else {
+            FmhaQuantMode::Bfloat16
+        };
+        let spec = &self.system_spec;
+        let sol = move |c: &[f64]| wideep_generation_mla_sol_ms(spec, fmha_quant, c[0], c[1], c[2]);
+        let cfg = OpInterpConfig::grid(GENERATION_AXES, &sol);
+        perf_interp::query(
+            &cfg,
+            node,
+            &[num_heads as f64, b as f64, sequence_tokens as f64],
+        )
     }
 
     fn load_context(&self) -> Result<&WideEpContextMlaGrids, AicError> {
@@ -158,6 +199,152 @@ impl WideEpMlaTable {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SOL formulas — verbatim ports of the Python `get_sol` closures in
+// `WideEPContextMLA._query_wideep_context_mla_table` and
+// `WideEPGenerationMLA._query_wideep_generation_mla_table` (DeepSeek
+// constants: hidden 7168, q_lora 1536, kv_lora 512, rope 64, nope 128,
+// v_head 128). Arithmetic ordering mirrors Python for float parity.
+// ---------------------------------------------------------------------------
+
+/// See `mla.rs::bf16_tc_flops` — Python indexes the spec directly.
+fn bf16_tc_flops(spec: &SystemSpec) -> f64 {
+    spec.gpu.bfloat16_tc_flops.unwrap_or(0.0)
+}
+
+/// The tables key by `num_heads`; the Python SOLs take `tp_size` and derive
+/// `num_head = 128 // tp_size`, with the sol_fn lambdas mapping
+/// `tp = 128 // n`. Compose both floor divisions exactly.
+fn wideep_num_head(n: f64) -> f64 {
+    let tp_size = (128.0 / n).floor();
+    (128.0 / tp_size).floor()
+}
+
+/// WideEP context MLA SOL in ms at prefix = 0. Structure (per Python):
+/// - q_b / kv_b projections + attention output projection -> `ops`
+///   (divided by `bf16_tc_flops * fmha.compute`)
+/// - attention flops `2 * nh * (nope*2 + rope) * b * full_s^2 // 2` added at
+///   full bf16 throughput (no fmha compute factor)
+/// - `mem = (q_b_mem + kv_b_mem + attn_mem * 2 + attn_out_mem) * fmha.memory`
+/// - `sol = max(sol_math, sol_mem)`
+fn wideep_context_mla_sol_ms(spec: &SystemSpec, fmha_quant: FmhaQuantMode, n: f64, s: f64, b: f64) -> f64 {
+    let hidden_size = 7168.0_f64;
+    let q_lora_rank = 1536.0_f64;
+    let kv_lora_rank = 512.0_f64;
+    let qk_rope_head_dim = 64.0_f64;
+    let qk_nope_head_dim = 128.0_f64;
+    let v_head_dim = 128.0_f64;
+    let num_head = wideep_num_head(n);
+    let prefix = 0.0_f64;
+
+    // q_b projection
+    let q_b_flop = 2.0 * q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) * b * s;
+    let q_b_mem = b * q_lora_rank * s
+        + q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim)
+        + 2.0 * b * num_head * (qk_rope_head_dim + qk_nope_head_dim) * s;
+
+    // kv_b projection
+    let kv_b_flop = 2.0 * kv_lora_rank * num_head * (qk_nope_head_dim + v_head_dim) * b * s;
+    let kv_b_mem = b * s * kv_lora_rank
+        + num_head * (qk_nope_head_dim + v_head_dim) * kv_lora_rank
+        + 2.0 * b * num_head * (qk_nope_head_dim + v_head_dim) * s;
+
+    // attention computation (prefill mode). Python floor-divides by 2; the
+    // numerator's leading 2 keeps that exact for integer-valued inputs.
+    let full_s = s + prefix;
+    let attn_flop = (2.0
+        * num_head
+        * (qk_nope_head_dim * 2.0 + qk_rope_head_dim)
+        * b
+        * (full_s * full_s - prefix * prefix)
+        / 2.0)
+        .floor();
+    let attn_mem = b * s * num_head * (qk_nope_head_dim + qk_rope_head_dim) // q read
+        + b * full_s * num_head * (qk_nope_head_dim + qk_rope_head_dim) // k read
+        + b * full_s * num_head * qk_nope_head_dim // v read
+        + b * s * num_head * qk_nope_head_dim; // write
+
+    // attention output projection
+    let attn_out_flop = 2.0 * num_head * v_head_dim * hidden_size * b * s;
+    let attn_out_mem =
+        b * num_head * v_head_dim * s + num_head * v_head_dim * hidden_size + 2.0 * b * hidden_size * s;
+
+    let ops = q_b_flop + kv_b_flop + attn_out_flop;
+    let mem_bytes = (q_b_mem + kv_b_mem + attn_mem * 2.0 + attn_out_mem) * fmha_quant.mapping().memory;
+    let mut sol_math = ops / (bf16_tc_flops(spec) * fmha_quant.mapping().compute) * 1000.0;
+    sol_math += attn_flop / bf16_tc_flops(spec) * 1000.0;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    sol_math.max(sol_mem)
+}
+
+/// WideEP generation MLA SOL in ms. Structure (per Python): q_b, q_w_kc,
+/// s_w_vc and attention-output projections -> `ops` (divided by
+/// `bf16_tc_flops * fmha.compute`); the MQA attention flops
+/// `2 * b * s * nh * (rope + kv_lora*2)` added at full bf16 throughput;
+/// `mem = (q_b + q_w_kc + attn*2 + s_w_vc + attn_out) * fmha.memory`;
+/// `sol = max(sol_math, sol_mem)`.
+fn wideep_generation_mla_sol_ms(spec: &SystemSpec, fmha_quant: FmhaQuantMode, n: f64, b: f64, s: f64) -> f64 {
+    let hidden_size = 7168.0_f64;
+    let q_lora_rank = 1536.0_f64;
+    let kv_lora_rank = 512.0_f64;
+    let qk_rope_head_dim = 64.0_f64;
+    let qk_nope_head_dim = 128.0_f64;
+    let v_head_dim = 128.0_f64;
+    let num_head = wideep_num_head(n);
+
+    // NOTE: qkv_a projection is modeled as a standalone GEMM op
+    // (generation_qkv_a_proj_gemm) outside the MLA attention forward path,
+    // matching sglang >= 0.5.6 (same note as the Python get_sol).
+
+    // q_b projection
+    let q_b_flop = 2.0 * q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) * b;
+    let q_b_mem = b * q_lora_rank
+        + q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim)
+        + 2.0 * b * num_head * (qk_rope_head_dim + qk_nope_head_dim);
+
+    // q_w_kc (attention computation)
+    let q_w_kc_flop = 2.0 * num_head * qk_nope_head_dim * kv_lora_rank * b;
+    let q_w_kc_mem = b * num_head * qk_nope_head_dim
+        + num_head * kv_lora_rank * qk_nope_head_dim
+        + 2.0 * b * num_head * kv_lora_rank;
+
+    let attn_flop = 2.0 * b * s * num_head * (qk_rope_head_dim + kv_lora_rank * 2.0);
+    let attn_mem = b * num_head * (kv_lora_rank + qk_rope_head_dim)
+        + b * s * (qk_rope_head_dim + kv_lora_rank)
+        + b * num_head * kv_lora_rank;
+
+    // s_w_vc (attention output projection)
+    let s_w_vc_flop = 2.0 * b * num_head * kv_lora_rank * v_head_dim;
+    let s_w_vc_mem = b * num_head * kv_lora_rank
+        + num_head * v_head_dim * kv_lora_rank
+        + 2.0 * b * num_head * v_head_dim;
+
+    // attention output projection
+    let attn_out_flop = 2.0 * num_head * v_head_dim * hidden_size * b;
+    let attn_out_mem =
+        b * num_head * v_head_dim + num_head * v_head_dim * hidden_size + 2.0 * b * hidden_size;
+
+    let ops = q_b_flop + q_w_kc_flop + s_w_vc_flop + attn_out_flop;
+    let mem_bytes =
+        (q_b_mem + q_w_kc_mem + attn_mem * 2.0 + s_w_vc_mem + attn_out_mem) * fmha_quant.mapping().memory;
+    let mut sol_math = ops / (bf16_tc_flops(spec) * fmha_quant.mapping().compute) * 1000.0;
+    sol_math += attn_flop / bf16_tc_flops(spec) * 1000.0;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    sol_math.max(sol_mem)
+}
+
+fn grid3_to_node(grid: &Grid3<f64>) -> Node {
+    let mut node = Node::branch();
+    for (&a, by_b) in grid {
+        for (&b, by_c) in by_b {
+            for (&c, &lat) in by_c {
+                node.insert(&[a, b, c], lat);
+            }
+        }
+    }
+    node
+}
+
 fn load_context_parquet(path: &Path) -> Result<WideEpContextMlaGrids, AicError> {
     let reader = PerfReader::open(path)?;
     let kernel_source_col = reader.col("kernel_source")?;
@@ -168,7 +355,7 @@ fn load_context_parquet(path: &Path) -> Result<WideEpContextMlaGrids, AicError> 
     let isl_col = reader.col("isl")?;
     let latency_col = reader.col("latency")?;
 
-    let mut by_keys: BTreeMap<ContextKey, Grid3<f64>> = BTreeMap::new();
+    let mut raw: BTreeMap<ContextKey, Grid3<f64>> = BTreeMap::new();
     for row in reader.rows()? {
         let row = row?;
         let key = ContextKey {
@@ -177,8 +364,7 @@ fn load_context_parquet(path: &Path) -> Result<WideEpContextMlaGrids, AicError> 
             kv_quant: row.str_owned(kv_cache_dtype_col)?,
         };
         // First-wins parity with Python `load_wideep_context_mla_data`.
-        by_keys
-            .entry(key)
+        raw.entry(key)
             .or_default()
             .entry(row.u32(num_heads_col)?)
             .or_default()
@@ -187,12 +373,16 @@ fn load_context_parquet(path: &Path) -> Result<WideEpContextMlaGrids, AicError> 
             .entry(row.u32(batch_size_col)?)
             .or_insert(row.f64(latency_col)?);
     }
-    if by_keys.is_empty() {
+    if raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no WideEP context MLA rows loaded from {}",
             path.display()
         )));
     }
+    let by_keys = raw
+        .into_iter()
+        .map(|(key, grid)| (key, grid3_to_node(&grid)))
+        .collect();
     Ok(WideEpContextMlaGrids { by_keys })
 }
 
@@ -206,7 +396,7 @@ fn load_generation_parquet(path: &Path) -> Result<WideEpGenerationMlaGrids, AicE
     let step_col = reader.col("step")?;
     let latency_col = reader.col("latency")?;
 
-    let mut by_keys: BTreeMap<GenerationKey, Grid3<f64>> = BTreeMap::new();
+    let mut raw: BTreeMap<GenerationKey, Grid3<f64>> = BTreeMap::new();
     for row in reader.rows()? {
         let row = row?;
         let key = GenerationKey {
@@ -215,8 +405,7 @@ fn load_generation_parquet(path: &Path) -> Result<WideEpGenerationMlaGrids, AicE
         };
         // Python collapses `s = isl + step` into the seq axis.
         let seq = row.u32(isl_col)? + row.u32(step_col)?;
-        by_keys
-            .entry(key)
+        raw.entry(key)
             .or_default()
             .entry(row.u32(num_heads_col)?)
             .or_default()
@@ -225,12 +414,16 @@ fn load_generation_parquet(path: &Path) -> Result<WideEpGenerationMlaGrids, AicE
             .entry(seq)
             .or_insert(row.f64(latency_col)?);
     }
-    if by_keys.is_empty() {
+    if raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no WideEP generation MLA rows loaded from {}",
             path.display()
         )));
     }
+    let by_keys = raw
+        .into_iter()
+        .map(|(key, grid)| (key, grid3_to_node(&grid)))
+        .collect();
     Ok(WideEpGenerationMlaGrids { by_keys })
 }
 
@@ -257,11 +450,24 @@ mod tests {
             .join("src/aiconfigurator/systems/data/b200_sxm/sglang/0.5.10")
     }
 
+    fn h200_sglang_data_root() -> PathBuf {
+        PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.10")
+    }
+
+    fn load_spec(name: &str) -> SystemSpec {
+        let systems_yaml = PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join(format!("src/aiconfigurator/systems/{name}.yaml"));
+        SystemSpec::load(&systems_yaml).unwrap_or_else(|_| panic!("{name}.yaml must parse"))
+    }
+
     #[test]
     fn wideep_context_mla_exact_hit() {
         // First DSv3 row in b200_sxm/sglang/0.5.10 wideep_context_mla_perf.txt:
         // kernel=trtllm_mla mla=fp8_block kv=fp8 num_heads=128 b=1 isl=1 latency=0.5470
-        let table = WideEpMlaTable::new(b200_sglang_data_root());
+        let table = WideEpMlaTable::new(b200_sglang_data_root(), load_spec("b200_sxm"));
         let latency = table
             .query_context(
                 1,
@@ -282,7 +488,7 @@ mod tests {
     fn wideep_generation_mla_exact_hit() {
         // First DSv3 row in b200_sxm/sglang/0.5.10 wideep_generation_mla_perf.txt:
         // kernel=trtllm_mla kv=fp8 num_heads=128 b=1 isl=1 step=0 latency=0.1049
-        let table = WideEpMlaTable::new(b200_sglang_data_root());
+        let table = WideEpMlaTable::new(b200_sglang_data_root(), load_spec("b200_sxm"));
         let latency = table
             .query_generation(1, 1, 128, KvCacheQuantMode::Fp8, "trtllm_mla")
             .expect("WideEP generation MLA query must succeed");
@@ -290,5 +496,64 @@ mod tests {
             (latency - 0.1049).abs() < 1e-3,
             "expected recorded latency, got {latency}"
         );
+    }
+
+    /// Cross-language parity with the Python v2 engine.
+    ///
+    /// h200_sxm/sglang/0.5.10 is the root whose wideep tables carry the
+    /// `flashinfer` kernel_source Python's query accepts (b200's are
+    /// trtllm_mla-only, which `_query_wideep_*_table` rejects at the
+    /// attn-backend check). Expected values generated with
+    /// `PYTHONPATH=src python3` via `get_database('h200_sxm', 'sglang',
+    /// '0.5.10', database_mode="SOL")` (shared layer disabled so Python
+    /// loads exactly this primary parquet) and per-query
+    /// `database_mode=DatabaseMode.SILICON`, `tp_size=1` (= 128 heads),
+    /// `prefix=0`, `fmha=fp8_block`, `kv=fp8`,
+    /// `attention_backend='flashinfer'`. Cases: exact hit, interior interp,
+    /// beyond-range util-hold.
+    #[test]
+    fn wideep_mla_queries_match_python_v2_engine() {
+        let table = WideEpMlaTable::new(h200_sglang_data_root(), load_spec("h200_sxm"));
+        let assert_rel = |got: f64, expected: f64, what: &str| {
+            assert!(
+                ((got - expected) / expected).abs() < 1e-9,
+                "{what}: rust {got} vs python {expected}"
+            );
+        };
+
+        // db.query_wideep_context_mla(b, s, prefix=0, tp_size=1, ...)
+        let ctx_cases: &[(u32, u32, f64)] = &[
+            (4, 4096, 9.6274),             // exact hit
+            (4, 6000, 16.671686220608603), // seq interior (sqrt blend)
+            (4, 50000, 699.5122474936111), // beyond seq range (util-hold)
+        ];
+        for &(b, s, expected) in ctx_cases {
+            let got = table
+                .query_context(
+                    b,
+                    s,
+                    128,
+                    KvCacheQuantMode::Fp8,
+                    FmhaQuantMode::Fp8Block,
+                    "flashinfer",
+                )
+                .unwrap();
+            assert_rel(got, expected, &format!("wideep_context_mla(b={b}, s={s})"));
+        }
+
+        // db.query_wideep_generation_mla(b, s, tp_size=1, kv=fp8,
+        // fmha=fp8_block, 'flashinfer'). The Rust query derives the SOL's
+        // fmha mode from the fp8 KV cache (same mapping as fp8_block).
+        let gen_cases: &[(u32, u32, f64)] = &[
+            (1, 4096, 0.1017),               // exact hit
+            (1, 3000, 0.09988046874999999),  // seq interior (raw blend)
+            (1, 100000, 0.17286183638702504), // beyond seq range (util-hold)
+        ];
+        for &(b, s, expected) in gen_cases {
+            let got = table
+                .query_generation(b, s, 128, KvCacheQuantMode::Fp8, "flashinfer")
+                .unwrap();
+            assert_rel(got, expected, &format!("wideep_generation_mla(b={b}, s={s})"));
+        }
     }
 }

@@ -5,14 +5,23 @@
 //! and module-level context/generation.
 //!
 //! Mirrors the SILICON paths of `aiconfigurator.sdk.operations.mla.{ContextMLA,
-//! GenerationMLA, MLABmm, MLAModule}._query_*_table`. Module-level data is
-//! collected as a fused unit (MLA + RoPE + BMM together) and indexed by an
-//! extra `gemm_quant` axis.
+//! GenerationMLA, MLABmm, MLAModule}._query_*_table` on the perf_interp v2
+//! engine: context-type tables ([num_heads][seq][batch], latency ~ seq^2) use
+//! a Grid resolver with SQRT blending on the seq axis; generation-type tables
+//! ([num_heads][batch][seq], ~linear in seq) and the 1-D BMM tokens curve use
+//! RAW Grid blending. Beyond the collected range every query util-holds on the
+//! boundary anchored by the op's SOL (ported verbatim from each Python
+//! `get_sol`). Module-level data is collected as a fused unit (MLA + RoPE +
+//! BMM together) and indexed by an extra `gemm_quant` axis.
 //!
 //! Caller passes `full_seq_tokens` for context queries (= `isl + prefix`);
-//! the prefix-correction multiplier is applied by the operator layer.
+//! the prefix-correction multiplier is applied by the operator layer, and the
+//! context SOL is therefore evaluated at `prefix = 0` exactly like the
+//! `sol_fn` Python wires into `perf_interp.context_grid_config`.
 //! The MLA BMM table falls back to `bfloat16` data when the requested quant
-//! mode is absent, matching Python's `quant_mode_lookup` behavior.
+//! mode is absent, matching Python's `quant_mode_lookup` behavior; the BMM
+//! SOL keeps using the REQUESTED quant (Python passes `quant_mode`, not the
+//! lookup fallback, into its `get_sol`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,11 +29,21 @@ use std::sync::OnceLock;
 
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
-use super::interpolation::{interp_1d, interp_2d_1d_grid, nearest_neighbors, Grid3};
+use crate::common::system_spec::SystemSpec;
+use super::interpolation::Grid3;
+use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
+
+/// Axes for context-type MLA tables (op-level and module-level).
+const CONTEXT_AXES: &[&str] = &["num_heads", "seq_len", "batch"];
+/// Axes for generation-type MLA tables (op-level and module-level).
+const GENERATION_AXES: &[&str] = &["num_heads", "batch", "seq_len"];
+/// Axes for the 1-D MLA BMM tokens curve.
+const BMM_AXES: &[&str] = &["num_tokens"];
 
 pub struct MlaTable {
     data_root: PathBuf,
+    system_spec: SystemSpec,
     context: OnceLock<Result<ContextMlaGrids, AicError>>,
     generation: OnceLock<Result<GenerationMlaGrids, AicError>>,
     bmm: OnceLock<Result<BmmGrids, AicError>>,
@@ -33,22 +52,22 @@ pub struct MlaTable {
 }
 
 struct ContextMlaGrids {
-    by_keys: BTreeMap<ContextKey, Grid3<f64>>,
+    by_keys: BTreeMap<ContextKey, Node>,
 }
 
 struct GenerationMlaGrids {
-    by_keys: BTreeMap<KvOnlyKey, Grid3<f64>>,
+    by_keys: BTreeMap<KvOnlyKey, Node>,
 }
 
 /// Module-level MLA grids, shared between context and generation variants
 /// (the same nested layout; distinct CSV files supply the data).
 struct ModuleGrids {
-    by_keys: BTreeMap<ModuleKey, Grid3<f64>>,
+    by_keys: BTreeMap<ModuleKey, Node>,
 }
 
 struct BmmGrids {
-    // (bmm_quant, "mla_gen_pre" | "mla_gen_post", num_heads) -> {num_tokens -> latency}
-    by_keys: BTreeMap<BmmKey, BTreeMap<u32, BTreeMap<u32, f64>>>,
+    // (bmm_quant, "mla_gen_pre" | "mla_gen_post") -> num_heads -> 1-D tokens curve
+    by_keys: BTreeMap<BmmKey, BTreeMap<u32, Node>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -76,9 +95,10 @@ struct BmmKey {
 }
 
 impl MlaTable {
-    pub fn new(data_root: PathBuf) -> Self {
+    pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
         Self {
             data_root,
+            system_spec,
             context: OnceLock::new(),
             generation: OnceLock::new(),
             bmm: OnceLock::new(),
@@ -101,11 +121,19 @@ impl MlaTable {
             fmha_quant: fmha_quant.name().to_string(),
             kv_quant: kv_quant.name().to_string(),
         };
-        let grid = grids
+        let node = grids
             .by_keys
             .get(&key)
             .ok_or_else(|| missing("context MLA", &self.data_root, format!("{key:?}")))?;
-        interp_2d_1d_grid(grid, num_heads, full_seq_tokens, b)
+        let spec = &self.system_spec;
+        // c = (num_heads, seq_len, batch), prefix = 0 (see module docs).
+        let sol = move |c: &[f64]| context_mla_sol_ms(spec, kv_quant, fmha_quant, c[0], c[1], c[2]);
+        let cfg = OpInterpConfig::grid_sqrt_axis(CONTEXT_AXES, 1, &sol);
+        perf_interp::query(
+            &cfg,
+            node,
+            &[num_heads as f64, full_seq_tokens as f64, b as f64],
+        )
     }
 
     /// Op-level generation MLA latency in ms.
@@ -120,19 +148,23 @@ impl MlaTable {
         let key = KvOnlyKey {
             kv_quant: kv_quant.name().to_string(),
         };
-        let grid = grids
+        let node = grids
             .by_keys
             .get(&key)
             .ok_or_else(|| missing("generation MLA", &self.data_root, format!("{key:?}")))?;
+        let spec = &self.system_spec;
         // Python's generation MLA uses (num_heads, b, s) as the 3 axes
-        // — note b and s order differs from context.
-        interp_2d_1d_grid(grid, num_heads, b, s)
+        // — note b and s order differs from context. RAW blending (~linear in s).
+        let sol = move |c: &[f64]| generation_mla_sol_ms(spec, kv_quant, c[0], c[1], c[2]);
+        let cfg = OpInterpConfig::grid(GENERATION_AXES, &sol);
+        perf_interp::query(&cfg, node, &[num_heads as f64, b as f64, s as f64])
     }
 
     /// MLA BMM (pre or post) latency in ms.
     ///
     /// Falls back to `bfloat16` if the requested quant mode is absent,
-    /// matching Python's `quant_mode_lookup` behavior.
+    /// matching Python's `quant_mode_lookup` behavior. The SOL keeps using
+    /// the requested quant mode either way (parity with Python's `get_sol`).
     pub fn query_bmm(
         &self,
         num_tokens: u32,
@@ -159,22 +191,19 @@ impl MlaTable {
             missing("MLA BMM", &self.data_root, format!("quant={}, {pre_or_post}", quant.name()))
         })?;
 
-        let by_tokens = by_heads.get(&num_heads).ok_or_else(|| {
+        let node = by_heads.get(&num_heads).ok_or_else(|| {
             AicError::PerfDatabase(format!(
                 "MLA BMM data missing for num_heads={num_heads} at {}",
                 self.data_root.display()
             ))
         })?;
 
-        // 1-D interpolation along num_tokens (extrapolation allowed).
-        if let Some(&latency) = by_tokens.get(&num_tokens) {
-            return Ok(latency);
-        }
-        let token_keys: Vec<u32> = by_tokens.keys().copied().collect();
-        let (lo, hi) = nearest_neighbors(num_tokens, &token_keys, false)?;
-        let y_lo = by_tokens[&lo];
-        let y_hi = by_tokens[&hi];
-        Ok(interp_1d(lo as f64, hi as f64, y_lo, y_hi, num_tokens as f64))
+        // 1-D tokens curve: RAW lerp in range (BMM is ~linear in tokens);
+        // boundary util-hold beyond it via the BMM SOL.
+        let spec = &self.system_spec;
+        let sol = move |c: &[f64]| mla_bmm_sol_ms(spec, quant, num_heads as f64, c[0]);
+        let cfg = OpInterpConfig::grid(BMM_AXES, &sol);
+        perf_interp::query(&cfg, node, &[num_tokens as f64])
     }
 
     /// Module-level context MLA latency in ms (raw — no prefix correction).
@@ -193,11 +222,21 @@ impl MlaTable {
             kv_quant: kv_quant.name().to_string(),
             gemm_quant: gemm_quant.name().to_string(),
         };
-        let grid = grids
+        let node = grids
             .by_keys
             .get(&key)
             .ok_or_else(|| missing("context MLA module", &self.data_root, format!("{key:?}")))?;
-        interp_2d_1d_grid(grid, num_heads, full_seq_tokens, b)
+        let spec = &self.system_spec;
+        // Python's module-context get_sol reuses the op-level context SOL
+        // verbatim (the module fuses MLA + RoPE + BMM but the SOL refinement
+        // was deliberately deferred there too).
+        let sol = move |c: &[f64]| context_mla_sol_ms(spec, kv_quant, fmha_quant, c[0], c[1], c[2]);
+        let cfg = OpInterpConfig::grid_sqrt_axis(CONTEXT_AXES, 1, &sol);
+        perf_interp::query(
+            &cfg,
+            node,
+            &[num_heads as f64, full_seq_tokens as f64, b as f64],
+        )
     }
 
     /// Module-level generation MLA latency in ms.
@@ -216,10 +255,17 @@ impl MlaTable {
             kv_quant: kv_quant.name().to_string(),
             gemm_quant: gemm_quant.name().to_string(),
         };
-        let grid = grids.by_keys.get(&key).ok_or_else(|| {
+        let node = grids.by_keys.get(&key).ok_or_else(|| {
             missing("generation MLA module", &self.data_root, format!("{key:?}"))
         })?;
-        interp_2d_1d_grid(grid, num_heads, b, s)
+        let spec = &self.system_spec;
+        // Generation module SOL = generation MLA SOL + BMM pre/post terms
+        // (Python's module get_sol folds the BMM into sol_math/sol_mem before
+        // the max). fmha_quant only keys the table slice, not the SOL.
+        let sol =
+            move |c: &[f64]| generation_mla_module_sol_ms(spec, kv_quant, gemm_quant, c[0], c[1], c[2]);
+        let cfg = OpInterpConfig::grid(GENERATION_AXES, &sol);
+        perf_interp::query(&cfg, node, &[num_heads as f64, b as f64, s as f64])
     }
 
     fn load_context(&self) -> Result<&ContextMlaGrids, AicError> {
@@ -258,6 +304,146 @@ impl MlaTable {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SOL formulas — verbatim ports of the Python `get_sol` closures in
+// `operations/mla.py`. Each keeps Python's `max(compute, mem)` structure and
+// arithmetic ordering so cross-language parity holds to float precision.
+// ---------------------------------------------------------------------------
+
+/// `bfloat16_tc_flops` from the system YAML. Python indexes
+/// `system_spec["gpu"]["bfloat16_tc_flops"]` directly (KeyError if absent);
+/// every shipped system defines it. A missing value degrades to 0.0
+/// (=> infinite sol_math) rather than panicking inside a sol closure.
+fn bf16_tc_flops(spec: &SystemSpec) -> f64 {
+    spec.gpu.bfloat16_tc_flops.unwrap_or(0.0)
+}
+
+/// Context MLA SOL in ms, evaluated at prefix = 0 (the perf_interp `sol_fn`
+/// contract — samples are prefix=0 and the operator layer owns the prefix
+/// correction). Mirrors `ContextMLA._query_context_mla_table::get_sol` and
+/// the identical `MLAModule._query_context_mla_module_table::get_sol`:
+/// - `ops      = b * n * 2/2 * (192 + 128) * (full_s^2 - prefix^2)`
+/// - `mem      = b * n * (kv.memory * full_s * (192+128) + 2 * s * (192+128))`
+/// - `sol_math = ops / bf16_tc_flops * 1000 / fmha.compute`
+/// - `sol_mem  = mem / mem_bw * 1000`
+/// - `sol      = max(sol_math, sol_mem)`
+fn context_mla_sol_ms(
+    spec: &SystemSpec,
+    kv_quant: KvCacheQuantMode,
+    fmha_quant: FmhaQuantMode,
+    n: f64,
+    s: f64,
+    b: f64,
+) -> f64 {
+    let prefix = 0.0_f64;
+    let full_s = s + prefix;
+    let ops = b * n * 2.0 / 2.0 * (192.0 + 128.0) * (full_s * full_s - prefix * prefix);
+    let mem_bytes =
+        b * n * (kv_quant.mapping().memory * full_s * (192.0 + 128.0) + 2.0 * s * (192.0 + 128.0));
+    let sol_math = ops / bf16_tc_flops(spec) * 1000.0 / fmha_quant.mapping().compute;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    sol_math.max(sol_mem)
+}
+
+/// Generation MLA SOL in ms. Mirrors
+/// `GenerationMLA._query_generation_mla_table::get_sol`:
+/// - `quant_gen = fp8 if kv == fp8 else bfloat16`
+/// - `ops      = 2 * b * n * 1088 * s`
+/// - `mem      = b * (n * 1088 * 2 + (s - 1) * 576 * kv.memory)`
+/// - `sol_math = ops / bf16_tc_flops * 1000 / quant_gen.compute`
+/// - `sol_mem  = mem / mem_bw * 1000`
+/// - `sol      = max(sol_math, sol_mem)`
+fn generation_mla_sol_ms(
+    spec: &SystemSpec,
+    kv_quant: KvCacheQuantMode,
+    n: f64,
+    b: f64,
+    s: f64,
+) -> f64 {
+    let quant_gen = if kv_quant == KvCacheQuantMode::Fp8 {
+        FmhaQuantMode::Fp8
+    } else {
+        FmhaQuantMode::Bfloat16
+    };
+    let ops = 2.0 * b * n * 1088.0 * s;
+    let mem_bytes = b * (n * 1088.0 * 2.0 + (s - 1.0) * 576.0 * kv_quant.mapping().memory);
+    let sol_math = ops / bf16_tc_flops(spec) * 1000.0 / quant_gen.mapping().compute;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    sol_math.max(sol_mem)
+}
+
+/// MLA BMM SOL in ms. Mirrors `MLABmm._query_mla_bmm_table::get_sol` (uses
+/// the REQUESTED quant, even when the data lookup fell back to bfloat16):
+/// - `ops      = 2 * t * n * 128 * 512`
+/// - `mem      = n * (t * 640 + 128 * 512) * quant.memory`
+/// - `sol_math = ops / (bf16_tc_flops * quant.compute) * 1000`
+/// - `sol_mem  = mem / mem_bw * 1000`
+/// - `sol      = max(sol_math, sol_mem)`
+fn mla_bmm_sol_ms(spec: &SystemSpec, quant: GemmQuantMode, n: f64, t: f64) -> f64 {
+    let ops = 2.0 * t * n * 128.0 * 512.0;
+    let mem_bytes = n * (t * 640.0 + 128.0 * 512.0) * quant.mapping().memory;
+    let sol_math = ops / (bf16_tc_flops(spec) * quant.mapping().compute) * 1000.0;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    sol_math.max(sol_mem)
+}
+
+/// Generation MLA module SOL in ms. Mirrors
+/// `MLAModule._query_generation_mla_module_table::get_sol`: the generation
+/// MLA SOL plus BMM pre+post terms folded into sol_math / sol_mem BEFORE the
+/// max (NOT `max(attn) + max(bmm)`):
+/// - attn: `ops = 2*b*n*1088*s`, `mem = b*(n*1088*2 + (s-1)*576*kv.memory)`
+/// - bmm:  `ops = 2*2*b*n*128*512`, `mem = 2*n*(b*640 + 128*512)*gemm.memory`
+/// - `sol_math = attn_ops/bf16/quant_gen.compute + bmm_ops/(bf16*gemm.compute)`
+/// - `sol_mem  = (attn_mem + bmm_mem) / mem_bw`
+/// - `sol      = max(sol_math, sol_mem)`
+fn generation_mla_module_sol_ms(
+    spec: &SystemSpec,
+    kv_quant: KvCacheQuantMode,
+    gemm_quant: GemmQuantMode,
+    n: f64,
+    b: f64,
+    s: f64,
+) -> f64 {
+    let quant_gen = if kv_quant == KvCacheQuantMode::Fp8 {
+        FmhaQuantMode::Fp8
+    } else {
+        FmhaQuantMode::Bfloat16
+    };
+    // MLA attention ops
+    let attn_ops = 2.0 * b * n * 1088.0 * s;
+    let mem_bytes = b * (n * 1088.0 * 2.0 + (s - 1.0) * 576.0 * kv_quant.mapping().memory);
+    let mut sol_math = attn_ops / bf16_tc_flops(spec) * 1000.0 / quant_gen.mapping().compute;
+    let mut sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    // Add BMM pre + post SOL (same as query_mla_bmm)
+    let bmm_ops = 2.0 * 2.0 * b * n * 128.0 * 512.0; // pre + post
+    let bmm_mem = 2.0 * n * (b * 640.0 + 128.0 * 512.0) * gemm_quant.mapping().memory;
+    let bmm_math = bmm_ops / (bf16_tc_flops(spec) * gemm_quant.mapping().compute) * 1000.0;
+    let bmm_mem_time = bmm_mem / spec.gpu.mem_bw * 1000.0;
+    sol_math += bmm_math;
+    sol_mem += bmm_mem_time;
+    sol_math.max(sol_mem)
+}
+
+fn grid3_to_node(grid: &Grid3<f64>) -> Node {
+    let mut node = Node::branch();
+    for (&a, by_b) in grid {
+        for (&b, by_c) in by_b {
+            for (&c, &lat) in by_c {
+                node.insert(&[a, b, c], lat);
+            }
+        }
+    }
+    node
+}
+
+fn curve_to_node(curve: &BTreeMap<u32, f64>) -> Node {
+    let mut node = Node::branch();
+    for (&t, &lat) in curve {
+        node.insert(&[t], lat);
+    }
+    node
+}
+
 fn load_op_parquet(path: &Path, is_context: bool) -> Result<ContextMlaGrids, AicError> {
     let reader = PerfReader::open(path)?;
     let mla_dtype_col = reader.col("mla_dtype")?;
@@ -268,7 +454,7 @@ fn load_op_parquet(path: &Path, is_context: bool) -> Result<ContextMlaGrids, Aic
     let step_col = reader.col("step")?;
     let latency_col = reader.col("latency")?;
 
-    let mut by_keys: BTreeMap<ContextKey, Grid3<f64>> = BTreeMap::new();
+    let mut raw: BTreeMap<ContextKey, Grid3<f64>> = BTreeMap::new();
     for row in reader.rows()? {
         let row = row?;
         let key = ContextKey {
@@ -278,8 +464,7 @@ fn load_op_parquet(path: &Path, is_context: bool) -> Result<ContextMlaGrids, Aic
         let isl = row.u32(isl_col)?;
         let y_axis = if is_context { isl } else { isl + row.u32(step_col)? };
         // First-wins parity with Python `load_mla_data` (context branch).
-        by_keys
-            .entry(key)
+        raw.entry(key)
             .or_default()
             .entry(row.u32(num_heads_col)?)
             .or_default()
@@ -288,12 +473,16 @@ fn load_op_parquet(path: &Path, is_context: bool) -> Result<ContextMlaGrids, Aic
             .entry(row.u32(batch_size_col)?)
             .or_insert(row.f64(latency_col)?);
     }
-    if by_keys.is_empty() {
+    if raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no MLA op rows loaded from {}",
             path.display()
         )));
     }
+    let by_keys = raw
+        .into_iter()
+        .map(|(key, grid)| (key, grid3_to_node(&grid)))
+        .collect();
     Ok(ContextMlaGrids { by_keys })
 }
 
@@ -306,7 +495,7 @@ fn load_op_gen_parquet(path: &Path) -> Result<GenerationMlaGrids, AicError> {
     let step_col = reader.col("step")?;
     let latency_col = reader.col("latency")?;
 
-    let mut by_keys: BTreeMap<KvOnlyKey, Grid3<f64>> = BTreeMap::new();
+    let mut raw: BTreeMap<KvOnlyKey, Grid3<f64>> = BTreeMap::new();
     for row in reader.rows()? {
         let row = row?;
         let key = KvOnlyKey {
@@ -315,8 +504,7 @@ fn load_op_gen_parquet(path: &Path) -> Result<GenerationMlaGrids, AicError> {
         let sequence_tokens = row.u32(isl_col)? + row.u32(step_col)?;
         // Python uses (num_heads, b, s) axis order for generation MLA.
         // First-wins parity with Python `load_mla_data` (generation branch).
-        by_keys
-            .entry(key)
+        raw.entry(key)
             .or_default()
             .entry(row.u32(num_heads_col)?)
             .or_default()
@@ -325,12 +513,16 @@ fn load_op_gen_parquet(path: &Path) -> Result<GenerationMlaGrids, AicError> {
             .entry(sequence_tokens)
             .or_insert(row.f64(latency_col)?);
     }
-    if by_keys.is_empty() {
+    if raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no generation MLA rows loaded from {}",
             path.display()
         )));
     }
+    let by_keys = raw
+        .into_iter()
+        .map(|(key, grid)| (key, grid3_to_node(&grid)))
+        .collect();
     Ok(GenerationMlaGrids { by_keys })
 }
 
@@ -345,7 +537,7 @@ fn load_module_parquet(path: &Path, is_context: bool) -> Result<ModuleGrids, Aic
     let step_col = reader.col("step")?;
     let latency_col = reader.col("latency")?;
 
-    let mut by_keys: BTreeMap<ModuleKey, Grid3<f64>> = BTreeMap::new();
+    let mut raw: BTreeMap<ModuleKey, Grid3<f64>> = BTreeMap::new();
     for row in reader.rows()? {
         let row = row?;
         let key = ModuleKey {
@@ -369,7 +561,7 @@ fn load_module_parquet(path: &Path, is_context: bool) -> Result<ModuleGrids, Aic
         // here caused a constant +0.247ms/step decode drift on b300 because
         // Rust picked the slightly-higher latency for ~184 affected keys.
         if is_context {
-            let inner = by_keys
+            let inner = raw
                 .entry(key)
                 .or_default()
                 .entry(num_heads)
@@ -380,7 +572,7 @@ fn load_module_parquet(path: &Path, is_context: bool) -> Result<ModuleGrids, Aic
         } else {
             // Generation module: (num_heads, b, s) axis order.
             let sequence_tokens = isl + row.u32(step_col)?;
-            let inner = by_keys
+            let inner = raw
                 .entry(key)
                 .or_default()
                 .entry(num_heads)
@@ -390,12 +582,16 @@ fn load_module_parquet(path: &Path, is_context: bool) -> Result<ModuleGrids, Aic
             inner.insert(sequence_tokens, latency);
         }
     }
-    if by_keys.is_empty() {
+    if raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no MLA module rows loaded from {}",
             path.display()
         )));
     }
+    let by_keys = raw
+        .into_iter()
+        .map(|(key, grid)| (key, grid3_to_node(&grid)))
+        .collect();
     Ok(ModuleGrids { by_keys })
 }
 
@@ -407,7 +603,7 @@ fn load_bmm_parquet(path: &Path) -> Result<BmmGrids, AicError> {
     let num_heads_col = reader.col("num_heads")?;
     let latency_col = reader.col("latency")?;
 
-    let mut by_keys: BTreeMap<BmmKey, BTreeMap<u32, BTreeMap<u32, f64>>> = BTreeMap::new();
+    let mut raw: BTreeMap<BmmKey, BTreeMap<u32, BTreeMap<u32, f64>>> = BTreeMap::new();
     for row in reader.rows()? {
         let row = row?;
         let key = BmmKey {
@@ -415,20 +611,29 @@ fn load_bmm_parquet(path: &Path) -> Result<BmmGrids, AicError> {
             pre_or_post: row.str_owned(op_name_col)?,
         };
         // First-wins parity with Python `load_mla_bmm_data`.
-        by_keys
-            .entry(key)
+        raw.entry(key)
             .or_default()
             .entry(row.u32(num_heads_col)?)
             .or_default()
             .entry(row.u32(num_tokens_col)?)
             .or_insert(row.f64(latency_col)?);
     }
-    if by_keys.is_empty() {
+    if raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no MLA BMM rows loaded from {}",
             path.display()
         )));
     }
+    let by_keys = raw
+        .into_iter()
+        .map(|(key, by_heads)| {
+            let converted = by_heads
+                .into_iter()
+                .map(|(heads, curve)| (heads, curve_to_node(&curve)))
+                .collect();
+            (key, converted)
+        })
+        .collect();
     Ok(BmmGrids { by_keys })
 }
 
@@ -461,11 +666,18 @@ mod tests {
             .join("src/aiconfigurator/systems/data/gb200/trtllm/1.3.0rc10")
     }
 
+    fn load_spec(name: &str) -> SystemSpec {
+        let systems_yaml = PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join(format!("src/aiconfigurator/systems/{name}.yaml"));
+        SystemSpec::load(&systems_yaml).unwrap_or_else(|_| panic!("{name}.yaml must parse"))
+    }
+
     #[test]
     fn op_level_context_mla_absent_on_vllm_b200() {
         // vLLM b200 ships module-level MLA only; op-level context_mla_perf.txt
         // is not present. Expect a clear IO error from the lazy loader.
-        let table = MlaTable::new(b200_vllm_data_root());
+        let table = MlaTable::new(b200_vllm_data_root(), load_spec("b200_sxm"));
         let err = table
             .query_context(1, 1024, 128, KvCacheQuantMode::Bfloat16, FmhaQuantMode::Bfloat16)
             .unwrap_err();
@@ -479,7 +691,7 @@ mod tests {
     fn module_level_context_mla_exact_hit() {
         // First row of b200_sxm/vllm/0.19.0/mla_context_module_perf.txt:
         // mla=bfloat16 kv=bfloat16 gemm=bfloat16 n=128 b=1 isl=1 step=0 latency=0.1351
-        let table = MlaTable::new(b200_vllm_data_root());
+        let table = MlaTable::new(b200_vllm_data_root(), load_spec("b200_sxm"));
         let latency = table
             .query_context_module(
                 1,
@@ -498,7 +710,7 @@ mod tests {
 
     #[test]
     fn module_level_generation_mla_smoke() {
-        let table = MlaTable::new(b200_vllm_data_root());
+        let table = MlaTable::new(b200_vllm_data_root(), load_spec("b200_sxm"));
         // Verify the generation module CSV loads and returns positive
         // values for a representative smoke shape.
         let result = table.query_generation_module(
@@ -522,7 +734,7 @@ mod tests {
     #[test]
     fn mla_bmm_falls_back_to_bfloat16() {
         // gb200/trtllm has mla_bmm data; verify the fallback path works.
-        let table = MlaTable::new(gb200_trtllm_data_root());
+        let table = MlaTable::new(gb200_trtllm_data_root(), load_spec("gb200"));
         // Request an unusual quant; loader should fall back to bfloat16.
         let result = table.query_bmm(64, 128, GemmQuantMode::Sq, true);
         // We just verify no panic and the result is a number; if Sq has no
@@ -531,6 +743,109 @@ mod tests {
             Ok(latency) => assert!(latency.is_finite() && latency > 0.0),
             Err(AicError::PerfDatabase(_)) => {}
             Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// Cross-language parity with the Python v2 engine on the same tables.
+    ///
+    /// Expected values generated with `PYTHONPATH=src python3` against
+    /// gb200/trtllm/1.3.0rc10 via `get_database('gb200', 'trtllm',
+    /// '1.3.0rc10', database_mode="SOL")` (shared layer disabled so Python
+    /// loads exactly the primary parquet this table reads) and per-query
+    /// `database_mode=DatabaseMode.SILICON`. Three resolution paths per
+    /// query: exact hit, interior interp, beyond-range util-hold.
+    #[test]
+    fn mla_queries_match_python_v2_engine() {
+        let table = MlaTable::new(gb200_trtllm_data_root(), load_spec("gb200"));
+        let assert_rel = |got: f64, expected: f64, what: &str| {
+            assert!(
+                ((got - expected) / expected).abs() < 1e-9,
+                "{what}: rust {got} vs python {expected}"
+            );
+        };
+
+        // db.query_context_mla(b, s, prefix=0, num_heads=128, kv=bf16, fmha=bf16)
+        let ctx_cases: &[(u32, u32, f64)] = &[
+            (4, 4096, 2.4523092905680337),   // exact hit
+            (4, 5000, 3.551457374840901),    // seq interior (sqrt blend)
+            (4, 100000, 1456.7266741020528), // beyond seq range (util-hold)
+        ];
+        for &(b, s, expected) in ctx_cases {
+            let got = table
+                .query_context(b, s, 128, KvCacheQuantMode::Bfloat16, FmhaQuantMode::Bfloat16)
+                .unwrap();
+            assert_rel(got, expected, &format!("context_mla(b={b}, s={s})"));
+        }
+
+        // db.query_generation_mla(b, s, num_heads=128, kv=bf16)
+        let gen_cases: &[(u32, u32, f64)] = &[
+            (1, 4096, 0.02057066683967908),   // exact hit
+            (1, 3000, 0.018758271161156394),  // seq interior (raw blend)
+            (1, 500000, 0.22062800915836348), // beyond seq range (util-hold)
+        ];
+        for &(b, s, expected) in gen_cases {
+            let got = table
+                .query_generation(b, s, 128, KvCacheQuantMode::Bfloat16)
+                .unwrap();
+            assert_rel(got, expected, &format!("generation_mla(b={b}, s={s})"));
+        }
+
+        // db.query_mla_bmm(num_tokens, num_heads=128, quant=bf16, if_pre=True)
+        let bmm_cases: &[(u32, f64)] = &[
+            (256, 0.010847999900579452),  // exact hit
+            (100, 0.008607199974358081),  // tokens interior (raw blend)
+            (20000, 0.5326748099591996),  // beyond tokens range (util-hold)
+        ];
+        for &(t, expected) in bmm_cases {
+            let got = table
+                .query_bmm(t, 128, GemmQuantMode::Bfloat16, true)
+                .unwrap();
+            assert_rel(got, expected, &format!("mla_bmm(t={t})"));
+        }
+        // fp8 is absent in the gb200 BMM table -> data falls back to bfloat16
+        // (Python quant_mode_lookup). The util-hold SOL uses the requested
+        // quant in both languages.
+        let got = table.query_bmm(20000, 128, GemmQuantMode::Fp8, true).unwrap();
+        assert_rel(got, 0.5326748099591996, "mla_bmm fp8 fallback (t=20000)");
+
+        // db.query_context_mla_module(b, s, prefix=0, num_heads=128, bf16^3)
+        let ctx_mod_cases: &[(u32, u32, f64)] = &[
+            (2, 4096, 2.6503),              // exact hit
+            (2, 5000, 3.532393382077576),   // seq interior (sqrt blend)
+            (2, 100000, 702.2051140666009), // beyond seq range (util-hold)
+        ];
+        for &(b, s, expected) in ctx_mod_cases {
+            let got = table
+                .query_context_module(
+                    b,
+                    s,
+                    128,
+                    KvCacheQuantMode::Bfloat16,
+                    FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Bfloat16,
+                )
+                .unwrap();
+            assert_rel(got, expected, &format!("context_mla_module(b={b}, s={s})"));
+        }
+
+        // db.query_generation_mla_module(b, s, num_heads=128, bf16^3)
+        let gen_mod_cases: &[(u32, u32, f64)] = &[
+            (8, 4097, 0.0938),               // exact hit
+            (8, 3000, 0.0918716796875),      // seq interior (raw blend)
+            (8, 500000, 1.0565041038424121), // beyond seq range (util-hold)
+        ];
+        for &(b, s, expected) in gen_mod_cases {
+            let got = table
+                .query_generation_module(
+                    b,
+                    s,
+                    128,
+                    KvCacheQuantMode::Bfloat16,
+                    FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Bfloat16,
+                )
+                .unwrap();
+            assert_rel(got, expected, &format!("generation_mla_module(b={b}, s={s})"));
         }
     }
 }
