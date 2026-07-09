@@ -1,10 +1,17 @@
 name: "Accuracy Regression Testing"
 
+# Demoted from a PR-time job to a nightly tracked metric — the PR gate is now
+# prediction-regression-gate.yml (docs/design/prediction_regression_gate_design.md
+# §2.6/§5). The value of a scheduled run is the new-side prediction-vs-silicon
+# MAPE in the uploaded artifacts; the old-vs-new comparison is only meaningful
+# on manual dispatches with an explicit old-ref. Longer term this converges
+# onto tools/accuracy_tracking/run_silicon.py and the two-venv machinery here
+# retires.
+
 on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
+  schedule:
+    # 7 AM PT / 2 PM UTC, same slot as the support matrix daily run.
+    - cron: "0 14 * * *"
   workflow_dispatch:
     inputs:
       old-ref:
@@ -42,12 +49,12 @@ jobs:
 
       - name: Resolve old revision
         id: old-ref
+        env:
+          # Empty on schedule events (inputs only exist for workflow_dispatch);
+          # fall back to main so nightly runs resolve a valid ref.
+          OLD_REF_INPUT: ${{ inputs.old-ref }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            OLD_REF="${{ github.event.pull_request.base.sha }}"
-          else
-            OLD_REF="${{ inputs.old-ref }}"
-          fi
+          OLD_REF="${OLD_REF_INPUT:-main}"
           echo "old_ref=${OLD_REF}" >> "$GITHUB_OUTPUT"
           echo "Comparing old revision ${OLD_REF} against incoming revision $(git rev-parse HEAD)"
 
@@ -109,7 +116,6 @@ jobs:
           python -m pytest tools/accuracy_regression_testing/test_regression_thresholds.py -q
 
       - name: Upload regression artifacts
-        id: upload-regression-artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -139,26 +145,3 @@ jobs:
           else
             echo "Comparison summary was not generated." >> "$GITHUB_STEP_SUMMARY"
           fi
-
-      - name: Prepare PR comment inputs
-        if: always() && github.event_name == 'pull_request'
-        env:
-          ARTIFACT_URL: ${{ steps.upload-regression-artifacts.outputs.artifact-url }}
-          OLD_REF: ${{ steps.old-ref.outputs.old_ref }}
-        run: |
-          set -euo pipefail
-          rm -rf accuracy-regression-comment-inputs
-          mkdir -p accuracy-regression-comment-inputs
-          printf '%s\n' "${OLD_REF}" > accuracy-regression-comment-inputs/old-ref.txt
-          printf '%s\n' "${ARTIFACT_URL}" > accuracy-regression-comment-inputs/artifact-url.txt
-          printf '%s\n' "${{ github.event.pull_request.number }}" > accuracy-regression-comment-inputs/pr-number.txt
-          cp tools/accuracy_regression_testing/results/comparison_summary.csv accuracy-regression-comment-inputs/ 2>/dev/null || true
-          cp tools/accuracy_regression_testing/results/comparison_plot.png accuracy-regression-comment-inputs/ 2>/dev/null || true
-
-      - name: Upload PR comment inputs
-        if: always() && github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v7
-        with:
-          name: accuracy-regression-comment-inputs
-          path: accuracy-regression-comment-inputs/**
-          retention-days: 30
