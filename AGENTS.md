@@ -20,7 +20,7 @@ Before making any change under `collector/**` MUST read:
 - For case YAML work: `.claude/rules/collector/case_authoring.md`
 
 For adding a new Collector operation, additionally follow
-`.agents/skills/aic-collector-op-development/SKILL.md` (consumer-contract,
+`.claude/skills/aic-collector-op-development/SKILL.md` (consumer-contract,
 case-identity, deduplication, and validation gates). Skills are procedural
 runbooks; if a skill and a `.claude/rules/` file ever disagree, the rule
 file wins.

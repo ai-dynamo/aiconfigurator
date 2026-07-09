@@ -6,7 +6,7 @@ review SGLang, TensorRT-LLM, or vLLM independently instead of combining all
 three in one change.
 
 The tracked agent workflow is
-[`aic-auto-collect`](../../.agents/skills/aic-auto-collect/SKILL.md). This
+[`aic-auto-collect`](../../.claude/skills/aic-auto-collect/SKILL.md). This
 document is the project source of truth; the skill turns it into an executable
 workflow.
 

@@ -24,7 +24,7 @@ reviews:
   # Include reviewable source areas explicitly so support-matrix CSV diffs are
   # reviewed even though CSV files are normally skipped by default.
   path_filters:
-    - ".agents/**"
+    - ".claude/skills/**"
     - ".claude/**"
     - ".github/**"
     - "collector/**"
@@ -53,7 +53,7 @@ reviews:
         - Prefer applicable inline comments. When the correct fix is clear, small, and limited to the commented diff hunk, include it as a GitHub Suggested Change so the author can apply it with one click.
         - Do not use a suggested change when the fix requires broader design choices, multiple files, generated artifacts, unavailable context, or validation that cannot be inferred from the diff.
         - If a comment is not directly applicable, state the smallest concrete next step and why a one-click suggestion is not safe.
-    - path: ".agents/skills/**/SKILL.md"
+    - path: ".claude/skills/**/SKILL.md"
       instructions: |
         - This file is a skill definition. Apply contract consistency rules when `## Inputs` or `## Outputs` sections are present.
         - If the skill references another skill by name, verify expected field names match the callee's declared outputs and required inputs.

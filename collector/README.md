@@ -12,7 +12,7 @@ This process is not well verified, you need to debug sometimes.
 
 For a framework-version or GPU-platform upgrade, follow the
 [Collector Upgrade Playbook](../docs/perf_database/collector-upgrade-playbook.md).
-The repo-tracked [`aic-auto-collect`](../.agents/skills/aic-auto-collect/SKILL.md)
+The repo-tracked [`aic-auto-collect`](../.claude/skills/aic-auto-collect/SKILL.md)
 skill applies that workflow during long, resumable collection runs.
 SGLang 0.5.14 Hopper/Blackwell follow-up work must also consult the
 platform alignment ledger, a local campaign record kept outside the repo
