@@ -9,7 +9,8 @@ Both are flat, generation-time filters applied before cases are queued:
   dtype requires a newer SM than the target is never queued.
 - ``denylist.yaml``: substring matches for cases that hang or kill the node.
   Ordinary crashes do not belong there -- they fail fast, get classified in
-  the failure log, and the circuit breaker stops repetition.
+  the failure log with a (model, dtype) group label, and systemic groups are
+  surfaced in the collection summary as fix-me signals (no auto-skip).
 
 Neither file supports shape conditions, framework-version conditions, or
 rule operators. That is intentional; do not add them.

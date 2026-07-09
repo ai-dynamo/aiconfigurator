@@ -3,12 +3,13 @@
 
 # Hang denylist. The ONLY cases that belong here are ones that hang the
 # collector or kill the node, so they cannot be handled by fail-fast +
-# failure log + circuit breaker.
+# failure log.
 #
 # Ordinary crashes (illegal memory access, asserts, OOM) do NOT belong
-# here: they fail in seconds, are recorded in the failure log with a
-# classification, and the circuit breaker skips the rest of a failing
-# (op, model, dtype) group automatically.
+# here: they fail fast, every failure is recorded and labeled with its
+# (model, dtype) group, and systemic groups are surfaced in the collection
+# summary (errors_by_group) as fix-me signals. There is no auto-skip —
+# a failing group keeps running by design, so it gets fixed, not tolerated.
 #
 # Entry format (substring match against str(test_case)):
 #   entries:

@@ -14,14 +14,15 @@
 #   - framework version conditions
 #   - per-backend nesting
 # Framework-version gaps and shape-level kernel bugs are runtime observations:
-# they fail, get classified in the failure log, and the circuit breaker stops
-# repeated failures. They must not be encoded here.
+# they fail fast, every failure is recorded and labeled with its (model, dtype)
+# group, and systemic groups are surfaced in the collection summary
+# (errors_by_group) as fix-me signals. They must not be encoded here.
 
 schema_version: 1
 
 dtype_min_sm:
   float16: 0
-  bfloat16: 0
+  bfloat16: 80
   int8: 0
   int4_wo: 0
   fp8: 89

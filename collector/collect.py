@@ -94,7 +94,10 @@ from helper import (
 
 logger = None
 RESUME_SCHEMA_VERSION = "collector-resume-v2"
-STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before stall bailout
+STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before logging a stall warning
+# Failures of one (model, dtype) group within an op before the summary flags
+# it as systemic (a fix-me warning; nothing is skipped).
+SYSTEMIC_GROUP_THRESHOLD = 5
 
 
 def _require_torch():
@@ -893,7 +896,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     # is a fix-me signal, not something to tolerate.
     group_counts = Counter(error["group"] for error in errors if error.get("group"))
     for group, count in sorted(group_counts.items()):
-        if count >= 5:
+        if count >= SYSTEMIC_GROUP_THRESHOLD:
             logger.warning(f"{module_name}: failure group {group!r} failed {count} times — needs fixing")
 
     errors.extend(_unresolved_failure_errors())

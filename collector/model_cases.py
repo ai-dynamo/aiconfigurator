@@ -16,7 +16,8 @@ Everything below the op level is owned elsewhere:
 - hardware floors are applied by ``collector.capabilities`` (generation-time
   intersection, ``cases/capabilities.yaml``);
 - everything else that cannot run is a runtime observation: it fails fast, is
-  classified in the failure log, and the circuit breaker stops repetition.
+  classified in the failure log with a (model, dtype) group label, and
+  systemic groups are surfaced in the collection summary as fix-me signals.
 
 There is intentionally no per-case selector or exception rule engine here.
 """
