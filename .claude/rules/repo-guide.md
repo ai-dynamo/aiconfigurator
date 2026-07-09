@@ -45,3 +45,7 @@ finding even when the code works.
    human approval and are never done "while you're at it".
 2. **Rule files are human-owned policy.** Propose changes; do not edit them as
    a side effect of a task.
+3. **Policy lives once, in `.claude/rules/`.** `.agents/skills/` and
+   `AGENTS.md` are procedural runbooks and pointers for agent runtimes that do
+   not auto-load these rules; they reference rule files, never restate policy.
+   When a skill and a rule conflict, the rule wins.

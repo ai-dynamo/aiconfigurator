@@ -125,6 +125,15 @@ Keep a small work log outside generated data. It should contain:
 | Backend truth | model, phase, dtype, SM, selected kernel, source/probe |
 | Decision | accepted limitation, code fix, or follow-up |
 
+Do not equate checkpoint compatibility with execution-precision support: a
+backend that repacks an FP4 checkpoint into a weight-only INT4/W4A16 kernel is
+not an FP4 measurement. In the SGLang collector, Marlin is allowed only for
+`int4_wo`; do not map NVFP4 or MXFP4 to Marlin, and fail any direct invocation
+that tries to combine them. The same applies to full-model setup for another
+timed operator: do not load an NVFP4/MXFP4 checkpoint on an SM where the pinned
+framework would repack its weights into Marlin merely because the timed module
+itself has a BF16 key.
+
 ## 5. Progress from smoke to full collection
 
 For each operation, use deterministic smoke coverage rather than relying only

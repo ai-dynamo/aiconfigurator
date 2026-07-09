@@ -12,13 +12,17 @@ whose persisted rows satisfy the existing AIC consumer contract.
 
 Before editing, read:
 
-1. `collector/README.md`
-2. `collector/cases/README.md`
-3. `docs/perf_database/collector-v2-population-design.md`, especially
+1. `.claude/rules/collector/layer_permissions.md`,
+   `.claude/rules/collector/failure_handling.md`, and
+   `.claude/rules/collector/case_authoring.md` — the repository-owned policy.
+   It is authoritative over anything restated in this skill.
+2. `collector/README.md`
+3. `collector/cases/README.md`
+4. `docs/perf_database/collector-v2-population-design.md`, especially
    **Three identities**, **Population flow**, and **Safe deduplication rules**
-4. The relevant `collector/<backend>/registry.py`, collector module, and model/base
+5. The relevant `collector/<backend>/registry.py`, collector module, and model/base
    case YAML
-5. Every Python and Rust loader/query that consumes the op's perf file
+6. Every Python and Rust loader/query that consumes the op's perf file
 
 If the task proceeds to GPU collection, also use `$aic-auto-collect`.
 
@@ -117,10 +121,9 @@ Examples:
 - Make targeted structural population exact when a model profile exists; it
   may still reuse shared workload sweeps. Full/raw collection may union
   defaults and model profiles, then stably deduplicate.
-- Use stable first-wins deduplication by default. If a later selector can
-  distinguish equivalent recipe representations, choose and document a
-  canonical representative that remains selectable (for example the smallest
-  TP for a local-head key); otherwise deduplication can erase targeted coverage.
+- Use stable first-wins deduplication on the real invocation/key identity.
+  When equivalent recipe representations collapse, document the canonical
+  representative (for example the smallest TP for a local-head key).
 - Add a generic synthetic default only when a consumer or interpolation need is
   demonstrated.
 
@@ -148,18 +151,22 @@ population path. If a later design decision removes either side, delete the
 orphan. Do not retain speculative aliases, phase selectors, compatibility
 modes, or one-time audit scaffolding.
 
-## Step 5: Prune and skip only with evidence
+## Step 5: Narrow coverage only through the declared homes
 
-Acceptable evidence includes:
+A queued case has two legal collector outcomes: execute it, or raise
+(`layer_permissions.md`). Coverage narrowing happens only in the auditable
+declaration homes — `capabilities.yaml` positive floors, registry
+`unverified`/`unverified_sms` markers, the hang denylist, declared model
+correlations, and the sanctioned memory-feasibility filter — each backed by:
 
-- Exact-version framework source showing the path is unsupported
-- A minimal runtime repro on the target framework/GPU
-- A proven invocation/key duplicate
-- A documented absence from every production consumer and default model plan
+- Exact-version framework source showing the path is unsupported, or
+- A minimal runtime repro on the target framework/GPU, or
+- A proven invocation/key duplicate.
 
-Place runtime/SM/version exclusions as close as possible to the backend that
-owns the limitation. Keep shared generators deterministic; avoid framework
-imports or runtime availability probes in shared YAML population.
+An op with no production consumer stays registry-only or explicitly
+experimental instead of joining default model plans. Keep shared generators
+deterministic; avoid framework imports or runtime availability probes in
+shared YAML population.
 
 Pay special attention to boundaries:
 
@@ -181,18 +188,20 @@ unsupported input.
 - Generate full/raw and representative targeted plans through each changed
   op's registry/public getter; testing only a shared case generator is not
   sufficient.
-- Count generator recipes, raw getter tasks, post-selector scheduled tasks,
+- Count generator recipes, raw getter tasks, scheduled tasks (after
+  capability floors, registry maturity markers, and the denylist),
   token-expanded benchmark invocations, and unique persisted keys separately.
 - For every deduplication, record stage-local before/after, unique invocation,
   and unique persisted-key counts using repository-owned inputs. Name the
-  stage being counted (generator recipes, raw getter tasks, post-selector tasks,
+  stage being counted (generator recipes, raw getter tasks, scheduled tasks,
   or token-expanded invocations). If the count at the dedupe stage does not
   decrease, remove the deduplication path.
 - When a runtime or subprocess expands an inner sweep, compare its quantization
   and SM policy with the outer getter. Test both sides of every changed hardware
   gate and assert that unsupported precision labels are absent.
-- Apply model, SM, and framework-version selectors before reporting a count as
-  the final scheduled queue; raw getter counts are not final plan counts.
+- Apply model plan selection, capability floors, registry maturity markers,
+  and the denylist before reporting a count as the final scheduled queue; raw
+  getter counts are not final plan counts.
 - Assert invocation IDs and persisted keys have no unexplained duplicates.
 - Assert required consumer query keys are covered.
 - Assert unrelated model dimensions never cross.
