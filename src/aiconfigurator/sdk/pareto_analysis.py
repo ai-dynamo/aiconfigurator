@@ -842,15 +842,42 @@ def _afd_runtime_configs_for_sla(runtime_config: config.RuntimeConfig) -> list[c
     return runtime_configs
 
 
+def _finite_float(value, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if math.isfinite(parsed) else default
+
+
+def _recompute_afd_decode_rate_fields(row: dict) -> None:
+    tpot = _finite_float(row.get("tpot"), 0.0)
+    ttft = _finite_float(row.get("ttft"), 0.0)
+    osl = max(int(_finite_float(row.get("osl"), 1.0)), 1)
+    b_total = _finite_float(row.get("b_total", row.get("concurrency", 0.0)), 0.0)
+    total_gpus = _finite_float(row.get("num_total_gpus"), 0.0)
+
+    tokens_per_s = b_total / (tpot / 1000.0) if tpot > 0.0 and b_total > 0.0 else 0.0
+    seq_per_s = tokens_per_s / osl if tokens_per_s > 0.0 else 0.0
+
+    row["request_latency"] = round(ttft + tpot * max(osl - 1, 0), 3)
+    row["tokens/s"] = round(tokens_per_s, 2)
+    row["seq/s"] = round(seq_per_s, 3)
+    row["request_rate"] = round(seq_per_s, 3)
+    row["tokens/s/gpu"] = round(tokens_per_s / total_gpus, 2) if total_gpus > 0.0 else 0.0
+    row["tokens/s/user"] = round(1000.0 / tpot, 2) if tpot > 0.0 else 0.0
+
+
 def _apply_afd_decode_latency_correction(row: dict, decode_latency_correction: float) -> None:
     if decode_latency_correction == 1.0:
         return
-    tpot = float(row.get("tpot", 0.0) or 0.0) * decode_latency_correction
-    row["tpot"] = tpot
-    osl = int(row.get("osl", 1) or 1)
-    ttft = float(row.get("ttft", 0.0) or 0.0)
-    row["request_latency"] = round(ttft + tpot * max(osl - 1, 0), 3)
-    row["tokens/s/user"] = round(1000.0 / tpot, 2) if tpot > 0.0 else 0.0
+    tpot = _finite_float(row.get("tpot"), 0.0) * decode_latency_correction
+    row["tpot"] = round(tpot, 3)
+    if "decode_t_step" in row:
+        row["decode_t_step"] = round(tpot, 3)
+    if row.get("phase") == "decode" and "t_step" in row:
+        row["t_step"] = round(tpot, 3)
+    _recompute_afd_decode_rate_fields(row)
 
 
 def _afd_sla_rejection_reason(

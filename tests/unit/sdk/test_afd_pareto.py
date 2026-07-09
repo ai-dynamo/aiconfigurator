@@ -14,6 +14,7 @@ from aiconfigurator.sdk.pareto_analysis import (
     _AFD_DECODE_DEGRADATION,
     _AFD_PREFILL_DEGRADATION,
     _AFD_TTFT_CORRECTION_FACTOR,
+    _apply_afd_decode_latency_correction,
     _combine_afd_row_with_static_prefill,
     _enumerate_afd_prefill_options,
 )
@@ -39,6 +40,7 @@ def _afd_decode_row(**overrides) -> dict:
         "ttft": 0.0,
         "tpot": 10.0,
         "request_latency": 9990.0,
+        "b_total": 256,
         "seq/s": 8.0,
         "request_rate": 8.0,
         "tokens/s": 8000.0,
@@ -55,6 +57,21 @@ def _afd_decode_row(**overrides) -> dict:
     }
     row.update(overrides)
     return row
+
+
+def test_decode_latency_correction_recomputes_rate_fields():
+    row = _afd_decode_row(tpot=10.0, ttft=100.0, osl=11, b_total=256, num_total_gpus=16)
+
+    _apply_afd_decode_latency_correction(row, 2.0)
+
+    expected_tokens_s = 256 * 1000.0 / 20.0
+    assert row["tpot"] == pytest.approx(20.0)
+    assert row["request_latency"] == pytest.approx(100.0 + 20.0 * 10)
+    assert row["tokens/s"] == pytest.approx(expected_tokens_s)
+    assert row["seq/s"] == pytest.approx(expected_tokens_s / 11.0, rel=1e-3)
+    assert row["request_rate"] == pytest.approx(expected_tokens_s / 11.0, rel=1e-3)
+    assert row["tokens/s/gpu"] == pytest.approx(expected_tokens_s / 16.0)
+    assert row["tokens/s/user"] == pytest.approx(50.0)
 
 
 class TestCombineAfdWithStaticPrefill:

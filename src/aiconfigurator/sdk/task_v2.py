@@ -375,6 +375,15 @@ def build_afd_parallel_lists(
                 for f_moe_ep_size in ep_candidates:
                     for num_microbatches in microbatch_candidates:
                         for pipeline_model in pipeline_candidates:
+                            # Skip optimistic + mb < 3: the K=3 pipeline
+                            # requires num_microbatches >= 2 + t_c/max(t_a,
+                            # t_f), which is >= 3 whenever t_c > 0 (the
+                            # normal case).  mb=2 + optimistic always degrades
+                            # to conservative, producing a duplicate of the
+                            # mb=2 + conservative candidate and a flood of
+                            # per-stride warnings.
+                            if pipeline_model == "optimistic" and num_microbatches < 3:
+                                continue
                             candidates.append(
                                 (n_a_nodes, n_f_nodes, tp_a, f_moe_ep_size, num_microbatches, pipeline_model)
                             )
