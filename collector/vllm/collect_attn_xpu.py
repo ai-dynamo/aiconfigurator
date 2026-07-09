@@ -254,7 +254,7 @@ def run_attention_torch(
     # Fix backend-specific kv cache layout.
     backend_name_str = backend_name if isinstance(backend_name, str) else backend_name.name
 
-    if backend_name_str in {"FLASHINFER", "TRITON_ATTN"}:
+    if backend_name_str in {"FLASH_ATTN", "FLASHINFER", "TRITON_ATTN"}:
         # The collector helper populates cache as [2, num_blocks, ...] because
         # that layout makes K/V insertion simple. vLLM V1 backends consume it as
         # [num_blocks, 2, ...].
