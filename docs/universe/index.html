@@ -308,7 +308,7 @@ const LAYERS = [
   {name:'Sweepers · Orchestration', color:'#4cc9f0'},
   {name:'Search Space', color:'#818cf8'},
   {name:'Deployment Simulation · Dynamo + AIC', color:'#38bdf8'},
-  {name:'AIC Core · Python Wheel + Rust Crate', color:'#c77dff'},
+  {name:'AIC Core · AIC Wheel + Rust Crate', color:'#c77dff'},
   {name:'Perf Model Variants · 4 Op Modes / Layerwise / FPM / FPM-tuned', color:'#ff9e64'},
   {name:'Op Collector Solution · Model / Operations / PerfDatabase', color:'#2dd4bf'},
   {name:'Op Data Points', color:'#14b8a6'},
@@ -584,10 +584,10 @@ const EDGES = [
   // L3 composition — Replay calls the component models and AIC timing oracle.
   ['m_sched','m_estlat'],
   ['m_sched','m_router','alt'],['m_sched','m_planner','alt'],['m_sched','m_kvbm','alt'],
-  // AIC ForwardPassPerfModel → both aiconfigurator-core distribution surfaces.
-  ['m_estlat','core_wheel'],['m_estlat','core_crate'],
+  // AIC ForwardPassPerfModel → Python wheel and Rust crate surfaces.
+  ['m_estlat','aic_wheel'],['m_estlat','core_crate'],
   // The Python wheel is built from the Rust crate; group-level links expose both L5 families.
-  ['core_wheel','core_crate','bridge'],
+  ['aic_wheel','core_crate','bridge'],
   ['core_crate','pm_ops'],                 // Rust engine-step op path is SILICON-only today.
   // All four op modes share the L6 op graph; mode-specific behavior resolves in PerfDatabase.
   ['pm_ops','op_model'],['pm_ops','op_operations'],['pm_ops','op_perfdb'],
@@ -612,8 +612,8 @@ const GROUP_EDGES = [
   ['profiler','space_dyn'],
   ['profiler','space_sched'],
   ['profiler','space_engine'],
-  ['core_wheel','models_op'],
-  ['core_wheel','models_fpm'],
+  ['aic_wheel','models_op'],
+  ['aic_wheel','models_fpm'],
   ['core_crate','models_fpm'],
 ];
 
@@ -633,9 +633,9 @@ const NOTE_MAP = [
   ['Deployment simulation · Mocker Replay (agg + disagg)', 'm_sched'],
   ['Planner · KV Router · KVBM / KV Transfer', 'm_planner','m_router','m_kvbm'],
   ['AIC ForwardPassPerfModel · per-pass timing', 'm_estlat'],
-  ['aiconfigurator-core Python wheel', 'core_wheel'],
+  ['aiconfigurator Python wheel', 'aic_wheel'],
   ['aiconfigurator-core Rust crate', 'core_crate'],
-  ['EngineConfig · ForwardPassMetrics · ForwardPassPerfModel', 'core_wheel','core_crate'],
+  ['EngineConfig · ForwardPassMetrics · ForwardPassPerfModel', 'aic_wheel','core_crate'],
   ['7 L5 variants · 4 op modes · layerwise · pure FPM · FPM-tuned', 'pm_ops','pm_op_hybrid','pm_op_empirical','pm_op_sol','pm_layerwise','pm_fpm','pm_fpm_tuned'],
   ['Op model internals · Model → Operations → PerfDatabase', 'op_model','op_operations','op_perfdb'],
   ['Op data → collectors → GPUs / LLMs / frameworks / versions', 'op_data_points','op_collectors','collect_gpus','collect_llms','collect_frameworks','collect_versions'],
@@ -780,7 +780,7 @@ const TODOS = {
   ],
 
   // L4–L7 · AIC core and performance-model data
-  core_wheel: [
+  aic_wheel: [
     'Expose the planned layerwise strategy through <code>aiconfigurator_core</code> once its estimator is stable.',
   ],
   core_crate: [
@@ -1238,6 +1238,7 @@ function clearSel(keepBack=true){
 const detail=document.getElementById('detail'), dhead=document.getElementById('dhead'), dbody=document.getElementById('dbody');
 const SOURCE_REPOS={
   aiconfigurator:{base:'https://github.com/ai-dynamo/aiconfigurator',ref:'ad0e3e5e31ee3b8ebcc69617f51b1bd5cfdd659a'},
+  'aiconfigurator-main':{base:'https://github.com/ai-dynamo/aiconfigurator',ref:'main'},
   dynamo:{base:'https://github.com/ai-dynamo/dynamo',ref:'ec45adf2a3f7b719fcba5d5c7c2cf32747b4e030'},
 };
 function encodeSourcePath(path){ return path.split('/').filter(Boolean).map(encodeURIComponent).join('/'); }
@@ -1324,7 +1325,7 @@ function renderOverview(){
     <h3>The rest of the spine</h3>
     <ul>
       <li><b>Deployment simulation</b> — Dynamo Mocker Replay owns <code>AggRuntime</code>/<code>DisaggRuntime</code> and scheduler behavior; Planner, KV Router, and KVBM contribute their component decisions; AIC’s <code>ForwardPassPerfModel</code> times each scheduled pass.</li>
-      <li><b>AIC core</b> has two package surfaces over one native implementation: the <code>aiconfigurator-core</code> <b>Python wheel</b> and <b>Rust crate</b>, centered on <code>EngineConfig</code>, <code>ForwardPassMetrics</code>, and the <code>ForwardPassPerfModel</code> estimator.</li>
+      <li><b>AIC core</b> has two runtime surfaces over one native implementation: the self-contained <code>aiconfigurator</code> <b>Python wheel</b> and the <code>aiconfigurator-core</code> <b>Rust crate</b>, centered on <code>EngineConfig</code>, <code>ForwardPassMetrics</code>, and the <code>ForwardPassPerfModel</code> estimator. There is no standalone <code>aiconfigurator-core</code> Python distribution.</li>
       <li><b>Seven L5 variants</b> — four op-based database modes (<b>SILICON</b>, <b>HYBRID</b>, <b>EMPIRICAL</b>, <b>SOL</b>), the planned <b>layerwise-collector</b> model, the <b>pure FPM-data</b> regression, and the <b>native model fine-tuned with FPM calibration</b>.</li>
       <li><b>Op-mode drill-down</b> — all four op modes share <b>Model → Operations → PerfDatabase</b>; the database mode selects silicon-first, silicon-with-formula-fallback, formula-only empirical/SOL, or theoretical SOL latency. The stack continues through <b>Op Data Points → Op Collectors</b>, parameterized by GPUs, LLMs, frameworks, and framework versions.</li>
       <li><b>Infrastructure (L10)</b> — Auto Op Collector, Support Matrix Healer, Auto Gap Analysis, Auto Gap Mitigation, and the planned Auto FPM Collector automate coverage and fidelity loops.</li>

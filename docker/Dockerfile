@@ -15,22 +15,33 @@ RUN mkdir /opt/aiconfigurator && \
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV MPLCONFIGDIR=/tmp/matplotlib
 
-FROM base AS build
-COPY --from=rust:1.88.0-slim-bookworm /usr/local/cargo /usr/local/cargo
-COPY --from=rust:1.88.0-slim-bookworm /usr/local/rustup /usr/local/rustup
-ENV CARGO_HOME=/usr/local/cargo
-ENV RUSTUP_HOME=/usr/local/rustup
-ENV PATH="${CARGO_HOME}/bin:${PATH}"
-# The standalone `aiconfigurator-core` wheel owns the canonical Python SDK,
-# Rust extension, and estimator data under `aiconfigurator_core`. The upper
-# `aiconfigurator` wheel owns CLI/generator/webapp/Spica plus compatibility
-# facades under `aiconfigurator.sdk`, and depends on the exact matching core
-# version. Maturin needs the Rust
-# crate sources, a C linker (gcc), and ca-certificates so cargo can fetch crates
-# from crates.io over TLS. The pinned Rust toolchain above supplies cargo/rustc.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev && \
-    rm -rf /var/lib/apt/lists/*
+# The standalone `aiconfigurator-core` wheel is built in the PyPA
+# manylinux_2_28 image so its native PyO3 extension links glibc 2.28 and gets a
+# portable tag. The upper pure-Python wheel is built beside it and depends on
+# the exact matching core version.
+#
+# TARGETARCH (amd64/arm64) selects the base per `--platform`; only the matching
+# stage builds. aarch64: `docker build --platform linux/arm64 --target build .`.
+FROM quay.io/pypa/manylinux_2_28_x86_64 AS manylinux-amd64
+FROM quay.io/pypa/manylinux_2_28_aarch64 AS manylinux-arm64
+ARG TARGETARCH
+FROM manylinux-${TARGETARCH} AS build
+WORKDIR /workspace
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+ENV RUSTUP_HOME=/opt/rust/rustup \
+    CARGO_HOME=/opt/rust/cargo \
+    PATH=/opt/rust/cargo/bin:${PATH}
+# Download to disk (not `curl | sh`, which hides a failed download behind sh's
+# exit status); pin the toolchain for reproducible release wheels.
+RUN curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-connrefused --retry-delay 2 \
+        https://sh.rustup.rs -o /tmp/rustup-init.sh \
+    && sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.96.0 \
+    && rm /tmp/rustup-init.sh
+
+# Pin to the image's CPython 3.12 so uv/maturin never fetch a standalone one.
+ENV UV_PYTHON=/opt/python/cp312-cp312/bin/python3
+
 COPY packages/ /workspace/packages/
 COPY pyproject.toml /workspace/
 COPY tools/verify_release_wheels.py /workspace/tools/verify_release_wheels.py
@@ -46,9 +57,13 @@ RUN set -e; \
         echo "Run 'git lfs install && git lfs pull' in the source tree before building." >&2; \
         exit 1; \
     fi
-RUN cd packages/aiconfigurator-core && uv build --wheel --out-dir /workspace/dist && \
-    cd /workspace/packages/aiconfigurator && uv build --wheel --out-dir /workspace/dist && \
-    cd /workspace && python tools/verify_release_wheels.py /workspace/dist
+# `uv build` runs maturin's PEP517 backend, which defaults to `--compatibility
+# off`; MATURIN_PEP517_ARGS overrides it to stamp the manylinux_2_28 tag (maturin
+# appends it last, so it wins). The upper setuptools wheel needs no platform tag.
+RUN MATURIN_PEP517_ARGS="--compatibility manylinux_2_28" \
+        uv build --package aiconfigurator-core --wheel --out-dir /workspace/dist && \
+    uv build --package aiconfigurator --wheel --out-dir /workspace/dist && \
+    "${UV_PYTHON}" tools/verify_release_wheels.py /workspace/dist
 
 # Exercise the real wheel boundary outside the checkout: core-only (including
 # the aiconfigurator_core.sdk import contract), full install, upper uninstall
@@ -104,7 +119,7 @@ RUN python tools/build_legacy_monolith_fixture.py /tmp/legacy-dist && \
 
 FROM base AS runtime
 COPY --from=build /workspace/dist /wheelhouse
-RUN uv pip install /wheelhouse/*.whl && \
+RUN uv pip install /wheelhouse/aiconfigurator-*.whl && \
     rm -rf /wheelhouse
 
 FROM runtime AS test
