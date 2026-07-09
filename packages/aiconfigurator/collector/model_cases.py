@@ -33,7 +33,8 @@ CASE_ROOT = COLLECTOR_ROOT / "cases"
 BASE_OP_CASES_DIR = CASE_ROOT / "base_ops"
 MODEL_CASES_DIR = CASE_ROOT / "models"
 SM_EXCEPTIONS_DIR = CASE_ROOT / "sm_exceptions"
-SYSTEMS_DIR = COLLECTOR_ROOT.parent / "src" / "aiconfigurator_core" / "systems"
+CORE_PROJECT_ROOT = COLLECTOR_ROOT.parent.parent / "aiconfigurator-core"
+SYSTEMS_DIR = CORE_PROJECT_ROOT / "src" / "aiconfigurator_core" / "systems"
 
 
 @dataclass(slots=True)

@@ -498,9 +498,9 @@ To estimate performance, we take the following steps:
 Data collection is a standalone process for building the database used by aiconfigurator. By default, you do not need to collect data yourself.
 Small changes to the database may not materially change performance estimates. For example, you can use 1.0.0rc3 data of `trtllm` on `h200_sxm` and deploy the generated configuration with Dynamo and a `trtllm` 1.0.0rc4 worker.
 
-To go through the process, refer to the [guidance](packages/aiconfigurator-core/collector/README.md) under the core package's `collector` folder.
+To go through the process, refer to the [guidance](packages/aiconfigurator/collector/README.md) under the upper AIC package's `collector` folder.
 
-**New:** The collector now supports optional GPU power monitoring during kernel execution. Use the `--measure_power` flag to collect power consumption data alongside performance metrics. See the [collector README](packages/aiconfigurator-core/collector/README.md#power-monitoring-optional) for details.
+**New:** The collector now supports optional GPU power monitoring during kernel execution. Use the `--measure_power` flag to collect power consumption data alongside performance metrics. See the [collector README](packages/aiconfigurator/collector/README.md#power-monitoring-optional) for details.
 
 ### System Data Support Matrix
 

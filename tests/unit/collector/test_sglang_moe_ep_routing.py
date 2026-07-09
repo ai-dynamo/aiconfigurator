@@ -11,7 +11,7 @@ import pytest
 
 def _import_helper_module():
     module_name = "collector.helper_test_copy"
-    helper_path = Path(__file__).resolve().parents[3] / "packages" / "aiconfigurator-core" / "collector" / "helper.py"
+    helper_path = Path(__file__).resolve().parents[3] / "packages" / "aiconfigurator" / "collector" / "helper.py"
     spec = importlib.util.spec_from_file_location(module_name, helper_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

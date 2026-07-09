@@ -117,7 +117,7 @@ pytest -m "unit or build"
 
 Data collection is typically not required for development. The repository includes pre-collected performance databases for supported systems.
 
-If you need to collect new data for a new GPU type or framework version, refer to the [Collector README](packages/aiconfigurator-core/collector/README.md).
+If you need to collect new data for a new GPU type or framework version, refer to the [Collector README](packages/aiconfigurator/collector/README.md).
 
 ## Contributing
 

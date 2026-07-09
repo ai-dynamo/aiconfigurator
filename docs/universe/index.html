@@ -500,47 +500,47 @@ const NODES = [
 
   // ---- L7 Measured operation rows ----
   {id:'op_data_points', l:7, repo:'aic', flag:'q', label:'Op Data Points', sub:'*_perf.parquet · shape + quant + kernel source → latency (+ power)',
-   det:{file:['packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/<gpu>/<framework>/<framework-version>/','collector/registry_types.py','src/aiconfigurator/sdk/common.py'],
+   det:{file:['packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/<gpu>/<framework>/<framework-version>/','packages/aiconfigurator/collector/registry_types.py','src/aiconfigurator/sdk/common.py'],
      desc:'Measured operation rows for GEMM, attention, MoE, MLA/DSA, communication/NCCL, state-space, and module-level kernels. Common provenance includes GPU/device, framework, framework version, operation, and <code>kernel_source</code>; op-specific columns hold shape, parallelism, and quantization inputs, with latency and optional power as outputs. Collectors stage CSV and publish curated Parquet files.',
      sym:['<code>gemm_perf.parquet</code>','<code>context_attention_perf.parquet</code> · <code>generation_attention_perf.parquet</code>','<code>moe_perf.parquet</code> · <code>generation_mla_perf.parquet</code>','<code>nccl_perf.parquet</code> · <code>custom_allreduce_perf.parquet</code>'],
      q:'<b>Fidelity check.</b> Before trusting an op model, audit whether rows have a named, reproducible <code>kernel_source</code> or rely on a low-fidelity/shared fallback. The same data-point layer carries <code>used_cuda_graph</code>, framework/version, device, and operation provenance.'}},
 
   // ---- L8 Collector planning + backend runners ----
   {id:'collector_plan', l:8, repo:'aic', label:'Collector V2 Case Planner', sub:'LLM + GPU/SM + framework → selected operations and concrete cases',
-   det:{file:['collector/model_cases.py','collector/case_generator.py','collector/cases/base_ops/','collector/cases/models/','collector/cases/sm_exceptions/'],
+   det:{file:['packages/aiconfigurator/collector/model_cases.py','packages/aiconfigurator/collector/case_generator.py','packages/aiconfigurator/collector/cases/base_ops/','packages/aiconfigurator/collector/cases/models/','packages/aiconfigurator/collector/cases/sm_exceptions/'],
      desc:'Builds the collection plan. It merges shared base-op cases, model-specific structural cases, and GPU/SM exceptions, then selects the operation subset and concrete benchmark shapes for the requested LLM, GPU, and framework.',
      sym:['<code>build_collection_case_plan()</code>','base op cases + model cases + SM exceptions','plan-only inspection']}},
 
   {id:'op_collectors', l:8, repo:'aic', label:'Per-backend Op Collectors', sub:'OpEntry registry → version-routed runner → real kernel benchmark',
-   det:{file:['collector/collect.py','collector/registry_types.py','collector/version_resolver.py','collector/trtllm/registry.py','collector/vllm/registry.py','collector/sglang/registry.py'],
+   det:{file:['packages/aiconfigurator/collector/collect.py','packages/aiconfigurator/collector/registry_types.py','packages/aiconfigurator/collector/version_resolver.py','packages/aiconfigurator/collector/trtllm/registry.py','packages/aiconfigurator/collector/vllm/registry.py','packages/aiconfigurator/collector/sglang/registry.py'],
      desc:'Executes the planned cases on real hardware. Each framework registry maps an operation to its case generator, benchmark runner, canonical output file, and optional version routes. The harness covers framework kernels plus network/NCCL and WideEP collectors, then writes the measured op data points.',
      sym:['<code>OpEntry</code> · <code>PerfFile</code> · <code>VersionRoute</code>','TRT-LLM · vLLM · SGLang registries','GEMM · attention · MLA · MoE · module ops','network/NCCL · custom all-reduce · WideEP']}},
 
   // ---- L9 Collection inputs / dimensions ----
   {id:'collect_gpus', l:9, repo:'aic', label:'GPUs', sub:'system YAML + live device / SM · hardware-specific exclusions',
-   det:{file:['packages/aiconfigurator-core/src/aiconfigurator_core/systems/*.yaml','collector/cases/sm_exceptions/','collector/helper.py'],
+   det:{file:['packages/aiconfigurator-core/src/aiconfigurator_core/systems/*.yaml','packages/aiconfigurator/collector/cases/sm_exceptions/','packages/aiconfigurator/collector/helper.py'],
      desc:'The target execution hardware. <code>--gpu</code> resolves the system YAML and SM generation used to plan cases and exclusions; the live device runs the benchmark and is recorded in each output row.',
      sym:['H100 · H200 · B200 · GB200 · A100 · L40S …','SM-specific exception plan','memory · bandwidth · compute characteristics']}},
 
   {id:'collect_llms', l:9, repo:'aic', label:'LLMs', sub:'HF model path + architecture · model-specific operation shapes',
-   det:{file:['packages/aiconfigurator-core/src/aiconfigurator_core/model_configs/','collector/cases/models/','collector/model_cases.py'],
+   det:{file:['packages/aiconfigurator-core/src/aiconfigurator_core/model_configs/','packages/aiconfigurator/collector/cases/models/','packages/aiconfigurator/collector/model_cases.py'],
      desc:'The Hugging Face model and architecture select the relevant operation subset and structural case shapes. Model-specific module rows may retain model identity, while generic shape-only operation rows are shared and deduplicated rather than universally partitioned by LLM.',
      sym:['<code>--model-path</code> · <code>--model-architecture</code>','architecture-specific case YAML','base cases + model extensions']}},
 
   {id:'collect_frameworks', l:9, repo:'aic', label:'Frameworks', sub:'TensorRT-LLM · vLLM · SGLang · framework-native kernels',
-   det:{file:['collector/framework_manifest.yaml','collector/trtllm/registry.py','collector/vllm/registry.py','collector/sglang/registry.py'],
+   det:{file:['packages/aiconfigurator/collector/framework_manifest.yaml','packages/aiconfigurator/collector/trtllm/registry.py','packages/aiconfigurator/collector/vllm/registry.py','packages/aiconfigurator/collector/sglang/registry.py'],
      desc:'Selects the backend registry and the real framework implementation to benchmark. The same conceptual operation can have different kernels, launch behavior, CUDA-graph semantics, and supported shapes across frameworks.',
      sym:['<code>trtllm</code>','<code>vllm</code>','<code>sglang</code>']}},
 
   {id:'collect_versions', l:9, repo:'aic', label:'Framework Versions', sub:'runtime manifest · compatibility rules · PEP 440 module routing',
-   det:{file:['collector/framework_manifest.yaml','collector/version_resolver.py','collector/registry_types.py'],
+   det:{file:['packages/aiconfigurator/collector/framework_manifest.yaml','packages/aiconfigurator/collector/version_resolver.py','packages/aiconfigurator/collector/registry_types.py'],
      desc:'The detected runtime version chooses the compatible collector implementation through manifest constraints and <code>VersionRoute</code>. It is recorded in every row and becomes the framework-version directory partition loaded by PerfDatabase.',
      sym:['<code>VersionRoute(min_version, module)</code>','runtime <code>__compat__</code>','data key: <code>&lt;framework&gt;/&lt;version&gt;</code>']}},
 
   // ---- L10 Automated infrastructure ----
   {id:'auto_op_collector', l:10, repo:'aic', tag:'current', label:'Auto Op Collector', sub:'plan → GPU collection → op perf data → quality gates → PR',
    det:{file:['aic-auto-collector: README.md','aic-auto-collector: data_collection/generate_ci_config.py','aic-auto-collector: data_collection/ci_job.py','aic-auto-collector: data_collection/gpu_node.sh','aic-auto-collector: campaign/README.md'],
-     desc:'Automates op-data campaigns across GPUs, frameworks, framework versions, LLMs, and operation subsets. It plans the job matrix, allocates GPU nodes, runs <code>collector/collect.py</code>, retains checkpoints/artifacts, triages collector failures, and can publish the resulting AIC data changes as a PR.',
+     desc:'Automates op-data campaigns across GPUs, frameworks, framework versions, LLMs, and operation subsets. It plans the job matrix, allocates GPU nodes, runs <code>packages/aiconfigurator/collector/collect.py</code>, retains checkpoints/artifacts, triages collector failures, and can publish the resulting AIC data changes as a PR.',
      sym:['dynamic child-job matrix','smoke → sample → full collection','checkpoint / resume · artifact collection','optional automated data PR']}},
 
   {id:'support_matrix_healer', l:10, repo:'aic', tag:'current', label:'Support Matrix Healer', sub:'non-PASS cells → targeted collect / repair / replay / verify / PR',

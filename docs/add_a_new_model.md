@@ -49,13 +49,13 @@ The database contains the function **query_moe** which defines how we estimate t
 
 ### 3. Collect Data for the Operation
 
-Taking MoE for TensorRT-LLM as an example, the current collector lives in `packages/aiconfigurator-core/collector/trtllm/collect_moe.py`, while shared model/op case values live under `packages/aiconfigurator-core/collector/cases/`.
+Taking MoE for TensorRT-LLM as an example, the current collector lives in `packages/aiconfigurator/collector/trtllm/collect_moe.py`, while shared model/op case values live under `packages/aiconfigurator/collector/cases/`.
 
 #### 3.1 Adding New Test Cases
 
 If the MoE operation you want is not covered by the current inherited [database](../packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt), you need to add the test case in the relevant YAML case file and collect your own data.
 
-For example, if you want to cover a new model with `num_experts=1024, topk=16`, you should extend the model's `*_cases.yaml` under `packages/aiconfigurator-core/collector/cases/models/` or the shared MoE cases under `packages/aiconfigurator-core/collector/cases/base_ops/` when the case is common across models.
+For example, if you want to cover a new model with `num_experts=1024, topk=16`, you should extend the model's `*_cases.yaml` under `packages/aiconfigurator/collector/cases/models/` or the shared MoE cases under `packages/aiconfigurator/collector/cases/base_ops/` when the case is common across models.
 
 #### 3.2 Update Database
 
@@ -89,7 +89,7 @@ This typically refers to a MoE model, as the MoE operation of a new model usuall
 
 You need to follow several steps:
 
-1. Define a new MoE operation test case in the relevant collector YAML case file and follow the collector [README](../packages/aiconfigurator-core/collector/README.md) to collect the MoE data points for your model.
+1. Define a new MoE operation test case in the relevant collector YAML case file and follow the collector [README](../packages/aiconfigurator/collector/README.md) to collect the MoE data points for your model.
 
 2. Update the inherited database such as `packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt` with the `moe_perf.txt` file you get in step 1.
 
@@ -105,7 +105,7 @@ Steps required:
 
 1. **Define a new Operation `Conv`** under `packages/aiconfigurator-core/src/aiconfigurator_core/sdk/operations/`
 2. **Define a new method `query_conv`** in `packages/aiconfigurator-core/src/aiconfigurator_core/sdk/perf_database.py`
-3. **Define the data collection process** under `packages/aiconfigurator-core/collector/` by referring to existing operations' collection code, such as `collect_gemm.py`
+3. **Define the data collection process** under `packages/aiconfigurator/collector/` by referring to existing operations' collection code, such as `collect_gemm.py`
 4. **Collect data for conv** and add the data file to systems in `packages/aiconfigurator-core/src/aiconfigurator_core/systems/`
 5. **Add data loading code** in the core `perf_database.py` to load your data, which is leveraged by the method `query_conv`
 6. **Add a new model definition** under the core `models/` package to build your model with the new operation. A new model class maps to a new model family.
@@ -151,7 +151,7 @@ flowchart TD
     C --> j
     j --> |YES|K([Some common cases in which you will need to collect new data])
     K --> L[/• You haved defined new operations<br/> • <i><b>MoE</b></i> with different <i><b>num_experts</b></i> or <i><b>topk</b></i> from existing ones<br/>• New <i><b>attention</b></i> variant, such as <b><i>attention</b></i> with <b><i>head_size</b></i> other than 64 or 128/]
-    L --> M[Add new test cases under packages/aiconfigurator-core/collector/]
+    L --> M[Add new test cases under packages/aiconfigurator/collector/]
     M --> N[Collect data using <i><b>collect.py</b></i> and generate <i><b>XX_XX_perf.txt</b></i> data files]
     N --> Z
     j --> |NO|Z[<i><b>Good news, you are now all set</b></i>]

@@ -203,7 +203,7 @@ spec:
     command = f"""
 set -euo pipefail
 cd {args.working_dir}
-bash collector/sglang/dsv4_megamoe/run_torchrun.sh
+bash packages/aiconfigurator/collector/sglang/dsv4_megamoe/run_torchrun.sh
 """
 
     return f"""{compute_domain}apiVersion: v1
@@ -272,7 +272,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--master-port", type=int, default=29500)
     parser.add_argument("--model-config", default="dsv4_pro")
     parser.add_argument("--working-dir", default="/workspace/aiconfigurator")
-    parser.add_argument("--output-path", default="/workspace/aiconfigurator/collector/sglang/dsv4_megamoe/results")
+    parser.add_argument(
+        "--output-path",
+        default="/workspace/aiconfigurator/packages/aiconfigurator/collector/sglang/dsv4_megamoe/results",
+    )
     parser.add_argument("--perf-file", default="dsv4_megamoe_module_perf.txt")
     parser.add_argument(
         "--distributions",

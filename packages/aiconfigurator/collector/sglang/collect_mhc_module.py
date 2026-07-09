@@ -48,9 +48,10 @@ PERF_FILENAME = PerfFile.MHC_MODULE.value
 # model directories. Under dummy load_format the collector never needs
 # tokenizer files or weights, so the packaged config.json alone is enough.
 _MODEL_CONFIG_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+    "aiconfigurator-core",
     "src",
-    "aiconfigurator",
+    "aiconfigurator_core",
     "model_configs",
 )
 

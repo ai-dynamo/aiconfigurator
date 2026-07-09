@@ -25,7 +25,7 @@
 /packages/aiconfigurator/src/aiconfigurator/eval/ @ai-dynamo/aiconfigurator-generators @ai-dynamo/maintainers-aiconfigurator
 
 # Profiling and data collectors
-/packages/aiconfigurator-core/collector/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
+/packages/aiconfigurator/collector/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 
 # Documentation
 /docs/ @ai-dynamo/maintainers-aiconfigurator

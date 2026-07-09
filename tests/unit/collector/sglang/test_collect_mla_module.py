@@ -11,7 +11,7 @@ import pytest
 _COLLECT_MLA_MODULE = (
     Path(__file__).resolve().parents[4]
     / "packages"
-    / "aiconfigurator-core"
+    / "aiconfigurator"
     / "collector"
     / "sglang"
     / "collect_mla_module.py"

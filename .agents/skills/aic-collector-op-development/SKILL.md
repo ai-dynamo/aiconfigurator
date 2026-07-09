@@ -12,11 +12,11 @@ whose persisted rows satisfy the existing AIC consumer contract.
 
 Before editing, read:
 
-1. `packages/aiconfigurator-core/collector/README.md`
-2. `packages/aiconfigurator-core/collector/cases/README.md`
+1. `packages/aiconfigurator/collector/README.md`
+2. `packages/aiconfigurator/collector/cases/README.md`
 3. `docs/perf_database/collector-v2-population-design.md`, especially
    **Three identities**, **Population flow**, and **Safe deduplication rules**
-4. The relevant `packages/aiconfigurator-core/collector/<backend>/registry.py`, collector module, and model/base
+4. The relevant `packages/aiconfigurator/collector/<backend>/registry.py`, collector module, and model/base
    case YAML
 5. Every Python and Rust loader/query that consumes the op's perf file
 
@@ -46,7 +46,7 @@ If the task proceeds to GPU collection, also use `$aic-auto-collect`.
   population contract. Full/raw and targeted entry paths must consume the same
   resolved YAML quantization and SM gates; do not reconstruct the policy with a
   second hard-coded hardware heuristic.
-- A case-population change may touch `packages/aiconfigurator-core/collector/collect.py` only for model/op
+- A case-population change may touch `packages/aiconfigurator/collector/collect.py` only for model/op
   plan selection required by the resolved case plan. Generic resume, retry,
   checkpoint, logging, and output-finalization behavior require separate
   explicit scope.
@@ -111,9 +111,9 @@ Examples:
 - Keep correlated structural axes in one profile. Typical correlated fields are
   `(heads, KV heads, head dimension, window, TP)` and
   `(experts, top-k, hidden, intermediate, TP, EP, quant)`.
-- Put shared production defaults in `packages/aiconfigurator-core/collector/cases/base_ops/<op>.yaml`.
+- Put shared production defaults in `packages/aiconfigurator/collector/cases/base_ops/<op>.yaml`.
 - Put model-native topology and artifact policy in
-  `packages/aiconfigurator-core/collector/cases/models/*_cases.yaml`.
+  `packages/aiconfigurator/collector/cases/models/*_cases.yaml`.
 - Make targeted structural population exact when a model profile exists; it
   may still reuse shared workload sweeps. Full/raw collection may union
   defaults and model profiles, then stably deduplicate.

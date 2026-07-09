@@ -12,7 +12,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-SOURCE_PATH = REPO_ROOT / "packages" / "aiconfigurator-core" / "collector" / "sglang" / "collect_moe.py"
+SOURCE_PATH = REPO_ROOT / "packages" / "aiconfigurator" / "collector" / "sglang" / "collect_moe.py"
 
 
 def _load_functions(*names: str, namespace: dict | None = None) -> dict:

@@ -70,7 +70,7 @@ Before implementing a generator change, check whether it affects:
 - **Dynamo profiler** (https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/profiler) -- profiler feeds data that generator consumes; schema changes propagate
 - **Generator validator** (`tools/generator_validator/`) -- new flags need validator updates
 - **Support matrix** (`tools/support_matrix/`) -- new backends/models may need matrix updates
-- **Collector** (`packages/aiconfigurator-core/collector/`) -- performance data collection may reference generator params
+- **Collector** (`packages/aiconfigurator/collector/`) -- performance data collection may reference generator params
 
 See `.claude/rules/generator/cross_module_impact.md` for the detailed dependency map.
 

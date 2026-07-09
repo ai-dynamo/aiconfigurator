@@ -19,7 +19,7 @@ from collector.version_resolver import (
     resolve_module,
 )
 
-CORE_PROJECT_ROOT = Path(__file__).resolve().parents[3] / "packages" / "aiconfigurator-core"
+AIC_PROJECT_ROOT = Path(__file__).resolve().parents[3] / "packages" / "aiconfigurator"
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +350,7 @@ class TestRegistryIntegrity:
         do NOT need to be installed.
         """
         parts = module_dotpath.split(".")
-        source_file = CORE_PROJECT_ROOT / Path(*parts).with_suffix(".py")
+        source_file = AIC_PROJECT_ROOT / Path(*parts).with_suffix(".py")
         if not source_file.exists():
             return set()
         tree = ast.parse(source_file.read_text(), filename=str(source_file))

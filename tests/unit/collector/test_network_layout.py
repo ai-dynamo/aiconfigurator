@@ -4,8 +4,13 @@
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-COLLECTOR_ROOT = REPO_ROOT / "packages" / "aiconfigurator-core" / "collector"
+COLLECTOR_ROOT = REPO_ROOT / "packages" / "aiconfigurator" / "collector"
 NETWORK_ROOT = COLLECTOR_ROOT / "network"
+
+
+def test_collector_tooling_is_owned_by_upper_aic_package():
+    assert COLLECTOR_ROOT.is_dir()
+    assert not (REPO_ROOT / "packages" / "aiconfigurator-core" / "collector").exists()
 
 
 def test_network_collectors_are_grouped_under_network_folder():

@@ -41,5 +41,5 @@ extend = "packages/aiconfigurator/pyproject.toml"
 
 [tool.ruff.lint.extend-per-file-ignores]
 # Collector modules deliberately interleave compatibility probes and imports.
-"packages/aiconfigurator-core/collector/**/*.py" = ["I001"]
+"packages/aiconfigurator/collector/**/*.py" = ["I001"]
 "tests/unit/collector/**/*.py" = ["I001"]

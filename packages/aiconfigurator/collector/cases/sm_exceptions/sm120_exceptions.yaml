@@ -363,7 +363,7 @@ known_exceptions:
   - framework: sglang
     op: moe
     reason_type: framework_version_unsupported
-    source: collector/sglang/collect_moe.py
+    source: packages/aiconfigurator/collector/sglang/collect_moe.py
     case_fields: [moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, tensor_parallel_size, expert_parallel_size, model_path, token_expert_distribution, power_law_alpha, swiglu_limit]
     reason: >
       SGLang 0.5.10 uses the default Triton block-FP8 MoE config for several

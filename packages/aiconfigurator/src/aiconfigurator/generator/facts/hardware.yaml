@@ -5,8 +5,8 @@
 # Keyed by logical profile name (matches system_name used in generator CLI).
 #
 # Provenance:
-#   - node_selector labels: collector/sglang/dsv4_megamoe/run_k8s_full_collection.sh
-#     and collector/sglang/dsv4_megamoe/README.md (verified GPU product label pattern).
+#   - node_selector labels: packages/aiconfigurator/collector/sglang/dsv4_megamoe/run_k8s_full_collection.sh
+#     and packages/aiconfigurator/collector/sglang/dsv4_megamoe/README.md (verified GPU product label pattern).
 #   - nccl_env: derived from platform hardware configs (§9 hardware-level silicon facts).
 #   - shared_memory: standard values from k8s deployment baseline tests and guard rails.
 #   - moe_backend: per design doc §9.3 (CUTLASS on Hopper sm90; WIDEEP on Blackwell sm100/GB200;
@@ -46,7 +46,7 @@ profiles:
   # ---------------------------------------------------------------------------
   h200:
     node_selector:
-      # Source: collector/sglang/dsv4_megamoe/run_k8s_full_collection.sh L63
+      # Source: packages/aiconfigurator/collector/sglang/dsv4_megamoe/run_k8s_full_collection.sh L63
       # pattern: NVIDIA-${gpu_product^^}  =>  NVIDIA-H200
       nvidia.com/gpu.product: NVIDIA-H200
     arch: x86_64
@@ -79,7 +79,7 @@ profiles:
   # ---------------------------------------------------------------------------
   b200:
     node_selector:
-      # Source: collector/sglang/dsv4_megamoe/run_k8s_full_collection.sh L62-63
+      # Source: packages/aiconfigurator/collector/sglang/dsv4_megamoe/run_k8s_full_collection.sh L62-63
       # pattern: NVIDIA-${B200_SXM%%_*}  =>  NVIDIA-B200
       nvidia.com/gpu.product: NVIDIA-B200
     arch: x86_64
@@ -111,7 +111,7 @@ profiles:
   # ---------------------------------------------------------------------------
   gb200:
     node_selector:
-      # Source: collector/sglang/dsv4_megamoe/run_k8s_full_collection.sh L58-59
+      # Source: packages/aiconfigurator/collector/sglang/dsv4_megamoe/run_k8s_full_collection.sh L58-59
       # and README.md L205: --node-selector kubernetes.io/arch=arm64,...
       # GB200 uses ARM64 Grace CPU; arch selector is required for scheduling.
       kubernetes.io/arch: arm64

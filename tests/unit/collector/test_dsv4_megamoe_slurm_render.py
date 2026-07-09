@@ -57,7 +57,7 @@ def test_slurm_renderer_uses_one_task_per_gpu_and_megamoe_flags():
     assert "#SBATCH --ntasks-per-node=4\n" in script
     assert '--container-image="${CONTAINER_IMAGE}"' in script
     assert "--container-writable" in script
-    assert "collector/sglang/collect_dsv4_megamoe.py" in script
+    assert "packages/aiconfigurator/collector/sglang/collect_dsv4_megamoe.py" in script
     assert '--routing-seeds "${ROUTING_SEEDS}"' in script
     assert '--sglang-version "${SGLANG_VERSION}"' in script
     assert "SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE" in script

@@ -1419,7 +1419,8 @@ def main():
         type=str,
         default=None,
         help="GPU type for resolving collector v2 SM exceptions, for example b200_sxm. "
-        "The SM version is read from src/aiconfigurator_core/systems/<gpu>.yaml unless --sm is provided.",
+        "The SM version is read from "
+        "packages/aiconfigurator-core/src/aiconfigurator_core/systems/<gpu>.yaml unless --sm is provided.",
     )
     parser.add_argument(
         "--sm",

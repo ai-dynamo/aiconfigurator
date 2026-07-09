@@ -34,15 +34,15 @@ profile; shared workload sweeps remain reusable.
 This work changes Collector-only population and the operation-local execution
 plumbing required to keep generated quantization labels truthful:
 
-- `collector/cases/**/*.yaml`
-- `collector/case_generator.py`
-- `collector/model_cases.py`
+- `packages/aiconfigurator/collector/cases/**/*.yaml`
+- `packages/aiconfigurator/collector/case_generator.py`
+- `packages/aiconfigurator/collector/model_cases.py`
 - operation-local case getters and the minimal runtime parameters required by
   declared quantization/precision cases
-- the model-specific op selection path in `collector/collect.py`
+- the model-specific op selection path in `packages/aiconfigurator/collector/collect.py`
 - Collector tests and documentation
 
-The `collector/collect.py` change removes only the DeepSeek V4 hard-coded op
+The `packages/aiconfigurator/collector/collect.py` change removes only the DeepSeek V4 hard-coded op
 override so that the resolved YAML case plan remains authoritative. Generic
 resume, checkpoint, and output-finalization behavior is unchanged. This work
 does not change AIC SDK or Rust lookup behavior, EngineSpec, or Dynamo Planner.

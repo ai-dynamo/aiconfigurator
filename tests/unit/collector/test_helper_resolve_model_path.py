@@ -10,10 +10,8 @@ from unittest.mock import patch
 
 import pytest
 
-# Ensure the core project's ``collector/`` scripts are directly importable.
-_COLLECTOR_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "packages", "aiconfigurator-core", "collector"
-)
+# Ensure the upper AIC project's ``collector/`` scripts are directly importable.
+_COLLECTOR_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "packages", "aiconfigurator", "collector")
 sys.path.insert(0, os.path.abspath(_COLLECTOR_DIR))
 
 from helper import _resolve_local_model_path

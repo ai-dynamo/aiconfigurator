@@ -55,8 +55,8 @@ dsv4_hca_generation_module_perf.txt
 They are registered in:
 
 ```text
-collector/sglang/registry.py
-collector/registry_types.py
+packages/aiconfigurator/collector/sglang/registry.py
+packages/aiconfigurator/collector/registry_types.py
 packages/aiconfigurator-core/src/aiconfigurator_core/sdk/common.py
 ```
 
@@ -77,7 +77,7 @@ from a legacy monolithic file to split CSA/HCA files.
 The collector entrypoint is:
 
 ```text
-collector/sglang/collect_dsv4_attn.py
+packages/aiconfigurator/collector/sglang/collect_dsv4_attn.py
 ```
 
 It builds an SGLang `ModelRunner` for one DeepSeek-V4 attention kind and times
@@ -99,7 +99,7 @@ case count stays small.
 Manual examples:
 
 ```bash
-python3 collector/sglang/collect_dsv4_attn.py \
+python3 packages/aiconfigurator/collector/sglang/collect_dsv4_attn.py \
   --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
   --mode context \
   --attn-kind csa \
@@ -108,7 +108,7 @@ python3 collector/sglang/collect_dsv4_attn.py \
   --gemm-type fp8_block \
   --tp-sizes 8
 
-python3 collector/sglang/collect_dsv4_attn.py \
+python3 packages/aiconfigurator/collector/sglang/collect_dsv4_attn.py \
   --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
   --mode generation \
   --attn-kind hca \
@@ -122,7 +122,7 @@ Full collection for attention modules:
 
 ```bash
 # From the repository root:
-python3 collector/collect.py \
+python3 packages/aiconfigurator/collector/collect.py \
   --backend sglang \
   --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
   --ops dsv4_csa_context_module dsv4_hca_context_module \
@@ -132,7 +132,7 @@ python3 collector/collect.py \
 Collect the other required SGLang ops separately:
 
 ```bash
-python3 collector/collect.py \
+python3 packages/aiconfigurator/collector/collect.py \
   --backend sglang \
   --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
   --ops gemm moe mhc_module
@@ -141,13 +141,13 @@ python3 collector/collect.py \
 Custom all-reduce collection, without NCCL collection:
 
 ```bash
-bash collector/collect_comm.sh --all_reduce_backend sglang --skip-nccl
+bash packages/aiconfigurator/collector/network/collect_comm.sh --all_reduce_backend sglang --skip-nccl
 ```
 
 Smoke test before long collection:
 
 ```bash
-python3 collector/collect.py \
+python3 packages/aiconfigurator/collector/collect.py \
   --backend sglang \
   --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
   --ops gemm moe mhc_module dsv4_csa_context_module dsv4_hca_context_module \
@@ -490,7 +490,7 @@ Collect all SGLang DeepSeek-V4 Flash FP8 module-level attention data:
 
 ```bash
 # From the repository root:
-python3 collector/collect.py \
+python3 packages/aiconfigurator/collector/collect.py \
   --backend sglang \
   --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
   --ops dsv4_csa_context_module dsv4_hca_context_module \
@@ -500,7 +500,7 @@ python3 collector/collect.py \
 Collect non-attention dependencies:
 
 ```bash
-python3 collector/collect.py \
+python3 packages/aiconfigurator/collector/collect.py \
   --backend sglang \
   --model-path sgl-project/DeepSeek-V4-Flash-FP8 \
   --ops gemm moe mhc_module
@@ -509,7 +509,7 @@ python3 collector/collect.py \
 Collect custom all-reduce only:
 
 ```bash
-bash collector/collect_comm.sh --all_reduce_backend sglang --skip-nccl
+bash packages/aiconfigurator/collector/network/collect_comm.sh --all_reduce_backend sglang --skip-nccl
 ```
 
 Run focused unit tests for the DeepSeek-V4 module path:

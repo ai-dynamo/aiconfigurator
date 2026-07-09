@@ -82,7 +82,7 @@ reviews:
       instructions: |
         - Verify UI changes preserve support-matrix navigation, filtering, and rendering behavior across local static previews and the webapp.
         - Check that webapp flows handle missing Git LFS performance data gracefully when the change touches default-mode or support data loading.
-    - path: "packages/aiconfigurator-core/collector/**"
+    - path: "packages/aiconfigurator/collector/**"
       instructions: |
         - Check collector changes for backend/runtime version accuracy, GPU resource assumptions, reproducible command construction, and clear failure evidence.
         - Flag changes that make support-matrix or perf-data results harder to trace back to the command, model, system, quantization, or runtime version that produced them.

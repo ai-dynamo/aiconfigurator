@@ -13,16 +13,16 @@ MUST read:
 ## Required Collector First Step
 
 Before adding a Collector operation or changing Collector case population under:
-- `packages/aiconfigurator-core/collector/cases/**`
-- `packages/aiconfigurator-core/collector/case_generator.py`
-- `packages/aiconfigurator-core/collector/model_cases.py`
-- `packages/aiconfigurator-core/collector/collect.py`
-- `packages/aiconfigurator-core/collector/registry_types.py`
-- `packages/aiconfigurator-core/collector/framework_manifest.yaml`
-- `packages/aiconfigurator-core/collector/*/registry.py`
-- `packages/aiconfigurator-core/collector/*/collect_*.py`
-- `packages/aiconfigurator-core/collector/wideep/*/registry.py`
-- `packages/aiconfigurator-core/collector/wideep/*/collect_*.py`
+- `packages/aiconfigurator/collector/cases/**`
+- `packages/aiconfigurator/collector/case_generator.py`
+- `packages/aiconfigurator/collector/model_cases.py`
+- `packages/aiconfigurator/collector/collect.py`
+- `packages/aiconfigurator/collector/registry_types.py`
+- `packages/aiconfigurator/collector/framework_manifest.yaml`
+- `packages/aiconfigurator/collector/*/registry.py`
+- `packages/aiconfigurator/collector/*/collect_*.py`
+- `packages/aiconfigurator/collector/wideep/*/registry.py`
+- `packages/aiconfigurator/collector/wideep/*/collect_*.py`
 
 MUST read and follow:
 - `.agents/skills/aic-collector-op-development/SKILL.md`

@@ -97,7 +97,7 @@ known_exceptions:
   - framework: sglang
     op: dsa_generation_module
     reason_type: framework_version_unsupported
-    source: collector/sglang/collect_mla_module.py
+    source: packages/aiconfigurator/collector/sglang/collect_mla_module.py
     case_fields: [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype, gemm_type, model_path, attn_type, attention_backend]
     reason: >
       On B200/SM100, SGLang DSv3.2 DSA generation with reduced heads (<= 32)

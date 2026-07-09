@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AIC_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+AIC_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
 
 SYSTEM_NAME="${SYSTEM_NAME:-gb200}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-}"
@@ -15,7 +15,7 @@ NODE_RANK="${NODE_RANK:-0}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-29500}"
 MODEL_CONFIG="${MODEL_CONFIG:-dsv4_pro}"
-OUTPUT_PATH="${OUTPUT_PATH:-${AIC_ROOT}/collector/sglang/dsv4_megamoe/results}"
+OUTPUT_PATH="${OUTPUT_PATH:-${AIC_ROOT}/packages/aiconfigurator/collector/sglang/dsv4_megamoe/results}"
 DISTRIBUTIONS="${DISTRIBUTIONS:-balanced,power_law_1.01,power_law_1.2,power_law_sampled_1.9}"
 SOURCE_POLICY="${SOURCE_POLICY:-random}"
 ROUTING_SEED="${ROUTING_SEED:-0}"
@@ -168,7 +168,7 @@ RUN_CMD=(
   --node-rank="${NODE_RANK}" \
   --master-addr="${MASTER_ADDR}" \
   --master-port="${MASTER_PORT}" \
-  "${AIC_ROOT}/collector/sglang/collect_dsv4_megamoe.py" \
+  "${AIC_ROOT}/packages/aiconfigurator/collector/sglang/collect_dsv4_megamoe.py" \
   --model-config "${MODEL_CONFIG}" \
   --system-name "${SYSTEM_NAME}" \
   --gpus-per-node "${GPUS_PER_NODE}" \

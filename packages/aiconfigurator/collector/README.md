@@ -10,6 +10,11 @@ configs with Dynamo + trtllm 1.0.0rc4 worker.
 If you want to go through the process, you can try belowing commands. However, you need to prepare the env by yourself such as installing a specific trtllm version.
 This process is not well verified, you need to debug sometimes.
 
+Collector and future auto-collector tooling are owned by the upper
+`packages/aiconfigurator/` project. The standalone core project contains only
+the estimator implementation and its required system/model data. Commands in
+this document are run from `packages/aiconfigurator/collector/` unless noted.
+
 # Preparation
 Before collecting the data, make sure you own the whole node and no interfierence happens.
 Next, please enable persistent-mode and lock frequency of the node. Make sure the cooling system of the node is working well.
@@ -190,7 +195,7 @@ architecture's `model_paths` list. Add shared op sweeps to the matching
 ops cannot generate the needed data points. To add a new hardware exception,
 create one `cases/sm_exceptions/sm<version>_exceptions.yaml` file instead of
 editing every model case. `--gpu b200_sxm` resolves the SM version from
-`src/aiconfigurator_core/systems/b200_sxm.yaml`; use `--sm 100` when collecting on an
+`packages/aiconfigurator-core/src/aiconfigurator_core/systems/b200_sxm.yaml`; use `--sm 100` when collecting on an
 unregistered GPU with a known SM version.
 
 # Version Management
@@ -442,7 +447,7 @@ python3 collect.py --backend trtllm
 ```
 For trtllm, the whole collecting process takes about 30 gpu-hours. On 8-gpu, it takes 3-4 hours.
 Please note that the whole process will report a lot of missing datapoints with errors. But it's okay. Our system is kindof robust to fair amount of missing data.
-Once everything is done, you might see mutliple xxx.txt files under the same folder. Refer to src/aiconfigurator_core/systems/ folder to prepare the database including
+Once everything is done, you might see mutliple xxx.txt files under the same folder. Refer to packages/aiconfigurator-core/src/aiconfigurator_core/systems/ folder to prepare the database including
 how many files are needed accordingly.
 
 ## Resume Collection (Checkpoint)
@@ -486,7 +491,7 @@ For **DeepSeek V3** models with DeepEP MoE, inter-node communication data requir
 See `wideep/sglang/deepep/README.md` for complete multi-node setup instructions.
 
 # Test
-Rebuild and install the new aiconfigurator. Please make sure you have your new system definition file prepared. It's src/aiconfigurator_core/systems/xxx.yaml
+Rebuild and install the new aiconfigurator. Please make sure you have your new system definition file prepared. It's packages/aiconfigurator-core/src/aiconfigurator_core/systems/xxx.yaml
 
 # Validate the correctness
 Today, we have limited method to validate the database. You can try tools/sanity_check to validate the database a little bit. But it highly depends on your understanding
@@ -503,4 +508,4 @@ of the GPU system and kernel optimization.
 **Solution**: Use `/tmp/` for output files, then copy results after collection.
 
 # Support Matrix
-refer to the [**support matrix CSV**](src/aiconfigurator_core/systems/support_matrix.csv)
+refer to the [**support matrix CSV**](packages/aiconfigurator-core/src/aiconfigurator_core/systems/support_matrix.csv)

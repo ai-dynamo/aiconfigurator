@@ -1651,7 +1651,7 @@ class DeepSeekV4MegaMoEModule(Operation):
     SGLang DeepSeek-V4 MegaMoE routed module.
 
     This models the measured routed MegaMoE module boundary used by
-    ``collector/sglang/collect_dsv4_megamoe.py``: prepared hidden states and
+    ``packages/aiconfigurator/collector/sglang/collect_dsv4_megamoe.py``: prepared hidden states and
     top-k tensors -> SGLang pre-dispatch -> ``deep_gemm.fp8_fp4_mega_moe`` ->
     routed output scaling. Gate/top-k and shared experts are modeled outside
     this operation.

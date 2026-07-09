@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AIC_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+AIC_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
 
 NAMESPACE="${NAMESPACE:-default}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d%H%M%S)}"
@@ -94,7 +94,7 @@ current_job=""
 cleanup_job() {
   local job="$1"
   [[ -n "${job}" ]] || return 0
-  bash "${LOCAL_REPO}/collector/sglang/dsv4_megamoe/cleanup_k8s_job.sh" "${job}" "${NAMESPACE}" \
+  bash "${LOCAL_REPO}/packages/aiconfigurator/collector/sglang/dsv4_megamoe/cleanup_k8s_job.sh" "${job}" "${NAMESPACE}" \
     >"${LOCAL_RESULT_DIR}/${job}_delete.log" 2>&1 || true
 }
 
@@ -116,7 +116,7 @@ render_job() {
   local decode_tokens="$5"
   local cap="$6"
   local args=(
-    "${LOCAL_REPO}/collector/sglang/dsv4_megamoe/render_k8s_indexed_job.py"
+    "${LOCAL_REPO}/packages/aiconfigurator/collector/sglang/dsv4_megamoe/render_k8s_indexed_job.py"
     --job-name "${job}"
     --namespace "${NAMESPACE}"
     --system-name "${SYSTEM_NAME}"

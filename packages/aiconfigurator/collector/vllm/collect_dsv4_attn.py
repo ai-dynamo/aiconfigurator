@@ -82,7 +82,9 @@ SPARSE_KERNEL_TO_PERF_FILE = {
     "paged_mqa_logits": PerfFile.DSV4_PAGED_MQA_LOGITS_MODULE,
     "hca_attn": PerfFile.DSV4_HCA_ATTN_MODULE,
 }
-MODEL_CONFIGS_DIR = Path(__file__).resolve().parents[2] / "src" / "aiconfigurator_core" / "model_configs"
+MODEL_CONFIGS_DIR = (
+    Path(__file__).resolve().parents[2].parent / "aiconfigurator-core" / "src" / "aiconfigurator_core" / "model_configs"
+)
 SUPPORTED_GEMM_TYPES = {"fp8_block"}
 DEFAULT_MAX_SEQ_LEN = 65536
 MAX_SEQ_LEN = int(os.environ.get("AIC_VLLM_DSV4_MAX_SEQ_LEN", DEFAULT_MAX_SEQ_LEN))

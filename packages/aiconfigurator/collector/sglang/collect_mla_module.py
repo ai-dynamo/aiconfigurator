@@ -118,9 +118,10 @@ SGLANG_KV_DTYPE: dict[str, str] = {
 
 # AIC's cached HuggingFace model configs — avoids HF downloads in CI.
 _MODEL_CONFIG_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+    "aiconfigurator-core",
     "src",
-    "aiconfigurator",
+    "aiconfigurator_core",
     "model_configs",
 )
 _GLM5_DSA_ARCHITECTURE = "GlmMoeDsaForCausalLM"
@@ -262,7 +263,7 @@ def _generation_cuda_graph_enabled_for_tokens(model_runner, num_tokens: int) -> 
 def _resolve_local_model_path(model_id: str) -> str:
     """Resolve a HuggingFace model ID to a local config directory.
 
-    Uses AIC's cached model configs from src/aiconfigurator_core/model_configs/
+    Uses AIC's cached model configs from packages/aiconfigurator-core/src/aiconfigurator_core/model_configs/
     so that the collection pipeline never needs HuggingFace network access.
     The function patches model_type and architectures for sglang AutoConfig
     compatibility and strips auto_map to prevent any remote code download.

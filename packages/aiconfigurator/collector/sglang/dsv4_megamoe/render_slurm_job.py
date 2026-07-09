@@ -179,7 +179,7 @@ if [[ "${{SLURM_PROCID:-0}}" == "0" ]]; then
   printf '%s\\n' "${{SGLANG_VERSION}}" >"${{OUTPUT_PATH}}/sglang_version.txt"
   _write_rank0_env
 fi
-python3 collector/sglang/collect_dsv4_megamoe.py \\
+python3 packages/aiconfigurator/collector/sglang/collect_dsv4_megamoe.py \\
   --model-config "${{MODEL_CONFIG}}" \\
   --system-name "${{SYSTEM_NAME}}" \\
   --gpus-per-node "${{GPUS_PER_NODE}}" \\

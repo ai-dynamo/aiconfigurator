@@ -87,7 +87,7 @@ python collect.py --backend sglang --ops mla_bmm_gen_pre dsa_context_module
 
 All scripts save results to the same output directory. Modify `output_path` in each script to your desired location:
 ```python
-output_path = "/aiconfigurator/src/aiconfigurator_core/systems/data/h100_sxm/sglang/0.5.0/"
+output_path = "/aiconfigurator/packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/h100_sxm/sglang/0.5.0/"
 ```
 
 

@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AIC_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+AIC_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
 
 SSH_TARGET="${SSH_TARGET:-}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d%H%M%S)}"
@@ -116,7 +116,7 @@ _render_job() {
   local remote_output="${REMOTE_RESULTS}/${job}"
   local remote_log_dir="${REMOTE_LOGS}/${job}"
   local args=(
-    "${LOCAL_REPO}/collector/sglang/dsv4_megamoe/render_slurm_job.py"
+    "${LOCAL_REPO}/packages/aiconfigurator/collector/sglang/dsv4_megamoe/render_slurm_job.py"
     --job-name "${job}"
     --account "${SLURM_ACCOUNT}"
     --partition "${SLURM_PARTITION}"
@@ -308,7 +308,7 @@ python3 "${SCRIPT_DIR}/validate_perf.py" validate \
 
 if [[ "${COPY_VALIDATED}" == "1" ]]; then
   target_system="$(printf '%s' "${SYSTEM_NAME}" | tr '[:upper:]' '[:lower:]')"
-  target_dir="${LOCAL_REPO}/src/aiconfigurator_core/systems/data/${target_system}/sglang/${TARGET_SGLANG_VERSION}"
+  target_dir="${LOCAL_REPO}/packages/aiconfigurator-core/src/aiconfigurator_core/systems/data/${target_system}/sglang/${TARGET_SGLANG_VERSION}"
   mkdir -p "${target_dir}"
   cp "${LOCAL_RESULT_DIR}/merged/${PERF_FILE}" "${target_dir}/${PERF_FILE}"
   echo "COPIED_TO=${target_dir}/${PERF_FILE}" | tee -a "${LOCAL_RESULT_DIR}/runner.log"

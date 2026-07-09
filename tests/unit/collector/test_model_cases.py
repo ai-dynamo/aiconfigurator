@@ -28,14 +28,15 @@ from collector.model_cases import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+AIC_PROJECT_ROOT = REPO_ROOT / "packages" / "aiconfigurator"
 CORE_PROJECT_ROOT = REPO_ROOT / "packages" / "aiconfigurator-core"
-COLLECTOR_ROOT = CORE_PROJECT_ROOT / "collector"
+COLLECTOR_ROOT = AIC_PROJECT_ROOT / "collector"
 SYSTEMS_ROOT = CORE_PROJECT_ROOT / "src" / "aiconfigurator_core" / "systems"
 SUPPORT_MATRIX_ROOT = SYSTEMS_ROOT / "support_matrix"
 
 
 def _load_mla_adapter(module_path: str, globals_dict: dict):
-    source_path = CORE_PROJECT_ROOT / module_path
+    source_path = AIC_PROJECT_ROOT / module_path
     tree = ast.parse(source_path.read_text(), filename=str(source_path))
     function = next(
         node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_build_mla_test_cases"
@@ -900,7 +901,7 @@ def test_dsv4_plan_only_uses_backend_specific_case_plan():
             model_path,
             "--plan-only",
         ],
-        cwd=CORE_PROJECT_ROOT,
+        cwd=AIC_PROJECT_ROOT,
         check=True,
         capture_output=True,
         text=True,
@@ -1635,7 +1636,7 @@ known_exceptions:
   - framework: sglang
     op: moe
     reason_type: framework_version_unsupported
-    source: collector/sglang/collect_moe.py
+    source: packages/aiconfigurator/collector/sglang/collect_moe.py
     case_fields:
       - moe_type
       - num_tokens
@@ -1676,6 +1677,6 @@ known_exceptions:
         "selector": "rule",
         "reason_type": "framework_version_unsupported",
         "reason": "expected SM120 shared-memory overflow",
-        "reference_source": "collector/sglang/collect_moe.py",
+        "reference_source": "packages/aiconfigurator/collector/sglang/collect_moe.py",
         "label": "Qwen3",
     }

@@ -22,13 +22,13 @@ Unit tests are added for `query_moe` SILICON path (within-range interpolation, o
   - Call sites (tensorrt_llm, trtllm, vllm): If `num_tokens > token_points[-1]`, return `_estimate_overflow_with_last_token_util(...)`; else use 1D interpolation and return that result.
 - **`tests/unit/sdk/database/test_moe_mla.py`**
   - New tests: `test_query_moe_silicon_within_range_uses_interpolation`, `test_query_moe_silicon_overflow_uses_util_extrapolation`, `test_query_moe_silicon_boundary_at_max_tokens`. Restored `class TestMLABMM` (was accidentally removed in an earlier edit).
-- **`collector/trtllm/collect_moe.py`**
+- **`packages/aiconfigurator/collector/trtllm/collect_moe.py`**
   - Current TRT-LLM MoE collector implementation.
   - `load_cache`: use `inspect.signature(load_cache).parameters` to pass `rank` only when supported (trtllm >= 1.3).
   - Docstrings added for `gc_collect`, `cleanup_empty_json_files`, `get_moe_test_cases`, `run_moe_torch`.
-- **`collector/wideep/trtllm/collect_moe_compute.py`**
+- **`packages/aiconfigurator/collector/wideep/trtllm/collect_moe_compute.py`**
   - Same `load_cache` rank check; docstrings for `cleanup_empty_json_files` and `moe_op` property.
-- **`collector/collect.py`**
+- **`packages/aiconfigurator/collector/collect.py`**
   - Use `getattr(torch, "AcceleratorError", None)` before `isinstance(e, ...)` so older PyTorch without `AcceleratorError` does not raise.
 - **`tools/sanity_check/validate_database.ipynb`**
   - MoE `weight_bits` derived from `quant_mode.value.memory * 8`; removed undefined `size_of` usage and redundant print.
@@ -37,7 +37,7 @@ Unit tests are added for `query_moe` SILICON path (within-range interpolation, o
 
 1. **`packages/aiconfigurator-core/src/aiconfigurator_core/sdk/perf_database.py`** — `query_moe` and `num_gemms` / `get_sol` / `_estimate_overflow_with_last_token_util` and the three backend branches (sglang, trtllm, vllm) that decide extrapolation vs interpolation.
 2. **`tests/unit/sdk/database/test_moe_mla.py`** — New MoE SILICON tests and `TestMLABMM` class.
-3. **`collector/trtllm/collect_moe.py`** — Current TRT-LLM MoE collector implementation.
+3. **`packages/aiconfigurator/collector/trtllm/collect_moe.py`** — Current TRT-LLM MoE collector implementation.
 
 #### Related Issues: (use one of the action keywords Closes / Fixes / Resolves / Relates to)
 

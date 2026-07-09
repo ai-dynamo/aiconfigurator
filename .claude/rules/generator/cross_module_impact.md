@@ -28,7 +28,7 @@ Support Matrix (tools/support_matrix/)
   |-- reads <-- model_configs/*.json, systems/*.yaml
   |-- reads <-- generator/config/backend_version_matrix.yaml
 
-Collector (packages/aiconfigurator-core/collector/)
+Collector (packages/aiconfigurator/collector/)
   |-- produces --> performance data CSVs
   |-- references --> generator parameter names for benchmark configs
 ```
@@ -86,7 +86,7 @@ Collector (packages/aiconfigurator-core/collector/)
 | 1. K8s manifests | Verify YAML is valid K8s | `kubectl apply --dry-run` |
 | 2. Run scripts | Verify bash syntax | `bash -n generated_run.sh` |
 | 3. Engine configs | Verify against backend schema | `tools/generator_validator/` |
-| 4. Collector | `packages/aiconfigurator-core/collector/` | If collector parses generated configs |
+| 4. Collector | `packages/aiconfigurator/collector/` | If collector parses generated configs |
 
 ## External Dependencies
 

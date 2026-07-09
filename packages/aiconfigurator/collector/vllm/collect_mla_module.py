@@ -82,11 +82,13 @@ if "glm_moe_dsa" not in _CONFIG_REGISTRY:
 # Local model config resolution — avoid HuggingFace Hub downloads
 # ═══════════════════════════════════════════════════════════════════════
 
-# Pre-cached HF configs live in src/aiconfigurator_core/model_configs/ as
+# Pre-cached HF configs live in packages/aiconfigurator-core/src/aiconfigurator_core/model_configs/ as
 # "<org>--<model>_config.json".  vLLM's ModelConfig accepts a local
 # directory containing config.json, so we create a temp dir with a
 # symlink when the cached file exists.
-_MODEL_CONFIGS_DIR = Path(__file__).resolve().parents[2] / "src" / "aiconfigurator_core" / "model_configs"
+_MODEL_CONFIGS_DIR = (
+    Path(__file__).resolve().parents[2].parent / "aiconfigurator-core" / "src" / "aiconfigurator_core" / "model_configs"
+)
 
 # Cache of model_name -> temp dir path (created once per process).
 _local_config_cache: dict[str, str] = {}

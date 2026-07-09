@@ -14,7 +14,7 @@ from collector.wideep.sglang.registry import REGISTRY as WIDEEP_SGLANG_REGISTRY
 from collector.wideep.trtllm.registry import REGISTRY as WIDEEP_TRTLLM_REGISTRY
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-COLLECTOR_ROOT = REPO_ROOT / "packages" / "aiconfigurator-core" / "collector"
+COLLECTOR_ROOT = REPO_ROOT / "packages" / "aiconfigurator" / "collector"
 
 
 def test_manifest_exposes_current_framework_versions_and_images():
@@ -39,7 +39,7 @@ def test_wideep_versions_stay_aligned_with_default_framework_versions():
 
     wideep_sglang = get_collector_runtime("sglang", workload="wideep")
     assert wideep_sglang.version == get_collector_runtime("sglang").version
-    assert wideep_sglang.collector_dir == "collector/wideep/sglang"
+    assert wideep_sglang.collector_dir == "packages/aiconfigurator/collector/wideep/sglang"
     assert "deepseek-v4" in wideep_sglang.image()
 
 
