@@ -51,7 +51,6 @@ dependencies = [
     "pydantic>=2.5",
     "pyarrow>=15.0.0",
     "pyyaml>=6.0",
-    "scipy>=1.13.1",
     "tqdm>=4.0.0",
     "bokeh",
     "nvidia-ml-py",

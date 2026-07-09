@@ -27,6 +27,9 @@ pub enum Source {
     Silicon,
     Empirical,
     Sol,
+    /// Composed from measured pieces plus modeled deltas (Python's
+    /// `source="estimated"`, e.g. the DSA CP prefill composition).
+    Estimated,
     Mixed,
 }
 
@@ -36,6 +39,7 @@ impl Source {
             Self::Silicon => "silicon",
             Self::Empirical => "empirical",
             Self::Sol => "sol",
+            Self::Estimated => "estimated",
             Self::Mixed => "mixed",
         }
     }

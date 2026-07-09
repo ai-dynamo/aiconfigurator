@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
 
 pytestmark = pytest.mark.unit
 
@@ -266,21 +266,15 @@ class TestGenerationAttention:
             b, s, n, n_kv, kv_cache_quant_mode, database_mode=common.DatabaseMode.SILICON
         )
 
-        # Should use n_kv=0 for MHA
-        attention_dict = comprehensive_perf_db._generation_attention_data[kv_cache_quant_mode][0][128][0]
+        # Should use n_kv=0 for MHA. n and b hit collected keys exactly, so
+        # the engine collapses those axes and lerps only s; the fixture
+        # latency 0.001*(n*b*s)/1000 is linear in s, so the lerp reproduces
+        # the formula exactly at every sample.
         s_min = max(1, int(s * 0.9))
         s_max = max(s_min, int(s * 1.1))
         sample_cnt = 5
         s_samples = [s_min + (s_max - s_min) * i // (sample_cnt - 1) for i in range(sample_cnt)]
-        expected = (
-            sum(
-                interpolation.interp_3d(
-                    n, b, s_i, attention_dict, "bilinear", comprehensive_perf_db._extracted_metrics_cache
-                )["latency"]
-                for s_i in s_samples
-            )
-            / sample_cnt
-        )
+        expected = sum(0.001 * (n * b * s_i) / 1000.0 for s_i in s_samples) / sample_cnt
 
         assert math.isclose(result, expected, rel_tol=1e-6)
 

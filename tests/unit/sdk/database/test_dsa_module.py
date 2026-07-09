@@ -7,11 +7,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.dsa import (
     DEFAULT_DSA_ARCHITECTURE,
-    ContextDSAModule,
-    GenerationDSAModule,
     load_context_dsa_module_data,
     load_generation_dsa_module_data,
 )
@@ -258,37 +256,14 @@ class TestContextDSAModule:
         assert float(result) == pytest.approx(12.4104)
         assert result.energy == pytest.approx(124.104)
 
-    def test_topk_piecewise_from_raw_handles_both_boundary_sides(self, stub_perf_db):
-        raw_dsa_dict = {
-            32: {
-                1024: {1: _dsa_value(10.0)},
-                2048: {1: _dsa_value(20.0)},
-                3072: {1: _dsa_value(80.0)},
-                4096: {1: _dsa_value(100.0)},
-            }
-        }
-
-        below = interpolation.interp_dsa_context_topk_piecewise_from_raw(32, 2047, 1, raw_dsa_dict, 2048)
-        above = interpolation.interp_dsa_context_topk_piecewise_from_raw(32, 2049, 1, raw_dsa_dict, 2048)
-
-        assert below is not None
-        assert above is not None
-        assert below["latency"] == pytest.approx(10.0 + (20.0 - 10.0) / 1024.0 * (2047 - 1024))
-        assert above["latency"] == pytest.approx(80.0 + (100.0 - 80.0) / 1024.0 * (2049 - 3072))
-        assert above["latency"] > raw_dsa_dict[32][2048][1]["latency"]
-
-    def test_topk_plus_one_uses_raw_piecewise_instead_of_cubic_fallback(self, stub_perf_db, monkeypatch):
+    def test_topk_plus_one_plain_crossing_on_raw_table(self, stub_perf_db):
+        """s = topk+1 interpolates PLAINLY between the collected 2048 and 3072
+        rows. The old topk-piecewise (same-regime-only anchors) was removed:
+        leave-one-out on every real config showed plain crossing ties or beats
+        it, incl. just above the boundary (the knee itself is collected)."""
         raw_dsa_dict = {
             32: {
                 2048: {1: _dsa_value(20.0)},
-                3072: {1: _dsa_value(80.0)},
-                4096: {1: _dsa_value(100.0)},
-            }
-        }
-        extrapolated_dsa_dict = {
-            32: {
-                2048: {1: _dsa_value(20.0)},
-                2049: {1: _dsa_value(21.0)},
                 3072: {1: _dsa_value(80.0)},
                 4096: {1: _dsa_value(100.0)},
             }
@@ -296,14 +271,7 @@ class TestContextDSAModule:
         stub_perf_db._raw_context_dsa_module_data = LoadedOpData(
             _context_dsa_data(raw_dsa_dict), common.PerfDataFilename.dsa_context_module, "raw"
         )
-        stub_perf_db._context_dsa_module_data = LoadedOpData(
-            _context_dsa_data(extrapolated_dsa_dict), common.PerfDataFilename.dsa_context_module, "extrapolated"
-        )
-
-        def fail_interp_3d(*args, **kwargs):
-            raise AssertionError("_interp_3d should not be used for topk + 1 when raw right-regime anchors exist")
-
-        monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", fail_interp_3d)
+        stub_perf_db._context_dsa_module_data = stub_perf_db._raw_context_dsa_module_data
 
         result = stub_perf_db.query_context_dsa_module(
             b=1,
@@ -317,10 +285,13 @@ class TestContextDSAModule:
             database_mode=common.DatabaseMode.SILICON,
         )
 
-        assert float(result) == pytest.approx(80.0 + (100.0 - 80.0) / 1024.0 * (2049 - 3072))
-        assert result.energy == pytest.approx((80.0 + (100.0 - 80.0) / 1024.0 * (2049 - 3072)) * 10.0)
+        expected = 20.0 + (80.0 - 20.0) / (3072 - 2048) * (2049 - 2048)
+        assert float(result) == pytest.approx(expected)
+        assert result.energy == pytest.approx(expected * 10.0)
 
-    def test_topk_piecewise_falls_back_when_raw_same_regime_anchors_are_unavailable(self, stub_perf_db, monkeypatch):
+    def test_topk_plus_one_plain_crossing_with_sparse_anchors(self, stub_perf_db):
+        """With only 2048 and 4096 collected, s=2049 plainly brackets them —
+        no cubic fallback, no piecewise; the engine resolves the raw grid."""
         raw_dsa_dict = {
             32: {
                 2048: {1: _dsa_value(20.0)},
@@ -330,16 +301,7 @@ class TestContextDSAModule:
         stub_perf_db._raw_context_dsa_module_data = LoadedOpData(
             _context_dsa_data(raw_dsa_dict), common.PerfDataFilename.dsa_context_module, "raw"
         )
-        stub_perf_db._context_dsa_module_data = LoadedOpData(
-            _context_dsa_data(raw_dsa_dict), common.PerfDataFilename.dsa_context_module, "extrapolated"
-        )
-        cubic_calls = []
-
-        def fake_interp_3d(*args, **kwargs):
-            cubic_calls.append((args, kwargs))
-            return {"latency": 123.0, "power": 0.0, "energy": 456.0}
-
-        monkeypatch.setattr("aiconfigurator.sdk.interpolation.interp_3d", fake_interp_3d)
+        stub_perf_db._context_dsa_module_data = stub_perf_db._raw_context_dsa_module_data
 
         result = stub_perf_db.query_context_dsa_module(
             b=1,
@@ -353,9 +315,9 @@ class TestContextDSAModule:
             database_mode=common.DatabaseMode.SILICON,
         )
 
-        assert float(result) == pytest.approx(123.0)
-        assert result.energy == pytest.approx(456.0)
-        assert len(cubic_calls) == 1
+        expected = 20.0 + (100.0 - 20.0) / (4096 - 2048) * (2049 - 2048)
+        assert float(result) == pytest.approx(expected)
+        assert result.energy == pytest.approx(expected * 10.0)
 
     def test_prefix_axis_interpolates_measured_prefix_slices(self, stub_perf_db):
         dsa_dict = {
@@ -694,58 +656,6 @@ class TestContextDSAModule:
         )
         assert r1 != r2
 
-    def test_extrapolate_descends_into_each_dsa_backend_independently(self):
-        """Regression: ``_extrapolate`` must descend through the ``dsa_backend``
-        level and extrapolate each backend's ``{num_heads: {prefix: {s: {b}}}}``
-        grid independently.  Before the fix the backend names ("flashmla_kv",
-        "trtllm") were treated as the num_heads x-axis, silently extrapolating
-        at the wrong nesting level."""
-        flashmla = {
-            32: {0: {1: {1: _dsa_value(10.0), 4: _dsa_value(40.0)}, 32: {1: _dsa_value(20.0), 4: _dsa_value(50.0)}}}
-        }
-        trtllm = {
-            32: {0: {1: {1: _dsa_value(100.0), 4: _dsa_value(400.0)}, 32: {1: _dsa_value(200.0), 4: _dsa_value(500.0)}}}
-        }
-        dsa_dict = {"flashmla_kv": flashmla, "trtllm": trtllm}
-        data_wrapper = LoadedOpData(
-            _context_dsa_data(dsa_dict, GLM5_ARCHITECTURE),
-            common.PerfDataFilename.dsa_context_module,
-            "test",
-        )
-
-        ContextDSAModule._extrapolate(data_wrapper)
-
-        arch_dict = data_wrapper[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][
-            common.GEMMQuantMode.bfloat16
-        ][GLM5_ARCHITECTURE]
-
-        # Backend names survive as backend-level keys (not consumed as grid keys).
-        assert set(arch_dict.keys()) == {"flashmla_kv", "trtllm"}
-
-        for backend in ("flashmla_kv", "trtllm"):
-            backend_grid = arch_dict[backend]
-            # num_heads level untouched: still plain int keys.
-            assert set(backend_grid.keys()) == {32}
-            # New b=2 interpolated within each (num_heads, prefix, s) slice.
-            assert 2 in backend_grid[32][0][1]
-            assert 2 in backend_grid[32][0][32]
-            # New s=16 interpolated within each (num_heads, prefix) slice.
-            assert 16 in backend_grid[32][0]
-            # All s-level keys are ints (no backend-name leakage into the grid).
-            assert all(isinstance(k, int) for k in backend_grid[32][0])
-
-        # Backends extrapolated independently: same grid point, different values.
-        flashmla_b2 = arch_dict["flashmla_kv"][32][0][1][2]["latency"]
-        trtllm_b2 = arch_dict["trtllm"][32][0][1][2]["latency"]
-        assert flashmla_b2 == pytest.approx(20.0)
-        assert trtllm_b2 == pytest.approx(200.0)
-        assert flashmla_b2 != trtllm_b2
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Generation DSA Module
-# ═══════════════════════════════════════════════════════════════════════
-
 
 class TestGenerationDSAModule:
     """Tests for query_generation_dsa_module."""
@@ -916,16 +826,14 @@ class TestGenerationDSAModule:
 
     def test_silicon_sequence_overflow_uses_raw_boundary_util(self, mutable_comprehensive_perf_db):
         db = mutable_comprehensive_perf_db
+        # No pre-expansion in v2: the working table IS the raw measurements
+        # (bogus synthesized points can no longer exist to supersede them).
         raw = {32: {4: {65: _dsa_value(10.0), 129: _dsa_value(11.0)}}}
-        # The working table deliberately contains a bogus exact target.  An
-        # extrapolated point must not supersede the last measured utilization.
-        working = {32: {4: {65: _dsa_value(10.0), 129: _dsa_value(11.0), 11000: _dsa_value(999.0)}}}
-        db._raw_generation_dsa_module_data = LoadedOpData(
+        wrapper = LoadedOpData(
             _generation_dsa_data_with_backend(raw), common.PerfDataFilename.dsa_generation_module, "raw"
         )
-        db._generation_dsa_module_data = LoadedOpData(
-            _generation_dsa_data_with_backend(working), common.PerfDataFilename.dsa_generation_module, "working"
-        )
+        db._raw_generation_dsa_module_data = wrapper
+        db._generation_dsa_module_data = wrapper
         db.clear_runtime_caches()
 
         query = {
@@ -967,7 +875,11 @@ class TestGenerationDSAModule:
         assert result.energy == pytest.approx(120.0)
         assert result.power == pytest.approx(10.0)
 
-    def test_silicon_sequence_overflow_interpolates_raw_batches(self, mutable_comprehensive_perf_db):
+    def test_silicon_sequence_overflow_snaps_batch_and_holds_boundary_util(self, mutable_comprehensive_perf_db):
+        """Query (b=3, s=1024) with both axes off-grid and s beyond every
+        collected sweep: the engine snaps outer axes to the nearest collected
+        path (batch 3 -> 2), holds that curve's boundary util (s=128), and
+        lets SOL(query) carry the growth."""
         db = mutable_comprehensive_perf_db
         raw = {
             32: {
@@ -975,16 +887,11 @@ class TestGenerationDSAModule:
                 4: {64: _dsa_value(17.0), 128: _dsa_value(18.0)},
             }
         }
-        # b=3 is a synthetic working-table batch and must not take the exact
-        # fast path. Extrapolate each measured batch in util-space first,
-        # then interpolate those two results along batch.
-        working = {32: {**raw[32], 3: {1024: _dsa_value(999.0)}}}
-        db._raw_generation_dsa_module_data = LoadedOpData(
+        wrapper = LoadedOpData(
             _generation_dsa_data_with_backend(raw), common.PerfDataFilename.dsa_generation_module, "raw"
         )
-        db._generation_dsa_module_data = LoadedOpData(
-            _generation_dsa_data_with_backend(working), common.PerfDataFilename.dsa_generation_module, "working"
-        )
+        db._raw_generation_dsa_module_data = wrapper
+        db._generation_dsa_module_data = wrapper
         db.clear_runtime_caches()
 
         def sol(batch: int, sequence: int) -> float:
@@ -999,9 +906,6 @@ class TestGenerationDSAModule:
                 )
             )
 
-        at_b2 = 10.0 * sol(2, 1024) / sol(2, 128)
-        at_b4 = 18.0 * sol(4, 1024) / sol(4, 128)
-        expected = (at_b2 + at_b4) / 2.0
         result = db.query_generation_dsa_module(
             b=3,
             s=1024,
@@ -1011,9 +915,10 @@ class TestGenerationDSAModule:
             database_mode=common.DatabaseMode.SILICON,
         )
 
+        expected = 10.0 * sol(3, 1024) / sol(2, 128)  # anchor: batch snapped to 2, boundary s=128
         assert float(result) == pytest.approx(expected)
-        assert result.energy == pytest.approx(expected * 10.0)
         assert result.power == pytest.approx(10.0)
+        assert result.energy == pytest.approx(expected * 10.0)
 
     def test_empirical_prefers_exact_head_slice_over_longer_other_tp(self, mutable_comprehensive_perf_db):
         db = mutable_comprehensive_perf_db
@@ -1043,53 +948,3 @@ class TestGenerationDSAModule:
 
         assert float(result) == pytest.approx(11.0 * sol_query / sol_boundary)
         assert result.source == "empirical"
-
-    def test_extrapolate_descends_into_each_dsa_backend_independently(self):
-        """Regression: ``_extrapolate`` must descend through the ``dsa_backend``
-        level and extrapolate each backend's ``{num_heads: {b: {s}}}`` grid
-        independently.  Before the fix the backend names ("flashmla_kv",
-        "trtllm") were treated as the num_heads x-axis, silently extrapolating
-        at the wrong nesting level."""
-        flashmla = {
-            32: {1: {256: _dsa_value(10.0), 1024: _dsa_value(20.0)}, 8: {256: _dsa_value(30.0), 1024: _dsa_value(40.0)}}
-        }
-        trtllm = {
-            32: {
-                1: {256: _dsa_value(100.0), 1024: _dsa_value(200.0)},
-                8: {256: _dsa_value(300.0), 1024: _dsa_value(400.0)},
-            }
-        }
-        dsa_dict = {"flashmla_kv": flashmla, "trtllm": trtllm}
-        data_wrapper = LoadedOpData(
-            _generation_dsa_data(dsa_dict),
-            common.PerfDataFilename.dsa_generation_module,
-            "test",
-        )
-
-        GenerationDSAModule._extrapolate(data_wrapper)
-
-        arch_dict = data_wrapper[common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][
-            DEFAULT_DSA_ARCHITECTURE
-        ]
-
-        # Backend names survive as backend-level keys (not consumed as grid keys).
-        assert set(arch_dict.keys()) == {"flashmla_kv", "trtllm"}
-
-        for backend in ("flashmla_kv", "trtllm"):
-            backend_grid = arch_dict[backend]
-            # num_heads level untouched: still plain int keys.
-            assert set(backend_grid.keys()) == {32}
-            # New b=2 interpolated within each num_heads slice (between b=1 and b=8).
-            assert 2 in backend_grid[32]
-            # New s=512 interpolated within each (num_heads, b) slice (between s=256 and s=1024).
-            assert 512 in backend_grid[32][1]
-            assert 512 in backend_grid[32][8]
-            # All b-level keys are ints (no backend-name leakage into the grid).
-            assert all(isinstance(k, int) for k in backend_grid[32])
-
-        # Backends extrapolated independently: same grid point, different values.
-        flashmla_s512 = arch_dict["flashmla_kv"][32][1][512]["latency"]
-        trtllm_s512 = arch_dict["trtllm"][32][1][512]["latency"]
-        assert flashmla_s512 == pytest.approx(13.333333, rel=1e-4)
-        assert trtllm_s512 == pytest.approx(133.333333, rel=1e-4)
-        assert flashmla_s512 != trtllm_s512

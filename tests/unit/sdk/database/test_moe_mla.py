@@ -410,25 +410,30 @@ class TestMoE:
         assert empirical.source == "empirical"
         assert hybrid.source == "empirical"
 
-    def test_query_moe_multi_point_underflow_keeps_existing_extrapolation(self, mutable_comprehensive_perf_db):
+    def test_query_moe_multi_point_underflow_holds_boundary_util(self, mutable_comprehensive_perf_db):
+        """num_tokens=4 below the min collected 8: the engine holds the boundary
+        util at the smallest token point and lets the MoE SOL carry the (small)
+        difference, instead of the legacy raw-linear downward extrapolation
+        (which can undershoot the launch-overhead floor)."""
         db = mutable_comprehensive_perf_db
+        kwargs = dict(
+            hidden_size=2048,
+            inter_size=8192,
+            topk=2,
+            num_experts=8,
+            moe_tp_size=2,
+            moe_ep_size=2,
+            quant_mode=common.MoEQuantMode.bfloat16,
+            workload_distribution="uniform",
+        )
         curve = db._moe_data[common.MoEQuantMode.bfloat16]["uniform"][2][8][2048][8192][2]
         curve[2] = {8: 0.8, 16: 1.6}
 
-        result = db.query_moe(
-            4,
-            2048,
-            8192,
-            2,
-            8,
-            2,
-            2,
-            common.MoEQuantMode.bfloat16,
-            "uniform",
-            database_mode=common.DatabaseMode.SILICON,
-        )
+        sol_anchor = float(db.query_moe(num_tokens=8, database_mode=common.DatabaseMode.SOL, **kwargs))
+        sol_query = float(db.query_moe(num_tokens=4, database_mode=common.DatabaseMode.SOL, **kwargs))
+        result = db.query_moe(num_tokens=4, database_mode=common.DatabaseMode.SILICON, **kwargs)
 
-        assert float(result) == pytest.approx(0.4)
+        assert float(result) == pytest.approx(0.8 * sol_query / sol_anchor)
 
     def test_query_moe_singleton_overflow_keeps_util_extrapolation(self, mutable_comprehensive_perf_db):
         db = mutable_comprehensive_perf_db

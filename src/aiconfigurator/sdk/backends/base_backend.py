@@ -419,7 +419,7 @@ class BaseBackend:
         context_latency_dict, context_energy_wms_dict, context_source_dict = {}, {}, {}
         generation_latency_dict, generation_energy_wms_dict, generation_source_dict = {}, {}, {}
 
-        if should_use_rust_engine_step(runtime_config):
+        if should_use_rust_engine_step(runtime_config, database):
             rust_runtime_config = runtime_config
             if img_ctx_tokens:
                 rust_runtime_config = copy.copy(runtime_config)
@@ -930,7 +930,7 @@ class BaseBackend:
         caller stores them under the "mix_step" key of the run_agg
         per-ops summary.
         """
-        if should_use_rust_engine_step(runtime_config):
+        if should_use_rust_engine_step(runtime_config, database):
             latency_ms = estimate_mixed_step_latency_with_rust(
                 model,
                 database,
@@ -1056,7 +1056,7 @@ class BaseBackend:
         """
         if gen_tokens <= 0:
             return 0.0, 0.0, {}, {}
-        if should_use_rust_engine_step(runtime_config):
+        if should_use_rust_engine_step(runtime_config, database):
             latency_ms = estimate_decode_step_latency_with_rust(
                 model,
                 database,
@@ -1146,7 +1146,7 @@ class BaseBackend:
         b = runtime_config.batch_size
         img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
         isl = text_isl + img_ctx_tokens
-        engine_step_backend_key = "rust" if should_use_rust_engine_step(runtime_config) else "python"
+        engine_step_backend_key = "rust" if should_use_rust_engine_step(runtime_config, database) else "python"
         ctx_tokens = kwargs.get("ctx_tokens")
         assert ctx_tokens is not None, "ctx_tokens is required"
         balance_score = isl * b / ctx_tokens / osl

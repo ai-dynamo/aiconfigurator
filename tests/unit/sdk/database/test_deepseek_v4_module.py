@@ -13,7 +13,6 @@ from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.operations.dsv4 import (
     _deep_merge_dsv4_dicts,
-    _dsv4_robust_3d_lookup,
 )
 from aiconfigurator.sdk.perf_database import (
     LoadedOpData,
@@ -255,38 +254,14 @@ class TestDeepSeekV4AttentionModule:
 
         assert next_step[1] > current[1]
 
-    def test_generation_robust_lookup_extrapolates_query_below_min_sampled_s_total(self, mutable_comprehensive_perf_db):
-        """Regression: query s_total=1 is below the collector's sampled s_total=2."""
-        db = mutable_comprehensive_perf_db
-        mock_grid = _dsv4_generation_sampled_grid()
-
-        result = _dsv4_robust_3d_lookup(db, mock_grid, 8, 1, 1, batch_axis="y")
-
-        expected = 0.20 + (0.50 - 0.20) * (1 - 2) / (5 - 2)
-        assert math.isclose(result["latency"], expected, rel_tol=1e-6)
-        assert math.isclose(result["energy"], expected * 10.0, rel_tol=1e-6)
-
-    def test_generation_robust_lookup_interpolates_between_covering_batches(self, mutable_comprehensive_perf_db):
-        """b=7 interpolates b=4/b=8 instead of scaling the b=4 launch floor."""
-        db = mutable_comprehensive_perf_db
-        mock_grid = {
-            8: {
-                4: {2048: _deepseek_v4_value(4.0), 4096: _deepseek_v4_value(8.0)},
-                8: {2048: _deepseek_v4_value(10.0), 4096: _deepseek_v4_value(14.0)},
-            }
-        }
-
-        result = _dsv4_robust_3d_lookup(db, mock_grid, 8, 7, 3072, batch_axis="y")
-
-        # Sequence interpolation gives 6 at b=4 and 12 at b=8; b=7 gives 10.5.
-        assert result["latency"] == pytest.approx(10.5)
-        assert result["energy"] == pytest.approx(105.0)
-
-    def test_generation_silicon_extrapolates_query_below_min_sampled_s_total(self, mutable_comprehensive_perf_db):
-        """Full-query regression for generated query b=1, s_total=1, tp=8."""
+    def test_generation_silicon_below_min_sampled_s_total_holds_boundary_util(self, mutable_comprehensive_perf_db):
+        """b=1, s_total=1 sits below the min sampled s_total=2: the engine holds
+        the boundary util and lets the decode SOL carry the (tiny) difference,
+        instead of the legacy raw-linear downward extrapolation (which halved
+        the latency straight through the launch-overhead floor)."""
         db = mutable_comprehensive_perf_db
         # SCHEME A silicon data is {head}{cr}{b}{s_total} — no tp level. The shared
-        # grid is {tp}{b}{s_total} (for the direct _dsv4_robust_3d_lookup test);
+        # The shared grid fixture is {tp}{b}{s_total};
         # strip the tp wrapper so it lands as {b}{s_total} under {head}{cr}.
         mock_grid = _dsv4_generation_sampled_grid()[8]
         db._generation_deepseek_v4_attention_module_data = LoadedOpData(
@@ -307,7 +282,15 @@ class TestDeepSeekV4AttentionModule:
             database_mode=common.DatabaseMode.SILICON,
         )
 
-        expected = 0.20 + (0.50 - 0.20) * (1 - 2) / (5 - 2)
+        def sol(b, s_total):
+            return float(
+                db.query_generation_deepseek_v4_attention_module(
+                    **{**kwargs, "b": b, "s": s_total, "num_heads": 8},
+                    database_mode=common.DatabaseMode.SOL,
+                )
+            )
+
+        expected = 0.20 * sol(1, 1) / sol(1, 2)  # boundary util held at s_total=2
         assert float(result) == pytest.approx(expected)
         assert result.energy == pytest.approx(expected * 10.0)
 
@@ -536,54 +519,6 @@ class TestDeepSeekV4AttentionModule:
         )
         assert fp8[1] < bf16[1]
         assert fp8[2] < bf16[2]
-
-    def test_robust_3d_lookup_uses_b2_when_b3_s2682_is_missing(self, mutable_comprehensive_perf_db):
-        """Keep lower-batch scaling when the upper batch does not cover query s."""
-        db = mutable_comprehensive_perf_db
-        mock_grid = _dsv4_sampled_batch_caps_grid()
-
-        result = _dsv4_robust_3d_lookup(db, mock_grid, 8, 2682, 3)
-        b2_at_2682 = 4.80 + (5.80 - 4.80) * (2682 - 2048) / (4096 - 2048)
-        expected = b2_at_2682 * 3 / 2
-        assert math.isclose(result["latency"], expected, rel_tol=1e-6)
-
-    def test_robust_3d_lookup_uses_b4_for_bs5_real_mixed_batch_shape(self, mutable_comprehensive_perf_db):
-        """Regression: real bs=5 mixed-prefix request uses b=4 at avg_isl=1565.2."""
-        db = mutable_comprehensive_perf_db
-        reqs = [(1266, 1792), (1292, 1280), (1251, 1792), (2225, 1280), (1792, 1792)]
-        avg_isl = sum(isl for isl, _ in reqs) / len(reqs)
-        avg_past_kv = sum(past_kv for _, past_kv in reqs) / len(reqs)
-        bs = len(reqs)
-
-        assert bs == 5
-        assert avg_isl == pytest.approx(1565.2)
-        assert avg_past_kv == pytest.approx(1587.2)
-
-        mock_grid = _dsv4_sampled_batch_caps_grid()
-        result = _dsv4_robust_3d_lookup(db, mock_grid, 8, avg_isl, bs)
-
-        b4_at_avg_isl = 6.00 + (8.00 - 6.00) * (avg_isl - 1024) / (2048 - 1024)
-        expected = b4_at_avg_isl * 5 / 4
-        assert math.isclose(result["latency"], expected, rel_tol=1e-6)
-        assert math.isclose(result["energy"], expected * 10.0, rel_tol=1e-6)
-
-    def test_robust_3d_lookup_uses_b1_for_bs1_short_single_attn_shape(self, mutable_comprehensive_perf_db):
-        """Regression: bs=1 has no smaller batch, so use b=1 along the s axis."""
-        db = mutable_comprehensive_perf_db
-        reqs = [(54, 2816)]
-        avg_isl = sum(isl for isl, _ in reqs) / len(reqs)
-        avg_past_kv = sum(past_kv for _, past_kv in reqs) / len(reqs)
-        bs = len(reqs)
-
-        assert bs == 1
-        assert avg_isl == pytest.approx(54.0)
-        assert avg_past_kv == pytest.approx(2816.0)
-
-        mock_grid = _dsv4_sampled_batch_caps_grid()
-        result = _dsv4_robust_3d_lookup(db, mock_grid, 8, avg_isl, bs)
-
-        b1_at_avg_isl = 1.00 + (2.00 - 1.00) * (avg_isl - 1024) / (2048 - 1024)
-        assert math.isclose(result["latency"], b1_at_avg_isl, rel_tol=1e-6)
 
     def test_context_silicon_handles_bs1_s54_prefix2816_single_attn_module(self, mutable_comprehensive_perf_db):
         """Full-query regression for the single bs=1, isl=54, prefix=2816 attention module."""

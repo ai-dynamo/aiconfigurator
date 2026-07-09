@@ -24,8 +24,12 @@ from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 
-from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
+from aiconfigurator.sdk import common, perf_interp
+from aiconfigurator.sdk.errors import (
+    EmpiricalNotImplementedError,
+    InterpolationDataNotAvailableError,
+    PerfDataNotAvailableError,
+)
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -206,26 +210,15 @@ class GEMM(Operation):
             compute_scale_loaded = _load(PerfDataFilename.compute_scale, load_compute_scale_data)
             scale_matrix_loaded = _load(PerfDataFilename.scale_matrix, load_scale_matrix_data)
 
-            # Correct + extrapolate the CANONICAL class-cache values directly
+            # Clamp the CANONICAL class-cache values to the SOL floor directly
             # (not via ``database._gemm_data``) so a pre-set test override
             # can't leave the cached wrapper uncorrected — a later DB sharing
-            # the same cache key would otherwise bind unextrapolated data.
+            # the same cache key would otherwise bind unclamped data.
             #
-            # The ordering (clamp THEN extrapolate) matches the legacy
-            # ``PerfDatabase.__init__`` flow exactly: ``_correct_data()``
-            # ran before the GEMM extrapolation block. Newly-extrapolated
-            # rows are derived from already-clamped real measurements so
-            # they sit at or above the SOL bound by construction.
-            # ``PerfDatabase._correct_data`` re-clamps via the backward-compat
-            # forward when called from ``__init__``, but standalone callers
-            # of ``GEMM.load_data`` get the legacy single-pass semantics.
-            cls._correct_sol(database, gemm_loaded)
-            cls._extrapolate_gemm_data(gemm_loaded)
-            # Re-clamp after extrapolation: interpolated/extrapolated grid
-            # points can land below the SOL bound. The legacy init path ran
-            # ``_correct_data()`` a second time which caught these; replicate
-            # that here so standalone ``load_data`` callers get the same
-            # physically-consistent floor.
+            # No load-time grid pre-expansion: queries resolve on the RAW table
+            # via perf_interp (site curves + util-hold + nearest-site transfer),
+            # so rectangularizing the scattered (n, k) shapes is both redundant
+            # and harmful (it mangles asymmetric dense-m sweeps).
             cls._correct_sol(database, gemm_loaded)
 
             # All three loads + correction + extrapolation succeeded — commit
@@ -252,6 +245,7 @@ class GEMM(Operation):
         cls._compute_scale_cache.clear()
         cls._scale_matrix_cache.clear()
         cls._compute_scale_delta_lookup_cache.clear()
+        perf_interp.clear_caches()  # engine site indexes are keyed off these tables
         query = cls.__dict__.get("query")
         if query is not None and hasattr(query, "cache_clear"):
             query.cache_clear()
@@ -423,28 +417,6 @@ class GEMM(Operation):
         262144,
     ]  # to fit vocab gemm
 
-    @classmethod
-    def _extrapolate_gemm_data(cls, gemm_data) -> None:
-        """Apply the 3D extrapolation grid to each quant_mode's table.
-
-        Takes the GEMM data wrapper explicitly. ``load_data`` passes the
-        canonical class-cache value; tests that need to extrapolate a
-        custom-loaded dict can call this with their own LoadedOpData."""
-        if gemm_data is None or not gemm_data.loaded:
-            return
-
-        target_x_list = cls._EXTRAPOLATION_TARGET_X
-        target_y_list = cls._EXTRAPOLATION_TARGET_Y
-        target_z_list = cls._EXTRAPOLATION_TARGET_Y
-
-        for _quant_mode, data_dict in gemm_data.items():
-            interpolation.extrapolate_data_grid(
-                data_dict=data_dict,
-                target_x_list=target_x_list,
-                target_y_list=target_y_list,
-                target_z_list=target_z_list,
-            )
-
     # ------------------------------------------------------------------
     # Table query classmethods (formerly PerfDatabase.query_*)
     # ------------------------------------------------------------------
@@ -540,21 +512,13 @@ class GEMM(Operation):
 
             gemm_data = gemm_data_wrapper[table_quant_mode]
 
-            if m in gemm_data and n in gemm_data[m] and k in gemm_data[m][n]:
-                result = gemm_data[m][n][k]
-                return _to_performance_result(result)
-
-            m_values = sorted(m_key for m_key in gemm_data if n in gemm_data[m_key] and k in gemm_data[m_key][n])
-            if len(m_values) >= 2:
-                m_left, m_right = interpolation.nearest_1d_point_helper(m, m_values, inner_only=False)
-                result = interpolation.interp_1d(
-                    [m_left, m_right], [gemm_data[m_left][n][k], gemm_data[m_right][n][k]], m
-                )
-                return _to_performance_result(result)
-
+            # Resolve on the raw table: exact hit -> the collected (n, k) site's
+            # own m-curve -> nearest-site util transfer -> util-hold beyond the
+            # sweep. See sdk/perf_interp/config.py for the design.
+            config = perf_interp.gemm_config(sol_fn=lambda m_v, n_v, k_v: get_sol(m_v, n_v, k_v, quant_mode)[0])
             try:
-                result = interpolation.interp_3d(m, n, k, gemm_data, "cubic", database._extracted_metrics_cache)
-            except interpolation.InterpolationDataNotAvailableError as exc:
+                result = perf_interp.query(config, gemm_data, m, n, k)
+            except InterpolationDataNotAvailableError as exc:
                 raise PerfDataNotAvailableError(
                     "GEMM perf data not available for requested shape. "
                     f"system='{database.system}', backend='{database.backend}', version='{database.version}', "
@@ -634,27 +598,26 @@ class GEMM(Operation):
                     f"Supported modes: {supported}"
                 )
             table = compute_scale_wrapper[table_quant_mode]
-            m_i = int(m)
-            k_i = int(k)
-
+            # Clamp into the collected range FIRST (preserving the legacy
+            # contract), then resolve the interior on the engine (RAW 2-axis).
             m_keys = sorted(table.keys())
-            m_i = max(m_keys[0], min(m_i, m_keys[-1]))
-
-            k_min = None
-            k_max = None
-            for row in table.values():
-                if not row:
-                    continue
-                row_min = min(row.keys())
-                row_max = max(row.keys())
-                k_min = row_min if k_min is None else min(k_min, row_min)
-                k_max = row_max if k_max is None else max(k_max, row_max)
-
-            if k_min is not None and k_max is not None:
-                k_i = max(k_min, min(k_i, k_max))
-
-            result = interpolation.interp_2d_linear(m_i, k_i, table, database._extracted_metrics_cache)
-            return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
+            m_c = max(m_keys[0], min(int(m), m_keys[-1]))
+            k_min = min(min(row) for row in table.values() if row)
+            k_max = max(max(row) for row in table.values() if row)
+            k_c = max(k_min, min(int(k), k_max))
+            config = perf_interp.OpInterpConfig(
+                axes=("m", "k"),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda m_v, k_v: get_sol(m_v, k_v)[0],
+            )
+            result = perf_interp.query(config, table, m_c, k_c)
+            interpolated = database._interp_pr(
+                perf_interp.get_value(result, "latency"),
+                energy=perf_interp.get_value(result, "energy"),
+            )
+            # compute_scale is a quantization-overhead DELTA: beyond the grid it
+            # is deliberately held FLAT at the clamped boundary (legacy contract).
+            return interpolated
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,
@@ -727,37 +690,30 @@ class GEMM(Operation):
                     f"Supported modes: {supported}"
                 )
             table = scale_matrix_wrapper[table_quant_mode]
-            m_query = int(m)
-            k_query = int(k)
-            m_i = m_query
-            k_i = k_query
-
+            # Clamp into the collected range FIRST (preserving the legacy
+            # contract), then resolve the interior on the engine (RAW 2-axis).
             m_keys = sorted(table.keys())
-            m_i = max(m_keys[0], min(m_i, m_keys[-1]))
-
-            k_min = None
-            k_max = None
-            for row in table.values():
-                if not row:
-                    continue
-                row_min = min(row.keys())
-                row_max = max(row.keys())
-                k_min = row_min if k_min is None else min(k_min, row_min)
-                k_max = row_max if k_max is None else max(k_max, row_max)
-
-            if k_min is not None and k_max is not None:
-                k_i = max(k_min, min(k_i, k_max))
-
-            result = interpolation.interp_2d_linear(m_i, k_i, table, database._extracted_metrics_cache)
-            interpolated = database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
-            if m_i == m_query and k_i == k_query:
+            m_c = max(m_keys[0], min(int(m), m_keys[-1]))
+            k_min = min(min(row) for row in table.values() if row)
+            k_max = max(max(row) for row in table.values() if row)
+            k_c = max(k_min, min(int(k), k_max))
+            config = perf_interp.OpInterpConfig(
+                axes=("m", "k"),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda m_v, k_v: get_sol(m_v, k_v)[0],
+            )
+            result = perf_interp.query(config, table, m_c, k_c)
+            interpolated = database._interp_pr(
+                perf_interp.get_value(result, "latency"),
+                energy=perf_interp.get_value(result, "energy"),
+            )
+            if m_c == int(m) and k_c == int(k):
                 return interpolated
-
-            # The table is finite, but scale_matrix is a real memory kernel.
-            # Outside its grid, freeze utilization at the clamped boundary
-            # rather than freezing latency: L(q) = L(boundary) * SOL(q)/SOL(boundary).
-            boundary_sol = get_sol(m_i, k_i)[0]
-            query_sol = get_sol(m_query, k_query)[0]
+            # Outside the grid, freeze utilization at the clamped boundary:
+            # L(q) = L(boundary) * SOL(q)/SOL(boundary) (a real memory kernel,
+            # unlike the compute_scale delta above).
+            boundary_sol = get_sol(m_c, k_c)[0]
+            query_sol = get_sol(int(m), int(k))[0]
             ratio = query_sol / boundary_sol
             return PerformanceResult(
                 latency=float(interpolated) * ratio,

@@ -7,33 +7,32 @@ Both ContextDSAModule and GenerationDSAModule own their CSV-backed perf
 tables and grid extrapolation. ``PerfDatabase.query_context_dsa_module``
 and ``query_generation_dsa_module`` delegate here.
 
-Both classes additionally maintain a ``_raw_data_cache`` — a
-``copy.deepcopy`` of the loaded table BEFORE extrapolation runs. Context uses
-it for the topk-boundary regime-aware piecewise lookup (PR #903); generation
-uses it to anchor sequence overflow to measured boundary utilization.
+Both classes still bind a ``_raw_data_cache`` for backward compatibility,
+but with load-time pre-expansion removed the table IS the raw measurements,
+so it is a plain alias. (The PR #903 topk-piecewise lookup and the hand-rolled
+boundary-util anchoring it served are superseded by perf_interp: linear
+bracket blends cannot overshoot the topk knee the way cubic did, and
+util-hold is native.)
 
 No SOL clamping in the legacy ``_correct_data`` for either DSA op —
 extrapolation only. The legacy ``__init__`` loaded DSA twice (once near
 the MLA/Mamba block, once after); both loads are consolidated into a
 single ``load_data`` call per class.
 
-DSA-specific helpers (``_is_dsa_interpolation_miss``,
-``_format_dsa_unavailable_message``) also move here as module-level
-functions. ``DSA_MODEL_DIMS`` and ``DEFAULT_DSA_ARCHITECTURE`` stay on
+The DSA-specific helper ``_format_dsa_unavailable_message`` also moves
+here as a module-level function. ``DSA_MODEL_DIMS`` and ``DEFAULT_DSA_ARCHITECTURE`` stay on
 ``perf_database.py`` as module-level constants for now — the cleanup PR
 revisits their home.
 """
 
 from __future__ import annotations
 
-import copy
 import logging
-import math
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+from aiconfigurator.sdk import common, perf_interp
+from aiconfigurator.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
@@ -109,25 +108,6 @@ def _dsa_sparse_file_prefix(architecture: str) -> str:
 # Extrapolation grids — lifted verbatim from the legacy blocks in
 # ``PerfDatabase.__init__``.
 
-# fmt: off
-_CONTEXT_DSA_TARGET_Y: list[int] = (
-    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-    + [4096 + i * 2048 for i in range(14)]
-    + [32768 + 16384 * i for i in range(6)]
-    + [131072 + 32768 * i for i in range(12)]
-    + [524288 + 65536 * i for i in range(9)]
-)  # s
-_CONTEXT_DSA_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048,
-]  # b
-
-_GENERATION_DSA_TARGET_Y: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192,
-]  # b
-_GENERATION_DSA_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
-    16384, 32768, 65536, 131072, 262144, 2097152 * 8,
-]  # s
 # fmt: on
 
 
@@ -163,19 +143,6 @@ def _cache_key(database: PerfDatabase) -> tuple:
         database.backend,
         database.version,
         database.enable_shared_layer,
-    )
-
-
-def _is_dsa_interpolation_miss(error: Exception) -> bool:
-    """Recognize the ``ValueError`` patterns raised by
-    ``interpolation.nearest_1d_point_helper`` when DSA shape is outside
-    the sampled grid. Lifted verbatim from
-    ``PerfDatabase._is_dsa_interpolation_miss``."""
-    message = str(error)
-    return isinstance(error, ValueError) and (
-        "x is not equal to the only value in the list" in message
-        or "x is less than the smallest value in the list" in message
-        or "x is greater than the largest value in the list" in message
     )
 
 
@@ -284,10 +251,9 @@ class ContextDSAModule(Operation):
             cls._data_cache[key] = LoadedOpData(
                 load_context_dsa_module_data(sources, op_kind="full"), PerfDataFilename.dsa_context_module, primary_path
             )
-            # Deepcopy BEFORE extrapolation so the raw rows survive intact
-            # for ``interp_dsa_context_topk_piecewise_from_raw``.
-            cls._raw_data_cache[key] = copy.deepcopy(cls._data_cache[key])
-            cls._extrapolate(cls._data_cache[key])
+            # No load-time grid pre-expansion: queries resolve on the RAW grid
+            # via perf_interp, so the raw wrapper is now an alias of the table.
+            cls._raw_data_cache[key] = cls._data_cache[key]
             cls._record_load()
 
         # skip_indexer (GLM-5.2) rows live in the SAME file, tagged by op_name
@@ -298,8 +264,7 @@ class ContextDSAModule(Operation):
             skip_dict = load_context_dsa_module_data(sources, op_kind="skip")
             if skip_dict:
                 cls._skip_data_cache[key] = LoadedOpData(skip_dict, PerfDataFilename.dsa_context_module, primary_path)
-                cls._raw_skip_data_cache[key] = copy.deepcopy(cls._skip_data_cache[key])
-                cls._extrapolate(cls._skip_data_cache[key])
+                cls._raw_skip_data_cache[key] = cls._skip_data_cache[key]
             else:
                 cls._skip_data_cache[key] = None
                 cls._raw_skip_data_cache[key] = None
@@ -320,68 +285,6 @@ class ContextDSAModule(Operation):
         cls._glm5_sparse_cache.clear()
         cls._skip_data_cache.clear()
         cls._raw_skip_data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 5-level (fmha_mode → kv_cache_dtype → gemm_mode → arch
-        → dsa_backend → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-
-        for fmha_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[fmha_mode]:
-                for gemm_mode in data_wrapper[fmha_mode][kv_cache_dtype]:
-                    for arch in data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode]:
-                        arch_dict = data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode][arch]
-
-                        def _is_latency_leaf(value):
-                            return isinstance(value, dict) and "latency" in value
-
-                        def _has_prefix_axis(module_dict):
-                            for head_data in module_dict.values():
-                                if not isinstance(head_data, dict):
-                                    continue
-                                for first_slice in head_data.values():
-                                    if not isinstance(first_slice, dict):
-                                        continue
-                                    # Legacy shape: [num_heads][s][b].
-                                    return not any(_is_latency_leaf(v) for v in first_slice.values())
-                            return False
-
-                        # arch_dict is {dsa_backend: {num_heads: {prefix: {s: {b}}}}}.
-                        for dsa_backend_key in list(arch_dict.keys()):
-                            data_dict = arch_dict[dsa_backend_key]
-
-                            if _has_prefix_axis(data_dict):
-                                prefix_values = sorted(
-                                    {
-                                        prefix
-                                        for head_data in data_dict.values()
-                                        if isinstance(head_data, dict)
-                                        for prefix in head_data
-                                    }
-                                )
-                                for prefix in prefix_values:
-                                    prefix_slice = {
-                                        head: head_data[prefix]
-                                        for head, head_data in data_dict.items()
-                                        if isinstance(head_data, dict) and prefix in head_data
-                                    }
-                                    interpolation.extrapolate_data_grid(
-                                        data_dict=prefix_slice,
-                                        target_x_list=list(prefix_slice.keys()),
-                                        target_y_list=_CONTEXT_DSA_TARGET_Y,
-                                        target_z_list=_CONTEXT_DSA_TARGET_Z,
-                                    )
-                                    for head, head_slice in prefix_slice.items():
-                                        data_dict[head][prefix] = head_slice
-                            else:
-                                interpolation.extrapolate_data_grid(
-                                    data_dict=data_dict,
-                                    target_x_list=list(data_dict.keys()),
-                                    target_y_list=_CONTEXT_DSA_TARGET_Y,
-                                    target_z_list=_CONTEXT_DSA_TARGET_Z,
-                                )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_context_dsa_module)
@@ -726,135 +629,43 @@ class ContextDSAModule(Operation):
             except PerfDataNotAvailableError as exc:
                 raise missing_context_dsa_error() from exc
             dsa_dict = _select_dsa_backend(dsa_dict, dsa_backend)
-            raw_dsa_dict = None
-            raw_dsa_module_data = (
-                database._raw_context_dsa_module_skip_data if skip_indexer else database._raw_context_dsa_module_data
-            )
-            if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
-                try:
-                    raw_dsa_dict = util_empirical.require_data_slice(
-                        raw_dsa_module_data,
-                        fmha_quant_mode,
-                        kvcache_quant_mode,
-                        gemm_quant_mode,
-                        architecture,
-                    )
-                    raw_dsa_dict = _select_dsa_backend(raw_dsa_dict, dsa_backend)
-                except PerfDataNotAvailableError:
-                    raw_dsa_dict = None
 
-            def _finite_result(result):
-                if not isinstance(result, dict):
-                    return False
-                value = result.get("latency")
-                if value is None:
-                    return False
-                try:
-                    return math.isfinite(float(value))
-                except (TypeError, ValueError):
-                    return False
-
-            def _is_latency_leaf(value):
-                return isinstance(value, dict) and "latency" in value
-
-            def _context_prefix_data(module_dict, require_prefix_axis: bool = False):
-                if not isinstance(module_dict, dict):
-                    return None, False
-                for head_data in module_dict.values():
-                    if not isinstance(head_data, dict):
-                        continue
-                    for maybe_batch_slice in head_data.values():
-                        if not isinstance(maybe_batch_slice, dict):
-                            continue
-                        # Legacy shape: [num_heads][s][b].
-                        if any(_is_latency_leaf(v) for v in maybe_batch_slice.values()):
-                            if require_prefix_axis:
-                                return None, False
-                            return {0: module_dict}, False
-                        break
-                    break
-
-                prefix_data = {}
-                for head, head_data in module_dict.items():
-                    if not isinstance(head_data, dict):
-                        continue
-                    for prefix_value, prefix_slice in head_data.items():
-                        if isinstance(prefix_slice, dict):
-                            prefix_data.setdefault(prefix_value, {})[head] = prefix_slice
-                return (prefix_data or None), True
-
-            require_prefix_axis = architecture == "GlmMoeDsaForCausalLM"
-            prefix_data, has_prefix_axis = _context_prefix_data(dsa_dict, require_prefix_axis)
-            raw_prefix_data, _ = _context_prefix_data(raw_dsa_dict, require_prefix_axis)
-
-            def _lookup_prefix_module_at(prefix_value: int):
-                if not isinstance(prefix_data, dict):
-                    return None
-                prefix_slice = prefix_data.get(prefix_value)
-                if not isinstance(prefix_slice, dict):
-                    return None
-
-                result = None
-                raw_slice = (
-                    raw_prefix_data.get(prefix_value)
-                    if isinstance(raw_prefix_data, dict) and isinstance(raw_prefix_data.get(prefix_value), dict)
-                    else None
-                )
-                if index_topk is not None:
-                    boundary = index_topk - prefix_value
-                    result = interpolation.interp_dsa_context_topk_piecewise_from_raw(
-                        num_heads, s, b, raw_slice, boundary
-                    )
-                    if not _finite_result(result):
-                        result = None
-                if result is None:
-                    try:
-                        from aiconfigurator.sdk.operations.dsv4 import _dsv4_robust_3d_lookup
-
-                        result = _dsv4_robust_3d_lookup(database, prefix_slice, num_heads, s, b)
-                    except Exception:
-                        return None
-                return result if _finite_result(result) else None
-
-            def _interp_results_1d(x0, x1, r0, r1, x):
-                return {
-                    field: interpolation.interp_1d([x0, x1], [r0.get(field, 0.0), r1.get(field, 0.0)], x)
-                    for field in ("latency", "power", "energy")
-                }
-
+            # Resolve on the RAW table via perf_interp. New collections carry the
+            # past-KV axis ([heads][prefix][seq][batch] -> 4-axis grid); legacy
+            # tables are [heads][seq][batch] and answer prefix=0 only. DSA is
+            # densely sampled and the topk-saturation knee is itself collected,
+            # so RAW blends everywhere (LOO: plain crossing ties/beats the old
+            # topk-piecewise on every real config); out-of-range (incl. prefix)
+            # is util-hold with the regime-aware SOL. The raw-vs-expanded table
+            # juggling existed to work around load-time pre-expansion (gone).
+            has_prefix_axis = _dsa_module_has_prefix_axis(dsa_dict)
+            if architecture == "GlmMoeDsaForCausalLM" and not has_prefix_axis:
+                raise missing_context_dsa_error()
             try:
-                result = _lookup_prefix_module_at(prefix)
-                if result is None:
-                    if not has_prefix_axis:
-                        raise missing_context_dsa_error()
-                    prefix_points = sorted(p for p, slice_ in prefix_data.items() if isinstance(slice_, dict))
-                    result_by_prefix = {}
-                    for prefix_point in prefix_points:
-                        prefix_result = _lookup_prefix_module_at(prefix_point)
-                        if prefix_result is not None:
-                            result_by_prefix[prefix_point] = prefix_result
-                    if len(result_by_prefix) < 2:
-                        raise missing_context_dsa_error()
-                    left, right = interpolation.nearest_1d_point_helper(
-                        prefix, list(result_by_prefix.keys()), inner_only=False
+                if has_prefix_axis:
+                    config = perf_interp.OpInterpConfig(
+                        axes=("num_heads", "prefix", "seq_len", "batch"),
+                        resolver=perf_interp.Grid(),
+                        sol_fn=lambda n_v, p_v, s_v, b_v: get_sol(
+                            b_v, s_v, p_v, n_v, kvcache_quant_mode, fmha_quant_mode
+                        )[0],
                     )
-                    result = (
-                        result_by_prefix[left]
-                        if left == right
-                        else _interp_results_1d(
-                            left,
-                            right,
-                            result_by_prefix[left],
-                            result_by_prefix[right],
-                            prefix,
-                        )
+                    result = perf_interp.query(config, dsa_dict, num_heads, prefix, s, b)
+                else:
+                    if prefix:
+                        raise missing_context_dsa_error()
+                    config = perf_interp.OpInterpConfig(
+                        axes=("num_heads", "seq_len", "batch"),
+                        resolver=perf_interp.Grid(),
+                        sol_fn=lambda n_v, s_v, b_v: get_sol(b_v, s_v, 0, n_v, kvcache_quant_mode, fmha_quant_mode)[0],
                     )
-                latency = result["latency"]
-                energy = result.get("energy", 0.0)
-            except (KeyError, TypeError, ValueError, AssertionError) as exc:
+                    result = perf_interp.query(config, dsa_dict, num_heads, s, b)
+                latency = perf_interp.get_value(result, "latency")
+                energy = perf_interp.get_value(result, "energy")
+            except InterpolationDataNotAvailableError as exc:
                 raise missing_context_dsa_error() from exc
             return database._interp_pr(latency, energy=energy)
-        except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError) as e:
+        except (PerfDataNotAvailableError, InterpolationDataNotAvailableError) as e:
             if database_mode == common.DatabaseMode.HYBRID:
                 logger.debug(
                     f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
@@ -1228,10 +1039,9 @@ class GenerationDSAModule(Operation):
                 PerfDataFilename.dsa_generation_module,
                 primary_path,
             )
-            # Boundary-util extrapolation must be anchored to a measured row,
-            # never to a latency-space point synthesized by ``_extrapolate``.
-            cls._raw_data_cache[key] = copy.deepcopy(cls._data_cache[key])
-            cls._extrapolate(cls._data_cache[key])
+            # No load-time grid pre-expansion: queries resolve on the RAW grid
+            # via perf_interp (its util-hold IS the boundary-util anchoring).
+            cls._raw_data_cache[key] = cls._data_cache[key]
             cls._record_load()
 
         # skip_indexer rows share the same file (op_name tag); load with op_kind="skip".
@@ -1241,11 +1051,7 @@ class GenerationDSAModule(Operation):
                 cls._skip_data_cache[key] = LoadedOpData(
                     skip_dict, PerfDataFilename.dsa_generation_module, primary_path
                 )
-                # Raw (pre-extrapolation) SKIP copy: skip_indexer queries must
-                # anchor boundary-util extrapolation to a measured SKIP row, not
-                # the full-table raw (else skip values anchor to wrong data).
-                cls._raw_skip_data_cache[key] = copy.deepcopy(cls._skip_data_cache[key])
-                cls._extrapolate(cls._skip_data_cache[key])
+                cls._raw_skip_data_cache[key] = cls._skip_data_cache[key]
             else:
                 cls._skip_data_cache[key] = None
                 cls._raw_skip_data_cache[key] = None
@@ -1263,27 +1069,6 @@ class GenerationDSAModule(Operation):
         cls._raw_data_cache.clear()
         cls._skip_data_cache.clear()
         cls._raw_skip_data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 4-level (kv_cache_dtype → gemm_mode → arch
-        → dsa_backend → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-
-        for kv_cache_dtype in data_wrapper:
-            for gemm_mode in data_wrapper[kv_cache_dtype]:
-                for arch in data_wrapper[kv_cache_dtype][gemm_mode]:
-                    arch_dict = data_wrapper[kv_cache_dtype][gemm_mode][arch]
-                    # arch_dict is {dsa_backend: {num_heads: {b: {s}}}}.
-                    for dsa_backend_key in list(arch_dict.keys()):
-                        data_dict = arch_dict[dsa_backend_key]
-                        interpolation.extrapolate_data_grid(
-                            data_dict=data_dict,
-                            target_x_list=list(data_dict.keys()),
-                            target_y_list=_GENERATION_DSA_TARGET_Y,
-                            target_z_list=_GENERATION_DSA_TARGET_Z,
-                        )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_generation_dsa_module)
@@ -1521,133 +1306,21 @@ class GenerationDSAModule(Operation):
                     raise missing_generation_dsa_error() from exc
                 dsa_dict = _select_dsa_backend(dsa_dict, dsa_backend)
 
-                raw_dsa_dict = None
-                raw_dsa_module_data = getattr(
-                    database,
-                    "_raw_generation_dsa_module_skip_data" if skip_indexer else "_raw_generation_dsa_module_data",
-                    None,
+                # Resolve on the RAW [heads][batch][seq] table via perf_interp
+                # (raw generation grid: ~linear in seq; the topk-saturation knee
+                # is collected, so blends never smooth it away). Out-of-range
+                # seq/batch is util-hold -- the former hand-rolled
+                # boundary_util_value did exactly this, point for point.
+                config = perf_interp.generation_grid_config(
+                    sol_fn=lambda n_v, b_v, s_v: get_sol(b_v, s_v, n_v, kv_cache_dtype)[0]
                 )
-                if raw_dsa_module_data is not None and getattr(raw_dsa_module_data, "loaded", True):
-                    try:
-                        raw_dsa_dict = util_empirical.require_data_slice(
-                            raw_dsa_module_data,
-                            kv_cache_dtype,
-                            gemm_quant_mode,
-                            architecture,
-                        )
-                        raw_dsa_dict = _select_dsa_backend(raw_dsa_dict, dsa_backend)
-                    except PerfDataNotAvailableError:
-                        raw_dsa_dict = None
-
-                def boundary_util_value(raw_seq_dict, batch_key):
-                    """Extrapolate outside a measured sequence curve by
-                    freezing the boundary row's SOL utilization."""
-                    if not isinstance(raw_seq_dict, dict) or not raw_seq_dict:
-                        return None
-                    seq_keys = sorted(raw_seq_dict)
-                    if seq_keys[0] <= s <= seq_keys[-1]:
-                        return None
-
-                    boundary_s = seq_keys[0] if s < seq_keys[0] else seq_keys[-1]
-                    boundary = raw_seq_dict[boundary_s]
-                    boundary_latency = interpolation.get_value(boundary, "latency")
-                    if boundary_latency <= 0:
-                        return None
-
-                    sol_boundary = get_sol(batch_key, boundary_s, num_heads, kv_cache_dtype)[0]
-                    sol_query = get_sol(batch_key, s, num_heads, kv_cache_dtype)[0]
-                    if sol_boundary <= 0 or sol_query <= 0:
-                        return None
-
-                    latency = boundary_latency * sol_query / sol_boundary
-                    boundary_power = interpolation.get_value(boundary, "power")
-                    boundary_energy = interpolation.get_value(boundary, "energy")
-                    energy = (
-                        boundary_power * latency
-                        if boundary_power > 0
-                        else boundary_energy * latency / boundary_latency
-                        if boundary_energy > 0
-                        else 0.0
-                    )
-                    return {"latency": latency, "power": boundary_power, "energy": energy}
-
-                def sequence_value(seq_dict, batch_key, raw_seq_dict=None):
-                    # Check raw coverage before consulting the working table: an
-                    # exact key in the latter may be a latency-space point added
-                    # by load-time extrapolation rather than a measurement.
-                    boundary_result = boundary_util_value(raw_seq_dict, batch_key)
-                    if boundary_result is not None:
-                        return boundary_result
-                    if s in seq_dict:
-                        return seq_dict[s]
-                    seq_keys = sorted(seq_dict)
-                    if len(seq_keys) < 2:
-                        return None
-                    left, right = interpolation.nearest_1d_point_helper(s, seq_keys, inner_only=False)
-
-                    def interp_sequence_metric(metric: str) -> float:
-                        return interpolation.interp_1d(
-                            [left, right],
-                            [
-                                interpolation.get_value(seq_dict[left], metric),
-                                interpolation.get_value(seq_dict[right], metric),
-                            ],
-                            s,
-                        )
-
-                    return {
-                        "latency": interp_sequence_metric("latency"),
-                        "power": interp_sequence_metric("power"),
-                        "energy": interp_sequence_metric("energy"),
-                    }
-
-                result = None
-                raw_head_dict = raw_dsa_dict.get(num_heads, {}) if isinstance(raw_dsa_dict, dict) else {}
-                # An exact batch in the working table may itself be a
-                # load-time extrapolation target.  If raw rows exist for this
-                # head, only take the fast path for a genuinely measured batch.
-                if num_heads in dsa_dict and b in dsa_dict[num_heads] and (not raw_head_dict or b in raw_head_dict):
-                    raw_seq_dict = raw_head_dict.get(b)
-                    result = sequence_value(dsa_dict[num_heads][b], b, raw_seq_dict)
-                if result is None and num_heads in dsa_dict:
-                    batch_dict = {}
-                    # Prefer measured batch curves. This keeps empty/pseudo keys
-                    # from the legacy load-time extrapolator out of the lookup.
-                    batch_source = raw_head_dict or dsa_dict[num_heads]
-                    for batch_key in batch_source:
-                        seq_dict = dsa_dict[num_heads].get(batch_key, batch_source[batch_key])
-                        value = sequence_value(seq_dict, batch_key, raw_head_dict.get(batch_key))
-                        if value is not None:
-                            batch_dict[batch_key] = value
-                    batch_keys = sorted(batch_dict)
-                    if len(batch_keys) >= 2:
-                        left, right = interpolation.nearest_1d_point_helper(b, batch_keys, inner_only=False)
-
-                        def interp_batch_metric(metric: str) -> float:
-                            return interpolation.interp_1d(
-                                [left, right],
-                                [
-                                    interpolation.get_value(batch_dict[left], metric),
-                                    interpolation.get_value(batch_dict[right], metric),
-                                ],
-                                b,
-                            )
-
-                        result = {
-                            "latency": interp_batch_metric("latency"),
-                            "power": interp_batch_metric("power"),
-                            "energy": interp_batch_metric("energy"),
-                        }
-                if result is None:
-                    result = interpolation.interp_3d(
-                        num_heads, b, s, dsa_dict, "cubic", database._extracted_metrics_cache
-                    )
-                latency = result["latency"]
-                energy = result.get("energy", 0.0)
-            except interpolation.InterpolationDataNotAvailableError as exc:
+                result = perf_interp.query(config, dsa_dict, num_heads, b, s)
+                latency = perf_interp.get_value(result, "latency")
+                energy = perf_interp.get_value(result, "energy")
+            except InterpolationDataNotAvailableError as exc:
                 raise missing_generation_dsa_error() from exc
             return database._interp_pr(latency, energy=energy)
-        except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError) as e:
+        except (PerfDataNotAvailableError, InterpolationDataNotAvailableError) as e:
             if database_mode == common.DatabaseMode.HYBRID:
                 logger.debug(
                     f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "

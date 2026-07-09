@@ -16,10 +16,9 @@ from typing import ClassVar, Optional
 
 import yaml
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, perf_interp
 from aiconfigurator.sdk.common import PerfDataFilename, parse_support_matrix_version
-from aiconfigurator.sdk.errors import PerfDataNotAvailableError
-from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
+from aiconfigurator.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
 from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.system_spec import SystemSpec
 
@@ -567,7 +566,6 @@ def _cached_configured_database_view(
     view._root_database_template = root_template
     view._default_database_mode = mode
     view._transfer_policy = policy
-    view._extracted_metrics_cache = {}
     view._is_query_view = True
 
     # Lazy support resolution binds loaded op tables onto its database. Rebind
@@ -1442,9 +1440,6 @@ class PerfDatabase:
             self.system_spec = SystemSpec(yaml.load(f, Loader=yaml.SafeLoader))
         self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
 
-        # Cache for extracted metric data to avoid repeated extraction in _interp_3d
-        self._extracted_metrics_cache = {}
-
         # Manifest entries grouped by op_file. Used by ``_build_op_sources``
         # (lazy-load path inside each op class) to discover which sibling
         # backend/version dirs hold rows the active backend can inherit.
@@ -1788,7 +1783,7 @@ class PerfDatabase:
 
     def clear_runtime_caches(self) -> None:
         """Clear cached query/interpolation state while preserving loaded op data."""
-        self._extracted_metrics_cache.clear()
+        perf_interp.clear_caches()
         _cached_configured_database_view.cache_clear()
         for attr_name in dir(self):
             attr = getattr(self, attr_name)

@@ -65,6 +65,16 @@ pub struct MoEDispatchOp {
     /// in prefill; decode replicates attention across CP ranks (no comm).
     #[serde(default)]
     pub is_context: bool,
+    /// DeepEP-normal dispatch SM count (Python `MoEDispatch._sms =
+    /// kwargs.get("sms", 12)`), forwarded to the sms-keyed deepep-normal
+    /// table with nearest-snap semantics. Default 12 = Python's kwarg
+    /// default, so old opspecs keep the same query point.
+    #[serde(default = "default_sms")]
+    pub sms: u32,
+}
+
+fn default_sms() -> u32 {
+    12
 }
 
 impl MoEDispatchOp {
@@ -96,12 +106,32 @@ impl MoEDispatchOp {
             moe_quant: MoeQuantMode::Bfloat16,
             attn_cp_size: 1,
             is_context: false,
+            sms: default_sms(),
         }
     }
 
     fn attention_tp_size(&self) -> u32 {
         let total = self.moe_tp_size * self.moe_ep_size;
         (total / self.attention_dp_size.max(1)).max(1)
+    }
+
+    /// Number of NODES the MoE group spans — the DeepEP tables' `node_num`
+    /// key. Python (`moe.py:1087-1088`): `_node_num = self.num_gpus /
+    /// num_gpus_per_node` with `self.num_gpus = moe_ep * moe_tp`; it is NOT
+    /// the per-node GPU count. Python's float ratio only hits the int-keyed
+    /// table when the division is whole; a fractional ratio walks into an
+    /// empty defaultdict slice and the query fails — mirrored here as an
+    /// explicit error rather than a floor-divided wrong slice.
+    fn deepep_node_num(&self, spec: &SystemSpec) -> Result<u32, AicError> {
+        let num_gpus = (self.moe_tp_size * self.moe_ep_size).max(1);
+        let per_node = spec.node.num_gpus_per_node;
+        if per_node == 0 || num_gpus % per_node != 0 {
+            return Err(AicError::PerfDatabase(format!(
+                "DeepEP node_num must be whole: num_gpus={num_gpus} / num_gpus_per_node={per_node} (op {})",
+                self.name
+            )));
+        }
+        Ok(num_gpus / per_node)
     }
 
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
@@ -196,19 +226,33 @@ impl MoEDispatchOp {
                             n1.query(db, tokens1)?.latency_ms
                                 + n2.query(db, tokens2)?.latency_ms
                         } else if self.attn_cp_size > 1 {
-                            // Context parallelism (Python moe.py:1390-1401):
+                            // Context parallelism (Python moe.py:1279-1290 pre,
+                            // :1318-1330 combine); volume = num_tokens * hidden:
                             //  * prefill: tokens are CP-sharded; all_gather (pre)
                             //    to assemble the full token set / reduce_scatter
-                            //    (combine) back. volume = num_tokens * hidden.
-                            //  * decode: CP does not run (attention replicated);
-                            //    the selection is local -> no comm.
+                            //    (combine) back.
+                            //  * decode pre: CP does not run (attention replicated
+                            //    across CP ranks, every rank already holds all
+                            //    tokens); the expert selection is local -> no comm.
+                            //  * decode combine: each rank computed its owned
+                            //    experts' partial outputs for all (replicated)
+                            //    tokens; combine into the full per-token sum ->
+                            //    custom_allreduce(half, num_gpus, volume).
                             if self.is_context {
                                 let op_name = if pre { "all_gather" } else { "reduce_scatter" };
                                 let nccl =
                                     NcclOp::new(&self.name, 1.0, self.hidden_size as f64, num_gpus, op_name);
                                 nccl.query(db, num_tokens)?.latency_ms
-                            } else {
+                            } else if pre {
                                 0.0
+                            } else {
+                                let ar = CustomAllReduceOp::new(
+                                    &self.name,
+                                    1.0,
+                                    self.hidden_size,
+                                    num_gpus,
+                                );
+                                ar.query(db, num_tokens)?.latency_ms
                             }
                         } else if attn_tp > 1 {
                             let ar = CustomAllReduceOp::new(
@@ -253,17 +297,26 @@ impl MoEDispatchOp {
             }
             DispatchFlavor::DeepEpNormal => {
                 let point = db.wideep.query_deepep_normal(
-                    spec.node.num_gpus_per_node,
+                    self.deepep_node_num(spec)?,
                     self.hidden_size,
                     num_tokens,
                     self.topk,
                     self.num_experts,
+                    // Python passes `sms=self._sms` (kwarg default 12).
+                    self.sms,
                 )?;
-                let total_us = if self.pre_dispatch {
-                    point.dispatch_transmit_us + point.dispatch_notify_us
-                } else {
-                    point.combine_transmit_us + point.combine_notify_us
-                };
+                // Python (`moe.py:1244-1252`) has NO pre/combine branch on
+                // the SGLang DeepEP path: BOTH the pre-dispatch op and the
+                // combine op call `query_wideep_deepep_normal`, whose loader
+                // stores the FULL round trip per point (`lat =
+                // dispatch_transmit + dispatch_notify + combine_transmit +
+                // combine_notify`, moe.py:2724). A layer's step total is
+                // therefore 2x the point — mirror the double-count exactly;
+                // do not split the point into halves.
+                let total_us = point.dispatch_transmit_us
+                    + point.dispatch_notify_us
+                    + point.combine_transmit_us
+                    + point.combine_notify_us;
                 let latency_ms = total_us / 1000.0;
                 Ok(PerformanceResult::new(latency_ms, Source::Silicon)
                     .clamp_non_negative()
@@ -271,17 +324,17 @@ impl MoEDispatchOp {
             }
             DispatchFlavor::DeepEpLowLatency => {
                 let point = db.wideep.query_deepep_ll(
-                    spec.node.num_gpus_per_node,
+                    self.deepep_node_num(spec)?,
                     self.hidden_size,
                     num_tokens,
                     self.topk,
                     self.num_experts,
                 )?;
-                let latency_ms = if self.pre_dispatch {
-                    point.dispatch_avg_t_us
-                } else {
-                    point.combine_avg_t_us
-                } / 1000.0;
+                // Same no-split rule as DeepEpNormal: Python's generation
+                // branch (`moe.py:1253-1260`) returns the summed LL point
+                // (`lat = combine_avg_t_us + dispatch_avg_t_us`, moe.py:2666)
+                // for BOTH the pre-dispatch and the combine op.
+                let latency_ms = (point.dispatch_avg_t_us + point.combine_avg_t_us) / 1000.0;
                 Ok(PerformanceResult::new(latency_ms, Source::Silicon)
                     .clamp_non_negative()
                     .scaled(self.scale_factor))
@@ -359,5 +412,315 @@ impl MoEDispatchOp {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn b200_sglang_db() -> PerfDatabase {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator/systems");
+        PerfDatabase::load(&root, "b200_sxm", "sglang", "0.5.10").expect("db loads")
+    }
+
+    fn cp_dispatch(pre_dispatch: bool, is_context: bool) -> MoEDispatchOp {
+        let mut op = MoEDispatchOp::new(
+            "moe_dispatch",
+            7168,
+            8,
+            256,
+            1, // moe_tp
+            8, // moe_ep
+            1, // attention_dp
+            pre_dispatch,
+            BackendKind::Sglang,
+            DispatchFlavor::CustomAllReduce,
+        );
+        op.attn_cp_size = 8;
+        op.is_context = is_context;
+        op
+    }
+
+    /// Decode combine under CP mirrors Python moe.py:1324-1330: each rank holds
+    /// its owned experts' partial outputs for all (replicated) tokens, combined
+    /// via `custom_allreduce(half, num_gpus, num_tokens * hidden)`. It must NOT
+    /// be zero — only the decode PRE-dispatch branch (moe.py:1286-1290) is a
+    /// local selection with no comm.
+    #[test]
+    fn cp_decode_combine_is_custom_allreduce_not_zero() {
+        let db = b200_sglang_db();
+        let num_tokens = 64;
+
+        let combine = cp_dispatch(false, false)
+            .query(&db, num_tokens)
+            .expect("decode combine query");
+        let reference = CustomAllReduceOp::new("moe_dispatch", 1.0, 7168, 8)
+            .query(&db, num_tokens)
+            .expect("allreduce reference query");
+        assert!(
+            combine.latency_ms > 0.0,
+            "decode combine under CP must not be zeroed, got {}",
+            combine.latency_ms
+        );
+        assert!(
+            (combine.latency_ms - reference.latency_ms).abs() < 1e-12,
+            "decode combine ({}) must equal custom_allreduce(num_gpus=8, volume=64*7168) ({})",
+            combine.latency_ms,
+            reference.latency_ms
+        );
+
+        // Decode pre-dispatch stays local (moe.py:1286-1290) — still zero.
+        let pre = cp_dispatch(true, false)
+            .query(&db, num_tokens)
+            .expect("decode pre query");
+        assert_eq!(pre.latency_ms, 0.0, "decode pre-dispatch under CP is local");
+    }
+
+    /// Write one synthetic DeepEP-normal parquet. Row tuple: `(node_num,
+    /// dispatch_sms, num_token, dispatch_transmit_us)`; the other latency
+    /// fields are fixed (`dispatch_notify_us = 1.0`, `combine_transmit_us =
+    /// 2.0`, `combine_notify_us = 0.0`), so a point's full sum is
+    /// `dispatch_transmit_us + 3.0`. Shape fixed at (hidden=7168, topk=8,
+    /// experts=256). Mirrors the writer in `perf_database/wideep.rs` tests.
+    fn write_deepep_normal_parquet(path: &std::path::Path, rows: &[(i64, i64, i64, f64)]) {
+        use parquet::data_type::{DoubleType, Int64Type};
+        use parquet::file::properties::WriterProperties;
+        use parquet::file::writer::SerializedFileWriter;
+        use parquet::schema::parser::parse_message_type;
+        use std::sync::Arc;
+
+        let schema = "message schema {
+            REQUIRED INT64 node_num;
+            REQUIRED INT64 hidden_size;
+            REQUIRED INT64 num_token;
+            REQUIRED INT64 num_topk;
+            REQUIRED INT64 num_experts;
+            REQUIRED INT64 dispatch_sms;
+            REQUIRED DOUBLE dispatch_transmit_us;
+            REQUIRED DOUBLE dispatch_notify_us;
+            REQUIRED DOUBLE combine_transmit_us;
+            REQUIRED DOUBLE combine_notify_us;
+        }";
+        let schema = Arc::new(parse_message_type(schema).expect("schema must parse"));
+        let file = std::fs::File::create(path).expect("create parquet");
+        let mut writer =
+            SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+                .expect("writer");
+        let mut rg = writer.next_row_group().expect("row group");
+        let int_cols: [Vec<i64>; 6] = [
+            rows.iter().map(|r| r.0).collect(),  // node_num
+            rows.iter().map(|_| 7168).collect(), // hidden_size
+            rows.iter().map(|r| r.2).collect(),  // num_token
+            rows.iter().map(|_| 8).collect(),    // num_topk
+            rows.iter().map(|_| 256).collect(),  // num_experts
+            rows.iter().map(|r| r.1).collect(),  // dispatch_sms
+        ];
+        for values in &int_cols {
+            let mut col = rg.next_column().expect("next col").expect("int col");
+            col.typed::<Int64Type>().write_batch(values, None, None).expect("write ints");
+            col.close().expect("close col");
+        }
+        let f64_cols: [Vec<f64>; 4] = [
+            rows.iter().map(|r| r.3).collect(), // dispatch_transmit_us
+            rows.iter().map(|_| 1.0).collect(), // dispatch_notify_us
+            rows.iter().map(|_| 2.0).collect(), // combine_transmit_us
+            rows.iter().map(|_| 0.0).collect(), // combine_notify_us
+        ];
+        for values in &f64_cols {
+            let mut col = rg.next_column().expect("next col").expect("f64 col");
+            col.typed::<DoubleType>().write_batch(values, None, None).expect("write f64");
+            col.close().expect("close col");
+        }
+        rg.close().expect("close row group");
+        writer.close().expect("close writer");
+    }
+
+    /// Write one synthetic DeepEP-LL parquet. Row tuple: `(node_num,
+    /// num_token, dispatch_avg_t_us, combine_avg_t_us)`; shape fixed at
+    /// (hidden=7168, topk=8, experts=256).
+    fn write_deepep_ll_parquet(path: &std::path::Path, rows: &[(i64, i64, f64, f64)]) {
+        use parquet::data_type::{DoubleType, Int64Type};
+        use parquet::file::properties::WriterProperties;
+        use parquet::file::writer::SerializedFileWriter;
+        use parquet::schema::parser::parse_message_type;
+        use std::sync::Arc;
+
+        let schema = "message schema {
+            REQUIRED INT64 node_num;
+            REQUIRED INT64 hidden_size;
+            REQUIRED INT64 num_token;
+            REQUIRED INT64 num_topk;
+            REQUIRED INT64 num_experts;
+            REQUIRED DOUBLE combine_avg_t_us;
+            REQUIRED DOUBLE dispatch_avg_t_us;
+        }";
+        let schema = Arc::new(parse_message_type(schema).expect("schema must parse"));
+        let file = std::fs::File::create(path).expect("create parquet");
+        let mut writer =
+            SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+                .expect("writer");
+        let mut rg = writer.next_row_group().expect("row group");
+        let int_cols: [Vec<i64>; 5] = [
+            rows.iter().map(|r| r.0).collect(),  // node_num
+            rows.iter().map(|_| 7168).collect(), // hidden_size
+            rows.iter().map(|r| r.1).collect(),  // num_token
+            rows.iter().map(|_| 8).collect(),    // num_topk
+            rows.iter().map(|_| 256).collect(),  // num_experts
+        ];
+        for values in &int_cols {
+            let mut col = rg.next_column().expect("next col").expect("int col");
+            col.typed::<Int64Type>().write_batch(values, None, None).expect("write ints");
+            col.close().expect("close col");
+        }
+        let f64_cols: [Vec<f64>; 2] = [
+            rows.iter().map(|r| r.3).collect(), // combine_avg_t_us
+            rows.iter().map(|r| r.2).collect(), // dispatch_avg_t_us
+        ];
+        for values in &f64_cols {
+            let mut col = rg.next_column().expect("next col").expect("f64 col");
+            col.typed::<DoubleType>().write_batch(values, None, None).expect("write f64");
+            col.close().expect("close col");
+        }
+        rg.close().expect("close row group");
+        writer.close().expect("close writer");
+    }
+
+    fn deepep_op(moe_ep: u32, pre: bool, flavor: DispatchFlavor) -> MoEDispatchOp {
+        let mut op = MoEDispatchOp::new(
+            "moe_dispatch",
+            7168,
+            8,
+            256,
+            1, // moe_tp
+            moe_ep,
+            1, // attention_dp
+            pre,
+            BackendKind::Sglang,
+            flavor,
+        );
+        op.is_context = flavor == DispatchFlavor::DeepEpNormal;
+        op.sms = 16;
+        op
+    }
+
+    /// Issue #1333 item 4.7-1: `node_num` for the DeepEP tables counts
+    /// NODES (`num_gpus / num_gpus_per_node`, Python moe.py:1087-1088 with
+    /// `num_gpus = moe_tp * moe_ep`), not GPUs per node. The old code
+    /// passed `num_gpus_per_node` (8) straight through, so on a
+    /// num_gpus=16 / 8-GPUs-per-node shape it read the node_num=8 slice.
+    /// Python oracle (num_gpus=16 -> node_num=2.0 -> the node-2 slice):
+    ///
+    /// ```text
+    /// PYTHONPATH=src python3 -c "
+    /// from aiconfigurator.sdk.perf_database import PerfDatabase
+    /// from aiconfigurator.sdk.operations.moe import MoEDispatch
+    /// db = PerfDatabase('h100_sxm','sglang','0.5.6.post2',
+    ///                   systems_root='src/aiconfigurator/systems', database_mode='SILICON')
+    /// db._wideep_deepep_normal_data = {
+    ///   2: {7168: {8: {256: {16: {64: {'latency': 103.0, 'energy': 0.0}}}}}},
+    ///   8: {7168: {8: {256: {16: {64: {'latency': 903.0, 'energy': 0.0}}}}}}}
+    /// op = MoEDispatch('d', 1.0, 7168, 8, 256, 1, 16, 1, True,
+    ///                  moe_backend='deepep_moe', is_context=True, sms=16)
+    /// print(float(op.query(db, x=64)))  # -> 0.103 (node-2 slice, full sum)"
+    /// ```
+    #[test]
+    fn deepep_node_num_counts_nodes_not_gpus_per_node() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_deepep_normal_parquet(
+            &tmp.path().join("wideep_deepep_normal_perf.parquet"),
+            // node_num=2 point sums to 103us; node_num=8 (what the old code
+            // selected on this shape) to 903us.
+            &[(2, 16, 64, 100.0), (8, 16, 64, 900.0)],
+        );
+        let mut db = b200_sglang_db(); // b200_sxm: num_gpus_per_node = 8
+        db.wideep = crate::perf_database::wideep::WideEpTable::new(tmp.path().to_path_buf());
+
+        // num_gpus = moe_tp * moe_ep = 16 -> node_num = 16 / 8 = 2.
+        let got = deepep_op(16, true, DispatchFlavor::DeepEpNormal)
+            .query(&db, 64)
+            .expect("query must succeed");
+        assert!(
+            (got.latency_ms - 0.103).abs() < 1e-12,
+            "must read the node_num=2 slice (103us full sum), got {} ms",
+            got.latency_ms
+        );
+
+        // num_gpus = 4 on an 8-GPU node: Python's fractional node_num (0.5)
+        // never hits the int-keyed table; the Rust mirror errors instead of
+        // floor-dividing into the node_num=1 slice.
+        assert!(deepep_op(4, true, DispatchFlavor::DeepEpNormal).query(&db, 64).is_err());
+    }
+
+    /// Issue #1333 item 4.7-2: Python's SGLang DeepEP branch
+    /// (moe.py:1244-1260) has NO pre/combine split — the model builds TWO
+    /// MoEDispatch ops per MoE layer (pre_dispatch=True and False, e.g.
+    /// deepseek.py:270/308) and EACH returns the FULL summed table point
+    /// (normal: dispatch_transmit + dispatch_notify + combine_transmit +
+    /// combine_notify, moe.py:2724; ll: dispatch_avg + combine_avg,
+    /// moe.py:2666), so the per-step per-layer dispatch total is 2x the
+    /// point. The old Rust code split the point into pre/combine halves
+    /// (step total = 1x). Python oracle (same synthetic-table pattern as
+    /// `deepep_node_num_counts_nodes_not_gpus_per_node`, with both a
+    /// pre_dispatch=True and a pre_dispatch=False op):
+    ///
+    /// ```text
+    /// mk = lambda pre: MoEDispatch('d', 1.0, 7168, 8, 256, 1, 8, 1, pre,
+    ///                              moe_backend='deepep_moe', is_context=True, sms=16)
+    /// print(float(mk(True).query(db, x=64)), float(mk(False).query(db, x=64)))
+    /// # -> 0.103 0.103   (step total 0.206)
+    /// # generation (is_context=False, ll table {'latency': 50.0}):
+    /// # -> 0.05 0.05     (step total 0.1)
+    /// ```
+    #[test]
+    fn deepep_pre_and_combine_each_return_full_point_sum() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        // num_gpus = 8 on b200 (8 GPUs/node) -> node_num = 1.
+        write_deepep_normal_parquet(
+            &tmp.path().join("wideep_deepep_normal_perf.parquet"),
+            &[(1, 16, 64, 100.0)], // full sum = 103us
+        );
+        write_deepep_ll_parquet(
+            &tmp.path().join("wideep_deepep_ll_perf.parquet"),
+            &[(1, 64, 30.0, 20.0)], // full sum = 50us
+        );
+        let mut db = b200_sglang_db();
+        db.wideep = crate::perf_database::wideep::WideEpTable::new(tmp.path().to_path_buf());
+
+        // Context (DeepEP normal): pre == combine == full point sum.
+        let pre = deepep_op(8, true, DispatchFlavor::DeepEpNormal)
+            .query(&db, 64)
+            .expect("normal pre query");
+        let combine = deepep_op(8, false, DispatchFlavor::DeepEpNormal)
+            .query(&db, 64)
+            .expect("normal combine query");
+        assert!((pre.latency_ms - 0.103).abs() < 1e-12, "pre got {}", pre.latency_ms);
+        assert!(
+            (combine.latency_ms - 0.103).abs() < 1e-12,
+            "combine got {}",
+            combine.latency_ms
+        );
+        assert!(
+            (pre.latency_ms + combine.latency_ms - 0.206).abs() < 1e-12,
+            "python step total is 2x the point (0.206), got {}",
+            pre.latency_ms + combine.latency_ms
+        );
+
+        // Generation (DeepEP LL): same no-split rule.
+        let pre = deepep_op(8, true, DispatchFlavor::DeepEpLowLatency)
+            .query(&db, 64)
+            .expect("ll pre query");
+        let combine = deepep_op(8, false, DispatchFlavor::DeepEpLowLatency)
+            .query(&db, 64)
+            .expect("ll combine query");
+        assert!((pre.latency_ms - 0.05).abs() < 1e-12, "ll pre got {}", pre.latency_ms);
+        assert!(
+            (combine.latency_ms - 0.05).abs() < 1e-12,
+            "ll combine got {}",
+            combine.latency_ms
+        );
     }
 }

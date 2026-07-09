@@ -659,8 +659,11 @@ def test_query_dsv4_megamoe_module_interpolates_energy_from_rows(tmp_path):
     )
 
     assert float(result) == pytest.approx(2.0)
-    assert result.power == pytest.approx(175.0)
-    assert result.energy == pytest.approx(350.0)
+    # perf_interp blends the measured POWER column (100, 200 -> 150) and
+    # re-derives energy = power * latency; the legacy path lerped ENERGY
+    # directly (conflating the latency growth into the blend, -> 350/175).
+    assert result.power == pytest.approx(150.0)
+    assert result.energy == pytest.approx(300.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

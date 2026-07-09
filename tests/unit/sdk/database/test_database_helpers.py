@@ -400,8 +400,9 @@ def test_get_database_skips_incomplete_version_directory(tmp_path: Path, perf_da
 
 
 def test_perf_database_clear_runtime_caches_clears_interpolation_and_lru_state(perf_database):
+    from aiconfigurator.sdk.perf_interp import engine as perf_interp_engine
+
     db = object.__new__(perf_database.PerfDatabase)
-    db._extracted_metrics_cache = {"table": object()}
     cache_clear_calls = []
 
     def fake_cached_method():
@@ -409,10 +410,11 @@ def test_perf_database_clear_runtime_caches_clears_interpolation_and_lru_state(p
 
     fake_cached_method.cache_clear = lambda: cache_clear_calls.append("cleared")
     db.fake_cached_method = fake_cached_method
+    perf_interp_engine._SITE_INDEX_CACHE[id(db)] = (db, None)
 
     db.clear_runtime_caches()
 
-    assert db._extracted_metrics_cache == {}
+    assert not perf_interp_engine._SITE_INDEX_CACHE
     assert cache_clear_calls == ["cleared"]
 
 
@@ -464,7 +466,6 @@ def test_database_view_configuration_is_isolated_and_same_key_is_reused(perf_dat
         assert view is not template
         assert view._root_database_template is template
         assert view._test_loaded_table is shared_table
-        assert view._extracted_metrics_cache is not template._extracted_metrics_cache
         assert view.supported_quant_mode._database is view
         assert view.get_default_database_mode() is common.DatabaseMode.HYBRID
         assert view.transfer_policy == frozenset()

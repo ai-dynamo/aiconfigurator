@@ -323,3 +323,72 @@ def test_forward_pass_perf_model_best_available_falls_back_on_bad_config() -> No
     diag = model.diagnostics()
     assert diag["source"] == "fallback_regression"
     assert diag["last_warning"] is not None
+
+
+def test_sparse_cp_ops_emit_cp_fields_in_spec():
+    """Sparse-attention CP is now PORTED to the compiled engine (dsa + dsv4
+    _query_cp compositions), so the specs carry cp_size (+ window_size for
+    dsv4 HCA) instead of refusing compilation. Both engines compute when the
+    sparse tables exist and fail loud identically when they don't -- logical
+    parity does not wait for data."""
+
+    class _Dsv4Op:
+        _name = "context_attention"
+        _scale_factor = 1.0
+        _compress_ratio = 4
+        _num_heads = 64
+        _native_heads = 64
+        _tp_size = 1
+        _cp_size = 2
+        _window_size = 2048
+        # Structural dims the emitter forwards for the Rust-side SOL
+        # (real ops always carry these via _BaseDeepSeekV4AttentionModule).
+        _hidden_size = 7168
+        _q_lora_rank = 1536
+        _o_lora_rank = 1024
+        _head_dim = 512
+        _rope_head_dim = 64
+        _index_n_heads = 64
+        _index_head_dim = 128
+        _index_topk = 1024
+        _o_groups = 16
+        from aiconfigurator.sdk import common
+
+        _kvcache_quant_mode = common.KVCacheQuantMode.fp8
+        _kv_cache_dtype = None
+        _fmha_quant_mode = common.FMHAQuantMode.bfloat16
+        _gemm_quant_mode = common.GEMMQuantMode.fp8_block
+
+    # exercised via the dict builder directly to avoid registry wiring
+    from aiconfigurator.sdk.engine import _dsv4_module
+
+    spec = _dsv4_module(_Dsv4Op(), architecture="DeepseekV4ForCausalLM")
+    assert spec["cp_size"] == 2
+    assert spec["window_size"] == 2048
+
+
+def test_non_silicon_database_mode_falls_back_to_python_step():
+    """The compiled engine is SILICON-only (no util_empirical layer); HYBRID /
+    EMPIRICAL databases must stay on the Python step so both backends give
+    the SAME answer (parity by delegation) instead of the rust side failing
+    configs Python fills in empirically."""
+    from enum import Enum
+
+    from aiconfigurator.sdk.config import RuntimeConfig
+    from aiconfigurator.sdk.rust_engine_step import should_use_rust_engine_step
+
+    class _Mode(Enum):
+        SILICON = "SILICON"
+        HYBRID = "HYBRID"
+
+    class _DB:
+        def __init__(self, mode):
+            self._mode = mode
+
+        def get_default_database_mode(self):
+            return self._mode
+
+    rc = RuntimeConfig(engine_step_backend="rust")
+    assert should_use_rust_engine_step(rc, _DB(_Mode.SILICON))
+    assert not should_use_rust_engine_step(rc, _DB(_Mode.HYBRID))
+    assert should_use_rust_engine_step(rc)  # no database context -> unchanged

@@ -105,10 +105,11 @@ Steps required:
 
 1. **Define a new Operation `Conv`** in `operations.py`
 2. **Define a new method `query_conv`** in `perf_database.py`
-3. **Define the data collection process** in collector by referring to existing operations' collection code, such as `collect_gemm.py`
-4. **Collect data for conv** and add the data file to systems in `src/aiconfigurator/systems/`
-5. **Add data loading code** in `perf_database.py` to load your data, which is leveraged by the method `query_conv`
-6. **Add new model definition** in `models.py` to build your model with new operation. A new model class is mapping to a new model family.  
+3. **Declare the op's interpolation config** in [`sdk/perf_interp/config.py`](../src/aiconfigurator/sdk/perf_interp/config.py). Raw perf tables are resolved through the shared `perf_interp.query` engine, and each op family declares its table shape once as an `OpInterpConfig` record: name the axes in the table's nesting order, pick the resolver (`ScatteredSites` for scattered-shapes-plus-swept-axis tables like GEMM, `Grid` for near-regular grids like attention), and provide the op's analytic `sol_fn` (its speed-of-light roofline — required; it anchors out-of-range extrapolation). Add a factory next to `gemm_config` / `context_grid_config`, register it in `OP_CONFIG_FACTORIES`, and call `perf_interp.query(config, table, *coords)` from `query_conv`.
+4. **Define the data collection process** in collector by referring to existing operations' collection code, such as `collect_gemm.py`
+5. **Collect data for conv** and add the data file to systems in `src/aiconfigurator/systems/`
+6. **Add data loading code** in `perf_database.py` to load your data, which is leveraged by the method `query_conv`
+7. **Add new model definition** in `models.py` to build your model with new operation. A new model class is mapping to a new model family.  
 update your model in ModelFamily dict defined in [`common.py`](../src/aiconfigurator/sdk/common.py)
 
 ### AFD Operation Partitioning Compatibility

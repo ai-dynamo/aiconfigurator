@@ -37,7 +37,9 @@ impl Mamba2Op {
         seq_len: u32,
     ) -> Result<PerformanceResult, AicError> {
         // Mirrors Python `Mamba2Kernel.query`: silicon-first, SOL fallback
-        // on perf-DB miss.
+        // on perf-DB miss. The op's arg-style SOL is threaded into the table
+        // query so the perf_interp engine can util-hold beyond-range queries
+        // (mirroring how Python passes `get_sol` into the engine record).
         match db.state_space.query_mamba2(
             &self.kernel_source,
             &self.phase,
@@ -50,12 +52,13 @@ impl Mamba2Op {
             self.head_dim,
             self.n_groups,
             self.chunk_size,
+            &|b, s| self.sol_latency_ms(db, b, s),
         ) {
             Ok(latency) => Ok(PerformanceResult::new(latency, Source::Silicon)
                 .clamp_non_negative()
                 .scaled(self.scale_factor)),
             Err(AicError::PerfDatabase(_)) => {
-                let latency = self.sol_latency_ms(db, batch_size, seq_len);
+                let latency = self.sol_latency_ms(db, batch_size as f64, seq_len as f64);
                 Ok(PerformanceResult::new(latency, Source::Sol)
                     .clamp_non_negative()
                     .scaled(self.scale_factor))
@@ -64,8 +67,9 @@ impl Mamba2Op {
         }
     }
 
-    /// Mirrors Python `Mamba2Kernel.get_sol()`.
-    fn sol_latency_ms(&self, db: &PerfDatabase, batch_size: u32, seq_len: u32) -> f64 {
+    /// Mirrors Python `Mamba2Kernel.get_sol()`. `f64` coordinates because the
+    /// perf_interp engine evaluates SOL at blended/snapped anchor points.
+    fn sol_latency_ms(&self, db: &PerfDatabase, batch_size: f64, seq_len: f64) -> f64 {
         let nheads = self.nheads as f64;
         let head_dim = self.head_dim as f64;
         let n_groups = self.n_groups as f64;
@@ -73,11 +77,11 @@ impl Mamba2Op {
         let d_conv = self.d_conv as f64;
         let d_inner = nheads * head_dim;
         let conv_dim = d_inner + 2.0 * n_groups * d_state;
-        let x = if self.phase == "context" && seq_len > 0 {
-            (batch_size as u64) * (seq_len as u64)
+        let x = if self.phase == "context" && seq_len > 0.0 {
+            batch_size * seq_len
         } else {
-            batch_size as u64
-        } as f64;
+            batch_size
+        };
         let total_bytes = match self.kernel_source.as_str() {
             "causal_conv1d_fn" | "causal_conv1d_update" => {
                 x * conv_dim * (d_conv + 1.0) * 2.0 + x * conv_dim * 2.0
@@ -119,6 +123,8 @@ impl GdnOp {
         // Mirrors Python `GDNKernel.query`: try the silicon table; on a
         // `PerfDataNotAvailableError`-class miss (the perf DB doesn't ship
         // every kernel/phase slice), fall back to a per-kernel SOL formula.
+        // The op's arg-style SOL is threaded into the table query for
+        // beyond-range util-hold (mirrors Python's engine record sol_fn).
         match db.state_space.query_gdn(
             &self.kernel_source,
             &self.phase,
@@ -130,12 +136,13 @@ impl GdnOp {
             self.head_k_dim,
             self.num_v_heads,
             self.head_v_dim,
+            &|b, s| self.sol_latency_ms(db, b, s),
         ) {
             Ok(latency) => Ok(PerformanceResult::new(latency, Source::Silicon)
                 .clamp_non_negative()
                 .scaled(self.scale_factor)),
             Err(AicError::PerfDatabase(_)) => {
-                let latency = self.sol_latency_ms(db, batch_size, seq_len);
+                let latency = self.sol_latency_ms(db, batch_size as f64, seq_len as f64);
                 Ok(PerformanceResult::new(latency, Source::Sol)
                     .clamp_non_negative()
                     .scaled(self.scale_factor))
@@ -145,14 +152,15 @@ impl GdnOp {
     }
 
     /// Mirrors Python `GDNKernel.get_sol()`. Per-kernel byte-count formula
-    /// divided by GPU memory bandwidth.
-    fn sol_latency_ms(&self, db: &PerfDatabase, batch_size: u32, seq_len: u32) -> f64 {
-        let x = if self.phase == "context" && seq_len > 0 {
-            (batch_size as u64) * (seq_len as u64)
+    /// divided by GPU memory bandwidth. `f64` coordinates because the
+    /// perf_interp engine evaluates SOL at blended/snapped anchor points.
+    fn sol_latency_ms(&self, db: &PerfDatabase, batch_size: f64, seq_len: f64) -> f64 {
+        let x = if self.phase == "context" && seq_len > 0.0 {
+            batch_size * seq_len
         } else {
-            batch_size as u64
-        } as f64;
-        let bs = batch_size as f64;
+            batch_size
+        };
+        let bs = batch_size;
         let nk = self.num_k_heads as f64;
         let hk = self.head_k_dim as f64;
         let nv = self.num_v_heads as f64;
@@ -162,8 +170,9 @@ impl GdnOp {
         let d_model = self.d_model as f64;
         let state_size = nv * hk * hv;
         let chunk_size = 64.0_f64;
-        let num_chunks = if seq_len > 0 {
-            (seq_len / 64) as f64
+        // Python: `(s // chunk_size) if s else 0` — floor division.
+        let num_chunks = if seq_len > 0.0 {
+            (seq_len / 64.0).floor()
         } else {
             0.0
         };
