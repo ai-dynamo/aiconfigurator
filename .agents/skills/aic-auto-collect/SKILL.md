@@ -347,6 +347,17 @@ implemented or measured, append the product identity and result to the same
 ledger entry and qualify the earlier state as historical; do not leave a
 superseded present-tense status for a later platform agent to misread.
 
+Human-authorized consolidation is the one exception to append-only. On an
+explicit owner instruction (never on the agent's own judgment), superseded
+process-iteration entries — stage updates, candidate status bindings,
+executed proposals, checkpoints whose uncommitted state has since landed —
+may be compressed to dated outcome stubs, each keeping the decision, the
+numbers that justified it, and any hash that still binds a live artifact.
+Durable material is never consolidated away: the fixed contract, evidence
+manifests, named provenance rows and every anchor cited from code, measured
+boundaries, and hardware-round outcomes. Mark the file with a dated
+consolidation note under the title; full history remains in git.
+
 ## Accept artifacts fail-closed
 
 For every completed op, verify:
