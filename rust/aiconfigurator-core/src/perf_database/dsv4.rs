@@ -12,14 +12,20 @@
 //! ## Indexing
 //!
 //! Mirrors Python `load_context_dsv4_kind_module_data` /
-//! `load_generation_dsv4_kind_module_data`. The latency tables are keyed by:
-//!   - `native_heads` (the model's total attention head count, CSV `num_heads`
-//!     column) — selects the data slice; and
-//!   - `tp_size` — the primary interpolation axis.
+//! `load_generation_dsv4_kind_module_data` (SCHEME A): the head axis is the
+//! rank-LOCAL head count straight from the CSV `num_heads` column; the CSV
+//! `tp_size` column is collapsed at load (see the loader note below).
 //!
-//! NOT by the per-rank partitioned head count. Context grids interpolate over
-//! `(tp_size, isl, batch)`; generation grids over `(tp_size, batch, s_total)`
-//! where `s_total = isl + step` (decode is `q_len=1` with `past_kv=step`).
+//! ## Resolution (perf_interp v2)
+//!
+//! Queries resolve on the RAW tables through the shared engine, mirroring
+//! Python `operations/dsv4.py`:
+//! - context: 3-axis Grid RAW `[prefix(step)][isl][batch]` — the step axis is
+//!   KEPT (a prefix beyond the collected range is util-hold with the
+//!   prefix-aware SOL carrying the effect, replacing the legacy
+//!   fold-to-last-anchor + robust batch-scaling lookup);
+//! - generation: 2-axis Grid RAW `[batch][s_total]` where
+//!   `s_total = isl + step` (decode is q_len=1 with past_kv=step).
 //!
 //! All four primary CSVs share the DSA module column layout. Data is
 //! collected only on TRT-LLM / SGLang today; loaders surface a clean error for
@@ -33,13 +39,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
-use super::interpolation::{interp_1d, nearest_neighbors};
+use crate::common::system_spec::SystemSpec;
+use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttnKind {
     Csa,
     Hca,
+}
+
+impl AttnKind {
+    /// The compress_ratio each split file was collected at. Python keeps
+    /// compress_ratio as a dict key inside one merged table; the Rust port
+    /// keeps the files separate, so the kind IS the ratio.
+    fn compress_ratio(self) -> i64 {
+        match self {
+            AttnKind::Csa => 4,
+            AttnKind::Hca => 128,
+        }
+    }
 }
 
 // head -> step -> isl -> batch -> latency
@@ -61,14 +80,21 @@ type ByNative = BTreeMap<u32, ByStep>;
 
 pub struct Dsv4Table {
     data_root: PathBuf,
-    csa_context: OnceLock<Result<ModuleGrids, AicError>>,
-    hca_context: OnceLock<Result<ModuleGrids, AicError>>,
-    csa_generation: OnceLock<Result<ModuleGrids, AicError>>,
-    hca_generation: OnceLock<Result<ModuleGrids, AicError>>,
+    csa_context: OnceLock<Result<ModuleNodes, AicError>>,
+    hca_context: OnceLock<Result<ModuleNodes, AicError>>,
+    csa_generation: OnceLock<Result<ModuleNodes, AicError>>,
+    hca_generation: OnceLock<Result<ModuleNodes, AicError>>,
 }
 
+/// Raw per-key nested grids straight from the parquet (loader output).
 struct ModuleGrids {
     by_keys: BTreeMap<ModuleKey, ByNative>,
+}
+
+/// Engine-ready tables: per (key, head), the phase-shaped `Node`
+/// (context: `[step][isl][batch]`; generation: `[batch][s_total]`).
+struct ModuleNodes {
+    by_keys: BTreeMap<ModuleKey, BTreeMap<u32, Node>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -77,6 +103,50 @@ struct ModuleKey {
     fmha_quant: String,
     kv_quant: String,
     gemm_quant: String,
+}
+
+/// DeepSeek-V4 structural dims for the analytic SOL. Python receives these
+/// from the model config (`DeepSeekV4Config`); the Rust perf-database query
+/// only carries the architecture string, so the dims are pinned here.
+///
+/// NOTE: DeepSeek-V4-Pro and DeepSeek-V4-Flash share the architecture string
+/// `DeepseekV4ForCausalLM` but differ in shape (Flash: hidden 4096,
+/// q_lora 1024, o_groups 8, index_topk 512). The table pins the PRO dims —
+/// the SOL only enters as a ratio (util-hold / single-survivor correction),
+/// so measured-range resolution is unaffected; only beyond-grid ratios for
+/// Flash would drift.
+struct Dsv4Dims {
+    hidden_size: i64,
+    q_lora_rank: i64,
+    o_lora_rank: i64,
+    head_dim: i64,
+    rope_head_dim: i64,
+    index_n_heads: i64,
+    index_head_dim: i64,
+    index_topk: i64,
+    window_size: i64,
+    o_groups: i64,
+    native_heads: i64,
+}
+
+const DSV4_PRO_DIMS: Dsv4Dims = Dsv4Dims {
+    hidden_size: 7168,
+    q_lora_rank: 1536,
+    o_lora_rank: 1024,
+    head_dim: 512,
+    rope_head_dim: 64,
+    index_n_heads: 64,
+    index_head_dim: 128,
+    index_topk: 1024,
+    window_size: 128,
+    o_groups: 16,
+    native_heads: 128,
+};
+
+fn dsv4_dims(_architecture: &str) -> &'static Dsv4Dims {
+    // Only DeepseekV4ForCausalLM exists today; see the Pro-vs-Flash note on
+    // `Dsv4Dims`.
+    &DSV4_PRO_DIMS
 }
 
 impl Dsv4Table {
@@ -90,23 +160,20 @@ impl Dsv4Table {
         }
     }
 
-    /// Context-DSV4 latency at `lookup_s = isl` (the new-token count). Mirrors
-    /// Python's context base lookup over `(tp_size, isl, b)` on the
-    /// `native_heads` slice. The context CSVs collected to date carry a single
-    /// `step=0` anchor, so there is no prefix axis to resolve here (the operator
-    /// already supplies the new-token count as `isl`).
+    /// Context-DSV4 latency at `lookup_s = isl` (the new-token count).
     ///
-    /// `local_heads` is the model's rank-LOCAL head count (`native // tp`); it is
-    /// resolved against the CSV head keys via [`resolve_head_key`] (Python
-    /// `_dsv4_resolve_head_key`). The lookup mirrors Python's context path
-    /// `_query_context_attn_table -> _dsv4_lookup_prefix_resolved ->
-    /// _dsv4_robust_3d_lookup(..., batch_axis="z")`: exact `(isl, b)` hit, else
-    /// the sampled-batch-scaling fallback (batch is the inner axis). The single
-    /// `step=0` anchor means the cubic 3-D path is degenerate, so Python always
-    /// falls through to exact-or-batch-scaling here.
+    /// Mirrors Python `ContextDeepSeekV4AttentionModule._query_context_attn_table`
+    /// (SILICON path): resolve the `(quant, arch)` key, resolve the model's
+    /// rank-LOCAL head count (`local_heads = native // tp`) against the CSV
+    /// head keys via [`resolve_head_key`], then one 3-axis Grid RAW engine
+    /// query over `(prefix, isl, batch)` — the step axis is KEPT. The context
+    /// CSVs collected to date carry a single `step=0` anchor, so `prefix=0`
+    /// collapses that level exactly and `prefix>0` is out-of-range util-hold
+    /// with the prefix-aware SOL carrying the effect (matching Python).
     #[allow(clippy::too_many_arguments)]
     pub fn query_context(
         &self,
+        spec: &SystemSpec,
         attn_kind: AttnKind,
         b: u32,
         isl: u32,
@@ -115,37 +182,50 @@ impl Dsv4Table {
         fmha_quant: FmhaQuantMode,
         gemm_quant: GemmQuantMode,
         architecture: &str,
+        prefix: u32,
     ) -> Result<f64, AicError> {
         let grids = match attn_kind {
             AttnKind::Csa => self.load_csa_context()?,
             AttnKind::Hca => self.load_hca_context()?,
         };
-        let by_step = select_resolved(grids, architecture, fmha_quant, kv_quant, gemm_quant, local_heads)?;
-        // Single step=0 anchor: fold the step axis to the `[isl][batch]` slice
-        // (last anchor wins, matching Python's prefix-resolved single anchor).
-        let slice = by_step
-            .values()
-            .next_back()
-            .ok_or_else(|| AicError::PerfDatabase("DSV4 context slice has no step anchor".into()))?;
-        // batch_axis="z": batch is the inner key, isl the outer.
-        robust_lookup_batch_inner(slice, isl, b)
+        let node = select_resolved(grids, architecture, fmha_quant, kv_quant, gemm_quant, local_heads)?;
+
+        let dims = dsv4_dims(architecture);
+        let cr = attn_kind.compress_ratio();
+        let heads = local_heads as i64;
+        // Engine coordinates are (prefix, seq, batch); Python's sol_fn is
+        // lambda p, s, b: get_sol(b, s, p).
+        let sol = move |c: &[f64]| {
+            dsv4_attention_sol_ms(
+                spec,
+                dims,
+                cr,
+                true,
+                kv_quant,
+                fmha_quant,
+                gemm_quant,
+                c[2] as i64, // b
+                c[1] as i64, // s
+                c[0] as i64, // prefix
+                heads,
+            )
+        };
+        let cfg = OpInterpConfig::grid(&["prefix", "seq_len", "batch"], &sol);
+        perf_interp::query(&cfg, node, &[prefix as f64, isl as f64, b as f64])
     }
 
     /// Generation-DSV4 latency. `sequence_tokens = isl + step` (absolute KV
-    /// length). Mirrors Python's generation path
-    /// `_query_generation_attn_table -> _dsv4_robust_3d_lookup(dict[head], head,
-    /// b, s_total, batch_axis="y")`: exact `(b, s_total)` hit, else
-    /// sampled-batch-scaling (batch is the MIDDLE axis, s_total the inner).
-    ///
-    /// `local_heads` is resolved against the CSV head keys via
-    /// [`resolve_head_key`]. The DSV4 generation table is RAGGED (e.g.
-    /// `s_total=385` is measured only at `batch=2`); the batch-scaling fallback
-    /// — take the largest measured `bp <= b`, interpolate along `s_total`, then
-    /// scale by `b/bp` — is what Python does and what a plain grid interpolation
-    /// would get wrong (it would smoothly interpolate the batch axis instead).
+    /// length). Mirrors Python
+    /// `GenerationDeepSeekV4AttentionModule._query_generation_attn_table`
+    /// (SILICON path): one 2-axis Grid RAW engine query over the
+    /// `{b: {s_total}}` table. The DSV4 generation table is RAGGED (e.g.
+    /// `s_total=385` measured only at some batches); the engine's
+    /// single-survivor SOL-ratio correction / util-hold replaces the legacy
+    /// batch-scaling fallback.
     #[allow(clippy::too_many_arguments)]
     pub fn query_generation(
         &self,
+        spec: &SystemSpec,
         attn_kind: AttnKind,
         b: u32,
         sequence_tokens: u32,
@@ -159,61 +239,117 @@ impl Dsv4Table {
             AttnKind::Csa => self.load_csa_generation()?,
             AttnKind::Hca => self.load_hca_generation()?,
         };
-        let by_step = select_resolved(grids, architecture, fmha_quant, kv_quant, gemm_quant, local_heads)?;
-        // Build the `[batch][s_total]` slice where s_total = isl + step. The
-        // generation CSVs use isl=1, so s_total = 1 + step. If multiple
-        // (step, isl) pairs map to the same s_total the last write wins, which
-        // mirrors Python's flat `{b: {s_total: leaf}}` dict overwrite.
-        let mut slice: BTreeMap<u32, BTreeMap<u32, f64>> = BTreeMap::new();
-        for (&step, by_isl) in by_step {
-            for (&isl_v, by_batch) in by_isl {
-                let s_total = isl_v + step;
-                for (&bb, &lat) in by_batch {
-                    slice.entry(bb).or_default().insert(s_total, lat);
-                }
-            }
-        }
-        // batch_axis="y": batch is the outer key of `slice`, s_total the inner.
-        robust_lookup_batch_outer(&slice, b, sequence_tokens)
+        let node = select_resolved(grids, architecture, fmha_quant, kv_quant, gemm_quant, local_heads)?;
+
+        let dims = dsv4_dims(architecture);
+        let cr = attn_kind.compress_ratio();
+        let heads = local_heads as i64;
+        // Engine coordinates are (batch, seq); Python's sol_fn is
+        // lambda b, s: get_sol(b, s) with prefix=0 and is_context=False.
+        let sol = move |c: &[f64]| {
+            dsv4_attention_sol_ms(
+                spec,
+                dims,
+                cr,
+                false,
+                kv_quant,
+                fmha_quant,
+                gemm_quant,
+                c[0] as i64, // b
+                c[1] as i64, // s_total
+                0,
+                heads,
+            )
+        };
+        let cfg = OpInterpConfig::grid(&["batch", "seq_len"], &sol);
+        perf_interp::query(&cfg, node, &[b as f64, sequence_tokens as f64])
     }
 
-    fn load_csa_context(&self) -> Result<&ModuleGrids, AicError> {
+    fn load_csa_context(&self) -> Result<&ModuleNodes, AicError> {
         let cell = self.csa_context.get_or_init(|| {
             load_module_parquet(&self.data_root.join("dsv4_csa_context_module_perf.parquet"))
+                .map(context_nodes)
         });
         cell.as_ref().map_err(clone_err)
     }
-    fn load_hca_context(&self) -> Result<&ModuleGrids, AicError> {
+    fn load_hca_context(&self) -> Result<&ModuleNodes, AicError> {
         let cell = self.hca_context.get_or_init(|| {
             load_module_parquet(&self.data_root.join("dsv4_hca_context_module_perf.parquet"))
+                .map(context_nodes)
         });
         cell.as_ref().map_err(clone_err)
     }
-    fn load_csa_generation(&self) -> Result<&ModuleGrids, AicError> {
+    fn load_csa_generation(&self) -> Result<&ModuleNodes, AicError> {
         let cell = self.csa_generation.get_or_init(|| {
             load_module_parquet(&self.data_root.join("dsv4_csa_generation_module_perf.parquet"))
+                .map(generation_nodes)
         });
         cell.as_ref().map_err(clone_err)
     }
-    fn load_hca_generation(&self) -> Result<&ModuleGrids, AicError> {
+    fn load_hca_generation(&self) -> Result<&ModuleNodes, AicError> {
         let cell = self.hca_generation.get_or_init(|| {
             load_module_parquet(&self.data_root.join("dsv4_hca_generation_module_perf.parquet"))
+                .map(generation_nodes)
         });
         cell.as_ref().map_err(clone_err)
     }
 }
 
+/// Convert loaded grids into context-phase engine tables: per (key, head),
+/// a `[step][isl][batch]` Node (the raw nesting, step axis KEPT).
+fn context_nodes(grids: ModuleGrids) -> ModuleNodes {
+    let mut by_keys: BTreeMap<ModuleKey, BTreeMap<u32, Node>> = BTreeMap::new();
+    for (key, by_native) in grids.by_keys {
+        let per_head = by_keys.entry(key).or_default();
+        for (head, by_step) in by_native {
+            let node = per_head.entry(head).or_insert_with(Node::branch);
+            for (step, by_isl) in by_step {
+                for (isl, by_batch) in by_isl {
+                    for (bb, lat) in by_batch {
+                        node.insert(&[step, isl, bb], lat);
+                    }
+                }
+            }
+        }
+    }
+    ModuleNodes { by_keys }
+}
+
+/// Convert loaded grids into generation-phase engine tables: per (key, head),
+/// a `[batch][s_total]` Node where `s_total = isl + step`. The generation
+/// CSVs use isl=1, so s_total = 1 + step. If multiple (step, isl) pairs map
+/// to the same s_total the last write wins, mirroring Python's flat
+/// `{b: {s_total: leaf}}` dict overwrite.
+fn generation_nodes(grids: ModuleGrids) -> ModuleNodes {
+    let mut by_keys: BTreeMap<ModuleKey, BTreeMap<u32, Node>> = BTreeMap::new();
+    for (key, by_native) in grids.by_keys {
+        let per_head = by_keys.entry(key).or_default();
+        for (head, by_step) in by_native {
+            let node = per_head.entry(head).or_insert_with(Node::branch);
+            for (step, by_isl) in by_step {
+                for (isl, by_batch) in by_isl {
+                    let s_total = isl + step;
+                    for (bb, lat) in by_batch {
+                        node.insert(&[bb, s_total], lat);
+                    }
+                }
+            }
+        }
+    }
+    ModuleNodes { by_keys }
+}
+
 /// Resolve the `(quant, architecture)` key, then resolve the model's rank-LOCAL
-/// head count against the CSV head keys, returning the `step -> isl -> batch`
-/// sub-tree for that head.
+/// head count against the CSV head keys, returning the engine table for that
+/// head.
 fn select_resolved<'a>(
-    grids: &'a ModuleGrids,
+    grids: &'a ModuleNodes,
     architecture: &str,
     fmha: FmhaQuantMode,
     kv: KvCacheQuantMode,
     gemm: GemmQuantMode,
     local_heads: u32,
-) -> Result<&'a ByStep, AicError> {
+) -> Result<&'a Node, AicError> {
     let key = ModuleKey {
         architecture: architecture.to_string(),
         fmha_quant: fmha.name().to_string(),
@@ -238,7 +374,7 @@ fn select_resolved<'a>(
 ///   1. exact match on the requested local-head value;
 ///   2. if only one head key is loaded, use it (the b300 universal-sweep case);
 ///   3. otherwise the nearest head key `<=` request, else the smallest key.
-fn resolve_head_key(by_native: &ByNative, local_heads: u32) -> Option<u32> {
+fn resolve_head_key<T>(by_native: &BTreeMap<u32, T>, local_heads: u32) -> Option<u32> {
     if by_native.is_empty() {
         return None;
     }
@@ -256,136 +392,196 @@ fn resolve_head_key(by_native: &ByNative, local_heads: u32) -> Option<u32> {
         .or_else(|| by_native.keys().next().copied())
 }
 
-/// DSV4 robust lookup with batch as the INNER axis (Python `batch_axis="z"`).
-/// `slice` is `[outer (isl)][inner (batch)]`. Used by the context path where the
-/// outer axis is the new-token count and the inner axis is the batch.
+// ---------------------------------------------------------------------------
+// Analytic SOL — verbatim port of Python `_deepseek_v4_attention_sol`
+// ---------------------------------------------------------------------------
+
+/// Python `GEMM._get_quant_tc_flops` (compute factor -> spec TC-flops entry,
+/// bf16-scaled fallback).
+fn tc_flops(spec: &SystemSpec, compute_factor: f64) -> f64 {
+    let bf16 = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
+    let direct = match compute_factor as u32 {
+        1 => spec.gpu.bfloat16_tc_flops,
+        2 => spec.gpu.fp8_tc_flops,
+        4 => spec.gpu.fp4_tc_flops,
+        _ => None,
+    };
+    direct.unwrap_or(bf16 * compute_factor)
+}
+
+/// Python `PerfDatabase._causal_limited_pairs`: sum over queries of
+/// `min(prefix + query_index + 1, limit)`, times batch.
+fn causal_limited_pairs(batch: i128, query_len: i128, prefix: i128, limit: i128) -> i128 {
+    if limit <= 0 || query_len <= 0 {
+        return 0;
+    }
+    let full_s = prefix + query_len;
+    if prefix >= limit {
+        return batch * query_len * limit;
+    }
+    if full_s <= limit {
+        return batch * (full_s * (full_s + 1) - prefix * (prefix + 1)) / 2;
+    }
+    let ramp = batch * (limit * (limit + 1) - prefix * (prefix + 1)) / 2;
+    let saturated = batch * (full_s - limit) * limit;
+    ramp + saturated
+}
+
+/// Python `PerfDatabase._sum_floor_upto`: `sum_{i=0..n} floor(i / divisor)`.
+fn sum_floor_upto(n: i128, divisor: i128) -> i128 {
+    if n < 0 {
+        return 0;
+    }
+    let q = n / divisor;
+    let r = n % divisor;
+    divisor * q * (q - 1) / 2 + q * (r + 1)
+}
+
+/// Python `PerfDatabase._compressed_context_pairs`.
+fn compressed_context_pairs(batch: i128, query_len: i128, prefix: i128, ratio: i128, limit: i128) -> i128 {
+    if ratio <= 0 || query_len <= 0 || limit <= 0 {
+        return 0;
+    }
+    let start = prefix + 1;
+    let end = prefix + query_len;
+    let saturation_start = limit * ratio;
+    let total = if end < saturation_start {
+        sum_floor_upto(end, ratio) - sum_floor_upto(start - 1, ratio)
+    } else if start >= saturation_start {
+        query_len * limit
+    } else {
+        let ramp = sum_floor_upto(saturation_start - 1, ratio) - sum_floor_upto(start - 1, ratio);
+        ramp + (end - saturation_start + 1) * limit
+    };
+    batch * total
+}
+
+/// Shared SOL formula for both context and generation phases. Verbatim port
+/// of Python `operations.dsv4._deepseek_v4_attention_sol` (returns only the
+/// `max(sol_math, sol_mem)` scalar the engine consumes).
 ///
-/// Exact `(outer, b)` hit, else the sampled-batch-scaling fallback: take the
-/// largest measured batch `bp <= b` (across all outer rows), interpolate along
-/// the outer axis at that batch (interpolation-only first, then extrapolation),
-/// and scale the result by `b / bp`.
-fn robust_lookup_batch_inner(slice: &ByIsl, outer: u32, b: u32) -> Result<f64, AicError> {
-    // Step 1: exact (outer, b).
-    if let Some(&lat) = slice.get(&outer).and_then(|by_b| by_b.get(&b)) {
-        return Ok(lat);
-    }
-    // Step 2: sampled-batch scaling. Candidate batches <= b across all rows.
-    let mut batch_points: Vec<u32> = slice
-        .values()
-        .flat_map(|by_b| by_b.keys().copied())
-        .filter(|&bp| bp <= b)
-        .collect();
-    batch_points.sort_unstable();
-    batch_points.dedup();
-    for allow_extrapolate in [false, true] {
-        for &bp in batch_points.iter().rev() {
-            if let Some(leaf) = interp_along_outer_at_batch(slice, outer, bp, allow_extrapolate) {
-                let scaled = leaf * (b as f64) / (bp as f64);
-                if scaled.is_finite() {
-                    return Ok(scaled);
-                }
-            }
+/// `local_heads` is the rank-local head count Python passes as `num_heads`;
+/// the rank-local `o_groups` Python receives from the model
+/// (`max(1, o_groups // tp)`) is derived here from
+/// `tp = native_heads / local_heads`.
+#[allow(clippy::too_many_arguments)]
+fn dsv4_attention_sol_ms(
+    spec: &SystemSpec,
+    dims: &Dsv4Dims,
+    compress_ratio: i64,
+    is_context: bool,
+    kv_quant: KvCacheQuantMode,
+    fmha_quant: FmhaQuantMode,
+    gemm_quant: GemmQuantMode,
+    b: i64,
+    s: i64,
+    prefix: i64,
+    local_heads: i64,
+) -> f64 {
+    let tp = (dims.native_heads / local_heads.max(1)).max(1);
+    let local_o_groups = (dims.o_groups / tp).max(1);
+
+    let (b, s, prefix) = (b as i128, s as i128, prefix as i128);
+    let nh = local_heads as i128;
+    let h = dims.hidden_size as i128;
+    let qlr = dims.q_lora_rank as i128;
+    let olr = dims.o_lora_rank as i128;
+    let hd = dims.head_dim as i128;
+    let rope_hd = dims.rope_head_dim as i128;
+    let inh = dims.index_n_heads as i128;
+    let ihd = dims.index_head_dim as i128;
+    let topk = dims.index_topk as i128;
+    let window = dims.window_size as i128;
+    let cr = compress_ratio as i128;
+    let lg = local_o_groups as i128; // Python local_groups = max(1, o_groups)
+
+    let tokens = if is_context { b * s } else { b };
+    let kv_len = if is_context { prefix + s } else { (s - 1).max(0) };
+
+    let gemm_projection_ops =
+        2 * tokens * h * qlr + 2 * tokens * qlr * nh * hd + 2 * tokens * h * hd + 2 * tokens * lg * olr * h;
+    let output_absorption_ops = 2 * tokens * nh * hd * olr;
+
+    let compressor_mult: i128 = if cr == 4 { 2 } else { 1 };
+    let mut compressor_ops: i128 = 0;
+    if cr != 0 {
+        compressor_ops = 4 * tokens * h * compressor_mult * hd + 2 * tokens * compressor_mult * hd;
+        if cr == 4 {
+            let indexer_compressor_mult: i128 = 2;
+            compressor_ops += 4 * tokens * h * indexer_compressor_mult * ihd;
+            compressor_ops += 2 * tokens * indexer_compressor_mult * ihd;
         }
     }
-    Err(AicError::PerfDatabase(format!(
-        "DSV4 robust lookup (batch inner) failed (outer={outer}, b={b})"
-    )))
-}
 
-/// Interpolate along the outer axis for a fixed batch `bp` within an
-/// `[outer][batch]` slice. Mirrors Python `_lookup_at_batch(batch_axis="z")`.
-fn interp_along_outer_at_batch(slice: &ByIsl, outer: u32, bp: u32, allow_extrapolate: bool) -> Option<f64> {
-    // Exact (outer, bp).
-    if let Some(by_b) = slice.get(&outer) {
-        if let Some(&leaf) = by_b.get(&bp) {
-            return Some(leaf);
-        }
-    }
-    // Outer points that carry this batch.
-    let outer_points: Vec<u32> = slice
-        .iter()
-        .filter(|(_, by_b)| by_b.contains_key(&bp))
-        .map(|(&o, _)| o)
-        .collect();
-    interp_1d_over(&outer_points, outer, allow_extrapolate, |o| slice[&o][&bp])
-}
+    let (window_pairs, compressed_pairs) = if is_context {
+        let wp = causal_limited_pairs(b, s, prefix, window);
+        let cp = if cr != 0 {
+            let limit = if cr == 4 { topk } else { (kv_len / cr).max(0) };
+            compressed_context_pairs(b, s, prefix, cr, limit)
+        } else {
+            0
+        };
+        (wp, cp)
+    } else {
+        let wp = b * kv_len.min(window);
+        let cp = if cr != 0 {
+            let limit = if cr == 4 { topk } else { (kv_len / cr).max(0) };
+            b * (kv_len / cr).min(limit)
+        } else {
+            0
+        };
+        (wp, cp)
+    };
 
-/// DSV4 robust lookup with batch as the OUTER axis (Python `batch_axis="y"`).
-/// `slice` is `[outer (batch)][inner (s_total)]`. Used by the generation path.
-///
-/// Exact `(b, s)` hit, else the sampled-batch-scaling fallback: take the largest
-/// measured batch `bp <= b`, interpolate along `s_total` within that batch row
-/// (interpolation-only first, then extrapolation), and scale by `b / bp`. This
-/// is the branch that reproduces Python's ragged-grid behaviour (a query batch
-/// with no measured `s_total` row scales up from the nearest smaller batch
-/// rather than smoothly interpolating the batch axis).
-fn robust_lookup_batch_outer(
-    slice: &BTreeMap<u32, BTreeMap<u32, f64>>,
-    b: u32,
-    s: u32,
-) -> Result<f64, AicError> {
-    // Step 1: exact (b, s).
-    if let Some(&lat) = slice.get(&b).and_then(|by_s| by_s.get(&s)) {
-        return Ok(lat);
-    }
-    // Step 2: sampled-batch scaling over batch rows <= b, descending.
-    let batch_points: Vec<u32> = slice.keys().copied().filter(|&bp| bp <= b).collect();
-    for allow_extrapolate in [false, true] {
-        for &bp in batch_points.iter().rev() {
-            if let Some(leaf) = interp_along_seq_at_batch(slice, bp, s, allow_extrapolate) {
-                let scaled = leaf * (b as f64) / (bp as f64);
-                if scaled.is_finite() {
-                    return Ok(scaled);
-                }
-            }
-        }
-    }
-    Err(AicError::PerfDatabase(format!(
-        "DSV4 robust lookup (batch outer) failed (b={b}, s={s})"
-    )))
-}
+    let attention_pairs = window_pairs + compressed_pairs;
+    let attention_ops = 4 * nh * hd * attention_pairs;
 
-/// Interpolate along `s_total` for a fixed batch row `bp` within a
-/// `[batch][s_total]` slice. Mirrors Python `_lookup_at_batch(batch_axis="y")`.
-fn interp_along_seq_at_batch(
-    slice: &BTreeMap<u32, BTreeMap<u32, f64>>,
-    bp: u32,
-    s: u32,
-    allow_extrapolate: bool,
-) -> Option<f64> {
-    let by_s = slice.get(&bp)?;
-    // Exact (bp, s).
-    if let Some(&leaf) = by_s.get(&s) {
-        return Some(leaf);
+    let mut indexer_ops: i128 = 0;
+    let mut indexer_bfloat16_ops: i128 = 0;
+    let mut indexer_cache_bytes: f64 = 0.0;
+    if cr == 4 {
+        let compressed_len = kv_len / cr;
+        let indexer_query_tokens = if is_context { b * s } else { b };
+        let indexer_pairs = indexer_query_tokens * compressed_len;
+        indexer_ops = 2 * indexer_query_tokens * qlr * inh * ihd + 2 * indexer_pairs * inh * ihd;
+        indexer_bfloat16_ops = 2 * indexer_query_tokens * h * inh;
+        // Python: b * compressed_len * deepseek_v4_indexer_cache_entry_bytes(ihd)
+        // where the entry is index_head_dim * 0.5 (FP4).
+        indexer_cache_bytes = (b * compressed_len) as f64 * (dims.index_head_dim as f64 * 0.5);
     }
-    let seq_points: Vec<u32> = by_s.keys().copied().collect();
-    interp_1d_over(&seq_points, s, allow_extrapolate, |sp| by_s[&sp])
-}
 
-/// Shared 1-D interpolation helper: bracket `query` within `points` and linearly
-/// interpolate `value_at(point)`. With `allow_extrapolate=false`, returns `None`
-/// when `query` is outside the measured range. Needs at least two points.
-fn interp_1d_over(
-    points: &[u32],
-    query: u32,
-    allow_extrapolate: bool,
-    value_at: impl Fn(u32) -> f64,
-) -> Option<f64> {
-    if points.len() < 2 {
-        return None;
+    let gemm_mem = gemm_quant.mapping().memory;
+    let bf16_mem = GemmQuantMode::Bfloat16.mapping().memory;
+    let mut gemm_weight_bytes =
+        (h * qlr + qlr * nh * hd + h * hd + lg * olr * h) as f64 * gemm_mem;
+    let mut bfloat16_weight_bytes = (nh * hd * olr) as f64 * bf16_mem;
+    if cr != 0 {
+        gemm_weight_bytes += (2 * h * compressor_mult * hd) as f64 * gemm_mem;
     }
-    let (lo_bound, hi_bound) = (points[0], points[points.len() - 1]);
-    if !allow_extrapolate && !(lo_bound <= query && query <= hi_bound) {
-        return None;
+    if cr == 4 {
+        gemm_weight_bytes += (qlr * inh * ihd) as f64 * gemm_mem;
+        bfloat16_weight_bytes += (h * inh) as f64 * bf16_mem;
     }
-    let (lo, hi) = nearest_neighbors(query, points, !allow_extrapolate).ok()?;
-    Some(interp_1d(
-        lo as f64,
-        hi as f64,
-        value_at(lo),
-        value_at(hi),
-        query as f64,
-    ))
+
+    let activation_bytes = (tokens * (h + qlr + nh * hd + hd + lg * olr)) as f64 * gemm_mem;
+    let kv_cache_bytes = (attention_pairs * hd) as f64 * kv_quant.mapping().memory;
+    let rope_bytes = (tokens * nh * rope_hd) as f64 * fmha_quant.mapping().memory;
+
+    let sol_math = ((gemm_projection_ops + compressor_ops) as f64 / tc_flops(spec, gemm_quant.mapping().compute)
+        + (output_absorption_ops + indexer_bfloat16_ops) as f64
+            / tc_flops(spec, GemmQuantMode::Bfloat16.mapping().compute)
+        + indexer_ops as f64 / tc_flops(spec, GemmQuantMode::Fp8.mapping().compute)
+        + attention_ops as f64 / tc_flops(spec, fmha_quant.mapping().compute))
+        * 1000.0;
+    let sol_mem = (gemm_weight_bytes
+        + bfloat16_weight_bytes
+        + activation_bytes
+        + kv_cache_bytes
+        + indexer_cache_bytes
+        + rope_bytes)
+        / spec.gpu.mem_bw
+        * 1000.0;
+    sol_math.max(sol_mem)
 }
 
 /// Canonicalize a DSV4 CSV dtype string to the enum `.name()` form.
@@ -460,6 +656,18 @@ fn clone_err(err: &AicError) -> AicError {
 mod tests {
     use super::*;
 
+    fn b200_sxm_spec() -> SystemSpec {
+        let systems_yaml = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator/systems/b200_sxm.yaml");
+        SystemSpec::load(&systems_yaml).expect("b200_sxm.yaml must parse")
+    }
+
+    fn b200_sglang_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/aiconfigurator/systems/data/b200_sxm/sglang/0.5.10")
+    }
+
     #[test]
     fn dsv4_data_absent_errors_cleanly() {
         // DSV4 modules aren't collected for vllm/0.19.0; loader must surface
@@ -467,8 +675,10 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../src/aiconfigurator/systems/data/b200_sxm/vllm/0.19.0");
         let table = Dsv4Table::new(root);
+        let spec = b200_sxm_spec();
         let err = table
             .query_context(
+                &spec,
                 AttnKind::Csa,
                 1,
                 1024,
@@ -477,6 +687,7 @@ mod tests {
                 FmhaQuantMode::Bfloat16,
                 GemmQuantMode::Bfloat16,
                 "DeepseekV4ForCausalLM",
+                0,
             )
             .unwrap_err();
         match err {
@@ -485,29 +696,83 @@ mod tests {
         }
     }
 
+    /// Cross-language parity with the Python v2 engine on the real
+    /// b200_sxm/sglang/0.5.10 tables. Oracle values generated with
+    /// `PYTHONPATH=src AIC_DSV4_TOPK_CORRECTION=0 python3` via
+    /// `PerfDatabase.query_{context,generation}_deepseek_v4_attention_module`
+    /// (DatabaseMode.SILICON, shared layer off, DSV4-Pro dims with rank-local
+    /// num_heads=16 / o_groups=2). Covers, per phase: exact hit, interior
+    /// blend, and util-hold beyond the collected range (incl. the ragged
+    /// batch row and the step=0-only prefix axis).
+    #[test]
+    fn dsv4_query_matches_python_v2_engine() {
+        let root = b200_sglang_root();
+        if !root.join("dsv4_csa_context_module_perf.parquet").exists() {
+            return; // git-lfs data not materialized
+        }
+        let table = Dsv4Table::new(root);
+        let spec = b200_sxm_spec();
+        let q_ctx = |kind, b, isl, prefix| {
+            table
+                .query_context(
+                    &spec, kind, b, isl, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", prefix,
+                )
+                .unwrap()
+        };
+        let q_gen = |kind, b, s| {
+            table
+                .query_generation(
+                    &spec, kind, b, s, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
+                )
+                .unwrap()
+        };
+        let approx = |got: f64, want: f64| {
+            assert!(
+                ((got - want) / want).abs() < 1e-9,
+                "rust {got} vs python {want}"
+            );
+        };
+        // Context CSA: exact / interior isl / interior batch / isl util-hold /
+        // prefix util-hold (step axis has only the 0 anchor).
+        approx(q_ctx(AttnKind::Csa, 8, 512, 0), 0.9819);
+        approx(q_ctx(AttnKind::Csa, 8, 768, 0), 1.46555);
+        approx(q_ctx(AttnKind::Csa, 12, 512, 0), 1.4142000000000001);
+        approx(q_ctx(AttnKind::Csa, 8, 8192, 0), 20.84104587973274);
+        approx(q_ctx(AttnKind::Csa, 8, 512, 1024), 1.0928707937592828);
+        // Context HCA: exact / isl util-hold.
+        approx(q_ctx(AttnKind::Hca, 1, 128, 0), 0.0802);
+        approx(q_ctx(AttnKind::Hca, 8, 8192, 0), 9.0088);
+        // Generation CSA: exact / interior s / s util-hold / ragged batch.
+        approx(q_gen(AttnKind::Csa, 16, 385), 0.1142);
+        approx(q_gen(AttnKind::Csa, 16, 200), 0.11328828125);
+        approx(q_gen(AttnKind::Csa, 16, 100000), 0.17550076017464525);
+        approx(q_gen(AttnKind::Csa, 15, 385), 0.1129625);
+        // Generation HCA: exact.
+        approx(q_gen(AttnKind::Hca, 16, 385), 0.07239999999999999);
+    }
+
     /// Parity regression for the DeepSeek-V4-Pro b200_sxm/sglang/0.5.10 lookup.
     /// The model passes rank-LOCAL `num_heads = 128 / tp(8) = 16`, which must
-    /// resolve to the CSV head key 64 (Python `_dsv4_resolve_head_key`). Oracle
-    /// values captured from the Python reference
-    /// (`query_{context,generation}_deepseek_v4_attention_module`):
-    ///   gen CSA b=16 s=385 = 0.1142 (exact grid point)
-    ///   gen CSA b=15 s=385 = 0.19556 (RAGGED: only b=2 carries s=385, so the
-    ///       robust lookup scales the largest measured bp<=15 by b/bp — NOT a
-    ///       smooth batch interpolation, which would give ~0.113)
-    ///   gen HCA b=16 s=385 = 0.0724
-    ///   ctx CSA b=1 isl=128 = 0.132 ; ctx HCA b=1 isl=128 = 0.0802
+    /// resolve to the CSV head key 64 (Python `_dsv4_resolve_head_key`).
+    /// Oracle values regenerated from the Python v2 engine (perf_interp):
+    /// exact grid points return the measured leaves; the ragged
+    /// `q_gen(Csa, 15, 385)` row now resolves through the engine
+    /// (single-survivor SOL-ratio correction) instead of the deleted
+    /// batch-scaling fallback.
     #[test]
     fn dsv4_pro_head_resolution_and_ragged_generation() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/aiconfigurator/systems/data/b200_sxm/sglang/0.5.10");
+        let root = b200_sglang_root();
         if !root.join("dsv4_csa_generation_module_perf.parquet").exists() {
             return; // git-lfs data not materialized
         }
         let table = Dsv4Table::new(root);
+        let spec = b200_sxm_spec();
         let q_gen = |kind, b, s| {
             table
                 .query_generation(
-                    kind, b, s, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    &spec, kind, b, s, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
                     GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
                 )
                 .unwrap()
@@ -515,20 +780,24 @@ mod tests {
         let q_ctx = |kind, b, isl| {
             table
                 .query_context(
-                    kind, b, isl, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
-                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
+                    &spec, kind, b, isl, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", 0,
                 )
                 .unwrap()
         };
         let approx = |got: f64, want: f64| {
-            assert!((got - want).abs() < 1e-4, "got {got}, want {want}");
+            assert!(
+                ((got - want) / want).abs() < 1e-9,
+                "rust {got} vs python {want}"
+            );
         };
         // local=16 resolves to head-64; b=16/s=385 is an exact grid point.
         approx(q_gen(AttnKind::Csa, 16, 385), 0.1142);
         approx(q_gen(AttnKind::Hca, 16, 385), 0.0724);
-        // RAGGED batch-scaling: b=15 has no measured s=385 row except at b=2.
-        approx(q_gen(AttnKind::Csa, 15, 385), 0.19556);
-        // Context single-anchor lookups.
+        // RAGGED batch row: engine semantics (regenerated from Python v2;
+        // the deleted batch-scaling fallback returned 0.19556 here).
+        approx(q_gen(AttnKind::Csa, 15, 385), 0.1129625);
+        // Context single-anchor lookups (exact grid points).
         approx(q_ctx(AttnKind::Csa, 1, 128), 0.132);
         approx(q_ctx(AttnKind::Hca, 1, 128), 0.0802);
     }
@@ -548,17 +817,18 @@ mod tests {
         // CSV stores `kv_cache_dtype=fp8_e4m3`, but the query builds the key
         // from `KvCacheQuantMode::Fp8.name()` = "fp8". Without load-side
         // normalization the lookup misses (Rust-only error vs Python success).
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/aiconfigurator/systems/data/b200_sxm/sglang/0.5.10");
+        let root = b200_sglang_root();
         if !root.join("dsv4_csa_context_module_perf.parquet").exists() {
             // Data files are git-lfs tracked; skip if not materialized.
             return;
         }
         let table = Dsv4Table::new(root);
+        let spec = b200_sxm_spec();
         // (head=64, isl=512, batch=8, step=0) are measured grid points in the
         // CSA context table for this entry, gemm=fp8_block.
         let latency = table
             .query_context(
+                &spec,
                 AttnKind::Csa,
                 8,   // batch
                 512, // isl
@@ -567,6 +837,7 @@ mod tests {
                 FmhaQuantMode::Bfloat16,
                 GemmQuantMode::Fp8Block,
                 "DeepseekV4ForCausalLM",
+                0, // prefix
             )
             .expect("DSV4 context lookup must resolve fp8_e4m3 kv_cache_dtype as fp8");
         assert!(latency.is_finite() && latency > 0.0, "unexpected latency: {latency}");

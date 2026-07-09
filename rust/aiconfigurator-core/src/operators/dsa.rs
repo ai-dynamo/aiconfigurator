@@ -4,10 +4,9 @@
 //! DSA (Dynamic Sparse Attention) module operator.
 //!
 //! Mirrors `aiconfigurator.sdk.operations.dsa.ContextDSAModule` /
-//! `GenerationDSAModule`. The context lookup keys the per-`prefix` slice and
-//! evaluates at `isl` (the new-token count), running the top-k regime-aware
-//! piecewise interpolation first and the DSv4 robust 3-D / batch-scaling
-//! lookup as the fallback (see `perf_database::dsa::query_context`).
+//! `GenerationDSAModule`. The context lookup evaluates at `isl` (the
+//! new-token count) on the raw 4-axis `[heads][prefix][seq][batch]` grid via
+//! the perf_interp v2 engine (see `perf_database::dsa::query_context`).
 //!
 //! `index_topk` is the top-k boundary (per-architecture; 2048 for both
 //! DeepSeek-V3.2 and GLM-5). It is plumbed from the Python op-spec emitter.
@@ -63,10 +62,12 @@ impl DsaModuleOp {
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
         // Query at `isl` (new-token count) for the exact `prefix` slice — NOT
-        // `isl + prefix`. The perf-DB layer runs the piecewise + robust 3-D
-        // dispatch; there is no multiplicative prefix correction (it had no
-        // Python counterpart and under-counted context latency ~75%).
+        // `isl + prefix`. The perf-DB layer resolves one 4-axis RAW grid via
+        // the perf_interp v2 engine; there is no multiplicative prefix
+        // correction (it had no Python counterpart and under-counted context
+        // latency ~75%).
         let latency = db.dsa.query_context(
+            &db.system_spec,
             batch_size,
             isl,
             self.num_heads,
@@ -89,6 +90,7 @@ impl DsaModuleOp {
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
         let latency = db.dsa.query_generation(
+            &db.system_spec,
             batch_size,
             s,
             self.num_heads,

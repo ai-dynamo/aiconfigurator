@@ -79,26 +79,15 @@ impl Dsv4ModuleOp {
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
         // Mirror Python `ContextDeepSeekV4AttentionModule._query_context_attn_table`
-        // -> `_dsv4_lookup_prefix_resolved`. The context module CSVs collected
-        // to date carry a SINGLE prefix anchor (`step=0`): the new-token count
-        // `isl` IS the kernel work, and the caller already supplies the
-        // new-token count as `isl` (Python's `s = effective_isl = isl - prefix`,
-        // computed in `run_context_ops`). With one prefix anchor, Python's
-        // prefix-resolved lookup returns that anchor's `(s, b)` slice for ANY
-        // prefix, so `prefix` does not select a different latency here — it is
-        // an intentional no-op for the table lookup.
-        //
-        // (If a future collection adds genuine `step>0` context rows, this
-        // would need a prefix-resolved slice mirroring `_dsv4_lookup_prefix_resolved`;
-        // the present data has none, so adding it would be dead code.)
-        //
-        // The prefix>0 parity bug fixed alongside this comment was NOT in the
-        // prefix handling: it was the missing exact-hit short-circuit in the
-        // shared `interp_2d_1d_grid` (see `perf_database::interpolation`), which
-        // corrupted the `(tp, isl, b)` lookup whenever `isl` had a sparse
-        // adjacent grid row (e.g. `isl=129`).
-        let _ = prefix;
+        // (SILICON path): a 3-axis perf_interp v2 Grid query over
+        // `(prefix, isl, batch)` with the step axis KEPT. The caller supplies
+        // the new-token count as `isl` (Python's `s = effective_isl =
+        // isl - prefix`, computed in `run_context_ops`); the context CSVs
+        // collected to date carry a single `step=0` anchor, so `prefix=0`
+        // collapses that level exactly and `prefix>0` resolves via util-hold
+        // with the prefix-aware SOL carrying the effect — matching Python.
         let raw = db.dsv4.query_context(
+            &db.system_spec,
             self.attn_kind,
             batch_size,
             isl,
@@ -107,6 +96,7 @@ impl Dsv4ModuleOp {
             self.fmha_quant_mode,
             self.gemm_quant_mode,
             &self.architecture,
+            prefix,
         )?;
         Ok(PerformanceResult::new(raw, Source::Silicon)
             .clamp_non_negative()
@@ -120,6 +110,7 @@ impl Dsv4ModuleOp {
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
         let latency = db.dsv4.query_generation(
+            &db.system_spec,
             self.attn_kind,
             batch_size,
             s,
