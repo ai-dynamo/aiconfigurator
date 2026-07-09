@@ -445,6 +445,7 @@ mod tests {
             kv_cache_dtype: KvCacheQuantMode::Fp8,
             fmha_quant_mode: FmhaQuantMode::Fp8,
             attn_backend: "flashinfer".into(),
+            cp_size: 1,
         }
     }
 

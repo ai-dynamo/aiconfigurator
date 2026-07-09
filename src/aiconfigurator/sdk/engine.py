@@ -464,6 +464,7 @@ def _wideep_context_mla(op: WideEPContextMLA) -> dict:
         "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
         "attn_backend": op._attn_backend,
+        "cp_size": op._cp_size,
     }
 
 

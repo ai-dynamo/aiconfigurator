@@ -196,19 +196,33 @@ impl MoEDispatchOp {
                             n1.query(db, tokens1)?.latency_ms
                                 + n2.query(db, tokens2)?.latency_ms
                         } else if self.attn_cp_size > 1 {
-                            // Context parallelism (Python moe.py:1390-1401):
+                            // Context parallelism (Python moe.py:1279-1290 pre,
+                            // :1318-1330 combine); volume = num_tokens * hidden:
                             //  * prefill: tokens are CP-sharded; all_gather (pre)
                             //    to assemble the full token set / reduce_scatter
-                            //    (combine) back. volume = num_tokens * hidden.
-                            //  * decode: CP does not run (attention replicated);
-                            //    the selection is local -> no comm.
+                            //    (combine) back.
+                            //  * decode pre: CP does not run (attention replicated
+                            //    across CP ranks, every rank already holds all
+                            //    tokens); the expert selection is local -> no comm.
+                            //  * decode combine: each rank computed its owned
+                            //    experts' partial outputs for all (replicated)
+                            //    tokens; combine into the full per-token sum ->
+                            //    custom_allreduce(half, num_gpus, volume).
                             if self.is_context {
                                 let op_name = if pre { "all_gather" } else { "reduce_scatter" };
                                 let nccl =
                                     NcclOp::new(&self.name, 1.0, self.hidden_size as f64, num_gpus, op_name);
                                 nccl.query(db, num_tokens)?.latency_ms
-                            } else {
+                            } else if pre {
                                 0.0
+                            } else {
+                                let ar = CustomAllReduceOp::new(
+                                    &self.name,
+                                    1.0,
+                                    self.hidden_size,
+                                    num_gpus,
+                                );
+                                ar.query(db, num_tokens)?.latency_ms
                             }
                         } else if attn_tp > 1 {
                             let ar = CustomAllReduceOp::new(
@@ -359,5 +373,71 @@ impl MoEDispatchOp {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn b200_sglang_db() -> PerfDatabase {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator/systems");
+        PerfDatabase::load(&root, "b200_sxm", "sglang", "0.5.10").expect("db loads")
+    }
+
+    fn cp_dispatch(pre_dispatch: bool, is_context: bool) -> MoEDispatchOp {
+        let mut op = MoEDispatchOp::new(
+            "moe_dispatch",
+            7168,
+            8,
+            256,
+            1, // moe_tp
+            8, // moe_ep
+            1, // attention_dp
+            pre_dispatch,
+            BackendKind::Sglang,
+            DispatchFlavor::CustomAllReduce,
+        );
+        op.attn_cp_size = 8;
+        op.is_context = is_context;
+        op
+    }
+
+    /// Decode combine under CP mirrors Python moe.py:1324-1330: each rank holds
+    /// its owned experts' partial outputs for all (replicated) tokens, combined
+    /// via `custom_allreduce(half, num_gpus, num_tokens * hidden)`. It must NOT
+    /// be zero — only the decode PRE-dispatch branch (moe.py:1286-1290) is a
+    /// local selection with no comm.
+    #[test]
+    fn cp_decode_combine_is_custom_allreduce_not_zero() {
+        let db = b200_sglang_db();
+        let num_tokens = 64;
+
+        let combine = cp_dispatch(false, false)
+            .query(&db, num_tokens)
+            .expect("decode combine query");
+        let reference = CustomAllReduceOp::new("moe_dispatch", 1.0, 7168, 8)
+            .query(&db, num_tokens)
+            .expect("allreduce reference query");
+        assert!(
+            combine.latency_ms > 0.0,
+            "decode combine under CP must not be zeroed, got {}",
+            combine.latency_ms
+        );
+        assert!(
+            (combine.latency_ms - reference.latency_ms).abs() < 1e-12,
+            "decode combine ({}) must equal custom_allreduce(num_gpus=8, volume=64*7168) ({})",
+            combine.latency_ms,
+            reference.latency_ms
+        );
+
+        // Decode pre-dispatch stays local (moe.py:1286-1290) — still zero.
+        let pre = cp_dispatch(true, false)
+            .query(&db, num_tokens)
+            .expect("decode pre query");
+        assert_eq!(pre.latency_ms, 0.0, "decode pre-dispatch under CP is local");
     }
 }

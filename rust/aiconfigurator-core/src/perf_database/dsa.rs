@@ -532,12 +532,21 @@ fn dsa_generation_sol_ms(
     sol_math.max(sol_mem)
 }
 
-/// Load a DSA module table from an ordered, priority-sorted source list. Sources
-/// are read in order; the first source containing a key wins (`or_insert`),
-/// mirroring Python's `_read_filtered_rows` concatenation + `load_dsa_module_data`
-/// skip-on-key-conflict. Missing files are skipped (a sibling declared in the
-/// manifest need not exist for every system); an error is returned only when no
-/// source yields rows. Shared by both the context and generation DSA files.
+/// Load a DSA module table from an ordered, priority-sorted source list, with
+/// Python's two-phase duplicate policy (`operations/dsa.py:1461-1502`):
+///
+/// 1. **Within a source: last row wins.** Each source is collapsed into a
+///    per-source coordinate map with plain overwrite, mirroring Python's
+///    "Preserve legacy last-row-wins behavior within each source"
+///    (`source_values[coordinate] = value`).
+/// 2. **Across sources: first source wins.** Sources are priority-ordered
+///    (active stack first, shared fallbacks later); a coordinate already
+///    populated by an earlier source is skipped (`seen_coordinates` guard in
+///    Python, `or_insert` here).
+///
+/// Missing files are skipped (a sibling declared in the manifest need not
+/// exist for every system); an error is returned only when no source yields
+/// rows. Shared by both the context and generation DSA files.
 fn load_dsa_parquet(sources: &[PerfSource]) -> Result<DsaGrids, AicError> {
     let mut by_keys: BTreeMap<DsaKey, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, f64>>>>> =
         BTreeMap::new();
@@ -559,6 +568,8 @@ fn load_dsa_parquet(sources: &[PerfSource]) -> Result<DsaGrids, AicError> {
         let step_col = reader.col("step")?;
         let latency_col = reader.col("latency")?;
         let ks_col = reader.col_optional("kernel_source");
+        // Phase 1: collapse this source with last-row-wins (plain insert).
+        let mut source_values: BTreeMap<(DsaKey, u32, u32, u32, u32), f64> = BTreeMap::new();
         for row in reader.rows()? {
             let row = row?;
             if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
@@ -570,19 +581,30 @@ fn load_dsa_parquet(sources: &[PerfSource]) -> Result<DsaGrids, AicError> {
                 kv_quant: row.str_owned(kv_cache_dtype_col)?,
                 gemm_quant: row.str_owned(gemm_type_col)?,
             };
-            // First-wins parity with Python `load_dsa_module_data`, extended
-            // across shared-layer sources (earlier source wins).
+            source_values.insert(
+                (
+                    key,
+                    row.u32(num_heads_col)?,
+                    row.u32(step_col)?,
+                    row.u32(isl_col)?,
+                    row.u32(batch_size_col)?,
+                ),
+                row.f64(latency_col)?,
+            );
+        }
+        // Phase 2: merge with first-source-wins (earlier source outranks).
+        for ((key, num_heads, step, isl, batch_size), latency) in source_values {
             by_keys
                 .entry(key)
                 .or_default()
-                .entry(row.u32(num_heads_col)?)
+                .entry(num_heads)
                 .or_default()
-                .entry(row.u32(step_col)?)
+                .entry(step)
                 .or_default()
-                .entry(row.u32(isl_col)?)
+                .entry(isl)
                 .or_default()
-                .entry(row.u32(batch_size_col)?)
-                .or_insert(row.f64(latency_col)?);
+                .entry(batch_size)
+                .or_insert(latency);
         }
     }
     if !any_source || by_keys.is_empty() {
@@ -661,6 +683,57 @@ mod tests {
             (latency - 1.0972).abs() < 1e-6,
             "expected recorded latency, got {latency}"
         );
+    }
+
+    /// Within-file duplicate policy: LAST row wins (Python two-phase loader,
+    /// `operations/dsa.py:1461-1502`). The real b300_sxm/vllm/0.19.0
+    /// `dsa_context_module_perf.parquet` carries 16k+ within-file duplicate
+    /// coordinates; at (arch=DeepseekV32ForCausalLM, bf16/bf16/bf16, n=128,
+    /// step=0, isl=8192, b=1) the first occurrence records 7.7643 and the
+    /// last records 7.7560. Python oracle (7.756) generated with:
+    ///
+    /// ```text
+    /// PYTHONPATH=src python3 -c "
+    /// from aiconfigurator.sdk.perf_database import get_database
+    /// from aiconfigurator.sdk import common
+    /// db = get_database('b300_sxm', 'vllm', '0.19.0')
+    /// r = db.query_context_dsa_module(
+    ///     b=1, s=8192, num_heads=128,
+    ///     kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+    ///     fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+    ///     gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+    ///     database_mode=common.DatabaseMode.SILICON,
+    ///     prefix=0, architecture='DeepseekV32ForCausalLM',
+    ///     dsa_backend='flashmla_kv')
+    /// print(float(r))"
+    /// ```
+    ///
+    /// The pre-fix per-row `or_insert` (first-row-wins) returned 7.7643 here.
+    #[test]
+    fn dsa_within_file_duplicates_last_row_wins() {
+        let data_root = PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator/systems/data/b300_sxm/vllm/0.19.0");
+        let systems_yaml = PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator/systems/b300_sxm.yaml");
+        let spec = SystemSpec::load(&systems_yaml).expect("b300_sxm.yaml must parse");
+        let table = DsaTable::new(data_root);
+        let latency = table
+            .query_context(
+                &spec,
+                1,
+                8192,
+                128,
+                KvCacheQuantMode::Bfloat16,
+                FmhaQuantMode::Bfloat16,
+                GemmQuantMode::Bfloat16,
+                "DeepseekV32ForCausalLM",
+                0,
+                INDEX_TOPK,
+            )
+            .expect("DSA context query must succeed");
+        approx_rel(latency, 7.756);
     }
 
     #[test]

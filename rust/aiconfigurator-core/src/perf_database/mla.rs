@@ -641,11 +641,14 @@ fn load_module_parquet(sources: &[PerfSource], is_context: bool) -> Result<Modul
             let latency = row.f64(latency_col)?;
             // Last-wins parity with Python `load_context_mla_module_data`
             // (`operations/mla.py:1804`) and `load_generation_mla_module_data`
-            // (`operations/mla.py:1847`). Unlike the legacy CSV loaders and every
-            // other Python perf-DB loader (GEMM, attention, MoE, MHC, DSA, wideep)
+            // (`operations/mla.py:1847`). Unlike the legacy CSV loaders and most
+            // other Python perf-DB loaders (GEMM, attention, MoE, MHC, wideep)
             // which guard with `try/except KeyError` for first-wins semantics,
             // these two MLA-module parquet loaders use direct assignment and
-            // therefore last-wins. Some perf-DB parquet shards (notably
+            // therefore last-wins. (Python DSA is neither: it is two-phase —
+            // last-row-wins within a file, first-source-wins across sources;
+            // see `operations/dsa.py:1461-1502` and `dsa.rs::load_dsa_parquet`.)
+            // Some perf-DB parquet shards (notably
             // b300_sxm/vllm/0.19.0 `mla_generation_module_perf.parquet`) contain
             // duplicate (num_heads, batch_size, sequence_tokens) rows; first-wins
             // here caused a constant +0.247ms/step decode drift on b300 because
