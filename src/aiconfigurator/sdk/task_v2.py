@@ -726,13 +726,19 @@ class Task:
                 from_hf = base.get(key)
                 if key == "fmha_quant_mode":
                     fmha_explicit[role] = explicit is not None
-                # DeepSeek-V4-Pro on sglang uses arch-specific MoE kernels. This acts at
-                # the HF-base layer so an explicit field still overrides it. Skip megamoe,
-                # which keys its own quant table. Mirrors legacy V1 dsv4pro-moe-arch.
+                # Native DeepSeek-V4 checkpoints on sglang use arch-specific MoE
+                # kernels (collector kernel_source sglang_mxfp4_flashinfer_trtllm_moe /
+                # sglang_flashinfer_cutlass_moe; the loader files those rows under the
+                # dedicated quant modes). This acts at the HF-base layer so an explicit
+                # field still overrides it. Skip megamoe, which keys its own quant
+                # table, and the sgl-project *-FP8 requant artifacts, whose MoE runs
+                # fp8_block. Mirrors legacy V1 dsv4pro-moe-arch; extended to V4-Flash,
+                # whose serving selects the same kernels per platform.
                 if (
                     key == "moe_quant_mode"
                     and self._role_attr(role, "backend_name") == "sglang"
-                    and self._role_attr(role, "model_path") == "deepseek-ai/DeepSeek-V4-Pro"
+                    and self._role_attr(role, "model_path")
+                    in ("deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4-Flash")
                     and self.moe_backend != "megamoe"
                 ):
                     sysn = self._role_attr(role, "system_name")
