@@ -749,6 +749,18 @@ def load_mamba2_data(mamba2_file: str):
     return result
 
 
+# The GDN decode-recurrence kernel name drifted across sglang releases
+# (0.5.10 recorded fused_recurrent_gated_delta_rule; 0.5.14 records the
+# executed fused_recurrent_gated_delta_rule_packed_decode). Consumers (the
+# qwen35 GDNKernel op and the Rust port) query one canonical modeling
+# identity; normalize the LOOKUP key here so every version's measured decode
+# rows are reachable. The parquet keeps the executed-kernel truth.
+_GDN_DECODE_RECURRENCE_ALIASES = {
+    "fused_recurrent_gated_delta_rule": "fused_sigmoid_gating_delta_rule_update",
+    "fused_recurrent_gated_delta_rule_packed_decode": "fused_sigmoid_gating_delta_rule_update",
+}
+
+
 def load_gdn_data(gdn_file: str):
     """
     Load GDN (Gated DeltaNet) kernel performance data from gdn_perf.txt.
@@ -779,7 +791,7 @@ def load_gdn_data(gdn_file: str):
         logger.debug("Legacy database format detected (gdn) - power will default to 0.0")
 
     for row in rows:
-        kernel_source = row["kernel_source"]
+        kernel_source = _GDN_DECODE_RECURRENCE_ALIASES.get(row["kernel_source"], row["kernel_source"])
         phase = row["phase"]
         batch_size = int(row["batch_size"])
         seq_len = int(row["seq_len"])

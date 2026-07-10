@@ -340,7 +340,7 @@ fn load_mamba2_parquet(sources: &[PerfSource]) -> Result<Mamba2Grids, AicError> 
             }
             let phase = row.str_owned(phase_col)?;
             let key = Mamba2Key {
-                kernel_source: row.str_owned(kernel_source_col)?,
+                kernel_source: normalize_gdn_kernel_source(row.str_owned(kernel_source_col)?),
                 phase: phase.clone(),
                 d_model: row.u32(d_model_col)?,
                 d_state: row.u32(d_state_col)?,
@@ -378,6 +378,21 @@ fn load_mamba2_parquet(sources: &[PerfSource]) -> Result<Mamba2Grids, AicError> 
 /// Load the GDN table from an ordered, priority-sorted source list. Same
 /// first-wins-across-sources + missing-file-skip semantics as
 /// [`load_mamba2_parquet`].
+/// The GDN decode-recurrence kernel name drifted across sglang releases
+/// (0.5.10: `fused_recurrent_gated_delta_rule`; 0.5.14 records the executed
+/// `fused_recurrent_gated_delta_rule_packed_decode`). Consumers query one
+/// canonical modeling identity; normalize the LOOKUP key here (mirrors
+/// Python `_GDN_DECODE_RECURRENCE_ALIASES`) — the parquet keeps the
+/// executed-kernel truth.
+fn normalize_gdn_kernel_source(kernel_source: String) -> String {
+    match kernel_source.as_str() {
+        "fused_recurrent_gated_delta_rule" | "fused_recurrent_gated_delta_rule_packed_decode" => {
+            "fused_sigmoid_gating_delta_rule_update".to_string()
+        }
+        _ => kernel_source,
+    }
+}
+
 fn load_gdn_parquet(sources: &[PerfSource]) -> Result<GdnGrids, AicError> {
     let mut by_keys: BTreeMap<GdnKey, Node> = BTreeMap::new();
     let mut any_source = false;
