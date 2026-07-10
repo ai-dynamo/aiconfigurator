@@ -158,6 +158,11 @@ def _plot_worker_setup_table(
 
     top_configs["cluster_request_rate"] = top_configs["request_rate"] * top_configs["replicas"]
 
+    # EPD rows carry a dedicated encode-worker pool; show it only when present.
+    has_encoder_pool = (
+        is_disagg and "(e)workers" in top_configs.columns and (top_configs["(e)workers"].fillna(0) > 0).any()
+    )
+
     if is_afd:
         field_names = [
             "Rank",
@@ -240,6 +245,8 @@ def _plot_worker_setup_table(
             "(d)parallel",
             "(d)bs",
         ]
+        if has_encoder_pool:
+            field_names.extend(["(e)workers", "(e)tp", "(e)bs"])
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -287,7 +294,11 @@ def _plot_worker_setup_table(
                     f"{p_gpus} (={_cli_underline(str(row['(p)tp']))}x{_cli_underline(str(row['(p)pp']))}{p_cp_factor})"
                 )
                 d_gpus_worker = f"{d_gpus} (={_cli_underline(str(row['(d)tp']))}x{_cli_underline(str(row['(d)pp']))})"
-            gpus_replica_str = f"{row['num_total_gpus']} (={row['(p)workers']}x{p_gpus}+{row['(d)workers']}x{d_gpus})"
+            e_workers = int(row.get("(e)workers", 0) or 0)
+            encoder_term = f"+{e_workers}x{int(row.get('(e)tp', 0) or 0)}(e)" if e_workers else ""
+            gpus_replica_str = (
+                f"{row['num_total_gpus']} (={row['(p)workers']}x{p_gpus}+{row['(d)workers']}x{d_gpus}{encoder_term})"
+            )
             row_data = [
                 i + 1,
                 row["backend"],
@@ -313,6 +324,14 @@ def _plot_worker_setup_table(
                     row["(d)bs"],
                 ]
             )
+            if has_encoder_pool:
+                row_data.extend(
+                    [
+                        e_workers,
+                        int(row.get("(e)tp", 0) or 0),
+                        int(row.get("(e)bs", 0) or 0),
+                    ]
+                )
             if show_power:
                 row_data.append(_format_power(row["power_w"]))
             table.add_row(row_data)
