@@ -271,6 +271,20 @@ def _add_default_mode_arguments(parser):
         "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
     )
     parser.add_argument(
+        "--enable-epd",
+        action="store_true",
+        help="EPD (vision-language models): run the vision encoder on dedicated encode workers "
+        "instead of colocated with prefill. Turns the disagg experiment into EPD; requires an "
+        "image workload (--image-height/--image-width).",
+    )
+    parser.add_argument(
+        "--encoder-tp",
+        type=int,
+        nargs="+",
+        default=None,
+        help="EPD encode-worker TP sizes to sweep (requires --enable-epd). Default: 1 2 4 8.",
+    )
+    parser.add_argument(
         "--ttft",
         type=float,
         default=2000.0,
@@ -1132,6 +1146,8 @@ def build_default_tasks(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
+    enable_epd: bool = False,
+    encoder_tp: list[int] | None = None,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -1332,6 +1348,8 @@ def build_default_tasks(
             decode_enable_wideep=enable_wideep,
             prefill_enable_chunked_prefill=enable_chunked_prefill,
             moe_backend=moe_backend_value,
+            enable_epd=enable_epd,
+            encoder_tp_candidates=encoder_tp,
             **global_kwargs,
         )
 
@@ -2351,6 +2369,8 @@ def main(args):
             image_height=args.image_height,
             image_width=args.image_width,
             num_images=args.num_images,
+            enable_epd=args.enable_epd,
+            encoder_tp=args.encoder_tp,
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,

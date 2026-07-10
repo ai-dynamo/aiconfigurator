@@ -784,6 +784,7 @@ ColumnsDisagg = [
     "(e)workers",
     "(e)tp",
     "(e)pp",
+    "(e)bs",
     "(e)parallel",
     "(e)memory",
     "power_w",  # NEW: E2E weighted average power in watts

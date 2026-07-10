@@ -29,6 +29,10 @@ class ModelConfig:
     # this in their op pipeline; GLM-5 DSA ignores it (handled in ContextDSAModule).
     cp_style: str = "none"
     workload_distribution: str = "power_law"
+    # EPD: when False, this worker does not host the vision encoder (a
+    # language-only prefill worker, e.g. SGLang --language-only). Vision
+    # tokens still extend its context; the ViT ops are simply not built.
+    encoder_colocated: bool = True
     # quantization options
     nextn: int = 0  # at most mtp5
     nextn_accept_rates: list = None

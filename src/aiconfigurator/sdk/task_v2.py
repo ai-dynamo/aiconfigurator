@@ -446,6 +446,16 @@ class Task:
     # ``picking.pick_autoscale``; default 1.8 locked by parity test.
     autoscale_ttft_correction_factor: float = 1.8
 
+    # ====== 8.6 EPD: encoder disaggregation (VL models, disagg only) ======
+    # enable_epd runs the vision encoder on dedicated encode workers, swept
+    # over tp x batch on the prefill database.  Prefill workers become
+    # language-only (vision tokens stay in context, no ViT hosted); TTFT adds
+    # the encode batch latency; the encode pool joins the worker rate matching.
+    enable_epd: bool = False
+    encoder_tp_candidates: list[int] | None = None  # None -> [1, 2, 4, 8]
+    encoder_batch_candidates: list[int] | None = None  # None -> default schedule
+    encoder_latency_correction: float = 1.0
+
     # ====== 8.5 Predictor strategy ======
     # Optional Predictor that decides how each single config point is
     # predicted.  None (default) uses sdk.predictor.AnalyticPredictor --
@@ -1180,6 +1190,8 @@ class Task:
             raise ValueError("agg mode requires model_path")
         if not self.system_name:
             raise ValueError("agg mode requires system_name")
+        if self.enable_epd:
+            raise ValueError("enable_epd (EPD) requires serving_mode='disagg'.")
         # fp8_static is not hard-gated to trtllm: it is derived from the dynamic
         # fp8 GEMM minus compute_scale/scale_matrix overhead and works on any
         # backend whose perf DB carries those tables.  _validate_database_quant_modes
@@ -1201,6 +1213,8 @@ class Task:
             )
         if not self.prefill_system_name or not self.decode_system_name:
             raise ValueError("disagg mode requires both prefill_system_name and decode_system_name.")
+        if (self.encoder_tp_candidates or self.encoder_batch_candidates) and not self.enable_epd:
+            raise ValueError("encoder_tp_candidates/encoder_batch_candidates require enable_epd=True.")
         # fp8_static is not hard-gated to trtllm (see _validate_agg); the
         # per-role DB check in _validate_database_quant_modes governs support.
 
@@ -1468,6 +1482,10 @@ class Task:
             "rate_matching_decode_degradation": self.rate_match_decode_degradation,
             "autoscale_ttft_correction_factor": self.autoscale_ttft_correction_factor,
             "require_same_tp": require_same_tp,
+            "enable_epd": self.enable_epd,
+            "encoder_tp_list": self.encoder_tp_candidates,
+            "encoder_batch_list": self.encoder_batch_candidates,
+            "encoder_latency_correction": self.encoder_latency_correction,
         }
 
     # =====================================================================

@@ -124,6 +124,11 @@ def _plot_worker_setup_table(
 
     top_configs["cluster_request_rate"] = top_configs["request_rate"] * top_configs["replicas"]
 
+    # EPD rows carry a dedicated encode-worker pool; show it only when present.
+    has_encoder_pool = (
+        is_disagg and "(e)workers" in top_configs.columns and (top_configs["(e)workers"].fillna(0) > 0).any()
+    )
+
     if is_disagg:
         field_names = [
             "Rank",
@@ -146,6 +151,8 @@ def _plot_worker_setup_table(
             "(d)parallel",
             "(d)bs",
         ]
+        if has_encoder_pool:
+            field_names.extend(["(e)workers", "(e)tp", "(e)bs"])
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -190,10 +197,12 @@ def _plot_worker_setup_table(
                     f"(={_cli_underline(str(row['(d)tp']))}x"
                     f"{_cli_underline(str(row['(d)pp']))})"
                 )
+            e_workers = int(row.get("(e)workers", 0) or 0)
+            encoder_term = f"+{e_workers}x{int(row.get('(e)tp', 0) or 0)}(e)" if e_workers else ""
             gpus_replica_str = (
                 f"{row['num_total_gpus']} "
                 f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
-                f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
+                f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']}{encoder_term})"
             )
             row_data = [
                 i + 1,
@@ -220,6 +229,14 @@ def _plot_worker_setup_table(
                     row["(d)bs"],
                 ]
             )
+            if has_encoder_pool:
+                row_data.extend(
+                    [
+                        e_workers,
+                        int(row.get("(e)tp", 0) or 0),
+                        int(row.get("(e)bs", 0) or 0),
+                    ]
+                )
             if show_power:
                 row_data.append(f"{row['power_w']:.1f}W")
             table.add_row(row_data)

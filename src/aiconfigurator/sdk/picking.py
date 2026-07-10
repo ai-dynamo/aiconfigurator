@@ -155,6 +155,7 @@ def _build_disagg_summary_dict(
         "(e)workers": 0,
         "(e)tp": 0,
         "(e)pp": 0,
+        "(e)bs": 0,
         "(e)parallel": "",
         "(e)memory": encoder_memory,
         "power_w": disagg_power_avg,

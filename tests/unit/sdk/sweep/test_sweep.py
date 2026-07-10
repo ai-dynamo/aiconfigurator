@@ -206,6 +206,144 @@ def test_sweep_disagg_rejects_invalid_max_decode_gpus():
         )
 
 
+def test_sweep_disagg_epd_composes_encoder_stage(monkeypatch):
+    """EPD end-to-end semantics on synthetic candidates.
+
+    Pins the three EPD invariants: (1) enable_epd flips the prefill workers
+    to language-only (encoder_colocated=False -> pure ttft 60 instead of the
+    colocated 100), (2) TTFT composes sequentially as encode latency +
+    corrected prefill ttft, (3) the encode pool is sized into the rate
+    matching and its GPUs dilute the per-GPU metrics.
+    """
+    import pandas as pd
+
+    def _worker_row(**overrides) -> dict:
+        base = {
+            "model": "m",
+            "isl": 1000,
+            "osl": 100,
+            "prefix": 0,
+            "concurrency": 1,
+            "request_rate": 0.0,
+            "bs": 1,
+            "global_bs": 1,
+            "ttft": 100.0,
+            "tpot": 0.0,
+            "seq/s": 10.0,
+            "seq/s/gpu": 2.5,
+            "tokens/s": 10.0,
+            "tokens/s/gpu": 2.5,
+            "tokens/s/user": 0.0,
+            "request_latency": 100.0,
+            "encoder_latency": 40.0,
+            "encoder_memory": 1.5,
+            "num_total_gpus": 4,
+            "tp": 4,
+            "pp": 1,
+            "dp": 1,
+            "moe_tp": 1,
+            "moe_ep": 1,
+            "cp": 1,
+            "parallel": "tp4pp1dp1",
+            "gemm": "fp8",
+            "kvcache": "fp8",
+            "fmha": "fp8",
+            "moe": "fp8",
+            "comm": "half",
+            "memory": 30.0,
+            "backend": "sglang",
+            "version": "0.5.10",
+            "system": "h200_sxm",
+            "power_w": 500.0,
+        }
+        base.update(overrides)
+        return base
+
+    # Colocated prefill (PD): ttft = 40ms encoder + 60ms context.  Language-only
+    # prefill (EPD, encoder_colocated=False): the same worker without the ViT.
+    colocated_prefill_df = pd.DataFrame([_worker_row()])
+    pure_prefill_df = pd.DataFrame(
+        [
+            _worker_row(
+                ttft=60.0,
+                request_latency=60.0,
+                encoder_latency=0.0,
+                encoder_memory=0.0,
+                **{"seq/s": 1000.0 / 60, "seq/s/gpu": 250.0 / 60, "tokens/s": 1000.0 / 60, "tokens/s/gpu": 250.0 / 60},
+            )
+        ]
+    )
+    decode_df = pd.DataFrame(
+        [
+            _worker_row(
+                bs=32,
+                global_bs=32,
+                concurrency=32,
+                ttft=0.0,
+                tpot=8.0,
+                **{"seq/s": 20.0, "seq/s/gpu": 2.5, "tokens/s/user": 125.0},
+                encoder_latency=0.0,
+                num_total_gpus=8,
+                tp=8,
+                parallel="tp8pp1dp1",
+            )
+        ]
+    )
+
+    def _fake_candidates(*, role, model_config, **_kwargs):
+        if role == "decode":
+            return decode_df.copy()
+        return (colocated_prefill_df if model_config.encoder_colocated else pure_prefill_df).copy()
+
+    monkeypatch.setattr(sweep, "_get_disagg_worker_candidates", _fake_candidates)
+    monkeypatch.setattr(
+        sweep,
+        "_get_encoder_worker_candidates",
+        lambda **_kwargs: [
+            {"encoder_latency": 50.0, "seq/s": 80.0, "num_total_gpus": 2, "tp": 2, "bs": 4, "memory": 1.5}
+        ],
+    )
+
+    common_kwargs = dict(
+        model_path="m",
+        runtime_config=config.RuntimeConfig(isl=1000, osl=100, ttft=200.0, tpot=10.0),
+        prefill_database=MagicMock(),
+        prefill_backend_name="sglang",
+        prefill_model_config=config.ModelConfig(),
+        prefill_parallel_config_list=[(4, 1, 1, 1, 1, 1)],
+        prefill_latency_correction=1.0,
+        decode_database=MagicMock(),
+        decode_backend_name="sglang",
+        decode_model_config=config.ModelConfig(),
+        decode_parallel_config_list=[(8, 1, 1, 1, 1, 1)],
+        decode_latency_correction=1.0,
+        prefill_num_worker_list=[1, 2, 3, 4],
+        decode_num_worker_list=[1, 2, 3, 4],
+        rate_matching_prefill_degradation=1.0,
+        rate_matching_decode_degradation=1.0,
+    )
+
+    # Plain PD: encoder stays colocated (ttft 100 * 1.8 correction).
+    pd_row = sweep_disagg(**common_kwargs).iloc[0]
+    assert pd_row["(e)workers"] == 0
+    assert pd_row["ttft"] == pytest.approx(180.0)
+    assert pd_row["encoder_latency"] == pytest.approx(40.0)
+
+    # EPD: language-only prefill ttft = 60 -> corrected 108; + encode batch 50 = 158.
+    epd_row = sweep_disagg(**common_kwargs, enable_epd=True, encoder_tp_list=[2]).iloc[0]
+    assert epd_row["ttft"] == pytest.approx(158.0)
+    assert epd_row["encoder_latency"] == pytest.approx(50.0)
+    # Rate matching: p 16.667/w (4 gpus), d 20/w (8 gpus), e 80/w * 0.9 deg (2 gpus)
+    # -> optimum (4p, 3d, 1e): seq/s 60, gpus 16+24+2=42.
+    assert (epd_row["(p)workers"], epd_row["(d)workers"], epd_row["(e)workers"]) == (4, 3, 1)
+    assert epd_row["num_total_gpus"] == 42
+    assert epd_row["seq/s"] == pytest.approx(60.0)
+    assert epd_row["tokens/s/gpu"] == pytest.approx(6000.0 / 42, abs=1e-3)
+    assert (epd_row["(e)tp"], epd_row["(e)bs"], epd_row["(e)parallel"]) == (2, 4, "tp2")
+    # request latency = corrected prefill ttft + tpot*(osl-1) + encode latency.
+    assert epd_row["request_latency"] == pytest.approx(108.0 + 8.0 * 99 + 50.0)
+
+
 def test_sweep_disagg_rejects_empty_num_worker_lists():
     """Empty worker lists silently skipped the rate-match inner loop in earlier
     versions; now fail loud to avoid surprising zero-result sweeps."""

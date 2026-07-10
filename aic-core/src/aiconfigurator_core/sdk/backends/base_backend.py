@@ -300,6 +300,31 @@ class BaseBackend:
 
         return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, n_img_post
 
+    def run_encoder_static(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        runtime_config: RuntimeConfig,
+        batch_size: int,
+        latency_correction_scale: float = 1.0,
+    ) -> tuple[float, float, dict[str, float]]:
+        """Encoder-only static evaluation for a disaggregated encode (EPD) worker.
+
+        Runs just the vision-encoder phase for one batch of ``batch_size``
+        requests (each carrying ``runtime_config.num_images_per_request``
+        images) and returns ``(latency_ms, power_w, memory_dict)``.
+        ``latency_ms`` is 0.0 when the model has no encoder ops or the
+        workload has no image input.  ``power_w`` is the phase-average power
+        (energy / latency; invariant to the latency correction).
+        """
+        encoder_latency_dict, encoder_energy_wms_dict, _, _ = self._run_encoder_phase(
+            model, database, runtime_config, batch_size
+        )
+        raw_latency = sum(encoder_latency_dict.values())
+        power_w = sum(encoder_energy_wms_dict.values()) / raw_latency if raw_latency > 0 else 0.0
+        memory = self._get_encoder_component_memory_for_runtime(model, runtime_config, batch_size)
+        return raw_latency * latency_correction_scale, power_w, memory
+
     def _run_context_phase(
         self,
         model: BaseModel,
@@ -497,7 +522,9 @@ class BaseBackend:
         This shares the same latency breakdown path as ``run_static`` but skips
         building an ``InferenceSummary``.
         """
-        if mode == "static_gen":
+        # Workers without encoder ops (text-only models, or EPD language-only
+        # prefill workers) still count vision tokens in the LLM context.
+        if mode == "static_gen" or not model.encoder_ops:
             encoder_latency = 0.0
             img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
         else:
@@ -570,7 +597,9 @@ class BaseBackend:
             runtime_config.prefix,
         )
 
-        if mode == "static_gen":
+        # Workers without encoder ops (text-only models, or EPD language-only
+        # prefill workers) still count vision tokens in the LLM context.
+        if mode == "static_gen" or not model.encoder_ops:
             encoder_latency_dict, encoder_energy_wms_dict = defaultdict(float), defaultdict(float)
             encoder_source_dict = {}
             img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
