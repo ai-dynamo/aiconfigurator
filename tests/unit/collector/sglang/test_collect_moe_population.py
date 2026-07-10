@@ -158,12 +158,21 @@ def test_kimi_int4_population_restores_all_hopper_ep_slices():
     assert len(populated) == 3078
     assert sum(case[7] == 64 for case in populated) == 243
     assert sum(case[7] == 128 for case in populated) == 162
-    assert not _populate_gptoss_cases(
+    # int4_wo opened to SM100/103 (owner decision 2026-07-11): serving
+    # auto-selects flashinfer_trtllm for Kimi INT4 there (server_args.py:3736),
+    # replacing the old zero-population contract.
+    sm100 = _populate_gptoss_cases(
         common_cases,
         sm_version=100,
         allowed_mode="int4_wo",
         module_config={"group_size": 32},
     )
+    assert len(sm100) == 3078
+    from types import SimpleNamespace
+
+    from collector.case_generator import get_sglang_moe_backend
+
+    assert get_sglang_moe_backend(SimpleNamespace(sglang_moe_backends={}), "int4_wo", 100) == "flashinfer_trtllm"
 
 
 def test_fp8_block_population_keeps_runtime_alignment_failures_attempted():

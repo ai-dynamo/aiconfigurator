@@ -363,7 +363,9 @@ def test_kimi_moe_quantization_is_artifact_specific():
     assert "int4_wo" in sm90_modes
     assert "nvfp4" not in sm90_modes
     assert "w4a16_mxfp4" in sm90_modes
-    assert "int4_wo" not in get_moe_quantization_modes("sglang", sm_version=100)
+    # int4_wo opened to SM100/103 (2026-07-11): serving auto-selects
+    # flashinfer_trtllm for Kimi INT4 there (server_args.py:3736).
+    assert "int4_wo" in get_moe_quantization_modes("sglang", sm_version=100)
     assert "nvfp4" in get_moe_quantization_modes("sglang", sm_version=100)
 
 

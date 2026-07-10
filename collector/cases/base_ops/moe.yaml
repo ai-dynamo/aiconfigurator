@@ -79,7 +79,10 @@ common_case_values:
       default: {default: triton}
       bfloat16: {default: triton}
       fp8_block: {default: triton}
-      int4_wo: {90: marlin}
+      # SM100/103: pinned SGLang 0.5.14 serving auto-selects flashinfer_trtllm
+      # for Kimi K2/K2.5 INT4 (server_args.py:3736 -> CompressedTensorsMxInt4MoE).
+      # B200 hardware validation: 2026-07-11 Kimi-filtered moe pipeline run.
+      int4_wo: {90: marlin, 100: flashinfer_trtllm, 103: flashinfer_trtllm}
       # NVFP4 SM120: serving auto resolves to FLASHINFER_TRTLLM
       # (modelopt_quant.py:2317-2323 — capability (12,0) is outside the
       # (8,0)..(10,0) Marlin fallback), but the trtllm-gen batched FP4 GEMM
@@ -104,16 +107,10 @@ common_case_values:
     - name: bfloat16
     - name: int4_wo
       min_sm: 90
-      # TODO(B200 bring-up): max_sm_exclusive hides Kimi INT4 from SM100/103,
-      # but pinned SGLang 0.5.14 serving supports it there (server_args.py:3736
-      # auto-selects flashinfer_trtllm for Kimi K2/K2.5 thinking INT4, which
-      # resolves to CompressedTensorsMxInt4MoE). Re-evaluate on Blackwell
-      # hardware: either add int4_wo backends {100/103: flashinfer_trtllm}
-      # and drop this gate, or decide INT4 stays unsupported on Blackwell and
-      # record that decision (this negative gate is also not a sanctioned home
-      # for a framework-gap rule per layer_permissions.md). Source-derived,
-      # hardware-unvalidated.
-      max_sm_exclusive: 100
+      # Resolved per the bring-up TODO (owner decision 2026-07-11): serving
+      # supports Kimi INT4 on SM100/103 via flashinfer_trtllm
+      # (server_args.py:3736), so the unsanctioned max_sm_exclusive gate is
+      # dropped and the backends map above pins the serving-true kernel.
       allowed_model_paths:
       - moonshotai/Kimi-K2.5
       module_config:
