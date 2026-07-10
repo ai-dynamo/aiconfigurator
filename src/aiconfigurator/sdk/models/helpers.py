@@ -293,6 +293,7 @@ def _apply_model_quant_defaults(
 ) -> None:
     # Clone original model_config to track if any modifications were made
     original_config = dataclasses.replace(model_config)
+    fmha_was_unset = model_config.fmha_quant_mode is None
 
     inferred = _infer_quant_modes_from_raw_config(raw_config, architecture)
     applied: list[str] = []
@@ -315,23 +316,30 @@ def _apply_model_quant_defaults(
     if applied:
         logger.debug("Using model-provided quantization defaults: %s", ", ".join(applied))
 
-    # DSA module (DeepSeek-V3.2 / GLM-5): DSA perf tables only have bfloat16 FMHA currently.
-    if (
-        architecture in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM")
-        and backend_name in ("trtllm", "sglang")
-        and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
-    ):
-        model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
+    # Legacy FMHA guards for direct get_model() callers that bypass Task /
+    # estimate-path resolution.  They apply ONLY when fmha arrived unset (i.e.
+    # this function inferred it from the checkpoint just above): a value that
+    # arrived already resolved is owned by Task._resolve_quant_modes or
+    # resolve_context_fmha_by_data, whose data-driven decision must not be
+    # overridden here.
+    if fmha_was_unset:
+        # DSA module (DeepSeek-V3.2 / GLM-5): DSA perf tables only have bfloat16 FMHA currently.
+        if (
+            architecture in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM")
+            and backend_name in ("trtllm", "sglang")
+            and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
+        ):
+            model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
 
-    # DeepSeek-V4 compressed attention collectors record the attention module as
-    # BF16 even when projections/KV cache are quantized.
-    if architecture == "DeepseekV4ForCausalLM" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
-        model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
+        # DeepSeek-V4 compressed attention collectors record the attention module as
+        # BF16 even when projections/KV cache are quantized.
+        if architecture == "DeepseekV4ForCausalLM" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
+            model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
 
-    # FIXME: temporary workaround for Qwen3 32B FP8, only bfloat16+fp8kvcache is supported
-    # VLLM perf tables only include bfloat16 FMHA; fall back to bfloat16 for estimation.
-    if backend_name == "vllm" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
-        model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
+        # FIXME: temporary workaround for Qwen3 32B FP8, only bfloat16+fp8kvcache is supported
+        # VLLM perf tables only include bfloat16 FMHA; fall back to bfloat16 for estimation.
+        if backend_name == "vllm" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
+            model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
 
     # Only log if model_config was modified
     if original_config != model_config:
@@ -382,10 +390,16 @@ def resolve_context_fmha_by_data(
     if not is_context_role:
         return
 
+    from aiconfigurator.sdk.perf_database import context_fmha_supported_modes
+
     info = _get_model_info(model_path)
     family = _architecture_to_model_family(info["architecture"])
+    inferred = _infer_quant_modes_from_raw_config(info.get("raw_config", {}), info.get("architecture"))
+    # Joint (fmha, kv) capability: use the kv mode this estimate will actually
+    # run with (explicit wins, else the checkpoint inference).
+    kv_mode = model_config.kvcache_quant_mode or inferred.get("kvcache_quant_mode")
     ctx_op, _ = attention_op_keys(family, backend_name)
-    supported = (getattr(database, "supported_quant_mode", {}) or {}).get(ctx_op, []) or []
+    supported = context_fmha_supported_modes(database, ctx_op, kv_mode)
     if not supported or common.FMHAQuantMode.fp8.name in supported:
         return
 
@@ -399,7 +413,6 @@ def resolve_context_fmha_by_data(
 
     # Not user-explicit: mirror what get_model would infer, and downgrade only
     # when that inference would pick fp8 (bf16 checkpoints need no change).
-    inferred = _infer_quant_modes_from_raw_config(info.get("raw_config", {}), info.get("architecture"))
     if inferred.get("fmha_quant_mode") == common.FMHAQuantMode.fp8 and common.FMHAQuantMode.bfloat16.name in supported:
         model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
         logger.warning(

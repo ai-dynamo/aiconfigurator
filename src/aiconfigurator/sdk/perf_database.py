@@ -155,6 +155,54 @@ def has_perf_data_not_available_cause(error: BaseException) -> bool:
     return False
 
 
+# Instance attribute(s) holding the raw table(s) behind each fmha-keyed context
+# op. Every listed table is keyed [fmha][kv_cache]... at its top two levels, so
+# joint (fmha, kv) slice presence can be checked uniformly. Ops absent from
+# this map (e.g. wideep_context_mla: [kernel_source][quant], no kv axis) fall
+# back to the flat supported list.
+_CONTEXT_FMHA_OP_TABLES: dict[str, tuple[str, ...]] = {
+    "context_attention": ("_context_attention_data",),
+    "context_mla": ("_context_mla_data", "_context_mla_module_data"),
+    "context_mla_granular": ("_context_mla_data",),
+    "dsa_context_module": ("_context_dsa_module_data",),
+    "deepseek_v4_context_module": ("_context_deepseek_v4_attention_module_data",),
+}
+
+
+def context_fmha_supported_modes(database, ctx_op: str, kv_cache_mode) -> list[str]:
+    """FMHA mode names with perf data for ``ctx_op``, restricted to slices that
+    exist JOINTLY with ``kv_cache_mode``.
+
+    The flat ``supported_quant_mode[ctx_op]`` list unions fmha keys across kv
+    slices (and across granular+module tables for ``context_mla``), so an fmha
+    mode collected only under a different kv dtype — e.g. the fp8 fmha slice
+    that exists solely under kv=fp8 — would look available for a bf16-kv role
+    and then miss at query time.  Returns ``[]`` when there is no information
+    (missing op/table); falls back to the flat list when the op has no kv axis
+    or the database exposes no raw tables (test stubs).
+    """
+    supported = getattr(database, "supported_quant_mode", {}) or {}
+    flat = supported.get(ctx_op, []) or []  # triggers the lazy load of the op's table(s)
+    if not flat:
+        return []
+    table_attrs = _CONTEXT_FMHA_OP_TABLES.get(ctx_op)
+    if table_attrs is None or kv_cache_mode is None:
+        return list(flat)
+    modes: set[str] = set()
+    saw_table = False
+    for attr in table_attrs:
+        data = getattr(database, attr, None)
+        if not data:
+            continue
+        saw_table = True
+        for fmha_key in data:
+            if kv_cache_mode in data[fmha_key]:
+                modes.add(fmha_key.name if hasattr(fmha_key, "name") else str(fmha_key))
+    if not saw_table:
+        return list(flat)
+    return sorted(modes)
+
+
 @functools.cache
 def _load_op_kernel_source_manifest_entries(systems_root: str) -> dict[str, tuple[dict, ...]]:
     """Load `<systems_root>/op_kernel_source_manifest.yaml` and group entries by op_file.

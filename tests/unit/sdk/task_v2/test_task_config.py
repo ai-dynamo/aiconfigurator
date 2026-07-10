@@ -416,6 +416,11 @@ def test_fmha_data_fallback_unknown_arch_downgrades_with_warning(caplog):
     has no fp8 slice (a100: no fp8 hardware) falls back to bfloat16 with a warning,
     instead of leaving a mode that validate would reject.  The same model on a
     platform WITH fp8 data (h200) keeps fp8 and does not warn.
+
+    kv is pinned to bfloat16 on a100: capability is judged jointly with the kv
+    mode, and a100's only slice is (bf16 fmha, bf16 kv) -- with an fp8 kv there
+    is nothing to fall back to and the inference is kept for validate to
+    report.
     """
     import logging
 
@@ -427,9 +432,23 @@ def test_fmha_data_fallback_unknown_arch_downgrades_with_warning(caplog):
             model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
             system_name="a100_sxm",
             backend_name="sglang",
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
         )
     assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
     assert any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
+
+    # With the inferred fp8 kv, no a100 slice can serve at all -> keep fp8
+    # (validate reports the gap); no misleading "falling back" warning.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        t_kv_fp8 = Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+            system_name="a100_sxm",
+            backend_name="sglang",
+        )
+    assert t_kv_fp8.fmha_quant_mode == common.FMHAQuantMode.fp8
+    assert not any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
 
     caplog.clear()
     with caplog.at_level(logging.WARNING):
@@ -459,9 +478,11 @@ def test_fmha_data_fallback_skips_generation_only_decode(caplog):
             prefill_model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
             prefill_system_name="a100_sxm",
             prefill_backend_name="sglang",
+            prefill_kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
             decode_model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
             decode_system_name="a100_sxm",
             decode_backend_name="sglang",
+            decode_kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
         )
     assert t.prefill_fmha_quant_mode == common.FMHAQuantMode.bfloat16
     assert t.decode_fmha_quant_mode == common.FMHAQuantMode.fp8
@@ -510,6 +531,48 @@ def test_deepseek_v32_v4_context_fmha_downgrade_is_data_driven():
         )
         assert t.prefill_fmha_quant_mode == common.FMHAQuantMode.bfloat16
         assert t.decode_fmha_quant_mode == common.FMHAQuantMode.fp8
+
+
+def test_get_model_preserves_task_resolved_fmha():
+    """get_model()'s legacy FMHA guards fire only when fmha arrives unset: a
+    Task-resolved fp8 (data-backed -- b200 vLLM ships native fp8 dsa_context
+    slices) must survive model build.  Review regression: the guards in
+    _apply_model_quant_defaults used to re-downgrade on the value, silently
+    undoing the data-driven resolution at every sweep point."""
+    from aiconfigurator.sdk import common
+    from aiconfigurator.sdk.models import get_model
+
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3.2",
+        system_name="b200_sxm",
+        backend_name="vllm",
+    )
+    assert t.fmha_quant_mode == common.FMHAQuantMode.fp8
+    mc = t.build_model_config(role="agg")
+    mc.tp_size = 8
+    mc.moe_ep_size = 8
+    mc.moe_tp_size = 1
+    get_model("deepseek-ai/DeepSeek-V3.2", mc, "vllm")
+    assert mc.fmha_quant_mode == common.FMHAQuantMode.fp8
+
+
+def test_fmha_fallback_uses_joint_fmha_kv_capability(caplog):
+    """Capability is judged jointly with the role's kv mode: on b200 trtllm the
+    fp8 context_mla slice exists only under kv=fp8 (shared-layer module rows),
+    so inferred fp8 fmha survives with kv=fp8 but must downgrade with an
+    explicit bf16 kv -- the flat per-op list would keep fp8 and crash at query
+    time (review finding)."""
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    base = dict(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="b200_sxm", backend_name="trtllm")
+    assert Task(**base).fmha_quant_mode == common.FMHAQuantMode.fp8  # kv inferred fp8 -> joint slice present
+    with caplog.at_level(logging.WARNING):
+        t = Task(**base, kvcache_quant_mode=common.KVCacheQuantMode.bfloat16)
+    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
 
 
 def test_wideep_trtllm_context_fmha_capability_uses_granular_table(caplog):

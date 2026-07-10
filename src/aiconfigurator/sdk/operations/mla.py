@@ -1055,6 +1055,15 @@ class WideEPGenerationMLA(Operation):
         database_mode: common.DatabaseMode | None = None,
     ):
         """Query WideEP generation MLA table. Verbatim port of the legacy body."""
+        # Decode attention compute dtype follows the kv-cache dtype; the fmha
+        # label is inert for generation (kernel tables key on kv dtype).
+        # Derive the SOL dtype from kv so label changes cannot move decode SOL
+        # -- mirrors query_generation_mla's get_sol.
+        fmha_quant_mode = (
+            common.FMHAQuantMode.fp8
+            if kvcache_quant_mode == common.KVCacheQuantMode.fp8
+            else common.FMHAQuantMode.bfloat16
+        )
 
         def get_sol(
             b: int,

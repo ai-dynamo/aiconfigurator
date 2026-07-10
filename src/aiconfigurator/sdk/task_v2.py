@@ -828,13 +828,21 @@ class Task:
 
     def _context_fmha_supported_modes(self, role: str) -> list[str]:
         """FMHA modes with perf data for this role's fmha-keyed context-attention
-        op.  Returns [] when the DB (or the op's table) is unavailable, meaning
-        "no information" -- callers must not read that as "nothing supported"."""
+        op, jointly with the role's resolved kv-cache mode (an fmha slice that
+        exists only under a different kv dtype cannot serve this role's
+        queries).  Returns [] when the DB (or the op's table) is unavailable,
+        meaning "no information" -- callers must not read that as "nothing
+        supported"."""
+        from aiconfigurator.sdk.perf_database import context_fmha_supported_modes
+
         database = self._try_load_role_database(role)
         if database is None:
             return []
-        supported = getattr(database, "supported_quant_mode", {}) or {}
-        return supported.get(self._attention_op_keys(role)[0], []) or []
+        return context_fmha_supported_modes(
+            database,
+            self._attention_op_keys(role)[0],
+            self._role_attr(role, "kvcache_quant_mode"),
+        )
 
     def _resolve_search_space(self) -> None:
         roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]

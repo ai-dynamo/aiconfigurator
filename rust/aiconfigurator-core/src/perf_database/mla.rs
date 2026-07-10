@@ -832,6 +832,12 @@ mod tests {
             .join("src/aiconfigurator/systems/data/gb200/trtllm/1.3.0rc10")
     }
 
+    fn h200_trtllm_data_root() -> PathBuf {
+        PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator/systems/data/h200_sxm/trtllm/1.3.0rc10")
+    }
+
     fn load_spec(name: &str) -> SystemSpec {
         let systems_yaml = PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
@@ -893,6 +899,28 @@ mod tests {
                 // interpolation-range error is acceptable for this smoke check.
             }
             Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn module_level_generation_mla_fp8_kv_anchor() {
+        // Exact-value pins for fp8-KV decode: dropping the degenerate fmha
+        // axis makes the generation module table live for fp8-checkpoint
+        // V3/R1/Kimi decode (was: FallbackOp -> granular path). h200 ships
+        // NATIVE (kv=fp8, gemm=fp8_block) rows, so this anchor holds under
+        // single-primary loading. Values minted from this Rust path on the
+        // PR branch.
+        let table = MlaTable::new(h200_trtllm_data_root(), load_spec("h200_sxm"));
+        let cases: &[(u32, u32, f64)] = &[(8, 4097, 0.0693), (64, 4096, 0.1146884765625)];
+        for &(b, s, expected) in cases {
+            let got = table
+                .query_generation_module(b, s, 16, KvCacheQuantMode::Fp8, GemmQuantMode::Fp8Block)
+                .unwrap();
+            let rel = ((got - expected) / expected.max(1e-12)).abs();
+            assert!(
+                rel < 1e-9,
+                "gen_mla_module_fp8kv(b={b}, s={s}): got {got:.16}, expected {expected:.16}"
+            );
         }
     }
 
