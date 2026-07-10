@@ -3,7 +3,11 @@
 
 import csv
 
+import pytest
+
 from collector import helper
+
+pytestmark = pytest.mark.unit
 
 
 def _log_perf(perf_filename: str) -> bool:

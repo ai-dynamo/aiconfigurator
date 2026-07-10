@@ -369,8 +369,10 @@ quantization are separate identities. New model profiles remain additive, but
 a backend schedules only the declared artifact mode rather than taking the
 Cartesian product of every shape and every backend quant mode. DeepSeek V4
 native artifacts schedule `w4a8_mxfp4_mxfp8` in TRT-LLM. Exact SGLang 0.5.14
-schedules the native Pro artifact as `w4a16_mxfp4` on SM90 and native
-Flash/Pro artifacts as `w4a8_mxfp4_mxfp8` on SM100/103. These are distinct
+schedules native Flash/Pro artifacts as `w4a8_mxfp4_mxfp8` on SM100/103;
+the native Pro artifact's `w4a16_mxfp4` SM90 path was removed from its
+allowed modes (owner decision 2026-07-05 — Hopper users take the
+`sgl-project/DeepSeek-V4-Pro-FP8` build instead). These are distinct
 framework-owned paths, not Marlin fallbacks; SM120 remains fail-closed until
 its native path is validated. Pinned vLLM 0.19.0 has no DSV4 MXFP4/MXFP8
 implementation and schedules no native V4 MoE case. The
