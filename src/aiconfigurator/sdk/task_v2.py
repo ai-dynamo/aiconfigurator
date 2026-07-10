@@ -40,6 +40,7 @@ from aiconfigurator.sdk.models import (
     _infer_quant_modes_from_raw_config,
     check_is_moe,
     get_model_family,
+    resolve_dsv4_moe_arch_mode,
 )
 from aiconfigurator.sdk.perf_database import (
     get_latest_database_version,
@@ -726,26 +727,19 @@ class Task:
                 from_hf = base.get(key)
                 if key == "fmha_quant_mode":
                     fmha_explicit[role] = explicit is not None
-                # Native DeepSeek-V4 checkpoints on sglang use arch-specific MoE
-                # kernels (collector kernel_source sglang_mxfp4_flashinfer_trtllm_moe /
-                # sglang_flashinfer_cutlass_moe; the loader files those rows under the
-                # dedicated quant modes). This acts at the HF-base layer so an explicit
-                # field still overrides it. Skip megamoe, which keys its own quant
-                # table, and the sgl-project *-FP8 requant artifacts, whose MoE runs
-                # fp8_block. Mirrors legacy V1 dsv4pro-moe-arch; extended to V4-Flash,
-                # whose serving selects the same kernels per platform.
-                if (
-                    key == "moe_quant_mode"
-                    and self._role_attr(role, "backend_name") == "sglang"
-                    and self._role_attr(role, "model_path")
-                    in ("deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4-Flash")
-                    and self.moe_backend != "megamoe"
-                ):
-                    sysn = self._role_attr(role, "system_name")
-                    if is_blackwell_system(sysn):
-                        from_hf = common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
-                    elif is_hopper_system(sysn):
-                        from_hf = common.MoEQuantMode.w4a16_mxfp4_cutlass
+                # Native DeepSeek-V4 on sglang uses arch-specific MoE kernels; the
+                # shared helper (also called on the cli estimate path) returns the
+                # dedicated perf-DB quant mode. Acts at the HF-base layer so an
+                # explicit field still overrides it.
+                if key == "moe_quant_mode":
+                    arch_mode = resolve_dsv4_moe_arch_mode(
+                        self._role_attr(role, "model_path"),
+                        self._role_attr(role, "system_name"),
+                        self._role_attr(role, "backend_name"),
+                        self.moe_backend,
+                    )
+                    if arch_mode is not None:
+                        from_hf = arch_mode
                 fallback = _QUANT_FALLBACKS[key]
 
                 if explicit is not None:

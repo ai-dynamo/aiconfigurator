@@ -26,7 +26,7 @@ from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.config_builders import apply_nextn as _apply_nextn
 from aiconfigurator.sdk.config_builders import build_model_config as _build_model_config
-from aiconfigurator.sdk.models import check_is_moe, resolve_context_fmha_compat
+from aiconfigurator.sdk.models import check_is_moe, resolve_context_fmha_compat, resolve_dsv4_moe_arch
 from aiconfigurator.sdk.task_v2 import Task
 
 # Default per-phase latency-correction scales for single-point disagg estimates.
@@ -1149,6 +1149,7 @@ def _run_agg_estimate(
     # Agg workers run context attention → apply the V3/Kimi context FMHA rule
     # before building the model (mirrors the sweep/task_v2 path).
     resolve_context_fmha_compat(model_config, model_path, is_context_role=True)
+    resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
     runtime_config = RuntimeConfig(
         isl=isl,
         osl=osl,
@@ -1280,6 +1281,7 @@ def _run_static_estimate(
     # static / static_ctx run context attention; static_gen is generation-only
     # and legitimately keeps fp8 FMHA. Apply the V3/Kimi context rule accordingly.
     resolve_context_fmha_compat(model_config, model_path, is_context_role=static_mode != "static_gen")
+    resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
 
     runtime_config = RuntimeConfig(
         batch_size=batch_size,
@@ -1429,6 +1431,13 @@ def _run_disagg_estimate(
     # Prefill runs context attention → V3/Kimi context FMHA rule applies. Decode
     # is generation-only and keeps fp8, so it needs no adjustment.
     resolve_context_fmha_compat(prefill_model_config, model_path, is_context_role=True)
+    resolve_dsv4_moe_arch(prefill_model_config, model_path, system_name=system_name, backend_name=backend_name)
+    resolve_dsv4_moe_arch(
+        decode_model_config,
+        model_path,
+        system_name=decode_system_name or system_name,
+        backend_name=backend_name,
+    )
 
     runtime_config = RuntimeConfig(
         isl=isl,
@@ -1712,6 +1721,8 @@ def _run_afd_estimate(
     # F-worker is FFN/MoE only and never touches FMHA. The decode-phase static
     # complement is a static_ctx call handled in _run_static_estimate.
     resolve_context_fmha_compat(a_model_config, model_path, is_context_role=afd_phase in ("prefill", "both"))
+    resolve_dsv4_moe_arch(a_model_config, model_path, system_name=system_name, backend_name=backend_name)
+    resolve_dsv4_moe_arch(f_model_config, model_path, system_name=system_name, backend_name=backend_name)
 
     afd_config = AFDConfig(
         n_a_nodes=n_a_nodes,

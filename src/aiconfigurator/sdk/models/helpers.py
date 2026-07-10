@@ -329,6 +329,64 @@ def _apply_model_quant_defaults(
         )
 
 
+# Native (FP4 routed-expert) DeepSeek-V4 checkpoints. The sgl-project *-FP8
+# requant artifacts are deliberately absent: their MoE runs fp8_block.
+_DSV4_NATIVE_MODEL_PATHS = ("deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4-Flash")
+
+
+def resolve_dsv4_moe_arch_mode(
+    model_path: str,
+    system_name: str | None,
+    backend_name: str | None,
+    moe_backend: str | None = None,
+) -> common.MoEQuantMode | None:
+    """Arch-specific MoE quant mode for native DeepSeek-V4 checkpoints on sglang.
+
+    SGLang serves the native V4 checkpoints through arch-specific MoE kernels,
+    and the perf DB files those rows under dedicated quant modes (loader
+    routing in ``operations/moe.py``): Blackwell -> ``w4a8_mxfp4_mxfp8_trtllm``
+    (kernel_source ``sglang_mxfp4_flashinfer_trtllm_moe``), Hopper ->
+    ``w4a16_mxfp4_cutlass`` (``sglang_flashinfer_cutlass_moe``). Returns the
+    remapped mode, or None when the rule does not apply (non-sglang backends,
+    megamoe, requant artifacts, other systems). Mirrors ``task_v2``'s HF-base
+    resolution (legacy V1 dsv4pro-moe-arch); an explicit user mode must win,
+    so callers only apply this when moe_quant_mode was not explicitly set.
+    """
+    if backend_name != "sglang" or moe_backend == "megamoe":
+        return None
+    if model_path not in _DSV4_NATIVE_MODEL_PATHS:
+        return None
+    from aiconfigurator.sdk.perf_database import is_blackwell_system, is_hopper_system
+
+    if is_blackwell_system(system_name):
+        return common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+    if is_hopper_system(system_name):
+        return common.MoEQuantMode.w4a16_mxfp4_cutlass
+    return None
+
+
+def resolve_dsv4_moe_arch(
+    model_config: config.ModelConfig,
+    model_path: str,
+    *,
+    system_name: str | None,
+    backend_name: str | None,
+    moe_backend: str | None = None,
+) -> None:
+    """In-place ModelConfig variant for the estimate path.
+
+    Mirrors ``resolve_context_fmha_compat``'s contract: a non-None
+    ``moe_quant_mode`` is treated as user-explicit and wins. Must be called
+    BEFORE ``get_model`` so the arch mode lands before HF auto-inference
+    resolves the plain label.
+    """
+    if model_config.moe_quant_mode is not None:
+        return
+    mode = resolve_dsv4_moe_arch_mode(model_path, system_name, backend_name, moe_backend)
+    if mode is not None:
+        model_config.moe_quant_mode = mode
+
+
 def resolve_context_fmha_compat(
     model_config: config.ModelConfig,
     model_path: str,
