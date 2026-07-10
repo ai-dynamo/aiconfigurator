@@ -466,24 +466,33 @@ def test_moe_backend_flows_into_model_config():
     assert t.build_model_config(role="agg").moe_backend == "deepep_moe"
 
 
-def test_dsv4_pro_sglang_moe_remap():
-    """DeepSeek-V4-Pro on sglang remaps MoE to the arch-specific kernel (v1 dsv4pro-moe-arch):
-    Blackwell -> w4a8_mxfp4_mxfp8_trtllm. megamoe and non-sglang backends are exempt.
+def test_dsv4_native_sglang_moe_remap():
+    """Native DeepSeek-V4 (Pro AND Flash) on sglang remaps MoE to the arch-specific
+    kernel (v1 dsv4pro-moe-arch): Blackwell -> w4a8_mxfp4_mxfp8_trtllm; on Hopper
+    the native FP4-expert checkpoints are rejected outright. megamoe, non-sglang
+    backends, and the sgl-project FP8 requant artifacts are exempt.
     """
     from aiconfigurator.sdk import common
 
-    def moe(be, **kw):
+    def moe(be, mp="deepseek-ai/DeepSeek-V4-Pro", system="b200_sxm", **kw):
         return Task(
             serving_mode="agg",
-            model_path="deepseek-ai/DeepSeek-V4-Pro",
-            system_name="b200_sxm",
+            model_path=mp,
+            system_name=system,
             backend_name=be,
             **kw,
         ).moe_quant_mode
 
-    assert moe("sglang") == common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+    for mp in ("deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4-Flash"):
+        assert moe("sglang", mp=mp) == common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+        # Native FP4-expert checkpoints are rejected outright on Hopper.
+        with pytest.raises(ValueError, match="native FP4 routed-expert"):
+            moe("sglang", mp=mp, system="h200_sxm")
+        assert moe("trtllm", mp=mp) != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+    # megamoe keys its own quant table (packaged data exists only for V4-Pro).
     assert moe("sglang", moe_backend="megamoe") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
-    assert moe("trtllm") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+    # FP8 requant artifacts keep their own (fp8_block-family) resolution.
+    assert moe("sglang", mp="sgl-project/DeepSeek-V4-Flash-FP8") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
 
 
 def test_pareto_sweep_controls_tpot_grid():
