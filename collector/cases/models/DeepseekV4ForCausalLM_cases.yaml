@@ -54,10 +54,14 @@ model_case_values:
           allowed_modes:
             - fp8_block
         vllm:
-          # This converted artifact stores full-width FP8 expert tensors but
-          # omits expert_dtype. vLLM defaults that field to FP4, so scheduling
-          # it would create incompatible packed parameters.
-          allowed_modes: []
+          # The artifact config omits expert_dtype and vLLM defaults it to
+          # FP4, but vLLM 0.24's DeepSeek-V4 quant config has a native
+          # fp8-expert branch — serving works with the documented override
+          # `--hf-overrides '{"expert_dtype": "fp8"}'` (models/deepseek_v4/
+          # quant_config.py @0.24.0). The benchmark constructs Fp8Config from
+          # the label with synthetic weights, matching that serving path.
+          allowed_modes:
+            - fp8_block
     - model_path: deepseek-ai/DeepSeek-V4-Pro
       hidden_size: 7168
       inter_size: 3072
@@ -87,8 +91,10 @@ model_case_values:
           allowed_modes:
             - fp8_block
         vllm:
-          # See the Flash converted-artifact note above.
-          allowed_modes: []
+          # See the Flash converted-artifact note above (same expert_dtype
+          # omission; same `--hf-overrides` serving path).
+          allowed_modes:
+            - fp8_block
   mhc:
     - model_paths:
         - deepseek-ai/DeepSeek-V4-Flash

@@ -370,16 +370,24 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
     monkeypatch.setattr(module, "get_sm_version", lambda: 90)
 
     cases = module.get_moe_test_cases()
-    dsv4_models = {
+    native_dsv4_models = {
         "deepseek-ai/DeepSeek-V4-Flash",
         "deepseek-ai/DeepSeek-V4-Pro",
+    }
+    converted_dsv4_models = {
         "sgl-project/DeepSeek-V4-Flash-FP8",
         "sgl-project/DeepSeek-V4-Pro-FP8",
     }
 
-    assert len(cases) == 1806
-    assert sum(len(case[1]) for case in cases) == 48762
-    assert not any(case[8] in dsv4_models for case in cases)
+    assert len(cases) == 1887
+    assert sum(len(case[1]) for case in cases) == 50949
+    # Native artifacts stay excluded (their w4a8_mxfp4_mxfp8 label has no
+    # consumable vLLM path); the converted FP8 artifacts are collected as
+    # fp8_block only — the layout vLLM serves with the documented
+    # expert_dtype override.
+    assert not any(case[8] in native_dsv4_models for case in cases)
+    converted_modes = {case[0] for case in cases if case[8] in converted_dsv4_models}
+    assert converted_modes == {"fp8_block"}
 
 
 @pytest.mark.parametrize(

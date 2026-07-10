@@ -70,7 +70,13 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
         or model_config.get("topk_group") is not None
         or model_config.get("topk_method") == "noaux_tc"
     )
-    if declares_grouped_routing and not use_grouped_topk:
+    # DeepSeek V4 (model_type "deepseek_ref") declares topk_method=noaux_tc
+    # but routes UNGROUPED in vLLM 0.24: its FusedMoE gets no expert grouping
+    # — only the noaux_tc e_score_correction_bias with sqrtsoftplus scoring
+    # and float32 router logits (models/deepseek_v4/nvidia/model.py:652-669,
+    # 557-561 @0.24.0). The bias/scoring fields below already carry that.
+    ungrouped_noaux_tc = model_type == "deepseek_ref"
+    if declares_grouped_routing and not use_grouped_topk and not ungrouped_noaux_tc:
         raise ValueError(
             f"vLLM MoE model {model_name!r} (model_type={model_type!r}) declares grouped/noaux_tc "
             "routing fields but is not a recognized grouped-topk model type; verify how vLLM 0.24 "
@@ -125,7 +131,7 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
         "scoring_func": scoring_func,
         "activation": activation,
         "routed_scaling_factor": float(model_config.get("routed_scaling_factor") or 1.0),
-        "swiglu_limit": model_config.get("swiglu_limit") if model_type == "deepseek_v4" else None,
+        "swiglu_limit": model_config.get("swiglu_limit") if model_type in ("deepseek_v4", "deepseek_ref") else None,
         "use_grouped_topk": use_grouped_topk,
         "num_expert_group": num_expert_group,
         "topk_group": topk_group,

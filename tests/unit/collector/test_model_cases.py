@@ -343,8 +343,8 @@ def test_dsv4_moe_quantization_policy_prunes_unrelated_modes():
         "vllm": {
             "deepseek-ai/DeepSeek-V4-Flash": set(),
             "deepseek-ai/DeepSeek-V4-Pro": set(),
-            "sgl-project/DeepSeek-V4-Flash-FP8": set(),
-            "sgl-project/DeepSeek-V4-Pro-FP8": set(),
+            "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
+            "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
         },
     }
 
