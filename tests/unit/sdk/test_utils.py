@@ -7,11 +7,13 @@ Unit tests for SDK utility functions.
 Tests HuggingFace config parsing and model config retrieval.
 """
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.models import Gemma4MixModel, HybridMoEModel
 from aiconfigurator.sdk.utils import (
     _parse_hf_config_json,
@@ -829,6 +831,26 @@ class TestGemma4MixModelBuilder:
         )
         gen_names = {op._name for op in model.generation_ops}
         assert not any("moe" in n.lower() or "router" in n.lower() for n in gen_names)
+
+        database = SimpleNamespace(
+            system_spec={
+                "misc": {
+                    "nccl_mem": {1: 0},
+                    "other_mem": 0,
+                }
+            }
+        )
+        memory = BaseBackend()._get_memory_usage(
+            model,
+            database,
+            batch_size=1,
+            beam_width=1,
+            isl=1,
+            osl=1,
+        )
+
+        assert memory["activations"] == pytest.approx(BaseBackend.MIN_ACTIVATION_BYTES / (1 << 30))
+        assert memory["total"] > 0
 
     def test_dense_variant_rejects_moe_ep_gt_1(self):
         """Dense Gemma 4 has no experts, so any moe_ep_size > 1 must be rejected
