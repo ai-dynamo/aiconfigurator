@@ -1116,8 +1116,6 @@ class Task:
             raise ValueError("agg mode requires model_path")
         if not self.system_name:
             raise ValueError("agg mode requires system_name")
-        if self.backend_name == "vllm" and self._model_family == "DEEPSEEK":
-            raise NotImplementedError("AIConfigurator does not yet support the DeepSeek family on the vLLM backend.")
         # fp8_static is not hard-gated to trtllm: it is derived from the dynamic
         # fp8 GEMM minus compute_scale/scale_matrix overhead and works on any
         # backend whose perf DB carries those tables.  _validate_database_quant_modes
@@ -1139,14 +1137,8 @@ class Task:
             )
         if not self.prefill_system_name or not self.decode_system_name:
             raise ValueError("disagg mode requires both prefill_system_name and decode_system_name.")
-        for role in ("prefill", "decode"):
-            backend = self._role_attr(role, "backend_name")
-            # fp8_static is not hard-gated to trtllm (see _validate_agg); the
-            # per-role DB check in _validate_database_quant_modes governs support.
-            if backend == "vllm" and self._model_family == "DEEPSEEK":
-                raise NotImplementedError(
-                    f"AIConfigurator does not yet support the DeepSeek family on the vLLM backend ({role} side)."
-                )
+        # fp8_static is not hard-gated to trtllm (see _validate_agg); the
+        # per-role DB check in _validate_database_quant_modes governs support.
 
     def _validate_database_quant_modes(self) -> None:
         """Validate user's quant modes against the perf database's supported list.

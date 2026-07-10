@@ -1239,17 +1239,6 @@ def test_validate_agg_requires_system_name():
         t.validate()
 
 
-def test_validate_agg_rejects_deepseek_on_vllm():
-    t = Task(
-        serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-V3",
-        system_name="h200_sxm",
-        backend_name="vllm",
-    )
-    with pytest.raises(NotImplementedError, match="DeepSeek family on the vLLM backend"):
-        t.validate()
-
-
 def test_validate_agg_fp8_static_on_sglang_is_data_driven():
     """fp8_static is no longer hard-gated to trtllm; support is decided by the
     perf DB.  h200_sxm/sglang has fp8 GEMM data but no compute_scale/scale_matrix
