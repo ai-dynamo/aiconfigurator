@@ -27,7 +27,10 @@
 #                             families) or a shape-gated dispatch
 #                             boundary inside the slice
 #   backends: [trtllm_internal] - runs inside TRT-LLM's unified op;
-#                             kernel not observable from the label
+#                             kernel not observable from the label.
+#                             Accepted for now; future trtllm collector
+#                             upgrades must label real kernels so these
+#                             entries split into named backends
 #   backends: [unverified]  - nobody has traced what actually runs;
 #                             fill kernel_source_backends.yaml, never guess
 schema_version: 1

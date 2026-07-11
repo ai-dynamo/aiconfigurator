@@ -85,7 +85,11 @@ mappings:
 
   # ---------------------------------------------------------------- trtllm
   # TRT-LLM's unified backend dispatches kernels internally; the static
-  # labels cannot name the kernel. trtllm_internal = true-but-coarse.
+  # labels cannot name the kernel. trtllm_internal = true-but-coarse,
+  # accepted for now BY DECISION (PR #1345 review): future trtllm collector
+  # upgrades must start recording the real kernel per row (as the sglang
+  # 0.5.14 upgrade did for sglang labels), then these entries get split
+  # into named backends and trtllm_internal shrinks to zero.
   - {framework: trtllm, kernel_source: torch_flow, match: {op_file: gemm_perf, gemm_dtype: bfloat16}, backend: cublas, source: "collector/trtllm/collect_gemm.py (torch-flow Linear, bf16)"}
   - {framework: trtllm, kernel_source: torch_flow, match: {op_file: gemm_perf, gemm_dtype: fp8}, backend: cutlass, source: "collector/trtllm/collect_gemm.py (FP8 per-tensor)"}
   - {framework: trtllm, kernel_source: torch_flow, match: {op_file: gemm_perf, gemm_dtype: fp8_block}, backend: cutlass, source: "collector/trtllm/collect_gemm.py:118-121 (SM90 CUTLASS; SM100 fp8_block is labeled deepgemm instead)"}
