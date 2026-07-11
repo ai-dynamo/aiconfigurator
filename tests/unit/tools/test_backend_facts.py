@@ -15,6 +15,19 @@ import yaml
 pytestmark = pytest.mark.unit
 
 BACKEND_FACTS = Path(__file__).resolve().parents[3] / "tools" / "perf_database" / "backend_facts.py"
+BACKEND_MAP = Path(__file__).resolve().parents[3] / "collector" / "kernel_source_backends.yaml"
+
+# Synthetic translation table exercising exact, match-conditioned, and absent entries.
+MAPPINGS = [
+    {"framework": "sglang", "kernel_source": "flash_attention", "backend": "fa3"},
+    {"framework": "sglang", "kernel_source": "triton", "backend": "triton"},
+    {
+        "framework": "trtllm",
+        "kernel_source": "default",
+        "match": {"op_file": "context_mla_perf", "mla_dtype": "float16"},
+        "backend": "trtllm_internal",
+    },
+]
 
 
 @pytest.fixture
@@ -71,15 +84,17 @@ def data_tree(tmp_path):
 
 def test_scan_groups_by_precision_slice(backend_facts_module, data_tree):
     facts, axes_by_op = backend_facts_module.scan(data_tree)
-    by_op = backend_facts_module._fact_entries(facts, axes_by_op)
+    by_op = backend_facts_module._fact_entries(facts, axes_by_op, MAPPINGS)
 
     attn = by_op["context_attention_perf"]
     assert axes_by_op["context_attention_perf"] == ["op_name", "attn_dtype", "kv_cache_dtype"]
     assert len(attn) == 2
     bf16 = next(e for e in attn if e["kv_cache_dtype"] == "bfloat16")
     assert bf16["kernel_sources"] == ["flash_attention"]
+    assert bf16["backends"] == ["fa3"]
     fp8 = next(e for e in attn if e["kv_cache_dtype"] == "fp8")
     assert fp8["kernel_sources"] == ["flash_attention", "triton"]
+    assert fp8["backends"] == ["fa3", "triton"]
 
     mla = by_op["context_mla_perf"]
     assert len(mla) == 1
@@ -87,11 +102,40 @@ def test_scan_groups_by_precision_slice(backend_facts_module, data_tree):
     assert mla[0]["version"] == "1.0.0rc3"
     assert mla[0]["system"] == "h200_sxm"
     assert mla[0]["kernel_sources"] == ["default"]
+    assert mla[0]["backends"] == ["trtllm_internal"]  # via the match-conditioned entry
+
+
+def test_translate_match_and_unmapped(backend_facts_module):
+    translate = backend_facts_module.translate
+    # match-conditioned entry applies only when every match key equals the slice value
+    assert translate(MAPPINGS, "trtllm", "context_mla_perf", {"mla_dtype": "float16"}, "default") == "trtllm_internal"
+    assert translate(MAPPINGS, "trtllm", "context_mla_perf", {"mla_dtype": "bfloat16"}, "default") is None
+    assert translate(MAPPINGS, "trtllm", "generation_mla_perf", {"mla_dtype": "float16"}, "default") is None
+    # unmapped label -> None, and _fact_entries records it as unverified
+    assert translate(MAPPINGS, "sglang", "gemm_perf", {}, "mystery_label") is None
+
+
+def test_unmapped_labels_become_unverified_and_are_reported(backend_facts_module, data_tree):
+    facts, axes_by_op = backend_facts_module.scan(data_tree)
+    unmapped: set = set()
+    by_op = backend_facts_module._fact_entries(facts, axes_by_op, MAPPINGS[:1], unmapped)
+    fp8 = next(e for e in by_op["context_attention_perf"] if e["kv_cache_dtype"] == "fp8")
+    assert fp8["backends"] == ["fa3", "unverified"]
+    assert ("sglang", "triton") in unmapped and ("trtllm", "default") in unmapped
+
+
+def test_committed_backend_map_covers_schema(backend_facts_module):
+    mappings = backend_facts_module.load_backend_map(BACKEND_MAP)
+    assert mappings, "translation table must not be empty"
+    for m in mappings:
+        assert set(m) <= {"framework", "kernel_source", "backend", "match", "source"}, m
+        assert m["framework"] in {"sglang", "trtllm", "vllm"}, m
+        assert m["kernel_source"] and m["backend"] and m["source"], m
 
 
 def test_yaml_output_is_valid_and_round_trips(backend_facts_module, data_tree):
     facts, axes_by_op = backend_facts_module.scan(data_tree)
-    by_op = backend_facts_module._fact_entries(facts, axes_by_op)
+    by_op = backend_facts_module._fact_entries(facts, axes_by_op, MAPPINGS)
     doc = yaml.safe_load(backend_facts_module.render_yaml(by_op, axes_by_op))
 
     assert doc["schema_version"] == 1
@@ -99,11 +143,12 @@ def test_yaml_output_is_valid_and_round_trips(backend_facts_module, data_tree):
     assert set(ops) == {"context_attention_perf", "context_mla_perf"}
     fp8 = next(f for f in ops["context_attention_perf"]["facts"] if f["kv_cache_dtype"] == "fp8")
     assert fp8["kernel_sources"] == ["flash_attention", "triton"]
+    assert fp8["backends"] == ["fa3", "triton"]
 
 
 def test_check_passes_when_registry_matches(backend_facts_module, data_tree, tmp_path):
     facts, axes_by_op = backend_facts_module.scan(data_tree)
-    by_op = backend_facts_module._fact_entries(facts, axes_by_op)
+    by_op = backend_facts_module._fact_entries(facts, axes_by_op, MAPPINGS)
     registry = tmp_path / "op_backend_facts.yaml"
     registry.write_text(backend_facts_module.render_yaml(by_op, axes_by_op))
 
@@ -112,7 +157,7 @@ def test_check_passes_when_registry_matches(backend_facts_module, data_tree, tmp
 
 def test_check_reports_drift(backend_facts_module, data_tree, tmp_path):
     facts, axes_by_op = backend_facts_module.scan(data_tree)
-    by_op = backend_facts_module._fact_entries(facts, axes_by_op)
+    by_op = backend_facts_module._fact_entries(facts, axes_by_op, MAPPINGS)
     registry = tmp_path / "op_backend_facts.yaml"
     registry.write_text(backend_facts_module.render_yaml(by_op, axes_by_op))
 
@@ -124,7 +169,7 @@ def test_check_reports_drift(backend_facts_module, data_tree, tmp_path):
     pq.write_table(pa.Table.from_pylist(rows), sglang_dir / "context_attention_perf.parquet")
 
     facts2, axes2 = backend_facts_module.scan(data_tree)
-    by_op2 = backend_facts_module._fact_entries(facts2, axes2)
+    by_op2 = backend_facts_module._fact_entries(facts2, axes2, MAPPINGS)
     drift = backend_facts_module.check(registry, by_op2, axes2)
     assert len(drift) == 1
     assert drift[0].startswith("data-not-in-registry:")
@@ -139,7 +184,7 @@ def test_check_reports_drift(backend_facts_module, data_tree, tmp_path):
 
 def test_check_reports_mismatched_kernel_sources(backend_facts_module, data_tree, tmp_path):
     facts, axes_by_op = backend_facts_module.scan(data_tree)
-    by_op = backend_facts_module._fact_entries(facts, axes_by_op)
+    by_op = backend_facts_module._fact_entries(facts, axes_by_op, MAPPINGS)
     text = backend_facts_module.render_yaml(by_op, axes_by_op)
     registry = tmp_path / "op_backend_facts.yaml"
     registry.write_text(text.replace('kernel_sources: ["default"]', 'kernel_sources: ["trtllm_mla"]'))

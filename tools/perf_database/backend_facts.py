@@ -4,11 +4,16 @@
 Bootstrap and audit `collector/op_backend_facts.yaml`.
 
 The registry records, for every (op table, framework, version, system,
-fact-axis slice), which kernel backend(s) the op runs on — the vocabulary is
-the `kernel_source` labels the collectors write. The registry itself is
-collector-owned reference data: after the initial bootstrap it is maintained
-deliberately (a collector-upgrade PR states the new version's backend defaults
-by editing it), NOT regenerated from whatever a collection run produced.
+fact-axis slice), which backend(s) the op actually runs on. The perf tables
+only carry `kernel_source` — a collector-written label that may be the real
+backend, a static placeholder, or a name hiding a dtype dispatch — so the
+label is translated through the curated table
+`collector/kernel_source_backends.yaml` into the runtime backend; the raw
+labels are kept per entry as the evidence / data join key. The registry
+itself is collector-owned reference data: after the initial bootstrap it is
+maintained deliberately (a collector-upgrade PR states the new version's
+backend defaults by editing it and the translation table), NOT regenerated
+from whatever a collection run produced.
 
 This tool has exactly two jobs:
 
@@ -162,16 +167,54 @@ def scan(data_root: Path) -> tuple[dict[FactKey, set[str]], dict[str, list[str]]
     return dict(facts), axes_by_op
 
 
-def _fact_entries(facts: dict[FactKey, set[str]], axes_by_op: dict[str, list[str]]) -> dict[str, list[dict]]:
+def load_backend_map(path: Path) -> list[dict]:
+    import yaml
+
+    return yaml.safe_load(path.read_text())["mappings"]
+
+
+def translate(
+    mappings: list[dict], framework: str, op_file: str, axis_map: dict[str, str], kernel_source: str
+) -> str | None:
+    """Resolve a kernel_source label to the runtime backend (first match wins).
+
+    Returns None when no mapping entry covers the label — the caller reports
+    it; an *explicit* `backend: unverified` entry is an honest recorded fact.
+    """
+    for m in mappings:
+        if m["framework"] != framework or m["kernel_source"] != kernel_source:
+            continue
+        match = m.get("match") or {}
+        if any((op_file if col == "op_file" else axis_map.get(col, "")) != str(want) for col, want in match.items()):
+            continue
+        return m["backend"]
+    return None
+
+
+def _fact_entries(
+    facts: dict[FactKey, set[str]],
+    axes_by_op: dict[str, list[str]],
+    mappings: list[dict],
+    unmapped: set[tuple[str, str]] | None = None,
+) -> dict[str, list[dict]]:
     """Reshape into the per-op sorted entry lists the registry stores."""
     by_op: dict[str, list[dict]] = defaultdict(list)
     for key, sources in facts.items():
         axis_map = dict(key.axis_values)
+        backends = set()
+        for ks in sources:
+            backend = translate(mappings, key.framework, key.op_file, axis_map, ks)
+            if backend is None:
+                backend = "unverified"
+                if unmapped is not None:
+                    unmapped.add((key.framework, ks))
+            backends.add(backend)
         entry = {
             "framework": key.framework,
             "version": key.version,
             "system": key.system,
             **{c: axis_map.get(c, "") for c in axes_by_op[key.op_file]},
+            "backends": sorted(backends),
             "kernel_sources": sorted(sources),
         }
         by_op[key.op_file].append(entry)
@@ -190,8 +233,11 @@ def render_yaml(by_op: dict[str, list[dict]], axes_by_op: dict[str, list[str]]) 
         "# SPDX-License-Identifier: Apache-2.0",
         "#",
         "# Op-backend facts registry: for every (op table, framework, version,",
-        "# system, fact-axis slice), the kernel backend(s) the op runs on, in the",
-        "# vocabulary of the `kernel_source` labels the collectors write.",
+        "# system, fact-axis slice), the backend(s) the op actually runs on.",
+        "# `backends` is the fact — kernel_source labels translated through",
+        "# collector/kernel_source_backends.yaml (the curated label->backend",
+        "# table). `kernel_sources` is the evidence: the raw labels as they",
+        "# appear in the perf tables (the data join key).",
         "#",
         "# Layer contract (see .claude/rules/collector/layer_permissions.md):",
         "# this is REFERENCE data for the collection harness — backend expectations",
@@ -207,12 +253,14 @@ def render_yaml(by_op: dict[str, list[dict]], axes_by_op: dict[str, list[str]]) 
         "#   python3 tools/perf_database/backend_facts.py --check",
         "#",
         "# Entry semantics:",
-        "#   kernel_sources: [one]      - the backend the op runs on for this slice",
-        "#   kernel_sources: [several]  - multi-backend sweep (e.g. MoE per-quant",
-        "#                                families, eager+graph) or a shape-gated",
-        "#                                dispatch boundary inside the slice",
-        "#   kernel_sources: [default]  - the collector did not name the kernel",
-        "#                                (framework-implicit; low fidelity)",
+        "#   backends: [one]         - the backend the op runs on for this slice",
+        "#   backends: [several]     - multi-backend sweep (e.g. MoE per-quant",
+        "#                             families) or a shape-gated dispatch",
+        "#                             boundary inside the slice",
+        "#   backends: [trtllm_internal] - runs inside TRT-LLM's unified op;",
+        "#                             kernel not observable from the label",
+        "#   backends: [unverified]  - nobody has traced what actually runs;",
+        "#                             fill kernel_source_backends.yaml, never guess",
         "schema_version: 1",
         "ops:",
     ]
@@ -224,20 +272,21 @@ def render_yaml(by_op: dict[str, list[dict]], axes_by_op: dict[str, list[str]]) 
         for e in entries:
             ks = ", ".join(_yaml_scalar(k) for k in e["kernel_sources"])
             fields = [f"{c}: {_yaml_scalar(e[c])}" for c in ("framework", "version", "system", *axes)]
-            lines.append(f"      - {{{', '.join(fields)}, kernel_sources: [{ks}]}}")
+            backends = ", ".join(_yaml_scalar(b) for b in e["backends"])
+            lines.append(f"      - {{{', '.join(fields)}, backends: [{backends}], kernel_sources: [{ks}]}}")
     return "\n".join(lines) + "\n"
 
 
-def _flatten(doc: dict) -> dict[tuple, tuple[str, ...]]:
-    """Flatten a registry document into {slice key: kernel_sources} for diffing."""
-    flat: dict[tuple, tuple[str, ...]] = {}
+def _flatten(doc: dict) -> dict[tuple, dict]:
+    """Flatten a registry document into {slice key: {backends, kernel_sources}} for diffing."""
+    flat: dict[tuple, dict] = {}
     for op in doc["ops"]:
         axes = op["axes"]
         for e in op["facts"]:
             key = (op["op_file"], e["framework"], str(e["version"]), e["system"]) + tuple(
                 str(e.get(c, "")) for c in axes
             )
-            flat[key] = tuple(e["kernel_sources"])
+            flat[key] = {"backends": list(e["backends"]), "kernel_sources": list(e["kernel_sources"])}
     return flat
 
 
@@ -255,12 +304,12 @@ def check(registry_path: Path, by_op: dict[str, list[dict]], axes_by_op: dict[st
 
     drift: list[str] = []
     for key in sorted(derived.keys() - committed.keys(), key=str):
-        drift.append(f"data-not-in-registry: {key} -> {list(derived[key])}")
+        drift.append(f"data-not-in-registry: {key} -> {derived[key]}")
     for key in sorted(committed.keys() - derived.keys(), key=str):
-        drift.append(f"registry-not-in-data: {key} -> {list(committed[key])}")
+        drift.append(f"registry-not-in-data: {key} -> {committed[key]}")
     for key in sorted(derived.keys() & committed.keys(), key=str):
         if derived[key] != committed[key]:
-            drift.append(f"mismatch: {key} registry={list(committed[key])} data={list(derived[key])}")
+            drift.append(f"mismatch: {key} registry={committed[key]} data={derived[key]}")
     return drift
 
 
@@ -268,6 +317,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data-root", type=Path, default=Path("src/aiconfigurator/systems/data"))
     parser.add_argument("--registry", type=Path, default=Path("collector/op_backend_facts.yaml"))
+    parser.add_argument("--backend-map", type=Path, default=Path("collector/kernel_source_backends.yaml"))
     parser.add_argument(
         "--check",
         action="store_true",
@@ -279,8 +329,17 @@ def main() -> None:
     logging.basicConfig(level=args.log_level.upper(), format="%(levelname)s %(message)s")
 
     facts, axes_by_op = scan(args.data_root)
-    by_op = _fact_entries(facts, axes_by_op)
+    mappings = load_backend_map(args.backend_map)
+    unmapped: set[tuple[str, str]] = set()
+    by_op = _fact_entries(facts, axes_by_op, mappings, unmapped)
     total = sum(len(v) for v in by_op.values())
+    if unmapped:
+        logger.warning(
+            "%d kernel_source labels have no entry in %s (recorded as backend=unverified): %s",
+            len(unmapped),
+            args.backend_map,
+            sorted(unmapped),
+        )
 
     if args.check:
         drift = check(args.registry, by_op, axes_by_op)

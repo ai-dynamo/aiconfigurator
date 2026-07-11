@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Kernel-source -> runtime-backend translation table.
+#
+# The perf tables label rows with `kernel_source` — a collector-written string
+# that is sometimes the real backend (sglang attention pins), sometimes a
+# static placeholder (`torch_flow`, `default`), and sometimes hides a
+# dtype-dependent dispatch (`sglang` on gemm). This file is the curated fact
+# layer that says what each label ACTUALLY runs, so that
+# collector/op_backend_facts.yaml can record real backends instead of labels.
+#
+# Hand-maintained; every entry cites where the fact was verified (collector
+# dispatch code or framework source). `backend: unverified` is an honest
+# "nobody has traced this yet" — fill it in with a citation, never a guess.
+#
+# Matching: first match wins. An entry applies when framework and
+# kernel_source are equal and every key in `match` equals the fact slice's
+# value (`op_file` or any fact-axis column). Equality only — this is a
+# translation table, not a rule engine; do not add operators.
+#
+# Backend vocabulary (keep names serving-visible and framework-neutral where
+# the kernel library is the identity): cublas, cutlass, deepgemm, trt_plugin,
+# torch, sgl_kernel, fa3, fa4, flash_attn, flashinfer, flashmla, triton,
+# trtllm_mha, trtllm_mla, trtllm_internal (TRT-LLM unified op, kernel chosen
+# inside TRT-LLM and not observable from the label), triton_fused_moe, marlin,
+# flashinfer_cutlass, flashinfer_cutedsl, flashinfer_trtllm_gen, deepep,
+# causal_conv1d, fla_triton, custom_allreduce, nccl, nvlink_one_sided,
+# nvlink_two_sided, dsa_nsa, unverified.
+
+schema_version: 1
+
+mappings:
+  # ---------------------------------------------------------------- sglang
+  # Attention backend pins (serving-truth per SM):
+  # collector/sglang/collect_attn.py — SM>=110 or (SM>=100 & head_dim=192) ->
+  # triton; SM>=100 -> TRTLLMHAAttnBackend; else FlashAttentionBackend (fa3).
+  - {framework: sglang, kernel_source: flash_attention, backend: fa3, source: "collector/sglang/collect_attn.py + collect_mla.py (FlashAttentionBackend pin)"}
+  - {framework: sglang, kernel_source: flash_attention_v3, backend: fa3, source: "collector/sglang/collect_attn_encoder.py"}
+  - {framework: sglang, kernel_source: flash_attention_v4, backend: fa4, source: "collector/sglang/collect_attn_encoder.py"}
+  - {framework: sglang, kernel_source: trtllm_mha, backend: trtllm_mha, source: "collector/sglang/collect_attn.py (TRTLLMHAAttnBackend, SM100+)"}
+  - {framework: sglang, kernel_source: trtllm_mla, backend: trtllm_mla, source: "collector/sglang/collect_mla.py (_select_default_mla_backend, SM100)"}
+  - {framework: sglang, kernel_source: triton, backend: triton, source: "collector/sglang/collect_attn.py (TritonAttnBackend)"}
+  - {framework: sglang, kernel_source: fa3, backend: fa3, source: "collector/wideep/sglang (attn_backend arg)"}
+  - {framework: sglang, kernel_source: flashinfer, backend: flashinfer, source: "collector/wideep/sglang (attn_backend arg)"}
+  - {framework: sglang, kernel_source: flash_mla_with_kvcache, backend: flashmla, source: "collector/sglang/collect_dsv4_attn.py"}
+  - {framework: sglang, kernel_source: compressed_flashmla, backend: flashmla, source: "collector/sglang/collect_dsv4_attn.py (compressed KV path)"}
+  - {framework: sglang, kernel_source: dsa_nsa, backend: dsa_nsa, source: "collector/sglang/collect_mla_module.py (NSA sparse-attention module; sub-backend per SM not split by the label)"}
+
+  # GEMM label "sglang" hides a dtype dispatch: collect_gemm.py runs
+  # torch.matmul (bf16), sgl_kernel fp8_scaled_mm (fp8), DeepGEMM
+  # gemm_nt_f8f8bf16 (fp8_block), flashinfer mm_fp4 backend="cutlass" (nvfp4).
+  - {framework: sglang, kernel_source: sglang, match: {op_file: gemm_perf, gemm_dtype: bfloat16}, backend: cublas, source: "collector/sglang/collect_gemm.py (torch.matmul)"}
+  - {framework: sglang, kernel_source: sglang, match: {op_file: gemm_perf, gemm_dtype: fp8}, backend: cutlass, source: "collector/sglang/collect_gemm.py (sgl_kernel fp8_scaled_mm)"}
+  - {framework: sglang, kernel_source: sglang, match: {op_file: gemm_perf, gemm_dtype: fp8_block}, backend: deepgemm, source: "collector/sglang/collect_gemm.py (fp8_gemm_deepgemm)"}
+  - {framework: sglang, kernel_source: sglang, match: {op_file: gemm_perf, gemm_dtype: nvfp4}, backend: flashinfer_cutlass, source: "collector/sglang/collect_gemm.py (flashinfer mm_fp4, backend=cutlass)"}
+  - {framework: sglang, kernel_source: sglang, backend: sgl_kernel, source: "collector/sglang/collect_computescale.py (sgl_per_token_quant_fp8; scale_matrix idem)"}
+
+  # mla_bmm "default": torch.bmm for bf16, sgl_kernel bmm_fp8 (cublasLt) for fp8.
+  - {framework: sglang, kernel_source: default, match: {op_file: mla_bmm_perf}, backend: cublas, source: "collector/sglang/collect_mla_bmm.py (torch.bmm / sgl_kernel bmm_fp8)"}
+
+  # MoE families (label names the constructed serving method).
+  - {framework: sglang, kernel_source: sglang_fused_moe_triton, backend: triton_fused_moe, source: "collector/sglang/collect_moe.py"}
+  - {framework: sglang, kernel_source: sglang_marlin_moe, backend: marlin, source: "collector/sglang/collect_moe.py (w4a16_mxfp4 GPT-OSS)"}
+  - {framework: sglang, kernel_source: sglang_flashinfer_cutedsl_moe, backend: flashinfer_cutedsl, source: "collector/sglang/collect_moe.py (nvfp4)"}
+  - {framework: sglang, kernel_source: sglang_flashinfer_mxfp4_moe, backend: flashinfer_trtllm_gen, source: "collector/sglang/collect_moe.py (w4a8_mxfp4_mxfp8)"}
+  - {framework: sglang, kernel_source: deepgemm_megamoe, backend: deepgemm, source: "collector/sglang/collect_dsv4_megamoe.py"}
+
+  # GDN / conv sub-kernels are the actual kernels.
+  - {framework: sglang, kernel_source: causal_conv1d_fn, backend: causal_conv1d, source: "sglang/srt causal-conv1d CUDA kernel"}
+  - {framework: sglang, kernel_source: causal_conv1d_update, backend: causal_conv1d, source: "sglang/srt causal-conv1d CUDA kernel"}
+  - {framework: sglang, kernel_source: fused_recurrent_gated_delta_rule, backend: fla_triton, source: "sglang/srt/layers/attention/fla (triton)"}
+  - {framework: sglang, kernel_source: deep_gemm.fp8_paged_mqa_logits, backend: deepgemm, source: "collector/sglang/deepseekv4_sparse_modules.py"}
+
+  # WideEP module labels.
+  - {framework: sglang, kernel_source: deepep, backend: deepep, source: "collector/wideep/sglang"}
+  - {framework: sglang, kernel_source: deepepmoe, backend: deepep, source: "collector/wideep/sglang (DeepEP-MoE compute path)"}
+  - {framework: sglang, kernel_source: deepseek_v3, backend: unverified, source: "wideep mlp label does not name the GEMM backend"}
+  - {framework: sglang, kernel_source: sglang_mhc, backend: sgl_kernel, source: "collector/sglang/collect_mhc_module.py"}
+
+  # Comm.
+  - {framework: sglang, kernel_source: SGLang_CustomAllReduce_eager, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py"}
+  - {framework: sglang, kernel_source: SGLang_CustomAllReduce_graph, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py (CUDA-graph launch)"}
+  - {framework: sglang, kernel_source: TRTLLM, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py (trtllm AR rows stored under sglang dir)"}
+
+  # ---------------------------------------------------------------- trtllm
+  # TRT-LLM's unified backend dispatches kernels internally; the static
+  # labels cannot name the kernel. trtllm_internal = true-but-coarse.
+  - {framework: trtllm, kernel_source: torch_flow, match: {op_file: gemm_perf, gemm_dtype: bfloat16}, backend: cublas, source: "collector/trtllm/collect_gemm.py (torch-flow Linear, bf16)"}
+  - {framework: trtllm, kernel_source: torch_flow, match: {op_file: gemm_perf, gemm_dtype: fp8}, backend: cutlass, source: "collector/trtllm/collect_gemm.py (FP8 per-tensor)"}
+  - {framework: trtllm, kernel_source: torch_flow, match: {op_file: gemm_perf, gemm_dtype: fp8_block}, backend: cutlass, source: "collector/trtllm/collect_gemm.py:118-121 (SM90 CUTLASS; SM100 fp8_block is labeled deepgemm instead)"}
+  - {framework: trtllm, kernel_source: torch_flow, match: {op_file: gemm_perf}, backend: trtllm_internal, source: "collector/trtllm/collect_gemm.py (nvfp4: kernel not named by label)"}
+  - {framework: trtllm, kernel_source: torch_flow, backend: trtllm_internal, source: "collector/trtllm/collect_attn.py (unified TRTLLM attention backend; fmha kernel chosen inside TRT-LLM)"}
+  - {framework: trtllm, kernel_source: default, backend: trtllm_internal, source: "collector/trtllm/collect_mla.py, collect_mla_module.py (static label)"}
+  - {framework: trtllm, kernel_source: deepgemm, backend: deepgemm, source: "collector/trtllm/collect_gemm.py:255 (fp8_block on SM100+)"}
+  - {framework: trtllm, kernel_source: torch_ops, backend: torch, source: "collector/trtllm/collect_computescale.py"}
+  - {framework: trtllm, kernel_source: "trt_flow_/smooth_quant_gemm_L96/PLUGIN_V2_SmoothQuantGemm_0", backend: trt_plugin, source: "legacy TRT engine flow"}
+  - {framework: trtllm, kernel_source: "trt_flow_/weight_only_quant_matmul_L257/PLUGIN_V2_WeightOnlyQuantMatmul_0", backend: trt_plugin, source: "legacy TRT engine flow"}
+
+  # MoE torch-flow labels.
+  - {framework: trtllm, kernel_source: moe_torch_flow_cutlass, backend: cutlass, source: "collector/trtllm/collect_moe.py (CUTLASS backend arg)"}
+  - {framework: trtllm, kernel_source: moe_torch_flow, backend: trtllm_internal, source: "collector/trtllm/collect_moe.py (backend chosen by trtllm per quant/SM; label does not split)"}
+  - {framework: trtllm, kernel_source: moe_torch_flow_min_latency, backend: trtllm_internal, source: "collector/trtllm/collect_moe.py (min-latency mode)"}
+  - {framework: trtllm, kernel_source: moe_torch_flow_nongated, backend: trtllm_internal, source: "collector/trtllm/collect_moe.py"}
+  - {framework: trtllm, kernel_source: wideep_compute_cutlass, backend: cutlass, source: "collector/wideep/trtllm"}
+
+  # Mamba/GDN kernels.
+  - {framework: trtllm, kernel_source: causal_conv1d_fn, backend: causal_conv1d, source: "trtllm _torch mamba modules"}
+  - {framework: trtllm, kernel_source: causal_conv1d_update, backend: causal_conv1d, source: "trtllm _torch mamba modules"}
+  - {framework: trtllm, kernel_source: chunk_gated_delta_rule, backend: fla_triton, source: "trtllm _torch GDN (triton)"}
+  - {framework: trtllm, kernel_source: fused_recurrent_gated_delta_rule, backend: fla_triton, source: "trtllm _torch GDN (triton)"}
+
+  # Comm.
+  - {framework: trtllm, kernel_source: TRTLLM, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py (trtllm custom AR)"}
+  - {framework: trtllm, kernel_source: NCCL, backend: nccl, source: "collector/network/collect_nccl.py"}
+  - {framework: trtllm, kernel_source: NVLinkOneSided, backend: nvlink_one_sided, source: "collector/network/slurm/collect_trtllm_alltoall.py"}
+  - {framework: trtllm, kernel_source: NVLinkTwoSided, backend: nvlink_two_sided, source: "collector/network/slurm/collect_trtllm_alltoall.py"}
+
+  # ---------------------------------------------------------------- vllm
+  # vLLM labels name the attention backend class vLLM's selector picked.
+  - {framework: vllm, kernel_source: vllm_flash_attn, backend: flash_attn, source: "collector/vllm/collect_attn.py (FLASH_ATTN)"}
+  - {framework: vllm, kernel_source: vllm_flashinfer, backend: flashinfer, source: "collector/vllm/collect_attn.py (FLASHINFER)"}
+  - {framework: vllm, kernel_source: vllm_vit_flash_attn, backend: flash_attn, source: "collector/vllm/collect_attn_encoder.py"}
+  - {framework: vllm, kernel_source: vllm_flash_attn_mla, backend: flash_attn, source: "collector/vllm/collect_mla* (FLASH_ATTN_MLA)"}
+  - {framework: vllm, kernel_source: vllm_flashmla, backend: flashmla, source: "collector/vllm (FLASHMLA)"}
+  - {framework: vllm, kernel_source: vllm_triton_mla, backend: triton, source: "collector/vllm (TRITON_MLA)"}
+  - {framework: vllm, kernel_source: vllm_fused_moe, backend: triton_fused_moe, source: "collector/vllm/collect_moe.py (vllm fused_moe triton)"}
+  - {framework: vllm, kernel_source: vllm_marlin_moe, backend: marlin, source: "collector/vllm/collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_marlin_int4_moe, backend: marlin, source: "collector/vllm/collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_mxfp4_moe, backend: unverified, source: "Mxfp4Config dispatch (marlin on SM90?) not traced yet"}
+  - {framework: vllm, kernel_source: vllm_flashinfer_trtllm_moe_fp4, backend: flashinfer_trtllm_gen, source: "collector/vllm/collect_moe.py (nvfp4)"}
+  - {framework: vllm, kernel_source: vllm_xpu_moe, backend: unverified, source: "XPU (ipex) path not traced"}
+  - {framework: vllm, kernel_source: vllm_xpu_moe_mxfp4, backend: unverified, source: "XPU (ipex) path not traced"}
+  - {framework: vllm, kernel_source: causal_conv1d_update, backend: causal_conv1d, source: "vllm mamba/GDN modules"}
+  - {framework: vllm, kernel_source: default, backend: unverified, source: "label from before vLLM collectors recorded the selected backend"}
+  - {framework: vllm, kernel_source: vllm_default, backend: unverified, source: "label from before vLLM collectors recorded the selected backend"}
+  - {framework: vllm, kernel_source: vLLM_custom_eager, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py"}
+  - {framework: vllm, kernel_source: vLLM_custom_graph, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py (CUDA-graph launch)"}
