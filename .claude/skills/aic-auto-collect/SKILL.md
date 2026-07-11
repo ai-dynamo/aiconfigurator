@@ -364,6 +364,28 @@ vLLM:
 
 ## Phase 7: Perf File Quality Gates
 
+**Job status is not evidence.** A green harness/CI job only means the wrapper
+script exited zero — it does NOT mean data was collected. Two real false-success
+signatures (2026-07-11, sglang 0.5.14 wave-2 recollection):
+
+- An op's case population raised (`No SGLang MoE backend for ...`) →
+  `collect_module_safe` recorded a `ModuleCollectionFailure` and the job stayed
+  green with zero perf rows for that op. (`collect.py` now exits non-zero on
+  this, but older revisions and other harness paths do not.)
+- The collection container died mid-run (node preemption / OOM) at 96% of the
+  first op → the harness packaged a partial tar and reported success; only a
+  SLURM `TIMEOUT` state is treated as retryable failure.
+
+Therefore ALWAYS verify results by content, never by status:
+
+1. Unpack the artifact and count rows per expected op family; an op with zero
+   rows and no capability-floor explanation is a failure regardless of status.
+2. Read `errors_*.json` / `collection_summary_*.json`; any
+   `ModuleCollectionFailure` means that op collected nothing.
+3. Compare collected vs planned counts (`--plan-only` gives the plan size);
+   large shortfalls mean the run died early — check the tail of the log for
+   container/cluster death, not just collector errors.
+
 Accept a perf file only when:
 
 - It exists under `src/aiconfigurator/systems/data/<system>/<backend>/<version>/`.
