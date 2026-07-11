@@ -455,6 +455,7 @@ def test_sm90_nvfp4_has_no_backend():
     ("moe_type", "moe_backend", "model_name", "sm_version", "kernel_source"),
     [
         ("int4_wo", "marlin", "moonshotai/Kimi-K2.5", 90, "sglang_marlin_moe"),
+        ("int4_wo", "flashinfer_trtllm", "moonshotai/Kimi-K2.5", 100, "sglang_flashinfer_trtllm_moe"),
         ("w4a16_mxfp4", "triton", "openai/gpt-oss-120b", 90, "sglang_fused_moe_triton"),
         (
             "w4a8_mxfp4_mxfp8",

@@ -619,19 +619,27 @@ def _benchmark_framework_quantized_moe(
                     )
             elif moe_type == "int4_wo":
                 scheme = getattr(moe_layer, "scheme", None)
+                expected_scheme = {
+                    "marlin": "CompressedTensorsWNA16MoE",
+                    "flashinfer_trtllm": "CompressedTensorsMxInt4MoE",
+                }[moe_backend]
+                # CompressedTensorsMxInt4MoE carries no runner attribute; its
+                # __init__ asserts is_flashinfer_trtllm(), so the scheme
+                # identity itself proves the backend. Marlin routes through a
+                # runner whose backend must match.
                 runner = getattr(scheme, "runner", None)
                 actual_backend = getattr(getattr(runner, "runner_backend", None), "value", None)
                 if (
                     quant_method_name != "CompressedTensorsFusedMoEMethod"
-                    or type(scheme).__name__ != "CompressedTensorsWNA16MoE"
-                    or actual_backend != moe_backend
+                    or type(scheme).__name__ != expected_scheme
+                    or (moe_backend == "marlin" and actual_backend != moe_backend)
                 ):
                     raise RuntimeError(
-                        "SGLang INT4-WO did not construct the requested Marlin path: "
+                        "SGLang INT4-WO did not construct the requested path: "
                         f"requested_backend={moe_backend}, actual_method={quant_method_name}, "
                         f"actual_scheme={type(scheme).__name__}, actual_backend={actual_backend}"
                     )
-                kernel_source = source_by_backend[actual_backend]
+                kernel_source = source_by_backend[moe_backend]
             elif moe_type == "nvfp4":
                 runner = getattr(quant_method, "runner", None)
                 actual_backend = getattr(getattr(quant_method, "_moe_runner_backend", None), "value", None)
@@ -1020,8 +1028,17 @@ def run_moe_torch(
             f"to be divisible by 128, got hidden_size={hidden_size}, local_inter_size={local_inter_size}"
         )
     use_int4_w4a16 = moe_type == "int4_wo"
-    if use_int4_w4a16 and moe_backend != "marlin":
-        raise ValueError(f"SGLang SM90 int4_wo requires the Marlin backend, got {moe_backend}")
+    # int4_wo runner truth is SM-split in SGLang 0.5.14 serving: SM90 auto
+    # resolves to Marlin (CompressedTensorsWNA16MoE), while SM100/103 force
+    # flashinfer_trtllm (server_args.py:3725-3737), whose scheme
+    # CompressedTensorsMxInt4MoE feeds BF16 activations straight into
+    # trtllm_mxint4_block_scale_moe — the same W4A16 identity on a different
+    # kernel (the FP8-activation variant arrived later, flashinfer PR#2912,
+    # and is not used by 0.5.14).
+    if use_int4_w4a16 and moe_backend not in ("marlin", "flashinfer_trtllm"):
+        raise ValueError(
+            f"SGLang int4_wo requires the Marlin (SM90) or flashinfer_trtllm (SM100/103) backend, got {moe_backend}"
+        )
     int4_group_size = 128
     if use_int4_w4a16:
         int4_config = get_moe_quantization_module_config("sglang", moe_type, model_name=model_name)
