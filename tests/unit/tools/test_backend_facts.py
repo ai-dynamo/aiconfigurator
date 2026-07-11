@@ -26,6 +26,21 @@ def backend_facts_module():
     return module
 
 
+def _attn_row(kernel_source, kv_cache_dtype, batch_size):
+    return {
+        "framework": "sglang",
+        "version": "0.5.12",
+        "device": "h200",
+        "op_name": "context_attention",
+        "kernel_source": kernel_source,
+        "attn_dtype": "bfloat16",
+        "kv_cache_dtype": kv_cache_dtype,
+        "batch_size": batch_size,
+        "isl": 512,
+        "latency": 1.0,
+    }
+
+
 @pytest.fixture
 def data_tree(tmp_path):
     """Tiny data tree: one parquet table (two dtype slices, one multi-backend)
@@ -34,55 +49,11 @@ def data_tree(tmp_path):
     sglang_dir.mkdir(parents=True)
     rows = [
         # bf16 slice: single named backend
-        {
-            "framework": "sglang",
-            "version": "0.5.12",
-            "device": "h200",
-            "op_name": "context_attention",
-            "kernel_source": "flash_attention",
-            "attn_dtype": "bfloat16",
-            "kv_cache_dtype": "bfloat16",
-            "batch_size": 1,
-            "isl": 512,
-            "latency": 1.0,
-        },
-        {
-            "framework": "sglang",
-            "version": "0.5.12",
-            "device": "h200",
-            "op_name": "context_attention",
-            "kernel_source": "flash_attention",
-            "attn_dtype": "bfloat16",
-            "kv_cache_dtype": "bfloat16",
-            "batch_size": 2,
-            "isl": 512,
-            "latency": 2.0,
-        },
-        # fp8 kv slice: two backends -> multi
-        {
-            "framework": "sglang",
-            "version": "0.5.12",
-            "device": "h200",
-            "op_name": "context_attention",
-            "kernel_source": "flash_attention",
-            "attn_dtype": "bfloat16",
-            "kv_cache_dtype": "fp8",
-            "batch_size": 1,
-            "isl": 512,
-            "latency": 1.0,
-        },
-        {
-            "framework": "sglang",
-            "version": "0.5.12",
-            "device": "h200",
-            "op_name": "context_attention",
-            "kernel_source": "triton",
-            "attn_dtype": "bfloat16",
-            "kv_cache_dtype": "fp8",
-            "batch_size": 1,
-            "isl": 8192,
-            "latency": 9.0,
-        },
+        _attn_row("flash_attention", "bfloat16", 1),
+        _attn_row("flash_attention", "bfloat16", 2),
+        # fp8 kv slice: two backends
+        _attn_row("flash_attention", "fp8", 1),
+        _attn_row("triton", "fp8", 2),
     ]
     pq.write_table(pa.Table.from_pylist(rows), sglang_dir / "context_attention_perf.parquet")
 
@@ -98,31 +69,24 @@ def data_tree(tmp_path):
     return tmp_path
 
 
-def _facts_for(by_op, op_file):
-    return by_op[op_file]
-
-
-def test_scan_groups_by_precision_slice_and_classifies_status(backend_facts_module, data_tree):
+def test_scan_groups_by_precision_slice(backend_facts_module, data_tree):
     facts, axes_by_op = backend_facts_module.scan(data_tree)
     by_op = backend_facts_module._fact_entries(facts, axes_by_op)
 
-    attn = _facts_for(by_op, "context_attention_perf")
+    attn = by_op["context_attention_perf"]
     assert axes_by_op["context_attention_perf"] == ["op_name", "attn_dtype", "kv_cache_dtype"]
     assert len(attn) == 2
     bf16 = next(e for e in attn if e["kv_cache_dtype"] == "bfloat16")
-    assert bf16["kernel_sources"] == {"flash_attention": 2}
-    assert bf16["status"] == "single"
+    assert bf16["kernel_sources"] == ["flash_attention"]
     fp8 = next(e for e in attn if e["kv_cache_dtype"] == "fp8")
-    assert fp8["kernel_sources"] == {"flash_attention": 1, "triton": 1}
-    assert fp8["status"] == "multi"
+    assert fp8["kernel_sources"] == ["flash_attention", "triton"]
 
-    mla = _facts_for(by_op, "context_mla_perf")
+    mla = by_op["context_mla_perf"]
     assert len(mla) == 1
     assert mla[0]["framework"] == "trtllm"
     assert mla[0]["version"] == "1.0.0rc3"
     assert mla[0]["system"] == "h200_sxm"
-    assert mla[0]["kernel_sources"] == {"default": 2}
-    assert mla[0]["status"] == "default_only"
+    assert mla[0]["kernel_sources"] == ["default"]
 
 
 def test_yaml_output_is_valid_and_round_trips(backend_facts_module, data_tree):
@@ -134,22 +98,53 @@ def test_yaml_output_is_valid_and_round_trips(backend_facts_module, data_tree):
     ops = {o["op_file"]: o for o in doc["ops"]}
     assert set(ops) == {"context_attention_perf", "context_mla_perf"}
     fp8 = next(f for f in ops["context_attention_perf"]["facts"] if f["kv_cache_dtype"] == "fp8")
-    assert fp8["kernel_sources"] == {"flash_attention": 1, "triton": 1}
-    assert fp8["status"] == "multi"
+    assert fp8["kernel_sources"] == ["flash_attention", "triton"]
 
 
-def test_markdown_output_lists_every_slice(backend_facts_module, data_tree):
+def test_check_passes_when_registry_matches(backend_facts_module, data_tree, tmp_path):
     facts, axes_by_op = backend_facts_module.scan(data_tree)
     by_op = backend_facts_module._fact_entries(facts, axes_by_op)
-    md = backend_facts_module.render_markdown(by_op, axes_by_op)
+    registry = tmp_path / "op_backend_facts.yaml"
+    registry.write_text(backend_facts_module.render_yaml(by_op, axes_by_op))
 
-    assert "## `context_attention_perf`" in md
-    assert "`flash_attention` (1), `triton` (1)" in md
-    assert "default_only" in md
-    assert "Fact slices: **3**" in md
+    assert backend_facts_module.check(registry, by_op, axes_by_op) == []
 
 
-def test_classify_status(backend_facts_module):
-    assert backend_facts_module.classify_status({"fa3": 10}) == "single"
-    assert backend_facts_module.classify_status({"fa3": 10, "default": 1}) == "multi"
-    assert backend_facts_module.classify_status({"default": 5}) == "default_only"
+def test_check_reports_drift(backend_facts_module, data_tree, tmp_path):
+    facts, axes_by_op = backend_facts_module.scan(data_tree)
+    by_op = backend_facts_module._fact_entries(facts, axes_by_op)
+    registry = tmp_path / "op_backend_facts.yaml"
+    registry.write_text(backend_facts_module.render_yaml(by_op, axes_by_op))
+
+    # New data appears (kernel changed for the bf16 slice + a brand-new slice).
+    sglang_dir = data_tree / "h200_sxm" / "sglang" / "0.5.14"
+    sglang_dir.mkdir(parents=True)
+    rows = [_attn_row("trtllm_mha", "bfloat16", 1)]
+    rows[0]["version"] = "0.5.14"
+    pq.write_table(pa.Table.from_pylist(rows), sglang_dir / "context_attention_perf.parquet")
+
+    facts2, axes2 = backend_facts_module.scan(data_tree)
+    by_op2 = backend_facts_module._fact_entries(facts2, axes2)
+    drift = backend_facts_module.check(registry, by_op2, axes2)
+    assert len(drift) == 1
+    assert drift[0].startswith("data-not-in-registry:")
+    assert "0.5.14" in drift[0] and "trtllm_mha" in drift[0]
+
+    # And the reverse direction: registry entry with no backing data.
+    registry.write_text(backend_facts_module.render_yaml(by_op2, axes2))
+    drift = backend_facts_module.check(registry, by_op, axes_by_op)
+    assert len(drift) == 1
+    assert drift[0].startswith("registry-not-in-data:")
+
+
+def test_check_reports_mismatched_kernel_sources(backend_facts_module, data_tree, tmp_path):
+    facts, axes_by_op = backend_facts_module.scan(data_tree)
+    by_op = backend_facts_module._fact_entries(facts, axes_by_op)
+    text = backend_facts_module.render_yaml(by_op, axes_by_op)
+    registry = tmp_path / "op_backend_facts.yaml"
+    registry.write_text(text.replace('kernel_sources: ["default"]', 'kernel_sources: ["trtllm_mla"]'))
+
+    drift = backend_facts_module.check(registry, by_op, axes_by_op)
+    assert len(drift) == 1
+    assert drift[0].startswith("mismatch:")
+    assert "trtllm_mla" in drift[0] and "default" in drift[0]

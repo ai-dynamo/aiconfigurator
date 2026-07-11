@@ -1,39 +1,35 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Derive the op-backend facts record from the perf database.
+Bootstrap and audit `collector/op_backend_facts.yaml`.
 
-For every (op table, framework, version, system, fact-axis slice) observed in
-the data tree, record which kernel backend(s) the rows were collected on — the
-`kernel_source` column. Fact axes are the columns kernel dispatch actually
-depends on: the op identity inside a shared table (`op_name`, `phase`,
-`architecture`) plus the precision/quant columns (`attn_dtype`,
-`kv_cache_dtype`, `moe_dtype`, ...). Shape columns (batch/seq/heads/...) are
-deliberately excluded: a slice whose backend flips with shape shows up as
-`multi` and is a fact to investigate, not to average away.
+The registry records, for every (op table, framework, version, system,
+fact-axis slice), which kernel backend(s) the op runs on — the vocabulary is
+the `kernel_source` labels the collectors write. The registry itself is
+collector-owned reference data: after the initial bootstrap it is maintained
+deliberately (a collector-upgrade PR states the new version's backend defaults
+by editing it), NOT regenerated from whatever a collection run produced.
 
-This is a *record of observations*, not a claim about framework internals:
-`kernel_source` is only as truthful as the collector that wrote it. SGLang
-collectors pin and label the serving-default backend per SM; vLLM defers to
-vLLM's own selector; TRT-LLM writes coarse static tags (`torch_flow`,
-`default`) because its unified backend dispatches internally. Slices whose
-only label is `default` are flagged `default_only` (framework-implicit,
-low-fidelity) rather than presented as a named backend.
+This tool has exactly two jobs:
 
-Statuses:
-  - `single`       : exactly one named kernel_source — the observed default.
-  - `multi`        : more than one kernel_source — either an intentional
-                     multi-backend sweep (e.g. MoE per-quant backend families,
-                     WideEP fa3+flashinfer) or a shape-dependent dispatch
-                     boundary. Row counts per kernel_source are kept.
-  - `default_only` : only the placeholder `default` label — the collector did
-                     not name the kernel.
+  - bootstrap (default): derive the registry from the perf database. Used once
+    to seed the file, and afterwards only to draft entries for a new
+    framework version/system from freshly collected data — the diff is then
+    reviewed like any hand edit.
+  - `--check`: audit the committed registry against the perf database labels.
+    Drift means either the data is mislabeled or the registry is stale; both
+    must be resolved explicitly. Exits non-zero on drift.
 
-Usage (regenerate the checked-in record after any data change):
-    python3 tools/perf_database/backend_facts.py \\
-        --data-root src/aiconfigurator/systems/data \\
-        --out-yaml docs/perf_database/op-backend-facts.yaml \\
-        --out-md   docs/perf_database/op-backend-facts.md
+Fact axes are the columns kernel dispatch actually depends on: the op identity
+inside a shared table (`op_name`, `phase`, `architecture`) plus the
+precision/quant columns (`attn_dtype`, `kv_cache_dtype`, `moe_dtype`, ...).
+Shape columns (batch/seq/heads/...) are deliberately excluded: a slice whose
+backend flips with shape shows up with multiple kernel_sources and is a fact
+to investigate, not to average away.
+
+Usage:
+    python3 tools/perf_database/backend_facts.py                # bootstrap/draft
+    python3 tools/perf_database/backend_facts.py --check        # drift audit
 """
 
 from __future__ import annotations
@@ -87,15 +83,6 @@ class FactKey:
     axis_values: tuple[tuple[str, str], ...]  # ((column, value), ...) in _FACT_COLUMNS order
 
 
-def classify_status(kernel_sources: dict[str, int]) -> str:
-    named = [ks for ks in kernel_sources if ks != "default"]
-    if not named:
-        return "default_only"
-    if len(kernel_sources) == 1:
-        return "single"
-    return "multi"
-
-
 def _scan_parquet(path: Path, axis_cols: list[str]) -> Counter:
     """Group one parquet table by (axis columns, kernel_source) → row count."""
     import pyarrow.parquet as pq
@@ -128,13 +115,13 @@ def _read_header(path: Path) -> list[str]:
         return next(csv.reader(f), [])
 
 
-def scan(data_root: Path) -> tuple[dict[FactKey, dict[str, int]], dict[str, list[str]]]:
-    """Walk the data tree and accumulate kernel_source counts per fact key.
+def scan(data_root: Path) -> tuple[dict[FactKey, set[str]], dict[str, list[str]]]:
+    """Walk the data tree and accumulate observed kernel_sources per fact key.
 
-    Returns (facts, axes_by_op): `facts` maps FactKey -> {kernel_source: rows};
+    Returns (facts, axes_by_op): `facts` maps FactKey -> {kernel_source, ...};
     `axes_by_op` maps op_file -> the union of fact columns seen in its headers.
     """
-    facts: dict[FactKey, Counter] = defaultdict(Counter)
+    facts: dict[FactKey, set[str]] = defaultdict(set)
     axes_by_op: dict[str, list[str]] = {}
     skipped_no_kernel_source: list[str] = []
 
@@ -151,11 +138,9 @@ def scan(data_root: Path) -> tuple[dict[FactKey, dict[str, int]], dict[str, list
                 seen.append(c)
 
         counts = _scan_parquet(path, axis_cols) if path.suffix.lower() == ".parquet" else _scan_txt(path, axis_cols)
-        for key, n in counts.items():
+        for key in counts:
             *axis_vals, kernel_source = key
-            kernel_source = kernel_source.strip()
-            if not kernel_source:
-                kernel_source = "<unnamed>"
+            kernel_source = kernel_source.strip() or "<unnamed>"
             fact_key = FactKey(
                 op_file=op_file,
                 framework=backend,
@@ -163,7 +148,7 @@ def scan(data_root: Path) -> tuple[dict[FactKey, dict[str, int]], dict[str, list
                 system=system,
                 axis_values=tuple(zip(axis_cols, axis_vals, strict=True)),
             )
-            facts[fact_key][kernel_source] += n
+            facts[fact_key].add(kernel_source)
 
     # Keep axis order canonical per op even when headers differ across files.
     for op_file, cols in axes_by_op.items():
@@ -174,11 +159,11 @@ def scan(data_root: Path) -> tuple[dict[FactKey, dict[str, int]], dict[str, list
             len(skipped_no_kernel_source),
             skipped_no_kernel_source[:5],
         )
-    return {k: dict(v) for k, v in facts.items()}, axes_by_op
+    return dict(facts), axes_by_op
 
 
-def _fact_entries(facts: dict[FactKey, dict[str, int]], axes_by_op: dict[str, list[str]]) -> dict[str, list[dict]]:
-    """Reshape into per-op sorted entry lists shared by both renderers."""
+def _fact_entries(facts: dict[FactKey, set[str]], axes_by_op: dict[str, list[str]]) -> dict[str, list[dict]]:
+    """Reshape into the per-op sorted entry lists the registry stores."""
     by_op: dict[str, list[dict]] = defaultdict(list)
     for key, sources in facts.items():
         axis_map = dict(key.axis_values)
@@ -187,8 +172,7 @@ def _fact_entries(facts: dict[FactKey, dict[str, int]], axes_by_op: dict[str, li
             "version": key.version,
             "system": key.system,
             **{c: axis_map.get(c, "") for c in axes_by_op[key.op_file]},
-            "kernel_sources": dict(sorted(sources.items())),
-            "status": classify_status(sources),
+            "kernel_sources": sorted(sources),
         }
         by_op[key.op_file].append(entry)
     for op_file, entries in by_op.items():
@@ -197,8 +181,6 @@ def _fact_entries(facts: dict[FactKey, dict[str, int]], axes_by_op: dict[str, li
 
 
 def _yaml_scalar(value) -> str:
-    if isinstance(value, int):
-        return str(value)
     return json.dumps(value)  # JSON string quoting is valid YAML
 
 
@@ -207,19 +189,30 @@ def render_yaml(by_op: dict[str, list[dict]], axes_by_op: dict[str, list[str]]) 
         "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
         "# SPDX-License-Identifier: Apache-2.0",
         "#",
-        "# Op-backend facts: for every (op table, framework, version, system,",
-        "# fact-axis slice) in the perf database, the kernel backend(s) the rows",
-        "# were collected on (`kernel_source`) with row counts, and a status:",
-        "#   single       - one named backend (the observed default)",
-        "#   multi        - multiple backends in the slice (multi-backend sweep or",
-        "#                  shape-dependent dispatch; see per-backend row counts)",
-        "#   default_only - collector wrote only the placeholder 'default' label",
+        "# Op-backend facts registry: for every (op table, framework, version,",
+        "# system, fact-axis slice), the kernel backend(s) the op runs on, in the",
+        "# vocabulary of the `kernel_source` labels the collectors write.",
         "#",
-        "# Generated by tools/perf_database/backend_facts.py from the data tree -",
-        "# do not hand-edit. Regenerate after any perf-data change:",
+        "# Layer contract (see .claude/rules/collector/layer_permissions.md):",
+        "# this is REFERENCE data for the collection harness — backend expectations",
+        "# to pin and validate against. It never gates whether a case runs and it",
+        "# must not grow match/skip rules.",
         "#",
-        "#   python3 tools/perf_database/backend_facts.py",
+        "# Ownership: bootstrapped from the perf database by",
+        "# tools/perf_database/backend_facts.py (2026-07-11). From then on it is",
+        "# maintained deliberately: a collector-upgrade PR that changes backend",
+        "# dispatch updates the affected entries (the tool can draft them from",
+        "# freshly collected data; review the diff like a hand edit). Audit with:",
         "#",
+        "#   python3 tools/perf_database/backend_facts.py --check",
+        "#",
+        "# Entry semantics:",
+        "#   kernel_sources: [one]      - the backend the op runs on for this slice",
+        "#   kernel_sources: [several]  - multi-backend sweep (e.g. MoE per-quant",
+        "#                                families, eager+graph) or a shape-gated",
+        "#                                dispatch boundary inside the slice",
+        "#   kernel_sources: [default]  - the collector did not name the kernel",
+        "#                                (framework-implicit; low fidelity)",
         "schema_version: 1",
         "ops:",
     ]
@@ -229,50 +222,57 @@ def render_yaml(by_op: dict[str, list[dict]], axes_by_op: dict[str, list[str]]) 
         lines.append(f"    axes: [{', '.join(axes)}]")
         lines.append("    facts:")
         for e in entries:
-            ks = ", ".join(f"{_yaml_scalar(k)}: {n}" for k, n in e["kernel_sources"].items())
+            ks = ", ".join(_yaml_scalar(k) for k in e["kernel_sources"])
             fields = [f"{c}: {_yaml_scalar(e[c])}" for c in ("framework", "version", "system", *axes)]
-            lines.append(f"      - {{{', '.join(fields)}, kernel_sources: {{{ks}}}, status: {e['status']}}}")
+            lines.append(f"      - {{{', '.join(fields)}, kernel_sources: [{ks}]}}")
     return "\n".join(lines) + "\n"
 
 
-def render_markdown(by_op: dict[str, list[dict]], axes_by_op: dict[str, list[str]]) -> str:
-    total = sum(len(v) for v in by_op.values())
-    status_counts: Counter = Counter(e["status"] for entries in by_op.values() for e in entries)
+def _flatten(doc: dict) -> dict[tuple, tuple[str, ...]]:
+    """Flatten a registry document into {slice key: kernel_sources} for diffing."""
+    flat: dict[tuple, tuple[str, ...]] = {}
+    for op in doc["ops"]:
+        axes = op["axes"]
+        for e in op["facts"]:
+            key = (op["op_file"], e["framework"], str(e["version"]), e["system"]) + tuple(
+                str(e.get(c, "")) for c in axes
+            )
+            flat[key] = tuple(e["kernel_sources"])
+    return flat
 
-    lines = [
-        "# Op-backend facts\n",
-        "For every `(op table, framework, version, system, fact-axis slice)` in the perf",
-        "database: which kernel backend(s) (`kernel_source`) the rows were collected on.",
-        "Generated by `tools/perf_database/backend_facts.py` — do not hand-edit; see the",
-        "tool docstring for status semantics and caveats (TRT-LLM labels are coarse).\n",
-        "## Headline numbers\n",
-        f"- Fact slices: **{total:,}**",
-    ]
-    for status in ("single", "multi", "default_only"):
-        lines.append(f"  - `{status}`: {status_counts.get(status, 0):,}")
-    lines.append("")
 
-    for op_file, entries in by_op.items():
-        axes = axes_by_op[op_file]
-        lines.append(f"\n## `{op_file}`\n")
-        lines.append(f"| framework | version | system | {' | '.join(axes)} | kernel_source(s) | status |")
-        lines.append("|---" * (5 + len(axes)) + "|")
-        for e in entries:
-            sources = e["kernel_sources"]
-            if len(sources) == 1:
-                ks = f"`{next(iter(sources))}`"
-            else:
-                ks = ", ".join(f"`{k}` ({n})" for k, n in sources.items())
-            axis_cells = " | ".join(str(e[c]) for c in axes)
-            lines.append(f"| {e['framework']} | {e['version']} | {e['system']} | {axis_cells} | {ks} | {e['status']} |")
-    return "\n".join(lines) + "\n"
+def check(registry_path: Path, by_op: dict[str, list[dict]], axes_by_op: dict[str, list[str]]) -> list[str]:
+    """Compare the committed registry against facts derived from the data tree.
+
+    Returns human-readable drift lines (empty = in sync).
+    """
+    import yaml
+
+    committed = _flatten(yaml.safe_load(registry_path.read_text()))
+    derived = _flatten(
+        {"ops": [{"op_file": op, "axes": axes_by_op[op], "facts": entries} for op, entries in by_op.items()]}
+    )
+
+    drift: list[str] = []
+    for key in sorted(derived.keys() - committed.keys(), key=str):
+        drift.append(f"data-not-in-registry: {key} -> {list(derived[key])}")
+    for key in sorted(committed.keys() - derived.keys(), key=str):
+        drift.append(f"registry-not-in-data: {key} -> {list(committed[key])}")
+    for key in sorted(derived.keys() & committed.keys(), key=str):
+        if derived[key] != committed[key]:
+            drift.append(f"mismatch: {key} registry={list(committed[key])} data={list(derived[key])}")
+    return drift
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data-root", type=Path, default=Path("src/aiconfigurator/systems/data"))
-    parser.add_argument("--out-yaml", type=Path, default=Path("docs/perf_database/op-backend-facts.yaml"))
-    parser.add_argument("--out-md", type=Path, default=Path("docs/perf_database/op-backend-facts.md"))
+    parser.add_argument("--registry", type=Path, default=Path("collector/op_backend_facts.yaml"))
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Audit the committed registry against the perf database instead of writing it.",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -280,19 +280,24 @@ def main() -> None:
 
     facts, axes_by_op = scan(args.data_root)
     by_op = _fact_entries(facts, axes_by_op)
-
-    args.out_yaml.parent.mkdir(parents=True, exist_ok=True)
-    args.out_yaml.write_text(render_yaml(by_op, axes_by_op))
-    logger.info("wrote %s", args.out_yaml)
-    args.out_md.parent.mkdir(parents=True, exist_ok=True)
-    args.out_md.write_text(render_markdown(by_op, axes_by_op))
-    logger.info("wrote %s", args.out_md)
-
-    status_counts: Counter = Counter(e["status"] for entries in by_op.values() for e in entries)
     total = sum(len(v) for v in by_op.values())
-    print(f"\nFact slices: {total:,}")
-    for status in ("single", "multi", "default_only"):
-        print(f"  {status:14}{status_counts.get(status, 0):>7,}")
+
+    if args.check:
+        drift = check(args.registry, by_op, axes_by_op)
+        if drift:
+            for line in drift[:50]:
+                print(line)
+            if len(drift) > 50:
+                print(f"... and {len(drift) - 50} more")
+            print(f"\nDRIFT: {len(drift)} differences between {args.registry} and {args.data_root}")
+            sys.exit(1)
+        print(f"OK: {args.registry} matches {args.data_root} ({total:,} fact slices)")
+        return
+
+    args.registry.parent.mkdir(parents=True, exist_ok=True)
+    args.registry.write_text(render_yaml(by_op, axes_by_op))
+    logger.info("wrote %s", args.registry)
+    print(f"Fact slices: {total:,}")
 
 
 if __name__ == "__main__":
