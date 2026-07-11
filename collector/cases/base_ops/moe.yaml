@@ -82,6 +82,10 @@ common_case_values:
       # SM100/103: pinned SGLang 0.5.14 serving auto-selects flashinfer_trtllm
       # for Kimi K2/K2.5 INT4 (server_args.py:3736 -> CompressedTensorsMxInt4MoE).
       # B200 hardware validation: 2026-07-11 Kimi-filtered moe pipeline run.
+      # SM90: the server_args.py:3725-3737 forcing branch is SM100/103-only, so
+      # the runner backend stays auto and get_moe_scheme falls through the
+      # flashinfer_trtllm/hip/triton gates to CompressedTensorsWNA16MoE (Marlin)
+      # (compressed_tensors.py:676-698 at image source 49e384ce).
       int4_wo: {90: marlin, 100: flashinfer_trtllm, 103: flashinfer_trtllm}
       # NVFP4 SM120: serving auto resolves to FLASHINFER_TRTLLM
       # (modelopt_quant.py:2317-2323 — capability (12,0) is outside the
