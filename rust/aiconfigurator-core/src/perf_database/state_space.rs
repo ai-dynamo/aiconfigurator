@@ -340,7 +340,7 @@ fn load_mamba2_parquet(sources: &[PerfSource]) -> Result<Mamba2Grids, AicError> 
             }
             let phase = row.str_owned(phase_col)?;
             let key = Mamba2Key {
-                kernel_source: normalize_gdn_kernel_source(row.str_owned(kernel_source_col)?),
+                kernel_source: row.str_owned(kernel_source_col)?,
                 phase: phase.clone(),
                 d_model: row.u32(d_model_col)?,
                 d_state: row.u32(d_state_col)?,
@@ -422,7 +422,7 @@ fn load_gdn_parquet(sources: &[PerfSource]) -> Result<GdnGrids, AicError> {
             }
             let phase = row.str_owned(phase_col)?;
             let key = GdnKey {
-                kernel_source: row.str_owned(kernel_source_col)?,
+                kernel_source: normalize_gdn_kernel_source(row.str_owned(kernel_source_col)?),
                 phase: phase.clone(),
                 d_model: row.u32(d_model_col)?,
                 d_conv: row.u32(d_conv_col)?,
