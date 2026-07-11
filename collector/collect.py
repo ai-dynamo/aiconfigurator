@@ -1131,6 +1131,7 @@ def collect_sglang(
     )
 
     generate_collection_summary(all_errors, "sglang", version)
+    return all_errors
 
 
 def collect_vllm(
@@ -1179,6 +1180,7 @@ def collect_vllm(
     )
 
     generate_collection_summary(all_errors, "vllm", version)
+    return all_errors
 
 
 def collect_trtllm(
@@ -1230,6 +1232,7 @@ def collect_trtllm(
     )
 
     generate_collection_summary(all_errors, "trtllm", version)
+    return all_errors
 
 
 def generate_collection_summary(all_errors, backend, version):
@@ -1587,7 +1590,7 @@ def main():
     # Use profiling context manager
     with ProfilerContext(args.backend, enabled=args.profile):
         collect_backend = {"trtllm": collect_trtllm, "sglang": collect_sglang, "vllm": collect_vllm}[args.backend]
-        collect_backend(
+        run_errors = collect_backend(
             num_processes,
             ops,
             limit=limit,
@@ -1611,6 +1614,17 @@ def main():
         converted = finalize_perf_files(touched_perf_outputs)
         if converted:
             logger.info(f"Finalized {len(converted)} collector perf files as parquet")
+
+    # A ModuleCollectionFailure means an op failed before running a single case
+    # (population raised, or the run infrastructure crashed) — the op collected
+    # nothing. Exit non-zero AFTER finalization so partial data from other ops
+    # is still packaged, but the job is not reported as a clean success.
+    module_failures = sorted(
+        {e["module"] for e in (run_errors or []) if e.get("error_type") == "ModuleCollectionFailure"}
+    )
+    if module_failures:
+        logger.error("Module-level collection failures (no cases ran): " + ", ".join(module_failures))
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
