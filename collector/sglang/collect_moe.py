@@ -1035,6 +1035,12 @@ def run_moe_torch(
     # trtllm_mxint4_block_scale_moe — the same W4A16 identity on a different
     # kernel (the FP8-activation variant arrived later, flashinfer PR#2912,
     # and is not used by 0.5.14).
+    # FIXME(kernel-limit): the trtllm-gen MXINT4 grouped GEMM asserts
+    # "K must be divisible by blockK". B200 validation 2026-07-11 (pipeline
+    # 57606364): Kimi-K2.5 local_inter 256 (moe_tp<=8) passes, 128/64
+    # (moe_tp 16/32) fail — 707/3,078 cases, all with that one message.
+    # blockK's exact value/origin in flashinfer is unverified; re-check on
+    # the next flashinfer/sglang bump before considering a probe or guard.
     if use_int4_w4a16 and moe_backend not in ("marlin", "flashinfer_trtllm"):
         raise ValueError(
             f"SGLang int4_wo requires the Marlin (SM90) or flashinfer_trtllm (SM100/103) backend, got {moe_backend}"
