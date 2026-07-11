@@ -113,6 +113,7 @@ def test_denylist_reason_defaults_to_matched_substring(monkeypatch):
         {"contains": "tp=32", "reason": "deadlocks in NCCL init"},  # missing added
         {"contains": "tp=32", "added": "2026-07-04"},  # missing reason
         {"contains": "tp=32", "reason": " ", "added": "2026-07-04"},  # blank reason
+        {"contains": "tp=32", "reason": "deadlocks", "added": "  "},  # blank added
     ],
 )
 def test_denylist_loader_requires_dated_reason(monkeypatch, tmp_path, entry):
@@ -144,5 +145,20 @@ def test_denylist_loader_accepts_dated_reason(monkeypatch, tmp_path):
     capabilities._load_denylist.cache_clear()
     try:
         assert capabilities._load_denylist() == (("tp=32", "deadlocks in NCCL init"),)
+    finally:
+        capabilities._load_denylist.cache_clear()
+
+
+def test_denylist_loader_rejects_empty_contains(monkeypatch, tmp_path):
+    """An empty substring matches every case string and would suppress the whole collection."""
+    import yaml
+
+    entry = {"contains": "  ", "reason": "deadlocks", "added": "2026-07-04"}
+    (tmp_path / "denylist.yaml").write_text(yaml.safe_dump({"schema_version": 1, "entries": [entry]}))
+    monkeypatch.setattr(capabilities, "_CASES_DIR", tmp_path)
+    capabilities._load_denylist.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="non-empty 'contains'"):
+            capabilities._load_denylist()
     finally:
         capabilities._load_denylist.cache_clear()

@@ -21,7 +21,10 @@ def test_xpu_collectors_use_the_legacy_utility_module():
     assert "from collector.vllm.utils_xpu import" in gemm_source
     assert "from collector.vllm.utils import" not in attention_source
     assert "from collector.vllm.utils import" not in gemm_source
-    assert "collector.vllm.utils" not in moe_source
+    # Match the import form precisely: "collector.vllm.utils" is a substring
+    # of "collector.vllm.utils_xpu", so a bare substring check would reject a
+    # correct utils_xpu import.
+    assert "from collector.vllm.utils import" not in moe_source
 
 
 def test_cuda_collectors_do_not_import_xpu_utilities():
