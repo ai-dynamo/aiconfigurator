@@ -38,15 +38,18 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from codeowners_match import parse_codeowners, resolve_owners  # noqa: E402
+from codeowners_match import parse_codeowners, resolve_owners
 
 
 def load_rosters_tsv(path: Path) -> dict[str, set[str]]:
     members: dict[str, set[str]] = {}
-    for line in path.read_text().splitlines():
+    for line_number, line in enumerate(path.read_text().splitlines(), start=1):
         if not line.strip():
             continue
-        slug, login = line.split("\t")
+        fields = line.split("\t")
+        if len(fields) != 2 or any(not field.strip() for field in fields):
+            raise SystemExit(f"{path}:{line_number}: expected exactly '<team-slug>\\t<login>'")
+        slug, login = (field.strip() for field in fields)
         members.setdefault(slug, set()).add(login)
     return members
 
@@ -76,6 +79,37 @@ def fetch_rosters(org: str, teams: set[str]) -> dict[str, set[str]]:
     return members
 
 
+def required_team_slugs(owners: set[str], org: str | None = None) -> set[str]:
+    """Return every referenced team slug, rejecting cross-org online lookups."""
+    slugs: set[str] = set()
+    for owner in owners:
+        if "/" not in owner:
+            continue
+        if not owner.startswith("@"):
+            raise SystemExit(f"invalid CODEOWNERS team token: {owner!r}")
+        owner_org, slug = owner[1:].split("/", 1)
+        if not owner_org or not slug:
+            raise SystemExit(f"invalid CODEOWNERS team token: {owner!r}")
+        if org is not None and owner_org != org:
+            raise SystemExit(f"cannot expand {owner!r} with --org {org!r}; use a complete offline roster")
+        slugs.add(slug)
+    return slugs
+
+
+def validate_rosters(required: set[str], rosters: dict[str, set[str]]) -> None:
+    """Fail unless every referenced team has at least one known member."""
+    incomplete = sorted(slug for slug in required if not rosters.get(slug))
+    if incomplete:
+        raise SystemExit(
+            "incomplete team rosters for: " + ", ".join(incomplete) + "; refusing to compute misleading approver counts"
+        )
+
+
+def load_corpus(path: Path) -> list[dict]:
+    """Load a JSONL PR corpus, ignoring formatting-only blank lines."""
+    return [json.loads(raw) for raw in path.read_text().splitlines() if raw.strip()]
+
+
 def min_hitting(sets: list[frozenset]) -> int:
     """Exact minimum hitting set size (small inputs only)."""
     sets = [s for s in sets if s]
@@ -93,9 +127,7 @@ def min_hitting(sets: list[frozenset]) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="Min distinct approvers per PR, replayed against CODEOWNERS."
-    )
+    ap = argparse.ArgumentParser(description="Min distinct approvers per PR, replayed against CODEOWNERS.")
     ap.add_argument("--codeowners", required=True, type=Path)
     ap.add_argument(
         "--corpus",
@@ -111,24 +143,22 @@ def main() -> int:
 
     rules = parse_codeowners(args.codeowners.read_text())
     all_teams = {o for _, owners in rules for o in owners}
+    required_slugs = required_team_slugs(all_teams, args.org)
     if args.rosters:
         rosters = load_rosters_tsv(args.rosters)
     else:
         rosters = fetch_rosters(args.org, all_teams)
-        if not rosters:
-            raise SystemExit(
-                "no rosters fetched -- gh unauthenticated or not an org member; "
-                "use --rosters to supply them offline"
-            )
+    validate_rosters(required_slugs, rosters)
 
     def people(owner: str) -> frozenset:
-        slug = owner.split("/", 1)[1] if "/" in owner else owner
-        return frozenset(rosters.get(slug, {owner}))
+        if "/" not in owner:
+            return frozenset({owner})
+        slug = owner.split("/", 1)[1]
+        return frozenset(rosters[slug])
 
     dist: Counter = Counter()
     worst: list[tuple[int, int, int]] = []
-    for raw in args.corpus.read_text().splitlines():
-        pr = json.loads(raw)
+    for pr in load_corpus(args.corpus):
         owner_sets = {
             frozenset(itertools.chain.from_iterable(people(o) for o in owners))
             for f in pr["files"]

@@ -33,12 +33,14 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from codeowners_match import (  # noqa: E402
+from codeowners_match import (
     anchor,
     match,
     parse_codeowners,
     resolve_owners,
 )
+
+DEFAULT_ADVISORY_PATH = Path(__file__).with_name("advisory-reviewers.yaml")
 
 
 def load_advisory(path: Path) -> tuple[list[dict], list[dict]]:
@@ -51,9 +53,7 @@ def load_advisory(path: Path) -> tuple[list[dict], list[dict]]:
     return data.get("path_rules", []) or [], data.get("filetype_rules", []) or []
 
 
-def advisory_for(
-    filepath: str, path_rules: list[dict], filetype_rules: list[dict]
-) -> set[str]:
+def advisory_for(filepath: str, path_rules: list[dict], filetype_rules: list[dict]) -> set[str]:
     """Non-blocking teams an advisory Action would request for ``filepath``."""
     teams: set[str] = set()
     for r in path_rules:
@@ -122,8 +122,7 @@ def _warn_people_unavailable() -> None:
     global _PEOPLE_WARNED
     if not _PEOPLE_WARNED:
         print(
-            "note: team membership is only visible to org members "
-            "(authenticated gh required); showing teams only",
+            "note: team membership is only visible to org members (authenticated gh required); showing teams only",
             file=sys.stderr,
         )
         _PEOPLE_WARNED = True
@@ -156,23 +155,22 @@ def changed_files(repo: str, base: str) -> list[str]:
     If everything fails (not a git checkout, unknown base), the last git
     error is surfaced instead of masquerading as "no changed files".
     """
-    last_err: subprocess.CalledProcessError | None = None
-    any_ok = False
+    last_err: OSError | subprocess.CalledProcessError | None = None
+    diff_ok = False
     changed: list[str] = []
-    for args in ([f"{base}...HEAD"], [base], []):
+    for args in ([f"{base}...HEAD"], [base]):
         try:
             out = subprocess.check_output(
                 ["git", "-C", repo, "diff", "--name-only", *args],
                 text=True,
                 stderr=subprocess.DEVNULL,
             )
-        except subprocess.CalledProcessError as err:
+        except (OSError, subprocess.CalledProcessError) as err:
             last_err = err
             continue
-        any_ok = True
+        diff_ok = True
         changed = [p for p in out.splitlines() if p.strip()]
-        if changed:
-            break
+        break
     untracked: list[str] = []
     try:
         out = subprocess.check_output(
@@ -181,21 +179,25 @@ def changed_files(repo: str, base: str) -> list[str]:
             stderr=subprocess.DEVNULL,
         )
         untracked = [p for p in out.splitlines() if p.strip()]
-        any_ok = True
     except (OSError, subprocess.CalledProcessError):
         pass
-    if not any_ok and last_err is not None:
-        raise SystemExit(
-            f"git diff failed in {repo!r} (not a checkout, or base "
-            f"{base!r} unavailable): {last_err}"
+    if not diff_ok:
+        raise SystemExit(f"git diff failed in {repo!r} (not a checkout, or base {base!r} unavailable): {last_err}")
+    working_tree: list[str] = []
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", repo, "diff", "--name-only"],
+            text=True,
+            stderr=subprocess.DEVNULL,
         )
-    return sorted(set(changed) | set(untracked))
+        working_tree = [p for p in out.splitlines() if p.strip()]
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return sorted(set(changed) | set(working_tree) | set(untracked))
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="Who reviews a path, per a generated CODEOWNERS."
-    )
+    ap = argparse.ArgumentParser(description="Who reviews a path, per a generated CODEOWNERS.")
     ap.add_argument(
         "--codeowners",
         required=True,
@@ -213,9 +215,7 @@ def main() -> int:
         action="store_true",
         help="resolve the repo's changed files instead of explicit paths",
     )
-    ap.add_argument(
-        "--base", default="main", help="base ref for --changed (default: main)"
-    )
+    ap.add_argument("--base", default="main", help="base ref for --changed (default: main)")
     ap.add_argument(
         "--people",
         action="store_true",
@@ -223,13 +223,11 @@ def main() -> int:
         "authenticated gh only; membership is not publicly visible)",
     )
     ap.add_argument("--repo", default=".", help="repo root for --changed (default: .)")
-    ap.add_argument(
-        "paths", nargs="*", help="paths to resolve (when not using --changed)"
-    )
+    ap.add_argument("paths", nargs="*", help="paths to resolve (when not using --changed)")
     args = ap.parse_args()
 
     rules = parse_codeowners(args.codeowners.read_text())
-    adv_path = args.advisory or args.codeowners.parent / "advisory-reviewers.yaml"
+    adv_path = args.advisory or DEFAULT_ADVISORY_PATH
     path_rules, filetype_rules = load_advisory(adv_path)
 
     if args.changed:

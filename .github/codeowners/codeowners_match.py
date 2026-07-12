@@ -40,9 +40,10 @@ import functools
 import re
 import subprocess
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, TypedDict
+from typing import TypedDict
 
 # ----------------------------------------------------------------------
 # Typed shapes (S6)
@@ -155,6 +156,12 @@ def _glob_to_re(pattern: str) -> str:
         c = pattern[i]
         if c == "*":
             if pattern[i : i + 2] == "**":
+                if pattern[i : i + 3] == "**/":
+                    # Git's ``**/`` is zero or more complete directories, so
+                    # ``a/**/b`` must match both ``a/b`` and ``a/x/b``.
+                    out.append("(?:.*/)?")
+                    i += 3
+                    continue
                 out.append(".*")
                 i += 2
                 continue
@@ -183,7 +190,7 @@ def _glob_to_re(pattern: str) -> str:
     return "".join(out)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _compiled(pattern: str) -> re.Pattern[str]:
     return re.compile(_glob_to_re(pattern))
 
@@ -247,6 +254,100 @@ def load_tree(repo: Path) -> list[str]:
     """Return tracked files under ``repo`` via ``git ls-files``."""
     out = subprocess.check_output(["git", "-C", str(repo), "ls-files"], text=True)
     return [p for p in out.splitlines() if p.strip()]
+
+
+# ----------------------------------------------------------------------
+# Taxonomy validation
+# ----------------------------------------------------------------------
+
+
+_GITHUB_LOGIN = r"(?:[A-Za-z0-9]|[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9]))"
+_GITHUB_TEAM_SLUG = r"(?:[A-Za-z0-9]|[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9]))"
+_GITHUB_OWNER_RE = re.compile(rf"^@{_GITHUB_LOGIN}(?:/{_GITHUB_TEAM_SLUG})?$")
+
+
+def validate_github_owner(owner: object, *, field: str) -> str:
+    """Return one valid ``@user`` or ``@org/team`` token, or fail closed."""
+    if not isinstance(owner, str) or _GITHUB_OWNER_RE.fullmatch(owner) is None:
+        raise SystemExit(f"{field} must be one GitHub owner token ('@user' or '@org/team'), got {owner!r}")
+    return owner
+
+
+def _validate_owner_rules(section: str, rules: object, labels: set[str]) -> None:
+    if not isinstance(rules, list):
+        raise SystemExit(f"areas.yaml: {section} must be a list")
+    for index, rule in enumerate(rules):
+        field = f"{section}[{index}]"
+        if not isinstance(rule, dict):
+            raise SystemExit(f"areas.yaml: {field} must be a mapping")
+        owners = rule.get("owners")
+        if not isinstance(owners, list) or not owners:
+            raise SystemExit(f"areas.yaml: {field}.owners must be a non-empty list")
+        for owner in owners:
+            if isinstance(owner, str) and owner in labels:
+                continue
+            validate_github_owner(owner, field=f"areas.yaml: {field}.owners")
+
+
+def _validate_classification_rules(classify: object, labels: set[str]) -> None:
+    if not isinstance(classify, dict):
+        raise SystemExit("areas.yaml: classify must be a mapping")
+
+    keyword_rules = classify.get("keyword_rules", []) or []
+    if not isinstance(keyword_rules, list):
+        raise SystemExit("areas.yaml: classify.keyword_rules must be a list")
+    for index, rule in enumerate(keyword_rules):
+        field = f"classify.keyword_rules[{index}]"
+        if not isinstance(rule, dict):
+            raise SystemExit(f"areas.yaml: {field} must be a mapping")
+        for target in ("area", "coowner"):
+            if target in rule and rule[target] not in labels:
+                raise SystemExit(f"areas.yaml: {field}.{target} must name a declared area; got {rule[target]!r}")
+
+    filetype_rules = classify.get("filetype_rules", []) or []
+    if not isinstance(filetype_rules, list):
+        raise SystemExit("areas.yaml: classify.filetype_rules must be a list")
+    for index, rule in enumerate(filetype_rules):
+        field = f"classify.filetype_rules[{index}]"
+        if not isinstance(rule, dict):
+            raise SystemExit(f"areas.yaml: {field} must be a mapping")
+        if rule.get("coowner") not in labels:
+            raise SystemExit(f"areas.yaml: {field}.coowner must name a declared area; got {rule.get('coowner')!r}")
+
+
+def validate_spec(spec: object) -> None:
+    """Validate ownership-bearing fields before coverage or emission.
+
+    Coverage is a security boundary: a malformed owner must never count as an
+    explicit claim merely because its glob matches a tracked path.
+    """
+    if not isinstance(spec, dict):
+        raise SystemExit("areas.yaml: document must be a mapping")
+
+    meta = spec.get("meta", {}) or {}
+    if not isinstance(meta, dict):
+        raise SystemExit("areas.yaml: meta must be a mapping")
+    validate_github_owner(meta.get("catch_all"), field="areas.yaml: meta.catch_all")
+
+    raw_areas = spec.get("areas", [])
+    if not isinstance(raw_areas, list):
+        raise SystemExit("areas.yaml: areas must be a list")
+    labels: set[str] = set()
+    for index, area in enumerate(raw_areas):
+        field = f"areas[{index}]"
+        if not isinstance(area, dict):
+            raise SystemExit(f"areas.yaml: {field} must be a mapping")
+        label = area.get("label")
+        if not isinstance(label, str) or not label.strip():
+            raise SystemExit(f"areas.yaml: {field}.label must be non-empty")
+        if label in labels:
+            raise SystemExit(f"areas.yaml: duplicate area label {label!r}")
+        labels.add(label)
+        validate_github_owner(area.get("github_team"), field=f"areas.yaml: {field}.github_team")
+
+    _validate_owner_rules("shared", spec.get("shared", []) or [], labels)
+    _validate_owner_rules("advisory", spec.get("advisory", []) or [], labels)
+    _validate_classification_rules(spec.get("classify", {}) or {}, labels)
 
 
 # ----------------------------------------------------------------------
@@ -343,9 +444,7 @@ def _keyword_coownership(
     emitted: list[tuple[str, frozenset[str]]] = [
         (s["glob"].rstrip("/"), frozenset(s["owners"])) for s in existing_shared
     ]
-    all_dirs = sorted(
-        {"/".join(p.split("/")[:i]) for p in tree for i in range(1, len(p.split("/")))}
-    )
+    all_dirs = sorted({"/".join(p.split("/")[:i]) for p in tree for i in range(1, len(p.split("/")))})
     out: list[SharedSpec] = []
     for d in all_dirs:
         if d in explicit_dirs:
@@ -360,10 +459,7 @@ def _keyword_coownership(
             if enc is None or enc == coowner:
                 break
             owners = frozenset((enc, coowner))
-            if any(
-                (d == top or d.startswith(top + "/")) and owners == prev
-                for top, prev in emitted
-            ):
+            if any((d == top or d.startswith(top + "/")) and owners == prev for top, prev in emitted):
                 break
             emitted.append((d, owners))
             out.append({"glob": d + "/", "owners": [enc, coowner]})
@@ -427,6 +523,7 @@ def compute_resolution(spec: dict, tree: list[str]) -> ResolvedModel:
     ``emit_codeowners.py`` (generator) call this -- the gate and the artifact
     cannot disagree because there is no second resolver.
     """
+    validate_spec(spec)
     catch_all = spec.get("meta", {}).get("catch_all", "")
     raw_areas = spec.get("areas", [])
     classify = spec.get("classify", {}) or {}
@@ -434,15 +531,11 @@ def compute_resolution(spec: dict, tree: list[str]) -> ResolvedModel:
     filetype_rules: list[FiletypeRule] = classify.get("filetype_rules", []) or []
 
     label_by = {a["label"]: a["label"] for a in raw_areas}
-    area_globs: dict[str, set[str]] = {
-        a["label"]: set(a.get("path_globs", []) or []) for a in raw_areas
-    }
+    area_globs: dict[str, set[str]] = {a["label"]: set(a.get("path_globs", []) or []) for a in raw_areas}
 
     spec_shared: list[SharedSpec] = spec.get("shared", []) or []
     audit = _auto_classify(tree, area_globs, keyword_rules, label_by)
-    keyword_shared = _keyword_coownership(
-        tree, area_globs, keyword_rules, label_by, spec_shared
-    )
+    keyword_shared = _keyword_coownership(tree, area_globs, keyword_rules, label_by, spec_shared)
     filetype_shared = _filetype_coownership(tree, area_globs, filetype_rules)
 
     areas = [

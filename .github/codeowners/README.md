@@ -1,10 +1,10 @@
-# CODEOWNERS as code
+# CODEOWNERS as Code
 
 This directory generates the repository's root `CODEOWNERS` file from one
 declarative source. **Do not hand-edit `CODEOWNERS`** - it is generated, and CI
 fails if it drifts from the source here. Change `areas.yaml` and regenerate.
 
-## Who reviews my change?
+## Who Reviews My Change?
 
 Usually nothing to do: when you open a PR, GitHub auto-requests the team that
 owns the files you touched. To check explicitly, before pushing:
@@ -33,7 +33,7 @@ adding required approvals.
 | `who_owns.py` | Answers "who reviews this?" for a path or a whole PR. |
 | `test_codeowners.py` | Unit tests for the canonical matcher, the min-cost cover, and external-contributor co-ownership. |
 
-## Change ownership
+## Change Ownership
 
 1. Edit `areas.yaml`: add a glob to an area, add a new area, or adjust the
    `shared` (co-own a path by two teams) block.
@@ -48,9 +48,11 @@ adding required approvals.
      --out CODEOWNERS
    ```
 
-3. Commit `areas.yaml` and `CODEOWNERS` together.
+3. Commit the changed sources and every changed generated output together:
+   `areas.yaml`, `external_contributors.yaml` when applicable, `CODEOWNERS`,
+   `CONTRIBUTORS.md`, and `advisory-reviewers.yaml` when present.
 
-## External contributors
+## External Contributors
 
 An external individual who has earned ownership of an area is granted it by
 attaching them to that area's **label** in `external_contributors.yaml` -- never
@@ -79,14 +81,19 @@ Regenerating `CODEOWNERS` also regenerates `CONTRIBUTORS.md`; the
 from the same directory by default. Commit the two source files and both
 generated outputs together.
 
-## How it stays correct (CI)
+## How It Stays Correct (CI)
 
 `.github/workflows/codeowners.yml` runs on every PR and fails if:
 
+- `.github/CODEOWNERS` or `docs/CODEOWNERS` exists and would shadow the
+  generated root policy;
 - any tracked file falls through to no owner (**coverage gate**) - a new
   directory no area claims blocks the PR until `areas.yaml` is updated; or
 - the committed `CODEOWNERS` or `CONTRIBUTORS.md` differs from what the sources
   produce (**drift check**) - so the outputs always match their sources.
+
+The workflow makes violations visible. Repository rules must also require the
+`codeowners` check before merge for those failures to be merge-blocking.
 
 ## Notes
 

@@ -25,7 +25,7 @@
 #                  contributor | trusted_contributor | maintainer | core_maintainer
 #                (human spellings like "Core Maintainer" are accepted and normalized)
 #   affiliation: optional org/company (shown in CONTRIBUTORS.md)
-#   areas:       one or more area labels from areas.yaml (e.g. router, kv-memory)
+#   areas:       one or more area labels from areas.yaml (e.g. runtime, generators)
 #
 # `level` is standing metadata (shown in CONTRIBUTORS.md); it does not change
 # CODEOWNERS routing. Co-ownership is granted by the `areas` a contributor is

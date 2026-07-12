@@ -40,13 +40,14 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
-from codeowners_match import (  # noqa: E402
+from codeowners_match import (
     ResolvedModel,
     anchor,
     compute_resolution,
     load_tree,
     minimal_cover,
     resolve_owners,
+    validate_github_owner,
 )
 
 
@@ -66,7 +67,25 @@ def _github(c: dict) -> str:
     if not gh:
         who = c.get("name") or "<unnamed>"
         raise SystemExit(f"external_contributors.yaml: {who!r} is missing 'github'")
-    return str(gh)
+    github = str(gh).strip()
+    handle = _handle(github)
+    validate_github_owner(handle, field="external_contributors.yaml: github")
+    if "/" in handle:
+        raise SystemExit(f"external_contributors.yaml: github must identify one user, not a team: {github!r}")
+    return github
+
+
+def _contributor_areas(c: dict) -> list[str]:
+    """Required non-empty list of area labels for one external contributor."""
+    who = c.get("name") or c.get("github") or "<unnamed>"
+    areas = c.get("areas")
+    if (
+        not isinstance(areas, list)
+        or not areas
+        or any(not isinstance(label, str) or not label.strip() for label in areas)
+    ):
+        raise SystemExit(f"external_contributors.yaml: {who!r} must declare a non-empty list of area labels")
+    return areas
 
 
 # Contributor standing, ordered low -> high. The rank drives CONTRIBUTORS.md
@@ -98,14 +117,12 @@ def contributor_level(c: dict) -> str:
     raw = c.get("level")
     if raw is None:
         raise SystemExit(
-            f"external_contributors.yaml: {who!r} is missing 'level' "
-            f"(one of: {', '.join(CONTRIBUTOR_LEVELS)})"
+            f"external_contributors.yaml: {who!r} is missing 'level' (one of: {', '.join(CONTRIBUTOR_LEVELS)})"
         )
     key = str(raw).strip().lower().replace(" ", "_").replace("-", "_")
     if key not in LEVEL_RANK:
         raise SystemExit(
-            f"external_contributors.yaml: invalid level {raw!r} for {who!r} "
-            f"(one of: {', '.join(CONTRIBUTOR_LEVELS)})"
+            f"external_contributors.yaml: invalid level {raw!r} for {who!r} (one of: {', '.join(CONTRIBUTOR_LEVELS)})"
         )
     return key
 
@@ -118,9 +135,7 @@ def load_external_contributors(path: Path) -> list[dict]:
     return data.get("contributors") or []
 
 
-def team_externals_map(
-    contributors: list[dict], label_to_team: dict[str, str]
-) -> dict[str, list[str]]:
+def team_externals_map(contributors: list[dict], label_to_team: dict[str, str]) -> dict[str, list[str]]:
     """Map each area team -> the external ``@handles`` co-owning that area.
 
     A contributor attaches to area LABELS (not globs); each label resolves to
@@ -131,7 +146,7 @@ def team_externals_map(
     mapping: dict[str, list[str]] = {}
     for c in contributors:
         handle = _handle(_github(c))
-        for label in c.get("areas", []) or []:
+        for label in _contributor_areas(c):
             team = label_to_team.get(label)
             if team is None:
                 raise SystemExit(
@@ -184,6 +199,9 @@ def render_contributors_md(contributors: list[dict]) -> str:
     if not contributors:
         lines += ["_No external contributors yet._", ""]
         return "\n".join(lines)
+    for contributor in contributors:
+        _github(contributor)
+        _contributor_areas(contributor)
     lines += [
         "| Contributor | Level | GitHub | Affiliation | Areas |",
         "| --- | --- | --- | --- | --- |",
@@ -200,7 +218,7 @@ def render_contributors_md(contributors: list[dict]) -> str:
         gh_link = f"[{handle}](https://github.com/{handle.lstrip('@')})"
         level = LEVEL_DISPLAY[contributor_level(c)]
         affiliation = c.get("affiliation") or "n/a"
-        areas = ", ".join(f"`{label}`" for label in (c.get("areas", []) or [])) or "n/a"
+        areas = ", ".join(f"`{label}`" for label in _contributor_areas(c))
         name = c.get("name", handle)
         lines.append(f"| {name} | {level} | {gh_link} | {affiliation} | {areas} |")
     lines.append("")
@@ -255,17 +273,11 @@ def _render_codeowners(
     base_rules = _base_rules(model, tree)
 
     shared_rules = sorted(
-        (
-            (anchor(s["glob"]), _owners_str(label_to_team, s["owners"]))
-            for s in model.shared
-        ),
+        ((anchor(s["glob"]), _owners_str(label_to_team, s["owners"])) for s in model.shared),
         key=lambda r: (len(r[0]), r[0]),
     )
     ft_rules = sorted(
-        (
-            (anchor(fs.glob), _owners_str(label_to_team, fs.owners))
-            for fs in model.filetype_shared
-        ),
+        ((anchor(fs.glob), _owners_str(label_to_team, fs.owners)) for fs in model.filetype_shared),
         key=lambda r: (len(r[0]), r[0]),
     )
 
@@ -279,9 +291,7 @@ def _render_codeowners(
     dir_rules = [(p, t) for p, t in base_rules if p.endswith("/")]
 
     def is_override(path: str, team: str) -> bool:
-        return any(
-            tp != team and path != pp and path.startswith(pp) for pp, tp in dir_rules
-        )
+        return any(tp != team and path != pp and path.startswith(pp) for pp, tp in dir_rules)
 
     groups: dict[str, list[tuple[str, str]]] = {}
     overrides: list[tuple[str, str]] = []
@@ -402,12 +412,8 @@ def _render_advisory(model: ResolvedModel) -> dict | None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--areas", required=True, help="path to areas.yaml (source of truth)"
-    )
-    ap.add_argument(
-        "--repo", default=".", help="repo whose tree the cover is built against"
-    )
+    ap.add_argument("--areas", required=True, help="path to areas.yaml (source of truth)")
+    ap.add_argument("--repo", default=".", help="repo whose tree the cover is built against")
     ap.add_argument("--out", default="CODEOWNERS", help="CODEOWNERS output path")
     ap.add_argument(
         "--advisory-out",
@@ -435,23 +441,12 @@ def main() -> int:
     tree = load_tree(Path(args.repo))
     model = compute_resolution(spec, tree)
 
-    external_path = (
-        Path(args.external)
-        if args.external
-        else Path(args.areas).parent / "external_contributors.yaml"
-    )
+    external_path = Path(args.external) if args.external else Path(args.areas).parent / "external_contributors.yaml"
     external = load_external_contributors(external_path)
 
-    lines, stats = _render_codeowners(
-        model, tree, group=not args.no_group, external=external
-    )
+    lines, stats = _render_codeowners(model, tree, group=not args.no_group, external=external)
     Path(args.out).write_text("\n".join(lines) + "\n")
-    total = (
-        stats["base"]
-        + stats["shared"]
-        + stats["filetype"]
-        + (1 if model.catch_all else 0)
-    )
+    total = stats["base"] + stats["shared"] + stats["filetype"] + (1 if model.catch_all else 0)
     print(
         f"wrote {args.out} | rules: {total} (base {stats['base']} | "
         f"shared {stats['shared']} | file-type {stats['filetype']}) | "
@@ -464,17 +459,10 @@ def main() -> int:
     print(f"wrote {args.contributors_out} ({len(external)} external contributor(s))")
 
     adv = _render_advisory(model)
-    adv_out = (
-        Path(args.advisory_out)
-        if args.advisory_out
-        else Path(args.areas).parent / "advisory-reviewers.yaml"
-    )
+    adv_out = Path(args.advisory_out) if args.advisory_out else Path(args.areas).parent / "advisory-reviewers.yaml"
     if adv is not None:
         adv_out.write_text(yaml.safe_dump(adv, sort_keys=False, width=120))
-        print(
-            f"wrote {adv_out} ({len(model.advisory)} path + "
-            f"{len(model.filetype_advisory)} filetype advisory rules)"
-        )
+        print(f"wrote {adv_out} ({len(model.advisory)} path + {len(model.filetype_advisory)} filetype advisory rules)")
     elif adv_out.exists():
         # The last advisory rule was removed from areas.yaml; a stale file
         # would keep driving obsolete reviewer requests.

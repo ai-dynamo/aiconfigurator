@@ -24,8 +24,8 @@ import pytest
 # Allow `import codeowners_match` when pytest runs from the repo root.
 sys.path.insert(0, str(Path(__file__).parent))
 
-import who_owns  # noqa: E402
-from codeowners_match import (  # noqa: E402
+import who_owns
+from codeowners_match import (
     Area,
     ResolvedModel,
     SharedSpec,
@@ -35,7 +35,7 @@ from codeowners_match import (  # noqa: E402
     minimal_cover,
     resolve_owners,
 )
-from emit_codeowners import (  # noqa: E402
+from emit_codeowners import (
     CONTRIBUTOR_LEVELS,
     _handle,
     _render_codeowners,
@@ -85,6 +85,13 @@ class TestMatchAnchoredFile:
         assert not match("/lib/*.rs", "lib/sub/foo.rs")
         assert match("/lib/**.rs", "lib/sub/foo.rs")
         assert match("/lib/**/foo.rs", "lib/a/b/foo.rs")
+
+    @pytest.mark.parametrize(
+        "path",
+        ["lib/foo.rs", "lib/a/foo.rs", "lib/a/b/foo.rs"],
+    )
+    def test_double_star_directory_matches_zero_one_or_many_levels(self, path: str) -> None:
+        assert match("/lib/**/foo.rs", path)
 
     def test_question_mark_stays_in_segment(self) -> None:
         assert match("/lib/?.rs", "lib/a.rs")
@@ -366,26 +373,18 @@ class TestComputeResolution:
         # A keyword rule with only `coowner` co-owns matching dirs with the
         # enclosing area instead of being silently inert.
         spec = self._spec()
-        spec["classify"]["keyword_rules"].append(
-            {"match": "metrics", "coowner": "docs"}
-        )
+        spec["classify"]["keyword_rules"].append({"match": "metrics", "coowner": "docs"})
         tree = self._tree() + ["lib/llm/metrics/gauge.rs"]
         model = compute_resolution(spec, tree)
-        assert {"glob": "lib/llm/metrics/", "owners": ["runtime", "docs"]} in (
-            model.keyword_coowned
-        )
+        assert {"glob": "lib/llm/metrics/", "owners": ["runtime", "docs"]} in (model.keyword_coowned)
         assert model.keyword_coowned[-1] in model.shared
 
     def test_keyword_coowner_defers_to_explicit_shared(self) -> None:
         # A hand-declared shared: entry for the same dir wins -- the keyword
         # rule must not emit a duplicate (or conflicting) row.
         spec = self._spec()
-        spec["classify"]["keyword_rules"].append(
-            {"match": "metrics", "coowner": "docs"}
-        )
-        spec["shared"].append(
-            {"glob": "lib/llm/metrics/", "owners": ["runtime", "docs"]}
-        )
+        spec["classify"]["keyword_rules"].append({"match": "metrics", "coowner": "docs"})
+        spec["shared"].append({"glob": "lib/llm/metrics/", "owners": ["runtime", "docs"]})
         tree = self._tree() + ["lib/llm/metrics/gauge.rs"]
         model = compute_resolution(spec, tree)
         assert model.keyword_coowned == []
@@ -395,9 +394,7 @@ class TestComputeResolution:
     def test_keyword_coowner_skips_unowned_dirs(self) -> None:
         # No enclosing area -> no co-ownership row; the gate flags the dir.
         spec = self._spec()
-        spec["classify"]["keyword_rules"].append(
-            {"match": "metrics", "coowner": "docs"}
-        )
+        spec["classify"]["keyword_rules"].append({"match": "metrics", "coowner": "docs"})
         tree = self._tree() + ["orphan/metrics/gauge.rs"]
         model = compute_resolution(spec, tree)
         assert not any("orphan" in s["glob"] for s in model.keyword_coowned)
@@ -448,6 +445,9 @@ class TestTeamMembers:
 
 
 class TestChangedFiles:
+    def test_default_advisory_path_is_beside_script(self) -> None:
+        assert Path(who_owns.__file__).with_name("advisory-reviewers.yaml") == who_owns.DEFAULT_ADVISORY_PATH
+
     def test_includes_untracked_files(self, tmp_path) -> None:
         # Brand-new (unstaged) files are the ones the coverage gate cares
         # about most; `git diff` alone never lists them.
@@ -455,9 +455,7 @@ class TestChangedFiles:
         repo.mkdir()
 
         def git(*args: str) -> None:
-            subprocess.check_output(
-                ["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL
-            )
+            subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL)
 
         git("init", "-q")
         git("config", "user.email", "t@example.com")
@@ -470,6 +468,45 @@ class TestChangedFiles:
 
         files = who_owns.changed_files(str(repo), "HEAD")
         assert files == ["brand_new.txt", "tracked.txt"]
+
+    def test_invalid_base_fails_even_when_worktree_has_changes(self, tmp_path) -> None:
+        repo = tmp_path / "r"
+        repo.mkdir()
+
+        def git(*args: str) -> None:
+            subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL)
+
+        git("init", "-q")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        (repo / "tracked.txt").write_text("x")
+        git("add", "tracked.txt")
+        git("commit", "-q", "-m", "init")
+        (repo / "tracked.txt").write_text("y")
+        (repo / "brand_new.txt").write_text("z")
+
+        with pytest.raises(SystemExit, match="base 'does-not-exist' unavailable"):
+            who_owns.changed_files(str(repo), "does-not-exist")
+
+    def test_branch_behind_base_has_no_changed_files(self, tmp_path) -> None:
+        repo = tmp_path / "r"
+        repo.mkdir()
+
+        def git(*args: str) -> None:
+            subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL)
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        (repo / "tracked.txt").write_text("base")
+        git("add", "tracked.txt")
+        git("commit", "-q", "-m", "init")
+        git("branch", "feature")
+        (repo / "tracked.txt").write_text("main advanced")
+        git("commit", "-q", "-am", "main update")
+        git("switch", "-q", "feature")
+
+        assert who_owns.changed_files(str(repo), "main") == []
 
 
 # ------------------------------------------------------------------
@@ -540,6 +577,18 @@ class TestTeamExternalsMap:
         with pytest.raises(SystemExit):
             team_externals_map(contributors, self._label_to_team())
 
+    @pytest.mark.parametrize("github", ["bad user", "acme/runtime"])
+    def test_invalid_individual_github_handle_is_fatal(self, github: str) -> None:
+        contributors = [{"name": "Jane", "github": github, "areas": ["router"]}]
+        with pytest.raises(SystemExit):
+            team_externals_map(contributors, self._label_to_team())
+
+    @pytest.mark.parametrize("areas", [None, [], "router"])
+    def test_missing_or_empty_areas_are_fatal(self, areas) -> None:
+        contributors = [{"name": "Jane", "github": "jane", "areas": areas}]
+        with pytest.raises(SystemExit, match="non-empty list of area labels"):
+            team_externals_map(contributors, self._label_to_team())
+
 
 class TestDecorateOwners:
     def test_appends_handle_for_matching_team(self) -> None:
@@ -568,14 +617,8 @@ class TestContributorLevel:
             assert contributor_level({"name": "x", "level": lvl}) == lvl
 
     def test_human_spelling_normalized(self) -> None:
-        assert (
-            contributor_level({"name": "x", "level": "Core Maintainer"})
-            == "core_maintainer"
-        )
-        assert (
-            contributor_level({"name": "x", "level": "trusted-contributor"})
-            == "trusted_contributor"
-        )
+        assert contributor_level({"name": "x", "level": "Core Maintainer"}) == "core_maintainer"
+        assert contributor_level({"name": "x", "level": "trusted-contributor"}) == "trusted_contributor"
 
     def test_missing_level_is_fatal(self) -> None:
         with pytest.raises(SystemExit):

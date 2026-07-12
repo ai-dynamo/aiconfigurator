@@ -27,14 +27,12 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
-from codeowners_match import compute_resolution, load_tree, match  # noqa: E402
+from codeowners_match import compute_resolution, load_tree, match
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--areas", required=True, help="path to areas.yaml (source of truth)"
-    )
+    ap.add_argument("--areas", required=True, help="path to areas.yaml (source of truth)")
     ap.add_argument("--repo", required=True, help="path to the target git repo")
     ap.add_argument(
         "--strict",
@@ -57,10 +55,7 @@ def main() -> int:
     pct = (100 * n_owned / n_tree) if n_tree else 100.0
 
     print(f"areas: {len(model.areas)} | tree files: {n_tree}")
-    print(
-        f"explicitly owned: {n_owned}/{n_tree} ({pct:.2f}%) | "
-        f"catch-all only: {len(unmatched)}"
-    )
+    print(f"explicitly owned: {n_owned}/{n_tree} ({pct:.2f}%) | catch-all only: {len(unmatched)}")
     print(f"auto-classified new dirs: {len(model.auto_classified)}")
     for d, lbl in model.auto_classified[:20]:
         print(f"    {d} -> {lbl}")
@@ -71,10 +66,7 @@ def main() -> int:
         print("catch-all-only sample (add an area or classify rule to cover these):")
         print("   ", unmatched[:15])
     if dead:
-        print(
-            f"globs matching no files: {len(dead)} "
-            "(prune from areas.yaml when the paths are gone; never blocking):"
-        )
+        print(f"globs matching no files: {len(dead)} (prune from areas.yaml when the paths are gone; never blocking):")
         for g in dead[:10]:
             print(f"    {g}")
     print("\nper-area glob counts:")
@@ -83,10 +75,7 @@ def main() -> int:
         print(f"  {lbl:<22} {c}")
 
     if args.strict and unmatched:
-        print(
-            f"!! strict: {len(unmatched)} file(s) fall to the catch-all -- "
-            "cover them in areas.yaml"
-        )
+        print(f"!! strict: {len(unmatched)} file(s) fall to the catch-all -- cover them in areas.yaml")
         return 1
     return 0
 
