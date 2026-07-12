@@ -94,12 +94,16 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsa_context_module_test_cases",
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_CONTEXT_MODULE,
-        # SM103's bundled TRTLLM-GEN capability check rejects the target.
+        # SM103 UNPARKED by hardware probe (B300, 2026-07-13, pipeline
+        # 57716023): 32+32 sampled cases ran clean — 9,826 rows across all
+        # three kernel buckets (dense_mha_trtllm_ragged, indexer_flashmla_
+        # sparse, indexer_trtllm), zero errors. The earlier "TRTLLM-GEN
+        # capability check rejects SM103" claim was source-derived and wrong.
         # SM120 stays parked: the RTX 6000 Pro probe (2026-07-06) confirmed
         # 0.5.14 forces the TRTLLM-GEN sub-backend there and every case
         # raises "Unsupported architecture" (fmhaRunner.cuh:37) — hardware
         # confirmation of the ledger's DSA-SUBBACKEND-SELECTOR row.
-        unverified_sms=(103, 120),
+        unverified_sms=(120,),
     ),
     OpEntry(
         op="dsa_generation_module",
@@ -107,7 +111,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsa_generation_module_test_cases",
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_GENERATION_MODULE,
-        unverified_sms=(103, 120),
+        unverified_sms=(120,),
     ),
     # GLM-5.2 skip-indexer layers (index_topk_freq>1): same shapes as the full
     # DSA module, but the per-layer indexer (mqa+topk+index-K store) is patched
