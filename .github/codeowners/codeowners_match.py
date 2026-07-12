@@ -59,7 +59,7 @@ class Area(TypedDict, total=False):
 
 
 class SharedSpec(TypedDict):
-    """Multi-owner override (``shared:``/``advisory:`` entry)."""
+    """Multi-owner override (``shared:`` entry)."""
 
     glob: str
     owners: list[str]
@@ -69,13 +69,11 @@ class FiletypeRule(TypedDict, total=False):
     """Filetype-level rule (``classify.filetype_rules`` entry).
 
     ``pattern`` is the single source of truth for the glob; ``coowner`` names
-    the area that joins the enclosing owner; ``advisory: true`` routes the
-    rule to the non-blocking advisory file instead of CODEOWNERS.
+    the area that joins the enclosing owner.
     """
 
     pattern: str
     coowner: str
-    advisory: bool
 
 
 @dataclass
@@ -107,9 +105,7 @@ class ResolvedModel:
     catch_all: str
     areas: list[ResolvedArea]
     shared: list[SharedSpec]
-    advisory: list[SharedSpec]
     filetype_shared: list[FiletypeShared]
-    filetype_advisory: list[FiletypeRule]
     auto_classified: list[tuple[str, str]] = field(default_factory=list)
     keyword_coowned: list[SharedSpec] = field(default_factory=list)
     meta: dict = field(default_factory=dict)
@@ -311,6 +307,8 @@ def _validate_classification_rules(classify: object, labels: set[str]) -> None:
         field = f"classify.filetype_rules[{index}]"
         if not isinstance(rule, dict):
             raise SystemExit(f"areas.yaml: {field} must be a mapping")
+        if "advisory" in rule:
+            raise SystemExit(f"areas.yaml: {field}.advisory was removed; use blocking CODEOWNERS ownership")
         if rule.get("coowner") not in labels:
             raise SystemExit(f"areas.yaml: {field}.coowner must name a declared area; got {rule.get('coowner')!r}")
 
@@ -323,6 +321,8 @@ def validate_spec(spec: object) -> None:
     """
     if not isinstance(spec, dict):
         raise SystemExit("areas.yaml: document must be a mapping")
+    if "advisory" in spec:
+        raise SystemExit("areas.yaml: advisory was removed; use shared blocking CODEOWNERS ownership")
 
     meta = spec.get("meta", {}) or {}
     if not isinstance(meta, dict):
@@ -346,7 +346,6 @@ def validate_spec(spec: object) -> None:
         validate_github_owner(area.get("github_team"), field=f"areas.yaml: {field}.github_team")
 
     _validate_owner_rules("shared", spec.get("shared", []) or [], labels)
-    _validate_owner_rules("advisory", spec.get("advisory", []) or [], labels)
     _validate_classification_rules(spec.get("classify", {}) or {}, labels)
 
 
@@ -492,8 +491,6 @@ def _filetype_coownership(
 
     out: list[FiletypeShared] = []
     for rule in filetype_rules:
-        if rule.get("advisory"):
-            continue
         pattern = rule.get("pattern")
         coowner = rule["coowner"]
         if not pattern:
@@ -546,15 +543,11 @@ def compute_resolution(spec: dict, tree: list[str]) -> ResolvedModel:
         )
         for a in raw_areas
     ]
-    filetype_advisory = [r for r in filetype_rules if r.get("advisory")]
-
     return ResolvedModel(
         catch_all=catch_all,
         areas=areas,
         shared=spec_shared + keyword_shared,
-        advisory=spec.get("advisory", []) or [],
         filetype_shared=filetype_shared,
-        filetype_advisory=filetype_advisory,
         auto_classified=audit,
         keyword_coowned=keyword_shared,
         meta=dict(spec.get("meta", {})),

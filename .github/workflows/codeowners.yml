@@ -77,13 +77,9 @@ jobs:
             --external .github/codeowners/external_contributors.yaml \
             --contributors-out CONTRIBUTORS.md
           if [[ -n "$(git status --porcelain --untracked-files=all -- \
-              CODEOWNERS CONTRIBUTORS.md \
-              .github/codeowners/advisory-reviewers.yaml)" ]]; then
-            git diff -- CODEOWNERS CONTRIBUTORS.md \
-              .github/codeowners/advisory-reviewers.yaml || true
-            git status --short --untracked-files=all -- \
-              CODEOWNERS CONTRIBUTORS.md \
-              .github/codeowners/advisory-reviewers.yaml
+              CODEOWNERS CONTRIBUTORS.md)" ]]; then
+            git diff -- CODEOWNERS CONTRIBUTORS.md || true
+            git status --short --untracked-files=all -- CODEOWNERS CONTRIBUTORS.md
             echo "::error::Generated CODEOWNERS artifacts are out of date. Regenerate from areas.yaml + external_contributors.yaml and commit every changed output."
             exit 1
           fi

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fail-closed input validation for the CODEOWNERS toolchain."""
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -64,7 +65,6 @@ class TestSpecValidation:
                 },
             ],
             "shared": [],
-            "advisory": [],
             "classify": {"keyword_rules": [], "filetype_rules": []},
         }
 
@@ -94,17 +94,15 @@ class TestSpecValidation:
         with pytest.raises(SystemExit, match="one GitHub owner token"):
             compute_resolution(spec, [])
 
-    @pytest.mark.parametrize("section", ["shared", "advisory"])
-    def test_rejects_empty_rule_owners(self, section: str) -> None:
+    def test_rejects_empty_rule_owners(self) -> None:
         spec = self._spec()
-        spec[section] = [{"glob": "src/", "owners": []}]
+        spec["shared"] = [{"glob": "src/", "owners": []}]
         with pytest.raises(SystemExit, match="owners must be a non-empty list"):
             compute_resolution(spec, ["src/main.py"])
 
-    @pytest.mark.parametrize("section", ["shared", "advisory"])
-    def test_rejects_unknown_rule_owner(self, section: str) -> None:
+    def test_rejects_unknown_rule_owner(self) -> None:
         spec = self._spec()
-        spec[section] = [{"glob": "src/", "owners": ["runntime"]}]
+        spec["shared"] = [{"glob": "src/", "owners": ["runntime"]}]
         with pytest.raises(SystemExit, match="one GitHub owner token"):
             compute_resolution(spec, ["src/main.py"])
 
@@ -113,6 +111,33 @@ class TestSpecValidation:
         spec["shared"] = [{"glob": "src/", "owners": ["runtime", "@acme/security"]}]
         model = compute_resolution(spec, ["src/main.py"])
         assert model.shared == spec["shared"]
+
+    @pytest.mark.parametrize("legacy_config", ["top-level", "filetype"])
+    def test_rejects_removed_advisory_config(self, legacy_config: str) -> None:
+        spec = self._spec()
+        if legacy_config == "top-level":
+            spec["advisory"] = [{"glob": "src/", "owners": ["docs"]}]
+        else:
+            spec["classify"]["filetype_rules"] = [
+                {"pattern": "*.md", "coowner": "docs", "advisory": True},
+            ]
+        with pytest.raises(SystemExit, match="advisory was removed"):
+            compute_resolution(spec, ["src/README.md"])
+
+    def test_removed_advisory_cli_flags_are_not_advertised(self) -> None:
+        scripts_and_flags = [
+            ("emit_codeowners.py", "--advisory-out"),
+            ("who_owns.py", "--advisory"),
+        ]
+        for script, removed_flag in scripts_and_flags:
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).with_name(script)), "--help"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert result.returncode == 0
+            assert removed_flag not in result.stdout
 
     @pytest.mark.parametrize(
         ("kind", "rule"),

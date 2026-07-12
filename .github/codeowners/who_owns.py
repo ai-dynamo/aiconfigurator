@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""who_owns.py -- "who reviews this?" from a generated CODEOWNERS (+ advisory).
+"""who_owns.py -- "who reviews this?" from a generated CODEOWNERS.
 
 The CODEOWNERS file is a machine input: GitHub auto-requests the owning team
 when a PR opens. This tool answers the human question on demand, so nobody
@@ -18,7 +18,7 @@ has to read 300 rules to find a reviewer.
   python who_owns.py --codeowners CODEOWNERS --changed --people
 
 Owners listed on a single line are co-owners (any one's approval satisfies
-the gate). Advisory teams are auto-requested too, but never block the merge.
+the gate).
 
 The CODEOWNERS parser and matcher live in ``codeowners_match`` so this tool
 resolves a path exactly the same way ``emit_codeowners.py`` routes it -- there
@@ -33,39 +33,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from codeowners_match import (
-    anchor,
-    match,
-    parse_codeowners,
-    resolve_owners,
-)
-
-DEFAULT_ADVISORY_PATH = Path(__file__).with_name("advisory-reviewers.yaml")
-
-
-def load_advisory(path: Path) -> tuple[list[dict], list[dict]]:
-    """Return (path_rules, filetype_rules) from an advisory-reviewers.yaml."""
-    if not path.exists():
-        return [], []
-    import yaml
-
-    data = yaml.safe_load(path.read_text()) or {}
-    return data.get("path_rules", []) or [], data.get("filetype_rules", []) or []
-
-
-def advisory_for(filepath: str, path_rules: list[dict], filetype_rules: list[dict]) -> set[str]:
-    """Non-blocking teams an advisory Action would request for ``filepath``."""
-    teams: set[str] = set()
-    for r in path_rules:
-        pat = r.get("path", "")
-        if pat and match(anchor(pat), filepath):
-            teams.update(r.get("request_review_from", []))
-    for r in filetype_rules:
-        pat = r.get("pattern", "")
-        if pat and match(pat, filepath):
-            teams.update(r.get("request_review_from", []))
-    return teams
-
+from codeowners_match import parse_codeowners, resolve_owners
 
 _TEAM_CACHE: dict[str, list[str] | None] = {}
 _PEOPLE_WARNED = False
@@ -151,6 +119,9 @@ def changed_files(repo: str, base: str) -> list[str]:
     exactly the ones the coverage gate cares about, and ``git diff`` alone
     never shows them.
 
+    Unstaged working-tree edits are included so local modifications that are
+    not yet in the index still appear in the result.
+
     Returns ``[]`` only when the lookups actually succeeded and were empty.
     If everything fails (not a git checkout, unknown base), the last git
     error is surfaced instead of masquerading as "no changed files".
@@ -205,12 +176,6 @@ def main() -> int:
         help="path to the CODEOWNERS file",
     )
     ap.add_argument(
-        "--advisory",
-        type=Path,
-        default=None,
-        help="advisory-reviewers.yaml (default: alongside CODEOWNERS)",
-    )
-    ap.add_argument(
         "--changed",
         action="store_true",
         help="resolve the repo's changed files instead of explicit paths",
@@ -227,9 +192,6 @@ def main() -> int:
     args = ap.parse_args()
 
     rules = parse_codeowners(args.codeowners.read_text())
-    adv_path = args.advisory or DEFAULT_ADVISORY_PATH
-    path_rules, filetype_rules = load_advisory(adv_path)
-
     if args.changed:
         files = changed_files(args.repo, args.base)
         if not files:
@@ -244,34 +206,23 @@ def main() -> int:
     # touch many files, so people are shown once in the union summary instead.
     expand_paths = args.people and not args.changed
     union_owners: set[str] = set()
-    union_advisory: set[str] = set()
     for f in files:
         owners = resolve_owners(rules, f)
-        adv = advisory_for(f, path_rules, filetype_rules) - set(owners)
         union_owners.update(owners)
-        union_advisory.update(adv)
         owners_str = (
             " ".join(_with_people(o) if expand_paths else o for o in owners)
             if owners
             else "(no owner -- falls through; CI coverage gate should block this)"
         )
-        line = f"{f}\n    review: {owners_str}"
-        if adv:
-            line += f"\n    advisory (non-blocking): {' '.join(sorted(adv))}"
-        print(line)
+        print(f"{f}\n    review: {owners_str}")
 
     if args.changed:
-        union_advisory -= union_owners
         print("\n" + "=" * 60)
         print(f"Teams auto-requested on this PR ({len(union_owners)}):")
         for t in sorted(union_owners):
             print(f"  {_with_people(t) if args.people else t}")
             if args.people and (url := _team_url(t)):
                 print(f"      {url}")
-        if union_advisory:
-            print(f"Advisory (non-blocking), {len(union_advisory)}:")
-            for t in sorted(union_advisory):
-                print(f"  {t}")
     return 0
 
 

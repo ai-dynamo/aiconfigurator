@@ -50,7 +50,7 @@ adding required approvals.
 
 3. Commit the changed sources and every changed generated output together:
    `areas.yaml`, `external_contributors.yaml` when applicable, `CODEOWNERS`,
-   `CONTRIBUTORS.md`, and `advisory-reviewers.yaml` when present.
+   and `CONTRIBUTORS.md`.
 
 ## External Contributors
 

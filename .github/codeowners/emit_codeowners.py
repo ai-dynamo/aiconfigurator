@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Emit a GitHub CODEOWNERS file (+ advisory-reviewers.yaml) from areas.yaml.
+"""Emit a GitHub CODEOWNERS file from areas.yaml.
 
 GitHub CODEOWNERS is last-match-wins. The base tier is emitted as a *minimal
 last-match cover* (broad parent globs + carve-out exceptions) computed against
@@ -26,7 +26,6 @@ Usage:
   uv run python .github/codeowners/emit_codeowners.py \\
       --areas .github/codeowners/areas.yaml --repo . \\
       --out CODEOWNERS \\
-      --advisory-out .github/codeowners/advisory-reviewers.yaml \\
       --external .github/codeowners/external_contributors.yaml \\
       --contributors-out CONTRIBUTORS.md
 """
@@ -376,50 +375,11 @@ def _render_codeowners(
     return lines, stats
 
 
-def _render_advisory(model: ResolvedModel) -> dict | None:
-    """Build the advisory-reviewers.yaml body, or ``None`` if no advisory rules."""
-    if not model.advisory and not model.filetype_advisory:
-        return None
-    label_to_team = model.label_to_team()
-    adv: dict = {
-        "_comment": (
-            "Non-blocking auto-request reviewers. Consumed by a review-request "
-            "Action, NOT by CODEOWNERS. path_rules match path globs; "
-            "filetype_rules match file globs by basename across the whole tree."
-        ),
-        "path_rules": [],
-        "filetype_rules": [],
-    }
-    for s in model.advisory:
-        adv["path_rules"].append(
-            {
-                "path": s["glob"],
-                "request_review_from": [label_to_team.get(o, o) for o in s["owners"]],
-            }
-        )
-    for r in model.filetype_advisory:
-        pattern = r.get("pattern")
-        if not pattern:
-            continue
-        adv["filetype_rules"].append(
-            {
-                "pattern": pattern,
-                "request_review_from": [label_to_team.get(r["coowner"], r["coowner"])],
-            }
-        )
-    return adv
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--areas", required=True, help="path to areas.yaml (source of truth)")
     ap.add_argument("--repo", default=".", help="repo whose tree the cover is built against")
     ap.add_argument("--out", default="CODEOWNERS", help="CODEOWNERS output path")
-    ap.add_argument(
-        "--advisory-out",
-        default=None,
-        help="advisory config output (default: alongside --areas)",
-    )
     ap.add_argument(
         "--external",
         default=None,
@@ -458,16 +418,6 @@ def main() -> int:
     Path(args.contributors_out).write_text(contributors_md)
     print(f"wrote {args.contributors_out} ({len(external)} external contributor(s))")
 
-    adv = _render_advisory(model)
-    adv_out = Path(args.advisory_out) if args.advisory_out else Path(args.areas).parent / "advisory-reviewers.yaml"
-    if adv is not None:
-        adv_out.write_text(yaml.safe_dump(adv, sort_keys=False, width=120))
-        print(f"wrote {adv_out} ({len(model.advisory)} path + {len(model.filetype_advisory)} filetype advisory rules)")
-    elif adv_out.exists():
-        # The last advisory rule was removed from areas.yaml; a stale file
-        # would keep driving obsolete reviewer requests.
-        adv_out.unlink()
-        print(f"removed {adv_out} (no advisory rules)")
     return 0
 
 

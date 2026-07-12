@@ -299,12 +299,9 @@ class TestComputeResolution:
             "shared": [
                 {"glob": "lib/llm/shared/", "owners": ["runtime", "kvbm"]},
             ],
-            "advisory": [],
             "classify": {
                 "keyword_rules": [{"match": "kvbm", "area": "kvbm"}],
-                "filetype_rules": [
-                    {"pattern": "*.md", "coowner": "docs", "advisory": True},
-                ],
+                "filetype_rules": [],
             },
         }
 
@@ -315,7 +312,7 @@ class TestComputeResolution:
             "lib/llm/shared/x.rs",
             "lib/kvbm/foo.rs",  # auto-classify via keyword
             "docs/intro.md",
-            "README.md",  # filetype_rule advisory only, falls to catch-all
+            "README.md",  # no explicit area; falls to catch-all
         ]
 
     def test_explicit_paths_resolved(self) -> None:
@@ -334,8 +331,7 @@ class TestComputeResolution:
 
     def test_catch_all_only_uncovered(self) -> None:
         model = compute_resolution(self._spec(), self._tree())
-        # README.md only gets an advisory rule (non-blocking); should not
-        # count as explicitly owned for the coverage gate.
+        # README.md has no explicit owner and should remain catch-all-only.
         unmatched = model.unmatched_paths(self._tree())
         assert "README.md" in unmatched
 
@@ -360,7 +356,7 @@ class TestComputeResolution:
         # nobody owns -- the file stays catch-all-only so --strict flags it.
         spec = self._spec()
         spec["classify"]["filetype_rules"] = [
-            {"pattern": "Dockerfile", "coowner": "docs", "advisory": False},
+            {"pattern": "Dockerfile", "coowner": "docs"},
         ]
         tree = self._tree() + ["lib/llm/Dockerfile", "stray/Dockerfile"]
         model = compute_resolution(spec, tree)
@@ -445,9 +441,6 @@ class TestTeamMembers:
 
 
 class TestChangedFiles:
-    def test_default_advisory_path_is_beside_script(self) -> None:
-        assert Path(who_owns.__file__).with_name("advisory-reviewers.yaml") == who_owns.DEFAULT_ADVISORY_PATH
-
     def test_includes_untracked_files(self, tmp_path) -> None:
         # Brand-new (unstaged) files are the ones the coverage gate cares
         # about most; `git diff` alone never lists them.
@@ -699,7 +692,6 @@ class TestRenderCodeownersWithExternals:
                 {"label": "kvbm", "github_team": "@kvbm", "path_globs": []},
             ],
             "shared": [{"glob": "lib/llm/shared/", "owners": ["runtime", "kvbm"]}],
-            "advisory": [],
             "classify": {"keyword_rules": [], "filetype_rules": []},
         }
         tree = ["lib/llm/a.rs", "lib/llm/b.rs", "lib/llm/shared/x.rs"]
