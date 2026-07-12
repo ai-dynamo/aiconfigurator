@@ -1,0 +1,177 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Unified op catalog: maps every perf table to a canonical op family, and —
+# for the families where it matters — enumerates the backend CHOICE SPACE per
+# framework: what a user can select, how, and under which constraints.
+#
+# This complements the other two facts files:
+#   - op_backend_facts.yaml         what backend each slice ACTUALLY ran on
+#   - kernel_source_backends.yaml   how data labels translate to backends
+#   - this file                     what backends CAN be chosen per op family
+#
+# `backend` values use the same canonical vocabulary as op_backend_facts.yaml;
+# `framework_name` is the framework's own flag/enum value. Every choice cites
+# the framework source (pinned checkouts) or collector code it was verified
+# against. Families without a `frameworks` section have no enumerated choice
+# space yet — fill them the same way, never from memory.
+#
+# tools/perf_database/backend_facts.py cross-checks the generated registry
+# against this catalog: every op_file must have a family, and observed
+# backends must appear in an enumerated family's choice space.
+
+schema_version: 1
+
+families:
+  - family: attention
+    op_files: [context_attention_perf, generation_attention_perf]
+    # Choice spaces verified against pinned checkouts: sglang v0.5.14,
+    # vllm v0.24.0, trtllm v1.3.0rc19 (paths relative to each repo).
+    frameworks:
+      sglang:
+        selector: "--attention-backend (per-phase: --prefill-/--decode-attention-backend)"
+        default: "MHA auto: SM90+CUDA>=12.3 -> fa3; SM100/103 -> trtllm_mha; else flashinfer, else triton (server_args.py:4407-4455)"
+        choices:
+          - {backend: fa3, framework_name: fa3, constraints: "SM80 (MHA) or SM90; kv fp8_e5m2 unsupported -> triton", source: "server_args.py:4433-4437,4644-4649"}
+          - {backend: fa4, framework_name: fa4, constraints: "non-MLA on SM100 forces page_size 128", source: "server_args.py:4651-4659"}
+          - {backend: trtllm_mha, framework_name: trtllm_mha, constraints: "prefill SM100 only; decode SM90/100/120; page {16,32,64}", source: "server_args.py:4620-4642"}
+          - {backend: flashinfer, framework_name: flashinfer, constraints: "no attention-sink support", source: "server_args.py:4451-4453"}
+          - {backend: triton, framework_name: triton, constraints: "universal fallback; not encoder-decoder", source: "attention_registry.py:157-160"}
+          - {backend: torch, framework_name: torch_native, constraints: "reference path", source: "server_args.py:180-207"}
+      vllm:
+        selector: "--attention-backend / AttentionConfig.backend (env VLLM_ATTENTION_BACKEND removed in 0.24)"
+        default: "priority list filtered by validate_configuration: SM100 FLASHINFER > FLASH_ATTN > TRITON_ATTN; else FLASH_ATTN > FLASHINFER > TRITON_ATTN (platforms/cuda.py:144-159)"
+        choices:
+          - {backend: flash_attn, framework_name: FLASH_ATTN, constraints: "SM>=80; fa2/fa3/fa4 chosen internally; fp8 kv only FA3 on SM90", source: "v1/attention/backends/flash_attn.py:173-206"}
+          - {backend: flashinfer, framework_name: FLASHINFER, constraints: "SM80-SM121; head {64,128,256,512}; kv +fp8/nvfp4; SM100 needs HND layout", source: "v1/attention/backends/flashinfer.py:326-456"}
+          - {backend: triton, framework_name: TRITON_ATTN, constraints: "any SM; kv +fp8/int8 per-token-head", source: "v1/attention/backends/triton_attn.py:249-373"}
+          - {backend: flex_attention, framework_name: FLEX_ATTENTION, constraints: "any SM; kv fp16/bf16 only", source: "v1/attention/backends/flex_attention.py:86-91"}
+      trtllm:
+        selector: "attn_backend (llmapi llm_args / ModelConfig; default TRTLLM)"
+        default: "TRTLLM unified backend; inside it an FMHA lib registry picks flashinfer trtllm-gen on SM100/103 else the fused C++ op (fmha_v2/XQA per SM inside cpp attentionOp)"
+        choices:
+          - {backend: trtllm_internal, framework_name: TRTLLM, constraints: "internal dispatch: flashinfer_trtllm_gen lib on SM100/103 (fmha/flashinfer_trtllm_gen.py:423-465) else thop.attention (fmha/fallback.py) -> cpp attentionOp fmha_v2/XQA", source: "_torch/attention_backend/trtllm.py:1628-1636, fmha/registry.py:24-27"}
+          - {backend: flashinfer, framework_name: FLASHINFER, constraints: "requires flashinfer; no fused pos-embd", source: "_torch/attention_backend/utils.py:27-53, model_config.py:259-264"}
+          - {backend: torch, framework_name: VANILLA, constraints: "reference; no MLA", source: "_torch/attention_backend/vanilla.py"}
+
+  - family: encoder_attention
+    op_files: [encoder_attention_perf]
+
+  - family: mla
+    op_files:
+      - context_mla_perf
+      - generation_mla_perf
+      - mla_context_module_perf
+      - mla_generation_module_perf
+      - wideep_context_mla_perf
+      - wideep_generation_mla_perf
+    frameworks:
+      sglang:
+        selector: "--attention-backend (MLA-capable subset)"
+        default: "MLA auto: SM90+CUDA>=12.3 -> fa3; SM100 -> flashinfer (FlashInferMLA); else triton (server_args.py:4458-4472); DeepSeek override SM100 -> trtllm_mla (server_args.py:3543,3647)"
+        choices:
+          - {backend: fa3, framework_name: fa3, constraints: "SM90", source: "server_args.py:4458-4459, attention_registry.py:190-195"}
+          - {backend: flashinfer, framework_name: flashinfer, constraints: "MHA/MLA dispatch inside registry", source: "attention_registry.py:34-56"}
+          - {backend: trtllm_mla, framework_name: trtllm_mla, constraints: "SM100/12x only; page {32,64}; kv {bf16,fp8_e4m3,fp4_e2m1}", source: "server_args.py:4545-4559"}
+          - {backend: flashmla, framework_name: flashmla, constraints: "forces page_size 64", source: "server_args.py:4524-4530"}
+          - {backend: cutlass_mla, framework_name: cutlass_mla, constraints: "Blackwell; forces page_size 128", source: "server_args.py:4532-4539"}
+          - {backend: cutedsl_mla, framework_name: cutedsl_mla, constraints: "SM100, decode-only (prefill auto-set trtllm_mla)", source: "server_args.py:4588-4607"}
+          - {backend: tokenspeed_mla, framework_name: tokenspeed_mla, constraints: "SM100/12x; requires kv fp8_e4m3", source: "server_args.py:4565-4578"}
+          - {backend: triton, framework_name: triton, constraints: "universal fallback", source: "server_args.py:4462-4472"}
+      vllm:
+        selector: "--attention-backend (MLA enum members)"
+        default: "SM90: FLASH_ATTN_MLA > FLASHMLA > FLASHINFER_MLA > TRITON_MLA; SM100: FLASHINFER_MLA > TOKENSPEED_MLA > CUTLASS_MLA > ...; SM120: TRITON_MLA (platforms/cuda.py:118-142)"
+        choices:
+          - {backend: flash_attn, framework_name: FLASH_ATTN_MLA, constraints: "SM90 only; no fp8 kv", source: "v1/attention/backends/mla/flashattn_mla.py:45-97"}
+          - {backend: flashmla, framework_name: FLASHMLA, constraints: "SM90/SM100; block 64; kv +fp8", source: "v1/attention/backends/mla/flashmla.py:49-105"}
+          - {backend: flashinfer, framework_name: FLASHINFER_MLA, constraints: "SM100 only; block {32,64}; kv +fp8", source: "v1/attention/backends/mla/flashinfer_mla.py:40-100"}
+          - {backend: cutlass_mla, framework_name: CUTLASS_MLA, constraints: "SM100 only; block 128", source: "v1/attention/backends/mla/cutlass_mla.py:40-73"}
+          - {backend: tokenspeed_mla, framework_name: TOKENSPEED_MLA, constraints: "SM100; kv fp8 only; DeepSeek-R1 dims; pip pkg", source: "v1/attention/backends/mla/tokenspeed_mla.py:61-126"}
+          - {backend: triton, framework_name: TRITON_MLA, constraints: "any SM; universal fallback", source: "v1/attention/backends/mla/triton_mla.py:38-85"}
+      trtllm:
+        selector: "attn_backend (TRTLLM/FLASHINFER both support MLA)"
+        default: "TRTLLM; FlashMLA used inside TRTLLM on SM90 when kv_lora_rank+qk_rope_head_dim==576"
+        choices:
+          - {backend: trtllm_internal, framework_name: TRTLLM, constraints: "MLA kernels internal; enable_flash_mla on SM90 for 576-dim", source: "_torch/model_config.py:266-276, attention_backend/utils.py:90-92"}
+          - {backend: flashinfer, framework_name: FLASHINFER, constraints: "support_mla()=True", source: "_torch/attention_backend/flashinfer.py:1352"}
+
+  - family: mla_bmm
+    op_files: [mla_bmm_perf]
+
+  - family: sparse_attention
+    op_files:
+      - dsa_context_module_perf
+      - dsa_generation_module_perf
+      - dsv4_csa_context_module_perf
+      - dsv4_csa_generation_module_perf
+      - dsv4_hca_attn_module_perf
+      - dsv4_hca_context_module_perf
+      - dsv4_hca_generation_module_perf
+      - dsv4_paged_mqa_logits_module_perf
+
+  - family: moe
+    op_files:
+      - moe_perf
+      - dsv4_megamoe_module_perf
+      - wideep_moe_perf
+      - wideep_context_moe_perf
+      - wideep_generation_moe_perf
+    frameworks:
+      sglang:
+        selector: "--moe-runner-backend (default auto; resolved per quant method + per-arch overrides)"
+        default: "auto: fp8 -> deep_gemm (if deepep a2a) else triton; nvfp4 SM100 -> flashinfer_trtllm, SM<100 -> marlin w4a16; mxfp4 GPT-OSS SM100 -> flashinfer_mxfp4, SM120 -> marlin; bf16 -> triton (fp8.py:1787-1815, modelopt_quant.py:1766-1783, mxfp4.py:1015-1046, unquant.py:405-421)"
+        choices:
+          - {backend: triton_fused_moe, framework_name: "triton / triton_kernel", constraints: "universal fallback; triton_kernel needs ep=1, segfaults Blackwell driver>=595 -> triton", source: "server_args.py:3922-3939"}
+          - {backend: deepgemm, framework_name: deep_gemm, constraints: "fp8_block; Hopper/Blackwell; JIT", source: "layers/quantization/fp8.py:889-903"}
+          - {backend: flashinfer_trtllm_gen, framework_name: "flashinfer_trtllm / flashinfer_trtllm_routed / flashinfer_mxfp4(SM100)", constraints: "trtllm-gen kernels SM100-only; quant {bf16,fp8,mxfp8,nvfp4,mxfp4}", source: "server_args.py:5140-5167, mxfp4.py:344-360"}
+          - {backend: flashinfer_cutlass, framework_name: "flashinfer_cutlass / flashinfer_mxfp4(SM90)", constraints: "quant {bf16,modelopt_fp4,modelopt_fp8}; ep in {1,tp}; SM90 mxfp4 needs FI>=0.6.11", source: "server_args.py:5107-5117, mxfp4.py:348-356"}
+          - {backend: flashinfer_cutedsl, framework_name: flashinfer_cutedsl, constraints: "nvfp4 only; SM100; deepep a2a", source: "server_args.py:5119-5138"}
+          - {backend: cutlass, framework_name: cutlass, constraints: "fp8_block SM90/100/120, mxfp8 SM100; ep=1", source: "layers/quantization/fp8.py:879-886, cutlass_moe.py:150"}
+          - {backend: marlin, framework_name: marlin, constraints: "w4a16 (nvfp4 fallback SM80-90; mxfp4 SM90/SM120)", source: "modelopt_quant.py:1770-1778, mxfp4.py:520-521"}
+          - {backend: deepep, framework_name: "(wideep a2a: deepep)", constraints: "wide-EP dispatch/combine + DeepEP-MoE compute", source: "collector/wideep/sglang"}
+      vllm:
+        selector: "KernelConfig.moe_backend (default auto; per-quant oracle walks priority list; forcing raises on unsupported)"
+        default: "auto per quant x SM: bf16 SM100 -> flashinfer trtllm-gen, SM90 -> triton; fp8 SM100 -> flashinfer trtllm-gen, SM90 block -> triton(TP)/flashinfer_cutlass(EP)/deepgemm; nvfp4 SM100 -> flashinfer, SM90 -> marlin; int4 wNa16 -> marlin (oracle/{unquantized,fp8,nvfp4,int_wna16}.py)"
+        choices:
+          - {backend: flashinfer_trtllm_gen, framework_name: flashinfer_trtllm, constraints: "TrtLlm*Experts SM100-family only; bf16/fp8/mxfp4+mxfp8; int4 needs VLLM_USE_FLASHINFER_MOE_INT4", source: "experts/trtllm_bf16_moe.py:49-56, trtllm_fp8_moe.py:64-70, trtllm_mxint4_moe.py:46-67"}
+          - {backend: flashinfer_cutlass, framework_name: flashinfer_cutlass, constraints: "SM90/SM100f/SM120f (SM110 excluded); bf16+fp8 SM>=90, fp8_block SM90-exact, nvfp4/mxfp4+mxfp8 SM>=100", source: "experts/flashinfer_cutlass_moe.py:131-185"}
+          - {backend: flashinfer_cutedsl, framework_name: flashinfer_cutedsl, constraints: "nvfp4; SM100", source: "oracle/nvfp4.py:165-173"}
+          - {backend: deepgemm, framework_name: deep_gemm, constraints: "fp8_block; VLLM_USE_DEEP_GEMM gates", source: "oracle/fp8.py:330-342"}
+          - {backend: cutlass, framework_name: cutlass, constraints: "vllm-native cutlass experts", source: "oracle/fp8.py:75-88"}
+          - {backend: triton_fused_moe, framework_name: triton, constraints: "universal fallback; SM90 default for bf16/fp8-block TP", source: "oracle/unquantized.py:62-74, oracle/fp8.py:106-115"}
+          - {backend: marlin, framework_name: marlin, constraints: "wNa16 int4/nvfp4-w4a16 default; SM90 nvfp4 fallback", source: "oracle/int_wna16.py:88-92, oracle/nvfp4.py:165-173"}
+      trtllm:
+        selector: "moe_config.backend (llmapi yaml; default AUTO)"
+        default: "AUTO: DSV4/GptOss Blackwell -> TRTLLM(trtllm-gen); GptOss Hopper -> TRITON; fp8_block SM100f -> TRTLLM; else CUTLASS (_torch/model_config.py:317-355)"
+        choices:
+          - {backend: cutlass, framework_name: CUTLASS, constraints: "universal: bf16 SM>=80, fp8 SM>=89, fp8_block SM{90,120}, nvfp4 SM{100,103,120,121}, w4a16_mxfp4 SM90, w4a8_mxfp4_* SM100f", source: "_torch/modules/fused_moe/fused_moe_cutlass.py:137-210"}
+          - {backend: trtllm_gen, framework_name: TRTLLM, constraints: "native trtllm-gen kernels (NOT flashinfer import); SM100/103 only, rejects SM>=120; quant {fp8_block,nvfp4,w4a16_mxfp4,w4a8_*}; bf16 path REQUIRES flashinfer fused MoE; TRTLLM_GEN_FUSED_MOE_USE_FLASHINFER=1 opt-in for quantized", source: "fused_moe_trtllm_gen.py:94-101,153-158,240-256,336-376"}
+          - {backend: cutedsl, framework_name: CUTEDSL, constraints: "fp8_block or nvfp4; SM120/121 nvfp4 -> B12x hybrid (cutlass prefill + flashinfer decode)", source: "create_moe.py:76-108"}
+          - {backend: deepgemm, framework_name: "DEEPGEMM / MEGAMOE_DEEPGEMM", constraints: "fp8_block; megamoe = w4a8_mxfp4_mxfp8", source: "create_moe.py:110-111,156-179"}
+          - {backend: triton_fused_moe, framework_name: TRITON, constraints: "GptOss Hopper default", source: "create_moe.py:154-155, model_config.py:317-355"}
+          - {backend: marlin, framework_name: MARLIN, constraints: "nvfp4 w4a16; Hopper", source: "create_moe.py:66-71"}
+          - {backend: wideep, framework_name: WIDEEP, constraints: "wide-EP MoE", source: "create_moe.py:152-153"}
+
+  - family: gemm
+    op_files: [gemm_perf]
+
+  - family: mlp
+    op_files: [wideep_context_mlp_perf, wideep_generation_mlp_perf]
+
+  - family: quantize
+    op_files: [computescale_perf, scale_matrix_perf]
+
+  - family: linear_attention
+    op_files: [gdn_perf, mamba2_perf]
+
+  - family: mhc
+    op_files: [mhc_module_perf]
+
+  - family: comm
+    op_files:
+      - custom_allreduce_perf
+      - nccl_perf
+      - oneccl_perf
+      - trtllm_alltoall_perf
+      - wideep_deepep_ll_perf
+      - wideep_deepep_normal_perf

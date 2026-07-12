@@ -227,7 +227,61 @@ def _yaml_scalar(value) -> str:
     return json.dumps(value)  # JSON string quoting is valid YAML
 
 
-def render_yaml(by_op: dict[str, list[dict]], axes_by_op: dict[str, list[str]]) -> str:
+def load_catalog(path: Path) -> dict:
+    import yaml
+
+    return yaml.safe_load(path.read_text())
+
+
+def catalog_families(catalog: dict) -> dict[str, str]:
+    """op_file -> family from the catalog's op_files lists."""
+    out: dict[str, str] = {}
+    for fam in catalog["families"]:
+        for op_file in fam.get("op_files", []):
+            out[op_file] = fam["family"]
+    return out
+
+
+def catalog_backend_vocab(catalog: dict) -> dict[str, set[str]]:
+    """family -> the set of catalog-listed canonical backend names (empty if the
+    family's choice space is not enumerated yet)."""
+    out: dict[str, set[str]] = {}
+    for fam in catalog["families"]:
+        vocab: set[str] = set()
+        for fw_choices in (fam.get("frameworks") or {}).values():
+            for choice in fw_choices.get("choices", []):
+                vocab.add(choice["backend"])
+        out[fam["family"]] = vocab
+    return out
+
+
+# Backend values that are never listed as catalog choices.
+_NON_CHOICE_BACKENDS = {"unverified", "trtllm_internal"}
+
+
+def catalog_inconsistencies(by_op: dict[str, list[dict]], catalog: dict) -> list[str]:
+    """Cross-check the generated facts against the catalog.
+
+    Reports op_files with no family and observed backends missing from an
+    enumerated family choice space.
+    """
+    families = catalog_families(catalog)
+    vocab = catalog_backend_vocab(catalog)
+    problems: list[str] = []
+    for op_file, entries in by_op.items():
+        family = families.get(op_file)
+        if family is None:
+            problems.append(f"op-file-without-family: {op_file}")
+            continue
+        if not vocab.get(family):
+            continue  # choice space not enumerated for this family yet
+        observed = {b for e in entries for b in e["backends"]} - _NON_CHOICE_BACKENDS
+        for backend in sorted(observed - vocab[family]):
+            problems.append(f"backend-not-in-catalog: family={family} op_file={op_file} backend={backend}")
+    return problems
+
+
+def render_yaml(by_op: dict[str, list[dict]], axes_by_op: dict[str, list[str]], families: dict[str, str]) -> str:
     lines = [
         "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
         "# SPDX-License-Identifier: Apache-2.0",
@@ -270,6 +324,7 @@ def render_yaml(by_op: dict[str, list[dict]], axes_by_op: dict[str, list[str]]) 
     for op_file, entries in by_op.items():
         axes = axes_by_op[op_file]
         lines.append(f"  - op_file: {op_file}")
+        lines.append(f"    family: {families.get(op_file, 'unknown')}")
         lines.append(f"    axes: [{', '.join(axes)}]")
         lines.append("    facts:")
         for e in entries:
@@ -321,6 +376,7 @@ def main() -> None:
     parser.add_argument("--data-root", type=Path, default=Path("src/aiconfigurator/systems/data"))
     parser.add_argument("--registry", type=Path, default=Path("collector/op_backend_facts.yaml"))
     parser.add_argument("--backend-map", type=Path, default=Path("collector/kernel_source_backends.yaml"))
+    parser.add_argument("--catalog", type=Path, default=Path("collector/op_backend_catalog.yaml"))
     parser.add_argument(
         "--check",
         action="store_true",
@@ -344,6 +400,10 @@ def main() -> None:
             sorted(unmapped),
         )
 
+    catalog = load_catalog(args.catalog)
+    for line in catalog_inconsistencies(by_op, catalog):
+        logger.warning(line)
+
     if args.check:
         drift = check(args.registry, by_op, axes_by_op)
         if drift:
@@ -357,7 +417,7 @@ def main() -> None:
         return
 
     args.registry.parent.mkdir(parents=True, exist_ok=True)
-    args.registry.write_text(render_yaml(by_op, axes_by_op))
+    args.registry.write_text(render_yaml(by_op, axes_by_op, catalog_families(catalog)))
     logger.info("wrote %s", args.registry)
     print(f"Fact slices: {total:,}")
 

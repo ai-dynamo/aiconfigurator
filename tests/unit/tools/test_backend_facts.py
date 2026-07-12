@@ -16,6 +16,8 @@ pytestmark = pytest.mark.unit
 
 BACKEND_FACTS = Path(__file__).resolve().parents[3] / "tools" / "perf_database" / "backend_facts.py"
 BACKEND_MAP = Path(__file__).resolve().parents[3] / "collector" / "kernel_source_backends.yaml"
+CATALOG = Path(__file__).resolve().parents[3] / "collector" / "op_backend_catalog.yaml"
+FAMILIES = {"context_attention_perf": "attention", "context_mla_perf": "mla"}
 
 # Synthetic translation table exercising exact, match-conditioned, and absent entries.
 MAPPINGS = [
@@ -136,7 +138,7 @@ def test_committed_backend_map_covers_schema(backend_facts_module):
 def test_yaml_output_is_valid_and_round_trips(backend_facts_module, data_tree):
     facts, axes_by_op = backend_facts_module.scan(data_tree)
     by_op = backend_facts_module._fact_entries(facts, axes_by_op, MAPPINGS)
-    doc = yaml.safe_load(backend_facts_module.render_yaml(by_op, axes_by_op))
+    doc = yaml.safe_load(backend_facts_module.render_yaml(by_op, axes_by_op, FAMILIES))
 
     assert doc["schema_version"] == 1
     ops = {o["op_file"]: o for o in doc["ops"]}
@@ -150,7 +152,7 @@ def test_check_passes_when_registry_matches(backend_facts_module, data_tree, tmp
     facts, axes_by_op = backend_facts_module.scan(data_tree)
     by_op = backend_facts_module._fact_entries(facts, axes_by_op, MAPPINGS)
     registry = tmp_path / "op_backend_facts.yaml"
-    registry.write_text(backend_facts_module.render_yaml(by_op, axes_by_op))
+    registry.write_text(backend_facts_module.render_yaml(by_op, axes_by_op, FAMILIES))
 
     assert backend_facts_module.check(registry, by_op, axes_by_op) == []
 
@@ -159,7 +161,7 @@ def test_check_reports_drift(backend_facts_module, data_tree, tmp_path):
     facts, axes_by_op = backend_facts_module.scan(data_tree)
     by_op = backend_facts_module._fact_entries(facts, axes_by_op, MAPPINGS)
     registry = tmp_path / "op_backend_facts.yaml"
-    registry.write_text(backend_facts_module.render_yaml(by_op, axes_by_op))
+    registry.write_text(backend_facts_module.render_yaml(by_op, axes_by_op, FAMILIES))
 
     # New data appears (kernel changed for the bf16 slice + a brand-new slice).
     sglang_dir = data_tree / "h200_sxm" / "sglang" / "0.5.14"
@@ -176,7 +178,7 @@ def test_check_reports_drift(backend_facts_module, data_tree, tmp_path):
     assert "0.5.14" in drift[0] and "trtllm_mha" in drift[0]
 
     # And the reverse direction: registry entry with no backing data.
-    registry.write_text(backend_facts_module.render_yaml(by_op2, axes2))
+    registry.write_text(backend_facts_module.render_yaml(by_op2, axes2, FAMILIES))
     drift = backend_facts_module.check(registry, by_op, axes_by_op)
     assert len(drift) == 1
     assert drift[0].startswith("registry-not-in-data:")
@@ -185,7 +187,7 @@ def test_check_reports_drift(backend_facts_module, data_tree, tmp_path):
 def test_check_reports_mismatched_kernel_sources(backend_facts_module, data_tree, tmp_path):
     facts, axes_by_op = backend_facts_module.scan(data_tree)
     by_op = backend_facts_module._fact_entries(facts, axes_by_op, MAPPINGS)
-    text = backend_facts_module.render_yaml(by_op, axes_by_op)
+    text = backend_facts_module.render_yaml(by_op, axes_by_op, FAMILIES)
     registry = tmp_path / "op_backend_facts.yaml"
     registry.write_text(text.replace('kernel_sources: ["default"]', 'kernel_sources: ["trtllm_mla"]'))
 
@@ -193,3 +195,34 @@ def test_check_reports_mismatched_kernel_sources(backend_facts_module, data_tree
     assert len(drift) == 1
     assert drift[0].startswith("mismatch:")
     assert "trtllm_mla" in drift[0] and "default" in drift[0]
+
+
+def test_committed_catalog_covers_every_registry_op_file(backend_facts_module):
+    catalog = backend_facts_module.load_catalog(CATALOG)
+    families = backend_facts_module.catalog_families(catalog)
+    registry = yaml.safe_load((Path(__file__).resolve().parents[3] / "collector" / "op_backend_facts.yaml").read_text())
+    missing = [op["op_file"] for op in registry["ops"] if op["op_file"] not in families]
+    assert missing == []
+    assert all(op["family"] == families[op["op_file"]] for op in registry["ops"])
+
+
+def test_catalog_inconsistencies(backend_facts_module, data_tree):
+    facts, axes_by_op = backend_facts_module.scan(data_tree)
+    by_op = backend_facts_module._fact_entries(facts, axes_by_op, MAPPINGS)
+    catalog = {
+        "families": [
+            {
+                "family": "attention",
+                "op_files": ["context_attention_perf"],
+                "frameworks": {"sglang": {"choices": [{"backend": "fa3"}]}},
+            }
+        ]
+    }
+    problems = backend_facts_module.catalog_inconsistencies(by_op, catalog)
+    # context_mla_perf has no family; observed triton is not in the enumerated attention space
+    assert "op-file-without-family: context_mla_perf" in problems
+    assert any(p.startswith("backend-not-in-catalog: family=attention") and "triton" in p for p in problems)
+
+    catalog["families"][0]["frameworks"]["sglang"]["choices"].append({"backend": "triton"})
+    catalog["families"].append({"family": "mla", "op_files": ["context_mla_perf"]})
+    assert backend_facts_module.catalog_inconsistencies(by_op, catalog) == []
