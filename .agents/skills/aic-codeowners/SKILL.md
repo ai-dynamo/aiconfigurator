@@ -39,8 +39,7 @@ Read the failing step before changing ownership:
    `catch-all only` is zero.
 3. **Regenerate and check for drift:** regenerate from the source files. Commit
    every changed generated artifact with its source: `CODEOWNERS`,
-   `CONTRIBUTORS.md`, and `.github/codeowners/advisory-reviewers.yaml` when it
-   is created, changed, or removed.
+   and `CONTRIBUTORS.md`.
 
 For coverage, routing, removal, or source-file changes, regenerate and verify:
 
