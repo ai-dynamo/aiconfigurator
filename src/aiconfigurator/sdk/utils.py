@@ -801,6 +801,13 @@ def _parse_hf_config_json(config: dict) -> dict:
                 projector_dims=((merger_dim, merger_dim), (merger_dim, out_hidden_size)),
                 projector_n_instances=1 + len(deepstack_visual_indexes),
                 partial_rotary_factor=0.5,
+                # Patch embedding Linear: flattened conv over each pre-merge
+                # patch, in = in_channels * temporal_patch_size * patch_size**2.
+                patch_embed_in_features=(
+                    vision_cfg.get("in_channels", 3)
+                    * vision_cfg["temporal_patch_size"]
+                    * vision_cfg["patch_size"] ** 2
+                ),
             )
             logger.info(
                 "Qwen3VL vision encoder config: depth=%d, hidden=%d, patch=%d, spatial_merge=%d",

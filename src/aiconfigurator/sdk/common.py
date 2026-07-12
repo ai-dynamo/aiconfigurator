@@ -176,6 +176,12 @@ class VisionEncoderConfig:
     projector_dims: tuple[tuple[int, int], ...] = ()
     projector_n_instances: int = 1
     partial_rotary_factor: float = 0.0
+    # Input feature size of the patch-embedding Linear (in_channels *
+    # temporal_patch_size * patch_size**2). When > 0, build_encoder_ops adds a
+    # single patch_embed GEMM (hidden_size <- patch_embed_in_features) applied
+    # once to every pre-merge patch. 0 (default) means the op is omitted, so
+    # models that do not populate this field are unaffected.
+    patch_embed_in_features: int = 0
 
 
 @dataclass(frozen=True)

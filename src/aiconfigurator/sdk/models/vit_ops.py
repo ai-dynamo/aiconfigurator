@@ -70,7 +70,25 @@ def _vit_transformer_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> l
     vit_gemm_mode = common.GEMMQuantMode.bfloat16
     vit_fmha_mode = common.FMHAQuantMode.bfloat16
 
-    return [
+    # Patch embedding: a single Linear (hidden_size <- patch_embed_in_features)
+    # applied once to every pre-merge patch (count=1, NOT x depth). Named so the
+    # encoder dispatch in _run_encoder_phase queries it with M = n_img_pre
+    # (pre-merge patch count), like the block GEMMs. Only emitted when the config
+    # populates patch_embed_in_features (>0); models that leave it 0 are
+    # unaffected. Not TP-sharded: patch_embed runs replicated before the ViT.
+    patch_embed_ops = []
+    if getattr(enc_cfg, "patch_embed_in_features", 0) > 0:
+        patch_embed_ops.append(
+            ops.GEMM(
+                "encoder_patch_embed_gemm",
+                1,
+                h_vit,
+                enc_cfg.patch_embed_in_features,
+                vit_gemm_mode,
+            )
+        )
+
+    return patch_embed_ops + [
         ops.ElementWise("encoder_add_norm_1", depth, 2 * h_vit, 2 * h_vit, 0.8),
         ops.GEMM(
             "encoder_qkv_gemm",
