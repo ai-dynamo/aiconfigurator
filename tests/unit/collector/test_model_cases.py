@@ -409,8 +409,10 @@ def test_sglang_registry_marks_unvalidated_dsa_and_moe_platforms_explicitly():
         assert op in sm100.selected_ops
         assert entries[op].unverified_sms == (90, 103, 120)
 
+    # SM103 unparked by the B300 hardware probe (2026-07-13, pipeline
+    # 57716023): sampled dsa cases ran clean across all three kernel buckets.
     for op in ("dsa_context_module", "dsa_generation_module"):
-        assert entries[op].unverified_sms == (103, 120)
+        assert entries[op].unverified_sms == (120,)
 
     # The SM120 MoE bring-up audit (RTX 6000 Pro, 2026-07-05) cleared the moe
     # maturity marker: every planned (quant mode x backend) family was probed
