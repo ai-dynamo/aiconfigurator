@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""who_owns.py -- "who reviews this?" from a generated CODEOWNERS (+ advisory).
+
+The CODEOWNERS file is a machine input: GitHub auto-requests the owning team
+when a PR opens. This tool answers the human question on demand, so nobody
+has to read 300 rules to find a reviewer.
+
+  # owners of specific paths (last-match-wins, exactly as GitHub resolves)
+  python who_owns.py --codeowners CODEOWNERS lib/llm/foo.rs components/.../snapshot.py
+
+  # the teams that will be auto-requested on your PR (union over changed files)
+  python who_owns.py --codeowners CODEOWNERS --changed --base main
+
+  # same, expanding each team to its member logins (org members only --
+  # GitHub does not show team membership to non-members)
+  python who_owns.py --codeowners CODEOWNERS --changed --people
+
+Owners listed on a single line are co-owners (any one's approval satisfies
+the gate). Advisory teams are auto-requested too, but never block the merge.
+
+The CODEOWNERS parser and matcher live in ``codeowners_match`` so this tool
+resolves a path exactly the same way ``emit_codeowners.py`` routes it -- there
+is no second implementation that could drift.
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from codeowners_match import (  # noqa: E402
+    anchor,
+    match,
+    parse_codeowners,
+    resolve_owners,
+)
+
+
+def load_advisory(path: Path) -> tuple[list[dict], list[dict]]:
+    """Return (path_rules, filetype_rules) from an advisory-reviewers.yaml."""
+    if not path.exists():
+        return [], []
+    import yaml
+
+    data = yaml.safe_load(path.read_text()) or {}
+    return data.get("path_rules", []) or [], data.get("filetype_rules", []) or []
+
+
+def advisory_for(
+    filepath: str, path_rules: list[dict], filetype_rules: list[dict]
+) -> set[str]:
+    """Non-blocking teams an advisory Action would request for ``filepath``."""
+    teams: set[str] = set()
+    for r in path_rules:
+        pat = r.get("path", "")
+        if pat and match(anchor(pat), filepath):
+            teams.update(r.get("request_review_from", []))
+    for r in filetype_rules:
+        pat = r.get("pattern", "")
+        if pat and match(pat, filepath):
+            teams.update(r.get("request_review_from", []))
+    return teams
+
+
+_TEAM_CACHE: dict[str, list[str] | None] = {}
+_PEOPLE_WARNED = False
+
+
+def _gh_fetch(org: str, slug: str) -> list[str]:
+    """Fetch a team's member logins via the ``gh`` CLI."""
+    out = subprocess.check_output(
+        [
+            "gh",
+            "api",
+            f"orgs/{org}/teams/{slug}/members",
+            "--paginate",
+            "--jq",
+            ".[].login",
+        ],
+        text=True,
+        stderr=subprocess.DEVNULL,
+    )
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def _parse_team(owner: str):
+    """``@org/slug`` -> ``(org, slug)``; ``None`` for individual ``@handle``s."""
+    if owner.startswith("@") and "/" in owner:
+        return tuple(owner[1:].split("/", 1))
+    return None
+
+
+def team_members(team, fetch=_gh_fetch, cache=None):
+    """Member logins for an ``@org/slug`` team, or ``None`` when unavailable.
+
+    GitHub only shows team membership to members of the org, so this works
+    for org members with an authenticated ``gh`` and cannot work for external
+    contributors -- callers degrade to the team handle. Individual ``@handle``
+    owners (no slash) return ``None`` and pass through unchanged. Results,
+    including failures, are cached per run.
+    """
+    if cache is None:
+        cache = _TEAM_CACHE
+    if team in cache:
+        return cache[team]
+    members = None
+    if parsed := _parse_team(team):
+        try:
+            members = sorted(fetch(*parsed))
+        except (OSError, subprocess.CalledProcessError):
+            members = None
+    cache[team] = members
+    return members
+
+
+def _warn_people_unavailable() -> None:
+    global _PEOPLE_WARNED
+    if not _PEOPLE_WARNED:
+        print(
+            "note: team membership is only visible to org members "
+            "(authenticated gh required); showing teams only",
+            file=sys.stderr,
+        )
+        _PEOPLE_WARNED = True
+
+
+def _with_people(owner: str) -> str:
+    """Render an owner as ``@org/team (member, member, ...)`` when possible."""
+    members = team_members(owner)
+    if members is None:
+        if _parse_team(owner):
+            _warn_people_unavailable()
+        return owner
+    return f"{owner} ({', '.join(members) if members else 'no members'})"
+
+
+def _team_url(team: str) -> str | None:
+    if parsed := _parse_team(team):
+        return "https://github.com/orgs/{}/teams/{}".format(*parsed)
+    return None
+
+
+def changed_files(repo: str, base: str) -> list[str]:
+    """Files changed vs ``base`` (merge-base diff), falling back to plain diff.
+
+    Untracked (not yet staged) files are included too -- brand-new paths are
+    exactly the ones the coverage gate cares about, and ``git diff`` alone
+    never shows them.
+
+    Returns ``[]`` only when the lookups actually succeeded and were empty.
+    If everything fails (not a git checkout, unknown base), the last git
+    error is surfaced instead of masquerading as "no changed files".
+    """
+    last_err: subprocess.CalledProcessError | None = None
+    any_ok = False
+    changed: list[str] = []
+    for args in ([f"{base}...HEAD"], [base], []):
+        try:
+            out = subprocess.check_output(
+                ["git", "-C", repo, "diff", "--name-only", *args],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError as err:
+            last_err = err
+            continue
+        any_ok = True
+        changed = [p for p in out.splitlines() if p.strip()]
+        if changed:
+            break
+    untracked: list[str] = []
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", repo, "ls-files", "--others", "--exclude-standard"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        untracked = [p for p in out.splitlines() if p.strip()]
+        any_ok = True
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    if not any_ok and last_err is not None:
+        raise SystemExit(
+            f"git diff failed in {repo!r} (not a checkout, or base "
+            f"{base!r} unavailable): {last_err}"
+        )
+    return sorted(set(changed) | set(untracked))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Who reviews a path, per a generated CODEOWNERS."
+    )
+    ap.add_argument(
+        "--codeowners",
+        required=True,
+        type=Path,
+        help="path to the CODEOWNERS file",
+    )
+    ap.add_argument(
+        "--advisory",
+        type=Path,
+        default=None,
+        help="advisory-reviewers.yaml (default: alongside CODEOWNERS)",
+    )
+    ap.add_argument(
+        "--changed",
+        action="store_true",
+        help="resolve the repo's changed files instead of explicit paths",
+    )
+    ap.add_argument(
+        "--base", default="main", help="base ref for --changed (default: main)"
+    )
+    ap.add_argument(
+        "--people",
+        action="store_true",
+        help="expand teams to member logins (org members with an "
+        "authenticated gh only; membership is not publicly visible)",
+    )
+    ap.add_argument("--repo", default=".", help="repo root for --changed (default: .)")
+    ap.add_argument(
+        "paths", nargs="*", help="paths to resolve (when not using --changed)"
+    )
+    args = ap.parse_args()
+
+    rules = parse_codeowners(args.codeowners.read_text())
+    adv_path = args.advisory or args.codeowners.parent / "advisory-reviewers.yaml"
+    path_rules, filetype_rules = load_advisory(adv_path)
+
+    if args.changed:
+        files = changed_files(args.repo, args.base)
+        if not files:
+            print(f"No changed files vs {args.base}.")
+            return 0
+    else:
+        files = args.paths
+        if not files:
+            ap.error("pass one or more paths, or use --changed")
+
+    # Per-path expansion only for explicit paths (small N); --changed PRs can
+    # touch many files, so people are shown once in the union summary instead.
+    expand_paths = args.people and not args.changed
+    union_owners: set[str] = set()
+    union_advisory: set[str] = set()
+    for f in files:
+        owners = resolve_owners(rules, f)
+        adv = advisory_for(f, path_rules, filetype_rules) - set(owners)
+        union_owners.update(owners)
+        union_advisory.update(adv)
+        owners_str = (
+            " ".join(_with_people(o) if expand_paths else o for o in owners)
+            if owners
+            else "(no owner -- falls through; CI coverage gate should block this)"
+        )
+        line = f"{f}\n    review: {owners_str}"
+        if adv:
+            line += f"\n    advisory (non-blocking): {' '.join(sorted(adv))}"
+        print(line)
+
+    if args.changed:
+        union_advisory -= union_owners
+        print("\n" + "=" * 60)
+        print(f"Teams auto-requested on this PR ({len(union_owners)}):")
+        for t in sorted(union_owners):
+            print(f"  {_with_people(t) if args.people else t}")
+            if args.people and (url := _team_url(t)):
+                print(f"      {url}")
+        if union_advisory:
+            print(f"Advisory (non-blocking), {len(union_advisory)}:")
+            for t in sorted(union_advisory):
+                print(f"  {t}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

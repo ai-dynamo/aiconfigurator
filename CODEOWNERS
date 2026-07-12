@@ -1,0 +1,73 @@
+# CODEOWNERS -- generated from .github/codeowners/areas.yaml.
+# Do not hand-edit. Change areas.yaml and regenerate.
+#
+# GitHub reads this file; engineers don't. To see who reviews a change, run:
+#   python .github/codeowners/who_owns.py --codeowners CODEOWNERS --changed  # owners of your PR's files
+#   python .github/codeowners/who_owns.py --codeowners CODEOWNERS <path> ...  # owners of specific paths
+#
+# Area index (base owner per subsystem; the catch-all owns everything else):
+#   docs        @ai-dynamo/maintainers-aiconfigurator
+#   generators  @ai-dynamo/aiconfigurator-generators
+#   infra       @ai-dynamo/aiconfigurator-infra
+#   runtime     @ai-dynamo/aiconfigurator-runtime
+#   *           @ai-dynamo/contributors-aiconfigurator  (catch-all)
+#
+# Teams referenced (each must exist in the org before this file validates):
+#   @ai-dynamo/aiconfigurator-generators
+#   @ai-dynamo/aiconfigurator-infra
+#   @ai-dynamo/aiconfigurator-runtime
+#   @ai-dynamo/contributors-aiconfigurator
+#   @ai-dynamo/maintainers-aiconfigurator
+
+*                                                                @ai-dynamo/contributors-aiconfigurator
+
+# === runtime  (@ai-dynamo/aiconfigurator-runtime) ===
+/src/                                                            @ai-dynamo/aiconfigurator-runtime
+/collector/                                                      @ai-dynamo/aiconfigurator-runtime
+/rust/aiconfigurator-core/                                       @ai-dynamo/aiconfigurator-runtime
+
+# === generators  (@ai-dynamo/aiconfigurator-generators) ===
+/tools/                                                          @ai-dynamo/aiconfigurator-generators
+/tests/unit/generator/                                           @ai-dynamo/aiconfigurator-generators
+/tests/unit/generator_validator/test_vllm_validator.py           @ai-dynamo/aiconfigurator-generators
+/tests/golden/generator/test_release_1_2_0_backend_contracts.py  @ai-dynamo/aiconfigurator-generators
+
+# === infra  (@ai-dynamo/aiconfigurator-infra) ===
+/uv.lock                                                         @ai-dynamo/aiconfigurator-infra
+/.github/                                                        @ai-dynamo/aiconfigurator-infra
+/AGENTS.md                                                       @ai-dynamo/aiconfigurator-infra
+/.gitignore                                                      @ai-dynamo/aiconfigurator-infra
+/Cargo.toml                                                      @ai-dynamo/aiconfigurator-infra
+/pytest.ini                                                      @ai-dynamo/aiconfigurator-infra
+/SECURITY.md                                                     @ai-dynamo/aiconfigurator-infra
+/.dockerignore                                                   @ai-dynamo/aiconfigurator-infra
+/.claude/rules/                                                  @ai-dynamo/aiconfigurator-infra
+/.gitattributes                                                  @ai-dynamo/aiconfigurator-infra
+/DEVELOPMENT.md                                                  @ai-dynamo/aiconfigurator-infra
+/pyproject.toml                                                  @ai-dynamo/aiconfigurator-infra
+/.agents/skills/                                                 @ai-dynamo/aiconfigurator-infra
+/.coderabbit.yaml                                                @ai-dynamo/aiconfigurator-infra
+/eslint.config.js                                                @ai-dynamo/aiconfigurator-infra
+/docker/Dockerfile                                               @ai-dynamo/aiconfigurator-infra
+/.pre-commit-config.yaml                                         @ai-dynamo/aiconfigurator-infra
+
+# === docs  (@ai-dynamo/maintainers-aiconfigurator) ===
+/docs/                                                           @ai-dynamo/maintainers-aiconfigurator
+/LICENSE                                                         @ai-dynamo/maintainers-aiconfigurator
+/README.md                                                       @ai-dynamo/maintainers-aiconfigurator
+/ATTRIBUTIONS.md                                                 @ai-dynamo/maintainers-aiconfigurator
+/CONTRIBUTING.md                                                 @ai-dynamo/maintainers-aiconfigurator
+/CONTRIBUTORS.md                                                 @ai-dynamo/maintainers-aiconfigurator
+/CODE_OF_CONDUCT.md                                              @ai-dynamo/maintainers-aiconfigurator
+
+# === Path overrides: a subsystem nested inside another area's tree.
+# More specific, so they win via last-match over the area globs above. ===
+/tools/sanity_check/                                             @ai-dynamo/aiconfigurator-runtime
+/tools/support_matrix/                                           @ai-dynamo/aiconfigurator-runtime
+/tools/simple_sdk_demo/                                          @ai-dynamo/aiconfigurator-runtime
+/src/aiconfigurator/cli/                                         @ai-dynamo/aiconfigurator-generators
+/src/aiconfigurator/generator/                                   @ai-dynamo/aiconfigurator-generators
+
+# --- Shared ownership: multi-team (any one approves; wins via last-match) ---
+/tests/                                                          @ai-dynamo/aiconfigurator-runtime @ai-dynamo/aiconfigurator-generators @ai-dynamo/aiconfigurator-infra
+/CODEOWNERS                                                      @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator

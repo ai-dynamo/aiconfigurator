@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# CODEOWNERS-as-code taxonomy for ai-dynamo/aiconfigurator.
+# Translated from the existing hand-written .github/CODEOWNERS (same teams),
+# extended to cover trees that file leaves to the catch-all (rust/, src/spica/).
+
+meta:
+  catch_all: "@ai-dynamo/contributors-aiconfigurator"
+
+areas:
+  - label: runtime
+    github_team: "@ai-dynamo/aiconfigurator-runtime"
+    path_globs:
+      - src/aiconfigurator/__init__.py
+      - src/aiconfigurator/logging_utils.py
+      - src/aiconfigurator/main.py
+      - src/aiconfigurator/sdk/
+      - src/aiconfigurator/systems/
+      - src/aiconfigurator/model_configs/
+      - src/aiconfigurator/webapp/
+      - src/aiconfigurator_core/
+      - src/spica/          # new since the hand-written file; perf/planning models
+      - rust/               # new since the hand-written file
+      - collector/
+      - tools/sanity_check/
+      - tools/simple_sdk_demo/
+      - tools/support_matrix/
+  - label: generators
+    github_team: "@ai-dynamo/aiconfigurator-generators"
+    path_globs:
+      - src/aiconfigurator/generator/
+      - src/aiconfigurator/cli/
+      - tools/
+      - tools/generator_validator/
+      - tools/automation/
+  - label: infra
+    github_team: "@ai-dynamo/aiconfigurator-infra"
+    path_globs:
+      - .coderabbit.yaml
+      - .dockerignore
+      - .gitattributes
+      - .gitignore
+      - .pre-commit-config.yaml
+      - Cargo.toml
+      - AGENTS.md
+      - .github/
+      - .claude/
+      - .agents/
+      - docker/
+      - pyproject.toml
+      - pytest.ini
+      - uv.lock
+      - eslint.config.js
+      - DEVELOPMENT.md
+      - SECURITY.md
+  - label: docs
+    github_team: "@ai-dynamo/maintainers-aiconfigurator"
+    path_globs:
+      - docs/
+      - README.md
+      - CONTRIBUTORS.md
+      - ATTRIBUTIONS.md
+      - CODE_OF_CONDUCT.md
+      - CONTRIBUTING.md
+      - LICENSE
+
+shared:
+  # Mirrors the hand-written file: tests touch product behavior and tooling.
+  - glob: tests/
+    owners: [runtime, generators, infra]
+  # Ownership policy changes require infra and maintainer review (docs area
+  # is the maintainers team), mirroring the previous hand-written policy.
+  - glob: CODEOWNERS
+    owners: [infra, docs]
+
+classify:
+  keyword_rules:
+    - match: generator
+      area: generators
+  filetype_rules: []
