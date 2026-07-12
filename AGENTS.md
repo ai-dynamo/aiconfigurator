@@ -53,8 +53,9 @@ Dependencies are managed via `uv` with a `uv.lock` lockfile. The virtual environ
 ## CODEOWNERS
 
 The root `CODEOWNERS` is generated from `.github/codeowners/areas.yaml` - never
-hand-edit it; CI blocks drift. If the `codeowners` check fails on a new
-directory, claim it with one line in `areas.yaml`, regenerate with
-`emit_codeowners.py`, and commit both files together. The `aic-codeowners`
-skill covers all flows (who reviews a change, gate failures, routing changes,
-external contributor grants).
+hand-edit it; CI fails on drift. Repository rules must require the `codeowners`
+check to make failures merge-blocking. If the check fails on a new directory,
+claim it in `areas.yaml`, regenerate with
+`emit_codeowners.py`, and commit every changed source and generated artifact
+together. The `aic-codeowners` skill covers all flows (who reviews a change,
+gate failures, routing changes, external contributor grants).
