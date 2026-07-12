@@ -111,6 +111,13 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
+    # Release allocator blocks retained from the previous case in this worker.
+    # run_gemm builds several full RowParallelLinear copies + a captured CUDA
+    # graph; the caching allocator holds those blocks after each case, so on a
+    # fixed-memory GPU a later (even small) case can OOM on leftover cache.
+    # Clearing at entry keeps each case's headroom independent of order.
+    torch.cuda.empty_cache()
+
     x = torch.randn((m, k), dtype=dtype, device=torch.device(device))
 
     if gemm_type == "fp8":
@@ -221,6 +228,21 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
     exit_stack.enter_context(set_current_vllm_config(vllm_config))
 
     outside_loop_count = 1 if gemm_type in ("fp8_block", "nvfp4") else 6
+    # Memory-adaptive copy count: the timing loop builds `outside_loop_count`
+    # full GEMM copies (each an n*k weight) plus an m*n output per copy, all
+    # captured in one CUDA graph. For the largest LLM shapes 6 copies exceed a
+    # 32 GB card. Reported latency is per-copy (latency / outside_loop_count),
+    # so any count >= 1 yields a valid per-forward number; the 6x loop only
+    # amortizes fixed launch overhead, which is negligible for these large ops.
+    # Cap the count so the estimated peak (x + count*(weight+output), bf16 2 B,
+    # doubled for the graph's activation copy) stays within a safe GPU budget.
+    if outside_loop_count > 1:
+        free_b, total_b = torch.cuda.mem_get_info(device)
+        budget_b = min(free_b, total_b) * 0.75
+        x_b = m * k * 2
+        per_copy_b = (n * k + m * n) * 2 * 2  # weight + output, doubled for graph
+        fit = int((budget_b - x_b) // max(per_copy_b, 1))
+        outside_loop_count = max(1, min(outside_loop_count, fit))
     op_list = []
     for i in range(outside_loop_count):
         op_list.append(create_gemm())
