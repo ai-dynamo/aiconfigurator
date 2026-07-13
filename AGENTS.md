@@ -49,3 +49,13 @@ Dependencies are managed via `uv` with a `uv.lock` lockfile. The virtual environ
 1. **LFS data:** `github-cloud.githubusercontent.com` may be blocked by network egress restrictions. If `git lfs pull` fails, unit tests and CLI `generate`/`support` modes still work. The `default` mode and `build`-marked tests will fail.
 2. **TTY tests:** 4 tests in `tests/unit/cli/test_plain_output.py` may fail because the agent runs in a non-TTY environment.
 3. **Rust tests:** `tests/unit/sdk/test_rust_engine_step.py` requires `cargo` with network access to `crates.io`. It will fail if that domain is blocked.
+
+## CODEOWNERS
+
+The root `CODEOWNERS` is generated from `.github/codeowners/areas.yaml` - never
+hand-edit it; CI fails on drift. Repository rules must require the `codeowners`
+check to make failures merge-blocking. If the check fails on a new directory,
+claim it in `areas.yaml`, regenerate with
+`emit_codeowners.py`, and commit every changed source and generated artifact
+together. The `aic-codeowners` skill covers all flows (who reviews a change,
+gate failures, routing changes, external contributor grants).
