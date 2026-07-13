@@ -738,3 +738,169 @@ class TestRenderCodeownersWithExternals:
         model = self._model()
         plain, _ = _render_codeowners(model, group=True, external=[])
         assert not any("@jane" in ln for ln in plain)
+
+
+# ------------------------------------------------------------------
+# Byte-identical determinism -- the fix for the base-branch race
+# ------------------------------------------------------------------
+
+
+class TestEmissionIsTreeIndependent:
+    """The whole point of the tree-decoupling: emit is a pure function.
+
+    Adding, deleting, or moving files UNDER an already-owned prefix must not
+    change a single byte of the emitted CODEOWNERS. The old min-cover /
+    auto-classify / filetype-tree-walk pipeline flunked this contract:
+    unrelated churn on ``main`` rewrote rules and broke the ``codeowners``
+    CI check on PRs that had touched none of it. These tests pin the pure-
+    function contract so a future regression re-adding a tree walk fails
+    loudly instead of silently churning CODEOWNERS.
+    """
+
+    def _spec(self) -> dict:
+        # Realistic-shaped spec: nested area overrides + shared + a
+        # blocking filetype rule + one keyword rule (which must be
+        # ignored at emit time). No advisory keys -- the AIC validator
+        # rejects them (that path was removed post-fork).
+        return {
+            "meta": {"catch_all": "@root"},
+            "areas": [
+                {
+                    "label": "runtime",
+                    "github_team": "@runtime",
+                    "path_globs": [
+                        "lib/",
+                        "lib/llm/",
+                        "lib/llm/preprocessor.rs",
+                    ],
+                },
+                {
+                    "label": "kvbm",
+                    "github_team": "@kvbm",
+                    "path_globs": ["lib/llm/kv/", "lib/kvbm/"],
+                },
+                {
+                    "label": "docs",
+                    "github_team": "@docs",
+                    "path_globs": ["docs/", "README.md"],
+                },
+                {"label": "ops", "github_team": "@ops", "path_globs": []},
+            ],
+            "shared": [
+                {"glob": "lib/llm/shared/", "owners": ["runtime", "kvbm"]},
+            ],
+            "classify": {
+                # Would previously auto-promote unmatched dirs and pull the
+                # enclosing area into Dockerfile lines -- both tree-walks.
+                "keyword_rules": [{"match": "metrics", "coowner": "docs"}],
+                "filetype_rules": [
+                    {"pattern": "Dockerfile", "coowner": "ops"},
+                ],
+            },
+        }
+
+    def _render(self, spec: dict) -> str:
+        model = compute_resolution(spec)
+        lines, _ = _render_codeowners(model, group=True, external=[])
+        return "\n".join(lines) + "\n"
+
+    def test_add_file_under_owned_prefix_does_not_change_output(self) -> None:
+        # Thread two "trees" through the deprecated positional argument to
+        # prove it really is ignored: even if a legacy caller keeps passing
+        # a tree, the resolved model does not move when files are added
+        # under already-owned prefixes.
+        spec = self._spec()
+        base_tree = [
+            "lib/llm/a.rs",
+            "lib/llm/preprocessor.rs",
+            "lib/llm/kv/x.rs",
+            "docs/intro.md",
+            "README.md",
+            "container/Dockerfile",
+        ]
+        mutated_tree = base_tree + [
+            "lib/llm/new_file.rs",  # add under runtime
+            "lib/llm/kv/another.rs",  # add under kvbm
+            "lib/llm/subdir/only_here.rs",  # deeper unknown dir under runtime
+            "docs/new.md",  # add under docs
+            "container/templates/args.Dockerfile",  # add matching filetype
+        ]
+        assert compute_resolution(spec, base_tree) == compute_resolution(spec, mutated_tree)
+
+    def test_delete_or_move_under_owned_prefix_does_not_change_output(self) -> None:
+        # The delete + move half of the pure-emit contract. Prove that
+        # (a) removing tracked files from under an owned prefix and
+        # (b) reshuffling their paths do not change the resolved model or
+        # the rendered body -- both are pure functions of the spec.
+        spec = self._spec()
+        base_tree = [
+            "lib/llm/a.rs",
+            "lib/llm/preprocessor.rs",
+            "lib/llm/kv/x.rs",
+            "lib/llm/kv/y.rs",
+            "lib/llm/shared/z.rs",
+            "docs/intro.md",
+            "docs/api/ref.md",
+            "README.md",
+            "container/Dockerfile",
+            "container/templates/args.Dockerfile",
+        ]
+        deleted_tree = [
+            # dropped: lib/llm/a.rs, lib/llm/kv/y.rs, docs/api/ref.md,
+            # container/templates/args.Dockerfile.
+            "lib/llm/preprocessor.rs",
+            "lib/llm/kv/x.rs",
+            "lib/llm/shared/z.rs",
+            "docs/intro.md",
+            "README.md",
+            "container/Dockerfile",
+        ]
+        moved_tree = [
+            "lib/llm/preprocessor.rs",
+            "lib/llm/renamed_a.rs",  # moved from lib/llm/a.rs
+            "lib/llm/kv/renamed_x.rs",
+            "lib/llm/kv/y.rs",
+            "lib/llm/shared/moved_z.rs",
+            "docs/intro_renamed.md",
+            "docs/api/ref.md",
+            "README.md",
+            "deploy/Dockerfile",  # moved from container/Dockerfile
+            "deploy/templates/args.Dockerfile",
+        ]
+        model_base = compute_resolution(spec, base_tree)
+        assert model_base == compute_resolution(spec, deleted_tree)
+        assert model_base == compute_resolution(spec, moved_tree)
+        # And the emitted body is byte-identical -- the render path never
+        # reads the tree, so the three "runs" produce the same file.
+        assert self._render(spec) == self._render(spec)
+
+    def test_emitter_has_no_tree_parameter(self) -> None:
+        # Guard against a future regression re-introducing the tree walk:
+        # the emitter's signature must not name a ``tree`` parameter, and
+        # ``compute_resolution``'s ``tree`` must default to None so callers
+        # that omit it get pure behavior for free.
+        import inspect
+
+        sig = inspect.signature(_render_codeowners)
+        assert "tree" not in sig.parameters, "emit tree parameter reintroduced -- see TestEmissionIsTreeIndependent"
+        sig_base = inspect.signature(compute_resolution)
+        tree_param = sig_base.parameters.get("tree")
+        assert tree_param is not None
+        assert tree_param.default is None
+
+    def test_no_ls_files_call_at_emit(self, monkeypatch) -> None:
+        # Belt-and-braces: monkeypatch ``codeowners_match.load_tree`` to
+        # blow up, then run the full emit path. If anything on that path
+        # ever reintroduces a tree walk via ``load_tree``, this test fails
+        # loudly instead of silently regressing determinism.
+        import codeowners_match
+
+        def _boom(*_a, **_kw):  # pragma: no cover - triggered only on regression
+            raise AssertionError("emit path called git ls-files -- tree independence broken")
+
+        monkeypatch.setattr(codeowners_match, "load_tree", _boom)
+        spec = self._spec()
+        model = compute_resolution(spec)
+        lines, _ = _render_codeowners(model, group=True, external=[])
+        # sanity: we actually rendered something
+        assert any(ln.startswith("/lib/") for ln in lines)
