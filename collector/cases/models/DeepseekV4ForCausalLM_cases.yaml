@@ -41,8 +41,10 @@ model_case_values:
           allowed_modes:
             - w4a8_mxfp4_mxfp8
         vllm:
-          # The pinned vLLM 0.19.0 collector has no DeepSeek-V4 MXFP4/MXFP8
-          # implementation. Keep the native artifact out of its queue.
+          # vLLM 0.24.0 selects W4A16 on SM90 but W4A8 on Blackwell for this
+          # artifact. The SDK currently requests only W4A8 and its MoE key has
+          # no system/backend dimension, so neither label is consumable across
+          # platforms yet.
           allowed_modes: []
     - model_path: sgl-project/DeepSeek-V4-Flash-FP8
       hidden_size: 4096
@@ -64,6 +66,12 @@ model_case_values:
           allowed_modes:
             - fp8_block
         vllm:
+          # The artifact config omits expert_dtype and vLLM defaults it to
+          # FP4, but vLLM 0.24's DeepSeek-V4 quant config has a native
+          # fp8-expert branch — serving works with the documented override
+          # `--hf-overrides '{"expert_dtype": "fp8"}'` (models/deepseek_v4/
+          # quant_config.py @0.24.0). The benchmark constructs Fp8Config from
+          # the label with synthetic weights, matching that serving path.
           allowed_modes:
             - fp8_block
     - model_path: deepseek-ai/DeepSeek-V4-Pro
@@ -96,6 +104,7 @@ model_case_values:
           allowed_modes:
             - w4a8_mxfp4_mxfp8
         vllm:
+          # See the native Flash consumer-contract note above.
           allowed_modes: []
     - model_path: sgl-project/DeepSeek-V4-Pro-FP8
       hidden_size: 7168
@@ -117,6 +126,8 @@ model_case_values:
           allowed_modes:
             - fp8_block
         vllm:
+          # See the Flash converted-artifact note above (same expert_dtype
+          # omission; same `--hf-overrides` serving path).
           allowed_modes:
             - fp8_block
   mhc:
@@ -307,8 +318,16 @@ framework_specific_op_cases:
     # the default model plan.
     mhc_module:
       cases: all
-
-# vLLM DSV4 collectors remain available through the registry/direct module
-# entrypoints, but are not in the default model plan until the manifest runtime
-# satisfies their compatibility floor and prefix-aware context collection is
-# implemented.
+  vllm:
+    # These four full-module paths are consumed by the production DSV4 model.
+    # Standalone sparse kernels and mHC remain registry-only because their
+    # current consumer contract/schedule does not represent vLLM 0.24.0's
+    # fused TileLang post->pre+norm and boundary/head calls.
+    dsv4_csa_context_module:
+      cases: all
+    dsv4_hca_context_module:
+      cases: all
+    dsv4_csa_generation_module:
+      cases: all
+    dsv4_hca_generation_module:
+      cases: all

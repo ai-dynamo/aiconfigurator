@@ -21,9 +21,22 @@ import torch
 from collector.case_generator import get_common_mhc_test_cases
 from collector.helper import benchmark_with_power, log_perf
 from collector.registry_types import PerfFile
-from collector.vllm.utils import setup_distributed
 
-__compat__ = "vllm>=0.20.1"
+__compat__ = "vllm==0.24.0"
+
+# vLLM imports stay lazy in this module so that a mismatched install fails
+# inside collect.py's per-op error handling (after the __compat__ gate can
+# label it) rather than at module import.
+_MHC_TILELANG_KERNELS: tuple | None = None
+
+
+def _mhc_tilelang_kernels():
+    global _MHC_TILELANG_KERNELS
+    if _MHC_TILELANG_KERNELS is None:
+        from vllm.model_executor.kernels.mhc.tilelang import mhc_post_tilelang, mhc_pre_tilelang
+
+        _MHC_TILELANG_KERNELS = (mhc_pre_tilelang, mhc_post_tilelang)
+    return _MHC_TILELANG_KERNELS
 
 
 DEFAULT_HIDDEN_SIZE = 4096
@@ -50,14 +63,13 @@ def _resolve_perf_path(output_path: str | None, filename: str | None) -> str:
 
 
 def _init_cuda(device: str) -> None:
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    from collector.vllm.utils import setup_distributed
+
     setup_distributed(device)
     torch.cuda.set_device(device)
-    try:
-        from vllm.v1.worker.workspace import init_workspace_manager
-
-        init_workspace_manager(torch.device(device))
-    except (ImportError, RuntimeWarning):
-        pass
+    init_workspace_manager(torch.device(device))
 
 
 def _active_mhc_common_cases():
@@ -102,16 +114,33 @@ def _make_mhc_tensors(num_tokens: int, hidden_size: int, hc_mult: int, *, device
 
 
 def _mhc_pre(residual, fn, base, scale):
-    post, comb, layer_input = torch.ops.vllm.mhc_pre(
-        residual=residual,
-        fn=fn,
-        hc_scale=scale,
-        hc_base=base,
-        rms_eps=MHC_EPS,
-        hc_pre_eps=MHC_EPS,
-        hc_sinkhorn_eps=MHC_EPS,
-        hc_post_mult_value=2.0,
-        sinkhorn_repeat=MHC_SINKHORN_ITERS,
+    # KNOWN GAP vs vLLM 0.24 serving: the NVIDIA DeepSeek-V4 model calls
+    # mhc_pre_tilelang standalone only on the FIRST layer and always with
+    # norm_weight=attn_norm.weight (fused-RMSNorm big_fuse variant), and every
+    # subsequent layer boundary runs the fused mhc_fused_post_pre_tilelang
+    # (vllm/models/deepseek_v4/nvidia/model.py:854-890 @0.24.0). This
+    # collector measures the norm_weight=None variant because the SDK's
+    # DeepSeekV4 model composes mhc_pre + attn_norm (ElementWise) + mhc_post
+    # as separate per-layer ops (src/aiconfigurator/sdk/models/deepseek_v4.py)
+    # — fusing the norm here would double-count it downstream.
+    # Measured impact (H20, hc_mult=4, hidden=4096, T=1k/8k, 2026-07):
+    # fused(post+pre+norm) matches pre(no-norm)+post within 1-2%, and the
+    # fused norm adds only 2-3% to pre — so this decomposition tracks the
+    # fused serving path closely; the SDK's separately-billed attn_norm is
+    # the only (small) over-count. Aligning row semantics with the fused
+    # serving path is a coordinated producer+consumer contract change; do
+    # not switch variants unilaterally.
+    mhc_pre_tilelang, _ = _mhc_tilelang_kernels()
+    post, comb, layer_input = mhc_pre_tilelang(
+        residual,
+        fn,
+        scale,
+        base,
+        MHC_EPS,
+        MHC_EPS,
+        MHC_EPS,
+        2.0,
+        MHC_SINKHORN_ITERS,
     )
     return layer_input, post, comb
 
@@ -128,8 +157,6 @@ def run_mhc_module(
     num_warmup: int = 5,
     num_iterations: int = 10,
 ) -> list[dict]:
-    import vllm.model_executor.layers.mhc  # noqa: F401
-
     _init_cuda(device)
     hidden_size = int(hidden_size)
     hc_mult = int(hc_mult)
@@ -152,18 +179,16 @@ def run_mhc_module(
                         return [_mhc_pre(residual, fn, base, scale) for residual, fn, base, scale in site_inputs]
 
             else:
+                _, mhc_post_tilelang = _mhc_tilelang_kernels()
                 with torch.no_grad():
                     post_inputs = [
                         (_mhc_pre(residual, fn, base, scale), residual) for residual, fn, base, scale in site_inputs
                     ]
                 torch.cuda.synchronize()
 
-                def kernel_func(post_inputs=post_inputs):
+                def kernel_func(post_inputs=post_inputs, mhc_post_tilelang=mhc_post_tilelang):
                     with torch.no_grad():
-                        return [
-                            torch.ops.vllm.mhc_post(x, residual, post, comb)
-                            for (x, post, comb), residual in post_inputs
-                        ]
+                        return [mhc_post_tilelang(x, residual, post, comb) for (x, post, comb), residual in post_inputs]
 
             with benchmark_with_power(
                 device=torch.device(device),
@@ -192,7 +217,7 @@ def run_mhc_module(
                 version=get_version("vllm"),
                 device_name=torch.cuda.get_device_name(device),
                 op_name=op,
-                kernel_source="vllm_mhc",
+                kernel_source=f"vllm.model_executor.kernels.mhc.tilelang.mhc_{op}_tilelang",
                 perf_filename=_resolve_perf_path(output_path, perf_filename or PerfFile.MHC_MODULE.value),
                 power_stats=result.get("power_stats"),
             )

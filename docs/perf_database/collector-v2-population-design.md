@@ -368,15 +368,35 @@ For migrated quant-sensitive MoE families, geometry and checkpoint
 quantization are separate identities. New model profiles remain additive, but
 a backend schedules only the declared artifact mode rather than taking the
 Cartesian product of every shape and every backend quant mode. DeepSeek V4
-native artifacts schedule `w4a8_mxfp4_mxfp8` in TRT-LLM. Exact SGLang 0.5.14
-schedules native Flash/Pro artifacts as `w4a8_mxfp4_mxfp8` on SM100/103;
-the native Pro artifact's `w4a16_mxfp4` SM90 path was removed from its
-allowed modes (owner decision 2026-07-05 — Hopper users take the
-`sgl-project/DeepSeek-V4-Pro-FP8` build instead). These are distinct
-framework-owned paths, not Marlin fallbacks; SM120 remains fail-closed until
-its native path is validated. Pinned vLLM 0.19.0 has no DSV4 MXFP4/MXFP8
-implementation and schedules no native V4 MoE case. The
-`sgl-project/*-FP8` artifacts schedule `fp8_block`.
+native artifacts schedule
+`w4a8_mxfp4_mxfp8` in TRT-LLM. Exact SGLang 0.5.14 schedules native Flash/Pro
+artifacts as `w4a8_mxfp4_mxfp8` on SM100/103; the native Pro artifact's
+`w4a16_mxfp4` SM90 path was removed from its allowed modes (owner decision
+2026-07-05 — Hopper users take the `sgl-project/DeepSeek-V4-Pro-FP8` build
+instead). These are distinct framework-owned paths, not Marlin fallbacks;
+SGLang SM120 remains fail-closed until its native path is validated. vLLM
+0.24.0 can dispatch the native checkpoints' packed FP4 experts, but the
+selected activation/backend is system-dependent: SM90 uses Marlin with BF16
+activation (`w4a16_mxfp4`), while SM100/SM103 and SM120 select W4A8 variants.
+The SDK currently infers only `w4a8_mxfp4_mxfp8` from the native artifact, and
+the persisted MoE key has no system/backend dimension with which to select a
+different mode. vLLM therefore schedules no native V4 MoE case rather than
+writing an unrequestable or falsely labelled measurement. Supporting it needs
+a system-aware consumer contract, not a collector-only SM heuristic. The
+converted `sgl-project/*-FP8` artifacts still schedule `fp8_block` in SGLang
+and TRT-LLM, but not vLLM: their full-width FP8 expert tensors conflict with
+vLLM's FP4 default when `expert_dtype` is absent. Removing those 72 converted
+tasks / 1,944 token rows is one vLLM-only pruning stage. vLLM 0.24 also builds
+Nemotron Ultra's routed `FusedMoE` at `moe_latent_size=2048`; the outer
+`hidden_size=8192` belongs to its projection layers. The shared 8192-wide
+profiles remain available to SGLang and TRT-LLM, while vLLM drops another 84
+tasks / 2,268 token rows. The SM90 vLLM MoE getter then retains every declared
+shape for runtime observation rather than applying version-specific shape
+predictors, leaving 1,806 grouped tasks / 48,762 token rows. The pinned vLLM
+0.24.0 SM90 full plan contains 277,297 grouped task IDs, including unsupported
+shapes that remain queued so their failures are observed. Earlier 347k
+artifact-expanded probes predated getter deduplication and are not
+checkpoint-count totals.
 Kimi-K2-Instruct schedules `fp8_block`, native Kimi-K2.5 schedules
 `int4_wo` with group size 32, and NVIDIA Kimi-K2.5 schedules `nvfp4`.
 
@@ -457,19 +477,21 @@ DeepSeek V4 has three additional population constraints:
    combines both models in one output. Targeted native and FP8 artifact paths
    remain supported.
 2. The model YAML is the source of truth for backend-specific operations.
-   Stock SGLang schedules CSA/HCA context and generation modules, top-k
-   calibration, mHC, and MoE. `wideep_moe` is not part of that stock model
-   plan; it remains an explicit, independent SGLang 0.5.10 run. WideEP MLA is
-   unregistered. vLLM's DSV4 collectors remain registry-only until the declared
-   runtime compatibility floor and prefix-aware context contract are both
-   satisfied. TRT-LLM continues to schedule only the operations its registry
-   implements.
+   Stock SGLang 0.5.14 schedules CSA/HCA context and generation modules, top-k
+   calibration, mHC, and MoE (`wideep_moe` is not part of that stock model
+   plan; it remains an explicit, independent SGLang 0.5.10 run; WideEP MLA is
+   unregistered). vLLM 0.24.0 schedules its four production CSA/HCA module
+   paths; disabling DSV4 MoE does not disable DSV4 attention. Standalone
+   sparse kernels and mHC remain registry-only until their consumer contracts
+   represent vLLM 0.24.0's fused execution. TRT-LLM continues to schedule only
+   the operations its registry implements.
 3. MoE artifact aliases are not merged across quantization formats. Native
-   DeepSeek V4 artifacts retain only `w4a8_mxfp4_mxfp8` for TRT-LLM, while the
-   converted `sgl-project/*-FP8` artifacts retain only `fp8_block`. Exact
-   SGLang 0.5.14 retains the native SM90 Pro W4A16 and SM100/103 Flash/Pro W4A8
-   paths described above; vLLM 0.19.0 keeps its native mode list empty instead
-   of advertising an unimplemented future-version path.
+   DeepSeek V4 artifacts retain only `w4a8_mxfp4_mxfp8` for TRT-LLM. Exact
+   SGLang 0.5.14 retains the native SM100/103 Flash/Pro W4A8 paths described
+   above. Converted `sgl-project/*-FP8` artifacts retain `fp8_block` only in
+   frameworks that can interpret their actual FP8 expert tensors; the vLLM
+   0.24.0 native mode list remains explicitly empty instead of advertising an
+   unsupported or unconsumable path.
 
 The NVIDIA DeepSeek-V4 NVFP4 checkpoints are intentionally not advertised by
 this Collector-only change. The current AIC model catalog and the DSV4 module

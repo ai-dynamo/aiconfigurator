@@ -35,7 +35,7 @@ exp_disagg_prefill_wideep_decode_standard:
   prefill_gemm_quant_mode: nvfp4
   prefill_moe_quant_mode: nvfp4
   prefill_kvcache_quant_mode: fp8
-  prefill_fmha_quant_mode: fp8
+  prefill_fmha_quant_mode: bfloat16
   prefill_comm_quant_mode: half
   prefill_num_gpu_candidates:
   - 4
@@ -190,7 +190,7 @@ exp_disagg_both_wideep:
   prefill_gemm_quant_mode: nvfp4
   prefill_moe_quant_mode: nvfp4
   prefill_kvcache_quant_mode: fp8
-  prefill_fmha_quant_mode: fp8
+  prefill_fmha_quant_mode: bfloat16
   prefill_comm_quant_mode: half
   prefill_num_gpu_candidates:
   - 4

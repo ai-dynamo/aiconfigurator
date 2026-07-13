@@ -10,9 +10,16 @@ model_paths:
   - meta-llama/Llama-4-Maverick-17B-128E-Instruct
 include_base: true
 base_ops:
-  - attention_context
-  - attention_generation
   - gemm
+framework_specific_base_ops:
+  # vLLM 0.24's Llama 4 attention uses fixed chunk boundaries; a generic
+  # sliding-window profile is not an equivalent persisted workload.
+  sglang:
+    - attention_context
+    - attention_generation
+  trtllm:
+    - attention_context
+    - attention_generation
 description: >
   Llama 4 hybrid model-centric collection plan. Starts with shared base op cases
   and includes the Scout/Maverick MoE shapes used by the support matrix.

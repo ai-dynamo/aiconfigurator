@@ -1243,6 +1243,15 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_generation_deepseek_v4_attention_module``."""
         cls.load_data(database)
+        # Decode attention compute dtype follows the kv-cache dtype; the fmha
+        # label is inert for generation (the table keys on kv dtype).  Derive
+        # the SOL dtype from kv so label changes cannot move decode SOL --
+        # mirrors query_generation_mla's get_sol.
+        fmha_quant_mode = (
+            common.FMHAQuantMode.fp8
+            if kvcache_quant_mode == common.KVCacheQuantMode.fp8
+            else common.FMHAQuantMode.bfloat16
+        )
 
         def get_sol(b_: int = b, s_: int = s) -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(

@@ -8,6 +8,17 @@ model_paths:
   - openai/gpt-oss-120b
   - openai/gpt-oss-20b
 include_base: true
+base_ops:
+  - gemm
+framework_specific_base_ops:
+  # vLLM 0.24's GPT-OSS attention uses sinks, which the persisted generic
+  # attention schema cannot encode.
+  sglang:
+    - attention_context
+    - attention_generation
+  trtllm:
+    - attention_context
+    - attention_generation
 description: >
   GPT-OSS MoE model-centric collection plan.
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-__compat__ = "vllm>=0.19.0"
+__compat__ = "vllm==0.24.0"
 
 """
 MLA Module Collector for vLLM — unified MLA and DSA benchmarking.
@@ -46,16 +46,16 @@ from pathlib import Path
 import torch
 from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.platforms import current_platform
 
 # ═══════════════════════════════════════════════════════════════════════
-# Config registry patch — vLLM 0.16.0 registers the GlmMoeDsaForCausalLM
+# Config registry patch — vLLM 0.24.0 registers the GlmMoeDsaForCausalLM
 # model class but omits the config-type mapping for "glm_moe_dsa", so
 # AutoConfig.from_pretrained() fails.  The config layout is identical to
 # DeepSeek-V3 (GlmMoeDsaForCausalLM inherits DeepseekV2ForCausalLM), so
 # reusing DeepseekV3Config is safe.
 # ═══════════════════════════════════════════════════════════════════════
 from vllm.transformers_utils.config import _CONFIG_REGISTRY
+from vllm.v1.worker.workspace import init_workspace_manager
 from vllm.version import __version__ as vllm_version
 
 from collector.case_generator import (
@@ -128,47 +128,56 @@ def _resolve_model_path(model_name: str) -> str:
     return tmp_dir
 
 
-def _is_sm120_or_newer() -> bool:
-    return get_sm_version() >= 120
-
-
-def _is_vllm_sm120_mla_module_fp8_block_unsupported() -> bool:
-    """Return True when vLLM's block-FP8 MLA module path rejects SM120."""
-    return _is_sm120_or_newer() and vllm_version.startswith("0.19.0")
-
-
-def _is_vllm_sm120_dsa_module_unsupported() -> bool:
-    """Return True when vLLM's sparse DSA module backend rejects SM120."""
-    return _is_sm120_or_newer() and vllm_version.startswith("0.19.0")
-
-
-def _is_vllm_sm120_mla_generation_fp8_large_cache_unsupported() -> bool:
-    """Return True when vLLM's FP8 MLA generation path hits SM120 illegal accesses."""
-    return _is_sm120_or_newer() and vllm_version.startswith("0.19.0")
-
-
-def _is_vllm_sm120_mla_generation_nvfp4_fp8_unsupported() -> bool:
-    """Return True when vLLM's NVFP4+FP8 MLA generation path hits SM120 illegal accesses."""
-    return _is_sm120_or_newer() and vllm_version.startswith("0.19.0")
-
-
-def _is_vllm_sm120_mla_generation_nvfp4_large_cache_unsupported() -> bool:
-    """Return True when vLLM's NVFP4 MLA generation path hits SM120 illegal accesses."""
-    return _is_sm120_or_newer() and vllm_version.startswith("0.19.0")
-
-
 # ═══════════════════════════════════════════════════════════════════════
 # Test Cases — aligned with TRT-LLM's collect_mla_module.py
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _get_precision_combos(phase: str):
+def _get_precision_combos(phase: str, attn_type: str):
     """Return YAML-backed (compute_dtype, kv_cache_dtype, gemm_type) triples."""
 
     return [
         (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
-        for spec in get_mla_module_precision_specs("vllm", phase=phase, sm_version=get_sm_version())
+        for spec in get_mla_module_precision_specs(
+            "vllm",
+            phase=phase,
+            sm_version=get_sm_version(),
+            attention_type=attn_type,
+        )
     ]
+
+
+# MLA cache layout of every model this module collects (DeepSeek-family
+# checkpoints: kv_lora_rank 512 + qk_rope_head_dim 64). Used only as a lower
+# bound by the memory-feasibility filter below.
+_MLA_KV_ENTRY_ELEMS = 512 + 64
+
+_MEMORY_BUDGET_SAFETY_FACTOR = 0.9
+
+
+def _device_total_memory_bytes():
+    """Live device memory for the generation-time memory-feasibility filter."""
+    try:
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_properties(0).total_memory
+    except Exception:
+        pass
+    return None
+
+
+def _generation_kv_footprint_bytes(total_tokens: int, kv_cache_dtype: str) -> int:
+    """Lower bound of a generation case's peak device footprint.
+
+    run_mla_module materializes the per-request context KV inputs and the
+    paged cache they are copied into (utils.create_and_prepopulate_kv_cache_mla),
+    i.e. two allocations of ~total_tokens x 576 elements each. fp8 layouts use
+    at least one byte per element (the packed fp8_ds_mla entry is 656 B/token,
+    still above this bound). Module weights and workspace are deliberately
+    excluded so the estimate stays a provable lower bound: a case this filter
+    drops cannot fit on the device, on any platform.
+    """
+    bytes_per_elem = 1 if "fp8" in kv_cache_dtype else 2
+    return 2 * total_tokens * _MLA_KV_ENTRY_ELEMS * bytes_per_elem
 
 
 def get_context_test_cases(attn_type: str):
@@ -179,11 +188,7 @@ def get_context_test_cases(attn_type: str):
     """
     cases = []
     sweep = get_mla_module_sweep_spec("vllm")
-    for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context"):
-        if attn_type == "mla" and gemm_type == "fp8_block" and _is_vllm_sm120_mla_module_fp8_block_unsupported():
-            # vLLM 0.19.0 routes these module GEMMs through CUTLASS
-            # cutlass_scaled_mm on SM120 and returns "Invalid status".
-            continue
+    for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context", attn_type):
         for num_heads in sweep.inner_sweep_head_counts:
             for b in sweep.context_batch_sizes:
                 for s in sweep.context_sequence_lengths:
@@ -205,45 +210,32 @@ def get_generation_test_cases(attn_type: str):
     """
     cases = []
     sweep = get_mla_module_sweep_spec("vllm")
-    for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation"):
-        if attn_type == "mla" and gemm_type == "fp8_block" and _is_vllm_sm120_mla_module_fp8_block_unsupported():
-            # Same vLLM/CUTLASS SM120 failure as context MLA module.
-            continue
+    # Generation-time memory-feasibility filter (the one sanctioned
+    # in-collector filter, layer_permissions.md): the largest declared
+    # kv_cache_len x batch_size points are arithmetically infeasible on
+    # smaller devices (e.g. 32768 x 1024 bf16 needs 2 x 36 GiB of KV alone;
+    # reproduced as OOM in isolation on L40S 46 GB). Size-vs-capacity only,
+    # queried live; drops are counted and logged below.
+    total_memory = _device_total_memory_bytes()
+    budget = None if total_memory is None else int(total_memory * _MEMORY_BUDGET_SAFETY_FACTOR)
+    considered = 0
+    dropped = 0
+    for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation", attn_type):
         for num_heads in sweep.inner_sweep_head_counts:
             for b in sweep.generation_batch_sizes:
                 for s in sweep.generation_sequence_lengths:
                     if b * s > sweep.generation_max_tokens:
                         continue
-                    if (
-                        attn_type == "mla"
-                        and kv_dtype == "fp8"
-                        and gemm_type == "nvfp4"
-                        and _is_vllm_sm120_mla_generation_nvfp4_fp8_unsupported()
-                    ):
-                        # The vLLM 0.19.0 SM120 generation path with NVFP4
-                        # module GEMMs and FP8 KV cache reports illegal memory
-                        # access even below the large-cache threshold.
-                        continue
-                    if (
-                        attn_type == "mla"
-                        and gemm_type == "nvfp4"
-                        and b * s >= sweep.generation_large_cache_tokens
-                        and _is_vllm_sm120_mla_generation_nvfp4_large_cache_unsupported()
-                    ):
-                        # NVFP4 module GEMMs hit the same illegal access at
-                        # larger generation-cache sizes, even with BF16 KV.
-                        continue
-                    if (
-                        attn_type == "mla"
-                        and kv_dtype == "fp8"
-                        and b * s >= sweep.generation_large_cache_tokens
-                        and _is_vllm_sm120_mla_generation_fp8_large_cache_unsupported()
-                    ):
-                        # vLLM 0.19.0's SM120 MLA generation kernel can pass
-                        # the dry run but report illegal memory access during
-                        # benchmarking at larger FP8 KV cache sizes.
+                    considered += 1
+                    if budget is not None and _generation_kv_footprint_bytes(b * s, kv_dtype) > budget:
+                        dropped += 1
                         continue
                     cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
+    if dropped:
+        print(
+            f"{attn_type}_generation_module: dropped {dropped}/{considered} cases "
+            f"(memory budget, device={total_memory / 2**30:.0f}GiB)"
+        )
     return cases
 
 
@@ -255,7 +247,7 @@ def _build_module_test_cases(attn_type: str, mode: str):
     """
     base_cases = get_context_test_cases(attn_type) if mode == "context" else get_generation_test_cases(attn_type)
     cases = []
-    for model_spec in get_mla_module_model_specs(attention_type=attn_type):
+    for model_spec in get_mla_module_model_specs(attention_type=attn_type, backend="vllm"):
         for base_case in base_cases:
             s, b, h, kv_dtype, compute_dtype, gemm_type, *rest = base_case
             case = [s, b, h, kv_dtype, compute_dtype, gemm_type, model_spec.model_path, attn_type]
@@ -277,25 +269,34 @@ def get_mla_generation_module_test_cases():
 
 def get_dsa_context_module_test_cases():
     """collect.py entrypoint for DSA context module collection."""
-    if _is_vllm_sm120_dsa_module_unsupported():
-        # vLLM 0.19.0 has no valid sparse MLA backend for these DSA module
-        # shapes on RTX PRO 6000 Blackwell Server (SM120); backend selection
-        # reports "compute capability not supported" for all candidates.
-        return []
     return _build_module_test_cases(attn_type="dsa", mode="context")
 
 
 def get_dsa_generation_module_test_cases():
     """collect.py entrypoint for DSA generation module collection."""
-    if _is_vllm_sm120_dsa_module_unsupported():
-        # The generation path hits the same sparse MLA backend selector gap.
-        return []
     return _build_module_test_cases(attn_type="dsa", mode="generation")
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # Module Construction
 # ═══════════════════════════════════════════════════════════════════════
+
+
+def _mla_backend_name(mla_layer, attn_type, is_context, attn_metadata):
+    """Ground-truth backend for the perf row.
+
+    MLA prefill runs mla_layer.prefill_backend; everything else — DSA, decode,
+    and "context" batches that vLLM classified entirely as decodes
+    (num_prefills == 0, e.g. s=1) — runs mla_layer.attn_backend.
+
+    ``num_prefills`` must only be read on the MLA-context branch: sparse DSA
+    metadata (FlashMLASparseMetadata / FlashInferMLASparseMetadata @0.24.0)
+    does not carry that attribute at the top level, so an eager read breaks
+    every DSA row.
+    """
+    if attn_type == "dsa" or not is_context or attn_metadata.num_prefills == 0:
+        return mla_layer.attn_backend.get_name()
+    return mla_layer.prefill_backend.get_name()
 
 
 def _create_gemm_quant_config(gemm_type: str):
@@ -338,9 +339,9 @@ def _create_attention_module(
     attn_type: str,
     num_heads: int,
     use_fp8_kv_cache: bool,
-    use_prefill_fp8: bool,
     max_seq_len: int,
     max_batch_size: int,
+    use_prefill_fp8: bool = False,
     gemm_type: str = "bfloat16",
     device: str = "cuda:0",
     is_context: bool = True,
@@ -356,8 +357,18 @@ def _create_attention_module(
     Args:
         model_path: HuggingFace model path (e.g. "deepseek-ai/DeepSeek-V3.2").
         attn_type: Attention type ("mla" or "dsa").
-        use_prefill_fp8: When True and on SM100+, enable FP8 prefill
-            attention via ``attention_config.use_prefill_query_quantization``.
+        use_prefill_fp8: When True, opt in to FP8 prefill query compute via
+            ``attention_config.use_prefill_query_quantization`` plus an
+            explicit ``attention_config.mla_prefill_backend`` pin. vLLM honors
+            the quantization flag only with an FP8 KV cache on the SM100
+            family with a FLASHINFER/TRTLLM_RAGGED/TOKENSPEED_MLA prefill
+            backend (determine_prefill_query_data_type +
+            backend_supports_prefill_query_quantization,
+            mla_attention.py:1371-1396,1453-1493 @0.24.0), and the SM100 auto
+            selector always picks FLASH_ATTN instead
+            (prefill/selector.py:60-66); the metadata probe in
+            _create_kv_cache_and_metadata fails closed if the decision
+            does not match the case label.
         gemm_type: Precision for linear-layer GEMMs — "bfloat16",
             "fp8_block", or "nvfp4".
     """
@@ -366,7 +377,9 @@ def _create_attention_module(
     local_model_path = _resolve_model_path(model_path)
 
     block_size = 64
-    max_model_len = max(max_seq_len + 1, 4096)
+    # seq_len includes the current token; generation caches only seq_len - 1.
+    # Keep exact-limit models such as Kimi-K2-Instruct at their declared limit.
+    max_model_len = max(max_seq_len, 4096)
     num_kv_cache_blocks = max(
         1 + math.ceil((max_seq_len + 1) / block_size) * max_batch_size,
         8192,
@@ -406,18 +419,53 @@ def _create_attention_module(
     # Fp8Config (blockwise) for fp8_block, ModelOptNvFp4Config for nvfp4.
     vllm_config.quant_config = _create_gemm_quant_config(gemm_type)
 
-    # For DSA, mirror the DeepseekV32ForCausalLM.verify_and_update_config()
-    # logic: fp8 cache must use ``fp8_ds_mla`` format.
-    if is_dsa and use_fp8_kv_cache:
-        vllm_config.cache_config.cache_dtype = "fp8_ds_mla"
-
-    # Enable FP8 prefill attention on SM100+ (Blackwell).
-    # This quantizes Q/K/V to FP8 before sending to the prefill kernel.
+    # Opt in to FP8 prefill query compute before the module (and later the
+    # metadata builder) reads the attention config.
     if use_prefill_fp8:
+        from vllm.platforms import current_platform
+
         vllm_config.attention_config.use_prefill_query_quantization = True
+        if current_platform.is_device_capability_family(100):
+            from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
+
+            # The quantization flag alone never engages on SM100: the auto
+            # selector ranks FLASH_ATTN first (prefill/selector.py:60-66
+            # @0.24.0) and FLASH_ATTN is always eligible there, but FP8 query
+            # compute requires a FLASHINFER/TRTLLM_RAGGED/TOKENSPEED_MLA
+            # prefill backend (backend_supports_prefill_query_quantization,
+            # mla_attention.py:1371-1396 @0.24.0). The FP8-prefill serving
+            # configuration therefore also pins attention_config
+            # .mla_prefill_backend; TRTLLM_RAGGED is the framework's own
+            # highest-priority SM100 backend among the supporting set
+            # (prefill/selector.py:60-66). get_mla_prefill_backend validates
+            # the explicit selection and raises when it is invalid, and the
+            # metadata probe below still fails closed on the resolved
+            # q_data_type.
+            vllm_config.attention_config.mla_prefill_backend = MLAPrefillBackendEnum.TRTLLM_RAGGED
+        # Outside the SM100 family the pin has no source proof: vLLM gates
+        # FP8 prefill query quantization to that family outright
+        # (backend_supports_prefill_query_quantization returns False when
+        # not is_device_capability_family(100), mla_attention.py:1385-1386
+        # @0.24.0), and TRTLLM_RAGGED fails its own capability validation
+        # (e.g. "compute capability 12.0 not supported" on SM120). Leave the
+        # auto selector in charge so the q_data_type probe below raises the
+        # accurate classified error for the unsupported fp8 label.
+
+    # backend_supports_prefill_query_quantization() is a zero-argument
+    # functools.cache that reads the *current* vllm config on first call
+    # (mla_attention.py:1371 @0.24.0). Serving processes hold one config, but
+    # collector workers build many per process, so a value cached from a
+    # previous case (e.g. bf16-prefill, FLASH_ATTN) would silently redirect
+    # this case's q_data_type decision. Clear it so vLLM re-decides from this
+    # case's config, exactly as a fresh serving process would.
+    from vllm.model_executor.layers.attention.mla_attention import (
+        backend_supports_prefill_query_quantization,
+    )
+
+    backend_supports_prefill_query_quantization.cache_clear()
 
     # Override just the layer-local dimensions we sweep in the collector.
-    hf_config = vllm_config.model_config.hf_config
+    hf_config = vllm_config.model_config.hf_text_config
     hf_config.num_hidden_layers = 1
     hf_config.num_attention_heads = num_heads
     hf_config.num_key_value_heads = num_heads
@@ -473,7 +521,7 @@ def _create_attention_module(
     # Scale params → 1.0 (avoid NaN during process_weights_after_loading).
     # Everything else → small constant.
     #
-    # Deterministic init — vLLM 0.17.0 DSA modules leave CUDA graph RNG
+    # Deterministic init — vLLM 0.24.0 DSA modules leave CUDA graph RNG
     # offset tracking active after construction (likely from FlashInfer
     # sparse MLA backend, vllm-project/vllm#33451 / vllm-project/vllm#34457).
     # Any RNG call (normal_, uniform_, randn) crashes with "Offset increment
@@ -515,7 +563,7 @@ def _process_module_weights(attn_module, vllm_config, device):
 
         # 2. Process MLAAttention layers (creates W_UK_T, W_UV).
         for _, module in attn_module.named_modules():
-            if isinstance(module, MLAAttention) and hasattr(module, "process_weights_after_loading"):
+            if isinstance(module, MLAAttention):
                 module.process_weights_after_loading(vllm_config.model_config.dtype)
 
 
@@ -573,19 +621,15 @@ def _create_kv_cache_and_metadata(
     attn_type: str,
     batch_size: int,
     seq_len: int,
-    num_heads: int,
     is_context: bool,
-    use_fp8_kv_cache: bool,
     prefix_len: int = 0,
+    compute_dtype: str = "bfloat16",
     device: str = "cuda:0",
 ):
     """Create KV cache and attention metadata for benchmarking."""
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec
-
-    hf_config = vllm_config.model_config.hf_config
+    hf_config = vllm_config.model_config.hf_text_config
     kv_lora_rank = hf_config.kv_lora_rank
     qk_rope_head_dim = hf_config.qk_rope_head_dim
-    head_dim = kv_lora_rank + qk_rope_head_dim
     block_size = vllm_config.cache_config.block_size
     is_dsa = attn_type == "dsa"
 
@@ -628,19 +672,15 @@ def _create_kv_cache_and_metadata(
         )
         common_attn_metadata.block_table_tensor = torch.cat([common_attn_metadata.block_table_tensor, padding], dim=1)
 
-    # Select the correct dtype for cache.
-    # DSA fp8 uses a custom 656-byte ``fp8_ds_mla`` cache format that
-    # stores quantised NoPE + per-128-element scales + BF16 RoPE.
-    # Dense MLA fp8 uses standard fp8_e4m3.
-    if is_dsa and use_fp8_kv_cache:
-        cache_dtype = current_platform.fp8_dtype()
-        kv_cache_dtype_str = "fp8_ds_mla"
-    elif use_fp8_kv_cache:
-        cache_dtype = current_platform.fp8_dtype()
-        kv_cache_dtype_str = "fp8"
-    else:
-        cache_dtype = torch.bfloat16
-        kv_cache_dtype_str = None
+    # Use the cache format chosen by the concrete production layer. In 0.24.0
+    # this matters on both SM10x (FlashMLA vs FlashInfer sparse) and SM120,
+    # where sparse MLA canonicalizes auto/fp8 to the packed fp8_ds_mla layout.
+    attn_layer_name = "model.layers.0.self_attn.attn"
+    attn_layer = vllm_config.compilation_config.static_forward_context[attn_layer_name]
+    backend_cls = attn_layer.get_attn_backend()
+    kv_cache_spec = attn_layer.get_kv_cache_spec(vllm_config)
+    cache_dtype = kv_cache_spec.dtype
+    kv_cache_dtype_str = kv_cache_spec.cache_dtype_str
 
     # Populate KV cache with the tokens that exist before this forward.
     kv_c_contexts, k_pe_contexts = _create_context_kv_inputs(
@@ -654,31 +694,40 @@ def _create_kv_cache_and_metadata(
         kv_c_contexts=kv_c_contexts,
         k_pe_contexts=k_pe_contexts,
         block_size=block_size,
-        head_size=head_dim,
+        head_size=kv_cache_spec.head_size,
         dtype=cache_dtype,
         device=torch.device(device),
         num_blocks=num_kv_cache_blocks,
         common_attn_metadata=common_attn_metadata,
         randomize_blocks=False,
         kv_cache_dtype=kv_cache_dtype_str,
+        scale=attn_layer._k_scale,
     )
 
-    # Build attention metadata via backend builder
-    backend_cls = _get_attention_backend(vllm_config, head_dim, use_fp8_kv_cache, is_dsa)
     builder_cls = backend_cls.get_builder_cls()
 
-    kv_cache_spec = MLAAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,  # MLA uses 1 KV head
-        head_size=head_dim,
-        dtype=cache_dtype,
-        sliding_window=None,
-        cache_dtype_str=kv_cache_dtype_str,
-    )
-
-    attn_layer_name = "model.layers.0.self_attn.attn"
     layer_names = [attn_layer_name]
     builder = builder_cls(kv_cache_spec, layer_names, vllm_config, torch.device(device))
+
+    # Fail closed on the framework's own prefill query dtype decision:
+    # vLLM silently falls back to the model dtype when FP8 prefill query
+    # quantization is requested but unsupported (fp8 KV cache + SM100 family
+    # + FLASHINFER/TRTLLM_RAGGED prefill backend required —
+    # determine_prefill_query_data_type, mla_attention.py:1453-1493 @0.24.0).
+    # A silently-bf16 run must not be recorded as an mla_dtype=fp8 row.
+    if is_context:
+        from vllm.platforms import current_platform
+
+        model_dtype = vllm_config.model_config.dtype
+        expected_q_dtype = current_platform.fp8_dtype() if compute_dtype == "fp8" else model_dtype
+        actual_q_dtype = getattr(builder, "q_data_type", model_dtype)
+        if actual_q_dtype != expected_q_dtype:
+            raise RuntimeError(
+                f"vLLM selected prefill query dtype {actual_q_dtype} but the case is labeled "
+                f"compute_dtype={compute_dtype!r}; refusing to record a mislabeled row "
+                "(see determine_prefill_query_data_type @0.24.0 for the support conditions)"
+            )
+
     attn_metadata = builder.build(
         common_prefix_len=prefix_len,
         common_attn_metadata=common_attn_metadata,
@@ -688,29 +737,17 @@ def _create_kv_cache_and_metadata(
     indexer_kv_cache = None
     indexer_metadata = None
     if is_dsa:
-        from vllm.v1.attention.backends.mla.indexer import (
-            DeepseekV32IndexerBackend,
-        )
-
-        index_head_dim = hf_config.index_head_dim
-        quant_block_size = 128
-        indexer_head_dim = index_head_dim + index_head_dim // quant_block_size * 4
-
         indexer_layer_name = "model.layers.0.self_attn.indexer.k_cache"
-        indexer_spec = MLAAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=indexer_head_dim,
-            dtype=torch.uint8,
-        )
+        indexer_layer = vllm_config.compilation_config.static_forward_context[indexer_layer_name]
+        indexer_spec = indexer_layer.get_kv_cache_spec(vllm_config)
         indexer_kv_cache = torch.zeros(
             num_kv_cache_blocks,
             block_size,
-            indexer_head_dim,
-            dtype=torch.uint8,
+            indexer_spec.head_size,
+            dtype=indexer_spec.dtype,
             device=device,
         )
-        indexer_builder_cls = DeepseekV32IndexerBackend.get_builder_cls()
+        indexer_builder_cls = indexer_layer.get_attn_backend().get_builder_cls()
         indexer_builder = indexer_builder_cls(indexer_spec, [indexer_layer_name], vllm_config, torch.device(device))
         indexer_metadata = indexer_builder.build(
             common_prefix_len=prefix_len,
@@ -723,41 +760,6 @@ def _create_kv_cache_and_metadata(
         )
 
     return kv_cache, attn_metadata, common_attn_metadata, indexer_kv_cache, indexer_metadata
-
-
-def _get_attention_backend(vllm_config, head_dim, use_fp8_kv_cache, is_dsa):
-    """Select attention backend based on GPU capability and config.
-
-    The backend selector uses kv_cache_dtype to pick the right implementation:
-      - DSA fp8 → ``fp8_ds_mla`` (FlashMLA Sparse custom format)
-      - MLA fp8 → ``fp8`` (standard fp8_e4m3)
-      - BF16   → None / "auto"
-    """
-    dtype = torch.bfloat16
-
-    # Compute the kv_cache_dtype token the selector expects.
-    if is_dsa and use_fp8_kv_cache:
-        kv_cache_dtype_val = "fp8_ds_mla"
-    elif use_fp8_kv_cache:
-        kv_cache_dtype_val = "fp8"
-    else:
-        kv_cache_dtype_val = None
-
-    from vllm.utils.import_utils import resolve_obj_by_qualname
-    from vllm.v1.attention.selector import AttentionSelectorConfig
-
-    attn_selector_config = AttentionSelectorConfig(
-        head_size=head_dim,
-        dtype=dtype,
-        kv_cache_dtype=kv_cache_dtype_val,
-        block_size=vllm_config.cache_config.block_size,
-        use_mla=True,
-        has_sink=False,
-        use_sparse=is_dsa,
-    )
-    backend = current_platform.get_attn_backend_cls(None, attn_selector_config)
-
-    return resolve_obj_by_qualname(backend)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -784,16 +786,24 @@ def run_mla_module(
     test_ite: int = 6,
 ):
     """Run a single MLA / DSA module-level benchmark point."""
+    if attn_type not in {"mla", "dsa"}:
+        raise ValueError(f"unsupported vLLM attention type: {attn_type!r}")
+    if kv_cache_dtype not in {"bfloat16", "fp8"}:
+        raise ValueError(f"unsupported vLLM MLA KV-cache dtype: {kv_cache_dtype!r}")
+    if compute_dtype not in {"bfloat16", "fp8"}:
+        raise ValueError(f"unsupported vLLM MLA query compute dtype: {compute_dtype!r}")
+    if compute_dtype == "fp8" and kv_cache_dtype != "fp8":
+        raise ValueError(
+            "vLLM FP8 MLA prefill query compute requires an FP8 KV cache "
+            "(determine_prefill_query_data_type, mla_attention.py:1462-1466 "
+            f"@0.24.0); got kv_cache_dtype={kv_cache_dtype!r}"
+        )
+
     setup_distributed(device)
     torch.cuda.set_device(device)
 
     # DSA's sparse_attn_indexer requires a WorkspaceManager.
-    try:
-        from vllm.v1.worker.workspace import init_workspace_manager
-
-        init_workspace_manager(torch.device(device))
-    except (ImportError, RuntimeWarning):
-        pass
+    init_workspace_manager(torch.device(device))
 
     use_fp8_kv_cache = kv_cache_dtype == "fp8"
     use_prefill_fp8 = compute_dtype == "fp8"
@@ -831,18 +841,13 @@ def run_mla_module(
             attn_type=attn_type,
             batch_size=batch_size,
             seq_len=seq_len,
-            num_heads=num_heads,
             is_context=is_context,
-            use_fp8_kv_cache=use_fp8_kv_cache,
             prefix_len=prefix_len,
+            compute_dtype=compute_dtype,
             device=device,
         )
 
-    # 2b. Bind KV cache to the attention layer so forward() can access it.
-    #     vLLM >=0.19 reads self.kv_cache directly as a Tensor (the previous
-    #     per-virtual-engine list wrapping is gone); flashinfer_mla.forward_mqa,
-    #     mla_attention.forward_impl, and the sparse_attn_indexer custom op all
-    #     now typecheck Tensor, so a list wrapper raises.
+    # 2b. Bind KV cache to the 0.24.0 attention layer.
     attn_layer_name = "model.layers.0.self_attn.attn"
     forward_ctx = vllm_config.compilation_config.static_forward_context
     forward_ctx[attn_layer_name].kv_cache = kv_cache
@@ -853,7 +858,7 @@ def run_mla_module(
         forward_ctx[indexer_layer_name].kv_cache = indexer_kv_cache
 
     # 3. Input tensors
-    hidden_size = vllm_config.model_config.hf_config.hidden_size
+    hidden_size = vllm_config.model_config.hf_text_config.hidden_size
     if is_context:
         num_tokens = seq_len * batch_size
         positions = (
@@ -883,6 +888,51 @@ def run_mla_module(
     #    set_current_vllm_config — needed by quantised layers and RoPE.
     #    set_forward_context — provides attn_metadata + kv_cache to the
     #    MLAAttention.forward() path (it calls get_forward_context()).
+    # FIXME(kernel-limit): on SM100, FlashInfer's trtllm-gen sparse-MLA decode
+    # ships kernels only for tileSizeQ >= 8. DSA cases whose per-rank head
+    # count is 1/2/4 (tileSizeQ = heads for q_len 1) raise "Missing TRTLLM-GEN
+    # kernel (decode)" (flashinfer csrc/trtllm_fmha_kernel_launcher.cu:272,
+    # flashinfer 0.6.12) whenever vLLM selects FLASHINFER_MLA_SPARSE — always
+    # for FP8 KV, and for BF16 KV at heads <= 16 (platforms/cuda.py:98-116
+    # @0.24.0). Heads 8..128 pass; boundary measured on B200. Serving fails
+    # identically, so the affected cases stay observed runtime failures.
+    # Re-verify on the next vLLM/FlashInfer bump.
+    # FIXME(kernel-limit): on SM120 and SM89, vLLM's dense-MLA decode backend
+    # is TRITON_MLA (SM120: platforms/cuda.py:130-134; SM89: the else-branch
+    # priority list at cuda.py:135-142, where FLASH_ATTN_MLA/FLASHMLA/
+    # FLASHINFER_MLA all reject major != 9/10 and TRITON_MLA is the only
+    # eligible backend @0.24.0). Two measured limits (RTX PRO 6000
+    # Blackwell; serving fails identically; re-verify on the next vLLM
+    # bump):
+    # 1. FP8 KV + q-heads >= 2 routes to the grouped decode kernel, which
+    #    requests 102400B shared memory vs SM120's 101376B limit ->
+    #    OutOfResources (heads == 1 takes the non-grouped kernel and
+    #    passes; bf16 KV passes). vLLM's overflow guard only drops
+    #    num_stages at BLOCK_DMODEL >= 1024, which the MLA Lk=576 path
+    #    (BLOCK_DMODEL=512) never reaches (triton_decode_attention.py
+    #    :490-532 @0.24.0). Upstream fix in flight: vllm#46728 (open PR,
+    #    num_stages=1 fallback for exactly this tile, fixes vllm#46721).
+    # 2. Decode batches whose total cached tokens exceed ~2^31/576 raise
+    #    a deterministic illegal memory access (reproduced in isolation
+    #    on a clean GPU): largest passing batch*seq = 2.10M tokens,
+    #    smallest failing = 4.19M, bracketing 2^31 / 576 elements = 3.73M
+    #    — consistent with int32 offset overflow in the Triton decode
+    #    kernel's KV indexing. Affects both KV dtypes (fp8 only at
+    #    heads == 1, where limit 1 does not fire first). Same family on
+    #    SM89 (L40S): 33/400 sampled generation cases, smallest failing
+    #    batch*seq again 4.19M tokens (bf16 KV; fp8-KV combos are not
+    #    declared below SM90).
+    # FIXME(kernel-limit): on SM120, every DSA case fails: the CUDA sparse
+    # attention indexer hard-requires DeepGEMM (sparse_attn_indexer.py:468-472
+    # @0.24.0), whose fp8 MQA-logits kernels ship for SM90/SM100 only
+    # (vllm/third_party/deep_gemm .../impls/sm{90,100}_fp8_mqa_logits.cuh) and
+    # assert "Unsupported architecture" (deepgemm csrc/apis/attention.hpp:184);
+    # cases with fp8_block linears die even earlier in DeepGEMM's scale-factor
+    # layout transform ("Unknown SF transformation", layout.hpp:59). Serving
+    # fails identically. Upstream: vllm#45317 (gap report), TRITON_MLA_SPARSE
+    # backend for SM8x/11x/12x in vllm#38476/#47629 (open PRs), sparse decode
+    # in vllm#47527; DeepGEMM SM120 support in DeepGEMM#318 (open PR).
+    # Re-verify on the next vLLM/DeepGEMM bump.
     exit_stack.enter_context(set_current_vllm_config(vllm_config))
     attn_metadata_dict = {attn_layer_name: attn_metadata}
     if indexer_metadata is not None:
@@ -892,10 +942,11 @@ def run_mla_module(
         with torch.inference_mode():
             attn_module.forward(positions, hidden_states, None)
     except torch.cuda.OutOfMemoryError as e:
-        # Capacity limit, not a bug — skip so total_errors stays meaningful.
-        print(f"  Dry run OOM (skipping): {e}")
+        print(f"  Dry run OOM: {e}")
         _cleanup()
-        return None
+        # Let collect.py record the capacity failure. Returning normally would
+        # mark a task done even though it emitted no performance row.
+        raise
     except Exception as e:
         print(f"  Dry run failed: {e}")
         traceback.print_exc()
@@ -928,7 +979,6 @@ def run_mla_module(
         num_warmups=warming_up,
         num_runs=test_ite,
         repeat_n=1,
-        allow_graph_fail=True,
         use_cuda_graph=use_cuda_graph,
     ) as results:
         pass
@@ -950,6 +1000,9 @@ def run_mla_module(
     # Aligns with sdk/models.py which uses architectures[0] throughout.
     hf_cfg = vllm_config.model_config.hf_config
     architecture = getattr(hf_cfg, "architectures", [getattr(hf_cfg, "model_type", "unknown")])[0]
+    mla_layer = attn_module.mla_attn.mla_attn
+    backend_name = _mla_backend_name(mla_layer, attn_type, is_context, attn_metadata)
+    actual_kv_cache_dtype = "fp8" if mla_layer.kv_cache_dtype.startswith("fp8") else "bfloat16"
 
     log_perf(
         item_list=[
@@ -957,7 +1010,7 @@ def run_mla_module(
                 "model": model_path,
                 "architecture": architecture,
                 "mla_dtype": "bfloat16" if compute_dtype == "bfloat16" else compute_dtype,
-                "kv_cache_dtype": "bfloat16" if kv_cache_dtype == "bfloat16" else kv_cache_dtype,
+                "kv_cache_dtype": actual_kv_cache_dtype,
                 "gemm_type": "bfloat16" if gemm_type == "bfloat16" else gemm_type,
                 "num_heads": num_heads,
                 "batch_size": batch_size,
@@ -971,7 +1024,7 @@ def run_mla_module(
         version=vllm_version,
         device_name=torch.cuda.get_device_name(device),
         op_name=op_name,
-        kernel_source="default",
+        kernel_source=backend_name,
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
     )
@@ -979,7 +1032,7 @@ def run_mla_module(
     print(
         f"  [{phase}] b={batch_size}, s={seq_len}, heads={num_heads}, "
         f"prefix={prefix_len}, gemm={gemm_type}, compute={compute_dtype}, "
-        f"kv={kv_cache_dtype}: {latency:.4f} ms"
+        f"kv={kv_cache_dtype}, backend={backend_name}: {latency:.4f} ms"
     )
 
     _cleanup()
@@ -1043,7 +1096,10 @@ def _cleanup():
 
 
 def _supported_model_map() -> dict[str, str]:
-    return {spec.model_path: spec.attention_type for spec in get_mla_module_model_specs(apply_model_filter=False)}
+    return {
+        spec.model_path: spec.attention_type
+        for spec in get_mla_module_model_specs(backend="vllm", apply_model_filter=False)
+    }
 
 
 def main():

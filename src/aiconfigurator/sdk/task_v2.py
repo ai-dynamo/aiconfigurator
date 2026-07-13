@@ -38,6 +38,7 @@ from typing import Any, Literal
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.models import (
     _infer_quant_modes_from_raw_config,
+    attention_op_keys,
     check_is_moe,
     get_model_family,
     resolve_dsv4_moe_arch_mode,
@@ -718,8 +719,8 @@ class Task:
                 self._set_role_attr(role, "moe_quant_mode", common.MoEQuantMode.w4a8_mxfp4_mxfp8)
 
         # Track whether fmha came from an explicit field (vs HF/fallback): the
-        # V3/Kimi context downgrade must NOT fire on an EXPLICIT fp8 -- v1 keeps it
-        # (its `not explicit_fmha_mode` guard) and lets validate fail fast.
+        # data-driven fallback below must NOT fire on an EXPLICIT fp8 -- explicit
+        # values are the user's contract and validate fails fast on them.
         fmha_explicit: dict[str, bool] = {}
         for role in roles:
             for key in _QUANT_ENUM_TABLES:
@@ -747,38 +748,101 @@ class Task:
                 resolved = from_hf if from_hf is not None else fallback
                 self._set_role_attr(role, key, resolved)
 
-        # Backend / architecture FMHA fp8->bf16 fixups (mirror v1: the V3/Kimi rule
-        # lives in validate_context => context-only; the V3.2/GLM-DSA, V4 and vLLM
-        # rules live in _apply_model_quant_defaults => every role incl. decode).
+        # Data-driven FMHA resolution: if an inferred fp8 has no fp8 slice in
+        # the role's fmha-keyed context-attention table, fall back to bfloat16
+        # with a warning instead of failing validate later.  bf16-as-fp8 is
+        # conservative: same kv-cache dtype, attention math modeled at bf16
+        # throughput.  The data IS the capability statement -- there are no
+        # per-model downgrade rules; when fp8 slices land for a combo (e.g.
+        # DSA on Blackwell vLLM), the inference survives and uses them.
+        # Explicit user fp8 is never overridden -- validate stays fail-fast
+        # for it (including v1 profile-derived values).  Systems with no
+        # packaged data keep the checkpoint inference untouched.
+        #
+        # Context-using roles only: NO generation table keys on fmha (decode
+        # compute dtype follows the kv-cache dtype; the generation MLA module
+        # loader drops the degenerate mla_dtype column), so an fp8 label is
+        # inert on decode -- and validate likewise checks fmha only for
+        # context-using roles.
         for role in roles:
-            backend_name = self._role_attr(role, "backend_name")
-            fmha = self._role_attr(role, "fmha_quant_mode")
-            # DeepSeek-V3/Kimi context attention (MLA prefill) does not support fp8 FMHA,
-            # so downgrade to bfloat16 -- but ONLY for context-attention roles (agg, prefill).
-            # The decode role uses generation attention, which keeps fp8.
-            if (
-                role != "decode"
-                and not fmha_explicit.get(role, False)
-                and self._architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
-                and fmha == common.FMHAQuantMode.fp8
-            ):
-                self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
-            # DSA module (DeepSeek-V3.2 / GLM-5): DSA perf tables only carry bf16 FMHA.
-            if (
-                self._architecture in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM")
-                and backend_name in ("trtllm", "sglang")
-                and self._role_attr(role, "fmha_quant_mode") == common.FMHAQuantMode.fp8
-            ):
-                self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
-            # DeepSeek-V4 compressed attention is recorded as bf16 in the perf tables.
-            if (
-                self._architecture == "DeepseekV4ForCausalLM"
-                and self._role_attr(role, "fmha_quant_mode") == common.FMHAQuantMode.fp8
-            ):
-                self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
-            # vLLM perf tables only include bf16 FMHA.
-            if backend_name == "vllm" and self._role_attr(role, "fmha_quant_mode") == common.FMHAQuantMode.fp8:
-                self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
+            if role == "decode":
+                continue
+            if fmha_explicit.get(role, False):
+                continue
+            if self._role_attr(role, "fmha_quant_mode") != common.FMHAQuantMode.fp8:
+                continue
+            supported = self._context_fmha_supported_modes(role)
+            if not supported or common.FMHAQuantMode.fp8.name in supported:
+                continue  # fp8 data present, or no DB to consult -> keep fp8
+            if common.FMHAQuantMode.bfloat16.name not in supported:
+                continue  # no bf16 slice either -> let validate report the gap
+            self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
+            ctx_op, _ = self._attention_op_keys(role)
+            field = "fmha_quant_mode" if self.serving_mode == "agg" else f"{role}_fmha_quant_mode"
+            logger.warning(
+                f"{role} fmha_quant_mode=fp8 (inferred from the model checkpoint) has no "
+                f"{ctx_op!r} perf data for system={self._role_attr(role, 'system_name')!r}, "
+                f"backend={self._role_attr(role, 'backend_name')!r}, "
+                f"version={self._role_attr(role, 'backend_version')!r}; falling back to bfloat16 "
+                f"FMHA data. Predictions are conservative if the deployed engine runs fp8 FMHA; "
+                f"set {field} explicitly to override."
+            )
+
+    def _attention_op_keys(self, role: str) -> tuple[str, str]:
+        """(context_op, generation_op) support-matrix keys for this role's model
+        family / backend / wideep combination (shared by the resolve-time FMHA
+        fallback and ``_check_role_against_db``; mapping lives in
+        ``models.attention_op_keys``)."""
+        return attention_op_keys(
+            self._model_family,
+            self._role_attr(role, "backend_name"),
+            bool(self._role_attr(role, "enable_wideep")),
+        )
+
+    def _try_load_role_database(self, role: str):
+        """Load the role's perf DB, returning None when the perf data is
+        unavailable (missing system/backend/version data).  Programmer errors
+        propagate; only data-availability failures are swallowed."""
+        from aiconfigurator.sdk.perf_database import (
+            PerfDataNotAvailableError,
+            has_perf_data_not_available_cause,
+        )
+
+        system = self._role_attr(role, "system_name")
+        backend = self._role_attr(role, "backend_name")
+        version = self._role_attr(role, "backend_version")
+        if not (system and backend and version):
+            return None
+        try:
+            return self._load_database(system, backend, version)
+        except (PerfDataNotAvailableError, FileNotFoundError) as exc:
+            logger.debug("perf DB unavailable for %s role (%s/%s/%s): %s", role, system, backend, version, exc)
+            return None
+        except Exception as exc:
+            # Match the legacy "DB error" envelope (e.g. wrapped FileNotFoundError
+            # inside RuntimeError) without swallowing programmer typos.
+            if not has_perf_data_not_available_cause(exc):
+                raise
+            logger.debug("perf DB unavailable for %s role (%s/%s/%s): %s", role, system, backend, version, exc)
+            return None
+
+    def _context_fmha_supported_modes(self, role: str) -> list[str]:
+        """FMHA modes with perf data for this role's fmha-keyed context-attention
+        op, jointly with the role's resolved kv-cache mode (an fmha slice that
+        exists only under a different kv dtype cannot serve this role's
+        queries).  Returns [] when the DB (or the op's table) is unavailable,
+        meaning "no information" -- callers must not read that as "nothing
+        supported"."""
+        from aiconfigurator.sdk.perf_database import context_fmha_supported_modes
+
+        database = self._try_load_role_database(role)
+        if database is None:
+            return []
+        return context_fmha_supported_modes(
+            database,
+            self._attention_op_keys(role)[0],
+            self._role_attr(role, "kvcache_quant_mode"),
+        )
 
     def _resolve_search_space(self) -> None:
         roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
@@ -1116,8 +1180,6 @@ class Task:
             raise ValueError("agg mode requires model_path")
         if not self.system_name:
             raise ValueError("agg mode requires system_name")
-        if self.backend_name == "vllm" and self._model_family == "DEEPSEEK":
-            raise NotImplementedError("AIConfigurator does not yet support the DeepSeek family on the vLLM backend.")
         # fp8_static is not hard-gated to trtllm: it is derived from the dynamic
         # fp8 GEMM minus compute_scale/scale_matrix overhead and works on any
         # backend whose perf DB carries those tables.  _validate_database_quant_modes
@@ -1139,14 +1201,8 @@ class Task:
             )
         if not self.prefill_system_name or not self.decode_system_name:
             raise ValueError("disagg mode requires both prefill_system_name and decode_system_name.")
-        for role in ("prefill", "decode"):
-            backend = self._role_attr(role, "backend_name")
-            # fp8_static is not hard-gated to trtllm (see _validate_agg); the
-            # per-role DB check in _validate_database_quant_modes governs support.
-            if backend == "vllm" and self._model_family == "DEEPSEEK":
-                raise NotImplementedError(
-                    f"AIConfigurator does not yet support the DeepSeek family on the vLLM backend ({role} side)."
-                )
+        # fp8_static is not hard-gated to trtllm (see _validate_agg); the
+        # per-role DB check in _validate_database_quant_modes governs support.
 
     def _validate_database_quant_modes(self) -> None:
         """Validate user's quant modes against the perf database's supported list.
@@ -1180,10 +1236,6 @@ class Task:
     ) -> None:
         """For one role, fetch its perf DB and verify each quant mode is supported."""
         from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
-        from aiconfigurator.sdk.perf_database import (
-            PerfDataNotAvailableError,
-            has_perf_data_not_available_cause,
-        )
 
         system = self._role_attr(role, "system_name")
         backend = self._role_attr(role, "backend_name")
@@ -1191,19 +1243,8 @@ class Task:
         if not (system and backend and version):
             return  # nothing to validate against
 
-        try:
-            database = self._load_database(system, backend, version)
-        except (PerfDataNotAvailableError, FileNotFoundError) as exc:
-            # DB unavailable; let sweep surface the real error later.
-            logger.debug("validate: skipping DB-side quant check (DB unavailable): %s", exc)
-            database = None
-        except Exception as exc:
-            # Match the legacy "DB error" envelope (e.g. wrapped FileNotFoundError
-            # inside RuntimeError) without swallowing programmer typos.
-            if not has_perf_data_not_available_cause(exc):
-                raise
-            logger.debug("validate: skipping DB-side quant check (DB unavailable): %s", exc)
-            database = None
+        # DB unavailable; let sweep surface the real error later.
+        database = self._try_load_role_database(role)
 
         if database is None:
             # In SILICON mode the DB must exist; fp8_static is derived from
@@ -1220,23 +1261,11 @@ class Task:
             return
 
         supported: dict = getattr(database, "supported_quant_mode", {}) or {}
-        enable_wideep = bool(self._role_attr(role, "enable_wideep"))
         moe_backend = self.moe_backend  # shared across roles
         is_moe = self._is_moe
-        fam = self._model_family
 
         # Pick the attention-module op keys for this (model family, backend, wideep).
-        if fam == "DEEPSEEKV4":
-            ctx_op, gen_op = "deepseek_v4_context_module", "deepseek_v4_generation_module"
-        elif fam == "DEEPSEEKV32":
-            ctx_op, gen_op = "dsa_context_module", "dsa_generation_module"
-        elif fam in ("DEEPSEEK", "KIMIK25") and backend != "vllm":
-            if backend == "sglang" and enable_wideep:
-                ctx_op, gen_op = "wideep_context_mla", "wideep_generation_mla"
-            else:
-                ctx_op, gen_op = "context_mla", "generation_mla"
-        else:
-            ctx_op, gen_op = "context_attention", "generation_attention"
+        ctx_op, gen_op = self._attention_op_keys(role)
 
         # supported_quant_mode is a DATA-PRESENCE list (which quants the DB carries
         # tables for), not a backend-capability list. In SILICON that equals what we

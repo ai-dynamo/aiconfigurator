@@ -58,6 +58,7 @@ def _ctx_row(
     bs: int,
     isl: int,
     tp: int,
+    step: int = 0,
     gemm: str = "fp8_block",
     lat: float = 1.0,
     model: str = _FLASH_MODEL,
@@ -69,7 +70,7 @@ def _ctx_row(
     return (
         f"SGLang,test,NVIDIA H20-3e,dsv4_{attn_kind}_context_module,"
         f"compressed_flashmla,{model},DeepseekV4ForCausalLM,"
-        f"bfloat16,fp8_e4m3,{gemm},{heads},{bs},{isl},{tp},0,{cr},{lat:.4f}"
+        f"bfloat16,fp8_e4m3,{gemm},{heads},{bs},{isl},{tp},{step},{cr},{lat:.4f}"
     )
 
 
@@ -169,6 +170,17 @@ def test_load_context_dsv4_kind_module_data_keys_by_local_head(tmp_path):
         _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=2, lat=14.0, model=_PRO_MODEL, num_heads=64),
         _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=4, lat=11.5, model=_PRO_MODEL, num_heads=32),
         _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=8, lat=10.5, model=_PRO_MODEL, num_heads=16),
+        _ctx_row(
+            attn_kind="csa",
+            cr=4,
+            bs=1,
+            isl=8192,
+            tp=8,
+            step=128,
+            lat=12.5,
+            model=_PRO_MODEL,
+            num_heads=16,
+        ),
     ]
     path = _write_csv(tmp_path / "csa_ctx.txt", _CTX_HEADER, rows)
     data = load_context_dsv4_kind_module_data(path)
@@ -177,6 +189,7 @@ def test_load_context_dsv4_kind_module_data_keys_by_local_head(tmp_path):
     assert set(quant.keys()) == {128, 64, 32, 16}
     # axis order after the head is [cr][prefix][s][b]
     assert quant[16][4][0][8192][1]["latency"] == pytest.approx(10.5)
+    assert quant[16][4][128][8192][1]["latency"] == pytest.approx(12.5)
     # more local heads (less sharded) is slower
     assert quant[128][4][0][8192][1]["latency"] > quant[16][4][0][8192][1]["latency"]
 

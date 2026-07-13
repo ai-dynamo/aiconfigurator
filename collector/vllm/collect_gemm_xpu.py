@@ -28,7 +28,7 @@ from vllm.version import __version__ as vllm_version
 
 from collector.case_generator import get_gemm_case_specs, get_gemm_type_specs
 from collector.helper import benchmark_with_power, get_device_module, log_perf
-from collector.vllm.utils import create_vllm_config, setup_distributed, with_exit_stack
+from collector.vllm.utils_xpu import create_vllm_config, setup_distributed, with_exit_stack
 
 FP8_BLOCK_SHAPE = (128, 128)
 

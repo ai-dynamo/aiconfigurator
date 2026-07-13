@@ -246,7 +246,14 @@ def test_sglang_0514_model_runtime_contracts(monkeypatch):
     assert {config.kernel_source for config in _model_configs(monkeypatch, "Qwen/Qwen3.5-27B", 100, "context")} == {
         "triton"
     }
-    assert _model_configs(monkeypatch, "moonshotai/Kimi-K2.5", 90, "context") == []
+    # Kimi's only standard-attention declaration (the MoonViT tower) moved to
+    # the vLLM-only encoder_attention op, so the generator-level vllm-profile
+    # suppression no longer applies. The real invariant lives at plan level:
+    # a targeted sglang Kimi run schedules no standard-attention op at all.
+    from collector.model_cases import build_collection_case_plan
+
+    kimi_plan = build_collection_case_plan(backend="sglang", model_path="moonshotai/Kimi-K2.5")
+    assert not {"attention_context", "attention_generation", "encoder_attention"} & set(kimi_plan.ops)
 
 
 def test_sglang_attention_runtime_fields_are_not_persisted_dimensions():

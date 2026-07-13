@@ -23,6 +23,8 @@ from collector.model_cases import (
     load_yaml_file,
 )
 
+pytestmark = pytest.mark.unit
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SUPPORT_MATRIX_ROOT = REPO_ROOT / "src" / "aiconfigurator" / "systems" / "support_matrix"
 
@@ -79,7 +81,8 @@ def test_attention_head_configs_preserve_real_model_structures_without_cross_mix
     ):
         configs = {
             (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-            for config in get_attention_head_configs(get_shape_sweeps("sglang")[0], phase=phase)
+            for sweep in get_shape_sweeps("sglang")
+            for config in get_attention_head_configs(sweep, phase=phase)
         }
 
         assert expected_model_structures <= configs
@@ -110,10 +113,8 @@ def test_targeted_attention_profile_uses_model_topology(monkeypatch):
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "Qwen/Qwen3-32B-FP8")
     configs = {
         (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-        for config in get_attention_head_configs(
-            get_attention_context_shape_sweeps("sglang")[0],
-            phase="context",
-        )
+        for sweep in get_attention_context_shape_sweeps("sglang")
+        for config in get_attention_head_configs(sweep, phase="context")
     }
 
     assert configs == {
@@ -126,15 +127,12 @@ def test_targeted_attention_profile_uses_model_topology(monkeypatch):
         (1, 1, 128, 0),
     }
 
-    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "moonshotai/Kimi-K2.5")
-    kimi_configs = {
-        (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-        for config in get_attention_head_configs(
-            get_attention_context_shape_sweeps("vllm")[0],
-            phase="context",
-        )
-    }
-    assert kimi_configs == {
+
+def test_retired_kimi_generic_attention_profile_was_redundant_for_legacy_full_grids(monkeypatch):
+    from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
+
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    retired_kimi_configs = {
         (64, 64, 128, 0),
         (32, 32, 128, 0),
         (16, 16, 128, 0),
@@ -143,6 +141,18 @@ def test_targeted_attention_profile_uses_model_topology(monkeypatch):
         (2, 2, 128, 0),
         (1, 1, 128, 0),
     }
+
+    for backend in ("sglang", "trtllm"):
+        for phase, get_shape_sweeps in (
+            ("context", get_attention_context_shape_sweeps),
+            ("generation", get_attention_generation_shape_sweeps),
+        ):
+            configs = {
+                (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
+                for sweep in get_shape_sweeps(backend)
+                for config in get_attention_head_configs(sweep, phase=phase)
+            }
+            assert retired_kimi_configs <= configs
 
 
 def test_added_model_attention_profiles_resolve_targeted_topology(monkeypatch):
@@ -166,10 +176,8 @@ def test_added_model_attention_profiles_resolve_targeted_topology(monkeypatch):
             monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
             configs = {
                 (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-                for config in get_attention_head_configs(
-                    get_attention_context_shape_sweeps("sglang")[0],
-                    phase="context",
-                )
+                for sweep in get_attention_context_shape_sweeps("sglang")
+                for config in get_attention_head_configs(sweep, phase="context")
             }
             assert configs == expected, model_path
 
@@ -196,10 +204,8 @@ def test_mimo_attention_profile_matches_aic_full_attention_window(monkeypatch):
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "XiaomiMiMo/MiMo-7B-Base")
     configs = {
         (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-        for config in get_attention_head_configs(
-            get_attention_context_shape_sweeps("vllm")[0],
-            phase="context",
-        )
+        for sweep in get_attention_context_shape_sweeps("vllm")
+        for config in get_attention_head_configs(sweep, phase="context")
     }
 
     assert configs == {
@@ -218,10 +224,8 @@ def test_qwen_vl_attention_profiles_stop_at_sdk_valid_tp16(monkeypatch):
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "Qwen/Qwen3-VL-32B-Instruct")
     configs = {
         (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-        for config in get_attention_head_configs(
-            get_attention_context_shape_sweeps("vllm")[0],
-            phase="context",
-        )
+        for sweep in get_attention_context_shape_sweeps("vllm")
+        for config in get_attention_head_configs(sweep, phase="context")
     }
 
     assert configs == {
@@ -237,26 +241,40 @@ def test_full_encoder_attention_profiles_combine_defaults_and_model_deltas(monke
     from collector.case_generator import get_attention_encoder_head_configs, get_attention_encoder_shape_sweeps
 
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
-    sweep = get_attention_encoder_shape_sweeps("vllm")[0]
-    configs = get_attention_encoder_head_configs(sweep)
-    keys = {(config.num_heads, config.head_dim) for config in configs}
-    default_keys = {(num_heads, head_dim) for head_dim in sweep["head_dims"] for num_heads in sweep["head_counts"]}
+    for backend in ("sglang", "trtllm", "vllm"):
+        sweeps = get_attention_encoder_shape_sweeps(backend)
+        keys = {
+            (config.num_heads, config.head_dim)
+            for sweep in sweeps
+            for config in get_attention_encoder_head_configs(sweep)
+        }
+        default_keys = {
+            (num_heads, head_dim)
+            for sweep in sweeps
+            for head_dim in sweep["head_dims"]
+            for num_heads in sweep["head_counts"]
+        }
 
-    assert default_keys <= keys
-    assert keys - default_keys == {(1, 64), (1, 72)}
+        assert default_keys <= keys
+        assert keys - default_keys == {(1, 64), (1, 72)}
 
 
 def test_targeted_encoder_attention_profile_is_model_exact(monkeypatch):
     from collector.case_generator import get_attention_encoder_head_configs, get_attention_encoder_shape_sweeps
 
-    sweep = get_attention_encoder_shape_sweeps("vllm")[0]
     for model_path, head_dim in (
         ("Qwen/Qwen3-VL-4B-Instruct", 64),
         ("Qwen/Qwen3-VL-32B-Instruct", 72),
         ("Qwen/Qwen3-VL-235B-A22B-Instruct", 72),
+        ("moonshotai/Kimi-K2.5", 72),
+        ("nvidia/Kimi-K2.5-NVFP4", 72),
     ):
         monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
-        configs = get_attention_encoder_head_configs(sweep)
+        configs = [
+            config
+            for sweep in get_attention_encoder_shape_sweeps("vllm")
+            for config in get_attention_encoder_head_configs(sweep)
+        ]
 
         assert {(config.num_heads, config.head_dim) for config in configs} == {
             (16, head_dim),
@@ -519,11 +537,16 @@ def test_sglang_mxfp4_quant_labels_select_explicit_activation_precision():
 def test_attention_shape_specs_are_yaml_backed_with_backend_overrides():
     from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
 
-    sglang_context = get_attention_context_shape_sweeps("sglang")[0]
-    trtllm_context = get_attention_context_shape_sweeps("trtllm")[0]
-    vllm_context = get_attention_context_shape_sweeps("vllm")[0]
-    vllm_xpu_context = get_attention_context_shape_sweeps("vllm_xpu")[0]
-    vllm_generation = get_attention_generation_shape_sweeps("vllm")[0]
+    def by_id(sweeps, sweep_id):
+        return next(sweep for sweep in sweeps if sweep["id"] == sweep_id)
+
+    context_id = "base_attention_context_shape_sweep"
+    generation_id = "base_attention_generation_shape_sweep"
+    sglang_context = by_id(get_attention_context_shape_sweeps("sglang"), context_id)
+    trtllm_context = by_id(get_attention_context_shape_sweeps("trtllm"), context_id)
+    vllm_context = by_id(get_attention_context_shape_sweeps("vllm"), context_id)
+    vllm_xpu_context = by_id(get_attention_context_shape_sweeps("vllm_xpu"), context_id)
+    vllm_generation = by_id(get_attention_generation_shape_sweeps("vllm"), generation_id)
 
     assert sglang_context["head_dims"] == [64, 128, 192, 256]
     assert trtllm_context["head_dims"] == [64, 128, 192, 256]
@@ -696,7 +719,6 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
         get_moe_quantization_modes,
         get_moe_quantization_module_config,
         moe_model_allows_quantization,
-        moe_shape_satisfies_constraints,
     )
 
     assert get_moe_quantization_modes("vllm", sm_version=90, runtime_features={"per_block_fp8": True}) == [
@@ -713,7 +735,7 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
     assert get_moe_quantization_modes(
         "vllm",
         sm_version=120,
-        runtime_version="0.19.0",
+        runtime_version="0.24.0",
         runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
     ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "nvfp4", "w4a16_mxfp4"]
 
@@ -729,31 +751,6 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
     assert get_moe_quantization_module_config("vllm", "int4_wo", model_name="moonshotai/Kimi-K2.5") == {
         "group_size": 32
     }
-
-    assert moe_shape_satisfies_constraints(
-        "vllm",
-        "fp8_block",
-        hidden_size=4096,
-        inter_size=1536,
-        tensor_parallel_size=1,
-        topk=8,
-    )
-    assert not moe_shape_satisfies_constraints(
-        "vllm",
-        "fp8_block",
-        hidden_size=4100,
-        inter_size=1536,
-        tensor_parallel_size=1,
-        topk=8,
-    )
-    assert not moe_shape_satisfies_constraints(
-        "vllm",
-        "nvfp4",
-        hidden_size=4096,
-        inter_size=1536,
-        tensor_parallel_size=1,
-        topk=22,
-    )
 
 
 def test_vllm_xpu_moe_metadata_is_yaml_backed(monkeypatch):
@@ -840,7 +837,14 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
 
     sweep = get_mla_module_sweep_spec()
     dsa_specs = get_mla_module_model_specs(attention_type="dsa", apply_model_filter=False)
+    kimi_specs = get_mla_module_model_specs(
+        attention_type="mla",
+        backend="vllm",
+        wideep_mla=False,
+        apply_model_filter=False,
+    )
     wideep_specs = get_mla_module_model_specs(attention_type="mla", wideep_mla=True, apply_model_filter=False)
+    vllm_specs = get_mla_module_model_specs(backend="vllm")
 
     assert sweep.batch_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     assert sweep.sequence_lengths[-2:] == [8192, 16384]
@@ -864,6 +868,20 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("bfloat16", "bfloat16", "fp8_block"),
         ("bfloat16", "fp8", "fp8_block"),
     ]
+    assert [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100)
+    ] == [
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("fp8", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+        ("fp8", "fp8", "fp8_block"),
+        ("bfloat16", "bfloat16", "nvfp4"),
+        ("bfloat16", "fp8", "nvfp4"),
+        ("fp8", "fp8", "nvfp4"),
+    ]
     assert get_mla_module_sweep_spec("sglang").context_sequence_lengths[-2:] == [8192, 16384]
 
     vllm_sweep = get_mla_module_sweep_spec("vllm")
@@ -882,6 +900,32 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("bfloat16", "fp8", "fp8_block"),
     ]
 
+    # vLLM 0.24.0 FP8 prefill-query compute is declared for the dense-MLA
+    # prefill path only: the sparse DSA builders have no prefill-query
+    # quantization concept, so the fp8 compute combos are scoped
+    # attention_types: [mla] and a DSA plan must not expand them.
+    assert [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100, attention_type="dsa")
+    ] == [
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+        ("bfloat16", "bfloat16", "nvfp4"),
+        ("bfloat16", "fp8", "nvfp4"),
+    ]
+    assert [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100, attention_type="mla")
+    ] == [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100)
+    ]
+
+    with pytest.raises(ValueError, match="attention_type"):
+        get_mla_module_precision_specs("vllm", phase="context", sm_version=100, attention_type="dense")
+
     assert {spec.model_path for spec in dsa_specs} == {
         "deepseek-ai/DeepSeek-V3.2",
         "zai-org/GLM-5",
@@ -890,10 +934,20 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         "nvidia/GLM-5.2-NVFP4",
     }
     assert {spec.native_num_heads for spec in dsa_specs if spec.architecture == "GlmMoeDsaForCausalLM"} == {64}
+    assert {(spec.model_path, spec.architecture, spec.native_num_heads) for spec in kimi_specs} == {
+        ("moonshotai/Kimi-K2-Instruct", "DeepseekV3ForCausalLM", 64),
+        ("moonshotai/Kimi-K2.5", "KimiK25ForConditionalGeneration", 64),
+        ("nvidia/Kimi-K2.5-NVFP4", "KimiK25ForConditionalGeneration", 64),
+    }
     assert {spec.model_path for spec in wideep_specs} == {
         "deepseek-ai/DeepSeek-R1",
         "deepseek-ai/DeepSeek-V3",
         "nvidia/DeepSeek-V3.1-NVFP4",
+    }
+    assert {(spec.attention_type, spec.model_path, spec.architecture) for spec in vllm_specs} == {
+        ("mla", "deepseek-ai/DeepSeek-V3", "DeepseekV3ForCausalLM"),
+        ("dsa", "deepseek-ai/DeepSeek-V3.2", "DeepseekV32ForCausalLM"),
+        ("dsa", "zai-org/GLM-5", "GlmMoeDsaForCausalLM"),
     }
 
 
@@ -902,11 +956,23 @@ def test_mla_module_targeted_artifacts_keep_requested_checkpoint(monkeypatch):
 
     for model_path, attention_type, architecture in (
         ("nvidia/DeepSeek-V3.1-NVFP4", "mla", "DeepseekV3ForCausalLM"),
+        ("moonshotai/Kimi-K2-Instruct", "mla", "DeepseekV3ForCausalLM"),
+        ("moonshotai/Kimi-K2.5", "mla", "KimiK25ForConditionalGeneration"),
+        ("nvidia/Kimi-K2.5-NVFP4", "mla", "KimiK25ForConditionalGeneration"),
         ("nvidia/GLM-5-NVFP4", "dsa", "GlmMoeDsaForCausalLM"),
     ):
         monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
-        specs = get_mla_module_model_specs(attention_type=attention_type)
+        specs = get_mla_module_model_specs(attention_type=attention_type, backend="vllm")
         assert [(spec.model_path, spec.architecture) for spec in specs] == [(model_path, architecture)]
+
+
+def test_vllm_mla_module_artifacts_have_local_configs():
+    from collector.case_generator import get_mla_module_model_specs
+
+    config_root = REPO_ROOT / "src" / "aiconfigurator" / "model_configs"
+    for spec in get_mla_module_model_specs(backend="vllm", apply_model_filter=False):
+        config_path = config_root / f"{spec.model_path.replace('/', '--')}_config.json"
+        assert config_path.is_file(), f"{spec.model_path} would require a runtime Hub download"
 
 
 def test_shape_only_mla_alias_uses_canonical_model(monkeypatch):
@@ -936,6 +1002,22 @@ def test_model_cases_path_can_infer_model_path():
     }.isdisjoint(plan.selected_ops)
 
 
+def test_plan_rejects_model_declared_ops_unknown_to_backend_registry(tmp_path):
+    """A typo in a model-declared op name must fail plan building loudly, not
+    silently collect nothing for the intended benchmark."""
+    case_file = tmp_path / "FakeArchForCausalLM_cases.yaml"
+    case_file.write_text(
+        "architecture: FakeArchForCausalLM\n"
+        "model_path: fake/model\n"
+        "model_ops:\n"
+        "  - attention_context\n"
+        "  - attention_contxt_typo\n"
+    )
+
+    with pytest.raises(ValueError, match="attention_contxt_typo"):
+        build_collection_case_plan(backend="vllm", model_cases_path=str(case_file))
+
+
 def test_dsv4_plan_only_uses_backend_specific_case_plan():
     model_path = "deepseek-ai/DeepSeek-V4-Pro"
     expected_ops = build_collection_case_plan(backend="sglang", model_path=model_path).ops
@@ -962,21 +1044,29 @@ def test_dsv4_plan_only_uses_backend_specific_case_plan():
     assert "wideep_moe" not in payload["ops"]
 
 
-def test_vllm_dsv4_collectors_are_registry_only():
+def test_vllm_024_schedules_consumed_dsv4_modules_only():
     from collector.vllm.registry import REGISTRY
 
-    dsv4_ops = {
+    consumed_dsv4_ops = {
         "dsv4_csa_context_module",
         "dsv4_hca_context_module",
         "dsv4_csa_generation_module",
         "dsv4_hca_generation_module",
-        "mhc_module",
     }
+    registry_only_ops = {"dsv4_paged_mqa_logits_module", "dsv4_hca_attn_module", "mhc_module"}
     plan = build_collection_case_plan(backend="vllm", model_path="sgl-project/DeepSeek-V4-Pro-FP8")
 
-    assert plan.ops == ["gemm", "moe"]
-    assert dsv4_ops.isdisjoint(plan.selected_ops)
-    assert dsv4_ops <= {entry.op for entry in REGISTRY}
+    assert plan.ops == [
+        "dsv4_csa_context_module",
+        "dsv4_csa_generation_module",
+        "dsv4_hca_context_module",
+        "dsv4_hca_generation_module",
+        "gemm",
+        "moe",
+    ]
+    assert consumed_dsv4_ops <= plan.selected_ops
+    assert registry_only_ops.isdisjoint(plan.selected_ops)
+    assert consumed_dsv4_ops | registry_only_ops <= {entry.op for entry in REGISTRY}
 
 
 def test_model_architecture_can_select_case_file():
@@ -1014,6 +1104,54 @@ def test_encoder_attention_plan_matches_sdk_model_and_backend_support():
     ).has_op("encoder_attention")
 
 
+def test_vllm_024_model_plans_only_schedule_representable_attention_paths():
+    kimi_path = "moonshotai/Kimi-K2.5"
+    assert build_collection_case_plan(backend="vllm", model_path=kimi_path).ops == [
+        "encoder_attention",
+        "gemm",
+        "mla_context_module",
+        "mla_generation_module",
+        "moe",
+    ]
+    assert build_collection_case_plan(backend="vllm", model_path="moonshotai/Kimi-K2-Instruct").ops == [
+        "gemm",
+        "mla_context_module",
+        "mla_generation_module",
+        "moe",
+    ]
+    assert build_collection_case_plan(backend="sglang", model_path=kimi_path).ops == [
+        "gemm",
+        "mla_bmm_gen_post",
+        "mla_bmm_gen_pre",
+        "mla_context",
+        "mla_generation",
+        "moe",
+    ]
+    assert build_collection_case_plan(backend="trtllm", model_path=kimi_path).ops == [
+        "gemm",
+        "mla_bmm_gen_post",
+        "mla_bmm_gen_pre",
+        "mla_context",
+        "mla_generation",
+        "moe",
+        "trtllm_moe_wideep",
+    ]
+    assert build_collection_case_plan(backend="vllm_xpu", model_path=kimi_path).ops == ["gemm", "moe"]
+
+    models_with_unrepresentable_vllm_attention = (
+        "XiaomiMiMo/MiMo-V2-Flash",
+        "google/gemma-4-26B-A4B",
+        "openai/gpt-oss-120b",
+        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    )
+    legacy_plan = ["attention_context", "attention_generation", "gemm", "moe"]
+    for model_path in models_with_unrepresentable_vllm_attention:
+        assert build_collection_case_plan(backend="vllm", model_path=model_path).ops == ["gemm", "moe"]
+        assert build_collection_case_plan(backend="vllm_xpu", model_path=model_path).ops == ["gemm", "moe"]
+        for backend in ("sglang", "trtllm"):
+            assert build_collection_case_plan(backend=backend, model_path=model_path).ops == legacy_plan
+
+
 def test_compute_scale_is_selected_only_for_static_fp8_artifact():
     static_model = "Qwen/Qwen3-32B-FP8-Static-PerTensor"
     non_static_models = ("Qwen/Qwen3-32B", "Qwen/Qwen3-32B-FP8", "Qwen/Qwen3-0.6B")
@@ -1043,15 +1181,18 @@ def test_model_plans_do_not_request_ops_missing_from_backend_registry():
         model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
     )
 
-    assert "mla_context" not in deepseek_vllm.selected_ops
-    assert "mla_generation" not in deepseek_vllm.selected_ops
-    assert "mla_context_module" in deepseek_vllm.selected_ops
-    assert "attention_context" in kimi_vllm.selected_ops
-    assert "attention_generation" in kimi_vllm.selected_ops
-    assert "mla_context" not in kimi_vllm.selected_ops
-    assert "mla_generation" not in kimi_vllm.selected_ops
-    assert "mamba2" not in nemotron_sglang.selected_ops
-    assert "mamba2" in nemotron_trtllm.selected_ops
+    assert not deepseek_vllm.has_op("mla_context")
+    assert not deepseek_vllm.has_op("mla_generation")
+    assert deepseek_vllm.has_op("mla_context_module")
+    assert not kimi_vllm.has_op("attention_context")
+    assert not kimi_vllm.has_op("attention_generation")
+    assert kimi_vllm.has_op("encoder_attention")
+    assert kimi_vllm.has_op("mla_context_module")
+    assert kimi_vllm.has_op("mla_generation_module")
+    assert not kimi_vllm.has_op("mla_context")
+    assert not kimi_vllm.has_op("mla_generation")
+    assert not nemotron_sglang.has_op("mamba2")
+    assert nemotron_trtllm.has_op("mamba2")
 
 
 def test_full_mode_aggregates_all_model_case_files():
@@ -1070,6 +1211,30 @@ def test_full_mode_ops_are_a_union_of_model_plan_ops():
         for model_path in ("deepseek-ai/DeepSeek-V3", "moonshotai/Kimi-K2.5", "Qwen/Qwen3-32B"):
             model_plan = build_collection_case_plan(backend=backend, model_path=model_path)
             assert model_plan.selected_ops <= full_plan.selected_ops, f"{backend}/{model_path}"
+
+
+def test_mla_module_metadata_preserves_legacy_backends_and_canonicalizes_vllm():
+    from collector.case_generator import get_mla_module_model_specs
+
+    original_artifacts = {
+        "deepseek-ai/DeepSeek-V3",
+        "deepseek-ai/DeepSeek-R1",
+        "nvidia/DeepSeek-V3.1-NVFP4",
+    }
+
+    def paths(backend):
+        return {
+            spec.model_path
+            for spec in get_mla_module_model_specs(
+                attention_type="mla",
+                backend=backend,
+                apply_model_filter=backend == "vllm",
+            )
+        }
+
+    assert paths("vllm") == {"deepseek-ai/DeepSeek-V3"}
+    assert paths("sglang") == original_artifacts
+    assert paths("trtllm") == original_artifacts
 
 
 def test_support_matrix_models_have_model_case_aliases():
@@ -1141,6 +1306,7 @@ def test_nemotron_ultra_quant_artifact_keeps_moe_path_but_reuses_mamba_profile(m
     mamba_cases = get_common_mamba2_test_cases()
 
     assert moe_cases and {case.model_name for case in moe_cases} == {"nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8"}
+    assert {case.hidden_size for case in moe_cases} == {2048, 8192}
     assert mamba_cases and {case.model_name for case in mamba_cases} == {
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
     }
