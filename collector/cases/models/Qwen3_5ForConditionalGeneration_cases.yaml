@@ -28,6 +28,7 @@ model_case_values:
       num_key_value_heads: 2
       head_dim: 256
       window_size: 0
+      sglang_backends: {90: fa3, 100: triton, 103: triton, 120: flashinfer}
       tensor_parallel_sizes: [1, 2, 4, 8]
     - id: qwen35_4b_9b_attention
       model_path: Qwen/Qwen3.5-4B
@@ -37,6 +38,7 @@ model_case_values:
       num_key_value_heads: 4
       head_dim: 256
       window_size: 0
+      sglang_backends: {90: fa3, 100: triton, 103: triton, 120: flashinfer}
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
     - id: qwen35_27b_attention
       model_path: Qwen/Qwen3.5-27B
@@ -44,6 +46,7 @@ model_case_values:
       num_key_value_heads: 4
       head_dim: 256
       window_size: 0
+      sglang_backends: {90: fa3, 100: triton, 103: triton, 120: flashinfer}
       tensor_parallel_sizes: [1, 2, 4, 8]
   gdn:
     - model_path: Qwen/Qwen3.5-0.8B

@@ -325,7 +325,7 @@ impl Dsv4Table {
         // measured topK DELTA = flat_ms - top_last_ms at the ORIGINAL query
         // point (prefix, s, b) and clamp at 0. HCA (cr==128) is left untouched.
         if attn_kind == AttnKind::Csa {
-            return self.topk_corrected(latency, prefix, isl, b);
+            return self.topk_corrected(latency, TopkPhase::Context, prefix, isl, b);
         }
         Ok(latency)
     }
@@ -387,7 +387,7 @@ impl Dsv4Table {
         // Decode is q_len=1 with past_kv = s_total - 1, so the DELTA keys at
         // (prefix = max(s_total - 1, 0), isl = 1, bs = b).
         if attn_kind == AttnKind::Csa {
-            return self.topk_corrected(latency, sequence_tokens.saturating_sub(1), 1, b);
+            return self.topk_corrected(latency, TopkPhase::Generation, sequence_tokens.saturating_sub(1), 1, b);
         }
         Ok(latency)
     }
@@ -423,11 +423,22 @@ impl Dsv4Table {
     /// No-op when the correction is disabled (`AIC_DSV4_TOPK_CORRECTION=0`)
     /// or when no calibration file exists — Python gates the calib LOAD behind
     /// the env var too, so keep the load lazy-skipped when disabled.
-    fn topk_corrected(&self, latency: f64, prefix: u32, isl: u32, bs: u32) -> Result<f64, AicError> {
+    fn topk_corrected(
+        &self,
+        latency: f64,
+        phase: TopkPhase,
+        prefix: u32,
+        isl: u32,
+        bs: u32,
+    ) -> Result<f64, AicError> {
         if !topk_correction_enabled() {
             return Ok(latency);
         }
-        Ok(apply_topk_delta(latency, self.load_topk_calib()?, prefix, isl, bs))
+        let exact = self.load_topk_calib()?.map(|calib| match phase {
+            TopkPhase::Context => &calib.exact_v1,
+            TopkPhase::Generation => &calib.exact_v2,
+        });
+        Ok(apply_topk_delta(latency, exact, prefix, isl, bs))
     }
 
     /// Lazy-load the topK DELTA calibration (Python `_get_dsv4_topk_calib`,
@@ -583,10 +594,12 @@ fn generation_nodes(grids: ModuleGrids) -> ModuleNodes {
 //
 // The CSA context-module collector runs the topK kernel on DEGENERATE scores
 // (near-constant logits -> the Small topK path's O(n^2) tie-break), inflating
-// the measured module latency vs real silicon. The calibration file stores two
-// rows (score_mode = flat | top_last) per (step, isl, batch_size) shape;
-// DELTA = flat.latency - top_last.latency. At query time the DELTA is
-// SUBTRACTED from the CSA (compress_ratio==4) module latency only.
+// the measured module latency vs real silicon. The calibration file stores
+// phase-qualified rows (context runs the v1 topk selector, generation v2:
+// score_mode = v{1,2}_{flat,top_last}) per (step, isl, batch_size) shape;
+// DELTA = flat.latency - top_last.latency per variant. At query time the
+// matching variant's DELTA is SUBTRACTED from the CSA (compress_ratio==4)
+// module latency only.
 // Gate: AIC_DSV4_TOPK_CORRECTION (default on; set "0" to disable).
 // ---------------------------------------------------------------------------
 
@@ -605,11 +618,21 @@ fn parse_topk_correction_env(value: Option<&str>) -> bool {
     value != Some("0")
 }
 
-/// The paired topK DELTA table: `(step, isl, batch_size) -> max(0, flat - top_last)`.
-/// Python keeps a `by_pi` sibling in the calib dict, but only `exact` is read
-/// by `_dsv4_topk_delta_ms`, so only `exact` is ported.
+/// Which topk selector variant a query needs: context runs v1, generation v2
+/// (the producer phase-qualifies score_mode accordingly).
+#[derive(Clone, Copy)]
+enum TopkPhase {
+    Context,
+    Generation,
+}
+
+/// The paired topK DELTA tables, one per selector variant:
+/// `(step, isl, batch_size) -> max(0, flat - top_last)`. Python keeps a
+/// `by_pi` sibling in the calib dict, but only `exact` is read by
+/// `_dsv4_topk_delta_ms`, so only `exact` is ported.
 struct TopkCalib {
-    exact: BTreeMap<(u32, u32, u32), f64>,
+    exact_v1: BTreeMap<(u32, u32, u32), f64>,
+    exact_v2: BTreeMap<(u32, u32, u32), f64>,
     /// RAW top_last rows for the CP composition (Python
     /// `_load_csa_topk_top_last` reads the same parquet; here they are
     /// retained in the ONE calib load pass instead of a second read). Keyed
@@ -621,9 +644,15 @@ struct TopkCalib {
 /// Python apply formula shared by both apply sites:
 /// `corrected = max(0.0, latency - _dsv4_topk_delta_ms(calib, prefix, isl, bs))`,
 /// with a missing calib meaning DELTA = 0 (no-op).
-fn apply_topk_delta(latency: f64, calib: Option<&TopkCalib>, prefix: u32, isl: u32, bs: u32) -> f64 {
-    match calib {
-        Some(calib) => (latency - topk_delta_ms(calib, prefix, isl, bs)).max(0.0),
+fn apply_topk_delta(
+    latency: f64,
+    exact: Option<&BTreeMap<(u32, u32, u32), f64>>,
+    prefix: u32,
+    isl: u32,
+    bs: u32,
+) -> f64 {
+    match exact {
+        Some(exact) => (latency - topk_delta_ms(exact, prefix, isl, bs)).max(0.0),
         None => latency,
     }
 }
@@ -669,7 +698,9 @@ fn load_topk_calib_parquet(sources: &[PerfSource]) -> Result<Option<TopkCalib>, 
                 (row.u32(step_col)?, row.u32(isl_col)?, row.u32(batch_size_col)?);
             let mode = row.str_owned(score_mode_col)?;
             let latency = row.f64(latency_col)?;
-            if mode == "top_last" {
+            // The CP composition consumes the context (v1) selector's raw
+            // top_last latencies.
+            if mode == "v1_top_last" {
                 top_last
                     .entry(row.u32_optional(num_heads_col)?)
                     .or_default()
@@ -683,17 +714,20 @@ fn load_topk_calib_parquet(sources: &[PerfSource]) -> Result<Option<TopkCalib>, 
     if !any_source {
         return Ok(None);
     }
-    let mut exact = BTreeMap::new();
+    let mut exact_v1 = BTreeMap::new();
+    let mut exact_v2 = BTreeMap::new();
     for (key, modes) in by_mode {
-        let (Some(flat), Some(tl)) = (modes.get("flat"), modes.get("top_last")) else {
-            continue;
-        };
-        exact.insert(key, (flat - tl).max(0.0));
+        if let (Some(flat), Some(tl)) = (modes.get("v1_flat"), modes.get("v1_top_last")) {
+            exact_v1.insert(key, (flat - tl).max(0.0));
+        }
+        if let (Some(flat), Some(tl)) = (modes.get("v2_flat"), modes.get("v2_top_last")) {
+            exact_v2.insert(key, (flat - tl).max(0.0));
+        }
     }
-    if exact.is_empty() && top_last.is_empty() {
+    if exact_v1.is_empty() && exact_v2.is_empty() && top_last.is_empty() {
         return Ok(None);
     }
-    Ok(Some(TopkCalib { exact, top_last }))
+    Ok(Some(TopkCalib { exact_v1, exact_v2, top_last }))
 }
 
 /// Paged-mqa-logits sparse-kernel table: `[native_heads][tp]` -> engine Node
@@ -783,8 +817,7 @@ fn topk_interp_1d(points: &[(u32, f64)], x: u32) -> Option<f64> {
 /// Python `_dsv4_topk_delta_ms`: exact `(prefix, isl, bs)` rows are preferred;
 /// off-grid shapes are interpolated prefix-first within a fixed `(isl, bs)`,
 /// then isl, then bs. Returns 0.0 when nothing resolves.
-fn topk_delta_ms(calib: &TopkCalib, prefix: u32, isl: u32, bs: u32) -> f64 {
-    let exact = &calib.exact;
+fn topk_delta_ms(exact: &BTreeMap<(u32, u32, u32), f64>, prefix: u32, isl: u32, bs: u32) -> f64 {
     if let Some(&direct) = exact.get(&(prefix, isl, bs)) {
         return direct.max(0.0);
     }
@@ -1583,21 +1616,21 @@ mod tests {
         write_calib_parquet(
             &path,
             &[
-                ("flat", 0, 512, 1, 1.0),
-                ("top_last", 0, 512, 1, 0.4),
-                ("flat", 0, 512, 4, 2.0),
-                ("top_last", 0, 512, 4, 0.9),
-                ("flat", 0, 2048, 1, 3.0),
-                ("top_last", 0, 2048, 1, 1.0),
-                ("flat", 0, 2048, 4, 5.0),
-                ("top_last", 0, 2048, 4, 2.2),
-                ("flat", 1024, 512, 1, 1.5),
-                ("top_last", 1024, 512, 1, 0.7),
-                ("flat", 1024, 512, 4, 2.5),
-                ("top_last", 1024, 512, 4, 1.0),
-                ("flat", 4096, 512, 1, 0.5),
-                ("top_last", 4096, 512, 1, 0.9), // flat < top_last -> DELTA clamps to 0
-                ("flat", 8192, 512, 1, 9.9),     // no top_last -> shape skipped
+                ("v1_flat", 0, 512, 1, 1.0),
+                ("v1_top_last", 0, 512, 1, 0.4),
+                ("v1_flat", 0, 512, 4, 2.0),
+                ("v1_top_last", 0, 512, 4, 0.9),
+                ("v1_flat", 0, 2048, 1, 3.0),
+                ("v1_top_last", 0, 2048, 1, 1.0),
+                ("v1_flat", 0, 2048, 4, 5.0),
+                ("v1_top_last", 0, 2048, 4, 2.2),
+                ("v1_flat", 1024, 512, 1, 1.5),
+                ("v1_top_last", 1024, 512, 1, 0.7),
+                ("v1_flat", 1024, 512, 4, 2.5),
+                ("v1_top_last", 1024, 512, 4, 1.0),
+                ("v1_flat", 4096, 512, 1, 0.5),
+                ("v1_top_last", 4096, 512, 1, 0.9), // flat < top_last -> DELTA clamps to 0
+                ("v1_flat", 8192, 512, 1, 9.9),     // no top_last -> shape skipped
             ],
         );
         let calib = load_topk_calib_parquet(&[PerfSource(path, None)])
@@ -1613,9 +1646,10 @@ mod tests {
             ((1024, 512, 4), 1.5),
             ((4096, 512, 1), 0.0),
         ];
-        assert_eq!(calib.exact.len(), expected_exact.len());
+        assert_eq!(calib.exact_v1.len(), expected_exact.len());
+        assert!(calib.exact_v2.is_empty());
         for (key, want) in expected_exact {
-            let got = calib.exact[&key];
+            let got = calib.exact_v1[&key];
             assert!((got - want).abs() < 1e-12, "exact[{key:?}] = {got} vs {want}");
         }
         let oracle = [
@@ -1631,7 +1665,7 @@ mod tests {
             ((0, 512, 4), 1.1),                   // second exact hit
         ];
         for ((prefix, isl, bs), want) in oracle {
-            let got = topk_delta_ms(&calib, prefix, isl, bs);
+            let got = topk_delta_ms(&calib.exact_v1, prefix, isl, bs);
             let tol = if want == 0.0 { 1e-12 } else { want * 1e-9 };
             assert!(
                 (got - want).abs() <= tol,
@@ -1666,10 +1700,9 @@ mod tests {
     fn topk_delta_clamps_corrected_latency_at_zero() {
         let mut exact = BTreeMap::new();
         exact.insert((0u32, 512u32, 8u32), 0.12);
-        let calib = TopkCalib { exact, top_last: BTreeMap::new() };
         // Python: corrected = max(0.0, latency - delta).
-        assert_eq!(apply_topk_delta(0.05, Some(&calib), 0, 512, 8), 0.0);
-        assert!((apply_topk_delta(1.0, Some(&calib), 0, 512, 8) - 0.88).abs() < 1e-12);
+        assert_eq!(apply_topk_delta(0.05, Some(&exact), 0, 512, 8), 0.0);
+        assert!((apply_topk_delta(1.0, Some(&exact), 0, 512, 8) - 0.88).abs() < 1e-12);
     }
 
     /// End-to-end apply-site check on synthetic module + calib parquets:
@@ -1688,10 +1721,10 @@ mod tests {
         let hca_ctx_rows = [(64, 8, 512, 0, 0.7)];
         let csa_gen_rows = [(64, 16, 1, 384, 0.5)]; // s_total = 385
         let calib_rows = [
-            ("flat", 0, 512, 8, 0.30),
-            ("top_last", 0, 512, 8, 0.18), // context DELTA = 0.12
-            ("flat", 384, 1, 16, 0.05),
-            ("top_last", 384, 1, 16, 0.02), // generation DELTA = 0.03
+            ("v1_flat", 0, 512, 8, 0.30),
+            ("v1_top_last", 0, 512, 8, 0.18), // context (v1) DELTA = 0.12
+            ("v2_flat", 384, 1, 16, 0.05),
+            ("v2_top_last", 384, 1, 16, 0.02), // generation (v2) DELTA = 0.03
         ];
         let make_root = |with_calib: bool| {
             let dir = tempfile::tempdir().unwrap();
@@ -1846,9 +1879,9 @@ mod tests {
         write_calib_parquet(
             &path,
             &[
-                ("top_last", 0, 16384, 1, 800.0),
-                ("top_last", 0, 2048, 1, 100.0),
-                ("flat", 0, 2048, 1, 130.0),
+                ("v1_top_last", 0, 16384, 1, 800.0),
+                ("v1_top_last", 0, 2048, 1, 100.0),
+                ("v1_flat", 0, 2048, 1, 130.0),
             ],
         );
         let table = Dsv4Table::new(dir.path().to_path_buf());
@@ -1858,7 +1891,7 @@ mod tests {
         assert_eq!(table.csa_topk_top_last(2048, 0, 64, 1).unwrap(), Some(100.0));
         // The DELTA table coexists in the same load: (0, 2048, 1) pairs up.
         let calib = table.load_topk_calib().unwrap().expect("calib must load");
-        assert!((topk_delta_ms(calib, 0, 2048, 1) - 30.0).abs() < 1e-12);
+        assert!((topk_delta_ms(&calib.exact_v1, 0, 2048, 1) - 30.0).abs() < 1e-12);
         // isl beyond the collected grid -> fail loud (dsa::lookup_2d contract).
         let err = table.csa_topk_top_last(32768, 0, 64, 1).unwrap_err();
         assert!(err.to_string().contains("exceeds the collected"), "unexpected: {err}");
@@ -1878,8 +1911,8 @@ mod tests {
         write_calib_parquet_with_heads(
             &dir.path().join("dsv4_csa_topk_calib_perf.parquet"),
             &[
-                ("top_last", 0, 2048, 1, 64, 42.0),
-                ("top_last", 0, 2048, 1, 128, 77.0),
+                ("v1_top_last", 0, 2048, 1, 64, 42.0),
+                ("v1_top_last", 0, 2048, 1, 128, 77.0),
             ],
         );
         let table = Dsv4Table::new(dir.path().to_path_buf());

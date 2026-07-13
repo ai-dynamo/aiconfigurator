@@ -84,6 +84,7 @@ from pathlib import Path
 
 from helper import (
     EXIT_CODE_RESTART,
+    WorkerRestartSignal,
     create_test_case_id,
     finalize_perf_files,
     find_perf_csv_outputs,
@@ -500,7 +501,12 @@ def worker(
 
         try:
             worker_logger.debug(f"Starting task {task_id}")
-            func(*task, device=device)
+            result = func(*task, device=device)
+            # Only the dedicated sentinel requests a recycle: entrypoints also
+            # return plain ints (row counts), which must never be mistaken for
+            # EXIT_CODE_RESTART.
+            if isinstance(result, WorkerRestartSignal):
+                raise SystemExit(EXIT_CODE_RESTART)
             worker_logger.debug(f"Completed task {task_id}")
 
             # Mark done ONLY on success — failed tasks should be retried on resume
@@ -1086,9 +1092,6 @@ def collect_sglang(
     case_filters: list[str] | None = None,
 ):
     """Collect performance data for SGLang with enhanced error tracking"""
-    from collector.sglang.registry import REGISTRY
-    from collector.version_resolver import build_collections
-
     os.environ["FLASHINFER_LOG_LEVEL"] = "ERROR"
 
     # DSV4-Pro mhc-pre fast path: the DeepGEMM tf32 prenorm + TileLang fused
@@ -1109,6 +1112,15 @@ def collect_sglang(
         logger.exception("SGLang is not installed")
         return
 
+    from collector.framework_manifest import require_collector_runtime
+
+    requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
+    wideep_ops = {entry.op for entry in _wideep_registry_for_backend("sglang")}
+    require_collector_runtime("sglang", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
+
+    from collector.sglang.registry import REGISTRY
+    from collector.version_resolver import build_collections
+
     registry = _registry_with_requested_wideep(REGISTRY, "sglang", ops, case_plan)
     collections = build_collections(registry, "sglang", version, ops, logger=logger)
     all_errors = collect_ops(
@@ -1126,6 +1138,7 @@ def collect_sglang(
     )
 
     generate_collection_summary(all_errors, "sglang", version)
+    return all_errors
 
 
 def collect_vllm(
@@ -1174,6 +1187,7 @@ def collect_vllm(
     )
 
     generate_collection_summary(all_errors, "vllm", version)
+    return all_errors
 
 
 def collect_trtllm(
@@ -1225,6 +1239,7 @@ def collect_trtllm(
     )
 
     generate_collection_summary(all_errors, "trtllm", version)
+    return all_errors
 
 
 def generate_collection_summary(all_errors, backend, version):
@@ -1582,7 +1597,7 @@ def main():
     # Use profiling context manager
     with ProfilerContext(args.backend, enabled=args.profile):
         collect_backend = {"trtllm": collect_trtllm, "sglang": collect_sglang, "vllm": collect_vllm}[args.backend]
-        collect_backend(
+        run_errors = collect_backend(
             num_processes,
             ops,
             limit=limit,
@@ -1606,6 +1621,17 @@ def main():
         converted = finalize_perf_files(touched_perf_outputs)
         if converted:
             logger.info(f"Finalized {len(converted)} collector perf files as parquet")
+
+    # A ModuleCollectionFailure means an op failed before running a single case
+    # (population raised, or the run infrastructure crashed) — the op collected
+    # nothing. Exit non-zero AFTER finalization so partial data from other ops
+    # is still packaged, but the job is not reported as a clean success.
+    module_failures = sorted(
+        {e["module"] for e in (run_errors or []) if e.get("error_type") == "ModuleCollectionFailure"}
+    )
+    if module_failures:
+        logger.error("Module-level collection failures (no cases ran): " + ", ".join(module_failures))
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

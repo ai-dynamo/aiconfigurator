@@ -50,8 +50,8 @@ def test_model_case_plan_merges_required_base_and_framework_specific_ops():
     assert not plan.has_op("attention_generation")
     assert "moe" in plan.selected_ops
     assert "mla_context" in plan.selected_ops
-    assert "wideep_mla_context" in plan.selected_ops
-    assert "wideep_moe" in plan.selected_ops
+    assert "wideep_mla_context" not in plan.selected_ops
+    assert "wideep_moe" not in plan.selected_ops
     assert "trtllm_moe_wideep" not in plan.selected_ops
 
 
@@ -311,9 +311,13 @@ def test_base_gemm_cases_are_readable_shape_specs():
 
 
 def test_moe_model_quantization_policy_is_yaml_backed():
-    assert not moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "w4a8_mxfp4_mxfp8")
+    assert moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "w4a8_mxfp4_mxfp8")
     assert not moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "bfloat16")
     assert not moe_model_allows_quantization("sglang", "Qwen/Qwen3-235B-A22B", "w4a8_mxfp4_mxfp8")
+    assert moe_model_allows_quantization("sglang", "nvidia/GLM-5.2-NVFP4", "nvfp4")
+    assert not moe_model_allows_quantization("sglang", "nvidia/GLM-5.2-NVFP4", "bfloat16")
+    assert moe_model_allows_quantization("sglang", "zai-org/GLM-5-FP8", "fp8_block")
+    assert not moe_model_allows_quantization("sglang", "zai-org/GLM-5-FP8", "nvfp4")
 
     assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a16_mxfp4")
     assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a8_mxfp4_mxfp8")
@@ -329,8 +333,8 @@ def test_moe_model_quantization_policy_is_yaml_backed():
 def test_dsv4_moe_quantization_policy_prunes_unrelated_modes():
     expected_by_backend = {
         "sglang": {
-            "deepseek-ai/DeepSeek-V4-Flash": set(),
-            "deepseek-ai/DeepSeek-V4-Pro": set(),
+            "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
+            "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
         },
@@ -367,6 +371,107 @@ def test_kimi_moe_quantization_is_artifact_specific():
         for model_path, expected in expected_by_artifact.items():
             allowed = {mode for mode in available_modes if moe_model_allows_quantization(backend, model_path, mode)}
             assert allowed == expected, (backend, model_path)
+
+    from collector.case_generator import get_moe_quantization_modes, get_moe_quantization_module_config
+
+    assert get_moe_quantization_module_config("sglang", "int4_wo", model_name="moonshotai/Kimi-K2.5") == {
+        "group_size": 32
+    }
+    sm90_modes = get_moe_quantization_modes("sglang", sm_version=90)
+    assert "int4_wo" in sm90_modes
+    assert "nvfp4" not in sm90_modes
+    assert "w4a16_mxfp4" in sm90_modes
+    # int4_wo opened to SM100/103 (2026-07-11): serving auto-selects
+    # flashinfer_trtllm for Kimi INT4 there (server_args.py:3736).
+    assert "int4_wo" in get_moe_quantization_modes("sglang", sm_version=100)
+    assert "nvfp4" in get_moe_quantization_modes("sglang", sm_version=100)
+
+
+def test_sglang_marlin_is_declared_only_for_weight_only_modes():
+    def backend_maps(value):
+        if isinstance(value, dict):
+            if "sglang_moe_backends" in value:
+                yield value["sglang_moe_backends"]
+            for child in value.values():
+                yield from backend_maps(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from backend_maps(child)
+
+    base = load_yaml_file(REPO_ROOT / "collector/cases/base_ops/moe.yaml")
+    maps = [base["common_case_values"]["moe_sglang"]["backends"]]
+    for path in (REPO_ROOT / "collector/cases/models").glob("*_cases.yaml"):
+        maps.extend(backend_maps(load_yaml_file(path)))
+
+    marlin_modes = {
+        mode for backends in maps for mode, mapping in backends.items() if "marlin" in json.dumps(mapping).lower()
+    }
+    # Marlin is a weight-only (bf16-activation) runner: INT4-WO everywhere it
+    # is declared, plus MXFP4 w4a16 on SM120 where SGLang 0.5.14 serving
+    # itself selects Marlin (server_args.py:3876-3887). NVFP4 and
+    # mxfp8-activation modes must never declare it (FP4/INT4 identity
+    # reversal).
+    assert marlin_modes == {"int4_wo", "w4a16_mxfp4"}
+
+
+@pytest.mark.unit
+def test_sglang_registry_marks_unvalidated_dsa_and_moe_platforms_explicitly():
+    from collector.sglang.registry import REGISTRY
+
+    sm90 = build_collection_case_plan(backend="sglang", full=True, sm_version=90)
+    sm100 = build_collection_case_plan(backend="sglang", full=True, sm_version=100)
+    entries = {entry.op: entry for entry in REGISTRY}
+
+    for op in ("dsa_context_module_skip_indexer", "dsa_generation_module_skip_indexer"):
+        assert op in sm90.selected_ops
+        assert op in sm100.selected_ops
+        assert entries[op].unverified_sms == (90, 120)
+
+    # SM103 unparked by the B300 hardware probe (2026-07-13, pipeline
+    # 57716023): sampled dsa cases ran clean across all three kernel buckets.
+    for op in ("dsa_context_module", "dsa_generation_module"):
+        assert entries[op].unverified_sms == (120,)
+
+    # The SM120 MoE bring-up audit (RTX 6000 Pro, 2026-07-05) cleared the moe
+    # maturity marker: every planned (quant mode x backend) family was probed
+    # on hardware with verified constructed-method provenance.
+    assert entries["moe"].unverified_sms == ()
+
+    # SM120 sparse-round audit (RTX 6000 Pro, 2026-07-06): the framework
+    # itself rejects the DSA/GLM-5 sparse family on SM120 (TRTLLM-GEN
+    # fmhaRunner "Unsupported architecture"; DeepGEMM attention.hpp:184;
+    # sgl-kernel sparse attention SM90a/SM100f-only), the CSA context pool
+    # derivation is fail-closed pending an SM120 Torch-indexer workspace
+    # policy, and the topk-calib producer is not yet SM120-variant-aware.
+    for op in (
+        "dsv4_csa_topk_calib",
+        "dsv4_paged_mqa_logits_module",
+        "glm5_mqa_logits_module",
+        "glm5_topk_module",
+        "glm5_dsa_attn_module",
+    ):
+        assert entries[op].unverified_sms == (120,)
+
+    # SM89 bring-up round 2 (L40S, 2026-07-07): stock 0.5.14 cannot run
+    # DSV4 on SM89 at all — the server_args DeepseekV4 hook leaves
+    # SGLANG_OPT_DEEPGEMM_HC_PRENORM default-True on non-SM120/non-HIP
+    # platforms while deep_gemm is unimported (NameError in both mHC
+    # directions), the compressed FlashMLA family has no SM89 target
+    # (in-kernel CUDA InternalError on every HCA/CSA-generation case), and
+    # the CSA context pool derivation is fail-closed below SM90.
+    assert entries["dsv4_csa_context_module"].unverified_sms == (89, 120)
+    for op in (
+        "mhc_module",
+        "dsv4_hca_context_module",
+        "dsv4_hca_generation_module",
+        "dsv4_csa_generation_module",
+    ):
+        assert entries[op].unverified_sms == (89,)
+
+    # Probed clean on SM120 and SM89 with only classified failure tails
+    # (GDN int32 kernel-limit raises, decode grid-Y boundary, top-cell
+    # OOMs): no markers.
+    assert entries["gdn"].unverified_sms == ()
 
 
 def test_deepseek_minimax_and_nemotron_moe_quantization_is_artifact_specific():
@@ -411,6 +516,7 @@ def test_gptoss_mxfp4_modes_are_additive_on_blackwell():
         }
 
     assert selected_modes("sglang", 100) == {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
+    assert selected_modes("sglang", 90) == {"w4a16_mxfp4"}
     assert selected_modes("trtllm", 90) == {"w4a16_mxfp4"}
     assert selected_modes("trtllm", 100) == {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
 
@@ -547,8 +653,6 @@ def test_mla_collectors_dedupe_on_loader_physical_keys(monkeypatch):
             "KV_LORA_RANK": 512,
             "QK_NOPE_HEAD_DIM": 128,
             "QK_ROPE_HEAD_DIM": 64,
-            "MLA_PAGE_SIZE": 64,
-            "MAX_KV_LOC": ((2**31 - 1) // (512 + 64)) - 64,
         },
     )
     trtllm_adapter = _load_mla_adapter(
@@ -580,6 +684,19 @@ def test_mla_collectors_dedupe_on_loader_physical_keys(monkeypatch):
         assert len(generation_cases) == len(physical_keys(generation_cases))
         assert 1 in {case[4] // case[6] for case in context_cases}
         assert 1 in {case[4] // case[6] for case in generation_cases}
+
+    large_generation_spec = SimpleNamespace(
+        model_name="large-generation-regression",
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        num_heads=128,
+        batch_size=1024,
+        input_len=4096,
+        is_context_phase=False,
+    )
+    assert sglang_adapter([large_generation_spec], dtype_list=("bf16",), tp_sizes=(1,), backend="fa3")
 
 
 def test_kimi_mla_plan_includes_generation_bmm_helpers():
@@ -924,7 +1041,7 @@ def test_dsv4_plan_only_uses_backend_specific_case_plan():
 
     assert payload["ops"] == expected_ops
     assert "dsv4_csa_topk_calib" in payload["ops"]
-    assert "wideep_moe" in payload["ops"]
+    assert "wideep_moe" not in payload["ops"]
 
 
 def test_vllm_024_schedules_consumed_dsv4_modules_only():
@@ -1083,7 +1200,7 @@ def test_full_mode_aggregates_all_model_case_files():
 
     assert plan.model_path is None
     assert len(plan.model_cases_paths) >= 18
-    assert "wideep_mla_context" in plan.selected_ops
+    assert "wideep_mla_context" not in plan.selected_ops
     assert "dsv4_csa_context_module" in plan.selected_ops
     assert "gdn" in plan.selected_ops
 

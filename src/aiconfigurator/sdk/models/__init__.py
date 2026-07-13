@@ -39,6 +39,8 @@ from aiconfigurator.sdk.models.helpers import (
     check_is_moe,
     get_model_family,
     resolve_context_fmha_by_data,
+    resolve_dsv4_moe_arch,
+    resolve_dsv4_moe_arch_mode,
 )
 
 # Auto-import every other module in this package so ``@register_model``
@@ -167,4 +169,6 @@ __all__ = [
     "get_model",
     "get_model_family",
     "resolve_context_fmha_by_data",
+    "resolve_dsv4_moe_arch",
+    "resolve_dsv4_moe_arch_mode",
 ]

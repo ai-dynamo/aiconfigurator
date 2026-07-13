@@ -37,6 +37,7 @@ plan cases = dedup( expand(base sweep grid) ∪ expand(model shapes) )
 | Change a shared sweep | edit the op's `cases/base_ops/<op>.yaml` |
 | New op collector | only when no existing op can produce the data points |
 | Op needs newer SM than some GPUs | axis `min_sm` (quant modes) or `cases/capabilities.yaml` |
+| Quant mode exists on an SM interval, not a floor (framework routes the platform elsewhere) | quant-mode `max_sm_exclusive` with a mandatory serving-dispatch citation (owner decision 2026-07-13: negative gates are sanctioned only on the quant-mode axis, only with a file:line@version citation, and every citation is re-verified on version bumps — the default-open behavior lets NEW SMs be probed and fail loudly instead of being silently whitelisted out) |
 
 ## Model file structure (unchanged from v2 core)
 

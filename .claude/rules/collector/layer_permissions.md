@@ -25,7 +25,7 @@ result     = perf rows  +  classified failure records   (failure is DATA, not a 
 
 | Layer | Allowed | Forbidden |
 |---|---|---|
-| `cases/base_ops/*.yaml` | sweep density/ranges; axis-level `min_sm` on quant/precision modes | per-model special cases; shape exclusion rules |
+| `cases/base_ops/*.yaml` | sweep density/ranges; axis-level `min_sm` on quant/precision modes; quant-mode-level `max_sm_exclusive` **iff** the entry carries a serving-dispatch citation (file:line at the pinned framework version) showing the framework itself excludes the platform — re-verified on every version bump like `FIXME(kernel-limit)` | per-model special cases; shape exclusion rules; `max_sm_exclusive` without a citation or below the quant-mode axis |
 | `cases/models/*_cases.yaml` | model structural shapes, correlated tuples, artifact/quant policy, op activation (`cases: all`) | selectors, match rules, a second generator recipe |
 | `cases/capabilities.yaml` | positive dtype/op → min-SM floors (hardware facts only) | negative "drop" rules; shape axes; framework-version conditions; per-backend nesting |
 | `<backend>/registry.py` | version routing (`VersionRoute`); maturity markers `unverified=True` (op × backend) and `unverified_sms=(...)` (op × backend × SM) | any shape-level information |

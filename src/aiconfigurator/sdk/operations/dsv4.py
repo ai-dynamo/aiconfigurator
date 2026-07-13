@@ -953,7 +953,8 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             # representative silicon topK). HCA (cr==128) is left untouched.
             if compress_ratio == 4 and _TOPK_CORRECTION_ENABLED:
                 calib = _get_dsv4_topk_calib(database)
-                delta = _dsv4_topk_delta_ms(calib, int(prefix), int(s), int(b))
+                # Context topk runs the v1 selector (producer phase-qualifies).
+                delta = _dsv4_topk_delta_ms((calib or {}).get("v1"), int(prefix), int(s), int(b))
                 corrected_latency = max(0.0, latency - delta)
                 if latency > 0.0 and energy:
                     energy *= corrected_latency / latency
@@ -1147,7 +1148,8 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             df = pd.read_parquet(path)
             if "num_heads" in df:
                 df = df[df["num_heads"] == native_heads]
-            tl = df[df["score_mode"].astype(str) == "top_last"]
+            # CP is a context-branch consumer; context topk is the v1 selector.
+            tl = df[df["score_mode"].astype(str) == "v1_top_last"]
             for _, r in tl.iterrows():
                 by_bs.setdefault(int(r["batch_size"]), {})[(int(r["isl"]), int(r["step"]))] = float(r["latency"])
         cls._csa_topk_abs_cache[key] = by_bs
@@ -1358,7 +1360,8 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             if compress_ratio == 4 and _TOPK_CORRECTION_ENABLED:
                 calib = _get_dsv4_topk_calib(database)
                 decode_prefix = max(int(s) - 1, 0)
-                delta = _dsv4_topk_delta_ms(calib, decode_prefix, 1, int(b))
+                # Generation topk runs the v2 selector (producer phase-qualifies).
+                delta = _dsv4_topk_delta_ms((calib or {}).get("v2"), decode_prefix, 1, int(b))
                 corrected_latency = max(0.0, latency - delta)
                 if latency > 0.0 and energy:
                     energy *= corrected_latency / latency
@@ -1714,45 +1717,56 @@ def _dsv4_normalize_dtype(name: str) -> str:
 # Small topK path falls into its O(n^2) tie-break). That inflates the measured
 # module latency vs real silicon, where logits are spread. We measured the topK
 # time standalone under a degenerate "flat" construction and a representative
-# "top_last" construction for every (prefix, isl, batch_size) shape, and store
-# as two rows (score_mode=flat | top_last, each a single latency) per shape in
-# dsv4_csa_topk_calib_perf; DELTA = flat.latency - top_last.latency. At query
-# time we SUBTRACT DELTA from the CSA (compress_ratio==4) module latency only.
+# "top_last" construction for every (prefix, isl, batch_size) shape, phase-
+# qualified (context runs the v1 selector, generation v2), stored as four rows
+# (score_mode=v{1,2}_{flat,top_last}) per shape in dsv4_csa_topk_calib_perf;
+# DELTA = flat.latency - top_last.latency per variant. At query time we
+# SUBTRACT the matching variant's DELTA from the CSA (compress_ratio==4)
+# module latency only.
 # Gate: AIC_DSV4_TOPK_CORRECTION (default on; set "0" to disable).
 # ───────────────────────────────────────────────────────────────────────
 _TOPK_CORRECTION_ENABLED = os.environ.get("AIC_DSV4_TOPK_CORRECTION", "1") != "0"
 
 
 def _build_topk_calib_from_rows(by_mode):
-    """Pair the flat / top_last rows the sparse-op loader produced into the topK
-    DELTA table ``{'exact': {(step, isl, bs): delta_ms},
-                   'by_pi': {(step, isl): [(bs, delta_ms), ...]}}`` or ``None``.
+    """Pair flat / top_last rows into per-variant topK DELTA tables.
+
+    Returns ``{"v1": table_or_None, "v2": table_or_None}`` (or ``None`` when
+    nothing pairs), where each table is ``{'exact': {(step, isl, bs): delta_ms},
+    'by_pi': {(step, isl): [(bs, delta_ms), ...]}}``.
 
     ``by_mode`` is the ``_TOPK_CALIB_KEYS`` nesting
-    ``data[step][isl][bs][score_mode] = {"latency": ms}``. The calibration is
-    stored as two rows per shape — ``score_mode=flat`` is the degenerate
-    worst-case the module CSV captured, ``top_last`` the representative one —
+    ``data[step][isl][bs][score_mode] = {"latency": ms}``. The producer emits
+    phase-qualified score modes — context topk runs the v1 selector and
+    generation runs v2, each measured under a degenerate ``flat`` and a
+    representative ``top_last`` score distribution (four rows per shape) —
     and DELTA = flat.latency - top_last.latency.
     """
     if not by_mode:
         return None
-    exact = {}
-    by_pi = {}
-    for step, isl_d in by_mode.items():
-        for isl, bs_d in isl_d.items():
-            for bs, mode_d in bs_d.items():
-                flat = mode_d.get("flat")
-                top_last = mode_d.get("top_last")
-                if not isinstance(flat, dict) or not isinstance(top_last, dict):
-                    continue
-                delta = max(0.0, float(flat["latency"]) - float(top_last["latency"]))
-                exact[(step, isl, bs)] = delta
-                by_pi.setdefault((step, isl), []).append((bs, delta))
-    if not exact:
+    out = {}
+    for variant in ("v1", "v2"):
+        exact = {}
+        by_pi = {}
+        for step, isl_d in by_mode.items():
+            for isl, bs_d in isl_d.items():
+                for bs, mode_d in bs_d.items():
+                    flat = mode_d.get(f"{variant}_flat")
+                    top_last = mode_d.get(f"{variant}_top_last")
+                    if not isinstance(flat, dict) or not isinstance(top_last, dict):
+                        continue
+                    delta = max(0.0, float(flat["latency"]) - float(top_last["latency"]))
+                    exact[(step, isl, bs)] = delta
+                    by_pi.setdefault((step, isl), []).append((bs, delta))
+        if not exact:
+            out[variant] = None
+            continue
+        for k in by_pi:
+            by_pi[k].sort()
+        out[variant] = {"exact": exact, "by_pi": by_pi}
+    if not any(out.values()):
         return None
-    for k in by_pi:
-        by_pi[k].sort()
-    return {"exact": exact, "by_pi": by_pi}
+    return out
 
 
 def _dsv4_interp_1d_from_points(points, x):

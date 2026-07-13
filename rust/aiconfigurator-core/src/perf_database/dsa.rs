@@ -17,8 +17,9 @@
 //!   (`*_skip_indexer` suffix); the tables here keep the FULL rows (the
 //!   default slice every Rust query path consumes — Python's op passes
 //!   `skip_indexer=False` on the paths ported here).
-//! - `dsa_backend` is derived per row from `kernel_source` (`"trtllm" if
-//!   "trtllm" in ks else "flashmla_kv"`); queries select a backend slice
+//! - `dsa_backend` bucket(s) are derived per row mirroring Python
+//!   `_dsa_kernel_source_buckets` (bf16-KV rows back BOTH buckets; fp8 rows
+//!   bucket by executed-kernel name); queries select a backend slice
 //!   with Python `_select_dsa_backend`'s fallback chain.
 //!
 //! Queries resolve on the RAW grids through the shared `perf_interp` v2
@@ -777,20 +778,35 @@ fn load_dsa_parquet(
             {
                 continue;
             }
-            let dsa_backend = if row
-                .str_optional(ks_col)?
-                .unwrap_or("")
-                .contains("trtllm")
-            {
-                "trtllm"
-            } else {
-                "flashmla_kv"
-            };
             let key = DsaKey {
                 architecture: row.str_owned(arch_col)?,
                 fmha_quant: row.str_owned(mla_dtype_col)?,
                 kv_quant: row.str_owned(kv_cache_dtype_col)?,
                 gemm_quant: row.str_owned(gemm_type_col)?,
+            };
+            // Configured-backend bucket(s) for the row — mirrors Python
+            // `_dsa_kernel_source_buckets` (operations/dsa.py). The
+            // trtllm/flashmla_kv split is an FP8-KV serving rule; with a BF16
+            // KV cache there is exactly ONE real execution path per shape, so
+            // every bf16 row backs BOTH buckets (a bare substring test split
+            // one measured sweep across the buckets and left the default
+            // query bucket with nothing beyond 2048 tokens). FP8 rows bucket
+            // by executed-kernel name; dense ragged prefill is selected by
+            // SHAPE (isl <= 2048) under either configured backend, so it
+            // backs both. Legacy (pre-0.5.14) names keep the old substring
+            // rule.
+            let ks_name = row.str_optional(ks_col)?.unwrap_or("").to_string();
+            let buckets: &[&str] = if key.kv_quant == "bfloat16" {
+                &["trtllm", "flashmla_kv"]
+            } else {
+                match ks_name.as_str() {
+                    "sglang_dsa_indexer_trtllm" | "sglang_dsa_skip_indexer_trtllm" => &["trtllm"],
+                    "sglang_dsa_indexer_flashmla_sparse"
+                    | "sglang_dsa_skip_indexer_flashmla_sparse" => &["flashmla_kv"],
+                    "sglang_dsa_dense_mha_trtllm_ragged" => &["trtllm", "flashmla_kv"],
+                    _ if ks_name.contains("trtllm") => &["trtllm"],
+                    _ => &["flashmla_kv"],
+                }
             };
             let (step, isl) = if collapse_isl_step_to_seq {
                 // Generation: canonical coordinate is s = isl + step (see fn
@@ -799,17 +815,15 @@ fn load_dsa_parquet(
             } else {
                 (row.u32(step_col)?, row.u32(isl_col)?)
             };
-            source_values.insert(
-                (
-                    key,
-                    dsa_backend.to_string(),
-                    row.u32(num_heads_col)?,
-                    step,
-                    isl,
-                    row.u32(batch_size_col)?,
-                ),
-                row.f64(latency_col)?,
-            );
+            let num_heads = row.u32(num_heads_col)?;
+            let batch_size = row.u32(batch_size_col)?;
+            let latency = row.f64(latency_col)?;
+            for dsa_backend in buckets {
+                source_values.insert(
+                    (key.clone(), dsa_backend.to_string(), num_heads, step, isl, batch_size),
+                    latency,
+                );
+            }
         }
         // Phase 2: merge with first-source-wins (earlier source outranks).
         for ((key, dsa_backend, num_heads, step, isl, batch_size), latency) in source_values {
@@ -1406,6 +1420,13 @@ mod tests {
     /// `(op_name, kernel_source, latency)`; the shape coordinate is fixed at
     /// (DeepseekV32ForCausalLM, bf16/bf16/bf16, n=128, b=1, isl=1024, step=0).
     fn write_dsa_module_parquet(path: &Path, rows: &[(&str, &str, f64)]) {
+        let rows_kv: Vec<(&str, &str, &str, i64, f64)> =
+            rows.iter().map(|r| (r.0, r.1, "bfloat16", 1024, r.2)).collect();
+        write_dsa_module_parquet_rows(path, &rows_kv)
+    }
+
+    /// Row tuple: `(op_name, kernel_source, kv_cache_dtype, isl, latency)`.
+    fn write_dsa_module_parquet_rows(path: &Path, rows: &[(&str, &str, &str, i64, f64)]) {
         use parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int64Type};
         use parquet::file::properties::WriterProperties;
         use parquet::file::writer::SerializedFileWriter;
@@ -1435,7 +1456,7 @@ mod tests {
             rows.iter().map(|r| ByteArray::from(r.1)).collect(),
             rows.iter().map(|_| ByteArray::from("DeepseekV32ForCausalLM")).collect(),
             rows.iter().map(|_| ByteArray::from("bfloat16")).collect(),
-            rows.iter().map(|_| ByteArray::from("bfloat16")).collect(),
+            rows.iter().map(|r| ByteArray::from(r.2)).collect(),
             rows.iter().map(|_| ByteArray::from("bfloat16")).collect(),
         ];
         for values in &str_cols {
@@ -1446,7 +1467,7 @@ mod tests {
         let int_cols: [Vec<i64>; 4] = [
             rows.iter().map(|_| 128).collect(), // num_heads
             rows.iter().map(|_| 1).collect(),   // batch_size
-            rows.iter().map(|_| 1024).collect(), // isl
+            rows.iter().map(|r| r.3).collect(), // isl
             rows.iter().map(|_| 0).collect(),   // step
         ];
         for values in &int_cols {
@@ -1454,7 +1475,7 @@ mod tests {
             col.typed::<Int64Type>().write_batch(values, None, None).expect("write ints");
             col.close().expect("close col");
         }
-        let latencies: Vec<f64> = rows.iter().map(|r| r.2).collect();
+        let latencies: Vec<f64> = rows.iter().map(|r| r.4).collect();
         let mut col = rg.next_column().expect("next col").expect("latency col");
         col.typed::<DoubleType>().write_batch(&latencies, None, None).expect("write latency");
         col.close().expect("close col");
@@ -1484,7 +1505,7 @@ mod tests {
     /// ]).to_parquet(f)
     /// full = load_context_dsa_module_data(f, op_kind='full')
     /// node = full[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16]['DeepseekV32ForCausalLM']
-    /// print(_select_dsa_backend(node, 'trtllm')[128][0][1024][1])       # {'latency': 1.0, ...}
+    /// print(_select_dsa_backend(node, 'trtllm')[128][0][1024][1])       # {'latency': 5.0, ...} (bf16 rows back both buckets)
     /// print(_select_dsa_backend(node, 'flashmla_kv')[128][0][1024][1])  # {'latency': 5.0, ...}"
     /// ```
     ///
@@ -1521,11 +1542,53 @@ mod tests {
                 )
                 .expect("query must succeed")
         };
-        // Plain path default (Python `dsa_backend="trtllm"`): the trtllm
-        // full row, NOT the skip row and NOT the flashmla_kv row.
-        assert_eq!(q("trtllm"), 1.0);
-        // CP-base selection (Python `dsa_backend="flashmla_kv"`).
+        // BF16-KV rows back BOTH buckets (mirrors Python
+        // `_dsa_kernel_source_buckets`): both full rows land in each bucket
+        // at the same coordinate, so last-row-wins answers 5.0 everywhere.
+        // The skip row (9.0) still never blends in.
+        assert_eq!(q("trtllm"), 5.0);
         assert_eq!(q("flashmla_kv"), 5.0);
+    }
+
+    /// FP8-KV rows bucket by executed-kernel name (the serving FP8-KV
+    /// sub-backend selector): indexer_trtllm -> trtllm only,
+    /// indexer_flashmla_sparse -> flashmla_kv only, dense ragged prefill
+    /// (shape-dispatched) -> both.
+    #[test]
+    fn dsa_fp8_rows_bucket_by_executed_kernel_name() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_dsa_module_parquet_rows(
+            &tmp.path().join("dsa_context_module_perf.parquet"),
+            &[
+                ("dsa_context_module", "sglang_dsa_indexer_trtllm", "fp8", 4096, 1.0),
+                ("dsa_context_module", "sglang_dsa_indexer_flashmla_sparse", "fp8", 4096, 5.0),
+                ("dsa_context_module", "sglang_dsa_dense_mha_trtllm_ragged", "fp8", 1024, 7.0),
+            ],
+        );
+        let table = DsaTable::new(tmp.path().to_path_buf());
+        let spec = b200_sxm_spec();
+        let q = |dsa_backend: &str, isl: u32| {
+            table
+                .query_context(
+                    &spec,
+                    1,
+                    isl,
+                    128,
+                    KvCacheQuantMode::Fp8,
+                    FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Bfloat16,
+                    "DeepseekV32ForCausalLM",
+                    0,
+                    INDEX_TOPK,
+                    dsa_backend,
+                )
+                .expect("query must succeed")
+        };
+        assert_eq!(q("trtllm", 4096), 1.0);
+        assert_eq!(q("flashmla_kv", 4096), 5.0);
+        // Dense prefill rows back both buckets.
+        assert_eq!(q("trtllm", 1024), 7.0);
+        assert_eq!(q("flashmla_kv", 1024), 7.0);
     }
 
     /// Write one synthetic DSA GENERATION parquet with the collector's

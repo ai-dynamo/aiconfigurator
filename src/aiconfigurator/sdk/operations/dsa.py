@@ -43,6 +43,39 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# kernel_source -> configured-backend bucket(s) for FP8-KV rows. 0.5.14
+# SGLang DSA collectors record the EXECUTED kernel; dense ragged prefill is
+# selected by SHAPE (isl <= 2048) under either configured backend, so its
+# rows back both buckets.
+_DSA_KERNEL_SOURCE_BUCKETS = {
+    "sglang_dsa_indexer_trtllm": ("trtllm",),
+    "sglang_dsa_skip_indexer_trtllm": ("trtllm",),
+    "sglang_dsa_indexer_flashmla_sparse": ("flashmla_kv",),
+    "sglang_dsa_skip_indexer_flashmla_sparse": ("flashmla_kv",),
+    "sglang_dsa_dense_mha_trtllm_ragged": ("trtllm", "flashmla_kv"),
+}
+
+
+def _dsa_kernel_source_buckets(kernel_source: str, kv_dtype) -> tuple[str, ...]:
+    """Configured-backend bucket(s) a DSA perf row supports.
+
+    The trtllm/flashmla_kv split mirrors serving's FP8-KV sub-backend selector
+    (an FP8-KV rule: SM90 -> flashmla_kv, SM100+ -> trtllm; BF16 KV stays on
+    framework defaults). With a BF16 KV cache there is exactly ONE real
+    execution path per shape, so every bf16 row backs BOTH buckets — a bare
+    substring test split one measured b200 sweep across the two buckets and
+    left the default query bucket with nothing beyond 2048 tokens. FP8 rows
+    bucket by executed-kernel name; legacy (pre-0.5.14) names keep the old
+    substring rule.
+    """
+    if kv_dtype is common.KVCacheQuantMode.bfloat16:
+        return ("trtllm", "flashmla_kv")
+    buckets = _DSA_KERNEL_SOURCE_BUCKETS.get(kernel_source)
+    if buckets is not None:
+        return buckets
+    return ("trtllm",) if "trtllm" in kernel_source else ("flashmla_kv",)
+
+
 def _dsa_module_has_prefix_axis(module_dict) -> bool:
     """Detect whether a context-DSA module slice carries an explicit prefix axis.
 
@@ -1485,13 +1518,13 @@ def load_context_dsa_module_data(dsa_file: str, op_kind: str = "full"):
             kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
             ks = row.get("kernel_source") or ""
-            dsa_backend = "trtllm" if "trtllm" in ks else "flashmla_kv"
-            coordinate = (fmha_mode, kv_dtype, gemm_mode, arch, dsa_backend, num_heads, prefix, s, b)
-            source_values[coordinate] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,
-            }
+            for dsa_backend in _dsa_kernel_source_buckets(ks, kv_dtype):
+                coordinate = (fmha_mode, kv_dtype, gemm_mode, arch, dsa_backend, num_heads, prefix, s, b)
+                source_values[coordinate] = {
+                    "latency": latency,
+                    "power": power,
+                    "energy": energy,
+                }
 
         # Sources are priority-ordered: active first, shared fallbacks later.
         for coordinate, value in source_values.items():
@@ -1553,15 +1586,15 @@ def load_generation_dsa_module_data(dsa_file: str, op_kind: str = "full"):
             kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
             ks = row.get("kernel_source") or ""
-            dsa_backend = "trtllm" if "trtllm" in ks else "flashmla_kv"
             # Total decode length is the canonical coordinate even if two rows
             # decompose it into different isl/step pairs.
-            coordinate = (kv_dtype, gemm_mode, arch, dsa_backend, num_heads, b, s)
-            source_values[coordinate] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,
-            }
+            for dsa_backend in _dsa_kernel_source_buckets(ks, kv_dtype):
+                coordinate = (kv_dtype, gemm_mode, arch, dsa_backend, num_heads, b, s)
+                source_values[coordinate] = {
+                    "latency": latency,
+                    "power": power,
+                    "energy": energy,
+                }
 
         # Sources are priority-ordered: active first, shared fallbacks later.
         for coordinate, value in source_values.items():
