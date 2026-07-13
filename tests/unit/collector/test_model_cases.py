@@ -407,7 +407,7 @@ def test_sglang_registry_marks_unvalidated_dsa_and_moe_platforms_explicitly():
     for op in ("dsa_context_module_skip_indexer", "dsa_generation_module_skip_indexer"):
         assert op in sm90.selected_ops
         assert op in sm100.selected_ops
-        assert entries[op].unverified_sms == (90, 103, 120)
+        assert entries[op].unverified_sms == (90, 120)
 
     # SM103 unparked by the B300 hardware probe (2026-07-13, pipeline
     # 57716023): sampled dsa cases ran clean across all three kernel buckets.

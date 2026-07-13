@@ -125,10 +125,12 @@ REGISTRY: list[OpEntry] = [
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_CONTEXT_MODULE_SKIP_INDEXER,
         # The only registered GLM-5.2 artifact is NVFP4 (SM100+); the exact
-        # reuse-layer path is currently hardware-validated only on SM100.
-        # SM120 shares the full-module TRTLLM-GEN "Unsupported architecture"
-        # raise (RTX 6000 Pro probe 2026-07-06).
-        unverified_sms=(90, 103, 120),
+        # reuse-layer path is hardware-validated on SM100 and — via the B300
+        # probe (2026-07-13, pipeline 57747474: 8,506 rows, skip_indexer
+        # trtllm+flashmla buckets clean, 1 error) — on SM103. SM120 shares the
+        # full-module TRTLLM-GEN "Unsupported architecture" raise (RTX 6000
+        # Pro probe 2026-07-06); SM90 stays unvalidated.
+        unverified_sms=(90, 120),
     ),
     OpEntry(
         op="dsa_generation_module_skip_indexer",
@@ -136,7 +138,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsa_generation_module_skip_indexer_test_cases",
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_GENERATION_MODULE_SKIP_INDEXER,
-        unverified_sms=(90, 103, 120),
+        unverified_sms=(90, 120),
     ),
     # DeepSeek-V4 module-level data (csa/hca x ctx/gen = 4 ops, 1 file each).
     OpEntry(
