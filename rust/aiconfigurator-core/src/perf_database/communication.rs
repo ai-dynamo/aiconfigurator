@@ -249,44 +249,7 @@ fn load_custom_allreduce_parquet(sources: &[PerfSource]) -> Result<CustomAllRedu
             continue;
         }
         any_source = true;
-        let reader = PerfReader::open(path)?;
-        let num_gpus_col = reader.col("num_gpus")?;
-        let message_size_col = reader.col("message_size")?;
-        let latency_col = reader.col("latency")?;
-        let kernel_source_col = reader.col_optional("kernel_source");
-        let backend_col = reader.col_optional("backend");
-        let ks_col = reader.col_optional("kernel_source");
-
-        // Mirror Python/legacy: skip "_eager" kernel sources on systems other
-        // than b60. We can't see the system name from here, so apply the filter
-        // by path prefix.
-        let path_str = path.to_string_lossy();
-        let is_b60 = path_str.contains("/b60/");
-
-        for row in reader.rows()? {
-            let row = row?;
-            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
-                continue;
-            }
-            if !is_b60 {
-                let kernel = row.str_optional(kernel_source_col)?.unwrap_or("");
-                let backend = row.str_optional(backend_col)?.unwrap_or("");
-                if kernel.ends_with("_eager") || backend.ends_with("_eager") {
-                    continue;
-                }
-            }
-            // Match Python's `load_custom_allreduce_data`: every row is stored
-            // under `CommQuantMode.half` regardless of the CSV's
-            // `allreduce_dtype` column (Python has a `TODO` here but the
-            // behavior is stable in production).
-            // First-wins parity with Python `load_custom_allreduce_data`,
-            // extended across shared-layer sources (earlier source wins).
-            by_keys
-                .entry(("half".to_string(), row.u32(num_gpus_col)?))
-                .or_default()
-                .entry(row.u64(message_size_col)?)
-                .or_insert(row.f64(latency_col)?);
-        }
+        ingest_custom_allreduce_source(source, path, &mut by_keys)?;
     }
     if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -296,6 +259,54 @@ fn load_custom_allreduce_parquet(sources: &[PerfSource]) -> Result<CustomAllRedu
         )));
     }
     Ok(CustomAllReduceGrids { by_keys })
+}
+
+/// Read one custom-allreduce perf source into `by_keys`. Split out of
+/// `load_custom_allreduce_parquet` to keep each function's branching shallow;
+/// behaviour (row filtering + first-wins insertion) is unchanged.
+fn ingest_custom_allreduce_source(
+    source: &PerfSource,
+    path: &Path,
+    by_keys: &mut BTreeMap<(String, u32), BTreeMap<u64, f64>>,
+) -> Result<(), AicError> {
+    let reader = PerfReader::open(path)?;
+    let num_gpus_col = reader.col("num_gpus")?;
+    let message_size_col = reader.col("message_size")?;
+    let latency_col = reader.col("latency")?;
+    let kernel_source_col = reader.col_optional("kernel_source");
+    let backend_col = reader.col_optional("backend");
+    let ks_col = reader.col_optional("kernel_source");
+
+    // Mirror Python/legacy: skip "_eager" kernel sources on systems other
+    // than b60. We can't see the system name from here, so apply the filter
+    // by path prefix.
+    let is_b60 = path.to_string_lossy().contains("/b60/");
+
+    for row in reader.rows()? {
+        let row = row?;
+        if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+            continue;
+        }
+        if !is_b60 {
+            let kernel = row.str_optional(kernel_source_col)?.unwrap_or("");
+            let backend = row.str_optional(backend_col)?.unwrap_or("");
+            if kernel.ends_with("_eager") || backend.ends_with("_eager") {
+                continue;
+            }
+        }
+        // Match Python's `load_custom_allreduce_data`: every row is stored
+        // under `CommQuantMode.half` regardless of the CSV's
+        // `allreduce_dtype` column (Python has a `TODO` here but the
+        // behavior is stable in production).
+        // First-wins parity with Python `load_custom_allreduce_data`,
+        // extended across shared-layer sources (earlier source wins).
+        by_keys
+            .entry(("half".to_string(), row.u32(num_gpus_col)?))
+            .or_default()
+            .entry(row.u64(message_size_col)?)
+            .or_insert(row.f64(latency_col)?);
+    }
+    Ok(())
 }
 
 fn load_nccl_parquet(path: &Path) -> Result<NcclGrids, AicError> {
