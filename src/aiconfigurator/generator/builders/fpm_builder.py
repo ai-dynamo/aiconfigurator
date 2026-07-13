@@ -31,6 +31,7 @@ _FPM_OWNED_ORCHESTRATION_FLAGS = frozenset(
         "--data-parallel-start-rank",
         "--data-parallel-address",
         "--data-parallel-rpc-port",
+        "--data-parallel-hybrid-lb",
     }
 )
 
@@ -91,7 +92,13 @@ def build_fpm_artifacts(
         wait_timeout_seconds,
         topology,
     )
-    workload = _lower_worker_to_resource(context, worker, main_container, topology)
+    workload = _lower_worker_to_resource(
+        context,
+        worker,
+        main_container,
+        topology,
+        efa_resource_name=_efa_resource_name(resolved_facts),
+    )
 
     return {
         "k8s_deploy.yaml": _dump_k8s_yaml(workload),
@@ -272,6 +279,10 @@ def _require_main_container(worker: DGDService) -> MainContainer:
 
 
 def _collect_concrete_env(worker: DGDService, main_container: MainContainer) -> list[tuple[str, str]]:
+    # build_dgd sets the operator-only envFromSecret="hf-token-secret" on
+    # every vLLM worker. FPM V1 intentionally accepts only concrete values:
+    # it cannot safely materialize a Secret into run.sh, and rejecting that
+    # built-in marker would make every FPM render fail.
     resolved: list[tuple[str, str]] = []
     entries = list(worker.envs or []) + list(main_container.env or [])
     for entry in entries:
@@ -332,18 +343,18 @@ def _ensure_benchmark_output_path(args: list[str], env: list[tuple[str, str]]) -
     env_value = _last_env_value(env, "DYN_FPM_BENCHMARK_OUTPUT_PATH")
     if cli_value is not None and env_value is not None and cli_value != env_value:
         raise ValueError(f"{flag} and DYN_FPM_BENCHMARK_OUTPUT_PATH must resolve to the same path")
-    value = cli_value or env_value
+    value = cli_value if cli_value is not None else env_value
 
     if value is None:
         value = "/results/benchmark.json"
+    if not value:
+        raise ValueError(f"{flag} must not be empty")
     if cli_value is None:
         # Waiting for an output path that the engine does not know about would
         # hang forever.  Make the V1 default explicit in the resolved command.
         args.extend([flag, value])
     if env_value is None:
         env.append(("DYN_FPM_BENCHMARK_OUTPUT_PATH", value))
-    if not value:
-        raise ValueError(f"{flag} must not be empty")
     return value
 
 
@@ -409,6 +420,7 @@ def _render_run_script(
             '    engine_command+=(--data-parallel-size-local "$local_data_parallel_size")',
             '    engine_command+=(--data-parallel-start-rank "$((node_rank * local_data_parallel_size))")',
             '    engine_command+=(--data-parallel-address "$master_addr" --data-parallel-rpc-port 29510)',
+            "    engine_command+=(--data-parallel-hybrid-lb)",
             "  else",
             '    engine_command+=(--nnodes "$node_count" --node-rank "$node_rank")',
             '    engine_command+=(--master-addr "$master_addr" --master-port 29500)',
@@ -480,12 +492,27 @@ def _render_run_script(
             "}",
             "",
             'engine_pid=""',
+            "engine_shutdown_grace_seconds=30",
+            "terminate_engine() {",
+            "  local pid=$1",
+            '  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true',
+            "  local shutdown_deadline=$((SECONDS + engine_shutdown_grace_seconds))",
+            '  while kill -0 "$pid" 2>/dev/null || kill -0 -- "-$pid" 2>/dev/null; do',
+            "    if (( SECONDS >= shutdown_deadline )); then",
+            '      echo "Engine did not stop within ${engine_shutdown_grace_seconds}s; sending SIGKILL" >&2',
+            '      kill -KILL -- "-$pid" 2>/dev/null || true',
+            '      kill -KILL "$pid" 2>/dev/null || true',
+            "      break",
+            "    fi",
+            "    sleep 1",
+            "  done",
+            '  wait "$pid" 2>/dev/null || true',
+            "}",
             "cleanup() {",
             "  local status=$?",
             "  trap - EXIT INT TERM",
-            '  if [[ -n "${engine_pid:-}" ]] && kill -0 "$engine_pid" 2>/dev/null; then',
-            '    kill -TERM "$engine_pid" 2>/dev/null || true',
-            '    wait "$engine_pid" 2>/dev/null || true',
+            '  if [[ -n "${engine_pid:-}" ]]; then',
+            '    terminate_engine "$engine_pid"',
             "  fi",
             '  exit "$status"',
             "}",
@@ -493,7 +520,7 @@ def _render_run_script(
             "trap 'exit 130' INT",
             "trap 'exit 143' TERM",
             "",
-            '"${engine_command[@]}" &',
+            "python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \"${engine_command[@]}\" &",
             "engine_pid=$!",
             "deadline=$((SECONDS + wait_timeout_seconds))",
             "",
@@ -513,6 +540,7 @@ def _render_run_script(
             '    wait "$engine_pid"',
             "    engine_status=$?",
             "    set -e",
+            '    terminate_engine "$engine_pid"',
             '    engine_pid=""',
             '    echo "Engine exited before writing all FPM benchmark outputs" >&2',
             '    if (( engine_status == 0 )); then exit 1; else exit "$engine_status"; fi',
@@ -524,8 +552,7 @@ def _render_run_script(
             "  sleep 2",
             "done",
             "",
-            'kill -TERM "$engine_pid" 2>/dev/null || true',
-            'wait "$engine_pid" 2>/dev/null || true',
+            'terminate_engine "$engine_pid"',
             'engine_pid=""',
             "trap - EXIT INT TERM",
             "",
@@ -539,6 +566,8 @@ def _lower_worker_to_resource(
     worker: DGDService,
     main_container: MainContainer,
     topology: dict[str, int],
+    *,
+    efa_resource_name: str | None,
 ) -> dict[str, Any]:
     k8s = context.get("K8sConfig") or {}
     if not isinstance(k8s, dict):
@@ -549,6 +578,7 @@ def _lower_worker_to_resource(
         topology["gpus_per_node"],
         shared_memory_size=k8s.get("fpm_shared_memory_size"),
         compute_domain_name=(f"{context.get('name')}-compute-domain-channel" if topology["node_count"] > 1 else None),
+        efa_resource_name=efa_resource_name,
     )
     metadata = _resource_metadata(context)
     if topology["node_count"] == 1:
@@ -641,6 +671,7 @@ def _lower_worker_pod_spec(
     *,
     shared_memory_size: Any = None,
     compute_domain_name: str | None = None,
+    efa_resource_name: str | None = None,
 ) -> dict[str, Any]:
     extra_pod_spec = worker.extra_pod_spec
     if extra_pod_spec is None:
@@ -713,9 +744,11 @@ def _lower_worker_pod_spec(
                     worker.resources,
                     gpu_limit=gpus_per_node,
                     allow_compute_domain_claim=compute_domain_name is not None,
+                    efa_resource_name=efa_resource_name,
                 ),
                 resource_override,
                 expected_gpu_limit=gpus_per_node,
+                efa_resource_name=efa_resource_name,
             ),
             "volumeMounts": volume_mounts,
             "command": ["/bin/bash", "-lc"],
@@ -733,6 +766,7 @@ def _lower_resources(
     *,
     gpu_limit: int,
     allow_compute_domain_claim: bool,
+    efa_resource_name: str | None,
 ) -> dict[str, Any]:
     if not isinstance(resources, dict):
         raise TypeError("The resolved vLLM worker has no resources")
@@ -758,6 +792,8 @@ def _lower_resources(
         if custom is not None:
             if not isinstance(custom, dict):
                 raise TypeError(f"resources.{section_name}.custom must be a mapping")
+            if efa_resource_name is not None and efa_resource_name in custom:
+                custom[efa_resource_name] = str(gpu_limit)
             section.update(copy.deepcopy(custom))
         if section:
             lowered[section_name] = section
@@ -773,6 +809,7 @@ def _merge_container_resources(
     override: Any,
     *,
     expected_gpu_limit: int,
+    efa_resource_name: str | None,
 ) -> dict[str, Any]:
     if override is None:
         return base
@@ -795,8 +832,33 @@ def _merge_container_resources(
                 if requested_gpu != expected_gpu_limit:
                     raise ValueError("worker_extra_pod_spec cannot override the Generator-resolved per-node GPU count")
                 value = str(expected_gpu_limit)
+            elif efa_resource_name is not None and name == efa_resource_name:
+                try:
+                    requested_efa = int(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{efa_resource_name} must be an integer") from exc
+                if requested_efa != expected_gpu_limit:
+                    raise ValueError("worker_extra_pod_spec cannot override the Generator-resolved per-node EFA count")
+                value = str(expected_gpu_limit)
             section[name] = copy.deepcopy(value)
     return merged
+
+
+def _efa_resource_name(resolved_facts: Any) -> str | None:
+    transport = getattr(resolved_facts, "transport", None)
+    if not isinstance(transport, dict):
+        return None
+    pod = transport.get("pod")
+    if pod is None:
+        return None
+    if not isinstance(pod, dict):
+        raise TypeError("Resolved transport pod facts must be a mapping")
+    resource_name = pod.get("efa_resource")
+    if resource_name is None:
+        return None
+    if not isinstance(resource_name, str) or not resource_name:
+        raise ValueError("Resolved transport efa_resource must be a non-empty string")
+    return resource_name
 
 
 def _add_volume_mount(

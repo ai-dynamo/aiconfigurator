@@ -9,8 +9,10 @@ import copy
 import json
 import os
 import shlex
+import signal
 import stat
 import subprocess
+import time
 
 import pytest
 import yaml
@@ -295,6 +297,51 @@ def test_fpm_rejects_conflicting_output_paths():
         _render(params)
 
 
+def _assert_process_stopped(pid_path) -> None:
+    process_pid = int(pid_path.read_text())
+    exit_deadline = time.monotonic() + 2
+    while time.monotonic() < exit_deadline:
+        try:
+            os.kill(process_pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+
+    try:
+        os.kill(process_pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    pytest.fail(f"process {process_pid} survived FPM run.sh cleanup")
+
+
+@pytest.mark.parametrize(
+    "empty_cli_args",
+    [
+        ["--benchmark-output-path", ""],
+        ["--benchmark-output-path="],
+    ],
+)
+def test_fpm_rejects_explicit_empty_cli_output_path(empty_cli_args):
+    params = _params()
+    params["K8sConfig"]["extra_env"] = [
+        entry for entry in params["K8sConfig"]["extra_env"] if entry["name"] != "DYN_FPM_BENCHMARK_OUTPUT_PATH"
+    ]
+    params["params"]["agg"]["extra_cli_args"].extend(empty_cli_args)
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        _render(params)
+
+
+def test_fpm_rejects_explicit_empty_environment_output_path():
+    params = _params()
+    for entry in params["K8sConfig"]["extra_env"]:
+        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
+            entry["value"] = ""
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        _render(params)
+
+
 def test_fpm_api_writes_exact_filenames_and_executable_script(tmp_path):
     artifacts = generate_backend_artifacts(
         copy.deepcopy(_params()),
@@ -491,6 +538,161 @@ while True:
     assert "boom" in completed.stderr
 
 
+@pytest.mark.parametrize(
+    ("result_status", "expected_returncode"),
+    [
+        ("passed", 0),
+        ("failed", 1),
+    ],
+)
+def test_fpm_run_script_bounds_stubborn_engine_shutdown(
+    tmp_path,
+    result_status,
+    expected_returncode,
+):
+    output_path = tmp_path / "benchmark.json"
+    pid_path = tmp_path / "engine.pid"
+    child_pid_path = tmp_path / "engine-child.pid"
+    params = _params()
+    for entry in params["K8sConfig"]["extra_env"]:
+        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
+            entry["value"] = str(output_path)
+
+    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
+    fake_package.mkdir(parents=True)
+    (fake_package.parent / "__init__.py").write_text("")
+    (fake_package / "__init__.py").write_text("")
+    (fake_package / "__main__.py").write_text(
+        f"""\
+import json
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path(os.environ["FAKE_ENGINE_PID_PATH"]).write_text(str(os.getpid()))
+child = subprocess.Popen([
+    sys.executable,
+    "-c",
+    "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(3600)",
+])
+pathlib.Path(os.environ["FAKE_ENGINE_CHILD_PID_PATH"]).write_text(str(child.pid))
+index = sys.argv.index("--benchmark-output-path")
+path = pathlib.Path(sys.argv[index + 1])
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps({{
+    "schema_version": 2,
+    "status": "{result_status}",
+    "config": {{"dp_rank": 0}},
+}}))
+while True:
+    time.sleep(0.1)
+"""
+    )
+    script_path = tmp_path / "run.sh"
+    script = _render(params)["run.sh"].replace(
+        "engine_shutdown_grace_seconds=30",
+        "engine_shutdown_grace_seconds=1",
+    )
+    script_path.write_text(script)
+    env = dict(os.environ)
+    env.update(
+        {
+            "PYTHONPATH": str(tmp_path / "fake-package"),
+            "FAKE_ENGINE_PID_PATH": str(pid_path),
+            "FAKE_ENGINE_CHILD_PID_PATH": str(child_pid_path),
+        }
+    )
+
+    started = time.monotonic()
+    completed = subprocess.run(
+        ["bash", str(script_path)],
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=8,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+
+    assert completed.returncode == expected_returncode
+    assert elapsed < 7
+    assert "Engine did not stop within 1s; sending SIGKILL" in completed.stderr
+    for process_pid_path in (pid_path, child_pid_path):
+        _assert_process_stopped(process_pid_path)
+
+
+def test_fpm_run_script_cleans_process_group_when_engine_parent_exits(tmp_path):
+    output_path = tmp_path / "benchmark.json"
+    child_pid_path = tmp_path / "engine-child.pid"
+    params = _params()
+    for entry in params["K8sConfig"]["extra_env"]:
+        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
+            entry["value"] = str(output_path)
+
+    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
+    fake_package.mkdir(parents=True)
+    (fake_package.parent / "__init__.py").write_text("")
+    (fake_package / "__init__.py").write_text("")
+    (fake_package / "__main__.py").write_text(
+        """\
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+
+child = subprocess.Popen(
+    [
+        sys.executable,
+        "-c",
+        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(3600)",
+    ],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+pathlib.Path(os.environ["FAKE_ENGINE_CHILD_PID_PATH"]).write_text(str(child.pid))
+raise SystemExit(23)
+"""
+    )
+    script_path = tmp_path / "run.sh"
+    script = _render(params)["run.sh"].replace(
+        "engine_shutdown_grace_seconds=30",
+        "engine_shutdown_grace_seconds=1",
+    )
+    script_path.write_text(script)
+    env = dict(os.environ)
+    env.update(
+        {
+            "PYTHONPATH": str(tmp_path / "fake-package"),
+            "FAKE_ENGINE_CHILD_PID_PATH": str(child_pid_path),
+        }
+    )
+
+    try:
+        completed = subprocess.run(
+            ["bash", str(script_path)],
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=8,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        if child_pid_path.exists():
+            os.kill(int(child_pid_path.read_text()), signal.SIGKILL)
+        raise
+
+    assert completed.returncode == 23
+    assert "Engine exited before writing all FPM benchmark outputs" in completed.stderr
+    assert "Engine did not stop within 1s; sending SIGKILL" in completed.stderr
+    _assert_process_stopped(child_pid_path)
+
+
 def test_default_and_explicit_normal_targets_remain_identical():
     params = _params()
     params["K8sConfig"].pop("extra_env")
@@ -643,6 +845,46 @@ def test_fpm_multinode_worker_emits_keepalive_leaderworkerset_and_rank_aware_scr
     assert 'master_addr="${LWS_LEADER_ADDRESS:?LWS_LEADER_ADDRESS is required for multinode FPM}"' in script
     assert '--nnodes "$node_count" --node-rank "$node_rank"' in script
     assert 'exec "${engine_command[@]}" --headless' in script
+
+
+def test_fpm_multinode_efa_resource_matches_per_node_gpu_count():
+    params = _params()
+    params["K8sConfig"]["transport"] = "efa"
+    params["K8sConfig"]["worker_extra_pod_spec"] = {
+        "mainContainer": {
+            "resources": {
+                "limits": {"example.com/unrelated": "1"},
+            }
+        }
+    }
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 16
+    params["params"]["agg"].update({"gpus_per_worker": 16, "tensor_parallel_size": 16})
+
+    workload = yaml.safe_load(_render(params)["k8s_deploy.yaml"])
+    group = workload["spec"]["leaderWorkerTemplate"]
+
+    for template_name in ("leaderTemplate", "workerTemplate"):
+        limits = group[template_name]["spec"]["containers"][0]["resources"]["limits"]
+        assert limits["nvidia.com/gpu"] == "8"
+        assert limits["vpc.amazonaws.com/efa"] == "8"
+        assert limits["example.com/unrelated"] == "1"
+
+
+def test_fpm_efa_resource_overlay_cannot_change_resolved_per_node_count():
+    params = _params()
+    params["K8sConfig"]["transport"] = "efa"
+    params["K8sConfig"]["worker_extra_pod_spec"] = {
+        "mainContainer": {
+            "resources": {
+                "limits": {"vpc.amazonaws.com/efa": "16"},
+            }
+        }
+    }
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 16
+    params["params"]["agg"].update({"gpus_per_worker": 16, "tensor_parallel_size": 16})
+
+    with pytest.raises(ValueError, match="per-node EFA count"):
+        _render(params)
 
 
 def test_fpm_multinode_dump_config_override_requires_rank_placeholder():
@@ -807,6 +1049,8 @@ while True:
     assert engine_args[engine_args.index("--data-parallel-start-rank") + 1] == "8"
     assert engine_args[engine_args.index("--data-parallel-address") + 1] == "leader.example"
     assert engine_args[engine_args.index("--dump-config-to") + 1].endswith("resolved-config-node1.json")
+    assert engine_args[-1] == "--data-parallel-hybrid-lb"
+    assert "--headless" not in engine_args
     assert {path.name for path in output_path.parent.glob("metrics.final_dp*.json")} == {
         f"metrics.final_dp{rank}.json" for rank in range(8, 16)
     }
@@ -825,6 +1069,7 @@ while True:
             "--data-parallel-start-rank",
             "--data-parallel-address",
             "--data-parallel-rpc-port",
+            "--data-parallel-hybrid-lb",
         ]
     ),
 )
