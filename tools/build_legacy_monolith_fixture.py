@@ -6,7 +6,7 @@
 AIConfigurator 0.9 owned both upper-layer and core-layer paths in the
 ``aiconfigurator`` distribution. The 0.10 split transfers the latter paths to
 ``aiconfigurator-core``. This fixture deliberately records representative paths
-from both layers so pip's install-before-uninstall upgrade behavior can be
+from both layers so the supported uninstall-before-install migration can be
 tested without downloading the historical release artifact.
 """
 
