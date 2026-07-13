@@ -1,0 +1,5 @@
+GB300 support for vLLM 0.20.1 is declared for support-matrix shared-layer reuse.
+
+This directory may contain measured active-version silicon tables. Missing
+compatible shapes may be inherited from sibling rows through
+op_kernel_source_manifest.yaml until fuller measured coverage lands here.
