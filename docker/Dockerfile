@@ -104,17 +104,17 @@ RUN uv venv --python 3.12 /tmp/aic-upper-install-test && \
 # monolithic 0.9 wheel. Core owns only `aiconfigurator_core/**`, while the upper
 # distribution continues to own `aiconfigurator/**`, so there is no file
 # ownership transfer between distributions.
-RUN python tools/build_legacy_monolith_fixture.py /tmp/legacy-dist && \
+RUN "${UV_PYTHON}" tools/build_legacy_monolith_fixture.py /tmp/legacy-dist && \
     LEGACY_WHL=$(ls /tmp/legacy-dist/aiconfigurator-0.9.0-*.whl) && \
     CORE_WHL=$(ls /workspace/dist/aiconfigurator_core-*.whl) && \
     AIC_WHL=$(ls /workspace/dist/aiconfigurator-*.whl) && \
-    python -m venv /tmp/aic-pip-migration && \
+    "${UV_PYTHON}" -m venv /tmp/aic-pip-migration && \
     /tmp/aic-pip-migration/bin/pip install "${LEGACY_WHL}" && \
     /tmp/aic-pip-migration/bin/pip uninstall -y aiconfigurator aiconfigurator-core && \
     /tmp/aic-pip-migration/bin/pip install "${CORE_WHL}" "${AIC_WHL}" && \
     cd /tmp && /tmp/aic-pip-migration/bin/python \
         /workspace/tools/verify_installed_package_layers.py --expect full --exercise-engine && \
-    python -m venv /tmp/aic-pip-upgrade && \
+    "${UV_PYTHON}" -m venv /tmp/aic-pip-upgrade && \
     /tmp/aic-pip-upgrade/bin/pip install "${LEGACY_WHL}" && \
     /tmp/aic-pip-upgrade/bin/pip install --upgrade "${CORE_WHL}" "${AIC_WHL}" && \
     cd /tmp && /tmp/aic-pip-upgrade/bin/python \
