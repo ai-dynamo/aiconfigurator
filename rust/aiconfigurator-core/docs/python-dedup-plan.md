@@ -5,11 +5,25 @@ SPDX-License-Identifier: Apache-2.0
 
 # Phase 2 Execution Plan — Rust-default flip and Python latency-path removal
 
-**Status:** draft. Awaiting approval before implementation starts.
+**Status (2026-07-13): NOT STARTED — plan of record, not yet implemented.**
+The switch is still opt-in: `engine_step_backend` defaults to Python
+(`config.py`), `should_use_rust_engine_step` returns Python unless it is set to
+`"rust"`, and the `operations/*.py` `query()` methods plus the
+`perf_database.py` latency-query methods are all still present. None of the
+gates below has run.
+
+**New blocker since drafting:** the Rust engine-step is **SILICON-only** (no
+`util_empirical` layer), so `should_use_rust_engine_step` delegates
+HYBRID/EMPIRICAL databases back to Python for answer-parity. A *global* default
+flip (Gate 1) therefore cannot ship until the empirical-layer port lands
+(issue #1333); until then any flip is silicon-only or staged per-family.
+
+**Done since drafting:** the full parity scan is complete
+(`../parity_tests/parity-scan-report.md`: gate CLOSED, 0 REGRESSION), and the
+engine-step parity, compile-engine parity, and engine-step perf gates all run
+in CI (`.github/workflows/build-test.yml`).
+
 **Branch base:** `main` tip (post #1200 / #1201).
-**Supersedes:** the "later phase" deferred by
-`phase-1.5-execution-plan.md` ("Removal of `sdk/rust_engine_step.py` …
-Final removal belongs to a later phase").
 
 ## Motivation
 
@@ -64,7 +78,7 @@ The deletable scope was verified, not assumed:
    No latency query. So `get_weights()` and the perf-DB metadata accessors
    must stay; the latency-query methods need not.
 3. **`compile_engine` reads instance attributes, never `query()`.**
-   The E0 OpSpec audit (`phase-1.5-opspec-audit.md`) proved every Rust `Op`
+   The E0 OpSpec audit proved every Rust `Op`
    field maps to a build-time Python `Operation` attribute (`op._n`,
    `op._scale_factor`, …). `_to_opspec` walks attributes; deleting `query()`
    does not touch it.
@@ -95,8 +109,9 @@ Three hard gates, in order. Do not collapse them into one PR.
 Flip `engine_step_backend` default to `"rust"`. Before merge:
 - Full-matrix scan must hold the Phase 1.5 bar: `STRICT_PASS >= 1906`,
   `REGRESSION == 0`.
-- The **16 residual DRIFT** entries (`phase1/support-matrix-scan.md`) were
-  held out of Phase 1.5 scope. A *global* default flip silently ships them.
+- The residual DRIFT entries (current list in the completed scan,
+  `../parity_tests/parity-scan-report.md`) were held out of Phase 1.5 scope.
+  A *global* default flip silently ships them.
   Each must be either resolved or **formally accepted** (listed by family,
   with the >5% throughput delta documented) as a precondition. Decide and
   record: is the flip global, or staged per-family (the `rust_engine_step.py:382`
@@ -130,7 +145,7 @@ Only after Gates 1–2 hold and have soaked one release cycle:
 
 | # | PR | Lands | Gated? |
 | --- | --- | --- | --- |
-| **P0** | DRIFT triage | Resolve or formally accept the 16 DRIFT entries; record decision in `support-matrix-scan.md`. No code beyond fixes. | — |
+| **P0** | DRIFT triage | Resolve or formally accept the residual DRIFT entries; record the decision alongside `../parity_tests/parity-scan-report.md`. No code beyond fixes. | — |
 | **P1** | Default flip | `engine_step_backend` defaults to `"rust"`; `"python"` retained. Full scan + smoke green. Both engines present. | **GATE 1** |
 | **P2** | Golden oracle | Capture Python goldens; rewire parity tests to Rust-vs-golden. | **GATE 2** |
 | **P3** | Delete Python latency path | `operations/*.py` `query()`, `base_backend` Python branch, `perf_database` latency-query methods. Re-audit `interpolation.py`. | **GATE 3** |
@@ -144,8 +159,8 @@ P0 → P1 → P2 → P3 → P4, strictly sequential. P2 may start once P1 is in.
 - Perf-DB schema or support-matrix CSV format changes.
 - CLI / generator / Pareto / webapp behaviour changes (the flip is internal
   to `sdk/`; webapp keeps its `interpolation.py` use).
-- The deferred Dynamo-side `estimate_num_gpu_blocks` rewrite
-  (`phase-1.5-capacity-followup.md`) — independent downstream PR.
+- The Dynamo-side `estimate_num_gpu_blocks` rewrite — completed downstream in
+  the Dynamo repo; no longer tracked here.
 - The `#1208` OOM-budget-sharing follow-up.
 
 ## Risks
@@ -170,9 +185,10 @@ P0 → P1 → P2 → P3 → P4, strictly sequential. P2 may start once P1 is in.
 
 ## Pointers
 
-- What #1200 delivered and the deferred-removal note: `phase-1.5-execution-plan.md`.
-- OpSpec field provenance (proves `compile_engine` reads attrs, not `query()`):
-  `phase-1.5-opspec-audit.md`.
-- Capacity API + deferred Dynamo wrapper: `phase-1.5-capacity-followup.md`.
-- Scan status / the 16 DRIFT entries: `phase1/support-matrix-scan.md`.
-- The opt-in switch this plan flips: `sdk/rust_engine_step.py:222`.
+- Completed parity scan (DRIFT list, gate status): `../parity_tests/parity-scan-report.md`.
+- Scan procedure: `parity-scan-runbook.md`.
+- Engine-step / compile-engine / perf gates in CI: `.github/workflows/build-test.yml`.
+- The opt-in switch this plan flips: `sdk/rust_engine_step.py`
+  (`should_use_rust_engine_step`).
+- Empirical-layer port that gates the global default flip: issue #1333.
+- Architecture reference: `design_doc.html`.
