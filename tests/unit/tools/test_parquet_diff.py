@@ -270,8 +270,7 @@ def test_full_diff_artifacts_include_every_changed_perf_file(parquet_diff_module
             "file": "src/aiconfigurator-core/aiconfigurator_core/systems/data/h100/gemm_perf.parquet",
             "old_file": "",
             "full_diff_file": (
-                "diffs/src/aiconfigurator-core/aiconfigurator_core/systems/data/"
-                "h100/gemm_perf.parquet.diff"
+                "diffs/src/aiconfigurator-core/aiconfigurator_core/systems/data/h100/gemm_perf.parquet.diff"
             ),
         },
         {
@@ -279,8 +278,7 @@ def test_full_diff_artifacts_include_every_changed_perf_file(parquet_diff_module
             "file": "src/aiconfigurator-core/aiconfigurator_core/systems/data/h100/new_perf.parquet",
             "old_file": "",
             "full_diff_file": (
-                "diffs/src/aiconfigurator-core/aiconfigurator_core/systems/data/"
-                "h100/new_perf.parquet.diff"
+                "diffs/src/aiconfigurator-core/aiconfigurator_core/systems/data/h100/new_perf.parquet.diff"
             ),
         },
         {
@@ -294,8 +292,7 @@ def test_full_diff_artifacts_include_every_changed_perf_file(parquet_diff_module
             "file": "src/aiconfigurator-core/aiconfigurator_core/systems/data/h100/nccl_perf.parquet",
             "old_file": "src/aiconfigurator-core/aiconfigurator_core/systems/data/h100/comm_perf.parquet",
             "full_diff_file": (
-                "diffs/src/aiconfigurator-core/aiconfigurator_core/systems/data/"
-                "h100/nccl_perf.parquet.diff"
+                "diffs/src/aiconfigurator-core/aiconfigurator_core/systems/data/h100/nccl_perf.parquet.diff"
             ),
         },
     ]
