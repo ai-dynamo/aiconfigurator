@@ -28,8 +28,7 @@ Two estimators, each built then asked to ``estimate()``:
 
 The budget math is factored into :func:`kv_cache_budget_bytes` so the deferred
 consolidation of ``InferenceSummary._check_and_set_kv_cache_oom`` onto a single
-formula is a small follow-up (tracked in #1208). See
-``docs/phase-1.5-capacity-followup.md``.
+formula is a small follow-up (tracked in #1208).
 """
 
 from __future__ import annotations
