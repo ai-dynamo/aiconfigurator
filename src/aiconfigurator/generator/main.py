@@ -63,6 +63,12 @@ def main(argv: Optional[list[str]] = None):
     )
     p_art.add_argument("--templates-dir", help="Templates directory override")
     p_art.add_argument("--version", help="Backend version for template selection")
+    p_art.add_argument(
+        "--deployment-target",
+        choices=["dynamo-j2", "dynamo-python", "llm-d-helm", "llm-d-kustomize", "fpm"],
+        default="dynamo-j2",
+        help="Artifact target. 'fpm' emits a reusable resource Pod and run.sh.",
+    )
     p_art.add_argument("--output", help="Directory to save generated artifacts")
     args = parser.parse_args(argv)
 
@@ -89,6 +95,7 @@ def main(argv: Optional[list[str]] = None):
             templates_dir=args.templates_dir,
             output_dir=args.output,
             backend_version=args.version,
+            deployment_target=args.deployment_target,
         )
         print(json.dumps(artifacts, ensure_ascii=False, indent=2))
         return

@@ -22,6 +22,7 @@ import yaml
 from aiconfigurator.cli.main import (
     _execute_tasks,
     _resolve_cli_log_level,
+    _validate_fpm_sweep_tasks,
     build_default_tasks,
     build_experiment_tasks,
     configure_parser,
@@ -195,6 +196,51 @@ class TestCLIIntegration:
         mock_builder.assert_called_once()
         mock_execute.assert_called_once_with({"agg": mock_task_config}, mode, top_n=5)
 
+    def test_fpm_sweep_validation_accepts_vllm_aggregated_tasks(self):
+        args = argparse.Namespace(deployment_target="fpm")
+        tasks = {
+            "agg": argparse.Namespace(
+                serving_mode="agg",
+                primary_backend_name="vllm",
+            )
+        }
+
+        _validate_fpm_sweep_tasks(args, tasks)
+
+    @patch("aiconfigurator.cli.main._execute_tasks")
+    @patch("aiconfigurator.cli.main.build_experiment_tasks")
+    def test_cli_fpm_rejects_incompatible_tasks_before_sweep(
+        self,
+        mock_build_exp,
+        mock_execute,
+        cli_args_factory,
+        mock_exp_yaml_path,
+    ):
+        mock_build_exp.return_value = {
+            "disagg": argparse.Namespace(
+                serving_mode="disagg",
+                primary_backend_name="vllm",
+            ),
+            "agg_trtllm": argparse.Namespace(
+                serving_mode="agg",
+                primary_backend_name="trtllm",
+            ),
+        }
+        args = cli_args_factory(
+            mode="exp",
+            extra_args=[
+                "--yaml-path",
+                str(mock_exp_yaml_path),
+                "--deployment-target",
+                "fpm",
+            ],
+        )
+
+        with pytest.raises(SystemExit, match="supports only vLLM aggregated tasks"):
+            cli_main(args)
+
+        mock_execute.assert_not_called()
+
     @patch("aiconfigurator.cli.main.run_spica_thorough_default")
     @patch("aiconfigurator.cli.main._execute_tasks")
     @patch("aiconfigurator.cli.main.build_default_tasks")
@@ -212,6 +258,26 @@ class TestCLIIntegration:
 
         mock_run_spica.assert_called_once_with(args)
         mock_build_default.assert_not_called()
+        mock_execute.assert_not_called()
+
+    @patch("aiconfigurator.cli.main.run_spica_thorough_default")
+    @patch("aiconfigurator.cli.main._execute_tasks")
+    def test_cli_fpm_rejects_thorough_sweep_before_spica(
+        self,
+        mock_execute,
+        mock_run_spica,
+        cli_args_factory,
+    ):
+        args = cli_args_factory(
+            mode="default",
+            thorough_sweep=True,
+            deployment_target="fpm",
+        )
+
+        with pytest.raises(SystemExit, match="does not support Spica thorough sweeps"):
+            cli_main(args)
+
+        mock_run_spica.assert_not_called()
         mock_execute.assert_not_called()
 
     @patch("aiconfigurator.cli.main.run_spica_thorough_default")
@@ -761,7 +827,7 @@ class TestCLIIntegration:
         assert planner_config["prefill_engine_num_gpu"] == 1
         assert planner_config["decode_engine_num_gpu"] == 2
 
-    @pytest.mark.parametrize("deployment_target", ["dynamo-python", "llm-d-helm", "llm-d-kustomize"])
+    @pytest.mark.parametrize("deployment_target", ["dynamo-python", "llm-d-helm", "llm-d-kustomize", "fpm"])
     def test_spica_artifacts_fail_closed_when_target_drops_native_features(self, deployment_target):
         generator_config = {
             "DynConfig": {
