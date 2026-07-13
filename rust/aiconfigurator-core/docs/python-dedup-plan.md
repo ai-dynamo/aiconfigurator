@@ -167,7 +167,7 @@ P0 → P1 → P2 → P3 → P4, strictly sequential. P2 may start once P1 is in.
 
 | Risk | Mitigation |
 | --- | --- |
-| Default flip silently regresses a DRIFT family. | P0 gate: triage/accept all 16 before P1. |
+| Default flip silently regresses a DRIFT family. | P0 gate: triage/accept the residual DRIFT (4 in the completed scan) before P1. |
 | Deleting Python destroys the differential oracle. | Gate 2: capture goldens + rewire tests before any deletion. |
 | `query()` deletion nicks a kept consumer (memory / OpSpec walk). | AST pass to confirm `query()` has no caller outside the deleted branch; `get_weights()` / attrs / loaders explicitly retained. |
 | `interpolation.py` assumed dead but webapp/perf-DB still use it. | Marked "keep, re-audit"; not in P3's delete set without a fresh consumer grep. |
@@ -176,7 +176,7 @@ P0 → P1 → P2 → P3 → P4, strictly sequential. P2 may start once P1 is in.
 ## Acceptance criteria
 
 1. **Default is Rust** with full scan `STRICT_PASS >= 1906`, `REGRESSION == 0`,
-   and the 16 DRIFT entries resolved or recorded as accepted.
+   and the residual DRIFT entries (4 in the completed scan) resolved or accepted.
 2. **Goldens replace the live oracle**; parity tests are Rust-vs-golden and green.
 3. **Python `query()` latency math removed**; `compile_engine` and
    `_get_memory_usage` unaffected (their kept dependencies proven).

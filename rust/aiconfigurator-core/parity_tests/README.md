@@ -33,6 +33,10 @@ path specifically: op-transfer bincode round-trip fidelity plus integration
 parity against the Python `BaseBackend`. Both suites run in the
 `rust-engine-step-parity` CI job (`build-test.yml`).
 
+Build the `aiconfigurator_core` extension first (the CI job does this with
+`maturin develop --release`; from a clean checkout run `uv run maturin develop
+--release` from the repo root), then:
+
 ```bash
 uv run pytest -q rust/aiconfigurator-core/parity_tests/test_compile_engine_parity.py
 ```
@@ -47,9 +51,11 @@ the pure-Python step, per case.
 uv run pytest -q -rA rust/aiconfigurator-core/parity_tests/test_engine_step_perf.py
 ```
 
-It is **machine-independent by construction** — Python and Rust are timed
-back-to-back on the same host, so the reported speedup *ratio* cancels absolute
-machine speed. That is why it is safe as a blocking gate on shared CI runners
+Because Python and Rust are timed **back-to-back on the same host**, the
+reported speedup *ratio* is far **more comparable across machines** than an
+absolute wall-clock number — most of the machine-speed variance divides out
+(the ratio can still shift somewhat across architectures; see the perf report's
+ARM-vs-x86 note). That is why it is safe as a blocking gate on shared CI runners
 where absolute wall-clock is noisy (it runs as a step in the
 `rust-engine-step-parity` job in `build-test.yml`, reusing the same built
 extension).

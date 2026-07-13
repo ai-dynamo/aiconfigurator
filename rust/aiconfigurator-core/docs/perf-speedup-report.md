@@ -21,9 +21,11 @@ date/commit whenever the Rust hot path changes.
 
 Per-call **engine-step latency**, hot cache, pure compute — the same
 `run_static` path the SDK uses. Python and Rust are timed **back-to-back on the
-same host**, so the reported **speedup ratio is machine-independent**: it
-cancels absolute machine speed (an x86 CI runner and this ARM host give
-different µs but comparable ratios). Absolute µs below are for context only.
+same host**, so the reported **speedup ratio is far more comparable across
+machines** than absolute wall-clock: most machine-speed variance divides out (an
+x86 CI runner and this ARM host give different µs but broadly similar ratios —
+the ratio can still shift somewhat across architectures). Absolute µs below are
+for context only.
 
 - Harness: `benchmark_engine_step.py --warmup 10 --iterations 50` (hot cache;
   runtime query caches cleared once per case, then warmed). One-time session /
@@ -86,14 +88,18 @@ capture.
 
 ## Regression guard
 
-The engine-step is protected in CI by two gates in the `rust-engine-step-parity`
+The engine-step is protected in CI by three gates in the `rust-engine-step-parity`
 job (`.github/workflows/build-test.yml`):
 
-- **Parity** (`test_engine_step_parity.py`): Rust vs Python numeric drift < 1%.
+- **Engine-step parity** (`test_engine_step_parity.py`): Rust vs Python numeric
+  drift < 1%.
+- **Compile-engine parity** (`test_compile_engine_parity.py`): the
+  `compile_engine` → `EngineHandle` op-transfer round-trip plus integration
+  parity vs the Python `BaseBackend`.
 - **Perf** (`test_engine_step_perf.py`): Rust-vs-Python p50 speedup ≥ a per-case
-  floor — the machine-independent guard that would have caught the
-  `perf_interp` v2 regression this report's fix resolves (it had pushed the Rust
-  step to 0.15–0.78× of Python on the large-graph families before the
+  floor — the same-runner guard that would have caught the `perf_interp` v2
+  regression this report's fix resolves (it had pushed the Rust step to
+  0.15–0.78× of Python on the large-graph families before the
   `SiteIndex::resolve` fix).
 
 ## How to reproduce

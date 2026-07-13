@@ -3,10 +3,11 @@
 """Engine-step performance guard -- the perf analog of ``test_engine_step_parity``.
 
 Asserts the compiled Rust engine-step stays at least a floor multiple as fast as
-the pure-Python step, per case. It is **machine-independent by construction**:
-Python and Rust are timed back-to-back on the same host, so the reported
-*speedup ratio* cancels absolute machine speed. That makes it safe to run as a
-blocking gate on shared CI runners where absolute wall-clock is noisy.
+the pure-Python step, per case. Python and Rust are timed back-to-back on the
+same host, so the reported *speedup ratio* is far more comparable across
+machines than absolute wall-clock -- most machine-speed variance divides out
+(the ratio can still shift somewhat across architectures). That makes it safe to
+run as a blocking gate on shared CI runners where absolute wall-clock is noisy.
 
 It exists to catch algorithmic regressions in the Rust hot path -- e.g. a
 per-query ``SiteIndex::resolve`` that sorts every collected GEMM site
