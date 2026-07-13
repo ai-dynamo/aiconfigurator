@@ -34,6 +34,40 @@ _COMPILATION_CONFIG = json.dumps(
 )
 
 
+def _benchmark_result(
+    dp_rank: int = 0,
+    *,
+    mode: str = "prefill",
+    valid: bool = True,
+    schema_version: int = 1,
+    status: str = "complete",
+) -> dict:
+    completed_points = 1 if valid else 0
+    skipped_points = 0 if valid else 1
+    return {
+        "schema_version": schema_version,
+        "status": status,
+        "valid": valid,
+        "coverage": {
+            "expected_points": 1,
+            "completed_points": completed_points,
+            "skipped_points": skipped_points,
+        },
+        "config": {"mode": mode},
+        "results": (
+            [
+                {
+                    "point": {"point_type": mode},
+                    "fpms": [{"dp_rank": dp_rank}],
+                }
+            ]
+            if valid
+            else []
+        ),
+        "skipped_points": [] if valid else [{"reason": "boom"}],
+    }
+
+
 def _params() -> dict:
     return {
         "ServiceConfig": {
@@ -86,7 +120,7 @@ def _params() -> dict:
                     "--scheduler-cls",
                     "fpm.scheduler.InstrumentedScheduler",
                     "--benchmark-mode",
-                    "agg",
+                    "prefill",
                     "--compilation-config",
                     _COMPILATION_CONFIG,
                 ],
@@ -241,7 +275,7 @@ def test_fpm_run_script_contains_resolved_args_passthrough_and_exports():
     # FPM-only argv is appended without losing token boundaries. The JSON has
     # spaces and nested values specifically to catch unsafe string joining.
     assert "--scheduler-cls fpm.scheduler.InstrumentedScheduler" in script
-    assert "--benchmark-mode agg" in script
+    assert "--benchmark-mode prefill" in script
     assert f"--compilation-config {shlex.quote(_COMPILATION_CONFIG)}" in script
     assert script.count(_COMPILATION_CONFIG) == 1
 
@@ -360,6 +394,7 @@ def test_fpm_api_writes_exact_filenames_and_executable_script(tmp_path):
 
 def test_fpm_run_script_completes_and_stops_fake_engine(tmp_path):
     output_path = tmp_path / "benchmark.json"
+    result = _benchmark_result()
     params = _params()
     for entry in params["K8sConfig"]["extra_env"]:
         if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
@@ -370,7 +405,7 @@ def test_fpm_run_script_completes_and_stops_fake_engine(tmp_path):
     (fake_package.parent / "__init__.py").write_text("")
     (fake_package / "__init__.py").write_text("")
     (fake_package / "__main__.py").write_text(
-        """\
+        f"""\
 import json
 import pathlib
 import signal
@@ -381,7 +416,7 @@ flag = "--benchmark-output-path"
 index = sys.argv.index(flag)
 path = pathlib.Path(sys.argv[index + 1])
 path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps({"schema_version": 2, "status": "passed", "config": {"dp_rank": 0}}))
+path.write_text({json.dumps(result)!r})
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 while True:
     time.sleep(0.1)
@@ -402,11 +437,7 @@ while True:
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert json.loads(output_path.read_text()) == {
-        "schema_version": 2,
-        "status": "passed",
-        "config": {"dp_rank": 0},
-    }
+    assert json.loads(output_path.read_text()) == result
 
     repeated = subprocess.run(
         ["bash", str(script_path)],
@@ -454,9 +485,13 @@ base.parent.mkdir(parents=True, exist_ok=True)
 for rank in range(dp_size):
     path = base if rank == 0 else base.with_name(f"{base.stem}_dp{rank}{base.suffix}")
     path.write_text(json.dumps({
-        "schema_version": 2,
-        "status": "passed",
-        "config": {"dp_rank": rank},
+        "schema_version": 1,
+        "status": "complete",
+        "valid": True,
+        "coverage": {"expected_points": 1, "completed_points": 1, "skipped_points": 0},
+        "config": {"mode": "prefill"},
+        "results": [{"point": {"point_type": "prefill"}, "fpms": [{"dp_rank": rank}]}],
+        "skipped_points": [],
         "rank": rank,
     }))
     time.sleep(1)
@@ -488,6 +523,7 @@ while True:
 
 def test_fpm_run_script_rejects_terminal_failed_result(tmp_path):
     output_path = tmp_path / "benchmark.json"
+    result = _benchmark_result(valid=False)
     params = _params()
     for entry in params["K8sConfig"]["extra_env"]:
         if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
@@ -498,7 +534,7 @@ def test_fpm_run_script_rejects_terminal_failed_result(tmp_path):
     (fake_package.parent / "__init__.py").write_text("")
     (fake_package / "__init__.py").write_text("")
     (fake_package / "__main__.py").write_text(
-        """\
+        f"""\
 import json
 import pathlib
 import signal
@@ -508,12 +544,7 @@ import time
 index = sys.argv.index("--benchmark-output-path")
 path = pathlib.Path(sys.argv[index + 1])
 path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps({
-    "schema_version": 2,
-    "status": "failed",
-    "config": {"dp_rank": 0},
-    "errors": ["boom"],
-}))
+path.write_text({json.dumps(result)!r})
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 while True:
     time.sleep(0.1)
@@ -534,23 +565,76 @@ while True:
     )
 
     assert completed.returncode == 1
-    assert "status='failed'" in completed.stderr
+    assert "valid=False" in completed.stderr
     assert "boom" in completed.stderr
 
 
 @pytest.mark.parametrize(
-    ("result_status", "expected_returncode"),
+    ("result", "expected_message"),
     [
-        ("passed", 0),
-        ("failed", 1),
+        (_benchmark_result(schema_version=2), "schema_version=2"),
+        (_benchmark_result(mode="decode"), "benchmark mode 'decode' != 'prefill'"),
+        (_benchmark_result(dp_rank=1), "FPM dp_ranks [1] != [0]"),
+    ],
+)
+def test_fpm_run_script_rejects_mismatched_result_identity(tmp_path, result, expected_message):
+    output_path = tmp_path / "benchmark.json"
+    params = _params()
+    for entry in params["K8sConfig"]["extra_env"]:
+        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
+            entry["value"] = str(output_path)
+
+    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
+    fake_package.mkdir(parents=True)
+    (fake_package.parent / "__init__.py").write_text("")
+    (fake_package / "__init__.py").write_text("")
+    (fake_package / "__main__.py").write_text(
+        f"""\
+import pathlib
+import signal
+import sys
+import time
+
+path = pathlib.Path(sys.argv[sys.argv.index("--benchmark-output-path") + 1])
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text({json.dumps(result)!r})
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+while True:
+    time.sleep(0.1)
+"""
+    )
+    script_path = tmp_path / "run.sh"
+    script_path.write_text(_render(params)["run.sh"])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(tmp_path / "fake-package")
+
+    completed = subprocess.run(
+        ["bash", str(script_path)],
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=8,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert expected_message in completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("result_valid", "expected_returncode"),
+    [
+        (True, 0),
+        (False, 1),
     ],
 )
 def test_fpm_run_script_bounds_stubborn_engine_shutdown(
     tmp_path,
-    result_status,
+    result_valid,
     expected_returncode,
 ):
     output_path = tmp_path / "benchmark.json"
+    result = _benchmark_result(valid=result_valid)
     pid_path = tmp_path / "engine.pid"
     child_pid_path = tmp_path / "engine-child.pid"
     params = _params()
@@ -583,11 +667,7 @@ pathlib.Path(os.environ["FAKE_ENGINE_CHILD_PID_PATH"]).write_text(str(child.pid)
 index = sys.argv.index("--benchmark-output-path")
 path = pathlib.Path(sys.argv[index + 1])
 path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps({{
-    "schema_version": 2,
-    "status": "{result_status}",
-    "config": {{"dp_rank": 0}},
-}}))
+path.write_text({json.dumps(result)!r})
 while True:
     time.sleep(0.1)
 """
@@ -755,7 +835,7 @@ def test_render_artifacts_cli_accepts_fpm_target(tmp_path, capsys):
                 "max_num_tokens": 4096,
                 "max_seq_len": 8192,
                 "tokens_per_block": 64,
-                "extra_cli_args": ["--benchmark-mode", "agg"],
+                "extra_cli_args": ["--benchmark-mode", "prefill"],
             }
         },
     }
@@ -1013,9 +1093,13 @@ output.parent.mkdir(parents=True, exist_ok=True)
 for rank in range(start, start + local):
     path = output if rank == 0 else output.with_name(f"{output.stem}_dp{rank}{output.suffix}")
     path.write_text(json.dumps({
-        "schema_version": 2,
-        "status": "passed",
-        "config": {"dp_rank": rank},
+        "schema_version": 1,
+        "status": "complete",
+        "valid": True,
+        "coverage": {"expected_points": 1, "completed_points": 1, "skipped_points": 0},
+        "config": {"mode": "prefill"},
+        "results": [{"point": {"point_type": "prefill"}, "fpms": [{"dp_rank": rank}]}],
+        "skipped_points": [],
     }))
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 while True:
@@ -1168,13 +1252,24 @@ def test_fpm_requires_benchmark_mode():
         _render(params)
 
 
-def test_fpm_requires_aggregated_benchmark_mode():
+@pytest.mark.parametrize("benchmark_mode", ["prefill", "decode"])
+def test_fpm_accepts_phase_specific_benchmark_mode(benchmark_mode):
     params = _params()
     args = params["params"]["agg"]["extra_cli_args"]
     index = args.index("--benchmark-mode")
-    args[index + 1] = "disagg"
+    args[index + 1] = benchmark_mode
 
-    with pytest.raises(ValueError, match="--benchmark-mode agg"):
+    assert f"--benchmark-mode {benchmark_mode}" in _render(params)["run.sh"]
+
+
+@pytest.mark.parametrize("benchmark_mode", ["agg", "disagg", "unknown"])
+def test_fpm_rejects_non_phase_benchmark_mode(benchmark_mode):
+    params = _params()
+    args = params["params"]["agg"]["extra_cli_args"]
+    index = args.index("--benchmark-mode")
+    args[index + 1] = benchmark_mode
+
+    with pytest.raises(ValueError, match="--benchmark-mode prefill or decode"):
         _render(params)
 
 

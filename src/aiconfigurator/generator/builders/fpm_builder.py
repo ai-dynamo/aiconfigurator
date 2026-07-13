@@ -76,7 +76,7 @@ def build_fpm_artifacts(
     args.extend(extra_cli_args)
 
     env = _collect_concrete_env(worker, main_container)
-    _require_cli_option(args, "--benchmark-mode", expected="agg")
+    benchmark_mode = _require_fpm_benchmark_mode(args)
     topology = _resolve_topology(context, worker, args)
     if topology["data_parallel_size"] > 1 and _cli_option_value(args, "--data-parallel-backend") is None:
         args.extend(["--data-parallel-backend", "mp"])
@@ -88,6 +88,7 @@ def build_fpm_artifacts(
     run_script = _render_run_script(
         command + args,
         env,
+        benchmark_mode,
         benchmark_output_path,
         wait_timeout_seconds,
         topology,
@@ -330,6 +331,15 @@ def _require_cli_option(args: list[str], flag: str, *, expected: str | None = No
         raise ValueError(f"FPM V1 requires {flag} {expected}")
 
 
+def _require_fpm_benchmark_mode(args: list[str]) -> str:
+    mode = _cli_option_value(args, "--benchmark-mode")
+    if mode is None:
+        raise ValueError("FPM V1 requires --benchmark-mode")
+    if mode not in {"prefill", "decode"}:
+        raise ValueError("FPM V1 requires --benchmark-mode prefill or decode")
+    return mode
+
+
 def _last_env_value(env: list[tuple[str, str]], name: str) -> str | None:
     for env_name, value in reversed(env):
         if env_name == name:
@@ -376,6 +386,7 @@ def _benchmark_wait_timeout_seconds(args: list[str]) -> int:
 def _render_run_script(
     command: list[str],
     env: list[tuple[str, str]],
+    benchmark_mode: str,
     benchmark_output_path: str,
     wait_timeout_seconds: int,
     topology: dict[str, int],
@@ -408,6 +419,7 @@ def _render_run_script(
             "  exit 2",
             "fi",
             'export DYN_FPM_WORKER_ID="${DYN_FPM_WORKER_ID:-${FPM_RUN_ID:-fpm}-node${node_rank}}"',
+            f"benchmark_mode={shlex.quote(benchmark_mode)}",
             f"benchmark_output_path={shlex.quote(benchmark_output_path)}",
             f"wait_timeout_seconds={wait_timeout_seconds}",
             f"engine_command=({' '.join(shlex.quote(token) for token in command)})",
@@ -462,13 +474,19 @@ def _render_run_script(
             "done",
             "",
             "check_result_files() {",
-            '  python3 - "$local_dp_start" "${expected_results[@]}" <<\'PY\'',
+            '  python3 - "$local_dp_start" "$benchmark_mode" "${expected_results[@]}" <<\'PY\'',
             "import json",
             "import pathlib",
             "import sys",
             "",
             "start_rank = int(sys.argv[1])",
-            "for offset, raw_path in enumerate(sys.argv[2:]):",
+            "expected_mode = sys.argv[2]",
+            "",
+            "def invalid(path, message):",
+            '    print(f"Invalid FPM benchmark result {path}: {message}", file=sys.stderr)',
+            "    raise SystemExit(20)",
+            "",
+            "for offset, raw_path in enumerate(sys.argv[3:]):",
             "    path = pathlib.Path(raw_path)",
             "    if not path.is_file() or path.stat().st_size == 0:",
             "        raise SystemExit(10)",
@@ -476,18 +494,54 @@ def _render_run_script(
             '        value = json.loads(path.read_text(encoding="utf-8"))',
             "    except (OSError, json.JSONDecodeError):",
             "        raise SystemExit(10)",
-            '    if value.get("schema_version") != 2 or value.get("status") != "passed":',
-            '        print(f"Invalid FPM benchmark result {path}: "',
-            "              f\"schema_version={value.get('schema_version')!r} \"",
-            "              f\"status={value.get('status')!r} errors={value.get('errors')!r}\",",
-            "              file=sys.stderr)",
-            "        raise SystemExit(20)",
+            '    if (value.get("schema_version") != 1 or value.get("status") != "complete"',
+            '            or value.get("valid") is not True):',
+            "        invalid(path,",
+            "                f\"schema_version={value.get('schema_version')!r} \"",
+            "                f\"status={value.get('status')!r} valid={value.get('valid')!r} \"",
+            "                f\"skipped_points={value.get('skipped_points')!r}\")",
+            '    config = value.get("config")',
+            '    actual_mode = config.get("mode") if isinstance(config, dict) else None',
+            "    if actual_mode != expected_mode:",
+            '        invalid(path, f"benchmark mode {actual_mode!r} "',
+            '                      f"!= {expected_mode!r}")',
+            '    coverage = value.get("coverage")',
+            "    if not isinstance(coverage, dict):",
+            '        invalid(path, "coverage must be an object")',
+            '    expected_points = coverage.get("expected_points")',
+            '    completed_points = coverage.get("completed_points")',
+            '    skipped_points = coverage.get("skipped_points")',
+            "    if (type(expected_points) is not int or expected_points <= 0",
+            "            or type(completed_points) is not int or completed_points != expected_points",
+            "            or type(skipped_points) is not int or skipped_points != 0):",
+            '        invalid(path, f"invalid coverage {coverage!r}")',
+            '    results = value.get("results")',
+            "    result_count = len(results) if isinstance(results, list) else None",
+            "    if not isinstance(results, list) or len(results) != completed_points:",
+            '        invalid(path, f"results count does not match coverage: "',
+            '                      f"{type(results).__name__}({result_count!r}) "',
+            '                      f"!= {completed_points}")',
             "    expected_rank = start_rank + offset",
-            '    if (value.get("config") or {}).get("dp_rank") != expected_rank:',
-            '        print(f"FPM benchmark DP rank mismatch for {path}: "',
-            "              f\"{(value.get('config') or {}).get('dp_rank')!r} != {expected_rank}\",",
-            "              file=sys.stderr)",
-            "        raise SystemExit(20)",
+            "    observed_ranks = set()",
+            "    for result in results:",
+            "        if not isinstance(result, dict):",
+            '            invalid(path, "result entry must be an object")',
+            '        point = result.get("point")',
+            '        point_type = point.get("point_type") if isinstance(point, dict) else None',
+            "        if point_type != expected_mode:",
+            '            invalid(path, f"point type {point_type!r} "',
+            '                          f"!= {expected_mode!r}")',
+            '        fpms = result.get("fpms")',
+            "        if not isinstance(fpms, list) or not fpms:",
+            '            invalid(path, "each result must contain at least one FPM sample")',
+            "        for fpm in fpms:",
+            '            rank = fpm.get("dp_rank") if isinstance(fpm, dict) else None',
+            "            if type(rank) is not int:",
+            '                invalid(path, f"invalid FPM dp_rank {rank!r}")',
+            "            observed_ranks.add(rank)",
+            "    if observed_ranks != {expected_rank}:",
+            '        invalid(path, f"FPM dp_ranks {sorted(observed_ranks)!r} "',
+            '                      f"!= [{expected_rank}]")',
             "PY",
             "}",
             "",
