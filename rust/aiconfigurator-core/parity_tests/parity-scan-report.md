@@ -5,6 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Rust↔Python Engine-Step Parity Coverage
 
+**Generated: 2026-06-16 (UTC). Commit: `048c3a7f`** (final confirming rescan).
+This is the parity sibling of `perf-speedup-report.md`; re-stamp the date/commit
+whenever the scan is regenerated.
+
 **Status as of 2026-06-16 — gate CLOSED.** **6 engine parity bugs found and
 fixed** (§5); probe 0 DRIFT / 0 REGRESSION; Pareto 0 REGRESSION, 99.8% pass. The
 4 residual Pareto DRIFT are **frontier-extent differences in the high-throughput
