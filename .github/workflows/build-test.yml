@@ -237,6 +237,12 @@ jobs:
         run: |
           "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx \
             rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py
+      - name: Run compile-engine (EngineHandle) parity suite
+        # Parity for the compile_engine -> EngineHandle path: op-transfer bincode
+        # round-trip fidelity plus integration parity vs the Python BaseBackend.
+        run: |
+          "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx \
+            rust/aiconfigurator-core/parity_tests/test_compile_engine_parity.py
       - name: Run Rust/Python engine-step perf gate
         # Guards against Rust hot-path perf regressions (e.g. an O(n log n)
         # per-query resolve). Compares Rust-vs-Python p50 on the SAME runner, so

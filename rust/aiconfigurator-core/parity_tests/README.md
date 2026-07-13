@@ -28,6 +28,15 @@ the 1% drift tolerance and the tests assert hard. If a parity assertion ever
 fails again, the failure message prints the Python value, Rust value, absolute
 delta, percent delta, tolerance, and status for each metric.
 
+`test_compile_engine_parity.py` covers the `compile_engine` -> `EngineHandle`
+path specifically: op-transfer bincode round-trip fidelity plus integration
+parity against the Python `BaseBackend`. Both suites run in the
+`rust-engine-step-parity` CI job (`build-test.yml`).
+
+```bash
+uv run pytest -q rust/aiconfigurator-core/parity_tests/test_compile_engine_parity.py
+```
+
 ## Perf Gate (CI)
 
 `test_engine_step_perf.py` is the performance analog of the parity suite: it
