@@ -310,33 +310,48 @@ class TestComputeResolution:
             "lib/llm/a.rs",
             "lib/llm/b.rs",
             "lib/llm/shared/x.rs",
-            "lib/kvbm/foo.rs",  # auto-classify via keyword
+            "lib/kvbm/foo.rs",  # unowned in the new tree-independent resolver
             "docs/intro.md",
             "README.md",  # no explicit area; falls to catch-all
         ]
 
     def test_explicit_paths_resolved(self) -> None:
-        model = compute_resolution(self._spec(), self._tree())
+        model = compute_resolution(self._spec())
         assert isinstance(model, ResolvedModel)
-        # docs area unchanged
         docs = next(a for a in model.areas if a.label == "docs")
         assert "docs/" in docs.path_globs
 
-    def test_auto_classify_promotes_new_dir(self) -> None:
-        model = compute_resolution(self._spec(), self._tree())
+    def test_no_auto_classify_at_emit_time(self) -> None:
+        # Old behavior: a `keyword_rules` entry with `area:` promoted an
+        # unmatched dir into that area at emit time by walking the tree. That
+        # tree walk was the source of the base-branch race, so the resolver
+        # drops it -- authors must now materialize the equivalent as an
+        # explicit ``path_globs`` entry.
+        model = compute_resolution(self._spec())
         kvbm = next(a for a in model.areas if a.label == "kvbm")
-        # lib/kvbm/foo.rs has no explicit area glob, but the kvbm keyword
-        # rule should add a dir-prefix glob to the kvbm area.
-        assert any("kvbm" in g for g in kvbm.path_globs)
+        assert kvbm.path_globs == []
+        assert model.auto_classified == []
+
+    def test_resolution_ignores_tree_argument(self) -> None:
+        # Two trees that differ only under an already-owned prefix must produce
+        # byte-identical resolutions, because ``tree`` is deprecated and
+        # ignored.
+        spec = self._spec()
+        tree_a = ["lib/llm/a.rs"]
+        tree_b = ["lib/llm/a.rs", "lib/llm/b.rs", "lib/llm/new/c.rs"]
+        model_a = compute_resolution(spec, tree_a)
+        model_b = compute_resolution(spec, tree_b)
+        assert model_a == model_b
+        # Legacy positional call (no tree) also matches.
+        assert compute_resolution(spec) == model_a
 
     def test_catch_all_only_uncovered(self) -> None:
-        model = compute_resolution(self._spec(), self._tree())
-        # README.md has no explicit owner and should remain catch-all-only.
+        model = compute_resolution(self._spec())
         unmatched = model.unmatched_paths(self._tree())
         assert "README.md" in unmatched
 
     def test_shared_multi_owner_recorded(self) -> None:
-        model = compute_resolution(self._spec(), self._tree())
+        model = compute_resolution(self._spec())
         sh = [s for s in model.shared if s["glob"] == "lib/llm/shared/"]
         assert sh and sh[0]["owners"] == ["runtime", "kvbm"]
 
@@ -346,55 +361,62 @@ class TestComputeResolution:
         spec = self._spec()
         spec["areas"][2]["path_globs"] = ["docs/", "README.md"]
         tree = self._tree() + ["foo/README.md"]
-        model = compute_resolution(spec, tree)
+        model = compute_resolution(spec)
         unmatched = model.unmatched_paths(tree)
         assert "README.md" not in unmatched
         assert "foo/README.md" in unmatched
 
-    def test_filetype_rule_skips_files_outside_any_area(self) -> None:
-        # A blocking filetype rule must not count as coverage for a tree
-        # nobody owns -- the file stays catch-all-only so --strict flags it.
+    def test_filetype_rule_emits_one_stable_coowner_only_row(self) -> None:
+        # A blocking filetype rule becomes ONE stable line matching by basename
+        # at any depth (GitHub CODEOWNERS semantics for a bare pattern with no
+        # leading slash). Coowner-only: the tree-dependent "enclosing area +
+        # coowner" pull-in is gone, because computing it required walking the
+        # live tree and was the second source of the base-branch race.
+        spec = self._spec()
+        spec["classify"]["filetype_rules"] = [
+            {"pattern": "Dockerfile", "coowner": "docs"},
+        ]
+        model = compute_resolution(spec)
+        assert len(model.filetype_shared) == 1
+        fs = model.filetype_shared[0]
+        assert fs.glob == "Dockerfile"
+        assert fs.owners == ["docs"]
+
+    def test_filetype_rule_covers_files_at_any_depth(self) -> None:
+        # The strict coverage gate relies on ``unmatched_paths`` -- a blocking
+        # filetype pattern must count as coverage for any file matching it,
+        # regardless of directory depth.
         spec = self._spec()
         spec["classify"]["filetype_rules"] = [
             {"pattern": "Dockerfile", "coowner": "docs"},
         ]
         tree = self._tree() + ["lib/llm/Dockerfile", "stray/Dockerfile"]
-        model = compute_resolution(spec, tree)
-        globs = {fs.glob for fs in model.filetype_shared}
-        assert "lib/llm/Dockerfile" in globs  # enclosed by runtime: co-owned
-        assert "stray/Dockerfile" not in globs  # no enclosing area: skipped
-        assert "stray/Dockerfile" in model.unmatched_paths(tree)
+        model = compute_resolution(spec)
+        unmatched = set(model.unmatched_paths(tree))
+        assert "lib/llm/Dockerfile" not in unmatched
+        assert "stray/Dockerfile" not in unmatched
 
-    def test_keyword_coowner_rule_emits_shared_dir(self) -> None:
-        # A keyword rule with only `coowner` co-owns matching dirs with the
-        # enclosing area instead of being silently inert.
+    def test_keyword_coowner_rules_are_ignored_at_emit_time(self) -> None:
+        # Old behavior: a keyword rule with `coowner` scanned every tree
+        # directory and emitted a `[enclosing_area, coowner]` shared row. That
+        # is exactly the tree walk we removed; the resolver now silently drops
+        # keyword_rules at emit time. Authors declare the equivalent explicitly
+        # in ``shared`` when they want it.
         spec = self._spec()
         spec["classify"]["keyword_rules"].append({"match": "metrics", "coowner": "docs"})
-        tree = self._tree() + ["lib/llm/metrics/gauge.rs"]
-        model = compute_resolution(spec, tree)
-        assert {"glob": "lib/llm/metrics/", "owners": ["runtime", "docs"]} in (model.keyword_coowned)
-        assert model.keyword_coowned[-1] in model.shared
-
-    def test_keyword_coowner_defers_to_explicit_shared(self) -> None:
-        # A hand-declared shared: entry for the same dir wins -- the keyword
-        # rule must not emit a duplicate (or conflicting) row.
-        spec = self._spec()
-        spec["classify"]["keyword_rules"].append({"match": "metrics", "coowner": "docs"})
-        spec["shared"].append({"glob": "lib/llm/metrics/", "owners": ["runtime", "docs"]})
-        tree = self._tree() + ["lib/llm/metrics/gauge.rs"]
-        model = compute_resolution(spec, tree)
+        model = compute_resolution(spec)
         assert model.keyword_coowned == []
+        assert not any(s["glob"].endswith("metrics/") for s in model.shared)
+
+    def test_explicit_shared_entry_still_wins(self) -> None:
+        # Hand-declared shared: entries are still emitted verbatim; they are
+        # now the ONLY way to express keyword-style co-ownership.
+        spec = self._spec()
+        spec["shared"].append({"glob": "lib/llm/metrics/", "owners": ["runtime", "docs"]})
+        model = compute_resolution(spec)
         rows = [s for s in model.shared if s["glob"] == "lib/llm/metrics/"]
         assert len(rows) == 1
-
-    def test_keyword_coowner_skips_unowned_dirs(self) -> None:
-        # No enclosing area -> no co-ownership row; the gate flags the dir.
-        spec = self._spec()
-        spec["classify"]["keyword_rules"].append({"match": "metrics", "coowner": "docs"})
-        tree = self._tree() + ["orphan/metrics/gauge.rs"]
-        model = compute_resolution(spec, tree)
-        assert not any("orphan" in s["glob"] for s in model.keyword_coowned)
-        assert "orphan/metrics/gauge.rs" in model.unmatched_paths(tree)
+        assert rows[0]["owners"] == ["runtime", "docs"]
 
 
 # ------------------------------------------------------------------
@@ -680,7 +702,7 @@ class TestRenderContributorsMd:
 class TestRenderCodeownersWithExternals:
     """End-to-end: an area-attached contributor rides every line the team owns."""
 
-    def _model_and_tree(self) -> tuple[ResolvedModel, list[str]]:
+    def _model(self) -> ResolvedModel:
         spec = {
             "meta": {"catch_all": "@root"},
             "areas": [
@@ -694,26 +716,25 @@ class TestRenderCodeownersWithExternals:
             "shared": [{"glob": "lib/llm/shared/", "owners": ["runtime", "kvbm"]}],
             "classify": {"keyword_rules": [], "filetype_rules": []},
         }
-        tree = ["lib/llm/a.rs", "lib/llm/b.rs", "lib/llm/shared/x.rs"]
-        return compute_resolution(spec, tree), tree
+        return compute_resolution(spec)
 
     def test_base_line_gets_handle(self) -> None:
-        model, tree = self._model_and_tree()
+        model = self._model()
         external = [{"name": "Jane", "github": "jane", "areas": ["runtime"]}]
-        lines, _ = _render_codeowners(model, tree, group=True, external=external)
+        lines, _ = _render_codeowners(model, group=True, external=external)
         body = "\n".join(lines)
         assert "@runtime @jane" in body
 
     def test_shared_line_gets_handle(self) -> None:
-        model, tree = self._model_and_tree()
+        model = self._model()
         external = [{"name": "Jane", "github": "jane", "areas": ["runtime"]}]
-        lines, _ = _render_codeowners(model, tree, group=True, external=external)
+        lines, _ = _render_codeowners(model, group=True, external=external)
         shared_line = next(ln for ln in lines if ln.startswith("/lib/llm/shared/"))
         assert "@runtime" in shared_line
         assert "@kvbm" in shared_line
         assert "@jane" in shared_line
 
     def test_no_externals_is_unchanged(self) -> None:
-        model, tree = self._model_and_tree()
-        plain, _ = _render_codeowners(model, tree, group=True, external=[])
+        model = self._model()
+        plain, _ = _render_codeowners(model, group=True, external=[])
         assert not any("@jane" in ln for ln in plain)

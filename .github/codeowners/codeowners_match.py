@@ -14,7 +14,7 @@ This module exposes:
   - ``resolve_owners(rules, path) -> list[str]`` -- last-match-wins resolution.
   - ``parse_codeowners(text) -> list[(pattern, owners)]`` -- shared parser.
   - ``anchor(glob) -> str`` -- repo-root anchoring helper.
-  - ``compute_resolution(spec, tree) -> ResolvedModel`` -- pure resolution
+  - ``compute_resolution(spec) -> ResolvedModel`` -- pure, tree-independent
     function used by both ``build_codeowners.py`` and ``emit_codeowners.py``.
   - ``minimal_cover(file_team, catch_all)`` -- min-cost last-match cover.
   - Typed shapes (``Area``, ``SharedSpec``, ``FiletypeRule``,
@@ -35,7 +35,6 @@ GitHub CODEOWNERS semantics implemented here:
 
 from __future__ import annotations
 
-import fnmatch
 import functools
 import re
 import subprocess
@@ -118,18 +117,23 @@ class ResolvedModel:
 
         The set used by the coverage gate -- if some pattern here matches a
         path, the path is "owned" and won't be reported as catch-all-only.
-        Globs are anchored exactly as ``emit_codeowners.py`` anchors them at
-        emission, so gate and artifact can't disagree: an unanchored
-        ``README.md`` must not silently cover ``foo/README.md``.
+        Area and shared globs are anchored exactly as ``emit_codeowners.py``
+        anchors them at emission, so gate and artifact can't disagree: an
+        unanchored ``README.md`` must not silently cover ``foo/README.md``.
+        Filetype-rule patterns are NOT anchored -- a bare ``*Dockerfile*``
+        matches by basename at any depth under GitHub CODEOWNERS rules, and
+        the emitter writes it that way.
         """
         pats: list[str] = []
         for area in self.areas:
-            pats.extend(area.path_globs)
+            pats.extend(anchor(g) for g in area.path_globs)
         for s in self.shared:
-            pats.append(s["glob"])
+            pats.append(anchor(s["glob"]))
+        # Filetype patterns are emitted unanchored (basename-any-depth), so
+        # keep them unanchored in the coverage set too.
         for fs in self.filetype_shared:
             pats.append(fs.glob)
-        return [anchor(p) for p in pats]
+        return pats
 
     def unmatched_paths(self, tree: Iterable[str]) -> list[str]:
         """Paths in ``tree`` that fall through to the catch-all only."""
@@ -352,204 +356,81 @@ def validate_spec(spec: object) -> None:
 # ----------------------------------------------------------------------
 # Resolution pipeline (S2, S5)
 # ----------------------------------------------------------------------
+#
+# ``compute_resolution`` is a PURE FUNCTION of the parsed policy YAML: it
+# never touches ``git ls-files``. The base-branch race the old generator
+# suffered from -- unrelated tree churn on ``main`` mutating the minimal
+# cover, the auto-classified globs, or the filetype co-ownership rows for a
+# PR that changed none of them -- came entirely from resolving against a
+# live tree at emit time. Coverage is still checked against the tree, but the
+# check lives in ``build_codeowners.py --strict`` and does not feed back into
+# the emitted rules.
 
 
-def _is_covered(path: str, patterns: Iterable[str]) -> bool:
-    return any(match(g, path) for g in patterns)
+def compute_resolution(spec: dict, tree: list[str] | None = None) -> ResolvedModel:
+    """Resolve an ``areas.yaml`` spec into the model the emitter renders.
 
+    Pure function of ``spec``: no tree, no filesystem, no ``git``. Same YAML
+    in -> byte-identical model out, so the emitted CODEOWNERS is a pure
+    function of the policy inputs. ``tree`` is accepted for backward
+    compatibility (older callers passed it) and ignored.
 
-def _dir_prefix(path: str, max_segments: int = 3) -> str:
-    """Group an unmatched file under a directory prefix (<= ``max_segments``).
+    Semantics per section:
 
-    Returns ``""`` for a repo-root file -- those are skipped by auto-classify
-    because we never want to invent a glob like ``/Dockerfile/``.
-    """
-    segs = path.split("/")
-    depth = min(max_segments, len(segs) - 1)
-    return "/".join(segs[:depth])
-
-
-def _auto_classify(
-    tree: list[str],
-    area_globs: dict[str, set[str]],
-    keyword_rules: list[dict],
-    label_by: dict[str, str],
-) -> list[tuple[str, str]]:
-    """Promote unmatched dirs into areas via keyword rules.
-
-    Mutates ``area_globs`` in place: new dir globs are appended to the chosen
-    area's set. Returns the ``(dir, label)`` audit list. First matching rule
-    wins (rules are evaluated in declared order).
-    """
-    if not keyword_rules:
-        return []
-    # Anchor like the generator does, so "unmatched" here agrees with the
-    # coverage gate and the emitted file.
-    initial_patterns = [anchor(g) for gs in area_globs.values() for g in gs]
-    unmatched = [p for p in tree if not _is_covered(p, initial_patterns)]
-    if not unmatched:
-        return []
-
-    by_dir = sorted({d for p in unmatched if (d := _dir_prefix(p))})
-    audit: list[tuple[str, str]] = []
-    for d in by_dir:
-        pl = ("/" + d + "/").lower()
-        for r in keyword_rules:
-            needle = r.get("match", "").lower()
-            if needle and needle in pl and r.get("area"):
-                lbl = label_by.get(r["area"], r["area"])
-                area_globs.setdefault(lbl, set()).add(d.rstrip("/") + "/")
-                audit.append((d, lbl))
-                break
-    return audit
-
-
-def _keyword_coownership(
-    tree: list[str],
-    area_globs: dict[str, set[str]],
-    keyword_rules: list[dict],
-    label_by: dict[str, str],
-    existing_shared: list[SharedSpec],
-) -> list[SharedSpec]:
-    """Keyword-level co-ownership: rules that declare ``coowner``.
-
-    A directory whose path mentions the keyword gets ``[enclosing_area,
-    coowner]`` shared ownership -- same shape as filetype co-ownership, so
-    the area stays in the review loop. Runs after auto-classify so promoted
-    dirs (rules with both ``area`` and ``coowner``) resolve their own area
-    as the enclosing owner. Dirs with no enclosing area are skipped -- the
-    coverage gate flags those instead of a coowner-only row masking them.
-    First matching rule wins per directory. A dir with a hand-declared
-    ``shared:`` entry keeps it (explicit beats implicit), and a subtree
-    already co-owned by an ancestor with the same owner set is not
-    re-emitted.
-    """
-    rules = [r for r in keyword_rules if r.get("coowner")]
-    if not rules:
-        return []
-    enc_pairs = sorted(
-        ((g, lbl) for lbl, s in area_globs.items() for g in s),
-        key=lambda kv: -len(kv[0]),
-    )
-
-    def enclosing(path: str) -> str | None:
-        for g, lbl in enc_pairs:
-            gg = g.rstrip("/")
-            if path == gg or path.startswith(gg + "/"):
-                return lbl
-        return None
-
-    explicit_dirs = {s["glob"].rstrip("/") for s in existing_shared}
-    emitted: list[tuple[str, frozenset[str]]] = [
-        (s["glob"].rstrip("/"), frozenset(s["owners"])) for s in existing_shared
-    ]
-    all_dirs = sorted({"/".join(p.split("/")[:i]) for p in tree for i in range(1, len(p.split("/")))})
-    out: list[SharedSpec] = []
-    for d in all_dirs:
-        if d in explicit_dirs:
-            continue
-        pl = ("/" + d + "/").lower()
-        for r in rules:
-            needle = r.get("match", "").lower()
-            if not needle or needle not in pl:
-                continue
-            coowner = label_by.get(r["coowner"], r["coowner"])
-            enc = enclosing(d)
-            if enc is None or enc == coowner:
-                break
-            owners = frozenset((enc, coowner))
-            if any((d == top or d.startswith(top + "/")) and owners == prev for top, prev in emitted):
-                break
-            emitted.append((d, owners))
-            out.append({"glob": d + "/", "owners": [enc, coowner]})
-            break
-    return out
-
-
-def _filetype_coownership(
-    tree: list[str],
-    area_globs: dict[str, set[str]],
-    filetype_rules: list[FiletypeRule],
-) -> list[FiletypeShared]:
-    """Compute the file-type co-ownership table (blocking rules only).
-
-    Each match becomes ``[enclosing_area, coowner]`` so the area stays in the
-    review loop. Files inside the coowner's own area stay sole-owned.
-    """
-    # Sort by glob length descending so the most-specific enclosing dir wins.
-    enc_pairs = sorted(
-        ((g, lbl) for lbl, s in area_globs.items() for g in s),
-        key=lambda kv: -len(kv[0]),
-    )
-
-    def enclosing(path: str) -> str | None:
-        for g, lbl in enc_pairs:
-            gg = g.rstrip("/")
-            if path == gg or path.startswith(gg + "/"):
-                return lbl
-        return None
-
-    out: list[FiletypeShared] = []
-    for rule in filetype_rules:
-        pattern = rule.get("pattern")
-        coowner = rule["coowner"]
-        if not pattern:
-            continue
-        for path in tree:
-            base = path.rsplit("/", 1)[-1]
-            if not fnmatch.fnmatch(base, pattern):
-                continue
-            enc = enclosing(path)
-            if enc is None:
-                # No subsystem owns this directory yet. Emitting a
-                # coowner-only row would count as explicit coverage and
-                # let the strict gate pass a tree nobody owns -- skip, so
-                # the file stays catch-all-only and the gate flags it.
-                continue
-            owners = [enc] if enc != coowner else []
-            owners.append(coowner)
-            out.append(FiletypeShared(glob=path, owners=owners))
-    return out
-
-
-def compute_resolution(spec: dict, tree: list[str]) -> ResolvedModel:
-    """Resolve an ``areas.yaml`` spec against a live tree.
-
-    Pure function: same spec + same tree -> same model. No I/O beyond the
-    tree list it's given. Both ``build_codeowners.py`` (coverage gate) and
-    ``emit_codeowners.py`` (generator) call this -- the gate and the artifact
-    cannot disagree because there is no second resolver.
+    * ``areas``       -- ``path_globs`` are emitted verbatim (sorted).
+    * ``shared``      -- passed through as declared.
+    * ``classify.filetype_rules`` -- each rule becomes one stable row with the
+      coowner as the sole owner (a single ``*Dockerfile*`` line owns every
+      Dockerfile via last-match at any depth).
+    * ``classify.keyword_rules`` -- validated, then ignored at emit time.
+      Auto-promotion of unmatched dirs into an area, and keyword-level
+      co-ownership, both required walking the live tree -- pure poison for a
+      stable output. Authors materialize the equivalent as explicit
+      ``path_globs`` / ``shared`` entries in ``areas.yaml``; the strict
+      coverage gate catches any new directory that slipped through.
     """
     validate_spec(spec)
+    if tree is not None:
+        # Deprecated argument: accepted for legacy callers, ignored so
+        # emission stays a pure function of the policy inputs.
+        _ = tree
+
     catch_all = spec.get("meta", {}).get("catch_all", "")
     raw_areas = spec.get("areas", [])
     classify = spec.get("classify", {}) or {}
-    keyword_rules = classify.get("keyword_rules", []) or []
     filetype_rules: list[FiletypeRule] = classify.get("filetype_rules", []) or []
 
-    label_by = {a["label"]: a["label"] for a in raw_areas}
-    area_globs: dict[str, set[str]] = {a["label"]: set(a.get("path_globs", []) or []) for a in raw_areas}
-
     spec_shared: list[SharedSpec] = spec.get("shared", []) or []
-    audit = _auto_classify(tree, area_globs, keyword_rules, label_by)
-    keyword_shared = _keyword_coownership(tree, area_globs, keyword_rules, label_by, spec_shared)
-    filetype_shared = _filetype_coownership(tree, area_globs, filetype_rules)
 
     areas = [
         ResolvedArea(
             label=a["label"],
             github_team=a["github_team"],
-            path_globs=sorted(area_globs[a["label"]]),
+            path_globs=sorted(set(a.get("path_globs", []) or [])),
         )
         for a in raw_areas
     ]
+
+    # Blocking filetype rule -> one stable coowner-only row (bare pattern
+    # matches by basename at any depth per GitHub CODEOWNERS semantics). The
+    # old "enclosing area + coowner" behavior required walking the tree; if a
+    # specific subtree wants that co-ownership, declare it explicitly in
+    # ``shared`` with a path glob.
+    filetype_shared: list[FiletypeShared] = []
+    for rule in filetype_rules:
+        pattern = rule.get("pattern")
+        coowner = rule.get("coowner")
+        if not pattern or not coowner:
+            continue
+        filetype_shared.append(FiletypeShared(glob=pattern, owners=[coowner]))
+
     return ResolvedModel(
         catch_all=catch_all,
         areas=areas,
-        shared=spec_shared + keyword_shared,
+        shared=list(spec_shared),
         filetype_shared=filetype_shared,
-        auto_classified=audit,
-        keyword_coowned=keyword_shared,
+        auto_classified=[],
+        keyword_coowned=[],
         meta=dict(spec.get("meta", {})),
     )
 

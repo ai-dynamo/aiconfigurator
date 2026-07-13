@@ -2,15 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Validate CODEOWNERS coverage against a live tree (repo-agnostic).
 
-Reads an ``areas.yaml`` (each area declares its path globs directly), runs the
-declared path-globs -> auto-classify keyword layer over the tree via the
-shared resolution pipeline, then reports how much of the tree is EXPLICITLY
-owned vs. falls to the catch-all.
+Reads an ``areas.yaml`` (each area declares its path globs directly), asks the
+pure resolver in ``codeowners_match`` what the emitted CODEOWNERS would cover,
+and reports how much of the live tree is EXPLICITLY owned vs. falls to the
+catch-all.
 
-The on-disk handoff to ``emit_codeowners.py`` used to be a near-copy of
-``areas.yaml`` written to ``/tmp/areas.resolved.yaml``; that's gone. Both
-scripts call ``codeowners_match.compute_resolution`` directly, so the gate
-here and the file produced by ``emit_codeowners.py`` cannot disagree.
+This is the ONLY place in the pipeline that reads ``git ls-files``. Emission
+is a pure function of the policy YAML; the tree only enters here, in the
+``--strict`` gate that asserts every tracked file matches some non-catch-all
+rule. The gate and the emitted file share the same resolver, so a file the
+gate accepts is a file the emitter has a rule for.
 
 Usage:
   uv run python .github/codeowners/build_codeowners.py \\
@@ -42,8 +43,10 @@ def main() -> int:
     args = ap.parse_args()
 
     spec = yaml.safe_load(Path(args.areas).read_text())
+    # Resolution is a pure function of the YAML; the tree only feeds the
+    # coverage/drift reports below, never the rule set.
+    model = compute_resolution(spec)
     tree = load_tree(Path(args.repo))
-    model = compute_resolution(spec, tree)
     unmatched = model.unmatched_paths(tree)
     # Deletions never fail a gate (coverage counts files, and the drift check
     # forces the CODEOWNERS regeneration), so stale claims would otherwise
@@ -56,14 +59,8 @@ def main() -> int:
 
     print(f"areas: {len(model.areas)} | tree files: {n_tree}")
     print(f"explicitly owned: {n_owned}/{n_tree} ({pct:.2f}%) | catch-all only: {len(unmatched)}")
-    print(f"auto-classified new dirs: {len(model.auto_classified)}")
-    for d, lbl in model.auto_classified[:20]:
-        print(f"    {d} -> {lbl}")
-    print(f"keyword co-owned dirs: {len(model.keyword_coowned)}")
-    for s in model.keyword_coowned[:20]:
-        print(f"    {s['glob']} -> {' + '.join(s['owners'])}")
     if unmatched:
-        print("catch-all-only sample (add an area or classify rule to cover these):")
+        print("catch-all-only sample (add an explicit glob to cover these):")
         print("   ", unmatched[:15])
     if dead:
         print(f"globs matching no files: {len(dead)} (prune from areas.yaml when the paths are gone; never blocking):")
