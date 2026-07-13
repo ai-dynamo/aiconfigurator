@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-SDK_ROOT = Path(__file__).parents[3] / "src" / "aiconfigurator-core" / "aiconfigurator_core" / "sdk"
+SDK_ROOT = Path(__file__).parents[3] / "aic-core" / "src" / "aiconfigurator_core" / "sdk"
 UPPER_MODULES = {"aiconfigurator", "spica"}
 
 

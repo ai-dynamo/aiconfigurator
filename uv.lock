@@ -86,7 +86,7 @@ webapp = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiconfigurator-core", editable = "src/aiconfigurator-core" },
+    { name = "aiconfigurator-core", editable = "aic-core" },
     { name = "bokeh" },
     { name = "chex", marker = "python_full_version < '3.13' and extra == 'spica'", specifier = "==0.1.87" },
     { name = "fastapi", marker = "extra == 'service'", specifier = ">=0.115.12" },
@@ -132,7 +132,7 @@ provides-extras = ["dev", "webapp", "service", "spica"]
 [[package]]
 name = "aiconfigurator-core"
 version = "0.10.0"
-source = { editable = "src/aiconfigurator-core" }
+source = { editable = "aic-core" }
 dependencies = [
     { name = "numpy" },
     { name = "packaging" },

@@ -23,7 +23,7 @@ os.environ["MPLBACKEND"] = "agg"
 import matplotlib.pyplot as plt
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-SYSTEMS_PREFIX = "src/aiconfigurator-core/aiconfigurator_core/systems/"
+SYSTEMS_PREFIX = "aic-core/src/aiconfigurator_core/systems/"
 
 # Import validate_database.ipynb jupyter notebook
 old_cwd = os.getcwd()
@@ -52,8 +52,8 @@ OPTIONAL_CHART_ERROR_SNIPPETS = (
 def _data_dir(system: str, backend: str, backend_version: str) -> str:
     return os.path.join(
         REPO_ROOT,
+        "aic-core",
         "src",
-        "aiconfigurator-core",
         "aiconfigurator_core",
         "systems",
         "data",

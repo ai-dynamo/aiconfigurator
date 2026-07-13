@@ -5,7 +5,7 @@
 
   AIConfigurator — Interactive Universe Map (aiconfigurator + dynamo)
   Self-contained (no network / CDN). Open directly in any modern browser.
-  Generated from a code walk of repo/aiconfigurator (+ rust/aiconfigurator-core)
+  Generated from a code walk of repo/aiconfigurator (+ aic-core/rust/aiconfigurator-core)
   and repo/dynamo (operator CRDs · profiler · planner).
 -->
 <html lang="en">
@@ -382,7 +382,7 @@ const NODES = [
      desc:'Attention-FFN Disaggregation — attention on <b>A-workers</b>, FFN/MoE on <b>F-workers</b>, separated by a cross-pool link. <b>Orthogonal to prefill/decode disagg</b> (<code>afd_phase</code> ∈ prefill/decode/both). Today exposed only as a single-config <b>estimate mode</b> (<code>cli estimate --estimate-mode afd</code>) with the A/F topology fixed by the user; <b>not yet swept</b>.',
      sym:['<code>AFDOpsPartition</code> (attn / ffn split)','<code>AFDTransfer</code> op (cross-pool comm)','topology: <code>n_a</code> / <code>n_f</code> nodes · <code>tp_a</code> · <code>f_moe_ep</code>']}},
   {id:'knob_kernels', l:2, repo:'aic', flag:'future', label:'Kernels / CUDA graph', sub:'capture sizes · keep/no-reload · multi-kernel · not yet swept',
-   det:{file:['rust/aiconfigurator-core/src/fpm/model.rs','src/aiconfigurator/systems/data/'],
+   det:{file:['aic-core/rust/aiconfigurator-core/src/fpm/model.rs','src/aiconfigurator/systems/data/'],
      desc:'Kernel-level knobs — CUDA-graph capture sizes, capture-once/replay (“keep / no-reload”), and multi-kernel op fusion. Perf rows are tagged <code>used_cuda_graph</code>; faithfully modeling capture/replay + multi-kernel ops is an open accuracy item (see <b>ForwardPassPerfModel</b>). <b>Not yet a swept dimension.</b>',
      sym:['cuda-graph capture sizes','<code>used_cuda_graph</code> perf-row tag','keep / no-reload · multi-kernel']}},
   // -- Scheduler Knobs (engine scheduler sub-space) --
@@ -431,24 +431,24 @@ const NODES = [
      desc:'The component that owns the <b>runtime semantics</b> of aggregated and disaggregated serving. <code>AggRuntime</code> drives one pool of mixed prefill/decode workers; <code>DisaggRuntime</code> drives separate prefill and decode pools, routing and P→D handoff. The Mocker scheduler cores model batching, chunked prefill, preemption, local KV blocks, and request lifecycle on a deterministic event clock.',
      sym:['<code>AggRuntime</code> · <code>DisaggRuntime</code>','<code>WorkerType</code>: aggregated · prefill · decode','<code>VllmCore::execute_pass()</code> · <code>SglangCore::execute_pass()</code>','<code>python -m dynamo.replay</code>']}},
   {id:'m_estlat', l:3, repo:'aic', label:'AIC ForwardPassPerfModel', sub:'mixed agg or prefill/decode scheduled pass → latency',
-   det:{file:['dynamo: lib/mocker/src/common/engine_perf.rs','aiconfigurator: rust/aiconfigurator-core/src/fpm/model.rs','aiconfigurator: src/aiconfigurator/sdk/rust_engine_step.py'],
+   det:{file:['dynamo: lib/mocker/src/common/engine_perf.rs','aiconfigurator: aic-core/rust/aiconfigurator-core/src/fpm/model.rs','aiconfigurator: src/aiconfigurator/sdk/rust_engine_step.py'],
      desc:'AIC’s <b>per-forward-pass timing model</b>. Mocker supplies the exact scheduled workload: mixed prefill+decode fields for an aggregated pass, prefill-only fields for a prefill worker, or decode-only fields for a decode worker. It predicts duration from the AIC modeling core and measured perf data; it does <b>not</b> own queues, routing, replica pools, KV allocation, or P→D handoff.',
      sym:['<code>EnginePerfModel</code> → <code>ForwardPassPerfModel</code>','<code>estimate_forward_pass_time()</code>','mixed · prefill · decode FPM workload kinds','native AIC model with regression fallback']}},
 
   // ---- L4 AIC Core · Python and Rust surfaces over one native implementation ----
   {id:'aic_wheel', l:4, repo:'aic', label:'aiconfigurator · Python Wheel', sub:'EngineConfig · ForwardPassMetrics · RustForwardPassPerfModel estimator',
-   det:{file:['aiconfigurator-main: pyproject.toml','aiconfigurator-main: src/aiconfigurator_core/__init__.py','aiconfigurator-main: rust/aiconfigurator-core/src/py.rs'],
+   det:{file:['aiconfigurator-main: pyproject.toml','aiconfigurator-main: src/aiconfigurator_core/__init__.py','aiconfigurator-main: aic-core/rust/aiconfigurator-core/src/py.rs'],
      desc:'The self-contained Maturin-built <b>Python distribution</b>. It bundles the CLI, SDK, system data, model configs, Spica, and the compiled <code>aiconfigurator_core</code> extension. Python supplies <code>EngineConfig</code> and per-iteration <code>ForwardPassMetrics</code>, then calls <code>RustForwardPassPerfModel</code> for forward-pass latency. The four op-based database modes (SILICON, HYBRID, EMPIRICAL, SOL), pure-FPM regression, and FPM-calibrated native strategy are available through this single wheel; the layerwise strategy below is planned.',
      sym:['distribution <code>aiconfigurator</code> · import <code>aiconfigurator_core</code>','<code>AicEngine</code>','<code>RustForwardPassPerfModel</code>','Maturin abi3 wheel']}},
 
   {id:'core_crate', l:4, repo:'aic', label:'aiconfigurator-core · Rust Crate', sub:'EngineConfig · ForwardPassMetrics · ForwardPassPerfModel estimator',
-   det:{file:['rust/aiconfigurator-core/Cargo.toml','rust/aiconfigurator-core/src/lib.rs','rust/aiconfigurator-core/src/config.rs','rust/aiconfigurator-core/src/fpm/metrics.rs','rust/aiconfigurator-core/src/fpm/model.rs'],
+   det:{file:['aic-core/rust/aiconfigurator-core/Cargo.toml','aic-core/rust/aiconfigurator-core/src/lib.rs','aic-core/rust/aiconfigurator-core/src/config.rs','aic-core/rust/aiconfigurator-core/src/fpm/metrics.rs','aic-core/rust/aiconfigurator-core/src/fpm/model.rs'],
      desc:'The native <b>Rust implementation surface</b> built as both <code>rlib</code> and <code>cdylib</code>. <code>EngineConfig</code> fixes the engine identity, <code>ForwardPassMetrics</code> describes one scheduled iteration, and <code>ForwardPassPerfModel</code> estimates its latency. Today the Rust engine-step op path is wired to SILICON; HYBRID, EMPIRICAL, and SOL remain schema-preserving enum variants in Rust while their working implementations live in the bundled Python SDK. The crate also implements native + FPM correction and pure-FPM regression; the layerwise strategy is planned.',
      sym:['<code>aiconfigurator_core::EngineConfig</code>','<code>aiconfigurator_core::ForwardPassMetrics</code>','<code>aiconfigurator_core::ForwardPassPerfModel</code>','<code>estimate_forward_pass_time_ms()</code>']}},
 
   // ---- L5 Forward-pass performance model strategies ----
   {id:'pm_ops', l:5, repo:'aic', tag:'default', label:'Op Silicon Mode', sub:'silicon tables · analytical-only ops · shared-layer reuse',
-   det:{file:['src/aiconfigurator/sdk/common.py','src/aiconfigurator/sdk/perf_database.py','src/aiconfigurator/sdk/engine.py','rust/aiconfigurator-core/src/engine/runtime.rs'],
+   det:{file:['src/aiconfigurator/sdk/common.py','src/aiconfigurator/sdk/perf_database.py','src/aiconfigurator/sdk/engine.py','aic-core/rust/aiconfigurator-core/src/engine/runtime.rs'],
      desc:'The default op-based mode: <code>DatabaseMode.SILICON</code>. <code>EngineConfig</code> compiles the HF model into context and generation operation lists; the scheduled FPM selects the prefill, decode, or mixed composition. Operations use measured silicon/shared-layer rows where a table exists, while analytical-only operations such as raw memory and P2P retain their formula path. The engine then sums the critical-path latency. Missing required silicon data remains an explicit error—there is no blanket empirical fallback.',
      sym:['<code>DatabaseMode.SILICON</code> (default)','silicon-table ops: measured data + interpolation','analytical-only memory / P2P formula paths','missing required silicon data → explicit failure']}},
 
@@ -473,28 +473,28 @@ const NODES = [
      sym:['planned <code>Layerwise</code> operation','planned <code>query_layerwise()</code>','<code>layerwise_perf.csv</code>','NVTX module ranges + CUPTI kernel attribution']}},
 
   {id:'pm_fpm', l:5, repo:'aic', label:'Pure FPM Data–based Perf Model', sub:'scheduled FPM features + observed wall_time → bucketed regression',
-   det:{file:['rust/aiconfigurator-core/src/fpm/model.rs','rust/aiconfigurator-core/src/fpm/regression.rs','rust/aiconfigurator-core/src/fpm/metrics.rs'],
+   det:{file:['aic-core/rust/aiconfigurator-core/src/fpm/model.rs','aic-core/rust/aiconfigurator-core/src/fpm/regression.rs','aic-core/rust/aiconfigurator-core/src/fpm/metrics.rs'],
      desc:'The implemented <b>FPM-only regression</b> path. It uses no HF config, system spec, op graph, or op database: scheduled FPM fields are the features and positive <code>wall_time</code> observations are the target. Separate prefill, decode, and mixed regressions become available only after their minimum observation count is reached; fitting is currently in-memory.',
      sym:['<code>ForwardPassPerfModel::from_regression()</code>','<code>tune_with_fpms()</code>','<code>BucketedRegression</code>','source: <code>FallbackRegression</code>']}},
 
   {id:'pm_fpm_tuned', l:5, repo:'aic', label:'Fine-tuned with FPM Perf Model', sub:'native op estimate + FPM correction buckets · observed/native calibration',
-   det:{file:['rust/aiconfigurator-core/src/fpm/model.rs','rust/aiconfigurator-core/src/fpm/correction.rs','rust/aiconfigurator-core/src/fpm/samples.rs','rust/aiconfigurator-core/src/fpm/options.rs'],
+   det:{file:['aic-core/rust/aiconfigurator-core/src/fpm/model.rs','aic-core/rust/aiconfigurator-core/src/fpm/correction.rs','aic-core/rust/aiconfigurator-core/src/fpm/samples.rs','aic-core/rust/aiconfigurator-core/src/fpm/options.rs'],
      desc:'The <b>FPM-calibrated native path</b>. It starts with the op-collector/native AIC estimate, then <code>tune_with_fpms()</code> uses observed FPM iterations to learn local correction factors. Each ready workload region applies the median <code>observed_ms / native_ms</code> ratio, bounded by configured correction limits. This is online performance-model calibration—not LLM weight fine-tuning—and remains analytically grounded in the native op model.',
      sym:['<code>tune_with_fpms()</code>','<code>CorrectionBuckets</code>','median <code>observed_ms / native_ms</code>','source: <code>AicWithCorrection</code>']}},
 
   // ---- L6 Current op-collector solution internals ----
   {id:'op_model', l:6, repo:'aic', label:'Model · EngineSpec', sub:'HF config → model family → context / generation op graph',
-   det:{file:['src/aiconfigurator/sdk/models/','src/aiconfigurator/sdk/engine.py','rust/aiconfigurator-core/src/engine/spec.rs'],
+   det:{file:['src/aiconfigurator/sdk/models/','src/aiconfigurator/sdk/engine.py','aic-core/rust/aiconfigurator-core/src/engine/spec.rs'],
      desc:'Resolves the Hugging Face architecture through the model registry and builds ordered <code>context_ops</code> and <code>generation_ops</code>. <code>compile_engine()</code> serializes those lists together with <code>EngineConfig</code> into the <code>EngineSpec</code> consumed by the Rust runtime.',
      sym:['<code>register_model()</code> / <code>get_model()</code>','<code>compile_engine()</code>','<code>EngineSpec</code>','<code>context_ops</code> · <code>generation_ops</code>']}},
 
   {id:'op_operations', l:6, repo:'aic', label:'Operations', sub:'typed op graph · GEMM / attention / MoE / MLA / comm / state-space',
-   det:{file:['src/aiconfigurator/sdk/operations/','rust/aiconfigurator-core/src/operators/','rust/aiconfigurator-core/src/operators/op.rs'],
+   det:{file:['src/aiconfigurator/sdk/operations/','aic-core/rust/aiconfigurator-core/src/operators/','aic-core/rust/aiconfigurator-core/src/operators/op.rs'],
      desc:'The typed nodes of the analytical execution graph. Each operation carries its structural and quantization parameters, derives the runtime query shape, and asks <b>PerfDatabase</b> for latency. <code>Overlap</code> and <code>Fallback</code> compose child operations while the engine sums the critical path.',
      sym:['<code>Gemm</code> · <code>Attention</code> · <code>Moe</code> · <code>Mla</code>','<code>Communication</code> · <code>Dsa</code> · <code>Mamba</code>','<code>OverlapOp</code> · <code>FallbackOp</code>']}},
 
   {id:'op_perfdb', l:6, repo:'aic', label:'PerfDatabase', sub:'<GPU>/<framework>/<version> · lazy Parquet tables · interpolation',
-   det:{file:['src/aiconfigurator/sdk/perf_database.py','rust/aiconfigurator-core/src/perf_database/','rust/aiconfigurator-core/src/perf_database/interpolation.rs'],
+   det:{file:['src/aiconfigurator/sdk/perf_database.py','aic-core/rust/aiconfigurator-core/src/perf_database/','aic-core/rust/aiconfigurator-core/src/perf_database/interpolation.rs'],
      desc:'The op-query engine for one GPU/system, framework, and framework version. It resolves the matching data root, lazily loads each op-family Parquet table on first use, filters by exact categorical fields, and interpolates or extrapolates numeric shape dimensions when an exact measured row is unavailable.',
      sym:['<code>PerfDatabase</code>','lazy per-op table loading','exact filter → interpolation / extrapolation','SILICON · HYBRID · EMPIRICAL · SOL']}},
 
@@ -559,7 +559,7 @@ const NODES = [
      sym:['gap classification / root-cause evidence','collector + model repair','automatic triage and fix loop','revalidate against silicon']}},
 
   {id:'auto_fpm_collector', l:10, repo:'aic', flag:'future', label:'Auto FPM Collector', sub:'planned · scheduled ForwardPassMetrics + observed wall_time datasets',
-   det:{file:['aiconfigurator: rust/aiconfigurator-core/src/fpm/metrics.rs','aiconfigurator: rust/aiconfigurator-core/src/fpm/model.rs','dynamo: lib/mocker/src/common/engine_perf.rs'],
+   det:{file:['aiconfigurator: aic-core/rust/aiconfigurator-core/src/fpm/metrics.rs','aiconfigurator: aic-core/rust/aiconfigurator-core/src/fpm/model.rs','dynamo: lib/mocker/src/common/engine_perf.rs'],
      desc:'A planned automated telemetry collector for the two FPM-trained L5 strategies. It would capture scheduled prefill/decode/mixed <code>ForwardPassMetrics</code> together with positive observed <code>wall_time</code>, preserve GPU/model/framework/version provenance, and publish reusable training/calibration datasets. No production collection pipeline exists yet.',
      sym:['<code>ForwardPassMetrics</code>','scheduled workload features','target: positive <code>wall_time</code>','feeds pure-FPM regression + native FPM correction']}},
 

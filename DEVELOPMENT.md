@@ -41,7 +41,7 @@ source .venv/bin/activate
 
 ```bash
 # Install the standalone core and upper package in editable mode
-pip install -e ./src/aiconfigurator-core
+pip install -e ./aic-core
 pip install -e ".[dev]"
 ```
 

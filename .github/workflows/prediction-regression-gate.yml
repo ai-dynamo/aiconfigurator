@@ -87,8 +87,8 @@ jobs:
           python -m pip install --upgrade pip
           # Split-era revisions need the payload-bearing Maturin core installed
           # first; newer revisions bundle it in the root package.
-          if grep -q 'build-backend = "maturin"' src/aiconfigurator-core/pyproject.toml 2>/dev/null; then
-            python -m pip install -e src/aiconfigurator-core
+          if grep -q 'build-backend = "maturin"' aic-core/pyproject.toml 2>/dev/null; then
+            python -m pip install -e aic-core
           fi
           python -m pip install -e ".[dev]"
 

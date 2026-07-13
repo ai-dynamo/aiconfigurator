@@ -118,7 +118,7 @@ include = ["aiconfigurator", "aiconfigurator.cli*", "aiconfigurator.generator*",
 exclude = ["aiconfigurator_core*"]
 
 [tool.uv.sources]
-aiconfigurator-core = { path = "src/aiconfigurator-core", editable = true }
+aiconfigurator-core = { path = "aic-core", editable = true }
 
 [tool.ruff]
 line-length = 120

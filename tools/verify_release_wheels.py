@@ -46,7 +46,7 @@ def _source_payloads() -> tuple[set[str], set[str]]:
     """Return ``(upper, core)`` payload paths expected from the source tree."""
     repo_root = Path(__file__).resolve().parents[1]
     upper_source = repo_root / "src"
-    core_source = repo_root / "src" / "aiconfigurator-core"
+    core_source = repo_root / "aic-core" / "src"
     upper: set[str] = set()
     core: set[str] = set()
 

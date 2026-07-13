@@ -45,7 +45,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-connrefused --retry-d
 # Pin to the image's CPython 3.12 so uv/maturin never fetch a standalone one.
 ENV UV_PYTHON=/opt/python/cp312-cp312/bin/python3
 COPY src/ /workspace/src/
-COPY rust/ /workspace/rust/
+COPY aic-core/ /workspace/aic-core/
 COPY LICENSE pyproject.toml README.md /workspace/
 COPY tools/verify_release_wheels.py /workspace/tools/verify_release_wheels.py
 COPY tools/verify_installed_package_layers.py /workspace/tools/verify_installed_package_layers.py
@@ -53,7 +53,7 @@ COPY tools/build_legacy_monolith_fixture.py /workspace/tools/build_legacy_monoli
 # Fail fast if Git LFS content wasn't materialized before the build — otherwise
 # the wheel ships pointer stubs in place of perf data (see DYN-2725).
 RUN set -e; \
-    bad=$(grep -rlE "^version https://git-lfs" /workspace/src/aiconfigurator-core/aiconfigurator_core/systems 2>/dev/null || true); \
+    bad=$(grep -rlE "^version https://git-lfs" /workspace/aic-core/src/aiconfigurator_core/systems 2>/dev/null || true); \
     if [ -n "$bad" ]; then \
         echo "ERROR: Unmaterialized Git LFS pointer files found:" >&2; \
         echo "$bad" >&2; \
@@ -64,7 +64,7 @@ RUN set -e; \
 # off`; MATURIN_PEP517_ARGS overrides it to stamp the manylinux_2_28 tag (maturin
 # appends it last, so it wins). `python` isn't on PATH here -> verify via UV_PYTHON.
 RUN MATURIN_PEP517_ARGS="--compatibility manylinux_2_28" \
-        uv build --project src/aiconfigurator-core --wheel --out-dir /workspace/dist && \
+        uv build --project aic-core --wheel --out-dir /workspace/dist && \
     cd /workspace && uv build --wheel --out-dir /workspace/dist && \
     cd /workspace && "${UV_PYTHON}" tools/verify_release_wheels.py /workspace/dist
 
