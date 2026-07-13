@@ -26,7 +26,7 @@ from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.config_builders import apply_nextn as _apply_nextn
 from aiconfigurator.sdk.config_builders import build_model_config as _build_model_config
-from aiconfigurator.sdk.models import check_is_moe, resolve_context_fmha_compat
+from aiconfigurator.sdk.models import check_is_moe, resolve_context_fmha_by_data
 from aiconfigurator.sdk.task_v2 import Task
 
 # Default per-phase latency-correction scales for single-point disagg estimates.
@@ -1146,9 +1146,11 @@ def _run_agg_estimate(
         comm_quant_mode,
     )
     _apply_nextn(model_config, nextn, nextn_accept_rates)
-    # Agg workers run context attention → apply the V3/Kimi context FMHA rule
+    # Agg workers run context attention → resolve fmha against the perf data
     # before building the model (mirrors the sweep/task_v2 path).
-    resolve_context_fmha_compat(model_config, model_path, is_context_role=True)
+    resolve_context_fmha_by_data(
+        model_config, model_path, load_database(system_name), backend_name, is_context_role=True
+    )
     runtime_config = RuntimeConfig(
         isl=isl,
         osl=osl,
@@ -1278,8 +1280,14 @@ def _run_static_estimate(
     )
     _apply_nextn(model_config, nextn, nextn_accept_rates)
     # static / static_ctx run context attention; static_gen is generation-only
-    # and legitimately keeps fp8 FMHA. Apply the V3/Kimi context rule accordingly.
-    resolve_context_fmha_compat(model_config, model_path, is_context_role=static_mode != "static_gen")
+    # and legitimately keeps fp8 FMHA. Resolve fmha against the perf data accordingly.
+    resolve_context_fmha_by_data(
+        model_config,
+        model_path,
+        load_database(system_name),
+        backend_name,
+        is_context_role=static_mode != "static_gen",
+    )
 
     runtime_config = RuntimeConfig(
         batch_size=batch_size,
@@ -1426,9 +1434,11 @@ def _run_disagg_estimate(
     # configs so a single ``--nextn N`` reaches each side of the disagg pair.
     _apply_nextn(prefill_model_config, nextn, nextn_accept_rates)
     _apply_nextn(decode_model_config, nextn, nextn_accept_rates)
-    # Prefill runs context attention → V3/Kimi context FMHA rule applies. Decode
+    # Prefill runs context attention → resolve fmha against the perf data. Decode
     # is generation-only and keeps fp8, so it needs no adjustment.
-    resolve_context_fmha_compat(prefill_model_config, model_path, is_context_role=True)
+    resolve_context_fmha_by_data(
+        prefill_model_config, model_path, load_database(system_name), backend_name, is_context_role=True
+    )
 
     runtime_config = RuntimeConfig(
         isl=isl,
@@ -1708,10 +1718,12 @@ def _run_afd_estimate(
     _apply_nextn(a_model_config, nextn, nextn_accept_rates)
     _apply_nextn(f_model_config, nextn, nextn_accept_rates)
     # The A-worker runs context attention whenever the phase covers prefill
-    # ("prefill" or "both"); apply the V3/Kimi context FMHA rule then. The
+    # ("prefill" or "both"); resolve fmha against the perf data then. The
     # F-worker is FFN/MoE only and never touches FMHA. The decode-phase static
     # complement is a static_ctx call handled in _run_static_estimate.
-    resolve_context_fmha_compat(a_model_config, model_path, is_context_role=afd_phase in ("prefill", "both"))
+    resolve_context_fmha_by_data(
+        a_model_config, model_path, database, backend_name, is_context_role=afd_phase in ("prefill", "both")
+    )
 
     afd_config = AFDConfig(
         n_a_nodes=n_a_nodes,

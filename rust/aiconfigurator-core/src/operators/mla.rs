@@ -184,12 +184,13 @@ impl MlaModuleOp {
         batch_size: u32,
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
+        // No fmha arg: the generation module table has no fmha axis (decode
+        // compute dtype follows the kv-cache dtype).
         let latency = db.mla.query_generation_module(
             batch_size,
             s,
             self.num_heads,
             self.kv_cache_dtype,
-            self.fmha_quant_mode,
             self.gemm_quant_mode,
         )?;
         Ok(PerformanceResult::new(latency, Source::Silicon)

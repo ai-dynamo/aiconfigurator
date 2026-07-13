@@ -155,6 +155,54 @@ def has_perf_data_not_available_cause(error: BaseException) -> bool:
     return False
 
 
+# Instance attribute(s) holding the raw table(s) behind each fmha-keyed context
+# op. Every listed table is keyed [fmha][kv_cache]... at its top two levels, so
+# joint (fmha, kv) slice presence can be checked uniformly. Ops absent from
+# this map (e.g. wideep_context_mla: [kernel_source][quant], no kv axis) fall
+# back to the flat supported list.
+_CONTEXT_FMHA_OP_TABLES: dict[str, tuple[str, ...]] = {
+    "context_attention": ("_context_attention_data",),
+    "context_mla": ("_context_mla_data", "_context_mla_module_data"),
+    "context_mla_granular": ("_context_mla_data",),
+    "dsa_context_module": ("_context_dsa_module_data",),
+    "deepseek_v4_context_module": ("_context_deepseek_v4_attention_module_data",),
+}
+
+
+def context_fmha_supported_modes(database, ctx_op: str, kv_cache_mode) -> list[str]:
+    """FMHA mode names with perf data for ``ctx_op``, restricted to slices that
+    exist JOINTLY with ``kv_cache_mode``.
+
+    The flat ``supported_quant_mode[ctx_op]`` list unions fmha keys across kv
+    slices (and across granular+module tables for ``context_mla``), so an fmha
+    mode collected only under a different kv dtype — e.g. the fp8 fmha slice
+    that exists solely under kv=fp8 — would look available for a bf16-kv role
+    and then miss at query time.  Returns ``[]`` when there is no information
+    (missing op/table); falls back to the flat list when the op has no kv axis
+    or the database exposes no raw tables (test stubs).
+    """
+    supported = getattr(database, "supported_quant_mode", {}) or {}
+    flat = supported.get(ctx_op, []) or []  # triggers the lazy load of the op's table(s)
+    if not flat:
+        return []
+    table_attrs = _CONTEXT_FMHA_OP_TABLES.get(ctx_op)
+    if table_attrs is None or kv_cache_mode is None:
+        return list(flat)
+    modes: set[str] = set()
+    saw_table = False
+    for attr in table_attrs:
+        data = getattr(database, attr, None)
+        if not data:
+            continue
+        saw_table = True
+        for fmha_key in data:
+            if kv_cache_mode in data[fmha_key]:
+                modes.add(fmha_key.name if hasattr(fmha_key, "name") else str(fmha_key))
+    if not saw_table:
+        return list(flat)
+    return sorted(modes)
+
+
 @functools.cache
 def _load_op_kernel_source_manifest_entries(systems_root: str) -> dict[str, tuple[dict, ...]]:
     """Load `<systems_root>/op_kernel_source_manifest.yaml` and group entries by op_file.
@@ -1075,6 +1123,7 @@ class _LazySupportMatrix:
             "context_attention",
             "generation_attention",
             "context_mla",
+            "context_mla_granular",
             "generation_mla",
             "dsa_context_module",
             "dsa_generation_module",
@@ -1094,6 +1143,7 @@ class _LazySupportMatrix:
             "context_attention",
             "generation_attention",
             "context_mla",
+            "context_mla_granular",
             "generation_mla",
             "dsa_context_module",
             "dsa_generation_module",
@@ -1108,6 +1158,7 @@ class _LazySupportMatrix:
             "context_attention",
             "generation_attention",
             "context_mla",
+            "context_mla_granular",
             "generation_mla",
             "dsa_context_module",
             "dsa_generation_module",
@@ -1197,23 +1248,26 @@ class _LazySupportMatrix:
                 getattr(db, "_context_mla_module_data", None),
             )
 
+        if key == "context_mla_granular":
+            # Granular-table-only capability: the trtllm wideep context path
+            # queries the granular context_mla table directly (no module
+            # primary), so module-only slices must not count for it.
+            from aiconfigurator.sdk.operations.mla import ContextMLA
+
+            ContextMLA.load_data(db)
+            return _enum_key_names(getattr(db, "_context_mla_data", None))
+
         if key == "generation_mla":
             from aiconfigurator.sdk.operations.mla import GenerationMLA, MLAModule
 
             GenerationMLA.load_data(db)
             MLAModule.load_data(db)
-            # Granular data is keyed [kv_cache]...; module data is keyed
-            # [fmha][kv_cache][gemm]... so kv modes are at the second level there.
-            kv_modes: set[str] = set()
-            granular = getattr(db, "_generation_mla_data", None)
-            if granular:
-                kv_modes.update(_enum_key_names(granular))
-            module = getattr(db, "_generation_mla_module_data", None)
-            if module:
-                for fmha_mode in module:
-                    for kv_mode in module[fmha_mode]:
-                        kv_modes.add(kv_mode.name if hasattr(kv_mode, "name") else str(kv_mode))
-            return sorted(kv_modes)
+            # Both granular and module data key on kv_cache_dtype at the top
+            # level (generation MLA has no fmha axis).
+            return _merge_key_names(
+                getattr(db, "_generation_mla_data", None),
+                getattr(db, "_generation_mla_module_data", None),
+            )
 
         if key == "dsa_context_module":
             from aiconfigurator.sdk.operations.dsa import ContextDSAModule
@@ -1487,22 +1541,13 @@ class PerfDatabase:
         def _generation_mla_kv_modes() -> list[str]:
             """Collect kv_cache_dtype names for generation MLA from both sources.
 
-            Granular data is keyed [kv_cache]... so top-level keys are kv modes.
-            Module data is keyed [fmha][kv_cache][gemm]... so kv modes are
-            at the second level.
+            Both granular and module data key on kv_cache_dtype at the top
+            level (generation MLA has no fmha axis).
             """
-            kv_modes: set[str] = set()
-            # Granular: top-level keys are kv_cache_dtype
-            granular = getattr(self, "_generation_mla_data", None)
-            if granular:
-                kv_modes.update(_enum_key_names(granular))
-            # Module: kv_cache_dtype is at the second level
-            module = getattr(self, "_generation_mla_module_data", None)
-            if module:
-                for fmha_mode in module:
-                    for kv_mode in module[fmha_mode]:
-                        kv_modes.add(kv_mode.name if hasattr(kv_mode, "name") else str(kv_mode))
-            return sorted(kv_modes)
+            return _merge_key_names(
+                getattr(self, "_generation_mla_data", None),
+                getattr(self, "_generation_mla_module_data", None),
+            )
 
         def _dsv4_megamoe_modes(data: dict | None) -> list[str]:
             """Collect MoE quant-mode names from DSv4 MegaMoE data.
@@ -1543,6 +1588,7 @@ class PerfDatabase:
                     getattr(self, "_context_mla_data", None),
                     getattr(self, "_context_mla_module_data", None),
                 ),
+                "context_mla_granular": _enum_key_names(getattr(self, "_context_mla_data", None)),
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
@@ -1570,6 +1616,7 @@ class PerfDatabase:
                     getattr(self, "_context_mla_data", None),
                     getattr(self, "_context_mla_module_data", None),
                 ),
+                "context_mla_granular": _enum_key_names(getattr(self, "_context_mla_data", None)),
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
@@ -1592,6 +1639,7 @@ class PerfDatabase:
                     getattr(self, "_context_mla_data", None),
                     getattr(self, "_context_mla_module_data", None),
                 ),
+                "context_mla_granular": _enum_key_names(getattr(self, "_context_mla_data", None)),
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
@@ -2069,7 +2117,6 @@ class PerfDatabase:
         s: int,
         num_heads: int,
         kv_cache_dtype: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode = common.FMHAQuantMode.bfloat16,
         gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
@@ -2082,7 +2129,6 @@ class PerfDatabase:
             s,
             num_heads,
             kv_cache_dtype,
-            fmha_quant_mode,
             gemm_quant_mode,
             database_mode,
         )

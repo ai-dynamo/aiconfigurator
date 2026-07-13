@@ -62,7 +62,7 @@ pub struct MlaTable {
     generation: OnceLock<Result<GenerationMlaGrids, AicError>>,
     bmm: OnceLock<Result<BmmGrids, AicError>>,
     context_module: OnceLock<Result<ModuleGrids, AicError>>,
-    generation_module: OnceLock<Result<ModuleGrids, AicError>>,
+    generation_module: OnceLock<Result<GenModuleGrids, AicError>>,
 }
 
 struct ContextMlaGrids {
@@ -73,10 +73,17 @@ struct GenerationMlaGrids {
     by_keys: BTreeMap<KvOnlyKey, Node>,
 }
 
-/// Module-level MLA grids, shared between context and generation variants
-/// (the same nested layout; distinct CSV files supply the data).
+/// Module-level context MLA grids (fmha is a real axis for context).
 struct ModuleGrids {
     by_keys: BTreeMap<ModuleKey, Node>,
+}
+
+/// Module-level generation MLA grids, keyed on (kv, gemm) only: the parquet's
+/// `mla_dtype` column is degenerate (collectors hardcode `bfloat16`; decode
+/// compute dtype follows the kv-cache dtype) and is dropped, mirroring
+/// Python's `load_generation_mla_module_data`.
+struct GenModuleGrids {
+    by_keys: BTreeMap<GenModuleKey, Node>,
 }
 
 struct BmmGrids {
@@ -98,6 +105,12 @@ struct KvOnlyKey {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ModuleKey {
     fmha_quant: String,
+    kv_quant: String,
+    gemm_quant: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct GenModuleKey {
     kv_quant: String,
     gemm_quant: String,
 }
@@ -285,19 +298,18 @@ impl MlaTable {
         )
     }
 
-    /// Module-level generation MLA latency in ms.
+    /// Module-level generation MLA latency in ms. No fmha axis: decode
+    /// compute dtype follows the kv-cache dtype (see [`GenModuleGrids`]).
     pub fn query_generation_module(
         &self,
         b: u32,
         s: u32,
         num_heads: u32,
         kv_quant: KvCacheQuantMode,
-        fmha_quant: FmhaQuantMode,
         gemm_quant: GemmQuantMode,
     ) -> Result<f64, AicError> {
         let grids = self.load_generation_module()?;
-        let key = ModuleKey {
-            fmha_quant: fmha_quant.name().to_string(),
+        let key = GenModuleKey {
             kv_quant: kv_quant.name().to_string(),
             gemm_quant: gemm_quant.name().to_string(),
         };
@@ -307,7 +319,7 @@ impl MlaTable {
         let spec = &self.system_spec;
         // Generation module SOL = generation MLA SOL + BMM pre/post terms
         // (Python's module get_sol folds the BMM into sol_math/sol_mem before
-        // the max). fmha_quant only keys the table slice, not the SOL.
+        // the max).
         let sol =
             move |c: &[f64]| generation_mla_module_sol_ms(spec, kv_quant, gemm_quant, c[0], c[1], c[2]);
         let cfg = OpInterpConfig::grid(GENERATION_AXES, &sol);
@@ -337,14 +349,14 @@ impl MlaTable {
 
     fn load_context_module(&self) -> Result<&ModuleGrids, AicError> {
         let cell = self.context_module.get_or_init(|| {
-            load_module_parquet(&self.mla_context_module_sources, true)
+            load_context_module_parquet(&self.mla_context_module_sources)
         });
         cell.as_ref().map_err(clone_err)
     }
 
-    fn load_generation_module(&self) -> Result<&ModuleGrids, AicError> {
+    fn load_generation_module(&self) -> Result<&GenModuleGrids, AicError> {
         let cell = self.generation_module.get_or_init(|| {
-            load_module_parquet(&self.mla_generation_module_sources, false)
+            load_generation_module_parquet(&self.mla_generation_module_sources)
         });
         cell.as_ref().map_err(clone_err)
     }
@@ -606,7 +618,7 @@ fn load_op_gen_parquet(sources: &[PerfSource]) -> Result<GenerationMlaGrids, Aic
     Ok(GenerationMlaGrids { by_keys })
 }
 
-fn load_module_parquet(sources: &[PerfSource], is_context: bool) -> Result<ModuleGrids, AicError> {
+fn load_context_module_parquet(sources: &[PerfSource]) -> Result<ModuleGrids, AicError> {
     let mut raw: BTreeMap<ModuleKey, Grid3<f64>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
@@ -622,7 +634,6 @@ fn load_module_parquet(sources: &[PerfSource], is_context: bool) -> Result<Modul
         let num_heads_col = reader.col("num_heads")?;
         let batch_size_col = reader.col("batch_size")?;
         let isl_col = reader.col("isl")?;
-        let step_col = reader.col("step")?;
         let latency_col = reader.col("latency")?;
         let ks_col = reader.col_optional("kernel_source");
         for row in reader.rows()? {
@@ -640,40 +651,27 @@ fn load_module_parquet(sources: &[PerfSource], is_context: bool) -> Result<Modul
             let isl = row.u32(isl_col)?;
             let latency = row.f64(latency_col)?;
             // Last-wins parity with Python `load_context_mla_module_data`
-            // (`operations/mla.py:1804`) and `load_generation_mla_module_data`
-            // (`operations/mla.py:1847`). Unlike the legacy CSV loaders and most
-            // other Python perf-DB loaders (GEMM, attention, MoE, MHC, wideep)
-            // which guard with `try/except KeyError` for first-wins semantics,
-            // these two MLA-module parquet loaders use direct assignment and
-            // therefore last-wins. (Python DSA is neither: it is two-phase —
-            // last-row-wins within a file, first-source-wins across sources;
-            // see `operations/dsa.py:1461-1502` and `dsa.rs::load_dsa_parquet`.)
-            // Some perf-DB parquet shards (notably
-            // b300_sxm/vllm/0.19.0 `mla_generation_module_perf.parquet`) contain
-            // duplicate (num_heads, batch_size, sequence_tokens) rows; first-wins
-            // here caused a constant +0.247ms/step decode drift on b300 because
+            // and `load_generation_mla_module_data`. Unlike the legacy CSV
+            // loaders and most other Python perf-DB loaders (GEMM, attention,
+            // MoE, MHC, wideep) which guard with `try/except KeyError` for
+            // first-wins semantics, these two MLA-module parquet loaders use
+            // direct assignment and therefore last-wins. (Python DSA is
+            // neither: it is two-phase — last-row-wins within a file,
+            // first-source-wins across sources; see
+            // `operations/dsa.py:1461-1502` and `dsa.rs::load_dsa_parquet`.)
+            // Some perf-DB parquet shards (notably b300_sxm/vllm/0.19.0
+            // `mla_generation_module_perf.parquet`) contain duplicate
+            // (num_heads, batch_size, sequence_tokens) rows; first-wins here
+            // caused a constant +0.247ms/step decode drift on b300 because
             // Rust picked the slightly-higher latency for ~184 affected keys.
-            if is_context {
-                let inner = raw
-                    .entry(key)
-                    .or_default()
-                    .entry(num_heads)
-                    .or_default()
-                    .entry(isl)
-                    .or_default();
-                inner.insert(batch_size, latency);
-            } else {
-                // Generation module: (num_heads, b, s) axis order.
-                let sequence_tokens = isl + row.u32(step_col)?;
-                let inner = raw
-                    .entry(key)
-                    .or_default()
-                    .entry(num_heads)
-                    .or_default()
-                    .entry(batch_size)
-                    .or_default();
-                inner.insert(sequence_tokens, latency);
-            }
+            let inner = raw
+                .entry(key)
+                .or_default()
+                .entry(num_heads)
+                .or_default()
+                .entry(isl)
+                .or_default();
+            inner.insert(batch_size, latency);
         }
     }
     if !any_source || raw.is_empty() {
@@ -688,6 +686,67 @@ fn load_module_parquet(sources: &[PerfSource], is_context: bool) -> Result<Modul
         .map(|(key, grid)| (key, grid3_to_node(&grid)))
         .collect();
     Ok(ModuleGrids { by_keys })
+}
+
+fn load_generation_module_parquet(sources: &[PerfSource]) -> Result<GenModuleGrids, AicError> {
+    let mut raw: BTreeMap<GenModuleKey, Grid3<f64>> = BTreeMap::new();
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        // The `mla_dtype` column is intentionally not read: it is degenerate
+        // for generation (collectors hardcode `bfloat16`; decode compute
+        // dtype follows the kv-cache dtype).
+        let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
+        let gemm_type_col = reader.col("gemm_type")?;
+        let num_heads_col = reader.col("num_heads")?;
+        let batch_size_col = reader.col("batch_size")?;
+        let isl_col = reader.col("isl")?;
+        let step_col = reader.col("step")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let key = GenModuleKey {
+                kv_quant: row.str_owned(kv_cache_dtype_col)?,
+                gemm_quant: row.str_owned(gemm_type_col)?,
+            };
+            let num_heads = row.u32(num_heads_col)?;
+            let batch_size = row.u32(batch_size_col)?;
+            let isl = row.u32(isl_col)?;
+            let latency = row.f64(latency_col)?;
+            // Generation module: (num_heads, b, s) axis order. Last-wins on
+            // duplicate rows -- see the note in `load_context_module_parquet`.
+            let sequence_tokens = isl + row.u32(step_col)?;
+            let inner = raw
+                .entry(key)
+                .or_default()
+                .entry(num_heads)
+                .or_default()
+                .entry(batch_size)
+                .or_default();
+            inner.insert(sequence_tokens, latency);
+        }
+    }
+    if !any_source || raw.is_empty() {
+        return Err(AicError::PerfDatabase(format!(
+            "no MLA module rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+        )));
+    }
+    let by_keys = raw
+        .into_iter()
+        .map(|(key, grid)| (key, grid3_to_node(&grid)))
+        .collect();
+    Ok(GenModuleGrids { by_keys })
 }
 
 fn load_bmm_parquet(sources: &[PerfSource]) -> Result<BmmGrids, AicError> {
@@ -773,6 +832,12 @@ mod tests {
             .join("src/aiconfigurator/systems/data/gb200/trtllm/1.3.0rc10")
     }
 
+    fn h200_trtllm_data_root() -> PathBuf {
+        PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator/systems/data/h200_sxm/trtllm/1.3.0rc10")
+    }
+
     fn load_spec(name: &str) -> SystemSpec {
         let systems_yaml = PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
@@ -825,7 +890,6 @@ mod tests {
             1024,
             128,
             KvCacheQuantMode::Bfloat16,
-            FmhaQuantMode::Bfloat16,
             GemmQuantMode::Bfloat16,
         );
         match result {
@@ -835,6 +899,28 @@ mod tests {
                 // interpolation-range error is acceptable for this smoke check.
             }
             Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn module_level_generation_mla_fp8_kv_anchor() {
+        // Exact-value pins for fp8-KV decode: dropping the degenerate fmha
+        // axis makes the generation module table live for fp8-checkpoint
+        // V3/R1/Kimi decode (was: FallbackOp -> granular path). h200 ships
+        // NATIVE (kv=fp8, gemm=fp8_block) rows, so this anchor holds under
+        // single-primary loading. Values minted from this Rust path on the
+        // PR branch.
+        let table = MlaTable::new(h200_trtllm_data_root(), load_spec("h200_sxm"));
+        let cases: &[(u32, u32, f64)] = &[(8, 4097, 0.0693), (64, 4096, 0.1146884765625)];
+        for &(b, s, expected) in cases {
+            let got = table
+                .query_generation_module(b, s, 16, KvCacheQuantMode::Fp8, GemmQuantMode::Fp8Block)
+                .unwrap();
+            let rel = ((got - expected) / expected.max(1e-12)).abs();
+            assert!(
+                rel < 1e-9,
+                "gen_mla_module_fp8kv(b={b}, s={s}): got {got:.16}, expected {expected:.16}"
+            );
         }
     }
 
@@ -953,7 +1039,6 @@ mod tests {
                     s,
                     128,
                     KvCacheQuantMode::Bfloat16,
-                    FmhaQuantMode::Bfloat16,
                     GemmQuantMode::Bfloat16,
                 )
                 .unwrap();
