@@ -43,6 +43,10 @@ families:
         default: "priority list filtered by validate_configuration: SM100 FLASHINFER > FLASH_ATTN > TRITON_ATTN; else FLASH_ATTN > FLASHINFER > TRITON_ATTN (platforms/cuda.py:144-159)"
         choices:
           - {backend: flash_attn, framework_name: FLASH_ATTN, constraints: "SM>=80; fa2/fa3/fa4 chosen internally; fp8 kv only FA3 on SM90", source: "v1/attention/backends/flash_attn.py:173-206"}
+          - {backend: fa2, framework_name: "FLASH_ATTN (resolved v2)", constraints: "internal version pick on pre-Hopper / fallback", source: "v1/attention/backends/flash_attn.py + fa_utils.get_flash_attn_version"}
+          - {backend: fa3, framework_name: "FLASH_ATTN (resolved v3)", constraints: "SM90; fp8 kv supported", source: "v1/attention/backends/flash_attn.py:183-190"}
+          - {backend: fa4, framework_name: "FLASH_ATTN (resolved v4)", constraints: "head_dim<=512, mm_prefix", source: "v1/attention/backends/flash_attn.py:173-184"}
+          - {backend: trtllm_mha, framework_name: "FLASHINFER (trtllm-gen portion)", constraints: "SM100; flashinfer dispatches trtllm-gen prefill/decode kernels", source: "v1/attention/backends/flashinfer.py:338-356"}
           - {backend: flashinfer, framework_name: FLASHINFER, constraints: "SM80-SM121; head {64,128,256,512}; kv +fp8/nvfp4; SM100 needs HND layout", source: "v1/attention/backends/flashinfer.py:326-456"}
           - {backend: triton, framework_name: TRITON_ATTN, constraints: "any SM; kv +fp8/int8 per-token-head", source: "v1/attention/backends/triton_attn.py:249-373"}
           - {backend: flex_attention, framework_name: FLEX_ATTENTION, constraints: "any SM; kv fp16/bf16 only", source: "v1/attention/backends/flex_attention.py:86-91"}
@@ -88,6 +92,7 @@ families:
           - {backend: cutlass_mla, framework_name: CUTLASS_MLA, constraints: "SM100 only; block 128", source: "v1/attention/backends/mla/cutlass_mla.py:40-73"}
           - {backend: tokenspeed_mla, framework_name: TOKENSPEED_MLA, constraints: "SM100; kv fp8 only; DeepSeek-R1 dims; pip pkg", source: "v1/attention/backends/mla/tokenspeed_mla.py:61-126"}
           - {backend: triton, framework_name: TRITON_MLA, constraints: "any SM; universal fallback", source: "v1/attention/backends/mla/triton_mla.py:38-85"}
+          - {backend: trtllm_ragged, framework_name: "MLAPrefillBackendEnum.TRTLLM_RAGGED", constraints: "MLA prefill sub-backend (trtllm-gen ragged); paired with an MLA decode backend", source: "config/attention.py mla_prefill_backend; PR#1344 collect_mla_module.py:438-444"}
       trtllm:
         selector: "attn_backend (TRTLLM/FLASHINFER both support MLA)"
         default: "TRTLLM; FlashMLA used inside TRTLLM on SM90 when kv_lora_rank+qk_rope_head_dim==576"
@@ -108,6 +113,10 @@ families:
       - dsv4_hca_context_module_perf
       - dsv4_hca_generation_module_perf
       - dsv4_paged_mqa_logits_module_perf
+      - dsv4_csa_topk_calib_perf
+      - glm5_dsa_attn_module_perf
+      - glm5_mqa_logits_module_perf
+      - glm5_topk_module_perf
 
   - family: moe
     op_files:

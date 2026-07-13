@@ -21,11 +21,13 @@
 #
 # Backend vocabulary (keep names serving-visible and framework-neutral where
 # the kernel library is the identity): cublas, cutlass, deepgemm, trt_plugin,
-# torch, sgl_kernel, fa3, fa4, flash_attn, flashinfer, flashmla, triton,
-# trtllm_mha, trtllm_mla, trtllm_internal (TRT-LLM unified op, kernel chosen
-# inside TRT-LLM and not observable from the label), triton_fused_moe, marlin,
-# flashinfer_cutlass, flashinfer_cutedsl, flashinfer_trtllm_gen, deepep,
-# causal_conv1d, fla_triton, custom_allreduce, nccl, nvlink_one_sided,
+# torch, sgl_kernel, vllm_kernel, fa2, fa3, fa4, flash_attn, flashinfer,
+# flashmla, triton, trtllm_mha, trtllm_mla, trtllm_ragged (trtllm-gen ragged
+# prefill, shared by sglang DSA dense-MHA and vllm MLA prefill),
+# trtllm_internal (TRT-LLM unified op, kernel chosen inside TRT-LLM and not
+# observable from the label), triton_fused_moe, marlin, flashinfer_cutlass,
+# flashinfer_cutedsl, flashinfer_trtllm_gen, deepep, causal_conv1d,
+# fla_triton, tilelang, custom_allreduce, nccl, nvlink_one_sided,
 # nvlink_two_sided, dsa_nsa, unverified.
 
 schema_version: 1
@@ -82,6 +84,43 @@ mappings:
   - {framework: sglang, kernel_source: SGLang_CustomAllReduce_eager, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py"}
   - {framework: sglang, kernel_source: SGLang_CustomAllReduce_graph, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py (CUDA-graph launch)"}
   - {framework: sglang, kernel_source: TRTLLM, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py (trtllm AR rows stored under sglang dir)"}
+
+  # --- sglang 0.5.14 upgrade labels (PR #1342: serving-truth per-row labels;
+  # constructions in the PR branch's collector/sglang/*). Pre-staged so the
+  # 0.5.14 data lands with zero unmapped labels.
+  # DSA/NSA module labels split by attention sub-backend:
+  # f"{attn_type}_{backend_name}" (collect_mla_module.py).
+  - {framework: sglang, kernel_source: sglang_dsa_dense_mha_fa3, backend: fa3, source: "PR#1342 collector/sglang/collect_mla_module.py (dense-MHA short-seq path, fa3 sub-backend)"}
+  - {framework: sglang, kernel_source: sglang_dsa_dense_mha_trtllm_ragged, backend: trtllm_ragged, source: "PR#1342 collect_mla_module.py (trtllm-gen ragged prefill sub-backend)"}
+  - {framework: sglang, kernel_source: sglang_dsa_indexer_fa3, backend: fa3, source: "PR#1342 collect_mla_module.py (indexer path, fa3)"}
+  - {framework: sglang, kernel_source: sglang_dsa_indexer_trtllm, backend: trtllm_mla, source: "PR#1342 collect_mla_module.py (indexer path, trtllm-gen sparse MLA)"}
+  - {framework: sglang, kernel_source: sglang_dsa_indexer_flashmla_kv, backend: flashmla, source: "PR#1342 collect_mla_module.py (indexer path, FlashMLA dense-kv)"}
+  - {framework: sglang, kernel_source: sglang_dsa_indexer_flashmla_sparse, backend: flashmla, source: "PR#1342 collect_mla_module.py (indexer path, FlashMLA sparse)"}
+  - {framework: sglang, kernel_source: sglang_dsa_skip_indexer_trtllm, backend: trtllm_mla, source: "PR#1342 collect_mla_module.py (GLM-5.2 reuse layer, trtllm-gen)"}
+  - {framework: sglang, kernel_source: sglang_dsa_skip_indexer_flashmla_sparse, backend: flashmla, source: "PR#1342 collect_mla_module.py (GLM-5.2 reuse layer, FlashMLA sparse)"}
+  - {framework: sglang, kernel_source: flash_mla_sparse_fwd, backend: flashmla, source: "PR#1342 glm5_dsa_sparse_modules.py"}
+  - {framework: sglang, kernel_source: deep_gemm.fp8_mqa_logits, backend: deepgemm, source: "PR#1342 glm5_dsa_sparse_modules.py (DeepGEMM mqa logits)"}
+  - {framework: sglang, kernel_source: fast_topk_transform_fused, backend: sgl_kernel, source: "PR#1342 glm5 topk jit kernel"}
+  - {framework: sglang, kernel_source: topk_transform_v1, backend: sgl_kernel, source: "PR#1342 glm5 topk jit kernel"}
+  - {framework: sglang, kernel_source: topk_transform_v2, backend: sgl_kernel, source: "PR#1342 glm5 topk jit kernel"}
+  # GEMM/BMM labels now name the executed kernel directly.
+  - {framework: sglang, kernel_source: sglang_torch_linear, backend: cublas, source: "PR#1342 collect_gemm.py (torch.matmul/linear)"}
+  - {framework: sglang, kernel_source: sglang_torch_bmm, backend: cublas, source: "PR#1342 collect_mla_bmm.py (torch.bmm)"}
+  - {framework: sglang, kernel_source: sglang_sgl_kernel_bmm_fp8, backend: cublas, source: "PR#1342 collect_mla_bmm.py (sgl_kernel bmm_fp8 = cublasLt)"}
+  - {framework: sglang, kernel_source: sglang_sgl_kernel_fp8_scaled_mm, backend: cutlass, source: "PR#1342 collect_gemm.py (sgl_kernel fp8_scaled_mm)"}
+  - {framework: sglang, kernel_source: sglang_deepgemm_gemm_nt_f8f8bf16, backend: deepgemm, source: "PR#1342 collect_gemm.py"}
+  - {framework: sglang, kernel_source: sglang_flashinfer_cutlass_nvfp4, backend: flashinfer_cutlass, source: "PR#1342 collect_gemm.py (flashinfer mm_fp4 cutlass)"}
+  # MoE labels name the constructed serving method + runner.
+  - {framework: sglang, kernel_source: sglang_flashinfer_trtllm_moe, backend: flashinfer_trtllm_gen, source: "PR#1342 collect_moe.py"}
+  - {framework: sglang, kernel_source: sglang_mxfp4_flashinfer_trtllm_moe, backend: flashinfer_trtllm_gen, source: "PR#1342 collect_moe.py (mxfp4 trtllm-gen)"}
+  - {framework: sglang, kernel_source: sglang_flashinfer_cutlass_moe, backend: flashinfer_cutlass, source: "PR#1342 collect_moe.py"}
+  - {framework: sglang, kernel_source: sglang_flashinfer_cutedsl_nvfp4, backend: flashinfer_cutedsl, source: "PR#1342 collect_moe.py"}
+  # GDN sub-kernels and mHC.
+  - {framework: sglang, kernel_source: chunk_gated_delta_rule, backend: fla_triton, source: "PR#1342 collect_gdn.py (fla triton chunk kernel)"}
+  - {framework: sglang, kernel_source: fused_recurrent_gated_delta_rule_packed_decode, backend: fla_triton, source: "PR#1342 collect_gdn.py"}
+  - {framework: sglang, kernel_source: sglang_tilelang_mhc_pre, backend: tilelang, source: "PR#1342 collect_mhc_module.py"}
+  - {framework: sglang, kernel_source: sglang_tilelang_mhc_post, backend: tilelang, source: "PR#1342 collect_mhc_module.py"}
+  - {framework: sglang, kernel_source: sglang_torch_mhc_pre, backend: torch, source: "PR#1342 collect_mhc_module.py (torch fallback leaf)"}
 
   # ---------------------------------------------------------------- trtllm
   # TRT-LLM's unified backend dispatches kernels internally; the static
@@ -140,3 +179,69 @@ mappings:
   - {framework: vllm, kernel_source: vllm_default, backend: unverified, source: "label from before vLLM collectors recorded the selected backend"}
   - {framework: vllm, kernel_source: vLLM_custom_eager, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py"}
   - {framework: vllm, kernel_source: vLLM_custom_graph, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py (CUDA-graph launch)"}
+
+  # --- vllm 0.24.0 upgrade labels (PR #1344: labels encode
+  # <quant-method>_<oracle-backend>_<experts-class> for MoE, backend-class +
+  # kernel portion for attention, kernel class names for GEMM/quant).
+  # Attention: FLASH_ATTN with the resolved FA version appended.
+  - {framework: vllm, kernel_source: vllm_flash_attn_fa2, backend: fa2, source: "PR#1344 collect_attn.py (_dense_kernel_source; FA version from get_flash_attn_version)"}
+  - {framework: vllm, kernel_source: vllm_flash_attn_fa3, backend: fa3, source: "PR#1344 collect_attn.py"}
+  - {framework: vllm, kernel_source: vllm_flash_attn_fa4, backend: fa4, source: "PR#1344 collect_attn.py"}
+  - {framework: vllm, kernel_source: vllm_vit_flash_attn_fa2, backend: fa2, source: "PR#1344 collect_attn_encoder.py"}
+  - {framework: vllm, kernel_source: vllm_vit_flash_attn_fa3, backend: fa3, source: "PR#1344 collect_attn_encoder.py"}
+  - {framework: vllm, kernel_source: vllm_vit_flash_attn_fa4, backend: fa4, source: "PR#1344 collect_attn_encoder.py"}
+  - {framework: vllm, kernel_source: vllm_triton_attn, backend: triton, source: "PR#1344 collect_attn.py (TRITON_ATTN)"}
+  # FLASHINFER backend, split by the kernel portion actually used: fi* =
+  # flashinfer native kernels; trtllm* = flashinfer's trtllm-gen kernels
+  # (same kernel family sglang labels trtllm_mha).
+  - {framework: vllm, kernel_source: vllm_flashinfer_fiprefill, backend: flashinfer, source: "PR#1344 collect_attn.py + tests/unit/collector/test_vllm_collect_attn.py:329-333"}
+  - {framework: vllm, kernel_source: vllm_flashinfer_fidecode, backend: flashinfer, source: "PR#1344 collect_attn.py"}
+  - {framework: vllm, kernel_source: vllm_flashinfer_trtllmprefill, backend: trtllm_mha, source: "PR#1344 collect_attn.py (flashinfer trtllm-gen prefill)"}
+  - {framework: vllm, kernel_source: vllm_flashinfer_trtllmdecode, backend: trtllm_mha, source: "PR#1344 collect_attn.py (flashinfer trtllm-gen decode)"}
+  # MLA module labels: the AttentionBackendEnum member that ran.
+  - {framework: vllm, kernel_source: FLASH_ATTN, backend: flash_attn, source: "PR#1344 collect_mla_module.py (enum-name labels)"}
+  - {framework: vllm, kernel_source: FLASH_ATTN_MLA, backend: flash_attn, source: "PR#1344 collect_mla_module.py"}
+  - {framework: vllm, kernel_source: FLASHMLA, backend: flashmla, source: "PR#1344 collect_mla_module.py"}
+  - {framework: vllm, kernel_source: FLASHMLA_SPARSE, backend: flashmla, source: "PR#1344 collect_mla_module.py"}
+  - {framework: vllm, kernel_source: FLASHMLA_SPARSE_DSV4, backend: flashmla, source: "PR#1344 collect_dsv4_attn.py"}
+  - {framework: vllm, kernel_source: FLASHINFER_MLA, backend: flashinfer, source: "PR#1344 collect_mla_module.py"}
+  - {framework: vllm, kernel_source: FLASHINFER_MLA_SPARSE, backend: flashinfer, source: "PR#1344 collect_mla_module.py"}
+  - {framework: vllm, kernel_source: TRITON_MLA, backend: triton, source: "PR#1344 collect_mla_module.py"}
+  - {framework: vllm, kernel_source: TRTLLM_RAGGED, backend: trtllm_ragged, source: "PR#1344 collect_mla_module.py:438-444 (MLAPrefillBackendEnum.TRTLLM_RAGGED, trtllm-gen ragged prefill)"}
+  # GEMM / quant labels: vllm kernel class names.
+  - {framework: vllm, kernel_source: CutlassFP8ScaledMMLinearKernel, backend: cutlass, source: "PR#1344 collect_gemm.py"}
+  - {framework: vllm, kernel_source: CutlassFp8BlockScaledMMKernel, backend: cutlass, source: "PR#1344 collect_gemm.py"}
+  - {framework: vllm, kernel_source: DeepGemmFp8BlockScaledMMKernel, backend: deepgemm, source: "PR#1344 collect_gemm.py"}
+  - {framework: vllm, kernel_source: TritonFp8BlockScaledMMKernel, backend: triton, source: "PR#1344 collect_gemm.py"}
+  - {framework: vllm, kernel_source: FlashInferFp8BlockScaledMMKernel, backend: flashinfer, source: "PR#1344 collect_gemm.py"}
+  - {framework: vllm, kernel_source: FlashInferCutlassNvFp4LinearKernel, backend: flashinfer_cutlass, source: "PR#1344 collect_gemm.py"}
+  - {framework: vllm, kernel_source: FlashInferCuteDslNvFp4LinearKernel, backend: flashinfer_cutedsl, source: "PR#1344 collect_gemm.py"}
+  - {framework: vllm, kernel_source: "torch.nn.functional.linear", backend: cublas, source: "PR#1344 collect_gemm.py (bf16)"}
+  - {framework: vllm, kernel_source: static_scaled_fp8_quant, backend: vllm_kernel, source: "PR#1344 collect_computescale.py:73 (vllm _custom_ops)"}
+  - {framework: vllm, kernel_source: dynamic_per_token_scaled_fp8_quant_minus_static_scaled_fp8_quant, backend: vllm_kernel, source: "PR#1344 collect_computescale.py:63 (derived overhead measure)"}
+  # MoE labels: vllm_<quant-method>_<oracle-backend>_<experts-class>.
+  - {framework: vllm, kernel_source: vllm_unquantizedfusedmoe_triton_tritonexperts, backend: triton_fused_moe, source: "PR#1344 collect_moe.py (label encodes oracle backend + experts class)"}
+  - {framework: vllm, kernel_source: vllm_unquantizedfusedmoe_flashinfer_cutlass_flashinferexperts, backend: flashinfer_cutlass, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_unquantizedfusedmoe_flashinfer_trtllm_trtllmbf16experts, backend: flashinfer_trtllm_gen, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_fp8moe_triton_tritonexperts, backend: triton_fused_moe, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_fp8moe_flashinfer_cutlass_flashinferexperts, backend: flashinfer_cutlass, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_fp8moe_flashinfer_trtllm_trtllmfp8expertsmodular, backend: flashinfer_trtllm_gen, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_fp8moe_flashinfer_trtllm_trtllmfp8expertsmonolithic, backend: flashinfer_trtllm_gen, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_modeloptfp8moe_triton_tritonexperts, backend: triton_fused_moe, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_modeloptfp8moe_flashinfer_cutlass_flashinferexperts, backend: flashinfer_cutlass, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_modeloptfp8moe_flashinfer_trtllm_trtllmfp8expertsmonolithic, backend: flashinfer_trtllm_gen, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_compressedtensorsw4a4nvfp4moe_flashinfer_cutlass_flashinferexperts, backend: flashinfer_cutlass, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_compressedtensorsw4a4nvfp4moe_flashinfer_trtllm_trtllmnvfp4expertsmodular, backend: flashinfer_trtllm_gen, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_compressedtensorsw4a4nvfp4moe_flashinfer_trtllm_trtllmnvfp4expertsmonolithic, backend: flashinfer_trtllm_gen, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_compressedtensorswna16marlinmoe_marlin_marlinexperts, backend: marlin, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_gptossmxfp4moe_marlin_marlinexperts, backend: marlin, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_gptossmxfp4moe_triton_oaitritonmxfp4expertsmonolithic, backend: triton_fused_moe, source: "PR#1344 collect_moe.py (OAI triton mxfp4 experts)"}
+  - {framework: vllm, kernel_source: vllm_gptossmxfp4moe_flashinfer_trtllm_mxfp4_bf16_trtllmmxfp4expertsmonolithic, backend: flashinfer_trtllm_gen, source: "PR#1344 collect_moe.py"}
+  # GDN / mamba sub-kernels and mHC.
+  - {framework: vllm, kernel_source: causal_conv1d_fn, backend: causal_conv1d, source: "PR#1344 collect_gdn.py"}
+  - {framework: vllm, kernel_source: chunk_gated_delta_rule_triton, backend: fla_triton, source: "PR#1344 collect_gdn.py"}
+  - {framework: vllm, kernel_source: chunk_gated_delta_rule_flashinfer, backend: flashinfer, source: "PR#1344 collect_gdn.py (flashinfer gated-delta-rule kernel)"}
+  - {framework: vllm, kernel_source: fused_recurrent_gated_delta_rule_packed_decode, backend: fla_triton, source: "PR#1344 collect_gdn.py"}
+  - {framework: vllm, kernel_source: "vllm.model_executor.kernels.mhc.tilelang.mhc_pre_tilelang", backend: tilelang, source: "PR#1344 collect_mhc_module.py"}
+  - {framework: vllm, kernel_source: "vllm.model_executor.kernels.mhc.tilelang.mhc_post_tilelang", backend: tilelang, source: "PR#1344 collect_mhc_module.py"}
+  - {framework: vllm, kernel_source: "vllm.utils.deep_gemm.fp8_fp4_paged_mqa_logits", backend: deepgemm, source: "PR#1344 collect_dsv4_attn.py"}
