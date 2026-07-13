@@ -33,6 +33,7 @@ pub struct StateSpaceTable {
     /// default (`StateSpaceTable::new`).
     mamba2_sources: Vec<PerfSource>,
     gdn_sources: Vec<PerfSource>,
+    vllm_024_gdn_aliases: bool,
     mamba2: OnceLock<Result<Mamba2Grids, AicError>>,
     gdn: OnceLock<Result<GdnGrids, AicError>>,
 }
@@ -85,14 +86,19 @@ impl StateSpaceTable {
     /// Construct an empty table for the given data directory. No I/O. Each
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
-    pub fn new(data_root: PathBuf) -> Self {
-        Self::with_sources(data_root, &PerfDbSources::default())
+    pub fn new(data_root: PathBuf, backend: &str, version: &str) -> Self {
+        Self::with_sources(data_root, backend, version, &PerfDbSources::default())
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources resolved from
     /// `perf_db_sources` (Python-supplied). Each state-space file falls back to
     /// its primary `data_root/<basename>` when absent from the map. No I/O.
-    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
+    pub fn with_sources(
+        data_root: PathBuf,
+        backend: &str,
+        version: &str,
+        perf_db_sources: &PerfDbSources,
+    ) -> Self {
         let mamba2_sources =
             resolve_op_sources(perf_db_sources, "mamba2_perf.parquet", &data_root);
         let gdn_sources = resolve_op_sources(perf_db_sources, "gdn_perf.parquet", &data_root);
@@ -100,6 +106,7 @@ impl StateSpaceTable {
             data_root,
             mamba2_sources,
             gdn_sources,
+            vllm_024_gdn_aliases: backend == "vllm" && version == "0.24.0",
             mamba2: OnceLock::new(),
             gdn: OnceLock::new(),
         }
@@ -223,6 +230,48 @@ impl StateSpaceTable {
         let node = match grids.by_keys.get(&key) {
             Some(node) => node,
             None => {
+                // vLLM 0.24 persists the selected physical recurrence
+                // implementation, while model operators retain stable logical
+                // kernel names. Resolve a physical source only for an exact
+                // model shape. Exact logical data always wins, and ambiguous
+                // physical data fails closed.
+                let aliases: &[&str] = if self.vllm_024_gdn_aliases {
+                    match (key.kernel_source.as_str(), key.phase.as_str()) {
+                        ("chunk_gated_delta_rule", "context") => &[
+                            "chunk_gated_delta_rule_flashinfer",
+                            "chunk_gated_delta_rule_triton",
+                            "chunk_gated_delta_rule_cutedsl",
+                        ],
+                        ("fused_sigmoid_gating_delta_rule_update", "generation") => {
+                            &["fused_recurrent_gated_delta_rule_packed_decode"]
+                        }
+                        _ => &[],
+                    }
+                } else {
+                    &[]
+                };
+                let alias_matches: Vec<_> = aliases
+                    .iter()
+                    .filter_map(|alias| {
+                        let mut alias_key = key.clone();
+                        alias_key.kernel_source = (*alias).to_string();
+                        grids.by_keys.get_key_value(&alias_key)
+                    })
+                    .collect();
+                if alias_matches.len() > 1 {
+                    let sources: Vec<_> = alias_matches
+                        .iter()
+                        .map(|(alias_key, _)| alias_key.kernel_source.as_str())
+                        .collect();
+                    return Err(AicError::PerfDatabase(format!(
+                        "ambiguous vLLM 0.24.0 GDN physical kernels for {key:?}: {}",
+                        sources.join(", ")
+                    )));
+                }
+                if let Some((_, node)) = alias_matches.first() {
+                    return engine_query(node, phase, batch_size, seq_len, sol);
+                }
+
                 let nearest = grids
                     .by_keys
                     .iter()
@@ -471,11 +520,177 @@ mod tests {
         1.0
     }
 
+    /// In-memory GDN table over one fixed model shape (d_model=5120,
+    /// heads 16/128, v-dim 128), varying only `(kernel_source, phase,
+    /// num_v_heads)`. Context rows land at `[batch=1][seq=1024]`, generation
+    /// rows at `[batch=1]`, matching the loader's leaf layout — queries below
+    /// hit those coordinates exactly, so engine RAW returns the stored value.
+    fn in_memory_gdn_table(
+        backend: &str,
+        version: &str,
+        rows: &[(&str, &str, u32, f64)],
+    ) -> StateSpaceTable {
+        let mut by_keys: BTreeMap<GdnKey, Node> = BTreeMap::new();
+        for &(kernel_source, phase, num_v_heads, latency) in rows {
+            let key = GdnKey {
+                kernel_source: kernel_source.to_string(),
+                phase: phase.to_string(),
+                d_model: 5120,
+                d_conv: 4,
+                num_k_heads: 16,
+                head_k_dim: 128,
+                num_v_heads,
+                head_v_dim: 128,
+            };
+            let node = by_keys.entry(key).or_insert_with(Node::branch);
+            if phase == "generation" {
+                insert_first_wins(node, &[1], latency);
+            } else {
+                insert_first_wins(node, &[1, 1024], latency);
+            }
+        }
+        let table = StateSpaceTable::new(PathBuf::from("test-data"), backend, version);
+        assert!(table.gdn.set(Ok(GdnGrids { by_keys })).is_ok());
+        table
+    }
+
+    fn query_gdn_test_shape(
+        table: &StateSpaceTable,
+        kernel_source: &str,
+        phase: &str,
+        num_v_heads: u32,
+    ) -> Result<f64, AicError> {
+        table.query_gdn(
+            kernel_source,
+            phase,
+            1,
+            1024,
+            5120,
+            4,
+            16,
+            128,
+            num_v_heads,
+            128,
+            &dummy_sol,
+        )
+    }
+
+    #[test]
+    fn vllm_024_gdn_resolves_context_and_generation_physical_aliases() {
+        for source in [
+            "chunk_gated_delta_rule_flashinfer",
+            "chunk_gated_delta_rule_triton",
+            "chunk_gated_delta_rule_cutedsl",
+        ] {
+            let table = in_memory_gdn_table("vllm", "0.24.0", &[(source, "context", 48, 2.0)]);
+            assert_eq!(
+                query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).unwrap(),
+                2.0
+            );
+        }
+
+        let table = in_memory_gdn_table(
+            "vllm",
+            "0.24.0",
+            &[(
+                "fused_recurrent_gated_delta_rule_packed_decode",
+                "generation",
+                48,
+                3.0,
+            )],
+        );
+        assert_eq!(
+            query_gdn_test_shape(
+                &table,
+                "fused_sigmoid_gating_delta_rule_update",
+                "generation",
+                48,
+            )
+            .unwrap(),
+            3.0
+        );
+    }
+
+    #[test]
+    fn vllm_024_gdn_exact_logical_key_wins_over_alias() {
+        let table = in_memory_gdn_table(
+            "vllm",
+            "0.24.0",
+            &[
+                ("chunk_gated_delta_rule", "context", 48, 1.0),
+                ("chunk_gated_delta_rule_flashinfer", "context", 48, 2.0),
+            ],
+        );
+        assert_eq!(
+            query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).unwrap(),
+            1.0
+        );
+    }
+
+    #[test]
+    fn gdn_physical_aliases_are_vllm_024_only() {
+        for (backend, version) in [("vllm", "0.23.0"), ("sglang", "0.24.0")] {
+            let table = in_memory_gdn_table(
+                backend,
+                version,
+                &[("chunk_gated_delta_rule_flashinfer", "context", 48, 2.0)],
+            );
+            assert!(query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).is_err());
+        }
+    }
+
+    #[test]
+    fn vllm_024_gdn_ambiguous_exact_aliases_error() {
+        let table = in_memory_gdn_table(
+            "vllm",
+            "0.24.0",
+            &[
+                ("chunk_gated_delta_rule_flashinfer", "context", 48, 2.0),
+                ("chunk_gated_delta_rule_triton", "context", 48, 3.0),
+            ],
+        );
+        match query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48) {
+            Err(AicError::PerfDatabase(message)) => {
+                assert!(message.contains("ambiguous vLLM 0.24.0 GDN physical kernels"));
+                assert!(message.contains("chunk_gated_delta_rule_flashinfer"));
+                assert!(message.contains("chunk_gated_delta_rule_triton"));
+            }
+            other => panic!("expected an explicit ambiguity error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vllm_024_gdn_alias_has_no_nearest_shape_fallback() {
+        let table = in_memory_gdn_table(
+            "vllm",
+            "0.24.0",
+            &[("chunk_gated_delta_rule_flashinfer", "context", 32, 2.0)],
+        );
+        assert!(query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).is_err());
+    }
+
+    #[test]
+    fn vllm_024_gdn_preserves_logical_source_nearest_fallback() {
+        let table = in_memory_gdn_table(
+            "vllm",
+            "0.24.0",
+            &[
+                ("chunk_gated_delta_rule_flashinfer", "context", 32, 2.0),
+                ("chunk_gated_delta_rule", "context", 16, 4.0),
+                ("chunk_gated_delta_rule", "context", 64, 5.0),
+            ],
+        );
+        assert_eq!(
+            query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).unwrap(),
+            5.0
+        );
+    }
+
     #[test]
     fn state_space_loaders_smoke() {
         // GDN data exists on vLLM b200 (Nemotron-H slice); Mamba2 may not.
         let root = data_root("b200_sxm/vllm/0.19.0");
-        let table = StateSpaceTable::new(root);
+        let table = StateSpaceTable::new(root, "vllm", "0.19.0");
         // Just verify loader doesn't panic on missing-key path; we don't
         // assert a specific value here.
         let _ = table
@@ -498,7 +713,7 @@ mod tests {
     #[test]
     fn gdn_table_finds_qwen35_27b_conv1d_update() {
         let root = data_root("b200_sxm/vllm/0.19.0");
-        let table = StateSpaceTable::new(root);
+        let table = StateSpaceTable::new(root, "vllm", "0.19.0");
         let r = table.query_gdn(
             "causal_conv1d_update",
             "generation",
@@ -544,7 +759,7 @@ mod tests {
         let gdn_ctx_sol = move |b: f64, s: f64| gdn_conv_sol(b * s);
         let gdn_gen_sol = move |b: f64, _s: f64| gdn_conv_sol(b);
 
-        let gdn = StateSpaceTable::new(data_root("h100_sxm/sglang/0.5.10"));
+        let gdn = StateSpaceTable::new(data_root("h100_sxm/sglang/0.5.10"), "sglang", "0.5.10");
         // (batch, seq, expected): exact / seq-interp / batch-interp / beyond-seq.
         let ctx_cases: &[(u32, u32, f64)] = &[
             (8, 1024, 0.03154560029506683),
@@ -607,7 +822,7 @@ mod tests {
             let x = b * s;
             (x * conv_dim * (4.0 + 1.0) * 2.0 + x * conv_dim * 2.0) / bw * 1000.0
         };
-        let mamba2 = StateSpaceTable::new(data_root("h100_sxm/trtllm/1.3.0rc10"));
+        let mamba2 = StateSpaceTable::new(data_root("h100_sxm/trtllm/1.3.0rc10"), "trtllm", "1.3.0rc10");
         let m2_cases: &[(u32, u32, f64)] = &[
             (4, 1024, 0.058057600259780885),
             (4, 1536, 0.07725920081138611),

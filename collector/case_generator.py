@@ -23,6 +23,10 @@ COLLECTOR_ROOT = Path(__file__).resolve().parent
 BASE_OP_CASES_DIR = COLLECTOR_ROOT / "cases" / "base_ops"
 MODEL_CASES_DIR = COLLECTOR_ROOT / "cases" / "models"
 
+# Backend names a model_case_values row may target via `frameworks:`. A typo
+# here would otherwise silently exclude the row from its intended backend.
+_KNOWN_CASE_FRAMEWORKS = frozenset({"sglang", "trtllm", "vllm", "wideep"})
+
 
 def _load_yaml_mapping(path: Path) -> dict:
     with open(path, encoding="utf-8") as f:
@@ -517,47 +521,78 @@ class MLAModulePrecisionSpec:
     gemm_type: str
     phases: tuple[str, ...]
     min_sm: int
+    attention_types: tuple[str, ...] = ("mla", "dsa")
+
+
+_MLA_MODULE_ATTENTION_TYPES = ("mla", "dsa")
 
 
 def get_mla_module_model_specs(
     attention_type: str | None = None,
     *,
+    backend: str | None = None,
     wideep_mla: bool | None = None,
     apply_model_filter: bool = True,
 ) -> list[MLAModuleModelSpec]:
     """Return YAML-backed model metadata for full MLA/DSA module collectors."""
 
-    values = []
-    model_path_filter = _get_model_path_filter() if apply_model_filter else None
-    for data in _load_model_cases_data():
-        raw_values = (data.get("model_case_values") or {}).get("mla_module", [])
-        if raw_values is None:
-            continue
-        if isinstance(raw_values, dict):
-            raw_values = [raw_values]
-        if not isinstance(raw_values, list):
-            raise TypeError("model_case_values.mla_module must be a list or mapping")
+    values = _model_case_values("mla_module", apply_model_filter=False)
+    if backend is not None:
+        values.extend(
+            _framework_specific_model_case_values(
+                "mla_module",
+                backend,
+                apply_model_filter=False,
+            )
+        )
 
-        architecture = data.get("architecture")
-        for index, raw_value in enumerate(raw_values):
-            for value in _expand_model_case_entry(raw_value, field_name=f"model_case_values.mla_module[{index}]"):
-                value.setdefault("architecture", architecture)
-                if model_path_filter and not _model_case_matches_path(value, model_path_filter):
-                    continue
-                if attention_type is not None and value.get("attention_type") != attention_type:
-                    continue
-                if wideep_mla is not None and bool(value.get("wideep_mla", False)) != wideep_mla:
-                    continue
-                values.append(
-                    MLAModuleModelSpec(
-                        model_path=str(value["model_path"]),
-                        attention_type=str(value["attention_type"]),
-                        architecture=str(value["architecture"]),
-                        native_num_heads=int(value["native_num_heads"]),
-                        wideep_mla=bool(value.get("wideep_mla", False)),
-                    )
-                )
-    return values
+    specs = []
+    model_path_filter = _get_model_path_filter() if apply_model_filter else None
+    for value in values:
+        if model_path_filter and not _model_case_matches_path(value, model_path_filter):
+            continue
+        if attention_type is not None and value.get("attention_type") != attention_type:
+            continue
+        if wideep_mla is not None and bool(value.get("wideep_mla", False)) != wideep_mla:
+            continue
+        specs.append(
+            MLAModuleModelSpec(
+                model_path=str(value["model_path"]),
+                attention_type=str(value["attention_type"]),
+                architecture=str(value["architecture"]),
+                native_num_heads=int(value["native_num_heads"]),
+                wideep_mla=bool(value.get("wideep_mla", False)),
+            )
+        )
+
+    if backend == "vllm" and apply_model_filter and model_path_filter is None:
+        # vLLM 0.24 builds every module with the case's explicit precision and
+        # head count, so checkpoint aliases no longer change the invocation.
+        # MLA has one architecture-less consumer table (the perf rows carry no
+        # lora/rope geometry key, so distinct-geometry models could not be
+        # represented anyway); DSA is keyed by architecture. Stable first-wins
+        # keeps DeepSeek-V3 and each DSA architecture canonical while targeted
+        # artifact runs remain exact. Revisit if an MLA model with different
+        # q_lora/kv_lora/rope geometry is declared — that first needs a new
+        # consumer key dimension (a contract change).
+        canonical_specs = {}
+        collapsed: dict[tuple, list[str]] = {}
+        for spec in specs:
+            key = (spec.attention_type, spec.architecture if spec.attention_type == "dsa" else None)
+            if key in canonical_specs:
+                collapsed.setdefault(key, []).append(spec.model_path)
+            else:
+                canonical_specs[key] = spec
+        specs = list(canonical_specs.values())
+        for key, dropped_paths in sorted(collapsed.items()):
+            canonical = canonical_specs[key]
+            print(
+                f"mla_module: collapsed {len(dropped_paths)} declared spec(s) into canonical "
+                f"{canonical.model_path!r} for {key[0]} (architecture-less consumer table): "
+                f"{', '.join(dropped_paths)}"
+            )
+
+    return specs
 
 
 def _required_mapping(value: object, *, field_name: str) -> dict[str, object]:
@@ -599,8 +634,14 @@ def get_mla_module_precision_specs(
     *,
     phase: str | None = None,
     sm_version: int | None = None,
+    attention_type: str | None = None,
 ) -> list[MLAModulePrecisionSpec]:
     """Return YAML-backed precision combos for module collectors."""
+
+    if attention_type is not None and attention_type not in _MLA_MODULE_ATTENTION_TYPES:
+        raise ValueError(
+            f"mla_module attention_type must be one of {_MLA_MODULE_ATTENTION_TYPES}, got {attention_type!r}"
+        )
 
     values = _merged_mla_module_values(backend)
     raw_precision_combos = values.get("module_precision_combos")
@@ -619,10 +660,26 @@ def get_mla_module_precision_specs(
         elif not isinstance(phases, tuple):
             raise TypeError("mla_module.module_precision_combos phases must be a string or list")
 
+        attention_types = combo.get("attention_types", _MLA_MODULE_ATTENTION_TYPES)
+        if isinstance(attention_types, str):
+            attention_types = (attention_types,)
+        elif isinstance(attention_types, list):
+            attention_types = tuple(str(item) for item in attention_types)
+        elif not isinstance(attention_types, tuple):
+            raise TypeError("mla_module.module_precision_combos attention_types must be a string or list")
+        invalid_attention_types = [item for item in attention_types if item not in _MLA_MODULE_ATTENTION_TYPES]
+        if invalid_attention_types:
+            raise ValueError(
+                "mla_module.module_precision_combos attention_types entries must be in "
+                f"{_MLA_MODULE_ATTENTION_TYPES}, got {invalid_attention_types!r}"
+            )
+
         min_sm = int(combo.get("min_sm", 0))
         if phase is not None and phase not in phases:
             continue
         if sm_version is not None and sm_version < min_sm:
+            continue
+        if attention_type is not None and attention_type not in attention_types:
             continue
         precision_specs.append(
             MLAModulePrecisionSpec(
@@ -631,6 +688,7 @@ def get_mla_module_precision_specs(
                 gemm_type=str(combo["gemm_type"]),
                 phases=phases,
                 min_sm=min_sm,
+                attention_types=attention_types,
             )
         )
     return precision_specs
@@ -887,6 +945,12 @@ def _model_moe_backend_quantization(model_name: str, backend: str) -> dict[str, 
     for model_case in _model_case_values("moe", apply_model_filter=False):
         if not _model_case_matches_path(model_case, model_name):
             continue
+        raw_frameworks = model_case.get("frameworks")
+        if raw_frameworks is not None and backend not in _as_str_list(
+            raw_frameworks,
+            field_name="model_case_values.moe.frameworks",
+        ):
+            continue
         framework_quantization = model_case.get("framework_quantization", {})
         if not isinstance(framework_quantization, dict):
             raise TypeError("model_case_values.moe.framework_quantization must be a mapping")
@@ -982,51 +1046,6 @@ def moe_model_allows_quantization(backend: str, model_name: str, moe_type: str) 
             field_name=f"moe_{backend}.model_quantization_policies.excluded_modes",
         ):
             return False
-    return True
-
-
-def moe_shape_satisfies_constraints(
-    backend: str,
-    moe_type: str,
-    *,
-    hidden_size: int,
-    inter_size: int,
-    tensor_parallel_size: int,
-    topk: int,
-) -> bool:
-    """Return whether a MoE shape satisfies backend YAML quantization limits."""
-
-    values = _moe_backend_values(backend)
-    raw_constraints = values.get("shape_constraints", [])
-    if not isinstance(raw_constraints, list):
-        raise TypeError(f"common_case_values.moe_{backend}.shape_constraints must be a list")
-
-    local_inter_size = inter_size // tensor_parallel_size
-    fields = {
-        "hidden_size": hidden_size,
-        "inter_size": inter_size,
-        "local_inter_size": local_inter_size,
-        "topk": topk,
-    }
-    for raw_constraint in raw_constraints:
-        if not isinstance(raw_constraint, dict):
-            raise TypeError(f"common_case_values.moe_{backend}.shape_constraints entries must be mappings")
-        if str(raw_constraint.get("mode")) != moe_type:
-            continue
-
-        divisible_by = raw_constraint.get("divisible_by", {})
-        if not isinstance(divisible_by, dict):
-            raise TypeError(f"common_case_values.moe_{backend}.shape_constraints.divisible_by must be a mapping")
-        for field_name, divisor in divisible_by.items():
-            if field_name not in fields:
-                raise ValueError(f"Unknown MoE shape constraint field: {field_name}")
-            if fields[field_name] % int(divisor) != 0:
-                return False
-
-        max_topk = raw_constraint.get("max_topk")
-        if max_topk is not None and topk > int(max_topk):
-            return False
-
     return True
 
 
@@ -1158,7 +1177,7 @@ def get_moe_backend_test_cases(backend: str) -> list[MoeCommonTestCase]:
     return test_cases
 
 
-def get_common_moe_test_cases():
+def get_common_moe_test_cases(*, backend: str | None = None):
     moe_sweep = _required_base_common_case_values("moe")
     num_tokens = _as_int_list(moe_sweep.get("token_counts"), field_name="moe.token_counts")
     tp_list = _as_int_list(moe_sweep.get("tensor_parallel_sizes"), field_name="moe.tensor_parallel_sizes")
@@ -1166,7 +1185,40 @@ def get_common_moe_test_cases():
     num_gpu_list = _as_int_list(moe_sweep.get("gpu_counts"), field_name="moe.gpu_counts")
     token_distributions = _moe_token_expert_distributions(moe_sweep)
 
-    model_config_list = _model_case_values("moe")
+    allowed_parallel_topologies = None
+    if backend is not None:
+        raw_topologies = _moe_backend_values(backend).get("parallel_topologies")
+        if raw_topologies is not None:
+            if not isinstance(raw_topologies, list):
+                raise TypeError(f"common_case_values.moe_{backend}.parallel_topologies must be a list")
+            allowed_parallel_topologies = set()
+            for index, topology in enumerate(raw_topologies):
+                if not isinstance(topology, dict):
+                    raise TypeError(f"common_case_values.moe_{backend}.parallel_topologies[{index}] must be a mapping")
+                topology_tps = _as_int_list(
+                    topology.get("tensor_parallel_sizes"),
+                    field_name=f"moe_{backend}.parallel_topologies[{index}].tensor_parallel_sizes",
+                )
+                topology_eps = _as_int_list(
+                    topology.get("expert_parallel_sizes"),
+                    field_name=f"moe_{backend}.parallel_topologies[{index}].expert_parallel_sizes",
+                )
+                allowed_parallel_topologies.update(itertools.product(topology_tps, topology_eps))
+
+    model_config_list = []
+    for model_config in _model_case_values("moe"):
+        raw_frameworks = model_config.get("frameworks")
+        if raw_frameworks is not None:
+            frameworks = _as_str_list(raw_frameworks, field_name="model_case_values.moe.frameworks")
+            unknown_frameworks = sorted(set(frameworks) - _KNOWN_CASE_FRAMEWORKS)
+            if unknown_frameworks:
+                raise ValueError(
+                    f"model_case_values.moe row {model_config.get('model_path')!r} declares unknown "
+                    f"frameworks {unknown_frameworks}; known: {sorted(_KNOWN_CASE_FRAMEWORKS)}"
+                )
+            if backend is not None and backend not in frameworks:
+                continue
+        model_config_list.append(model_config)
 
     test_cases: list[MoeCommonTestCase] = []
 
@@ -1191,6 +1243,9 @@ def get_common_moe_test_cases():
 
         max_tp_exclusive = model_config.get("max_tp_exclusive")
         if max_tp_exclusive is not None and tp >= int(max_tp_exclusive):
+            continue
+
+        if allowed_parallel_topologies is not None and (tp, ep) not in allowed_parallel_topologies:
             continue
 
         if tp * ep != num_gpu:

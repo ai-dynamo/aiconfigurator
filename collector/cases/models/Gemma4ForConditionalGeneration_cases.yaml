@@ -8,9 +8,16 @@ model_paths:
   - google/gemma-4-26B-A4B
 include_base: true
 base_ops:
-  - attention_context
-  - attention_generation
   - gemm
+framework_specific_base_ops:
+  # vLLM 0.24's Gemma 4 path requires multimodal-prefix semantics that the
+  # persisted generic attention schema cannot express.
+  sglang:
+    - attention_context
+    - attention_generation
+  trtllm:
+    - attention_context
+    - attention_generation
 description: >
   Gemma 4 hybrid SWA/global attention plus routed-MoE collection plan.
 

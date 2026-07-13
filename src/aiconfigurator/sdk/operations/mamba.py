@@ -419,20 +419,42 @@ class GDNKernel(Operation):
 
         model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
         try:
-            by_phase = gdn_data[kernel_source]
+            by_key = gdn_data[kernel_source][phase]
         except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        try:
-            by_key = by_phase[phase]
-        except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            by_key = {}
         if model_key not in by_key:
-            # Nearest config by d_model, then num_v_heads as secondary discriminator
-            keys_same_d_model = [k for k in by_key if k[0] == d_model]
-            if keys_same_d_model:
-                model_key = min(keys_same_d_model, key=lambda k: abs(k[3] - num_v_heads))
-            else:
+            alias_sources = ()
+            if database.backend == "vllm" and database.version == "0.24.0":
+                if phase == "context" and kernel_source == "chunk_gated_delta_rule":
+                    alias_sources = (
+                        "chunk_gated_delta_rule_flashinfer",
+                        "chunk_gated_delta_rule_triton",
+                        "chunk_gated_delta_rule_cutedsl",
+                    )
+                elif phase == "generation" and kernel_source == "fused_sigmoid_gating_delta_rule_update":
+                    alias_sources = ("fused_recurrent_gated_delta_rule_packed_decode",)
+
+            exact_aliases = []
+            for alias_source in alias_sources:
+                try:
+                    alias_by_key = gdn_data[alias_source][phase]
+                except KeyError:
+                    continue
+                if model_key in alias_by_key:
+                    exact_aliases.append(alias_by_key)
+
+            if len(exact_aliases) == 1:
+                by_key = exact_aliases[0]
+            elif exact_aliases:
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            else:
+                # Preserve the legacy fallback only within the logical source;
+                # physical aliases must match the complete model shape.
+                keys_same_d_model = [k for k in by_key if k[0] == d_model]
+                if keys_same_d_model:
+                    model_key = min(keys_same_d_model, key=lambda k: abs(k[3] - num_v_heads))
+                else:
+                    return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
 
         table = by_key[model_key]
 

@@ -10,7 +10,7 @@ Quant: bf16 only. vLLM upstream supports fp8 ViT FMHA via FLASHINFER;
 enabling that path here is left for the future.
 """
 
-__compat__ = "vllm>=0.21.0"
+__compat__ = "vllm==0.24.0"
 
 import torch
 from vllm.model_executor.models.vision import get_vit_attn_backend
@@ -85,6 +85,8 @@ def run_encoder_attention_torch(
 
     if backend == AttentionBackendEnum.FLASH_ATTN:
         fa_version = get_flash_attn_version(head_size=head_dim)
+        if fa_version is None:
+            raise RuntimeError("vLLM selected FlashAttention for ViT without a concrete FA version")
 
         def run():
             vit_flash_attn_wrapper(
@@ -133,6 +135,11 @@ def run_encoder_attention_torch(
     latency = results["latency_ms"]
     print(f"encoder attn latency: {latency}")
 
+    if backend == AttentionBackendEnum.FLASH_ATTN:
+        kernel_source = f"vllm_vit_flash_attn_fa{fa_version}"
+    else:
+        kernel_source = f"vllm_vit_{backend.name}".lower()
+
     log_perf(
         item_list=[
             {
@@ -148,7 +155,7 @@ def run_encoder_attention_torch(
         version=vllm_version,
         device_name=torch.cuda.get_device_name(device),
         op_name="encoder_attention",
-        kernel_source=f"vllm_vit_{backend.name}".lower(),
+        kernel_source=kernel_source,
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
     )

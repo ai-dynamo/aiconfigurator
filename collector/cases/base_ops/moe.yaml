@@ -126,6 +126,13 @@ common_case_values:
       - openai/gpt-oss-20b
       - openai/gpt-oss-120b
   moe_vllm:
+    # vLLM 0.24 represents either routed-expert TP or EP. Enabling EP flattens
+    # the requested parallel world into EP rather than preserving TP x EP.
+    parallel_topologies:
+    - tensor_parallel_sizes: [1, 2, 4, 8, 16, 32]
+      expert_parallel_sizes: [1]
+    - tensor_parallel_sizes: [1]
+      expert_parallel_sizes: [2, 4, 8, 16, 32, 64, 128, 256]
     quantization_modes:
     - name: bfloat16
     - name: int4_wo
@@ -136,7 +143,11 @@ common_case_values:
     - name: fp8
       min_sm_exclusive: 86
     - name: fp8_block
-      min_sm: 90
+      # Same floor as the fp8_block dtype in capabilities.yaml: vLLM's fused
+      # MoE dispatches block-fp8 below SM90 to Triton experts (the DeepGEMM/
+      # cutlass/flashinfer tiers are SM90/SM100+), verified on L40S with
+      # kernel_source=vllm_fp8moe_triton_tritonexperts recorded per row.
+      min_sm: 89
       requires_runtime_feature: per_block_fp8
     - name: nvfp4
       min_sm: 100
@@ -144,24 +155,6 @@ common_case_values:
     - name: w4a16_mxfp4
       requires_runtime_feature: mxfp4
       requires_model_quantization_config: true
-    shape_constraints:
-    - mode: fp8_block
-      divisible_by:
-        hidden_size: 128
-        local_inter_size: 128
-    - mode: nvfp4
-      divisible_by:
-        hidden_size: 512
-        local_inter_size: 64
-      max_topk: 10
-    - mode: w4a16_mxfp4
-      divisible_by:
-        hidden_size: 32
-        local_inter_size: 32
-    - mode: int4_wo
-      divisible_by:
-        hidden_size: 32
-        local_inter_size: 32
   moe_vllm_xpu:
     token_counts:
     - 1

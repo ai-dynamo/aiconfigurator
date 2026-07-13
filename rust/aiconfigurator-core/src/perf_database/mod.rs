@@ -185,7 +185,12 @@ impl PerfDatabase {
             wideep: WideEpTable::with_sources(data_root.clone(), perf_db_sources),
             wideep_mla: WideEpMlaTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
             wideep_moe: WideEpMoeTable::with_sources(data_root.clone(), perf_db_sources),
-            state_space: StateSpaceTable::with_sources(data_root.clone(), perf_db_sources),
+            state_space: StateSpaceTable::with_sources(
+                data_root.clone(),
+                backend,
+                version,
+                perf_db_sources,
+            ),
             system_spec: spec,
             data_root,
         })
