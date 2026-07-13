@@ -82,16 +82,18 @@ common_case_values:
       # SM100/103: pinned SGLang 0.5.14 serving auto-selects flashinfer_trtllm
       # for Kimi K2/K2.5 INT4 (server_args.py:3736 -> CompressedTensorsMxInt4MoE).
       # B200 hardware validation: 2026-07-11 Kimi-filtered moe pipeline run.
-      # SM90/SM120: the forcing block above sits under `if is_sm100_supported()`
-      # (server_args.py:3684), which is capability major == [10] exactly
-      # (utils/common.py:282) — so on SM90 and SM120 the runner backend stays
-      # auto and get_moe_scheme falls through the flashinfer_trtllm/hip/triton
-      # gates to CompressedTensorsWNA16MoE (compressed_tensors.py:676-698),
-      # whose create_moe_runner unconditionally selects Marlin
-      # (compressed_tensors_wNa16_moe.py:412-416, min_capability 80). No other
-      # SM120 server_args branch touches compressed-tensors int4 (3787 is
-      # DeepseekV4-only, 5099 modelopt_fp4-only). All at image source 49e384ce.
-      int4_wo: {90: marlin, 100: flashinfer_trtllm, 103: flashinfer_trtllm, 120: marlin}
+      # SM89/SM90/SM120: the forcing block above sits under
+      # `if is_sm100_supported()` (server_args.py:3684), which is capability
+      # major == [10] exactly (utils/common.py:282) — so on SM89/90/120 the
+      # runner backend stays auto and get_moe_scheme falls through the
+      # flashinfer_trtllm/hip/triton gates to CompressedTensorsWNA16MoE
+      # (compressed_tensors.py:676-698), whose create_moe_runner
+      # unconditionally selects Marlin (compressed_tensors_wNa16_moe.py:412-416,
+      # min_capability 80 = Ampere+). No other server_args branch touches
+      # compressed-tensors int4 on these SMs (3787 is DeepseekV4-only, 5099
+      # modelopt_fp4-only). All at image source 49e384ce. SM89 hardware
+      # precedent: l40s 0.5.10 shipped 19,035 Marlin int4 moe rows.
+      int4_wo: {89: marlin, 90: marlin, 100: flashinfer_trtllm, 103: flashinfer_trtllm, 120: marlin}
       # NVFP4 SM120: serving auto resolves to FLASHINFER_TRTLLM
       # (modelopt_quant.py:2317-2323 — capability (12,0) is outside the
       # (8,0)..(10,0) Marlin fallback), but the trtllm-gen batched FP4 GEMM
@@ -115,7 +117,7 @@ common_case_values:
     quantization_modes:
     - name: bfloat16
     - name: int4_wo
-      min_sm: 90
+      min_sm: 89
       # Resolved per the bring-up TODO (owner decision 2026-07-11): serving
       # supports Kimi INT4 on SM100/103 via flashinfer_trtllm
       # (server_args.py:3736), so the unsanctioned max_sm_exclusive gate is

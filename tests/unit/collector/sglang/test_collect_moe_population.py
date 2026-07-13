@@ -413,6 +413,7 @@ def test_gptoss_mxfp4_population_retains_tp_and_ep_buckets(tp, ep):
         ("nvfp4", 100, "flashinfer_trtllm"),
         ("nvfp4", 103, "flashinfer_trtllm"),
         ("nvfp4", 120, "flashinfer_cutlass"),
+        ("int4_wo", 89, "marlin"),
         ("int4_wo", 90, "marlin"),
         ("int4_wo", 120, "marlin"),
         ("w4a16_mxfp4", 90, "triton"),
