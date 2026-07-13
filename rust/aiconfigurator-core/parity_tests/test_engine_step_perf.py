@@ -17,7 +17,7 @@ of bug once pushed the Rust step to 0.15-0.78x of Python (see
 Every floor is ``>= 1.0``: the gate encodes the project goal that Rust must be
 *at least as fast as* Python on each guarded case -- a sub-1.0 floor would license
 Rust being slower, defeating the migration. Floors sit below the measured margin
-(see ``perf-speedup-report.md``) with headroom for runner noise:
+(see ``../docs/perf-speedup-report.md``) with headroom for runner noise:
 - ``nemotron-nas`` -- large graph, wide stable margin (~1.9-2.3x) -> 1.5x floor,
   which also catches partial regressions that still leave Rust >1x.
 - the small (~20 us) graphs sit near the fixed-FFI-tax floor (~1.1-1.5x) -> 1.0x,
@@ -47,7 +47,7 @@ ITERATIONS = 100
 
 # Minimum Rust-vs-Python p50 speedup per case (applied to both phases). All
 # >= 1.0 by design (see the module docstring). Derived from the per-case minimum
-# margin in perf-speedup-report.md, discounted ~15% for runner variance and
+# margin in ../docs/perf-speedup-report.md, discounted ~15% for runner variance and
 # clamped to 1.0.
 MIN_SPEEDUP = {
     "nemotron-nas-49b": 1.5,

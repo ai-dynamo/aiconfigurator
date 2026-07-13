@@ -70,7 +70,7 @@ and status.
 ## Engine-Step Benchmark
 
 The latest full-family speedup numbers (dated + commit-stamped) live in
-[`perf-speedup-report.md`](./perf-speedup-report.md) — regenerate it from this
+[`perf-speedup-report.md`](../docs/perf-speedup-report.md) — regenerate it from this
 harness when the Rust hot path changes.
 
 Run the hot-cache Python SDK vs Rust engine-step API benchmark:

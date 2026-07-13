@@ -19,7 +19,7 @@ flip (Gate 1) therefore cannot ship until the empirical-layer port lands
 (issue #1333); until then any flip is silicon-only or staged per-family.
 
 **Done since drafting:** the full parity scan is complete
-(`../parity_tests/parity-scan-report.md`: gate CLOSED, 0 REGRESSION), and the
+(`parity-scan-report.md`: gate CLOSED, 0 REGRESSION), and the
 engine-step parity, compile-engine parity, and engine-step perf gates all run
 in CI (`.github/workflows/build-test.yml`).
 
@@ -110,7 +110,7 @@ Flip `engine_step_backend` default to `"rust"`. Before merge:
 - Full-matrix scan must hold the Phase 1.5 bar: `STRICT_PASS >= 1906`,
   `REGRESSION == 0`.
 - The residual DRIFT entries (current list in the completed scan,
-  `../parity_tests/parity-scan-report.md`) were held out of Phase 1.5 scope.
+  `parity-scan-report.md`) were held out of Phase 1.5 scope.
   A *global* default flip silently ships them.
   Each must be either resolved or **formally accepted** (listed by family,
   with the >5% throughput delta documented) as a precondition. Decide and
@@ -145,7 +145,7 @@ Only after Gates 1–2 hold and have soaked one release cycle:
 
 | # | PR | Lands | Gated? |
 | --- | --- | --- | --- |
-| **P0** | DRIFT triage | Resolve or formally accept the residual DRIFT entries; record the decision alongside `../parity_tests/parity-scan-report.md`. No code beyond fixes. | — |
+| **P0** | DRIFT triage | Resolve or formally accept the residual DRIFT entries; record the decision alongside `parity-scan-report.md`. No code beyond fixes. | — |
 | **P1** | Default flip | `engine_step_backend` defaults to `"rust"`; `"python"` retained. Full scan + smoke green. Both engines present. | **GATE 1** |
 | **P2** | Golden oracle | Capture Python goldens; rewire parity tests to Rust-vs-golden. | **GATE 2** |
 | **P3** | Delete Python latency path | `operations/*.py` `query()`, `base_backend` Python branch, `perf_database` latency-query methods. Re-audit `interpolation.py`. | **GATE 3** |
@@ -185,7 +185,7 @@ P0 → P1 → P2 → P3 → P4, strictly sequential. P2 may start once P1 is in.
 
 ## Pointers
 
-- Completed parity scan (DRIFT list, gate status): `../parity_tests/parity-scan-report.md`.
+- Completed parity scan (DRIFT list, gate status): `parity-scan-report.md`.
 - Scan procedure: `parity-scan-runbook.md`.
 - Engine-step / compile-engine / perf gates in CI: `.github/workflows/build-test.yml`.
 - The opt-in switch this plan flips: `sdk/rust_engine_step.py`
