@@ -80,7 +80,7 @@ fn resolve_systems_root(systems_path: Option<&str>) -> PyResult<PathBuf> {
         return Ok(PathBuf::from(p));
     }
     let installed_root = Python::with_gil(|py| -> PyResult<Option<PathBuf>> {
-        let Ok(perf_database) = py.import("aiconfigurator.sdk.perf_database") else {
+        let Ok(perf_database) = py.import("aiconfigurator_core.sdk.perf_database") else {
             return Ok(None);
         };
         let paths: Vec<String> = perf_database.call_method0("get_systems_paths")?.extract()?;
@@ -386,7 +386,7 @@ fn compile_engine_from_flat(
         ))
     })?;
     let spec_bytes: Vec<u8> = Python::with_gil(|py| -> PyResult<Vec<u8>> {
-        let engine_mod = py.import("aiconfigurator.sdk.engine")?;
+        let engine_mod = py.import("aiconfigurator_core.sdk.engine")?;
         let kwargs = pyo3::types::PyDict::new(py);
         kwargs.set_item("backend_version", backend_version)?;
         kwargs.set_item("tp_size", tp_size)?;

@@ -13,7 +13,6 @@ from email.message import Message
 from pathlib import Path
 
 PAYLOAD_SUFFIXES = {".css", ".csv", ".j2", ".js", ".json", ".md", ".parquet", ".py", ".rule", ".txt", ".yaml"}
-CORE_AIC_DIRS = {"model_configs", "sdk", "systems"}
 
 
 def _wheel_files(wheel: Path) -> tuple[set[str], Message]:
@@ -46,19 +45,14 @@ def _add_source_tree(expected: set[str], source_root: Path, package_root: str) -
 def _source_payloads() -> tuple[set[str], set[str]]:
     """Return ``(upper, core)`` payload paths expected from the source tree."""
     repo_root = Path(__file__).resolve().parents[1]
-    aic_source = repo_root / "src" / "aiconfigurator"
+    upper_source = repo_root / "src"
+    core_source = repo_root / "src" / "aiconfigurator-core"
     upper: set[str] = set()
     core: set[str] = set()
 
-    for path in aic_source.rglob("*"):
-        if not path.is_file() or path.suffix not in PAYLOAD_SUFFIXES:
-            continue
-        relative = path.relative_to(aic_source)
-        owner = core if relative.parts[0] in CORE_AIC_DIRS else upper
-        owner.add((Path("aiconfigurator") / relative).as_posix())
-
-    _add_source_tree(core, repo_root / "src" / "aiconfigurator_core", "aiconfigurator_core")
-    _add_source_tree(upper, repo_root / "src" / "spica", "spica")
+    _add_source_tree(upper, upper_source / "aiconfigurator", "aiconfigurator")
+    _add_source_tree(upper, upper_source / "spica", "spica")
+    _add_source_tree(core, core_source / "aiconfigurator_core", "aiconfigurator_core")
     return upper, core
 
 
@@ -77,6 +71,9 @@ def _verify_main_wheel(wheel: Path, expected_payload: set[str]) -> tuple[str, se
         "aiconfigurator/cli/main.py",
         "aiconfigurator/generator/api.py",
         "aiconfigurator/logging_utils.py",
+        "aiconfigurator/sdk/_compat.py",
+        "aiconfigurator/sdk/engine.py",
+        "aiconfigurator/sdk/task_v2.py",
         "spica/config.py",
     }
     missing = sorted(required - payload)
@@ -87,18 +84,9 @@ def _verify_main_wheel(wheel: Path, expected_payload: set[str]) -> tuple[str, se
     if missing_source:
         raise RuntimeError(f"{wheel.name}: missing upper source-tree payload: {missing_source}")
 
-    forbidden = {
-        "aiconfigurator/sdk/common.py",
-        "aiconfigurator/systems/h100_sxm.yaml",
-        "aiconfigurator_core/__init__.py",
-        "aiconfigurator_core/sdk/__init__.py",
-        "aiconfigurator_core/sdk/task_v2.py",
-    }
-    misplaced = sorted(forbidden & payload)
+    misplaced = sorted(name for name in payload if name.startswith("aiconfigurator_core/"))
     if misplaced:
         raise RuntimeError(f"{wheel.name}: upper wheel must not own core payload: {misplaced}")
-    if any(name.startswith("aiconfigurator_core/_aiconfigurator_core.") for name in payload):
-        raise RuntimeError(f"{wheel.name}: upper wheel must not own the native core extension")
 
     version = metadata.get("Version")
     if not version:
@@ -114,15 +102,13 @@ def _verify_core_wheel(wheel: Path, aic_version: str, expected_payload: set[str]
     names, metadata = _wheel_files(wheel)
     payload = _payload_files(names)
     required = {
-        "aiconfigurator/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json",
-        "aiconfigurator/sdk/common.py",
-        "aiconfigurator/sdk/engine.py",
-        "aiconfigurator/sdk/logging_utils.py",
-        "aiconfigurator/sdk/memory.py",
-        "aiconfigurator/systems/h100_sxm.yaml",
         "aiconfigurator_core/__init__.py",
+        "aiconfigurator_core/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json",
         "aiconfigurator_core/sdk/__init__.py",
-        "aiconfigurator_core/sdk/task_v2.py",
+        "aiconfigurator_core/sdk/common.py",
+        "aiconfigurator_core/sdk/engine.py",
+        "aiconfigurator_core/sdk/memory.py",
+        "aiconfigurator_core/systems/h100_sxm.yaml",
     }
     missing = sorted(required - payload)
     if missing:
@@ -132,13 +118,17 @@ def _verify_core_wheel(wheel: Path, aic_version: str, expected_payload: set[str]
     if missing_source:
         raise RuntimeError(f"{wheel.name}: missing core source-tree payload: {missing_source}")
 
+    misplaced = sorted(name for name in payload if name.startswith("aiconfigurator/") or name.startswith("spica/"))
+    if misplaced:
+        raise RuntimeError(f"{wheel.name}: core wheel must not own upper-layer payload: {misplaced}")
+
     checks = {
         "native core extension": any(
             name.startswith("aiconfigurator_core/_aiconfigurator_core.") and name.endswith((".so", ".pyd"))
             for name in payload
         ),
         "nested performance data": any(
-            name.startswith("aiconfigurator/systems/data/") and name.endswith(".parquet") for name in payload
+            name.startswith("aiconfigurator_core/systems/data/") and name.endswith(".parquet") for name in payload
         ),
         "Rust SBOM": any(".dist-info/sboms/" in name and name.endswith(".json") for name in names),
     }

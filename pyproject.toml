@@ -114,8 +114,8 @@ include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["aiconfigurator", "aiconfigurator.cli*", "aiconfigurator.generator*", "aiconfigurator.webapp*", "spica*"]
-exclude = ["aiconfigurator.sdk*", "aiconfigurator.systems*", "aiconfigurator.model_configs*", "aiconfigurator_core*"]
+include = ["aiconfigurator", "aiconfigurator.cli*", "aiconfigurator.generator*", "aiconfigurator.sdk*", "aiconfigurator.webapp*", "spica*"]
+exclude = ["aiconfigurator_core*"]
 
 [tool.uv.sources]
 aiconfigurator-core = { path = "src/aiconfigurator-core", editable = true }
@@ -173,7 +173,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["aiconfigurator", "spica", "utils", "helper"]
+known-first-party = ["aiconfigurator", "aiconfigurator_core", "spica", "utils", "helper"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/aiconfigurator/webapp/components/**/*.py" = ["E501", "W291", "SIM117"]

@@ -31,7 +31,7 @@ PAYLOAD_SOURCES = {
     "aiconfigurator/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json": (
         "src/aiconfigurator/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json"
     ),
-    "aiconfigurator_core/__init__.py": "src/aiconfigurator_core/__init__.py",
+    "aiconfigurator_core/__init__.py": "src/aiconfigurator-core/aiconfigurator_core/__init__.py",
 }
 
 METADATA = f"""Metadata-Version: 2.4

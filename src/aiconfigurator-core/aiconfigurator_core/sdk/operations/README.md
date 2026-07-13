@@ -60,7 +60,7 @@ def load_my_op_data(my_op_file):
 ```
 
 Imports needed at module top: `defaultdict` from `collections`,
-`_read_filtered_rows` from `aiconfigurator.sdk.operations.base`,
+`_read_filtered_rows` from `aiconfigurator_core.sdk.operations.base`,
 `logger` from `logging.getLogger(__name__)`, and `common` for
 quant-mode enums.
 
@@ -74,7 +74,7 @@ special — pass whatever your `load_data` classmethod receives from
 
 ```python
 from typing import ClassVar
-from aiconfigurator.sdk.operations.base import Operation
+from aiconfigurator_core.sdk.operations.base import Operation
 
 class MyOp(Operation):
     # Override the base Operation._data_cache with your own dict — the
@@ -114,7 +114,7 @@ class MyOp(Operation):
         """Idempotent. On cache miss: load CSV, populate class cache.
         Always: bind the instance attribute the legacy query body reads."""
         import os
-        from aiconfigurator.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
@@ -182,7 +182,7 @@ Notes:
   with `AttributeError: 'PerfDatabase' object has no attribute
   '_my_op_data'`.
 - Interpolation / extrapolation helpers live in
-  `aiconfigurator.sdk.interpolation`. Call them directly.
+  `aiconfigurator_core.sdk.interpolation`. Call them directly.
   `interp_2d_linear` and `interp_3d` require `database._extracted_metrics_cache`
   as the last positional argument.
 
@@ -194,7 +194,7 @@ In `perf_database.py`:
 @functools.lru_cache(maxsize=32768)
 def query_my_op(self, *args, database_mode=None):
     """Delegates to MyOp; see operations.<module>.MyOp._query_my_op_table."""
-    from aiconfigurator.sdk.operations.<module> import MyOp
+    from aiconfigurator_core.sdk.operations.<module> import MyOp
     return MyOp._query_my_op_table(self, *args, database_mode=database_mode)
 ```
 
@@ -211,7 +211,7 @@ quant modes are already covered by another key.
 Add to `operations/__init__.py`:
 
 ```python
-from aiconfigurator.sdk.operations.<module> import MyOp
+from aiconfigurator_core.sdk.operations.<module> import MyOp
 __all__ = [..., "MyOp", ...]
 ```
 
@@ -302,12 +302,12 @@ A few things that look reasonable but break the lazy invariant:
 - `operations/gemm.py` — the cleanest fully-migrated example. Read
   `GEMM.load_data` and `GEMM._query_gemm_table` for the canonical
   pattern.
-- `aiconfigurator/sdk/interpolation.py` — the numeric helpers
+- `aiconfigurator_core/sdk/interpolation.py` — the numeric helpers
   (`interp_1d`, `interp_3d`, `nearest_1d_point_helper`,
   `validate_interpolation_result`, …). 3-axis+ op queries route through
-  `aiconfigurator/sdk/perf_interp/` (declarative per-op configs + shared
+  `aiconfigurator_core/sdk/perf_interp/` (declarative per-op configs + shared
   resolver); interpolation.py remains for 1-D/2-D tables (comm, bmm, scales).
-- `aiconfigurator/sdk/perf_database.py` — `PerfDatabase`,
+- `aiconfigurator_core/sdk/perf_database.py` — `PerfDatabase`,
   `_LazySupportMatrix` (the dict-like view powering
   `database.supported_quant_mode`), `LoadedOpData`, the query entry
   points.

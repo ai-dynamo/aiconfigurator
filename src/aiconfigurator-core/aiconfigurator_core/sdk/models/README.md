@@ -30,7 +30,7 @@ models/
 Model classes register themselves using the `@register_model` decorator. The decorator accepts one or more family names — most classes register one family, but a class can register multiple if it serves multiple families with branching inside `create()`:
 
 ```python
-from aiconfigurator.sdk.models.base import BaseModel, register_model
+from aiconfigurator_core.sdk.models.base import BaseModel, register_model
 
 @register_model("LLAMA")
 class LLAMAModel(BaseModel):
@@ -111,7 +111,7 @@ That's it. The existing `LLAMAModel` handles the rest.
 **1. Create `models/new_model.py`:**
 
 ```python
-from aiconfigurator.sdk.models.base import BaseModel, register_model
+from aiconfigurator_core.sdk.models.base import BaseModel, register_model
 
 
 @register_model("NEWMODEL")

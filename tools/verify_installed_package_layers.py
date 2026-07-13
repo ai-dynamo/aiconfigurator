@@ -47,9 +47,12 @@ def _verify_core(*, exercise_engine: bool) -> str:
     _require_distribution_files(
         "aiconfigurator-core",
         (
-            "aiconfigurator/sdk/task_v2.py",
+            "aiconfigurator_core/__init__.py",
+            "aiconfigurator_core/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json",
             "aiconfigurator_core/sdk/__init__.py",
-            "aiconfigurator_core/sdk/task_v2.py",
+            "aiconfigurator_core/sdk/engine.py",
+            "aiconfigurator_core/sdk/memory.py",
+            "aiconfigurator_core/systems/h100_sxm.yaml",
         ),
     )
 
@@ -57,19 +60,14 @@ def _verify_core(*, exercise_engine: bool) -> str:
     if core._build_smoke() != 1:
         raise RuntimeError("native core extension returned an unexpected schema version")
 
-    core_namespaced_task = importlib.import_module("aiconfigurator_core.sdk.task_v2").Task
-    canonical_task = importlib.import_module("aiconfigurator.sdk.task_v2").Task
-    if core_namespaced_task is not canonical_task:
-        raise RuntimeError("aiconfigurator_core.sdk.task_v2.Task is not the canonical SDK Task class")
-
     for module in (
-        "aiconfigurator.sdk.engine",
-        "aiconfigurator.sdk.memory",
-        "aiconfigurator.sdk.pareto_analysis",
+        "aiconfigurator_core.sdk.engine",
+        "aiconfigurator_core.sdk.memory",
+        "aiconfigurator_core.sdk.perf_database",
     ):
         importlib.import_module(module)
 
-    resources = importlib.resources.files("aiconfigurator")
+    resources = importlib.resources.files("aiconfigurator_core")
     required_resources = (
         resources / "model_configs" / "meta-llama--Meta-Llama-3.1-8B_config.json",
         resources / "systems" / "h100_sxm.yaml",
@@ -80,7 +78,7 @@ def _verify_core(*, exercise_engine: bool) -> str:
         raise RuntimeError(f"standalone core is missing bundled resources: {missing}")
 
     if exercise_engine:
-        from aiconfigurator.sdk.engine import EngineHandle
+        from aiconfigurator_core.sdk.engine import EngineHandle
 
         engine = EngineHandle.compile(
             "MiniMaxAI/MiniMax-M2.5",
@@ -108,6 +106,10 @@ def _verify_upper(*, import_runtime: bool) -> str:
         (
             "aiconfigurator/cli/main.py",
             "aiconfigurator/generator/api.py",
+            "aiconfigurator/sdk/_compat.py",
+            "aiconfigurator/sdk/engine.py",
+            "aiconfigurator/sdk/memory.py",
+            "aiconfigurator/sdk/task_v2.py",
             "aiconfigurator/webapp/main.py",
             "spica/config.py",
         ),
@@ -116,6 +118,28 @@ def _verify_upper(*, import_runtime: bool) -> str:
         for module in ("aiconfigurator.cli.main", "aiconfigurator.generator.api", "spica.config"):
             importlib.import_module(module)
     return aic_version
+
+
+def _verify_legacy_sdk_compatibility() -> None:
+    """Verify representative legacy aliases and the upper-owned Task API."""
+    for module_name, public_name in (
+        ("engine", "EngineHandle"),
+        ("memory", "estimate_kv_cache"),
+    ):
+        canonical = importlib.import_module(f"aiconfigurator_core.sdk.{module_name}")
+        legacy = importlib.import_module(f"aiconfigurator.sdk.{module_name}")
+        if legacy is not canonical:
+            raise RuntimeError(
+                f"aiconfigurator.sdk.{module_name} is not the canonical aiconfigurator_core.sdk.{module_name} module"
+            )
+        if getattr(legacy, public_name) is not getattr(canonical, public_name):
+            raise RuntimeError(f"legacy {public_name} is not the canonical core object")
+
+    task_module = importlib.import_module("aiconfigurator.sdk.task_v2")
+    if task_module.Task.__module__ != "aiconfigurator.sdk.task_v2":
+        raise RuntimeError("Task must remain implemented by the upper aiconfigurator package")
+    if importlib.util.find_spec("aiconfigurator_core.sdk.task_v2") is not None:
+        raise RuntimeError("Task must not be shipped by the standalone core package")
 
 
 def main() -> int:
@@ -128,11 +152,11 @@ def main() -> int:
         core_version = _verify_core(exercise_engine=args.exercise_engine)
         if _distribution_version("aiconfigurator") is not None:
             raise RuntimeError("core-only install unexpectedly contains the aiconfigurator distribution")
-        for module in ("aiconfigurator.cli", "aiconfigurator.generator", "aiconfigurator.webapp", "spica"):
+        for module in ("aiconfigurator", "spica"):
             _forbid_module(module)
         print(
-            f"Verified standalone aiconfigurator-core {core_version}, including "
-            "from aiconfigurator_core.sdk.task_v2 import Task"
+            f"Verified standalone aiconfigurator-core {core_version}, including canonical "
+            "aiconfigurator_core.sdk imports, resources, and native extension"
         )
         return 0
 
@@ -141,18 +165,23 @@ def main() -> int:
         aic_version = _verify_upper(import_runtime=True)
         if core_version != aic_version:
             raise RuntimeError(f"upper/core version mismatch: {aic_version=} {core_version=}")
+        _verify_legacy_sdk_compatibility()
         print(
-            f"Verified full aiconfigurator {aic_version} with standalone core, including "
-            "from aiconfigurator.sdk.task_v2 import Task"
+            f"Verified full aiconfigurator {aic_version} with standalone core, legacy SDK aliases, "
+            "and upper-owned aiconfigurator.sdk.task_v2.Task"
         )
         return 0
 
     aic_version = _verify_upper(import_runtime=False)
     if _distribution_version("aiconfigurator-core") is not None:
         raise RuntimeError("upper-only install unexpectedly contains aiconfigurator-core metadata")
-    for module in ("aiconfigurator.sdk", "aiconfigurator_core"):
-        _forbid_module(module)
-    print(f"Verified upper-only aiconfigurator payload {aic_version}")
+    _forbid_module("aiconfigurator_core")
+    if importlib.util.find_spec("aiconfigurator.sdk.engine") is None:
+        raise RuntimeError("upper-only install is missing the legacy aiconfigurator.sdk.engine wrapper")
+    print(
+        f"Verified upper-only aiconfigurator payload {aic_version}; legacy SDK wrappers remain installed "
+        "and await the intentionally absent core dependency"
+    )
     return 0
 
 

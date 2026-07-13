@@ -36,7 +36,7 @@ AIConfigurator is a Python CLI/SDK tool for optimizing LLM inference deployment 
 Dependencies are managed via `uv` with a `uv.lock` lockfile. The virtual environment lives at `.venv/`. All commands below assume `.venv/bin/` is on PATH or you prefix with `.venv/bin/`.
 
 - **Install/refresh deps:** `python3 -m uv sync --extra dev`
-- **Git LFS:** The performance database files under `src/aiconfigurator/systems/data/**/*.txt` are tracked with Git LFS. Run `git lfs pull` after cloning. If LFS pull fails (e.g., `github-cloud.githubusercontent.com` is blocked), the CLI `generate` and `support` modes still work. The `default` mode requires real LFS data.
+- **Git LFS:** The performance database files under `src/aiconfigurator-core/aiconfigurator_core/systems/data/**/*.txt` are tracked with Git LFS. Run `git lfs pull` after cloning. If LFS pull fails (e.g., `github-cloud.githubusercontent.com` is blocked), the CLI `generate` and `support` modes still work. The `default` mode requires real LFS data.
 
 ### Lint / Test / Run
 
