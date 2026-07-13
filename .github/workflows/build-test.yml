@@ -237,3 +237,11 @@ jobs:
         run: |
           "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx \
             rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py
+      - name: Run Rust/Python engine-step perf gate
+        # Guards against Rust hot-path perf regressions (e.g. an O(n log n)
+        # per-query resolve). Compares Rust-vs-Python p50 on the SAME runner, so
+        # the ratio is machine-independent; floors are generous (see the test's
+        # docstring) so runner noise never fails a healthy build.
+        run: |
+          "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rA \
+            rust/aiconfigurator-core/parity_tests/test_engine_step_perf.py
