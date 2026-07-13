@@ -29,12 +29,12 @@ Let's get started.
 
 ### Install from PyPI
 
-> **Supported platform: Linux x86-64 only.** The required `aiconfigurator-core`
-> wheel bundles a native Rust/PyO3 extension and is built as a
-> `manylinux_2_28_x86_64` wheel (Linux x86-64, glibc >= 2.28). macOS, Windows,
-> and other architectures (including Linux aarch64) are **not supported** and
-> have no published core wheels. Please install from source for non-Linux
-> platforms.
+> **Published-wheel support: Linux x86-64 only.** The required
+> `aiconfigurator-core` wheel bundles a native Rust/PyO3 extension and is built
+> as a `manylinux_2_28_x86_64` wheel (Linux x86-64, glibc >= 2.28). Linux
+> aarch64 has no published core wheel and must build `./aic-core` and the root
+> project from source; that path is not covered by published-wheel support.
+> macOS and Windows have no supported installation path.
 
 ```bash
 pip3 install aiconfigurator

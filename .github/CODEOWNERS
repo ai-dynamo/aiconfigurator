@@ -17,6 +17,8 @@
 # Runtime, SDK, backends, systems, model configs, and UI
 /src/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 /aic-core/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
+/src/aiconfigurator/systems @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
+/src/aiconfigurator/model_configs @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 /src/aiconfigurator/sdk/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 /src/aiconfigurator/sdk/backends/sglang_backend.py @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 /src/aiconfigurator/sdk/backends/trtllm_backend.py @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
