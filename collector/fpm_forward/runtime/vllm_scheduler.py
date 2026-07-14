@@ -108,7 +108,7 @@ class InstrumentedScheduler(_BaseInstrumentedScheduler):
             raise ValueError(f"{ENV_CASE_CONFIG} is required")
         config_path = Path(config_path_raw)
         raw = json.loads(config_path.read_text())
-        warmups = int(raw.get("warmup_repeats", 1))
+        warmups = int(raw.get("warmup_repeats", 0))
         repeats = int(raw.get("measured_repeats", 1))
         target_count = int(raw["selected_point_count"])
         shapes = raw.get("ordered_shapes")
