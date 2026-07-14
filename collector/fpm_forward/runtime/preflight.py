@@ -10,19 +10,53 @@ from pathlib import Path
 
 from dynamo.vllm.instrumented_scheduler import BenchmarkPoint, InstrumentedScheduler
 
+LEGACY_FIELDS = {"point_type", "isl", "kv_read_tokens", "context_length", "batch_size"}
+GRAPH_AWARE_FIELDS = {
+    "point_type",
+    "benchmark_id",
+    "total_prefill_tokens",
+    "total_kv_read_tokens",
+    "batch_size",
+}
+LEGACY_METHODS = {
+    "_bench_prefill_scheduled_tokens_per_req",
+    "_bench_prefill_blocks_per_req",
+    "_bench_blocks_per_req",
+}
+GRAPH_AWARE_METHODS = {
+    *LEGACY_METHODS,
+    "_bench_available_blocks",
+    "_bench_usable_blocks",
+    "_bench_prefill_point_feasible",
+    "_bench_decode_point_feasible",
+    "_bench_cudagraph_metadata",
+    "_bench_seed_prompt_len",
+    "_bench_cache_fake_prefixes",
+    "_bench_save_current_point",
+    "_bench_write_results",
+}
+
+
+def _contract(fields: set[str]) -> tuple[str, set[str], set[str]]:
+    if fields >= GRAPH_AWARE_FIELDS:
+        return "dynamo_pr11509_schema_v2", GRAPH_AWARE_FIELDS, GRAPH_AWARE_METHODS
+    if fields >= LEGACY_FIELDS:
+        return "dynamo_legacy_schema_v1", LEGACY_FIELDS, LEGACY_METHODS
+    candidates = (
+        ("dynamo_pr11509_schema_v2", GRAPH_AWARE_FIELDS, GRAPH_AWARE_METHODS),
+        ("dynamo_legacy_schema_v1", LEGACY_FIELDS, LEGACY_METHODS),
+    )
+    return min(candidates, key=lambda candidate: len(candidate[1] - fields))
+
 
 def main() -> None:
     fields = set(getattr(BenchmarkPoint, "__dataclass_fields__", {}))
-    required_fields = {"point_type", "isl", "kv_read_tokens", "context_length", "batch_size"}
-    required_methods = {
-        "_bench_prefill_scheduled_tokens_per_req",
-        "_bench_prefill_blocks_per_req",
-        "_bench_blocks_per_req",
-    }
+    runtime_contract, required_fields, required_methods = _contract(fields)
     missing_fields = sorted(required_fields - fields)
     missing_methods = sorted(name for name in required_methods if not hasattr(InstrumentedScheduler, name))
     audit = {
         "schema_version": 1,
+        "runtime_contract": runtime_contract,
         "benchmark_point_fields": sorted(fields),
         "missing_fields": missing_fields,
         "missing_methods": missing_methods,

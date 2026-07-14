@@ -416,7 +416,8 @@ def _case_payload(
         "plan_sha256": plan.sha256,
         "cell_id": cell.cell_id,
         "workload_kind": cell.workload_kind,
-        "warmup_repeats": plan.options.warmup_repeats,
+        "global_warmup_iterations": plan.options.warmup_iterations,
+        "warmup_repeats": 0,
         "measured_repeats": plan.options.measurement_repeats,
         "selected_point_count": selected_point_count,
         "ordered_shapes": [point.to_dict() for point in profile.ordered_points],
@@ -469,7 +470,7 @@ def _cell_generator_overrides(
         "--benchmark-mode",
         cell.workload_kind,
         "--benchmark-warmup-iterations",
-        "0",
+        str(plan.options.warmup_iterations),
     ]
     model_args = []
     architecture = getattr(getattr(plan, "capability", None), "architecture", None)
@@ -612,8 +613,31 @@ def _render_cell(
     if errors:
         raise ValueError(f"invalid GeneratorRequest for {cell.cell_id}: {errors}")
     artifacts = generate_from_request(request, output_dir=str(cell_dir))
+    _allow_graph_aware_benchmark_results(cell_dir / "run.sh")
     _atomic_json(cell_dir / "generator-request.json", params)
     return artifacts
+
+
+def _allow_graph_aware_benchmark_results(run_script: Path) -> None:
+    """Teach the generated strict result gate about Dynamo's schema-v2 rank artifact.
+
+    The Generator still owns process launch, timeout, validation, and teardown.
+    This compatibility shim changes only the accepted upstream schema version;
+    its existing complete/valid/coverage/rank checks remain unchanged.
+    """
+
+    script = run_script.read_text()
+    legacy = 'value.get("schema_version") != 1'
+    compatible = 'value.get("schema_version") not in {1, 2}'
+    if compatible in script:
+        return
+    occurrences = script.count(legacy)
+    if occurrences != 1:
+        raise RuntimeError(
+            "generated FPM run.sh has an unsupported benchmark result gate: "
+            f"expected one legacy schema check, found {occurrences}"
+        )
+    run_script.write_text(script.replace(legacy, compatible))
 
 
 def _expected_nodes(manifest: Path) -> int:
@@ -633,10 +657,17 @@ def _validate_runtime_collection(
 ) -> None:
     """Validate integrated runtime capacity, canary, and formal results across DP ranks."""
 
-    paths = sorted(raw_root.glob("**/benchmark*.json"))
-    if not paths:
+    rank_payloads = []
+    for path in sorted(raw_root.glob("**/benchmark*.json")):
+        payload = json.loads(path.read_text())
+        if payload.get("artifact_type") == "merged" or path.stem.endswith("_merged"):
+            continue
+        rank_payloads.append((path, payload))
+    if not rank_payloads:
         raise ValueError(f"integrated runtime emitted no benchmark results for {cell.cell_id}")
     seen_ranks = set()
+    seen_schema_versions = set()
+    graph_aware_identity = None
     ordered_population = [point.to_dict() for point in cell.execution_profile.ordered_points]
     formal_points = None
     target = cell.execution_profile.selected_point_count if selected_point_count is None else selected_point_count
@@ -649,13 +680,22 @@ def _validate_runtime_collection(
             int(point["prefix_length"]),
         )
 
-    for path in paths:
-        payload = json.loads(path.read_text())
+    for path, payload in rank_payloads:
+        schema_version = payload.get("schema_version")
+        if schema_version not in {1, 2}:
+            raise ValueError(f"unsupported integrated result schema for {cell.cell_id}: {path}")
+        seen_schema_versions.add(schema_version)
+        if schema_version == 2 and payload.get("artifact_type") != "rank":
+            raise ValueError(f"schema-v2 integrated result is not a rank artifact for {cell.cell_id}: {path}")
         if payload.get("status") != "complete" or payload.get("valid") is not True:
             raise ValueError(f"invalid integrated result for {cell.cell_id}: {path}")
         collector = payload.get("collector")
         if not isinstance(collector, dict) or collector.get("cell_id") != cell.cell_id:
             raise ValueError(f"integrated result identity mismatch for {cell.cell_id}: {path}")
+        if schema_version == 2 and collector.get("runtime_contract") != "dynamo_pr11509_schema_v2":
+            raise ValueError(
+                f"schema-v2 integrated result has no PR11509 collector contract for {cell.cell_id}: {path}"
+            )
         if int(collector.get("selected_point_count", -1)) != target:
             raise ValueError(f"integrated selected-count mismatch for {cell.cell_id}: {path}")
         eligible = int(collector.get("capacity_eligible_count", -1))
@@ -697,9 +737,22 @@ def _validate_runtime_collection(
         if len(row_ranks) != 1:
             raise ValueError(f"integrated result mixes DP ranks for {cell.cell_id}: {path}")
         rank = row_ranks.pop()
+        if schema_version == 2:
+            dp = payload.get("dp")
+            if not isinstance(dp, dict) or dp.get("rank") != rank or dp.get("size") != cell.topology.dp:
+                raise ValueError(f"schema-v2 DP metadata mismatch for {cell.cell_id}: {path}")
+            identity = (payload.get("run_id"), payload.get("grid_digest"))
+            if not all(isinstance(value, str) and value for value in identity):
+                raise ValueError(f"schema-v2 run identity is missing for {cell.cell_id}: {path}")
+            if graph_aware_identity is None:
+                graph_aware_identity = identity
+            elif identity != graph_aware_identity:
+                raise ValueError(f"schema-v2 DP ranks have different run identities for {cell.cell_id}: {path}")
         if rank in seen_ranks:
             raise ValueError(f"duplicate integrated dp_rank={rank} for {cell.cell_id}: {path}")
         seen_ranks.add(rank)
+    if len(seen_schema_versions) != 1:
+        raise ValueError(f"integrated DP ranks emitted mixed result schemas for {cell.cell_id}: {seen_schema_versions}")
     expected_ranks = set(range(cell.topology.dp))
     if seen_ranks != expected_ranks:
         raise ValueError(
@@ -715,6 +768,33 @@ def _load_checkpoint(path: Path, plan: FPMCollectionPlan, resume: bool) -> dict[
             raise ValueError("FPM checkpoint does not match the current frozen plan")
         return payload
     return {"schema": CHECKPOINT_SCHEMA, "plan_sha256": plan.sha256, "cells": {}}
+
+
+def _runtime_timing_summary(raw_root: Path) -> dict[str, int | float]:
+    """Summarize validated rank timing without treating merged artifacts as ranks."""
+
+    rank_timings = []
+    for path in sorted(raw_root.glob("**/benchmark*.json")):
+        payload = json.loads(path.read_text())
+        if payload.get("artifact_type") == "merged" or path.stem.endswith("_merged"):
+            continue
+        timing = payload.get("timing")
+        if not isinstance(timing, dict):
+            continue
+        benchmark_elapsed = timing.get("benchmark_elapsed_seconds")
+        measured_iterations = timing.get("measured_iteration_seconds")
+        if not isinstance(benchmark_elapsed, (int, float)) or benchmark_elapsed < 0:
+            continue
+        if not isinstance(measured_iterations, (int, float)) or measured_iterations < 0:
+            continue
+        rank_timings.append((float(benchmark_elapsed), float(measured_iterations)))
+    if not rank_timings:
+        return {}
+    return {
+        "runtime_rank_count": len(rank_timings),
+        "benchmark_elapsed_seconds": max(value[0] for value in rank_timings),
+        "measured_iteration_seconds": max(value[1] for value in rank_timings),
+    }
 
 
 def run_collection(
@@ -750,6 +830,24 @@ def run_collection(
         raise ValueError("runtime overlay source does not match the frozen plan")
     target_cells = plan.cells[: (cell_limit or (1 if smoke else len(plan.cells)))]
 
+    checkpoint_changed = False
+    for cell in target_cells:
+        entry = checkpoint["cells"].get(cell.cell_id)
+        if not isinstance(entry, dict) or entry.get("status") != "passed":
+            continue
+        metadata = {
+            "total_gpus": cell.topology.total_gpus,
+            "planned_point_count": cell.execution_profile.selected_point_count,
+            "global_warmup_iterations": plan.options.warmup_iterations,
+            **_runtime_timing_summary(root / "cells" / cell.cell_id / "raw"),
+        }
+        for key, value in metadata.items():
+            if entry.get(key) != value:
+                entry[key] = value
+                checkpoint_changed = True
+    if checkpoint_changed:
+        _atomic_json(checkpoint_path, checkpoint)
+
     for cell in target_cells:
         previous = checkpoint["cells"].get(cell.cell_id, {})
         if resume and previous.get("status") == "passed":
@@ -782,13 +880,21 @@ def run_collection(
             _atomic_json(cell_dir / "runtime-overlay-manifest.json", overlay_manifest)
             overlay_files.append(cell_dir / "runtime-overlay-manifest.json")
         selected_count = plan.options.smoke_points if smoke else None
+        planned_point_count = selected_count or cell.execution_profile.selected_point_count
         _atomic_json(
             cell_dir / "cases.json",
             _case_payload(plan, cell, selected_point_count=selected_count),
         )
         cell_started = time.monotonic()
         started_at = _utc_now()
-        checkpoint["cells"][cell.cell_id] = {"status": "running", "started_at": started_at}
+        base_record = {
+            "status": "running",
+            "started_at": started_at,
+            "total_gpus": cell.topology.total_gpus,
+            "planned_point_count": planned_point_count,
+            "global_warmup_iterations": plan.options.warmup_iterations,
+        }
+        checkpoint["cells"][cell.cell_id] = base_record
         _atomic_json(checkpoint_path, checkpoint)
         resource = None
         try:
@@ -827,10 +933,11 @@ def run_collection(
                 selected_point_count=selected_count,
             )
             checkpoint["cells"][cell.cell_id] = {
+                **base_record,
                 "status": "passed",
                 "artifact_dir": str(cell_dir),
                 "pods": pods,
-                "started_at": started_at,
+                **_runtime_timing_summary(cell_dir / "raw"),
             }
         except KeyboardInterrupt:
             if resource is not None:
@@ -839,9 +946,9 @@ def run_collection(
                 except Exception:
                     pass
             checkpoint["cells"][cell.cell_id] = {
+                **base_record,
                 "status": "interrupted",
                 "artifact_dir": str(cell_dir),
-                "started_at": started_at,
             }
             raise
         except Exception as error:
@@ -851,11 +958,11 @@ def run_collection(
                 except Exception:
                     pass
             checkpoint["cells"][cell.cell_id] = {
+                **base_record,
                 "status": "failed",
                 "artifact_dir": str(cell_dir),
                 "error_type": type(error).__name__,
                 "error": str(error),
-                "started_at": started_at,
             }
             errors.append(
                 {

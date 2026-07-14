@@ -119,28 +119,40 @@ def aggregate_cell(plan: FPMCollectionPlan, cell: FPMCell, cell_dir: Path) -> li
     """Validate all rank files and take max-rank latency for the one repeat."""
 
     _validate_backend_markers(cell, cell_dir)
-    paths = sorted((cell_dir / "raw").glob("**/benchmark*.json"))
-    if not paths:
+    rank_payloads = []
+    for path in sorted((cell_dir / "raw").glob("**/benchmark*.json")):
+        payload = json.loads(path.read_text())
+        if payload.get("artifact_type") == "merged" or path.stem.endswith("_merged"):
+            continue
+        rank_payloads.append((path, payload))
+    if not rank_payloads:
         raise ValueError(f"no benchmark result files found for {cell.cell_id}")
     by_point: dict[tuple[str, int, int, int], dict[int, float]] = defaultdict(dict)
-    for path in paths:
-        payload = json.loads(path.read_text())
-        if (
-            payload.get("schema_version") != 1
-            or payload.get("status") != "complete"
-            or payload.get("valid") is not True
-        ):
+    seen_schema_versions = set()
+    graph_aware_identity = None
+    for path, payload in rank_payloads:
+        schema_version = payload.get("schema_version")
+        if schema_version not in {1, 2} or payload.get("status") != "complete" or payload.get("valid") is not True:
             raise ValueError(f"invalid terminal result envelope: {path}")
+        seen_schema_versions.add(schema_version)
+        if schema_version == 2 and payload.get("artifact_type") != "rank":
+            raise ValueError(f"schema-v2 result is not a rank artifact: {path}")
         collector = payload.get("collector")
         if not isinstance(collector, dict):
             raise TypeError(f"missing collector envelope: {path}")
         if collector.get("plan_sha256") != plan.sha256 or collector.get("cell_id") != cell.cell_id:
             raise ValueError(f"result identity mismatch: {path}")
+        if schema_version == 2 and collector.get("runtime_contract") != "dynamo_pr11509_schema_v2":
+            raise ValueError(f"schema-v2 result has no PR11509 collector contract: {path}")
+        expected_global_warmup = int(getattr(plan.options, "warmup_iterations", 0))
+        if int(collector.get("global_warmup_iterations", 0)) != expected_global_warmup:
+            raise ValueError(f"FPM global warmup mismatch: {path}")
         if collector.get("warmup_repeats") != 0 or collector.get("measured_repeats") != 1:
-            raise ValueError(f"V1 requires no warmup and exactly one measurement: {path}")
+            raise ValueError(f"FPM collection requires no warmup and exactly one measurement: {path}")
         rows = payload.get("campaign_results")
         if not isinstance(rows, list):
             raise TypeError(f"campaign_results must be a list: {path}")
+        payload_ranks = set()
         for row in rows:
             point = _point_key(row["point"])
             if point[0] != cell.workload_kind:
@@ -152,10 +164,27 @@ def aggregate_cell(plan: FPMCollectionPlan, cell: FPMCell, cell_dir: Path) -> li
             if not isinstance(measurements, list) or len(measurements) != 1:
                 raise ValueError(f"expected one measured FPM for {point} in {path}")
             rank, latency = _validate_fpm(point, measurements[0])
+            payload_ranks.add(rank)
             if rank in by_point[point]:
                 raise ValueError(f"duplicate dp_rank={rank} for point={point}")
             by_point[point][rank] = latency
+        if schema_version == 2:
+            if len(payload_ranks) != 1:
+                raise ValueError(f"schema-v2 rank artifact mixes DP ranks: {path}")
+            rank = payload_ranks.pop()
+            dp = payload.get("dp")
+            if not isinstance(dp, dict) or dp.get("rank") != rank or dp.get("size") != cell.topology.dp:
+                raise ValueError(f"schema-v2 DP metadata mismatch: {path}")
+            identity = (payload.get("run_id"), payload.get("grid_digest"))
+            if not all(isinstance(value, str) and value for value in identity):
+                raise ValueError(f"schema-v2 run identity is missing: {path}")
+            if graph_aware_identity is None:
+                graph_aware_identity = identity
+            elif identity != graph_aware_identity:
+                raise ValueError(f"schema-v2 rank artifacts have different run identities: {path}")
 
+    if len(seen_schema_versions) != 1:
+        raise ValueError(f"rank artifacts contain mixed result schemas: {seen_schema_versions}")
     target_count = cell.execution_profile.selected_point_count
     if len(by_point) != target_count:
         raise ValueError(f"measured point count {len(by_point)} != selected count {target_count} for {cell.cell_id}")

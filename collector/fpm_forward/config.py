@@ -9,7 +9,7 @@ import argparse
 from dataclasses import dataclass
 
 FPM_FORWARD_OP = "fpm_forward"
-FPM_WARMUP_REPEATS = 0
+FPM_WARMUP_ITERATIONS = 0
 FPM_MEASUREMENT_REPEATS = 1
 
 PARALLEL_AXES = ("tp", "pp", "dp", "moe_tp", "moe_ep", "cp")
@@ -30,6 +30,13 @@ def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be a non-negative integer")
     return parsed
 
 
@@ -62,7 +69,7 @@ class FPMCollectionOptions:
     moe_ep_sizes: tuple[int, ...] | None = None
     cp_sizes: tuple[int, ...] | None = None
     kv_block_size: int = 64
-    warmup_repeats: int = FPM_WARMUP_REPEATS
+    warmup_iterations: int = FPM_WARMUP_ITERATIONS
     measurement_repeats: int = FPM_MEASUREMENT_REPEATS
     smoke_points: int = 1
 
@@ -120,6 +127,7 @@ class FPMCollectionOptions:
             moe_ep_sizes=_optional_size_list(getattr(args, "fpm_moe_ep_sizes", None)),
             cp_sizes=cp_sizes,
             kv_block_size=getattr(args, "fpm_kv_block_size", None) or 64,
+            warmup_iterations=getattr(args, "fpm_warmup_iterations", None) or FPM_WARMUP_ITERATIONS,
             smoke_points=getattr(args, "fpm_smoke_points", None) or 1,
         )
 
@@ -140,7 +148,8 @@ class FPMCollectionOptions:
             "moe_ep_sizes": list(self.moe_ep_sizes) if self.moe_ep_sizes is not None else None,
             "cp_sizes": list(self.cp_sizes) if self.cp_sizes is not None else None,
             "kv_block_size": self.kv_block_size,
-            "warmup_repeats": self.warmup_repeats,
+            "global_warmup_iterations": self.warmup_iterations,
+            "warmup_repeats": 0,
             "measurement_repeats": self.measurement_repeats,
             "smoke_points": self.smoke_points,
         }
@@ -210,6 +219,15 @@ def add_fpm_arguments(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=None,
         help="KV block size used to derive block-aligned P>0 candidates (default: 64).",
+    )
+    group.add_argument(
+        "--fpm-warmup-iterations",
+        type=_nonnegative_int,
+        default=None,
+        help=(
+            "Dynamo scheduler global warmup decode iterations before the point sweep; "
+            "does not repeat warmup for each point (default: 0)."
+        ),
     )
     group.add_argument(
         "--fpm-artifact-root",
@@ -307,6 +325,7 @@ def reject_fpm_arguments_without_fpm(args: argparse.Namespace) -> None:
         "fpm_backend_axes",
         "fpm_sampling_budget",
         "fpm_kv_block_size",
+        "fpm_warmup_iterations",
         "fpm_artifact_root",
         "fpm_database_root",
         "fpm_smoke_points",
