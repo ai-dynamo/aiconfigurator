@@ -9,7 +9,9 @@
 # bump: verify, then probe-and-raise or delete this note. Never move this back
 # into YAML.
 
-__compat__ = ">=1.2.0rc5"
+# 1.3.0rc20 renamed the cache-manager sparse kwargs and moved attention
+# metadata to lowered SparseMetadataParams; this module follows those APIs.
+__compat__ = ">=1.3.0rc20"
 
 """
 MLA Module Collector for TRT-LLM — unified MLA and DSA benchmarking.
@@ -502,13 +504,26 @@ def create_kv_cache_and_metadata(
     """
     config = model_config.pretrained_config
     mapping = model_config.mapping
-    # TRT-LLM PR #10261 (>=1.3.0rc0) dropped numTokensPerPage=64 trtllm-gen MLA
-    # cubins for DeepSeek-V3 dims (headDimQk=576, headDimV=512). Only P32 remains.
-    tokens_per_block = 32 if tensorrt_llm.__version__ >= "1.3.0rc0" else 64
 
     kv_lora_rank = config.kv_lora_rank
     qk_rope_head_dim = config.qk_rope_head_dim
     head_dim = kv_lora_rank + qk_rope_head_dim
+
+    # SM90 serving forces tokens_per_block=64 for FlashMLA-eligible MLA models
+    # (head_dim==576): model_config.enable_flash_mla
+    # (tensorrt_llm/_torch/model_config.py@v1.3.0rc20) plus the
+    # py_executor_creator.py override; the attention op enables FlashMLA only
+    # for SM90 && tokens_per_block==64
+    # (cpp/tensorrt_llm/thop/attentionOp.cpp:1235@v1.3.0rc20), and its
+    # 1.3.0rc20 SM90 FMHA generation fallback rejects FP8 KV cache.
+    # TRT-LLM PR #10261 (>=1.3.0rc0) dropped numTokensPerPage=64 trtllm-gen MLA
+    # cubins for DeepSeek-V3 dims (headDimQk=576, headDimV=512) on Blackwell;
+    # only P32 remains there.
+    if tensorrt_llm.__version__ >= "1.3.0rc0":
+        is_sm90_flash_mla = torch.cuda.get_device_capability() == (9, 0) and head_dim == 576
+        tokens_per_block = 64 if is_sm90_flash_mla else 32
+    else:
+        tokens_per_block = 64
 
     prefix_len = int(prefix_len) if is_context else 0
 
@@ -551,7 +566,12 @@ def create_kv_cache_and_metadata(
         mapping=mapping,
         dtype=kv_cache_dtype,
         layer_mask=layer_mask,
-        sparse_attn_config=model_config.sparse_attention_config,
+        # Serving passes sparse_attention_config + pretrained_config when
+        # constructing cache managers (tensorrt_llm/_torch/pyexecutor/
+        # _util.py::_create_kv_cache_manager@v1.3.0rc20); the DSA cache
+        # manager requires both, the dense manager swallows them via kwargs.
+        sparse_attention_config=model_config.sparse_attention_config,
+        pretrained_config=config,
         model_config=model_config,
     )
 
@@ -568,6 +588,15 @@ def create_kv_cache_and_metadata(
     sm_major = torch.cuda.get_device_capability()[0]
     _enable_flash_mla = (
         model_config.attn_backend == "TRTLLM" and (kv_lora_rank + qk_rope_head_dim) == 576 and sm_major == 9
+    )
+
+    # 1.3.0rc20 metadata classes take lowered SparseMetadataParams instead of
+    # the raw sparse_attention_config (tensorrt_llm/_torch/pyexecutor/
+    # model_engine.py::_set_up_attn_metadata@v1.3.0rc20).
+    sparse_metadata_params = (
+        model_config.sparse_attention_config.to_sparse_metadata_params(pretrained_config=config)
+        if model_config.sparse_attention_config is not None
+        else None
     )
 
     attn_metadata = attention_cls.Metadata(
@@ -592,7 +621,7 @@ def create_kv_cache_and_metadata(
         ),
         all_rank_num_tokens=None,
         workspace=torch.tensor([], device=device, dtype=torch.int8),
-        sparse_attention_config=model_config.sparse_attention_config,
+        sparse_metadata_params=sparse_metadata_params,
     )
 
     # DSA needs a reference to the indexer for prepare()

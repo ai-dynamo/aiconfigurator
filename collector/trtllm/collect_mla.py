@@ -23,24 +23,33 @@ from tensorrt_llm._torch.attention_backend.interface import (
 )
 from tensorrt_llm._torch.attention_backend.utils import get_attention_backend
 from tensorrt_llm._torch.metadata import KVCacheParams
-from tensorrt_llm._torch.pyexecutor.llm_request import LlmRequest, SamplingConfig
 from tensorrt_llm._torch.pyexecutor.resource_manager import KVCacheManager
 from tensorrt_llm.bindings.executor import KvCacheConfig
 from tensorrt_llm.functional import PositionEmbeddingType
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantConfig
 from tensorrt_llm.quantization.mode import QuantAlgo
-from tensorrt_llm.sampling_params import SamplingParams
 
 from collector.case_generator import get_context_mla_case_specs, get_generation_mla_case_specs
-from collector.helper import benchmark_with_power, log_perf
+from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
 
 def _mla_tokens_per_block() -> int:
+    # SM90 serving runs DeepSeek-dim MLA (headDimQk=576) through FlashMLA and
+    # forces tokens_per_block=64: model_config.enable_flash_mla requires
+    # head_dim==576 on SM90 (tensorrt_llm/_torch/model_config.py@v1.3.0rc20),
+    # py_executor_creator.py then overrides tokens_per_block to 64, and the
+    # attention op enables FlashMLA only for SM90 && tokens_per_block==64
+    # (cpp/tensorrt_llm/thop/attentionOp.cpp:1235@v1.3.0rc20). With 32 the op
+    # falls back to the generation FMHA runner, which 1.3.0rc20 no longer
+    # supports for FP8 KV cache on SM90 ("Deepseek should be supported by fmha
+    # in generation part", cpp/tensorrt_llm/common/attentionOp.cpp:3091).
+    #
     # TRT-LLM PR #10261 (>=1.3.0rc0) dropped numTokensPerPage=64 trtllm-gen MLA
-    # cubins for DeepSeek-V3 dims (headDimQk=576, headDimV=512). Only P32 remains.
+    # cubins for DeepSeek-V3 dims (headDimQk=576, headDimV=512) on Blackwell;
+    # only P32 remains there.
     if tensorrt_llm.__version__ >= "1.3.0rc0":
-        return 32
+        return 64 if get_sm_version() == 90 else 32
     return 64
 
 
@@ -355,17 +364,15 @@ def _run_attn_for_backend(
         dtype=kv_cache_dtype,
     )
 
-    for req_id, ctx_len in enumerate(context_sequence_lengths):
-        req = LlmRequest(
-            request_id=req_id,
-            max_new_tokens=num_generation_steps + 1,
-            input_tokens=[1] * ctx_len,
-            sampling_config=SamplingConfig(SamplingParams()._get_sampling_config()),
-            is_streaming=False,
-        )
-        req.paged_kv_block_ids = []
-        beam_width = 1
-        kv_cache_manager.impl.add_sequence(req_id, ctx_len, beam_width, req)
+    # TRT-LLM 1.3.0rc20 removed the per-request ``impl.add_sequence`` binding
+    # (serving batches registrations through ``add_sequence_batch`` in
+    # tensorrt_llm/_torch/pyexecutor/resource_manager.py::prepare_resources).
+    # Register context sequences through the framework's own
+    # ``add_dummy_requests`` warmup path, like the sibling attention collectors.
+    kv_cache_manager.add_dummy_requests(
+        list(range(len(context_sequence_lengths))),
+        token_nums=list(context_sequence_lengths),
+    )
 
     attn_metadata = attention_cls.Metadata(
         seq_lens=torch.tensor(context_sequence_lengths, dtype=torch.int),
@@ -405,27 +412,30 @@ def _run_attn_for_backend(
         attn_metadata.prepare()
 
     if is_context_phase:
+        # Packed context token count; case grids use uniform context lengths,
+        # so this matches the previous last-length * num-contexts sizing.
+        total_ctx_tokens = sum(context_sequence_lengths)
         ctx_compressed_kv = torch.randn(
-            [ctx_len * len(context_sequence_lengths), kv_lora_rank],
+            [total_ctx_tokens, kv_lora_rank],
             dtype=dtype,
             device=device,
         )
 
         ctx_k_pe = torch.randn(
-            [ctx_len * len(context_sequence_lengths), qk_rope_head_dim],
+            [total_ctx_tokens, qk_rope_head_dim],
             dtype=dtype,
             device=device,
         )
 
         ctx_q = torch.randn(
-            [ctx_len * len(context_sequence_lengths), num_heads * qk_head_dim],
+            [total_ctx_tokens, num_heads * qk_head_dim],
             dtype=dtype,
             device=device,
         )
 
         ctx_kv = torch.randn(
             [
-                ctx_len * len(context_sequence_lengths),
+                total_ctx_tokens,
                 num_kv_heads * (qk_nope_head_dim + v_head_dim),
             ],
             dtype=dtype,

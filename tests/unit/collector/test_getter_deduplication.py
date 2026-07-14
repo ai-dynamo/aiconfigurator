@@ -54,7 +54,7 @@ def _install_trtllm_stubs(monkeypatch):
         cuda=types.SimpleNamespace(empty_cache=_noop, Stream=_noop),
         device=lambda value: value,
     )
-    _stub_module(monkeypatch, "tensorrt_llm", __version__="1.3.0rc10")
+    _stub_module(monkeypatch, "tensorrt_llm", __version__="1.3.0rc20")
     for package in (
         "tensorrt_llm._torch",
         "tensorrt_llm._torch.models",
