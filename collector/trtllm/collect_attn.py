@@ -108,43 +108,6 @@ def _skip_trtllm_sm89_rc15_long_context_gqa(
     return False
 
 
-def _skip_trtllm_sm90_rc15_long_context_gqa(
-    batch_size: int,
-    input_len: int,
-    num_heads: int,
-    num_key_value_heads: int,
-    head_dim: int,
-) -> bool:
-    if not (tensorrt_llm.__version__.startswith("1.3.0rc15") and get_sm_version() == 90):
-        return False
-
-    if num_key_value_heads not in {1, 2, 4, 8}:
-        return False
-
-    # TRT-LLM 1.3.0rc15 SM90 context attention crashes with
-    # cudaErrorIllegalAddress for the same long-context GQA region already
-    # filtered on SM89. Verified on H200 during power collection for 96/64/48
-    # query-head cases; keep the 40-head boundary aligned with the SM89 guard.
-    num_tokens = batch_size * input_len
-    if num_heads == 96:
-        if head_dim == 128:
-            return num_tokens >= 98304
-        if head_dim >= 256:
-            return num_tokens >= 49152
-        return head_dim >= 192 and num_tokens >= 65536
-    if num_heads == 64:
-        if head_dim >= 256:
-            return num_tokens >= 81920
-        return head_dim >= 192 and num_tokens >= 98304
-    if num_heads == 48:
-        if head_dim >= 256:
-            return num_tokens >= 98304
-        return head_dim >= 192 and num_tokens >= 131072
-    if num_heads == 40:
-        return head_dim >= 256 and num_tokens >= 131072
-    return False
-
-
 def _skip_trtllm_sm89_rc15_fp8_context_mha(
     batch_size: int,
     input_len: int,
@@ -174,36 +137,6 @@ def _skip_trtllm_sm89_rc15_fp8_context_mha(
     if num_heads == 48:
         return head_dim >= 256 and num_tokens >= 65536
     return False
-
-
-def _skip_trtllm_sm90_rc15_fp8_generation(
-    use_fp8_kv_cache: bool,
-) -> bool:
-    if not (tensorrt_llm.__version__.startswith("1.3.0rc15") and get_sm_version() == 90):
-        return False
-
-    # TRT-LLM 1.3.0rc15 SM90 generation attention crashes/SIGABRTs for FP8 KV
-    # across h=64 and h=128 MHA/GQA shapes. Treat the FP8-KV generation path as
-    # unsupported on H200; BF16 KV generation remains in the queue.
-    return use_fp8_kv_cache
-
-
-def _skip_trtllm_unsupported_head_dim(head_dim: int) -> bool:
-    """TRT-LLM dense attention (MMHA/XQA) kernel support gaps.
-
-    - head_dim > 256 (e.g. Gemma4 global attention head_dim=512) aborts in
-      ``AttentionOp::initialize()`` with ``Head size N is not supported by MMHA``.
-    - head_dim == 192 on Hopper+ (SM >= 90) aborts in TllmGenFmha with
-      ``Unsupported HeadDim for BMM2-N 192`` (MiMo-style models). Ada/SM89 can
-      collect these cases.
-
-    Both are C++ ``std::terminate``/SIGABRT paths Python cannot catch. Because op
-    init prechecks generation kernels, unsupported shapes fire in the context
-    phase too and can crash-loop the whole worker pool.
-    """
-    if head_dim > 256:
-        return True
-    return head_dim == 192 and get_sm_version() >= 90
 
 
 def run_attention_torch(
@@ -479,8 +412,10 @@ def get_context_attention_test_cases():
             num_kv_heads = head_config.num_kv_heads
             h = head_config.head_dim
             attention_window_size = head_config.window_size
-            if _skip_trtllm_unsupported_head_dim(h):
-                continue
+            # FIXME(kernel-limit): head_dim > 256 hits "Head size N is not supported by MMHA"
+            # (std::terminate in AttentionOp::initialize). head_dim == 192 on SM >= 90 hits
+            # "Unsupported HeadDim for BMM2-N 192" in TllmGenFmha (SM89 is unaffected).
+            # Both abort before Python can catch; re-verify on each TRT-LLM version bump.
             if num_kv_heads != n and (num_kv_heads >= n or n % num_kv_heads != 0):
                 continue
 
@@ -514,8 +449,6 @@ def get_context_attention_test_cases():
                         h,
                     )
                     if _skip_trtllm_sm89_rc15_long_context_gqa(b, s, n, num_kv_heads, h):
-                        continue
-                    if _skip_trtllm_sm90_rc15_long_context_gqa(b, s, n, num_kv_heads, h):
                         continue
                     for precision_case in shape_sweep["precision_cases"]:
                         use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
@@ -587,8 +520,7 @@ def get_generation_attention_test_cases():
             n_kv = head_config.num_kv_heads
             h = head_config.head_dim
             attention_window_size = head_config.window_size
-            if _skip_trtllm_unsupported_head_dim(h):
-                continue
+            # FIXME(kernel-limit): same head_dim limits as context phase above apply here.
             max_tokens_key = "max_mha_tokens_per_step" if n == n_kv else "max_xqa_tokens_per_step"
             b_s_dict = _generation_target_sequence_lengths(
                 batch_sizes,
@@ -614,8 +546,6 @@ def get_generation_attention_test_cases():
                     for precision_case in shape_sweep["precision_cases"]:
                         use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
                         if not has_fp8 and use_fp8_kv_cache:
-                            continue
-                        if _skip_trtllm_sm90_rc15_fp8_generation(use_fp8_kv_cache):
                             continue
                         test_cases.append([b, s, n, n_kv, h, attention_window_size, use_fp8_kv_cache, False, False])
     return test_cases

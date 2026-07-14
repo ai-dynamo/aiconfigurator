@@ -44,25 +44,12 @@ def _mla_tokens_per_block() -> int:
     return 64
 
 
-def _skip_sm90_mla_generation() -> bool:
-    if not torch.cuda.is_available():
-        return False
-    # TRT-LLM 1.3.0rc15 aborts in AttentionOp::initialize() for standalone
-    # DeepSeek MLA generation on Hopper with:
-    # "Deepseek should be supported by fmha in generation part."
-    # This is a C++ SIGABRT, so Python cannot mark it expected after dispatch.
-    # Pinned to rc15 only (verified on H200); re-evaluate on rc17+ before extending.
-    return tensorrt_llm.__version__.startswith("1.3.0rc15") and torch.cuda.get_device_capability() == (9, 0)
-
-
 def get_context_mla_test_cases():
     dtype_list = [tensorrt_llm.bindings.DataType.BF16, tensorrt_llm.bindings.DataType.FP8]
     return _build_mla_test_cases(get_context_mla_case_specs(), dtype_list=dtype_list)
 
 
 def get_generation_mla_test_cases():
-    if _skip_sm90_mla_generation():
-        return []
     dtype_list = [tensorrt_llm.bindings.DataType.BF16, tensorrt_llm.bindings.DataType.FP8]
     return _build_mla_test_cases(get_generation_mla_case_specs(), dtype_list=dtype_list)
 

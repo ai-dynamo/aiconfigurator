@@ -142,34 +142,6 @@ def _is_trtllm_sm120_mla_module_fp8_block_unsupported() -> bool:
     )
 
 
-def _is_trtllm_sm100_dsa_context_prefix_unsupported(prefix_len: int) -> bool:
-    """Return True when TRT-LLM DSA context prefix cases poison the CUDA context.
-
-    Verified on SM100 (B200) only. SM120 uses a separate predicate if the same
-    issue is confirmed there.
-    """
-    if prefix_len <= 0 or get_sm_version() != 100:
-        return False
-    version = tensorrt_llm.__version__
-    return version.startswith("1.3.0rc15") or version.startswith("1.3.0rc17")
-
-
-def _is_trtllm_sm100_glm_dsa_module_unsupported(model_spec) -> bool:
-    """Return True when TRT-LLM GLM DSA module paths abort on Blackwell.
-
-    rc15/rc17 on SM100 hit DeepGEMM row-alignment asserts
-    (``Num. rows must be a multiple of 8``) for every GLM-5 checkpoint shape;
-    DeepSeek-V3.2 DSA module collection is unaffected.
-    Verified on SM100 (B200) only; add a separate predicate if SM120 is confirmed.
-    """
-    if get_sm_version() != 100:
-        return False
-    version = tensorrt_llm.__version__
-    if not (version.startswith("1.3.0rc15") or version.startswith("1.3.0rc17")):
-        return False
-    return model_spec.architecture == "GlmMoeDsaForCausalLM"
-
-
 # ═══════════════════════════════════════════════════════════════════════
 # Test Cases
 # ═══════════════════════════════════════════════════════════════════════
@@ -240,8 +212,6 @@ def get_context_test_cases(attn_type: str):
                         continue
                     if attn_type == "dsa":
                         for prefix_len in sweep.context_prefix_lengths:
-                            if _is_trtllm_sm100_dsa_context_prefix_unsupported(prefix_len):
-                                continue
                             cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type, prefix_len])
                     else:
                         cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
@@ -281,8 +251,6 @@ def _build_module_test_cases(attn_type: str, mode: str):
     """
     base_cases = get_context_test_cases(attn_type) if mode == "context" else get_generation_test_cases(attn_type)
     model_specs = get_mla_module_model_specs(attention_type=attn_type)
-    if attn_type == "dsa":
-        model_specs = [spec for spec in model_specs if not _is_trtllm_sm100_glm_dsa_module_unsupported(spec)]
     cases = []
     for model_spec in model_specs:
         for base_case in base_cases:
