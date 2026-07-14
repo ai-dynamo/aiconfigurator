@@ -221,25 +221,30 @@ def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list
     return iterations
 
 
+# Database modes the compiled engine answers itself. SILICON plus the
+# util-space empirical layer (HYBRID / EMPIRICAL, mirroring
+# `sdk/operations/util_empirical.py`); the SOL diagnostic modes stay on the
+# Python step.
+_RUST_SUPPORTED_DATABASE_MODES = {"SILICON", "HYBRID", "EMPIRICAL"}
+
+
 def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = None) -> bool:
     """Route to the compiled engine only when it can give the SAME answer.
 
-    The compiled engine implements the SILICON path only (no util_empirical
-    layer), so HYBRID/EMPIRICAL databases must stay on the Python step:
-    wherever silicon data misses, Python fills in empirically while the
-    compiled engine would fail the config -- delegating keeps the two
-    backends answer-identical instead of capability-divergent (parity by
-    delegation; the empirical-layer port is tracked in issue #1333).
+    The compiled engine implements the SILICON path and the util-space
+    empirical layer (HYBRID / EMPIRICAL). The SOL/SOL_FULL diagnostic modes
+    stay on the Python step -- delegating keeps the two backends
+    answer-identical instead of capability-divergent.
     """
     backend = getattr(runtime_config, "engine_step_backend", None) or os.environ.get(ENGINE_STEP_BACKEND_ENV)
     if str(backend or "python").lower() != "rust":
         return False
     if database is not None:
         mode = getattr(database, "get_default_database_mode", lambda: None)()
-        if mode is not None and getattr(mode, "name", str(mode)) != "SILICON":
+        if mode is not None and getattr(mode, "name", str(mode)) not in _RUST_SUPPORTED_DATABASE_MODES:
             logger.debug(
                 "engine-step backend 'rust' requested but database_mode=%s; "
-                "using the python step (compiled engine is SILICON-only).",
+                "using the python step (compiled engine implements SILICON/HYBRID/EMPIRICAL only).",
                 getattr(mode, "name", mode),
             )
             return False
