@@ -46,13 +46,14 @@ owns the SDK, model/system data, and native extension. Installing
 `aiconfigurator` therefore installs the complete product, while core-only
 consumers can install `aiconfigurator-core` without pulling in the upper layer.
 
-The core wheel also exposes a core-namespaced alias for the user-facing SDK
-task. Both imports resolve to the same class:
+`Task` and the orchestration APIs live in the application wheel only:
 
 ```python
-from aiconfigurator_core.sdk.task_v2 import Task
-# Equivalent to: from aiconfigurator.sdk.task_v2 import Task
+from aiconfigurator.sdk.task_v2 import Task
 ```
+
+The core wheel intentionally does not expose `task_v2`; the standalone core
+never depends back on the application package.
 
 #### Upgrading from 0.9
 

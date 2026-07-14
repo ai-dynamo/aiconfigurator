@@ -417,8 +417,7 @@ mod tests {
     // parity test. The Rust side is a pure forwarder; the only pure-Rust unit
     // left here is the memory-fraction wire mapping. The dict round-trip
     // (`fetch_python_estimate` → `estimate_from_dict`, including the
-    // `tolerance_adjusted` parse) is covered end-to-end by the Mocker consumer;
-    // see `docs/phase-1.5-capacity-followup.md` for that coverage note.
+    // `tolerance_adjusted` parse) is covered end-to-end by the Mocker consumer.
 
     /// The memory fraction must cross to Python as the wire `(kind, value)` pair
     /// the Python `estimate_kv_cache` expects.

@@ -28,7 +28,57 @@ the 1% drift tolerance and the tests assert hard. If a parity assertion ever
 fails again, the failure message prints the Python value, Rust value, absolute
 delta, percent delta, tolerance, and status for each metric.
 
+`test_compile_engine_parity.py` covers the `compile_engine` -> `EngineHandle`
+path specifically: op-transfer bincode round-trip fidelity plus integration
+parity against the Python `BaseBackend`. Both suites run in the
+`rust-engine-step-parity` CI job (`build-test.yml`).
+
+Build the `aiconfigurator_core` extension first (the CI job does this with
+`maturin develop --release`; from a clean checkout run
+`cd aic-core && ../.venv/bin/maturin develop --release`), then return to the
+repository root and run:
+
+```bash
+uv run pytest -q aic-core/rust/aiconfigurator-core/parity_tests/test_compile_engine_parity.py
+```
+
+## Perf Gate (CI)
+
+`test_engine_step_perf.py` is the performance analog of the parity suite: it
+asserts the compiled Rust engine-step stays at least a floor multiple as fast as
+the pure-Python step, per case.
+
+```bash
+uv run pytest -q -rA aic-core/rust/aiconfigurator-core/parity_tests/test_engine_step_perf.py
+```
+
+Because Python and Rust are timed **back-to-back on the same host**, the
+reported speedup *ratio* is far **more comparable across machines** than an
+absolute wall-clock number — most of the machine-speed variance divides out
+(the ratio can still shift somewhat across architectures; see the perf report's
+ARM-vs-x86 note). That is why it is safe as a blocking gate on shared CI runners
+where absolute wall-clock is noisy (it runs as a step in the
+`rust-engine-step-parity` job in `build-test.yml`, reusing the same built
+extension).
+
+It exists to catch algorithmic regressions in the Rust hot path — e.g. a
+per-query `SiteIndex::resolve` that sorts every collected GEMM site
+(`O(n log n)`) instead of selecting the nearest handful (`O(n)`). That class of
+bug once pushed the Rust step to 0.15–0.78x of Python.
+
+Per-case floors live in `MIN_SPEEDUP` and are all **≥ 1.0** — the gate encodes
+the goal that Rust must be at least as fast as Python on every guarded case.
+`nemotron-nas` (large graph, wide stable margin ~1.9–2.3x) uses a 1.5x floor
+that also catches partial regressions; the small ~20 us graphs (`deepseek-v3`,
+`minimax-m25`) sit near the FFI-tax floor (~1.1–1.5x) and use 1.0x. On failure
+the assertion prints a per-phase table of Python p50, Rust p50, speedup, floor,
+and status.
+
 ## Engine-Step Benchmark
+
+The latest full-family speedup numbers (dated + commit-stamped) live in
+[`perf-speedup-report.md`](../docs/perf-speedup-report.md) — regenerate it from this
+harness when the Rust hot path changes.
 
 Run the hot-cache Python SDK vs Rust engine-step API benchmark:
 

@@ -451,6 +451,10 @@ pub struct SiteIndex {
     /// site key -> sorted (curve coordinate, latency) sweep
     sites: BTreeMap<Vec<u32>, Vec<(u32, f64)>>,
     site_logs: Vec<(Vec<u32>, Vec<f64>)>,
+    /// Per-site curve span `(first_curve_coord, last_curve_coord)`, aligned with
+    /// `site_logs`. Cached so the curve-coverage filter is an array index rather
+    /// than a per-query `sites` map lookup.
+    curve_bounds: Vec<(u32, u32)>,
 }
 
 impl SiteIndex {
@@ -465,17 +469,22 @@ impl SiteIndex {
         for curve in sites.values_mut() {
             curve.sort_by_key(|&(c, _)| c);
         }
-        let site_logs = sites
-            .keys()
-            .map(|k| {
+        let (site_logs, curve_bounds): (Vec<(Vec<u32>, Vec<f64>)>, Vec<(u32, u32)>) = sites
+            .iter()
+            .map(|(k, curve)| {
                 let logs = k
                     .iter()
                     .map(|&v| (v.max(1) as f64).log2())
                     .collect::<Vec<f64>>();
-                (k.clone(), logs)
+                let bounds = (curve[0].0, curve[curve.len() - 1].0);
+                ((k.clone(), logs), bounds)
             })
-            .collect();
-        SiteIndex { sites, site_logs }
+            .unzip();
+        SiteIndex {
+            sites,
+            site_logs,
+            curve_bounds,
+        }
     }
 
     /// Resolve one query. Exact hits are answered by the site's own curve
@@ -523,33 +532,55 @@ impl SiteIndex {
                 .sqrt()
         };
 
-        let mut candidates: Vec<usize> = (0..self.site_logs.len()).collect();
+        // Rank collected sites by distance to the query. Everything downstream
+        // — coverage filter, distance gate, nearest-k selection, IDW weight —
+        // reads off this ONE `(distance, site index)` buffer, so resolve does a
+        // single allocation and computes each site's `dist` (a sqrt over the
+        // site axes) exactly once. Recomputing `dist` inside the old sort
+        // comparator, plus separate dists/candidates/covering vecs, made this
+        // resolve the dominant engine-step cost for query-heavy models (e.g.
+        // per-block puzzle nets whose GEMM shapes miss the collected sites).
+        let mut ranked: Vec<(f64, usize)> = Vec::with_capacity(self.site_logs.len());
         if *require_curve_coverage {
-            let covering: Vec<usize> = candidates
-                .iter()
-                .copied()
-                .filter(|&i| {
-                    let curve = &self.sites[&self.site_logs[i].0];
-                    (curve[0].0 as f64) <= q && q <= (curve[curve.len() - 1].0 as f64)
-                })
-                .collect();
-            if !covering.is_empty() {
-                // else: fall back to all sites, each held at its own curve end
-                candidates = covering;
+            for (i, (_, logs)) in self.site_logs.iter().enumerate() {
+                let (lo, hi) = self.curve_bounds[i];
+                if (lo as f64) <= q && q <= (hi as f64) {
+                    ranked.push((dist(logs), i));
+                }
+            }
+        }
+        // No coverage requirement, or nothing covered q -> fall back to all
+        // sites (each later held at its own curve end).
+        if ranked.is_empty() {
+            for (i, (_, logs)) in self.site_logs.iter().enumerate() {
+                ranked.push((dist(logs), i));
             }
         }
 
-        let mut ranked = candidates;
-        ranked.sort_by(|&a, &b| dist(&self.site_logs[a].1).total_cmp(&dist(&self.site_logs[b].1)));
+        // Gate first, then partial-select the nn_sites nearest — O(n) — instead
+        // of a full O(n log n) sort we would immediately truncate to a handful.
+        // (Equivalent to the former sort→gate→take: a full sort then gate then
+        // take-k selects exactly the k nearest gated sites.) The `.then` index
+        // tie-break reproduces the previous *stable* sort's order on equal
+        // distances (sites are pushed in ascending-index order), so the selected
+        // set and its ordering are identical.
         if let Some(gate) = max_site_distance {
-            ranked.retain(|&i| dist(&self.site_logs[i].1) <= *gate);
+            ranked.retain(|&(d, _)| d <= *gate);
             if ranked.is_empty() {
                 return Err(miss(cfg, coords, "no site within max_site_distance"));
             }
         }
+        let cmp =
+            |a: &(f64, usize), b: &(f64, usize)| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1));
+        let k = (*nn_sites).min(ranked.len());
+        if k < ranked.len() {
+            ranked.select_nth_unstable_by(k, cmp);
+            ranked.truncate(k);
+        }
+        ranked.sort_by(cmp);
 
         let (mut wsum, mut u_acc) = (0.0_f64, 0.0_f64);
-        for &i in ranked.iter().take(*nn_sites) {
+        for &(d, i) in ranked.iter().take(*nn_sites) {
             let neigh = &self.site_logs[i].0;
             let curve = &self.sites[neigh];
             // one bad neighbour must not poison the query
@@ -565,7 +596,6 @@ impl SiteIndex {
             if !(lat_i.is_finite() && lat_i > 0.0 && sol_i.is_finite() && sol_i > 0.0) {
                 continue;
             }
-            let d = dist(&self.site_logs[i].1);
             let w = 1.0 / (d * d + 1e-12);
             u_acc += w * (sol_i / lat_i);
             wsum += w;

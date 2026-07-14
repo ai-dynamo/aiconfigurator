@@ -5,6 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Rust↔Python Engine-Step Parity Coverage
 
+**Generated: 2026-06-16 (UTC). Commit: `048c3a7f`** (final confirming rescan).
+This is the parity sibling of `perf-speedup-report.md`; re-stamp the date/commit
+whenever the scan is regenerated.
+
 **Status as of 2026-06-16 — gate CLOSED.** **6 engine parity bugs found and
 fixed** (§5); probe 0 DRIFT / 0 REGRESSION; Pareto 0 REGRESSION, 99.8% pass. The
 4 residual Pareto DRIFT are **frontier-extent differences in the high-throughput
@@ -26,8 +30,8 @@ model × system × backend × version matrix.
 This report is that gate's evidence: the coverage swept, the methodology, the
 results, and every parity bug found and fixed along the way.
 
-- Plan: [`aic-core/rust/aiconfigurator-core/docs/phase-2-python-dedup-plan.md`](../docs/phase-2-python-dedup-plan.md)
-- Scan runbook: [`aic-core/rust/aiconfigurator-core/docs/phase-2-parity-scan-runbook.md`](../docs/phase-2-parity-scan-runbook.md)
+- Plan: [`aic-core/rust/aiconfigurator-core/docs/python-dedup-plan.md`](./python-dedup-plan.md)
+- Scan runbook: [`aic-core/rust/aiconfigurator-core/docs/parity-scan-runbook.md`](./parity-scan-runbook.md)
 - Harness: `tools/support_matrix/scan_rust_parity.py`
 
 ## 2. Coverage
@@ -108,9 +112,9 @@ by this work.
 Bugs `49751d1e` (low-batch prefill) and `b195bbfd` (large-batch-×-long-kv decode)
 were **invisible to the single-point probe** (`bs=16, isl/osl=256`), which sits
 in a low-drift pocket. They surfaced only in the Pareto layer (frontier-shape
-DRIFTs) and were localized with a multi-config drift sweep
-(`parity_tests/drift_map.py`), which dropped from **37 → 4** `>1%` configs after
-both fixes. Lesson: a one-config probe gives false "0 DRIFT" confidence; the
+DRIFTs) and were localized with a one-time multi-config drift sweep, which
+dropped from **37 → 4** `>1%` configs after both fixes. Lesson: a one-config
+probe gives false "0 DRIFT" confidence; the
 Pareto sweep + drift map are the real corner coverage.
 
 ### DeepSeek-V4 detail (the hard one)
@@ -162,7 +166,7 @@ the final build is the confirming gate (§8).
 | `moonshotai/Kimi-K2.5` · h200_sxm · vllm 0.19.0 | 0.0% | mean **1.23%** / max 6.88% | 6% (min-latency endpoint; tpot & peak-tput identical) |
 | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` · gb300 · sglang 0.5.10 | 0.0% | mean **0.15%** / max 0.97% | 7% (extreme endpoints; curve <1%) |
 
-A classifier (`parity_tests/classify_drift.py`) compared the two engines'
+A one-time drift classifier compared the two engines'
 user-facing frontier **curves** (request_latency vs tokens/s/user) and the
 **envelope extremes** the comparator checks. The result resolves the ambiguity:
 

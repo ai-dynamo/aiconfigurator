@@ -275,10 +275,12 @@ worker/recycle settings used.
 
 ## 10. Background context (optional reading)
 
-- Scan design + schema + historical outcome (2026-06-01: 1906 STRICT_PASS,
-  16 DRIFT, 0 REGRESSION over 2016 entries): `phase1/support-matrix-scan.md`.
-- Why Phase 2 needs this (flip Rust to default, then delete Python latency
-  path): `phase-2-python-dedup-plan.md`.
-- Note: the matrix has since grown to ~2,158 entries (new DeepSeek-V4, Qwen3-VL,
-  GLM-5, more backend versions), so a fresh full scan on current HEAD is
-  required — the 2016-entry baseline is stale.
+- Completed scan result — the deliverable this runbook produces
+  (last full run 2026-06-16, commit `048c3a7f`: gate CLOSED, 0 REGRESSION,
+  DRIFT list triaged over ~2,158 entries):
+  `parity-scan-report.md`.
+- Why Phase 2 needs this (flip Rust to default, then delete the Python latency
+  path): `python-dedup-plan.md`.
+- Re-run this runbook on the current HEAD whenever the support matrix grows or
+  the Rust hot path changes; the runner refuses to mix results across commits
+  (§4.3), so record the `commit_sha` under test.
