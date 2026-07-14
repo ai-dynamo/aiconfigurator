@@ -1317,6 +1317,12 @@ def _all_op_names() -> list[str]:
             if entry.op not in seen:
                 seen.add(entry.op)
                 ops.append(entry.op)
+    # Whole-forward FPM collection is an explicit campaign runner rather than
+    # a normal per-device OpEntry. Keep it in the existing --ops interface,
+    # but do not add it to backend registries consumed by collect_ops().
+    from collector.fpm_forward import FPM_FORWARD_OP
+
+    ops.append(FPM_FORWARD_OP)
     return ops
 
 
@@ -1441,7 +1447,30 @@ def main():
         action="store_true",
         help="Keep collector CSV staging files instead of finalizing *_perf.txt outputs to parquet.",
     )
+    from collector.fpm_forward import FPM_FORWARD_OP, add_fpm_arguments
+    from collector.fpm_forward.config import add_fpm_generator_arguments
+
+    add_fpm_arguments(parser)
+    # Do not import Generator code on ordinary op-level collector invocations.
+    # FPM is explicit-only, so a lightweight argv pre-scan is sufficient to
+    # expose its shared Generator/Kubernetes flags without changing the legacy
+    # import path or startup requirements.
+    import sys
+
+    if any(value in {FPM_FORWARD_OP, f"--ops={FPM_FORWARD_OP}"} for value in sys.argv):
+        add_fpm_generator_arguments(parser)
     args = parser.parse_args()
+    from collector.fpm_forward.config import reject_fpm_arguments_without_fpm
+
+    try:
+        reject_fpm_arguments_without_fpm(args)
+    except ValueError as error:
+        parser.error(str(error))
+    fpm_requested = FPM_FORWARD_OP in (args.ops or ())
+    if fpm_requested and set(args.ops or ()) != {FPM_FORWARD_OP}:
+        parser.error("fpm_forward must be collected alone; do not mix campaign and local op entries")
+    if fpm_requested and not (args.model_path or args.model_architecture or args.model_cases):
+        parser.error("fpm_forward requires --model-path, --model-architecture, or --model-cases")
     ops = args.ops
     case_plan = None
     logger_message = None
@@ -1471,7 +1500,7 @@ def main():
         if args.ops is None:
             ops = planned_ops
         else:
-            requested_ops = set(args.ops)
+            requested_ops = set(args.ops) - {FPM_FORWARD_OP}
             ops = [op for op in planned_ops if op in requested_ops]
             missing_ops = requested_ops - set(ops)
             if missing_ops:
@@ -1486,6 +1515,15 @@ def main():
                 "using base op cases only plus legacy model filtering."
             )
 
+        if args.plan_only and fpm_requested:
+            from collector.fpm_forward.entry import resolve_inputs
+
+            try:
+                fpm_plan, _generator_overrides, _runtime_overlay_dir = resolve_inputs(args, case_plan)
+            except (TypeError, ValueError) as error:
+                parser.error(str(error))
+            print(json.dumps(fpm_plan.to_dict(), indent=2, sort_keys=True))
+            return
         if args.plan_only:
             log_dict = case_plan.to_log_dict()
             log_dict["ops"] = ops
@@ -1542,6 +1580,18 @@ def main():
             f"Resume enabled: dir={Path(args.checkpoint_dir).expanduser()}"
             + (" (retrying previously failed tasks)" if args.resume_retry_failed else "")
         )
+
+    if fpm_requested:
+        from collector.fpm_forward.entry import run_from_args
+
+        try:
+            run_errors = run_from_args(args, case_plan)
+        except (TypeError, ValueError) as error:
+            parser.error(str(error))
+        generate_collection_summary(run_errors, args.backend, "generator-resolved")
+        if run_errors:
+            raise SystemExit(1)
+        return
 
     _require_torch()
 
