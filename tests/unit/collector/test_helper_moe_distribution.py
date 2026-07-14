@@ -14,7 +14,8 @@ KV-cache stack. That is left for a follow-up if the function is ever refactored.
 """
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 
 from collector.helper import (
     _generate_power_law_distribution,
