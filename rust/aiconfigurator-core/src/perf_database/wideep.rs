@@ -54,7 +54,7 @@ use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
 use super::perf_interp::{self, Node, OpInterpConfig};
 use super::{kernel_source_ok, resolve_op_sources};
-use super::moe::{query_token_curve, singleton_underflow};
+use super::moe::{query_token_curve, singleton_underflow, MoeSiblingSlice};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct WideEpTable {
@@ -78,6 +78,10 @@ pub struct WideEpTable {
 
 struct MoeGrids {
     by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>>,
+    /// Distinct quant names in first-seen (file row) order — Python's dict
+    /// insertion order, consumed by the operator-layer transfer ladder
+    /// (same contract as `moe.rs::MoeTable::available_quants`).
+    quants_in_load_order: Vec<String>,
 }
 
 /// TRT-LLM alltoall grids. Keying mirrors Python `load_trtllm_alltoall_data`
@@ -261,6 +265,97 @@ impl WideEpTable {
             true,
             sol,
         )
+    }
+
+    /// Own-slice `num_tokens -> latency_ms` curve of the context/generation
+    /// WideEP MoE table, after the per-quant `"uniform"` distribution
+    /// fallback. Typed miss when the slice is absent or empty — the
+    /// EMPIRICAL calibration input of the SGLang deepep branch of
+    /// `MoE._query_moe_table` (`_moe_table` routes the util grid to these
+    /// tables, `operations/moe.py:364-397`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe_slice_points(
+        &self,
+        is_context: bool,
+        quant_name: &str,
+        workload_distribution: &str,
+        topk: u32,
+        num_experts: u32,
+        hidden_size: u32,
+        inter_size: u32,
+        moe_tp_size: u32,
+        moe_ep_size: u32,
+    ) -> Result<Vec<(u32, f64)>, AicError> {
+        let grids = self.load_ctx_or_gen_moe(is_context)?;
+        let key = MoeKey {
+            quant: quant_name.to_string(),
+            distribution: resolve_moe_distribution(grids, quant_name, workload_distribution),
+            topk,
+            num_experts,
+            hidden_size,
+            inter_size,
+            moe_tp_size,
+            moe_ep_size,
+        };
+        let by_tokens = grids.by_keys.get(&key).filter(|curve| !curve.is_empty()).ok_or_else(|| {
+            AicError::PerfDatabase(format!(
+                "WideEP MoE data missing for {key:?} at {}",
+                self.data_root.display()
+            ))
+        })?;
+        Ok(by_tokens.iter().map(|(&t, &lat)| (t, lat)).collect())
+    }
+
+    /// All collected sibling slices of the context/generation WideEP MoE
+    /// table for `(quant, distribution-after-uniform-fallback, moe_tp,
+    /// moe_ep)`; empty curves skipped, an empty result is data (not an
+    /// error). Same contract (incl. the tie-order NOTE) as
+    /// `moe.rs::MoeTable::sibling_slices` — the transfer ladder walks THIS
+    /// table when Python's `_moe_table` routes an SGLang deepep query here.
+    pub fn moe_sibling_slices(
+        &self,
+        is_context: bool,
+        quant_name: &str,
+        workload_distribution: &str,
+        moe_tp_size: u32,
+        moe_ep_size: u32,
+    ) -> Result<Vec<MoeSiblingSlice>, AicError> {
+        let grids = self.load_ctx_or_gen_moe(is_context)?;
+        let dist = resolve_moe_distribution(grids, quant_name, workload_distribution);
+        let mut slices = Vec::new();
+        for (key, curve) in &grids.by_keys {
+            if key.quant != quant_name
+                || key.distribution != dist
+                || key.moe_tp_size != moe_tp_size
+                || key.moe_ep_size != moe_ep_size
+                || curve.is_empty()
+            {
+                continue;
+            }
+            slices.push(MoeSiblingSlice {
+                topk: key.topk,
+                num_experts: key.num_experts,
+                hidden_size: key.hidden_size,
+                inter_size: key.inter_size,
+                points: curve.iter().map(|(&t, &lat)| (t, lat)).collect(),
+            });
+        }
+        Ok(slices)
+    }
+
+    /// Distinct quant names of the context/generation WideEP MoE table, in
+    /// first-seen (file row) order (Python dict insertion order — same
+    /// contract as `moe.rs::MoeTable::available_quants`).
+    pub fn moe_available_quants(&self, is_context: bool) -> Result<Vec<String>, AicError> {
+        Ok(self.load_ctx_or_gen_moe(is_context)?.quants_in_load_order.clone())
+    }
+
+    fn load_ctx_or_gen_moe(&self, is_context: bool) -> Result<&MoeGrids, AicError> {
+        if is_context {
+            self.load_context_moe()
+        } else {
+            self.load_generation_moe()
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -527,6 +622,24 @@ impl WideEpTable {
     }
 }
 
+/// Mirrors Python's `wl = workload if workload in moe_data[quant] else
+/// "uniform"` on a wideep MoE grid.
+fn resolve_moe_distribution(
+    grids: &MoeGrids,
+    quant_name: &str,
+    workload_distribution: &str,
+) -> String {
+    let requested_exists = grids
+        .by_keys
+        .keys()
+        .any(|k| k.quant == quant_name && k.distribution == workload_distribution);
+    if requested_exists {
+        workload_distribution.to_string()
+    } else {
+        "uniform".to_string()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn query_moe(
     grids: &MoeGrids,
@@ -544,15 +657,7 @@ fn query_moe(
     sol: &dyn Fn(f64) -> f64,
 ) -> Result<f64, AicError> {
     let quant_name = quant.name();
-    let requested_exists = grids
-        .by_keys
-        .keys()
-        .any(|k| k.quant == quant_name && k.distribution == workload_distribution);
-    let distribution = if requested_exists {
-        workload_distribution.to_string()
-    } else {
-        "uniform".to_string()
-    };
+    let distribution = resolve_moe_distribution(grids, quant_name, workload_distribution);
     let key = MoeKey {
         quant: quant_name.to_string(),
         distribution,
@@ -752,6 +857,7 @@ fn dispatch_lookup(
 /// context/generation/wideep-moe parquets (alltoall has its own loader).
 fn load_moe_parquet(sources: &[PerfSource]) -> Result<MoeGrids, AicError> {
     let mut by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
+    let mut quants_in_load_order: Vec<String> = Vec::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -789,6 +895,10 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<MoeGrids, AicError> {
                 moe_tp_size: row.u32_optional(moe_tp_size_col)?.unwrap_or(1),
                 moe_ep_size: row.u32(moe_ep_size_col)?,
             };
+            // First-seen (file row) quant order (Python dict insertion order).
+            if !quants_in_load_order.iter().any(|q| q == &key.quant) {
+                quants_in_load_order.push(key.quant.clone());
+            }
             // Last-wins parity with Python `load_wideep_*_moe_data`
             // (direct-assign, no skip-on-conflict guard).
             by_keys
@@ -804,7 +914,7 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<MoeGrids, AicError> {
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
-    Ok(MoeGrids { by_keys })
+    Ok(MoeGrids { by_keys, quants_in_load_order })
 }
 
 /// Auto-select the TRT-LLM All2All kernel. Verbatim port of Python

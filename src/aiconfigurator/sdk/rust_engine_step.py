@@ -259,6 +259,28 @@ def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = N
     return True
 
 
+def _note_rust_provenance(handle: Any) -> None:
+    """Forward the compiled engine's per-call empirical provenance tier into
+    Python's capture (``util_empirical.note_provenance``).
+
+    ``EngineHandle.last_provenance()`` returns the worst tier fired during the
+    engine call just made (``None`` for a pure-silicon answer). Forwarding it
+    keeps ``capture_provenance()`` consumers — the support matrix's
+    HYBRID_PASS tier labelling — working unchanged when the engine step is
+    rust-routed. ``note_provenance`` is a no-op outside an active capture, so
+    this costs one getattr-free call per step. Only the worst tier crosses the
+    FFI (not the full tag set); ``worst_provenance`` over the captured tags is
+    unaffected because max(worst) == worst(all).
+    """
+    tier = handle.last_provenance()
+    if tier is not None and tier != "silicon":
+        # Deferred import: keep module import light and cycle-free
+        # (sdk.engine imports this module at top level).
+        from aiconfigurator.sdk.operations import util_empirical
+
+        util_empirical.note_provenance(tier)
+
+
 def estimate_static_latency_breakdown_with_rust(
     model: Any,
     database: Any,
@@ -290,6 +312,7 @@ def estimate_static_latency_breakdown_with_rust(
         mode=engine_mode,
         stride=int(stride),
     )
+    _note_rust_provenance(handle)
 
     if latency_correction_scale != 1.0:
         context_latency_ms *= latency_correction_scale
@@ -324,7 +347,7 @@ def estimate_mixed_step_latency_with_rust(
     straight through with no Python-side pre-math.
     """
     handle = _cached_engine_handle(model, database)
-    return handle.mixed_step_latency(
+    latency_ms = handle.mixed_step_latency(
         int(ctx_tokens),
         int(gen_tokens),
         int(isl),
@@ -333,6 +356,8 @@ def estimate_mixed_step_latency_with_rust(
         seq_imbalance_correction_scale=float(seq_imbalance_correction_scale or 1.0),
         gen_seq_imbalance_correction_scale=float(gen_seq_imbalance_correction_scale or 1.0),
     )
+    _note_rust_provenance(handle)
+    return latency_ms
 
 
 def estimate_decode_step_latency_with_rust(
@@ -353,12 +378,14 @@ def estimate_decode_step_latency_with_rust(
     applied internally, so the raw args pass straight through.
     """
     handle = _cached_engine_handle(model, database)
-    return handle.decode_step_latency(
+    latency_ms = handle.decode_step_latency(
         int(gen_tokens),
         int(isl),
         int(osl),
         gen_seq_imbalance_correction_scale=float(gen_seq_imbalance_correction_scale or 1.0),
     )
+    _note_rust_provenance(handle)
+    return latency_ms
 
 
 # Memo of compiled ``EngineHandle`` objects, keyed by the engine identity

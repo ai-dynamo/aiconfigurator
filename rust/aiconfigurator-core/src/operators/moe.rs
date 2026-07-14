@@ -27,10 +27,11 @@
 //! [`AicError::EmpiricalNotImplemented`] only surfaces when every permitted
 //! tier found nothing.
 //!
-//! Scope: the SGLang `moe_backend == "deepep_moe"` branch of Python's
-//! `_moe_table` does not exist here — the Rust engine routes WideEP MoE
-//! through `WideEpMoeOp` (`operators/wideep_moe.rs`), so this op only ever
-//! addresses the regular / low-latency tables.
+//! The SGLang `moe_backend == "deepep_moe"` branch of Python's `_moe_table`
+//! routes BOTH the silicon lookup and the empirical calibration (own-shape
+//! grid + transfer ladder) to the wideep context/generation MoE tables —
+//! mirrored here via [`MoeTableSel`]. (The TRT-LLM WideEP compute table is a
+//! different op: `WideEpMoeOp`, `operators/wideep_moe.rs`.)
 //!
 //! Weights accounting (per-expert FFN weights + router) is in the model
 //! layer; the operator returns latency only.
@@ -94,9 +95,9 @@ fn moe_quant_from_name(name: &str) -> Option<MoeQuantMode> {
 
 /// Collected quants with a DIFFERENT `(memory, compute)` profile than the
 /// query, nearest-profile first (stable sort by `|Δmemory| + |Δcompute|`;
-/// mirrors `_xprofile_moe_quants`, `operations/moe.py:105-117`). NOTE:
-/// Python breaks distance ties by table insertion (file row) order; here
-/// the input arrives in the accessor's sorted-name order.
+/// mirrors `_xprofile_moe_quants`, `operations/moe.py:105-117`). Python
+/// breaks distance ties by table insertion (file row) order — the accessor
+/// feeds that load order in, and the stable sort preserves it.
 fn xprofile_moe_quants(query: MoeQuantMode, table_quants: &[MoeQuantMode]) -> Vec<MoeQuantMode> {
     let qp = query.mapping();
     let mut refs: Vec<MoeQuantMode> = table_quants
@@ -123,6 +124,42 @@ fn policy_fingerprint(policy: TransferPolicy) -> String {
         "xshape={},xquant={},xprofile={},xop={}",
         policy.xshape as u8, policy.xquant as u8, policy.xprofile as u8, policy.xop as u8
     )
+}
+
+/// Which perf table calibrates the EMPIRICAL path. Mirrors Python's
+/// `_moe_table()` selection (`operations/moe.py:364-397`): SGLang
+/// `moe_backend == "deepep_moe"` routes to the wideep context/generation
+/// MoE tables; nvfp4 small-token gated probes the TRT-LLM low-latency
+/// split; everything else uses the default table.
+#[derive(Clone, Copy, PartialEq)]
+enum MoeTableSel {
+    Standard,
+    LowLatency,
+    Wideep { is_context: bool },
+}
+
+impl MoeTableSel {
+    /// Grid cache-key tag. Python folds `kernel_tag` ("std" / "ll" /
+    /// "wideep") plus `id(node)` into the key; the ctx/gen split here plays
+    /// the node-identity role, so the two wideep tables cannot alias.
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Standard => "std",
+            Self::LowLatency => "ll",
+            Self::Wideep { is_context: true } => "wideep_ctx",
+            Self::Wideep { is_context: false } => "wideep_gen",
+        }
+    }
+}
+
+/// The perf-DB kernel grid behind a non-wideep selector. Callers match the
+/// wideep variants off to `WideEpTable` accessors before reaching this.
+fn moe_kernel(table: MoeTableSel) -> MoeKernel {
+    match table {
+        MoeTableSel::Standard => MoeKernel::Standard,
+        MoeTableSel::LowLatency => MoeKernel::LowLatency,
+        MoeTableSel::Wideep { .. } => unreachable!("wideep selectors dispatch to WideEpTable"),
+    }
 }
 
 /// A sibling slice the transfer ladder may borrow: the reference slice's
@@ -219,17 +256,6 @@ impl MoeOp {
         // `MoE.query` (`x = x * attention_dp_size`). Applied exactly once,
         // before the perf-DB resolution keys off the token count.
         let num_tokens = num_tokens.saturating_mul(self.attention_dp_size.max(1));
-        let is_sglang = db.backend == "sglang";
-        // SGLang EPLB prefill correction (Python operations/moe.py:
-        // `num_tokens_corrected = int(num_tokens * 0.8) if enable_eplb and
-        // is_context else num_tokens`, sglang branch only). Applied before
-        // BOTH the silicon resolution and the empirical estimate (Python
-        // corrects the token count ahead of the table query).
-        let num_tokens = if is_sglang && self.enable_eplb && self.is_context {
-            (num_tokens as f64 * 0.8) as u32
-        } else {
-            num_tokens
-        };
 
         // Database-mode dispatch, mirroring the Python `_query_moe_table`
         // tail (`database._query_silicon_or_hybrid`): EMPIRICAL always
@@ -261,6 +287,16 @@ impl MoeOp {
     /// grid, scale/clamp applied per branch — the audit-PR body, unchanged).
     fn silicon_pr(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
         let is_sglang = db.backend == "sglang";
+        // SGLang EPLB prefill correction — INSIDE get_silicon only (Python
+        // operations/moe.py:684, sglang branch: `num_tokens_corrected =
+        // int(num_tokens * 0.8) if enable_eplb and is_context else
+        // num_tokens`). The EMPIRICAL closures receive RAW tokens
+        // (moe.py:637-647, 803-813), so the correction must not leak there.
+        let num_tokens = if is_sglang && self.enable_eplb && self.is_context {
+            (num_tokens as f64 * 0.8) as u32
+        } else {
+            num_tokens
+        };
         // The roofline SOL the perf-DB engine anchors its beyond-range
         // util-hold on (Python `_resolve_tokens` passes the same closure).
         // Coordinates arriving from the engine are always integral (table
@@ -373,30 +409,34 @@ impl MoeOp {
             self.moe_ep_size,
         );
 
-        // Kernel-table selection mirrors get_silicon's (`_moe_table`,
-        // `operations/moe.py:355-386`): nvfp4 + small tokens + gated probes
-        // the low-latency table for the FULL slice and falls back to the
-        // default table on a shape miss. Building util from the wrong table
-        // would over-estimate by the ~3x kernel gap. The `kernel_tag` folds
-        // the choice into every grid cache key so a low-latency grid can't
-        // be served to a regular query (or vice versa) at the same shape.
-        let kernel = if num_tokens <= 128
+        // Table selection mirrors get_silicon's (`_moe_table`,
+        // `operations/moe.py:364-397`): the SGLang deepep branch comes FIRST
+        // and routes the whole calibration (own-shape grid + ladder) to the
+        // wideep context/generation tables; otherwise nvfp4 + small tokens +
+        // gated probes the low-latency table for the FULL slice and falls
+        // back to the default table on a shape miss. Building util from the
+        // wrong table would over-estimate by the ~3x kernel gap. The tag
+        // folds the choice into every grid cache key so one table's grid
+        // can't be served to another's query at the same shape.
+        let table = if db.backend == "sglang" && self.moe_backend.as_deref() == Some("deepep_moe")
+        {
+            MoeTableSel::Wideep {
+                is_context: self.is_context,
+            }
+        } else if num_tokens <= 128
             && quant == MoeQuantMode::Nvfp4
             && self.is_gated
             && db.moe.low_latency_available()?
         {
-            match self.slice_points(db, MoeKernel::LowLatency) {
-                Ok(_) => MoeKernel::LowLatency,
-                Err(err) if err.is_missing_perf_data() => MoeKernel::Standard,
+            match self.slice_points(db, MoeTableSel::LowLatency) {
+                Ok(_) => MoeTableSel::LowLatency,
+                Err(err) if err.is_missing_perf_data() => MoeTableSel::Standard,
                 Err(err) => return Err(err),
             }
         } else {
-            MoeKernel::Standard
+            MoeTableSel::Standard
         };
-        let kernel_tag = match kernel {
-            MoeKernel::LowLatency => "ll",
-            MoeKernel::Standard => "std",
-        };
+        let kernel_tag = table.tag();
 
         // Own-shape grid over this slice's num_tokens curve (depth 1).
         let own_sol = |c: &[f64]| {
@@ -427,7 +467,7 @@ impl MoeOp {
             num_gemms,
         );
         let mut grid = db.util_grids.get_or_try_build(&own_key, || {
-            match self.slice_points(db, kernel) {
+            match self.slice_points(db, table) {
                 Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(
                     points.into_iter().map(|(t, lat)| (vec![t as f64], lat)),
                     own_sol,
@@ -449,11 +489,11 @@ impl MoeOp {
             // xshape set falls through to same-profile xquant siblings.
             let mut candidates: Vec<MoeReferenceCandidate> = Vec::new();
             if policy.contains(TransferKind::XShape) {
-                self.collect_candidates(db, kernel, quant, quant, "xshape", &mut candidates)?;
+                self.collect_candidates(db, table, quant, quant, "xshape", &mut candidates)?;
             }
             if candidates.is_empty() && policy.contains(TransferKind::XQuant) {
                 let qp = quant.mapping();
-                for name in db.moe.available_quants(kernel)? {
+                for name in self.table_available_quants(db, table)? {
                     let Some(sibling) = moe_quant_from_name(&name) else {
                         continue;
                     };
@@ -464,7 +504,7 @@ impl MoeOp {
                     {
                         continue;
                     }
-                    self.collect_candidates(db, kernel, sibling, quant, "xquant", &mut candidates)?;
+                    self.collect_candidates(db, table, sibling, quant, "xquant", &mut candidates)?;
                 }
             }
             if let Some(reference) =
@@ -480,9 +520,8 @@ impl MoeOp {
             if grid.as_deref().is_none_or(UtilGrid::is_empty)
                 && policy.contains(TransferKind::XProfile)
             {
-                let table_quants: Vec<MoeQuantMode> = db
-                    .moe
-                    .available_quants(kernel)?
+                let table_quants: Vec<MoeQuantMode> = self
+                    .table_available_quants(db, table)?
                     .iter()
                     .filter_map(|name| moe_quant_from_name(name))
                     .collect();
@@ -490,7 +529,7 @@ impl MoeOp {
                     let mut candidates: Vec<MoeReferenceCandidate> = Vec::new();
                     self.collect_candidates(
                         db,
-                        kernel,
+                        table,
                         ref_quant,
                         ref_quant,
                         "xprofile",
@@ -512,22 +551,59 @@ impl MoeOp {
 
         let query = [num_tokens as f64];
         let (latency, _) = util_empirical::estimate(sol_time, &query, grid.as_deref(), util_scale)?;
+        // Tier fired = the reference grid's transfer kind (xshape / xquant /
+        // xprofile), or own-shape "empirical" when no borrow happened —
+        // Python `prov` at moe.py:447/534/569 passed to estimate() at :571.
+        db.note_provenance(
+            grid.as_deref()
+                .and_then(|g| g.reference_provenance)
+                .and_then(util_empirical::ProvenanceTier::from_tag)
+                .unwrap_or(util_empirical::ProvenanceTier::Empirical),
+        );
         Ok(latency)
     }
 
-    /// This op's own-slice token curve on the chosen kernel table.
-    fn slice_points(&self, db: &PerfDatabase, kernel: MoeKernel) -> Result<Vec<(u32, f64)>, AicError> {
-        db.moe.slice_points(
-            kernel,
-            self.quant_mode.name(),
-            &self.workload_distribution,
-            self.topk,
-            self.num_experts,
-            self.hidden_size,
-            self.inter_size,
-            self.moe_tp_size,
-            self.moe_ep_size,
-        )
+    /// This op's own-slice token curve on the selected table.
+    fn slice_points(&self, db: &PerfDatabase, table: MoeTableSel) -> Result<Vec<(u32, f64)>, AicError> {
+        match table {
+            MoeTableSel::Standard | MoeTableSel::LowLatency => db.moe.slice_points(
+                moe_kernel(table),
+                self.quant_mode.name(),
+                &self.workload_distribution,
+                self.topk,
+                self.num_experts,
+                self.hidden_size,
+                self.inter_size,
+                self.moe_tp_size,
+                self.moe_ep_size,
+            ),
+            MoeTableSel::Wideep { is_context } => db.wideep.moe_slice_points(
+                is_context,
+                self.quant_mode.name(),
+                &self.workload_distribution,
+                self.topk,
+                self.num_experts,
+                self.hidden_size,
+                self.inter_size,
+                self.moe_tp_size,
+                self.moe_ep_size,
+            ),
+        }
+    }
+
+    /// Distinct quant names of the selected table, in first-seen (file row)
+    /// order — Python's `for q in moe_table` dict-insertion iteration.
+    fn table_available_quants(
+        &self,
+        db: &PerfDatabase,
+        table: MoeTableSel,
+    ) -> Result<Vec<String>, AicError> {
+        match table {
+            MoeTableSel::Standard | MoeTableSel::LowLatency => {
+                db.moe.available_quants(moe_kernel(table))
+            }
+            MoeTableSel::Wideep { is_context } => db.wideep.moe_available_quants(is_context),
+        }
     }
 
     /// Enumerate `source_quant`'s collected sibling slices (same table,
@@ -538,19 +614,29 @@ impl MoeOp {
     fn collect_candidates(
         &self,
         db: &PerfDatabase,
-        kernel: MoeKernel,
+        table: MoeTableSel,
         source_quant: MoeQuantMode,
         sol_quant: MoeQuantMode,
         provenance: &'static str,
         out: &mut Vec<MoeReferenceCandidate>,
     ) -> Result<(), AicError> {
-        let slices = match db.moe.sibling_slices(
-            kernel,
-            source_quant.name(),
-            &self.workload_distribution,
-            self.moe_tp_size,
-            self.moe_ep_size,
-        ) {
+        let slices = match table {
+            MoeTableSel::Standard | MoeTableSel::LowLatency => db.moe.sibling_slices(
+                moe_kernel(table),
+                source_quant.name(),
+                &self.workload_distribution,
+                self.moe_tp_size,
+                self.moe_ep_size,
+            ),
+            MoeTableSel::Wideep { is_context } => db.wideep.moe_sibling_slices(
+                is_context,
+                source_quant.name(),
+                &self.workload_distribution,
+                self.moe_tp_size,
+                self.moe_ep_size,
+            ),
+        };
+        let slices = match slices {
             Ok(slices) => slices,
             Err(err) if err.is_missing_perf_data() => return Ok(()),
             Err(err) => return Err(err),
@@ -814,6 +900,8 @@ mod tests {
         assert_oracle(&r333, 0.19184494219320924, Source::Empirical, "own_emp_t333");
         let r96 = op.query(&db, 96).expect("own-shape empirical t=96");
         assert_oracle(&r96, 0.13852159976959227, Source::Empirical, "own_emp_t96");
+        // Python capture: {"empirical"} (own-shape grid, no borrow).
+        assert_eq!(db.worst_provenance(), util_empirical::ProvenanceTier::Empirical);
     }
 
     /// HYBRID with data present must stay on silicon (exact hit and in-range
@@ -838,6 +926,8 @@ mod tests {
         let op = qwen3_op(MoeQuantMode::W4a16Mxfp4Cutlass);
         let r = op.query(&db, 96).expect("xquant transfer");
         assert_oracle(&r, 0.329638409614563, Source::Empirical, "xquant_t96");
+        // Python capture: {"xquant"} (reference grid's tier, moe.py:534).
+        assert_eq!(db.worst_provenance(), util_empirical::ProvenanceTier::XQuant);
     }
 
     /// XPROFILE tier: `w4afp8` ((0.5, 2)) has no same-profile sibling in the
@@ -849,6 +939,8 @@ mod tests {
         let op = qwen3_op(MoeQuantMode::W4afp8);
         let r = op.query(&db, 96).expect("xprofile transfer");
         assert_oracle(&r, 0.13701972961425785, Source::Empirical, "xprofile_t96");
+        // Python capture: {"xprofile"} (tier-3 borrow, moe.py:569).
+        assert_eq!(db.worst_provenance(), util_empirical::ProvenanceTier::XProfile);
     }
 
     /// XSHAPE tier: same quant (bfloat16), uncollected inter_size 1600 →
@@ -862,6 +954,8 @@ mod tests {
         let db = b200_vllm_db().with_mode(crate::common::enums::DatabaseMode::Hybrid, TransferPolicy::ALL);
         let r = op.query(&db, 96).expect("xshape transfer");
         assert_oracle(&r, 0.14427836344943168, Source::Empirical, "xshape_t96");
+        // Python capture: {"xshape"} (tier-1 borrow, moe.py:534).
+        assert_eq!(db.worst_provenance(), util_empirical::ProvenanceTier::XShape);
 
         let conservative = b200_vllm_db().with_mode(crate::common::enums::DatabaseMode::Hybrid, CONSERVATIVE);
         let rc = op.query(&conservative, 96).expect("xshape under conservative policy");
@@ -935,6 +1029,146 @@ mod tests {
         off_shape.inter_size = 17000;
         let xshape = off_shape.query(&db, 100).expect("failed ll probe -> std xshape");
         assert_oracle(&xshape, 0.05842286435922407, Source::Empirical, "nvfp4_xshape_t100");
+    }
+
+    /// XPROFILE tie-break follows FILE-ROW quant order, not sorted order:
+    /// b200/vllm/0.24.0 lists `fp8_block` before `fp8` (both profile (1,2),
+    /// distance 0.5 from w4afp8), so Python's stable sort borrows the
+    /// `fp8_block` util curve. Oracles:
+    ///
+    /// ```text
+    /// db = perf_database.get_database_view("b200_sxm", "vllm", "0.24.0",
+    ///     allow_missing_data=True, database_mode="EMPIRICAL", shared_layer=False)
+    /// float(MoE._query_moe_table(db, num_tokens=..., hidden_size=5120,
+    ///     inter_size=8192, topk=1, num_experts=16, moe_tp_size=1,
+    ///     moe_ep_size=1, quant_mode=common.MoEQuantMode.w4afp8,
+    ///     workload_distribution="power_law_1.01",
+    ///     database_mode=common.DatabaseMode.EMPIRICAL))
+    /// ```
+    ///
+    /// The fp8-referenced value (the old sorted-name order) is
+    /// 0.42024958928426115 at t=96 — a live ~13% divergence this pins.
+    #[test]
+    fn moe_xprofile_tie_break_follows_file_order() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("src/aiconfigurator/systems");
+        let db = PerfDatabase::load(&root, "b200_sxm", "vllm", "0.24.0")
+            .expect("db loads")
+            .with_mode(crate::common::enums::DatabaseMode::Empirical, TransferPolicy::ALL);
+        let op = MoeOp {
+            name: "moe".into(),
+            scale_factor: 1.0,
+            hidden_size: 5120,
+            inter_size: 8192,
+            topk: 1,
+            num_experts: 16,
+            moe_tp_size: 1,
+            moe_ep_size: 1,
+            quant_mode: MoeQuantMode::W4afp8,
+            workload_distribution: "power_law_1.01".into(),
+            attention_dp_size: 1,
+            is_gated: true,
+            moe_backend: None,
+            enable_eplb: false,
+            is_context: false,
+        };
+        let r96 = op.query(&db, 96).expect("xprofile tie t=96");
+        assert_oracle(&r96, 0.47411200205485027, Source::Empirical, "xprofile_tie_t96");
+        let r512 = op.query(&db, 512).expect("xprofile tie t=512");
+        assert_oracle(&r512, 0.8249173482259117, Source::Empirical, "xprofile_tie_t512");
+    }
+
+    /// SGLang deepep op used by the routing tests below: the h200 sglang
+    /// 0.5.10 wideep context/generation MoE tables cover the DSv3 expert
+    /// shape (7168, 2048, topk 8, experts 256) at tp=1/ep=8 under
+    /// power_law_0.8 — while the REGULAR h200 moe table also carries
+    /// fp8_block, so mis-routing to it yields a value, not an error.
+    fn h200_deepep_op(is_context: bool) -> MoeOp {
+        MoeOp {
+            name: "moe".into(),
+            scale_factor: 1.0,
+            hidden_size: 7168,
+            inter_size: 2048,
+            topk: 8,
+            num_experts: 256,
+            moe_tp_size: 1,
+            moe_ep_size: 8,
+            quant_mode: MoeQuantMode::Fp8Block,
+            workload_distribution: "power_law_0.8".into(),
+            attention_dp_size: 1,
+            is_gated: true,
+            moe_backend: Some("deepep_moe".into()),
+            enable_eplb: false,
+            is_context,
+        }
+    }
+
+    fn h200_sglang_db(mode: crate::common::enums::DatabaseMode) -> PerfDatabase {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("src/aiconfigurator/systems");
+        PerfDatabase::load(&root, "h200_sxm", "sglang", "0.5.10")
+            .expect("db loads")
+            .with_mode(mode, TransferPolicy::ALL)
+    }
+
+    /// EMPIRICAL under SGLang deepep calibrates from the WIDEEP
+    /// context/generation MoE tables, not the regular one — Python
+    /// `_moe_table()` (`operations/moe.py:364-397`) routes the util grid by
+    /// `moe_backend == "deepep_moe"` + `is_context`. Oracles:
+    ///
+    /// ```text
+    /// db = perf_database.get_database_view("h200_sxm", "sglang", "0.5.10",
+    ///     allow_missing_data=True, database_mode="EMPIRICAL", shared_layer=False)
+    /// float(MoE._query_moe_table(db, num_tokens=..., hidden_size=7168,
+    ///     inter_size=2048, topk=8, num_experts=256, moe_tp_size=1,
+    ///     moe_ep_size=8, quant_mode=common.MoEQuantMode.fp8_block,
+    ///     workload_distribution="power_law_0.8", is_context=...,
+    ///     moe_backend="deepep_moe", database_mode=common.DatabaseMode.EMPIRICAL))
+    /// ```
+    ///
+    /// ctx t=200000 sits beyond the collected range (max 131072) so the
+    /// util-hold anchors on the MoE roofline through the wideep grid.
+    #[test]
+    fn moe_empirical_deepep_routes_to_wideep_tables() {
+        let db = h200_sglang_db(crate::common::enums::DatabaseMode::Empirical);
+        let ctx = h200_deepep_op(true);
+        let r = ctx.query(&db, 300).expect("deepep ctx t=300");
+        assert_oracle(&r, 0.6444098182832491, Source::Empirical, "deepep_ctx_t300");
+        let r = ctx.query(&db, 200000).expect("deepep ctx t=200000");
+        assert_oracle(&r, 21.3889914448373, Source::Empirical, "deepep_ctx_t200000");
+        let gen = h200_deepep_op(false);
+        let r = gen.query(&db, 100).expect("deepep gen t=100");
+        assert_oracle(&r, 0.34094198365735795, Source::Empirical, "deepep_gen_t100");
+        let r = gen.query(&db, 3000).expect("deepep gen t=3000");
+        assert_oracle(&r, 0.4024570594575049, Source::Empirical, "deepep_gen_t3000");
+        // Python capture: {"empirical"} (own-slice wideep calibration).
+        assert_eq!(db.worst_provenance(), util_empirical::ProvenanceTier::Empirical);
+    }
+
+    /// The EPLB 0.8 prefill token correction applies INSIDE the silicon
+    /// path only (Python moe.py:684); the empirical estimate uses RAW
+    /// tokens (moe.py:637-647, 803-813). Python oracles (same call shape as
+    /// `moe_empirical_deepep_routes_to_wideep_tables`, `enable_eplb=True`):
+    /// SILICON eplb-on t=160 = SILICON eplb-off t=128 = 0.6220973747117179
+    /// (int(160*0.8) = 128, a collected point); EMPIRICAL eplb-on t=300 =
+    /// eplb-off t=300 = 0.6444098182832491.
+    #[test]
+    fn moe_eplb_correction_scoped_to_silicon_only() {
+        let mut eplb_op = h200_deepep_op(true);
+        eplb_op.enable_eplb = true;
+
+        let silicon = h200_sglang_db(crate::common::enums::DatabaseMode::Hybrid);
+        let corrected = eplb_op.query(&silicon, 160).expect("eplb-on silicon t=160");
+        assert_oracle(&corrected, 0.6220973747117179, Source::Silicon, "eplb_sil_t160");
+        let baseline = h200_deepep_op(true).query(&silicon, 128).expect("eplb-off silicon t=128");
+        assert!(
+            (corrected.latency_ms - baseline.latency_ms).abs() < 1e-12,
+            "silicon eplb-on(160) ({}) must equal eplb-off(128) ({})",
+            corrected.latency_ms,
+            baseline.latency_ms
+        );
+
+        let empirical = h200_sglang_db(crate::common::enums::DatabaseMode::Empirical);
+        let raw = eplb_op.query(&empirical, 300).expect("eplb-on empirical t=300");
+        assert_oracle(&raw, 0.6444098182832491, Source::Empirical, "eplb_emp_t300");
     }
 
     /// With attention-dp, all dp ranks' tokens funnel into the shared expert

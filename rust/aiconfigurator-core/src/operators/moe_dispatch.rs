@@ -450,7 +450,7 @@ impl MoEDispatchOp {
                 //                quant-compressed volumes on the pre side
                 //     elif tp>1 && reduce_results: custom_allreduce(num_gpus)
                 //       (the NVL72 tp>4 -> NCCL all_reduce reroute lives in
-                //        the DB-level `query_custom_allreduce_scaled`)
+                //        the operator-level `query_custom_allreduce_table`)
                 //     else 0
                 //   sm != 100 (checks tp FIRST, mirroring Python):
                 //     if tp>1: custom_allreduce(num_gpus, volume)
@@ -804,6 +804,8 @@ fn alltoall_empirical(
     })?;
     let query = [num_tokens as f64];
     let (latency, _) = util_empirical::estimate(sol_time, &query, grid.as_deref(), 1.0)?;
+    // Own-shape util fired (Python estimate()'s default tier).
+    db.note_provenance(util_empirical::ProvenanceTier::Empirical);
     Ok(latency)
 }
 

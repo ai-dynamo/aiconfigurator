@@ -176,6 +176,8 @@ fn gemm_empirical(
     })?;
     let query = [m as f64, n as f64, k as f64];
     let (latency, _) = util_empirical::estimate(sol(&query), &query, grid.as_deref(), 1.0)?;
+    // Own-shape util fired (Python estimate()'s default provenance).
+    db.note_provenance(util_empirical::ProvenanceTier::Empirical);
     Ok(latency)
 }
 
@@ -220,7 +222,12 @@ fn compute_scale_empirical(
         })?;
     // sol_mem = 2 m k / bw * 1000 (read + write of the activation).
     let spec = &db.system_spec;
-    lookup.estimate(&[m as f64, k as f64], |c| 2.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0)
+    let latency =
+        lookup.estimate(&[m as f64, k as f64], |c| 2.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0)?;
+    // The delta lookup fired (Python `_ZeroAwareDeltaLookup.estimate` notes
+    // "empirical"; zero deltas count — they are measured values).
+    db.note_provenance(util_empirical::ProvenanceTier::Empirical);
+    Ok(latency)
 }
 
 /// scale_matrix latency for `(m, k)` under the database's query mode.
@@ -265,6 +272,8 @@ fn scale_matrix_empirical(
     })?;
     let query = [m as f64, k as f64];
     let (latency, _) = util_empirical::estimate(sol(&query), &query, grid.as_deref(), 1.0)?;
+    // Own-shape util fired (Python estimate()'s default provenance).
+    db.note_provenance(util_empirical::ProvenanceTier::Empirical);
     Ok(latency)
 }
 

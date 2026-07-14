@@ -102,9 +102,26 @@ fn query_custom_allreduce_table(
     tp_size: u32,
     size: f64,
 ) -> Result<(f64, Source), AicError> {
+    // GB200 NVL72 reroute — inside get_silicon only (Python
+    // `communication.py:188-190`): custom AR is only collected up to tp4
+    // there, so (SILICON and HYBRID) queries reroute to the MODE-AWARE
+    // `database.query_nccl` dispatch. Under HYBRID an NCCL silicon miss
+    // therefore falls to the NCCL empirical (never the custom-AR
+    // empirical), and a terminal NCCL EmpiricalNotImplemented propagates
+    // (Python's outer catch only handles the missing-silicon-data class).
+    // EMPIRICAL mode never reaches get_silicon, so it never reroutes.
+    // Handled here rather than via the DB-internal reroute in
+    // `query_custom_allreduce_scaled`, which is silicon-only; in SILICON
+    // mode both routes evaluate the identical `query_nccl_scaled` call.
+    if db.system_spec.node.num_gpus_per_node == 72
+        && tp_size > 4
+        && db.database_mode != DatabaseMode::Empirical
+    {
+        return query_nccl_table(db, quant, tp_size, "all_reduce", size);
+    }
     // The silicon path is the DB-level `_scaled` query (fan-out capping +
-    // beyond-range bandwidth correction inside, incl. the GB200 NVL72
-    // reroute), mirroring Python `_query_custom_allreduce_table.get_silicon`.
+    // beyond-range bandwidth correction inside), mirroring Python
+    // `_query_custom_allreduce_table.get_silicon`.
     let silicon =
         |db: &PerfDatabase| db.communication.query_custom_allreduce_scaled(&db.system_spec, quant, tp_size, size);
     match db.database_mode {
@@ -169,6 +186,13 @@ fn custom_allreduce_empirical(
     })?;
     let query = [size];
     let (latency, _) = util_empirical::estimate(sol_q, &query, grid.as_deref(), 1.0)?;
+    // Rank-count overflow borrowed the node-boundary tp slice -> "xshape";
+    // otherwise own-slice "empirical" (Python communication.py:167-168).
+    db.note_provenance(if eff != tp_size {
+        util_empirical::ProvenanceTier::XShape
+    } else {
+        util_empirical::ProvenanceTier::Empirical
+    });
     Ok(latency)
 }
 
@@ -336,6 +360,14 @@ fn nccl_empirical(
     })?;
     let query = [message_size];
     let (latency, _) = util_empirical::estimate(sol_q, &query, grid.as_deref(), 1.0)?;
+    // Fan-out beyond the largest collected num_gpus borrowed the boundary
+    // slice -> "xshape"; otherwise own-slice "empirical" (Python
+    // communication.py:439-440).
+    db.note_provenance(if eff != num_gpus {
+        util_empirical::ProvenanceTier::XShape
+    } else {
+        util_empirical::ProvenanceTier::Empirical
+    });
     Ok(latency)
 }
 
@@ -385,6 +417,7 @@ fn p2p_bandwidth(spec: &SystemSpec, num_gpus: u32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::perf_database::CommunicationTable;
     use std::path::PathBuf;
 
     const REPO_ROOT_HINT: &str = env!("CARGO_MANIFEST_DIR");
@@ -405,18 +438,21 @@ mod tests {
     fn custom_allreduce_empirical_matches_python_oracles() {
         let mut db = b200_vllm_db();
         db.database_mode = DatabaseMode::Empirical;
+        use util_empirical::ProvenanceTier;
         let cases = [
             // off-grid size on a collected tp slice
-            (8u32, 300_000u64, 0.0210877421663319),
+            (8u32, 300_000u64, 0.0210877421663319, ProvenanceTier::Empirical),
             // exact collected hit: util reconstruction returns the measured value
-            (8, 1024, 0.007716159820556641),
+            (8, 1024, 0.007716159820556641, ProvenanceTier::Empirical),
             // rank overflow: tp=16 on an 8-GPU node borrows the tp=8 boundary
-            // util; SOL(tp=16, inter-node bw) carries the multi-node scaling
-            (16, 524_288, 0.1607595384120941),
-            (2, 777_777, 0.019098769751423886),
-            (4, 65_536, 0.008213120102882384),
+            // util; SOL(tp=16, inter-node bw) carries the multi-node scaling.
+            // Python capture: {"xshape"} (communication.py:167).
+            (16, 524_288, 0.1607595384120941, ProvenanceTier::XShape),
+            (2, 777_777, 0.019098769751423886, ProvenanceTier::Empirical),
+            (4, 65_536, 0.008213120102882384, ProvenanceTier::Empirical),
         ];
-        for (tp, size, expected) in cases {
+        for (tp, size, expected, tier) in cases {
+            db.reset_provenance();
             let (latency, source) =
                 query_custom_allreduce_table(&db, CommQuantMode::Half, tp, size as f64)
                     .expect("empirical query");
@@ -425,6 +461,7 @@ mod tests {
                 "(tp={tp}, size={size}): expected {expected}, got {latency}"
             );
             assert_eq!(source, Source::Empirical);
+            assert_eq!(db.worst_provenance(), tier, "(tp={tp}, size={size}): wrong tier");
         }
     }
 
@@ -476,19 +513,22 @@ mod tests {
     fn nccl_empirical_matches_python_oracles() {
         let mut db = b200_vllm_db();
         db.database_mode = DatabaseMode::Empirical;
+        use util_empirical::ProvenanceTier;
         let cases = [
             // off-grid message sizes on collected fan-outs
-            (8u32, "all_reduce", 300_000u64, 0.027067167868039803),
-            (4, "all_gather", 10_000_000, 0.05871496201240777),
+            (8u32, "all_reduce", 300_000u64, 0.027067167868039803, ProvenanceTier::Empirical),
+            (4, "all_gather", 10_000_000, 0.05871496201240777, ProvenanceTier::Empirical),
             // gpu-count overflow: 32 > max collected 8 borrows the boundary
-            // util; SOL(32, inter-node bw) carries the scaling
-            (32, "all_reduce", 1_048_576, 0.31676464285714284),
+            // util; SOL(32, inter-node bw) carries the scaling.
+            // Python capture: {"xshape"} (communication.py:439).
+            (32, "all_reduce", 1_048_576, 0.31676464285714284, ProvenanceTier::XShape),
             // below-min size: boundary util-hold
-            (8, "reduce_scatter", 999, 0.015899137756552793),
+            (8, "reduce_scatter", 999, 0.015899137756552793, ProvenanceTier::Empirical),
             // exact collected hit
-            (2, "alltoall", 4096, 0.009470000000000001),
+            (2, "alltoall", 4096, 0.009470000000000001, ProvenanceTier::Empirical),
         ];
-        for (num_gpus, op, msg, expected) in cases {
+        for (num_gpus, op, msg, expected, tier) in cases {
+            db.reset_provenance();
             let (latency, source) = query_nccl_table(&db, CommQuantMode::Half, num_gpus, op, msg as f64)
                 .expect("empirical query");
             assert!(
@@ -496,6 +536,7 @@ mod tests {
                 "({num_gpus}, {op}, {msg}): expected {expected}, got {latency}"
             );
             assert_eq!(source, Source::Empirical);
+            assert_eq!(db.worst_provenance(), tier, "({num_gpus}, {op}, {msg}): wrong tier");
         }
     }
 
@@ -533,6 +574,96 @@ mod tests {
         let (latency, _) = query_custom_allreduce_table(&db, CommQuantMode::Half, 1, 4096 as f64)
             .expect("single rank allreduce");
         assert_eq!(latency, 0.0);
+    }
+
+    /// GB200 NVL72 reroute (num_gpus_per_node == 72 && tp > 4): Python's
+    /// get_silicon returns the MODE-AWARE `database.query_nccl(...)`
+    /// (communication.py:188-190), so under HYBRID an NCCL miss falls to the
+    /// NCCL empirical — never the custom-AR empirical — and EMPIRICAL mode
+    /// never reroutes at all. No shipped spec has 72 GPUs per node, so the
+    /// spec is patched like the Python oracle run:
+    ///
+    /// ```text
+    /// db = perf_database.get_database_view("b200_sxm", "vllm", "0.19.0",
+    ///     allow_missing_data=True, database_mode=..., shared_layer=False)
+    /// db.system_spec = copy.deepcopy(db.system_spec)
+    /// db.system_spec["node"]["num_gpus_per_node"] = 72
+    /// CustomAllReduce._query_custom_allreduce_table(db, half, tp, size, mode)
+    /// ```
+    #[test]
+    fn custom_allreduce_nvl72_reroute_is_mode_aware() {
+        let nvl72_db = |mode: DatabaseMode| {
+            let mut db = b200_vllm_db();
+            db.tables_mut().system_spec.node.num_gpus_per_node = 72;
+            db.database_mode = mode;
+            db
+        };
+
+        // HYBRID with NCCL data present: the reroute answers from the NCCL
+        // silicon table (tp=16 exercises the beyond-max fan-out scaling).
+        let db = nvl72_db(DatabaseMode::Hybrid);
+        for (tp, size, expected) in [
+            (8u32, 300_000u64, 0.02807729736328125),
+            (16, 524_288, 0.031017857142857142),
+        ] {
+            let (latency, source) =
+                query_custom_allreduce_table(&db, CommQuantMode::Half, tp, size as f64)
+                    .expect("hybrid reroute");
+            assert!(
+                (latency - expected).abs() < 1e-9,
+                "(tp={tp}, size={size}): expected {expected}, got {latency}"
+            );
+            assert_eq!(source, Source::Silicon);
+        }
+
+        // SILICON mode is unchanged: the operator-level reroute evaluates the
+        // identical `query_nccl_scaled` the DB-internal reroute did.
+        let db = nvl72_db(DatabaseMode::Silicon);
+        let (latency, source) =
+            query_custom_allreduce_table(&db, CommQuantMode::Half, 8, 300_000.0)
+                .expect("silicon reroute");
+        let scaled = db
+            .communication
+            .query_custom_allreduce_scaled(&db.system_spec, CommQuantMode::Half, 8, 300_000.0)
+            .expect("db-level reroute");
+        assert!(
+            (latency - scaled).abs() < 1e-12,
+            "operator ({latency}) and DB-level ({scaled}) reroutes must agree"
+        );
+        assert_eq!(source, Source::Silicon);
+
+        // EMPIRICAL never reaches get_silicon, hence never reroutes: the
+        // value stays the custom-AR empirical estimate (same as the
+        // unpatched-spec oracle at tp=8/300k).
+        let db = nvl72_db(DatabaseMode::Empirical);
+        let (latency, source) =
+            query_custom_allreduce_table(&db, CommQuantMode::Half, 8, 300_000.0)
+                .expect("empirical never reroutes");
+        assert!(
+            (latency - 0.0210877421663319).abs() < 1e-9,
+            "expected the custom-AR empirical value, got {latency}"
+        );
+        assert_eq!(source, Source::Empirical);
+
+        // HYBRID with NO NCCL data at all: the nested NCCL empirical raises
+        // the terminal EmpiricalNotImplemented, which PROPAGATES (Python:
+        // "No NCCL data to estimate all_reduce (half, num_gpus=8)." — not in
+        // `_MISSING_SILICON_DATA_EXCEPTIONS`, so the outer catch never runs
+        // the custom-AR empirical). The pre-fix DB-internal reroute wrongly
+        // fell back to the custom-AR empirical here.
+        let mut db = b200_vllm_db();
+        {
+            let tables = db.tables_mut();
+            tables.system_spec.node.num_gpus_per_node = 72;
+            tables.communication =
+                CommunicationTable::new(tables.data_root.clone(), None, None);
+        }
+        db.database_mode = DatabaseMode::Hybrid;
+        let result = query_custom_allreduce_table(&db, CommQuantMode::Half, 8, 300_000.0);
+        assert!(
+            matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
+            "expected the NCCL empirical miss to propagate, got {result:?}"
+        );
     }
 
     /// HYBRID prefers silicon whenever the table covers the slice. Oracles:

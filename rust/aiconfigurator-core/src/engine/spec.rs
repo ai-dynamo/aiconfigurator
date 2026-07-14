@@ -158,7 +158,8 @@ mod tests {
     };
     use crate::operators::op::{FallbackOp, OverlapOp};
     use crate::operators::{
-        ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4ModuleOp,
+        ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
+        Dsv4ModuleOp,
         ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
         GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
         NcclOp, P2POp, TrtllmWideEpMoEDispatchOp, VisionEncoderOp, WideEpContextMlaOp,
@@ -437,6 +438,27 @@ mod tests {
         }
     }
 
+    fn dsv4_megamoe() -> Dsv4MegaMoeOp {
+        Dsv4MegaMoeOp {
+            name: "context_megamoe".into(),
+            scale_factor: 61.0,
+            hidden_size: 7168,
+            inter_size: 3072,
+            topk: 6,
+            num_experts: 384,
+            moe_tp_size: 1,
+            moe_ep_size: 8,
+            quant_mode: MoeQuantMode::W4a8Mxfp4Mxfp8,
+            workload_distribution: "balanced".into(),
+            is_context: true,
+            source_policy: "random".into(),
+            pre_dispatch: "sglang_jit".into(),
+            num_fused_shared_experts: 0,
+            kernel_source: "deepgemm_megamoe".into(),
+            kernel_dtype: "fp8_fp4".into(),
+        }
+    }
+
     fn mhc() -> MhcModuleOp {
         MhcModuleOp {
             name: "mhc_module".into(),
@@ -598,6 +620,9 @@ mod tests {
             OpSpec::WideEpMoeDispatch(wideep_moe_dispatch()),
             OpSpec::Overlap(overlap()),
             OpSpec::Fallback(fallback()),
+            // Appended AFTER Fallback (bincode enum indices are positional;
+            // appending shifts nothing, so no ENGINE_SPEC_SCHEMA_VERSION bump).
+            OpSpec::Dsv4MegaMoe(dsv4_megamoe()),
         ];
 
         // Exhaustiveness guard: if a variant is added to `Op`, this match
@@ -635,7 +660,8 @@ mod tests {
                 | OpSpec::WideEpMoe(_)
                 | OpSpec::WideEpMoeDispatch(_)
                 | OpSpec::Overlap(_)
-                | OpSpec::Fallback(_) => {}
+                | OpSpec::Fallback(_)
+                | OpSpec::Dsv4MegaMoe(_) => {}
             }
         }
         ops

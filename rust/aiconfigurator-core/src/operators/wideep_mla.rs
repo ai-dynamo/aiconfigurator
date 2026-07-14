@@ -35,14 +35,18 @@ fn prefix_correction(full_s: u32, prefix: u32) -> f64 {
     (f * f - p * p) / (f * f)
 }
 
-/// Python's `get_silicon` whitelists the attention backend before slicing
+/// Python whitelists the attention backend INSIDE `get_silicon` only
 /// (`mla.py:1191-1192` generation, `:1459-1460` context:
-/// `if attn_backend not in {"flashinfer", "fa3"}: raise ValueError`).
-/// Mirror it so both engines error symmetrically on unsupported backends
-/// instead of Rust answering from whatever `kernel_source` slice exists.
+/// `if attn_backend not in {"flashinfer", "fa3"}: raise ValueError`), AFTER
+/// the table's `raise_if_not_loaded()`. The EMPIRICAL path slices whatever
+/// backend is requested (`mla.py:1147, 1410`) — e.g. b200's `trtllm_mla`
+/// wideep slices calibrate fine there — so the check must not run for
+/// EMPIRICAL or for the HYBRID fallback. The error is a Python `ValueError`,
+/// deliberately NOT a missing-data signal: under HYBRID it propagates
+/// instead of triggering the empirical fallback.
 fn check_attn_backend(attn_backend: &str) -> Result<(), AicError> {
     if attn_backend != "flashinfer" && attn_backend != "fa3" {
-        return Err(AicError::PerfDatabase(format!(
+        return Err(AicError::InvalidEngineConfig(format!(
             "Unsupported attention backend: {attn_backend}"
         )));
     }
@@ -93,7 +97,6 @@ impl WideEpContextMlaOp {
         isl: u32,
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
-        check_attn_backend(&self.attn_backend)?;
         // ctx(s, pfx): the un-sharded wideep context-MLA query for a sequence
         // chunk of length `s` at prefix `pfx` (mode dispatch handles prefix
         // correction for silicon and the prefix-aware SOL for empirical).
@@ -251,6 +254,11 @@ mod tests {
             );
             assert_eq!(source, Source::Empirical);
         }
+        // Python capture: {"empirical"} (own-slice util, mla.py:1431).
+        assert_eq!(
+            db.worst_provenance(),
+            util_empirical::ProvenanceTier::Empirical
+        );
 
         // HYBRID on a kv slice with no data (bfloat16; h200's wideep tables
         // are fp8-KV only) -> terminal EmpiricalNotImplemented miss.
@@ -301,6 +309,11 @@ mod tests {
             );
             assert_eq!(source, Source::Empirical);
         }
+        // Python capture: {"empirical"} (own-slice util, mla.py:1162).
+        assert_eq!(
+            db.worst_provenance(),
+            util_empirical::ProvenanceTier::Empirical
+        );
 
         // HYBRID on a kv slice with no data (bfloat16) -> terminal miss.
         db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
@@ -309,10 +322,12 @@ mod tests {
         assert!(matches!(result, Err(AicError::EmpiricalNotImplemented(_))), "got {result:?}");
     }
 
-    /// Python whitelists attn_backend in {flashinfer, fa3} before slicing
-    /// (mla.py:1191-1192, 1459-1460) — an out-of-whitelist backend must error
-    /// here too, even when a matching kernel_source slice exists in the data
-    /// (b200's wideep tables carry kernel_source=trtllm_mla).
+    /// Python whitelists attn_backend in {flashinfer, fa3} inside
+    /// `get_silicon` only (mla.py:1191-1192, 1459-1460) — SILICON (the
+    /// db default here) errors on an out-of-whitelist backend even when a
+    /// matching kernel_source slice exists in the data, and under HYBRID
+    /// with a loaded table the ValueError propagates (a config error, not
+    /// a missing-data fallback trigger).
     #[test]
     fn attn_backend_whitelist_mirrors_python() {
         let db = h200_sglang_db();
@@ -334,6 +349,101 @@ mod tests {
         fa3.attn_backend = "fa3".to_string();
         assert!(fa3.query(&db, 1, 1024, 0).is_ok());
 
+        // HYBRID + loaded table + bad backend: the whitelist error is NOT a
+        // missing-data signal, so it propagates instead of falling back to
+        // the empirical estimate (Python: plain ValueError is not in
+        // `_MISSING_SILICON_DATA_EXCEPTIONS`).
+        let mut hybrid = h200_sglang_db();
+        hybrid.database_mode = crate::common::enums::DatabaseMode::Hybrid;
+        let mut bad = op(1);
+        bad.attn_backend = "trtllm_mla".to_string();
+        let result = bad.query(&hybrid, 1, 1024, 0);
+        assert!(
+            matches!(result, Err(AicError::InvalidEngineConfig(_))),
+            "HYBRID must propagate the whitelist error, got {result:?}"
+        );
+    }
+
+    /// EMPIRICAL mode never runs the whitelist: it slices whatever backend
+    /// is requested (mla.py:1147, 1410) — b200's wideep MLA tables are
+    /// `trtllm_mla`-only and calibrate fine. Oracles:
+    ///
+    /// ```text
+    /// db = perf_database.get_database_view("b200_sxm", "sglang", "0.5.10",
+    ///     allow_missing_data=True, database_mode="EMPIRICAL", shared_layer=False)
+    /// float(WideEPContextMLA._query_wideep_context_mla_table(db, b, s,
+    ///     prefix, tp_size, KVCacheQuantMode.fp8, FMHAQuantMode.fp8_block,
+    ///     "trtllm_mla", DatabaseMode.EMPIRICAL))   # + generation variant
+    /// ```
+    #[test]
+    fn empirical_estimates_from_non_whitelisted_backend_slice() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator/systems");
+        let mut db = PerfDatabase::load(&root, "b200_sxm", "sglang", "0.5.10").expect("db loads");
+        db.database_mode = crate::common::enums::DatabaseMode::Empirical;
+
+        // (b, s, prefix, num_heads = 128 // tp_size, expected)
+        let ctx_cases: &[(u32, u32, u32, u32, f64)] = &[
+            (4, 4096, 0, 128, 5.1478),
+            (2, 3000, 1000, 16, 0.5668068670651026),
+        ];
+        for &(b, s, prefix, n, expected) in ctx_cases {
+            let (latency, source) = query_wideep_context_mla_table(
+                &db,
+                b,
+                s,
+                prefix,
+                n,
+                KvCacheQuantMode::Fp8,
+                FmhaQuantMode::Fp8Block,
+                "trtllm_mla",
+            )
+            .expect("trtllm_mla slice estimates");
+            assert_close(latency, expected, &format!("trtllm_mla ctx(b={b}, s={s}, pfx={prefix})"));
+            assert_eq!(source, Source::Empirical);
+        }
+
+        let (latency, source) = query_wideep_generation_mla_table(
+            &db,
+            3,
+            5000,
+            16,
+            KvCacheQuantMode::Fp8,
+            "trtllm_mla",
+        )
+        .expect("trtllm_mla gen slice estimates");
+        assert_close(latency, 0.056915046282426024, "trtllm_mla gen(b=3, s=5000)");
+        assert_eq!(source, Source::Empirical);
+    }
+
+    /// HYBRID with the table NOT loaded (vLLM DBs ship no wideep MLA files):
+    /// the load probe is the typed miss that precedes the whitelist — the
+    /// fallback runs the empirical path with the requested backend and
+    /// surfaces the terminal EmpiricalNotImplemented (never the whitelist
+    /// config error). Mirrors Python get_silicon's `raise_if_not_loaded()`
+    /// -> whitelist ordering (mla.py:1449-1461).
+    #[test]
+    fn hybrid_unloaded_table_falls_to_empirical_before_whitelist() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator/systems");
+        let mut db = PerfDatabase::load(&root, "b200_sxm", "vllm", "0.19.0").expect("db loads");
+        db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
+        let result = query_wideep_context_mla_table(
+            &db,
+            1,
+            1024,
+            0,
+            128,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Fp8Block,
+            "trtllm_mla",
+        );
+        assert!(
+            matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
+            "expected the typed empirical miss, got {result:?}"
+        );
     }
 }
 
@@ -373,9 +483,6 @@ impl WideEpGenerationMlaOp {
         batch_size: u32,
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
-        // Python whitelists the attention backend BEFORE any table/mode
-        // dispatch (mla.py:1459-1460) — a bad backend errors in every mode.
-        check_attn_backend(&self.attn_backend)?;
         let (latency, source) = query_wideep_generation_mla_table(
             db,
             batch_size,
@@ -424,6 +531,11 @@ fn query_wideep_context_mla_table(
     attn_backend: &str,
 ) -> Result<(f64, Source), AicError> {
     let silicon = || -> Result<f64, AicError> {
+        // Python get_silicon order (mla.py:1449-1461): raise_if_not_loaded
+        // (typed miss -> HYBRID may still estimate) BEFORE the attn-backend
+        // whitelist ValueError (propagates, never falls back).
+        db.wideep_mla.ensure_context_loaded()?;
+        check_attn_backend(attn_backend)?;
         let full_s = s + prefix;
         let raw = db.wideep_mla.query_context(
             b,
@@ -500,6 +612,8 @@ fn wideep_context_mla_empirical(
     );
     let query = [num_heads as f64, (s + prefix) as f64, b as f64];
     let (latency, _) = util_empirical::estimate(sol_query, &query, grid.as_deref(), 1.0)?;
+    // Own-slice util fired (Python mla.py:1431 estimate()'s default tier).
+    db.note_provenance(util_empirical::ProvenanceTier::Empirical);
     Ok(latency)
 }
 
@@ -516,29 +630,29 @@ fn query_wideep_generation_mla_table(
     kv_quant: KvCacheQuantMode,
     attn_backend: &str,
 ) -> Result<(f64, Source), AicError> {
+    let silicon = || -> Result<f64, AicError> {
+        // Python get_silicon order (mla.py:1188-1192): raise_if_not_loaded
+        // (typed miss -> HYBRID may still estimate) BEFORE the attn-backend
+        // whitelist ValueError (propagates, never falls back).
+        db.wideep_mla.ensure_generation_loaded()?;
+        check_attn_backend(attn_backend)?;
+        db.wideep_mla
+            .query_generation(b, s, num_heads, kv_quant, attn_backend)
+    };
     match db.database_mode {
         DatabaseMode::Empirical => Ok((
             wideep_generation_mla_empirical(db, b, s, num_heads, kv_quant, attn_backend)?,
             Source::Empirical,
         )),
-        DatabaseMode::Hybrid => {
-            match db
-                .wideep_mla
-                .query_generation(b, s, num_heads, kv_quant, attn_backend)
-            {
-                Ok(latency) => Ok((latency, Source::Silicon)),
-                Err(err) if err.is_missing_perf_data() => Ok((
-                    wideep_generation_mla_empirical(db, b, s, num_heads, kv_quant, attn_backend)?,
-                    Source::Empirical,
-                )),
-                Err(err) => Err(err),
-            }
-        }
-        _ => Ok((
-            db.wideep_mla
-                .query_generation(b, s, num_heads, kv_quant, attn_backend)?,
-            Source::Silicon,
-        )),
+        DatabaseMode::Hybrid => match silicon() {
+            Ok(latency) => Ok((latency, Source::Silicon)),
+            Err(err) if err.is_missing_perf_data() => Ok((
+                wideep_generation_mla_empirical(db, b, s, num_heads, kv_quant, attn_backend)?,
+                Source::Empirical,
+            )),
+            Err(err) => Err(err),
+        },
+        _ => Ok((silicon()?, Source::Silicon)),
     }
 }
 
@@ -577,5 +691,7 @@ fn wideep_generation_mla_empirical(
     let sol_query = wideep_generation_mla_sol_ms(spec, fmha_quant, num_heads as f64, b as f64, s as f64);
     let query = [num_heads as f64, b as f64, s as f64];
     let (latency, _) = util_empirical::estimate(sol_query, &query, grid.as_deref(), 1.0)?;
+    // Own-slice util fired (Python mla.py:1162 estimate()'s default tier).
+    db.note_provenance(util_empirical::ProvenanceTier::Empirical);
     Ok(latency)
 }

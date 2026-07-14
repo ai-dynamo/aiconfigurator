@@ -56,6 +56,9 @@ def test_static_latency_breakdown_routes_through_engine_handle(monkeypatch) -> N
             # (context_ms, generation_ms, total_ms)
             return (10.0, 6.0, 16.0)
 
+        def last_provenance(self):
+            return None  # pure-silicon answer
+
     monkeypatch.setattr(rust_engine_step, "_cached_engine_handle", lambda model, database: _FakeHandle())
 
     model = _dense_model()
@@ -102,6 +105,9 @@ def test_mixed_and_decode_helpers_pass_raw_step_args(monkeypatch) -> None:
             decode_calls.append((args, kwargs))
             return 9.5
 
+        def last_provenance(self):
+            return None  # pure-silicon answer
+
     monkeypatch.setattr(rust_engine_step, "_cached_engine_handle", lambda model, database: _FakeHandle())
 
     model = _dense_model()
@@ -135,6 +141,60 @@ def test_mixed_and_decode_helpers_pass_raw_step_args(monkeypatch) -> None:
         )
     ]
     assert decode_calls == [((7, 256, 256), {"gen_seq_imbalance_correction_scale": 1.0})]
+
+
+def test_rust_provenance_tier_forwarded_into_python_capture(monkeypatch) -> None:
+    """The engine-step helpers forward the compiled engine's per-call
+    empirical provenance tier into Python's ``capture_provenance`` (used by
+    the support matrix to label HYBRID_PASS rows). Silicon answers
+    (``last_provenance() is None`` or ``"silicon"``) record nothing."""
+    from aiconfigurator.sdk.operations import util_empirical
+
+    class _FakeHandle:
+        def __init__(self, tier):
+            self._tier = tier
+
+        def run_static(self, **kwargs):
+            return (10.0, 6.0, 16.0)
+
+        def mixed_step_latency(self, *args, **kwargs):
+            return 8.5
+
+        def decode_step_latency(self, *args, **kwargs):
+            return 9.5
+
+        def last_provenance(self):
+            return self._tier
+
+    model = _dense_model()
+    database = SimpleNamespace(system="test_sxm", backend="vllm", version="1.0.0")
+    runtime_config = RuntimeConfig(batch_size=1, beam_width=1, isl=8, osl=4)
+
+    def run_all_helpers(tier):
+        monkeypatch.setattr(rust_engine_step, "_cached_engine_handle", lambda model, database: _FakeHandle(tier))
+        rust_engine_step.estimate_static_latency_breakdown_with_rust(
+            model, database, runtime_config, mode="static", stride=2, latency_correction_scale=1.0
+        )
+        rust_engine_step.estimate_mixed_step_latency_with_rust(
+            model, database, ctx_tokens=8, gen_tokens=1, isl=8, osl=4, prefix=0
+        )
+        rust_engine_step.estimate_decode_step_latency_with_rust(model, database, gen_tokens=1, isl=8, osl=4)
+
+    # A rust-routed HYBRID rescue records its tier (all three step surfaces).
+    with util_empirical.capture_provenance() as tags:
+        run_all_helpers("xop")
+    assert tags == {"xop"}
+    assert util_empirical.worst_provenance(tags) == "xop"
+
+    # Pure-silicon runs record nothing -> worst_provenance stays "silicon".
+    for silicon_tier in (None, "silicon"):
+        with util_empirical.capture_provenance() as tags:
+            run_all_helpers(silicon_tier)
+        assert tags == set()
+        assert util_empirical.worst_provenance(tags) == "silicon"
+
+    # Outside a capture, forwarding is a no-op (note_provenance no-ops).
+    run_all_helpers("xshape")
 
 
 def test_engine_config_json_preserves_moe_specific_quant_mode() -> None:

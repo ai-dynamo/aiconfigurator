@@ -115,6 +115,12 @@ struct LoadedMoeGrids {
 
 struct MoeGrids {
     by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>>,
+    /// Distinct quant names in first-seen (file row) order. Python's
+    /// transfer ladder iterates the table dict in INSERTION order
+    /// (`for q in moe_table`), which breaks profile-distance ties by file
+    /// order — live on shards whose file order differs from sorted order
+    /// (e.g. b200/vllm/0.24.0 lists `fp8_block` before `fp8`).
+    quants_in_load_order: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -360,20 +366,12 @@ impl MoeTable {
         Ok(slices)
     }
 
-    /// Distinct quant names present in the kernel grid, in sorted (BTreeMap)
-    /// order. Python iterates the table dict in insertion (file row) order;
-    /// the difference is observable only through exact ties in the transfer
-    /// ladder's profile-distance sort / nearest-candidate selection.
+    /// Distinct quant names present in the kernel grid, in first-seen
+    /// (file row) order — Python iterates the table dict in insertion
+    /// order (`for q in moe_table`), and the transfer ladder's stable
+    /// profile-distance sort breaks ties by that order.
     pub fn available_quants(&self, kernel: MoeKernel) -> Result<Vec<String>, AicError> {
-        let grids = self.grids_for(kernel)?;
-        let mut names: Vec<String> = Vec::new();
-        for key in grids.by_keys.keys() {
-            // `MoeKey` sorts by quant first, so consecutive dedup suffices.
-            if names.last().map(String::as_str) != Some(key.quant.as_str()) {
-                names.push(key.quant.clone());
-            }
-        }
-        Ok(names)
+        Ok(self.grids_for(kernel)?.quants_in_load_order.clone())
     }
 
     fn grids_for(&self, kernel: MoeKernel) -> Result<&MoeGrids, AicError> {
@@ -421,6 +419,8 @@ impl MoeTable {
 fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> {
     let mut default_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
     let mut low_latency_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
+    let mut default_quants: Vec<String> = Vec::new();
+    let mut low_latency_quants: Vec<String> = Vec::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -479,11 +479,16 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
                 moe_tp_size: row.u32(moe_tp_size_col)?,
                 moe_ep_size: row.u32(moe_ep_size_col)?,
             };
-            let target = if kernel_source == "moe_torch_flow_min_latency" {
-                &mut low_latency_keys
+            let (target, target_quants) = if kernel_source == "moe_torch_flow_min_latency" {
+                (&mut low_latency_keys, &mut low_latency_quants)
             } else {
-                &mut default_keys
+                (&mut default_keys, &mut default_quants)
             };
+            // First-seen (file row) quant order — Python's dict insertion
+            // order, consumed by `available_quants`.
+            if !target_quants.iter().any(|q| q == &key.quant) {
+                target_quants.push(key.quant.clone());
+            }
             // Python's `load_moe_data` wraps the leaf insert in a try/except KeyError
             // and skips on conflict, i.e. it keeps the FIRST occurrence of each
             // (shape, num_tokens) tuple. Some perf files contain duplicate rows
@@ -504,8 +509,14 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
         )));
     }
     Ok(LoadedMoeGrids {
-        default: MoeGrids { by_keys: default_keys },
-        low_latency: MoeGrids { by_keys: low_latency_keys },
+        default: MoeGrids {
+            by_keys: default_keys,
+            quants_in_load_order: default_quants,
+        },
+        low_latency: MoeGrids {
+            by_keys: low_latency_keys,
+            quants_in_load_order: low_latency_quants,
+        },
     })
 }
 

@@ -50,6 +50,12 @@ pub struct WideEpMoeTable {
 ///   num_slots, moe_tp, moe_ep)` -> `num_tokens -> latency`.
 pub struct WideEpMoeGrids {
     pub by_keys: BTreeMap<WideEpMoeKey, BTreeMap<u32, f64>>,
+    /// First-seen (file row order) distribution per `(kernel_source, quant)`.
+    /// Python's fallback takes `list(quant_data.keys())[0]` — dict INSERTION
+    /// order, i.e. the distribution of the first row loaded for that
+    /// `(kernel, quant)` — which differs from sorted order on real shards
+    /// (e.g. gb200/h100 wideep files start with `power_law_1.01_eplb`).
+    pub first_distribution: BTreeMap<(String, String), String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -200,11 +206,11 @@ impl WideEpMoeTable {
     /// `require_data_slice(data, kernel)` -> `require_data_slice(kd, quant)`
     /// -> distribution fallback (`workload if present else first available
     /// under (kernel, quant)`) -> exact remaining coordinate. Each level
-    /// misses with a typed `AicError::PerfDatabase`. NOTE: the Python
-    /// fallback takes the FIRST distribution in dict-insertion (file row)
-    /// order and then requires the full shape under it (a shape present only
-    /// under a later distribution still misses) — mirrored here with sorted
-    /// (BTreeMap) order for the distribution list.
+    /// misses with a typed `AicError::PerfDatabase`. The Python fallback
+    /// takes the FIRST distribution in dict-insertion (file row) order —
+    /// served here from the load-time `first_distribution` map — and then
+    /// requires the full shape under it (a shape present only under a later
+    /// distribution still misses).
     #[allow(clippy::too_many_arguments)]
     fn resolve_slice(
         &self,
@@ -222,7 +228,6 @@ impl WideEpMoeTable {
         let grids = self.load_compute()?;
         let mut kernel_seen = false;
         let mut quant_seen = false;
-        let mut first_distribution: Option<&str> = None;
         let mut requested_distribution_seen = false;
         for key in grids.by_keys.keys() {
             if key.kernel_source != kernel_source {
@@ -233,9 +238,6 @@ impl WideEpMoeTable {
                 continue;
             }
             quant_seen = true;
-            if first_distribution.is_none() {
-                first_distribution = Some(&key.distribution);
-            }
             if key.distribution == distribution {
                 requested_distribution_seen = true;
                 break;
@@ -257,7 +259,10 @@ impl WideEpMoeTable {
         let dist = if requested_distribution_seen {
             distribution
         } else {
-            first_distribution.expect("quant_seen implies at least one distribution")
+            grids
+                .first_distribution
+                .get(&(kernel_source.to_string(), quant_name.to_string()))
+                .expect("quant_seen implies a recorded first distribution")
         };
         let key = WideEpMoeKey {
             kernel_source: kernel_source.to_string(),
@@ -298,6 +303,7 @@ impl WideEpMoeTable {
 /// yields rows.
 fn load_compute_parquet(sources: &[PerfSource]) -> Result<WideEpMoeGrids, AicError> {
     let mut by_keys: BTreeMap<WideEpMoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
+    let mut first_distribution: BTreeMap<(String, String), String> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -342,6 +348,11 @@ fn load_compute_parquet(sources: &[PerfSource]) -> Result<WideEpMoeGrids, AicErr
                 moe_tp_size: row.u32(moe_tp_size_col)?,
                 moe_ep_size: row.u32(moe_ep_size_col)?,
             };
+            // First-seen (file order) distribution per (kernel, quant) — the
+            // distribution-fallback anchor (Python dict insertion order).
+            first_distribution
+                .entry((key.kernel_source.clone(), key.quant.clone()))
+                .or_insert_with(|| key.distribution.clone());
             // Last-wins parity with Python `load_wideep_moe_compute_data`
             // (moe.py): it direct-assigns per coordinate with no
             // `try/except KeyError` guard, so a later row overwrites an
@@ -365,7 +376,7 @@ fn load_compute_parquet(sources: &[PerfSource]) -> Result<WideEpMoeGrids, AicErr
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
-    Ok(WideEpMoeGrids { by_keys })
+    Ok(WideEpMoeGrids { by_keys, first_distribution })
 }
 
 fn clone_err(err: &AicError) -> AicError {

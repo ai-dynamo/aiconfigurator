@@ -34,6 +34,75 @@ use std::sync::{Arc, Mutex};
 
 use crate::common::error::AicError;
 
+/// Empirical provenance tiers, mirroring Python's `PROVENANCE_ORDER`
+/// (`sdk/operations/util_empirical.py`): ordered by DECREASING confidence,
+/// so the max rank fired during a run is the run's effective data source
+/// (Python `worst_provenance`). `Silicon` is the default when nothing fired;
+/// operators never note it.
+///
+/// The accumulation cell lives on `PerfDatabase` (shared across mode views);
+/// operators call `PerfDatabase::note_provenance` at the same sites Python
+/// calls `note_provenance` — after a successful `estimate` with the tier the
+/// call site knows (Python passes it as `estimate`'s `provenance` param).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum ProvenanceTier {
+    /// Pure silicon table data (default; never recorded by operators).
+    Silicon = 0,
+    /// Own-shape util (no transfer).
+    Empirical = 1,
+    /// Cross-shape, same quant.
+    XShape = 2,
+    /// Cross-quant, same profile.
+    XQuant = 3,
+    /// Cross-quant, cross profile.
+    XProfile = 4,
+    /// Cross-op (borrowed a different op's util).
+    XOp = 5,
+}
+
+impl ProvenanceTier {
+    /// The Python tag string (`PROVENANCE_ORDER` spelling) for this tier.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProvenanceTier::Silicon => "silicon",
+            ProvenanceTier::Empirical => "empirical",
+            ProvenanceTier::XShape => "xshape",
+            ProvenanceTier::XQuant => "xquant",
+            ProvenanceTier::XProfile => "xprofile",
+            ProvenanceTier::XOp => "xop",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`] for call sites that carry the Python tag
+    /// string (e.g. a reference grid's `reference_provenance`). Unknown tags
+    /// yield `None` so callers choose their own default tier.
+    pub fn from_tag(tag: &str) -> Option<ProvenanceTier> {
+        match tag {
+            "silicon" => Some(ProvenanceTier::Silicon),
+            "empirical" => Some(ProvenanceTier::Empirical),
+            "xshape" => Some(ProvenanceTier::XShape),
+            "xquant" => Some(ProvenanceTier::XQuant),
+            "xprofile" => Some(ProvenanceTier::XProfile),
+            "xop" => Some(ProvenanceTier::XOp),
+            _ => None,
+        }
+    }
+
+    /// Inverse of `tier as u8` for reading the accumulation cell back.
+    /// Out-of-range ranks clamp to the least-confident tier.
+    pub fn from_rank(rank: u8) -> ProvenanceTier {
+        match rank {
+            0 => ProvenanceTier::Silicon,
+            1 => ProvenanceTier::Empirical,
+            2 => ProvenanceTier::XShape,
+            3 => ProvenanceTier::XQuant,
+            4 => ProvenanceTier::XProfile,
+            _ => ProvenanceTier::XOp,
+        }
+    }
+}
+
 /// One collected calibration point: continuous-axis coordinates plus the
 /// positive effective calibration factor `util = SOL / measured`.
 #[derive(Clone, Debug, PartialEq)]
@@ -597,6 +666,29 @@ mod tests {
         assert!(err.is_err());
         let recovered = cache.get_or_try_build("broken", || Ok(None));
         assert!(recovered.unwrap().is_none());
+    }
+
+    #[test]
+    fn provenance_tier_mirrors_python_provenance_order() {
+        // Rank order == PROVENANCE_ORDER index; tag strings match Python.
+        let tiers = [
+            (ProvenanceTier::Silicon, 0u8, "silicon"),
+            (ProvenanceTier::Empirical, 1, "empirical"),
+            (ProvenanceTier::XShape, 2, "xshape"),
+            (ProvenanceTier::XQuant, 3, "xquant"),
+            (ProvenanceTier::XProfile, 4, "xprofile"),
+            (ProvenanceTier::XOp, 5, "xop"),
+        ];
+        for (tier, rank, tag) in tiers {
+            assert_eq!(tier as u8, rank);
+            assert_eq!(tier.as_str(), tag);
+            assert_eq!(ProvenanceTier::from_rank(rank), tier);
+            assert_eq!(ProvenanceTier::from_tag(tag), Some(tier));
+        }
+        assert_eq!(ProvenanceTier::from_tag("unknown"), None);
+        // max-rank == worst_provenance semantics; overflow clamps to XOp.
+        assert!(ProvenanceTier::XOp > ProvenanceTier::Empirical);
+        assert_eq!(ProvenanceTier::from_rank(200), ProvenanceTier::XOp);
     }
 
     #[test]

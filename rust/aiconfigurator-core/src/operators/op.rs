@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::error::AicError;
 use crate::operators::{
-    ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4ModuleOp,
+    ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
+    Dsv4ModuleOp,
     ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
     GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
     MsaModuleOp, TrtllmWideEpMoEDispatchOp,
@@ -144,6 +145,16 @@ pub enum Op {
     /// transitional state where some systems have module-level profiling
     /// data and others still ship per-kernel granular data.
     Fallback(FallbackOp),
+    /// SGLang DeepSeek-V4 MegaMoE routed module (Python
+    /// `DeepSeekV4MegaMoEModule`): one variant for both phases — the op's
+    /// `is_context` field selects the phase inside the unified table.
+    /// Measured-SILICON-only; see `operators/dsv4.rs::Dsv4MegaMoeOp`.
+    ///
+    /// APPENDED after `Fallback` on purpose: bincode enum indices are
+    /// positional, so appending does not shift existing variants and
+    /// `ENGINE_SPEC_SCHEMA_VERSION` stays unchanged. Do NOT insert new
+    /// variants mid-enum.
+    Dsv4MegaMoe(Dsv4MegaMoeOp),
 }
 
 /// Inline-defined here (rather than a sibling module under `operators/`)
@@ -223,6 +234,7 @@ impl Op {
             Op::WideEpMoeDispatch(o) => &o.name,
             Op::Overlap(o) => &o.name,
             Op::Fallback(o) => &o.name,
+            Op::Dsv4MegaMoe(o) => &o.name,
         }
     }
 
@@ -376,6 +388,10 @@ impl Op {
                     Err(other) => Err(other),
                 }
             }
+            // Rank-LOCAL token count, like Moe/MoeDispatch (Python passes the
+            // same `x`); the megamoe table is indexed by local-rank tokens
+            // and the op must NOT re-multiply by attention_dp_size.
+            Op::Dsv4MegaMoe(op) => op.query(db, ctx.num_tokens),
         }
     }
 }

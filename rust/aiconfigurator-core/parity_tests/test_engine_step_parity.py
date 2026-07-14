@@ -19,9 +19,10 @@ from dataclasses import dataclass
 import pytest
 
 from aiconfigurator.cli.api import cli_estimate
-from aiconfigurator.sdk import common, config, perf_database, rust_engine_step
+from aiconfigurator.sdk import common, config, errors, perf_database, rust_engine_step
 from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.models import get_model
+from aiconfigurator.sdk.operations import util_empirical
 
 pytestmark = pytest.mark.integration
 
@@ -563,8 +564,11 @@ PARITY_RTOL = 0.01
 # Error-symmetry contract: when Python raises one of these, Rust is
 # expected to raise (Python's `PerfDataNotAvailableError` and friends
 # travel through `cli_estimate` as `ValueError` / `RuntimeError`
-# subclasses; the Rust FFI surfaces perf-DB misses as
-# `RustCoreError`). Tests count any exception in either as a sentinel
+# subclasses; the Rust FFI maps `AicError::PerfDatabase`/`Io` to the same
+# `PerfDataNotAvailableError` and `AicError::EmpiricalNotImplemented` to
+# `EmpiricalNotImplementedError` — see `TestRustTypedErrorsAcrossFfi` —
+# with everything else as `ValueError`). Tests count any exception in
+# either as a sentinel
 # value `_ERROR` and assert that *both* engines either compute or
 # error consistently. Numeric tolerance only applies when both
 # compute.
@@ -1297,3 +1301,104 @@ class TestRustEngineStepHybridDisaggParity:
 
         reason = _parity_mismatch_reason(_disagg_comparison_metrics(case), rtol=HYBRID_PARITY_RTOL)
         assert reason is None, reason
+
+
+def _rust_static_breakdown(case: EngineStepParityCase):
+    """Drive the rust engine-step bridge directly (no cli_estimate error
+    wrapping) so the exception object crossing the FFI is what the test sees."""
+    database = _case_database(case)
+    model = _quiet_call(get_model, case.model_path, _case_model_config(case), case.backend_name)
+    runtime_config = config.RuntimeConfig(
+        batch_size=case.batch_size,
+        beam_width=1,
+        isl=case.isl,
+        osl=case.osl,
+        prefix=case.prefix,
+    )
+    return rust_engine_step.estimate_static_latency_breakdown_with_rust(
+        model, database, runtime_config, "static", 1, 1.0
+    )
+
+
+class TestRustTypedErrorsAcrossFfi:
+    """FFI typed-error contract (audit finding #8): `aic_to_py` used to map
+    every `AicError` to `ValueError`, so Python-side classifiers
+    (`perf_database.has_perf_data_not_available_cause`, the support-matrix
+    HYBRID-miss triage on `EmpiricalNotImplementedError`) could not recognize
+    rust-path misses. The boundary now raises the canonical
+    `aiconfigurator.sdk.errors` classes for the typed variants."""
+
+    def test_silicon_data_gap_raises_typed_perf_data_miss(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # NVFP4 GEMM tables are not collected on h200/vllm/0.19.0: under
+        # SILICON, Rust hits `AicError::PerfDatabase` ("GEMM perf data missing
+        # for quant 'nvfp4'") at the query point — which must cross the FFI as
+        # the SAME sdk class Python raises, recognized by the cause-chain
+        # walker (the miss-classification the sweep/support-matrix rely on).
+        _prepare_rust_core(monkeypatch)
+        case = EngineStepParityCase(model_path="nvidia/MiniMax-M2.5-NVFP4", system_name="h200_sxm")
+        with pytest.raises(errors.PerfDataNotAvailableError) as excinfo:
+            _rust_static_breakdown(case)
+        assert perf_database.has_perf_data_not_available_cause(excinfo.value)
+        # The AicError display prefix pins the raise to the rust side of the
+        # FFI (a Python-side miss would carry the sdk's own wording).
+        message = str(excinfo.value)
+        assert "perf database error" in message or "I/O error" in message, message
+
+    def test_hybrid_ladder_miss_raises_typed_empirical_miss(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # NVFP4 MoE on Hopper: no own-shape/cross-shape/sibling reference
+        # anywhere (the HYBRID_CASES ladder-miss config). Rust raises
+        # `AicError::EmpiricalNotImplemented`, which must surface as the sdk's
+        # EmpiricalNotImplementedError — the typed hybrid-miss — and NOT be
+        # classified as a plain perf-data miss.
+        _prepare_rust_core(monkeypatch)
+        case = EngineStepParityCase(
+            model_path="nvidia/MiniMax-M2.5-NVFP4",
+            system_name="h200_sxm",
+            database_mode="HYBRID",
+        )
+        with pytest.raises(errors.EmpiricalNotImplementedError) as excinfo:
+            _rust_static_breakdown(case)
+        message = str(excinfo.value)
+        assert "empirical estimation not implemented" in message, message
+        assert not perf_database.has_perf_data_not_available_cause(excinfo.value)
+
+
+class TestRustProvenanceCapture:
+    """FFI provenance contract (audit finding #6): the compiled engine records
+    the empirical tier that fired (max-rank, mirroring Python's
+    `PROVENANCE_ORDER`) and the bridge forwards it into
+    `util_empirical.capture_provenance`, so support-matrix HYBRID_PASS tier
+    labelling works identically for rust-routed runs."""
+
+    def test_hybrid_xop_run_records_tier(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # MiniMax-M3 HYBRID: MSA borrows DSA's util (xop) — the run's worst
+        # tier. Python probes record {xop, xshape}; the rust path must land on
+        # the same worst_provenance.
+        _prepare_rust_core(monkeypatch)
+        case = EngineStepParityCase(model_path="MiniMaxAI/MiniMax-M3", database_mode="HYBRID")
+        with util_empirical.capture_provenance() as tags:
+            metrics = _static_metrics(case, engine_step_backend="rust")
+        assert not isinstance(metrics["total_ms"], _ErrorSentinel), repr(metrics)
+        assert util_empirical.worst_provenance(tags) == "xop", tags
+
+    def test_pure_silicon_run_records_nothing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Fully-collected config on SILICON: no empirical path fires, so the
+        # capture stays empty and worst_provenance defaults to "silicon".
+        _prepare_rust_core(monkeypatch)
+        case = EngineStepParityCase(model_path="moonshotai/Kimi-K2.5")
+        with util_empirical.capture_provenance() as tags:
+            metrics = _static_metrics(case, engine_step_backend="rust")
+        assert not isinstance(metrics["total_ms"], _ErrorSentinel), repr(metrics)
+        assert util_empirical.worst_provenance(tags) == "silicon", tags

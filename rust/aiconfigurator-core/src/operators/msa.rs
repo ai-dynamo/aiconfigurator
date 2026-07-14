@@ -84,6 +84,8 @@ impl MsaModuleOp {
                 match util {
                     Some(util) if util > 0.0 => {
                         let latency = sol / (util * self.dsa_scale_k);
+                        // Cross-op transfer from DSA (Python msa.py:297 "xop").
+                        db.note_provenance(crate::operators::util_empirical::ProvenanceTier::XOp);
                         Ok(PerformanceResult::new(
                             latency * self.scale_factor,
                             Source::Empirical,
@@ -128,6 +130,8 @@ impl MsaModuleOp {
                 match util {
                     Some(util) if util > 0.0 => {
                         let latency = sol / (util * self.dsa_scale_k);
+                        // Cross-op transfer from DSA (Python msa.py:335 "xop").
+                        db.note_provenance(crate::operators::util_empirical::ProvenanceTier::XOp);
                         Ok(PerformanceResult::new(
                             latency * self.scale_factor,
                             Source::Empirical,
@@ -405,6 +409,7 @@ mod tests {
             let db = db(backend, version);
             let op = msa_op();
             for (b, s, prefix, is_context, expected) in anchors {
+                db.reset_provenance();
                 let result = if is_context {
                     op.query_context(&db, b, s, prefix)
                 } else {
@@ -413,6 +418,12 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{backend} b={b} s={s}: {e}"));
                 approx(result.latency_ms, expected);
                 assert_eq!(result.source, Source::Empirical);
+                // The xop tier must be recorded on the db accumulator
+                // (Python msa.py:297/335 note_provenance("xop")).
+                assert_eq!(
+                    db.worst_provenance(),
+                    crate::operators::util_empirical::ProvenanceTier::XOp
+                );
             }
         }
     }

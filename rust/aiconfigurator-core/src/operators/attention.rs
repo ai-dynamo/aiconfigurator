@@ -476,6 +476,8 @@ fn context_attention_empirical(
         })?;
         if grid.as_deref().is_some_and(|g| !g.is_empty()) {
             let (latency, _) = util_empirical::estimate(sol_time, &query, grid.as_deref(), 1.0)?;
+            // Own-shape util fired (Python attention.py:406, default tier).
+            db.note_provenance(util_empirical::ProvenanceTier::Empirical);
             return Ok(latency);
         }
         // Cross-head_size transfer (XSHAPE): this head_size has no data, but
@@ -491,6 +493,8 @@ fn context_attention_empirical(
                     / attn_prefill_hs_ratio(&db.backend, ref_hs);
                 let (latency, _) =
                     util_empirical::estimate(sol_time, &query, Some(&ref_grid), scale)?;
+                // Cross-head_size borrow (Python attention.py:424 "xshape").
+                db.note_provenance(util_empirical::ProvenanceTier::XShape);
                 return Ok(latency);
             }
         }
@@ -638,6 +642,8 @@ fn generation_attention_empirical(
         })?;
         if grid.as_deref().is_some_and(|g| !g.is_empty()) {
             let (latency, _) = util_empirical::estimate(sol_time, &query, grid.as_deref(), 1.0)?;
+            // Own-shape util fired (Python attention.py:791, default tier).
+            db.note_provenance(util_empirical::ProvenanceTier::Empirical);
             return Ok(latency);
         }
         if db.transfer_policy.contains(TransferKind::XShape) {
@@ -646,6 +652,8 @@ fn generation_attention_empirical(
             {
                 let (latency, _) =
                     util_empirical::estimate(sol_time, &query, Some(&ref_grid), 1.0)?;
+                // Cross-head_size borrow (Python attention.py:802 "xshape").
+                db.note_provenance(util_empirical::ProvenanceTier::XShape);
                 return Ok(latency);
             }
         }
@@ -752,6 +760,8 @@ fn encoder_attention_empirical(
         }
     })?;
     let (latency, _) = util_empirical::estimate(sol(&query), &query, grid.as_deref(), 1.0)?;
+    // Own-shape util fired (Python attention.py:1044, default tier).
+    db.note_provenance(util_empirical::ProvenanceTier::Empirical);
     Ok(latency)
 }
 

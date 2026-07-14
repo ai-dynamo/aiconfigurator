@@ -688,6 +688,8 @@ fn context_empirical(
         ))))
     })?;
     let (latency, _) = util_empirical::estimate(sol_time, &query, grid.as_deref(), 1.0)?;
+    // Own-shape util fired (Python dsa.py:620, estimate()'s default tier).
+    db.note_provenance(util_empirical::ProvenanceTier::Empirical);
     Ok(latency)
 }
 
@@ -755,6 +757,8 @@ fn generation_empirical(
         })?;
         let (latency, _) =
             util_empirical::estimate(sol_time, &[b as f64, s as f64], grid.as_deref(), 1.0)?;
+        // Own-shape util fired (Python dsa.py:1296, estimate()'s default tier).
+        db.note_provenance(util_empirical::ProvenanceTier::Empirical);
         Ok(latency)
     } else if let Some(slc) = slice {
         let skip_tag = if skip_indexer { ":skip" } else { "" };
@@ -778,6 +782,8 @@ fn generation_empirical(
             grid.as_deref(),
             1.0,
         )?;
+        // Own-shape util fired (Python dsa.py:1296, estimate()'s default tier).
+        db.note_provenance(util_empirical::ProvenanceTier::Empirical);
         Ok(latency)
     } else {
         let (latency, _) = util_empirical::estimate(

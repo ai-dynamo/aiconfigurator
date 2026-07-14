@@ -175,6 +175,8 @@ impl MhcModuleOp {
         })?;
         let query = [f64::from(num_tokens)];
         let (latency, _) = util_empirical::estimate(sol(&query), &query, grid.as_deref(), 1.0)?;
+        // Own-shape util fired (Python mhc.py, estimate()'s default tier).
+        db.note_provenance(util_empirical::ProvenanceTier::Empirical);
         Ok(latency)
     }
 }

@@ -323,6 +323,8 @@ fn context_mla_empirical(
     );
     let query = [num_heads as f64, (s + prefix) as f64, b as f64];
     let (latency, _) = util_empirical::estimate(sol_query, &query, grid.as_deref(), 1.0)?;
+    // Own-shape util fired (Python mla.py, estimate()'s default tier).
+    db.note_provenance(util_empirical::ProvenanceTier::Empirical);
     Ok(latency)
 }
 
@@ -373,6 +375,8 @@ fn generation_mla_empirical(
     })?;
     let query = [num_heads as f64, b as f64, s as f64];
     let (latency, _) = util_empirical::estimate(sol(&query), &query, grid.as_deref(), 1.0)?;
+    // Own-shape util fired (Python mla.py, estimate()'s default tier).
+    db.note_provenance(util_empirical::ProvenanceTier::Empirical);
     Ok(latency)
 }
 
@@ -448,6 +452,8 @@ fn mla_bmm_empirical(
     };
     let query = [num_tokens as f64];
     let (latency, _) = util_empirical::estimate(sol(&query), &query, grid.as_deref(), 1.0)?;
+    // Own-shape util fired (Python mla.py, estimate()'s default tier).
+    db.note_provenance(util_empirical::ProvenanceTier::Empirical);
     Ok(latency)
 }
 
@@ -531,6 +537,8 @@ fn context_mla_module_empirical(
     );
     let query = [num_heads as f64, (s + prefix) as f64, b as f64];
     let (latency, _) = util_empirical::estimate(sol_query, &query, grid.as_deref(), 1.0)?;
+    // Own-shape util fired (Python mla.py, estimate()'s default tier).
+    db.note_provenance(util_empirical::ProvenanceTier::Empirical);
     Ok(latency)
 }
 
@@ -593,6 +601,8 @@ fn generation_mla_module_empirical(
     })?;
     let query = [num_heads as f64, b as f64, s as f64];
     let (latency, _) = util_empirical::estimate(sol(&query), &query, grid.as_deref(), 1.0)?;
+    // Own-shape util fired (Python mla.py, estimate()'s default tier).
+    db.note_provenance(util_empirical::ProvenanceTier::Empirical);
     Ok(latency)
 }
 

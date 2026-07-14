@@ -184,6 +184,27 @@ impl Engine {
         &self.db
     }
 
+    /// Clear the empirical-provenance accumulator (start of a run). The PyO3
+    /// boundary calls this at the top of every compute method so
+    /// [`Self::last_provenance`] carries per-call semantics, mirroring
+    /// Python's `capture_provenance()` scope. Deliberately NOT called inside
+    /// `run_static` itself: `mixed_step_latency` composes multiple internal
+    /// passes whose tiers must accumulate into one answer.
+    pub fn reset_provenance(&self) {
+        self.db.reset_provenance();
+    }
+
+    /// The least-confident empirical tier fired since the last
+    /// [`Self::reset_provenance`], as the Python tag string; `None` when the
+    /// run was answered purely from silicon tables (nothing to note — Python's
+    /// `note_provenance` is skipped for silicon too).
+    pub fn last_provenance(&self) -> Option<&'static str> {
+        match self.db.worst_provenance() {
+            crate::operators::util_empirical::ProvenanceTier::Silicon => None,
+            tier => Some(tier.as_str()),
+        }
+    }
+
     /// Test-only accessor for the context op list (the field is private, but
     /// `fpm`'s `#[cfg(test)]` parity tests compare `forward_pass_time_ms`
     /// against the shared session free fns over these exact ops).

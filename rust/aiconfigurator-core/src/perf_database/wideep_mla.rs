@@ -273,6 +273,19 @@ impl WideEpMlaTable {
         non_empty_points(node, "WideEP generation MLA", &self.data_root)
     }
 
+    /// Probe the context table load. Typed missing-data error when the
+    /// perf file is absent — Python `get_silicon`'s `raise_if_not_loaded()`
+    /// step, which PRECEDES the attn-backend whitelist (`mla.py:1449-1461`).
+    pub fn ensure_context_loaded(&self) -> Result<(), AicError> {
+        self.load_context().map(|_| ())
+    }
+
+    /// Generation-table counterpart of [`Self::ensure_context_loaded`]
+    /// (`mla.py:1188-1192`).
+    pub fn ensure_generation_loaded(&self) -> Result<(), AicError> {
+        self.load_generation().map(|_| ())
+    }
+
     fn load_context(&self) -> Result<&WideEpContextMlaGrids, AicError> {
         let cell = self
             .context

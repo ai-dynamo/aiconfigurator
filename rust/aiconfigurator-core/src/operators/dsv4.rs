@@ -17,7 +17,7 @@
 //! `perf_database::dsv4` and Python `load_context_dsv4_kind_module_data`.
 
 use serde::{Deserialize, Serialize};
-use crate::common::enums::{DatabaseMode, FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
+use crate::common::enums::{DatabaseMode, FmhaQuantMode, GemmQuantMode, KvCacheQuantMode, MoeQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::communication::NcclOp;
@@ -334,6 +334,8 @@ impl Dsv4ModuleOp {
             })?;
             let query = [f64::from(prefix), f64::from(s), f64::from(b)];
             let (latency, _) = util_empirical::estimate(sol_q, &query, grid.as_deref(), 1.0)?;
+            // Own-shape util fired (Python dsv4.py:889, default tier).
+            db.note_provenance(util_empirical::ProvenanceTier::Empirical);
             Ok(latency)
         } else {
             let sol2 = |c: &[f64]| sol_at(c[1] as i64, c[0] as i64, 0); // c=(s, b); anchor prefix=0
@@ -354,6 +356,8 @@ impl Dsv4ModuleOp {
             })?;
             let query = [f64::from(s) + f64::from(prefix), f64::from(b)];
             let (latency, _) = util_empirical::estimate(sol_q, &query, grid.as_deref(), 1.0)?;
+            // Own-shape util fired (Python dsv4.py:889, default tier).
+            db.note_provenance(util_empirical::ProvenanceTier::Empirical);
             Ok(latency)
         }
     }
@@ -638,7 +642,107 @@ impl Dsv4ModuleOp {
         })?;
         let query = [f64::from(b), f64::from(s)];
         let (latency, _) = util_empirical::estimate(sol(&query), &query, grid.as_deref(), 1.0)?;
+        // Own-shape util fired (Python dsv4.py:1313, default tier).
+        db.note_provenance(util_empirical::ProvenanceTier::Empirical);
         Ok(latency)
+    }
+}
+
+/// SGLang DeepSeek-V4 MegaMoE routed module.
+///
+/// Mirrors Python `operations/dsv4.py::DeepSeekV4MegaMoEModule`: the measured
+/// routed MegaMoE module boundary (prepared hidden states + top-k tensors ->
+/// SGLang pre-dispatch -> `deep_gemm.fp8_fp4_mega_moe` -> routed output
+/// scaling). Gate/top-k and shared experts are modeled outside this op. One
+/// class serves both phases via `is_context` (same as Python), so a single
+/// `Op::Dsv4MegaMoe` variant dispatches on `ctx.num_tokens`.
+///
+/// Mode contract (Python `_query_megamoe_table`): SILICON/HYBRID only. The op
+/// has NO empirical path — EMPIRICAL (and the SOL diagnostics) raise a typed
+/// perf-data error, and under HYBRID a silicon miss propagates RAW (Python
+/// never routes this op through `_query_silicon_or_hybrid`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Dsv4MegaMoeOp {
+    pub name: String,
+    pub scale_factor: f64,
+    pub hidden_size: u32,
+    /// FULL (un-partitioned) MoE inter size — Python passes
+    /// `self._moe_inter_size` (models/deepseek_v4.py), not the tp-local one.
+    pub inter_size: u32,
+    pub topk: u32,
+    pub num_experts: u32,
+    pub moe_tp_size: u32,
+    pub moe_ep_size: u32,
+    pub quant_mode: MoeQuantMode,
+    /// Normalized by the Python op ctor (`uniform` -> `balanced`); the query
+    /// re-applies the normalization defensively (see `query`).
+    pub workload_distribution: String,
+    pub is_context: bool,
+    pub source_policy: String,
+    pub pre_dispatch: String,
+    pub num_fused_shared_experts: u32,
+    pub kernel_source: String,
+    pub kernel_dtype: String,
+}
+
+impl Dsv4MegaMoeOp {
+    /// Query measured MegaMoE routed-module latency at the rank-LOCAL token
+    /// count `num_tokens` (Python `query`'s `x`; the perf rows are indexed by
+    /// local-rank tokens — do NOT pre-multiply by attention_dp_size).
+    pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
+        // Python `DeepSeekV4MegaMoEModule.query`: Blackwell-only guard
+        // (`ValueError`, not a perf-data miss).
+        let sm_version = db
+            .system_spec
+            .gpu
+            .sm_version
+            .map_or(-1_i64, i64::from);
+        if sm_version < 100 {
+            return Err(AicError::ModelConfig(format!(
+                "DeepSeek-V4 MegaMoE is only supported on Blackwell-class GPUs (SM >= 100); \
+                 got sm_version={sm_version}."
+            )));
+        }
+        // Python `_query_megamoe_table`: `database_mode not in (SILICON,
+        // HYBRID)` -> PerfDataNotAvailableError. HYBRID takes the SAME
+        // silicon table path as SILICON, and a miss propagates raw.
+        match db.database_mode {
+            DatabaseMode::Silicon | DatabaseMode::Hybrid => {}
+            mode => {
+                return Err(AicError::PerfDatabase(format!(
+                    "DSv4 MegaMoE module only supports measured SILICON data, got \
+                     database_mode={mode:?}."
+                )))
+            }
+        }
+        // Python `_normalize_distribution` (op ctor): uniform -> balanced.
+        // The Python emitter sends the already-normalized value; re-apply for
+        // hand-written specs.
+        let distribution = if self.workload_distribution == "uniform" {
+            "balanced"
+        } else {
+            self.workload_distribution.as_str()
+        };
+        let latency = db.dsv4_megamoe.query_module(
+            num_tokens,
+            self.hidden_size,
+            self.inter_size,
+            self.topk,
+            self.num_experts,
+            self.moe_tp_size,
+            self.moe_ep_size,
+            self.quant_mode,
+            distribution,
+            self.is_context,
+            &self.source_policy,
+            &self.pre_dispatch,
+            self.num_fused_shared_experts,
+            &self.kernel_source,
+            &self.kernel_dtype,
+        )?;
+        // Python: `PerformanceResult(float(result) * scale, source="silicon")`
+        // — no clamp (nothing is subtracted on this path).
+        Ok(PerformanceResult::new(latency, Source::Silicon).scaled(self.scale_factor))
     }
 }
 
@@ -1065,6 +1169,178 @@ mod tests {
             matches!(gen, Err(AicError::EmpiricalNotImplemented(_))),
             "got {gen:?}"
         );
+    }
+
+    /// DeepSeek-V4-Pro MegaMoE routed-module op mirroring the model builder
+    /// (`models/deepseek_v4.py::_moe_ops` with `use_megamoe`): full
+    /// moe_inter_size, defaults for source_policy / pre_dispatch / fused
+    /// shared experts / kernel identity.
+    fn megamoe_op(is_context: bool, distribution: &str) -> Dsv4MegaMoeOp {
+        Dsv4MegaMoeOp {
+            name: if is_context { "context_megamoe" } else { "generation_megamoe" }.into(),
+            scale_factor: 1.0,
+            hidden_size: 7168,
+            inter_size: 3072,
+            topk: 6,
+            num_experts: 384,
+            moe_tp_size: 1,
+            moe_ep_size: 8,
+            quant_mode: MoeQuantMode::W4a8Mxfp4Mxfp8,
+            workload_distribution: distribution.into(),
+            is_context,
+            source_policy: "random".into(),
+            pre_dispatch: "sglang_jit".into(),
+            num_fused_shared_experts: 0,
+            kernel_source: "deepgemm_megamoe".into(),
+            kernel_dtype: "fp8_fp4".into(),
+        }
+    }
+
+    fn gb200_db() -> Option<PerfDatabase> {
+        let systems_root = systems_root();
+        let data_root = systems_root.join("data/gb200/sglang/0.5.10");
+        if !data_root.join("dsv4_megamoe_module_perf.parquet").exists() {
+            return None; // git-lfs data not materialized
+        }
+        Some(
+            PerfDatabase::load(&systems_root, "gb200", "sglang", "0.5.10")
+                .expect("gb200/sglang/0.5.10 must load"),
+        )
+    }
+
+    /// SILICON parity anchors on the shipped gb200/sglang/0.5.10 MegaMoE
+    /// table. Python oracle:
+    ///
+    /// ```text
+    /// uv run --no-sync python -c "
+    /// from aiconfigurator.sdk import common
+    /// from aiconfigurator.sdk.perf_database import get_database
+    /// from aiconfigurator.sdk.operations.dsv4 import DeepSeekV4MegaMoEModule as M
+    /// from aiconfigurator.sdk.common import DatabaseMode
+    /// db = get_database('gb200', 'sglang', '0.5.10')
+    /// base = dict(hidden_size=7168, inter_size=3072, topk=6, num_experts=384,
+    ///             moe_tp_size=1, moe_ep_size=8,
+    ///             quant_mode=common.MoEQuantMode.w4a8_mxfp4_mxfp8)
+    /// for tok, dist, ctx in [(1024,'balanced',True), (3000,'power_law_1.2',True),
+    ///                        (100,'balanced',True), (64,'power_law_1.01',False),
+    ///                        (2000,'balanced',False)]:
+    ///     print(float(M._query_megamoe_table(db, num_tokens=tok,
+    ///           workload_distribution=dist, is_context=ctx,
+    ///           database_mode=DatabaseMode.SILICON, **base)))"
+    /// ```
+    ///
+    /// Covers: exact collected hit, off-grid in-range lerp, below-range and
+    /// beyond-range boundary util-hold (linear token-proxy SOL), both phases.
+    #[test]
+    fn megamoe_silicon_matches_python_oracles() {
+        let Some(db) = gb200_db() else { return };
+        assert_eq!(db.database_mode, DatabaseMode::Silicon);
+
+        let cases: &[(bool, &str, u32, f64)] = &[
+            // exact collected hit (context, tokens=1024, balanced, ep=8)
+            (true, "balanced", 1024, 0.508394),
+            // off-grid in-range lerp (context, tokens=3000 between 2048/4096)
+            (true, "power_law_1.2", 3000, 2.01460530859375),
+            // below the collected range (context, tokens=100 < 1024)
+            (true, "balanced", 100, 0.0496478515625),
+            // exact collected hit (generation, tokens=64)
+            (false, "power_law_1.01", 64, 0.312203),
+            // beyond the collected range (generation, tokens=2000 > 512)
+            (false, "balanced", 2000, 1.5932929687500001),
+        ];
+        for &(is_context, dist, tokens, expected) in cases {
+            let result = megamoe_op(is_context, dist)
+                .query(&db, tokens)
+                .expect("silicon megamoe query");
+            approx(result.latency_ms, expected);
+            assert_eq!(result.source, Source::Silicon);
+        }
+    }
+
+    /// Mode + miss contract, mirroring Python `_query_megamoe_table`:
+    /// - EMPIRICAL -> typed PerfDataNotAvailableError (the op has NO
+    ///   empirical path);
+    /// - an absent shape is a typed miss under SILICON;
+    /// - HYBRID == SILICON: hit passes through, a miss propagates RAW
+    ///   (never converted into an empirical estimate).
+    /// - `uniform` normalizes to `balanced` (Python ctor normalization).
+    #[test]
+    fn megamoe_mode_contract_and_miss() {
+        let Some(mut db) = gb200_db() else { return };
+
+        // EMPIRICAL -> error, Python message mirrored.
+        db.database_mode = DatabaseMode::Empirical;
+        let err = megamoe_op(true, "balanced").query(&db, 1024).unwrap_err();
+        assert!(err.is_missing_perf_data(), "got {err:?}");
+        assert!(
+            err.to_string()
+                .contains("DSv4 MegaMoE module only supports measured SILICON data"),
+            "unexpected message: {err}"
+        );
+
+        // SILICON miss: absent shape is a typed miss naming the key.
+        db.database_mode = DatabaseMode::Silicon;
+        let mut op = megamoe_op(true, "balanced");
+        op.num_experts = 999;
+        let err = op.query(&db, 1024).unwrap_err();
+        assert!(err.is_missing_perf_data(), "got {err:?}");
+        assert!(
+            err.to_string().contains("No DSv4 MegaMoE context module data")
+                && err.to_string().contains("num_experts=999"),
+            "unexpected message: {err}"
+        );
+
+        // HYBRID: hit == silicon value; miss propagates raw (same typed
+        // error, no empirical conversion).
+        db.database_mode = DatabaseMode::Hybrid;
+        let result = megamoe_op(true, "balanced")
+            .query(&db, 1024)
+            .expect("hybrid megamoe hit");
+        approx(result.latency_ms, 0.508394);
+        assert_eq!(result.source, Source::Silicon);
+        let err = op.query(&db, 1024).unwrap_err();
+        assert!(err.is_missing_perf_data(), "got {err:?}");
+
+        // `uniform` -> `balanced` (Python `_normalize_distribution`).
+        db.database_mode = DatabaseMode::Silicon;
+        let result = megamoe_op(true, "uniform")
+            .query(&db, 1024)
+            .expect("uniform must normalize to balanced");
+        approx(result.latency_ms, 0.508394);
+    }
+
+    /// The exact externally-tagged JSON the Python emitter
+    /// (`engine.py::_dsv4_megamoe`) produces must decode into the op —
+    /// pins the wire field names.
+    #[test]
+    fn megamoe_python_wire_json_decodes() {
+        let json = serde_json::json!({
+            "Dsv4MegaMoe": {
+                "name": "context_megamoe",
+                "scale_factor": 61.0,
+                "hidden_size": 7168,
+                "inter_size": 3072,
+                "topk": 6,
+                "num_experts": 384,
+                "moe_tp_size": 1,
+                "moe_ep_size": 8,
+                "quant_mode": "w4a8_mxfp4_mxfp8",
+                "workload_distribution": "balanced",
+                "is_context": true,
+                "source_policy": "random",
+                "pre_dispatch": "sglang_jit",
+                "num_fused_shared_experts": 0,
+                "kernel_source": "deepgemm_megamoe",
+                "kernel_dtype": "fp8_fp4",
+            }
+        });
+        let op: crate::operators::op::Op = serde_json::from_value(json).expect("decode");
+        let crate::operators::op::Op::Dsv4MegaMoe(op) = op else {
+            panic!("expected Dsv4MegaMoe variant");
+        };
+        assert_eq!(op.quant_mode, MoeQuantMode::W4a8Mxfp4Mxfp8);
+        assert_eq!(op.scale_factor, 61.0);
+        assert!(op.is_context);
     }
 
     /// `cp_size` / `window_size` are absent from every opspec the Python

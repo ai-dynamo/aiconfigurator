@@ -38,7 +38,7 @@ pub use attention::{ContextAttentionOp, EncoderAttentionOp, GenerationAttentionO
 pub use base::{PerformanceResult, Source};
 pub use communication::{CustomAllReduceOp, NcclOp, P2POp};
 pub use dsa::DsaModuleOp;
-pub use dsv4::Dsv4ModuleOp;
+pub use dsv4::{Dsv4MegaMoeOp, Dsv4ModuleOp};
 pub use elementwise::ElementwiseOp;
 pub use embedding::EmbeddingOp;
 pub use gemm::GemmOp;

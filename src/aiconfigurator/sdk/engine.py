@@ -51,6 +51,7 @@ from aiconfigurator.sdk.operations import (
     ContextMLA,
     ContextMSAModule,
     CustomAllReduce,
+    DeepSeekV4MegaMoEModule,
     DeepSeekV4MHCModule,
     ElementWise,
     Embedding,
@@ -457,6 +458,32 @@ def _dsv4_module(
     }
 
 
+def _dsv4_megamoe(op: DeepSeekV4MegaMoEModule) -> dict:
+    """SGLang DeepSeek-V4 MegaMoE routed module (Python
+    ``DeepSeekV4MegaMoEModule``). One class serves both phases via
+    ``is_context``, so a single Rust variant carries the flag. Field names
+    match the Rust ``Dsv4MegaMoeOp``; ``workload_distribution`` is already
+    normalized by the ctor (``uniform`` -> ``balanced``)."""
+    return {
+        "name": op._name,
+        "scale_factor": op._scale_factor,
+        "hidden_size": op._hidden_size,
+        "inter_size": op._inter_size,
+        "topk": op._topk,
+        "num_experts": op._num_experts,
+        "moe_tp_size": op._moe_tp_size,
+        "moe_ep_size": op._moe_ep_size,
+        "quant_mode": _quant_name(op._quant_mode),
+        "workload_distribution": op._workload_distribution,
+        "is_context": op._is_context,
+        "source_policy": op._source_policy,
+        "pre_dispatch": op._pre_dispatch,
+        "num_fused_shared_experts": op._num_fused_shared_experts,
+        "kernel_source": op._kernel_source,
+        "kernel_dtype": op._kernel_dtype,
+    }
+
+
 def _mhc_module(op: DeepSeekV4MHCModule, *, architecture: str) -> dict:
     return {
         "name": op._name,
@@ -626,6 +653,11 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
         return {"Dsv4Context": _dsv4_module(op, architecture=architecture)}
     if isinstance(op, GenerationDeepSeekV4AttentionModule):
         return {"Dsv4Generation": _dsv4_module(op, architecture=architecture)}
+    # Rust `Op::Dsv4MegaMoe` is APPENDED after `Fallback` (bincode enum
+    # indices are positional; appending shifts nothing), so no
+    # ENGINE_SPEC_SCHEMA_VERSION bump.
+    if isinstance(op, DeepSeekV4MegaMoEModule):
+        return {"Dsv4MegaMoe": _dsv4_megamoe(op)}
 
     # WideEP variants (must precede their non-WideEP base classes if any).
     if isinstance(op, WideEPContextMLA):
@@ -1059,3 +1091,13 @@ class EngineHandle:
         return self._engine.decode_step_latency(
             int(gen_tokens), int(isl), int(osl), float(gen_seq_imbalance_correction_scale)
         )
+
+    def last_provenance(self) -> str | None:
+        """Empirical provenance tier fired during the most recent engine call
+        on this handle (worst tier across ops, per Python's
+        ``util_empirical.PROVENANCE_ORDER``), or ``None`` for a pure-silicon
+        answer. Per-call state: every compute method resets the accumulator on
+        entry. The rust engine-step bridge forwards non-silicon tiers into
+        ``util_empirical.note_provenance`` so ``capture_provenance()`` /
+        support-matrix HYBRID labelling behave identically on both engines."""
+        return self._engine.last_provenance()

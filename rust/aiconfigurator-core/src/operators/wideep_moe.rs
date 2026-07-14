@@ -230,6 +230,8 @@ impl WideEpMoeOp {
         })?;
         let query = [num_tokens as f64];
         let (latency, _) = util_empirical::estimate(sol_time, &query, grid.as_deref(), 1.0)?;
+        // Own-slice util fired (Python moe.py:1697 estimate()'s default tier).
+        db.note_provenance(util_empirical::ProvenanceTier::Empirical);
         Ok(latency)
     }
 
@@ -339,6 +341,11 @@ mod tests {
         assert_oracle(&off, 0.4523388956415573, Source::Empirical, "emp_t333");
         let hold = op().query(&db, 100000).expect("beyond-range empirical");
         assert_oracle(&hold, 15.171406557783484, Source::Empirical, "emp_t100000");
+        // Python capture: {"empirical"} (own-slice util, no transfer ladder).
+        assert_eq!(
+            db.worst_provenance(),
+            util_empirical::ProvenanceTier::Empirical
+        );
     }
 
     /// HYBRID with data present stays on silicon; the in-range interpolation
@@ -390,6 +397,54 @@ mod tests {
             "expected the typed empirical miss, got {result:?}"
         );
 
+    }
+
+    /// Distribution fallback is FILE-ROW order, not sorted order: gb200's
+    /// `wideep_moe_perf.parquet` lists `power_law_1.01_eplb` before
+    /// `power_law_1.01` (b200's happens to be sorted, which masked this).
+    /// Python's `dists[0]` (dict insertion order — moe.py:1650-1653
+    /// empirical, :1755-1765 silicon) therefore answers an uncollected
+    /// distribution from the EPLB slice. Oracles:
+    ///
+    /// ```text
+    /// db = perf_database.get_database_view("gb200", "trtllm", "1.3.0rc10",
+    ///     allow_missing_data=True, database_mode=..., shared_layer=False)
+    /// float(TrtLLMWideEPMoE._query_compute_table(db, num_tokens=...,
+    ///     hidden_size=6144, inter_size=2048, topk=8, num_experts=256,
+    ///     num_slots=256, moe_tp_size=1, moe_ep_size=2,
+    ///     quant_mode=common.MoEQuantMode.nvfp4,
+    ///     workload_distribution="balanced", database_mode=...))
+    /// ```
+    ///
+    /// nt=64 is a collected point of the EPLB slice (0.34764...; the sorted
+    /// -first `power_law_1.01` slice holds 0.34145... there, so this anchor
+    /// fails on lexicographic fallback); nt=333 is an interior lerp,
+    /// covering both the silicon and the empirical fallback sites.
+    #[test]
+    fn wideep_compute_distribution_fallback_uses_file_order() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator/systems");
+        let gb200 = |mode: DatabaseMode| {
+            PerfDatabase::load(&root, "gb200", "trtllm", "1.3.0rc10")
+                .expect("db loads")
+                .with_mode(mode, TransferPolicy::ALL)
+        };
+        let mut fallback_op = op();
+        fallback_op.workload_distribution = "balanced".into();
+
+        let hit = fallback_op
+            .query(&gb200(DatabaseMode::Hybrid), 64)
+            .expect("silicon dist fallback");
+        assert_oracle(&hit, 0.34764800071716306, Source::Silicon, "gb200_dist_fb_t64");
+        let interp = fallback_op
+            .query(&gb200(DatabaseMode::Hybrid), 333)
+            .expect("silicon dist fallback interp");
+        assert_oracle(&interp, 0.42581739127635954, Source::Silicon, "gb200_dist_fb_t333");
+        let emp = fallback_op
+            .query(&gb200(DatabaseMode::Empirical), 333)
+            .expect("empirical dist fallback");
+        assert_oracle(&emp, 0.4259303480537969, Source::Empirical, "gb200_emp_dist_fb_t333");
     }
 
 }
