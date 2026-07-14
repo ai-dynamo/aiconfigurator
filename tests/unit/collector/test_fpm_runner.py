@@ -63,6 +63,45 @@ def _runner(tmp_path) -> KubernetesCellRunner:
     return runner
 
 
+def test_apply_skips_client_validation_and_verifies_created_object(tmp_path):
+    runner = _runner(tmp_path)
+    runner.manifest = tmp_path / "k8s_deploy.yaml"
+    runner.manifest.write_text("apiVersion: v1\nkind: Pod\n")
+    runner.kind = "Pod"
+    runner.name = "pod-0"
+    calls = []
+
+    def kubectl(*args, **kwargs):
+        calls.append(args)
+        if args[0] == "get":
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"metadata": {"name": "pod-0"}}), stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="pod/pod-0 created\n", stderr="")
+
+    runner._kubectl = kubectl
+
+    runner.apply()
+
+    assert calls[0][:2] == ("apply", "--validate=false")
+    assert calls[1][:2] == ("get", "Pod/pod-0")
+
+
+def test_apply_rejects_masked_failure_without_created_object(tmp_path):
+    runner = _runner(tmp_path)
+    runner.manifest = tmp_path / "k8s_deploy.yaml"
+    runner.manifest.write_text("apiVersion: v1\nkind: Pod\n")
+    runner.kind = "Pod"
+    runner.name = "pod-0"
+    runner._kubectl = lambda *args, **kwargs: subprocess.CompletedProcess(
+        args,
+        0,
+        stdout="",
+        stderr="error: context deadline exceeded\n",
+    )
+
+    with pytest.raises(RuntimeError, match="did not create Pod/pod-0"):
+        runner.apply()
+
+
 def test_exec_checked_rejects_masked_remote_failure(tmp_path):
     runner = _runner(tmp_path)
     runner._kubectl = lambda *args, **kwargs: subprocess.CompletedProcess(
@@ -81,15 +120,93 @@ def test_collect_rejects_masked_copy_without_benchmark_files(tmp_path):
     runner._exec_checked = lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="", stderr="")
     runner._kubectl = lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-    with pytest.raises(RuntimeError, match="failed to collect benchmark results"):
+    with pytest.raises(RuntimeError, match="did not return a /results file manifest"):
         runner.collect(["pod-0"])
+
+
+def test_stage_rejects_masked_truncated_copy(tmp_path):
+    runner = _runner(tmp_path)
+    source = tmp_path / "cases.json"
+    source.write_text('{"selected_point_count": 1}\n')
+    calls = []
+
+    def exec_checked(pod, command, *, timeout):
+        calls.append(command)
+        if command[:2] == ["python3", "-c"]:
+            raise RuntimeError("remote hash mismatch")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    runner._exec_checked = exec_checked
+    runner._kubectl = lambda *args, **kwargs: subprocess.CompletedProcess(
+        args,
+        0,
+        stdout="",
+        stderr="connection reset by peer\n",
+    )
+
+    with pytest.raises(RuntimeError, match="failed to stage an exact copy"):
+        runner.stage(["pod-0"], [source])
+
+    assert hashlib.sha256(source.read_bytes()).hexdigest() in calls[-1]
+
+
+def test_collect_rejects_masked_partial_copy(tmp_path):
+    runner = _runner(tmp_path)
+    payloads = {
+        "benchmark.json": b'{"status":"complete"}\n',
+        "benchmark_dp1.json": b'{"status":"complete"}\n',
+    }
+    runner._exec_checked = lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+    runner._remote_result_manifest = lambda pod: {
+        name: {"size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+        for name, payload in payloads.items()
+    }
+
+    def kubectl(*args, **kwargs):
+        if args[0] == "cp":
+            destination = Path(args[2])
+            (destination / "benchmark.json").write_bytes(payloads["benchmark.json"])
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="connection reset by peer\n")
+
+    runner._kubectl = kubectl
+
+    with pytest.raises(RuntimeError, match=r"missing=\['benchmark_dp1.json'\]"):
+        runner.collect(["pod-0"])
+
+
+def test_collect_accepts_exact_remote_manifest(tmp_path):
+    runner = _runner(tmp_path)
+    payloads = {
+        "benchmark.json": b'{"status":"complete"}\n',
+        "engine.stderr.log": b"benchmark complete\n",
+    }
+    runner._exec_checked = lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+    runner._remote_result_manifest = lambda pod: {
+        name: {"size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+        for name, payload in payloads.items()
+    }
+
+    def kubectl(*args, **kwargs):
+        if args[0] == "cp":
+            destination = Path(args[2])
+            for name, payload in payloads.items():
+                (destination / name).write_bytes(payload)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    runner._kubectl = kubectl
+
+    runner.collect(["pod-0"])
+
+    assert (tmp_path / "raw" / "pod-0" / "benchmark.json").read_bytes() == payloads["benchmark.json"]
 
 
 def test_cell_render_preserves_capacity_planned_engine_limits():
     point = FPMPoint("prefill", batch_size=1, suffix_length=1, prefix_length=0)
     plan = SimpleNamespace(
         sha256="plan-sha",
+        model_path="nvidia/GLM-5.2-NVFP4",
         options=SimpleNamespace(kv_block_size=64),
+        capability=SimpleNamespace(architecture="GlmMoeDsaForCausalLM"),
         prefill_design=SimpleNamespace(selected=(point,)),
         decode_design=SimpleNamespace(selected=()),
     )
@@ -108,7 +225,13 @@ def test_cell_render_preserves_capacity_planned_engine_limits():
             max_seq_len=65537,
         ),
     )
-    base = {"K8sConfig": {"k8s_image": "example/runtime:test"}}
+    base = {
+        "K8sConfig": {
+            "k8s_image": "example/runtime:test",
+            "k8s_pvc_mount_path": "/model-cache",
+            "k8s_model_path_in_pvc": "models--nvidia--GLM-5.2-NVFP4",
+        }
+    }
 
     overrides = _cell_generator_overrides(plan, cell, base, selected_point_count=1)
 
@@ -119,7 +242,16 @@ def test_cell_render_preserves_capacity_planned_engine_limits():
     assert overrides["params"]["agg"]["gpu_memory_utilization"] == 0.86
     assert overrides["params"]["agg"]["compilation_config"]["cudagraph_capture_sizes"] == [1]
     assert overrides["K8sConfig"]["k8s_image"] == "example/runtime:test"
+    assert overrides["ServiceConfig"]["model_path"] == "/model-cache/models--nvidia--GLM-5.2-NVFP4"
+    assert overrides["ServiceConfig"]["served_model_name"] == "nvidia/GLM-5.2-NVFP4"
     assert overrides["params"]["agg"]["extra_cli_args"].count("--benchmark-timeout") == 1
+    assert "--enable-prefix-caching" in overrides["params"]["agg"]["extra_cli_args"]
+    assert "--no-scheduler-reserve-full-isl" in overrides["params"]["agg"]["extra_cli_args"]
+    assert "--no-async-scheduling" in overrides["params"]["agg"]["extra_cli_args"]
+    assert "--trust-remote-code" in overrides["params"]["agg"]["extra_cli_args"]
+    assert "--reasoning-parser=glm45" in overrides["params"]["agg"]["extra_cli_args"]
+    executor_index = overrides["params"]["agg"]["extra_cli_args"].index("--distributed-executor-backend")
+    assert overrides["params"]["agg"]["extra_cli_args"][executor_index + 1] == "mp"
     timeout_index = overrides["params"]["agg"]["extra_cli_args"].index("--benchmark-timeout")
     assert overrides["params"]["agg"]["extra_cli_args"][timeout_index + 1] == "3600"
 
@@ -128,6 +260,7 @@ def test_cell_render_adds_one_collector_owned_benchmark_timeout():
     point = FPMPoint("prefill", batch_size=1, suffix_length=1, prefix_length=0)
     plan = SimpleNamespace(
         sha256="plan-sha",
+        model_path="model",
         options=SimpleNamespace(kv_block_size=64),
         prefill_design=SimpleNamespace(selected=(point,)),
         decode_design=SimpleNamespace(selected=()),
@@ -219,6 +352,7 @@ def test_typed_generator_render_keeps_frozen_fpm_limits(tmp_path):
         system="b200_sxm",
         backend="vllm",
         options=SimpleNamespace(kv_block_size=64),
+        capability=SimpleNamespace(architecture="GlmMoeDsaForCausalLM"),
         prefill_design=SimpleNamespace(selected=(point,)),
         decode_design=SimpleNamespace(selected=()),
     )
@@ -239,7 +373,11 @@ def test_typed_generator_render_keeps_frozen_fpm_limits(tmp_path):
         ),
     )
     base = {
-        "K8sConfig": {"k8s_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:test"},
+        "K8sConfig": {
+            "k8s_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:test",
+            "k8s_pvc_mount_path": "/model-cache",
+            "k8s_model_path_in_pvc": "models--nvidia--GLM-5.2-NVFP4",
+        },
     }
 
     _render_cell(plan, cell, tmp_path, base, selected_point_count=1)
@@ -251,6 +389,8 @@ def test_typed_generator_render_keeps_frozen_fpm_limits(tmp_path):
     assert "--gpu-memory-utilization 0.86" in script
     assert "--compilation-config" in script
     assert "--enable-expert-parallel" in script
+    assert "--model /model-cache/models--nvidia--GLM-5.2-NVFP4" in script
+    assert "--served-model-name nvidia/GLM-5.2-NVFP4" in script
 
 
 @pytest.mark.parametrize(

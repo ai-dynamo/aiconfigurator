@@ -9,9 +9,12 @@ import hashlib
 import json
 import math
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .types import FPMPoint
+
+SelectionAdmission = Callable[[tuple[FPMPoint, ...], FPMPoint], bool]
 
 _BUDGET_DIVISORS = {
     "one_eighth": 8,
@@ -153,15 +156,25 @@ def _halton(index: int, base: int) -> float:
 
 def _halton_order(
     remaining: set[FPMPoint],
+    selected_prefix: list[FPMPoint],
     coordinates: dict[FPMPoint, tuple[float, ...]],
     *,
     phase: str,
     count: int,
-) -> list[FPMPoint]:
+    selection_admission: SelectionAdmission | None,
+) -> tuple[list[FPMPoint], set[FPMPoint]]:
     bases = (2, 3, 5) if phase == "prefill" else (2, 3)
     selected = []
+    excluded = set()
     index = 1
     while remaining and len(selected) < count:
+        if selection_admission is not None:
+            prefix = (*selected_prefix, *selected)
+            inadmissible = {point for point in remaining if not selection_admission(prefix, point)}
+            remaining.difference_update(inadmissible)
+            excluded.update(inadmissible)
+            if not remaining:
+                break
         target = tuple(_halton(index, base) for base in bases)
         point = min(
             remaining,
@@ -173,19 +186,30 @@ def _halton_order(
         remaining.remove(point)
         selected.append(point)
         index += 1
-    return selected
+    return selected, excluded
 
 
 def _maximin_order(
     remaining: set[FPMPoint],
     selected: list[FPMPoint],
     coordinates: dict[FPMPoint, tuple[float, ...]],
-) -> list[FPMPoint]:
+    selection_admission: SelectionAdmission | None,
+) -> tuple[list[FPMPoint], set[FPMPoint]]:
     order = []
+    excluded = set()
     nearest_distance = {
         point: min(_distance(coordinates[point], coordinates[chosen]) for chosen in selected) for point in remaining
     }
     while nearest_distance:
+        if selection_admission is not None:
+            prefix = tuple(selected)
+            inadmissible = {point for point in nearest_distance if not selection_admission(prefix, point)}
+            for point in inadmissible:
+                remaining.remove(point)
+                nearest_distance.pop(point)
+            excluded.update(inadmissible)
+            if not nearest_distance:
+                break
         point = max(
             nearest_distance,
             key=lambda item: (
@@ -202,7 +226,7 @@ def _maximin_order(
                 nearest_distance[candidate],
                 _distance(coordinates[candidate], coordinates[point]),
             )
-    return order
+    return order, excluded
 
 
 def _sha256(payload: object) -> str:
@@ -219,6 +243,8 @@ class SamplingDesign:
     budget_counts: dict[str, int]
     active_budget: str
     sha256: str
+    excluded_points: tuple[FPMPoint, ...] = ()
+    selection_constraint: str = "none"
 
     @property
     def selected(self) -> tuple[FPMPoint, ...]:
@@ -233,7 +259,10 @@ class SamplingDesign:
             "phase": self.phase,
             "method": "anchors_then_halton_then_workload_maximin",
             "latency_labels_used": False,
+            "selection_constraint": self.selection_constraint,
             "population_count": len(self.population),
+            "joint_capacity_excluded_count": len(self.excluded_points),
+            "joint_capacity_excluded_points": [point.to_dict() for point in self.excluded_points],
             "active_budget": self.active_budget,
             "budget_counts": self.budget_counts,
             "ordered_points": [
@@ -254,6 +283,7 @@ def build_sampling_design(
     *,
     block_size: int,
     active_budget: str,
+    selection_admission: SelectionAdmission | None = None,
 ) -> SamplingDesign:
     """Build one phase's nested sparse design without accepting latency input."""
 
@@ -267,22 +297,38 @@ def build_sampling_design(
         raise ValueError(f"unknown sampling budget: {active_budget}")
 
     phase = unique[0].workload_kind
-    anchors, raw_roles = _prefill_anchors(unique) if phase == "prefill" else _decode_anchors(unique)
+    anchor_candidates, raw_roles = _prefill_anchors(unique) if phase == "prefill" else _decode_anchors(unique)
     coordinates = _coordinates(unique, block_size)
-    remaining = set(unique) - set(anchors)
+    anchors = []
+    excluded = set()
+    for point in anchor_candidates:
+        if selection_admission is None or selection_admission(tuple(anchors), point):
+            anchors.append(point)
+        else:
+            excluded.add(point)
+    remaining = set(unique) - set(anchors) - excluded
     one_eighth_target = max(len(anchors), math.ceil(len(unique) / 8))
     halton_count = min(math.ceil(one_eighth_target / 4), len(remaining))
-    halton_points = _halton_order(
+    halton_points, halton_excluded = _halton_order(
         remaining,
+        anchors,
         coordinates,
         phase=phase,
         count=halton_count,
+        selection_admission=selection_admission,
     )
+    excluded.update(halton_excluded)
     roles = {point: set(point_roles) for point, point_roles in raw_roles.items()}
     for point in halton_points:
         roles.setdefault(point, set()).add("halton")
     ordered = [*anchors, *halton_points]
-    maximin_points = _maximin_order(remaining, ordered.copy(), coordinates)
+    maximin_points, maximin_excluded = _maximin_order(
+        remaining,
+        ordered.copy(),
+        coordinates,
+        selection_admission,
+    )
+    excluded.update(maximin_excluded)
     for point in maximin_points:
         roles.setdefault(point, set()).add("maximin")
     ordered.extend(maximin_points)
@@ -290,7 +336,7 @@ def build_sampling_design(
     budget_counts = {
         name: max(len(anchors), math.ceil(len(unique) / divisor)) for name, divisor in _BUDGET_DIVISORS.items()
     }
-    budget_counts["full"] = len(unique)
+    budget_counts["full"] = len(ordered)
     for name in ("one_eighth", "one_quarter", "one_half", "full"):
         budget_counts[name] = min(budget_counts[name], len(unique))
 
@@ -302,6 +348,8 @@ def build_sampling_design(
         "budget_counts": budget_counts,
         "active_budget": active_budget,
         "block_size": block_size,
+        "joint_capacity_excluded": [point.to_dict() for point in sorted(excluded)],
+        "selection_constraint": "joint_memory_envelope" if selection_admission is not None else "none",
     }
     return SamplingDesign(
         phase=phase,
@@ -311,4 +359,6 @@ def build_sampling_design(
         budget_counts=budget_counts,
         active_budget=active_budget,
         sha256=_sha256(canonical),
+        excluded_points=tuple(sorted(excluded)),
+        selection_constraint="joint_memory_envelope" if selection_admission is not None else "none",
     )

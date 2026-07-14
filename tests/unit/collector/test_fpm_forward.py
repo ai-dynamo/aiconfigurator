@@ -15,7 +15,9 @@ from collector.fpm_forward.capacity import (
     _cudagraph_capture_sizes,
     _engine_envelope,
     _required_point_kv_bytes,
+    _runtime_reserve_bytes,
     build_execution_profile,
+    filter_memory_feasible_points,
 )
 from collector.fpm_forward.config import FPMCollectionOptions
 from collector.fpm_forward.database import aggregate_cell, write_formal_database
@@ -149,6 +151,7 @@ def test_execution_profile_replaces_infeasible_point_and_computes_fraction():
         design=design,
         block_size=64,
         capacity_model=capacity_model,
+        runtime_reserve_bytes_override=0,
     )
 
     assert profile.selected == (low, replacement)
@@ -158,6 +161,97 @@ def test_execution_profile_replaces_infeasible_point_and_computes_fraction():
     assert profile.gpu_memory_utilization == 0.3398
     assert profile.cudagraph_capture_sizes == (64, 128)
     assert next(decision for decision in profile.decisions if decision.point == high).admitted is False
+
+
+def test_execution_profile_reserves_runtime_headroom_before_point_admission():
+    high = FPMPoint("prefill", 1, 4000, 0)
+    low = FPMPoint("prefill", 1, 64, 0)
+    replacement = FPMPoint("prefill", 2, 64, 0)
+    design = SimpleNamespace(
+        phase="prefill",
+        selected=(high, low),
+        ordered_points=(high, low, replacement),
+    )
+    gib = 1024**3
+    capacity_model = FPMCapacityModel(
+        total_gpu_capacity_bytes=100 * gib,
+        fixed_non_activation_bytes=50 * gib,
+        activation_floor_bytes=5 * gib,
+        activation_bytes_per_token=0.0,
+        tokens_from_kv_bytes=lambda byte_count: int(byte_count),
+        kv_bytes_for_sequence=lambda tokens: tokens * 7 * 1024**2,
+        source="test",
+    )
+
+    without_reserve = build_execution_profile(
+        model_path="unused",
+        system="unused",
+        backend="vllm",
+        capability=SimpleNamespace(),
+        topology=ParallelTopology(tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1, cp=1),
+        kv_cache_dtype="fp8",
+        design=design,
+        block_size=64,
+        capacity_model=capacity_model,
+        runtime_reserve_bytes_override=0,
+    )
+    with_reserve = build_execution_profile(
+        model_path="unused",
+        system="unused",
+        backend="vllm",
+        capability=SimpleNamespace(),
+        topology=ParallelTopology(tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1, cp=1),
+        kv_cache_dtype="fp8",
+        design=design,
+        block_size=64,
+        capacity_model=capacity_model,
+    )
+
+    assert without_reserve.selected == (high, low)
+    assert with_reserve.selected == (low, replacement)
+    assert with_reserve.gpu_memory_utilization <= 0.9
+    assert with_reserve.aic_non_kv_bytes == 55 * gib
+    assert with_reserve.runtime_reserve_bytes == 10 * gib
+    assert with_reserve.runtime_reserve_fraction == 0.1
+    assert with_reserve.non_kv_bytes == 65 * gib
+    assert with_reserve.memory_source == "test+static_runtime_reserve"
+
+
+def test_runtime_reserve_uses_larger_of_ten_percent_and_ten_gibibytes():
+    gib = 1024**3
+
+    assert _runtime_reserve_bytes(80 * gib) == 10 * gib
+    assert _runtime_reserve_bytes(180 * gib) == 18 * gib
+
+
+def test_pointwise_memory_filter_runs_before_sparse_sampling():
+    high = FPMPoint("prefill", 1, 4000, 0)
+    low = FPMPoint("prefill", 1, 64, 0)
+    replacement = FPMPoint("prefill", 2, 64, 0)
+    gib = 1024**3
+    capacity_model = FPMCapacityModel(
+        total_gpu_capacity_bytes=100 * gib,
+        fixed_non_activation_bytes=50 * gib,
+        activation_floor_bytes=5 * gib,
+        activation_bytes_per_token=0.0,
+        tokens_from_kv_bytes=lambda byte_count: int(byte_count),
+        kv_bytes_for_sequence=lambda tokens: tokens * 7 * 1024**2,
+        source="test",
+    )
+
+    feasible, decisions = filter_memory_feasible_points(
+        (high, low, replacement),
+        capacity_model=capacity_model,
+        block_size=64,
+    )
+    design = build_sampling_design(feasible, block_size=64, active_budget="one_quarter")
+
+    assert set(feasible) == {low, replacement}
+    assert set(design.population) == {low, replacement}
+    assert high not in design.ordered_points
+    rejected = next(decision for decision in decisions if decision.point == high)
+    assert rejected.admitted is False
+    assert rejected.disposition == "rejected_before_sampling"
 
 
 def test_cudagraph_sizes_cover_every_piecewise_shape_at_or_below_8192():
@@ -278,6 +372,21 @@ def test_glm_auto_matrix_includes_capacity_admitted_pure_tp():
     assert {cell.parallel_strategy for cell in plan.cells} == {"pure_tp", "tep", "dep"}
     assert ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1) in plan.topologies
     for cell in plan.cells:
+        assert cell.sampling_design is not None
+        assert cell.sampling_sha256 == cell.sampling_design.sha256
+        source_population = (
+            plan.population.prefill_points if cell.workload_kind == "prefill" else plan.population.decode_points
+        )
+        assert set(cell.sampling_design.population) <= set(source_population)
+        rejected_before_sampling = {
+            decision.point
+            for decision in cell.execution_profile.decisions
+            if decision.disposition == "rejected_before_sampling"
+        }
+        assert rejected_before_sampling.isdisjoint(cell.sampling_design.population)
+        assert set(cell.execution_profile.selected) <= set(cell.sampling_design.population)
+        assert cell.sampling_design.selection_constraint == "joint_memory_envelope"
+        assert cell.execution_profile.selected == cell.sampling_design.selected
         assert all(size <= 8192 for size in cell.execution_profile.cudagraph_capture_sizes)
         if cell.workload_kind == "prefill":
             assert 8192 in cell.execution_profile.cudagraph_capture_sizes

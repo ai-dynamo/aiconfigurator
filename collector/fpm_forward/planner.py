@@ -17,9 +17,12 @@ from .capacity import (
     CapacityDecision,
     FPMCapacityModel,
     FPMExecutionProfile,
+    PointCapacityDecision,
     admit_model_residency,
     build_capacity_model,
     build_execution_profile,
+    build_memory_selection_admission,
+    filter_memory_feasible_points,
 )
 from .config import FPMCollectionOptions
 from .population import AttentionPopulation, build_attention_population
@@ -148,6 +151,7 @@ class FPMCell:
     moe_quant_mode: str | None = None
     fmha_quant_mode: str | None = None
     comm_quant_mode: str | None = None
+    sampling_design: SamplingDesign | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -166,6 +170,7 @@ class FPMCell:
             },
             "backend_policy": self.backend_policy.to_dict(),
             "sampling_sha256": self.sampling_sha256,
+            "sampling_design": self.sampling_design.to_dict() if self.sampling_design is not None else None,
             "execution_profile": self.execution_profile.to_dict(),
         }
 
@@ -195,7 +200,7 @@ class FPMCollectionPlan:
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_name": "aic_fpm_collection_plan",
-            "schema_version": 3,
+            "schema_version": 4,
             "backend": self.backend,
             "model_path": self.model_path,
             "system": self.system,
@@ -206,6 +211,7 @@ class FPMCollectionPlan:
             "dtype_profile": self.dtype_profile.to_dict(),
             "population": self.population.to_summary(),
             "sampling": {
+                "scope": "reference_before_per_cell_memory_filter",
                 "prefill": self.prefill_design.to_dict(),
                 "decode": self.decode_design.to_dict(),
             },
@@ -232,8 +238,11 @@ class FPMCollectionPlan:
             "cells": [cell.to_dict() for cell in self.cells],
             "counts": {
                 "population_points": len(self.population.points),
-                "selected_prefill_points": len(self.prefill_design.selected),
-                "selected_decode_points": len(self.decode_design.selected),
+                "reference_selected_prefill_points": len(self.prefill_design.selected),
+                "reference_selected_decode_points": len(self.decode_design.selected),
+                "selected_points_by_cell": {
+                    cell.cell_id: cell.execution_profile.selected_point_count for cell in self.cells
+                },
                 "topologies": len(self.topologies),
                 "topology_candidates": len(self.capacity_decisions),
                 "capacity_rejected": sum(not decision.admitted for decision in self.capacity_decisions),
@@ -336,10 +345,16 @@ def build_collection_plan(
     policies = _backend_policies(options, collector_config, backend=backend)
     runtime_overlay_files, runtime_overlay_base_files = _runtime_overlay_files(collector_config)
 
-    designs = {"prefill": prefill, "decode": decode}
-    execution_profiles: dict[tuple[str, ParallelTopology, str], FPMExecutionProfile] = {}
+    phase_populations = {
+        "prefill": population.prefill_points,
+        "decode": population.decode_points,
+    }
+    execution_profiles: dict[
+        tuple[str, ParallelTopology, str],
+        tuple[SamplingDesign, FPMExecutionProfile],
+    ] = {}
     capacity_models: dict[tuple[ParallelTopology, str], FPMCapacityModel] = {}
-    all_design_points = (*prefill.ordered_points, *decode.ordered_points)
+    all_design_points = population.points
     maximum_design_batch = max(point.batch_size for point in all_design_points)
     maximum_design_tokens = max(point.batch_size * point.suffix_length for point in all_design_points)
     cells_list = []
@@ -348,8 +363,8 @@ def build_collection_plan(
             for weight_quantization in weight_quantizations:
                 for kv_cache_dtype in capability.dtype.kv_cache_dtypes:
                     profile_key = (phase, topology, kv_cache_dtype)
-                    execution_profile = execution_profiles.get(profile_key)
-                    if execution_profile is None:
+                    cached_profile = execution_profiles.get(profile_key)
+                    if cached_profile is None:
                         capacity_key = (topology, kv_cache_dtype)
                         capacity_model = capacity_models.get(capacity_key)
                         if capacity_model is None:
@@ -364,6 +379,33 @@ def build_collection_plan(
                                 max_num_tokens_hint=maximum_design_tokens,
                             )
                             capacity_models[capacity_key] = capacity_model
+                        feasible_points, pointwise_decisions = filter_memory_feasible_points(
+                            phase_populations[phase],
+                            capacity_model=capacity_model,
+                            block_size=options.kv_block_size,
+                        )
+                        sampling_design = build_sampling_design(
+                            feasible_points,
+                            block_size=options.kv_block_size,
+                            active_budget=options.sampling_budget,
+                            selection_admission=build_memory_selection_admission(
+                                capacity_model=capacity_model,
+                                block_size=options.kv_block_size,
+                            ),
+                        )
+                        jointly_excluded = set(sampling_design.excluded_points)
+                        pointwise_decisions = tuple(
+                            PointCapacityDecision(
+                                point=decision.point,
+                                admitted=False,
+                                disposition="rejected_by_joint_sampling_envelope",
+                                reason="point cannot join the capacity-constrained sparse design below the ceiling",
+                                required_memory_fraction=None,
+                            )
+                            if decision.point in jointly_excluded
+                            else decision
+                            for decision in pointwise_decisions
+                        )
                         execution_profile = build_execution_profile(
                             model_path=model_path,
                             system=system,
@@ -371,11 +413,14 @@ def build_collection_plan(
                             capability=capability,
                             topology=topology,
                             kv_cache_dtype=kv_cache_dtype,
-                            design=designs[phase],
+                            design=sampling_design,
                             block_size=options.kv_block_size,
                             capacity_model=capacity_model,
+                            pre_admission_decisions=pointwise_decisions,
                         )
-                        execution_profiles[profile_key] = execution_profile
+                        cached_profile = (sampling_design, execution_profile)
+                        execution_profiles[profile_key] = cached_profile
+                    sampling_design, execution_profile = cached_profile
                     for policy in policies:
                         cells_list.append(
                             FPMCell(
@@ -394,13 +439,14 @@ def build_collection_plan(
                                 weight_quantization=weight_quantization,
                                 kv_cache_dtype=kv_cache_dtype,
                                 backend_policy=policy,
-                                sampling_sha256=designs[phase].sha256,
+                                sampling_sha256=sampling_design.sha256,
                                 execution_profile=execution_profile,
                                 parallel_strategy=topology_strategy(topology, is_moe=capability.is_moe),
                                 gemm_quant_mode=capability.dtype.gemm_quant_mode,
                                 moe_quant_mode=capability.dtype.moe_quant_mode,
                                 fmha_quant_mode=capability.dtype.fmha_quant_mode,
                                 comm_quant_mode=capability.dtype.comm_quant_mode,
+                                sampling_design=sampling_design,
                             )
                         )
     cells = tuple(cells_list)
