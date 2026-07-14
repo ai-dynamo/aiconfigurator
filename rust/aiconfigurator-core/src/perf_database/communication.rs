@@ -167,6 +167,96 @@ impl CommunicationTable {
         interp_message_size(by_size, message_size)
     }
 
+    /// Collected `(message_size,) -> latency_ms` points of the
+    /// custom-allreduce curve for `(quant, tp_size)` — the input of the
+    /// operator-layer util grid (mirrors Python's
+    /// `require_data_slice(dw, quant_mode, eff, "AUTO")`). Typed miss when
+    /// the slice is absent or empty.
+    pub fn custom_allreduce_points(
+        &self,
+        quant: CommQuantMode,
+        tp_size: u32,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load_custom_allreduce()?;
+        let key = (quant.name().to_string(), tp_size);
+        let by_size = grids.by_keys.get(&key).ok_or_else(|| {
+            AicError::PerfDatabase(format!(
+                "custom_allreduce data missing for {key:?} at {}",
+                self.data_root.display()
+            ))
+        })?;
+        if by_size.is_empty() {
+            return Err(AicError::PerfDatabase(format!(
+                "custom_allreduce data empty for {key:?} at {}",
+                self.data_root.display()
+            )));
+        }
+        Ok(by_size.iter().map(|(&size, &lat)| (vec![size as f64], lat)).collect())
+    }
+
+    /// The single NCCL source the empirical path calibrates from, with
+    /// Python's selection order (`NCCL._query_nccl_table.get_empirical`):
+    /// the NCCL table when loaded, else the OneCCL fallback; a typed miss
+    /// when neither is loaded. Unlike [`Self::query_nccl`], there is NO
+    /// per-slice fallback across sources.
+    fn nccl_empirical_source(&self) -> Result<&NcclGrids, AicError> {
+        if let Ok(grids) = self.load_nccl() {
+            return Ok(grids);
+        }
+        self.load_oneccl()
+    }
+
+    /// Maximum collected `num_gpus` for `(dtype, operation)` in the NCCL
+    /// empirical source (single source, Python parity — unlike
+    /// [`Self::nccl_max_num_gpus`], which unions NCCL and OneCCL for the
+    /// silicon cap). Typed miss when the source has no such bucket.
+    pub fn nccl_empirical_max_num_gpus(
+        &self,
+        dtype: CommQuantMode,
+        operation: &str,
+    ) -> Result<u32, AicError> {
+        let grids = self.nccl_empirical_source()?;
+        let dtype_name = dtype.name();
+        grids
+            .by_keys
+            .keys()
+            .filter(|(d, op, _)| d.as_str() == dtype_name && op.as_str() == operation)
+            .map(|(_, _, n)| *n)
+            .max()
+            .ok_or_else(|| {
+                AicError::PerfDatabase(format!(
+                    "NCCL data missing for dtype='{dtype_name}', operation='{operation}' at {}",
+                    self.data_root.display()
+                ))
+            })
+    }
+
+    /// Collected `(message_size,) -> latency_ms` points for
+    /// `(dtype, operation, num_gpus)` in the NCCL empirical source. Typed
+    /// miss when the slice is absent or empty.
+    pub fn nccl_empirical_points(
+        &self,
+        dtype: CommQuantMode,
+        operation: &str,
+        num_gpus: u32,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.nccl_empirical_source()?;
+        let key = (dtype.name().to_string(), operation.to_string(), num_gpus);
+        let by_size = grids.by_keys.get(&key).ok_or_else(|| {
+            AicError::PerfDatabase(format!(
+                "NCCL data missing for {key:?} at {}",
+                self.data_root.display()
+            ))
+        })?;
+        if by_size.is_empty() {
+            return Err(AicError::PerfDatabase(format!(
+                "NCCL data empty for {key:?} at {}",
+                self.data_root.display()
+            )));
+        }
+        Ok(by_size.iter().map(|(&size, &lat)| (vec![size as f64], lat)).collect())
+    }
+
     /// Maximum recorded `num_gpus` for an NCCL (dtype, operation) tuple.
     /// Operator layer uses this to decide whether to apply a bandwidth
     /// scale factor for out-of-range fan-outs.
