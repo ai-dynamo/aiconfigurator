@@ -21,6 +21,7 @@ use crate::operators::{
     ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4ModuleOp,
     ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
     GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
+    MsaModuleOp,
     NcclOp, P2POp, PerformanceResult, Source, VisionEncoderOp, WideEpContextMlaOp,
     WideEpGenerationMlaOp, WideEpMoeOp,
 };
@@ -109,6 +110,11 @@ pub enum Op {
     Vision(VisionEncoderOp),
     DsaContext(DsaModuleOp),
     DsaGeneration(DsaModuleOp),
+    /// MiniMax Sparse Attention (MSA) context module — no silicon data;
+    /// answers only under HYBRID/EMPIRICAL via cross-op DSA util transfer.
+    MsaContext(MsaModuleOp),
+    /// MSA generation module (`s` = total KV length).
+    MsaGeneration(MsaModuleOp),
     Dsv4Context(Dsv4ModuleOp),
     Dsv4Generation(Dsv4ModuleOp),
     Mhc(MhcModuleOp),
@@ -200,6 +206,8 @@ impl Op {
             Op::Vision(o) => &o.name,
             Op::DsaContext(o) => &o.name,
             Op::DsaGeneration(o) => &o.name,
+            Op::MsaContext(o) => &o.name,
+            Op::MsaGeneration(o) => &o.name,
             Op::Dsv4Context(o) => &o.name,
             Op::Dsv4Generation(o) => &o.name,
             Op::Mhc(o) => &o.name,
@@ -280,6 +288,8 @@ impl Op {
             Op::Vision(op) => op.query(db, ctx.num_image_tokens),
             Op::DsaContext(op) => op.query_context(db, ctx.batch_size, ctx.s, ctx.prefix),
             Op::DsaGeneration(op) => op.query_generation(db, ctx.batch_size, ctx.s),
+            Op::MsaContext(op) => op.query_context(db, ctx.batch_size, ctx.s, ctx.prefix),
+            Op::MsaGeneration(op) => op.query_generation(db, ctx.batch_size, ctx.s),
             Op::Dsv4Context(op) => op.query_context(db, ctx.batch_size, ctx.s, ctx.prefix),
             Op::Dsv4Generation(op) => op.query_generation(db, ctx.batch_size, ctx.s),
             Op::Mhc(op) => op.query(db, ctx.num_tokens),

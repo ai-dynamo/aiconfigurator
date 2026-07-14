@@ -48,6 +48,7 @@ from aiconfigurator.sdk.operations import (
     ContextDeepSeekV4AttentionModule,
     ContextDSAModule,
     ContextMLA,
+    ContextMSAModule,
     CustomAllReduce,
     DeepSeekV4MHCModule,
     ElementWise,
@@ -59,6 +60,7 @@ from aiconfigurator.sdk.operations import (
     GenerationDeepSeekV4AttentionModule,
     GenerationDSAModule,
     GenerationMLA,
+    GenerationMSAModule,
     Mamba2Kernel,
     MLABmm,
     MLAModule,
@@ -86,10 +88,11 @@ from aiconfigurator.sdk.rust_engine_step import (
 # Schema versions must match the Rust crate constants
 # (`ENGINE_SPEC_SCHEMA_VERSION` / `ENGINE_CONFIG_SCHEMA_VERSION` in `lib.rs`).
 # ENGINE_SPEC bumped to 2 for the 0.10.0 op-payload layout change (CP + perf-DB
-# refactor added serialized `OpSpec` fields); the Rust consumer gates on this
-# version before decoding the positional op lists. Keep in lockstep with the
-# Rust `ENGINE_SPEC_SCHEMA_VERSION`.
-ENGINE_SPEC_SCHEMA_VERSION = 2
+# refactor added serialized `OpSpec` fields), and to 3 when the MSA op variants
+# were inserted (bincode enum indices after `DsaGeneration` shifted); the Rust
+# consumer gates on this version before decoding the positional op lists. Keep
+# in lockstep with the Rust `ENGINE_SPEC_SCHEMA_VERSION`.
+ENGINE_SPEC_SCHEMA_VERSION = 3
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 
@@ -334,6 +337,27 @@ def _p2p(op: P2P) -> dict:
     }
 
 
+def _msa_module(op: ContextMSAModule | GenerationMSAModule) -> dict:
+    return {
+        "name": op._name,
+        "scale_factor": op._scale_factor,
+        "num_heads": op._num_heads,
+        "num_kv_heads": op._num_kv_heads,
+        "hidden_size": op._hidden_size,
+        "head_dim": op._head_dim,
+        "v_head_dim": op._v_head_dim,
+        "index_n_heads": op._index_n_heads,
+        "index_head_dim": op._index_head_dim,
+        "index_topk": op._index_topk,
+        "block_size": op._block_size,
+        "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
+        "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
+        "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
+        "dsa_architecture": op._dsa_architecture,
+        "dsa_scale_k": op._dsa_scale_k,
+    }
+
+
 def _dsa_module(op: ContextDSAModule | GenerationDSAModule, *, architecture: str) -> dict:
     # GenerationDSAModule stores `_kv_cache_dtype`; ContextDSAModule stores
     # `_kvcache_quant_mode` + `_fmha_quant_mode`. The Rust `DsaModuleOp` carries
@@ -545,6 +569,10 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
         return {"DsaContext": _dsa_module(op, architecture=architecture)}
     if isinstance(op, GenerationDSAModule):
         return {"DsaGeneration": _dsa_module(op, architecture=architecture)}
+    if isinstance(op, ContextMSAModule):
+        return {"MsaContext": _msa_module(op)}
+    if isinstance(op, GenerationMSAModule):
+        return {"MsaGeneration": _msa_module(op)}
     if isinstance(op, ContextDeepSeekV4AttentionModule):
         return {"Dsv4Context": _dsv4_module(op, architecture=architecture)}
     if isinstance(op, GenerationDeepSeekV4AttentionModule):

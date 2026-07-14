@@ -21,11 +21,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::enums::{BackendKind, CommQuantMode, MoeQuantMode};
+use crate::common::enums::{BackendKind, CommQuantMode, DatabaseMode, MoeQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::communication::{CustomAllReduceOp, NcclOp};
+use crate::operators::util_empirical::{self, UtilGrid};
 use crate::perf_database::PerfDatabase;
 
 /// MoE dispatch flavor.
@@ -296,6 +297,19 @@ impl MoEDispatchOp {
                     .scaled(self.scale_factor))
             }
             DispatchFlavor::DeepEpNormal => {
+                // Python `_query_wideep_deepep_normal_table` has NO empirical
+                // path: EMPIRICAL mode raises (`NotImplementedError("WideEP
+                // deepep normal operation's empirical is not implemented
+                // yet")`), and HYBRID goes STRAIGHT to the silicon interp with
+                // no fallback (the method never routes through
+                // `_query_silicon_or_hybrid`) — so a silicon miss under HYBRID
+                // must propagate unchanged, not convert into an estimate.
+                if db.database_mode == DatabaseMode::Empirical {
+                    return Err(AicError::EmpiricalNotImplemented(
+                        "WideEP deepep normal operation's empirical is not implemented yet"
+                            .to_string(),
+                    ));
+                }
                 let point = db.wideep.query_deepep_normal(
                     self.deepep_node_num(spec)?,
                     self.hidden_size,
@@ -323,6 +337,13 @@ impl MoEDispatchOp {
                     .scaled(self.scale_factor))
             }
             DispatchFlavor::DeepEpLowLatency => {
+                // Same no-empirical rule as DeepEpNormal (Python
+                // `_query_wideep_deepep_ll_table`).
+                if db.database_mode == DatabaseMode::Empirical {
+                    return Err(AicError::EmpiricalNotImplemented(
+                        "WideEP deepep ll operation's empirical is not implemented yet".to_string(),
+                    ));
+                }
                 let point = db.wideep.query_deepep_ll(
                     self.deepep_node_num(spec)?,
                     self.hidden_size,
@@ -367,18 +388,31 @@ impl MoEDispatchOp {
                 let attention_tp = self.attention_tp_size();
 
                 if enable_alltoall {
-                    let latency = db.wideep.query_trtllm_alltoall(
+                    // Python queries op_name="alltoall_dispatch" (pre) /
+                    // "alltoall_combine" (post) through
+                    // `database.query_trtllm_alltoall` with `moe_backend =
+                    // self._moe_backend` (None in all current callers) and
+                    // `node_num=None` (computed from moe_ep_size inside the
+                    // table method). `float(result)` + tail scaling ==
+                    // `.scaled(scale_factor)` here.
+                    let op_name = if self.pre_dispatch {
+                        "alltoall_dispatch"
+                    } else {
+                        "alltoall_combine"
+                    };
+                    let result = query_alltoall_table(
+                        db,
+                        op_name,
                         num_tokens,
                         self.hidden_size,
                         self.topk,
                         self.num_experts,
                         self.moe_ep_size,
                         self.moe_quant,
-                        "uniform",
+                        None,
+                        None,
                     )?;
-                    Ok(PerformanceResult::new(latency, Source::Silicon)
-                        .clamp_non_negative()
-                        .scaled(self.scale_factor))
+                    Ok(result.clamp_non_negative().scaled(self.scale_factor))
                 } else if self.attention_dp_size > 1 {
                     // Python: query_nccl(half, num_gpus, "all_gather" or
                     // "reduce_scatter", volume * attention_dp_size).
@@ -413,6 +447,261 @@ impl MoEDispatchOp {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// TRT-LLM alltoall table (Python
+// `TrtLLMWideEPMoEDispatch._query_alltoall_table`, also reached from
+// `MoEDispatch.query`'s trtllm SM100 branch via
+// `database.query_trtllm_alltoall`). Own-shape empirical only — no transfer
+// ladder.
+// ---------------------------------------------------------------------------
+
+/// Mirror of `TrtLLMWideEPMoEDispatch._normalize_quant_mode_for_table`:
+/// `fp8_block` is a behavioral mode that reuses the `fp8` alltoall tables.
+fn normalize_alltoall_quant_for_table(quant: MoeQuantMode) -> MoeQuantMode {
+    if quant == MoeQuantMode::Fp8Block {
+        MoeQuantMode::Fp8
+    } else {
+        quant
+    }
+}
+
+/// Mirror of `TrtLLMWideEPMoEDispatch._select_alltoall_kernel` (aligned with
+/// TRT-LLM's per-backend `select_alltoall_method_type`). Pure logic: the
+/// Python tail's data-availability check only LOGS a warning and returns the
+/// preferred kernel anyway, so it has no behavioral counterpart here.
+/// (Python's `quant_mode` parameter is unused by the selection — dropped.)
+fn select_alltoall_kernel(
+    spec: &SystemSpec,
+    moe_ep_size: u32,
+    topk: u32,
+    moe_backend: Option<&str>,
+) -> &'static str {
+    if let Some(backend) = moe_backend {
+        let upper = backend.to_uppercase();
+        if upper == "DEEPGEMM" || upper == "CUTE_DSL" {
+            return "NotEnabled";
+        }
+    }
+    let sm_version = spec.gpu.sm_version.unwrap_or(0);
+    let num_gpus_per_node = spec.node.num_gpus_per_node;
+    let is_inter_node = moe_ep_size > num_gpus_per_node;
+    let is_wideep = moe_backend.is_some_and(|b| b.to_uppercase() == "WIDEEP");
+    // Python approximates supports_mnnvl() as SM >= 100.
+    let supports_mnnvl = sm_version >= 100;
+
+    if is_wideep {
+        if supports_mnnvl {
+            "NVLinkTwoSided"
+        } else {
+            let deepep_feasible = moe_ep_size > 1 && topk <= 8;
+            if deepep_feasible && is_inter_node {
+                "DeepEP"
+            } else if deepep_feasible {
+                "DeepEPLowLatency"
+            } else {
+                "NotEnabled"
+            }
+        }
+    } else if supports_mnnvl {
+        "NVLinkOneSided"
+    } else {
+        "NotEnabled"
+    }
+}
+
+/// Alltoall communication SOL (ms), mirroring `_query_alltoall_table.get_sol`:
+/// - prepare: lightweight metadata exchange (`topk * 4` bytes per token);
+/// - combine: bfloat16 results (2 B/elem), or fp4 (0.5 B/elem) for the
+///   low-precision variant;
+/// - dispatch: per-rank deduplication at the RAW quant's precision.
+/// `remote_ranks = min(topk, num_experts, ep - 1)`; bandwidth is inter-node
+/// when the group spans more than one node. Linear in `num_tokens` with zero
+/// intercept — coordinates arrive as f64 from the util-grid engine, and the
+/// math is float-exact against Python's (no floor division here).
+#[allow(clippy::too_many_arguments)]
+fn alltoall_sol_ms(
+    spec: &SystemSpec,
+    op_name: &str,
+    quant: MoeQuantMode,
+    node_num: u32,
+    num_tokens: f64,
+    hidden_size: u32,
+    topk: u32,
+    num_experts: u32,
+    moe_ep_size: u32,
+) -> f64 {
+    let is_inter_node = node_num > 1;
+    let bw = if is_inter_node {
+        spec.node.inter_node_bw
+    } else {
+        spec.node.intra_node_bw
+    };
+    let remote_ranks = topk.min(num_experts).min(moe_ep_size.saturating_sub(1)) as f64;
+    let data_bytes = if op_name == "alltoall_prepare" {
+        num_tokens * topk as f64 * 4.0 // token routing indices, ~4 bytes each
+    } else if op_name.contains("combine") {
+        let bytes_per_element = if op_name.contains("low_precision") { 0.5 } else { 2.0 };
+        num_tokens * remote_ranks * hidden_size as f64 * bytes_per_element
+    } else {
+        // dispatch: per-rank deduplication, use quant_mode precision
+        num_tokens * remote_ranks * hidden_size as f64 * quant.mapping().memory
+    };
+    data_bytes / bw * 1000.0
+}
+
+/// Verbatim port of `TrtLLMWideEPMoEDispatch._query_alltoall_table` (minus
+/// the SOL diagnostic modes, which never reach the compiled engine):
+/// normalize the table quant, default `node_num` from `moe_ep_size`, select
+/// the kernel, early-return 0 for `NotEnabled`, then dispatch on the
+/// database mode — EMPIRICAL always estimates `SOL(query)/util` from the
+/// own-slice token grid; HYBRID converts a typed silicon miss into the
+/// estimate; SILICON queries the table.
+///
+/// KNOWN PYTHON DIVERGENCE: Python's HYBRID fallback closure calls
+/// `get_empirical_from_sol` without its `kernel_source` argument and raises
+/// `TypeError` (a latent bug — the branch has no working oracle). This port
+/// implements the intended fallback (kernel threaded through); when the
+/// slice has no data anywhere both languages still end in a typed failure
+/// (`EmpiricalNotImplemented` here, `TypeError` there).
+#[allow(clippy::too_many_arguments)]
+fn query_alltoall_table(
+    db: &PerfDatabase,
+    op_name: &str,
+    num_tokens: u32,
+    hidden_size: u32,
+    topk: u32,
+    num_experts: u32,
+    moe_ep_size: u32,
+    quant: MoeQuantMode,
+    node_num: Option<u32>,
+    moe_backend: Option<&str>,
+) -> Result<PerformanceResult, AicError> {
+    let table_quant = normalize_alltoall_quant_for_table(quant);
+
+    // Python: `node_num = 1 if moe_ep_size < 4 else moe_ep_size // 4` when
+    // not provided (no Rust caller provides one today, matching
+    // `MoEDispatch.query` which never passes node_num).
+    let node_num = node_num.unwrap_or(if moe_ep_size < 4 { 1 } else { moe_ep_size / 4 });
+
+    const VALID_OP_NAMES: [&str; 4] = [
+        "alltoall_prepare",
+        "alltoall_dispatch",
+        "alltoall_combine",
+        "alltoall_combine_low_precision",
+    ];
+    if !VALID_OP_NAMES.contains(&op_name) {
+        // Python raises ValueError — a programming error, deliberately NOT a
+        // missing-data signal (must not trigger HYBRID/fallback handling).
+        return Err(AicError::InvalidEngineConfig(format!(
+            "Invalid op_name '{op_name}'. Must be one of {VALID_OP_NAMES:?}"
+        )));
+    }
+
+    let kernel_source = select_alltoall_kernel(&db.system_spec, moe_ep_size, topk, moe_backend);
+    if kernel_source == "NotEnabled" {
+        // Python returns PerformanceResult(0.0, source="empirical") for every
+        // non-SOL mode.
+        return Ok(PerformanceResult::new(0.0, Source::Empirical));
+    }
+
+    let silicon = || {
+        db.wideep.query_trtllm_alltoall(
+            kernel_source,
+            op_name,
+            table_quant,
+            node_num,
+            hidden_size,
+            topk,
+            num_experts,
+            moe_ep_size,
+            num_tokens,
+        )
+    };
+    let empirical = || {
+        alltoall_empirical(
+            db,
+            kernel_source,
+            op_name,
+            quant,
+            table_quant,
+            node_num,
+            num_tokens,
+            hidden_size,
+            topk,
+            num_experts,
+            moe_ep_size,
+        )
+    };
+    match db.database_mode {
+        DatabaseMode::Empirical => Ok(PerformanceResult::new(empirical()?, Source::Empirical)),
+        DatabaseMode::Hybrid => match silicon() {
+            Ok(latency) => Ok(PerformanceResult::new(latency, Source::Silicon)),
+            Err(err) if err.is_missing_perf_data() => {
+                Ok(PerformanceResult::new(empirical()?, Source::Empirical))
+            }
+            Err(err) => Err(err),
+        },
+        _ => Ok(PerformanceResult::new(silicon()?, Source::Silicon)),
+    }
+}
+
+/// `SOL(query)/util` over the own-slice token curve (depth 1, no transfer
+/// ladder). Mirrors `_query_alltoall_table::get_empirical_from_sol`: the SOL
+/// uses the RAW quant (only the dispatch op consults its memory width), the
+/// table slice uses the NORMALIZED quant.
+#[allow(clippy::too_many_arguments)]
+fn alltoall_empirical(
+    db: &PerfDatabase,
+    kernel_source: &str,
+    op_name: &str,
+    quant: MoeQuantMode,
+    table_quant: MoeQuantMode,
+    node_num: u32,
+    num_tokens: u32,
+    hidden_size: u32,
+    topk: u32,
+    num_experts: u32,
+    moe_ep_size: u32,
+) -> Result<f64, AicError> {
+    let spec = &db.system_spec;
+    let sol = |c: &[f64]| {
+        alltoall_sol_ms(spec, op_name, quant, node_num, c[0], hidden_size, topk, num_experts, moe_ep_size)
+    };
+    let sol_time = sol(&[num_tokens as f64]);
+
+    // Python keys on ("alltoall", system, backend, version, kernel, op_name,
+    // tqm.name, node_num, hidden, topk, experts, ep) + id(node); the cache
+    // here is per-database.
+    let key = format!(
+        "alltoall:{kernel_source}:{op_name}:{}:{node_num}:{hidden_size}:{topk}:{num_experts}:{moe_ep_size}",
+        table_quant.name(),
+    );
+    let grid = db.util_grids.get_or_try_build(&key, || {
+        match db.wideep.alltoall_slice_points(
+            kernel_source,
+            op_name,
+            table_quant,
+            node_num,
+            hidden_size,
+            topk,
+            num_experts,
+            moe_ep_size,
+        ) {
+            Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(
+                points.into_iter().map(|(t, lat)| (vec![t as f64], lat)),
+                sol,
+            )))),
+            // Typed coverage miss -> no grid (estimate() raises the
+            // empirical miss); schema/load errors propagate.
+            Err(err) if err.is_missing_perf_data() => Ok(None),
+            Err(err) => Err(err),
+        }
+    })?;
+    let query = [num_tokens as f64];
+    let (latency, _) = util_empirical::estimate(sol_time, &query, grid.as_deref(), 1.0)?;
+    Ok(latency)
 }
 
 #[cfg(test)]
@@ -722,5 +1011,208 @@ mod tests {
             "ll combine got {}",
             combine.latency_ms
         );
+    }
+
+    // -----------------------------------------------------------------
+    // HYBRID / EMPIRICAL parity (util-space empirical port).
+    // -----------------------------------------------------------------
+
+    use crate::common::enums::TransferPolicy;
+
+    fn gb200_trtllm_db(mode: DatabaseMode) -> PerfDatabase {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator/systems");
+        PerfDatabase::load(&root, "gb200", "trtllm", "1.3.0rc10")
+            .expect("db loads")
+            .with_mode(mode, TransferPolicy::ALL)
+    }
+
+    fn h100_sglang_db(mode: DatabaseMode) -> PerfDatabase {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator/systems");
+        PerfDatabase::load(&root, "h100_sxm", "sglang", "0.5.6.post2")
+            .expect("db loads")
+            .with_mode(mode, TransferPolicy::ALL)
+    }
+
+    /// Shorthand for the collected gb200 alltoall shape (hidden=7168,
+    /// topk=8, experts=256).
+    fn a2a(
+        db: &PerfDatabase,
+        op_name: &str,
+        num_tokens: u32,
+        quant: MoeQuantMode,
+        moe_backend: Option<&str>,
+    ) -> Result<PerformanceResult, AicError> {
+        query_alltoall_table(db, op_name, num_tokens, 7168, 8, 256, 8, quant, None, moe_backend)
+    }
+
+    fn assert_oracle(result: &PerformanceResult, expected: f64, source: Source, label: &str) {
+        assert!(
+            (result.latency_ms - expected).abs() < 1e-9,
+            "{label}: expected {expected}, got {}",
+            result.latency_ms
+        );
+        assert_eq!(result.source, source, "{label}: wrong source");
+    }
+
+    /// Oracle values generated from the Python reference on the same data
+    /// (shared layer pinned OFF so Python reads exactly the primary parquet):
+    ///
+    /// ```text
+    /// db = perf_database.get_database_view("gb200", "trtllm", "1.3.0rc10",
+    ///     allow_missing_data=True, database_mode=..., shared_layer=False)
+    /// float(TrtLLMWideEPMoEDispatch._query_alltoall_table(db, op_name=...,
+    ///     num_tokens=..., hidden_size=7168, topk=8, num_experts=256,
+    ///     moe_ep_size=8, quant_mode=..., node_num=None,
+    ///     database_mode=..., moe_backend=...))
+    /// ```
+    ///
+    /// `moe_backend=None` selects NVLinkOneSided (gb200 SM100, non-WideEP;
+    /// only nvfp4 collected there); `moe_backend="wideep"` selects
+    /// NVLinkTwoSided (bfloat16/fp8/nvfp4 + prepare/combine_low_precision).
+    /// ep=8 -> node_num = 8 // 4 = 2 (both computed and, in the loader, the
+    /// num-nodes-column default `max(1, ep // 4)`). nt=64 is a collected
+    /// point (exact hit); nt=333 is an off-grid interior point.
+    #[test]
+    fn alltoall_empirical_matches_python_oracles() {
+        let db = gb200_trtllm_db(DatabaseMode::Empirical);
+        let hit = a2a(&db, "alltoall_dispatch", 64, MoeQuantMode::Nvfp4, None).expect("exact hit");
+        assert_oracle(&hit, 0.018886399269104005, Source::Empirical, "emp_dispatch_t64");
+        let off = a2a(&db, "alltoall_dispatch", 333, MoeQuantMode::Nvfp4, None).expect("off-grid");
+        assert_oracle(&off, 0.033548976838374114, Source::Empirical, "emp_dispatch_t333");
+        let combine = a2a(&db, "alltoall_combine", 333, MoeQuantMode::Nvfp4, None).expect("combine");
+        assert_oracle(&combine, 0.07118654040018774, Source::Empirical, "emp_combine_t333");
+
+        // WideEP kernel + the ops only that path uses.
+        let wideep_dispatch =
+            a2a(&db, "alltoall_dispatch", 333, MoeQuantMode::Fp8, Some("wideep")).expect("wideep");
+        assert_oracle(&wideep_dispatch, 0.04266341407888801, Source::Empirical, "emp_wideep_fp8");
+        let prepare =
+            a2a(&db, "alltoall_prepare", 333, MoeQuantMode::Fp8, Some("wideep")).expect("prepare");
+        assert_oracle(&prepare, 0.015176159059580488, Source::Empirical, "emp_wideep_prepare");
+        let combine_lp =
+            a2a(&db, "alltoall_combine_low_precision", 333, MoeQuantMode::Nvfp4, Some("wideep"))
+                .expect("combine_lp");
+        assert_oracle(&combine_lp, 0.06946014693369004, Source::Empirical, "emp_wideep_combine_lp");
+    }
+
+    /// HYBRID with data present stays on silicon; the in-range interpolation
+    /// differs from the empirical reconstruction at the same points.
+    #[test]
+    fn alltoall_hybrid_prefers_silicon_when_covered() {
+        let db = gb200_trtllm_db(DatabaseMode::Hybrid);
+        let hit = a2a(&db, "alltoall_dispatch", 64, MoeQuantMode::Nvfp4, None).expect("exact hit");
+        assert_oracle(&hit, 0.018886399269104005, Source::Silicon, "hyb_dispatch_t64");
+        let off = a2a(&db, "alltoall_dispatch", 333, MoeQuantMode::Nvfp4, None).expect("off-grid");
+        assert_oracle(&off, 0.033547499962151055, Source::Silicon, "hyb_dispatch_t333");
+        let combine = a2a(&db, "alltoall_combine", 333, MoeQuantMode::Nvfp4, None).expect("combine");
+        assert_oracle(&combine, 0.07116495203226805, Source::Silicon, "hyb_combine_t333");
+        let wideep_dispatch =
+            a2a(&db, "alltoall_dispatch", 333, MoeQuantMode::Fp8, Some("wideep")).expect("wideep");
+        assert_oracle(&wideep_dispatch, 0.042655749106779696, Source::Silicon, "hyb_wideep_fp8");
+        let prepare =
+            a2a(&db, "alltoall_prepare", 333, MoeQuantMode::Fp8, Some("wideep")).expect("prepare");
+        assert_oracle(&prepare, 0.015222300426103175, Source::Silicon, "hyb_wideep_prepare");
+        let combine_lp =
+            a2a(&db, "alltoall_combine_low_precision", 333, MoeQuantMode::Nvfp4, Some("wideep"))
+                .expect("combine_lp");
+        assert_oracle(&combine_lp, 0.069468751270324, Source::Silicon, "hyb_wideep_combine_lp");
+    }
+
+    /// fp8 is uncollected under NVLinkOneSided: EMPIRICAL surfaces the typed
+    /// empirical miss (own-shape only — no transfer ladder), and fp8_block
+    /// normalizes onto the same missing fp8 slice. Under HYBRID, Python's
+    /// fallback closure raises `TypeError` (it drops the `kernel_source`
+    /// argument — a latent bug, see `query_alltoall_table`); the Rust port
+    /// runs the intended fallback, which finds no data and surfaces the same
+    /// typed empirical miss.
+    #[test]
+    fn alltoall_missing_slice_is_typed_empirical_miss() {
+        let emp = gb200_trtllm_db(DatabaseMode::Empirical);
+        for quant in [MoeQuantMode::Fp8, MoeQuantMode::Fp8Block] {
+            let result = a2a(&emp, "alltoall_dispatch", 333, quant, None);
+            assert!(
+                matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
+                "EMPIRICAL {quant:?} must be a typed empirical miss, got {result:?}"
+            );
+        }
+        let hyb = gb200_trtllm_db(DatabaseMode::Hybrid);
+        let result = a2a(&hyb, "alltoall_dispatch", 333, MoeQuantMode::Fp8, None);
+        assert!(
+            matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
+            "HYBRID fallback on a data-less slice must be a typed empirical miss, got {result:?}"
+        );
+    }
+
+    /// `_select_alltoall_kernel` mirror + the NotEnabled early return
+    /// (0.0, source "empirical", regardless of mode — before any table I/O).
+    #[test]
+    fn alltoall_kernel_selection_matches_python() {
+        let db = gb200_trtllm_db(DatabaseMode::Hybrid);
+        let spec = &db.system_spec; // SM100, 4 GPUs per node
+        assert_eq!(select_alltoall_kernel(spec, 8, 8, None), "NVLinkOneSided");
+        assert_eq!(select_alltoall_kernel(spec, 8, 8, Some("wideep")), "NVLinkTwoSided");
+        assert_eq!(select_alltoall_kernel(spec, 8, 8, Some("DEEPGEMM")), "NotEnabled");
+        assert_eq!(select_alltoall_kernel(spec, 8, 8, Some("cute_dsl")), "NotEnabled");
+
+        // Pre-Blackwell WideEP: DeepEP when feasible, split on inter-node.
+        let mut hopper = db.system_spec.clone();
+        hopper.gpu.sm_version = Some(90);
+        assert_eq!(select_alltoall_kernel(&hopper, 8, 8, Some("wideep")), "DeepEP");
+        assert_eq!(select_alltoall_kernel(&hopper, 4, 8, Some("wideep")), "DeepEPLowLatency");
+        assert_eq!(select_alltoall_kernel(&hopper, 8, 16, Some("wideep")), "NotEnabled");
+        assert_eq!(select_alltoall_kernel(&hopper, 8, 8, None), "NotEnabled");
+
+        let zero = a2a(&db, "alltoall_dispatch", 333, MoeQuantMode::Nvfp4, Some("deepgemm"))
+            .expect("NotEnabled early return");
+        assert_oracle(&zero, 0.0, Source::Empirical, "not_enabled_zero");
+    }
+
+    /// Python `_query_wideep_deepep_{ll,normal}_table` raise
+    /// `NotImplementedError` in EMPIRICAL mode — mirrored as the typed
+    /// `EmpiricalNotImplemented` (the gate fires before any table I/O, so
+    /// any sglang database works).
+    #[test]
+    fn deepep_empirical_mode_is_typed_not_implemented() {
+        let db = b200_sglang_db().with_mode(DatabaseMode::Empirical, TransferPolicy::ALL);
+        for flavor in [DispatchFlavor::DeepEpNormal, DispatchFlavor::DeepEpLowLatency] {
+            let result = deepep_op(8, true, flavor).query(&db, 64);
+            assert!(
+                matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
+                "{flavor:?} EMPIRICAL must be a typed empirical miss, got {result:?}"
+            );
+        }
+    }
+
+    /// Python's deepep tables have NO hybrid fallback (the `else:` branch
+    /// serves both SILICON and HYBRID and never routes through
+    /// `_query_silicon_or_hybrid`), so HYBRID answers the silicon interp
+    /// value unchanged. Oracles from the shipped h100 data:
+    ///
+    /// ```text
+    /// float(MoEDispatch._query_wideep_deepep_ll_table(db, node_num=1,
+    ///     num_tokens=20, num_experts=256, topk=8, hidden_size=7168,
+    ///     database_mode=common.DatabaseMode.HYBRID))       # -> 0.03853445
+    /// float(MoEDispatch._query_wideep_deepep_normal_table(db, node_num=2,
+    ///     num_tokens=64, num_experts=256, topk=8, hidden_size=7168, sms=20,
+    ///     database_mode=common.DatabaseMode.HYBRID))       # -> 0.20963
+    /// ```
+    #[test]
+    fn deepep_hybrid_equals_silicon_interp() {
+        let db = h100_sglang_db(DatabaseMode::Hybrid);
+        // moe_ep=8 on h100 (8 GPUs/node) -> node_num = 1.
+        let ll = deepep_op(8, false, DispatchFlavor::DeepEpLowLatency)
+            .query(&db, 20)
+            .expect("ll hybrid query");
+        assert_oracle(&ll, 0.03853445, Source::Silicon, "hyb_deepep_ll_t20");
+        // moe_ep=16 -> node_num = 2; sms=20 with node_num != 1 resolves the
+        // 2-axis (sms, tokens) grid.
+        let mut normal = deepep_op(16, true, DispatchFlavor::DeepEpNormal);
+        normal.sms = 20;
+        let got = normal.query(&db, 64).expect("normal hybrid query");
+        assert_oracle(&got, 0.20963, Source::Silicon, "hyb_deepep_normal_t64");
     }
 }

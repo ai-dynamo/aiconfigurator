@@ -10,12 +10,18 @@
 //!    - `wideep_generation_moe_perf.txt`
 //!    - `wideep_moe_perf.txt` (TRT-LLM WideEP MoE compute; extra columns
 //!      handled by tolerant deserialization)
-//!    - `trtllm_alltoall_perf.txt` (TRT-LLM alltoall dispatch; subset of
-//!      MoE columns)
 //!
 //! 2. DeepEP dispatch layout (separate notify/transmit latencies):
 //!    - `wideep_deepep_normal_perf.txt`
 //!    - `wideep_deepep_ll_perf.txt`
+//!
+//! 3. TRT-LLM alltoall layout (`trtllm_alltoall_perf.txt`), keyed exactly
+//!    like Python `load_trtllm_alltoall_data`:
+//!    `[kernel_source][op_name][quant][num_nodes][hidden_size][topk]`
+//!    `[num_experts][moe_ep_size][num_tokens] -> latency_ms`.
+//!    `kernel_source` defaults to `"NVLinkTwoSided"` when the column is
+//!    absent/null; `num_nodes` defaults to `max(1, moe_ep_size // 4)` when
+//!    the column is absent (the GB200-era collector convention).
 //!
 //! All loaders are lazy. Token curves resolve on the shared perf_interp v2
 //! engine (Grid, RAW lerp in range; beyond the collected range the
@@ -70,13 +76,31 @@ pub struct WideEpTable {
     context_moe: OnceLock<Result<MoeGrids, AicError>>,
     generation_moe: OnceLock<Result<MoeGrids, AicError>>,
     trtllm_wideep_moe: OnceLock<Result<MoeGrids, AicError>>,
-    trtllm_alltoall: OnceLock<Result<MoeGrids, AicError>>,
+    trtllm_alltoall: OnceLock<Result<AlltoallGrids, AicError>>,
     deepep_normal: OnceLock<Result<NormalDispatchGrids, AicError>>,
     deepep_ll: OnceLock<Result<DispatchGrids, AicError>>,
 }
 
 struct MoeGrids {
     by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>>,
+}
+
+struct AlltoallGrids {
+    by_keys: BTreeMap<AlltoallKey, BTreeMap<u32, f64>>,
+}
+
+/// Python `load_trtllm_alltoall_data` coordinate (minus the token level):
+/// `[kernel_source][op_name][quant][num_nodes][hidden][topk][experts][ep]`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct AlltoallKey {
+    kernel_source: String,
+    op_name: String,
+    quant: String,
+    num_nodes: u32,
+    hidden_size: u32,
+    topk: u32,
+    num_experts: u32,
+    moe_ep_size: u32,
 }
 
 struct DispatchGrids {
@@ -267,35 +291,105 @@ impl WideEpTable {
         )
     }
 
-    /// TRT-LLM alltoall dispatch latency. CSV uses `moe_ep_size` for fan-out
-    /// (`moe_tp_size`/`inter_size` are not present); the query API still
-    /// accepts them for shape symmetry but they're effectively ignored.
+    /// TRT-LLM alltoall latency (ms) for one `(kernel_source, op_name,
+    /// table_quant, node_num, hidden, topk, experts, ep)` slice, resolved on
+    /// the shared token-curve engine. Mirrors the silicon body of Python
+    /// `TrtLLMWideEPMoEDispatch._query_alltoall_table`: RAW lerp in range;
+    /// beyond-range holds ride the LINEAR num_tokens proxy, which is
+    /// ratio-equivalent to Python's alltoall SOL (`data_bytes / bw` with
+    /// `data_bytes = const * num_tokens` in every op branch, so
+    /// `sol(q)/sol(b) = q/b` exactly).
+    ///
+    /// `quant` must be the TABLE quant, i.e. already normalized by the
+    /// operator (`fp8_block -> fp8`); this layer does no algorithm work.
     #[allow(clippy::too_many_arguments)]
     pub fn query_trtllm_alltoall(
         &self,
-        num_tokens: u32,
+        kernel_source: &str,
+        op_name: &str,
+        quant: MoeQuantMode,
+        node_num: u32,
         hidden_size: u32,
         topk: u32,
         num_experts: u32,
         moe_ep_size: u32,
-        quant: MoeQuantMode,
-        workload_distribution: &str,
+        num_tokens: u32,
     ) -> Result<f64, AicError> {
-        let grids = self.load_trtllm_alltoall()?;
-        query_moe(
-            grids,
-            num_tokens,
+        let by_tokens = self.alltoall_slice(
+            kernel_source,
+            op_name,
+            quant,
+            node_num,
             hidden_size,
-            0,
             topk,
             num_experts,
-            1,
             moe_ep_size,
+        )?;
+        query_token_curve(by_tokens, num_tokens as f64, &|t| t)
+    }
+
+    /// Own-slice `num_tokens -> latency_ms` points for the alltoall grid.
+    /// Typed `AicError::PerfDatabase` miss when the slice is absent or empty
+    /// (mirrors `util_empirical.require_data_slice` as used by the empirical
+    /// `_slice` closure in `_query_alltoall_table`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn alltoall_slice_points(
+        &self,
+        kernel_source: &str,
+        op_name: &str,
+        quant: MoeQuantMode,
+        node_num: u32,
+        hidden_size: u32,
+        topk: u32,
+        num_experts: u32,
+        moe_ep_size: u32,
+    ) -> Result<Vec<(u32, f64)>, AicError> {
+        let by_tokens = self.alltoall_slice(
+            kernel_source,
+            op_name,
             quant,
-            workload_distribution,
-            &self.data_root,
-            false,
-        )
+            node_num,
+            hidden_size,
+            topk,
+            num_experts,
+            moe_ep_size,
+        )?;
+        Ok(by_tokens.iter().map(|(&t, &lat)| (t, lat)).collect())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn alltoall_slice(
+        &self,
+        kernel_source: &str,
+        op_name: &str,
+        quant: MoeQuantMode,
+        node_num: u32,
+        hidden_size: u32,
+        topk: u32,
+        num_experts: u32,
+        moe_ep_size: u32,
+    ) -> Result<&BTreeMap<u32, f64>, AicError> {
+        let grids = self.load_trtllm_alltoall()?;
+        let key = AlltoallKey {
+            kernel_source: kernel_source.to_string(),
+            op_name: op_name.to_string(),
+            quant: quant.name().to_string(),
+            num_nodes: node_num,
+            hidden_size,
+            topk,
+            num_experts,
+            moe_ep_size,
+        };
+        grids
+            .by_keys
+            .get(&key)
+            .filter(|curve| !curve.is_empty())
+            .ok_or_else(|| {
+                AicError::PerfDatabase(format!(
+                    "TRT-LLM alltoall data missing for {key:?} at {}",
+                    self.data_root.display()
+                ))
+            })
     }
 
     /// DeepEP normal-mode dispatch point.
@@ -394,10 +488,10 @@ impl WideEpTable {
             .get_or_init(|| load_moe_parquet(&self.moe_sources));
         cell.as_ref().map_err(clone_err)
     }
-    fn load_trtllm_alltoall(&self) -> Result<&MoeGrids, AicError> {
+    fn load_trtllm_alltoall(&self) -> Result<&AlltoallGrids, AicError> {
         let cell = self
             .trtllm_alltoall
-            .get_or_init(|| load_moe_parquet(&self.alltoall_sources));
+            .get_or_init(|| load_alltoall_parquet(&self.alltoall_sources));
         cell.as_ref().map_err(clone_err)
     }
     fn load_deepep_normal(&self) -> Result<&NormalDispatchGrids, AicError> {
@@ -633,7 +727,8 @@ fn dispatch_lookup(
 /// (`or_insert`), mirroring Python's `_read_filtered_rows` concatenation +
 /// `load_wideep_*_moe_data` skip-on-key-conflict. Missing files are skipped; an
 /// error is returned only when no source yields rows. Reused for the
-/// context/generation/wideep-moe/alltoall parquets.
+/// context/generation/wideep-moe parquets (alltoall has its own layout, see
+/// [`load_alltoall_parquet`]).
 fn load_moe_parquet(sources: &[PerfSource]) -> Result<MoeGrids, AicError> {
     let mut by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
     let mut any_source = false;
@@ -647,9 +742,8 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<MoeGrids, AicError> {
         let moe_dtype_col = reader.col("moe_dtype")?;
         let num_tokens_col = reader.col("num_tokens")?;
         let hidden_size_col = reader.col("hidden_size")?;
-        // `inter_size` / `moe_tp_size` are absent in `trtllm_alltoall_perf.parquet`;
-        // shared with the wideep_*_moe parquets which carry them. Optional lookup
-        // mirrors the prior `Option<u32>` deserialization plus `unwrap_or` default.
+        // Optional lookup mirrors the prior `Option<u32>` deserialization plus
+        // `unwrap_or` default (tolerant of older collector schemas).
         let inter_size_col = reader.col_optional("inter_size");
         let topk_col = reader.col("topk")?;
         let num_experts_col = reader.col("num_experts")?;
@@ -690,6 +784,78 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<MoeGrids, AicError> {
         )));
     }
     Ok(MoeGrids { by_keys })
+}
+
+/// Load the TRT-LLM alltoall table from an ordered, priority-sorted source
+/// list. Missing files are skipped; an error is returned only when no source
+/// yields rows.
+///
+/// Keying mirrors Python `load_trtllm_alltoall_data` exactly:
+/// - `kernel_source` is optional/nullable, defaulting to `"NVLinkTwoSided"`;
+/// - `num_nodes` is optional, defaulting to `max(1, moe_ep_size // 4)` (the
+///   GB200 NVL4 convention Python applies when the column is absent);
+/// - duplicates resolve LAST-wins (Python uses plain dict assignment here,
+///   unlike the skip-on-conflict deepep/moe-compute loaders), over
+///   `_read_filtered_rows`' priority-ordered concatenation.
+fn load_alltoall_parquet(sources: &[PerfSource]) -> Result<AlltoallGrids, AicError> {
+    let mut by_keys: BTreeMap<AlltoallKey, BTreeMap<u32, f64>> = BTreeMap::new();
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let op_name_col = reader.col("op_name")?;
+        let moe_dtype_col = reader.col("moe_dtype")?;
+        let num_tokens_col = reader.col("num_tokens")?;
+        let hidden_size_col = reader.col("hidden_size")?;
+        let topk_col = reader.col("topk")?;
+        let num_experts_col = reader.col("num_experts")?;
+        let moe_ep_size_col = reader.col("moe_ep_size")?;
+        let latency_col = reader.col("latency")?;
+        let kernel_source_col = reader.col_optional("kernel_source");
+        let num_nodes_col = reader.col_optional("num_nodes");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), kernel_source_col, &row)? {
+                continue;
+            }
+            let moe_ep_size = row.u32(moe_ep_size_col)?;
+            let kernel_source = row
+                .str_optional(kernel_source_col)?
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "NVLinkTwoSided".to_string());
+            let num_nodes = match row.u32_optional(num_nodes_col)? {
+                Some(n) => n,
+                None => (moe_ep_size / 4).max(1),
+            };
+            let key = AlltoallKey {
+                kernel_source,
+                op_name: row.str_owned(op_name_col)?,
+                quant: row.str_owned(moe_dtype_col)?,
+                num_nodes,
+                hidden_size: row.u32(hidden_size_col)?,
+                topk: row.u32(topk_col)?,
+                num_experts: row.u32(num_experts_col)?,
+                moe_ep_size,
+            };
+            // Last-wins on the full coordinate (Python plain assignment).
+            by_keys
+                .entry(key)
+                .or_default()
+                .insert(row.u32(num_tokens_col)?, row.f64(latency_col)?);
+        }
+    }
+    if !any_source || by_keys.is_empty() {
+        return Err(AicError::PerfDatabase(format!(
+            "no TRT-LLM alltoall rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+        )));
+    }
+    Ok(AlltoallGrids { by_keys })
 }
 
 /// Load the DeepEP-normal dispatch table from an ordered source list. Missing

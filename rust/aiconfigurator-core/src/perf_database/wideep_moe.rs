@@ -95,18 +95,17 @@ impl WideEpMoeTable {
     /// `(kernel_source, quant, distribution, topk, num_experts, hidden,
     /// inter, num_slots, moe_tp_size, moe_ep_size)` key. The token curve
     /// rides the perf_interp v2 engine (1-axis Grid, RAW lerp in range,
-    /// boundary util-hold beyond it), mirroring Python's
-    /// `TrtllmWideEPMoE._query_compute_table`. If the exact `distribution`
-    /// isn't in the table, falls back to the first distribution available
-    /// under the matched quant — same as Python.
+    /// boundary util-hold beyond it), mirroring the silicon body of Python's
+    /// `TrtLLMWideEPMoE._query_compute_table`. `kernel_source` must be the
+    /// RESOLVED kernel (the operator mirrors `_select_kernel`, including its
+    /// data-availability fallback via [`Self::available_kernels`]); the
+    /// distribution falls back level-wise exactly like Python's
+    /// `get_silicon` (first distribution under the matched `(kernel, quant)`
+    /// when the exact string is absent — see [`Self::slice_points`]).
     ///
-    /// The util-hold SOL is a LINEAR num_tokens proxy: Python anchors on
-    /// the WideEP MoE roofline (`_query_compute_table.get_sol`, num_slots-
-    /// aware), which this table layer cannot compute (no SystemSpec). The
-    /// proxy only affects beyond-range holds; in-range lerp is SOL-free and
-    /// matches Python exactly. Thread the roofline through (like
-    /// `moe.rs::MoeTable::query`) if the operator layer ever needs
-    /// beyond-range parity here.
+    /// `sol` is the WideEP MoE roofline (num_slots-aware) the beyond-range
+    /// util-hold anchors on — Python threads the same closure through
+    /// `OpInterpConfig(sol_fn=...)`. In-range lerp never consults it.
     #[allow(clippy::too_many_arguments)]
     pub fn query_compute(
         &self,
@@ -121,36 +120,149 @@ impl WideEpMoeTable {
         quant: MoeQuantMode,
         distribution: &str,
         kernel_source: &str,
+        sol: &dyn Fn(f64) -> f64,
     ) -> Result<f64, AicError> {
-        let grids = self.load_compute()?;
+        let by_tokens = self.resolve_slice(
+            kernel_source,
+            quant.name(),
+            distribution,
+            topk,
+            num_experts,
+            hidden_size,
+            inter_size,
+            num_slots,
+            moe_tp_size,
+            moe_ep_size,
+        )?;
+        query_token_curve(by_tokens, num_tokens as f64, sol)
+    }
 
-        // Mirror Python's `TrtllmWideEPMoE._select_kernel` fallback: if
-        // the requested kernel_source isn't in the loaded table (e.g. the
-        // caller asks for "moe_torch_flow" but the collected data is
-        // tagged "wideep_compute_cutlass"), fall back to any kernel
-        // present in the grid (Python takes `available_kernels[0]`).
-        let resolved_kernel = if grids
-            .by_keys
-            .keys()
-            .any(|k| k.kernel_source == kernel_source)
-        {
-            kernel_source.to_string()
-        } else {
-            grids
-                .by_keys
-                .keys()
-                .next()
-                .map(|k| k.kernel_source.clone())
-                .unwrap_or_else(|| kernel_source.to_string())
+    /// Own-slice `num_tokens -> latency_ms` points, after the level-wise
+    /// distribution fallback. Typed `AicError::PerfDatabase` miss when the
+    /// slice is absent or empty — mirrors the `_slice` closure of Python
+    /// `_query_compute_table.get_empirical_from_sol`
+    /// (`util_empirical.require_data_slice` semantics).
+    #[allow(clippy::too_many_arguments)]
+    pub fn slice_points(
+        &self,
+        kernel_source: &str,
+        quant: MoeQuantMode,
+        distribution: &str,
+        topk: u32,
+        num_experts: u32,
+        hidden_size: u32,
+        inter_size: u32,
+        num_slots: u32,
+        moe_tp_size: u32,
+        moe_ep_size: u32,
+    ) -> Result<Vec<(u32, f64)>, AicError> {
+        let by_tokens = self.resolve_slice(
+            kernel_source,
+            quant.name(),
+            distribution,
+            topk,
+            num_experts,
+            hidden_size,
+            inter_size,
+            num_slots,
+            moe_tp_size,
+            moe_ep_size,
+        )?;
+        Ok(by_tokens.iter().map(|(&t, &lat)| (t, lat)).collect())
+    }
+
+    /// Distinct kernel names present in the loaded table, in sorted
+    /// (BTreeMap) order; EMPTY when the table failed to load with a typed
+    /// data miss. Mirrors the `if database._wideep_moe_compute_data:` guard
+    /// of Python `_select_kernel` (an unloaded/empty table is falsy there —
+    /// the caller then keeps its architecture-preferred kernel). NOTE:
+    /// Python yields dict insertion (file row) order; sorted order is
+    /// observable only when several kernels coexist and the preferred one is
+    /// absent.
+    pub fn available_kernels(&self) -> Result<Vec<String>, AicError> {
+        let grids = match self.load_compute() {
+            Ok(grids) => grids,
+            Err(err) if err.is_missing_perf_data() => return Ok(Vec::new()),
+            Err(err) => return Err(err),
         };
+        let mut names: Vec<String> = Vec::new();
+        for key in grids.by_keys.keys() {
+            // `WideEpMoeKey` sorts by kernel_source first, so consecutive
+            // dedup suffices.
+            if names.last().map(String::as_str) != Some(key.kernel_source.as_str()) {
+                names.push(key.kernel_source.clone());
+            }
+        }
+        Ok(names)
+    }
 
-        // Find a matching key. Python falls back to "first distribution
-        // under the same (kernel, quant)" when the exact distribution
-        // string isn't in the loaded data.
-        let exact_key = WideEpMoeKey {
-            kernel_source: resolved_kernel,
-            quant: quant.name().to_string(),
-            distribution: distribution.to_string(),
+    /// Level-wise slice resolution mirroring Python's nested-dict walk:
+    /// `require_data_slice(data, kernel)` -> `require_data_slice(kd, quant)`
+    /// -> distribution fallback (`workload if present else first available
+    /// under (kernel, quant)`) -> exact remaining coordinate. Each level
+    /// misses with a typed `AicError::PerfDatabase`. NOTE: the Python
+    /// fallback takes the FIRST distribution in dict-insertion (file row)
+    /// order and then requires the full shape under it (a shape present only
+    /// under a later distribution still misses) — mirrored here with sorted
+    /// (BTreeMap) order for the distribution list.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_slice(
+        &self,
+        kernel_source: &str,
+        quant_name: &str,
+        distribution: &str,
+        topk: u32,
+        num_experts: u32,
+        hidden_size: u32,
+        inter_size: u32,
+        num_slots: u32,
+        moe_tp_size: u32,
+        moe_ep_size: u32,
+    ) -> Result<&BTreeMap<u32, f64>, AicError> {
+        let grids = self.load_compute()?;
+        let mut kernel_seen = false;
+        let mut quant_seen = false;
+        let mut first_distribution: Option<&str> = None;
+        let mut requested_distribution_seen = false;
+        for key in grids.by_keys.keys() {
+            if key.kernel_source != kernel_source {
+                continue;
+            }
+            kernel_seen = true;
+            if key.quant != quant_name {
+                continue;
+            }
+            quant_seen = true;
+            if first_distribution.is_none() {
+                first_distribution = Some(&key.distribution);
+            }
+            if key.distribution == distribution {
+                requested_distribution_seen = true;
+                break;
+            }
+        }
+        if !kernel_seen {
+            return Err(AicError::PerfDatabase(format!(
+                "WideEP MoE compute data missing for kernel_source={kernel_source:?} at {}",
+                self.data_root.display()
+            )));
+        }
+        if !quant_seen {
+            return Err(AicError::PerfDatabase(format!(
+                "WideEP MoE compute data missing for kernel_source={kernel_source:?} \
+                 quant={quant_name:?} at {}",
+                self.data_root.display()
+            )));
+        }
+        let dist = if requested_distribution_seen {
+            distribution
+        } else {
+            first_distribution.expect("quant_seen implies at least one distribution")
+        };
+        let key = WideEpMoeKey {
+            kernel_source: kernel_source.to_string(),
+            quant: quant_name.to_string(),
+            distribution: dist.to_string(),
             topk,
             num_experts,
             hidden_size,
@@ -159,41 +271,16 @@ impl WideEpMoeTable {
             moe_tp_size,
             moe_ep_size,
         };
-        let by_tokens = match grids.by_keys.get(&exact_key) {
-            Some(t) => t,
-            None => {
-                let fallback = grids
-                    .by_keys
-                    .iter()
-                    .find(|(k, _)| {
-                        k.kernel_source == exact_key.kernel_source
-                            && k.quant == exact_key.quant
-                            && k.topk == exact_key.topk
-                            && k.num_experts == exact_key.num_experts
-                            && k.hidden_size == exact_key.hidden_size
-                            && k.inter_size == exact_key.inter_size
-                            && k.num_slots == exact_key.num_slots
-                            && k.moe_tp_size == exact_key.moe_tp_size
-                            && k.moe_ep_size == exact_key.moe_ep_size
-                    })
-                    .map(|(_, t)| t)
-                    .ok_or_else(|| {
-                        AicError::PerfDatabase(format!(
-                            "WideEP MoE compute data missing for {exact_key:?} at {}",
-                            self.data_root.display()
-                        ))
-                    })?;
-                fallback
-            }
-        };
-
-        if by_tokens.is_empty() {
-            return Err(AicError::PerfDatabase(format!(
-                "WideEP MoE compute data has no token points for {exact_key:?} at {}",
-                self.data_root.display()
-            )));
-        }
-        query_token_curve(by_tokens, num_tokens as f64, &|t| t)
+        grids
+            .by_keys
+            .get(&key)
+            .filter(|curve| !curve.is_empty())
+            .ok_or_else(|| {
+                AicError::PerfDatabase(format!(
+                    "WideEP MoE compute data missing for {key:?} at {}",
+                    self.data_root.display()
+                ))
+            })
     }
 
     fn load_compute(&self) -> Result<&WideEpMoeGrids, AicError> {
@@ -310,11 +397,16 @@ mod tests {
                 MoeQuantMode::Nvfp4,
                 "power_law_1.01",
                 "wideep_compute_cutlass",
+                &|t| t,
             )
             .expect("WideEP MoE compute query must succeed");
         assert!(
             (latency - 0.086_009_597_778_320_32).abs() < 1e-6,
             "expected recorded latency, got {latency}"
+        );
+        assert_eq!(
+            table.available_kernels().expect("kernels list"),
+            vec!["wideep_compute_cutlass".to_string()]
         );
     }
 }

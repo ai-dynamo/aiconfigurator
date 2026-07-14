@@ -382,6 +382,27 @@ mod tests {
         }
     }
 
+    fn msa_module() -> crate::operators::MsaModuleOp {
+        crate::operators::MsaModuleOp {
+            name: "context_attention".into(),
+            scale_factor: 62.0,
+            num_heads: 8,
+            num_kv_heads: 1,
+            hidden_size: 7168,
+            head_dim: 128,
+            v_head_dim: 128,
+            index_n_heads: 64,
+            index_head_dim: 128,
+            index_topk: 2048,
+            block_size: 64,
+            kv_cache_dtype: KvCacheQuantMode::Bfloat16,
+            fmha_quant_mode: FmhaQuantMode::Bfloat16,
+            gemm_quant_mode: GemmQuantMode::Fp8Block,
+            dsa_architecture: "GlmMoeDsaForCausalLM".into(),
+            dsa_scale_k: 1.0,
+        }
+    }
+
     fn dsv4_module() -> Dsv4ModuleOp {
         Dsv4ModuleOp {
             name: "dsv4_module".into(),
@@ -540,6 +561,8 @@ mod tests {
             OpSpec::Vision(vision()),
             OpSpec::DsaContext(dsa_module()),
             OpSpec::DsaGeneration(dsa_module()),
+            OpSpec::MsaContext(msa_module()),
+            OpSpec::MsaGeneration(msa_module()),
             OpSpec::Dsv4Context(dsv4_module()),
             OpSpec::Dsv4Generation(dsv4_module()),
             OpSpec::Mhc(mhc()),
@@ -575,6 +598,8 @@ mod tests {
                 | OpSpec::Vision(_)
                 | OpSpec::DsaContext(_)
                 | OpSpec::DsaGeneration(_)
+                | OpSpec::MsaContext(_)
+                | OpSpec::MsaGeneration(_)
                 | OpSpec::Dsv4Context(_)
                 | OpSpec::Dsv4Generation(_)
                 | OpSpec::Mhc(_)

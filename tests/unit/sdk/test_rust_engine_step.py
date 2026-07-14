@@ -367,11 +367,11 @@ def test_sparse_cp_ops_emit_cp_fields_in_spec():
     assert spec["window_size"] == 2048
 
 
-def test_non_silicon_database_mode_falls_back_to_python_step():
-    """The compiled engine is SILICON-only (no util_empirical layer); HYBRID /
-    EMPIRICAL databases must stay on the Python step so both backends give
-    the SAME answer (parity by delegation) instead of the rust side failing
-    configs Python fills in empirically."""
+def test_sol_database_modes_fall_back_to_python_step():
+    """The compiled engine implements SILICON plus the util-space empirical
+    layer (HYBRID / EMPIRICAL) — those modes route to Rust and are guarded by
+    the hybrid parity suite. The SOL/SOL_FULL diagnostic modes stay on the
+    Python step so both backends give the SAME answer."""
     from enum import Enum
 
     from aiconfigurator.sdk.config import RuntimeConfig
@@ -380,6 +380,9 @@ def test_non_silicon_database_mode_falls_back_to_python_step():
     class _Mode(Enum):
         SILICON = "SILICON"
         HYBRID = "HYBRID"
+        EMPIRICAL = "EMPIRICAL"
+        SOL = "SOL"
+        SOL_FULL = "SOL_FULL"
 
     class _DB:
         def __init__(self, mode):
@@ -390,5 +393,8 @@ def test_non_silicon_database_mode_falls_back_to_python_step():
 
     rc = RuntimeConfig(engine_step_backend="rust")
     assert should_use_rust_engine_step(rc, _DB(_Mode.SILICON))
-    assert not should_use_rust_engine_step(rc, _DB(_Mode.HYBRID))
+    assert should_use_rust_engine_step(rc, _DB(_Mode.HYBRID))
+    assert should_use_rust_engine_step(rc, _DB(_Mode.EMPIRICAL))
+    assert not should_use_rust_engine_step(rc, _DB(_Mode.SOL))
+    assert not should_use_rust_engine_step(rc, _DB(_Mode.SOL_FULL))
     assert should_use_rust_engine_step(rc)  # no database context -> unchanged
