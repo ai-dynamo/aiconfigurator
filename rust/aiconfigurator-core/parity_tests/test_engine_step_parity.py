@@ -214,6 +214,18 @@ SMOKE_CASES = [
         ),
         id="glm5-b200-sglang-0514-isl16384-osl2",
     ),
+    # GLM-5.2 shared-index amortization (full_frac = 21/78): per-layer DSA is
+    # w*full + (1-w)*skip using the skip_indexer rows collected in the same
+    # parquet. Tripwire for the Rust skip-table port — dropping the skip rows
+    # (the pre-port behavior) silently overestimates every GLM-5.2 sweep.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="nvidia/GLM-5.2-NVFP4",
+            backend_name="sglang",
+            backend_version="0.5.14",
+        ),
+        id="glm52-b200-sglang-0514-isl1024-osl2",
+    ),
     # Phase 4 D7-F: backend coverage for newly-ported families. The
     # builders are backend-independent (the per-backend conditional
     # `_attn_dp` / `_tp_allreduce` branches are handled inside each

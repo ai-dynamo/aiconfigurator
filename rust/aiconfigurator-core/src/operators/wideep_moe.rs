@@ -85,6 +85,11 @@ impl WideEpMoeOp {
     ) -> Result<PerformanceResult, AicError> {
         // Python: `x = num_tokens * self._attention_dp_size`.
         let scaled = num_tokens.saturating_mul(self.attention_dp_size.max(1));
+        // Beyond-range util-hold roofline (Python `_query_compute_table`'s
+        // get_sol): num_slots-aware weight-read term keeps small-token holds
+        // above the launch/weight floor. Coordinates from the engine are
+        // integral, so rounding keeps floor-division parity with Python.
+        let sol = |t: f64| self.sol_latency_ms(db, t.round() as u64);
         let latency = db.wideep_moe.query_compute(
             scaled,
             self.hidden_size,
@@ -97,9 +102,37 @@ impl WideEpMoeOp {
             self.quant_mode,
             &self.workload_distribution,
             &self.kernel_source,
+            &sol,
         )?;
         Ok(PerformanceResult::new(latency, Source::Silicon)
             .clamp_non_negative()
             .scaled(self.scale_factor))
+    }
+
+    /// WideEP MoE roofline. Verbatim port of Python
+    /// `TrtllmWideEPMoE._query_compute_table::get_sol` (operations/moe.py):
+    /// weight memory reads `min(num_slots // ep, total_tokens // ep)` experts
+    /// (EPLB redundant mode replicates experts across slots). The WideEP MoE
+    /// path is always gated (SwiGLU, 3 GEMMs).
+    fn sol_latency_ms(&self, db: &PerfDatabase, num_tokens: u64) -> f64 {
+        let num_gemms: u64 = 3;
+        let total_tokens = num_tokens * self.topk as u64;
+        let moe_ep = (self.moe_ep_size as u64).max(1);
+        let moe_tp = (self.moe_tp_size as u64).max(1);
+        let h = self.hidden_size as u64;
+        let inter = self.inter_size as u64;
+        let slots = self.num_slots as u64;
+
+        let ops = total_tokens * h * inter * num_gemms * 2 / moe_ep / moe_tp;
+        let mem_bytes_int = total_tokens / moe_ep * h * 2
+            + total_tokens / moe_ep * inter * num_gemms / moe_tp
+            + h * inter * num_gemms / moe_tp * std::cmp::min(slots / moe_ep, total_tokens / moe_ep);
+        let mem_bytes = (mem_bytes_int as f64) * self.quant_mode.mapping().memory;
+
+        let spec = &db.system_spec;
+        let tc_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(1.0);
+        let sol_math = (ops as f64) / (tc_flops * self.quant_mode.mapping().compute) * 1000.0;
+        let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+        sol_math.max(sol_mem)
     }
 }

@@ -34,6 +34,7 @@ The live ``rust_engine_step.py`` helpers build on this path.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
@@ -66,6 +67,7 @@ from aiconfigurator.sdk.operations import (
     MoEDispatch,
     OverlapOp,
     TrtLLMWideEPMoE,
+    TrtLLMWideEPMoEDispatch,
     WideEPContextMLA,
     WideEPGenerationMLA,
 )
@@ -91,6 +93,8 @@ from aiconfigurator.sdk.rust_engine_step import (
 # Rust `ENGINE_SPEC_SCHEMA_VERSION`.
 ENGINE_SPEC_SCHEMA_VERSION = 2
 ENGINE_CONFIG_SCHEMA_VERSION = 1
+
+logger = logging.getLogger(__name__)
 
 
 class OpConversionError(RuntimeError):
@@ -147,15 +151,15 @@ def _embedding(op: Embedding) -> dict:
 
 
 def _elementwise(op: ElementWise) -> dict:
-    # Rust `ElementwiseOp.bytes_per_token * num_tokens` must equal Python's
-    # `(x * dim_in * 2 + x * dim_out * 2)` after `x //= scale_num_tokens`.
-    # Per-token bytes = (dim_in * 2 + dim_out * 2) / scale_num_tokens.
-    scale = op._scale_num_tokens if op._scale_num_tokens else 1
-    bytes_per_token = (op._dim_in * 2 + op._dim_out * 2) / scale
+    # `scale_num_tokens` rides the wire as its own field so the Rust op can
+    # reproduce Python's integer order exactly (`x //= scale` THEN the CP
+    # ceil-split). Folding it into bytes_per_token (the old encoding) is only
+    # exact when the divisor divides the token count.
     return {
         "name": op._name,
         "scale_factor": op._scale_factor,
-        "bytes_per_token": float(bytes_per_token),
+        "bytes_per_token": float(op._dim_in * 2 + op._dim_out * 2),
+        "scale_num_tokens": op._scale_num_tokens if op._scale_num_tokens else 1,
         "seq_split": op._seq_split,
     }
 
@@ -194,6 +198,9 @@ def _encoder_attention(op: EncoderAttention) -> dict:
         "n": op._n,
         "head_size": op._head_size,
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
+        # Partial-RoPE extra (Qwen3-VL uses 0.5); Rust adds
+        # `factor * 2 * mem_op(Q+K bytes) * 1.1` on top of the table latency.
+        "partial_rotary_factor": float(getattr(op, "_partial_rotary_factor", 0.0) or 0.0),
     }
 
 
@@ -252,26 +259,33 @@ def _moe(op: MoE) -> dict:
         "quant_mode": _quant_name(op._quant_mode),
         "workload_distribution": op._workload_distribution,
         "is_gated": op._is_gated,
+        # SGLang MoE routing (Python `MoE.query` sglang branch): deepep_moe
+        # reads the wideep context/generation tables; EPLB corrects the
+        # prefill token count to int(x * 0.8).
+        "moe_backend": op._moe_backend,
+        "enable_eplb": bool(op._enable_eplb),
+        "is_context": bool(op._is_context),
     }
 
 
-def _dispatch_flavor(backend: str) -> str:
-    """Mirror Rust `models/moe.rs::dispatch_flavor`: trtllm -> TrtllmAlltoall,
-    everything else -> CustomAllReduce. The `DispatchFlavor` enum has no serde
-    rename, so emit the exact Rust variant name. The fine SGLang-DeepEP /
-    NVL72 gating stays inside the Rust `MoEDispatchOp::query`.
+def _dispatch_flavor(backend: str, op: MoEDispatch) -> str:
+    """Resolve the Rust `DispatchFlavor` variant for a dispatch op. The enum
+    has no serde rename, so emit the exact variant name:
 
-    KNOWN LIMITATION (WideEP / DeepEP, out of scope): this binary
-    `trtllm -> TrtllmAlltoall, else -> CustomAllReduce` mapping is correct for
-    the standard (non-WideEP) MoE path that the gated parity harness
-    (`test_engine_step_parity.py`) and `cli_estimate` exercise. It does NOT emit
-    the SGLang-WideEP `DeepEpNormal` / `DeepEpLowLatency` flavors — that DeepEP
-    path is out-of-scope scan territory, not gated by the smoke harness. A future
-    WideEP stage must thread the WideEP/DeepEP flavor selection through here
-    (and likely needs the resolved dispatch kind off the Python op rather than a
-    pure backend-string mapping).
+    - trtllm -> `TrtllmAlltoall` (the fine SM/NVL72 gating stays inside the
+      Rust `MoEDispatchOp::query`);
+    - sglang with `moe_backend == "deepep_moe"` -> the WideEP DeepEP tables:
+      context ops use DeepEP-normal (high-throughput), decode ops use
+      DeepEP-low-latency — mirroring the Python branch split
+      (`operations/moe.py`: `if self._is_context: query_wideep_deepep_normal
+      else query_wideep_deepep_ll`);
+    - everything else -> `CustomAllReduce`.
     """
-    return "TrtllmAlltoall" if backend == "trtllm" else "CustomAllReduce"
+    if backend == "trtllm":
+        return "TrtllmAlltoall"
+    if backend == "sglang" and getattr(op, "_moe_backend", None) == "deepep_moe":
+        return "DeepEpNormal" if op._is_context else "DeepEpLowLatency"
+    return "CustomAllReduce"
 
 
 def _moe_dispatch(op: MoEDispatch, *, backend: str) -> dict:
@@ -290,7 +304,10 @@ def _moe_dispatch(op: MoEDispatch, *, backend: str) -> dict:
         "attention_dp_size": op._attention_dp_size,
         "pre_dispatch": op._pre_dispatch,
         "backend": backend,
-        "flavor": _dispatch_flavor(backend),
+        "flavor": _dispatch_flavor(backend, op),
+        # DeepEP branches divide the dispatch token count by this (Python
+        # `num_tokens // self._scale_num_tokens`, moe.py sglang DeepEP path).
+        "scale_num_tokens": op._scale_num_tokens,
         "comm_quant": "half",
         "moe_quant": _quant_name(quant) if quant is not None else "bfloat16",
         "attn_cp_size": op._attn_cp_size,
@@ -318,7 +335,12 @@ def _nccl(op: NCCL) -> dict:
         "scale_factor": op._scale_factor,
         "hidden_size": op._num_elements_per_token,
         "num_gpus": op._num_gpus,
-        "dtype": "half",
+        # Pass the op's real comm dtype through (every current model builder
+        # passes half, but the NCCL op supports int8/fp8 and the Rust enum
+        # carries them). CustomAllReduce / MoEDispatch stay "half" by
+        # construction — Python hardcodes CommQuantMode.half at their query
+        # sites, so "half" IS the parity value there.
+        "dtype": op._comm_quant_mode.name,
         "operation": op._nccl_op,
         "seq_split": op._seq_split,
     }
@@ -357,6 +379,10 @@ def _dsa_module(op: ContextDSAModule | GenerationDSAModule, *, architecture: str
         "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
         "architecture": arch,
         "index_topk": int(dims["index_topk"]),
+        # GLM-5.2 shared-index amortization: per-layer cost is
+        # `full_frac*full + (1-full_frac)*skip` (see `ContextDSAModule.query`).
+        # 1.0 (DeepSeek-V3.2 / GLM-5) keeps the pure-full path.
+        "full_frac": float(getattr(op, "_full_frac", 1.0)),
     }
 
 
@@ -460,7 +486,10 @@ def _wideep_context_mla(op: WideEPContextMLA) -> dict:
     return {
         "name": op._name,
         "scale_factor": op._scale_factor,
-        "num_heads": op._tp_size,  # Rust num_heads slot carries the per-rank head split
+        # The op stores tp_size; the Rust table axis is per-rank heads. Mirror
+        # the Python query's conversion (mla.py: `num_heads = 128 // tp_size`,
+        # DeepSeek's 128 total heads).
+        "num_heads": 128 // op._tp_size,
         "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
         "attn_backend": op._attn_backend,
@@ -472,7 +501,7 @@ def _wideep_generation_mla(op: WideEPGenerationMLA) -> dict:
     return {
         "name": op._name,
         "scale_factor": op._scale_factor,
-        "num_heads": op._tp_size,
+        "num_heads": 128 // op._tp_size,
         "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
         "attn_backend": op._attn_backend,
@@ -503,6 +532,26 @@ def _wideep_moe(op: TrtLLMWideEPMoE, *, database: Any) -> dict:
         "workload_distribution": op._workload_distribution,
         "num_slots": op._num_slots,
         "kernel_source": kernel_source,
+    }
+
+
+def _wideep_moe_dispatch(op: TrtLLMWideEPMoEDispatch) -> dict:
+    """TRT-LLM WideEP All2All dispatch (Python `TrtLLMWideEPMoEDispatch`).
+    Field names match the Rust `TrtllmWideEpMoEDispatchOp`. `node_num` is
+    intentionally NOT on the wire: the model builders never set it and the
+    Rust query applies Python's default (`1 if ep < 4 else ep // 4`)."""
+    return {
+        "name": op._name,
+        "scale_factor": op._scale_factor,
+        "hidden_size": op._hidden_size,
+        "topk": op._topk,
+        "num_experts": op._num_experts,
+        "moe_tp_size": op._moe_tp_size,
+        "moe_ep_size": op._moe_ep_size,
+        "attention_dp_size": op._attention_dp_size,
+        "pre_dispatch": op._pre_dispatch,
+        "quant_mode": _quant_name(op._quant_mode),
+        "use_low_precision_combine": bool(op._use_low_precision_combine),
     }
 
 
@@ -557,6 +606,10 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
         return {"WideEpGenerationMla": _wideep_generation_mla(op)}
     if isinstance(op, TrtLLMWideEPMoE):
         return {"WideEpMoe": _wideep_moe(op, database=database)}
+    # MUST precede the MoEDispatch check: TrtLLMWideEPMoEDispatch is a direct
+    # `Operation` subclass (not a MoEDispatch), but keep the guard explicit.
+    if isinstance(op, TrtLLMWideEPMoEDispatch):
+        return {"WideEpMoeDispatch": _wideep_moe_dispatch(op)}
 
     # Plain (single-variant) ops.
     if isinstance(op, GEMM):
@@ -633,6 +686,16 @@ def _compute_perf_db_sources(database: Any) -> dict:
             ]
         return out
     except Exception:
+        logger.warning(
+            "Failed to resolve shared-layer perf-DB sources for %s/%s/%s; the "
+            "compiled engine will load PRIMARY-ONLY rows while Python uses the "
+            "shared layer in the same run — cross-engine drift is possible. "
+            "Investigate rather than ignore.",
+            getattr(database, "system", "?"),
+            getattr(database, "backend", "?"),
+            getattr(database, "version", "?"),
+            exc_info=True,
+        )
         return {}
 
 
@@ -904,8 +967,33 @@ class EngineHandle:
     def predict_decode_latency(self, bs: int, isl: int, osl: int = 2) -> float:
         return self._engine.predict_decode_latency(int(bs), int(isl), int(osl))
 
-    def mixed_step_latency(self, ctx_tokens: int, gen_tokens: int, isl: int, osl: int, prefix: int = 0) -> float:
-        return self._engine.mixed_step_latency(int(ctx_tokens), int(gen_tokens), int(isl), int(osl), int(prefix))
+    def mixed_step_latency(
+        self,
+        ctx_tokens: int,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+        seq_imbalance_correction_scale: float = 1.0,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> float:
+        return self._engine.mixed_step_latency(
+            int(ctx_tokens),
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            int(prefix),
+            float(seq_imbalance_correction_scale),
+            float(gen_seq_imbalance_correction_scale),
+        )
 
-    def decode_step_latency(self, gen_tokens: int, isl: int, osl: int) -> float:
-        return self._engine.decode_step_latency(int(gen_tokens), int(isl), int(osl))
+    def decode_step_latency(
+        self,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> float:
+        return self._engine.decode_step_latency(
+            int(gen_tokens), int(isl), int(osl), float(gen_seq_imbalance_correction_scale)
+        )

@@ -31,6 +31,20 @@ fn prefix_correction(full_s: u32, prefix: u32) -> f64 {
     (f * f - p * p) / (f * f)
 }
 
+/// Python's `get_silicon` whitelists the attention backend before slicing
+/// (`mla.py:1191-1192` generation, `:1459-1460` context:
+/// `if attn_backend not in {"flashinfer", "fa3"}: raise ValueError`).
+/// Mirror it so both engines error symmetrically on unsupported backends
+/// instead of Rust answering from whatever `kernel_source` slice exists.
+fn check_attn_backend(attn_backend: &str) -> Result<(), AicError> {
+    if attn_backend != "flashinfer" && attn_backend != "fa3" {
+        return Err(AicError::PerfDatabase(format!(
+            "Unsupported attention backend: {attn_backend}"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WideEpContextMlaOp {
     pub name: String,
@@ -75,6 +89,7 @@ impl WideEpContextMlaOp {
         isl: u32,
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
+        check_attn_backend(&self.attn_backend)?;
         // ctx(s, pfx): the un-sharded wideep context-MLA query for a sequence
         // chunk of length `s` at prefix `pfx`, with prefix correction applied.
         let ctx = |s: u32, pfx: u32| -> Result<f64, AicError> {
@@ -110,11 +125,11 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn b200_sglang_db() -> PerfDatabase {
+    fn h200_sglang_db() -> PerfDatabase {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("src/aiconfigurator/systems");
-        PerfDatabase::load(&root, "b200_sxm", "sglang", "0.5.10").expect("db loads")
+        PerfDatabase::load(&root, "h200_sxm", "sglang", "0.5.10").expect("db loads")
     }
 
     fn op(cp_size: u32) -> WideEpContextMlaOp {
@@ -124,8 +139,9 @@ mod tests {
             KvCacheQuantMode::Fp8,
             FmhaQuantMode::Fp8Block,
         );
-        // b200 sglang 0.5.10 wideep table carries kernel_source=trtllm_mla.
-        op.attn_backend = "trtllm_mla".to_string();
+        // h200 sglang 0.5.10 wideep table carries kernel_source in
+        // {flashinfer, fa3} — the only backends the Python query whitelists.
+        op.attn_backend = "flashinfer".to_string();
         op.cp_size = cp_size;
         op
     }
@@ -136,7 +152,7 @@ mod tests {
     /// cp=1 stays the single full-length query.
     #[test]
     fn cp_zigzag_composition() {
-        let db = b200_sglang_db();
+        let db = h200_sglang_db();
         let (b, isl, prefix) = (4u32, 4096u32, 0u32);
 
         // cp=1 unchanged: exactly the raw single-chunk table query (prefix=0
@@ -150,7 +166,7 @@ mod tests {
                 128,
                 KvCacheQuantMode::Fp8,
                 FmhaQuantMode::Fp8Block,
-                "trtllm_mla",
+                "flashinfer",
             )
             .expect("raw table query");
         assert!(
@@ -181,6 +197,32 @@ mod tests {
             chunked.latency_ms,
             baseline.latency_ms
         );
+    }
+
+    /// Python whitelists attn_backend in {flashinfer, fa3} before slicing
+    /// (mla.py:1191-1192, 1459-1460) — an out-of-whitelist backend must error
+    /// here too, even when a matching kernel_source slice exists in the data
+    /// (b200's wideep tables carry kernel_source=trtllm_mla).
+    #[test]
+    fn attn_backend_whitelist_mirrors_python() {
+        let db = h200_sglang_db();
+        let mut bad = op(1);
+        bad.attn_backend = "trtllm_mla".to_string();
+        assert!(bad.query(&db, 1, 1024, 0).is_err());
+
+        let mut bad_gen = WideEpGenerationMlaOp::new(
+            "wideep_gen_mla",
+            128,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Fp8Block,
+        );
+        bad_gen.attn_backend = "trtllm_mla".to_string();
+        assert!(bad_gen.query(&db, 1, 1024).is_err());
+
+        // fa3 stays allowed (h200 carries an fa3 slice).
+        let mut fa3 = op(1);
+        fa3.attn_backend = "fa3".to_string();
+        assert!(fa3.query(&db, 1, 1024, 0).is_ok());
     }
 }
 
@@ -220,6 +262,7 @@ impl WideEpGenerationMlaOp {
         batch_size: u32,
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
+        check_attn_backend(&self.attn_backend)?;
         let latency = db.wideep_mla.query_generation(
             batch_size,
             s,

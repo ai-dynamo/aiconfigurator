@@ -22,22 +22,23 @@ use crate::common::error::AicError;
 use crate::engine::spec::EngineSpec;
 use crate::operators::Op;
 use crate::perf_database::PerfDatabase;
-use crate::session::{get_mix_step_ops, run_context_ops, run_generation_ops_step};
+use crate::session::{get_mix_step_ops, run_context_ops, run_generation_ops_step, ContextOpFilter};
 use crate::{validate_forward_pass_metrics, ForwardPassMetrics};
 
 /// Per-call runtime inputs. Field-for-field mirror of the Python
 /// `sdk/config.RuntimeConfig`.
 ///
-/// Only the fields the static composition reads are consumed (`batch_size`,
-/// `beam_width`, `isl`, `osl`, `prefix`). The two imbalance-correction scales
-/// are carried for wire parity but are not yet threaded into the op
-/// queries (the live FPM path hard-codes them to 1.0; see
-/// `session::run_context_ops`).
+/// The imbalance-correction scales thread into the per-op queries exactly
+/// where Python applies them (`base_backend.py:331,372`): context-attention
+/// ops multiply by `seq_imbalance_correction_scale`, generation-attention ops
+/// by `gen_seq_imbalance_correction_scale`. (The FPM telemetry path has no
+/// scale concept and keeps 1.0.)
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RuntimeConfig {
     pub batch_size: u32,
-    /// Beam width. Defaults to 1; the engine-step path is not exercised for
-    /// beam > 1 (matches `session.rs`), so it does not scale the gen batch.
+    /// Beam width. The generation phase queries token-major ops at
+    /// `x = batch_size * beam_width` (Python `_run_generation_phase`);
+    /// attention ops key on the raw decode batch.
     pub beam_width: u32,
     pub isl: u32,
     pub osl: u32,
@@ -235,6 +236,8 @@ impl Engine {
             runtime.batch_size,
             effective_isl,
             runtime.prefix,
+            runtime.seq_imbalance_correction_scale,
+            ContextOpFilter::All,
         )
     }
 
@@ -264,7 +267,15 @@ impl Engine {
             // Python `s = isl + i + 1`. NOTE the `+1` — distinct from the FPM
             // bridge's `context_length = isl + i` packing convention.
             let s = runtime.isl + i + 1;
-            let step = run_generation_ops_step(&self.generation_ops, &self.db, bs, s)?;
+            let step = crate::session::run_generation_ops_step_beamed(
+                &self.generation_ops,
+                &self.db,
+                bs,
+                runtime.beam_width,
+                s,
+                runtime.gen_seq_imbalance_correction_scale,
+                false,
+            )?;
             let repeat_count = stride.min(upper - i);
             total += step * repeat_count as f64;
             i += stride;
@@ -305,33 +316,34 @@ impl Engine {
             .total_ms)
     }
 
-    /// One mixed (chunked-prefill + decode) step latency. Mirrors Python
-    /// `_get_mix_step_latency` (`base_backend.py:706`) via the same FPM
-    /// parameter packing the live ctypes bridge
-    /// (`rust_engine_step.estimate_mixed_step_latency_with_rust`) uses, so the
-    /// numbers match Python to within the parity tolerance.
-    ///
-    /// The packing reproduces the bridge's FPM build + the session unpack in
-    /// `session::rank_latency_ms`, then calls the shared
-    /// [`get_mix_step_ops`] composition over this engine's op lists:
+    /// One mixed (chunked-prefill + decode) step latency. LITERAL mirror of
+    /// Python `_get_mix_step_latency` (`base_backend.py:925-1050`), which
+    /// composes three `run_static` calls and filters the per-op breakdown by
+    /// name:
     ///
     /// ```text
-    /// // prefill chunk (FPM build)
-    /// n_prefill   = max(ceil(ctx_tokens / isl), 1)
-    /// cached_total= prefix * n_prefill
-    /// new_prefill = ctx_tokens - cached_total (>=1) if cached_total else ctx_tokens
-    /// // decode (FPM build, with the (nextn+1) MTP multiplier)
-    /// eff_gen     = gen_tokens * (nextn + 1)
-    /// kv_total    = eff_gen * (isl + osl/2)
-    /// // session unpack -> get_mix_step_ops args
-    /// new_tokens_per_req = new_prefill / n_prefill
-    /// prefix_per_req     = cached_total / n_prefill
-    /// combined_prefix    = cached_total
-    /// kv_per_decode      = kv_total / eff_gen
-    /// decode_batch       = eff_gen
-    /// ctx_tokens(arg)    = new_prefill   // == sum_prefill_tokens
-    /// gen_tokens(arg)    = eff_gen       // == num_decode_requests
+    /// // Pass 1 — combined non-attention work:
+    /// //   run_static(batch=1, isl=ctx+gen, osl=1,
+    /// //              prefix=prefix*floor(ctx/isl), mode=static_ctx)
+    /// //   sum every op EXCEPT "context_attention"
+    /// // Pass 2 — context attention at the prefill shape:
+    /// //   run_static(batch=ceil(ctx/isl), isl=isl, osl=1, prefix=prefix)
+    /// //   take ONLY "context_attention", divide by ceil(isl/ctx)
+    /// // Pass 3 — decode attention (only when gen_tokens > 0):
+    /// //   run_static(batch=gen, isl=isl+osl//2, osl=2, mode=static_gen)
+    /// //   -> one step at s = isl + osl//2 + 1 with the (nextn+1) batch
+    /// //   take ONLY "generation_attention"
     /// ```
+    ///
+    /// Note the Python conventions this deliberately preserves (they differed
+    /// from the pre-rewrite FPM packing): pass 1 uses the RAW `ctx + gen`
+    /// token count (no `(nextn+1)` inflation — the MTP multiplier applies only
+    /// to the pass-3 decode batch via `_run_generation_phase`), the cached
+    /// prefix multiplier is `floor(ctx/isl)` (not ceil), and the pass-3 kv
+    /// position carries `_run_generation_phase`'s `+1`.
+    ///
+    /// The imbalance-correction scales mirror the `RuntimeConfig` fields
+    /// Python threads into each pass (`base_backend.py:950-1043`).
     pub fn mixed_step_latency(
         &self,
         ctx_tokens: u32,
@@ -339,69 +351,107 @@ impl Engine {
         isl: u32,
         osl: u32,
         prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
     ) -> Result<f64, AicError> {
-        let isl = isl.max(1);
-        let osl = osl.max(1);
-
-        // ---- Prefill chunk FPM build (mirrors the bridge) ----
-        let (sum_prefill_tokens, sum_prefill_kv_tokens, n_prefill) = if ctx_tokens > 0 {
-            let n_prefill = ctx_tokens.div_ceil(isl).max(1);
-            let cached_total = prefix * n_prefill;
-            let new_prefill = if cached_total > 0 {
-                ctx_tokens.saturating_sub(cached_total).max(1)
-            } else {
-                ctx_tokens
-            };
-            (new_prefill, cached_total, n_prefill)
-        } else {
-            (0, 0, 0)
-        };
-
-        // ---- Decode FPM build with the (nextn + 1) MTP multiplier ----
-        let (num_decode_requests, sum_decode_kv_tokens) = if gen_tokens > 0 {
-            let eff_gen = gen_tokens.saturating_mul(self.nextn.saturating_add(1));
-            let kv_per_req = isl.saturating_add(osl / 2);
-            (eff_gen, eff_gen.saturating_mul(kv_per_req))
-        } else {
-            (0, 0)
-        };
-
-        if sum_prefill_tokens == 0 && num_decode_requests == 0 {
+        if ctx_tokens == 0 && gen_tokens == 0 {
             return Ok(0.0);
         }
+        // Python divides by `isl` (`floor(ctx/isl)`, `ceil(ctx/isl)`) without
+        // a guard — callers always pass isl >= 1. Clamp to avoid a Rust
+        // div-by-zero panic on degenerate input Python would crash on.
+        let isl = isl.max(1);
+        let mut total = 0.0_f64;
 
-        // ---- Session unpack (mirrors session::rank_latency_ms) ----
-        let n_prefill_safe = n_prefill.max(1);
-        let new_tokens_per_req = (sum_prefill_tokens / n_prefill_safe).max(1);
-        let prefix_per_req = sum_prefill_kv_tokens / n_prefill_safe;
-        let n_decode_safe = num_decode_requests.max(1);
-        let kv_per_decode = sum_decode_kv_tokens / n_decode_safe;
-
-        crate::session::get_mix_step_ops(
+        // ---- Pass 1: combined non-attention work ----
+        let combined = ctx_tokens + gen_tokens;
+        let prefix1 = prefix * (ctx_tokens / isl); // prefix * floor(ctx/isl)
+        if prefix1 >= combined {
+            return Err(AicError::InvalidEngineConfig(format!(
+                "isl must be greater than 0 after removing prefix, but got {}",
+                combined as i64 - prefix1 as i64
+            )));
+        }
+        total += run_context_ops(
             &self.context_ops,
-            &self.generation_ops,
             &self.db,
-            sum_prefill_tokens,
-            num_decode_requests,
-            new_tokens_per_req,
-            prefix_per_req,
-            sum_prefill_kv_tokens,
-            kv_per_decode,
-            num_decode_requests,
-        )
+            1,
+            combined - prefix1,
+            prefix1,
+            seq_imbalance_correction_scale,
+            ContextOpFilter::SkipContextAttention,
+        )?;
+
+        // ---- Pass 2: context attention at the prefill shape ----
+        // Python: batch = ceil(ctx/isl), effective_isl = isl - prefix, then
+        // latency["context_attention"] / ceil(isl/ctx). With ctx_tokens == 0
+        // Python's `np.ceil(isl/0)` is +inf and the division yields 0 — skip.
+        if ctx_tokens > 0 {
+            if prefix >= isl {
+                return Err(AicError::InvalidEngineConfig(format!(
+                    "isl must be greater than 0 after removing prefix, but got {}",
+                    isl as i64 - prefix as i64
+                )));
+            }
+            let batch2 = ctx_tokens.div_ceil(isl);
+            let scale2 = isl.div_ceil(ctx_tokens) as f64;
+            let attn = run_context_ops(
+                &self.context_ops,
+                &self.db,
+                batch2,
+                isl - prefix,
+                prefix,
+                seq_imbalance_correction_scale,
+                ContextOpFilter::OnlyContextAttention,
+            )?;
+            total += attn / scale2;
+        }
+
+        // ---- Pass 3: decode attention ----
+        if gen_tokens > 0 {
+            let bs = gen_tokens.saturating_mul(self.nextn.saturating_add(1));
+            // `_run_generation_phase` queries at s = isl_pass3 + i + 1 with
+            // isl_pass3 = isl + osl//2 and a single step (osl=2, i=0).
+            let s = isl + osl / 2 + 1;
+            total += run_generation_ops_step(
+                &self.generation_ops,
+                &self.db,
+                bs,
+                s,
+                gen_seq_imbalance_correction_scale,
+                true,
+            )?;
+        }
+
+        Ok(total)
     }
 
-    /// One generation-only step latency. Mirrors Python
-    /// `_get_genonly_step_latency` (`base_backend.py:834`) /
-    /// `rust_engine_step.estimate_decode_step_latency_with_rust`: one decode
-    /// step at `s = isl + osl/2` with the decode batch scaled by `(nextn + 1)`.
-    pub fn decode_step_latency(&self, gen_tokens: u32, isl: u32, osl: u32) -> Result<f64, AicError> {
+    /// One generation-only step latency. LITERAL mirror of Python
+    /// `_get_genonly_step_latency` (`base_backend.py:1040-1100`):
+    /// `run_static(batch=gen_tokens, isl=isl+osl//2, osl=2, mode=static_gen)`
+    /// summed over the FULL generation op list — one step at
+    /// `s = isl + osl//2 + 1` (note `_run_generation_phase`'s `+1`) with the
+    /// decode batch scaled by `(nextn + 1)`.
+    pub fn decode_step_latency(
+        &self,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> Result<f64, AicError> {
         if gen_tokens == 0 {
             return Ok(0.0);
         }
         let effective_batch = gen_tokens.saturating_mul(self.nextn.saturating_add(1));
-        let context_length = isl.max(1).saturating_add(osl.max(1) / 2);
-        run_generation_ops_step(&self.generation_ops, &self.db, effective_batch, context_length)
+        let s = isl.max(1).saturating_add(osl.max(1) / 2).saturating_add(1);
+        run_generation_ops_step(
+            &self.generation_ops,
+            &self.db,
+            effective_batch,
+            s,
+            gen_seq_imbalance_correction_scale,
+            false,
+        )
     }
 
     /// Compute one forward-pass latency from a list of per-rank FPM entries.
@@ -490,13 +540,22 @@ impl Engine {
                 n_prefill,
                 new_tokens_per_req,
                 prefix_per_req,
+                1.0,
+                ContextOpFilter::All,
             )?;
         }
 
         if has_decode {
             let n_decode = sched.num_decode_requests.max(1);
             let kv_per_req = sched.sum_decode_kv_tokens / n_decode;
-            total += run_generation_ops_step(&self.generation_ops, &self.db, n_decode, kv_per_req)?;
+            total += run_generation_ops_step(
+                &self.generation_ops,
+                &self.db,
+                n_decode,
+                kv_per_req,
+                1.0,
+                false,
+            )?;
         }
 
         Ok(total)
@@ -531,6 +590,7 @@ mod tests {
                 name: "rmsnorm".into(),
                 scale_factor: 1.0,
                 bytes_per_token: 8192.0,
+                scale_num_tokens: 1,
                 seq_split: 1,
             }),
             Op::Gemm(GemmOp {
@@ -564,6 +624,7 @@ mod tests {
                 name: "rmsnorm".into(),
                 scale_factor: 1.0,
                 bytes_per_token: 8192.0,
+                scale_num_tokens: 1,
                 seq_split: 1,
             }),
             Op::GenerationAttention(GenerationAttentionOp {
@@ -686,6 +747,8 @@ mod tests {
             engine.database(),
             1, // batch_size * (nextn+1), nextn=0
             1024 + 0 + 1,
+            1.0,
+            false,
         )
         .unwrap();
         assert!((coarse.generation_ms - one_step * 8.0).abs() < 1e-6);
@@ -715,7 +778,7 @@ mod tests {
     #[test]
     fn mixed_step_empty_is_zero() {
         let engine = build_engine(None);
-        assert_eq!(engine.mixed_step_latency(0, 0, 1024, 8, 0).unwrap(), 0.0);
+        assert_eq!(engine.mixed_step_latency(0, 0, 1024, 8, 0, 1.0, 1.0).unwrap(), 0.0);
     }
 
     #[test]
@@ -725,7 +788,7 @@ mod tests {
         // End-to-end parity is covered by the mixed-step parity cases; this is
         // the fast pure-Rust smoke that the composition actually computes.
         let engine = build_engine(None);
-        let ms = engine.mixed_step_latency(1024, 2, 1024, 8, 0).unwrap();
+        let ms = engine.mixed_step_latency(1024, 2, 1024, 8, 0, 1.0, 1.0).unwrap();
         assert!(ms > 0.0 && ms.is_finite(), "mixed-step latency must be > 0, got {ms}");
     }
 
@@ -752,6 +815,8 @@ mod tests {
             engine_nextn1.database(),
             2,
             1024 + 1,
+            1.0,
+            false,
         )
         .unwrap();
         assert!(

@@ -8,9 +8,12 @@
 //! P2P latency is computed analytically by the operator layer from
 //! `SystemSpec` fields, not from a CSV, so there's no `P2PTable` here.
 //!
-//! Query APIs take *effective* tp_size / num_gpus values — the operator is
-//! responsible for capping to the node fan-out and applying any
-//! cross-rack bandwidth correction factor (those depend on `SystemSpec`).
+//! The `*_scaled` query APIs take RAW tp_size / num_gpus values and own the
+//! full Python DB-level semantics (node-fan-out capping, beyond-range
+//! bandwidth correction, and the GB200-NVL72 custom-AR -> NCCL reroute) so
+//! every consumer inherits them, exactly like Python's `_query_*_table`
+//! funnels. The non-`_scaled` variants take *effective* values and only
+//! interpolate the table.
 //! Rows with `_eager` kernel sources are filtered out at load time per
 //! Python's `CustomAllReduce.load_data` behavior; the production path uses
 //! CUDA-graph variants.
@@ -25,6 +28,7 @@ use std::sync::OnceLock;
 
 use crate::common::enums::CommQuantMode;
 use crate::common::error::AicError;
+use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
 use super::{kernel_source_ok, resolve_op_sources};
 use super::perf_interp::{self, Node, OpInterpConfig};
@@ -114,7 +118,7 @@ impl CommunicationTable {
         &self,
         quant: CommQuantMode,
         tp_size_effective: u32,
-        message_size: u64,
+        message_size: f64,
     ) -> Result<f64, AicError> {
         if tp_size_effective <= 1 {
             return Ok(0.0);
@@ -128,6 +132,70 @@ impl CommunicationTable {
             ))
         })?;
         interp_message_size(by_size, message_size)
+    }
+
+    /// Custom-allreduce latency at a RAW tp_size, mirroring the full Python
+    /// DB-level `_query_custom_allreduce_table.get_silicon`
+    /// (operations/communication.py) so every consumer inherits the same
+    /// semantics:
+    ///   1. `tp == 1` -> 0;
+    ///   2. GB200 NVL72 (`num_gpus_per_node == 72`) with `tp > 4` -> reroute
+    ///      to NCCL all_reduce at the RAW tp (custom AR is only collected up
+    ///      to tp4 there);
+    ///   3. clamp tp to the node size and interpolate the table;
+    ///   4. beyond-node overflow: scale by the p2p-bandwidth ratio.
+    pub fn query_custom_allreduce_scaled(
+        &self,
+        spec: &SystemSpec,
+        quant: CommQuantMode,
+        tp_size: u32,
+        message_size: f64,
+    ) -> Result<f64, AicError> {
+        if tp_size <= 1 {
+            return Ok(0.0);
+        }
+        let per_node = spec.node.num_gpus_per_node;
+        if per_node == 72 && tp_size > 4 {
+            return self.query_nccl_scaled(spec, quant, "all_reduce", tp_size, message_size);
+        }
+        let effective_tp = tp_size.min(per_node);
+        let mut latency = self.query_custom_allreduce(quant, effective_tp, message_size)?;
+        if tp_size > per_node {
+            let base_bw = spec.get_p2p_bandwidth(per_node);
+            let target_bw = spec.get_p2p_bandwidth(tp_size);
+            let f_tp = tp_size as f64;
+            let f_pn = per_node as f64;
+            latency *= (f_tp - 1.0) / f_tp * f_pn / (f_pn - 1.0).max(1.0) * base_bw / target_bw;
+        }
+        Ok(latency)
+    }
+
+    /// NCCL collective latency at a RAW num_gpus, mirroring the Python
+    /// DB-level `_query_nccl_table.get_silicon`: fan-out capped to the max
+    /// recorded `num_gpus` for the (dtype, operation) slice, with the
+    /// p2p-bandwidth correction applied beyond it.
+    pub fn query_nccl_scaled(
+        &self,
+        spec: &SystemSpec,
+        dtype: CommQuantMode,
+        operation: &str,
+        num_gpus: u32,
+        message_size: f64,
+    ) -> Result<f64, AicError> {
+        if num_gpus <= 1 {
+            return Ok(0.0);
+        }
+        let max_recorded = self.nccl_max_num_gpus(dtype, operation)?.unwrap_or(num_gpus);
+        let effective = num_gpus.min(max_recorded);
+        let mut latency = self.query_nccl(dtype, operation, effective, message_size)?;
+        if num_gpus > max_recorded {
+            let max_bw = spec.get_p2p_bandwidth(max_recorded);
+            let req_bw = spec.get_p2p_bandwidth(num_gpus);
+            let f_n = num_gpus as f64;
+            let f_m = max_recorded as f64;
+            latency *= (f_n - 1.0) / f_n * f_m / (f_m - 1.0).max(1.0) * max_bw / req_bw;
+        }
+        Ok(latency)
     }
 
     /// Raw NCCL collective latency in ms.
@@ -144,7 +212,7 @@ impl CommunicationTable {
         dtype: CommQuantMode,
         operation: &str,
         num_gpus_effective: u32,
-        message_size: u64,
+        message_size: f64,
     ) -> Result<f64, AicError> {
         if num_gpus_effective <= 1 {
             return Ok(0.0);
@@ -239,7 +307,11 @@ impl CommunicationTable {
 /// The query coordinate is passed as `f64` without truncation (Python does
 /// none). Table keys clamp to `u32` only as a defensive bound; every shipped
 /// comm table tops out at 512 MiB message sizes, well under `u32::MAX`.
-fn interp_message_size(by_size: &BTreeMap<u64, f64>, message_size: u64) -> Result<f64, AicError> {
+/// Interpolate the 1-D size curve at a possibly FRACTIONAL message size —
+/// Python keeps float element counts (e.g. the gemma4 CP KV all-gather sizes
+/// `kvcache_bytes_per_token / comm_bytes`), and the engine query coordinate
+/// is float anyway. Truncating to integer first shifted the lerp point.
+fn interp_message_size(by_size: &BTreeMap<u64, f64>, message_size: f64) -> Result<f64, AicError> {
     if by_size.is_empty() {
         return Err(AicError::PerfDatabase(
             "comm data has no message_size points".to_string(),
@@ -251,7 +323,7 @@ fn interp_message_size(by_size: &BTreeMap<u64, f64>, message_size: u64) -> Resul
     }
     let sol = |c: &[f64]| c[0];
     let cfg = OpInterpConfig::grid(&["message_bytes"], &sol);
-    perf_interp::query(&cfg, &node, &[message_size as f64])
+    perf_interp::query(&cfg, &node, &[message_size])
 }
 
 fn load_custom_allreduce_parquet(sources: &[PerfSource]) -> Result<CustomAllReduceGrids, AicError> {
@@ -377,7 +449,7 @@ mod tests {
     fn custom_allreduce_tp1_is_zero() {
         let table = CommunicationTable::new(b200_vllm_data_root(), None, None);
         let latency = table
-            .query_custom_allreduce(CommQuantMode::Half, 1, 1024)
+            .query_custom_allreduce(CommQuantMode::Half, 1, 1024.0)
             .expect("tp=1 is a no-op");
         assert_eq!(latency, 0.0);
     }
@@ -395,7 +467,7 @@ mod tests {
         let table = CommunicationTable::new(b200_sglang_data_root(), None, None);
         // SGLang b200 ships custom_allreduce data; pick a small message
         // and a TP that exists.
-        let result = table.query_custom_allreduce(CommQuantMode::Half, 2, 1024);
+        let result = table.query_custom_allreduce(CommQuantMode::Half, 2, 1024.0);
         match result {
             Ok(latency) => assert!(latency > 0.0, "expected positive latency"),
             Err(AicError::PerfDatabase(_)) => {
@@ -409,7 +481,7 @@ mod tests {
     fn nccl_num_gpus_1_is_zero() {
         let table = CommunicationTable::new(b200_vllm_data_root(), None, None);
         let latency = table
-            .query_nccl(CommQuantMode::Half, "all_reduce", 1, 1024)
+            .query_nccl(CommQuantMode::Half, "all_reduce", 1, 1024.0)
             .expect("num_gpus=1 is a no-op");
         assert_eq!(latency, 0.0);
     }
@@ -455,7 +527,7 @@ mod tests {
         ];
         for &(msg, expected) in cases {
             let got = table
-                .query_nccl(CommQuantMode::Half, "all_gather", 8, msg)
+                .query_nccl(CommQuantMode::Half, "all_gather", 8, msg as f64)
                 .expect("query must succeed");
             assert!(
                 ((got - expected) / expected).abs() < 1e-9,
@@ -471,7 +543,7 @@ mod tests {
         // rather than silently degrading.
         let table = CommunicationTable::new(b200_vllm_data_root(), None, None);
         let err = table
-            .query_nccl(CommQuantMode::Half, "all_reduce", 2, 1024)
+            .query_nccl(CommQuantMode::Half, "all_reduce", 2, 1024.0)
             .unwrap_err();
         match err {
             AicError::PerfDatabase(msg) => {

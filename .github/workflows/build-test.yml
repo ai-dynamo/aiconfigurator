@@ -233,6 +233,16 @@ jobs:
         run: |
           VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" \
             "${GITHUB_WORKSPACE}/.venv/bin/maturin" develop --release
+      - name: Run Rust unit tests (cargo test)
+        # The crate's own oracle/unit tests were previously NOT in any gate,
+        # which let "match Python" pins go stale silently (e.g. the b200
+        # mem_bw test survived a YAML correction unnoticed). The py:: binding
+        # tests self-initialize the interpreter (prepare_freethreaded_python),
+        # so plain `cargo test --lib` covers them; PYO3_PYTHON pins the venv
+        # interpreter for linking.
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: cargo test --release --lib
       - name: Run Rust/Python engine-step parity suite
         run: |
           "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx \

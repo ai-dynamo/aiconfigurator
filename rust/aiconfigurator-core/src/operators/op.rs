@@ -21,6 +21,7 @@ use crate::operators::{
     ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4ModuleOp,
     ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
     GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
+    TrtllmWideEpMoEDispatchOp,
     NcclOp, P2POp, PerformanceResult, Source, VisionEncoderOp, WideEpContextMlaOp,
     WideEpGenerationMlaOp, WideEpMoeOp,
 };
@@ -122,8 +123,12 @@ pub enum Op {
     WideEpGenerationMla(WideEpGenerationMlaOp),
     /// TensorRT-LLM WideEP MoE compute. Used by the
     /// `TrtllmWideEPDeepSeekModel` variant; dispatch / combine cost is
-    /// modeled separately by `MoEDispatchOp` (TrtllmAlltoall flavor).
+    /// modeled separately by `WideEpMoeDispatch`.
     WideEpMoe(WideEpMoeOp),
+    /// TensorRT-LLM WideEP All2All dispatch (prepare+dispatch / combine).
+    /// Mirrors Python `TrtLLMWideEPMoEDispatch` — a direct `Operation`
+    /// subclass, NOT a `MoEDispatch` flavor.
+    WideEpMoeDispatch(TrtllmWideEpMoEDispatchOp),
     /// Two op groups that execute in parallel on different CUDA streams.
     /// Mirrors Python `aiconfigurator.sdk.operations.overlap.OverlapOp`:
     /// `latency = max(sum(group_a), sum(group_b))`.
@@ -208,6 +213,7 @@ impl Op {
             Op::WideEpContextMla(o) => &o.name,
             Op::WideEpGenerationMla(o) => &o.name,
             Op::WideEpMoe(o) => &o.name,
+            Op::WideEpMoeDispatch(o) => &o.name,
             Op::Overlap(o) => &o.name,
             Op::Fallback(o) => &o.name,
         }
@@ -288,6 +294,7 @@ impl Op {
             Op::WideEpContextMla(op) => op.query(db, ctx.batch_size, ctx.s, ctx.prefix),
             Op::WideEpGenerationMla(op) => op.query(db, ctx.batch_size, ctx.s),
             Op::WideEpMoe(op) => op.query(db, ctx.num_tokens),
+            Op::WideEpMoeDispatch(op) => op.query(db, ctx.num_tokens),
             Op::Overlap(op) => {
                 // Mirrors Python `OverlapOp.query`: each group is summed
                 // independently, then `max(group_a_total, group_b_total)` is

@@ -94,12 +94,12 @@ def test_mixed_and_decode_helpers_pass_raw_step_args(monkeypatch) -> None:
     decode_calls = []
 
     class _FakeHandle:
-        def mixed_step_latency(self, *args):
-            mixed_calls.append(args)
+        def mixed_step_latency(self, *args, **kwargs):
+            mixed_calls.append((args, kwargs))
             return 8.5
 
-        def decode_step_latency(self, *args):
-            decode_calls.append(args)
+        def decode_step_latency(self, *args, **kwargs):
+            decode_calls.append((args, kwargs))
             return 9.5
 
     monkeypatch.setattr(rust_engine_step, "_cached_engine_handle", lambda model, database: _FakeHandle())
@@ -126,8 +126,15 @@ def test_mixed_and_decode_helpers_pass_raw_step_args(monkeypatch) -> None:
 
     assert mixed_ms == 8.5
     assert decode_ms == 9.5
-    assert mixed_calls == [(384, 7, 256, 256, 128)]
-    assert decode_calls == [(7, 256, 256)]
+    # Raw step args pass through positionally; the runtime imbalance scales
+    # ride as kwargs (default 1.0 when the caller doesn't set them).
+    assert mixed_calls == [
+        (
+            (384, 7, 256, 256, 128),
+            {"seq_imbalance_correction_scale": 1.0, "gen_seq_imbalance_correction_scale": 1.0},
+        )
+    ]
+    assert decode_calls == [((7, 256, 256), {"gen_seq_imbalance_correction_scale": 1.0})]
 
 
 def test_engine_config_json_preserves_moe_specific_quant_mode() -> None:
@@ -365,6 +372,103 @@ def test_sparse_cp_ops_emit_cp_fields_in_spec():
     spec = _dsv4_module(_Dsv4Op(), architecture="DeepseekV4ForCausalLM")
     assert spec["cp_size"] == 2
     assert spec["window_size"] == 2048
+
+
+def test_engine_config_json_identity_disambiguates_collapsed_quant_modes():
+    """Two models differing only in a wire-collapsed dtype (sq vs int8_wo both
+    -> "int8") or an identity-omitted ModelConfig field (moe_backend) must get
+    DISTINCT handle-cache keys — sharing one cached handle silently returns
+    the other model's latencies."""
+    from aiconfigurator.sdk import common
+
+    def _model(gemm_mode, moe_backend=None):
+        cfg = SimpleNamespace(
+            tp_size=8,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=1,
+            cp_size=None,
+            gemm_quant_mode=gemm_mode,
+            moe_quant_mode=None,
+            fmha_quant_mode=None,
+            kvcache_quant_mode=None,
+            comm_quant_mode=None,
+            moe_backend=moe_backend,
+            attention_backend=None,
+            enable_wideep=False,
+            enable_eplb=False,
+            wideep_num_slots=None,
+            cp_style=None,
+            workload_distribution=None,
+            overwrite_num_layers=None,
+            sms=None,
+        )
+        return SimpleNamespace(model_path="test/model", architecture=None, config=cfg, _nextn=None)
+
+    database = SimpleNamespace(system="test_sxm", backend="vllm", version="1.0.0")
+    key_sq = rust_engine_step._engine_config_json(_model(common.GEMMQuantMode.sq), database)
+    key_int8 = rust_engine_step._engine_config_json(_model(common.GEMMQuantMode.int8_wo), database)
+    assert key_sq != key_int8, "sq and int8_wo must not alias one cached handle"
+
+    key_deepep = rust_engine_step._engine_config_json(
+        _model(common.GEMMQuantMode.sq, moe_backend="deepep_moe"), database
+    )
+    assert key_sq != key_deepep, "moe_backend must participate in the cache identity"
+
+
+def test_op_conversion_error_falls_back_to_python_step(monkeypatch):
+    """An OpConversionError (op graph not expressible in Rust) must be
+    surfaced as RustEngineUnsupportedError, cached per engine identity, and
+    caught by the base_backend gates (fallback to the Python step) — NOT
+    crash the sweep."""
+    import pytest
+
+    from aiconfigurator.sdk.engine import OpConversionError
+    from aiconfigurator.sdk.rust_engine_step import RustEngineUnsupportedError
+
+    calls = {"n": 0}
+
+    def _raise_conversion(*args, **kwargs):
+        calls["n"] += 1
+        raise OpConversionError("unsupported op: ContextMSAModule")
+
+    monkeypatch.setattr("aiconfigurator.sdk.engine.build_engine_spec_json", _raise_conversion)
+    rust_engine_step._engine_handle_cache_clear()
+
+    model = _dense_model()
+    database = SimpleNamespace(system="test_sxm", backend="vllm", version="1.0.0")
+
+    with pytest.raises(RustEngineUnsupportedError):
+        rust_engine_step._cached_engine_handle(model, database)
+    # Second call re-raises from the cache without recompiling.
+    with pytest.raises(RustEngineUnsupportedError):
+        rust_engine_step._cached_engine_handle(model, database)
+    assert calls["n"] == 1, "compile failure must be memoized per engine identity"
+    rust_engine_step._engine_handle_cache_clear()
+
+
+def test_wideep_mla_spec_emits_per_rank_heads_not_tp():
+    """The WideEP MLA table axis is per-rank heads; the Python query converts
+    ``num_heads = 128 // tp_size`` (mla.py). The spec emitter must apply the
+    same conversion — emitting raw tp_size makes Rust query the wrong table
+    slice (tp=8 would read the heads=8 extrapolation instead of heads=16)."""
+    from aiconfigurator.sdk import common
+    from aiconfigurator.sdk.engine import _wideep_context_mla, _wideep_generation_mla
+
+    class _WideEpOp:
+        _name = "context_attention"
+        _scale_factor = 1.0
+        _tp_size = 8
+        _cp_size = 1
+        _kvcache_quant_mode = common.KVCacheQuantMode.fp8
+        _fmha_quant_mode = common.FMHAQuantMode.fp8_block
+        _attn_backend = "flashinfer"
+
+    ctx_spec = _wideep_context_mla(_WideEpOp())
+    gen_spec = _wideep_generation_mla(_WideEpOp())
+    assert ctx_spec["num_heads"] == 16  # 128 // 8, NOT tp_size=8
+    assert gen_spec["num_heads"] == 16
 
 
 def test_non_silicon_database_mode_falls_back_to_python_step():

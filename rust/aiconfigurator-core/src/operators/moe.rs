@@ -45,6 +45,22 @@ pub struct MoeOp {
     /// `moe_torch_flow_min_latency` kernel is only valid for gated nvfp4
     /// MoE; non-gated paths (e.g. NemotronH) must skip it.
     pub is_gated: bool,
+    /// SGLang MoE backend (Python `MoE._moe_backend`). `Some("deepep_moe")`
+    /// routes the compute lookup to the wideep context/generation MoE tables
+    /// instead of `moe_perf` (operations/moe.py sglang branch). Absent in
+    /// pre-existing specs -> None -> the regular table.
+    #[serde(default)]
+    pub moe_backend: Option<String>,
+    /// EPLB enabled (Python `MoE._enable_eplb`). On the sglang branch the
+    /// PREFILL token count is corrected to `int(num_tokens * 0.8)`
+    /// (operations/moe.py: expert-parallel load balancing evens the
+    /// per-expert token distribution).
+    #[serde(default)]
+    pub enable_eplb: bool,
+    /// Context (prefill) op — selects the wideep CONTEXT MoE table under
+    /// deepep and gates the EPLB prefill correction (Python `MoE._is_context`).
+    #[serde(default)]
+    pub is_context: bool,
 }
 
 impl MoeOp {
@@ -72,6 +88,9 @@ impl MoeOp {
             quant_mode,
             workload_distribution: workload_distribution.into(),
             is_gated: true,
+            moe_backend: None,
+            enable_eplb: false,
+            is_context: false,
         }
     }
 
@@ -81,6 +100,15 @@ impl MoeOp {
         // `MoE.query` (`x = x * attention_dp_size`). Applied exactly once,
         // before the perf-DB resolution keys off the token count.
         let num_tokens = num_tokens.saturating_mul(self.attention_dp_size.max(1));
+        let is_sglang = db.backend == "sglang";
+        // SGLang EPLB prefill correction (Python operations/moe.py:
+        // `num_tokens_corrected = int(num_tokens * 0.8) if enable_eplb and
+        // is_context else num_tokens`, sglang branch only).
+        let num_tokens = if is_sglang && self.enable_eplb && self.is_context {
+            (num_tokens as f64 * 0.8) as u32
+        } else {
+            num_tokens
+        };
         // The roofline SOL the perf-DB engine anchors its beyond-range
         // util-hold on (Python `_resolve_tokens` passes the same closure).
         // Coordinates arriving from the engine are always integral (table
@@ -89,6 +117,44 @@ impl MoeOp {
         // deleted op-level SOL-anchored overflow estimator (the engine's
         // `k_tail=1` util-hold handles beyond-range queries).
         let sol = |t: f64| self.sol_latency_ms(db, t.round() as u32);
+
+        // SGLang DeepEP (wideep) routes MoE compute to the wideep
+        // context/generation tables (Python operations/moe.py:
+        // `if moe_backend == "deepep_moe": moe_data = _wideep_*_moe_data`),
+        // resolved through the SAME `_resolve_tokens` semantics (singleton
+        // guard + MoE-roofline util-hold, threaded via `sol`).
+        if is_sglang && self.moe_backend.as_deref() == Some("deepep_moe") {
+            let latency = if self.is_context {
+                db.wideep.query_context_moe(
+                    num_tokens,
+                    self.hidden_size,
+                    self.inter_size,
+                    self.topk,
+                    self.num_experts,
+                    self.moe_tp_size,
+                    self.moe_ep_size,
+                    self.quant_mode,
+                    &self.workload_distribution,
+                    &sol,
+                )?
+            } else {
+                db.wideep.query_generation_moe(
+                    num_tokens,
+                    self.hidden_size,
+                    self.inter_size,
+                    self.topk,
+                    self.num_experts,
+                    self.moe_tp_size,
+                    self.moe_ep_size,
+                    self.quant_mode,
+                    &self.workload_distribution,
+                    &sol,
+                )?
+            };
+            return Ok(PerformanceResult::new(latency, Source::Silicon)
+                .clamp_non_negative()
+                .scaled(self.scale_factor));
+        }
 
         // Mirrors Python's MoE._query_moe_table TRT-LLM gate: for nvfp4
         // gated MoE at num_tokens <= 128, probe the
@@ -206,6 +272,9 @@ mod tests {
             workload_distribution: "power_law_1.2".into(),
             attention_dp_size,
             is_gated: true,
+            moe_backend: None,
+            enable_eplb: false,
+            is_context: false,
         }
     }
 

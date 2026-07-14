@@ -226,6 +226,12 @@ pub struct EncoderAttentionOp {
     pub n: u32,
     pub head_size: u32,
     pub fmha_quant_mode: FmhaQuantMode,
+    /// Partial-RoPE fraction (Python `_partial_rotary_factor`): 1.0 = full
+    /// rotation, 0.5 = half head_dim rotated (Qwen3-VL), 0.0 = no RoPE.
+    /// Adds `factor * 2 * mem_op(Q+K bytes) * 1.1` on top of the table
+    /// latency. Defaults to 0.0 for pre-field opspecs.
+    #[serde(default)]
+    pub partial_rotary_factor: f64,
 }
 
 impl EncoderAttentionOp {
@@ -241,6 +247,7 @@ impl EncoderAttentionOp {
             n,
             head_size,
             fmha_quant_mode,
+            partial_rotary_factor: 0.0,
         }
     }
 
@@ -250,13 +257,23 @@ impl EncoderAttentionOp {
         batch_size: u32,
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
-        let latency = db.attention.query_encoder(
+        let mut latency = db.attention.query_encoder(
             batch_size,
             s,
             self.n,
             self.head_size,
             self.fmha_quant_mode,
         )?;
+        // Partial RoPE extra (Python `EncoderAttention.query`,
+        // operations/attention.py): Q + K bytes (bf16) over all tokens,
+        // rotated fractionally, with the 1.1 correction factor.
+        if self.partial_rotary_factor > 0.0 {
+            let qk_num = (self.n as u64) * (self.head_size as u64); // MHA: q == k
+            let qk_bytes = 2 * (qk_num * 2) * (batch_size as u64) * (s as u64);
+            let apply_rope =
+                self.partial_rotary_factor * 2.0 * mem_op_latency_ms(&db.system_spec, qk_bytes as f64);
+            latency += apply_rope * 1.1;
+        }
         Ok(PerformanceResult::new(latency, Source::Silicon)
             .clamp_non_negative()
             .scaled(self.scale_factor))
@@ -343,10 +360,15 @@ mod tests {
     #[test]
     fn mem_op_latency_uses_empirical_formula() {
         let db = b200_vllm_db();
-        // b200_sxm.yaml: mem_bw=8e12, scaling=0.8, constant=3e-6.
-        // For 1MB: latency = (1e6 / (8e12 * 0.8) + 3e-6) * 1000 = 0.156... + 0.003 = 0.159ms.
-        let latency = mem_op_latency_ms(&db.system_spec, 1_000_000.0);
-        let expected = (1_000_000.0_f64 / (8e12 * 0.8) + 3e-6) * 1000.0;
+        // Formula check against the LIVE spec values (hardcoding mem_bw went
+        // stale when PR #1246 corrected b200 to 7.7 TB/s):
+        // latency = (bytes / (mem_bw * scaling) + constant) * 1000.
+        let spec = &db.system_spec;
+        let latency = mem_op_latency_ms(spec, 1_000_000.0);
+        let expected = (1_000_000.0_f64
+            / (spec.gpu.mem_bw * spec.gpu.mem_bw_empirical_scaling_factor)
+            + spec.gpu.mem_empirical_constant_latency)
+            * 1000.0;
         assert!((latency - expected).abs() < 1e-12);
     }
 }

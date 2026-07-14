@@ -57,6 +57,9 @@ impl CustomAllReduceOp {
     /// count, not bytes) and passes it directly to
     /// `query_custom_allreduce`. Mirror that here — the underlying table
     /// is keyed by element count, with dtype implicit in the quant mode.
+    /// Node-fan-out capping, beyond-node bandwidth scaling and the GB200
+    /// NVL72 -> NCCL reroute all live in the DB-level `_scaled` query
+    /// (mirroring Python's `_query_custom_allreduce_table` funnel).
     pub fn query(
         &self,
         db: &PerfDatabase,
@@ -66,21 +69,13 @@ impl CustomAllReduceOp {
             return Ok(PerformanceResult::zero());
         }
         let per_rank_tokens = num_tokens.div_ceil(self.seq_split.max(1)); // CP: busiest rank
-        let message_size = (per_rank_tokens as u64) * (self.hidden_size as u64);
-        let spec = &db.system_spec;
-        let per_node = spec.node.num_gpus_per_node;
-        let effective_tp = self.tp_size.min(per_node);
-        let mut latency =
-            db.communication
-                .query_custom_allreduce(self.quant, effective_tp, message_size)?;
-        if self.tp_size > per_node {
-            let base_bw = p2p_bandwidth(spec, per_node);
-            let target_bw = p2p_bandwidth(spec, self.tp_size);
-            let f_tp = self.tp_size as f64;
-            let f_pn = per_node as f64;
-            let scale = (f_tp - 1.0) / f_tp * f_pn / (f_pn - 1.0).max(1.0) * base_bw / target_bw;
-            latency *= scale;
-        }
+        let message_size = (per_rank_tokens as f64) * (self.hidden_size as f64);
+        let latency = db.communication.query_custom_allreduce_scaled(
+            &db.system_spec,
+            self.quant,
+            self.tp_size,
+            message_size,
+        )?;
         Ok(PerformanceResult::new(latency, Source::Silicon)
             .clamp_non_negative()
             .scaled(self.scale_factor))
@@ -134,26 +129,19 @@ impl NcclOp {
             return Ok(PerformanceResult::zero());
         }
         let per_rank_tokens = num_tokens.div_ceil(self.seq_split.max(1)); // CP: busiest rank
-        // Python: message_size = ceil(x/seq_split) * num_elements_per_token (float).
-        let message_size = ((per_rank_tokens as f64) * self.hidden_size) as u64;
-        let max_recorded = db
-            .communication
-            .nccl_max_num_gpus(self.dtype, &self.operation)?
-            .unwrap_or(self.num_gpus);
-        let effective = self.num_gpus.min(max_recorded);
-        let mut latency = db
-            .communication
-            .query_nccl(self.dtype, &self.operation, effective, message_size)?;
-        if self.num_gpus > max_recorded {
-            let spec = &db.system_spec;
-            let max_bw = p2p_bandwidth(spec, max_recorded);
-            let req_bw = p2p_bandwidth(spec, self.num_gpus);
-            let f_n = self.num_gpus as f64;
-            let f_m = max_recorded as f64;
-            let scale =
-                (f_n - 1.0) / f_n * f_m / (f_m - 1.0).max(1.0) * max_bw / req_bw;
-            latency *= scale;
-        }
+        // Python: message_size = ceil(x/seq_split) * num_elements_per_token —
+        // kept as a FLOAT (fractional element counts are real: the gemma4 CP
+        // KV all-gather sizes per-token elements as kv_bytes / comm_bytes).
+        let message_size = (per_rank_tokens as f64) * self.hidden_size;
+        // Fan-out capping + beyond-range bandwidth correction live in the
+        // DB-level `_scaled` query (mirroring Python's `_query_nccl_table`).
+        let latency = db.communication.query_nccl_scaled(
+            &db.system_spec,
+            self.dtype,
+            &self.operation,
+            self.num_gpus,
+            message_size,
+        )?;
         Ok(PerformanceResult::new(latency, Source::Silicon)
             .clamp_non_negative()
             .scaled(self.scale_factor))

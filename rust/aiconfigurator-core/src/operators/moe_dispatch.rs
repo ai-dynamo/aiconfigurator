@@ -71,10 +71,74 @@ pub struct MoEDispatchOp {
     /// default, so old opspecs keep the same query point.
     #[serde(default = "default_sms")]
     pub sms: u32,
+    /// Token-count divisor for the DeepEP branches (Python
+    /// `MoEDispatch._scale_num_tokens`, applied as
+    /// `num_tokens // scale_num_tokens` before the deepep table lookup).
+    /// Defaults to 1 (no scaling) for pre-field opspecs.
+    #[serde(default = "crate::operators::gemm::default_seq_split")]
+    pub scale_num_tokens: u32,
 }
 
 fn default_sms() -> u32 {
     12
+}
+
+/// TensorRT-LLM WideEP MoE dispatch (NVLink Two-Sided All2All). Mirrors
+/// Python `operations.moe.TrtLLMWideEPMoEDispatch`:
+///
+/// - pre-dispatch op: `alltoall_prepare` + `alltoall_dispatch` (two queries,
+///   summed);
+/// - post-dispatch op: `alltoall_combine`, or `alltoall_combine_low_precision`
+///   when `use_low_precision_combine` (models set it for nvfp4 generation);
+/// - every query passes `moe_backend="wideep"`, so the kernel auto-selection
+///   resolves `NVLinkTwoSided` on MNNVL (SM >= 100) and the DeepEP variants
+///   on Hopper (see `perf_database::wideep::select_alltoall_kernel`).
+///
+/// `node_num` is never set by the model builders (Python passes None), so the
+/// perf-DB default `1 if ep < 4 else ep // 4` applies.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrtllmWideEpMoEDispatchOp {
+    pub name: String,
+    pub scale_factor: f64,
+    pub hidden_size: u32,
+    pub topk: u32,
+    pub num_experts: u32,
+    pub moe_tp_size: u32,
+    pub moe_ep_size: u32,
+    pub attention_dp_size: u32,
+    pub pre_dispatch: bool,
+    pub quant_mode: MoeQuantMode,
+    #[serde(default)]
+    pub use_low_precision_combine: bool,
+}
+
+impl TrtllmWideEpMoEDispatchOp {
+    pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
+        let spec: &SystemSpec = &db.system_spec;
+        let q = |op_name: &str| {
+            db.wideep.query_trtllm_alltoall(
+                spec,
+                op_name,
+                num_tokens,
+                self.hidden_size,
+                self.topk,
+                self.num_experts,
+                self.moe_ep_size,
+                self.quant_mode,
+                Some("wideep"),
+            )
+        };
+        let latency = if self.pre_dispatch {
+            q("alltoall_prepare")? + q("alltoall_dispatch")?
+        } else if self.use_low_precision_combine {
+            q("alltoall_combine_low_precision")?
+        } else {
+            q("alltoall_combine")?
+        };
+        Ok(PerformanceResult::new(latency, Source::Silicon)
+            .clamp_non_negative()
+            .scaled(self.scale_factor))
+    }
 }
 
 impl MoEDispatchOp {
@@ -107,6 +171,7 @@ impl MoEDispatchOp {
             attn_cp_size: 1,
             is_context: false,
             sms: default_sms(),
+            scale_num_tokens: 1,
         }
     }
 
@@ -296,6 +361,9 @@ impl MoEDispatchOp {
                     .scaled(self.scale_factor))
             }
             DispatchFlavor::DeepEpNormal => {
+                // Python DeepEP branch: `num_tokens = num_tokens //
+                // self._scale_num_tokens` before the table lookup.
+                let num_tokens = num_tokens / self.scale_num_tokens.max(1);
                 let point = db.wideep.query_deepep_normal(
                     self.deepep_node_num(spec)?,
                     self.hidden_size,
@@ -323,6 +391,9 @@ impl MoEDispatchOp {
                     .scaled(self.scale_factor))
             }
             DispatchFlavor::DeepEpLowLatency => {
+                // Python DeepEP branch: `num_tokens = num_tokens //
+                // self._scale_num_tokens` before the table lookup.
+                let num_tokens = num_tokens / self.scale_num_tokens.max(1);
                 let point = db.wideep.query_deepep_ll(
                     self.deepep_node_num(spec)?,
                     self.hidden_size,
@@ -340,76 +411,112 @@ impl MoEDispatchOp {
                     .scaled(self.scale_factor))
             }
             DispatchFlavor::TrtllmAlltoall => {
-                // Port of Python `MoEDispatch.query` trtllm SM100 branch
-                // (operations/moe.py). The Python control flow:
-                //   if backend_supports_alltoall && attention_dp > 1
-                //      && moe_tp == 1 && is_nvl72:    -> trtllm_alltoall table
-                //   elif attention_dp > 1:            -> NCCL all_gather/reduce_scatter
-                //   elif attention_tp > 1:            -> custom_allreduce (when
-                //                                       reduce_results) else 0
-                //   else:                             -> 0
+                // Full port of Python `MoEDispatch.query`'s trtllm branch
+                // (operations/moe.py:1095-1221). Selecting the *flavor* up
+                // front (as the model builder does) cannot encode the gating —
+                // it depends on the system's SM version and NVLink topology —
+                // so `DispatchFlavor::TrtllmAlltoall` means "trtllm dispatch
+                // op; the *path* is picked here at query time with the spec
+                // in hand". Two regimes, split on `sm_version == 100`
+                // EXACTLY like Python (`.get("sm_version", -1) == 100` —
+                // gb300 is sm 103 and takes the else-branch):
                 //
-                // Selecting the *flavor* up front (as the model builder does)
-                // cannot encode this gating — the choice depends on the system's
-                // NVLink topology (`num_gpus_per_node`) and on tp/dp shapes that
-                // are only known with the system spec in hand. So
-                // `DispatchFlavor::TrtllmAlltoall` now means "trtllm SM100
-                // dispatch op; the *table* is picked here at query time".
-                let num_gpus_per_node = spec.node.num_gpus_per_node;
-                let is_nvl72 = num_gpus_per_node >= 72;
-                // `moe_backend` is `None` in all current callers (no caller
-                // sets a non-default backend); treat as supporting alltoall.
-                let backend_supports_alltoall = true;
-                let enable_alltoall = backend_supports_alltoall
-                    && self.attention_dp_size > 1
-                    && self.moe_tp_size == 1
-                    && is_nvl72;
+                //   sm == 100:
+                //     if alltoall (dp>1 && moe_tp==1 && NVL72): alltoall table
+                //       (pre -> alltoall_dispatch, combine -> alltoall_combine)
+                //     elif dp>1: NCCL all_gather((x+sf volumes)*dp) pre /
+                //                reduce_scatter(volume*dp) combine —
+                //                quant-compressed volumes on the pre side
+                //     elif tp>1 && reduce_results: custom_allreduce(num_gpus)
+                //       (the NVL72 tp>4 -> NCCL all_reduce reroute lives in
+                //        the DB-level `query_custom_allreduce_scaled`)
+                //     else 0
+                //   sm != 100 (checks tp FIRST, mirroring Python):
+                //     if tp>1: custom_allreduce(num_gpus, volume)
+                //     elif dp>1: all_gather(volume*dp) pre /
+                //                reduce_scatter(volume*dp) combine
+                //     else 0
+                //
+                // `reduce_results` defaults True in Python and no model
+                // overrides it; `moe_backend` is None in all current callers
+                // (backend_supports_alltoall = true). Python raises when the
+                // alltoall path is taken with quant_mode=None; the Rust op's
+                // `moe_quant` is non-optional so that guard is structural.
+                let num_gpus = (self.moe_tp_size * self.moe_ep_size).max(1);
                 let attention_tp = self.attention_tp_size();
+                let pre = self.pre_dispatch;
+                let sm_version = spec.gpu.sm_version.map(i64::from).unwrap_or(-1);
 
-                if enable_alltoall {
-                    let latency = db.wideep.query_trtllm_alltoall(
-                        num_tokens,
-                        self.hidden_size,
-                        self.topk,
-                        self.num_experts,
-                        self.moe_ep_size,
-                        self.moe_quant,
-                        "uniform",
-                    )?;
-                    Ok(PerformanceResult::new(latency, Source::Silicon)
-                        .clamp_non_negative()
-                        .scaled(self.scale_factor))
-                } else if self.attention_dp_size > 1 {
-                    // Python: query_nccl(half, num_gpus, "all_gather" or
-                    // "reduce_scatter", volume * attention_dp_size).
-                    // No smoke case exercises this branch today (all smoke
-                    // configs use attention_dp_size == 1). The implementation
-                    // is intentionally absent rather than added as untested
-                    // code; a `PerfDatabase` error will surface and any
-                    // future smoke case that hits this path will document
-                    // the need.
-                    Err(AicError::PerfDatabase(format!(
-                        "trtllm MoEDispatch attention_dp_size={}>1 path not yet ported; \
-                         add a smoke case to fix.",
-                        self.attention_dp_size
-                    )))
+                let comm_latency_ms = if sm_version == 100 {
+                    let is_nvl72 = spec.node.num_gpus_per_node >= 72;
+                    let enable_alltoall =
+                        self.attention_dp_size > 1 && self.moe_tp_size == 1 && is_nvl72;
+                    // Quantize-aware dispatch volume factors (elements per
+                    // hidden element): nvfp4 -> x/4 + sf/32; fp8/fp8_block ->
+                    // x/2; others -> full volume (moe.py:1109-1123).
+                    let (x_factor, sf_factor) = match self.moe_quant {
+                        MoeQuantMode::Nvfp4 => (0.25, 0.25 / 8.0),
+                        MoeQuantMode::Fp8 | MoeQuantMode::Fp8Block => (0.5, 0.0),
+                        _ => (1.0, 0.0),
+                    };
+                    if enable_alltoall {
+                        let op_name = if pre { "alltoall_dispatch" } else { "alltoall_combine" };
+                        db.wideep.query_trtllm_alltoall(
+                            spec,
+                            op_name,
+                            num_tokens,
+                            self.hidden_size,
+                            self.topk,
+                            self.num_experts,
+                            self.moe_ep_size,
+                            self.moe_quant,
+                            None,
+                        )?
+                    } else if self.attention_dp_size > 1 {
+                        if pre {
+                            // all_gather((dispatch_x + dispatch_sf) * dp):
+                            // fold the quant compression into the per-token
+                            // element count so NcclOp's `tokens * hidden`
+                            // reproduces Python's message size exactly.
+                            let nccl = NcclOp::new(
+                                &self.name,
+                                1.0,
+                                self.hidden_size as f64 * (x_factor + sf_factor),
+                                num_gpus,
+                                "all_gather",
+                            );
+                            nccl.query(db, num_tokens * self.attention_dp_size)?.latency_ms
+                        } else {
+                            let nccl = NcclOp::new(
+                                &self.name,
+                                1.0,
+                                self.hidden_size as f64,
+                                num_gpus,
+                                "reduce_scatter",
+                            );
+                            nccl.query(db, num_tokens * self.attention_dp_size)?.latency_ms
+                        }
+                    } else if attention_tp > 1 {
+                        let ar = CustomAllReduceOp::new(&self.name, 1.0, self.hidden_size, num_gpus);
+                        ar.query(db, num_tokens)?.latency_ms
+                    } else {
+                        0.0
+                    }
                 } else if attention_tp > 1 {
-                    // reduce_results path: Python defaults `_reduce_results`
-                    // to True, and the smoke configs do not override it, so
-                    // the branch we replicate is the custom_allreduce one.
-                    let ar = CustomAllReduceOp::new(
-                        &self.name,
-                        self.scale_factor,
-                        self.hidden_size,
-                        attention_tp,
-                    );
-                    ar.query(db, num_tokens)
+                    let ar = CustomAllReduceOp::new(&self.name, 1.0, self.hidden_size, num_gpus);
+                    ar.query(db, num_tokens)?.latency_ms
+                } else if self.attention_dp_size > 1 {
+                    let op_name = if pre { "all_gather" } else { "reduce_scatter" };
+                    let nccl =
+                        NcclOp::new(&self.name, 1.0, self.hidden_size as f64, num_gpus, op_name);
+                    nccl.query(db, num_tokens * self.attention_dp_size)?.latency_ms
                 } else {
-                    // attn_tp == 1 and attn_dp == 1: no communication needed.
-                    Ok(PerformanceResult::new(0.0, Source::Silicon)
-                        .clamp_non_negative()
-                        .scaled(self.scale_factor))
-                }
+                    0.0
+                };
+
+                Ok(PerformanceResult::new(comm_latency_ms, Source::Silicon)
+                    .clamp_non_negative()
+                    .scaled(self.scale_factor))
             }
         }
     }

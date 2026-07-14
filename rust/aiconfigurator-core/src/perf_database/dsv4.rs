@@ -121,9 +121,14 @@ struct ModuleNodes {
     by_keys: BTreeMap<ModuleKey, BTreeMap<u32, Node>>,
 }
 
+/// Table key mirroring the Python loaders (PR #1337 alignment):
+/// - context modules key `[fmha][kv][gemm]` (`load_context_dsv4_kind_module_data`);
+/// - generation modules key `[kv][gemm]` only — the `mla_dtype` column is
+///   ignored at load (`load_generation_dsv4_kind_module_data`), so
+///   `fmha_quant` is the empty sentinel for generation keys.
+/// Neither keys on `architecture` (Python never reads that column).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ModuleKey {
-    architecture: String,
     fmha_quant: String,
     kv_quant: String,
     gemm_quant: String,
@@ -295,7 +300,7 @@ impl Dsv4Table {
             AttnKind::Csa => self.load_csa_context()?,
             AttnKind::Hca => self.load_hca_context()?,
         };
-        let node = select_resolved(grids, architecture, fmha_quant, kv_quant, gemm_quant, local_heads)?;
+        let node = select_resolved(grids, Some(fmha_quant), kv_quant, gemm_quant, local_heads)?;
 
         let dims = sol_dims
             .unwrap_or_else(|| Dsv4SolDims::from_pinned(dsv4_dims(architecture), local_heads as i64));
@@ -348,7 +353,6 @@ impl Dsv4Table {
         sequence_tokens: u32,
         local_heads: u32,
         kv_quant: KvCacheQuantMode,
-        fmha_quant: FmhaQuantMode,
         gemm_quant: GemmQuantMode,
         architecture: &str,
         sol_dims: Option<Dsv4SolDims>,
@@ -357,7 +361,18 @@ impl Dsv4Table {
             AttnKind::Csa => self.load_csa_generation()?,
             AttnKind::Hca => self.load_hca_generation()?,
         };
-        let node = select_resolved(grids, architecture, fmha_quant, kv_quant, gemm_quant, local_heads)?;
+        // PR #1337: decode attention compute dtype follows the kv-cache dtype;
+        // the fmha label is inert for generation (the table keys on kv dtype).
+        // Derive the SOL dtype from kv so label changes cannot move decode SOL
+        // — mirrors `GenerationDeepSeekV4AttentionModule` (operations/dsv4.py).
+        // The table key carries no fmha level at all (see `ModuleKey`), so this
+        // query takes no fmha parameter.
+        let fmha_quant = if kv_quant == KvCacheQuantMode::Fp8 {
+            FmhaQuantMode::Fp8
+        } else {
+            FmhaQuantMode::Bfloat16
+        };
+        let node = select_resolved(grids, None, kv_quant, gemm_quant, local_heads)?;
 
         let dims = sol_dims
             .unwrap_or_else(|| Dsv4SolDims::from_pinned(dsv4_dims(architecture), local_heads as i64));
@@ -394,25 +409,25 @@ impl Dsv4Table {
 
     fn load_csa_context(&self) -> Result<&ModuleNodes, AicError> {
         let cell = self.csa_context.get_or_init(|| {
-            load_module_parquet(&self.csa_context_sources).map(context_nodes)
+            load_module_parquet(&self.csa_context_sources, true).map(context_nodes)
         });
         cell.as_ref().map_err(clone_err)
     }
     fn load_hca_context(&self) -> Result<&ModuleNodes, AicError> {
         let cell = self.hca_context.get_or_init(|| {
-            load_module_parquet(&self.hca_context_sources).map(context_nodes)
+            load_module_parquet(&self.hca_context_sources, true).map(context_nodes)
         });
         cell.as_ref().map_err(clone_err)
     }
     fn load_csa_generation(&self) -> Result<&ModuleNodes, AicError> {
         let cell = self.csa_generation.get_or_init(|| {
-            load_module_parquet(&self.csa_generation_sources).map(generation_nodes)
+            load_module_parquet(&self.csa_generation_sources, false).map(generation_nodes)
         });
         cell.as_ref().map_err(clone_err)
     }
     fn load_hca_generation(&self) -> Result<&ModuleNodes, AicError> {
         let cell = self.hca_generation.get_or_init(|| {
-            load_module_parquet(&self.hca_generation_sources).map(generation_nodes)
+            load_module_parquet(&self.hca_generation_sources, false).map(generation_nodes)
         });
         cell.as_ref().map_err(clone_err)
     }
@@ -849,20 +864,19 @@ fn topk_delta_ms(exact: &BTreeMap<(u32, u32, u32), f64>, prefix: u32, isl: u32, 
     }
 }
 
-/// Resolve the `(quant, architecture)` key, then resolve the model's rank-LOCAL
+/// Resolve the quant key ([fmha][kv][gemm] for context, [kv][gemm] for
+/// generation — pass `fmha = None`), then resolve the model's rank-LOCAL
 /// head count against the CSV head keys, returning the engine table for that
 /// head.
 fn select_resolved<'a>(
     grids: &'a ModuleNodes,
-    architecture: &str,
-    fmha: FmhaQuantMode,
+    fmha: Option<FmhaQuantMode>,
     kv: KvCacheQuantMode,
     gemm: GemmQuantMode,
     local_heads: u32,
 ) -> Result<&'a Node, AicError> {
     let key = ModuleKey {
-        architecture: architecture.to_string(),
-        fmha_quant: fmha.name().to_string(),
+        fmha_quant: fmha.map(|f| f.name().to_string()).unwrap_or_default(),
         kv_quant: kv.name().to_string(),
         gemm_quant: gemm.name().to_string(),
     };
@@ -1109,7 +1123,13 @@ fn normalize_dsv4_dtype(name: &str) -> String {
 /// tp_size axis is collapsed with last-write-wins, so a later source overwrites
 /// an earlier one at a shared cell (mirroring Python's flat-dict overwrite). An
 /// error is returned only when no source yields rows.
-fn load_module_parquet(sources: &[PerfSource]) -> Result<ModuleGrids, AicError> {
+///
+/// `key_on_fmha` selects the Python keying (PR #1337): context loaders key
+/// `[fmha][kv][gemm]`, generation loaders ignore the `mla_dtype` column and
+/// key `[kv][gemm]` (the fmha level of `ModuleKey` stays the empty sentinel,
+/// and duplicate rows that differed only in `mla_dtype` collapse last-wins —
+/// exactly what Python's direct-assign loader does).
+fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<ModuleGrids, AicError> {
     let mut by_keys: BTreeMap<ModuleKey, ByNative> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
@@ -1119,8 +1139,7 @@ fn load_module_parquet(sources: &[PerfSource]) -> Result<ModuleGrids, AicError> 
         }
         any_source = true;
         let reader = PerfReader::open(path)?;
-        let arch_col = reader.col("architecture")?;
-        let mla_dtype_col = reader.col("mla_dtype")?;
+        let mla_dtype_col = if key_on_fmha { Some(reader.col("mla_dtype")?) } else { None };
         let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
         let gemm_type_col = reader.col("gemm_type")?;
         let num_heads_col = reader.col("num_heads")?;
@@ -1136,14 +1155,16 @@ fn load_module_parquet(sources: &[PerfSource]) -> Result<ModuleGrids, AicError> 
                 continue;
             }
             let key = ModuleKey {
-                architecture: row.str_owned(arch_col)?,
                 // CSV columns use sglang dtype naming; the query side builds keys
                 // from the enum `.name()` (canonical short names). Normalize on
                 // load to match Python `_dsv4_normalize_dtype`, which aliases
                 // `fp8_e4m3` -> `fp8` for `mla_dtype` (fmha) and `kv_cache_dtype`
                 // (kv). `gemm_type` is intentionally left untouched, matching
                 // Python (e.g. `fp8_block` is a real value that must pass through).
-                fmha_quant: normalize_dsv4_dtype(&row.str_owned(mla_dtype_col)?),
+                fmha_quant: match mla_dtype_col {
+                    Some(col) => normalize_dsv4_dtype(&row.str_owned(col)?),
+                    None => String::new(),
+                },
                 kv_quant: normalize_dsv4_dtype(&row.str_owned(kv_cache_dtype_col)?),
                 gemm_quant: row.str_owned(gemm_type_col)?,
             };
@@ -1252,7 +1273,7 @@ mod tests {
         let q_gen = |kind, b, s| {
             table
                 .query_generation(
-                    &spec, kind, b, s, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    &spec, kind, b, s, 16, KvCacheQuantMode::Fp8,
                     GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
                     None,
                 )
@@ -1275,9 +1296,11 @@ mod tests {
         approx(q_ctx(AttnKind::Hca, 1, 128, 0), 0.0802);
         approx(q_ctx(AttnKind::Hca, 8, 8192, 0), 9.0088);
         // Generation CSA: exact / interior s / s util-hold / ragged batch.
+        // Util-hold oracle regenerated post-#1337: the generation SOL now
+        // derives its fmha dtype from the kv dtype (fp8 here), not the label.
         approx(q_gen(AttnKind::Csa, 16, 385), 0.1142);
         approx(q_gen(AttnKind::Csa, 16, 200), 0.11328828125);
-        approx(q_gen(AttnKind::Csa, 16, 100000), 0.17550076017464525);
+        approx(q_gen(AttnKind::Csa, 16, 100000), 0.17550461244541488);
         approx(q_gen(AttnKind::Csa, 15, 385), 0.1129625);
         // Generation HCA: exact.
         approx(q_gen(AttnKind::Hca, 16, 385), 0.07239999999999999);
@@ -1303,7 +1326,7 @@ mod tests {
         let q_gen = |kind, b, s| {
             table
                 .query_generation(
-                    &spec, kind, b, s, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    &spec, kind, b, s, 16, KvCacheQuantMode::Fp8,
                     GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
                     None,
                 )
@@ -1750,7 +1773,7 @@ mod tests {
         let q_gen = |table: &Dsv4Table, kind| {
             table
                 .query_generation(
-                    &spec, kind, 16, 385, 64, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    &spec, kind, 16, 385, 64, KvCacheQuantMode::Fp8,
                     GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", None,
                 )
                 .unwrap()

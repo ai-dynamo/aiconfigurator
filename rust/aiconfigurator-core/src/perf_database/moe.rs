@@ -321,8 +321,29 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
             if !kernel_source_ok(source.kernel_sources(), kernel_source_col, &row)? {
                 continue;
             }
+            let kernel_source = row.str_optional(kernel_source_col)?.unwrap_or("").to_string();
+            // Kernel-specific mxfp4 remaps (mirror Python `load_moe_data`):
+            // the collector logs two distinct kernels under one `moe_dtype`;
+            // route them to dedicated quant modes so DeepSeek-V4 modeling can
+            // select the right one per GPU generation.
+            //  - Blackwell trtllm-gen MXFP4xMXFP8:
+            //    w4a8_mxfp4_mxfp8 + sglang_mxfp4_flashinfer_trtllm_moe
+            //      -> w4a8_mxfp4_mxfp8_trtllm
+            //  - Hopper flashinfer cutlass SM90 mixed-GEMM:
+            //    w4a16_mxfp4 + sglang_flashinfer_cutlass_moe
+            //      -> w4a16_mxfp4_cutlass
+            let raw_quant = row.str_owned(moe_dtype_col)?;
+            let quant = match (raw_quant.as_str(), kernel_source.as_str()) {
+                ("w4a8_mxfp4_mxfp8", "sglang_mxfp4_flashinfer_trtllm_moe") => {
+                    "w4a8_mxfp4_mxfp8_trtllm".to_string()
+                }
+                ("w4a16_mxfp4", "sglang_flashinfer_cutlass_moe") => {
+                    "w4a16_mxfp4_cutlass".to_string()
+                }
+                _ => raw_quant,
+            };
             let key = MoeKey {
-                quant: row.str_owned(moe_dtype_col)?,
+                quant,
                 distribution: row.str_owned(distribution_col)?,
                 topk: row.u32(topk_col)?,
                 num_experts: row.u32(num_experts_col)?,
@@ -331,7 +352,6 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
                 moe_tp_size: row.u32(moe_tp_size_col)?,
                 moe_ep_size: row.u32(moe_ep_size_col)?,
             };
-            let kernel_source = row.str_optional(kernel_source_col)?.unwrap_or("");
             let target = if kernel_source == "moe_torch_flow_min_latency" {
                 &mut low_latency_keys
             } else {

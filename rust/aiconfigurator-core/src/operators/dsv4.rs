@@ -411,6 +411,9 @@ impl Dsv4ModuleOp {
         batch_size: u32,
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
+        // No fmha argument: the generation table keys on kv dtype only and the
+        // SOL dtype is derived from kv inside `query_generation` (PR #1337).
+        // `self.fmha_quant_mode` stays on the op for the context path.
         let latency = db.dsv4.query_generation(
             &db.system_spec,
             self.attn_kind,
@@ -418,7 +421,6 @@ impl Dsv4ModuleOp {
             s,
             self.num_heads,
             self.kv_cache_dtype,
-            self.fmha_quant_mode,
             self.gemm_quant_mode,
             &self.architecture,
             Some(self.sol_dims()),

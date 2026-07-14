@@ -161,7 +161,8 @@ mod tests {
         ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4ModuleOp,
         ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
         GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
-        NcclOp, P2POp, VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp, WideEpMoeOp,
+        NcclOp, P2POp, TrtllmWideEpMoEDispatchOp, VisionEncoderOp, WideEpContextMlaOp,
+        WideEpGenerationMlaOp, WideEpMoeOp,
     };
     use crate::operators::moe_dispatch::DispatchFlavor;
     use crate::perf_database::dsv4::AttnKind;
@@ -201,6 +202,7 @@ mod tests {
             name: "rmsnorm".into(),
             scale_factor: 1.5,
             bytes_per_token: 8192.0,
+            scale_num_tokens: 1,
             seq_split: 1,
         }
     }
@@ -239,6 +241,7 @@ mod tests {
             n: 16,
             head_size: 80,
             fmha_quant_mode: FmhaQuantMode::Fp8,
+            partial_rotary_factor: 0.0,
         }
     }
 
@@ -297,6 +300,9 @@ mod tests {
             quant_mode: MoeQuantMode::Fp8Block,
             workload_distribution: "power_law_1.2".into(),
             is_gated: true,
+            moe_backend: None,
+            enable_eplb: false,
+            is_context: false,
         }
     }
 
@@ -318,6 +324,7 @@ mod tests {
             attn_cp_size: 1,
             is_context: false,
             sms: 12,
+            scale_num_tokens: 1,
         }
     }
 
@@ -379,6 +386,7 @@ mod tests {
             architecture: "DeepseekV32ForCausalLM".into(),
             index_topk: 2048,
             cp_size: 1,
+            full_frac: 1.0,
         }
     }
 
@@ -493,6 +501,22 @@ mod tests {
         }
     }
 
+    fn wideep_moe_dispatch() -> TrtllmWideEpMoEDispatchOp {
+        TrtllmWideEpMoEDispatchOp {
+            name: "wideep_moe_dispatch".into(),
+            scale_factor: 61.0,
+            hidden_size: 7168,
+            topk: 8,
+            num_experts: 256,
+            moe_tp_size: 1,
+            moe_ep_size: 8,
+            attention_dp_size: 8,
+            pre_dispatch: true,
+            quant_mode: MoeQuantMode::Nvfp4,
+            use_low_precision_combine: false,
+        }
+    }
+
     fn overlap() -> OverlapOp {
         // Recursive: nested children on both groups.
         OverlapOp {
@@ -548,6 +572,7 @@ mod tests {
             OpSpec::WideEpContextMla(wideep_context_mla()),
             OpSpec::WideEpGenerationMla(wideep_generation_mla()),
             OpSpec::WideEpMoe(wideep_moe()),
+            OpSpec::WideEpMoeDispatch(wideep_moe_dispatch()),
             OpSpec::Overlap(overlap()),
             OpSpec::Fallback(fallback()),
         ];
@@ -583,6 +608,7 @@ mod tests {
                 | OpSpec::WideEpContextMla(_)
                 | OpSpec::WideEpGenerationMla(_)
                 | OpSpec::WideEpMoe(_)
+                | OpSpec::WideEpMoeDispatch(_)
                 | OpSpec::Overlap(_)
                 | OpSpec::Fallback(_) => {}
             }

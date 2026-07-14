@@ -225,9 +225,13 @@ impl AicEngine {
 
     /// One mixed (chunked-prefill + decode) engine-step latency in ms. Binds
     /// [`Engine::mixed_step_latency`]; the Python agg orchestration
-    /// (`base_backend._get_mix_step_latency`) calls this per mix step. Mirrors
-    /// the live FPM bridge `estimate_mixed_step_latency_with_rust`.
-    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0))]
+    /// (`base_backend._get_mix_step_latency`) calls this per mix step. The
+    /// imbalance-correction scales default to 1.0 and mirror the
+    /// `RuntimeConfig` fields Python threads into the three passes.
+    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0,
+                        seq_imbalance_correction_scale=1.0,
+                        gen_seq_imbalance_correction_scale=1.0))]
+    #[allow(clippy::too_many_arguments)]
     fn mixed_step_latency(
         &self,
         py: Python<'_>,
@@ -236,10 +240,19 @@ impl AicEngine {
         isl: u32,
         osl: u32,
         prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
     ) -> PyResult<f64> {
         py.allow_threads(|| {
-            self.inner
-                .mixed_step_latency(ctx_tokens, gen_tokens, isl, osl, prefix)
+            self.inner.mixed_step_latency(
+                ctx_tokens,
+                gen_tokens,
+                isl,
+                osl,
+                prefix,
+                seq_imbalance_correction_scale,
+                gen_seq_imbalance_correction_scale,
+            )
         })
         .map_err(aic_to_py)
     }
@@ -247,17 +260,20 @@ impl AicEngine {
     /// One generation-only engine-step latency in ms. Binds
     /// [`Engine::decode_step_latency`]; the Python agg orchestration
     /// (`base_backend._get_genonly_step_latency`) calls this per genonly step.
-    /// Mirrors the live FPM bridge `estimate_decode_step_latency_with_rust`.
-    #[pyo3(signature = (gen_tokens, isl, osl))]
+    #[pyo3(signature = (gen_tokens, isl, osl, gen_seq_imbalance_correction_scale=1.0))]
     fn decode_step_latency(
         &self,
         py: Python<'_>,
         gen_tokens: u32,
         isl: u32,
         osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
     ) -> PyResult<f64> {
-        py.allow_threads(|| self.inner.decode_step_latency(gen_tokens, isl, osl))
-            .map_err(aic_to_py)
+        py.allow_threads(|| {
+            self.inner
+                .decode_step_latency(gen_tokens, isl, osl, gen_seq_imbalance_correction_scale)
+        })
+        .map_err(aic_to_py)
     }
 }
 
@@ -678,6 +694,14 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src/aiconfigurator/systems")
     }
 
+    /// `cargo test` runs without an embedding host, so the interpreter must
+    /// be initialized before any `Python::with_gil` (pyo3's
+    /// `auto-initialize` feature is intentionally off for the extension
+    /// build). Idempotent.
+    fn py_init() {
+        pyo3::prepare_freethreaded_python();
+    }
+
     const TEST_MODEL: &str = "MiniMaxAI/MiniMax-M2.5";
 
     /// Hand-built context op list against the b200_sxm/vllm/0.19.0 perf tables.
@@ -692,6 +716,7 @@ mod tests {
                 name: "rmsnorm".into(),
                 scale_factor: 1.0,
                 bytes_per_token: 8192.0,
+                scale_num_tokens: 1,
                 seq_split: 1,
             }),
             Op::Gemm(GemmOp {
@@ -727,6 +752,7 @@ mod tests {
                 name: "rmsnorm".into(),
                 scale_factor: 1.0,
                 bytes_per_token: 8192.0,
+                scale_num_tokens: 1,
                 seq_split: 1,
             }),
             Op::GenerationAttention(GenerationAttentionOp {
@@ -783,6 +809,7 @@ mod tests {
     /// `Engine` built from the same bytes via `from_spec_bytes`.
     #[test]
     fn aic_engine_matches_raw_engine() {
+        py_init();
         let bytes = fixture_spec_bytes();
         let root = systems_root();
 
@@ -859,6 +886,7 @@ mod tests {
     /// unknown mode must raise (not silently default).
     #[test]
     fn mode_strings_map_correctly() {
+        py_init();
         let bytes = fixture_spec_bytes();
         let root = systems_root();
         let aic = AicEngine::from_spec(&bytes, root.to_str()).unwrap();
@@ -885,17 +913,19 @@ mod tests {
     /// the raw `Engine` numbers unchanged.
     #[test]
     fn per_step_bindings_match_raw_engine() {
+        py_init();
         let bytes = fixture_spec_bytes();
         let root = systems_root();
         let raw = Engine::from_spec_bytes(&bytes, &root).unwrap();
         let aic = AicEngine::from_spec(&bytes, root.to_str()).unwrap();
 
-        let raw_mixed = raw.mixed_step_latency(1024, 2, 1024, 8, 0).unwrap();
-        let mixed = Python::with_gil(|py| aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0)).unwrap();
+        let raw_mixed = raw.mixed_step_latency(1024, 2, 1024, 8, 0, 1.0, 1.0).unwrap();
+        let mixed =
+            Python::with_gil(|py| aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0, 1.0, 1.0)).unwrap();
         assert!((mixed - raw_mixed).abs() < 1e-12);
 
-        let raw_decode = raw.decode_step_latency(4, 1024, 8).unwrap();
-        let decode = Python::with_gil(|py| aic.decode_step_latency(py, 4, 1024, 8)).unwrap();
+        let raw_decode = raw.decode_step_latency(4, 1024, 8, 1.0).unwrap();
+        let decode = Python::with_gil(|py| aic.decode_step_latency(py, 4, 1024, 8, 1.0)).unwrap();
         assert!((decode - raw_decode).abs() < 1e-12);
     }
 
@@ -917,6 +947,7 @@ mod tests {
     /// exercises end-to-end.
     #[test]
     fn inherent_predict_matches_raw_engine() {
+        py_init();
         let bytes = fixture_spec_bytes();
         let root = systems_root();
         let raw = Engine::from_spec_bytes(&bytes, &root).unwrap();
