@@ -55,6 +55,7 @@ def _args(**overrides):
         "fpm_moe_ep_sizes": None,
         "fpm_cp_sizes": None,
         "fpm_kv_block_size": 64,
+        "fpm_warmup_iterations": None,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -62,11 +63,17 @@ def _args(**overrides):
 
 def test_options_freeze_single_sample_policy_and_gpu_bound():
     options = FPMCollectionOptions.from_args(_args())
-    assert options.warmup_repeats == 0
+    assert options.warmup_iterations == 0
     assert options.measurement_repeats == 1
     assert options.sampling_budget == "one_eighth"
     assert options.gpu_counts == (4,)
     assert options.parallel_presets == ("auto",)
+    assert options.to_dict()["warmup_repeats"] == 0
+
+    warmed = FPMCollectionOptions.from_args(_args(fpm_warmup_iterations=3))
+    assert warmed.warmup_iterations == 3
+    assert warmed.to_dict()["global_warmup_iterations"] == 3
+    assert warmed.to_dict()["warmup_repeats"] == 0
 
     with pytest.raises(ValueError, match="exceed"):
         FPMCollectionOptions.from_args(_args(fpm_gpu_counts=[4, 8]))
@@ -694,6 +701,7 @@ def _synthetic_plan_and_cell(tmp_path):
         model_path="org/model",
         system="b200_sxm",
         backend="vllm",
+        options=SimpleNamespace(warmup_iterations=0),
         capability=SimpleNamespace(
             support_level="exact",
             template_id="aic_exact:dsa_module",
@@ -727,6 +735,7 @@ def _synthetic_plan_and_cell(tmp_path):
                     "collector": {
                         "plan_sha256": "plan-sha",
                         "cell_id": "fpm-test",
+                        "global_warmup_iterations": 0,
                         "warmup_repeats": 0,
                         "measured_repeats": 1,
                     },
@@ -756,6 +765,35 @@ def test_single_measurement_dp_aggregation_uses_max_rank(tmp_path):
     assert rows[0]["fmha_quant_mode"] == "fp8"
     assert rows[0]["comm_quant_mode"] == "half"
     assert rows[0]["model_support_level"] == "exact"
+
+
+def test_single_measurement_aggregation_accepts_pr11509_rank_schema(tmp_path):
+    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    rank_paths = sorted((cell_dir / "raw").glob("**/benchmark*.json"))
+    for rank, path in enumerate(rank_paths):
+        payload = json.loads(path.read_text())
+        payload["schema_version"] = 2
+        payload["artifact_type"] = "rank"
+        payload["run_id"] = "run"
+        payload["grid_digest"] = "grid"
+        payload["dp"] = {"rank": rank, "size": 2}
+        payload["collector"]["runtime_contract"] = "dynamo_pr11509_schema_v2"
+        path.write_text(json.dumps(payload))
+    merged = json.loads(rank_paths[0].read_text())
+    merged["artifact_type"] = "merged"
+    (rank_paths[0].parent / "benchmark_merged.json").write_text(json.dumps(merged))
+
+    rows = aggregate_cell(plan, cell, cell_dir)
+
+    assert len(rows) == 1
+    assert rows[0]["latency_ms"] == pytest.approx(6.0)
+
+    second_rank = rank_paths[1]
+    mismatched = json.loads(second_rank.read_text())
+    mismatched["run_id"] = "different-run"
+    second_rank.write_text(json.dumps(mismatched))
+    with pytest.raises(ValueError, match="different run identities"):
+        aggregate_cell(plan, cell, cell_dir)
 
 
 def test_formal_database_is_idempotent_and_rejects_conflicts(tmp_path):

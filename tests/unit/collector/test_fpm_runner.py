@@ -23,6 +23,7 @@ from collector.fpm_forward.runner import (
     _case_payload,
     _cell_generator_overrides,
     _render_cell,
+    _runtime_timing_summary,
     _validate_runtime_collection,
     run_collection,
 )
@@ -207,7 +208,7 @@ def test_cell_render_preserves_capacity_planned_engine_limits():
     plan = SimpleNamespace(
         sha256="plan-sha",
         model_path="nvidia/GLM-5.2-NVFP4",
-        options=SimpleNamespace(kv_block_size=64),
+        options=SimpleNamespace(kv_block_size=64, warmup_iterations=3),
         capability=SimpleNamespace(architecture="GlmMoeDsaForCausalLM"),
         prefill_design=SimpleNamespace(selected=(point,)),
         decode_design=SimpleNamespace(selected=()),
@@ -247,6 +248,8 @@ def test_cell_render_preserves_capacity_planned_engine_limits():
     assert overrides["ServiceConfig"]["model_path"] == "/model-cache/models--nvidia--GLM-5.2-NVFP4"
     assert overrides["ServiceConfig"]["served_model_name"] == "nvidia/GLM-5.2-NVFP4"
     assert overrides["params"]["agg"]["extra_cli_args"].count("--benchmark-timeout") == 1
+    warmup_index = overrides["params"]["agg"]["extra_cli_args"].index("--benchmark-warmup-iterations")
+    assert overrides["params"]["agg"]["extra_cli_args"][warmup_index + 1] == "3"
     assert "--enable-prefix-caching" in overrides["params"]["agg"]["extra_cli_args"]
     assert "--no-scheduler-reserve-full-isl" in overrides["params"]["agg"]["extra_cli_args"]
     assert "--no-async-scheduling" in overrides["params"]["agg"]["extra_cli_args"]
@@ -263,7 +266,7 @@ def test_cell_render_adds_one_collector_owned_benchmark_timeout():
     plan = SimpleNamespace(
         sha256="plan-sha",
         model_path="model",
-        options=SimpleNamespace(kv_block_size=64),
+        options=SimpleNamespace(kv_block_size=64, warmup_iterations=2),
         prefill_design=SimpleNamespace(selected=(point,)),
         decode_design=SimpleNamespace(selected=()),
     )
@@ -285,6 +288,8 @@ def test_cell_render_adds_one_collector_owned_benchmark_timeout():
     assert args.count("--benchmark-timeout") == 1
     timeout_index = args.index("--benchmark-timeout")
     assert args[timeout_index + 1] == "3600"
+    warmup_index = args.index("--benchmark-warmup-iterations")
+    assert args[warmup_index + 1] == "2"
 
 
 def test_smoke_case_payload_freezes_requested_point_count():
@@ -294,7 +299,7 @@ def test_smoke_case_payload_freezes_requested_point_count():
     )
     plan = SimpleNamespace(
         sha256="plan-sha",
-        options=SimpleNamespace(warmup_repeats=0, measurement_repeats=1),
+        options=SimpleNamespace(warmup_iterations=4, measurement_repeats=1),
         prefill_design=SimpleNamespace(selected=points, ordered_points=points, sha256="sampling"),
         decode_design=SimpleNamespace(selected=(), ordered_points=(), sha256="decode"),
     )
@@ -313,6 +318,7 @@ def test_smoke_case_payload_freezes_requested_point_count():
 
     assert payload["selected_point_count"] == 2
     assert len(payload["ordered_shapes"]) == 2
+    assert payload["global_warmup_iterations"] == 4
     assert payload["warmup_repeats"] == 0
     assert payload["measured_repeats"] == 1
 
@@ -335,6 +341,7 @@ def test_integrated_collection_requires_runtime_capacity_for_full_profile(tmp_pa
         path.write_text(
             json.dumps(
                 {
+                    "schema_version": 1,
                     "status": "complete",
                     "valid": True,
                     "collector": {
@@ -383,6 +390,7 @@ def test_integrated_collection_requires_identical_dp_rank_selection(tmp_path):
         path.write_text(
             json.dumps(
                 {
+                    "schema_version": 1,
                     "status": "complete",
                     "valid": True,
                     "collector": {
@@ -407,6 +415,71 @@ def test_integrated_collection_requires_identical_dp_rank_selection(tmp_path):
         _validate_runtime_collection(cell, tmp_path, selected_point_count=1)
 
 
+def test_integrated_collection_accepts_pr11509_rank_artifacts_and_ignores_merged(tmp_path):
+    point = FPMPoint("decode", batch_size=2, suffix_length=1, prefix_length=128)
+    cell = FPMCell(
+        cell_id="cell",
+        workload_kind="decode",
+        topology=ParallelTopology(tp=1, pp=1, dp=2, moe_tp=1, moe_ep=2, cp=1),
+        weight_quantization="nvfp4",
+        kv_cache_dtype="fp8_e4m3",
+        backend_policy=BackendPolicy("baseline", "baseline", {}, {}),
+        sampling_sha256="sampling",
+        execution_profile=_profile((point,)),
+    )
+    pod_root = tmp_path / "pod"
+    pod_root.mkdir()
+    for rank in range(2):
+        path = pod_root / ("benchmark.json" if rank == 0 else f"benchmark_dp{rank}.json")
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "artifact_type": "rank",
+                    "status": "complete",
+                    "valid": True,
+                    "run_id": "run",
+                    "grid_digest": "grid",
+                    "dp": {"rank": rank, "size": 2},
+                    "collector": {
+                        "cell_id": "cell",
+                        "runtime_contract": "dynamo_pr11509_schema_v2",
+                        "selected_point_count": 1,
+                        "capacity_eligible_count": 1,
+                        "capacity_cancelled_count": 0,
+                    },
+                    "cancelled_points": [],
+                    "campaign_results": [
+                        {
+                            "point": point.to_dict(),
+                            "warmup_fpms": [],
+                            "fpms": [{"dp_rank": rank}],
+                        }
+                    ],
+                }
+            )
+        )
+    (pod_root / "benchmark_merged.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "artifact_type": "merged",
+                "status": "complete",
+                "valid": True,
+            }
+        )
+    )
+
+    _validate_runtime_collection(cell, tmp_path)
+
+    second_rank = pod_root / "benchmark_dp1.json"
+    mismatched = json.loads(second_rank.read_text())
+    mismatched["grid_digest"] = "different-grid"
+    second_rank.write_text(json.dumps(mismatched))
+    with pytest.raises(ValueError, match="different run identities"):
+        _validate_runtime_collection(cell, tmp_path)
+
+
 def test_run_collection_starts_engine_once_per_cell(monkeypatch, tmp_path):
     point = FPMPoint("prefill", batch_size=1, suffix_length=1, prefix_length=0)
     cell = FPMCell(
@@ -424,7 +497,7 @@ def test_run_collection_starts_engine_once_per_cell(monkeypatch, tmp_path):
         cells=(cell,),
         runtime_overlay_files=(),
         runtime_overlay_base_files=(),
-        options=SimpleNamespace(smoke_points=1, warmup_repeats=0, measurement_repeats=1),
+        options=SimpleNamespace(smoke_points=1, warmup_iterations=0, measurement_repeats=1),
         to_dict=lambda: {"sha256": "plan-sha"},
     )
     events = []
@@ -487,6 +560,40 @@ def test_run_collection_starts_engine_once_per_cell(monkeypatch, tmp_path):
     assert events.count("cleanup") == 1
 
 
+def test_runtime_timing_summary_uses_max_rank_times_and_skips_merged(tmp_path):
+    pod_root = tmp_path / "pod"
+    pod_root.mkdir()
+    for rank, benchmark_elapsed, measured_iterations in ((0, 12.5, 10.0), (1, 13.0, 9.5)):
+        name = "benchmark.json" if rank == 0 else f"benchmark_dp{rank}.json"
+        (pod_root / name).write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "artifact_type": "rank",
+                    "timing": {
+                        "benchmark_elapsed_seconds": benchmark_elapsed,
+                        "measured_iteration_seconds": measured_iterations,
+                    },
+                }
+            )
+        )
+    (pod_root / "benchmark_merged.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "artifact_type": "merged",
+                "timing": {"benchmark_elapsed_seconds": 999, "measured_iteration_seconds": 999},
+            }
+        )
+    )
+
+    assert _runtime_timing_summary(tmp_path) == {
+        "runtime_rank_count": 2,
+        "benchmark_elapsed_seconds": 13.0,
+        "measured_iteration_seconds": 10.0,
+    }
+
+
 def test_typed_generator_render_keeps_frozen_fpm_limits(tmp_path):
     point = FPMPoint("prefill", batch_size=1, suffix_length=1, prefix_length=0)
     plan = SimpleNamespace(
@@ -494,7 +601,7 @@ def test_typed_generator_render_keeps_frozen_fpm_limits(tmp_path):
         model_path="nvidia/GLM-5.2-NVFP4",
         system="b200_sxm",
         backend="vllm",
-        options=SimpleNamespace(kv_block_size=64),
+        options=SimpleNamespace(kv_block_size=64, warmup_iterations=0),
         capability=SimpleNamespace(architecture="GlmMoeDsaForCausalLM"),
         prefill_design=SimpleNamespace(selected=(point,)),
         decode_design=SimpleNamespace(selected=()),
@@ -534,6 +641,8 @@ def test_typed_generator_render_keeps_frozen_fpm_limits(tmp_path):
     assert "--enable-expert-parallel" in script
     assert "--model /model-cache/models--nvidia--GLM-5.2-NVFP4" in script
     assert "--served-model-name nvidia/GLM-5.2-NVFP4" in script
+    assert 'value.get("schema_version") not in {1, 2}' in script
+    subprocess.run(["bash", "-n", str(tmp_path / "run.sh")], check=True)
 
 
 @pytest.mark.parametrize(
@@ -550,7 +659,7 @@ def test_pure_tp_render_uses_shared_vllm_tp_without_expert_parallel(tmp_path, mo
         model_path=model_path,
         system="b200_sxm",
         backend="vllm",
-        options=SimpleNamespace(kv_block_size=64),
+        options=SimpleNamespace(kv_block_size=64, warmup_iterations=0),
         prefill_design=SimpleNamespace(selected=(point,)),
         decode_design=SimpleNamespace(selected=()),
     )
