@@ -60,3 +60,16 @@ pub enum AicError {
     },
 }
 
+impl AicError {
+    /// The "missing silicon data" class that HYBRID converts into an
+    /// empirical estimate. Mirrors Python's
+    /// `_MISSING_SILICON_DATA_EXCEPTIONS` (`PerfDataNotAvailableError`,
+    /// `InterpolationDataNotAvailableError`) — the same set `Op::Fallback`
+    /// catches. `EmpiricalNotImplemented` is deliberately NOT in this set:
+    /// it is the terminal miss raised after the empirical path itself found
+    /// no calibration data.
+    pub fn is_missing_perf_data(&self) -> bool {
+        matches!(self, Self::PerfDatabase(_) | Self::Io { .. })
+    }
+}
+

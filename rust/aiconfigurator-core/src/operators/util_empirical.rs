@@ -283,21 +283,159 @@ impl UtilGridCache {
         Self::default()
     }
 
-    /// Fetch or build the grid for `key`. `builder` returns `None` when the
-    /// slice has no usable calibration data (typed coverage miss) — that
-    /// outcome is memoised too, mirroring Python's `grid_for` returning
-    /// `None` (the caller then raises via [`estimate`] with `grid=None`).
-    pub fn get_or_build<F>(&self, key: &str, builder: F) -> Option<Arc<UtilGrid>>
+    /// Fetch or build the grid for `key`.
+    ///
+    /// `builder` mirrors Python's `grid_for` contract: `Ok(None)` when the
+    /// slice has no usable calibration data (a typed coverage miss — memoised,
+    /// the caller then raises via [`estimate`] with `grid=None`), `Err` for
+    /// programming/schema errors (propagated, NOT memoised, never converted
+    /// into a fallback).
+    pub fn get_or_try_build<F>(&self, key: &str, builder: F) -> Result<Option<Arc<UtilGrid>>, AicError>
     where
-        F: FnOnce() -> Option<UtilGrid>,
+        F: FnOnce() -> Result<Option<UtilGrid>, AicError>,
     {
         let mut grids = self.grids.lock().expect("util grid cache poisoned");
         if let Some(cached) = grids.get(key) {
-            return cached.clone();
+            return Ok(cached.clone());
         }
-        let built = builder().map(Arc::new);
+        let built = builder()?.map(Arc::new);
         grids.insert(key.to_string(), built.clone());
-        built
+        Ok(built)
+    }
+}
+
+/// Nearest-point lookup over a non-negative latency *delta* table (the
+/// `compute_scale` mechanism; Python `gemm._ZeroAwareDeltaLookup`).
+///
+/// `compute_scale` stores `max(dynamic_quant - static_quant, 0)`: zero is a
+/// measured, meaningful delta, not a missing latency. A normal util grid
+/// cannot represent it (`SOL / 0`), and dropping zeroes can make one positive
+/// noise sample the reference for the whole table. Select the nearest point
+/// on the complete 2-D grid first: a selected zero stays zero; a positive
+/// point uses frozen utilization so extrapolation scales with the query's
+/// amount of work.
+#[derive(Debug)]
+pub struct ZeroAwareDeltaLookup {
+    coords: Vec<Vec<f64>>,
+    latencies: Vec<f64>,
+    mins: Vec<f64>,
+    spans: Vec<f64>,
+    norm: Vec<Vec<f64>>,
+}
+
+impl ZeroAwareDeltaLookup {
+    /// Keep every point with `latency >= 0` (zero INCLUDED, unlike
+    /// [`build_samples`]).
+    pub fn new(points: Vec<(Vec<f64>, f64)>) -> Self {
+        let kept: Vec<(Vec<f64>, f64)> = points.into_iter().filter(|(_, lat)| *lat >= 0.0).collect();
+        if kept.is_empty() {
+            return Self {
+                coords: Vec::new(),
+                latencies: Vec::new(),
+                mins: Vec::new(),
+                spans: Vec::new(),
+                norm: Vec::new(),
+            };
+        }
+        let dims = kept[0].0.len();
+        let logc: Vec<Vec<f64>> = kept
+            .iter()
+            .map(|(c, _)| c.iter().map(|&v| log_floor(v)).collect())
+            .collect();
+        let mut mins = vec![f64::INFINITY; dims];
+        let mut maxs = vec![f64::NEG_INFINITY; dims];
+        for row in &logc {
+            for (a, &v) in row.iter().enumerate() {
+                mins[a] = mins[a].min(v);
+                maxs[a] = maxs[a].max(v);
+            }
+        }
+        let spans: Vec<f64> = mins
+            .iter()
+            .zip(&maxs)
+            .map(|(&lo, &hi)| if hi - lo > 0.0 { hi - lo } else { 1.0 })
+            .collect();
+        let norm: Vec<Vec<f64>> = logc
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .map(|(a, &v)| (v - mins[a]) / spans[a])
+                    .collect()
+            })
+            .collect();
+        Self {
+            latencies: kept.iter().map(|(_, lat)| *lat).collect(),
+            coords: kept.into_iter().map(|(c, _)| c).collect(),
+            mins,
+            spans,
+            norm,
+        }
+    }
+
+    /// Nearest-point delta estimate (query is NOT clamped; the frozen-util
+    /// rescale `query_sol / (ref_sol / ref_latency)` carries extrapolation).
+    pub fn estimate<F>(&self, query: &[f64], sol_fn: F) -> Result<f64, AicError>
+    where
+        F: Fn(&[f64]) -> f64,
+    {
+        if self.latencies.is_empty() {
+            return Err(AicError::EmpiricalNotImplemented(format!(
+                "No empirical compute_scale delta data is available at query={query:?}."
+            )));
+        }
+        let q: Vec<f64> = query
+            .iter()
+            .enumerate()
+            .map(|(a, &v)| (log_floor(v) - self.mins[a]) / self.spans[a])
+            .collect();
+        let mut best = 0;
+        let mut best_dist2 = f64::INFINITY;
+        for (i, row) in self.norm.iter().enumerate() {
+            let dist2: f64 = row.iter().zip(&q).map(|(&x, &y)| (x - y) * (x - y)).sum();
+            if dist2 < best_dist2 {
+                best_dist2 = dist2;
+                best = i;
+            }
+        }
+        let reference_latency = self.latencies[best];
+        if reference_latency == 0.0 {
+            return Ok(0.0);
+        }
+        let reference_sol = sol_fn(&self.coords[best]);
+        let query_sol = sol_fn(query);
+        if reference_sol <= 0.0 || query_sol <= 0.0 {
+            return Err(AicError::EmpiricalNotImplemented(format!(
+                "No positive SOL reference is available for compute_scale at query={query:?}."
+            )));
+        }
+        Ok(query_sol / (reference_sol / reference_latency))
+    }
+}
+
+/// Memo of built [`ZeroAwareDeltaLookup`]s (same keying/lifetime rationale as
+/// [`UtilGridCache`]).
+#[derive(Debug, Default)]
+pub struct DeltaLookupCache {
+    lookups: Mutex<HashMap<String, Arc<ZeroAwareDeltaLookup>>>,
+}
+
+impl DeltaLookupCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get_or_try_build<F>(&self, key: &str, builder: F) -> Result<Arc<ZeroAwareDeltaLookup>, AicError>
+    where
+        F: FnOnce() -> Result<ZeroAwareDeltaLookup, AicError>,
+    {
+        let mut lookups = self.lookups.lock().expect("delta lookup cache poisoned");
+        if let Some(cached) = lookups.get(key) {
+            return Ok(cached.clone());
+        }
+        let built = Arc::new(builder()?);
+        lookups.insert(key.to_string(), built.clone());
+        Ok(built)
     }
 }
 
@@ -430,26 +568,55 @@ mod tests {
     }
 
     #[test]
-    fn util_grid_cache_memoises_including_misses() {
+    fn util_grid_cache_memoises_hits_and_misses_but_not_errors() {
         let cache = UtilGridCache::new();
         let mut builds = 0;
-        let grid = cache.get_or_build("k", || {
+        let grid = cache.get_or_try_build("k", || {
             builds += 1;
-            Some(UtilGrid::new(vec![UtilSample::new(vec![1.0], 0.5)]))
+            Ok(Some(UtilGrid::new(vec![UtilSample::new(vec![1.0], 0.5)])))
         });
-        assert!(grid.is_some());
-        let again = cache.get_or_build("k", || {
+        assert!(grid.unwrap().is_some());
+        let again = cache.get_or_try_build("k", || {
             builds += 1;
-            None
+            Ok(None)
         });
-        assert!(again.is_some());
+        assert!(again.unwrap().is_some());
         assert_eq!(builds, 1);
 
-        let miss = cache.get_or_build("missing", || None);
-        assert!(miss.is_none());
-        let miss_again = cache.get_or_build("missing", || {
-            panic!("memoised miss must not rebuild")
+        // Typed coverage miss (Ok(None)) is memoised, like Python's grid_for.
+        let miss = cache.get_or_try_build("missing", || Ok(None));
+        assert!(miss.unwrap().is_none());
+        let miss_again =
+            cache.get_or_try_build("missing", || panic!("memoised miss must not rebuild"));
+        assert!(miss_again.unwrap().is_none());
+
+        // Programming/schema errors propagate and are NOT memoised.
+        let err = cache.get_or_try_build("broken", || {
+            Err(AicError::PerfDatabase("schema".to_string()))
         });
-        assert!(miss_again.is_none());
+        assert!(err.is_err());
+        let recovered = cache.get_or_try_build("broken", || Ok(None));
+        assert!(recovered.unwrap().is_none());
+    }
+
+    #[test]
+    fn zero_aware_delta_keeps_zeroes_and_freezes_utilization() {
+        let lookup = ZeroAwareDeltaLookup::new(vec![
+            (vec![16.0, 16.0], 0.0),
+            (vec![1024.0, 1024.0], 2.0),
+        ]);
+        let sol = |c: &[f64]| c[0] * c[1];
+
+        // Nearest to the zero point: the measured zero delta stays zero.
+        assert_eq!(lookup.estimate(&[8.0, 8.0], sol).unwrap(), 0.0);
+        // Nearest to the positive point: frozen util scales with query SOL.
+        let expected = (2048.0 * 2048.0) / ((1024.0 * 1024.0) / 2.0);
+        assert!((lookup.estimate(&[2048.0, 2048.0], sol).unwrap() - expected).abs() < 1e-12);
+        // Empty table -> typed empirical miss.
+        let empty = ZeroAwareDeltaLookup::new(vec![]);
+        assert!(matches!(
+            empty.estimate(&[1.0, 1.0], sol),
+            Err(AicError::EmpiricalNotImplemented(_))
+        ));
     }
 }

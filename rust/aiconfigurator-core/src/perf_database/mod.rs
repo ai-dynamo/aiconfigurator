@@ -16,7 +16,7 @@ use crate::common::enums::{DatabaseMode, TransferPolicy};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
-use crate::operators::util_empirical::UtilGridCache;
+use crate::operators::util_empirical::{DeltaLookupCache, UtilGridCache};
 
 /// Resolve the ordered source list for one op-file basename: the Python-supplied
 /// shared-layer sources when present, else a single primary `data_root/<basename>`
@@ -117,6 +117,9 @@ pub struct PerfDatabase {
     /// mode/policy are fixed per database instance, so the cache never needs
     /// invalidation.
     pub util_grids: UtilGridCache,
+    /// Memo of zero-aware delta lookups (the `compute_scale` empirical
+    /// mechanism); same keying/lifetime rationale as `util_grids`.
+    pub delta_lookups: DeltaLookupCache,
 }
 
 impl PerfDatabase {
@@ -211,6 +214,7 @@ impl PerfDatabase {
             database_mode: DatabaseMode::default(),
             transfer_policy: TransferPolicy::ALL,
             util_grids: UtilGridCache::new(),
+            delta_lookups: DeltaLookupCache::new(),
         })
     }
 
