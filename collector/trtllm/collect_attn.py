@@ -206,7 +206,11 @@ def run_attention_torch(
     # FIXME(kernel-limit): head_dim > 256 hits "Head size N is not supported by MMHA"
     # (std::terminate in AttentionOp::initialize); head_dim == 192 on SM >= 90 hits
     # "Unsupported HeadDim for BMM2-N 192" in TllmGenFmha (SM89 is unaffected).
-    # Applies to both context and generation phases; re-verify on each TRT-LLM version bump.
+    # Observed on 1.3.0rc15 (SM100/B200 and SM90/H200). Both are hard aborts before
+    # Python can catch them. Source anchors: grep "is not supported by MMHA" in
+    # tensorrt_llm/cpp/tensorrt_llm/kernels/; grep "Unsupported HeadDim for BMM2-N"
+    # in tensorrt_llm/cpp/tensorrt_llm/kernels/tllmGenKernels/.
+    # Re-verify on each TRT-LLM version bump; delete if the kernel gains support.
     attn = create_attention(
         backend_name=backend_name,
         layer_idx=layer_idx,
