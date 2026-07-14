@@ -1127,7 +1127,10 @@ def test_vllm_024_model_plans_only_schedule_representable_attention_paths():
         "mla_generation",
         "moe",
     ]
+    # TRT-LLM 1.3.0rc20 serves the full K2.5 VLM including MoonViT3d, so the
+    # trtllm plan carries the vision encoder_attention profile like vLLM.
     assert build_collection_case_plan(backend="trtllm", model_path=kimi_path).ops == [
+        "encoder_attention",
         "gemm",
         "mla_bmm_gen_post",
         "mla_bmm_gen_pre",
