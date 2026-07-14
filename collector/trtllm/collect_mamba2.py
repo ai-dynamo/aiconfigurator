@@ -73,6 +73,35 @@ aic_debug = int(os.getenv("aic_mamba2_debug", "0"))  # noqa: SIM112
 aic_cached_inputs = int(os.getenv("AIC_MAMBA2_CACHED_INPUTS", "0"))
 
 
+def _is_trtllm_sm90_rc15() -> bool:
+    if get_sm_version() != 90:
+        return False
+    try:
+        import tensorrt_llm
+    except ImportError:
+        return False
+    return tensorrt_llm.__version__.startswith("1.3.0rc15")
+
+
+def _skip_trtllm_sm90_rc15_ultra_context(common_case) -> bool:
+    if not _is_trtllm_sm90_rc15():
+        return False
+
+    # TRT-LLM 1.3.0rc15 on H200 crash-loops the Ultra 550B context task after
+    # partial row emission: smaller shapes raise internal NoneType errors and
+    # larger batch/sequence points OOM, then the worker exits before checkpoint.
+    return (
+        common_case.phase == "context"
+        and common_case.model_name == "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+        and common_case.d_model == 8192
+        and common_case.d_state == 128
+        and common_case.nheads == 256
+        and common_case.head_dim == 64
+        and common_case.n_groups == 8
+        and common_case.chunk_size == 128
+    )
+
+
 def get_mamba2_test_cases():
     """
     Generate test cases for Mamba2 SSM benchmarking.
@@ -87,6 +116,9 @@ def get_mamba2_test_cases():
 
     # Get common test cases from centralized definition
     for common_case in get_common_mamba2_test_cases():
+        if _skip_trtllm_sm90_rc15_ultra_context(common_case):
+            continue
+
         if common_case.phase == "context":
             # Context phase: sweep batch_size x seq_len
             test_cases.append(
