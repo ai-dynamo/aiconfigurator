@@ -366,6 +366,45 @@ def _apply_gemm_type_quant(model_config, gemm_type: str, use_fp8_kv_cache: bool)
         raise ValueError(f"Unknown gemm_type: {gemm_type!r}")
 
 
+def _config_dir_without_layer_types(model_path: str) -> str:
+    """Materialize a config-only local copy of ``model_path`` minus ``layer_types``.
+
+    Mirrors the upstream TRT-LLM main fix for glm_moe_dsa (config_utils.py
+    drops the HF-bookkeeping-only ``layer_types`` before building the config;
+    transformers 5.5.x rejects its 'deepseek_sparse_attention' entries). Only
+    JSON config files are fetched — module benchmarks never load weights —
+    and ``ModelConfig.from_pretrained`` then runs unmodified on the local dir,
+    so the framework's own config/quant handling stays authoritative.
+    """
+    import hashlib
+    import json
+    import shutil
+
+    from huggingface_hub import snapshot_download
+
+    src = snapshot_download(model_path, allow_patterns=["*.json"])
+    dst = os.path.join(
+        os.path.expanduser("~/.cache/aic_collector/glm_dsa_config_norm"),
+        hashlib.sha1(src.encode()).hexdigest()[:16],
+    )
+    config_path = os.path.join(dst, "config.json")
+    if not os.path.exists(config_path):
+        staging = f"{dst}.tmp-{os.getpid()}"
+        shutil.copytree(src, staging, dirs_exist_ok=True)
+        with open(os.path.join(staging, "config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+        cfg.pop("layer_types", None)
+        with open(os.path.join(staging, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        try:
+            os.replace(staging, dst)
+        except OSError:
+            # Another worker won the atomic-rename race; use its copy.
+            shutil.rmtree(staging, ignore_errors=True)
+    return dst
+
+
 def create_attention_layer(
     model_path: str,
     num_heads: int = 128,
@@ -385,7 +424,8 @@ def create_attention_layer(
     # GLM-5 uses model_type "glm_moe_dsa" / arch "GlmMoeDsaForCausalLM" which
     # TRT-LLM doesn't recognise.  ModelConfig.from_pretrained() only auto-builds
     # sparse_attention_config for "DeepseekV32ForCausalLM", so we pre-read the
-    # HF config and supply it manually for GLM-5.
+    # HF config and supply it manually for GLM-5. See
+    # _config_dir_without_layer_types for the GLM-5.2 layer_types shim.
     sparse_attention_config = None
     import transformers
 
@@ -398,6 +438,19 @@ def create_attention_layer(
             index_head_dim=_cfg_dict["index_head_dim"],
             index_topk=_cfg_dict["index_topk"],
         )
+        # glm_moe_dsa checkpoints (GLM-5.2) tag every layer with
+        # layer_types=['deepseek_sparse_attention', ...] for HF bookkeeping.
+        # TRT-LLM never reads the field (DSA layer routing is driven by
+        # index_topk_freq / index_skip_topk_offset), but the transformers
+        # 5.5.x validate_layer_type validator rejects the unknown entry, so
+        # ModelConfig.from_pretrained() cannot load the checkpoint at all on
+        # 1.3.0rc20. Upstream drops the field before building the config
+        # (NVIDIA/TensorRT-LLM main, _torch/pyexecutor/config_utils.py
+        # "elif model_type == 'glm_moe_dsa'", not in any released rc yet);
+        # mirror that by loading from a config-only local copy with the inert
+        # field removed, leaving every framework code path untouched.
+        if "layer_types" in _cfg_dict:
+            model_path = _config_dir_without_layer_types(model_path)
 
     # Capture the original HF architecture *before* from_pretrained() which
     # may remap the model_type.  We return it separately because ModelConfig
