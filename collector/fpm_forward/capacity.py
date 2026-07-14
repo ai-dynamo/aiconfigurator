@@ -20,6 +20,8 @@ from .types import FPMPoint, ParallelTopology
 FPM_MAX_GPU_MEMORY_UTILIZATION = 0.9
 FPM_KV_TOLERANCE_FRACTION = 0.05
 FPM_MAX_CUDAGRAPH_CAPTURE_TOKENS = 8192
+FPM_RUNTIME_RESERVE_FRACTION = 0.1
+FPM_RUNTIME_RESERVE_MIN_BYTES = 10 * 1024**3
 _FRACTION_DIGITS = 4
 
 
@@ -77,6 +79,10 @@ class FPMExecutionProfile:
     non_kv_bytes: int | None
     required_kv_bytes: int | None
     decisions: tuple[PointCapacityDecision, ...]
+    aic_non_kv_bytes: int | None = None
+    runtime_reserve_bytes: int = 0
+    runtime_reserve_fraction: float = 0.0
+    runtime_reserve_source: str = "max(10_percent_total,10_gib)"
 
     @property
     def selected(self) -> tuple[FPMPoint, ...]:
@@ -106,6 +112,10 @@ class FPMExecutionProfile:
                 "kv_tolerance_fraction": self.kv_tolerance_fraction,
                 "total_gpu_capacity_bytes": self.total_gpu_capacity_bytes,
                 "non_kv_bytes": self.non_kv_bytes,
+                "aic_non_kv_bytes": self.aic_non_kv_bytes,
+                "runtime_reserve_bytes": self.runtime_reserve_bytes,
+                "runtime_reserve_fraction": self.runtime_reserve_fraction,
+                "runtime_reserve_source": self.runtime_reserve_source,
                 "required_kv_bytes": self.required_kv_bytes,
             },
             "decisions": [decision.to_dict() for decision in self.decisions],
@@ -231,12 +241,28 @@ def _required_point_kv_bytes(
     return point.batch_size * per_request
 
 
-def _required_fraction(estimate: _EnvelopeEstimate, required_kv_bytes: int) -> float:
+def _required_fraction(
+    estimate: _EnvelopeEstimate,
+    required_kv_bytes: int,
+    *,
+    runtime_reserve_bytes: int = 0,
+) -> float:
     # AIC's tolerance reserves part of the modeled KV budget.  Solving the vLLM
     # of-total formula for the requested fraction makes the emitted engine value
     # explicit instead of inheriting a YAML/default value.
     protected_kv_bytes = required_kv_bytes / (1.0 - FPM_KV_TOLERANCE_FRACTION)
-    return (estimate.non_kv_bytes + protected_kv_bytes) / estimate.total_gpu_capacity_bytes
+    return (estimate.non_kv_bytes + protected_kv_bytes + runtime_reserve_bytes) / estimate.total_gpu_capacity_bytes
+
+
+def _runtime_reserve_bytes(total_gpu_capacity_bytes: int) -> int:
+    """Reserve unmodeled runtime memory inside the 0.9 engine ceiling."""
+
+    if total_gpu_capacity_bytes <= 0:
+        raise ValueError("total_gpu_capacity_bytes must be positive")
+    return max(
+        math.ceil(total_gpu_capacity_bytes * FPM_RUNTIME_RESERVE_FRACTION),
+        FPM_RUNTIME_RESERVE_MIN_BYTES,
+    )
 
 
 def build_capacity_model(
@@ -314,11 +340,124 @@ def build_capacity_model(
     )
 
 
+def filter_memory_feasible_points(
+    points: tuple[FPMPoint, ...] | list[FPMPoint],
+    *,
+    capacity_model: FPMCapacityModel,
+    block_size: int,
+) -> tuple[tuple[FPMPoint, ...], tuple[PointCapacityDecision, ...]]:
+    """Build a pointwise memory-feasible population before sparse sampling."""
+
+    unique = tuple(sorted(set(points)))
+    if not unique:
+        raise ValueError("memory-feasibility population must not be empty")
+    if capacity_model.error is not None:
+        # Bootstrap models have no AIC memory curve. Their sampling population
+        # remains intact and the explicit runtime capacity gate stays fail-closed.
+        return unique, ()
+
+    runtime_reserve_bytes = _runtime_reserve_bytes(capacity_model.total_gpu_capacity_bytes)
+    feasible = []
+    decisions = []
+    for point in unique:
+        max_batch, max_tokens, max_length = _engine_envelope((point,))
+        estimate = capacity_model.envelope(
+            max_batch_size=max_batch,
+            max_num_tokens=max_tokens,
+            max_seq_len=max_length,
+        )
+        required_kv = _required_point_kv_bytes(point, block_size=block_size, estimate=estimate)
+        required_fraction = _round_fraction_up(
+            _required_fraction(
+                estimate,
+                required_kv,
+                runtime_reserve_bytes=runtime_reserve_bytes,
+            )
+        )
+        admitted = required_fraction <= FPM_MAX_GPU_MEMORY_UTILIZATION
+        if admitted:
+            feasible.append(point)
+        decisions.append(
+            PointCapacityDecision(
+                point=point,
+                admitted=admitted,
+                disposition="feasible_population" if admitted else "rejected_before_sampling",
+                reason=(
+                    "pointwise AIC envelope plus static runtime reserve fits the memory ceiling"
+                    if admitted
+                    else "pointwise AIC envelope plus static runtime reserve exceeds the memory ceiling"
+                ),
+                required_memory_fraction=required_fraction,
+            )
+        )
+    if not feasible:
+        raise ValueError("no points remain after pointwise AIC memory-feasibility filtering")
+    return tuple(feasible), tuple(decisions)
+
+
+def build_memory_selection_admission(
+    *,
+    capacity_model: FPMCapacityModel,
+    block_size: int,
+) -> Callable[[tuple[FPMPoint, ...], FPMPoint], bool]:
+    """Return a monotonic joint-envelope predicate for sparse sampling."""
+
+    if capacity_model.error is not None:
+        return lambda _selected, _candidate: True
+
+    runtime_reserve_bytes = _runtime_reserve_bytes(capacity_model.total_gpu_capacity_bytes)
+    kv_bytes: dict[FPMPoint, int] = {}
+    cached_selected: tuple[FPMPoint, ...] | None = None
+    cached_envelope = (0, 0, 0, 0)
+
+    def point_kv(point: FPMPoint) -> int:
+        value = kv_bytes.get(point)
+        if value is None:
+            max_batch, max_tokens, max_length = _engine_envelope((point,))
+            estimate = capacity_model.envelope(
+                max_batch_size=max_batch,
+                max_num_tokens=max_tokens,
+                max_seq_len=max_length,
+            )
+            value = _required_point_kv_bytes(point, block_size=block_size, estimate=estimate)
+            kv_bytes[point] = value
+        return value
+
+    def admit(selected: tuple[FPMPoint, ...], candidate: FPMPoint) -> bool:
+        nonlocal cached_selected, cached_envelope
+        if selected != cached_selected:
+            if selected:
+                max_batch, max_tokens, max_length = _engine_envelope(selected)
+                max_kv = max(point_kv(point) for point in selected)
+                cached_envelope = (max_batch, max_tokens, max_length, max_kv)
+            else:
+                cached_envelope = (0, 0, 0, 0)
+            cached_selected = selected
+        max_batch, max_tokens, max_length, max_kv = cached_envelope
+        candidate_length = candidate.prefix_length + candidate.suffix_length + 1
+        estimate = capacity_model.envelope(
+            max_batch_size=max(max_batch, candidate.batch_size),
+            max_num_tokens=max(max_tokens, candidate.batch_size * candidate.suffix_length),
+            max_seq_len=max(max_length, candidate_length),
+        )
+        required_fraction = _round_fraction_up(
+            _required_fraction(
+                estimate,
+                max(max_kv, point_kv(candidate)),
+                runtime_reserve_bytes=runtime_reserve_bytes,
+            )
+        )
+        return required_fraction <= FPM_MAX_GPU_MEMORY_UTILIZATION
+
+    return admit
+
+
 def _bootstrap_execution_profile(
     design: SamplingDesign,
     *,
     capacity_bytes: int,
     error: Exception,
+    runtime_reserve_bytes: int,
 ) -> FPMExecutionProfile:
     """Freeze a fail-closed runtime-verified profile when AIC cannot model it."""
 
@@ -360,6 +499,9 @@ def _bootstrap_execution_profile(
         non_kv_bytes=None,
         required_kv_bytes=None,
         decisions=decisions,
+        aic_non_kv_bytes=None,
+        runtime_reserve_bytes=runtime_reserve_bytes,
+        runtime_reserve_fraction=runtime_reserve_bytes / capacity_bytes,
     )
 
 
@@ -374,6 +516,8 @@ def build_execution_profile(
     design: SamplingDesign,
     block_size: int,
     capacity_model: FPMCapacityModel | None = None,
+    runtime_reserve_bytes_override: int | None = None,
+    pre_admission_decisions: tuple[PointCapacityDecision, ...] = (),
 ) -> FPMExecutionProfile:
     """Select the first capacity-legal sparse points and derive engine limits."""
 
@@ -389,11 +533,19 @@ def build_execution_profile(
             max_num_tokens_hint=max(point.batch_size * point.suffix_length for point in design.ordered_points),
         )
     capacity_bytes = capacity_model.total_gpu_capacity_bytes
+    runtime_reserve_bytes = (
+        _runtime_reserve_bytes(capacity_bytes)
+        if runtime_reserve_bytes_override is None
+        else runtime_reserve_bytes_override
+    )
+    if runtime_reserve_bytes < 0:
+        raise ValueError("runtime_reserve_bytes_override must be non-negative")
     if capacity_model.error is not None:
         return _bootstrap_execution_profile(
             design,
             capacity_bytes=capacity_bytes,
             error=ValueError(capacity_model.error),
+            runtime_reserve_bytes=runtime_reserve_bytes,
         )
 
     target_count = len(design.selected)
@@ -408,7 +560,15 @@ def build_execution_profile(
             max_seq_len=max_length,
         )
         required_kv = max(_required_point_kv_bytes(point, block_size=block_size, estimate=estimate) for point in points)
-        return estimate, required_kv, _required_fraction(estimate, required_kv)
+        return (
+            estimate,
+            required_kv,
+            _required_fraction(
+                estimate,
+                required_kv,
+                runtime_reserve_bytes=runtime_reserve_bytes,
+            ),
+        )
 
     remaining_index = target_count
     while True:
@@ -430,7 +590,7 @@ def build_execution_profile(
         point_kv = {
             point: _required_point_kv_bytes(point, block_size=block_size, estimate=estimate) for point in selected
         }
-        if estimate.non_kv_bytes >= capacity_bytes * FPM_MAX_GPU_MEMORY_UTILIZATION:
+        if estimate.non_kv_bytes + runtime_reserve_bytes >= capacity_bytes * FPM_MAX_GPU_MEMORY_UTILIZATION:
             culprit = max(
                 selected,
                 key=lambda point: (
@@ -440,7 +600,7 @@ def build_execution_profile(
                     point.key,
                 ),
             )
-            reason = "point forces an activation envelope above the FPM memory-fraction ceiling"
+            reason = "point forces the activation envelope plus static runtime reserve above the ceiling"
         else:
             culprit = max(
                 selected,
@@ -471,7 +631,12 @@ def build_execution_profile(
             point.batch_size <= estimate.max_batch_size
             and point.batch_size * point.suffix_length <= estimate.max_num_tokens
             and point.prefix_length + point.suffix_length + 1 <= estimate.max_seq_len
-            and _required_fraction(estimate, point_required_kv) <= memory_fraction
+            and _required_fraction(
+                estimate,
+                point_required_kv,
+                runtime_reserve_bytes=runtime_reserve_bytes,
+            )
+            <= memory_fraction
         )
         if compatible:
             reserves.append(point)
@@ -481,21 +646,33 @@ def build_execution_profile(
                 False,
                 "rejected",
                 "reserve point is outside the frozen selected-point execution profile",
-                _round_fraction_up(_required_fraction(estimate, point_required_kv)),
+                _round_fraction_up(
+                    _required_fraction(
+                        estimate,
+                        point_required_kv,
+                        runtime_reserve_bytes=runtime_reserve_bytes,
+                    )
+                ),
             )
 
     selected_set = set(selected)
     ordered = tuple(selected + reserves)
-    decisions = tuple(
+    sampled_decisions = tuple(
         rejected.get(point)
         or PointCapacityDecision(
             point,
             True,
             "selected" if point in selected_set else "reserve",
-            "admitted by AIC execution-envelope and block-aligned KV capacity",
+            "admitted by AIC execution-envelope, static runtime reserve, and block-aligned KV capacity",
             memory_fraction,
         )
         for point in design.ordered_points
+    )
+    pre_by_point = {decision.point: decision for decision in pre_admission_decisions}
+    sampled_by_point = {decision.point: decision for decision in sampled_decisions}
+    decisions = tuple(
+        sampled_by_point.get(point) or pre_by_point[point]
+        for point in sorted(set(pre_by_point) | set(sampled_by_point))
     )
     capture_sizes = _cudagraph_capture_sizes(ordered)
     return FPMExecutionProfile(
@@ -506,13 +683,16 @@ def build_execution_profile(
         max_seq_len=estimate.max_seq_len,
         gpu_memory_utilization=memory_fraction,
         cudagraph_capture_sizes=capture_sizes,
-        memory_source=capacity_model.source,
+        memory_source=f"{capacity_model.source}+static_runtime_reserve",
         memory_fraction_ceiling=FPM_MAX_GPU_MEMORY_UTILIZATION,
         kv_tolerance_fraction=FPM_KV_TOLERANCE_FRACTION,
         total_gpu_capacity_bytes=estimate.total_gpu_capacity_bytes,
-        non_kv_bytes=estimate.non_kv_bytes,
+        non_kv_bytes=estimate.non_kv_bytes + runtime_reserve_bytes,
         required_kv_bytes=required_kv,
         decisions=decisions,
+        aic_non_kv_bytes=estimate.non_kv_bytes,
+        runtime_reserve_bytes=runtime_reserve_bytes,
+        runtime_reserve_fraction=runtime_reserve_bytes / estimate.total_gpu_capacity_bytes,
     )
 
 

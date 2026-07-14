@@ -591,7 +591,7 @@ Workers:
       - --scheduler-cls
       - InstrumentedScheduler
       - --benchmark-mode
-      - agg
+      - prefill
       - --dump-config-to
       - "/results/resolved-config-node{node_rank}.json"
 K8sConfig:
@@ -638,7 +638,7 @@ kubectl exec -i <pod> -- bash -s < artifacts/run.sh
 
 For multiple nodes, the collector stages inputs first and then starts the same `run.sh` concurrently on every LWS Pod. The script requires the controller-injected `LWS_WORKER_INDEX` and `LWS_LEADER_ADDRESS` values to add the rank, master, headless, or local-DP arguments required by that node. Multinode values passed to `--dump-config-to` must contain `{node_rank}`; the default is `/results/resolved-config-node{node_rank}.json`. This placeholder applies only to `--dump-config-to`, not to environment values or arbitrary CLI arguments. Callers must not pass Generator-owned orchestration options such as `--nnodes`, `--node-rank`, `--headless`, or `--data-parallel-size-local` in `extra_cli_args`. On multinode runs, leave `DYN_FPM_WORKER_ID` unset so the script derives `<FPM_RUN_ID>-node<N>`, unless the collector supplies a distinct value to each process.
 
-With DP greater than one, DP rank 0 uses the configured benchmark output path and later DP ranks use `_dp<N>` before the extension. Each node waits for all results in its local rank range. Under the current FPM schema-v1 contract, a result counts as complete only when it has `status: complete`, `valid: true`, complete zero-skipped coverage, the requested benchmark mode and point phase, and nested FPM samples for the expected DP rank. For `agg`, result points may be `prefill` or `decode`. The script also accepts the legacy schema-v2 `status: passed` plus `config.dp_rank` result used by earlier Phase 1 collectors. A terminal invalid result stops the script. The collector still owns staging the complete runtime bundle (scheduler code, cases, capacity, run-spec, runtime contracts, and validators) on every Pod, strict schema/metric validation, result download/aggregation/evidence, exit coordination, and cleanup.
+With DP greater than one, DP rank 0 uses the configured benchmark output path and later DP ranks use `_dp<N>` before the extension. Each node waits for all results in its local rank range. Under the current FPM schema-v1 contract, a result counts as complete only when it has `status: complete`, `valid: true`, complete zero-skipped coverage, the requested benchmark mode and point phase, and nested FPM samples for the expected DP rank. For `agg`, result points may be `prefill` or `decode`. The script also accepts the legacy schema-v2 `status: passed` plus `config.dp_rank` result used by earlier Phase 1 collectors. A terminal invalid result stops the script. The Collector still owns staging the case manifest, Scheduler adapter, preflight, optional pinned runtime overlay, and wrapper on every Pod, plus strict plan/workload/repeat validation, result download/aggregation/evidence, exit coordination, and cleanup.
 
 Every execution starts a new engine and reloads the model. `run.sh` refuses to overwrite any expected benchmark output, so each run must use new paths. With the default `/results` `emptyDir`, results remain only for the lifetime of the Pod. FPM V1 does not keep the engine or GPU-resident model alive between executions. Selecting any other deployment target preserves the existing generator output and behavior.
 

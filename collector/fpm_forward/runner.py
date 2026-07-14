@@ -17,7 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -26,7 +26,18 @@ from .planner import FPMCell, FPMCollectionPlan
 
 CHECKPOINT_SCHEMA = "aic-fpm-collector-checkpoint-v1"
 DEFAULT_BENCHMARK_TIMEOUT_SECONDS = 3600
+_FPM_VLLM_RUNTIME_ARGS = (
+    "--distributed-executor-backend",
+    "mp",
+    "--distributed-timeout-seconds",
+    "1800",
+    "--no-async-scheduling",
+    "--enable-prefix-caching",
+    "--no-scheduler-reserve-full-isl",
+    "--no-enable-log-requests",
+)
 REMOTE_EXIT_MARKER = "__FPM_REMOTE_EXIT_CODE__="
+REMOTE_FILES_MARKER = "__FPM_REMOTE_FILES__="
 REMOTE_WORKDIR = "/tmp/fpm-bench"
 
 
@@ -49,6 +60,18 @@ def _atomic_json(path: Path, payload: object) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     os.replace(temporary, path)
+
+
+def _file_manifest(root: Path) -> dict[str, dict[str, int | str]]:
+    manifest: dict[str, dict[str, int | str]] = {}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        manifest[str(path.relative_to(root))] = {
+            "size": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+    return manifest
 
 
 def _command_env() -> dict[str, str]:
@@ -137,7 +160,35 @@ class KubernetesCellRunner:
         return completed
 
     def apply(self) -> None:
-        self._kubectl("apply", "-f", str(self.manifest), timeout=120)
+        applied = self._kubectl(
+            "apply",
+            "--validate=false",
+            "-f",
+            str(self.manifest),
+            check=False,
+            timeout=120,
+        )
+        observed = self._kubectl(
+            "get",
+            f"{self.kind}/{self.name}",
+            "-n",
+            self.namespace,
+            "-o",
+            "json",
+            check=False,
+            timeout=60,
+        )
+        try:
+            payload = json.loads(observed.stdout)
+        except json.JSONDecodeError as error:
+            detail = (applied.stderr or applied.stdout or observed.stderr or observed.stdout).strip()
+            raise RuntimeError(
+                f"kubectl apply did not create {self.kind}/{self.name}: "
+                f"apply_exit={applied.returncode}, get_exit={observed.returncode}, output={detail!r}"
+            ) from error
+        metadata = payload.get("metadata") if isinstance(payload, dict) else None
+        if not isinstance(metadata, dict) or metadata.get("name") != self.name:
+            raise RuntimeError(f"kubectl apply returned the wrong object for {self.kind}/{self.name}: {payload!r}")
 
     def pods(self) -> list[str]:
         result = self._kubectl(
@@ -200,12 +251,48 @@ class KubernetesCellRunner:
                     check=False,
                     timeout=180,
                 )
-                self._exec_checked(pod, ["test", "-s", f"{REMOTE_WORKDIR}/{path.name}"], timeout=60)
-                if copied.returncode != 0:
-                    raise RuntimeError(
-                        f"failed to stage {path.name} to {pod}: local_exit={copied.returncode}, "
-                        f"output={(copied.stderr or copied.stdout).strip()!r}"
+                remote_path = f"{REMOTE_WORKDIR}/{path.name}"
+                expected_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+                verifier = (
+                    "import hashlib, pathlib, sys; "
+                    "path = pathlib.Path(sys.argv[1]); "
+                    "actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None; "
+                    "raise SystemExit(0 if actual == sys.argv[2] else 1)"
+                )
+                try:
+                    self._exec_checked(
+                        pod,
+                        ["python3", "-c", verifier, remote_path, expected_sha256],
+                        timeout=60,
                     )
+                except RuntimeError as error:
+                    raise RuntimeError(
+                        f"failed to stage an exact copy of {path.name} to {pod}: "
+                        f"local_exit={copied.returncode}, "
+                        f"output={(copied.stderr or copied.stdout).strip()!r}"
+                    ) from error
+
+    def _remote_result_manifest(self, pod: str) -> dict[str, dict[str, int | str]]:
+        script = (
+            "import hashlib, json, pathlib; "
+            "root = pathlib.Path('/results'); "
+            "files = {str(path.relative_to(root)): "
+            "{'size': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()} "
+            "for path in sorted(root.rglob('*')) if path.is_file()}; "
+            f"print('{REMOTE_FILES_MARKER}' + json.dumps(files, sort_keys=True))"
+        )
+        completed = self._exec_checked(pod, ["python3", "-c", script], timeout=120)
+        matches = re.findall(
+            rf"^{re.escape(REMOTE_FILES_MARKER)}(.+)$",
+            completed.stdout,
+            flags=re.MULTILINE,
+        )
+        if not matches:
+            raise RuntimeError(f"pod {pod} did not return a /results file manifest")
+        payload = json.loads(matches[-1])
+        if not isinstance(payload, dict):
+            raise TypeError(f"pod {pod} returned a non-object /results file manifest")
+        return payload
 
     def _run_pod(self, pod: str, timeout_seconds: int) -> tuple[str, subprocess.CompletedProcess[str]]:
         completed = self._exec_checked(
@@ -270,6 +357,11 @@ class KubernetesCellRunner:
                     ],
                     timeout=60,
                 )
+            remote_manifest = self._remote_result_manifest(pod)
+            if require_benchmark and not any(
+                Path(name).name.startswith("benchmark") and name.endswith(".json") for name in remote_manifest
+            ):
+                raise RuntimeError(f"pod {pod} result manifest contains no benchmark JSON files")
             pod_root = results_root / pod
             pod_root.mkdir(parents=True, exist_ok=True)
             copied = self._kubectl(
@@ -279,9 +371,19 @@ class KubernetesCellRunner:
                 check=False,
                 timeout=300,
             )
-            if copied.returncode != 0 or (require_benchmark and not any(pod_root.glob("benchmark*.json"))):
+            local_manifest = _file_manifest(pod_root)
+            if local_manifest != remote_manifest:
+                missing = sorted(set(remote_manifest) - set(local_manifest))
+                unexpected = sorted(set(local_manifest) - set(remote_manifest))
+                mismatched = sorted(
+                    name
+                    for name in set(remote_manifest) & set(local_manifest)
+                    if remote_manifest[name] != local_manifest[name]
+                )
                 raise RuntimeError(
-                    f"failed to collect benchmark results from {pod}: local_exit={copied.returncode}, "
+                    f"failed to collect an exact /results copy from {pod}: "
+                    f"local_exit={copied.returncode}, missing={missing!r}, "
+                    f"unexpected={unexpected!r}, mismatched={mismatched!r}, "
                     f"output={(copied.stderr or copied.stdout).strip()!r}"
                 )
             logs = self._kubectl(
@@ -310,17 +412,12 @@ class KubernetesCellRunner:
             raise RuntimeError(f"owned FPM pods remain after cleanup: {remaining}")
 
 
-def _selected_design(plan: FPMCollectionPlan, cell: FPMCell):
-    return plan.prefill_design if cell.workload_kind == "prefill" else plan.decode_design
-
-
 def _case_payload(
     plan: FPMCollectionPlan,
     cell: FPMCell,
     *,
     selected_point_count: int | None = None,
 ) -> dict[str, object]:
-    design = _selected_design(plan, cell)
     profile = cell.execution_profile
     selected_point_count = profile.selected_point_count if selected_point_count is None else selected_point_count
     if selected_point_count < 1 or selected_point_count > profile.selected_point_count:
@@ -337,7 +434,7 @@ def _case_payload(
         "measured_repeats": plan.options.measurement_repeats,
         "selected_point_count": selected_point_count,
         "ordered_shapes": [point.to_dict() for point in profile.ordered_points],
-        "sampling_sha256": design.sha256,
+        "sampling_sha256": cell.sampling_sha256,
         "execution_profile": {
             "max_batch_size": profile.max_batch_size,
             "max_num_tokens": profile.max_num_tokens,
@@ -362,6 +459,24 @@ def _cell_generator_overrides(
     unsupported_base = set(base) - {"K8sConfig", "generator_dynamo_version"}
     if unsupported_base:
         raise ValueError(f"FPM runner accepts deployment-only Generator inputs, got {sorted(unsupported_base)}")
+    service = {"include_frontend": False}
+    deployment = base.get("K8sConfig") or {}
+    mount_path = deployment.get("k8s_pvc_mount_path")
+    model_path_in_pvc = deployment.get("k8s_model_path_in_pvc")
+    if mount_path is not None or model_path_in_pvc is not None:
+        if not mount_path or not model_path_in_pvc:
+            raise ValueError("K8sConfig.k8s_pvc_mount_path and k8s_model_path_in_pvc must be provided together")
+        relative_model_path = PurePosixPath(str(model_path_in_pvc))
+        if relative_model_path.is_absolute() or ".." in relative_model_path.parts:
+            raise ValueError("K8sConfig.k8s_model_path_in_pvc must be a relative path without '..'")
+        deployed_model_path = str(PurePosixPath(str(mount_path)) / relative_model_path)
+        service.update(
+            {
+                "model_path": deployed_model_path,
+                "served_model_path": deployed_model_path,
+                "served_model_name": plan.model_path,
+            }
+        )
     scheduler_args = [
         "--scheduler-cls",
         "fpm_scheduler.InstrumentedScheduler",
@@ -370,6 +485,13 @@ def _cell_generator_overrides(
         "--benchmark-warmup-iterations",
         "0",
     ]
+    model_args = []
+    architecture = getattr(getattr(plan, "capability", None), "architecture", None)
+    if architecture == "GlmMoeDsaForCausalLM":
+        # This is the serving path validated by the pinned GLM-5.2 vLLM image.
+        # The parser does not alter FPM scheduling, but keeping the model's
+        # native runtime initialization avoids measuring a different engine.
+        model_args.extend(["--trust-remote-code", "--reasoning-parser=glm45"])
     env = [
         {"name": "PYTHONPATH", "value": REMOTE_WORKDIR},
         {"name": "DYN_FPM_CASE_CONFIG", "value": f"{REMOTE_WORKDIR}/cases.json"},
@@ -383,7 +505,7 @@ def _cell_generator_overrides(
         # Letting Generator's SLA rules recompute them can silently make a
         # frozen point illegal or change CUDA Graph coverage.
         "preserve_engine_limits": True,
-        "ServiceConfig": {"include_frontend": False},
+        "ServiceConfig": service,
         "DynConfig": {"mode": "agg"},
         "WorkerConfig": {"agg_workers": 1, "agg_gpus_per_worker": total_gpus},
         "K8sConfig": {
@@ -430,7 +552,7 @@ def _cell_generator_overrides(
     merged.setdefault("K8sConfig", {})["extra_env"] = list(resolved_env.values())
 
     policy_args = ((policy.get("params") or {}).get("agg") or {}).get("extra_cli_args") or []
-    resolved_args = [*policy_args]
+    resolved_args = [*_FPM_VLLM_RUNTIME_ARGS, *model_args, *policy_args]
     has_benchmark_timeout = any(
         str(argument) == "--benchmark-timeout" or str(argument).startswith("--benchmark-timeout=")
         for argument in resolved_args

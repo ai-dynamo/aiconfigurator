@@ -113,6 +113,16 @@ capabilities.py                        — generation-time capability/denylist f
 The plan is one equation: cases = dedup(base grid ∪ model shapes), then
 intersected with hardware capability floors and minus the hang denylist.
 
+## Whole-forward FPM campaign
+
+`--ops fpm_forward` is an explicit vLLM whole-forward campaign, not a normal
+backend-registry `OpEntry`. It must be selected alone and requires a resolved
+model, `--gpu`, and `--fpm-max-gpus`. It derives a latency-blind prefill/decode
+design from the model's AIC attention cases, asks Generator for a keepalive
+Pod/LeaderWorkerSet plus `run.sh`, stages its Scheduler adapter, and publishes
+the formal table only after every frozen cell passes. Start with `--plan-only`
+or a one-cell `--smoke --limit 1` run.
+
 ## Failure philosophy: observe, don't predict
 
 There is no declarative expected-failure layer. A case that cannot run on the
