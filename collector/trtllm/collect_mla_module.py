@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# FIXME(kernel-limit): retired sm_exceptions rules (PR #1302), not verified
-# against TRT-LLM source. Reportedly: MLA-module FP8 KV-cache variants are
-# Hopper-only (fail on SM100/103/120 where Blackwell FP8-KV applies elsewhere),
-# while DSA-module FP8 KV-cache variants are Blackwell-only (fail on SM90).
-# Affected precision combos currently fail at runtime. On the next version
-# bump: verify, then probe-and-raise or delete this note. Never move this back
-# into YAML.
+# FIXME(kernel-limit): retired sm_exceptions rules (PR #1302).
+# DSA half VERIFIED on 1.3.0rc20/SM90 (2026-07-14): the SM90 DSA core runs
+# FlashMLA sparse kernels, whose sparse_prefill_fwd asserts
+# kv.dtype()==kBFloat16 (flashmla-src/csrc/pybind.cpp:404) — FP8-KV DSA is
+# genuinely Blackwell-only (trtllm-gen sparseMla), matching the SM>=100 combo
+# floor in _get_precision_combos. MLA half partially verified: FP8-KV MLA
+# modules pass on SM90/rc20; the "fails on SM100/103/120" claim remains
+# hardware-unvalidated until the Blackwell phase. Never move this back into
+# YAML.
 
 # 1.3.0rc20 renamed the cache-manager sparse kwargs and moved attention
 # metadata to lowered SparseMetadataParams; this module follows those APIs.
@@ -777,11 +779,15 @@ def run_mla_module(
         try:
             with torch.inference_mode():
                 attn_module.forward(position_ids, hidden_states, attn_metadata)
-        except Exception as e:
-            print(f"  Dry run failed: {e}")
+        except Exception:
+            # Never swallow a failed case: raising lets the executor record a
+            # classified failure. A silent return here left green runs with
+            # missing perf rows (e.g. FlashMLA sparse rejecting FP8 KV probes
+            # surfaced as "passed" with no output).
+            print("  Dry run failed:")
             traceback.print_exc()
             _cleanup(kv_cache_manager)
-            return
+            raise
 
     # 5. Benchmark
     import tensorrt_llm._torch.utils as _trtllm_utils
