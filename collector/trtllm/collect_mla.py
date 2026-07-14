@@ -355,6 +355,9 @@ def _run_attn_for_backend(
         dtype=kv_cache_dtype,
     )
 
+    beam_width = 1
+    batch_request_infos = []
+    batch_llm_requests = []
     for req_id, ctx_len in enumerate(context_sequence_lengths):
         req = LlmRequest(
             request_id=req_id,
@@ -364,8 +367,16 @@ def _run_attn_for_backend(
             is_streaming=False,
         )
         req.paged_kv_block_ids = []
-        beam_width = 1
-        kv_cache_manager.impl.add_sequence(req_id, ctx_len, beam_width, req)
+        batch_request_infos.append((req_id, ctx_len, beam_width))
+        batch_llm_requests.append(req)
+    # TRT-LLM (>=1.3.0rc era) removed the per-sequence KVCacheManager.impl.add_sequence
+    # binding in favor of a batched add_sequence_batch(request_infos, requests). Fall back
+    # to the legacy per-sequence call for older runtimes still covered by __compat__.
+    if hasattr(kv_cache_manager.impl, "add_sequence_batch"):
+        kv_cache_manager.impl.add_sequence_batch(batch_request_infos, batch_llm_requests)
+    else:
+        for (req_id, ctx_len, req_beam_width), req in zip(batch_request_infos, batch_llm_requests, strict=True):
+            kv_cache_manager.impl.add_sequence(req_id, ctx_len, req_beam_width, req)
 
     attn_metadata = attention_cls.Metadata(
         seq_lens=torch.tensor(context_sequence_lengths, dtype=torch.int),
