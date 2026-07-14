@@ -203,6 +203,10 @@ def run_attention_torch(
         exclude_modules=None,
     )
 
+    # FIXME(kernel-limit): head_dim > 256 hits "Head size N is not supported by MMHA"
+    # (std::terminate in AttentionOp::initialize); head_dim == 192 on SM >= 90 hits
+    # "Unsupported HeadDim for BMM2-N 192" in TllmGenFmha (SM89 is unaffected).
+    # Applies to both context and generation phases; re-verify on each TRT-LLM version bump.
     attn = create_attention(
         backend_name=backend_name,
         layer_idx=layer_idx,
@@ -412,10 +416,6 @@ def get_context_attention_test_cases():
             num_kv_heads = head_config.num_kv_heads
             h = head_config.head_dim
             attention_window_size = head_config.window_size
-            # FIXME(kernel-limit): head_dim > 256 hits "Head size N is not supported by MMHA"
-            # (std::terminate in AttentionOp::initialize). head_dim == 192 on SM >= 90 hits
-            # "Unsupported HeadDim for BMM2-N 192" in TllmGenFmha (SM89 is unaffected).
-            # Both abort before Python can catch; re-verify on each TRT-LLM version bump.
             if num_kv_heads != n and (num_kv_heads >= n or n % num_kv_heads != 0):
                 continue
 
@@ -520,7 +520,6 @@ def get_generation_attention_test_cases():
             n_kv = head_config.num_kv_heads
             h = head_config.head_dim
             attention_window_size = head_config.window_size
-            # FIXME(kernel-limit): same head_dim limits as context phase above apply here.
             max_tokens_key = "max_mha_tokens_per_step" if n == n_kv else "max_xqa_tokens_per_step"
             b_s_dict = _generation_target_sequence_lengths(
                 batch_sizes,
