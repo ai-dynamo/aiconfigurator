@@ -14,6 +14,8 @@ import yaml
 from .config import FPMCollectionOptions
 from .planner import FPMCollectionPlan, build_collection_plan
 
+ResolvedFPMInputs = tuple[FPMCollectionPlan, dict[str, Any], str | None]
+
 
 def _deep_merge(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
     merged = copy.deepcopy(left)
@@ -76,7 +78,7 @@ def _load_generator_overrides(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
-def resolve_inputs(args: argparse.Namespace, case_plan) -> tuple[FPMCollectionPlan, dict[str, Any], str | None]:
+def resolve_inputs(args: argparse.Namespace, case_plan) -> ResolvedFPMInputs:
     if case_plan is None or not case_plan.model_path:
         raise ValueError("fpm_forward requires a resolved --model-path or single-model case plan")
     if not args.gpu:
@@ -102,14 +104,22 @@ def resolve_inputs(args: argparse.Namespace, case_plan) -> tuple[FPMCollectionPl
     return plan, generator_overrides, str(runtime_overlay_dir) if runtime_overlay_dir is not None else None
 
 
-def run_from_args(args: argparse.Namespace, case_plan) -> list[dict[str, object]]:
+def resolve_run_inputs(args: argparse.Namespace, case_plan) -> ResolvedFPMInputs:
+    """Validate execution-only arguments and resolve an immutable FPM plan."""
+
     if args.limit is not None and not args.smoke:
         raise ValueError("fpm_forward --limit is allowed only with --smoke")
     if args.limit is not None and args.limit < 1:
         raise ValueError("fpm_forward --limit must be a positive cell count")
     if args.fpm_smoke_points is not None and not args.smoke:
         raise ValueError("--fpm-smoke-points requires --smoke")
-    plan, generator_overrides, runtime_overlay_dir = resolve_inputs(args, case_plan)
+    return resolve_inputs(args, case_plan)
+
+
+def run_resolved(args: argparse.Namespace, resolved_inputs: ResolvedFPMInputs) -> list[dict[str, object]]:
+    """Execute already-resolved inputs without reclassifying runtime failures as CLI errors."""
+
+    plan, generator_overrides, runtime_overlay_dir = resolved_inputs
     from .runner import run_collection
 
     return run_collection(
@@ -124,3 +134,9 @@ def run_from_args(args: argparse.Namespace, case_plan) -> list[dict[str, object]
         runtime_overlay_dir=runtime_overlay_dir,
         database_root=args.fpm_database_root,
     )
+
+
+def run_from_args(args: argparse.Namespace, case_plan) -> list[dict[str, object]]:
+    """Resolve and execute an FPM collection for non-CLI callers."""
+
+    return run_resolved(args, resolve_run_inputs(args, case_plan))

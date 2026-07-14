@@ -75,6 +75,7 @@ import json
 import multiprocessing as mp
 import pstats
 import signal
+import subprocess
 import time
 import traceback
 from collections import Counter
@@ -99,6 +100,17 @@ STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before logging a stall
 # Failures of one (model, dtype) group within an op before the summary flags
 # it as systemic (a fix-me warning; nothing is skipped).
 SYSTEMIC_GROUP_THRESHOLD = 5
+
+FPM_INPUT_ERRORS = (TypeError, ValueError, subprocess.CalledProcessError, FileNotFoundError, RuntimeError)
+
+
+def _resolve_fpm_cli_inputs(parser, resolver):
+    """Render expected FPM input-resolution failures through argparse."""
+
+    try:
+        return resolver()
+    except FPM_INPUT_ERRORS as error:
+        parser.error(str(error))
 
 
 def _require_torch():
@@ -1518,10 +1530,9 @@ def main():
         if args.plan_only and fpm_requested:
             from collector.fpm_forward.entry import resolve_inputs
 
-            try:
-                fpm_plan, _generator_overrides, _runtime_overlay_dir = resolve_inputs(args, case_plan)
-            except (TypeError, ValueError) as error:
-                parser.error(str(error))
+            fpm_plan, _generator_overrides, _runtime_overlay_dir = _resolve_fpm_cli_inputs(
+                parser, lambda: resolve_inputs(args, case_plan)
+            )
             print(json.dumps(fpm_plan.to_dict(), indent=2, sort_keys=True))
             return
         if args.plan_only:
@@ -1582,12 +1593,10 @@ def main():
         )
 
     if fpm_requested:
-        from collector.fpm_forward.entry import run_from_args
+        from collector.fpm_forward.entry import resolve_run_inputs, run_resolved
 
-        try:
-            run_errors = run_from_args(args, case_plan)
-        except (TypeError, ValueError) as error:
-            parser.error(str(error))
+        resolved_inputs = _resolve_fpm_cli_inputs(parser, lambda: resolve_run_inputs(args, case_plan))
+        run_errors = run_resolved(args, resolved_inputs)
         generate_collection_summary(run_errors, args.backend, "generator-resolved")
         if run_errors:
             raise SystemExit(1)
