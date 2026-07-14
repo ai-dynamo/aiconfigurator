@@ -16,7 +16,12 @@ KV-cache stack. That is left for a follow-up if the function is ever refactored.
 import pytest
 import torch
 
-from collector.helper import _generate_power_law_distribution, _round_robin_adjust_per_rank
+from collector.helper import (
+    _generate_power_law_distribution,
+    _round_robin_adjust_per_rank,
+)
+
+pytestmark = pytest.mark.unit
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +94,8 @@ def test_round_robin_adjust_stops_when_no_valid_slot():
 def test_power_law_distribution_exact_sum(num_tokens, num_experts, topk, ep, alpha):
     counts, _ = _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha)
     assert counts.sum().item() == num_tokens * topk
+    rank_sums = counts.view(ep, num_experts // ep).sum(dim=1)
+    assert rank_sums[0] == rank_sums.max()
 
 
 @pytest.mark.parametrize(
