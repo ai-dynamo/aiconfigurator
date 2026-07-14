@@ -734,6 +734,19 @@ def _analytical_max_batch_size(
     return max_bs
 
 
+def _afd_total_batch_capacity(
+    max_micro_batch_size: int,
+    num_microbatches: int,
+    *,
+    align_to: int = 1,
+) -> int:
+    """Convert an AFD per-execution microbatch capacity to total A batch."""
+    max_total_batch_size = max(int(max_micro_batch_size), 0) * max(int(num_microbatches or 1), 1)
+    if align_to > 1:
+        max_total_batch_size = (max_total_batch_size // align_to) * align_to
+    return max_total_batch_size
+
+
 def _derive_a_batch_size(
     model_path: str,
     a_model_config: config.ModelConfig,
@@ -750,10 +763,11 @@ def _derive_a_batch_size(
 ) -> tuple[int, object, object]:
     """Derive ``a_batch_size`` from A-pool KV-cache capacity.
 
-    Analytically computes the maximum batch size whose A-pool memory
-    fits within the GPU HBM budget (both absolute capacity and KV-cache
-    fraction constraints).  The result is aligned down to a multiple of
-    8, capped at 256, and floored at 32.
+    Analytically computes the maximum per-execution microbatch whose A-pool
+    memory fits within the GPU HBM budget (both absolute capacity and KV-cache
+    fraction constraints), then converts it to the total in-flight batch over
+    all microbatches. The total result is aligned down to a multiple of 8,
+    capped at 256, and floored at 32.
 
     Falls back to 32 when the analytical result is below 32; the caller's
     per-candidate OOM check will then skip that topology naturally.
@@ -768,7 +782,7 @@ def _derive_a_batch_size(
 
     kvcache_multiplier = max(int(num_microbatches or 1), 1)
 
-    max_bs = _analytical_max_batch_size(
+    max_micro_bs = _analytical_max_batch_size(
         backend,
         a_model,
         database,
@@ -780,10 +794,11 @@ def _derive_a_batch_size(
         include_kvcache=True,
         kvcache_multiplier=kvcache_multiplier,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
-        align_to=8,
+        align_to=1,
     )
+    max_total_bs = _afd_total_batch_capacity(max_micro_bs, kvcache_multiplier, align_to=8)
 
-    return max(min(max_bs, 256), 32), a_model, a_partition
+    return max(min(max_total_bs, 256), 32), a_model, a_partition
 
 
 _AFD_BALANCE_RATIO_THRESHOLD = 0.3
@@ -1128,7 +1143,7 @@ def afd_pareto(
                         phase="generation",
                         boundary_on_attn=boundary_on_attn,
                     )
-                    derived_bs = _analytical_max_batch_size(
+                    max_bs_a_micro = _analytical_max_batch_size(
                         backend,
                         a_model,
                         database,
@@ -1141,6 +1156,10 @@ def afd_pareto(
                         kvcache_multiplier=max(int(num_microbatches or 1), 1),
                         free_gpu_memory_fraction=free_gpu_memory_fraction,
                         align_to=1,
+                    )
+                    derived_bs = _afd_total_batch_capacity(
+                        max_bs_a_micro,
+                        num_microbatches,
                     )
 
                 # --- F-Worker: analytical max batch_size ---
@@ -1167,7 +1186,10 @@ def afd_pareto(
                 )
                 nm = max(int(num_microbatches or 1), 1)
                 if n_a_workers > 0 and max_bs_f_micro > 0:
-                    max_bs_f = (max_bs_f_micro // n_a_workers) * nm
+                    max_bs_f = _afd_total_batch_capacity(
+                        max_bs_f_micro // n_a_workers,
+                        nm,
+                    )
                 else:
                     max_bs_f = 0
 

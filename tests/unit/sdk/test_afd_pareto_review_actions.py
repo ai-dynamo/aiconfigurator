@@ -124,6 +124,23 @@ def _patch_afd_pareto_fixed_batch_dependencies(
     return captured
 
 
+@pytest.mark.parametrize(
+    ("max_micro_batch_size", "num_microbatches", "align_to", "expected"),
+    [
+        (171, 3, 1, 513),
+        (171, 3, 8, 512),
+        (128, 2, 8, 256),
+        (64, 1, 8, 64),
+    ],
+)
+def test_afd_total_batch_capacity_converts_from_microbatch(
+    max_micro_batch_size, num_microbatches, align_to, expected
+):
+    assert (
+        pa._afd_total_batch_capacity(max_micro_batch_size, num_microbatches, align_to=align_to) == expected
+    )
+
+
 def test_afd_pareto_fixed_total_batch_uses_exact_a_batch(monkeypatch):
     captured = _patch_afd_pareto_fixed_batch_dependencies(monkeypatch, max_batch_size=1024)
 
@@ -219,8 +236,35 @@ def test_afd_pareto_fixed_total_batch_requires_exact_divisibility(monkeypatch, t
     assert captured["sessions"] == []
 
 
+def test_afd_pareto_fixed_batch_uses_microbatch_capacity(monkeypatch):
+    captured = _patch_afd_pareto_fixed_batch_dependencies(
+        monkeypatch,
+        max_batch_size=171,
+        f_max_batch_size=4096,
+    )
+
+    df = pa.afd_pareto(
+        model_path="Qwen/Qwen3-32B",
+        runtime_config=RuntimeConfig(isl=4096, osl=1024, tpot=25.0),
+        database=_FakeDatabase(),
+        backend_name="trtllm",
+        afd_parallel_config_list=[(1, 1, 2, 1, 3, "optimistic")],
+        gpus_per_node=8,
+        combined_with_pd=False,
+        total_batch_size=2048,
+    )
+
+    assert not df.empty
+    assert captured["sessions"][0].a_batch_size == 512
+    assert captured["runtime_configs"][0].batch_size == 2048
+
+
 def test_afd_pareto_fixed_total_batch_checks_memory_capacity(monkeypatch):
-    captured = _patch_afd_pareto_fixed_batch_dependencies(monkeypatch, max_batch_size=32)
+    captured = _patch_afd_pareto_fixed_batch_dependencies(
+        monkeypatch,
+        max_batch_size=21,
+        f_max_batch_size=4096,
+    )
 
     with pytest.raises(NoFeasibleConfigError, match="total_batch_size=256"):
         pa.afd_pareto(
@@ -235,6 +279,32 @@ def test_afd_pareto_fixed_total_batch_checks_memory_capacity(monkeypatch):
         )
 
     assert captured["sessions"] == []
+
+
+def test_derive_a_batch_size_aligns_converted_total_capacity(monkeypatch):
+    monkeypatch.setattr(pa, "get_model", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        "aiconfigurator.sdk.afd_partition.build_afd_ops_partition",
+        lambda *_args, **_kwargs: SimpleNamespace(attn_ops=[]),
+    )
+    monkeypatch.setattr(pa, "_analytical_max_batch_size", lambda *_args, **_kwargs: 15)
+
+    backend = SimpleNamespace(name=SimpleNamespace(value="trtllm"))
+    batch_size, _, _ = pa._derive_a_batch_size(
+        "Qwen/Qwen3-32B",
+        ModelConfig(),
+        backend,
+        _FakeDatabase(),
+        num_microbatches=3,
+        boundary_on_attn=False,
+        isl=128,
+        osl=32,
+        prefix=0,
+        max_seq_len=None,
+        free_gpu_memory_fraction=None,
+    )
+
+    assert batch_size == 40
 
 
 def test_afd_pareto_without_fixed_total_batch_keeps_auto_derivation(monkeypatch):
