@@ -70,22 +70,9 @@ def _build_disagg_summary_dict(
     Returns:
         Dict with keys matching ``common.ColumnsDisagg``.
     """
-    prefill_capacity = (
-        prefill_summary_dict["seq/s"]
-        * prefill_num_worker
-        * prefill_degradation_factor
-    )
-    decode_capacity = (
-        decode_summary_dict["seq/s"]
-        * decode_num_worker
-        * decode_degradation_factor
-    )
-    prefill_ttft_capacity = (
-        prefill_summary_dict["bs"]
-        * prefill_num_worker
-        * 1000.0
-        / prefill_summary_dict["ttft"]
-    )
+    prefill_capacity = prefill_summary_dict["seq/s"] * prefill_num_worker * prefill_degradation_factor
+    decode_capacity = decode_summary_dict["seq/s"] * decode_num_worker * decode_degradation_factor
+    prefill_ttft_capacity = prefill_summary_dict["bs"] * prefill_num_worker * 1000.0 / prefill_summary_dict["ttft"]
 
     seq_s = min(prefill_capacity, decode_capacity, prefill_ttft_capacity)
 
