@@ -151,11 +151,8 @@ class InstrumentedScheduler(_BaseInstrumentedScheduler):
             else:
                 eligible.append((design_index, point_dict, point, capacity))
 
-        selected = eligible[:target_count]
-        if len(selected) != target_count:
-            raise ValueError(
-                f"capacity-legal population {len(eligible)} is smaller than selected_point_count={target_count}"
-            )
+        capacity_sufficient = len(eligible) >= target_count
+        selected = eligible[:target_count] if capacity_sufficient else []
         points = []
         execution_meta = []
         for design_index, point_dict, point, capacity in selected:
@@ -182,13 +179,21 @@ class InstrumentedScheduler(_BaseInstrumentedScheduler):
         self._fpm_cancelled = cancelled
         self._fpm_execution_meta = execution_meta
         self._fpm_pending_execution_meta = deque(execution_meta)
+        self._fpm_canary_completed = False
         self._fpm_started_unix_ns = time.time_ns()
         self._fpm_started_monotonic_ns = time.monotonic_ns()
         self._fpm_result_written = False
 
         self._bench_grid.extend(points)
-        self._bench_expected_points = len(points)
+        self._bench_expected_points = len(points) if capacity_sufficient else target_count * (warmups + repeats)
         self._bench_grid_built = True
+        if not capacity_sufficient:
+            logger.error(
+                "AIC FPM runtime capacity admits only %d/%d selected points; "
+                "writing an invalid terminal result without executing forwards",
+                len(eligible),
+                target_count,
+            )
         logger.info(
             "AIC FPM explicit grid: population=%d eligible=%d selected=%d executions=%d warmups=%d repeats=%d",
             len(shapes),
@@ -204,6 +209,17 @@ class InstrumentedScheduler(_BaseInstrumentedScheduler):
         if point is not None:
             self._fpm_active_execution_meta = self._fpm_pending_execution_meta.popleft()
         return point
+
+    def _bench_skip_point(self, point: BenchmarkPoint, reason: str) -> None:
+        super()._bench_skip_point(point, reason)
+        meta = getattr(self, "_fpm_active_execution_meta", None)
+        if meta is not None and meta["measured"] and not self._fpm_canary_completed:
+            self._bench_grid.clear()
+            self._fpm_pending_execution_meta.clear()
+            logger.error(
+                "AIC FPM integrated canary failed (%s); aborting the remaining formal points",
+                reason,
+            )
 
     def _bench_save_current_point(self) -> None:
         point = self._bench_current_point
@@ -246,6 +262,8 @@ class InstrumentedScheduler(_BaseInstrumentedScheduler):
                     self._bench_skip_point(point, f"explicit_fpm_mismatch:{mismatches}")
                 else:
                     self._bench_results.append(BenchmarkPointResult(point=point, fpms=list(self._bench_current_fpms)))
+                    if meta["measured"] and not self._fpm_canary_completed:
+                        self._fpm_canary_completed = True
         self._bench_current_point = None
         self._bench_current_fpms = []
 

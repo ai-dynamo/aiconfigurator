@@ -7,6 +7,7 @@ import importlib.util
 import json
 import sys
 import types
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,7 +33,8 @@ class _BenchmarkPointResult:
 
 
 class _BaseScheduler:
-    pass
+    def _bench_skip_point(self, point, reason):
+        self._bench_skipped_points.append((point, reason))
 
 
 @dataclass
@@ -96,6 +98,69 @@ def test_runtime_capacity_supports_prefill_past_kv_and_decode(adapter):
     assert reason is None
     assert decode.point_type == "decode"
     assert decode.context_length == 1024
+
+
+def test_runtime_capacity_shortfall_writes_no_forward_grid(adapter, monkeypatch, tmp_path):
+    scheduler, loaded = adapter
+    case = tmp_path / "cases.json"
+    case.write_text(
+        json.dumps(
+            {
+                "selected_point_count": 2,
+                "ordered_shapes": [
+                    {
+                        "workload_kind": "prefill",
+                        "batch_size": 1,
+                        "suffix_length": 64,
+                        "prefix_length": 0,
+                    },
+                    {
+                        "workload_kind": "prefill",
+                        "batch_size": 64,
+                        "suffix_length": 64,
+                        "prefix_length": 0,
+                    },
+                ],
+            }
+        )
+    )
+    monkeypatch.setenv(loaded.ENV_CASE_CONFIG, str(case))
+    scheduler._bench_grid = deque()
+    scheduler._bench_grid_built = False
+
+    scheduler._bench_build_grid()
+
+    assert list(scheduler._bench_grid) == []
+    assert scheduler._bench_expected_points == 2
+    assert len(scheduler._fpm_eligible) == 1
+    assert scheduler._fpm_target_count == 2
+
+    output = tmp_path / "benchmark.json"
+    scheduler._bench_results = []
+    scheduler._bench_skipped_points = []
+    scheduler._bench_missing_phases = []
+    scheduler._bench_config = _BenchConfig(mode="prefill", output_path=str(output))
+    scheduler._bench_write_results()
+    payload = json.loads(output.read_text())
+    assert payload["valid"] is False
+    assert payload["coverage"] == {"expected_points": 2, "completed_points": 0, "skipped_points": 0}
+
+
+def test_integrated_canary_failure_aborts_remaining_grid(adapter):
+    scheduler, _ = adapter
+    first = _BenchmarkPoint(point_type="prefill", isl=64)
+    second = _BenchmarkPoint(point_type="prefill", isl=128)
+    scheduler._bench_skipped_points = []
+    scheduler._bench_grid = deque([second])
+    scheduler._fpm_pending_execution_meta = deque([{"measured": True}])
+    scheduler._fpm_active_execution_meta = {"measured": True}
+    scheduler._fpm_canary_completed = False
+
+    scheduler._bench_skip_point(first, "canary_failed")
+
+    assert list(scheduler._bench_grid) == []
+    assert list(scheduler._fpm_pending_execution_meta) == []
+    assert scheduler._bench_skipped_points == [(first, "canary_failed")]
 
 
 def test_runtime_result_envelope_matches_generator_contract(adapter, tmp_path):

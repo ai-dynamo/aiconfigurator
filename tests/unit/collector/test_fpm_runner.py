@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import collector.fpm_forward.runner as fpm_runner
 from collector.fpm_forward.capacity import FPMExecutionProfile, _cudagraph_capture_sizes
 from collector.fpm_forward.planner import BackendPolicy, FPMCell
 from collector.fpm_forward.runner import (
@@ -22,7 +23,8 @@ from collector.fpm_forward.runner import (
     _case_payload,
     _cell_generator_overrides,
     _render_cell,
-    _validate_capability_gate,
+    _validate_runtime_collection,
+    run_collection,
 )
 from collector.fpm_forward.types import FPMPoint, ParallelTopology
 
@@ -315,7 +317,7 @@ def test_smoke_case_payload_freezes_requested_point_count():
     assert payload["measured_repeats"] == 1
 
 
-def test_capability_gate_requires_runtime_capacity_for_full_profile(tmp_path):
+def test_integrated_collection_requires_runtime_capacity_for_full_profile(tmp_path):
     point = FPMPoint("prefill", batch_size=1, suffix_length=1, prefix_length=0)
     cell = FPMCell(
         cell_id="cell",
@@ -335,15 +337,154 @@ def test_capability_gate_requires_runtime_capacity_for_full_profile(tmp_path):
                 {
                     "status": "complete",
                     "valid": True,
-                    "collector": {"cell_id": "cell", "capacity_eligible_count": eligible},
+                    "collector": {
+                        "cell_id": "cell",
+                        "selected_point_count": 1,
+                        "capacity_eligible_count": eligible,
+                        "capacity_cancelled_count": 0 if eligible else 1,
+                    },
                     "cancelled_points": [] if eligible else [{"point": point.to_dict()}],
-                    "campaign_results": [{"point": point.to_dict(), "fpms": [{"dp_rank": rank}]}],
+                    "campaign_results": [
+                        {
+                            "point": point.to_dict(),
+                            "warmup_fpms": [],
+                            "fpms": [{"dp_rank": rank}],
+                        }
+                    ],
                 }
             )
         )
 
     with pytest.raises(ValueError, match="runtime capacity admits only 0/1"):
-        _validate_capability_gate(cell, tmp_path)
+        _validate_runtime_collection(cell, tmp_path)
+
+
+def test_integrated_collection_requires_identical_dp_rank_selection(tmp_path):
+    points = (
+        FPMPoint("prefill", batch_size=1, suffix_length=1, prefix_length=0),
+        FPMPoint("prefill", batch_size=1, suffix_length=1, prefix_length=64),
+    )
+    cell = FPMCell(
+        cell_id="cell",
+        workload_kind="prefill",
+        topology=ParallelTopology(tp=1, pp=1, dp=2, moe_tp=1, moe_ep=2, cp=1),
+        weight_quantization="nvfp4",
+        kv_cache_dtype="fp8_e4m3",
+        backend_policy=BackendPolicy("baseline", "baseline", {}, {}),
+        sampling_sha256="sampling",
+        execution_profile=_profile(points),
+    )
+    for rank, selected, cancelled in (
+        (0, points[0], []),
+        (1, points[1], [{"point": points[0].to_dict()}]),
+    ):
+        path = tmp_path / f"pod-{rank}" / f"benchmark_dp{rank}.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "status": "complete",
+                    "valid": True,
+                    "collector": {
+                        "cell_id": "cell",
+                        "selected_point_count": 1,
+                        "capacity_eligible_count": len(points) - len(cancelled),
+                        "capacity_cancelled_count": len(cancelled),
+                    },
+                    "cancelled_points": cancelled,
+                    "campaign_results": [
+                        {
+                            "point": selected.to_dict(),
+                            "warmup_fpms": [],
+                            "fpms": [{"dp_rank": rank}],
+                        }
+                    ],
+                }
+            )
+        )
+
+    with pytest.raises(ValueError, match="selected different formal point sets"):
+        _validate_runtime_collection(cell, tmp_path, selected_point_count=1)
+
+
+def test_run_collection_starts_engine_once_per_cell(monkeypatch, tmp_path):
+    point = FPMPoint("prefill", batch_size=1, suffix_length=1, prefix_length=0)
+    cell = FPMCell(
+        cell_id="cell",
+        workload_kind="prefill",
+        topology=ParallelTopology(tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1, cp=1),
+        weight_quantization="nvfp4",
+        kv_cache_dtype="fp8_e4m3",
+        backend_policy=BackendPolicy("baseline", "baseline", {}, {}),
+        sampling_sha256="sampling",
+        execution_profile=_profile((point,)),
+    )
+    plan = SimpleNamespace(
+        sha256="plan-sha",
+        cells=(cell,),
+        runtime_overlay_files=(),
+        runtime_overlay_base_files=(),
+        options=SimpleNamespace(smoke_points=1, warmup_repeats=0, measurement_repeats=1),
+        to_dict=lambda: {"sha256": "plan-sha"},
+    )
+    events = []
+
+    def render_cell(*_args, **_kwargs):
+        cell_dir = _args[2]
+        (cell_dir / "k8s_deploy.yaml").write_text("apiVersion: v1\nkind: Pod\n")
+        (cell_dir / "run.sh").write_text("#!/bin/sh\n")
+
+    class FakeResource:
+        def __init__(self, _manifest, _cell_dir):
+            events.append("init")
+
+        def apply(self):
+            events.append("apply")
+
+        def wait_ready(self, _expected_nodes):
+            events.append("ready")
+            return ["pod-0"]
+
+        def stage(self, _pods, _files):
+            events.append("stage")
+
+        def execute(self, _pods):
+            events.append("execute")
+
+        def collect(self, _pods, *, require_benchmark=True):
+            assert require_benchmark is True
+            events.append("collect")
+
+        def cleanup(self):
+            events.append("cleanup")
+
+    monkeypatch.setattr(fpm_runner, "_render_cell", render_cell)
+    monkeypatch.setattr(fpm_runner, "KubernetesCellRunner", FakeResource)
+    monkeypatch.setattr(
+        fpm_runner,
+        "_validate_runtime_collection",
+        lambda *_args, **_kwargs: events.append("validate"),
+    )
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+
+    errors = run_collection(
+        plan,
+        generator_overrides={},
+        checkpoint_dir=str(checkpoint_dir),
+        artifact_root=str(tmp_path / "artifacts"),
+        resume=False,
+        retry_failed=False,
+        smoke=True,
+        cell_limit=1,
+    )
+
+    assert errors == []
+    assert events.count("execute") == 1
+    assert events.count("collect") == 1
+    assert events.count("stage") == 1
+    assert events.count("validate") == 1
+    assert events.count("cleanup") == 1
 
 
 def test_typed_generator_render_keeps_frozen_fpm_limits(tmp_path):

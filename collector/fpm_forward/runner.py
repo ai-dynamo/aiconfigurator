@@ -321,20 +321,6 @@ class KubernetesCellRunner:
         if failures:
             raise RuntimeError(f"generated FPM run.sh failed: {failures}")
 
-    def clear_results(self, pods: list[str]) -> None:
-        for pod in pods:
-            self._kubectl(
-                "exec",
-                "-n",
-                self.namespace,
-                pod,
-                "--",
-                "bash",
-                "-lc",
-                "rm -f /results/*",
-                timeout=60,
-            )
-
     def collect(
         self,
         pods: list[str],
@@ -639,15 +625,21 @@ def _expected_nodes(manifest: Path) -> int:
     raise ValueError(f"unsupported generated FPM workload kind: {payload.get('kind')}")
 
 
-def _validate_capability_gate(cell: FPMCell, gate_root: Path) -> None:
-    """Require every DP rank to confirm the frozen point population at runtime."""
+def _validate_runtime_collection(
+    cell: FPMCell,
+    raw_root: Path,
+    *,
+    selected_point_count: int | None = None,
+) -> None:
+    """Validate integrated runtime capacity, canary, and formal results across DP ranks."""
 
-    paths = sorted(gate_root.glob("**/benchmark*.json"))
+    paths = sorted(raw_root.glob("**/benchmark*.json"))
     if not paths:
-        raise ValueError(f"capability gate emitted no benchmark results for {cell.cell_id}")
+        raise ValueError(f"integrated runtime emitted no benchmark results for {cell.cell_id}")
     seen_ranks = set()
     ordered_population = [point.to_dict() for point in cell.execution_profile.ordered_points]
     formal_points = None
+    target = cell.execution_profile.selected_point_count if selected_point_count is None else selected_point_count
 
     def point_key(point: dict[str, object]) -> tuple[str, int, int, int]:
         return (
@@ -660,12 +652,13 @@ def _validate_capability_gate(cell: FPMCell, gate_root: Path) -> None:
     for path in paths:
         payload = json.loads(path.read_text())
         if payload.get("status") != "complete" or payload.get("valid") is not True:
-            raise ValueError(f"invalid capability result for {cell.cell_id}: {path}")
+            raise ValueError(f"invalid integrated result for {cell.cell_id}: {path}")
         collector = payload.get("collector")
         if not isinstance(collector, dict) or collector.get("cell_id") != cell.cell_id:
-            raise ValueError(f"capability result identity mismatch for {cell.cell_id}: {path}")
+            raise ValueError(f"integrated result identity mismatch for {cell.cell_id}: {path}")
+        if int(collector.get("selected_point_count", -1)) != target:
+            raise ValueError(f"integrated selected-count mismatch for {cell.cell_id}: {path}")
         eligible = int(collector.get("capacity_eligible_count", -1))
-        target = cell.execution_profile.selected_point_count
         if eligible < target:
             raise ValueError(
                 f"runtime capacity admits only {eligible}/{target} frozen points for {cell.cell_id}; "
@@ -673,32 +666,44 @@ def _validate_capability_gate(cell: FPMCell, gate_root: Path) -> None:
             )
         cancelled = payload.get("cancelled_points")
         if not isinstance(cancelled, list):
-            raise TypeError(f"capability result has no capacity decisions for {cell.cell_id}: {path}")
+            raise TypeError(f"integrated result has no capacity decisions for {cell.cell_id}: {path}")
+        if int(collector.get("capacity_cancelled_count", -1)) != len(cancelled):
+            raise ValueError(f"integrated cancelled-count mismatch for {cell.cell_id}: {path}")
         cancelled_keys = {point_key(item["point"]) for item in cancelled}
         rank_eligible = [point for point in ordered_population if point_key(point) not in cancelled_keys]
         if len(rank_eligible) != eligible:
-            raise ValueError(f"capability eligible-count mismatch for {cell.cell_id}: {path}")
+            raise ValueError(f"integrated eligible-count mismatch for {cell.cell_id}: {path}")
         rank_formal_points = rank_eligible[:target]
         if formal_points is None:
             formal_points = rank_formal_points
         elif rank_formal_points != formal_points:
-            raise ValueError(f"capability DP ranks selected different formal point sets for {cell.cell_id}: {path}")
+            raise ValueError(f"integrated DP ranks selected different formal point sets for {cell.cell_id}: {path}")
         rows = payload.get("campaign_results")
-        if not isinstance(rows, list) or len(rows) != 1 or rows[0].get("point") != rank_formal_points[0]:
+        if not isinstance(rows, list) or len(rows) != target:
             raise ValueError(
-                f"capability gate did not execute the first runtime-admitted point for {cell.cell_id}: {path}"
+                f"integrated collection did not execute {target} runtime-admitted points for {cell.cell_id}: {path}"
             )
-        measurements = rows[0].get("fpms")
-        if not isinstance(measurements, list) or len(measurements) != 1:
-            raise ValueError(f"capability gate did not emit one measured FPM for {cell.cell_id}: {path}")
-        rank = int(measurements[0]["dp_rank"])
+        if [row.get("point") for row in rows] != rank_formal_points:
+            raise ValueError(f"integrated formal point order mismatch for {cell.cell_id}: {path}")
+        row_ranks = set()
+        for row in rows:
+            warmups = row.get("warmup_fpms")
+            measurements = row.get("fpms")
+            if not isinstance(warmups, list) or warmups:
+                raise ValueError(f"integrated collection emitted warmup FPMs for {cell.cell_id}: {path}")
+            if not isinstance(measurements, list) or len(measurements) != 1:
+                raise ValueError(f"integrated collection did not emit one measured FPM for {cell.cell_id}: {path}")
+            row_ranks.add(int(measurements[0]["dp_rank"]))
+        if len(row_ranks) != 1:
+            raise ValueError(f"integrated result mixes DP ranks for {cell.cell_id}: {path}")
+        rank = row_ranks.pop()
         if rank in seen_ranks:
-            raise ValueError(f"duplicate capability dp_rank={rank} for {cell.cell_id}: {path}")
+            raise ValueError(f"duplicate integrated dp_rank={rank} for {cell.cell_id}: {path}")
         seen_ranks.add(rank)
     expected_ranks = set(range(cell.topology.dp))
     if seen_ranks != expected_ranks:
         raise ValueError(
-            f"capability DP rank set mismatch for {cell.cell_id}: "
+            f"integrated DP rank set mismatch for {cell.cell_id}: "
             f"actual={sorted(seen_ranks)} expected={sorted(expected_ranks)}"
         )
 
@@ -781,8 +786,6 @@ def run_collection(
             cell_dir / "cases.json",
             _case_payload(plan, cell, selected_point_count=selected_count),
         )
-        gate_dir = cell_dir / "capability"
-        _atomic_json(gate_dir / "cases.json", _case_payload(plan, cell, selected_point_count=1))
         cell_started = time.monotonic()
         started_at = _utc_now()
         checkpoint["cells"][cell.cell_id] = {"status": "running", "started_at": started_at}
@@ -804,11 +807,10 @@ def run_collection(
             resource = KubernetesCellRunner(manifest, cell_dir)
             resource.apply()
             pods = resource.wait_ready(_expected_nodes(manifest))
-            initial_cases = cell_dir / "cases.json" if smoke else gate_dir / "cases.json"
             resource.stage(
                 pods,
                 [
-                    initial_cases,
+                    cell_dir / "cases.json",
                     cell_dir / "fpm_scheduler.py",
                     run_script,
                     runtime_wrapper,
@@ -818,15 +820,12 @@ def run_collection(
                 ],
             )
             resource.execute(pods)
-            if smoke:
-                resource.collect(pods)
-            else:
-                resource.collect(pods, destination="capability/raw")
-                _validate_capability_gate(cell, gate_dir / "raw")
-                resource.clear_results(pods)
-                resource.stage(pods, [cell_dir / "cases.json"])
-                resource.execute(pods)
-                resource.collect(pods)
+            resource.collect(pods)
+            _validate_runtime_collection(
+                cell,
+                cell_dir / "raw",
+                selected_point_count=selected_count,
+            )
             checkpoint["cells"][cell.cell_id] = {
                 "status": "passed",
                 "artifact_dir": str(cell_dir),
