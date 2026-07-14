@@ -90,10 +90,10 @@ def _plot_worker_setup_table(
         return ""
 
     config_df = config_df.copy()
-    if preserve_ranking:
-        # A Spica replay row is already a complete evaluated deployment (and may
-        # have been planner-scaled). Do not extrapolate it to the search budget or
-        # re-rank it by the legacy throughput/GPU heuristic.
+    # Load-match (replicas_needed present) and Spica replay (preserve_ranking)
+    # both carry per-replica throughput that should not be extrapolated to a
+    # fixed GPU budget. Only the default picking path scales by total_gpus.
+    if preserve_ranking or "replicas_needed" in config_df.columns:
         config_df["tokens/s/gpu_cluster"] = config_df["tokens/s/gpu"]
     else:
         config_df["tokens/s/gpu_cluster"] = (
@@ -121,7 +121,10 @@ def _plot_worker_setup_table(
     else:
         top_configs = config_df.copy()
     if not preserve_ranking:
-        top_configs = top_configs.sort_values(by="tokens/s/gpu_cluster", ascending=False)
+        if "replicas_needed" in top_configs.columns:
+            top_configs = top_configs.sort_values(by="total_gpus_needed", ascending=True)
+        else:
+            top_configs = top_configs.sort_values(by="tokens/s/gpu_cluster", ascending=False)
     top_configs = top_configs.head(top).copy()
 
     if top_configs.empty:
@@ -130,11 +133,22 @@ def _plot_worker_setup_table(
     if preserve_ranking:
         top_configs["replicas"] = 1
         top_configs["total_gpus_used"] = top_configs["num_total_gpus"]
+    elif "replicas_needed" in top_configs.columns:
+        # Load-match / recommend: pick_load_match already computed the replica
+        # count needed to meet the target load; use that instead of dividing
+        # the sweep ceiling (total_gpus) which is just a search-space bound.
+        top_configs["replicas"] = top_configs["replicas_needed"].astype(int)
+        top_configs["total_gpus_used"] = top_configs["total_gpus_needed"].astype(int)
     else:
         top_configs["replicas"] = total_gpus // top_configs["num_total_gpus"]
         top_configs["total_gpus_used"] = top_configs["num_total_gpus"] * top_configs["replicas"]
 
-    ranking_label = objective_target if preserve_ranking and objective_target else "tokens/s/gpu"
+    if preserve_ranking and objective_target:
+        ranking_label = objective_target
+    elif "replicas_needed" in top_configs.columns:
+        ranking_label = "total_gpus_needed"
+    else:
+        ranking_label = "tokens/s/gpu"
     buf.append(f"\n{exp_name} Top Configurations: (Ranked by {ranking_label})")
     table = PrettyTable()
 
@@ -171,7 +185,7 @@ def _plot_worker_setup_table(
             field_names.append("power_w")
         table.field_names = field_names
         for i, row in enumerate(top_configs.to_dict("records")):
-            display_total_gpus = row["total_gpus_used"] if preserve_ranking else total_gpus
+            display_total_gpus = row["total_gpus_used"] if preserve_ranking or "replicas_needed" in row else total_gpus
             display_concurrency = row["concurrency"] if preserve_ranking else row["concurrency"] * row["replicas"]
             if is_moe:
                 p_parallel = (
@@ -265,7 +279,7 @@ def _plot_worker_setup_table(
             field_names.append("power_w")
         table.field_names = field_names
         for i, row in enumerate(top_configs.to_dict("records")):
-            display_total_gpus = row["total_gpus_used"] if preserve_ranking else total_gpus
+            display_total_gpus = row["total_gpus_used"] if preserve_ranking or "replicas_needed" in row else total_gpus
             display_concurrency = row["concurrency"] if preserve_ranking else row["concurrency"] * row["replicas"]
             if is_moe:
                 parallel = (
@@ -400,7 +414,8 @@ def log_final_summary(
         chosen_task = tasks[chosen_exp]
 
     summary_box.append(f"    Model: {chosen_task.primary_model_path} (is_moe: {chosen_task.is_moe})")
-    summary_box.append(f"    Total GPUs: {chosen_task.total_gpus}")
+    if not load_match:
+        summary_box.append(f"    Total GPUs: {chosen_task.total_gpus}")
     if extra_input_lines:
         for line in extra_input_lines:
             summary_box.append(f"    {line}")
@@ -513,11 +528,17 @@ def log_final_summary(
             if average_gpus is not None and not pd.isna(average_gpus):
                 summary_box.append(f"    - Average Provisioned GPUs: {float(average_gpus):.2f}")
         else:
-            summary_box.append(f"    - Best Throughput: {best_throughput * chosen_task.total_gpus:,.2f} tokens/s")
+            if load_match and "replicas_needed" in best_conf_details.index:
+                display_total_gpus = int(best_conf_details["total_gpus_needed"])
+            else:
+                display_total_gpus = chosen_task.total_gpus
+            summary_box.append(f"    - Best Throughput: {best_throughput * display_total_gpus:,.2f} tokens/s")
             summary_box.append(f"    - Per-GPU Throughput: {best_throughput:.2f} tokens/s/gpu")
         summary_box.append(f"    - Per-User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
         if objective_aware:
             cluster_rr = float(best_conf_details["request_rate"])
+        elif load_match and "replicas_needed" in best_conf_details.index:
+            cluster_rr = float(best_conf_details["request_rate"]) * int(best_conf_details["replicas_needed"])
         else:
             replicas = chosen_task.total_gpus // int(best_conf_details["num_total_gpus"])
             cluster_rr = float(best_conf_details["request_rate"]) * replicas
