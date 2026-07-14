@@ -1,0 +1,751 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Generator-driven Kubernetes execution for an immutable FPM plan."""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from .planner import FPMCell, FPMCollectionPlan
+
+CHECKPOINT_SCHEMA = "aic-fpm-collector-checkpoint-v1"
+DEFAULT_BENCHMARK_TIMEOUT_SECONDS = 3600
+REMOTE_EXIT_MARKER = "__FPM_REMOTE_EXIT_CODE__="
+REMOTE_WORKDIR = "/tmp/fpm-bench"
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _deep_merge(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(left)
+    for key, value in right.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _atomic_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    os.replace(temporary, path)
+
+
+def _command_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        env.pop(name, None)
+    return env
+
+
+def _kubectl_command() -> list[str]:
+    override = os.environ.get("FPM_KUBECTL")
+    if override:
+        return override.split()
+    if shutil.which("kubectl"):
+        return ["kubectl"]
+    if shutil.which("tsh"):
+        return ["tsh", "kubectl"]
+    raise RuntimeError("neither kubectl nor tsh is available")
+
+
+def _run_command(
+    args: list[str],
+    *,
+    check: bool = True,
+    timeout: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        check=check,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=_command_env(),
+    )
+
+
+class KubernetesCellRunner:
+    """Own one generated Pod/LWS from apply through verified deletion."""
+
+    def __init__(self, manifest: Path, cell_dir: Path) -> None:
+        self.manifest = manifest
+        self.cell_dir = cell_dir
+        workload = yaml.safe_load(manifest.read_text())
+        if not isinstance(workload, dict):
+            raise TypeError("generated k8s_deploy.yaml must be one YAML mapping")
+        metadata = workload.get("metadata") or {}
+        self.name = str(metadata["name"])
+        self.namespace = str(metadata.get("namespace") or "default")
+        self.kind = str(workload["kind"])
+        self.selector = f"app.kubernetes.io/name={self.name}"
+        self.kubectl = _kubectl_command()
+
+    def _kubectl(self, *args: str, check: bool = True, timeout: int | None = None):
+        return _run_command([*self.kubectl, *args], check=check, timeout=timeout)
+
+    def _exec_checked(self, pod: str, command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        """Run a pod command without trusting the local kubectl wrapper's exit code.
+
+        ``tsh kubectl exec`` can return zero after printing a non-zero remote
+        exit status.  Emit and parse an explicit marker from inside the pod so
+        staging and benchmark failures remain fail-closed.
+        """
+
+        remote_command = shlex.join(command)
+        script = f"{remote_command}; rc=$?; printf '\\n{REMOTE_EXIT_MARKER}%s\\n' \"$rc\"; exit 0"
+        completed = self._kubectl(
+            "exec",
+            "-n",
+            self.namespace,
+            pod,
+            "--",
+            "bash",
+            "-lc",
+            script,
+            check=False,
+            timeout=timeout,
+        )
+        matches = re.findall(rf"{re.escape(REMOTE_EXIT_MARKER)}(\d+)", completed.stdout + completed.stderr)
+        remote_exit = int(matches[-1]) if matches else None
+        if completed.returncode != 0 or remote_exit != 0:
+            detail = (completed.stderr or completed.stdout).strip()
+            raise RuntimeError(
+                f"pod command failed for {pod}: local_exit={completed.returncode}, "
+                f"remote_exit={remote_exit}, command={command!r}, output={detail!r}"
+            )
+        return completed
+
+    def apply(self) -> None:
+        self._kubectl("apply", "-f", str(self.manifest), timeout=120)
+
+    def pods(self) -> list[str]:
+        result = self._kubectl(
+            "get",
+            "pods",
+            "-n",
+            self.namespace,
+            "-l",
+            self.selector,
+            "-o",
+            "json",
+            timeout=60,
+        )
+        payload = json.loads(result.stdout)
+        return sorted(item["metadata"]["name"] for item in payload.get("items", []))
+
+    def wait_ready(self, expected_nodes: int, timeout_seconds: int = 900) -> list[str]:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            result = self._kubectl(
+                "get",
+                "pods",
+                "-n",
+                self.namespace,
+                "-l",
+                self.selector,
+                "-o",
+                "json",
+                check=False,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                payload = json.loads(result.stdout)
+                items = payload.get("items", [])
+                ready = [
+                    item
+                    for item in items
+                    if item.get("status", {}).get("phase") == "Running"
+                    and any(
+                        condition.get("type") == "Ready" and condition.get("status") == "True"
+                        for condition in item.get("status", {}).get("conditions", [])
+                    )
+                ]
+                if len(ready) == expected_nodes:
+                    return sorted(item["metadata"]["name"] for item in ready)
+                failed = [item for item in items if item.get("status", {}).get("phase") in {"Failed", "Succeeded"}]
+                if failed:
+                    raise RuntimeError(f"FPM resource pods terminated before readiness: {failed}")
+            time.sleep(5)
+        raise TimeoutError(f"timed out waiting for {expected_nodes} FPM pods for {self.name}")
+
+    def stage(self, pods: list[str], files: list[Path]) -> None:
+        for pod in pods:
+            self._exec_checked(pod, ["mkdir", "-p", REMOTE_WORKDIR, "/results"], timeout=60)
+            for path in files:
+                copied = self._kubectl(
+                    "cp",
+                    str(path),
+                    f"{self.namespace}/{pod}:{REMOTE_WORKDIR}/{path.name}",
+                    check=False,
+                    timeout=180,
+                )
+                self._exec_checked(pod, ["test", "-s", f"{REMOTE_WORKDIR}/{path.name}"], timeout=60)
+                if copied.returncode != 0:
+                    raise RuntimeError(
+                        f"failed to stage {path.name} to {pod}: local_exit={copied.returncode}, "
+                        f"output={(copied.stderr or copied.stdout).strip()!r}"
+                    )
+
+    def _run_pod(self, pod: str, timeout_seconds: int) -> tuple[str, subprocess.CompletedProcess[str]]:
+        completed = self._exec_checked(
+            pod,
+            ["bash", f"{REMOTE_WORKDIR}/run_with_etcd.sh"],
+            timeout=timeout_seconds,
+        )
+        return pod, completed
+
+    def execute(self, pods: list[str], timeout_seconds: int = 14400) -> None:
+        logs_dir = self.cell_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        failures = []
+        with ThreadPoolExecutor(max_workers=len(pods)) as pool:
+            futures = {pool.submit(self._run_pod, pod, timeout_seconds): pod for pod in pods}
+            for future in as_completed(futures):
+                pod = futures[future]
+                try:
+                    _, completed = future.result()
+                except Exception as error:
+                    (logs_dir / f"{pod}.run.stderr.log").write_text(str(error) + "\n")
+                    failures.append((pod, str(error)))
+                    continue
+                (logs_dir / f"{pod}.run.stdout.log").write_text(completed.stdout)
+                (logs_dir / f"{pod}.run.stderr.log").write_text(completed.stderr)
+        if failures:
+            raise RuntimeError(f"generated FPM run.sh failed: {failures}")
+
+    def clear_results(self, pods: list[str]) -> None:
+        for pod in pods:
+            self._kubectl(
+                "exec",
+                "-n",
+                self.namespace,
+                pod,
+                "--",
+                "bash",
+                "-lc",
+                "rm -f /results/*",
+                timeout=60,
+            )
+
+    def collect(
+        self,
+        pods: list[str],
+        *,
+        destination: str = "raw",
+        require_benchmark: bool = True,
+    ) -> None:
+        results_root = self.cell_dir / destination
+        results_root.mkdir(parents=True, exist_ok=True)
+        logs_dir = self.cell_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        for pod in pods:
+            if require_benchmark:
+                self._exec_checked(
+                    pod,
+                    [
+                        "bash",
+                        "-lc",
+                        "find /results -maxdepth 1 -type f -name 'benchmark*.json' -size +0c | grep -q .",
+                    ],
+                    timeout=60,
+                )
+            pod_root = results_root / pod
+            pod_root.mkdir(parents=True, exist_ok=True)
+            copied = self._kubectl(
+                "cp",
+                f"{self.namespace}/{pod}:/results/.",
+                str(pod_root),
+                check=False,
+                timeout=300,
+            )
+            if copied.returncode != 0 or (require_benchmark and not any(pod_root.glob("benchmark*.json"))):
+                raise RuntimeError(
+                    f"failed to collect benchmark results from {pod}: local_exit={copied.returncode}, "
+                    f"output={(copied.stderr or copied.stdout).strip()!r}"
+                )
+            logs = self._kubectl(
+                "logs",
+                "-n",
+                self.namespace,
+                pod,
+                check=False,
+                timeout=120,
+            )
+            (logs_dir / f"{pod}.container.log").write_text(logs.stdout + logs.stderr)
+
+    def cleanup(self) -> None:
+        self._kubectl(
+            "delete",
+            "-f",
+            str(self.manifest),
+            "--ignore-not-found=true",
+            "--wait=true",
+            "--timeout=180s",
+            check=False,
+            timeout=240,
+        )
+        remaining = self.pods()
+        if remaining:
+            raise RuntimeError(f"owned FPM pods remain after cleanup: {remaining}")
+
+
+def _selected_design(plan: FPMCollectionPlan, cell: FPMCell):
+    return plan.prefill_design if cell.workload_kind == "prefill" else plan.decode_design
+
+
+def _case_payload(
+    plan: FPMCollectionPlan,
+    cell: FPMCell,
+    *,
+    selected_point_count: int | None = None,
+) -> dict[str, object]:
+    design = _selected_design(plan, cell)
+    selected_point_count = selected_point_count or len(design.selected)
+    return {
+        "schema_name": "aic_fpm_case_manifest",
+        "schema_version": 1,
+        "plan_sha256": plan.sha256,
+        "cell_id": cell.cell_id,
+        "workload_kind": cell.workload_kind,
+        "warmup_repeats": plan.options.warmup_repeats,
+        "measured_repeats": plan.options.measurement_repeats,
+        "selected_point_count": selected_point_count,
+        "ordered_shapes": [point.to_dict() for point in design.ordered_points],
+        "sampling_sha256": design.sha256,
+    }
+
+
+def _cell_generator_overrides(
+    plan: FPMCollectionPlan,
+    cell: FPMCell,
+    base: dict[str, Any],
+    *,
+    selected_point_count: int | None = None,
+) -> dict[str, Any]:
+    design = _selected_design(plan, cell)
+    selected = design.selected[:selected_point_count]
+    maximum_batch = max(point.batch_size for point in selected)
+    maximum_tokens = max(point.batch_size * point.suffix_length for point in selected)
+    maximum_length = max(point.prefix_length + point.suffix_length + 1 for point in selected)
+    scheduler_args = [
+        "--scheduler-cls",
+        "fpm_scheduler.InstrumentedScheduler",
+        "--benchmark-mode",
+        cell.workload_kind,
+        "--benchmark-warmup-iterations",
+        "0",
+    ]
+    env = [
+        {"name": "PYTHONPATH", "value": REMOTE_WORKDIR},
+        {"name": "DYN_FPM_CASE_CONFIG", "value": f"{REMOTE_WORKDIR}/cases.json"},
+        {"name": "DYN_FPM_BENCHMARK_OUTPUT_PATH", "value": "/results/benchmark.json"},
+        {"name": "FPM_RUN_ID", "value": cell.cell_id},
+        {"name": "FPM_RESULT_GRACE_SECONDS", "value": "0"},
+    ]
+    total_gpus = cell.topology.total_gpus
+    generated = {
+        # FPM cases are capacity-planned against these explicit engine bounds.
+        # Letting Generator's SLA rules recompute them can silently make a
+        # frozen point illegal or change CUDA Graph coverage.
+        "preserve_engine_limits": True,
+        "ServiceConfig": {"include_frontend": False},
+        "DynConfig": {"mode": "agg"},
+        "WorkerConfig": {"agg_workers": 1, "agg_gpus_per_worker": total_gpus},
+        "K8sConfig": {
+            "name_prefix": cell.cell_id,
+            "extra_env": env,
+            "fpm_resource_labels": {
+                "aiconfigurator.nvidia.com/owned-by": "fpm-forward-collector",
+                "aiconfigurator.nvidia.com/plan": plan.sha256[:16],
+                "aiconfigurator.nvidia.com/cell": cell.cell_id,
+            },
+        },
+        "params": {
+            "agg": {
+                "tensor_parallel_size": cell.topology.tp,
+                "pipeline_parallel_size": cell.topology.pp,
+                "data_parallel_size": cell.topology.dp,
+                "moe_tensor_parallel_size": cell.topology.moe_tp,
+                "moe_expert_parallel_size": cell.topology.moe_ep,
+                "gpus_per_worker": total_gpus,
+                "max_batch_size": maximum_batch,
+                "max_num_tokens": maximum_tokens,
+                "max_seq_len": maximum_length,
+                "tokens_per_block": plan.options.kv_block_size,
+                "kv_cache_dtype": cell.kv_cache_dtype,
+                "extra_cli_args": scheduler_args,
+            }
+        },
+    }
+    policy = cell.backend_policy.generator_overrides
+    merged = _deep_merge(_deep_merge(base, generated), policy)
+
+    base_env = (base.get("K8sConfig") or {}).get("extra_env") or []
+    policy_env = (policy.get("K8sConfig") or {}).get("extra_env") or []
+    resolved_env: dict[str, dict[str, str]] = {}
+    for item in [*base_env, *policy_env, *env]:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise TypeError("K8sConfig.extra_env entries must be {name, value} mappings")
+        name = item["name"]
+        existing = resolved_env.get(name)
+        if existing is not None and existing != item:
+            raise ValueError(f"conflicting FPM environment value for {name}")
+        resolved_env[name] = copy.deepcopy(item)
+    merged.setdefault("K8sConfig", {})["extra_env"] = list(resolved_env.values())
+
+    base_args = ((base.get("params") or {}).get("agg") or {}).get("extra_cli_args") or []
+    policy_args = ((policy.get("params") or {}).get("agg") or {}).get("extra_cli_args") or []
+    base_agg = (base.get("params") or {}).get("agg") or {}
+    resolved_args = [*base_args, *policy_args]
+    has_benchmark_timeout = any(
+        str(argument) == "--benchmark-timeout" or str(argument).startswith("--benchmark-timeout=")
+        for argument in resolved_args
+    )
+    if not has_benchmark_timeout:
+        # Dynamo's engine-side default is 300 seconds. A formal sparse design
+        # can legitimately run longer even though the outer Kubernetes exec
+        # timeout is four hours, so make the inner deadline campaign-safe.
+        resolved_args.extend(["--benchmark-timeout", str(DEFAULT_BENCHMARK_TIMEOUT_SECONDS)])
+    gpu_memory_utilization = base_agg.get("gpu_memory_utilization")
+    has_gpu_memory_arg = any(
+        str(argument) == "--gpu-memory-utilization" or str(argument).startswith("--gpu-memory-utilization=")
+        for argument in resolved_args
+    )
+    if gpu_memory_utilization is not None and not has_gpu_memory_arg:
+        # Generator currently preserves this legacy request field but does not
+        # lower it into the vLLM command.  FPM capacity depends on the exact KV
+        # budget, so make the execution contract explicit here.
+        resolved_args.extend(["--gpu-memory-utilization", str(gpu_memory_utilization)])
+    compilation_config = base_agg.get("compilation_config")
+    if compilation_config is not None and "--compilation-config" not in resolved_args:
+        if isinstance(compilation_config, dict):
+            compilation_value = json.dumps(compilation_config, separators=(",", ":"), sort_keys=True)
+        elif isinstance(compilation_config, str):
+            compilation_value = compilation_config
+        else:
+            raise TypeError("params.agg.compilation_config must be a mapping or JSON string")
+        resolved_args.extend(["--compilation-config", compilation_value])
+    resolved_args.extend(scheduler_args)
+    merged.setdefault("params", {}).setdefault("agg", {})["extra_cli_args"] = resolved_args
+    for key in (
+        "max_batch_size",
+        "max_num_tokens",
+        "max_seq_len",
+        "tokens_per_block",
+        "gpu_memory_utilization",
+        "compilation_config",
+    ):
+        if key in base_agg:
+            merged["params"]["agg"][key] = copy.deepcopy(base_agg[key])
+    return merged
+
+
+def _render_cell(
+    plan: FPMCollectionPlan,
+    cell: FPMCell,
+    cell_dir: Path,
+    generator_overrides: dict[str, Any],
+    *,
+    selected_point_count: int | None = None,
+) -> dict[str, Any]:
+    from aiconfigurator.generator.api import generate_from_request
+    from aiconfigurator.generator.naive import build_naive_generator_params
+    from aiconfigurator.generator.request import from_legacy_params
+
+    overrides = _cell_generator_overrides(
+        plan,
+        cell,
+        generator_overrides,
+        selected_point_count=selected_point_count,
+    )
+    params = build_naive_generator_params(
+        model_name=plan.model_path,
+        total_gpus=cell.topology.total_gpus,
+        system_name=plan.system,
+        backend_name=plan.backend,
+        mode="agg",
+        generator_dynamo_version=overrides.get("generator_dynamo_version"),
+        generator_overrides=overrides,
+    )
+    # ``build_naive_generator_params`` merges section and role overrides but
+    # intentionally does not propagate arbitrary top-level keys.  Carry this
+    # rule control explicitly across the typed request boundary so rendering
+    # cannot recompute limits after the FPM plan has been frozen.
+    params["preserve_engine_limits"] = True
+    request = from_legacy_params(params, plan.backend)
+    request = replace(
+        request,
+        emit=replace(request.emit, deployment_target="fpm", output_dir=str(cell_dir)),
+        backend=replace(
+            request.backend,
+            generated_config_version=overrides.get("generated_config_version"),
+        ),
+    )
+    errors = request.validate()
+    if errors:
+        raise ValueError(f"invalid GeneratorRequest for {cell.cell_id}: {errors}")
+    artifacts = generate_from_request(request, output_dir=str(cell_dir))
+    _atomic_json(cell_dir / "generator-request.json", params)
+    return artifacts
+
+
+def _expected_nodes(manifest: Path) -> int:
+    payload = yaml.safe_load(manifest.read_text())
+    if payload["kind"] == "Pod":
+        return 1
+    if payload["kind"] == "LeaderWorkerSet":
+        return int(payload["spec"]["leaderWorkerTemplate"]["size"])
+    raise ValueError(f"unsupported generated FPM workload kind: {payload.get('kind')}")
+
+
+def _load_checkpoint(path: Path, plan: FPMCollectionPlan, resume: bool) -> dict[str, Any]:
+    if resume and path.exists():
+        payload = json.loads(path.read_text())
+        if payload.get("schema") != CHECKPOINT_SCHEMA or payload.get("plan_sha256") != plan.sha256:
+            raise ValueError("FPM checkpoint does not match the current frozen plan")
+        return payload
+    return {"schema": CHECKPOINT_SCHEMA, "plan_sha256": plan.sha256, "cells": {}}
+
+
+def run_collection(
+    plan: FPMCollectionPlan,
+    *,
+    generator_overrides: dict[str, Any],
+    checkpoint_dir: str,
+    artifact_root: str,
+    resume: bool,
+    retry_failed: bool,
+    smoke: bool = False,
+    cell_limit: int | None = None,
+    runtime_overlay_dir: str | None = None,
+    database_root: str | None = None,
+) -> list[dict[str, object]]:
+    """Render and run every cell, always tearing down owned resources."""
+
+    root = Path(artifact_root).expanduser().resolve() / plan.sha256[:16]
+    if smoke:
+        root /= "smoke"
+    root.mkdir(parents=True, exist_ok=True)
+    _atomic_json(root / "collection-plan.json", plan.to_dict())
+    checkpoint_name = "fpm_forward_smoke.json" if smoke else "fpm_forward.json"
+    checkpoint_path = Path(checkpoint_dir).expanduser().resolve() / checkpoint_name
+    checkpoint = _load_checkpoint(checkpoint_path, plan, resume)
+    errors: list[dict[str, object]] = []
+    runtime_scheduler = Path(__file__).resolve().parent / "runtime" / "vllm_scheduler.py"
+    runtime_wrapper = Path(__file__).resolve().parent / "runtime" / "run_with_etcd.sh"
+    runtime_preflight = Path(__file__).resolve().parent / "runtime" / "preflight.py"
+    runtime_installer = Path(__file__).resolve().parent / "runtime" / "install_overlay.py"
+    overlay_source = Path(runtime_overlay_dir).expanduser().resolve() if runtime_overlay_dir else None
+    if bool(plan.runtime_overlay_files) != bool(overlay_source):
+        raise ValueError("runtime overlay source does not match the frozen plan")
+    target_cells = plan.cells[: (cell_limit or (1 if smoke else len(plan.cells)))]
+
+    for cell in target_cells:
+        previous = checkpoint["cells"].get(cell.cell_id, {})
+        if resume and previous.get("status") == "passed":
+            continue
+        if resume and previous.get("status") == "failed" and not retry_failed:
+            continue
+
+        cell_dir = root / "cells" / cell.cell_id
+        if cell_dir.exists() and not resume:
+            shutil.rmtree(cell_dir)
+        cell_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_json(cell_dir / "cell.json", cell.to_dict())
+        overlay_files: list[Path] = []
+        if overlay_source is not None:
+            overlay_manifest = {"schema_version": 1, "files": {}}
+            expected_base = dict(plan.runtime_overlay_base_files)
+            for name, expected_sha256 in plan.runtime_overlay_files:
+                source = overlay_source / name
+                actual_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+                if actual_sha256 != expected_sha256:
+                    raise ValueError(f"runtime overlay changed after planning: {source}")
+                destination = cell_dir / f"runtime-overlay-{name}"
+                shutil.copy2(source, destination)
+                overlay_files.append(destination)
+                overlay_manifest["files"][name] = {
+                    "source_name": destination.name,
+                    "original_sha256": expected_base[name],
+                    "sha256": expected_sha256,
+                }
+            _atomic_json(cell_dir / "runtime-overlay-manifest.json", overlay_manifest)
+            overlay_files.append(cell_dir / "runtime-overlay-manifest.json")
+        selected_count = plan.options.smoke_points if smoke else None
+        _atomic_json(
+            cell_dir / "cases.json",
+            _case_payload(plan, cell, selected_point_count=selected_count),
+        )
+        gate_dir = cell_dir / "capability"
+        _atomic_json(gate_dir / "cases.json", _case_payload(plan, cell, selected_point_count=1))
+        cell_started = time.monotonic()
+        started_at = _utc_now()
+        checkpoint["cells"][cell.cell_id] = {"status": "running", "started_at": started_at}
+        _atomic_json(checkpoint_path, checkpoint)
+        resource = None
+        try:
+            _render_cell(
+                plan,
+                cell,
+                cell_dir,
+                generator_overrides,
+                selected_point_count=selected_count,
+            )
+            shutil.copy2(runtime_scheduler, cell_dir / "fpm_scheduler.py")
+            manifest = cell_dir / "k8s_deploy.yaml"
+            run_script = cell_dir / "run.sh"
+            if not manifest.exists() or not run_script.exists():
+                raise RuntimeError("Generator FPM target did not emit k8s_deploy.yaml and run.sh")
+            resource = KubernetesCellRunner(manifest, cell_dir)
+            resource.apply()
+            pods = resource.wait_ready(_expected_nodes(manifest))
+            initial_cases = cell_dir / "cases.json" if smoke else gate_dir / "cases.json"
+            resource.stage(
+                pods,
+                [
+                    initial_cases,
+                    cell_dir / "fpm_scheduler.py",
+                    run_script,
+                    runtime_wrapper,
+                    runtime_preflight,
+                    runtime_installer,
+                    *overlay_files,
+                ],
+            )
+            resource.execute(pods)
+            if smoke:
+                resource.collect(pods)
+            else:
+                resource.collect(pods, destination="capability/raw")
+                resource.clear_results(pods)
+                resource.stage(pods, [cell_dir / "cases.json"])
+                resource.execute(pods)
+                resource.collect(pods)
+            checkpoint["cells"][cell.cell_id] = {
+                "status": "passed",
+                "artifact_dir": str(cell_dir),
+                "pods": pods,
+                "started_at": started_at,
+            }
+        except KeyboardInterrupt:
+            if resource is not None:
+                try:
+                    resource.collect(resource.pods(), require_benchmark=False)
+                except Exception:
+                    pass
+            checkpoint["cells"][cell.cell_id] = {
+                "status": "interrupted",
+                "artifact_dir": str(cell_dir),
+                "started_at": started_at,
+            }
+            raise
+        except Exception as error:
+            if resource is not None:
+                try:
+                    resource.collect(resource.pods(), require_benchmark=False)
+                except Exception:
+                    pass
+            checkpoint["cells"][cell.cell_id] = {
+                "status": "failed",
+                "artifact_dir": str(cell_dir),
+                "error_type": type(error).__name__,
+                "error": str(error),
+                "started_at": started_at,
+            }
+            errors.append(
+                {
+                    "module": "fpm_forward",
+                    "cell_id": cell.cell_id,
+                    "error_type": type(error).__name__,
+                    "error_message": str(error),
+                    "classification": "campaign_cell_failed",
+                }
+            )
+        finally:
+            if resource is not None:
+                try:
+                    resource.cleanup()
+                except Exception as cleanup_error:
+                    checkpoint["cells"][cell.cell_id]["cleanup_error"] = str(cleanup_error)
+                    errors.append(
+                        {
+                            "module": "fpm_forward",
+                            "cell_id": cell.cell_id,
+                            "error_type": type(cleanup_error).__name__,
+                            "error_message": str(cleanup_error),
+                            "classification": "resource_cleanup_failed",
+                        }
+                    )
+            checkpoint["cells"][cell.cell_id]["completed_at"] = _utc_now()
+            checkpoint["cells"][cell.cell_id]["duration_seconds"] = round(time.monotonic() - cell_started, 3)
+            _atomic_json(checkpoint_path, checkpoint)
+    all_passed = all(checkpoint["cells"].get(cell.cell_id, {}).get("status") == "passed" for cell in target_cells)
+    if smoke and not errors and all_passed:
+        checkpoint["smoke"] = {
+            "status": "passed",
+            "cell_count": len(target_cells),
+            "points_per_cell": plan.options.smoke_points,
+            "formal_database_written": False,
+        }
+        _atomic_json(checkpoint_path, checkpoint)
+    elif not errors and all_passed:
+        from .database import aggregate_cell, write_formal_database
+
+        try:
+            formal_rows = []
+            for cell in plan.cells:
+                formal_rows.extend(aggregate_cell(plan, cell, root / "cells" / cell.cell_id))
+            systems_root = Path(database_root).expanduser().resolve() if database_root else None
+            parquet_path, metadata_path = write_formal_database(plan, formal_rows, systems_root=systems_root)
+            checkpoint["database"] = {
+                "status": "passed",
+                "parquet": str(parquet_path),
+                "metadata": str(metadata_path),
+                "row_count": len(formal_rows),
+            }
+        except Exception as error:
+            checkpoint["database"] = {
+                "status": "failed",
+                "error_type": type(error).__name__,
+                "error": str(error),
+            }
+            errors.append(
+                {
+                    "module": "fpm_forward.database",
+                    "error_type": type(error).__name__,
+                    "error_message": str(error),
+                    "classification": "formal_database_failed",
+                }
+            )
+        _atomic_json(checkpoint_path, checkpoint)
+    elif not errors and not all_passed:
+        errors.append(
+            {
+                "module": "fpm_forward",
+                "error_type": "IncompleteCampaign",
+                "error_message": "not every frozen FPM cell is passed; formal database was not written",
+                "classification": "campaign_incomplete",
+            }
+        )
+    return errors
