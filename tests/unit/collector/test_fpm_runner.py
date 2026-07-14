@@ -292,7 +292,7 @@ def test_smoke_case_payload_freezes_requested_point_count():
     )
     plan = SimpleNamespace(
         sha256="plan-sha",
-        options=SimpleNamespace(warmup_repeats=1, measurement_repeats=1),
+        options=SimpleNamespace(warmup_repeats=0, measurement_repeats=1),
         prefill_design=SimpleNamespace(selected=points, ordered_points=points, sha256="sampling"),
         decode_design=SimpleNamespace(selected=(), ordered_points=(), sha256="decode"),
     )
@@ -311,6 +311,8 @@ def test_smoke_case_payload_freezes_requested_point_count():
 
     assert payload["selected_point_count"] == 2
     assert len(payload["ordered_shapes"]) == 2
+    assert payload["warmup_repeats"] == 0
+    assert payload["measured_repeats"] == 1
 
 
 def test_capability_gate_requires_runtime_capacity_for_full_profile(tmp_path):

@@ -46,7 +46,7 @@ def _args(**overrides):
         "fpm_backend_axes": None,
         "fpm_weight_quantizations": None,
         "fpm_kv_cache_dtypes": None,
-        "fpm_sampling_budget": "one_quarter",
+        "fpm_sampling_budget": None,
         "fpm_tp_sizes": None,
         "fpm_pp_sizes": None,
         "fpm_dp_sizes": None,
@@ -62,8 +62,9 @@ def _args(**overrides):
 
 def test_options_freeze_single_sample_policy_and_gpu_bound():
     options = FPMCollectionOptions.from_args(_args())
-    assert options.warmup_repeats == 1
+    assert options.warmup_repeats == 0
     assert options.measurement_repeats == 1
+    assert options.sampling_budget == "one_eighth"
     assert options.gpu_counts == (4,)
     assert options.parallel_presets == ("auto",)
 
@@ -726,13 +727,13 @@ def _synthetic_plan_and_cell(tmp_path):
                     "collector": {
                         "plan_sha256": "plan-sha",
                         "cell_id": "fpm-test",
-                        "warmup_repeats": 1,
+                        "warmup_repeats": 0,
                         "measured_repeats": 1,
                     },
                     "campaign_results": [
                         {
                             "point": point.to_dict(),
-                            "warmup_fpms": [{**fpm, "wall_time": latency * 2}],
+                            "warmup_fpms": [],
                             "fpms": [fpm],
                         }
                     ],
@@ -748,6 +749,7 @@ def test_single_measurement_dp_aggregation_uses_max_rank(tmp_path):
     assert len(rows) == 1
     assert rows[0]["latency_ms"] == pytest.approx(6.0)
     assert rows[0]["measurement_policy"] == "single_sample_v1"
+    assert rows[0]["warmup_repeats"] == 0
     assert rows[0]["parallel_strategy"] == "dep"
     assert rows[0]["gemm_quant_mode"] == "nvfp4"
     assert rows[0]["moe_quant_mode"] == "nvfp4"
@@ -763,8 +765,9 @@ def test_formal_database_is_idempotent_and_rejects_conflicts(tmp_path):
     write_formal_database(plan, rows, systems_root=tmp_path / "systems")
     assert parquet.exists()
     metadata_payload = json.loads(metadata.read_text())
+    assert metadata_payload["warmup_repeats"] == 0
     assert metadata_payload["measurement_repeats"] == 1
-    assert metadata_payload["schema_version"] == 2
+    assert metadata_payload["schema_version"] == 3
 
     conflicting = [{**rows[0], "latency_ms": 7.0}]
     with pytest.raises(ValueError, match="conflicting"):

@@ -136,8 +136,8 @@ def aggregate_cell(plan: FPMCollectionPlan, cell: FPMCell, cell_dir: Path) -> li
             raise TypeError(f"missing collector envelope: {path}")
         if collector.get("plan_sha256") != plan.sha256 or collector.get("cell_id") != cell.cell_id:
             raise ValueError(f"result identity mismatch: {path}")
-        if collector.get("warmup_repeats") != 1 or collector.get("measured_repeats") != 1:
-            raise ValueError(f"V1 requires exactly one warmup and one measurement: {path}")
+        if collector.get("warmup_repeats") != 0 or collector.get("measured_repeats") != 1:
+            raise ValueError(f"V1 requires no warmup and exactly one measurement: {path}")
         rows = payload.get("campaign_results")
         if not isinstance(rows, list):
             raise TypeError(f"campaign_results must be a list: {path}")
@@ -147,8 +147,8 @@ def aggregate_cell(plan: FPMCollectionPlan, cell: FPMCell, cell_dir: Path) -> li
                 raise ValueError(f"mixed workload kind in {path}: {point[0]}")
             warmups = row.get("warmup_fpms")
             measurements = row.get("fpms")
-            if not isinstance(warmups, list) or len(warmups) != 1:
-                raise ValueError(f"expected one warmup FPM for {point} in {path}")
+            if not isinstance(warmups, list) or warmups:
+                raise ValueError(f"expected no warmup FPMs for {point} in {path}")
             if not isinstance(measurements, list) or len(measurements) != 1:
                 raise ValueError(f"expected one measured FPM for {point} in {path}")
             rank, latency = _validate_fpm(point, measurements[0])
@@ -200,7 +200,7 @@ def aggregate_cell(plan: FPMCollectionPlan, cell: FPMCell, cell_dir: Path) -> li
                 "suffix_length": suffix,
                 "prefix_length": prefix,
                 "latency_ms": max(rank_latencies.values()) * 1000.0,
-                "warmup_repeats": 1,
+                "warmup_repeats": 0,
                 "measurement_repeats": 1,
                 "measurement_policy": "single_sample_v1",
                 "model_support_level": getattr(capability, "support_level", "unknown"),
@@ -263,9 +263,9 @@ def write_formal_database(
     os.replace(temporary, parquet_path)
     metadata = {
         "schema_name": "aic_fpm_forward_perf",
-        "schema_version": 2,
+        "schema_version": 3,
         "measurement_policy": "single_sample_v1",
-        "warmup_repeats": 1,
+        "warmup_repeats": 0,
         "measurement_repeats": 1,
         "row_count": len(merged),
         "parquet_sha256": _sha256(parquet_path),

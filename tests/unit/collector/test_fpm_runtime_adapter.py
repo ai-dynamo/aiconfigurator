@@ -134,7 +134,7 @@ def test_runtime_result_envelope_matches_generator_contract(adapter, tmp_path):
     ]
     scheduler._fpm_case_raw = {"plan_sha256": "plan", "cell_id": "cell"}
     scheduler._fpm_case_path = case
-    scheduler._fpm_warmups = 1
+    scheduler._fpm_warmups = 0
     scheduler._fpm_repeats = 1
     scheduler._fpm_population_count = 10
     scheduler._fpm_target_count = 1
@@ -149,4 +149,6 @@ def test_runtime_result_envelope_matches_generator_contract(adapter, tmp_path):
     assert payload["status"] == "complete"
     assert payload["valid"] is True
     assert payload["coverage"] == {"expected_points": 1, "completed_points": 1, "skipped_points": 0}
+    assert payload["collector"]["warmup_repeats"] == 0
     assert payload["collector"]["measurement_policy"] == "single_sample_v1"
+    assert payload["campaign_results"][0]["warmup_fpms"] == []

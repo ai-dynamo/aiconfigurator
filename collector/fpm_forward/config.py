@@ -9,7 +9,7 @@ import argparse
 from dataclasses import dataclass
 
 FPM_FORWARD_OP = "fpm_forward"
-FPM_WARMUP_REPEATS = 1
+FPM_WARMUP_REPEATS = 0
 FPM_MEASUREMENT_REPEATS = 1
 
 PARALLEL_AXES = ("tp", "pp", "dp", "moe_tp", "moe_ep", "cp")
@@ -112,7 +112,7 @@ class FPMCollectionOptions:
                 dict.fromkeys(value.lower() for value in (getattr(args, "fpm_weight_quantizations", None) or ()))
             ),
             kv_cache_dtypes=tuple(dict.fromkeys(getattr(args, "fpm_kv_cache_dtypes", None) or ("auto",))),
-            sampling_budget=getattr(args, "fpm_sampling_budget", None) or "one_quarter",
+            sampling_budget=getattr(args, "fpm_sampling_budget", None) or "one_eighth",
             tp_sizes=_optional_size_list(getattr(args, "fpm_tp_sizes", None)),
             pp_sizes=pp_sizes,
             dp_sizes=_optional_size_list(getattr(args, "fpm_dp_sizes", None)),
@@ -203,7 +203,7 @@ def add_fpm_arguments(parser: argparse.ArgumentParser) -> None:
         "--fpm-sampling-budget",
         choices=SAMPLING_BUDGETS,
         default=None,
-        help="Nested sparse-design budget to measure (default: one_quarter).",
+        help="Nested sparse-design budget to measure (default: one_eighth).",
     )
     group.add_argument(
         "--fpm-kv-block-size",
