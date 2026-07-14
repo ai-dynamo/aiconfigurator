@@ -16,6 +16,11 @@
 
 # Runtime, SDK, backends, systems, model configs, and UI
 /src/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
+# The compiled engine mirrors the SDK op/query math (parity-coupled: changes
+# to sdk/operations or the perf-DB query layer require a matching change
+# here — see .claude/rules/rust-core/parity.md). Same owners as /src/ so the
+# same reviewers see both sides.
+/rust/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 /src/aiconfigurator/sdk/ @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 /src/aiconfigurator/sdk/backends/sglang_backend.py @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 /src/aiconfigurator/sdk/backends/trtllm_backend.py @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
