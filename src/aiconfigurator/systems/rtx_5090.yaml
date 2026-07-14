@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# NVIDIA GeForce RTX 5090 (GB202, consumer Blackwell, SM 12.0 — same die family as
+# RTX PRO 6000 Blackwell with 170/188 SMs enabled and 32GB GDDR7).
+# Observed on this node (driver 595.71.05, CUDA 13.2): 32607 MiB VRAM, 600 W power
+# limit (Gigabyte AIB card; reference spec is 575 W), 3105 MHz max SM clock.
+# Tensor-core FLOPS are scaled from the rtx_pro_6000_server entry's per-SM-per-MHz
+# throughput (same SM 12.0 architecture) at the official 2407 MHz boost clock:
+# 170 SM x 2407 MHz -> ~419 TFLOPS dense bf16, matching NVIDIA published specs.
+# The 3105 MHz reported max clock is a ceiling, not a sustained boost; values here
+# are conservative estimates — tune from collected data.
+
+data_dir: data/rtx_5090 # relative to systems_dir
+gpu:
+  mem_bw: 1792000000000 # 1.792 TB/s GDDR7, 512-bit (same memory subsystem class as RTX PRO 6000)
+  mem_bw_empirical_scaling_factor: 0.8 # copied from rtx_pro_6000_server; tune from own observations
+  mem_empirical_constant_latency: 0.000003 # 3us, copied from rtx_pro_6000_server; tune from own observations
+  mem_capacity: 34190917632 # 32607 MiB reported by nvidia-smi
+  bfloat16_tc_flops: 418990000000000 # 419.0 TFLOPS dense, 170 SMs at 2407 MHz boost
+  int8_tc_flops: 837980000000000 # 838.0 TFLOPS dense (2x bf16)
+  fp8_tc_flops: 837980000000000 # 838.0 TFLOPS dense (2x bf16)
+  fp4_tc_flops: 1675960000000000 # 1676.0 TFLOPS dense (4x bf16)
+  power: 600 # Watt, observed power.limit on this AIB card (reference spec 575 W)
+  sm_version: 120
+
+node:
+  num_gpus_per_node: 1 # single consumer card in this node
+  inter_node_bw: 50000000000 # Byte/s per GPU, single direction, conservative placeholder (no RDMA NIC assumed)
+  intra_node_bw: 64000000000 # Byte/s per GPU, single direction, PCIe Gen5 x16 (no NVLink on GeForce)
+  pcie_bw: 64000000000 # Byte/s, single direction, PCIe Gen5 x16
+  p2p_latency: 0.00001 # 10us placeholder copied from rtx_pro_6000_server; single-GPU node, unused in practice
+
+misc:
+  nccl_mem: # copied from rtx_pro_6000_server; single-GPU node rarely exercises >1 rank
+    1: 0
+    2: 358612992 # 342MB
+    4: 411041792 # 392MB
+    8: 411041792 # 392MB
+  other_mem: 3758096384 # 3.5GB safety margin, copied from rtx_pro_6000_server
+  nccl_version: '2.28.9' # placeholder copied from rtx_pro_6000_server; update from installed runtime
