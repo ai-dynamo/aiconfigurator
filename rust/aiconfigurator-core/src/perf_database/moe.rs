@@ -79,6 +79,30 @@ pub struct MoeTable {
     moe: OnceLock<Result<LoadedMoeGrids, AicError>>,
 }
 
+/// Which kernel grid a MoE accessor addresses: the default table or the
+/// TRT-LLM `moe_torch_flow_min_latency` low-latency split (Python's
+/// `_moe_data` vs `_moe_low_latency_data`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoeKernel {
+    Standard,
+    LowLatency,
+}
+
+/// One collected sibling slice of the MoE table for a fixed
+/// `(quant, distribution, moe_tp, moe_ep)`: the categorical shape features
+/// plus its `num_tokens -> latency_ms` curve. Consumed by the operator
+/// layer's cross-shape/cross-quant transfer ladder (the algorithm lives in
+/// `operators/moe.rs`; this is a data accessor payload only).
+#[derive(Clone, Debug)]
+pub struct MoeSiblingSlice {
+    pub topk: u32,
+    pub num_experts: u32,
+    pub hidden_size: u32,
+    pub inter_size: u32,
+    /// `(num_tokens, latency_ms)` in ascending token order.
+    pub points: Vec<(u32, f64)>,
+}
+
 /// Two parallel grids split by `kernel_source`. Mirrors Python's split in
 /// `aiconfigurator.sdk.operations.moe.MoE.load_data`, where rows tagged
 /// `kernel_source == "moe_torch_flow_min_latency"` route to a separate
@@ -91,6 +115,12 @@ struct LoadedMoeGrids {
 
 struct MoeGrids {
     by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>>,
+    /// Distinct quant names in first-seen (file row) order. Python's
+    /// transfer ladder iterates the table dict in INSERTION order
+    /// (`for q in moe_table`), which breaks profile-distance ties by file
+    /// order — live on shards whose file order differs from sorted order
+    /// (e.g. b200/vllm/0.24.0 lists `fp8_block` before `fp8`).
+    quants_in_load_order: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -257,6 +287,101 @@ impl MoeTable {
         Ok(!loaded.low_latency.by_keys.is_empty())
     }
 
+    /// Own-slice `num_tokens -> latency_ms` curve for a full MoE key, after
+    /// the per-quant `"uniform"` distribution fallback. A typed miss
+    /// (`AicError::PerfDatabase`) means the slice is absent or empty —
+    /// mirroring Python `util_empirical.require_data_slice` as used by the
+    /// empirical own-shape grid (`_slice`) and the low-latency table probe
+    /// (`_moe_table`) in `MoE._query_moe_table`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn slice_points(
+        &self,
+        kernel: MoeKernel,
+        quant_name: &str,
+        workload_distribution: &str,
+        topk: u32,
+        num_experts: u32,
+        hidden_size: u32,
+        inter_size: u32,
+        moe_tp_size: u32,
+        moe_ep_size: u32,
+    ) -> Result<Vec<(u32, f64)>, AicError> {
+        let grids = self.grids_for(kernel)?;
+        let dist = self.resolve_distribution(grids, quant_name, workload_distribution);
+        let key = MoeKey {
+            quant: quant_name.to_string(),
+            distribution: dist,
+            topk,
+            num_experts,
+            hidden_size,
+            inter_size,
+            moe_tp_size,
+            moe_ep_size,
+        };
+        let by_tokens = grids.by_keys.get(&key).filter(|curve| !curve.is_empty()).ok_or_else(|| {
+            AicError::PerfDatabase(format!(
+                "MoE data missing for {key:?} ({kernel:?}) at {}",
+                self.data_root.display()
+            ))
+        })?;
+        Ok(by_tokens.iter().map(|(&t, &lat)| (t, lat)).collect())
+    }
+
+    /// All collected sibling slices for `(quant, distribution-after-uniform-
+    /// fallback, moe_tp, moe_ep)`; empty curves skipped, an empty result is
+    /// data (not an error). Mirrors the enumeration in Python `_collect`
+    /// (`MoE._query_moe_table`), which walks the nested
+    /// `topk -> num_experts -> hidden -> inter` dicts. NOTE: Python yields
+    /// dict insertion (file row) order; the `BTreeMap` yields sorted
+    /// `(topk, num_experts, hidden, inter)` order instead — observable only
+    /// through exact ties in nearest-candidate selection.
+    pub fn sibling_slices(
+        &self,
+        kernel: MoeKernel,
+        quant_name: &str,
+        workload_distribution: &str,
+        moe_tp_size: u32,
+        moe_ep_size: u32,
+    ) -> Result<Vec<MoeSiblingSlice>, AicError> {
+        let grids = self.grids_for(kernel)?;
+        let dist = self.resolve_distribution(grids, quant_name, workload_distribution);
+        let mut slices = Vec::new();
+        for (key, curve) in &grids.by_keys {
+            if key.quant != quant_name
+                || key.distribution != dist
+                || key.moe_tp_size != moe_tp_size
+                || key.moe_ep_size != moe_ep_size
+                || curve.is_empty()
+            {
+                continue;
+            }
+            slices.push(MoeSiblingSlice {
+                topk: key.topk,
+                num_experts: key.num_experts,
+                hidden_size: key.hidden_size,
+                inter_size: key.inter_size,
+                points: curve.iter().map(|(&t, &lat)| (t, lat)).collect(),
+            });
+        }
+        Ok(slices)
+    }
+
+    /// Distinct quant names present in the kernel grid, in first-seen
+    /// (file row) order — Python iterates the table dict in insertion
+    /// order (`for q in moe_table`), and the transfer ladder's stable
+    /// profile-distance sort breaks ties by that order.
+    pub fn available_quants(&self, kernel: MoeKernel) -> Result<Vec<String>, AicError> {
+        Ok(self.grids_for(kernel)?.quants_in_load_order.clone())
+    }
+
+    fn grids_for(&self, kernel: MoeKernel) -> Result<&MoeGrids, AicError> {
+        let loaded = self.load()?;
+        Ok(match kernel {
+            MoeKernel::Standard => &loaded.default,
+            MoeKernel::LowLatency => &loaded.low_latency,
+        })
+    }
+
     /// Mirrors Python's:
     /// `dist = workload if workload in moe_data[quant] else "uniform"`
     fn resolve_distribution(
@@ -294,6 +419,8 @@ impl MoeTable {
 fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> {
     let mut default_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
     let mut low_latency_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
+    let mut default_quants: Vec<String> = Vec::new();
+    let mut low_latency_quants: Vec<String> = Vec::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -321,8 +448,29 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
             if !kernel_source_ok(source.kernel_sources(), kernel_source_col, &row)? {
                 continue;
             }
+            let kernel_source = row.str_optional(kernel_source_col)?.unwrap_or("").to_string();
+            // Kernel-specific mxfp4 remaps (mirror Python `load_moe_data`):
+            // the collector logs two distinct kernels under one `moe_dtype`;
+            // route them to dedicated quant modes so DeepSeek-V4 modeling can
+            // select the right one per GPU generation.
+            //  - Blackwell trtllm-gen MXFP4xMXFP8:
+            //    w4a8_mxfp4_mxfp8 + sglang_mxfp4_flashinfer_trtllm_moe
+            //      -> w4a8_mxfp4_mxfp8_trtllm
+            //  - Hopper flashinfer cutlass SM90 mixed-GEMM:
+            //    w4a16_mxfp4 + sglang_flashinfer_cutlass_moe
+            //      -> w4a16_mxfp4_cutlass
+            let raw_quant = row.str_owned(moe_dtype_col)?;
+            let quant = match (raw_quant.as_str(), kernel_source.as_str()) {
+                ("w4a8_mxfp4_mxfp8", "sglang_mxfp4_flashinfer_trtllm_moe") => {
+                    "w4a8_mxfp4_mxfp8_trtllm".to_string()
+                }
+                ("w4a16_mxfp4", "sglang_flashinfer_cutlass_moe") => {
+                    "w4a16_mxfp4_cutlass".to_string()
+                }
+                _ => raw_quant,
+            };
             let key = MoeKey {
-                quant: row.str_owned(moe_dtype_col)?,
+                quant,
                 distribution: row.str_owned(distribution_col)?,
                 topk: row.u32(topk_col)?,
                 num_experts: row.u32(num_experts_col)?,
@@ -331,12 +479,16 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
                 moe_tp_size: row.u32(moe_tp_size_col)?,
                 moe_ep_size: row.u32(moe_ep_size_col)?,
             };
-            let kernel_source = row.str_optional(kernel_source_col)?.unwrap_or("");
-            let target = if kernel_source == "moe_torch_flow_min_latency" {
-                &mut low_latency_keys
+            let (target, target_quants) = if kernel_source == "moe_torch_flow_min_latency" {
+                (&mut low_latency_keys, &mut low_latency_quants)
             } else {
-                &mut default_keys
+                (&mut default_keys, &mut default_quants)
             };
+            // First-seen (file row) quant order — Python's dict insertion
+            // order, consumed by `available_quants`.
+            if !target_quants.iter().any(|q| q == &key.quant) {
+                target_quants.push(key.quant.clone());
+            }
             // Python's `load_moe_data` wraps the leaf insert in a try/except KeyError
             // and skips on conflict, i.e. it keeps the FIRST occurrence of each
             // (shape, num_tokens) tuple. Some perf files contain duplicate rows
@@ -357,8 +509,14 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
         )));
     }
     Ok(LoadedMoeGrids {
-        default: MoeGrids { by_keys: default_keys },
-        low_latency: MoeGrids { by_keys: low_latency_keys },
+        default: MoeGrids {
+            by_keys: default_keys,
+            quants_in_load_order: default_quants,
+        },
+        low_latency: MoeGrids {
+            by_keys: low_latency_keys,
+            quants_in_load_order: low_latency_quants,
+        },
     })
 }
 

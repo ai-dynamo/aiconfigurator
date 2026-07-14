@@ -912,3 +912,43 @@ class TestMoECrossProfileTransfer:
             assert util_empirical.worst_provenance(tags) == "xprofile"
         finally:
             comprehensive_perf_db.set_transfer_policy(None)
+
+
+class TestAlltoallHybridFallbackClosure:
+    """Regression: the HYBRID fallback closure of
+    `TrtLLMWideEPMoEDispatch._query_alltoall_table` omitted the mandatory
+    `kernel_source` argument of `get_empirical_from_sol`, so a silicon miss
+    under HYBRID raised `TypeError` instead of running the empirical
+    estimate. The fallback must execute and surface the TYPED empirical
+    outcome (a value, or `EmpiricalNotImplementedError` when the slice has no
+    calibration data) — never a `TypeError`."""
+
+    def test_hybrid_silicon_miss_runs_empirical_closure(self):
+        from aiconfigurator.sdk import perf_database
+        from aiconfigurator.sdk.operations.moe import TrtLLMWideEPMoEDispatch
+
+        db = perf_database.get_database_view(
+            "gb200",
+            "trtllm",
+            "1.3.0rc10",
+            allow_missing_data=True,
+            database_mode="HYBRID",
+            shared_layer=False,
+        )
+        if db is None:
+            pytest.skip("gb200/trtllm/1.3.0rc10 data unavailable")
+
+        # Off-shape hidden_size forces a silicon miss; the HYBRID fallback
+        # closure must run (typed empirical miss here — the slice has no
+        # own-shape calibration data), not crash with TypeError.
+        with pytest.raises(EmpiricalNotImplementedError):
+            TrtLLMWideEPMoEDispatch._query_alltoall_table(
+                db,
+                op_name="alltoall_dispatch",
+                num_tokens=64,
+                hidden_size=7000,
+                topk=8,
+                num_experts=256,
+                moe_ep_size=8,
+                quant_mode=common.MoEQuantMode.nvfp4,
+            )

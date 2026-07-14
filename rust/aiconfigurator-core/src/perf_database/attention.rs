@@ -255,6 +255,153 @@ impl AttentionTable {
         perf_interp::query(&cfg, node, &[n as f64, s as f64, b as f64])
     }
 
+    /// Collected `(num_heads, full_seq, batch) -> latency` points of one
+    /// context slice, for the operator-layer util-calibration grid (Python's
+    /// `require_data_slice(_context_attention_data, fmha, kv, n_kv, hs, w)` +
+    /// `iter_grid(..., depth=3)`). `n_kv_lookup` is the MHA-normalized
+    /// kv-head count (`0` == MHA). Missing slice / empty node is a typed
+    /// `PerfDatabase` miss. No estimation logic here — callers own the
+    /// SOL/util math.
+    pub fn context_points(
+        &self,
+        fmha_quant: FmhaQuantMode,
+        kv_quant: KvCacheQuantMode,
+        n_kv_lookup: u32,
+        head_size: u32,
+        window_size: u32,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load_context()?;
+        let key = ContextKey {
+            fmha_quant: fmha_quant.name().to_string(),
+            kv_quant: kv_quant.name().to_string(),
+            n_kv_lookup,
+            head_size,
+            window_size,
+        };
+        let node = grids.by_keys.get(&key).ok_or_else(|| missing_key(&self.data_root, &key))?;
+        let points = perf_interp::node_points(node);
+        if points.is_empty() {
+            return Err(missing_key(&self.data_root, &key));
+        }
+        Ok(points)
+    }
+
+    /// Distinct collected `head_size` keys under `(fmha, kv, n_kv_lookup)`,
+    /// any window — the cross-head_size (XSHAPE) candidate list (Python's
+    /// `require_data_slice(wrapper, fmha, kv, n_kv).keys()`). Returned in
+    /// ascending order; Python yields CSV insertion order instead, which is
+    /// observable only on exact log-distance ties in the reference pick.
+    /// Typed `PerfDatabase` miss when nothing matches.
+    pub fn context_head_sizes(
+        &self,
+        fmha_quant: FmhaQuantMode,
+        kv_quant: KvCacheQuantMode,
+        n_kv_lookup: u32,
+    ) -> Result<Vec<u32>, AicError> {
+        let grids = self.load_context()?;
+        let fmha = fmha_quant.name();
+        let kv = kv_quant.name();
+        let mut sizes: Vec<u32> = Vec::new();
+        for key in grids.by_keys.keys() {
+            if key.fmha_quant == fmha
+                && key.kv_quant == kv
+                && key.n_kv_lookup == n_kv_lookup
+                && !sizes.contains(&key.head_size)
+            {
+                sizes.push(key.head_size);
+            }
+        }
+        if sizes.is_empty() {
+            return Err(AicError::PerfDatabase(format!(
+                "context attention data missing for fmha={fmha}, kv={kv}, \
+                 n_kv={n_kv_lookup} at {}",
+                self.data_root.display()
+            )));
+        }
+        Ok(sizes)
+    }
+
+    /// Collected `(num_heads, batch, seq) -> latency` points of one
+    /// generation slice. Python calibrates from
+    /// `_raw_generation_attention_data`, which in v2 is an alias of the
+    /// SOL-clamped working table (`_correct_sol` runs before the alias is
+    /// taken) — exactly what [`AttentionTable::load_generation`] produces, so
+    /// this IS the RAW-table equivalent. Typed `PerfDatabase` miss when the
+    /// slice is absent/empty.
+    pub fn generation_points(
+        &self,
+        kv_quant: KvCacheQuantMode,
+        n_kv_lookup: u32,
+        head_size: u32,
+        window_size: u32,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load_generation()?;
+        let key = GenerationKey {
+            kv_quant: kv_quant.name().to_string(),
+            n_kv_lookup,
+            head_size,
+            window_size,
+        };
+        let node = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing_gen_key(&self.data_root, &key))?;
+        let points = perf_interp::node_points(node);
+        if points.is_empty() {
+            return Err(missing_gen_key(&self.data_root, &key));
+        }
+        Ok(points)
+    }
+
+    /// Distinct collected `head_size` keys under `(kv, n_kv_lookup)`, any
+    /// window — the decode XSHAPE candidate list. Same ordering note as
+    /// [`AttentionTable::context_head_sizes`].
+    pub fn generation_head_sizes(
+        &self,
+        kv_quant: KvCacheQuantMode,
+        n_kv_lookup: u32,
+    ) -> Result<Vec<u32>, AicError> {
+        let grids = self.load_generation()?;
+        let kv = kv_quant.name();
+        let mut sizes: Vec<u32> = Vec::new();
+        for key in grids.by_keys.keys() {
+            if key.kv_quant == kv && key.n_kv_lookup == n_kv_lookup && !sizes.contains(&key.head_size) {
+                sizes.push(key.head_size);
+            }
+        }
+        if sizes.is_empty() {
+            return Err(AicError::PerfDatabase(format!(
+                "generation attention data missing for kv={kv}, n_kv={n_kv_lookup} at {}",
+                self.data_root.display()
+            )));
+        }
+        Ok(sizes)
+    }
+
+    /// Collected `(num_heads, seq, batch) -> latency` points of one encoder
+    /// slice (own-shape only; encoder has no transfer ladder). Typed
+    /// `PerfDatabase` miss when the slice is absent/empty.
+    pub fn encoder_points(
+        &self,
+        fmha_quant: FmhaQuantMode,
+        head_size: u32,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load_encoder()?;
+        let key = EncoderKey {
+            fmha_quant: fmha_quant.name().to_string(),
+            head_size,
+        };
+        let node = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing_encoder_key(&self.data_root, &key))?;
+        let points = perf_interp::node_points(node);
+        if points.is_empty() {
+            return Err(missing_encoder_key(&self.data_root, &key));
+        }
+        Ok(points)
+    }
+
     fn load_context(&self) -> Result<&ContextGrids, AicError> {
         let cell = self.context.get_or_init(|| {
             let raw = load_context_parquet(&self.context_sources)?;
@@ -451,7 +598,7 @@ fn load_generation_parquet(
 /// `n_kv_lookup == 0` means MHA (n_kv tracks n); a positive `window_size`
 /// smaller than the seq cuts the O(s^2) causal work to O(s*w).
 #[allow(clippy::too_many_arguments)]
-fn context_attention_sol_ms(
+pub(crate) fn context_attention_sol_ms(
     spec: &SystemSpec,
     n_kv_lookup: u32,
     head_size: u32,
@@ -483,12 +630,55 @@ fn context_attention_sol_ms(
     sol_math.max(sol_mem)
 }
 
+/// Speed-of-light context-attention latency in ms for a QUERY with a prefix.
+///
+/// Mirrors Python's `ContextAttention._query_context_attention_table::get_sol`
+/// verbatim: `full_s = s + prefix`; the windowed branch fires when `w > 0 &&
+/// full_s > w`; the causal branch discounts already-computed prefix work
+/// (`full_s² − prefix²`) and the Q/output traffic covers only the new tokens
+/// (`full_s − prefix`) while the KV write spans the full sequence.
+/// [`context_attention_sol_ms`] is the `prefix = 0` specialization used as
+/// the per-sample sol_fn (table rows are full attention); this variant feeds
+/// the empirical query SOL. `n_kv` is the REAL kv-head count (not the MHA
+/// sentinel).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn context_attention_sol_with_prefix_ms(
+    spec: &SystemSpec,
+    b: f64,
+    s: f64,
+    prefix: f64,
+    n: f64,
+    n_kv: f64,
+    head_size: u32,
+    window_size: u32,
+    kv_quant: KvCacheQuantMode,
+    fmha_quant: FmhaQuantMode,
+) -> f64 {
+    let bf16_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
+    if bf16_flops <= 0.0 {
+        return 0.0;
+    }
+    let h = head_size as f64;
+    let w = window_size as f64;
+    let full_s = s + prefix;
+    let ops = if window_size > 0 && full_s > w {
+        2.0 * b * (full_s - prefix) * w * n * h * 2.0
+    } else {
+        2.0 * b * (full_s * full_s - prefix * prefix) * n * h * 2.0 / 2.0
+    };
+    let mem_bytes = 2.0 * b * (n * (full_s - prefix) * h + n * (full_s - prefix) * h)
+        + kv_quant.mapping().memory * b * (2.0 * n_kv * full_s * h);
+    let sol_math = ops / bf16_flops * 1000.0 / fmha_quant.mapping().compute;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    sol_math.max(sol_mem)
+}
+
 /// Speed-of-light encoder-attention latency in ms.
 ///
 /// Mirrors Python's `EncoderAttention._query_encoder_attention_table::get_sol`:
 /// non-causal full N^2 (no /2), no KV-cache read — Q/K/V read + output write
 /// in bf16 only.
-fn encoder_attention_sol_ms(
+pub(crate) fn encoder_attention_sol_ms(
     spec: &SystemSpec,
     head_size: u32,
     fmha_quant: FmhaQuantMode,
@@ -514,7 +704,7 @@ fn encoder_attention_sol_ms(
 /// as wired into the perf_interp sol_fn: c = [n, b, s]. `n_kv_lookup == 0`
 /// means MHA (n_kv tracks n); `window_size > 0` clamps `kv_len` to
 /// `min(s-1, window_size)`.
-fn generation_attention_sol_ms(
+pub(crate) fn generation_attention_sol_ms(
     spec: &SystemSpec,
     n_kv_lookup: u32,
     head_size: u32,

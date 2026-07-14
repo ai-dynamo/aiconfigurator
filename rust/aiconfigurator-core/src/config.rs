@@ -21,7 +21,9 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 // only distinguishable by this version — `EngineSpec::from_bincode` reads and
 // checks it before decoding the op lists. Bump whenever an `OpSpec` field
 // changes; keep in lockstep with `sdk/engine.py::ENGINE_SPEC_SCHEMA_VERSION`.
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 2;
+// Bumped to 3 when the `Msa{Context,Generation}` variants were inserted
+// (bincode enum indices after `DsaGeneration` shifted).
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 3;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].
@@ -71,6 +73,20 @@ pub struct EngineConfig {
     /// specs).
     #[serde(default)]
     pub perf_db_sources: PerfDbSources,
+
+    /// Perf-database lookup mode (Python's `database._default_database_mode`).
+    /// SILICON queries collected tables only; HYBRID falls back to the
+    /// util-space empirical layer on a typed silicon miss; EMPIRICAL always
+    /// answers `SOL/util`. Absent on old specs -> Silicon (back-compat).
+    #[serde(default)]
+    pub database_mode: crate::common::enums::DatabaseMode,
+
+    /// Enabled empirical transfer kinds as explicit tokens (`xshape` /
+    /// `xquant` / `xprofile` / `xop`). Python resolves preset names before
+    /// serialising, so no preset vocabulary exists on the wire. `None` =
+    /// the default ALL-transfers policy (mirrors `common.ALL_TRANSFERS`).
+    #[serde(default)]
+    pub transfer_policy: Option<Vec<String>>,
 
     #[serde(default)]
     pub extra: BTreeMap<String, String>,
@@ -193,6 +209,10 @@ pub enum DataType {
     W4a16Mxfp4,
     #[serde(rename = "w4a8_mxfp4_mxfp8")]
     W4a8Mxfp4Mxfp8,
+    #[serde(rename = "w4a8_mxfp4_mxfp8_trtllm")]
+    W4a8Mxfp4Mxfp8Trtllm,
+    #[serde(rename = "w4a16_mxfp4_cutlass")]
+    W4a16Mxfp4Cutlass,
 }
 
 #[cfg(test)]

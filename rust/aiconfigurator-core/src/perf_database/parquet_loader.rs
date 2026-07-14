@@ -211,6 +211,20 @@ impl PerfRow {
         })
     }
 
+    /// BOOLEAN column, with fallbacks mirroring Python's `_to_bool` string
+    /// coercion (`str(value).strip().lower() in {"1","true","yes","y"}`) for
+    /// files that store flags as INT64 or strings.
+    pub fn bool(&self, col: usize) -> Result<bool, AicError> {
+        if let Ok(v) = self.row.get_bool(col) {
+            return Ok(v);
+        }
+        if let Ok(v) = self.row.get_long(col) {
+            return Ok(v == 1);
+        }
+        let s = self.str(col)?;
+        Ok(matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "y"))
+    }
+
     /// Optional double. Returns None when the column lookup is None OR the
     /// cell is null. Used by dispatch tables whose split-latency columns
     /// can legitimately be absent for one mode of the schema (DeepEP normal

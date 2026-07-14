@@ -326,6 +326,136 @@ impl MlaTable {
         perf_interp::query(&cfg, node, &[num_heads as f64, b as f64, s as f64])
     }
 
+    // -----------------------------------------------------------------------
+    // Point accessors for the util-space empirical layer (algorithm-free:
+    // typed `AicError::PerfDatabase` miss on absent slice / empty node, no
+    // estimation logic). Coordinate order matches the Python `depth=3`
+    // iteration of each `require_data_slice` slice.
+    // -----------------------------------------------------------------------
+
+    /// Collected `(num_heads, seq, batch) -> latency` points of the op-level
+    /// context MLA `(fmha, kv)` slice. Typed miss when absent/empty.
+    pub fn context_points(
+        &self,
+        kv_quant: KvCacheQuantMode,
+        fmha_quant: FmhaQuantMode,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load_context()?;
+        let key = ContextKey {
+            fmha_quant: fmha_quant.name().to_string(),
+            kv_quant: kv_quant.name().to_string(),
+        };
+        let node = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing("context MLA", &self.data_root, format!("{key:?}")))?;
+        non_empty_points(node, "context MLA", &self.data_root)
+    }
+
+    /// Collected `(num_heads, batch, seq) -> latency` points of the op-level
+    /// generation MLA kv slice. Typed miss when absent/empty.
+    pub fn generation_points(
+        &self,
+        kv_quant: KvCacheQuantMode,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load_generation()?;
+        let key = KvOnlyKey {
+            kv_quant: kv_quant.name().to_string(),
+        };
+        let node = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing("generation MLA", &self.data_root, format!("{key:?}")))?;
+        non_empty_points(node, "generation MLA", &self.data_root)
+    }
+
+    /// The BMM quant slice Python's `quant_mode in wrapper` membership check
+    /// selects: the requested quant when ANY BMM data exists for it (either
+    /// op_name), otherwise `bfloat16` — even when bfloat16 has no data
+    /// either (the follow-up [`Self::bmm_points`] then reports the typed
+    /// miss, matching Python's `require_data_slice`). Errs only when the
+    /// whole BMM table failed to load.
+    pub fn bmm_selected_quant(&self, quant: GemmQuantMode) -> Result<GemmQuantMode, AicError> {
+        let grids = self.load_bmm()?;
+        let has_quant = grids
+            .by_keys
+            .keys()
+            .any(|key| key.bmm_quant == quant.name());
+        Ok(if has_quant { quant } else { GemmQuantMode::Bfloat16 })
+    }
+
+    /// Collected `(num_tokens,) -> latency` points of the
+    /// `(quant, op_name, num_heads)` BMM slice. No fallback here — the caller
+    /// resolves the quant via [`Self::bmm_selected_quant`] first (mirroring
+    /// Python, where the membership check is on the quant level only).
+    /// Typed miss when the slice is absent/empty.
+    pub fn bmm_points(
+        &self,
+        quant: GemmQuantMode,
+        is_pre: bool,
+        num_heads: u32,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load_bmm()?;
+        let pre_or_post = if is_pre { "mla_gen_pre" } else { "mla_gen_post" };
+        let key = BmmKey {
+            bmm_quant: quant.name().to_string(),
+            pre_or_post: pre_or_post.to_string(),
+        };
+        let node = grids
+            .by_keys
+            .get(&key)
+            .and_then(|by_heads| by_heads.get(&num_heads))
+            .ok_or_else(|| {
+                missing(
+                    "MLA BMM",
+                    &self.data_root,
+                    format!("quant={}, {pre_or_post}, num_heads={num_heads}", quant.name()),
+                )
+            })?;
+        non_empty_points(node, "MLA BMM", &self.data_root)
+    }
+
+    /// Collected `(num_heads, seq, batch) -> latency` points of the
+    /// module-level context MLA `(fmha, kv, gemm)` slice. Typed miss when
+    /// absent/empty.
+    pub fn context_module_points(
+        &self,
+        kv_quant: KvCacheQuantMode,
+        fmha_quant: FmhaQuantMode,
+        gemm_quant: GemmQuantMode,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load_context_module()?;
+        let key = ModuleKey {
+            fmha_quant: fmha_quant.name().to_string(),
+            kv_quant: kv_quant.name().to_string(),
+            gemm_quant: gemm_quant.name().to_string(),
+        };
+        let node = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing("context MLA module", &self.data_root, format!("{key:?}")))?;
+        non_empty_points(node, "context MLA module", &self.data_root)
+    }
+
+    /// Collected `(num_heads, batch, seq) -> latency` points of the
+    /// module-level generation MLA `(kv, gemm)` slice. Typed miss when
+    /// absent/empty.
+    pub fn generation_module_points(
+        &self,
+        kv_quant: KvCacheQuantMode,
+        gemm_quant: GemmQuantMode,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load_generation_module()?;
+        let key = GenModuleKey {
+            kv_quant: kv_quant.name().to_string(),
+            gemm_quant: gemm_quant.name().to_string(),
+        };
+        let node = grids.by_keys.get(&key).ok_or_else(|| {
+            missing("generation MLA module", &self.data_root, format!("{key:?}"))
+        })?;
+        non_empty_points(node, "generation MLA module", &self.data_root)
+    }
+
     fn load_context(&self) -> Result<&ContextMlaGrids, AicError> {
         let cell = self
             .context
@@ -378,14 +508,8 @@ fn bf16_tc_flops(spec: &SystemSpec) -> f64 {
 
 /// Context MLA SOL in ms, evaluated at prefix = 0 (the perf_interp `sol_fn`
 /// contract — samples are prefix=0 and the operator layer owns the prefix
-/// correction). Mirrors `ContextMLA._query_context_mla_table::get_sol` and
-/// the identical `MLAModule._query_context_mla_module_table::get_sol`:
-/// - `ops      = b * n * 2/2 * (192 + 128) * (full_s^2 - prefix^2)`
-/// - `mem      = b * n * (kv.memory * full_s * (192+128) + 2 * s * (192+128))`
-/// - `sol_math = ops / bf16_tc_flops * 1000 / fmha.compute`
-/// - `sol_mem  = mem / mem_bw * 1000`
-/// - `sol      = max(sol_math, sol_mem)`
-fn context_mla_sol_ms(
+/// correction). See [`context_mla_sol_prefix_ms`] for the formula.
+pub(crate) fn context_mla_sol_ms(
     spec: &SystemSpec,
     kv_quant: KvCacheQuantMode,
     fmha_quant: FmhaQuantMode,
@@ -393,7 +517,28 @@ fn context_mla_sol_ms(
     s: f64,
     b: f64,
 ) -> f64 {
-    let prefix = 0.0_f64;
+    context_mla_sol_prefix_ms(spec, kv_quant, fmha_quant, n, s, 0.0, b)
+}
+
+/// Prefix-aware context MLA SOL in ms (`s` is the chunk / isl length; the
+/// util-empirical query SOL carries prefix natively, unlike the prefix=0
+/// sample SOL). Mirrors `ContextMLA._query_context_mla_table::get_sol` and
+/// the identical `MLAModule._query_context_mla_module_table::get_sol`:
+/// - `full_s   = s + prefix`
+/// - `ops      = b * n * 2/2 * (192 + 128) * (full_s^2 - prefix^2)`
+/// - `mem      = b * n * (kv.memory * full_s * (192+128) + 2 * s * (192+128))`
+/// - `sol_math = ops / bf16_tc_flops * 1000 / fmha.compute`
+/// - `sol_mem  = mem / mem_bw * 1000`
+/// - `sol      = max(sol_math, sol_mem)`
+pub(crate) fn context_mla_sol_prefix_ms(
+    spec: &SystemSpec,
+    kv_quant: KvCacheQuantMode,
+    fmha_quant: FmhaQuantMode,
+    n: f64,
+    s: f64,
+    prefix: f64,
+    b: f64,
+) -> f64 {
     let full_s = s + prefix;
     let ops = b * n * 2.0 / 2.0 * (192.0 + 128.0) * (full_s * full_s - prefix * prefix);
     let mem_bytes =
@@ -411,7 +556,7 @@ fn context_mla_sol_ms(
 /// - `sol_math = ops / bf16_tc_flops * 1000 / quant_gen.compute`
 /// - `sol_mem  = mem / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
-fn generation_mla_sol_ms(
+pub(crate) fn generation_mla_sol_ms(
     spec: &SystemSpec,
     kv_quant: KvCacheQuantMode,
     n: f64,
@@ -437,7 +582,7 @@ fn generation_mla_sol_ms(
 /// - `sol_math = ops / (bf16_tc_flops * quant.compute) * 1000`
 /// - `sol_mem  = mem / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
-fn mla_bmm_sol_ms(spec: &SystemSpec, quant: GemmQuantMode, n: f64, t: f64) -> f64 {
+pub(crate) fn mla_bmm_sol_ms(spec: &SystemSpec, quant: GemmQuantMode, n: f64, t: f64) -> f64 {
     let ops = 2.0 * t * n * 128.0 * 512.0;
     let mem_bytes = n * (t * 640.0 + 128.0 * 512.0) * quant.mapping().memory;
     let sol_math = ops / (bf16_tc_flops(spec) * quant.mapping().compute) * 1000.0;
@@ -454,7 +599,7 @@ fn mla_bmm_sol_ms(spec: &SystemSpec, quant: GemmQuantMode, n: f64, t: f64) -> f6
 /// - `sol_math = attn_ops/bf16/quant_gen.compute + bmm_ops/(bf16*gemm.compute)`
 /// - `sol_mem  = (attn_mem + bmm_mem) / mem_bw`
 /// - `sol      = max(sol_math, sol_mem)`
-fn generation_mla_module_sol_ms(
+pub(crate) fn generation_mla_module_sol_ms(
     spec: &SystemSpec,
     kv_quant: KvCacheQuantMode,
     gemm_quant: GemmQuantMode,
@@ -808,6 +953,24 @@ fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
         "{table} data missing for {descriptor} at {}",
         data_root.display()
     ))
+}
+
+/// Flatten a slice node into `(coords, latency)` points, treating an empty
+/// node as a typed coverage miss (mirrors `require_data_slice`'s empty-node
+/// check).
+fn non_empty_points(
+    node: &Node,
+    table: &str,
+    data_root: &Path,
+) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+    let points = perf_interp::node_points(node);
+    if points.is_empty() {
+        return Err(AicError::PerfDatabase(format!(
+            "{table} perf data empty for the requested slice at {}",
+            data_root.display()
+        )));
+    }
+    Ok(points)
 }
 
 fn clone_err(err: &AicError) -> AicError {

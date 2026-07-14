@@ -34,6 +34,7 @@ The live ``rust_engine_step.py`` helpers build on this path.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
@@ -48,7 +49,9 @@ from aiconfigurator.sdk.operations import (
     ContextDeepSeekV4AttentionModule,
     ContextDSAModule,
     ContextMLA,
+    ContextMSAModule,
     CustomAllReduce,
+    DeepSeekV4MegaMoEModule,
     DeepSeekV4MHCModule,
     ElementWise,
     Embedding,
@@ -59,6 +62,7 @@ from aiconfigurator.sdk.operations import (
     GenerationDeepSeekV4AttentionModule,
     GenerationDSAModule,
     GenerationMLA,
+    GenerationMSAModule,
     Mamba2Kernel,
     MLABmm,
     MLAModule,
@@ -66,6 +70,7 @@ from aiconfigurator.sdk.operations import (
     MoEDispatch,
     OverlapOp,
     TrtLLMWideEPMoE,
+    TrtLLMWideEPMoEDispatch,
     WideEPContextMLA,
     WideEPGenerationMLA,
 )
@@ -86,11 +91,14 @@ from aiconfigurator.sdk.rust_engine_step import (
 # Schema versions must match the Rust crate constants
 # (`ENGINE_SPEC_SCHEMA_VERSION` / `ENGINE_CONFIG_SCHEMA_VERSION` in `lib.rs`).
 # ENGINE_SPEC bumped to 2 for the 0.10.0 op-payload layout change (CP + perf-DB
-# refactor added serialized `OpSpec` fields); the Rust consumer gates on this
-# version before decoding the positional op lists. Keep in lockstep with the
-# Rust `ENGINE_SPEC_SCHEMA_VERSION`.
-ENGINE_SPEC_SCHEMA_VERSION = 2
+# refactor added serialized `OpSpec` fields), and to 3 when the MSA op variants
+# were inserted (bincode enum indices after `DsaGeneration` shifted); the Rust
+# consumer gates on this version before decoding the positional op lists. Keep
+# in lockstep with the Rust `ENGINE_SPEC_SCHEMA_VERSION`.
+ENGINE_SPEC_SCHEMA_VERSION = 3
 ENGINE_CONFIG_SCHEMA_VERSION = 1
+
+logger = logging.getLogger(__name__)
 
 
 class OpConversionError(RuntimeError):
@@ -147,15 +155,15 @@ def _embedding(op: Embedding) -> dict:
 
 
 def _elementwise(op: ElementWise) -> dict:
-    # Rust `ElementwiseOp.bytes_per_token * num_tokens` must equal Python's
-    # `(x * dim_in * 2 + x * dim_out * 2)` after `x //= scale_num_tokens`.
-    # Per-token bytes = (dim_in * 2 + dim_out * 2) / scale_num_tokens.
-    scale = op._scale_num_tokens if op._scale_num_tokens else 1
-    bytes_per_token = (op._dim_in * 2 + op._dim_out * 2) / scale
+    # `scale_num_tokens` rides the wire as its own field so the Rust op can
+    # reproduce Python's integer order exactly (`x //= scale` THEN the CP
+    # ceil-split). Folding it into bytes_per_token (the old encoding) is only
+    # exact when the divisor divides the token count.
     return {
         "name": op._name,
         "scale_factor": op._scale_factor,
-        "bytes_per_token": float(bytes_per_token),
+        "bytes_per_token": float(op._dim_in * 2 + op._dim_out * 2),
+        "scale_num_tokens": op._scale_num_tokens if op._scale_num_tokens else 1,
         "seq_split": op._seq_split,
     }
 
@@ -194,6 +202,9 @@ def _encoder_attention(op: EncoderAttention) -> dict:
         "n": op._n,
         "head_size": op._head_size,
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
+        # Partial-RoPE extra (Qwen3-VL uses 0.5); Rust adds
+        # `factor * 2 * mem_op(Q+K bytes) * 1.1` on top of the table latency.
+        "partial_rotary_factor": float(getattr(op, "_partial_rotary_factor", 0.0) or 0.0),
     }
 
 
@@ -252,26 +263,33 @@ def _moe(op: MoE) -> dict:
         "quant_mode": _quant_name(op._quant_mode),
         "workload_distribution": op._workload_distribution,
         "is_gated": op._is_gated,
+        # SGLang MoE routing (Python `MoE.query` sglang branch): deepep_moe
+        # reads the wideep context/generation tables; EPLB corrects the
+        # prefill token count to int(x * 0.8).
+        "moe_backend": op._moe_backend,
+        "enable_eplb": bool(op._enable_eplb),
+        "is_context": bool(op._is_context),
     }
 
 
-def _dispatch_flavor(backend: str) -> str:
-    """Mirror Rust `models/moe.rs::dispatch_flavor`: trtllm -> TrtllmAlltoall,
-    everything else -> CustomAllReduce. The `DispatchFlavor` enum has no serde
-    rename, so emit the exact Rust variant name. The fine SGLang-DeepEP /
-    NVL72 gating stays inside the Rust `MoEDispatchOp::query`.
+def _dispatch_flavor(backend: str, op: MoEDispatch) -> str:
+    """Resolve the Rust `DispatchFlavor` variant for a dispatch op. The enum
+    has no serde rename, so emit the exact variant name:
 
-    KNOWN LIMITATION (WideEP / DeepEP, out of scope): this binary
-    `trtllm -> TrtllmAlltoall, else -> CustomAllReduce` mapping is correct for
-    the standard (non-WideEP) MoE path that the gated parity harness
-    (`test_engine_step_parity.py`) and `cli_estimate` exercise. It does NOT emit
-    the SGLang-WideEP `DeepEpNormal` / `DeepEpLowLatency` flavors — that DeepEP
-    path is out-of-scope scan territory, not gated by the smoke harness. A future
-    WideEP stage must thread the WideEP/DeepEP flavor selection through here
-    (and likely needs the resolved dispatch kind off the Python op rather than a
-    pure backend-string mapping).
+    - trtllm -> `TrtllmAlltoall` (the fine SM/NVL72 gating stays inside the
+      Rust `MoEDispatchOp::query`);
+    - sglang with `moe_backend == "deepep_moe"` -> the WideEP DeepEP tables:
+      context ops use DeepEP-normal (high-throughput), decode ops use
+      DeepEP-low-latency — mirroring the Python branch split
+      (`operations/moe.py`: `if self._is_context: query_wideep_deepep_normal
+      else query_wideep_deepep_ll`);
+    - everything else -> `CustomAllReduce`.
     """
-    return "TrtllmAlltoall" if backend == "trtllm" else "CustomAllReduce"
+    if backend == "trtllm":
+        return "TrtllmAlltoall"
+    if backend == "sglang" and getattr(op, "_moe_backend", None) == "deepep_moe":
+        return "DeepEpNormal" if op._is_context else "DeepEpLowLatency"
+    return "CustomAllReduce"
 
 
 def _moe_dispatch(op: MoEDispatch, *, backend: str) -> dict:
@@ -290,7 +308,10 @@ def _moe_dispatch(op: MoEDispatch, *, backend: str) -> dict:
         "attention_dp_size": op._attention_dp_size,
         "pre_dispatch": op._pre_dispatch,
         "backend": backend,
-        "flavor": _dispatch_flavor(backend),
+        "flavor": _dispatch_flavor(backend, op),
+        # DeepEP branches divide the dispatch token count by this (Python
+        # `num_tokens // self._scale_num_tokens`, moe.py sglang DeepEP path).
+        "scale_num_tokens": op._scale_num_tokens,
         "comm_quant": "half",
         "moe_quant": _quant_name(quant) if quant is not None else "bfloat16",
         "attn_cp_size": op._attn_cp_size,
@@ -318,7 +339,12 @@ def _nccl(op: NCCL) -> dict:
         "scale_factor": op._scale_factor,
         "hidden_size": op._num_elements_per_token,
         "num_gpus": op._num_gpus,
-        "dtype": "half",
+        # Pass the op's real comm dtype through (every current model builder
+        # passes half, but the NCCL op supports int8/fp8 and the Rust enum
+        # carries them). CustomAllReduce / MoEDispatch stay "half" by
+        # construction — Python hardcodes CommQuantMode.half at their query
+        # sites, so "half" IS the parity value there.
+        "dtype": op._comm_quant_mode.name,
         "operation": op._nccl_op,
         "seq_split": op._seq_split,
     }
@@ -331,6 +357,27 @@ def _p2p(op: P2P) -> dict:
         "pp_size": op._pp_size,
         "hidden_size": op._h,
         "seq_split": op._seq_split,
+    }
+
+
+def _msa_module(op: ContextMSAModule | GenerationMSAModule) -> dict:
+    return {
+        "name": op._name,
+        "scale_factor": op._scale_factor,
+        "num_heads": op._num_heads,
+        "num_kv_heads": op._num_kv_heads,
+        "hidden_size": op._hidden_size,
+        "head_dim": op._head_dim,
+        "v_head_dim": op._v_head_dim,
+        "index_n_heads": op._index_n_heads,
+        "index_head_dim": op._index_head_dim,
+        "index_topk": op._index_topk,
+        "block_size": op._block_size,
+        "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
+        "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
+        "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
+        "dsa_architecture": op._dsa_architecture,
+        "dsa_scale_k": op._dsa_scale_k,
     }
 
 
@@ -357,6 +404,10 @@ def _dsa_module(op: ContextDSAModule | GenerationDSAModule, *, architecture: str
         "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
         "architecture": arch,
         "index_topk": int(dims["index_topk"]),
+        # GLM-5.2 shared-index amortization: per-layer cost is
+        # `full_frac*full + (1-full_frac)*skip` (see `ContextDSAModule.query`).
+        # 1.0 (DeepSeek-V3.2 / GLM-5) keeps the pure-full path.
+        "full_frac": float(getattr(op, "_full_frac", 1.0)),
     }
 
 
@@ -404,6 +455,32 @@ def _dsv4_module(
         "index_topk": op._index_topk,
         # Rank-LOCAL o_groups (the model pre-divides by tp).
         "o_groups": op._o_groups,
+    }
+
+
+def _dsv4_megamoe(op: DeepSeekV4MegaMoEModule) -> dict:
+    """SGLang DeepSeek-V4 MegaMoE routed module (Python
+    ``DeepSeekV4MegaMoEModule``). One class serves both phases via
+    ``is_context``, so a single Rust variant carries the flag. Field names
+    match the Rust ``Dsv4MegaMoeOp``; ``workload_distribution`` is already
+    normalized by the ctor (``uniform`` -> ``balanced``)."""
+    return {
+        "name": op._name,
+        "scale_factor": op._scale_factor,
+        "hidden_size": op._hidden_size,
+        "inter_size": op._inter_size,
+        "topk": op._topk,
+        "num_experts": op._num_experts,
+        "moe_tp_size": op._moe_tp_size,
+        "moe_ep_size": op._moe_ep_size,
+        "quant_mode": _quant_name(op._quant_mode),
+        "workload_distribution": op._workload_distribution,
+        "is_context": op._is_context,
+        "source_policy": op._source_policy,
+        "pre_dispatch": op._pre_dispatch,
+        "num_fused_shared_experts": op._num_fused_shared_experts,
+        "kernel_source": op._kernel_source,
+        "kernel_dtype": op._kernel_dtype,
     }
 
 
@@ -460,7 +537,10 @@ def _wideep_context_mla(op: WideEPContextMLA) -> dict:
     return {
         "name": op._name,
         "scale_factor": op._scale_factor,
-        "num_heads": op._tp_size,  # Rust num_heads slot carries the per-rank head split
+        # The op stores tp_size; the Rust table axis is per-rank heads. Mirror
+        # the Python query's conversion (mla.py: `num_heads = 128 // tp_size`,
+        # DeepSeek's 128 total heads).
+        "num_heads": 128 // op._tp_size,
         "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
         "attn_backend": op._attn_backend,
@@ -472,7 +552,7 @@ def _wideep_generation_mla(op: WideEPGenerationMLA) -> dict:
     return {
         "name": op._name,
         "scale_factor": op._scale_factor,
-        "num_heads": op._tp_size,
+        "num_heads": 128 // op._tp_size,
         "kv_cache_dtype": _quant_name(op._kvcache_quant_mode),
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
         "attn_backend": op._attn_backend,
@@ -503,6 +583,26 @@ def _wideep_moe(op: TrtLLMWideEPMoE, *, database: Any) -> dict:
         "workload_distribution": op._workload_distribution,
         "num_slots": op._num_slots,
         "kernel_source": kernel_source,
+    }
+
+
+def _wideep_moe_dispatch(op: TrtLLMWideEPMoEDispatch) -> dict:
+    """TRT-LLM WideEP All2All dispatch (Python `TrtLLMWideEPMoEDispatch`).
+    Field names match the Rust `TrtllmWideEpMoEDispatchOp`. `node_num` is
+    intentionally NOT on the wire: the model builders never set it and the
+    Rust query applies Python's default (`1 if ep < 4 else ep // 4`)."""
+    return {
+        "name": op._name,
+        "scale_factor": op._scale_factor,
+        "hidden_size": op._hidden_size,
+        "topk": op._topk,
+        "num_experts": op._num_experts,
+        "moe_tp_size": op._moe_tp_size,
+        "moe_ep_size": op._moe_ep_size,
+        "attention_dp_size": op._attention_dp_size,
+        "pre_dispatch": op._pre_dispatch,
+        "quant_mode": _quant_name(op._quant_mode),
+        "use_low_precision_combine": bool(op._use_low_precision_combine),
     }
 
 
@@ -545,10 +645,19 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
         return {"DsaContext": _dsa_module(op, architecture=architecture)}
     if isinstance(op, GenerationDSAModule):
         return {"DsaGeneration": _dsa_module(op, architecture=architecture)}
+    if isinstance(op, ContextMSAModule):
+        return {"MsaContext": _msa_module(op)}
+    if isinstance(op, GenerationMSAModule):
+        return {"MsaGeneration": _msa_module(op)}
     if isinstance(op, ContextDeepSeekV4AttentionModule):
         return {"Dsv4Context": _dsv4_module(op, architecture=architecture)}
     if isinstance(op, GenerationDeepSeekV4AttentionModule):
         return {"Dsv4Generation": _dsv4_module(op, architecture=architecture)}
+    # Rust `Op::Dsv4MegaMoe` is APPENDED after `Fallback` (bincode enum
+    # indices are positional; appending shifts nothing), so no
+    # ENGINE_SPEC_SCHEMA_VERSION bump.
+    if isinstance(op, DeepSeekV4MegaMoEModule):
+        return {"Dsv4MegaMoe": _dsv4_megamoe(op)}
 
     # WideEP variants (must precede their non-WideEP base classes if any).
     if isinstance(op, WideEPContextMLA):
@@ -557,6 +666,10 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
         return {"WideEpGenerationMla": _wideep_generation_mla(op)}
     if isinstance(op, TrtLLMWideEPMoE):
         return {"WideEpMoe": _wideep_moe(op, database=database)}
+    # MUST precede the MoEDispatch check: TrtLLMWideEPMoEDispatch is a direct
+    # `Operation` subclass (not a MoEDispatch), but keep the guard explicit.
+    if isinstance(op, TrtLLMWideEPMoEDispatch):
+        return {"WideEpMoeDispatch": _wideep_moe_dispatch(op)}
 
     # Plain (single-variant) ops.
     if isinstance(op, GEMM):
@@ -633,6 +746,16 @@ def _compute_perf_db_sources(database: Any) -> dict:
             ]
         return out
     except Exception:
+        logger.warning(
+            "Failed to resolve shared-layer perf-DB sources for %s/%s/%s; the "
+            "compiled engine will load PRIMARY-ONLY rows while Python uses the "
+            "shared layer in the same run — cross-engine drift is possible. "
+            "Investigate rather than ignore.",
+            getattr(database, "system", "?"),
+            getattr(database, "backend", "?"),
+            getattr(database, "version", "?"),
+            exc_info=True,
+        )
         return {}
 
 
@@ -693,6 +816,13 @@ def _engine_config_dict(
         # in Python so the Rust core inherits the same rows. Empty/absent = Rust
         # uses its single-``data_root`` default (back-compat with old specs).
         "perf_db_sources": _compute_perf_db_sources(database),
+        # Perf-database query mode + enabled empirical transfer kinds, read off
+        # the live database view so the compiled engine answers HYBRID/EMPIRICAL
+        # queries the same way the Python step does. Presets are resolved here
+        # (single source of truth in ``common.TRANSFER_PRESETS``); the wire form
+        # is always explicit kind tokens, ``None`` = the default ALL policy.
+        "database_mode": _database_mode_name(database),
+        "transfer_policy": _transfer_policy_tokens(database),
         "extra": {},
     }
     # SpeculativeConfig (flattened, Option<>): emit nextn/nextn_accept_rates at
@@ -706,6 +836,33 @@ def _engine_config_dict(
 
 def _opt_int(value: Any) -> int | None:
     return None if value is None else int(value)
+
+
+def _database_mode_name(database: Any) -> str:
+    """The database view's query mode as the wire token (default SILICON)."""
+    if database is None:
+        return "SILICON"
+    mode = getattr(database, "get_default_database_mode", lambda: None)()
+    return getattr(mode, "name", str(mode)) if mode is not None else "SILICON"
+
+
+def _transfer_policy_tokens(database: Any) -> list[str] | None:
+    """The view's enabled transfer kinds as explicit wire tokens.
+
+    ``None`` = the default ALL-transfers policy (backward-compatible absent
+    key). A non-default policy serialises as a sorted list of kind values so
+    the Rust side never needs the preset vocabulary.
+    """
+    if database is None:
+        return None
+    policy = getattr(database, "transfer_policy", None)
+    if policy is None:
+        return None
+    from aiconfigurator.sdk.common import ALL_TRANSFERS
+
+    if frozenset(policy) == ALL_TRANSFERS:
+        return None
+    return sorted(kind.value for kind in policy)
 
 
 # --------------------------------------------------------------------------- #
@@ -904,8 +1061,43 @@ class EngineHandle:
     def predict_decode_latency(self, bs: int, isl: int, osl: int = 2) -> float:
         return self._engine.predict_decode_latency(int(bs), int(isl), int(osl))
 
-    def mixed_step_latency(self, ctx_tokens: int, gen_tokens: int, isl: int, osl: int, prefix: int = 0) -> float:
-        return self._engine.mixed_step_latency(int(ctx_tokens), int(gen_tokens), int(isl), int(osl), int(prefix))
+    def mixed_step_latency(
+        self,
+        ctx_tokens: int,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+        seq_imbalance_correction_scale: float = 1.0,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> float:
+        return self._engine.mixed_step_latency(
+            int(ctx_tokens),
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            int(prefix),
+            float(seq_imbalance_correction_scale),
+            float(gen_seq_imbalance_correction_scale),
+        )
 
-    def decode_step_latency(self, gen_tokens: int, isl: int, osl: int) -> float:
-        return self._engine.decode_step_latency(int(gen_tokens), int(isl), int(osl))
+    def decode_step_latency(
+        self,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> float:
+        return self._engine.decode_step_latency(
+            int(gen_tokens), int(isl), int(osl), float(gen_seq_imbalance_correction_scale)
+        )
+
+    def last_provenance(self) -> str | None:
+        """Empirical provenance tier fired during the most recent engine call
+        on this handle (worst tier across ops, per Python's
+        ``util_empirical.PROVENANCE_ORDER``), or ``None`` for a pure-silicon
+        answer. Per-call state: every compute method resets the accumulator on
+        entry. The rust engine-step bridge forwards non-silicon tiers into
+        ``util_empirical.note_provenance`` so ``capture_provenance()`` /
+        support-matrix HYBRID labelling behave identically on both engines."""
+        return self._engine.last_provenance()

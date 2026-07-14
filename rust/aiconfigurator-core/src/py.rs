@@ -30,6 +30,8 @@ use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::sync::GILOnceCell;
+use pyo3::types::PyType;
 
 use crate::common::error::AicError;
 use crate::engine::runtime::{
@@ -44,10 +46,70 @@ fn _build_smoke() -> u32 {
     ENGINE_CONFIG_SCHEMA_VERSION
 }
 
+/// Cached handles to the canonical SDK exception classes
+/// (`aiconfigurator.sdk.errors`). Filled lazily on first use so importing the
+/// extension never imports the sdk (the sdk imports aiconfigurator_core — an
+/// eager import here would be a cycle), and left empty in pure-Rust contexts
+/// where the sdk is not installed (fallback to `PyValueError`).
+static PERF_DATA_NOT_AVAILABLE_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+static EMPIRICAL_NOT_IMPLEMENTED_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+
+/// Resolve (and memoize) one sdk error class; `None` when the sdk is not
+/// importable, so the caller falls back to `PyValueError`.
+fn sdk_error_type(
+    py: Python<'_>,
+    cell: &'static GILOnceCell<Py<PyType>>,
+    name: &str,
+) -> Option<Py<PyType>> {
+    cell.get_or_try_init(py, || -> PyResult<Py<PyType>> {
+        Ok(py
+            .import("aiconfigurator.sdk.errors")?
+            .getattr(name)?
+            .downcast_into::<PyType>()?
+            .unbind())
+    })
+    .ok()
+    .map(|ty| ty.clone_ref(py))
+}
+
 /// Convert a crate error into a Python exception at the `#[pymethods]` boundary.
 /// Inline (not a `From` impl in `error.rs`) so the error module stays pyo3-free.
+///
+/// Typed mapping so Python-side classifiers keep working across the FFI:
+/// * missing-perf-data errors (`AicError::PerfDatabase` / `Io` — the
+///   `is_missing_perf_data` set) raise the canonical
+///   `aiconfigurator.sdk.errors.PerfDataNotAvailableError`, so
+///   `perf_database.has_perf_data_not_available_cause` recognizes rust-path
+///   data misses;
+/// * `AicError::EmpiricalNotImplemented` raises
+///   `aiconfigurator.sdk.errors.EmpiricalNotImplementedError` (the typed
+///   HYBRID/EMPIRICAL coverage miss);
+/// * everything else stays `PyValueError`.
+///
+/// The sdk import is lazy and failure-tolerant: in pure-Rust test contexts
+/// (cargo test without the sdk on `sys.path`) the conversion degrades to
+/// `PyValueError` with the same message.
 fn aic_to_py(e: AicError) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    let sdk_class: Option<(&'static GILOnceCell<Py<PyType>>, &str)> = if e.is_missing_perf_data() {
+        Some((&PERF_DATA_NOT_AVAILABLE_ERROR, "PerfDataNotAvailableError"))
+    } else if matches!(e, AicError::EmpiricalNotImplemented(_)) {
+        Some((&EMPIRICAL_NOT_IMPLEMENTED_ERROR, "EmpiricalNotImplementedError"))
+    } else {
+        None
+    };
+    let message = e.to_string();
+    if let Some((cell, name)) = sdk_class {
+        // `with_gil` is re-entrant, so this is safe whether the caller holds
+        // the GIL (from_spec) or just re-acquired it (post-allow_threads).
+        let typed = Python::with_gil(|py| {
+            sdk_error_type(py, cell, name)
+                .map(|ty| PyErr::from_type(ty.into_bound(py), message.clone()))
+        });
+        if let Some(err) = typed {
+            return err;
+        }
+    }
+    PyValueError::new_err(message)
 }
 
 /// Map the `mode` string (Python's `_run_static_breakdown` convention) to the
@@ -192,11 +254,28 @@ impl AicEngine {
             gen_seq_imbalance_correction_scale,
         };
         let mode = parse_mode(mode)?;
+        // Per-call provenance scope (see `last_provenance`).
+        self.inner.reset_provenance();
         // Rust compute runs with the GIL released.
         let result: StaticResult = py
             .allow_threads(|| self.inner.run_static(&rt, mode, stride))
             .map_err(aic_to_py)?;
         Ok((result.context_ms, result.generation_ms, result.total_ms))
+    }
+
+    /// Empirical provenance tier fired during the most recent compute call on
+    /// this handle (max-rank across ops, Python `worst_provenance` semantics),
+    /// or `None` when the call was answered purely from silicon tables.
+    ///
+    /// Every compute method (`run_static`, `predict_*_latency`,
+    /// `mixed_step_latency`, `decode_step_latency`) resets the accumulator on
+    /// entry, so this is per-call state — the Python bridge reads it right
+    /// after each call and forwards non-silicon tiers into
+    /// `util_empirical.note_provenance` (support-matrix HYBRID labelling).
+    /// Not meaningful under concurrent calls on one handle (the sweep drives
+    /// each handle sequentially).
+    fn last_provenance(&self) -> Option<&'static str> {
+        self.inner.last_provenance()
     }
 
     /// Mocker H1: prefill-step latency in ms. Thin shim over `run_static` with
@@ -210,6 +289,7 @@ impl AicEngine {
         isl: u32,
         prefix: u32,
     ) -> PyResult<f64> {
+        self.inner.reset_provenance();
         py.allow_threads(|| self.inner.predict_prefill_latency(bs, isl, prefix))
             .map_err(aic_to_py)
     }
@@ -219,15 +299,20 @@ impl AicEngine {
     /// `s = isl + 1`). Returns the total ms (== generation_ms in this mode).
     #[pyo3(signature = (bs, isl, osl=2))]
     fn predict_decode_latency(&self, py: Python<'_>, bs: u32, isl: u32, osl: u32) -> PyResult<f64> {
+        self.inner.reset_provenance();
         py.allow_threads(|| self.inner.predict_decode_latency(bs, isl, osl))
             .map_err(aic_to_py)
     }
 
     /// One mixed (chunked-prefill + decode) engine-step latency in ms. Binds
     /// [`Engine::mixed_step_latency`]; the Python agg orchestration
-    /// (`base_backend._get_mix_step_latency`) calls this per mix step. Mirrors
-    /// the live FPM bridge `estimate_mixed_step_latency_with_rust`.
-    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0))]
+    /// (`base_backend._get_mix_step_latency`) calls this per mix step. The
+    /// imbalance-correction scales default to 1.0 and mirror the
+    /// `RuntimeConfig` fields Python threads into the three passes.
+    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0,
+                        seq_imbalance_correction_scale=1.0,
+                        gen_seq_imbalance_correction_scale=1.0))]
+    #[allow(clippy::too_many_arguments)]
     fn mixed_step_latency(
         &self,
         py: Python<'_>,
@@ -236,10 +321,20 @@ impl AicEngine {
         isl: u32,
         osl: u32,
         prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
     ) -> PyResult<f64> {
+        self.inner.reset_provenance();
         py.allow_threads(|| {
-            self.inner
-                .mixed_step_latency(ctx_tokens, gen_tokens, isl, osl, prefix)
+            self.inner.mixed_step_latency(
+                ctx_tokens,
+                gen_tokens,
+                isl,
+                osl,
+                prefix,
+                seq_imbalance_correction_scale,
+                gen_seq_imbalance_correction_scale,
+            )
         })
         .map_err(aic_to_py)
     }
@@ -247,17 +342,21 @@ impl AicEngine {
     /// One generation-only engine-step latency in ms. Binds
     /// [`Engine::decode_step_latency`]; the Python agg orchestration
     /// (`base_backend._get_genonly_step_latency`) calls this per genonly step.
-    /// Mirrors the live FPM bridge `estimate_decode_step_latency_with_rust`.
-    #[pyo3(signature = (gen_tokens, isl, osl))]
+    #[pyo3(signature = (gen_tokens, isl, osl, gen_seq_imbalance_correction_scale=1.0))]
     fn decode_step_latency(
         &self,
         py: Python<'_>,
         gen_tokens: u32,
         isl: u32,
         osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
     ) -> PyResult<f64> {
-        py.allow_threads(|| self.inner.decode_step_latency(gen_tokens, isl, osl))
-            .map_err(aic_to_py)
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner
+                .decode_step_latency(gen_tokens, isl, osl, gen_seq_imbalance_correction_scale)
+        })
+        .map_err(aic_to_py)
     }
 }
 
@@ -678,6 +777,14 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src/aiconfigurator/systems")
     }
 
+    /// `cargo test` runs without an embedding host, so the interpreter must
+    /// be initialized before any `Python::with_gil` (pyo3's
+    /// `auto-initialize` feature is intentionally off for the extension
+    /// build). Idempotent.
+    fn py_init() {
+        pyo3::prepare_freethreaded_python();
+    }
+
     const TEST_MODEL: &str = "MiniMaxAI/MiniMax-M2.5";
 
     /// Hand-built context op list against the b200_sxm/vllm/0.19.0 perf tables.
@@ -692,6 +799,7 @@ mod tests {
                 name: "rmsnorm".into(),
                 scale_factor: 1.0,
                 bytes_per_token: 8192.0,
+                scale_num_tokens: 1,
                 seq_split: 1,
             }),
             Op::Gemm(GemmOp {
@@ -727,6 +835,7 @@ mod tests {
                 name: "rmsnorm".into(),
                 scale_factor: 1.0,
                 bytes_per_token: 8192.0,
+                scale_num_tokens: 1,
                 seq_split: 1,
             }),
             Op::GenerationAttention(GenerationAttentionOp {
@@ -766,6 +875,8 @@ mod tests {
             },
             speculative: None,
             perf_db_sources: Default::default(),
+            database_mode: Default::default(),
+            transfer_policy: None,
             extra: BTreeMap::new(),
         }
     }
@@ -783,6 +894,7 @@ mod tests {
     /// `Engine` built from the same bytes via `from_spec_bytes`.
     #[test]
     fn aic_engine_matches_raw_engine() {
+        py_init();
         let bytes = fixture_spec_bytes();
         let root = systems_root();
 
@@ -859,6 +971,7 @@ mod tests {
     /// unknown mode must raise (not silently default).
     #[test]
     fn mode_strings_map_correctly() {
+        py_init();
         let bytes = fixture_spec_bytes();
         let root = systems_root();
         let aic = AicEngine::from_spec(&bytes, root.to_str()).unwrap();
@@ -885,17 +998,19 @@ mod tests {
     /// the raw `Engine` numbers unchanged.
     #[test]
     fn per_step_bindings_match_raw_engine() {
+        py_init();
         let bytes = fixture_spec_bytes();
         let root = systems_root();
         let raw = Engine::from_spec_bytes(&bytes, &root).unwrap();
         let aic = AicEngine::from_spec(&bytes, root.to_str()).unwrap();
 
-        let raw_mixed = raw.mixed_step_latency(1024, 2, 1024, 8, 0).unwrap();
-        let mixed = Python::with_gil(|py| aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0)).unwrap();
+        let raw_mixed = raw.mixed_step_latency(1024, 2, 1024, 8, 0, 1.0, 1.0).unwrap();
+        let mixed =
+            Python::with_gil(|py| aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0, 1.0, 1.0)).unwrap();
         assert!((mixed - raw_mixed).abs() < 1e-12);
 
-        let raw_decode = raw.decode_step_latency(4, 1024, 8).unwrap();
-        let decode = Python::with_gil(|py| aic.decode_step_latency(py, 4, 1024, 8)).unwrap();
+        let raw_decode = raw.decode_step_latency(4, 1024, 8, 1.0).unwrap();
+        let decode = Python::with_gil(|py| aic.decode_step_latency(py, 4, 1024, 8, 1.0)).unwrap();
         assert!((decode - raw_decode).abs() < 1e-12);
     }
 
@@ -917,6 +1032,7 @@ mod tests {
     /// exercises end-to-end.
     #[test]
     fn inherent_predict_matches_raw_engine() {
+        py_init();
         let bytes = fixture_spec_bytes();
         let root = systems_root();
         let raw = Engine::from_spec_bytes(&bytes, &root).unwrap();
@@ -931,5 +1047,87 @@ mod tests {
         let aic_decode = aic.decode_latency_ms(4, 1024, 2).unwrap();
         assert!((aic_decode - raw_decode).abs() < 1e-12);
         assert!(aic_decode > 0.0 && aic_decode.is_finite());
+    }
+
+    /// `aic_to_py` must raise the canonical sdk exception classes for the
+    /// typed variants when the sdk is importable, and degrade to `ValueError`
+    /// when it is not (pure-Rust test contexts). Everything else stays
+    /// `ValueError` unconditionally.
+    #[test]
+    fn aic_to_py_maps_typed_errors_to_sdk_classes() {
+        py_init();
+        Python::with_gil(|py| {
+            let sdk_available = py.import("aiconfigurator.sdk.errors").is_ok();
+
+            let check = |err: AicError, sdk_name: &str| {
+                let pyerr = aic_to_py(err);
+                let type_name = pyerr.get_type(py).name().unwrap().to_string();
+                if sdk_available {
+                    assert_eq!(type_name, sdk_name);
+                } else {
+                    assert_eq!(type_name, "ValueError");
+                }
+            };
+            check(
+                AicError::PerfDatabase("missing table".to_string()),
+                "PerfDataNotAvailableError",
+            );
+            check(
+                AicError::Io {
+                    path: PathBuf::from("/nope"),
+                    source: std::io::Error::new(std::io::ErrorKind::NotFound, "nope"),
+                },
+                "PerfDataNotAvailableError",
+            );
+            check(
+                AicError::EmpiricalNotImplemented("no basis".to_string()),
+                "EmpiricalNotImplementedError",
+            );
+
+            // Non-typed variants stay ValueError regardless of the sdk.
+            let other = aic_to_py(AicError::InvalidEngineConfig("bad".to_string()));
+            assert_eq!(other.get_type(py).name().unwrap().to_string(), "ValueError");
+
+            // The message survives the mapping.
+            let msg_err = aic_to_py(AicError::PerfDatabase("missing table xyz".to_string()));
+            assert!(msg_err.value(py).to_string().contains("missing table xyz"));
+        });
+    }
+
+    /// Compute bindings reset the provenance accumulator on entry, and
+    /// `last_provenance` reads it back (None == pure silicon). The silicon
+    /// fixture fires no empirical path, so a pre-seeded tier must be cleared
+    /// by the next compute call.
+    #[test]
+    fn compute_bindings_reset_provenance_per_call() {
+        use crate::operators::util_empirical::ProvenanceTier;
+
+        py_init();
+        let bytes = fixture_spec_bytes();
+        let root = systems_root();
+        let aic = AicEngine::from_spec(&bytes, root.to_str()).unwrap();
+
+        assert_eq!(aic.last_provenance(), None);
+        aic.inner.database().note_provenance(ProvenanceTier::XOp);
+        assert_eq!(aic.last_provenance(), Some("xop"));
+
+        // Positional order: (bs, beam, isl, osl, prefix, seq_corr, gen_seq_corr, mode, stride).
+        Python::with_gil(|py| {
+            aic.run_static(py, 1, 1, 1024, 8, 0, 1.0, 1.0, "static", 32)
+                .unwrap();
+        });
+        assert_eq!(aic.last_provenance(), None);
+
+        aic.inner.database().note_provenance(ProvenanceTier::Empirical);
+        Python::with_gil(|py| {
+            aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0, 1.0, 1.0).unwrap();
+        });
+        assert_eq!(aic.last_provenance(), None);
+
+        aic.inner.database().note_provenance(ProvenanceTier::XShape);
+        Python::with_gil(|py| {
+            aic.decode_step_latency(py, 4, 1024, 8, 1.0).unwrap();
+        });
+        assert_eq!(aic.last_provenance(), None);
     }
 }

@@ -56,6 +56,9 @@ def test_static_latency_breakdown_routes_through_engine_handle(monkeypatch) -> N
             # (context_ms, generation_ms, total_ms)
             return (10.0, 6.0, 16.0)
 
+        def last_provenance(self):
+            return None  # pure-silicon answer
+
     monkeypatch.setattr(rust_engine_step, "_cached_engine_handle", lambda model, database: _FakeHandle())
 
     model = _dense_model()
@@ -94,13 +97,16 @@ def test_mixed_and_decode_helpers_pass_raw_step_args(monkeypatch) -> None:
     decode_calls = []
 
     class _FakeHandle:
-        def mixed_step_latency(self, *args):
-            mixed_calls.append(args)
+        def mixed_step_latency(self, *args, **kwargs):
+            mixed_calls.append((args, kwargs))
             return 8.5
 
-        def decode_step_latency(self, *args):
-            decode_calls.append(args)
+        def decode_step_latency(self, *args, **kwargs):
+            decode_calls.append((args, kwargs))
             return 9.5
+
+        def last_provenance(self):
+            return None  # pure-silicon answer
 
     monkeypatch.setattr(rust_engine_step, "_cached_engine_handle", lambda model, database: _FakeHandle())
 
@@ -126,8 +132,69 @@ def test_mixed_and_decode_helpers_pass_raw_step_args(monkeypatch) -> None:
 
     assert mixed_ms == 8.5
     assert decode_ms == 9.5
-    assert mixed_calls == [(384, 7, 256, 256, 128)]
-    assert decode_calls == [(7, 256, 256)]
+    # Raw step args pass through positionally; the runtime imbalance scales
+    # ride as kwargs (default 1.0 when the caller doesn't set them).
+    assert mixed_calls == [
+        (
+            (384, 7, 256, 256, 128),
+            {"seq_imbalance_correction_scale": 1.0, "gen_seq_imbalance_correction_scale": 1.0},
+        )
+    ]
+    assert decode_calls == [((7, 256, 256), {"gen_seq_imbalance_correction_scale": 1.0})]
+
+
+def test_rust_provenance_tier_forwarded_into_python_capture(monkeypatch) -> None:
+    """The engine-step helpers forward the compiled engine's per-call
+    empirical provenance tier into Python's ``capture_provenance`` (used by
+    the support matrix to label HYBRID_PASS rows). Silicon answers
+    (``last_provenance() is None`` or ``"silicon"``) record nothing."""
+    from aiconfigurator.sdk.operations import util_empirical
+
+    class _FakeHandle:
+        def __init__(self, tier):
+            self._tier = tier
+
+        def run_static(self, **kwargs):
+            return (10.0, 6.0, 16.0)
+
+        def mixed_step_latency(self, *args, **kwargs):
+            return 8.5
+
+        def decode_step_latency(self, *args, **kwargs):
+            return 9.5
+
+        def last_provenance(self):
+            return self._tier
+
+    model = _dense_model()
+    database = SimpleNamespace(system="test_sxm", backend="vllm", version="1.0.0")
+    runtime_config = RuntimeConfig(batch_size=1, beam_width=1, isl=8, osl=4)
+
+    def run_all_helpers(tier):
+        monkeypatch.setattr(rust_engine_step, "_cached_engine_handle", lambda model, database: _FakeHandle(tier))
+        rust_engine_step.estimate_static_latency_breakdown_with_rust(
+            model, database, runtime_config, mode="static", stride=2, latency_correction_scale=1.0
+        )
+        rust_engine_step.estimate_mixed_step_latency_with_rust(
+            model, database, ctx_tokens=8, gen_tokens=1, isl=8, osl=4, prefix=0
+        )
+        rust_engine_step.estimate_decode_step_latency_with_rust(model, database, gen_tokens=1, isl=8, osl=4)
+
+    # A rust-routed HYBRID rescue records its tier (all three step surfaces).
+    with util_empirical.capture_provenance() as tags:
+        run_all_helpers("xop")
+    assert tags == {"xop"}
+    assert util_empirical.worst_provenance(tags) == "xop"
+
+    # Pure-silicon runs record nothing -> worst_provenance stays "silicon".
+    for silicon_tier in (None, "silicon"):
+        with util_empirical.capture_provenance() as tags:
+            run_all_helpers(silicon_tier)
+        assert tags == set()
+        assert util_empirical.worst_provenance(tags) == "silicon"
+
+    # Outside a capture, forwarding is a no-op (note_provenance no-ops).
+    run_all_helpers("xshape")
 
 
 def test_engine_config_json_preserves_moe_specific_quant_mode() -> None:
@@ -367,11 +434,115 @@ def test_sparse_cp_ops_emit_cp_fields_in_spec():
     assert spec["window_size"] == 2048
 
 
+def test_engine_config_json_identity_disambiguates_collapsed_quant_modes():
+    """Two models differing only in a wire-collapsed dtype (sq vs int8_wo both
+    -> "int8") or an identity-omitted ModelConfig field (moe_backend) must get
+    DISTINCT handle-cache keys — sharing one cached handle silently returns
+    the other model's latencies."""
+    from aiconfigurator.sdk import common
+
+    def _model(gemm_mode, moe_backend=None):
+        cfg = SimpleNamespace(
+            tp_size=8,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=1,
+            cp_size=None,
+            gemm_quant_mode=gemm_mode,
+            moe_quant_mode=None,
+            fmha_quant_mode=None,
+            kvcache_quant_mode=None,
+            comm_quant_mode=None,
+            moe_backend=moe_backend,
+            attention_backend=None,
+            enable_wideep=False,
+            enable_eplb=False,
+            wideep_num_slots=None,
+            cp_style=None,
+            workload_distribution=None,
+            overwrite_num_layers=None,
+            sms=None,
+        )
+        return SimpleNamespace(model_path="test/model", architecture=None, config=cfg, _nextn=None)
+
+    database = SimpleNamespace(system="test_sxm", backend="vllm", version="1.0.0")
+    key_sq = rust_engine_step._engine_config_json(_model(common.GEMMQuantMode.sq), database)
+    key_int8 = rust_engine_step._engine_config_json(_model(common.GEMMQuantMode.int8_wo), database)
+    assert key_sq != key_int8, "sq and int8_wo must not alias one cached handle"
+
+    key_deepep = rust_engine_step._engine_config_json(
+        _model(common.GEMMQuantMode.sq, moe_backend="deepep_moe"), database
+    )
+    assert key_sq != key_deepep, "moe_backend must participate in the cache identity"
+
+
+def test_op_conversion_error_falls_back_to_python_step(monkeypatch):
+    """An OpConversionError (op graph not expressible in Rust) must be
+    surfaced as RustEngineUnsupportedError, cached per engine identity, and
+    caught by the base_backend gates (fallback to the Python step) — NOT
+    crash the sweep."""
+    import pytest
+
+    from aiconfigurator.sdk.engine import OpConversionError
+    from aiconfigurator.sdk.rust_engine_step import RustEngineUnsupportedError
+
+    calls = {"n": 0}
+
+    def _raise_conversion(*args, **kwargs):
+        calls["n"] += 1
+        raise OpConversionError("unsupported op: ContextMSAModule")
+
+    monkeypatch.setattr("aiconfigurator.sdk.engine.build_engine_spec_json", _raise_conversion)
+    rust_engine_step._engine_handle_cache_clear()
+
+    model = _dense_model()
+    database = SimpleNamespace(system="test_sxm", backend="vllm", version="1.0.0")
+
+    with pytest.raises(RustEngineUnsupportedError):
+        rust_engine_step._cached_engine_handle(model, database)
+    # Second call re-raises from the cache without recompiling.
+    with pytest.raises(RustEngineUnsupportedError):
+        rust_engine_step._cached_engine_handle(model, database)
+    assert calls["n"] == 1, "compile failure must be memoized per engine identity"
+    rust_engine_step._engine_handle_cache_clear()
+
+
+def test_wideep_mla_spec_emits_per_rank_heads_not_tp():
+    """The WideEP MLA table axis is per-rank heads; the Python query converts
+    ``num_heads = 128 // tp_size`` (mla.py). The spec emitter must apply the
+    same conversion — emitting raw tp_size makes Rust query the wrong table
+    slice (tp=8 would read the heads=8 extrapolation instead of heads=16)."""
+    from aiconfigurator.sdk import common
+    from aiconfigurator.sdk.engine import _wideep_context_mla, _wideep_generation_mla
+
+    class _WideEpOp:
+        _name = "context_attention"
+        _scale_factor = 1.0
+        _tp_size = 8
+        _cp_size = 1
+        _kvcache_quant_mode = common.KVCacheQuantMode.fp8
+        _fmha_quant_mode = common.FMHAQuantMode.fp8_block
+        _attn_backend = "flashinfer"
+
+    ctx_spec = _wideep_context_mla(_WideEpOp())
+    gen_spec = _wideep_generation_mla(_WideEpOp())
+    assert ctx_spec["num_heads"] == 16  # 128 // 8, NOT tp_size=8
+    assert gen_spec["num_heads"] == 16
+
+
 def test_non_silicon_database_mode_falls_back_to_python_step():
     """The compiled engine is SILICON-only (no util_empirical layer); HYBRID /
     EMPIRICAL databases must stay on the Python step so both backends give
     the SAME answer (parity by delegation) instead of the rust side failing
     configs Python fills in empirically."""
+
+
+def test_sol_database_modes_fall_back_to_python_step():
+    """The compiled engine implements SILICON plus the util-space empirical
+    layer (HYBRID / EMPIRICAL) — those modes route to Rust and are guarded by
+    the hybrid parity suite. The SOL/SOL_FULL diagnostic modes stay on the
+    Python step so both backends give the SAME answer."""
     from enum import Enum
 
     from aiconfigurator.sdk.config import RuntimeConfig
@@ -380,6 +551,9 @@ def test_non_silicon_database_mode_falls_back_to_python_step():
     class _Mode(Enum):
         SILICON = "SILICON"
         HYBRID = "HYBRID"
+        EMPIRICAL = "EMPIRICAL"
+        SOL = "SOL"
+        SOL_FULL = "SOL_FULL"
 
     class _DB:
         def __init__(self, mode):
@@ -390,5 +564,8 @@ def test_non_silicon_database_mode_falls_back_to_python_step():
 
     rc = RuntimeConfig(engine_step_backend="rust")
     assert should_use_rust_engine_step(rc, _DB(_Mode.SILICON))
-    assert not should_use_rust_engine_step(rc, _DB(_Mode.HYBRID))
+    assert should_use_rust_engine_step(rc, _DB(_Mode.HYBRID))
+    assert should_use_rust_engine_step(rc, _DB(_Mode.EMPIRICAL))
+    assert not should_use_rust_engine_step(rc, _DB(_Mode.SOL))
+    assert not should_use_rust_engine_step(rc, _DB(_Mode.SOL_FULL))
     assert should_use_rust_engine_step(rc)  # no database context -> unchanged

@@ -11,9 +11,10 @@
 //! the raw latency by `scale_factor`.
 
 use serde::{Deserialize, Serialize};
-use crate::common::enums::GemmQuantMode;
+use crate::common::enums::{DatabaseMode, GemmQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
+use crate::operators::util_empirical::{self, UtilGrid};
 use crate::perf_database::gemm::tc_flops_for_compute;
 use crate::perf_database::PerfDatabase;
 
@@ -111,14 +112,72 @@ impl MhcModuleOp {
         sol_math.max(sol_mem)
     }
 
+    /// Database-mode dispatch mirroring Python `_query_mhc_table`
+    /// (`operations/dsv4.py`): SILICON queries the table; HYBRID converts a
+    /// typed silicon miss into the util-space empirical estimate; EMPIRICAL
+    /// always estimates. The SOL diagnostic modes never reach the compiled
+    /// engine (the routing gate delegates them to the Python step).
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
         let sol = |op_name: &str, t: f64| self.sol_ms(db, op_name, t.round() as i64);
-        let latency =
+        let silicon = || {
             db.mhc
-                .query_module(&self.op, num_tokens, self.hc_mult, self.hidden_size, &sol)?;
-        Ok(PerformanceResult::new(latency, Source::Silicon)
+                .query_module(&self.op, num_tokens, self.hc_mult, self.hidden_size, &sol)
+        };
+        let (latency, source) = match db.database_mode {
+            DatabaseMode::Empirical => (self.mhc_empirical(db, num_tokens)?, Source::Empirical),
+            DatabaseMode::Hybrid => match silicon() {
+                Ok(latency) => (latency, Source::Silicon),
+                Err(err) if err.is_missing_perf_data() => {
+                    (self.mhc_empirical(db, num_tokens)?, Source::Empirical)
+                }
+                Err(err) => return Err(err),
+            },
+            _ => (silicon()?, Source::Silicon),
+        };
+        Ok(PerformanceResult::new(latency, source)
             .clamp_non_negative()
             .scaled(self.scale_factor))
+    }
+
+    /// Mirrors Python `_query_mhc_table::get_empirical`: for `op == "both"`
+    /// the empirical estimate is the SUM of the two halves' own estimates
+    /// (`_emp_for_op("pre") + _emp_for_op("post")`), each half calibrated on
+    /// its own token curve with its own SOL.
+    fn mhc_empirical(&self, db: &PerfDatabase, num_tokens: u32) -> Result<f64, AicError> {
+        if self.op == "both" {
+            return Ok(self.emp_for_op(db, "pre", num_tokens)?
+                + self.emp_for_op(db, "post", num_tokens)?);
+        }
+        self.emp_for_op(db, &self.op, num_tokens)
+    }
+
+    /// `SOL(query)/util` over one op half's own `(num_tokens,)` curve.
+    /// Mirrors Python `_query_mhc_table::get_empirical::_emp_for_op` (grid
+    /// depth 1, `sol_fn = lambda c: get_sol(c[0], op_name)[0]`).
+    fn emp_for_op(&self, db: &PerfDatabase, op_name: &str, num_tokens: u32) -> Result<f64, AicError> {
+        let sol = |c: &[f64]| self.sol_ms(db, op_name, c[0].round() as i64);
+        // Python keys the grid on (op_name, hc_mult, hidden_size, quant) —
+        // NOT sinkhorn_iters, which is mirrored deliberately.
+        let key = format!(
+            "dsv4_mhc:{op_name}:{}:{}:{}",
+            self.hc_mult,
+            self.hidden_size,
+            self.quant_mode.name()
+        );
+        let grid = db.util_grids.get_or_try_build(&key, || {
+            match db.mhc.module_points(op_name, self.hc_mult, self.hidden_size) {
+                Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol)))),
+                // Typed coverage miss -> no grid (estimate() raises the
+                // empirical miss); schema/load errors propagate.
+                Err(err) if err.is_missing_perf_data() => Ok(None),
+                Err(err) => Err(err),
+            }
+        })?;
+        let query = [f64::from(num_tokens)];
+        let (latency, _) = util_empirical::estimate(sol(&query), &query, grid.as_deref(), 1.0)?;
+        // Own-shape util fired (Python mhc.py, estimate()'s default tier).
+        db.note_provenance(util_empirical::ProvenanceTier::Empirical);
+        Ok(latency)
     }
 }
 
@@ -200,6 +259,85 @@ mod tests {
                 "nt={nt}: rust {got} vs python {expected}"
             );
         }
+    }
+
+    /// Oracle values generated from the Python reference on the same data:
+    ///
+    /// ```text
+    /// uv run --no-sync python3 -c "
+    /// from aiconfigurator.sdk import perf_database, common
+    /// from aiconfigurator.sdk.operations.dsv4 import DeepSeekV4MHCModule as MHC
+    /// db = perf_database.get_database('b200_sxm', 'sglang', '0.5.10')
+    /// for nt, op in [(3000,'pre'), (3000,'post'), (3000,'both'), (8,'pre'), (8,'both'), (1048576,'pre')]:
+    ///     r = MHC._query_mhc_table(db, num_tokens=nt, hidden_size=7168, hc_mult=4,
+    ///                              sinkhorn_iters=20, op=op, quant_mode=common.GEMMQuantMode.bfloat16,
+    ///                              database_mode=common.DatabaseMode.EMPIRICAL)
+    ///     print(nt, op, repr(float(r)))"
+    /// ```
+    ///
+    /// Covers: off-grid interior IDW (nt=3000), the exact collected hit
+    /// reconstructing the measured value (nt=8), the `both` = emp(pre) +
+    /// emp(post) composition at both points, and the beyond-range clamp
+    /// (nt=1048576: boundary util frozen, the mHC roofline ratio carries the
+    /// growth). Regenerate if the shipped mHC table or the util-empirical
+    /// math changes.
+    #[test]
+    fn mhc_empirical_matches_python_oracles() {
+        let mut db = b200_sglang_db();
+        db.database_mode = crate::common::enums::DatabaseMode::Empirical;
+        let cases: &[(&str, u32, f64)] = &[
+            ("pre", 3000, 0.28677656188924283),
+            ("post", 3000, 0.12520766094146765),
+            // "both" empirical = emp("pre") + emp("post"), each half on its
+            // own curve with its own SOL (Python `_emp_for_op` composition).
+            ("both", 3000, 0.41198422283071046),
+            ("pre", 8, 0.0251),
+            ("both", 8, 0.0357),
+            ("pre", 1_048_576, 71.55398179178216),
+        ];
+        for &(op, nt, expected) in cases {
+            let result = mhc_op(op).query(&db, nt).expect("empirical query");
+            assert!(
+                ((result.latency_ms - expected) / expected).abs() < 1e-9,
+                "op={op}, nt={nt}: rust {} vs python {expected}",
+                result.latency_ms
+            );
+            assert_eq!(result.source, Source::Empirical);
+        }
+    }
+
+    /// HYBRID with silicon data present must stay on the silicon path
+    /// (in-range RAW lerp, Source::Silicon) — same oracle as the silicon test.
+    #[test]
+    fn mhc_hybrid_with_data_stays_silicon() {
+        let mut db = b200_sglang_db();
+        db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
+        let result = mhc_op("pre").query(&db, 3).expect("hybrid query");
+        let expected = 0.025050000000000003;
+        assert!(
+            ((result.latency_ms - expected) / expected).abs() < 1e-9,
+            "rust {} vs python {expected}",
+            result.latency_ms
+        );
+        assert_eq!(result.source, Source::Silicon);
+    }
+
+    /// HYBRID on a slice with NO collected curve (hidden_size=1234 is not in
+    /// the mHC table) must surface the terminal EmpiricalNotImplemented miss,
+    /// never a fabricated value (mirrors Python: the silicon miss falls to
+    /// `get_empirical`, whose own typed miss raises
+    /// `EmpiricalNotImplementedError`).
+    #[test]
+    fn mhc_hybrid_missing_slice_raises_empirical_not_implemented() {
+        let mut db = b200_sglang_db();
+        db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
+        let mut op = mhc_op("pre");
+        op.hidden_size = 1234;
+        let result = op.query(&db, 8);
+        assert!(
+            matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
+            "got {result:?}"
+        );
     }
 
     /// `sinkhorn_iters` / `quant_mode` are new opspec fields; old specs lack
