@@ -261,13 +261,11 @@ def resolve_model_capability(
             f"supported modes: {sorted(generation_modes)}"
         )
 
-    # vLLM folds MoE tensor parallelism into ordinary tensor parallelism.
-    # AIC's real-silicon policy admits pure TP for registered GQA/MHA MoE
-    # families and its DSA/MSA model contracts accept the same tuple. Generic
-    # bootstrap templates and compressed MLA/DSV4 attention remain excluded.
-    allow_pure_tp = bool(
-        is_moe and model_family is not None and attention_kind in {"moe_mha", "moe_gqa", "moe_dsa", "moe_msa"}
-    )
+    # vLLM folds MoE tensor parallelism into ordinary tensor parallelism, so
+    # pure TP is a backend capability rather than an attention-family
+    # capability. Enumerate it for every MoE checkpoint and let exact topology,
+    # quantization-alignment, and residency checks reject invalid widths.
+    allow_pure_tp = is_moe and backend == "vllm"
     return ModelCapabilityProfile(
         architecture=architecture,
         model_family=model_family,

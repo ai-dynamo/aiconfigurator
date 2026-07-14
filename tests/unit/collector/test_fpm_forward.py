@@ -9,6 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from collector.fpm_forward.capacity import (
+    FPMCapacityModel,
+    FPMExecutionProfile,
+    _cudagraph_capture_sizes,
+    _engine_envelope,
+    _required_point_kv_bytes,
+    build_execution_profile,
+)
 from collector.fpm_forward.config import FPMCollectionOptions
 from collector.fpm_forward.database import aggregate_cell, write_formal_database
 from collector.fpm_forward.planner import (
@@ -112,6 +120,84 @@ def test_decode_sampling_uses_only_aic_population_members():
     assert set(design.ordered_points) == set(points)
 
 
+def test_execution_profile_replaces_infeasible_point_and_computes_fraction():
+    high = FPMPoint("prefill", 1, 4000, 0)
+    low = FPMPoint("prefill", 1, 64, 0)
+    replacement = FPMPoint("prefill", 2, 64, 0)
+    design = SimpleNamespace(
+        phase="prefill",
+        selected=(high, low),
+        ordered_points=(high, low, replacement),
+    )
+    capacity_model = FPMCapacityModel(
+        total_gpu_capacity_bytes=10_000,
+        fixed_non_activation_bytes=3_000,
+        activation_floor_bytes=100,
+        activation_bytes_per_token=1.0,
+        tokens_from_kv_bytes=lambda byte_count: int(byte_count // 2),
+        kv_bytes_for_sequence=lambda tokens: tokens * 2,
+        source="test",
+    )
+
+    profile = build_execution_profile(
+        model_path="unused",
+        system="unused",
+        backend="vllm",
+        capability=SimpleNamespace(),
+        topology=ParallelTopology(tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1, cp=1),
+        kv_cache_dtype="fp8",
+        design=design,
+        block_size=64,
+        capacity_model=capacity_model,
+    )
+
+    assert profile.selected == (low, replacement)
+    assert profile.max_num_tokens == 128
+    assert profile.max_batch_size == 2
+    assert profile.required_kv_bytes == 256
+    assert profile.gpu_memory_utilization == 0.3398
+    assert profile.cudagraph_capture_sizes == (64, 128)
+    assert next(decision for decision in profile.decisions if decision.point == high).admitted is False
+
+
+def test_cudagraph_sizes_cover_every_piecewise_shape_at_or_below_8192():
+    points = (
+        FPMPoint("prefill", 2, 64, 0),
+        FPMPoint("prefill", 1, 8192, 0),
+        FPMPoint("prefill", 3, 4096, 0),
+        FPMPoint("prefill", 1, 9000, 0),
+        FPMPoint("decode", 512, 1, 64),
+    )
+
+    assert _cudagraph_capture_sizes(points) == (128, 512, 808, 4096, 8192)
+
+
+def test_cudagraph_shape_excludes_past_kv_while_capacity_includes_it():
+    no_prefix = FPMPoint("prefill", 2, 64, 0)
+    with_prefix = FPMPoint("prefill", 2, 64, 1024)
+    decode = FPMPoint("decode", 2, 1, 2048)
+    points = (no_prefix, with_prefix, decode)
+
+    # The graph key is the current forward's scheduled query tokens.  Prefix
+    # length is dynamic attention metadata, so both prefills share B*S=128.
+    assert _cudagraph_capture_sizes(points) == (2, 128)
+    assert _engine_envelope(list(points)) == (2, 128, 2050)
+
+    capacity_model = FPMCapacityModel(
+        total_gpu_capacity_bytes=1_000_000,
+        fixed_non_activation_bytes=1,
+        activation_floor_bytes=1,
+        activation_bytes_per_token=1.0,
+        tokens_from_kv_bytes=lambda byte_count: int(byte_count),
+        kv_bytes_for_sequence=lambda tokens: tokens,
+        source="test",
+    )
+    estimate = capacity_model.envelope(max_batch_size=2, max_num_tokens=128, max_seq_len=2050)
+    assert _required_point_kv_bytes(no_prefix, block_size=64, estimate=estimate) == 128
+    assert _required_point_kv_bytes(with_prefix, block_size=64, estimate=estimate) == 2176
+    assert _required_point_kv_bytes(decode, block_size=64, estimate=estimate) == 4224
+
+
 def test_parallel_topologies_are_delegated_to_aic_enumerator():
     options = FPMCollectionOptions.from_args(_args())
     topologies = enumerate_fpm_topologies(backend="vllm", is_moe=True, options=options)
@@ -145,7 +231,7 @@ def test_pure_tp_requires_explicit_model_runtime_capability():
         enumerate_fpm_topologies(backend="vllm", is_moe=True, options=options)
 
 
-def test_plan_identity_includes_generator_execution_config():
+def test_plan_identity_includes_deployment_config():
     options = FPMCollectionOptions.from_args(
         _args(
             fpm_parallel_axes=["dp", "moe_ep"],
@@ -160,8 +246,14 @@ def test_plan_identity_includes_generator_execution_config():
         "selected_ops": {"dsa_context_module", "dsa_generation_module"},
         "options": options,
     }
-    first = build_collection_plan(**kwargs, generator_overrides={"params": {"agg": {"max_seq_len": 66}}})
-    second = build_collection_plan(**kwargs, generator_overrides={"params": {"agg": {"max_seq_len": 65537}}})
+    first = build_collection_plan(
+        **kwargs,
+        generator_overrides={"K8sConfig": {"k8s_image": "example/vllm-runtime:first"}},
+    )
+    second = build_collection_plan(
+        **kwargs,
+        generator_overrides={"K8sConfig": {"k8s_image": "example/vllm-runtime:second"}},
+    )
 
     assert first.generator_config_sha256 != second.generator_config_sha256
     assert first.sha256 != second.sha256
@@ -185,6 +277,10 @@ def test_glm_auto_matrix_includes_capacity_admitted_pure_tp():
     assert plan.capability.allow_pure_tp is True
     assert {cell.parallel_strategy for cell in plan.cells} == {"pure_tp", "tep", "dep"}
     assert ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1) in plan.topologies
+    for cell in plan.cells:
+        assert all(size <= 8192 for size in cell.execution_profile.cudagraph_capture_sizes)
+        if cell.workload_kind == "prefill":
+            assert 8192 in cell.execution_profile.cudagraph_capture_sizes
 
 
 def test_minimax_m3_uses_dsa_transfer_population_and_registered_pure_tp():
@@ -246,13 +342,13 @@ def test_dsv4_fp8_uses_exact_compressed_attention_population(model_path):
     assert plan.capability.template_id == "aic_exact:dsv4_module"
     assert plan.capability.attention_kind == "moe_dsv4"
     assert plan.capability.attention_source == "dsv4_module"
-    assert plan.capability.allow_pure_tp is False
+    assert plan.capability.allow_pure_tp is True
     assert plan.dtype_profile.fmha_quant_mode == "bfloat16"
     assert plan.dtype_profile.kv_cache_dtypes == ("fp8",)
     assert set(plan.population.source_ops) == _DSV4_ATTENTION_OPS
     assert FPMPoint("prefill", 1, 64, 65472) in plan.population.prefill_points
     assert FPMPoint("decode", 1, 1, 65536) in plan.population.decode_points
-    assert {cell.parallel_strategy for cell in plan.cells} == {"tep", "dep"}
+    assert {cell.parallel_strategy for cell in plan.cells} == {"pure_tp", "tep", "dep"}
 
 
 @pytest.mark.parametrize(
@@ -312,7 +408,42 @@ def test_unknown_model_uses_auditable_bootstrap_template(tmp_path):
     assert plan.capability.template_id == "generic:moe_dsa"
     assert plan.capability.attention_source == "dsa_module"
     assert plan.population.source_name == "dsa_module"
-    assert {cell.parallel_strategy for cell in plan.cells} == {"dep", "tep"}
+    assert plan.capability.allow_pure_tp is True
+    assert {cell.parallel_strategy for cell in plan.cells} == {"dep", "pure_tp", "tep"}
+
+
+def test_minimax_m27_rejects_only_block_misaligned_pure_tp_widths():
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="MiniMaxAI/MiniMax-M2.7",
+        model_architecture="MiniMaxM2ForCausalLM",
+        system="b200_sxm",
+        selected_ops={"attention_context", "attention_generation"},
+        has_model_cases=False,
+        options=FPMCollectionOptions.from_args(
+            _args(
+                fpm_max_gpus=16,
+                fpm_gpu_counts=[2, 4, 8, 16],
+            )
+        ),
+    )
+
+    admitted_pure_tp = {
+        topology.tp
+        for topology in plan.topologies
+        if topology.tp == topology.moe_tp and topology.dp == topology.moe_ep == 1
+    }
+    rejected_pure_tp = {
+        decision.topology.tp: decision.reason
+        for decision in plan.capacity_decisions
+        if not decision.admitted
+        and decision.topology.tp == decision.topology.moe_tp
+        and decision.topology.dp == decision.topology.moe_ep == 1
+    }
+
+    assert admitted_pure_tp == {2, 4}
+    assert set(rejected_pure_tp) == {8, 16}
+    assert all("Invalid quantized MoE configuration" in reason for reason in rejected_pure_tp.values())
 
 
 def test_unregistered_phi4_mini_uses_dense_gqa_bootstrap_template(tmp_path):
@@ -415,6 +546,23 @@ def test_population_uses_model_selected_aic_attention_family(model_path, expecte
 
 def _synthetic_plan_and_cell(tmp_path):
     topology = ParallelTopology(tp=1, pp=1, dp=2, moe_tp=1, moe_ep=2, cp=1)
+    point = FPMPoint("prefill", 2, 64, 128)
+    execution_profile = FPMExecutionProfile(
+        ordered_points=(point,),
+        selected_point_count=1,
+        max_batch_size=2,
+        max_num_tokens=128,
+        max_seq_len=193,
+        gpu_memory_utilization=0.8,
+        cudagraph_capture_sizes=(128,),
+        memory_source="test",
+        memory_fraction_ceiling=0.9,
+        kv_tolerance_fraction=0.05,
+        total_gpu_capacity_bytes=1,
+        non_kv_bytes=1,
+        required_kv_bytes=1,
+        decisions=(),
+    )
     cell = FPMCell(
         cell_id="fpm-test",
         workload_kind="prefill",
@@ -423,13 +571,13 @@ def _synthetic_plan_and_cell(tmp_path):
         kv_cache_dtype="fp8_e4m3",
         backend_policy=BackendPolicy("baseline", "baseline_auto", {}, {}),
         sampling_sha256="sampling",
+        execution_profile=execution_profile,
         parallel_strategy="dep",
         gemm_quant_mode="nvfp4",
         moe_quant_mode="nvfp4",
         fmha_quant_mode="fp8",
         comm_quant_mode="half",
     )
-    point = FPMPoint("prefill", 2, 64, 128)
     plan = SimpleNamespace(
         sha256="plan-sha",
         aic_revision="revision",

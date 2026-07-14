@@ -12,11 +12,57 @@ from types import SimpleNamespace
 import pytest
 
 from collector.fpm_forward.config import reject_fpm_arguments_without_fpm
-from collector.fpm_forward.entry import run_resolved
+from collector.fpm_forward.entry import _load_generator_overrides, run_resolved
 
 pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _generator_args(**overrides):
+    values = {
+        "generator_config": None,
+        "generator_set": None,
+        "generator_dynamo_version": None,
+        "generated_config_version": None,
+        "namespace": None,
+        "transport": None,
+        "image_pull_secret": None,
+        "model_cache": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_fpm_generator_config_accepts_only_deployment_fields(tmp_path):
+    config = tmp_path / "deployment.yaml"
+    config.write_text(
+        """K8sConfig:
+  k8s_image: example/vllm-runtime:test
+  k8s_pvc_name: model-cache
+  k8s_pvc_mount_path: /models
+  k8s_model_path_in_pvc: glm
+  fpm_shared_memory_size: 200Gi
+"""
+    )
+
+    resolved = _load_generator_overrides(
+        _generator_args(generator_config=str(config), generator_dynamo_version="1.2.0")
+    )
+
+    assert resolved["K8sConfig"]["k8s_image"] == "example/vllm-runtime:test"
+    assert resolved["generator_dynamo_version"] == "1.2.0"
+
+
+def test_fpm_generator_config_rejects_collector_owned_engine_fields(tmp_path):
+    config = tmp_path / "invalid.yaml"
+    config.write_text("params:\n  agg:\n    gpu_memory_utilization: 0.86\n")
+
+    with pytest.raises(ValueError, match="deployment-only"):
+        _load_generator_overrides(_generator_args(generator_config=str(config)))
+
+    with pytest.raises(ValueError, match="resolves generated_config_version"):
+        _load_generator_overrides(_generator_args(generated_config_version="0.20.1"))
 
 
 def test_normal_op_arguments_do_not_activate_fpm():

@@ -17,6 +17,25 @@ from .planner import FPMCollectionPlan, build_collection_plan
 ResolvedFPMInputs = tuple[FPMCollectionPlan, dict[str, Any], str | None]
 
 
+# FPM owns every engine/workload field.  The optional YAML is deliberately a
+# deployment-only document so a stale campaign scaffold cannot silently change
+# the frozen sampling envelope or its memory contract.
+_DEPLOYMENT_K8S_FIELDS = frozenset(
+    {
+        "k8s_namespace",
+        "k8s_image",
+        "k8s_image_pull_secret",
+        "transport",
+        "k8s_pvc_name",
+        "k8s_pvc_mount_path",
+        "k8s_model_path_in_pvc",
+        "k8s_hf_home",
+        "worker_extra_pod_spec",
+        "fpm_shared_memory_size",
+    }
+)
+
+
 def _deep_merge(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
     merged = copy.deepcopy(left)
     for key, value in right.items():
@@ -55,10 +74,27 @@ def _load_generator_overrides(args: argparse.Namespace) -> dict[str, Any]:
             raise TypeError("--generator-config must contain a YAML mapping")
         payload = loaded
     payload = _deep_merge(payload, _inline_overrides(args.generator_set))
+    unsupported_sections = set(payload) - {"K8sConfig"}
+    if unsupported_sections:
+        raise ValueError(
+            f"FPM --generator-config is deployment-only; unsupported top-level sections: {sorted(unsupported_sections)}"
+        )
+    raw_k8s = payload.get("K8sConfig", {})
+    if not isinstance(raw_k8s, dict):
+        raise TypeError("K8sConfig must be a mapping")
+    unsupported_k8s = set(raw_k8s) - _DEPLOYMENT_K8S_FIELDS
+    if unsupported_k8s:
+        raise ValueError(
+            "FPM --generator-config contains Collector-owned or unsupported K8sConfig fields: "
+            f"{sorted(unsupported_k8s)}"
+        )
     if args.generator_dynamo_version:
         payload["generator_dynamo_version"] = args.generator_dynamo_version
     if args.generated_config_version:
-        payload["generated_config_version"] = args.generated_config_version
+        raise ValueError(
+            "FPM resolves generated_config_version from the target Dynamo version; "
+            "do not set --generated-config-version"
+        )
     k8s: dict[str, Any] = {}
     if args.namespace:
         k8s["k8s_namespace"] = args.namespace
@@ -86,10 +122,6 @@ def resolve_inputs(args: argparse.Namespace, case_plan) -> ResolvedFPMInputs:
 
     options = FPMCollectionOptions.from_args(args)
     generator_overrides = copy.deepcopy(_load_generator_overrides(args))
-    collector_config = generator_overrides.pop("FpmCollector", {})
-    if not isinstance(collector_config, dict):
-        raise TypeError("FpmCollector generator-config section must be a mapping")
-    runtime_overlay_dir = collector_config.get("runtime_overlay_dir")
     plan = build_collection_plan(
         backend=args.backend,
         model_path=case_plan.model_path,
@@ -98,10 +130,10 @@ def resolve_inputs(args: argparse.Namespace, case_plan) -> ResolvedFPMInputs:
         options=options,
         model_architecture=case_plan.model_architecture,
         has_model_cases=bool(case_plan.model_cases_paths),
-        collector_config=collector_config,
+        collector_config={},
         generator_overrides=generator_overrides,
     )
-    return plan, generator_overrides, str(runtime_overlay_dir) if runtime_overlay_dir is not None else None
+    return plan, generator_overrides, None
 
 
 def resolve_run_inputs(args: argparse.Namespace, case_plan) -> ResolvedFPMInputs:

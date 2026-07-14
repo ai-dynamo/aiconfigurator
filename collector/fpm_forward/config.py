@@ -245,27 +245,39 @@ def add_fpm_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def add_fpm_generator_arguments(parser: argparse.ArgumentParser) -> None:
-    """Expose the existing Generator override surface without importing it.
+    """Expose deployment-only Generator inputs without importing its stack.
 
     Importing ``aiconfigurator.generator.api`` loads the rendering stack. That
     is appropriate during execution, but unnecessary for ``--plan-only`` and
     must not become a dependency of ordinary op-level collection.
     """
 
-    group = parser.add_argument_group("FPM Generator and Kubernetes overrides")
-    group.add_argument("--generator-config", default=None)
-    group.add_argument("--generator-set", action="append", default=None, metavar="KEY=VALUE")
+    group = parser.add_argument_group("FPM deployment inputs")
+    group.add_argument(
+        "--generator-config",
+        default=None,
+        help="Deployment-only YAML containing supported K8sConfig fields.",
+    )
+    group.add_argument(
+        "--generator-set",
+        action="append",
+        default=None,
+        metavar="KEY=VALUE",
+        help="Inline deployment-only K8sConfig override.",
+    )
     group.add_argument(
         "--config-template-version",
         "--generated-config-version",
         dest="generated_config_version",
         default=None,
+        help="Rejected for FPM; the Collector resolves this from --dynamo-version.",
     )
     group.add_argument(
         "--dynamo-version",
         "--generator-dynamo-version",
         dest="generator_dynamo_version",
         default=None,
+        help="Target Dynamo release used to resolve the Generator template.",
     )
     group.add_argument("--namespace", default=None)
     group.add_argument("--model-cache", default=None, metavar="NAME[:MOUNT[:SUBPATH]]")
