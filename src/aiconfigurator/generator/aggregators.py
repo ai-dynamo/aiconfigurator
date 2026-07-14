@@ -70,7 +70,9 @@ def collect_generator_params(
     enable_router = coerce_bool(dyn_cfg.get("enable_router"))
     mode_tag = "agg" if mode_value == "agg" else "disagg"
     name_prefix = k8s.get("name_prefix") or "dynamo"
-    name = f"{name_prefix}-{mode_tag}{('-router' if enable_router else '')}"
+    explicit_name = k8s.get("name")
+    explicit_name = explicit_name.strip() if isinstance(explicit_name, str) else ""
+    name = explicit_name or f"{name_prefix}-{mode_tag}{('-router' if enable_router else '')}"
     use_engine_cm = k8s.get("k8s_engine_mode", "inline") == "configmap"
     # PVC config: new unified names with backward compat fallbacks
     _pvc_name_raw = k8s.get("k8s_pvc_name") or k8s.get("k8s_model_cache")

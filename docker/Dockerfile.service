@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+FROM ghcr.io/astral-sh/uv:0.11.3 AS uv
+FROM registry.k8s.io/kubectl:v1.31.0 AS kubectl
+
+FROM python:3.12-slim-bookworm AS build
+
+COPY --from=uv /uv /usr/local/bin/uv
+WORKDIR /build
+COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY src/ ./src/
+
+# Do not publish an image with Git LFS pointer stubs instead of performance data.
+RUN set -eu; \
+    bad="$(grep -rlE '^version https://git-lfs' /build/src/aiconfigurator/systems 2>/dev/null || true)"; \
+    if [ -n "$bad" ]; then \
+      echo "ERROR: Git LFS objects are not materialized:" >&2; \
+      echo "$bad" >&2; \
+      exit 1; \
+    fi; \
+    uv build --wheel --out-dir /dist
+
+FROM python:3.12-slim-bookworm AS runtime
+
+ARG AIC_MODEL_S3_BUCKET=aiplat
+ARG AWS_ENDPOINT_URL=https://oss-s3.haiercash.com
+ARG AWS_DEFAULT_REGION=cn-east-1
+
+COPY --from=uv /uv /usr/local/bin/uv
+COPY --from=kubectl /bin/kubectl /usr/local/bin/kubectl
+COPY --from=build /dist /wheelhouse
+
+RUN set -eu; \
+    wheel="$(find /wheelhouse -name '*.whl' -print -quit)"; \
+    uv pip install --system "${wheel}[service]"; \
+    rm -rf /wheelhouse; \
+    useradd --create-home --uid 10001 aiconfigurator; \
+    mkdir -p /data/model-configs /tmp/aiconfigurator-service; \
+    chown -R aiconfigurator:aiconfigurator /data/model-configs /tmp/aiconfigurator-service
+
+ENV AIC_MODEL_SOURCE=s3 \
+    AIC_MODEL_S3_BUCKET=${AIC_MODEL_S3_BUCKET} \
+    AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL} \
+    AWS_ENDPOINT_URL_S3=${AWS_ENDPOINT_URL} \
+    AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION} \
+    AWS_REGION=${AWS_DEFAULT_REGION} \
+    AWS_EC2_METADATA_DISABLED=true \
+    PYTHONUNBUFFERED=1 \
+    MPLCONFIGDIR=/tmp/matplotlib
+
+USER aiconfigurator
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)" || exit 1
+
+ENTRYPOINT ["aiconfigurator-service"]
+CMD ["--host", "0.0.0.0", "--port", "8000", "--systems-paths", "default"]

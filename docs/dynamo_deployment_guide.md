@@ -483,5 +483,41 @@ Use `--generator-set K8sConfig.<field>=value` (or place the same keys inside `--
 * `K8sConfig.k8s_image=<image>` - runtime image. Default **nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0**.
 * `K8sConfig.k8s_image_pull_secret=<secret>` - optional pull secret name.
 
+### S3-compatible OSS models with ModelExpress (vLLM)
+
+The service UI can use an S3-compatible object store as its model catalog. Model
+directories must use this layout and contain `config.json`:
+
+```text
+s3://<bucket>/<namespace>/<model_name>/<model_version>/config.json
+```
+
+Configure model discovery in the AIConfigurator service process:
+
+```bash
+export AIC_MODEL_S3_BUCKET=aiplat
+export AWS_ENDPOINT_URL=https://oss-s3.haiercash.com
+export AWS_DEFAULT_REGION=cn-east-1
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+```
+
+When the UI enables OSS deployment, the vLLM manifest downloads model metadata
+to an `emptyDir` and loads safetensors through ModelExpress/ModelStreamer. The
+runtime image must include `modelexpress`, `runai-model-streamer`, `boto3`, and
+the custom S3 endpoint fix required by the target object store.
+
+Relevant generator settings are:
+
+* `K8sConfig.oss_enabled=true`
+* `K8sConfig.oss_endpoint_url=<S3-compatible endpoint>`
+* `K8sConfig.oss_region=<region>`
+* `K8sConfig.oss_secret_name=<Kubernetes Secret name>`
+* `K8sConfig.oss_model_express_url=<ModelExpress service URL>`
+* `K8sConfig.oss_streamer_concurrency=<parallel readers>`
+
+The referenced Secret must contain `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY`. Credentials are never embedded in generated manifests.
+
 
 ---

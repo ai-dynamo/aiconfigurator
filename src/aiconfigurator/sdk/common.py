@@ -387,15 +387,19 @@ def get_supported_architectures() -> set[str]:
     return {row["Architecture"] for row in matrix if row["Status"] == "PASS"}
 
 
-@cache
 def get_default_models() -> set[str]:
     """
-    Get the set of default HuggingFace model IDs.
+    Get models from the configured source.
 
     Returns:
-        set[str]: Set of unique HuggingFace model IDs from the support matrix
-            plus locally cached default model configs.
+        set[str]: Versioned S3 model URIs in OSS mode, otherwise the built-in
+            HuggingFace model IDs.
     """
+    from aiconfigurator.sdk.s3_models import get_configured_s3_model_uris, is_s3_model_source_configured
+
+    if is_s3_model_source_configured():
+        return set(get_configured_s3_model_uris())
+
     models = {row["HuggingFaceID"] for row in get_support_matrix()}
     models.update(DefaultHFModels)
     return models

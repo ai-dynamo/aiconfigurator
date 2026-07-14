@@ -9,11 +9,16 @@
 {%- set k8s_model_cache_pvc = (model_cache_input if k8s_use_model_cache else 'model-cache') -%}
 {%- set k8s_model_cache_mount = '/workspace/model_cache' -%}
 {%- set enable_router = DynConfig.enable_router | default(false) -%}
+{%- set oss_enabled = K8sConfig.oss_enabled | default(false) -%}
+{%- set served_model_name = ServiceConfig.served_model_name | default(ServiceConfig.model_path.split('/')[-2], true) -%}
+{%- set oss_metadata_dir = '/tmp/' ~ served_model_name ~ '-meta' -%}
 
 {%- macro render_worker(component_name, role, replicas, gpu, cli_args_list) -%}
     {%- set parsed_args = cli_args_list | default([]) -%}
 {{ "    " ~ component_name ~ ":" }}
+      {% if not oss_enabled %}
       envFromSecret: hf-token-secret
+      {% endif %}
       {% if K8sConfig.k8s_hf_home or K8sConfig.k8s_etcd_endpoints %}
       envs:
         {% if K8sConfig.k8s_etcd_endpoints %}
@@ -34,7 +39,21 @@
         limits:
           gpu: "{{ gpu }}"
       extraPodSpec:
-        {% if k8s_use_model_cache %}
+        {% if oss_enabled and K8sConfig.worker_node_selector %}
+        nodeSelector:
+          {% for key, value in K8sConfig.worker_node_selector.items() %}
+          {{ key }}: {{ value | tojson }}
+          {% endfor %}
+        {% endif %}
+        {% if oss_enabled %}
+        volumes:
+          - name: triton-cache
+            emptyDir: {}
+          - name: xdg-cache
+            emptyDir: {}
+          - name: model-meta
+            emptyDir: {}
+        {% elif k8s_use_model_cache %}
         volumes:
           - name: model-cache
             persistentVolumeClaim:
@@ -48,11 +67,123 @@
           image: {{ K8sConfig.k8s_image }}
           workingDir: {{ runtime_working_dir }}
           imagePullPolicy: IfNotPresent
-          {% if k8s_use_model_cache %}
+          {% if oss_enabled %}
+          volumeMounts:
+            - name: triton-cache
+              mountPath: /tmp/triton
+            - name: xdg-cache
+              mountPath: /tmp/.cache
+            - name: model-meta
+              mountPath: {{ oss_metadata_dir }}
+          env:
+            - name: TRITON_CACHE_DIR
+              value: /tmp/triton
+            - name: XDG_CACHE_HOME
+              value: /tmp/.cache
+            - name: HOME
+              value: /tmp
+            - name: VLLM_PLUGINS
+              value: modelexpress
+            - name: MODEL_NAME
+              value: {{ served_model_name | tojson }}
+            - name: MX_MODEL_URI
+              value: {{ ServiceConfig.model_path | tojson }}
+            - name: MODEL_EXPRESS_URL
+              value: {{ K8sConfig.oss_model_express_url | tojson }}
+            - name: DYN_REGISTER_MODEL_PATH
+              value: {{ oss_metadata_dir | tojson }}
+            - name: MODEL_EXPRESS_NO_SHARED_STORAGE
+              value: "1"
+            - name: RUNAI_STREAMER_CONCURRENCY
+              value: {{ K8sConfig.oss_streamer_concurrency | string | tojson }}
+            - name: RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING
+              value: "0"
+            - name: RUNAI_STREAMER_DIST
+              value: "0"
+            - name: RUNAI_STREAMER_MEMORY_LIMIT
+              value: "0"
+            - name: AWS_ENDPOINT_URL
+              value: {{ K8sConfig.oss_endpoint_url | tojson }}
+            - name: AWS_ENDPOINT_URL_S3
+              value: {{ K8sConfig.oss_endpoint_url | tojson }}
+            - name: AWS_S3_FORCE_PATH_STYLE
+              value: "true"
+            - name: AWS_DEFAULT_REGION
+              value: {{ K8sConfig.oss_region | tojson }}
+            - name: AWS_REGION
+              value: {{ K8sConfig.oss_region | tojson }}
+            - name: AWS_EC2_METADATA_DISABLED
+              value: "true"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ K8sConfig.oss_secret_name }}
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ K8sConfig.oss_secret_name }}
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: OTEL_EXPORT_ENABLED
+              value: "false"
+          {% elif k8s_use_model_cache %}
           volumeMounts:
             - name: model-cache
               mountPath: {{ k8s_model_cache_mount }}
           {% endif %}
+          {% if oss_enabled %}
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              META_DIR={{ oss_metadata_dir | tojson }}
+              mkdir -p "${META_DIR}"
+              python3 - <<'PY'
+              import os
+              from urllib.parse import urlparse
+              import boto3
+
+              uri = os.environ["MX_MODEL_URI"]
+              parsed = urlparse(uri)
+              bucket = parsed.netloc
+              prefix = parsed.path.lstrip("/").rstrip("/")
+              meta_dir = os.environ["DYN_REGISTER_MODEL_PATH"]
+              s3 = boto3.client(
+                  "s3",
+                  endpoint_url=os.environ["AWS_ENDPOINT_URL"],
+                  region_name=os.environ["AWS_REGION"],
+              )
+              for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json"):
+                  try:
+                      s3.download_file(bucket, f"{prefix}/{name}", os.path.join(meta_dir, name))
+                  except Exception:
+                      if name == "generation_config.json":
+                          continue
+                      raise
+              PY
+              worker_cmd=(
+                python3 -m dynamo.vllm
+                --model "${MX_MODEL_URI}"
+                --tokenizer "${META_DIR}"
+                --hf-config-path "${META_DIR}"
+                --served-model-name {{ served_model_name | tojson }}
+                --load-format modelexpress
+              )
+              {% for arg in parsed_args %}
+              worker_cmd+=( {{ arg | tojson }} )
+              {% endfor %}
+              {% if enable_router %}
+              worker_cmd+=( --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{{ ServiceConfig.dyn_vllm_kv_event_port | default(20081, true) }}","enable_kv_cache_events":true}' )
+              {% endif %}
+              {% if role == 'prefill' %}
+              worker_cmd+=( --is-prefill-worker --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' )
+              {% elif role == 'decode' %}
+              worker_cmd+=( --is-decode-worker --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' )
+              {% endif %}
+              exec "${worker_cmd[@]}"
+          {% else %}
           command:
             - python3
             - -m
@@ -76,6 +207,7 @@
             - --kv-transfer-config
             - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
             {% endif %}
+          {% endif %}
 {%- endmacro %}
 
 apiVersion: nvidia.com/v1alpha1
@@ -84,12 +216,26 @@ metadata:
   name: {{ name }}
   namespace: {{ K8sConfig.k8s_namespace }}
 spec:
+  envs: []
   services:
     Frontend:
+      {% if not oss_enabled %}
       envFromSecret: hf-token-secret
+      {% endif %}
       componentType: frontend
       replicas: {{ frontend_replicas | default(1) }}
       extraPodSpec:
+        {% if oss_enabled and K8sConfig.frontend_node_selector %}
+        nodeSelector:
+          {% for key, value in K8sConfig.frontend_node_selector.items() %}
+          {{ key }}: {{ value | tojson }}
+          {% endfor %}
+        {% endif %}
+        {% if oss_enabled %}
+        volumes:
+          - name: frontend-meta
+            emptyDir: {}
+        {% endif %}
         {% if K8sConfig.k8s_image_pull_secret %}
         imagePullSecrets:
           - name: {{ K8sConfig.k8s_image_pull_secret }}
@@ -97,6 +243,80 @@ spec:
         mainContainer:
           image: {{ K8sConfig.k8s_image }}
           imagePullPolicy: IfNotPresent
+          {% if oss_enabled %}
+          workingDir: /workspace/components/backends/vllm
+          volumeMounts:
+            - name: frontend-meta
+              mountPath: {{ oss_metadata_dir }}
+          env:
+            - name: MODEL_NAME
+              value: {{ served_model_name | tojson }}
+            - name: MX_MODEL_URI
+              value: {{ ServiceConfig.model_path | tojson }}
+            - name: DYN_MODEL_NAME
+              value: {{ served_model_name | tojson }}
+            - name: DYN_MODEL_PATH
+              value: {{ oss_metadata_dir | tojson }}
+            - name: AWS_ENDPOINT_URL
+              value: {{ K8sConfig.oss_endpoint_url | tojson }}
+            - name: AWS_ENDPOINT_URL_S3
+              value: {{ K8sConfig.oss_endpoint_url | tojson }}
+            - name: AWS_S3_FORCE_PATH_STYLE
+              value: "true"
+            - name: AWS_DEFAULT_REGION
+              value: {{ K8sConfig.oss_region | tojson }}
+            - name: AWS_REGION
+              value: {{ K8sConfig.oss_region | tojson }}
+            - name: AWS_EC2_METADATA_DISABLED
+              value: "true"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ K8sConfig.oss_secret_name }}
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ K8sConfig.oss_secret_name }}
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: OTEL_EXPORT_ENABLED
+              value: "false"
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              META_DIR={{ oss_metadata_dir | tojson }}
+              mkdir -p "${META_DIR}"
+              python3 - <<'PY'
+              import os
+              from urllib.parse import urlparse
+              import boto3
+
+              uri = os.environ["MX_MODEL_URI"]
+              parsed = urlparse(uri)
+              bucket = parsed.netloc
+              prefix = parsed.path.lstrip("/").rstrip("/")
+              meta_dir = os.environ["DYN_MODEL_PATH"]
+              s3 = boto3.client(
+                  "s3",
+                  endpoint_url=os.environ["AWS_ENDPOINT_URL"],
+                  region_name=os.environ["AWS_REGION"],
+              )
+              for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json"):
+                  try:
+                      s3.download_file(bucket, f"{prefix}/{name}", os.path.join(meta_dir, name))
+                  except Exception:
+                      if name == "generation_config.json":
+                          continue
+                      raise
+              PY
+              exec python3 -m dynamo.frontend \
+                --model-name {{ served_model_name | tojson }} \
+                --model-path "${META_DIR}" \
+                --router-mode round-robin
+          {% endif %}
       {% if enable_router or K8sConfig.k8s_hf_home or K8sConfig.k8s_etcd_endpoints %}
       envs:
         {% if K8sConfig.k8s_etcd_endpoints %}

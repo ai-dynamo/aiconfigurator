@@ -9,6 +9,40 @@ from aiconfigurator.generator.aggregators import collect_generator_params
 
 
 @pytest.mark.unit
+class TestDeploymentName:
+    """Test DGD deployment name selection."""
+
+    @pytest.mark.parametrize("mode", ["agg", "disagg"])
+    def test_ui_deployment_name_takes_priority(self, mode):
+        result = collect_generator_params(
+            service={"model_path": "test/model", "served_model_name": "test-model"},
+            k8s={
+                "name": "ui-deployment-name",
+                "name_prefix": "ignored-prefix",
+                "k8s_namespace": "dynamo",
+            },
+            dyn_config={"mode": mode},
+            backend="vllm",
+        )
+
+        assert result["K8sConfig"]["name"] == "ui-deployment-name"
+
+    @pytest.mark.parametrize(
+        "mode,expected_name",
+        [("agg", "custom-agg"), ("disagg", "custom-disagg")],
+    )
+    def test_generated_name_remains_the_fallback(self, mode, expected_name):
+        result = collect_generator_params(
+            service={"model_path": "test/model", "served_model_name": "test-model"},
+            k8s={"name_prefix": "custom", "k8s_namespace": "dynamo"},
+            dyn_config={"mode": mode},
+            backend="vllm",
+        )
+
+        assert result["K8sConfig"]["name"] == expected_name
+
+
+@pytest.mark.unit
 class TestK8sHfHomeDefaulting:
     """Test k8s_hf_home auto-defaulting behavior."""
 

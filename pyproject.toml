@@ -40,6 +40,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 
 dependencies = [
+    "boto3>=1.35.0",
     "jinja2>=3.1.0",
     "packaging>=20.0",
     "matplotlib>=3.9.4",
@@ -59,6 +60,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "uv",
+    "httpx>=0.28.0",
     "ruff==0.14.1",
     "pre-commit==4.3.0",
     "pytest>=8.3.5",
@@ -90,6 +92,7 @@ build-backend = "setuptools.build_meta"
 
 [project.scripts]
 aiconfigurator = "aiconfigurator.main:main"
+aiconfigurator-service = "aiconfigurator.service.main:main"
 
 [tool.setuptools.package-data]
 "aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
@@ -103,6 +106,7 @@ aiconfigurator = "aiconfigurator.main:main"
     "model_configs/*.json",
 ]
 "aiconfigurator.webapp.components.profiling" = ["styles.css", "js/*.js"]
+"aiconfigurator.service" = ["static/*.html"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

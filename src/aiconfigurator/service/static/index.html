@@ -531,16 +531,12 @@
         <h2>基础配置</h2>
         <div class="grid">
           <div class="field-full">
-            <label for="model-config-path">模型</label>
+            <label for="model-config-path">OSS 模型（命名空间 / 模型 / 版本）</label>
             <select id="model-config-path">
-              <option value="Qwen/Qwen3-8B" selected>Qwen/Qwen3-8B</option>
+              <option value="" selected>正在从 OSS 加载模型...</option>
             </select>
           </div>
-          <div class="field-full">
-            <label for="model-path">模型路径</label>
-            <input id="model-path" value="/data/models/qwen3-8b">
-            <input id="systems-paths" type="hidden" value="/data/aiconfigurator-data/aic-systems/systems">
-          </div>
+          <input id="systems-paths" type="hidden" value="/data/aiconfigurator-data/aic-systems/systems">
           <div class="field">
             <label for="system">GPU 类型</label>
             <select id="system">
@@ -556,8 +552,6 @@
             <label for="backend">推理框架</label>
             <select id="backend">
               <option value="vllm" selected>vllm</option>
-              <option value="sglang">sglang</option>
-              <option value="trtllm">trtllm</option>
             </select>
           </div>
           <div class="field">
@@ -616,7 +610,7 @@
             </div>
             <div class="field-wide">
               <label for="image">Dynamo 镜像</label>
-              <input id="image" value="parties-hub.haiercash.com/nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1">
+              <input id="image" value="parties-hub.haiercash.com/nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-mx-pip-0.4.1-s3fix6">
             </div>
             <div class="field">
               <label for="served-model-name">API 调用模型名称</label>
@@ -628,15 +622,20 @@
             </div>
             <div class="field">
               <label for="frontend-node">Frontend 节点</label>
-              <input id="frontend-node" value="kubeflow-master">
+              <input id="frontend-node" value="kubeflow-master2">
             </div>
             <div class="field">
               <label for="worker-node">Worker 节点</label>
-              <input id="worker-node" value="kubeflow-master">
+              <input id="worker-node" value="kubeflow-master2">
             </div>
             <input id="worker-working-dir" type="hidden" value="/workspace/examples/backends/vllm">
             <input id="frontend-image-pull-policy" type="hidden" value="IfNotPresent">
             <input id="worker-image-pull-policy" type="hidden" value="IfNotPresent">
+            <input id="oss-endpoint" type="hidden" value="https://oss-s3.haiercash.com">
+            <input id="oss-region" type="hidden" value="cn-east-1">
+            <input id="oss-secret-name" type="hidden" value="oss-s3-secret">
+            <input id="model-express-url" type="hidden" value="http://model-express-modelexpress.model-express.svc.cluster.local:8001">
+            <input id="oss-streamer-concurrency" type="hidden" value="4">
             <textarea id="worker-extra-envs" hidden>[
   {"name":"TRITON_CACHE_DIR","value":"/tmp/triton"},
   {"name":"XDG_CACHE_HOME","value":"/tmp/.cache"},
@@ -651,7 +650,7 @@
         </div>
 
         <div class="note">
-          “模型”决定性能估算使用的配置；“模型路径”会写入最终部署 YAML。
+          模型列表来自 OSS；所选版本同时用于性能估算和最终部署，不需要单独填写模型路径。
           系统数据目录固定为 <code>/data/aiconfigurator-data/aic-systems/systems</code>。
           当两种模式均可用时，系统会同时生成 agg 与 disagg 的 Top 1 方案。
         </div>
@@ -756,9 +755,9 @@
   <script>
     const ids = (name) => document.getElementById(name);
     const fallbackOptions = {
-      models: ["Qwen/Qwen3-8B"],
+      models: [],
       systems: ["h200_sxm", "h100_sxm", "b200_sxm", "gb200", "l20", "h20"],
-      backends: ["vllm", "sglang", "trtllm"],
+      backends: ["vllm"],
       supported_databases: {}
     };
     const state = {
@@ -830,8 +829,11 @@
       if (!cleaned) {
         return "";
       }
-      const lastSegment = cleaned.split(/[\\/]/).pop() || cleaned;
-      return lastSegment.replace(/[^A-Za-z0-9._-]+/g, "-").toLowerCase();
+      const segments = cleaned.split(/[\\/]/).filter(Boolean);
+      const modelSegment = cleaned.startsWith("s3://") && segments.length >= 2
+        ? segments.at(-2)
+        : segments.at(-1) || cleaned;
+      return modelSegment.replace(/[^A-Za-z0-9._-]+/g, "-").toLowerCase();
     }
 
     function deriveDeploymentName(servedModelName) {
@@ -873,6 +875,10 @@
     }
 
     function validateEstimateInputs() {
+      if (!ids("model-config-path").value.trim()) {
+        ids("model-config-path").focus();
+        throw new Error("OSS 中没有可用模型，请检查 Bucket、凭据和 config.json。");
+      }
       const requiredFields = [
         ["total-gpus", "GPU 总数"],
         ["isl", "输入序列长度（ISL）"],
@@ -895,7 +901,7 @@
     }
 
     function buildGeneratorOverrides() {
-      const modelPath = ids("model-path").value.trim();
+      const modelPath = ids("model-config-path").value.trim();
       const servedModelName = (ids("served-model-name").value.trim() || deriveServedModelName(modelPath)).toLowerCase();
       const deploymentName = (ids("deployment-name").value.trim() || deriveDeploymentName(servedModelName)).toLowerCase();
       return {
@@ -912,39 +918,23 @@
           frontend_image_pull_policy: ids("frontend-image-pull-policy").value.trim(),
           worker_image_pull_policy: ids("worker-image-pull-policy").value.trim(),
           worker_working_dir: ids("worker-working-dir").value.trim(),
+          oss_enabled: true,
+          oss_endpoint_url: ids("oss-endpoint").value.trim(),
+          oss_region: ids("oss-region").value.trim(),
+          oss_secret_name: ids("oss-secret-name").value.trim(),
+          oss_model_express_url: ids("model-express-url").value.trim(),
+          oss_streamer_concurrency: Number(ids("oss-streamer-concurrency").value || 4),
           frontend_node_selector: {
             "kubernetes.io/hostname": ids("frontend-node").value.trim()
           },
           worker_node_selector: {
             "kubernetes.io/hostname": ids("worker-node").value.trim()
           },
-          frontend_extra_volumes: [
-            {
-              name: "model-dir",
-              hostPath: { path: modelPath, type: "Directory" }
-            }
-          ],
           worker_extra_volumes: [
-            {
-              name: "model-dir",
-              hostPath: { path: modelPath, type: "Directory" }
-            },
             { name: "triton-cache", emptyDir: {} },
             { name: "xdg-cache", emptyDir: {} }
           ],
-          frontend_extra_volume_mounts: [
-            {
-              name: "model-dir",
-              mountPath: modelPath,
-              readOnly: true
-            }
-          ],
           worker_extra_volume_mounts: [
-            {
-              name: "model-dir",
-              mountPath: modelPath,
-              readOnly: true
-            },
             {
               name: "triton-cache",
               mountPath: "/tmp/triton"
@@ -1000,7 +990,7 @@
       }
     }
 
-    function fillModelSelect(models = [], localModelConfigs = [], preferred = "") {
+    function fillModelSelect(models = [], preferred = "") {
       const select = ids("model-config-path");
       select.innerHTML = "";
 
@@ -1022,17 +1012,20 @@
         select.appendChild(group);
       };
 
-      const builtInItems = (models || []).map((model) => ({ label: model, value: model }));
-      const localItems = (localModelConfigs || []).map((item) => ({
-        label: `Local: ${item.label}`,
-        value: item.value
-      }));
-
-      addGroup("Built-in Models", builtInItems);
-      addGroup("/data/model-configs", localItems);
+      const builtInItems = (models || []).map((model) => ({
+        label: model.replace(/^s3:\/\/[^/]+\//, ""),
+        value: model
+      })).sort((left, right) => {
+        const leftParts = left.label.split("/");
+        const rightParts = right.label.split("/");
+        const leftModel = leftParts.slice(0, -1).join("/");
+        const rightModel = rightParts.slice(0, -1).join("/");
+        return leftModel.localeCompare(rightModel) || rightParts.at(-1).localeCompare(leftParts.at(-1));
+      });
+      addGroup("OSS Models", builtInItems);
 
       if (!select.value) {
-        select.value = preferred || "Qwen/Qwen3-8B";
+        select.value = preferred;
       }
       if (!select.value && select.options.length > 0) {
         select.selectedIndex = 0;
@@ -1041,7 +1034,7 @@
 
     function loadFallbackOptions() {
       state.options = fallbackOptions;
-      fillModelSelect(fallbackOptions.models || ["Qwen/Qwen3-8B"], [], ids("model-config-path").value || "Qwen/Qwen3-8B");
+      fillModelSelect(fallbackOptions.models || [], ids("model-config-path").value);
       fillSelect(ids("system"), fallbackOptions.systems, ids("system").value || "h200_sxm");
       fillSelect(ids("backend"), fallbackOptions.backends, ids("backend").value || "vllm");
       refreshVersions();
@@ -1064,10 +1057,12 @@
     async function loadOptions() {
       const payload = await fetchJson("/api/v1/options");
       state.options = payload;
-      fillModelSelect(payload.models || fallbackOptions.models || [], payload.local_model_configs || [], ids("model-config-path").value || "Qwen/Qwen3-8B");
+      fillModelSelect(payload.models || [], ids("model-config-path").value);
+      ids("served-model-name").value = deriveServedModelName(ids("model-config-path").value);
+      syncDeploymentName(true);
       const systems = Array.from(new Set([...(payload.systems || []), "l20", "h20"])).sort();
       fillSelect(ids("system"), systems.length ? systems : fallbackOptions.systems, ids("system").value || "h200_sxm");
-      fillSelect(ids("backend"), (payload.backends || []).length ? payload.backends : fallbackOptions.backends, ids("backend").value || "vllm");
+      fillSelect(ids("backend"), ["vllm"], "vllm");
       refreshVersions();
     }
 
@@ -1752,11 +1747,9 @@
       ids("deployment-name").addEventListener("input", () => {
         ids("deployment-name").dataset.auto = "false";
       });
-      ids("model-path").addEventListener("input", () => {
-        if (!ids("served-model-name").value.trim()) {
-          ids("served-model-name").value = deriveServedModelName(ids("model-path").value);
-          syncDeploymentName(true);
-        }
+      ids("model-config-path").addEventListener("change", () => {
+        ids("served-model-name").value = deriveServedModelName(ids("model-config-path").value);
+        syncDeploymentName(true);
       });
       ids("served-model-name").addEventListener("input", () => {
         const input = ids("served-model-name");
@@ -1824,7 +1817,7 @@
     async function init() {
       wireEvents();
       loadFallbackOptions();
-      ids("served-model-name").value = deriveServedModelName(ids("model-path").value);
+      ids("served-model-name").value = deriveServedModelName(ids("model-config-path").value);
       syncDeploymentName(true);
       try {
         await loadOptions();

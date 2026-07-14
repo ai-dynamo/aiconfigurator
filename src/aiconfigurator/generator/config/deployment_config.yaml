@@ -20,7 +20,10 @@ inputs:
     default: ""
   - key: ServiceConfig.served_model_name
     required: true
-    default: "ServiceConfig.model_name or ServiceConfig.served_model_path or ServiceConfig.model_path"
+    default: >-
+      ServiceConfig.model_name or
+      (ServiceConfig.model_path.split('/')[-2] if ServiceConfig.model_path.startswith('s3://') else
+      (ServiceConfig.served_model_path or ServiceConfig.model_path))
   - key: ServiceConfig.model_name
     required: false
     default: "ServiceConfig.served_model_name"
@@ -60,6 +63,9 @@ inputs:
     default: false
 
   # K8sConfig
+  - key: K8sConfig.name
+    required: false
+    default: ""
   - key: K8sConfig.name_prefix
     required: false
     default: "dynamo"
@@ -71,7 +77,10 @@ inputs:
     default: &default_trtllm_image '"nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:" ~ generator_dynamo_version'
     backend_defaults:
       trtllm: *default_trtllm_image
-      vllm: '"nvcr.io/nvidia/ai-dynamo/vllm-runtime:" ~ generator_dynamo_version'
+      vllm: >-
+        "parties-hub.haiercash.com/nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-mx-pip-0.4.1-s3fix6"
+        if ServiceConfig.model_path.startswith("s3://") else
+        ("nvcr.io/nvidia/ai-dynamo/vllm-runtime:" ~ generator_dynamo_version)
       sglang: '"nvcr.io/nvidia/ai-dynamo/sglang-runtime:" ~ generator_dynamo_version'
   - key: K8sConfig.k8s_image_pull_secret
     required: false
@@ -99,6 +108,37 @@ inputs:
   - key: K8sConfig.k8s_hf_home
     required: false
     default: ""
+  # S3-compatible OSS + ModelExpress settings (vLLM only)
+  - key: K8sConfig.oss_enabled
+    required: false
+    default: "ServiceConfig.model_path.startswith('s3://') if ServiceConfig.model_path else false"
+    backends: ["vllm"]
+  - key: K8sConfig.oss_endpoint_url
+    required: false
+    default: "https://oss-s3.haiercash.com"
+    backends: ["vllm"]
+  - key: K8sConfig.oss_region
+    required: false
+    default: "cn-east-1"
+    backends: ["vllm"]
+  - key: K8sConfig.oss_secret_name
+    required: false
+    default: "oss-s3-secret"
+    backends: ["vllm"]
+  - key: K8sConfig.oss_model_express_url
+    required: false
+    default: "http://model-express-modelexpress.model-express.svc.cluster.local:8001"
+    backends: ["vllm"]
+  - key: K8sConfig.oss_streamer_concurrency
+    required: false
+    default: 4
+    backends: ["vllm"]
+  - key: K8sConfig.frontend_node_selector
+    required: false
+    default: {}
+  - key: K8sConfig.worker_node_selector
+    required: false
+    default: {}
 
   # Worker config
   - key: WorkerConfig.prefill_workers

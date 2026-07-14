@@ -1099,6 +1099,13 @@ def _load_model_config_from_model_path(model_path: str) -> dict:
         ValueError: If the model config cannot be found
         HuggingFaceDownloadError: If fetching from HuggingFace fails
     """
+    if model_path.startswith("s3://"):
+        from aiconfigurator.sdk.s3_models import load_s3_json
+
+        config = load_s3_json(model_path, "config.json") or {}
+        hf_quant_config = load_s3_json(model_path, "hf_quant_config.json", required=False)
+        return _attach_inferred_quant_fields(_attach_hf_quant_config(config, hf_quant_config))
+
     # Check if it's a local path
     if os.path.isdir(model_path):
         config = _load_local_config(model_path)
