@@ -106,6 +106,8 @@ fn fixture_engine_config() -> EngineConfig {
         },
         speculative: None,
         perf_db_sources: Default::default(),
+        database_mode: Default::default(),
+        transfer_policy: None,
         extra: BTreeMap::new(),
     }
 }

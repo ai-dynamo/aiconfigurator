@@ -693,6 +693,13 @@ def _engine_config_dict(
         # in Python so the Rust core inherits the same rows. Empty/absent = Rust
         # uses its single-``data_root`` default (back-compat with old specs).
         "perf_db_sources": _compute_perf_db_sources(database),
+        # Perf-database query mode + enabled empirical transfer kinds, read off
+        # the live database view so the compiled engine answers HYBRID/EMPIRICAL
+        # queries the same way the Python step does. Presets are resolved here
+        # (single source of truth in ``common.TRANSFER_PRESETS``); the wire form
+        # is always explicit kind tokens, ``None`` = the default ALL policy.
+        "database_mode": _database_mode_name(database),
+        "transfer_policy": _transfer_policy_tokens(database),
         "extra": {},
     }
     # SpeculativeConfig (flattened, Option<>): emit nextn/nextn_accept_rates at
@@ -706,6 +713,33 @@ def _engine_config_dict(
 
 def _opt_int(value: Any) -> int | None:
     return None if value is None else int(value)
+
+
+def _database_mode_name(database: Any) -> str:
+    """The database view's query mode as the wire token (default SILICON)."""
+    if database is None:
+        return "SILICON"
+    mode = getattr(database, "get_default_database_mode", lambda: None)()
+    return getattr(mode, "name", str(mode)) if mode is not None else "SILICON"
+
+
+def _transfer_policy_tokens(database: Any) -> list[str] | None:
+    """The view's enabled transfer kinds as explicit wire tokens.
+
+    ``None`` = the default ALL-transfers policy (backward-compatible absent
+    key). A non-default policy serialises as a sorted list of kind values so
+    the Rust side never needs the preset vocabulary.
+    """
+    if database is None:
+        return None
+    policy = getattr(database, "transfer_policy", None)
+    if policy is None:
+        return None
+    from aiconfigurator.sdk.common import ALL_TRANSFERS
+
+    if frozenset(policy) == ALL_TRANSFERS:
+        return None
+    return sorted(kind.value for kind in policy)
 
 
 # --------------------------------------------------------------------------- #

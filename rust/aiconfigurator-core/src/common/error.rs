@@ -34,6 +34,12 @@ pub enum AicError {
     ModelConfig(String),
     #[error("perf database error: {0}")]
     PerfDatabase(String),
+    /// The HYBRID/EMPIRICAL path found no calibration data for the requested
+    /// slice — no own-shape, cross-shape, or sibling transfer reference.
+    /// Mirrors Python's `EmpiricalNotImplementedError`: a coverage gap, never
+    /// converted into a fabricated `SOL / constant` value.
+    #[error("empirical estimation not implemented: {0}")]
+    EmpiricalNotImplemented(String),
     #[error("I/O error at {path}: {source}")]
     Io {
         path: PathBuf,

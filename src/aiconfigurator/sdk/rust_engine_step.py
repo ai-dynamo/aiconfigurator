@@ -432,9 +432,26 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "kv_block_size": None,
         "nextn": int(nextn) if nextn is not None else None,
         "nextn_accept_rates": ([float(r) for r in nextn_accept_rates] if nextn_accept_rates is not None else None),
+        # Mode + transfer policy are part of the engine identity: a HYBRID or
+        # EMPIRICAL view of the same model/system must not reuse a SILICON
+        # handle (the compiled engine bakes the mode into its query dispatch).
+        "database_mode": _database_mode_key(database),
+        "transfer_policy": _transfer_policy_key(database),
         "extra": {},
     }
     return json.dumps(config, sort_keys=True, separators=(",", ":"))
+
+
+def _database_mode_key(database: Any) -> str:
+    mode = getattr(database, "get_default_database_mode", lambda: None)()
+    return getattr(mode, "name", str(mode)) if mode is not None else "SILICON"
+
+
+def _transfer_policy_key(database: Any) -> list[str] | None:
+    policy = getattr(database, "transfer_policy", None)
+    if policy is None:
+        return None
+    return sorted(getattr(kind, "value", str(kind)) for kind in policy)
 
 
 def _backend_name(value: Any) -> str:
@@ -480,7 +497,13 @@ def _moe_quant_to_dtype(value: Any) -> str | None:
     value_name = getattr(getattr(value, "value", None), "name", None)
     if value_name:
         name = value_name.lower()
-    if name in {"w4afp8", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}:
+    if name in {
+        "w4afp8",
+        "w4a16_mxfp4",
+        "w4a8_mxfp4_mxfp8",
+        "w4a8_mxfp4_mxfp8_trtllm",
+        "w4a16_mxfp4_cutlass",
+    }:
         return name
     return _quant_to_dtype(value)
 

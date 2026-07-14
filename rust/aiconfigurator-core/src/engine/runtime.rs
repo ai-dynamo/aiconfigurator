@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+use crate::common::enums::TransferPolicy;
 use crate::common::error::AicError;
 use crate::engine::spec::EngineSpec;
 use crate::operators::Op;
@@ -164,13 +165,16 @@ impl Engine {
         // The spec's own `systems_path` wins when present; otherwise fall back
         // to the `systems_root` argument.
         let systems_root = spec.engine.systems_path.as_deref().unwrap_or(systems_root);
+        let transfer_policy = TransferPolicy::from_wire(spec.engine.transfer_policy.as_deref())
+            .map_err(AicError::InvalidEngineConfig)?;
         let db = PerfDatabase::load_with_sources(
             systems_root,
             &spec.engine.system_name,
             spec.engine.backend.as_str(),
             version,
             &spec.engine.perf_db_sources,
-        )?;
+        )?
+        .with_mode(spec.engine.database_mode, transfer_policy);
         Engine::build(spec, Arc::new(db))
     }
 
@@ -606,6 +610,8 @@ mod tests {
                 nextn_accept_rates: None,
             }),
             perf_db_sources: Default::default(),
+            database_mode: Default::default(),
+            transfer_policy: None,
             extra: BTreeMap::new(),
         }
     }

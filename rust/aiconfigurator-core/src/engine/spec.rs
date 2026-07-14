@@ -618,6 +618,8 @@ mod tests {
                 nextn_accept_rates: Some(vec![0.85, 0.3, 0.0, 0.0, 0.0]),
             }),
             perf_db_sources: Default::default(),
+            database_mode: Default::default(),
+            transfer_policy: None,
             extra: BTreeMap::new(),
         }
     }

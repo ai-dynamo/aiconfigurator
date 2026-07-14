@@ -66,6 +66,78 @@ impl Default for DatabaseMode {
     }
 }
 
+/// A way the empirical path may borrow utilisation when an op's own slice
+/// has no data. Mirrors Python `common.TransferKind`; each kind is
+/// independently enabled by the transfer policy carried on the engine
+/// config. Ordered by decreasing confidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransferKind {
+    /// Cross-shape within the SAME quant (nearest collected config).
+    XShape,
+    /// Cross-quant within the SAME (memory, compute) profile.
+    XQuant,
+    /// Cross-quant across profiles (rescaled by a util-level ratio).
+    XProfile,
+    /// Cross-op (borrow a related op's util, e.g. MSA<-DSA, via util_scale).
+    XOp,
+}
+
+/// Enabled transfer kinds. Python resolves presets
+/// (`off`/`conservative`/`balanced`/`aggressive`) before serialising, so the
+/// wire form is always an explicit list of kind tokens; `None` on the wire
+/// means the default ALL-transfers policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct TransferPolicy {
+    pub xshape: bool,
+    pub xquant: bool,
+    pub xprofile: bool,
+    pub xop: bool,
+}
+
+impl TransferPolicy {
+    pub const ALL: TransferPolicy = TransferPolicy {
+        xshape: true,
+        xquant: true,
+        xprofile: true,
+        xop: true,
+    };
+    pub const OFF: TransferPolicy = TransferPolicy {
+        xshape: false,
+        xquant: false,
+        xprofile: false,
+        xop: false,
+    };
+
+    pub fn contains(&self, kind: TransferKind) -> bool {
+        match kind {
+            TransferKind::XShape => self.xshape,
+            TransferKind::XQuant => self.xquant,
+            TransferKind::XProfile => self.xprofile,
+            TransferKind::XOp => self.xop,
+        }
+    }
+
+    /// Parse the wire form: `None` -> ALL (Python's default policy), a list
+    /// of kind tokens -> exactly those kinds (an empty list is `off`).
+    pub fn from_wire(kinds: Option<&[String]>) -> Result<TransferPolicy, String> {
+        let Some(kinds) = kinds else {
+            return Ok(TransferPolicy::ALL);
+        };
+        let mut policy = TransferPolicy::OFF;
+        for token in kinds {
+            match token.as_str() {
+                "xshape" => policy.xshape = true,
+                "xquant" => policy.xquant = true,
+                "xprofile" => policy.xprofile = true,
+                "xop" => policy.xop = true,
+                other => return Err(format!("unknown transfer kind {other:?}")),
+            }
+        }
+        Ok(policy)
+    }
+}
+
 /// Per-variant payload mirroring Python's
 /// `QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])`.
 ///
@@ -126,6 +198,8 @@ pub enum MoeQuantMode {
     Nvfp4,
     W4a16Mxfp4,
     W4a8Mxfp4Mxfp8,
+    W4a8Mxfp4Mxfp8Trtllm,
+    W4a16Mxfp4Cutlass,
 }
 
 impl MoeQuantMode {
@@ -140,6 +214,12 @@ impl MoeQuantMode {
             Self::W4a16Mxfp4 => QuantMapping { memory: 0.5, compute: 1.0, name: "w4a16_mxfp4" },
             Self::W4a8Mxfp4Mxfp8 => {
                 QuantMapping { memory: 0.5, compute: 2.0, name: "w4a8_mxfp4_mxfp8" }
+            }
+            Self::W4a8Mxfp4Mxfp8Trtllm => {
+                QuantMapping { memory: 0.5, compute: 2.0, name: "w4a8_mxfp4_mxfp8_trtllm" }
+            }
+            Self::W4a16Mxfp4Cutlass => {
+                QuantMapping { memory: 0.5, compute: 1.0, name: "w4a16_mxfp4_cutlass" }
             }
         }
     }

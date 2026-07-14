@@ -12,9 +12,11 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::common::enums::{DatabaseMode, TransferPolicy};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
+use crate::operators::util_empirical::UtilGridCache;
 
 /// Resolve the ordered source list for one op-file basename: the Python-supplied
 /// shared-layer sources when present, else a single primary `data_root/<basename>`
@@ -102,6 +104,19 @@ pub struct PerfDatabase {
     pub wideep_mla: WideEpMlaTable,
     pub wideep_moe: WideEpMoeTable,
     pub state_space: StateSpaceTable,
+    /// Query mode (Python's `database._default_database_mode`). SILICON
+    /// queries collected tables only; HYBRID falls back to the util-space
+    /// empirical layer on a typed silicon miss; EMPIRICAL always answers
+    /// `SOL/util`. Defaults to SILICON; `Engine::from_spec_bytes` overwrites
+    /// it from the spec.
+    pub database_mode: DatabaseMode,
+    /// Enabled empirical transfer kinds (Python's `database.transfer_policy`).
+    pub transfer_policy: TransferPolicy,
+    /// Memo of built util-calibration grids, keyed by op/slice identity
+    /// (see `operators::util_empirical`). Tables are immutable after load and
+    /// mode/policy are fixed per database instance, so the cache never needs
+    /// invalidation.
+    pub util_grids: UtilGridCache,
 }
 
 impl PerfDatabase {
@@ -193,7 +208,19 @@ impl PerfDatabase {
             ),
             system_spec: spec,
             data_root,
+            database_mode: DatabaseMode::default(),
+            transfer_policy: TransferPolicy::ALL,
+            util_grids: UtilGridCache::new(),
         })
+    }
+
+    /// Configure the query mode + transfer policy (both immutable per
+    /// database instance afterwards, mirroring Python's configured query
+    /// views). Called by `Engine::from_spec_bytes` with the spec's values.
+    pub fn with_mode(mut self, database_mode: DatabaseMode, transfer_policy: TransferPolicy) -> Self {
+        self.database_mode = database_mode;
+        self.transfer_policy = transfer_policy;
+        self
     }
 }
 

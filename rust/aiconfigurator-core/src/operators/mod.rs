@@ -28,6 +28,7 @@ pub mod moe;
 pub mod moe_dispatch;
 pub mod op;
 pub mod overlap;
+pub mod util_empirical;
 pub mod vision;
 pub mod wideep_mla;
 pub mod wideep_moe;
