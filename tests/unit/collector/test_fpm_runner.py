@@ -194,6 +194,37 @@ def test_typed_generator_render_keeps_frozen_fpm_limits(tmp_path):
     assert "--max-num-batched-tokens 16384" in script
     assert "--gpu-memory-utilization 0.86" in script
     assert "--compilation-config" in script
+    assert "--enable-expert-parallel" in script
+
+
+def test_pure_tp_render_uses_shared_vllm_tp_without_expert_parallel(tmp_path):
+    point = FPMPoint("prefill", batch_size=1, suffix_length=1, prefix_length=0)
+    plan = SimpleNamespace(
+        sha256="plan-sha",
+        model_path="nvidia/GLM-5.2-NVFP4",
+        system="b200_sxm",
+        backend="vllm",
+        options=SimpleNamespace(kv_block_size=64),
+        prefill_design=SimpleNamespace(selected=(point,)),
+        decode_design=SimpleNamespace(selected=()),
+    )
+    cell = FPMCell(
+        cell_id="pure-tp",
+        workload_kind="prefill",
+        topology=ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1),
+        weight_quantization="nvfp4",
+        kv_cache_dtype="fp8",
+        backend_policy=BackendPolicy("baseline", "baseline", {}, {}),
+        sampling_sha256="sampling",
+        parallel_strategy="pure_tp",
+    )
+
+    _render_cell(plan, cell, tmp_path, {}, selected_point_count=1)
+
+    script = (tmp_path / "run.sh").read_text()
+    assert "--tensor-parallel-size 4" in script
+    assert "--data-parallel-size 1" in script
+    assert "--enable-expert-parallel" not in script
 
 
 def test_runtime_overlay_installer_rejects_wrong_base_hash(tmp_path, monkeypatch):

@@ -13,7 +13,9 @@ FPM_WARMUP_REPEATS = 1
 FPM_MEASUREMENT_REPEATS = 1
 
 PARALLEL_AXES = ("tp", "pp", "dp", "moe_tp", "moe_ep", "cp")
+PARALLEL_PRESETS = ("auto", "tp", "tep", "dep", "pure_tp")
 BACKEND_AXES = (
+    "auto",
     "baseline",
     "prefill_attention",
     "decode_attention",
@@ -47,6 +49,7 @@ class FPMCollectionOptions:
 
     max_gpus: int
     gpu_counts: tuple[int, ...]
+    parallel_presets: tuple[str, ...]
     parallel_axes: tuple[str, ...]
     backend_axes: tuple[str, ...]
     weight_quantizations: tuple[str, ...]
@@ -84,28 +87,47 @@ class FPMCollectionOptions:
         if over_limit:
             raise ValueError(f"--fpm-gpu-counts values exceed --fpm-max-gpus={max_gpus}: {over_limit}")
 
+        explicit_presets = getattr(args, "fpm_parallel_presets", None)
+        requested_axes = tuple(dict.fromkeys(getattr(args, "fpm_parallel_axes", None) or ()))
+        requested_presets = tuple(dict.fromkeys(explicit_presets or (() if requested_axes else ("auto",))))
+        if explicit_presets is not None and requested_axes:
+            raise ValueError("--fpm-parallel-presets and legacy --fpm-parallel-axes cannot be combined")
+        if "auto" in requested_presets and len(requested_presets) > 1:
+            raise ValueError("parallel preset 'auto' cannot be combined with explicit presets")
+
+        pp_sizes = _optional_size_list(getattr(args, "fpm_pp_sizes", None))
+        cp_sizes = _optional_size_list(getattr(args, "fpm_cp_sizes", None))
+        if pp_sizes not in {None, (1,)} or cp_sizes not in {None, (1,)}:
+            raise ValueError("FPM typical-matrix V1 fixes PP=1 and CP=1")
+        if {"pp", "cp"}.intersection(requested_axes):
+            raise ValueError("FPM typical-matrix V1 does not vary PP or CP")
+
         return cls(
             max_gpus=max_gpus,
             gpu_counts=tuple(counts),
-            parallel_axes=tuple(dict.fromkeys(args.fpm_parallel_axes or ("tp", "pp", "dp", "moe_tp", "moe_ep"))),
-            backend_axes=tuple(dict.fromkeys(args.fpm_backend_axes or ("baseline",))),
-            weight_quantizations=tuple(dict.fromkeys(value.lower() for value in (args.fpm_weight_quantizations or ()))),
-            kv_cache_dtypes=tuple(dict.fromkeys(args.fpm_kv_cache_dtypes or ("auto",))),
-            sampling_budget=args.fpm_sampling_budget or "one_quarter",
-            tp_sizes=_optional_size_list(args.fpm_tp_sizes),
-            pp_sizes=_optional_size_list(args.fpm_pp_sizes),
-            dp_sizes=_optional_size_list(args.fpm_dp_sizes),
-            moe_tp_sizes=_optional_size_list(args.fpm_moe_tp_sizes),
-            moe_ep_sizes=_optional_size_list(args.fpm_moe_ep_sizes),
-            cp_sizes=_optional_size_list(args.fpm_cp_sizes),
-            kv_block_size=args.fpm_kv_block_size or 64,
-            smoke_points=args.fpm_smoke_points or 1,
+            parallel_presets=requested_presets,
+            parallel_axes=requested_axes,
+            backend_axes=tuple(dict.fromkeys(getattr(args, "fpm_backend_axes", None) or ("auto",))),
+            weight_quantizations=tuple(
+                dict.fromkeys(value.lower() for value in (getattr(args, "fpm_weight_quantizations", None) or ()))
+            ),
+            kv_cache_dtypes=tuple(dict.fromkeys(getattr(args, "fpm_kv_cache_dtypes", None) or ("auto",))),
+            sampling_budget=getattr(args, "fpm_sampling_budget", None) or "one_quarter",
+            tp_sizes=_optional_size_list(getattr(args, "fpm_tp_sizes", None)),
+            pp_sizes=pp_sizes,
+            dp_sizes=_optional_size_list(getattr(args, "fpm_dp_sizes", None)),
+            moe_tp_sizes=_optional_size_list(getattr(args, "fpm_moe_tp_sizes", None)),
+            moe_ep_sizes=_optional_size_list(getattr(args, "fpm_moe_ep_sizes", None)),
+            cp_sizes=cp_sizes,
+            kv_block_size=getattr(args, "fpm_kv_block_size", None) or 64,
+            smoke_points=getattr(args, "fpm_smoke_points", None) or 1,
         )
 
     def to_dict(self) -> dict[str, object]:
         return {
             "max_gpus": self.max_gpus,
             "gpu_counts": list(self.gpu_counts),
+            "parallel_presets": list(self.parallel_presets),
             "parallel_axes": list(self.parallel_axes),
             "backend_axes": list(self.backend_axes),
             "weight_quantizations": list(self.weight_quantizations),
@@ -145,11 +167,18 @@ def add_fpm_arguments(parser: argparse.ArgumentParser) -> None:
         help="Exact total-GPU counts to consider; defaults to powers of two up to the maximum.",
     )
     group.add_argument(
+        "--fpm-parallel-presets",
+        nargs="+",
+        choices=PARALLEL_PRESETS,
+        default=None,
+        help="Typical deployment families: dense TP, MoE pure TP, TEP, or DEP.",
+    )
+    group.add_argument(
         "--fpm-parallel-axes",
         nargs="+",
         choices=PARALLEL_AXES,
         default=None,
-        help="Parallel dimensions AIC may vary while enumerating valid topologies.",
+        help="Deprecated compatibility filter; use --fpm-parallel-presets for new campaigns.",
     )
     group.add_argument(
         "--fpm-backend-axes",
@@ -262,6 +291,7 @@ def reject_fpm_arguments_without_fpm(args: argparse.Namespace) -> None:
         "fpm_moe_ep_sizes",
         "fpm_cp_sizes",
         "fpm_parallel_axes",
+        "fpm_parallel_presets",
         "fpm_backend_axes",
         "fpm_sampling_budget",
         "fpm_kv_block_size",

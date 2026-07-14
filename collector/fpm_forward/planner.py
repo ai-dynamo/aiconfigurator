@@ -8,14 +8,16 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .capabilities import ModelCapabilityProfile, ResolvedDTypeProfile, resolve_model_capability
+from .capacity import CapacityDecision, admit_model_residency
 from .config import FPMCollectionOptions
 from .population import AttentionPopulation, build_attention_population
 from .sampling import SamplingDesign, build_sampling_design
-from .topology import enumerate_fpm_topologies
+from .topology import enumerate_fpm_topologies, topology_strategy
 from .types import ParallelTopology
 
 RUNTIME_OVERLAY_FILES = ("args.py", "backend_args.py", "instrumented_scheduler.py", "worker_factory.py")
@@ -70,6 +72,8 @@ class BackendPolicy:
     policy_id: str
     generator_overrides: dict[str, Any]
     expected_markers: dict[str, str]
+    aic_fields: dict[str, object] = field(default_factory=dict)
+    admission_reason: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -77,39 +81,49 @@ class BackendPolicy:
             "policy_id": self.policy_id,
             "generator_overrides": self.generator_overrides,
             "expected_markers": self.expected_markers,
+            "aic_fields": self.aic_fields,
+            "admission_reason": self.admission_reason,
         }
 
 
 def _backend_policies(
     options: FPMCollectionOptions,
     collector_config: dict[str, Any],
+    *,
+    backend: str,
 ) -> tuple[BackendPolicy, ...]:
-    policies = [BackendPolicy("baseline", "baseline_auto", {}, {})]
     declarations = collector_config.get("backend_variants", {})
     if not isinstance(declarations, dict):
         raise TypeError("FpmCollector.backend_variants must be a mapping")
-
-    for axis in options.backend_axes:
-        if axis == "baseline":
-            continue
-        variants = declarations.get(axis)
-        if not isinstance(variants, list) or not variants:
-            raise ValueError(
-                f"--fpm-backend-axes requested {axis!r}, but FpmCollector.backend_variants.{axis} "
-                "has no declared variants"
-            )
-        for index, variant in enumerate(variants):
-            if not isinstance(variant, dict):
-                raise TypeError(f"backend variant {axis}[{index}] must be a mapping")
-            policy_id = variant.get("id")
-            if not policy_id:
-                raise ValueError(f"backend variant {axis}[{index}] requires an id")
-            overrides = variant.get("generator_overrides", {})
-            markers = variant.get("expected_markers", {})
-            if not isinstance(overrides, dict) or not isinstance(markers, dict):
-                raise TypeError(f"backend variant {axis}[{index}] overrides/markers must be mappings")
-            policies.append(BackendPolicy(axis, str(policy_id), overrides, markers))
-    return tuple(policies)
+    if declarations:
+        raise ValueError(
+            "FpmCollector.backend_variants is no longer an admission mechanism; backend policies must come from "
+            "AIC structured capabilities"
+        )
+    if "auto" in options.backend_axes and len(options.backend_axes) > 1:
+        raise ValueError("backend axis 'auto' cannot be combined with explicit backend axes")
+    requested = {"baseline"} if options.backend_axes == ("auto",) else set(options.backend_axes)
+    unsupported = requested - {"baseline"}
+    if unsupported:
+        raise ValueError(
+            f"AIC exposes no structured {backend} FPM backend variant for axes {sorted(unsupported)}; "
+            "arbitrary runtime overrides are not treated as modeled support"
+        )
+    return (
+        BackendPolicy(
+            "baseline",
+            "baseline_auto",
+            {},
+            {},
+            {
+                "moe_backend": None,
+                "attention_backend": None,
+                "enable_wideep": False,
+                "enable_eplb": False,
+            },
+            "AIC automatic baseline for the selected model/backend",
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,14 +135,27 @@ class FPMCell:
     kv_cache_dtype: str
     backend_policy: BackendPolicy
     sampling_sha256: str
+    parallel_strategy: str = "unspecified"
+    gemm_quant_mode: str | None = None
+    moe_quant_mode: str | None = None
+    fmha_quant_mode: str | None = None
+    comm_quant_mode: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
             "cell_id": self.cell_id,
             "workload_kind": self.workload_kind,
             "topology": self.topology.to_dict(),
+            "parallel_strategy": self.parallel_strategy,
             "weight_quantization": self.weight_quantization,
             "kv_cache_dtype": self.kv_cache_dtype,
+            "resolved_dtypes": {
+                "gemm_quant_mode": self.gemm_quant_mode or self.weight_quantization,
+                "moe_quant_mode": self.moe_quant_mode,
+                "fmha_quant_mode": self.fmha_quant_mode,
+                "comm_quant_mode": self.comm_quant_mode,
+                "kvcache_quant_mode": self.kv_cache_dtype,
+            },
             "backend_policy": self.backend_policy.to_dict(),
             "sampling_sha256": self.sampling_sha256,
         }
@@ -142,10 +169,14 @@ class FPMCollectionPlan:
     aic_revision: str
     generator_config_sha256: str
     options: FPMCollectionOptions
+    capability: ModelCapabilityProfile
+    dtype_profile: ResolvedDTypeProfile
     population: AttentionPopulation
     prefill_design: SamplingDesign
     decode_design: SamplingDesign
     topologies: tuple[ParallelTopology, ...]
+    capacity_decisions: tuple[CapacityDecision, ...]
+    capacity_memory_fraction: float
     backend_policies: tuple[BackendPolicy, ...]
     runtime_overlay_files: tuple[tuple[str, str], ...]
     runtime_overlay_base_files: tuple[tuple[str, str], ...]
@@ -155,19 +186,35 @@ class FPMCollectionPlan:
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_name": "aic_fpm_collection_plan",
-            "schema_version": 1,
+            "schema_version": 2,
             "backend": self.backend,
             "model_path": self.model_path,
             "system": self.system,
             "aic_revision": self.aic_revision,
             "generator_config_sha256": self.generator_config_sha256,
             "options": self.options.to_dict(),
+            "capability": self.capability.to_dict(),
+            "dtype_profile": self.dtype_profile.to_dict(),
             "population": self.population.to_summary(),
             "sampling": {
                 "prefill": self.prefill_design.to_dict(),
                 "decode": self.decode_design.to_dict(),
             },
-            "topologies": [topology.to_dict() for topology in self.topologies],
+            "topologies": [
+                {
+                    **topology.to_dict(),
+                    "strategy": topology_strategy(topology, is_moe=self.capability.is_moe),
+                }
+                for topology in self.topologies
+            ],
+            "capacity_admission": {
+                "scope": "model_residency_only",
+                "max_num_tokens": 1,
+                "max_batch_size": 1,
+                "memory_fraction_kind": "of_total",
+                "memory_fraction_value": self.capacity_memory_fraction,
+                "decisions": [decision.to_dict() for decision in self.capacity_decisions],
+            },
             "backend_policies": [policy.to_dict() for policy in self.backend_policies],
             "runtime_overlay": {
                 "overlay_sha256": dict(self.runtime_overlay_files),
@@ -179,6 +226,8 @@ class FPMCollectionPlan:
                 "selected_prefill_points": len(self.prefill_design.selected),
                 "selected_decode_points": len(self.decode_design.selected),
                 "topologies": len(self.topologies),
+                "topology_candidates": len(self.capacity_decisions),
+                "capacity_rejected": sum(not decision.admitted for decision in self.capacity_decisions),
                 "backend_policies": len(self.backend_policies),
                 "cells": len(self.cells),
             },
@@ -218,6 +267,8 @@ def build_collection_plan(
     system: str,
     selected_ops: set[str],
     options: FPMCollectionOptions,
+    model_architecture: str | None = None,
+    has_model_cases: bool = True,
     collector_config: dict[str, Any] | None = None,
     generator_overrides: dict[str, Any] | None = None,
 ) -> FPMCollectionPlan:
@@ -225,20 +276,27 @@ def build_collection_plan(
         raise ValueError("FPM Generator V1 currently supports only backend=vllm")
     collector_config = collector_config or {}
     generator_config_sha256 = _canonical_hash(generator_overrides or {})
+    capability = resolve_model_capability(
+        backend=backend,
+        model_path=model_path,
+        model_architecture=model_architecture,
+        selected_ops=selected_ops,
+        has_model_cases=has_model_cases,
+        system=system,
+        requested_weight_quantizations=options.weight_quantizations,
+        requested_kv_cache_dtypes=options.kv_cache_dtypes,
+        database_version=(
+            str(collector_config["aic_database_version"]) if "aic_database_version" in collector_config else None
+        ),
+    )
     population = build_attention_population(
         backend=backend,
         model_path=model_path,
         selected_ops=selected_ops,
         kv_block_size=options.kv_block_size,
+        attention_source=capability.attention_source,
     )
-
-    requested_quantizations = set(options.weight_quantizations)
-    if requested_quantizations and requested_quantizations != {population.native_weight_quantization}:
-        raise ValueError(
-            "one --model-path represents one weight artifact; requested quantizations must exactly match "
-            f"its native value {population.native_weight_quantization!r}, got {sorted(requested_quantizations)}"
-        )
-    weight_quantizations = (population.native_weight_quantization,)
+    weight_quantizations = (capability.dtype.gemm_quant_mode,)
 
     prefill = build_sampling_design(
         population.prefill_points,
@@ -250,12 +308,21 @@ def build_collection_plan(
         block_size=options.kv_block_size,
         active_budget=options.sampling_budget,
     )
-    topologies = enumerate_fpm_topologies(
+    topology_candidates = enumerate_fpm_topologies(
         backend=backend,
-        is_moe=population.is_moe,
+        is_moe=capability.is_moe,
         options=options,
+        allow_pure_tp=capability.allow_pure_tp,
     )
-    policies = _backend_policies(options, collector_config)
+    topologies, capacity_decisions, capacity_memory_fraction = admit_model_residency(
+        model_path=model_path,
+        system=system,
+        backend=backend,
+        capability=capability,
+        topologies=topology_candidates,
+        generator_overrides=generator_overrides or {},
+    )
+    policies = _backend_policies(options, collector_config, backend=backend)
     runtime_overlay_files, runtime_overlay_base_files = _runtime_overlay_files(collector_config)
 
     designs = {"prefill": prefill, "decode": decode}
@@ -277,11 +344,16 @@ def build_collection_plan(
             kv_cache_dtype=kv_cache_dtype,
             backend_policy=policy,
             sampling_sha256=designs[phase].sha256,
+            parallel_strategy=topology_strategy(topology, is_moe=capability.is_moe),
+            gemm_quant_mode=capability.dtype.gemm_quant_mode,
+            moe_quant_mode=capability.dtype.moe_quant_mode,
+            fmha_quant_mode=capability.dtype.fmha_quant_mode,
+            comm_quant_mode=capability.dtype.comm_quant_mode,
         )
         for phase in ("prefill", "decode")
         for topology in topologies
         for weight_quantization in weight_quantizations
-        for kv_cache_dtype in options.kv_cache_dtypes
+        for kv_cache_dtype in capability.dtype.kv_cache_dtypes
         for policy in policies
     )
     canonical = {
@@ -291,10 +363,16 @@ def build_collection_plan(
         "aic_revision": _git_revision(),
         "generator_config_sha256": generator_config_sha256,
         "options": options.to_dict(),
+        "capability": capability.to_dict(),
+        "dtype_profile": capability.dtype.to_dict(),
         "population": population.to_summary(),
         "prefill_sampling": prefill.sha256,
         "decode_sampling": decode.sha256,
         "topologies": [topology.to_dict() for topology in topologies],
+        "capacity_admission": {
+            "memory_fraction": capacity_memory_fraction,
+            "decisions": [decision.to_dict() for decision in capacity_decisions],
+        },
         "policies": [policy.to_dict() for policy in policies],
         "runtime_overlay": {
             "overlay_sha256": dict(runtime_overlay_files),
@@ -310,10 +388,14 @@ def build_collection_plan(
         aic_revision=str(revision),
         generator_config_sha256=generator_config_sha256,
         options=options,
+        capability=capability,
+        dtype_profile=capability.dtype,
         population=population,
         prefill_design=prefill,
         decode_design=decode,
         topologies=topologies,
+        capacity_decisions=capacity_decisions,
+        capacity_memory_fraction=capacity_memory_fraction,
         backend_policies=policies,
         runtime_overlay_files=runtime_overlay_files,
         runtime_overlay_base_files=runtime_overlay_base_files,
