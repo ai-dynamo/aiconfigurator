@@ -369,9 +369,11 @@ def _run_attn_for_backend(
         req.paged_kv_block_ids = []
         batch_request_infos.append((req_id, ctx_len, beam_width))
         batch_llm_requests.append(req)
-    # TRT-LLM (>=1.3.0rc era) removed the per-sequence KVCacheManager.impl.add_sequence
-    # binding in favor of a batched add_sequence_batch(request_infos, requests). Fall back
-    # to the legacy per-sequence call for older runtimes still covered by __compat__.
+    # TRT-LLM >=1.3.0rc replaced KVCacheManager.impl.add_sequence (per-sequence) with
+    # add_sequence_batch(request_infos, requests) (batched). Confirmed absent on <1.3.0rc
+    # and present on 1.3.0rc15; the hasattr probe is the live boundary check. When the
+    # minimum supported TRT-LLM version always carries add_sequence_batch, remove the
+    # else branch (source: tensorrt_llm/_torch/pyexecutor/resource_manager.py, KVCacheManager).
     if hasattr(kv_cache_manager.impl, "add_sequence_batch"):
         kv_cache_manager.impl.add_sequence_batch(batch_request_infos, batch_llm_requests)
     else:
