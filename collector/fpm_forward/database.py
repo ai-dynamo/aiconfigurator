@@ -24,6 +24,10 @@ _ROW_KEY = (
     "backend",
     "backend_version",
     "weight_quantization",
+    "gemm_quant_mode",
+    "moe_quant_mode",
+    "fmha_quant_mode",
+    "comm_quant_mode",
     "kv_cache_dtype",
     "tp",
     "pp",
@@ -159,6 +163,7 @@ def aggregate_cell(plan: FPMCollectionPlan, cell: FPMCell, cell_dir: Path) -> li
         )
     expected_ranks = set(range(cell.topology.dp))
     backend_version = get_collector_runtime(plan.backend).version
+    capability = getattr(plan, "capability", None)
     rows = []
     for point, rank_latencies in sorted(by_point.items()):
         if set(rank_latencies) != expected_ranks:
@@ -174,7 +179,12 @@ def aggregate_cell(plan: FPMCollectionPlan, cell: FPMCell, cell_dir: Path) -> li
                 "backend": plan.backend,
                 "backend_version": backend_version,
                 "weight_quantization": cell.weight_quantization,
+                "gemm_quant_mode": cell.gemm_quant_mode or cell.weight_quantization,
+                "moe_quant_mode": cell.moe_quant_mode,
+                "fmha_quant_mode": cell.fmha_quant_mode,
+                "comm_quant_mode": cell.comm_quant_mode,
                 "kv_cache_dtype": cell.kv_cache_dtype,
+                "parallel_strategy": cell.parallel_strategy,
                 "tp": cell.topology.tp,
                 "pp": cell.topology.pp,
                 "dp": cell.topology.dp,
@@ -191,6 +201,10 @@ def aggregate_cell(plan: FPMCollectionPlan, cell: FPMCell, cell_dir: Path) -> li
                 "warmup_repeats": 1,
                 "measurement_repeats": 1,
                 "measurement_policy": "single_sample_v1",
+                "model_support_level": getattr(capability, "support_level", "unknown"),
+                "model_template_id": getattr(capability, "template_id", "unknown"),
+                "model_template_version": getattr(capability, "template_version", 0),
+                "aic_database_version": getattr(capability, "aic_database_version", "unknown"),
                 "source_plan_sha256": plan.sha256,
             }
         )
@@ -247,7 +261,7 @@ def write_formal_database(
     os.replace(temporary, parquet_path)
     metadata = {
         "schema_name": "aic_fpm_forward_perf",
-        "schema_version": 1,
+        "schema_version": 2,
         "measurement_policy": "single_sample_v1",
         "warmup_repeats": 1,
         "measurement_repeats": 1,

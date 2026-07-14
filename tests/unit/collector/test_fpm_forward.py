@@ -31,8 +31,9 @@ def _args(**overrides):
     values = {
         "fpm_max_gpus": 4,
         "fpm_gpu_counts": [4],
-        "fpm_parallel_axes": ["tp", "pp", "dp", "moe_tp", "moe_ep"],
-        "fpm_backend_axes": ["baseline"],
+        "fpm_parallel_presets": None,
+        "fpm_parallel_axes": None,
+        "fpm_backend_axes": None,
         "fpm_weight_quantizations": None,
         "fpm_kv_cache_dtypes": None,
         "fpm_sampling_budget": "one_quarter",
@@ -54,6 +55,7 @@ def test_options_freeze_single_sample_policy_and_gpu_bound():
     assert options.warmup_repeats == 1
     assert options.measurement_repeats == 1
     assert options.gpu_counts == (4,)
+    assert options.parallel_presets == ("auto",)
 
     with pytest.raises(ValueError, match="exceed"):
         FPMCollectionOptions.from_args(_args(fpm_gpu_counts=[4, 8]))
@@ -113,22 +115,33 @@ def test_decode_sampling_uses_only_aic_population_members():
 def test_parallel_topologies_are_delegated_to_aic_enumerator():
     options = FPMCollectionOptions.from_args(_args())
     topologies = enumerate_fpm_topologies(backend="vllm", is_moe=True, options=options)
-    assert topologies
-    assert all(topology.total_gpus == 4 for topology in topologies)
-    assert all(not (topology.dp > 1 and topology.moe_tp > 1) for topology in topologies)
-    assert ParallelTopology(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=4, cp=1) in topologies
+    assert topologies == (
+        ParallelTopology(tp=1, pp=1, dp=4, moe_tp=1, moe_ep=4, cp=1),
+        ParallelTopology(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=4, cp=1),
+    )
+
+    with_pure_tp = enumerate_fpm_topologies(
+        backend="vllm",
+        is_moe=True,
+        options=options,
+        allow_pure_tp=True,
+    )
+    assert with_pure_tp == (
+        ParallelTopology(tp=1, pp=1, dp=4, moe_tp=1, moe_ep=4, cp=1),
+        ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1),
+        ParallelTopology(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=4, cp=1),
+    )
 
 
-def test_vllm_rejects_independent_moe_tp_across_dp_replicas():
+def test_pure_tp_requires_explicit_model_runtime_capability():
     options = FPMCollectionOptions.from_args(
         _args(
-            fpm_parallel_axes=["dp", "moe_tp"],
-            fpm_dp_sizes=[4],
+            fpm_parallel_presets=["pure_tp"],
             fpm_moe_tp_sizes=[4],
         )
     )
 
-    with pytest.raises(ValueError, match="produced no valid FPM topology"):
+    with pytest.raises(ValueError, match="does not explicitly admit"):
         enumerate_fpm_topologies(backend="vllm", is_moe=True, options=options)
 
 
@@ -152,6 +165,231 @@ def test_plan_identity_includes_generator_execution_config():
 
     assert first.generator_config_sha256 != second.generator_config_sha256
     assert first.sha256 != second.sha256
+    assert first.capability.support_level == "exact"
+    assert first.capability.attention_kind == "moe_dsa"
+    assert first.dtype_profile.gemm_quant_mode == "nvfp4"
+    assert first.dtype_profile.kv_cache_dtypes == ("fp8",)
+    assert {cell.parallel_strategy for cell in first.cells} == {"dep"}
+
+
+def test_glm_auto_matrix_includes_capacity_admitted_pure_tp():
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="nvidia/GLM-5.2-NVFP4",
+        model_architecture="GlmMoeDsaForCausalLM",
+        system="b200_sxm",
+        selected_ops={"dsa_context_module", "dsa_generation_module"},
+        options=FPMCollectionOptions.from_args(_args()),
+    )
+
+    assert plan.capability.allow_pure_tp is True
+    assert {cell.parallel_strategy for cell in plan.cells} == {"pure_tp", "tep", "dep"}
+    assert ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1) in plan.topologies
+
+
+def test_minimax_m3_uses_dsa_transfer_population_and_registered_pure_tp():
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="MiniMaxAI/MiniMax-M3",
+        model_architecture="MiniMaxM3ForCausalLM",
+        system="b200_sxm",
+        selected_ops={"attention_context", "attention_generation"},
+        has_model_cases=False,
+        options=FPMCollectionOptions.from_args(
+            _args(
+                fpm_max_gpus=16,
+                fpm_gpu_counts=[8, 16],
+            )
+        ),
+    )
+
+    assert plan.capability.support_level == "family_template"
+    assert plan.capability.template_id == "aic_family:minimaxm3:moe_msa"
+    assert plan.capability.attention_kind == "moe_msa"
+    assert plan.capability.attention_source == "dsa_module"
+    assert plan.capability.allow_pure_tp is True
+    assert plan.population.source_ops == ("dsa_context_module", "dsa_generation_module")
+    assert {cell.parallel_strategy for cell in plan.cells} == {"pure_tp", "tep", "dep"}
+
+
+_DSV4_ATTENTION_OPS = {
+    "dsv4_csa_context_module",
+    "dsv4_hca_context_module",
+    "dsv4_csa_generation_module",
+    "dsv4_hca_generation_module",
+}
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "sgl-project/DeepSeek-V4-Pro-FP8",
+        "sgl-project/DeepSeek-V4-Flash-FP8",
+    ],
+)
+def test_dsv4_fp8_uses_exact_compressed_attention_population(model_path):
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path=model_path,
+        model_architecture="DeepseekV4ForCausalLM",
+        system="b200_sxm",
+        selected_ops=_DSV4_ATTENTION_OPS,
+        options=FPMCollectionOptions.from_args(
+            _args(
+                fpm_max_gpus=16,
+                fpm_gpu_counts=[16],
+            )
+        ),
+    )
+
+    assert plan.capability.support_level == "exact"
+    assert plan.capability.template_id == "aic_exact:dsv4_module"
+    assert plan.capability.attention_kind == "moe_dsv4"
+    assert plan.capability.attention_source == "dsv4_module"
+    assert plan.capability.allow_pure_tp is False
+    assert plan.dtype_profile.fmha_quant_mode == "bfloat16"
+    assert plan.dtype_profile.kv_cache_dtypes == ("fp8",)
+    assert set(plan.population.source_ops) == _DSV4_ATTENTION_OPS
+    assert FPMPoint("prefill", 1, 64, 65472) in plan.population.prefill_points
+    assert FPMPoint("decode", 1, 1, 65536) in plan.population.decode_points
+    assert {cell.parallel_strategy for cell in plan.cells} == {"tep", "dep"}
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "deepseek-ai/DeepSeek-V4-Pro",
+        "deepseek-ai/DeepSeek-V4-Flash",
+    ],
+)
+def test_dsv4_native_fp4_is_rejected_by_vllm_dtype_capability(model_path):
+    with pytest.raises(ValueError, match="does not support moe dtype 'w4a8_mxfp4_mxfp8'"):
+        build_collection_plan(
+            backend="vllm",
+            model_path=model_path,
+            model_architecture="DeepseekV4ForCausalLM",
+            system="b200_sxm",
+            selected_ops=_DSV4_ATTENTION_OPS,
+            options=FPMCollectionOptions.from_args(
+                _args(
+                    fpm_max_gpus=16,
+                    fpm_gpu_counts=[16],
+                )
+            ),
+        )
+
+
+def test_unknown_model_uses_auditable_bootstrap_template(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["NewMoeDsaForCausalLM"],
+                "num_attention_heads": 32,
+                "num_key_value_heads": 32,
+                "head_dim": 128,
+                "hidden_size": 4096,
+                "intermediate_size": 8192,
+                "num_hidden_layers": 4,
+                "vocab_size": 32000,
+                "n_routed_experts": 8,
+                "kv_lora_rank": 512,
+                "qk_rope_head_dim": 64,
+                "max_position_embeddings": 4096,
+            }
+        )
+    )
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path=str(tmp_path),
+        model_architecture="NewMoeDsaForCausalLM",
+        system="b200_sxm",
+        selected_ops={"attention_context", "attention_generation"},
+        has_model_cases=False,
+        options=FPMCollectionOptions.from_args(_args()),
+    )
+
+    assert plan.capability.support_level == "bootstrap_template"
+    assert plan.capability.template_id == "generic:moe_dsa"
+    assert plan.capability.attention_source == "dsa_module"
+    assert plan.population.source_name == "dsa_module"
+    assert {cell.parallel_strategy for cell in plan.cells} == {"dep", "tep"}
+
+
+def test_unregistered_phi4_mini_uses_dense_gqa_bootstrap_template(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Phi3ForCausalLM"],
+                "hidden_size": 3072,
+                "intermediate_size": 8192,
+                "num_hidden_layers": 32,
+                "num_attention_heads": 24,
+                "num_key_value_heads": 8,
+                "vocab_size": 200064,
+                "max_position_embeddings": 131072,
+                "torch_dtype": "bfloat16",
+            }
+        )
+    )
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path=str(tmp_path),
+        model_architecture="Phi3ForCausalLM",
+        system="b200_sxm",
+        selected_ops={"attention_context", "attention_generation"},
+        has_model_cases=False,
+        options=FPMCollectionOptions.from_args(_args()),
+    )
+
+    assert plan.capability.architecture == "Phi3ForCausalLM"
+    assert plan.capability.model_family is None
+    assert plan.capability.support_level == "bootstrap_template"
+    assert plan.capability.template_id == "generic:dense_gqa"
+    assert plan.capability.attention_source == "dense_attention"
+    assert plan.capability.allow_pure_tp is False
+    assert {cell.parallel_strategy for cell in plan.cells} == {"tp"}
+
+
+def test_registered_model_without_case_file_uses_family_template():
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="Qwen/Qwen3-32B",
+        model_architecture="Qwen3ForCausalLM",
+        system="b200_sxm",
+        selected_ops={"attention_context", "attention_generation"},
+        has_model_cases=False,
+        options=FPMCollectionOptions.from_args(_args()),
+    )
+
+    assert plan.capability.support_level == "family_template"
+    assert plan.capability.template_id == "aic_family:llama:dense_gqa"
+    assert plan.capability.attention_source == "dense_attention"
+    assert {cell.parallel_strategy for cell in plan.cells} == {"tp"}
+
+
+def test_explicit_kv_dtype_requires_aic_attention_data():
+    options = FPMCollectionOptions.from_args(_args(fpm_kv_cache_dtypes=["int8"]))
+    with pytest.raises(ValueError, match="does not support KV-cache dtype"):
+        build_collection_plan(
+            backend="vllm",
+            model_path="nvidia/GLM-5.2-NVFP4",
+            system="b200_sxm",
+            selected_ops={"dsa_context_module", "dsa_generation_module"},
+            options=options,
+        )
+
+
+def test_arbitrary_backend_variant_is_not_a_capability_declaration():
+    options = FPMCollectionOptions.from_args(_args())
+    with pytest.raises(ValueError, match="no longer an admission mechanism"):
+        build_collection_plan(
+            backend="vllm",
+            model_path="nvidia/GLM-5.2-NVFP4",
+            system="b200_sxm",
+            selected_ops={"dsa_context_module", "dsa_generation_module"},
+            options=options,
+            collector_config={"backend_variants": {"moe": [{"id": "invented"}]}},
+        )
 
 
 @pytest.mark.parametrize(
@@ -185,6 +423,11 @@ def _synthetic_plan_and_cell(tmp_path):
         kv_cache_dtype="fp8_e4m3",
         backend_policy=BackendPolicy("baseline", "baseline_auto", {}, {}),
         sampling_sha256="sampling",
+        parallel_strategy="dep",
+        gemm_quant_mode="nvfp4",
+        moe_quant_mode="nvfp4",
+        fmha_quant_mode="fp8",
+        comm_quant_mode="half",
     )
     point = FPMPoint("prefill", 2, 64, 128)
     plan = SimpleNamespace(
@@ -193,6 +436,12 @@ def _synthetic_plan_and_cell(tmp_path):
         model_path="org/model",
         system="b200_sxm",
         backend="vllm",
+        capability=SimpleNamespace(
+            support_level="exact",
+            template_id="aic_exact:dsa_module",
+            template_version=1,
+            aic_database_version="0.24.0",
+        ),
         prefill_design=SimpleNamespace(selected=(point,)),
         decode_design=SimpleNamespace(selected=()),
     )
@@ -242,6 +491,12 @@ def test_single_measurement_dp_aggregation_uses_max_rank(tmp_path):
     assert len(rows) == 1
     assert rows[0]["latency_ms"] == pytest.approx(6.0)
     assert rows[0]["measurement_policy"] == "single_sample_v1"
+    assert rows[0]["parallel_strategy"] == "dep"
+    assert rows[0]["gemm_quant_mode"] == "nvfp4"
+    assert rows[0]["moe_quant_mode"] == "nvfp4"
+    assert rows[0]["fmha_quant_mode"] == "fp8"
+    assert rows[0]["comm_quant_mode"] == "half"
+    assert rows[0]["model_support_level"] == "exact"
 
 
 def test_formal_database_is_idempotent_and_rejects_conflicts(tmp_path):
@@ -250,7 +505,9 @@ def test_formal_database_is_idempotent_and_rejects_conflicts(tmp_path):
     parquet, metadata = write_formal_database(plan, rows, systems_root=tmp_path / "systems")
     write_formal_database(plan, rows, systems_root=tmp_path / "systems")
     assert parquet.exists()
-    assert json.loads(metadata.read_text())["measurement_repeats"] == 1
+    metadata_payload = json.loads(metadata.read_text())
+    assert metadata_payload["measurement_repeats"] == 1
+    assert metadata_payload["schema_version"] == 2
 
     conflicting = [{**rows[0], "latency_ms": 7.0}]
     with pytest.raises(ValueError, match="conflicting"):

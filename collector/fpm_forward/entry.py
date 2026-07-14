@@ -94,6 +94,8 @@ def resolve_inputs(args: argparse.Namespace, case_plan) -> tuple[FPMCollectionPl
         system=args.gpu,
         selected_ops=set(case_plan.selected_ops),
         options=options,
+        model_architecture=case_plan.model_architecture,
+        has_model_cases=bool(case_plan.model_cases_paths),
         collector_config=collector_config,
         generator_overrides=generator_overrides,
     )

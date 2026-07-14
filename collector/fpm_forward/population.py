@@ -20,7 +20,7 @@ from .types import FPMPoint
 @dataclass(frozen=True, slots=True)
 class AttentionPopulation:
     source_name: str
-    source_ops: tuple[str, str]
+    source_ops: tuple[str, ...]
     prefill_points: tuple[FPMPoint, ...]
     decode_points: tuple[FPMPoint, ...]
     p_values: tuple[int, ...]
@@ -73,7 +73,7 @@ def _cached_model_config_path(model_path: str) -> Path | None:
     return cached if cached.exists() else None
 
 
-def _load_model_config(model_path: str) -> tuple[dict[str, object], Path | None]:
+def load_model_config(model_path: str) -> tuple[dict[str, object], Path | None]:
     path = _cached_model_config_path(model_path)
     if path is None:
         return {}, None
@@ -190,34 +190,124 @@ def _dense_attention_pairs(
 @dataclass(frozen=True, slots=True)
 class _SourceProvider:
     name: str
-    context_op: str
-    generation_op: str
-    build_pairs: Callable[[str, dict[str, object]], tuple[list[tuple[int, int]], list[tuple[int, int]]]]
+    required_ops: frozenset[str]
+    source_ops: tuple[str, ...]
+    build_pairs: Callable[[str, dict[str, object]], tuple[list[tuple[int, int]], list[tuple[int, int]]]] | None
+    build_points: (
+        Callable[
+            [str, dict[str, object]],
+            tuple[list[FPMPoint], list[FPMPoint]],
+        ]
+        | None
+    ) = None
 
 
 def _mla_provider(backend: str, _config: dict[str, object]):
     return _mla_pairs(backend)
 
 
+def _dsv4_vllm_points(
+    backend: str,
+    _config: dict[str, object],
+) -> tuple[list[FPMPoint], list[FPMPoint]]:
+    """Project the lightweight vLLM DSV4 CSA/HCA module case domain.
+
+    CSA and HCA use the same coordinates, so their union contains one point
+    per physical workload. These bounds mirror the vLLM op-level collector's
+    default case filter without importing vLLM during FPM planning.
+    """
+
+    if backend != "vllm":
+        raise ValueError(f"FPM DSV4 population is not implemented for backend={backend!r}")
+
+    max_seq_len = 65536
+    max_context_query_tokens = 262144
+    max_generation_kv_tokens = 1024 * 1024
+    context_prefix_anchors = (0, 128, 2048, 4096)
+    batch_sizes = case_generator._DSV4_MODULE_BATCH_SIZES
+    sequence_lengths = case_generator._DSV4_MODULE_SEQ_LENGTHS
+
+    prefill: list[FPMPoint] = []
+    decode: list[FPMPoint] = []
+    for batch_size in batch_sizes:
+        for sequence_length in sequence_lengths:
+            if sequence_length > max_seq_len:
+                continue
+            prefixes = dict.fromkeys((*context_prefix_anchors, max_seq_len - sequence_length))
+            for prefix_length in prefixes:
+                total_sequence_length = prefix_length + sequence_length
+                if prefix_length < 0 or total_sequence_length > max_seq_len:
+                    continue
+                if batch_size * sequence_length > max_context_query_tokens:
+                    continue
+                if batch_size * total_sequence_length > max_generation_kv_tokens:
+                    continue
+                prefill.append(FPMPoint("prefill", batch_size, sequence_length, prefix_length))
+
+            if batch_size * sequence_length > max_generation_kv_tokens:
+                continue
+            if sequence_length >= 524288 and batch_size > 1:
+                continue
+            if sequence_length >= 262144 and batch_size > 2:
+                continue
+            if sequence_length >= 131072 and batch_size > 4:
+                continue
+            if sequence_length >= 65536 and batch_size > 8:
+                continue
+            if sequence_length >= 32768 and batch_size > 16:
+                continue
+            if sequence_length >= 8192 and batch_size > 64:
+                continue
+            decode.append(FPMPoint("decode", batch_size, 1, sequence_length))
+    return prefill, decode
+
+
 _SOURCE_PROVIDERS = (
-    _SourceProvider("dsa_module", "dsa_context_module", "dsa_generation_module", _mla_provider),
-    _SourceProvider("mla_module", "mla_context_module", "mla_generation_module", _mla_provider),
+    _SourceProvider(
+        "dsa_module",
+        frozenset({"dsa_context_module", "dsa_generation_module"}),
+        ("dsa_context_module", "dsa_generation_module"),
+        _mla_provider,
+    ),
+    _SourceProvider(
+        "dsv4_module",
+        frozenset(
+            {
+                "dsv4_csa_context_module",
+                "dsv4_hca_context_module",
+                "dsv4_csa_generation_module",
+                "dsv4_hca_generation_module",
+            }
+        ),
+        (
+            "dsv4_csa_context_module",
+            "dsv4_hca_context_module",
+            "dsv4_csa_generation_module",
+            "dsv4_hca_generation_module",
+        ),
+        None,
+        _dsv4_vllm_points,
+    ),
+    _SourceProvider(
+        "mla_module",
+        frozenset({"mla_context_module", "mla_generation_module"}),
+        ("mla_context_module", "mla_generation_module"),
+        _mla_provider,
+    ),
     _SourceProvider(
         "dense_attention",
-        "attention_context",
-        "attention_generation",
+        frozenset({"attention_context", "attention_generation"}),
+        ("attention_context", "attention_generation"),
         _dense_attention_pairs,
     ),
 )
 
 
-def _resolve_provider(selected_ops: set[str]) -> _SourceProvider:
-    matches = [
-        provider
-        for provider in _SOURCE_PROVIDERS
-        if {provider.context_op, provider.generation_op}.issubset(selected_ops)
-    ]
+def _resolve_provider(selected_ops: set[str], *, required: bool = True) -> _SourceProvider | None:
+    matches = [provider for provider in _SOURCE_PROVIDERS if provider.required_ops.issubset(selected_ops)]
     if not matches:
+        if not required:
+            return None
         raise ValueError(
             "fpm_forward requires one supported AIC context/generation attention pair; "
             f"selected ops were {sorted(selected_ops)}"
@@ -230,51 +320,77 @@ def _resolve_provider(selected_ops: set[str]) -> _SourceProvider:
     return matches[0]
 
 
+def resolve_attention_source(selected_ops: set[str], *, required: bool = True) -> str | None:
+    """Return the exact AIC attention source declared by model cases."""
+
+    provider = _resolve_provider(selected_ops, required=required)
+    return provider.name if provider is not None else None
+
+
+def _provider_by_name(source_name: str) -> _SourceProvider:
+    for provider in _SOURCE_PROVIDERS:
+        if provider.name == source_name:
+            return provider
+    raise ValueError(f"unknown FPM attention source template: {source_name!r}")
+
+
 def build_attention_population(
     *,
     backend: str,
     model_path: str,
     selected_ops: set[str],
     kv_block_size: int,
+    attention_source: str | None = None,
 ) -> AttentionPopulation:
     """Build the latency-blind physical workload population for one model."""
 
-    model_config, config_path = _load_model_config(model_path)
-    provider = _resolve_provider(selected_ops)
-    with _model_path_filter(model_path):
-        context_pairs, generation_pairs = provider.build_pairs(backend, model_config)
-    if not context_pairs or not generation_pairs:
-        raise ValueError(f"AIC attention source {provider.name} produced an empty phase")
-
+    model_config, config_path = load_model_config(model_path)
+    provider = _provider_by_name(attention_source) if attention_source is not None else _resolve_provider(selected_ops)
+    assert provider is not None
     max_len = _max_model_len(model_config)
-    prefix_values = sorted(
-        {
-            length
-            for _, length in generation_pairs
-            if length >= kv_block_size and length % kv_block_size == 0 and (max_len is None or length < max_len)
-        }
-    )
-    if not prefix_values:
-        raise ValueError(f"AIC generation population has no P>0 values aligned to KV block size {kv_block_size}")
-
-    prefill_points = sorted(
-        {
-            FPMPoint("prefill", batch, suffix, prefix)
-            for batch, suffix in context_pairs
-            for prefix in [0, *prefix_values]
-            if max_len is None or prefix + suffix <= max_len
-        }
-    )
-    decode_points = sorted(
-        {
-            FPMPoint("decode", batch, 1, length)
-            for batch, length in generation_pairs
-            if max_len is None or length + 1 <= max_len
-        }
-    )
+    if provider.build_points is not None:
+        with _model_path_filter(model_path):
+            raw_prefill, raw_decode = provider.build_points(backend, model_config)
+        prefill_points = sorted(
+            {point for point in raw_prefill if max_len is None or point.prefix_length + point.suffix_length <= max_len}
+        )
+        decode_points = sorted({point for point in raw_decode if max_len is None or point.prefix_length + 1 <= max_len})
+        prefix_values = sorted({point.prefix_length for point in prefill_points if point.prefix_length > 0})
+    else:
+        assert provider.build_pairs is not None
+        with _model_path_filter(model_path):
+            context_pairs, generation_pairs = provider.build_pairs(backend, model_config)
+        if not context_pairs or not generation_pairs:
+            raise ValueError(f"AIC attention source {provider.name} produced an empty phase")
+        prefix_values = sorted(
+            {
+                length
+                for _, length in generation_pairs
+                if length >= kv_block_size and length % kv_block_size == 0 and (max_len is None or length < max_len)
+            }
+        )
+        if not prefix_values:
+            raise ValueError(f"AIC generation population has no P>0 values aligned to KV block size {kv_block_size}")
+        prefill_points = sorted(
+            {
+                FPMPoint("prefill", batch, suffix, prefix)
+                for batch, suffix in context_pairs
+                for prefix in [0, *prefix_values]
+                if max_len is None or prefix + suffix <= max_len
+            }
+        )
+        decode_points = sorted(
+            {
+                FPMPoint("decode", batch, 1, length)
+                for batch, length in generation_pairs
+                if max_len is None or length + 1 <= max_len
+            }
+        )
+    if not prefill_points or not decode_points:
+        raise ValueError(f"AIC attention source {provider.name} produced an empty phase")
     return AttentionPopulation(
         source_name=provider.name,
-        source_ops=(provider.context_op, provider.generation_op),
+        source_ops=provider.source_ops,
         prefill_points=tuple(prefill_points),
         decode_points=tuple(decode_points),
         p_values=(0, *prefix_values),
