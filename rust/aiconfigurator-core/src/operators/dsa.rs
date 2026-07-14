@@ -136,9 +136,9 @@ impl DsaModuleOp {
     /// Context-Parallel (CP) prefill — GLM-5/DSA sparse composition.
     ///
     /// Wires the real data dependencies and delegates to [`Self::query_cp_with`]
-    /// (the verbatim mirror of Python `ContextDSAModule._query_cp`,
-    /// `skip_indexer=False` — the Rust table loads Python's full slice, so
-    /// this matches the full-layer-only opspec path):
+    /// (the verbatim mirror of Python `ContextDSAModule._query_cp`); the
+    /// caller passes `skip_indexer` through, so GLM-5.2's CP + shared-index
+    /// amortization can query both the full and skip-indexer slices:
     /// - base = the existing 4-axis engine query at `(b, per_card, prefix)`
     ///   with `dsa_backend="flashmla_kv"`, exactly like Python's `_query_cp`
     ///   base query;

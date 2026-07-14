@@ -281,6 +281,16 @@ def _note_rust_provenance(handle: Any) -> None:
         util_empirical.note_provenance(tier)
 
 
+def _scale_or_one(value: Any) -> float:
+    """Imbalance-scale forwarding: default to ``1.0`` only for ``None``.
+
+    The Python engine path multiplies by the raw scale, so an explicit
+    ``0.0`` must pass through unchanged — a truthiness fallback (``or 1.0``)
+    would silently clobber it into ``1.0``.
+    """
+    return 1.0 if value is None else float(value)
+
+
 def estimate_static_latency_breakdown_with_rust(
     model: Any,
     database: Any,
@@ -307,8 +317,8 @@ def estimate_static_latency_breakdown_with_rust(
         osl=int(runtime_config.osl),
         prefix=int(runtime_config.prefix or 0),
         beam_width=int(runtime_config.beam_width or 1),
-        seq_imbalance_correction_scale=float(runtime_config.seq_imbalance_correction_scale or 1.0),
-        gen_seq_imbalance_correction_scale=float(runtime_config.gen_seq_imbalance_correction_scale or 1.0),
+        seq_imbalance_correction_scale=_scale_or_one(runtime_config.seq_imbalance_correction_scale),
+        gen_seq_imbalance_correction_scale=_scale_or_one(runtime_config.gen_seq_imbalance_correction_scale),
         mode=engine_mode,
         stride=int(stride),
     )
@@ -353,8 +363,8 @@ def estimate_mixed_step_latency_with_rust(
         int(isl),
         int(osl),
         int(prefix or 0),
-        seq_imbalance_correction_scale=float(seq_imbalance_correction_scale or 1.0),
-        gen_seq_imbalance_correction_scale=float(gen_seq_imbalance_correction_scale or 1.0),
+        seq_imbalance_correction_scale=_scale_or_one(seq_imbalance_correction_scale),
+        gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
     )
     _note_rust_provenance(handle)
     return latency_ms
@@ -382,7 +392,7 @@ def estimate_decode_step_latency_with_rust(
         int(gen_tokens),
         int(isl),
         int(osl),
-        gen_seq_imbalance_correction_scale=float(gen_seq_imbalance_correction_scale or 1.0),
+        gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
     )
     _note_rust_provenance(handle)
     return latency_ms

@@ -333,7 +333,14 @@ mod tests {
         let db = h200_sglang_db();
         let mut bad = op(1);
         bad.attn_backend = "trtllm_mla".to_string();
-        assert!(bad.query(&db, 1, 1024, 0).is_err());
+        // Pin the WHITELIST error specifically: h200 has no trtllm_mla slice,
+        // so a plain `.is_err()` would also pass on a mere lookup miss
+        // (`PerfDatabase`) if the whitelist were removed.
+        let ctx = bad.query(&db, 1, 1024, 0);
+        assert!(
+            matches!(ctx, Err(AicError::InvalidEngineConfig(_))),
+            "context whitelist must reject trtllm_mla, got {ctx:?}"
+        );
 
         let mut bad_gen = WideEpGenerationMlaOp::new(
             "wideep_gen_mla",
@@ -342,7 +349,11 @@ mod tests {
             FmhaQuantMode::Fp8Block,
         );
         bad_gen.attn_backend = "trtllm_mla".to_string();
-        assert!(bad_gen.query(&db, 1, 1024).is_err());
+        let gen = bad_gen.query(&db, 1, 1024);
+        assert!(
+            matches!(gen, Err(AicError::InvalidEngineConfig(_))),
+            "generation whitelist must reject trtllm_mla, got {gen:?}"
+        );
 
         // fa3 stays allowed (h200 carries an fa3 slice).
         let mut fa3 = op(1);

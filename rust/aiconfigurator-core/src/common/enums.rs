@@ -87,12 +87,20 @@ pub enum TransferKind {
 /// (`off`/`conservative`/`balanced`/`aggressive`) before serialising, so the
 /// wire form is always an explicit list of kind tokens; `None` on the wire
 /// means the default ALL-transfers policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransferPolicy {
     pub xshape: bool,
     pub xquant: bool,
     pub xprofile: bool,
     pub xop: bool,
+}
+
+/// "Unset" means ALL everywhere (`from_wire(None)`, `PerfDatabase::load`);
+/// a derived all-`false` Default would silently mean OFF.
+impl Default for TransferPolicy {
+    fn default() -> Self {
+        Self::ALL
+    }
 }
 
 impl TransferPolicy {

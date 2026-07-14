@@ -1,3 +1,18 @@
+---
+description: >
+  Parity discipline for the compiled engine: the frozen Python op/query math
+  is the spec; latency-affecting changes must land on both sides with an
+  oracle anchor in the same PR.
+paths:
+  - "rust/aiconfigurator-core/**"
+  - "src/aiconfigurator/sdk/operations/**"
+  - "src/aiconfigurator/sdk/perf_database.py"
+  - "src/aiconfigurator/sdk/perf_interp/**"
+  - "src/aiconfigurator/sdk/engine.py"
+  - "src/aiconfigurator/sdk/rust_engine_step.py"
+  - "tests/unit/sdk/test_opspec_coverage.py"
+---
+
 # Rust-Core Parity Discipline (Python-path freeze)
 
 The compiled engine (`rust/aiconfigurator-core`) is at full numeric parity

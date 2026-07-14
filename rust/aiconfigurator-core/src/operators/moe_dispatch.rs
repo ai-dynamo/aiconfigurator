@@ -14,7 +14,8 @@
 //! - **SGLang DeepEP**: dispatch + combine latencies come from the
 //!   `wideep_deepep_normal` / `wideep_deepep_ll` tables (see
 //!   `db.wideep.query_deepep_normal/ll`).
-//! - **TRT-LLM WideEP**: uses `db.wideep.query_trtllm_alltoall`.
+//! - **TRT-LLM WideEP**: uses the mode-aware [`query_alltoall_table`]
+//!   (silicon arm = `db.wideep.query_trtllm_alltoall`).
 //!
 //! All paths route through the corresponding tables; the higher-level
 //! model is responsible for choosing the dispatch flavor.
@@ -114,11 +115,19 @@ pub struct TrtllmWideEpMoEDispatchOp {
 }
 
 impl TrtllmWideEpMoEDispatchOp {
+    /// Mode-aware, like every phase-op query in Python's
+    /// `TrtLLMWideEPMoEDispatch.query` (it calls
+    /// `database.query_trtllm_alltoall` with `database_mode=None`, which
+    /// resolves to the view's mode inside `_query_alltoall_table`):
+    /// EMPIRICAL estimates `SOL/util`, HYBRID converts a typed silicon miss
+    /// into the estimate, SILICON queries the table. `node_num` stays the
+    /// perf-DB default (Python's model builders always pass `None`). The
+    /// pre-dispatch sum combines sources exactly like Python's
+    /// `PerformanceResult.__add__` (same -> same, mismatch -> mixed).
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
-        let spec: &SystemSpec = &db.system_spec;
         let q = |op_name: &str| {
-            db.wideep.query_trtllm_alltoall(
-                spec,
+            query_alltoall_table(
+                db,
                 op_name,
                 num_tokens,
                 self.hidden_size,
@@ -126,19 +135,23 @@ impl TrtllmWideEpMoEDispatchOp {
                 self.num_experts,
                 self.moe_ep_size,
                 self.quant_mode,
+                None,
                 Some("wideep"),
             )
         };
-        let latency = if self.pre_dispatch {
-            q("alltoall_prepare")? + q("alltoall_dispatch")?
+        let result = if self.pre_dispatch {
+            let prepare = q("alltoall_prepare")?;
+            let dispatch = q("alltoall_dispatch")?;
+            PerformanceResult::new(
+                prepare.latency_ms + dispatch.latency_ms,
+                prepare.source.combine(dispatch.source),
+            )
         } else if self.use_low_precision_combine {
             q("alltoall_combine_low_precision")?
         } else {
             q("alltoall_combine")?
         };
-        Ok(PerformanceResult::new(latency, Source::Silicon)
-            .clamp_non_negative()
-            .scaled(self.scale_factor))
+        Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
 }
 
@@ -1225,6 +1238,57 @@ mod tests {
             a2a(&db, "alltoall_combine_low_precision", 333, MoeQuantMode::Nvfp4, Some("wideep"))
                 .expect("combine_lp");
         assert_oracle(&combine_lp, 0.069468751270324, Source::Silicon, "hyb_wideep_combine_lp");
+    }
+
+    /// The standalone WideEP dispatch op must route through the mode-aware
+    /// [`query_alltoall_table`] (Python `TrtLLMWideEPMoEDispatch.query`
+    /// passes `database_mode=None`, i.e. the view's mode) — a direct
+    /// silicon-table call would return silicon values under EMPIRICAL and
+    /// hard-error instead of falling back under HYBRID. Expected values are
+    /// the per-phase-op Python oracles already pinned in
+    /// `alltoall_empirical_matches_python_oracles` /
+    /// `alltoall_hybrid_prefers_silicon_when_covered`, composed per phase
+    /// (pre-dispatch = prepare + dispatch).
+    #[test]
+    fn standalone_wideep_dispatch_is_mode_aware() {
+        let wideep_op = |pre_dispatch: bool, quant: MoeQuantMode, low_precision: bool| {
+            TrtllmWideEpMoEDispatchOp {
+                name: "trtllm_wideep_dispatch".to_string(),
+                scale_factor: 1.0,
+                hidden_size: 7168,
+                topk: 8,
+                num_experts: 256,
+                moe_tp_size: 1,
+                moe_ep_size: 8,
+                attention_dp_size: 8,
+                pre_dispatch,
+                quant_mode: quant,
+                use_low_precision_combine: low_precision,
+            }
+        };
+
+        let emp = gb200_trtllm_db(DatabaseMode::Empirical);
+        let pre = wideep_op(true, MoeQuantMode::Fp8, false).query(&emp, 333).expect("emp pre");
+        assert_oracle(
+            &pre,
+            0.015176159059580488 + 0.04266341407888801, // prepare + dispatch
+            Source::Empirical,
+            "standalone_emp_pre",
+        );
+        let combine_lp =
+            wideep_op(false, MoeQuantMode::Nvfp4, true).query(&emp, 333).expect("emp combine_lp");
+        assert_oracle(&combine_lp, 0.06946014693369004, Source::Empirical, "standalone_emp_combine_lp");
+
+        // HYBRID with data present stays on silicon (same values as the
+        // covered-slice oracles above).
+        let hyb = gb200_trtllm_db(DatabaseMode::Hybrid);
+        let pre = wideep_op(true, MoeQuantMode::Fp8, false).query(&hyb, 333).expect("hyb pre");
+        assert_oracle(
+            &pre,
+            0.015222300426103175 + 0.042655749106779696,
+            Source::Silicon,
+            "standalone_hyb_pre",
+        );
     }
 
     /// fp8 is uncollected under NVLinkOneSided: EMPIRICAL surfaces the typed

@@ -75,3 +75,11 @@ def test_every_operation_converts_to_an_opspec_or_is_exempt():
 
     stale = sorted(set(EXEMPT) & handled)
     assert not stale, f"EXEMPT entries now have conversion branches; remove them: {stale}"
+
+    # EXEMPT is a closed set: every entry must name a live Operation class
+    # (deleted/renamed ops must drop their entry) and carry a real reason.
+    unknown = sorted(set(EXEMPT) - all_ops)
+    assert not unknown, f"EXEMPT entries are not discovered Operation classes; remove them: {unknown}"
+
+    blank = sorted(name for name, reason in EXEMPT.items() if not reason.strip())
+    assert not blank, f"EXEMPT entries need a non-empty justification: {blank}"

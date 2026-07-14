@@ -840,9 +840,12 @@ def _parity_mismatch_reason(
 ) -> str | None:
     """Compare Python and Rust per-metric outputs with three valid pairings:
 
-      - both compute    -> numeric tolerance check
-      - both error      -> pass (error-symmetry contract)
-      - only one errors -> fail with the asymmetric reason
+      - both compute                  -> numeric tolerance check
+      - both error with the SAME kind -> pass (error-symmetry contract; the
+        typed-FFI mapping raises the canonical sdk classes on the rust side,
+        so `type(exc).__name__` must agree — a panic/TypeError paired with a
+        typed miss is a real divergence, not symmetry)
+      - anything else                 -> fail with the asymmetric reason
 
     Returns ``None`` when every metric in `comparisons` matches under
     one of those rules; otherwise returns a formatted multi-row diff.
@@ -854,7 +857,15 @@ def _parity_mismatch_reason(
         py_err = isinstance(python_value, _ErrorSentinel)
         rs_err = isinstance(rust_value, _ErrorSentinel)
         if py_err and rs_err:
-            # Both errored — symmetric. Pass.
+            if python_value.kind != rust_value.kind:
+                # Both errored, but with different exception classes.
+                has_mismatch = True
+                rows.append(
+                    f"{name:<{metric_width}} {python_value!r:>10} {rust_value!r:>10} "
+                    f"{'-':>10} {'-':>10} {'-':>10}  kind"
+                )
+                continue
+            # Both errored with the same kind — symmetric. Pass.
             rows.append(f"{name:<{metric_width}} {'ERROR':>10} {'ERROR':>10} {'-':>10} {'-':>10} {'-':>10}    sym")
             continue
         if py_err != rs_err:
