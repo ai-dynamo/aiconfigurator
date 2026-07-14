@@ -205,9 +205,11 @@ def pick_default(
     ``process_experiment_result``.
 
     Args:
-        pareto_df: Performance DataFrame (``ColumnsAgg`` or ``ColumnsDisagg``).
+        pareto_df: Performance DataFrame (``ColumnsAgg``, ``ColumnsDisagg``,
+            or ``ColumnsAFD``).
         total_gpus: Total GPUs available for deployment.
-        serving_mode: ``"agg"`` or ``"disagg"``.
+        serving_mode: ``"agg"``, ``"disagg"``, or ``"afd"``.  AFD frames are
+            grouped by their synthesized ``parallel`` column like agg.
         target_tpot: TPOT SLA target in ms.  Used when
             ``target_request_latency`` is not set.
         target_request_latency: End-to-end request latency SLA in ms.  Takes
@@ -316,8 +318,10 @@ def pick_load_match(
     This is the standalone equivalent of the "load-match" picking path.
 
     Args:
-        pareto_df: Performance DataFrame (``ColumnsAgg`` or ``ColumnsDisagg``).
-        serving_mode: ``"agg"`` or ``"disagg"``.
+        pareto_df: Performance DataFrame (``ColumnsAgg``, ``ColumnsDisagg``,
+            or ``ColumnsAFD``).
+        serving_mode: ``"agg"``, ``"disagg"``, or ``"afd"`` (afd groups by the
+            synthesized ``parallel`` column like agg).
         target_tpot: TPOT SLA target in ms.
         target_request_latency: Request latency SLA in ms (takes precedence).
         target_request_rate: Target system request rate in req/s.
@@ -540,7 +544,8 @@ def pick_optimization_type(
         optimization_type: ``"throughput"`` or ``"latency"``.
         total_gpus: Total GPUs available for deployment. Used to compute
             ``tokens/s/gpu_cluster`` for throughput ranking.
-        serving_mode: ``"agg"`` or ``"disagg"``.
+        serving_mode: ``"agg"``, ``"disagg"``, or ``"afd"`` (afd groups by the
+            synthesized ``parallel`` column like agg).
         top_n: Number of top configurations to return.
 
     Returns:

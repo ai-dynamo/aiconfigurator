@@ -961,3 +961,102 @@ def sweep_disagg(
         .sort_values(by="tokens/s/gpu", ascending=False)
         .reset_index(drop=True)
     )
+
+
+# ---------------------------------------------------------------------------
+# AFD sweep
+# ---------------------------------------------------------------------------
+
+
+def sweep_afd(
+    *,
+    model_path: str,
+    runtime_config: config.RuntimeConfig,
+    database: PerfDatabase,
+    backend_name: str,
+    model_config: config.ModelConfig,
+    afd_parallel_config_list: list[tuple[int, int, int, int, int, str]],
+    gpus_per_node: int,
+    total_gpus: int | None = None,
+    combined_with_pd: bool = True,
+    comm_overhead_factor: float = 1.0,
+    boundary_on_attn: bool = True,
+    total_batch_size: int | None = None,
+    target_ttft: float | None = None,
+    free_gpu_memory_fraction: float | None = None,
+    max_seq_len: int | None = None,
+    # combined-with-PD prefill options
+    prefill_database: PerfDatabase | None = None,
+    prefill_backend_name: str | None = None,
+    prefill_model_config: config.ModelConfig | None = None,
+    prefill_parallel_config_list: list | None = None,
+    prefill_batch_size_list: list[int] | None = None,
+    prefill_system_name: str | None = None,
+    prefill_backend_version: str | None = None,
+    prefill_max_candidates: int = 256,
+    prefill_candidate_overflow: str = "error",
+    max_prefill_gpus: int | None = None,
+    max_prefill_workers: int | None = None,
+    # calibration
+    prefill_degradation: float | None = None,
+    decode_degradation: float | None = None,
+    ttft_correction_factor: float | None = None,
+    decode_latency_correction: float = 1.0,
+) -> pd.DataFrame:
+    """Sweep AFD candidate topologies; return feasible-candidate DataFrame.
+
+    Thin wrapper around :func:`pareto_analysis.afd_pareto` that matches the
+    interface pattern of :func:`sweep_agg` / :func:`sweep_disagg`.
+
+    Returns:
+        DataFrame with :data:`common.ColumnsAFD` schema sorted by
+        ``tokens/s/gpu`` descending.
+
+    Raises:
+        NoFeasibleConfigError: When no candidate satisfies the SLA.
+    """
+    from aiconfigurator.sdk.pareto_analysis import (
+        _AFD_DECODE_DEGRADATION,
+        _AFD_PREFILL_DEGRADATION,
+        _AFD_TTFT_CORRECTION_FACTOR,
+        afd_pareto,
+    )
+
+    if not afd_parallel_config_list:
+        raise NoFeasibleConfigError(
+            "sweep_afd: empty afd_parallel_config_list — no AFD topologies to evaluate."
+        )
+
+    result_df = afd_pareto(
+        model_path=model_path,
+        runtime_config=runtime_config,
+        database=database,
+        backend_name=backend_name,
+        afd_parallel_config_list=afd_parallel_config_list,
+        gpus_per_node=gpus_per_node,
+        model_config=model_config,
+        total_gpus=total_gpus,
+        combined_with_pd=combined_with_pd,
+        comm_overhead_factor=comm_overhead_factor,
+        boundary_on_attn=boundary_on_attn,
+        total_batch_size=total_batch_size,
+        target_ttft=target_ttft,
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+        max_seq_len=max_seq_len,
+        prefill_database=prefill_database,
+        prefill_backend_name=prefill_backend_name,
+        prefill_model_config=prefill_model_config,
+        prefill_parallel_config_list=prefill_parallel_config_list,
+        prefill_batch_size_list=prefill_batch_size_list,
+        prefill_system_name=prefill_system_name,
+        prefill_backend_version=prefill_backend_version,
+        prefill_max_candidates=prefill_max_candidates,
+        prefill_candidate_overflow=prefill_candidate_overflow,
+        max_prefill_gpus=max_prefill_gpus,
+        max_prefill_workers=max_prefill_workers,
+        prefill_degradation=prefill_degradation or _AFD_PREFILL_DEGRADATION,
+        decode_degradation=decode_degradation or _AFD_DECODE_DEGRADATION,
+        ttft_correction_factor=ttft_correction_factor or _AFD_TTFT_CORRECTION_FACTOR,
+        decode_latency_correction=decode_latency_correction,
+    )
+    return result_df

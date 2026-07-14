@@ -1133,6 +1133,30 @@ class AFDInferenceSession:
         # conservative K=2
         return max(t_a + t_a2f, t_f + t_f2a), False
 
+    def _pipeline_global_step_latency(
+        self,
+        t_a: float,
+        t_f: float,
+        t_a2f: float,
+        t_f2a: float,
+        *,
+        num_layers: int,
+    ) -> tuple[float, float, bool]:
+        """Return the Eq.5-style global decode-step latency.
+
+        ``_pipeline_tcycle`` returns the overlapped per-layer cadence. A
+        global decode step spans all in-flight microbatches across all
+        layers; that global step is TPOT because every request receives
+        its next token only after the whole in-flight batch advances.
+        """
+        cfg = self._afd_config
+        num_layers = max(int(num_layers or 1), 1)
+        num_microbatches = max(int(cfg.num_microbatches or 1), 1)
+        t_cycle, comm_hidden = self._pipeline_tcycle(t_a, t_f, t_a2f, t_f2a)
+        pipeline_fill = t_a + t_f + t_a2f + t_f2a
+        t_global_step = pipeline_fill + t_cycle * max(num_microbatches * num_layers - 1, 0)
+        return t_global_step, t_cycle, comm_hidden
+
     def _estimate_a_memory_dict(
         self,
         *,
@@ -1244,7 +1268,7 @@ class AFDInferenceSession:
         brk_t_f_per_layer: float,
         t_a2f_layer: float,
         t_f2a_layer: float,
-    ) -> tuple[float, float, float, dict, dict]:
+    ) -> tuple[float, float, float, float, dict, dict, bool]:
         """Integrate compute latency along the decode KV-cache length.
 
         Attention is the only op whose latency reads ``s``; sampling at
@@ -1252,10 +1276,12 @@ class AFDInferenceSession:
         used by ``_run_generation_phase`` and recovers the average
         per-step latency over the full decode trace.
 
-        Returns ``(t_a_layer_avg, t_f_layer_avg, t_step_avg, a_per_op,
-        f_per_op)``, where the scalars are per-step averages and the
-        per-op dicts are *per-step* totals (averaged across the trace)
-        in the same units as ``_sum_latency`` output.
+        Returns ``(t_a_layer_avg, t_f_layer_avg, t_cycle_avg,
+        t_step_avg, a_per_op, f_per_op, comm_hidden)``. ``t_step`` is the
+        global-batch decode step used as TPOT. The per-op dicts are
+        *per-step* totals (averaged across the trace) in the same units as
+        ``_sum_latency`` output. ``comm_hidden`` is the flag from the last
+        sampled stride.
 
         ``brk_t_a_per_layer`` / ``brk_t_f_per_layer`` are the per-layer
         intra-pool comm contributions (A-side combine, F-side AG+RS) —
@@ -1269,10 +1295,12 @@ class AFDInferenceSession:
 
         t_a_layer_sum = 0.0
         t_f_layer_sum = 0.0
+        t_cycle_sum = 0.0
         t_step_sum = 0.0
         a_per_op_sum: dict[str, float] = defaultdict(float)
         f_per_op_sum: dict[str, float] = defaultdict(float)
         total_repeat = 0
+        comm_hidden = False
 
         decode_steps = max(osl - 1, 1)
         for i in range(0, decode_steps, stride):
@@ -1307,11 +1335,18 @@ class AFDInferenceSession:
             # accumulation. ``sum_i max(...)`` ≠ ``max(sum_i ...)``;
             # the latter under-estimates the bottleneck whenever the
             # winning pool changes across the decode trace.
-            t_cycle_i, _ = self._pipeline_tcycle(t_a_layer_i, t_f_layer_i, t_a2f_layer, t_f2a_layer)
-            t_step_i = num_layers * t_cycle_i
+            t_step_i, t_cycle_i, comm_hidden_i = self._pipeline_global_step_latency(
+                t_a_layer_i,
+                t_f_layer_i,
+                t_a2f_layer,
+                t_f2a_layer,
+                num_layers=num_layers,
+            )
+            comm_hidden = comm_hidden_i
 
             t_a_layer_sum += t_a_layer_i * repeat
             t_f_layer_sum += t_f_layer_i * repeat
+            t_cycle_sum += t_cycle_i * repeat
             t_step_sum += t_step_i * repeat
             for k, v in a_per_op_i.items():
                 a_per_op_sum[k] += v * repeat
@@ -1322,10 +1357,19 @@ class AFDInferenceSession:
         denom = max(total_repeat, 1)
         t_a_layer_avg = t_a_layer_sum / denom
         t_f_layer_avg = t_f_layer_sum / denom
+        t_cycle_avg = t_cycle_sum / denom
         t_step_avg = t_step_sum / denom
         a_per_op = {k: v / denom for k, v in a_per_op_sum.items()}
         f_per_op = {k: v / denom for k, v in f_per_op_sum.items()}
-        return t_a_layer_avg, t_f_layer_avg, t_step_avg, a_per_op, f_per_op
+        return (
+            t_a_layer_avg,
+            t_f_layer_avg,
+            t_cycle_avg,
+            t_step_avg,
+            a_per_op,
+            f_per_op,
+            comm_hidden,
+        )
 
     def _simulate_phase(
         self,
@@ -1443,7 +1487,15 @@ class AFDInferenceSession:
         # ``num_layers`` per-layer compute and AFD does not currently
         # model them as separate stages.
         if phase == "decode":
-            t_a_layer, t_f_layer, t_step, a_per_op, f_per_op = self._integrate_decode_phase(
+            (
+                t_a_layer,
+                t_f_layer,
+                t_cycle,
+                t_step,
+                a_per_op,
+                f_per_op,
+                comm_hidden,
+            ) = self._integrate_decode_phase(
                 a_partition=a_partition,
                 f_partition=f_partition,
                 a_model=a_model,
@@ -1459,12 +1511,10 @@ class AFDInferenceSession:
                 t_a2f_layer=t_a2f_layer,
                 t_f2a_layer=t_f2a_layer,
             )
-            t_cycle = t_step / num_layers
-            # The ``comm_hidden`` flag is informational only; report it
-            # at the *average* operating point so it stays a single
-            # stable scalar even though the per-step pipeline above
-            # already accounts for s-dependent bottleneck shifts.
-            _, comm_hidden = self._pipeline_tcycle(t_a_layer, t_f_layer, t_a2f_layer, t_f2a_layer)
+            # ``comm_hidden`` was captured during the decode integration
+            # loop above — reuse it instead of re-evaluating
+            # ``_pipeline_tcycle`` (which would both waste compute and
+            # re-trigger the optimistic-degradation warning).
         else:
             # Prefill: single shot over the uncached input suffix; no
             # need to integrate, ``s == isl - prefix`` everywhere.
@@ -1744,7 +1794,10 @@ class AFDInferenceSession:
 
         if decode_metrics is not None:
             tpot = decode_metrics["t_step"]
-            tokens_per_s = b_total / (num_microbatches * (tpot / 1000.0)) if tpot > 0 else 0.0
+            # tpot (= t_step) is the global decode-step latency after
+            # pipeline overlap; the system produces b_total tokens per
+            # global step, so throughput = b_total / tpot.
+            tokens_per_s = b_total / (tpot / 1000.0) if tpot > 0 else 0.0
         else:
             tpot = 0.0
             tokens_per_s = 0.0
@@ -1792,7 +1845,7 @@ class AFDInferenceSession:
         is_oom = a_is_oom or f_is_oom
 
         tokens_per_s_per_user = (1000.0 / tpot) if tpot > 0 else 0.0
-        seq_per_s = tokens_per_s / max(osl - 1, 1) if tokens_per_s > 0 else 0.0
+        seq_per_s = tokens_per_s / max(osl, 1) if tokens_per_s > 0 else 0.0
 
         result_dict = {
             "model": self._model_path,
@@ -1851,10 +1904,12 @@ class AFDInferenceSession:
             "tokens/s/gpu": round(tokens_per_s_per_gpu, 2),
             "tokens/s/user": round(tokens_per_s_per_user, 2),
             "seq/s": round(seq_per_s, 3),
+            "request_rate": round(seq_per_s, 3),
             # ``a_batch_size`` is the total in-flight batch per A-Worker;
             # latency is evaluated on the derived microbatch, while the
             # user-visible concurrency remains the total in-flight batch.
             "concurrency": b_total,
+            "parallel": (f"a{cfg.n_a_nodes}n-tp{cfg.tp_a}+f{cfg.n_f_nodes}n-ep{cfg.f_moe_ep_size}"),
             "pipeline_model": cfg.pipeline_model,
             "num_microbatches": num_microbatches,
             "combined_with_pd": bool(cfg.combined_with_pd),

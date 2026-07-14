@@ -138,14 +138,77 @@ def _plot_worker_setup_table(
     buf.append(f"\n{exp_name} Top Configurations: (Ranked by {ranking_label})")
     table = PrettyTable()
 
+    # AFD frames also carry (p)-prefixed columns for the paired static
+    # prefill pool, so the AFD check must run before the disagg one.
+    is_afd = "(a)nodes" in top_configs.columns
     # Check if it is disagg config by checking for prefill/decode specific columns
-    is_disagg = "(p)tp" in top_configs.columns
+    is_disagg = "(p)tp" in top_configs.columns and not is_afd
 
     top_configs["cluster_request_rate"] = (
         top_configs["request_rate"] if preserve_ranking else top_configs["request_rate"] * top_configs["replicas"]
     )
 
-    if is_disagg:
+    if is_afd:
+        field_names = [
+            "Rank",
+            "backend",
+            _cli_bold("tokens/s/gpu"),
+            "tokens/s/user",
+            "req/s",
+            "TTFT",
+            "TPOT",
+            "request_latency",
+            "concurrency",
+            "total_gpus (used)",
+            "replicas",
+            "gpus/replica",
+            "(a)nodes",
+            "(a)tp",
+            "(a)bs",
+            "(f)nodes",
+            "(f)ep",
+            "(p)workers",
+        ]
+        if show_power:
+            field_names.append("power_w")
+        table.field_names = field_names
+        for i, row in enumerate(top_configs.to_dict("records")):
+            a_gpus = int(row["(a)workers"]) * int(row["(a)tp"])
+            f_gpus = int(row["(f)workers"])
+            prefill_workers = row.get("(p)workers")
+            has_prefill_pool = prefill_workers is not None and not pd.isna(prefill_workers)
+            if has_prefill_pool:
+                p_workers = int(prefill_workers)
+                p_gpus = p_workers * int(row.get("(p)tp", 1))
+                gpus_replica_str = f"{row['num_total_gpus']} (=A{a_gpus}+F{f_gpus}+P{p_gpus})"
+                p_workers_str = f"{p_workers} (tp{int(row.get('(p)tp', 1))})"
+            else:
+                gpus_replica_str = f"{row['num_total_gpus']} (=A{a_gpus}+F{f_gpus})"
+                p_workers_str = "-"
+            row_data = [
+                i + 1,
+                row["backend"],
+                _cli_bold(f"{row['tokens/s/gpu_cluster']:.2f}"),
+                f"{row['tokens/s/user']:.2f}",
+                f"{row['cluster_request_rate']:.2f}",
+                f"{row['ttft']:.2f}",
+                f"{row['tpot']:.2f}",
+                f"{row['request_latency']:.2f}",
+                f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
+                f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
+                row["replicas"],
+                gpus_replica_str,
+                row["(a)nodes"],
+                row["(a)tp"],
+                row["(a)bs"],
+                row["(f)nodes"],
+                row["(f)ep"],
+                p_workers_str,
+            ]
+            if show_power:
+                row_data.append(f"{row['power_w']:.1f}W")
+            table.add_row(row_data)
+    elif is_disagg:
         field_names = [
             "Rank",
             "backend",
@@ -471,6 +534,11 @@ def log_final_summary(
         else:
             bold_msg = _cli_bold(f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu")
         summary_box.append(f"    Best Experiment Chosen: {bold_msg}")
+        afd_value = best_throughputs.get("afd")
+        if afd_value is not None and afd_value > 0:
+            reference = max((v for k, v in best_throughputs.items() if k != "afd" and v > 0), default=0.0)
+            if reference > 0:
+                summary_box.append(f"    AFD vs best non-AFD: {afd_value / reference:.2f}x")
     else:
         bold_msg = _cli_bold(f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu")
         summary_box.append(f"    Best Experiment Chosen: {bold_msg}")

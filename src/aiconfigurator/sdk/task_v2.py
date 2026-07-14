@@ -31,7 +31,7 @@ import copy
 import dataclasses
 import logging
 import warnings
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -306,6 +306,128 @@ def build_disagg_parallel_lists(
 
 
 # ---------------------------------------------------------------------------
+# AFD search space helpers (migrated from legacy sdk.task)
+# ---------------------------------------------------------------------------
+
+
+def build_afd_parallel_lists(
+    total_gpus: int,
+    gpus_per_node: int,
+    is_moe: bool,
+    num_experts: int = 0,
+    *,
+    search_config: Mapping[str, Any] | None = None,
+) -> list[tuple[int, int, int, int, int, str]]:
+    """Enumerate AFD candidate topologies for the default-mode sweep.
+
+    Returns a list of ``(n_a_nodes, n_f_nodes, tp_a, f_moe_ep_size,
+    num_microbatches, pipeline_model)`` tuples.
+
+    Candidates satisfy the hard constraints:
+    * GPU budget -- ``(n_a_nodes + n_f_nodes) * gpus_per_node <= total_gpus``
+    * ``tp_a`` divides ``gpus_per_node``
+    * ``f_moe_ep_size`` divides ``tp_f = n_f_nodes * gpus_per_node``
+    * ``num_experts % f_moe_ep_size == 0`` when known
+    """
+    if gpus_per_node < 1 or total_gpus < 1:
+        return []
+
+    total_nodes = total_gpus // gpus_per_node
+    if total_nodes < 2:
+        return []
+
+    search = dict(search_config or {})
+    tp_a_candidates = search.get("tp_a_list")
+    if tp_a_candidates is None:
+        tp_a_candidates = sorted({d for d in (1, 2, 4, gpus_per_node) if d >= 1 and gpus_per_node % d == 0})
+    else:
+        tp_a_candidates = sorted({int(tp) for tp in tp_a_candidates if gpus_per_node % int(tp) == 0})
+
+    microbatch_candidates = list(search.get("microbatch_list") or [2, 3, 4])
+    pipeline_candidates = list(search.get("pipeline_model_list") or ["optimistic", "conservative"])
+    f_moe_ep_size_list = search.get("f_moe_ep_size_list")
+    max_af_ratio = float(search.get("max_af_ratio", 4.0))
+    max_candidates = int(search.get("max_candidates", 2000))
+    candidate_overflow = str(search.get("candidate_overflow", "error"))
+
+    candidates: list[tuple[int, int, int, int, int, str]] = []
+    for n_a_nodes in range(1, total_nodes):
+        for n_f_nodes in range(1, total_nodes - n_a_nodes + 1):
+            if n_a_nodes / n_f_nodes > max_af_ratio:
+                continue
+            tp_f = n_f_nodes * gpus_per_node
+            if is_moe:
+                raw_ep_candidates = f_moe_ep_size_list or [1, 2, "n_f_nodes", "tp_f"]
+                resolved_ep_candidates: set[int] = set()
+                for ep in raw_ep_candidates:
+                    if ep == "n_f_nodes":
+                        resolved_ep_candidates.add(n_f_nodes)
+                    elif ep == "tp_f":
+                        resolved_ep_candidates.add(tp_f)
+                    else:
+                        resolved_ep_candidates.add(int(ep))
+                ep_candidates = sorted(
+                    ep
+                    for ep in resolved_ep_candidates
+                    if ep >= 1 and tp_f % ep == 0 and (num_experts <= 0 or num_experts % ep == 0)
+                )
+            else:
+                ep_candidates = [1]
+            for tp_a in tp_a_candidates:
+                for f_moe_ep_size in ep_candidates:
+                    for num_microbatches in microbatch_candidates:
+                        for pipeline_model in pipeline_candidates:
+                            # Skip optimistic + mb < 3: the K=3 pipeline
+                            # requires num_microbatches >= 2 + t_c/max(t_a,
+                            # t_f), which is >= 3 whenever t_c > 0 (the
+                            # normal case).  mb=2 + optimistic always degrades
+                            # to conservative, producing a duplicate of the
+                            # mb=2 + conservative candidate and a flood of
+                            # per-stride warnings.
+                            if pipeline_model == "optimistic" and num_microbatches < 3:
+                                continue
+                            candidates.append(
+                                (n_a_nodes, n_f_nodes, tp_a, f_moe_ep_size, num_microbatches, pipeline_model)
+                            )
+    if len(candidates) > max_candidates:
+        message = (
+            f"AFD default sweep produced {len(candidates)} candidates, exceeding "
+            f"afd_config.search.max_candidates={max_candidates}."
+        )
+        if candidate_overflow == "truncate":
+            logger.warning("%s Truncating deterministically to the first %d candidates.", message, max_candidates)
+            candidates = candidates[:max_candidates]
+        else:
+            raise ValueError(f"{message} Reduce afd_config.search or set candidate_overflow='truncate'.")
+    logger.info("AFD default sweep candidate count: %d", len(candidates))
+    return candidates
+
+
+def _lookup_num_gpus_per_node(system_name: str) -> int | None:
+    """Best-effort lookup of ``num_gpus_per_node`` from a system's yaml spec."""
+    import os
+
+    from aiconfigurator.sdk.perf_database import get_systems_paths
+
+    for systems_root in get_systems_paths():
+        yaml_path = os.path.join(systems_root, f"{system_name}.yaml")
+        if not os.path.isfile(yaml_path):
+            continue
+        try:
+            import yaml as _yaml
+
+            with open(yaml_path) as fh:
+                spec = _yaml.safe_load(fh) or {}
+        except Exception:
+            logger.debug("Could not read system yaml at %s", yaml_path, exc_info=True)
+            continue
+        node = spec.get("node") if isinstance(spec, dict) else None
+        if isinstance(node, dict) and isinstance(node.get("num_gpus_per_node"), int):
+            return int(node["num_gpus_per_node"])
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Task
 # ---------------------------------------------------------------------------
 
@@ -328,7 +450,7 @@ class Task:
     """
 
     # ====== 1. Mode + workload ======
-    serving_mode: Literal["agg", "disagg"] = "agg"
+    serving_mode: Literal["agg", "disagg", "afd"] = "agg"
     isl: int = 4000
     osl: int = 1000
     prefix: int = 0
@@ -456,11 +578,44 @@ class Task:
     # not a primitive value).
     predictor: Any = field(default=None, repr=False)
 
-    # ====== 9. Internal — resolved in __post_init__ ======
+    # ====== 10. AFD config (serving_mode='afd') ======
+    afd_total_gpus: int | None = None  # AFD GPU budget (defaults to total_gpus)
+    afd_combined_with_pd: bool = True
+    afd_comm_overhead_factor: float = 1.0
+    afd_boundary_on_attn: bool = True
+    afd_total_batch_size: int | None = None
+    # AFD pinned topology (single-point mode: skip sweep, run AFDInferenceSession)
+    afd_n_a_nodes: int | None = None
+    afd_n_f_nodes: int | None = None
+    afd_tp_a: int | None = None
+    afd_a_batch_size: int | None = None
+    # AFD search space config (used only when topology is NOT pinned)
+    afd_tp_a_candidates: list[int] | None = None
+    afd_microbatch_candidates: list[int] | None = None
+    afd_pipeline_model_candidates: list[str] | None = None
+    afd_f_moe_ep_size_candidates: list[int | str] | None = None
+    afd_max_af_ratio: float = 4.0
+    afd_max_candidates: int = 2000
+    afd_candidate_overflow: str = "error"
+    # AFD prefill search config (used when combined_with_pd=True)
+    afd_prefill_batch_size_list: list[int] | None = None
+    afd_prefill_max_candidates: int = 256
+    afd_prefill_candidate_overflow: str = "error"
+    afd_max_prefill_gpus: int | None = None
+    afd_max_prefill_workers: int | None = None
+    # AFD calibration
+    afd_prefill_degradation: float | None = None
+    afd_decode_degradation: float | None = None
+    afd_ttft_correction_factor: float | None = None
+    afd_decode_latency_correction: float = 1.0
+
+    # ====== 11. Internal — resolved in __post_init__ ======
     _is_moe: bool = field(default=False, repr=False, init=False)
     _model_family: str = field(default="", repr=False, init=False)
     _raw_config: dict = field(default_factory=dict, repr=False, init=False)
     _architecture: str = field(default="", repr=False, init=False)
+    _afd_parallel_config_list: list = field(default_factory=list, repr=False, init=False)
+    _afd_gpus_per_node: int = field(default=8, repr=False, init=False)
 
     # =====================================================================
     # Construction
@@ -536,19 +691,19 @@ class Task:
 
     @property
     def primary_model_path(self) -> str:
-        return self.model_path if self.serving_mode == "agg" else self.prefill_model_path
+        return self.model_path if self.serving_mode in ("agg", "afd") else self.prefill_model_path
 
     @property
     def primary_system_name(self) -> str:
-        return self.system_name if self.serving_mode == "agg" else self.prefill_system_name
+        return self.system_name if self.serving_mode in ("agg", "afd") else self.prefill_system_name
 
     @property
     def primary_backend_name(self) -> str:
-        return self.backend_name if self.serving_mode == "agg" else self.prefill_backend_name
+        return self.backend_name if self.serving_mode in ("agg", "afd") else self.prefill_backend_name
 
     @property
     def primary_backend_version(self) -> str | None:
-        return self.backend_version if self.serving_mode == "agg" else self.prefill_backend_version
+        return self.backend_version if self.serving_mode in ("agg", "afd") else self.prefill_backend_version
 
     # =====================================================================
     # __post_init__
@@ -571,7 +726,7 @@ class Task:
             return
         wideep = (
             self.enable_wideep
-            if self.serving_mode == "agg"
+            if self.serving_mode in ("agg", "afd")
             else (self.prefill_enable_wideep or self.decode_enable_wideep)
         )
         if wideep:
@@ -581,7 +736,7 @@ class Task:
         """v1 _validate_megamoe_backend_support: megamoe is sglang + DeepSeek-V4-Pro + Blackwell only."""
         if self.moe_backend != "megamoe":
             return
-        roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
+        roles = ["agg"] if self.serving_mode in ("agg", "afd") else ["prefill", "decode"]
         if self._role_attr(roles[0], "backend_name") != "sglang":
             raise ValueError("moe_backend='megamoe' is currently supported only for the SGLang backend.")
         if self._model_family != "DEEPSEEKV4":
@@ -606,7 +761,7 @@ class Task:
 
     def _validate_deepseek_v4_hardware(self) -> None:
         """Reject native DeepSeek-V4 FP4-expert checkpoints on Hopper (use the FP8 build)."""
-        roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
+        roles = ["agg"] if self.serving_mode in ("agg", "afd") else ["prefill", "decode"]
         for role in roles:
             model = self._role_attr(role, "model_path")
             replacement = _DEEPSEEK_V4_NATIVE_FP4_TO_FP8_MODEL.get(model)
@@ -647,7 +802,7 @@ class Task:
             )
 
     def _resolve_model_identity(self) -> None:
-        primary = self.model_path if self.serving_mode == "agg" else self.prefill_model_path
+        primary = self.model_path if self.serving_mode in ("agg", "afd") else self.prefill_model_path
         if not primary:
             return
         info = get_model_config_from_model_path(primary)
@@ -683,7 +838,7 @@ class Task:
                 return current
             return get_latest_database_version(system=system, backend=backend)
 
-        if self.serving_mode == "agg":
+        if self.serving_mode in ("agg", "afd"):
             if self.system_name and self.backend_name:
                 self.backend_version = _resolve(self.system_name, self.backend_name, self.backend_version)
         else:
@@ -701,7 +856,7 @@ class Task:
 
         Priority (highest wins): explicit field > HF base > bfloat16 fallback.
         """
-        roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
+        roles = ["agg"] if self.serving_mode in ("agg", "afd") else ["prefill", "decode"]
         base = _infer_quant_modes_from_raw_config(self._raw_config)
 
         # GPT-OSS on Blackwell (trtllm): default MoE to w4a8_mxfp4_mxfp8 for higher
@@ -845,6 +1000,9 @@ class Task:
         )
 
     def _resolve_search_space(self) -> None:
+        if self.serving_mode == "afd":
+            self._resolve_afd_search()
+            return
         roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
         # Candidate fields the user did NOT supply are eligible for default augmentation
         # (large-PP). User-supplied candidates win, matching v1's yaml-over-defaults order.
@@ -1014,6 +1172,90 @@ class Task:
         if self.max_decode_workers is None:
             self.max_decode_workers = 32
 
+    def _resolve_afd_search(self) -> None:
+        """Resolve AFD search space: enumerate candidate topologies.
+
+        When afd_n_a_nodes/afd_n_f_nodes/afd_tp_a are all set, the topology is
+        pinned and no sweep is needed (single-point mode via AFDInferenceSession).
+        """
+        gpus_per_node = _lookup_num_gpus_per_node(self.system_name)
+        if gpus_per_node is None:
+            raise ValueError(
+                f"Cannot resolve num_gpus_per_node for system '{self.system_name}'; "
+                "AFD requires a valid system yaml spec."
+            )
+        self._afd_gpus_per_node = gpus_per_node
+
+        # Pinned topology: skip sweep enumeration
+        if self.afd_n_a_nodes is not None and self.afd_n_f_nodes is not None and self.afd_tp_a is not None:
+            self._afd_parallel_config_list = []  # empty = single-point mode
+            return
+
+        effective_total_gpus = self.afd_total_gpus or self.total_gpus
+        if effective_total_gpus is None:
+            raise ValueError("total_gpus is required for serving_mode='afd'.")
+        if effective_total_gpus < 2 * gpus_per_node:
+            raise ValueError(
+                f"AFD requires at least 2 nodes ({2 * gpus_per_node} GPUs at "
+                f"{gpus_per_node} GPUs/node), got total_gpus={effective_total_gpus}."
+            )
+
+        # Obtain num_experts for MoE models
+        num_experts = 0
+        if self._is_moe:
+            try:
+                num_experts = int(get_model_config_from_model_path(self.model_path).get("num_experts", 0) or 0)
+            except Exception:
+                num_experts = 0
+
+        # Build search config from Task fields
+        search_config: dict[str, Any] = {}
+        if self.afd_tp_a_candidates is not None:
+            search_config["tp_a_list"] = self.afd_tp_a_candidates
+        if self.afd_microbatch_candidates is not None:
+            search_config["microbatch_list"] = self.afd_microbatch_candidates
+        if self.afd_pipeline_model_candidates is not None:
+            search_config["pipeline_model_list"] = self.afd_pipeline_model_candidates
+        if self.afd_f_moe_ep_size_candidates is not None:
+            search_config["f_moe_ep_size_list"] = self.afd_f_moe_ep_size_candidates
+        search_config["max_af_ratio"] = self.afd_max_af_ratio
+        search_config["max_candidates"] = self.afd_max_candidates
+        search_config["candidate_overflow"] = self.afd_candidate_overflow
+
+        self._afd_parallel_config_list = build_afd_parallel_lists(
+            total_gpus=effective_total_gpus,
+            gpus_per_node=gpus_per_node,
+            is_moe=self._is_moe,
+            num_experts=num_experts,
+            search_config=search_config,
+        )
+
+        # Also resolve disagg-style prefill parallel lists for combined-with-PD
+        if self.afd_combined_with_pd:
+            prefill_cfg, _ = build_disagg_parallel_lists(
+                backend_name=self.backend_name,
+                is_moe=self._is_moe,
+                prefill_system=self.system_name,
+                decode_system=self.system_name,
+                prefill_enable_wideep=self.enable_wideep,
+                decode_enable_wideep=self.enable_wideep,
+                moe_backend=self.moe_backend,
+            )
+            # Store prefill parallel for sweep_afd_kwargs
+            self.prefill_num_gpu_candidates = prefill_cfg["num_gpu_per_worker"]
+            self.prefill_tp_candidates = prefill_cfg["tp_list"]
+            self.prefill_pp_candidates = prefill_cfg["pp_list"]
+            self.prefill_dp_candidates = prefill_cfg["dp_list"]
+            self.prefill_moe_tp_candidates = prefill_cfg["moe_tp_list"]
+            self.prefill_moe_ep_candidates = prefill_cfg["moe_ep_list"]
+            # Propagate resolved agg quant modes to prefill role so
+            # build_model_config(role="prefill") inherits the same promotions
+            # (e.g. GPT-OSS Blackwell w4a8_mxfp4_mxfp8)
+            for qkey in ("gemm_quant_mode", "moe_quant_mode", "kvcache_quant_mode",
+                         "fmha_quant_mode", "comm_quant_mode"):
+                if getattr(self, f"prefill_{qkey}") is None:
+                    setattr(self, f"prefill_{qkey}", getattr(self, qkey))
+
     def _fill_role_search(self, role: str, src: dict[str, list[int]]) -> None:
         map_to_attr = {
             "num_gpu_per_worker": f"{role}_num_gpu_candidates",
@@ -1171,6 +1413,8 @@ class Task:
             self._validate_agg()
         elif self.serving_mode == "disagg":
             self._validate_disagg()
+        elif self.serving_mode == "afd":
+            self._validate_afd()
         else:
             raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
         self._validate_database_quant_modes()
@@ -1204,6 +1448,16 @@ class Task:
         # fp8_static is not hard-gated to trtllm (see _validate_agg); the
         # per-role DB check in _validate_database_quant_modes governs support.
 
+    def _validate_afd(self) -> None:
+        if not self.model_path:
+            raise ValueError("afd mode requires model_path")
+        if not self.system_name:
+            raise ValueError("afd mode requires system_name")
+        if self.total_gpus is None:
+            raise ValueError("afd mode requires total_gpus")
+        if self.backend_name == "vllm" and self._model_family == "DEEPSEEK":
+            raise NotImplementedError("AIConfigurator does not yet support the DeepSeek family on the vLLM backend.")
+
     def _validate_database_quant_modes(self) -> None:
         """Validate user's quant modes against the perf database's supported list.
 
@@ -1222,6 +1476,9 @@ class Task:
             return
 
         if self.serving_mode == "agg":
+            self._check_role_against_db("agg", validate_context=True, validate_generation=True)
+        elif self.serving_mode == "afd":
+            # AFD uses the agg worker config for both A and F pools
             self._check_role_against_db("agg", validate_context=True, validate_generation=True)
         else:
             self._check_role_against_db("prefill", validate_context=True, validate_generation=False)
@@ -1470,6 +1727,57 @@ class Task:
             "require_same_tp": require_same_tp,
         }
 
+    def sweep_afd_kwargs(self, *, database) -> dict[str, Any]:
+        """Return the exact kwargs needed for sweep.sweep_afd."""
+        if self.serving_mode != "afd":
+            raise ValueError(f"sweep_afd_kwargs requires serving_mode='afd', got {self.serving_mode!r}")
+
+        runtime_config = self.build_runtime_config()
+        if self.pareto_sweep:
+            runtime_config.tpot = _LEGACY_TPOT_SWEEP
+
+        # Build prefill parallel config list for combined-with-PD
+        prefill_parallel_config_list = None
+        prefill_model_config = None
+        if self.afd_combined_with_pd:
+            prefill_parallel_config_list = list(self.iter_parallel("prefill"))
+            prefill_model_config = self.build_model_config(role="prefill")
+
+        return {
+            "model_path": self.model_path,
+            "runtime_config": runtime_config,
+            "database": database,
+            "backend_name": self.backend_name,
+            "model_config": self.build_model_config(role="agg"),
+            "afd_parallel_config_list": [tuple(c) for c in self._afd_parallel_config_list],
+            "gpus_per_node": self._afd_gpus_per_node,
+            "total_gpus": self.total_gpus,
+            "combined_with_pd": self.afd_combined_with_pd,
+            "comm_overhead_factor": self.afd_comm_overhead_factor,
+            "boundary_on_attn": self.afd_boundary_on_attn,
+            "total_batch_size": self.afd_total_batch_size,
+            "target_ttft": self.ttft,
+            "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
+            "max_seq_len": self.max_seq_len,
+            # combined-with-PD prefill options
+            "prefill_database": database if self.afd_combined_with_pd else None,
+            "prefill_backend_name": self.backend_name if self.afd_combined_with_pd else None,
+            "prefill_model_config": prefill_model_config,
+            "prefill_parallel_config_list": prefill_parallel_config_list,
+            "prefill_batch_size_list": self.afd_prefill_batch_size_list,
+            "prefill_system_name": self.system_name if self.afd_combined_with_pd else None,
+            "prefill_backend_version": self.backend_version if self.afd_combined_with_pd else None,
+            "prefill_max_candidates": self.afd_prefill_max_candidates,
+            "prefill_candidate_overflow": self.afd_prefill_candidate_overflow,
+            "max_prefill_gpus": self.afd_max_prefill_gpus,
+            "max_prefill_workers": self.afd_max_prefill_workers,
+            # calibration
+            "prefill_degradation": self.afd_prefill_degradation,
+            "decode_degradation": self.afd_decode_degradation,
+            "ttft_correction_factor": self.afd_ttft_correction_factor,
+            "decode_latency_correction": self.afd_decode_latency_correction,
+        }
+
     # =====================================================================
     # Optimization entry point
     # =====================================================================
@@ -1517,7 +1825,7 @@ class Task:
         """
         if validate:
             self.validate()
-        from aiconfigurator.sdk.sweep import sweep_agg, sweep_disagg
+        from aiconfigurator.sdk.sweep import sweep_afd, sweep_agg, sweep_disagg
 
         if self.serving_mode == "agg":
             if autoscale:
@@ -1527,6 +1835,14 @@ class Task:
                 **self.sweep_agg_kwargs(database=database),
                 predictor=self.predictor,
             )
+        if self.serving_mode == "afd":
+            if autoscale:
+                raise ValueError("autoscale is not supported for afd serving mode")
+            database = self._load_database(self.system_name, self.backend_name, self.backend_version)
+            if not self._afd_parallel_config_list:
+                # Pinned topology: single-point via AFDInferenceSession
+                return self._run_afd_single_point(database)
+            return sweep_afd(**self.sweep_afd_kwargs(database=database))
         if self.serving_mode == "disagg":
             prefill_database = self._load_database(
                 self.prefill_system_name, self.prefill_backend_name, self.prefill_backend_version
@@ -1729,5 +2045,93 @@ class Task:
         d_dict = d_summary.get_summary_df().iloc[0].to_dict()
         return _rate_match_dict(p_dict, prefill_num_workers, d_dict, decode_num_workers)
 
+    def _run_afd_single_point(self, database):
+        """Run a single pinned-topology AFD estimate via AFDInferenceSession."""
+        import copy
 
-__all__ = ["ParallelChoice", "Task"]
+        from aiconfigurator.sdk.backends.factory import get_backend
+        from aiconfigurator.sdk.config import AFDConfig
+        from aiconfigurator.sdk.inference_session import AFDInferenceSession
+
+        gpus_per_node = self._afd_gpus_per_node
+        n_a_nodes = self.afd_n_a_nodes
+        n_f_nodes = self.afd_n_f_nodes
+        tp_a = self.afd_tp_a
+
+        backend = get_backend(self.backend_name)
+        base_model_config = self.build_model_config(role="agg")
+
+        tp_f = n_f_nodes * gpus_per_node
+        n_a_workers = (n_a_nodes * gpus_per_node) // tp_a
+
+        # Derive a_batch_size from total_batch_size if provided
+        a_batch_size = self.afd_a_batch_size or 128
+        if self.afd_total_batch_size is not None:
+            if n_a_workers <= 0 or self.afd_total_batch_size % n_a_workers != 0:
+                raise ValueError(
+                    f"afd_total_batch_size={self.afd_total_batch_size} must be exactly divisible "
+                    f"by n_a_workers={n_a_workers}."
+                )
+            derived = self.afd_total_batch_size // n_a_workers
+            if self.afd_a_batch_size is not None and self.afd_a_batch_size != derived:
+                raise ValueError(
+                    f"afd_a_batch_size={self.afd_a_batch_size} conflicts with "
+                    f"afd_total_batch_size={self.afd_total_batch_size} / n_a_workers={n_a_workers} = {derived}."
+                )
+            a_batch_size = derived
+
+        # Determine f_moe_ep_size (default: tp_f for MoE, 1 for dense)
+        f_moe_ep_size = tp_f if self._is_moe else 1
+        if tp_f % f_moe_ep_size != 0:
+            raise ValueError(f"f_moe_ep_size ({f_moe_ep_size}) must divide tp_f ({tp_f}).")
+        f_moe_tp = tp_f // f_moe_ep_size
+
+        afd_config = AFDConfig(
+            n_a_nodes=n_a_nodes,
+            n_f_nodes=n_f_nodes,
+            tp_a=tp_a,
+            tp_f=tp_f,
+            a_batch_size=a_batch_size,
+            n_a_workers=n_a_workers,
+            gpus_per_node=gpus_per_node,
+            f_moe_ep_size=f_moe_ep_size,
+            comm_overhead_factor=self.afd_comm_overhead_factor,
+            boundary_on_attn=self.afd_boundary_on_attn,
+        )
+
+        a_model_config = copy.deepcopy(base_model_config)
+        a_model_config.tp_size = tp_a
+        a_model_config.pp_size = 1
+        a_model_config.moe_tp_size = tp_a
+        a_model_config.moe_ep_size = 1
+        a_model_config.attention_dp_size = 1
+
+        f_model_config = copy.deepcopy(base_model_config)
+        f_model_config.tp_size = tp_f
+        f_model_config.pp_size = 1
+        f_model_config.moe_tp_size = f_moe_tp
+        f_model_config.moe_ep_size = f_moe_ep_size
+        f_model_config.attention_dp_size = 1
+
+        runtime_config = self.build_runtime_config(
+            batch_size=afd_config.n_a_workers * afd_config.a_batch_size
+        )
+
+        session = AFDInferenceSession(
+            model_path=self.model_path,
+            a_model_config=a_model_config,
+            f_model_config=f_model_config,
+            database=database,
+            backend=backend,
+            afd_config=afd_config,
+        )
+        summary = session.run_afd(
+            runtime_config,
+            phase="both",
+            free_gpu_memory_fraction=self.free_gpu_memory_fraction,
+            max_seq_len=self.max_seq_len,
+        )
+        return summary.get_summary_df()
+
+
+__all__ = ["ParallelChoice", "Task", "_lookup_num_gpus_per_node", "build_afd_parallel_lists"]

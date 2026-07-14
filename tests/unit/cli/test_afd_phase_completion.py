@@ -411,6 +411,43 @@ def test_afd_summary_concurrency_reflects_total_in_flight_batch(monkeypatch):
     assert result["b_micro_total"] == session._afd_config.n_a_workers * 2
 
 
+def test_afd_summary_uses_global_batch_tpot_for_pipeline(monkeypatch):
+    decode_metrics = _fake_phase_metrics(
+        t_a_layer=1.0,
+        t_f_layer=2.0,
+        balance_ratio=0.5,
+        t_a2f_layer=0.5,
+        t_f2a_layer=0.5,
+        t_step=26.0,
+        comm_hidden=True,
+    )
+    session = _build_afd_session_with_phase_metrics(
+        monkeypatch,
+        prefill_metrics=decode_metrics,
+        decode_metrics=decode_metrics,
+    )
+
+    global_step, cycle, comm_hidden = session._pipeline_global_step_latency(
+        1.0,
+        2.0,
+        0.5,
+        0.5,
+        num_layers=4,
+    )
+    assert cycle == pytest.approx(2.0)
+    assert global_step == pytest.approx(26.0)
+    assert comm_hidden is True
+
+    summary = session.run_afd(RuntimeConfig(isl=128, osl=10), phase="decode")
+    result = summary.get_result_dict()
+    expected_b_total = session._afd_config.n_a_workers * session._afd_config.a_batch_size
+
+    assert result["tpot"] == pytest.approx(26.0)
+    assert result["request_latency"] == pytest.approx(26.0 * 9)
+    assert result["tokens/s"] == pytest.approx(expected_b_total * 1000.0 / 26.0, rel=1e-3)
+    assert result["tokens/s/user"] == pytest.approx(1000.0 / 26.0, rel=1e-3)
+
+
 def test_afd_summary_phase_both_paired_scalars_and_nan_unprefixed(monkeypatch):
     """``phase='both'`` writes both ``prefill_*`` and ``decode_*`` paired
     scalars and leaves the un-prefixed "headline" form NaN/None.
@@ -463,7 +500,15 @@ def test_afd_summary_phase_both_paired_scalars_and_nan_unprefixed(monkeypatch):
 
     # Un-prefixed scalars are NaN (numeric) / None (bool) so consumers
     # cannot accidentally treat decode-only values as the both-phase answer.
-    for key in ("t_a_layer", "t_f_layer", "t_a2f_layer", "t_f2a_layer", "t_c_layer", "t_step", "balance_ratio"):
+    for key in (
+        "t_a_layer",
+        "t_f_layer",
+        "t_a2f_layer",
+        "t_f2a_layer",
+        "t_c_layer",
+        "t_step",
+        "balance_ratio",
+    ):
         assert math.isnan(result[key]), f"expected NaN un-prefixed {key} in phase=both, got {result[key]!r}"
     assert result["comm_hidden"] is None
 
