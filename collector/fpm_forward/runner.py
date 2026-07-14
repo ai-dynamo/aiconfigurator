@@ -321,7 +321,12 @@ def _case_payload(
     selected_point_count: int | None = None,
 ) -> dict[str, object]:
     design = _selected_design(plan, cell)
-    selected_point_count = selected_point_count or len(design.selected)
+    profile = cell.execution_profile
+    selected_point_count = profile.selected_point_count if selected_point_count is None else selected_point_count
+    if selected_point_count < 1 or selected_point_count > profile.selected_point_count:
+        raise ValueError(
+            f"selected_point_count={selected_point_count} is outside the frozen profile for {cell.cell_id}"
+        )
     return {
         "schema_name": "aic_fpm_case_manifest",
         "schema_version": 1,
@@ -331,8 +336,14 @@ def _case_payload(
         "warmup_repeats": plan.options.warmup_repeats,
         "measured_repeats": plan.options.measurement_repeats,
         "selected_point_count": selected_point_count,
-        "ordered_shapes": [point.to_dict() for point in design.ordered_points],
+        "ordered_shapes": [point.to_dict() for point in profile.ordered_points],
         "sampling_sha256": design.sha256,
+        "execution_profile": {
+            "max_batch_size": profile.max_batch_size,
+            "max_num_tokens": profile.max_num_tokens,
+            "max_seq_len": profile.max_seq_len,
+            "gpu_memory_utilization": profile.gpu_memory_utilization,
+        },
     }
 
 
@@ -343,11 +354,14 @@ def _cell_generator_overrides(
     *,
     selected_point_count: int | None = None,
 ) -> dict[str, Any]:
-    design = _selected_design(plan, cell)
-    selected = design.selected[:selected_point_count]
-    maximum_batch = max(point.batch_size for point in selected)
-    maximum_tokens = max(point.batch_size * point.suffix_length for point in selected)
-    maximum_length = max(point.prefix_length + point.suffix_length + 1 for point in selected)
+    profile = cell.execution_profile
+    if selected_point_count is not None and not 1 <= selected_point_count <= profile.selected_point_count:
+        raise ValueError(
+            f"selected_point_count={selected_point_count} is outside the frozen profile for {cell.cell_id}"
+        )
+    unsupported_base = set(base) - {"K8sConfig", "generator_dynamo_version"}
+    if unsupported_base:
+        raise ValueError(f"FPM runner accepts deployment-only Generator inputs, got {sorted(unsupported_base)}")
     scheduler_args = [
         "--scheduler-cls",
         "fpm_scheduler.InstrumentedScheduler",
@@ -389,22 +403,23 @@ def _cell_generator_overrides(
                 "moe_tensor_parallel_size": cell.topology.moe_tp,
                 "moe_expert_parallel_size": cell.topology.moe_ep,
                 "gpus_per_worker": total_gpus,
-                "max_batch_size": maximum_batch,
-                "max_num_tokens": maximum_tokens,
-                "max_seq_len": maximum_length,
+                "max_batch_size": profile.max_batch_size,
+                "max_num_tokens": profile.max_num_tokens,
+                "max_seq_len": profile.max_seq_len,
                 "tokens_per_block": plan.options.kv_block_size,
                 "kv_cache_dtype": cell.kv_cache_dtype,
-                "extra_cli_args": scheduler_args,
+                "gpu_memory_utilization": profile.gpu_memory_utilization,
+                "compilation_config": profile.compilation_config,
+                "extra_cli_args": [],
             }
         },
     }
     policy = cell.backend_policy.generator_overrides
     merged = _deep_merge(_deep_merge(base, generated), policy)
 
-    base_env = (base.get("K8sConfig") or {}).get("extra_env") or []
     policy_env = (policy.get("K8sConfig") or {}).get("extra_env") or []
     resolved_env: dict[str, dict[str, str]] = {}
-    for item in [*base_env, *policy_env, *env]:
+    for item in [*policy_env, *env]:
         if not isinstance(item, dict) or not isinstance(item.get("name"), str):
             raise TypeError("K8sConfig.extra_env entries must be {name, value} mappings")
         name = item["name"]
@@ -414,10 +429,8 @@ def _cell_generator_overrides(
         resolved_env[name] = copy.deepcopy(item)
     merged.setdefault("K8sConfig", {})["extra_env"] = list(resolved_env.values())
 
-    base_args = ((base.get("params") or {}).get("agg") or {}).get("extra_cli_args") or []
     policy_args = ((policy.get("params") or {}).get("agg") or {}).get("extra_cli_args") or []
-    base_agg = (base.get("params") or {}).get("agg") or {}
-    resolved_args = [*base_args, *policy_args]
+    resolved_args = [*policy_args]
     has_benchmark_timeout = any(
         str(argument) == "--benchmark-timeout" or str(argument).startswith("--benchmark-timeout=")
         for argument in resolved_args
@@ -427,37 +440,22 @@ def _cell_generator_overrides(
         # can legitimately run longer even though the outer Kubernetes exec
         # timeout is four hours, so make the inner deadline campaign-safe.
         resolved_args.extend(["--benchmark-timeout", str(DEFAULT_BENCHMARK_TIMEOUT_SECONDS)])
-    gpu_memory_utilization = base_agg.get("gpu_memory_utilization")
-    has_gpu_memory_arg = any(
-        str(argument) == "--gpu-memory-utilization" or str(argument).startswith("--gpu-memory-utilization=")
-        for argument in resolved_args
-    )
-    if gpu_memory_utilization is not None and not has_gpu_memory_arg:
-        # Generator currently preserves this legacy request field but does not
-        # lower it into the vLLM command.  FPM capacity depends on the exact KV
-        # budget, so make the execution contract explicit here.
-        resolved_args.extend(["--gpu-memory-utilization", str(gpu_memory_utilization)])
-    compilation_config = base_agg.get("compilation_config")
-    if compilation_config is not None and "--compilation-config" not in resolved_args:
-        if isinstance(compilation_config, dict):
-            compilation_value = json.dumps(compilation_config, separators=(",", ":"), sort_keys=True)
-        elif isinstance(compilation_config, str):
-            compilation_value = compilation_config
-        else:
-            raise TypeError("params.agg.compilation_config must be a mapping or JSON string")
-        resolved_args.extend(["--compilation-config", compilation_value])
+    resolved_args.extend(["--gpu-memory-utilization", str(profile.gpu_memory_utilization)])
+    compilation_value = json.dumps(profile.compilation_config, separators=(",", ":"), sort_keys=True)
+    resolved_args.extend(["--compilation-config", compilation_value])
     resolved_args.extend(scheduler_args)
-    merged.setdefault("params", {}).setdefault("agg", {})["extra_cli_args"] = resolved_args
-    for key in (
-        "max_batch_size",
-        "max_num_tokens",
-        "max_seq_len",
-        "tokens_per_block",
-        "gpu_memory_utilization",
-        "compilation_config",
-    ):
-        if key in base_agg:
-            merged["params"]["agg"][key] = copy.deepcopy(base_agg[key])
+    merged_agg = merged.setdefault("params", {}).setdefault("agg", {})
+    merged_agg.update(
+        {
+            "max_batch_size": profile.max_batch_size,
+            "max_num_tokens": profile.max_num_tokens,
+            "max_seq_len": profile.max_seq_len,
+            "tokens_per_block": plan.options.kv_block_size,
+            "gpu_memory_utilization": profile.gpu_memory_utilization,
+            "compilation_config": profile.compilation_config,
+            "extra_cli_args": resolved_args,
+        }
+    )
     return merged
 
 
@@ -517,6 +515,70 @@ def _expected_nodes(manifest: Path) -> int:
     if payload["kind"] == "LeaderWorkerSet":
         return int(payload["spec"]["leaderWorkerTemplate"]["size"])
     raise ValueError(f"unsupported generated FPM workload kind: {payload.get('kind')}")
+
+
+def _validate_capability_gate(cell: FPMCell, gate_root: Path) -> None:
+    """Require every DP rank to confirm the frozen point population at runtime."""
+
+    paths = sorted(gate_root.glob("**/benchmark*.json"))
+    if not paths:
+        raise ValueError(f"capability gate emitted no benchmark results for {cell.cell_id}")
+    seen_ranks = set()
+    ordered_population = [point.to_dict() for point in cell.execution_profile.ordered_points]
+    formal_points = None
+
+    def point_key(point: dict[str, object]) -> tuple[str, int, int, int]:
+        return (
+            str(point["workload_kind"]),
+            int(point["batch_size"]),
+            int(point["suffix_length"]),
+            int(point["prefix_length"]),
+        )
+
+    for path in paths:
+        payload = json.loads(path.read_text())
+        if payload.get("status") != "complete" or payload.get("valid") is not True:
+            raise ValueError(f"invalid capability result for {cell.cell_id}: {path}")
+        collector = payload.get("collector")
+        if not isinstance(collector, dict) or collector.get("cell_id") != cell.cell_id:
+            raise ValueError(f"capability result identity mismatch for {cell.cell_id}: {path}")
+        eligible = int(collector.get("capacity_eligible_count", -1))
+        target = cell.execution_profile.selected_point_count
+        if eligible < target:
+            raise ValueError(
+                f"runtime capacity admits only {eligible}/{target} frozen points for {cell.cell_id}; "
+                "formal collection was not started"
+            )
+        cancelled = payload.get("cancelled_points")
+        if not isinstance(cancelled, list):
+            raise TypeError(f"capability result has no capacity decisions for {cell.cell_id}: {path}")
+        cancelled_keys = {point_key(item["point"]) for item in cancelled}
+        rank_eligible = [point for point in ordered_population if point_key(point) not in cancelled_keys]
+        if len(rank_eligible) != eligible:
+            raise ValueError(f"capability eligible-count mismatch for {cell.cell_id}: {path}")
+        rank_formal_points = rank_eligible[:target]
+        if formal_points is None:
+            formal_points = rank_formal_points
+        elif rank_formal_points != formal_points:
+            raise ValueError(f"capability DP ranks selected different formal point sets for {cell.cell_id}: {path}")
+        rows = payload.get("campaign_results")
+        if not isinstance(rows, list) or len(rows) != 1 or rows[0].get("point") != rank_formal_points[0]:
+            raise ValueError(
+                f"capability gate did not execute the first runtime-admitted point for {cell.cell_id}: {path}"
+            )
+        measurements = rows[0].get("fpms")
+        if not isinstance(measurements, list) or len(measurements) != 1:
+            raise ValueError(f"capability gate did not emit one measured FPM for {cell.cell_id}: {path}")
+        rank = int(measurements[0]["dp_rank"])
+        if rank in seen_ranks:
+            raise ValueError(f"duplicate capability dp_rank={rank} for {cell.cell_id}: {path}")
+        seen_ranks.add(rank)
+    expected_ranks = set(range(cell.topology.dp))
+    if seen_ranks != expected_ranks:
+        raise ValueError(
+            f"capability DP rank set mismatch for {cell.cell_id}: "
+            f"actual={sorted(seen_ranks)} expected={sorted(expected_ranks)}"
+        )
 
 
 def _load_checkpoint(path: Path, plan: FPMCollectionPlan, resume: bool) -> dict[str, Any]:
@@ -638,6 +700,7 @@ def run_collection(
                 resource.collect(pods)
             else:
                 resource.collect(pods, destination="capability/raw")
+                _validate_capability_gate(cell, gate_dir / "raw")
                 resource.clear_results(pods)
                 resource.stage(pods, [cell_dir / "cases.json"])
                 resource.execute(pods)

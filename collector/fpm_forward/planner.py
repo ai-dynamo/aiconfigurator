@@ -13,7 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from .capabilities import ModelCapabilityProfile, ResolvedDTypeProfile, resolve_model_capability
-from .capacity import CapacityDecision, admit_model_residency
+from .capacity import (
+    CapacityDecision,
+    FPMCapacityModel,
+    FPMExecutionProfile,
+    admit_model_residency,
+    build_capacity_model,
+    build_execution_profile,
+)
 from .config import FPMCollectionOptions
 from .population import AttentionPopulation, build_attention_population
 from .sampling import SamplingDesign, build_sampling_design
@@ -135,6 +142,7 @@ class FPMCell:
     kv_cache_dtype: str
     backend_policy: BackendPolicy
     sampling_sha256: str
+    execution_profile: FPMExecutionProfile
     parallel_strategy: str = "unspecified"
     gemm_quant_mode: str | None = None
     moe_quant_mode: str | None = None
@@ -158,6 +166,7 @@ class FPMCell:
             },
             "backend_policy": self.backend_policy.to_dict(),
             "sampling_sha256": self.sampling_sha256,
+            "execution_profile": self.execution_profile.to_dict(),
         }
 
 
@@ -186,7 +195,7 @@ class FPMCollectionPlan:
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_name": "aic_fpm_collection_plan",
-            "schema_version": 2,
+            "schema_version": 3,
             "backend": self.backend,
             "model_path": self.model_path,
             "system": self.system,
@@ -208,11 +217,11 @@ class FPMCollectionPlan:
                 for topology in self.topologies
             ],
             "capacity_admission": {
-                "scope": "model_residency_only",
+                "scope": "model_residency_then_per_cell_execution_envelope",
                 "max_num_tokens": 1,
                 "max_batch_size": 1,
                 "memory_fraction_kind": "of_total",
-                "memory_fraction_value": self.capacity_memory_fraction,
+                "memory_fraction_ceiling": self.capacity_memory_fraction,
                 "decisions": [decision.to_dict() for decision in self.capacity_decisions],
             },
             "backend_policies": [policy.to_dict() for policy in self.backend_policies],
@@ -228,6 +237,9 @@ class FPMCollectionPlan:
                 "topologies": len(self.topologies),
                 "topology_candidates": len(self.capacity_decisions),
                 "capacity_rejected": sum(not decision.admitted for decision in self.capacity_decisions),
+                "point_capacity_rejected": sum(
+                    not decision.admitted for cell in self.cells for decision in cell.execution_profile.decisions
+                ),
                 "backend_policies": len(self.backend_policies),
                 "cells": len(self.cells),
             },
@@ -320,42 +332,78 @@ def build_collection_plan(
         backend=backend,
         capability=capability,
         topologies=topology_candidates,
-        generator_overrides=generator_overrides or {},
     )
     policies = _backend_policies(options, collector_config, backend=backend)
     runtime_overlay_files, runtime_overlay_base_files = _runtime_overlay_files(collector_config)
 
     designs = {"prefill": prefill, "decode": decode}
-    cells = tuple(
-        FPMCell(
-            cell_id=_cell_id(
-                backend=backend,
-                model_path=model_path,
-                system=system,
-                phase=phase,
-                topology=topology,
-                weight_quantization=weight_quantization,
-                kv_cache_dtype=kv_cache_dtype,
-                policy=policy,
-            ),
-            workload_kind=phase,
-            topology=topology,
-            weight_quantization=weight_quantization,
-            kv_cache_dtype=kv_cache_dtype,
-            backend_policy=policy,
-            sampling_sha256=designs[phase].sha256,
-            parallel_strategy=topology_strategy(topology, is_moe=capability.is_moe),
-            gemm_quant_mode=capability.dtype.gemm_quant_mode,
-            moe_quant_mode=capability.dtype.moe_quant_mode,
-            fmha_quant_mode=capability.dtype.fmha_quant_mode,
-            comm_quant_mode=capability.dtype.comm_quant_mode,
-        )
-        for phase in ("prefill", "decode")
-        for topology in topologies
-        for weight_quantization in weight_quantizations
-        for kv_cache_dtype in capability.dtype.kv_cache_dtypes
-        for policy in policies
-    )
+    execution_profiles: dict[tuple[str, ParallelTopology, str], FPMExecutionProfile] = {}
+    capacity_models: dict[tuple[ParallelTopology, str], FPMCapacityModel] = {}
+    all_design_points = (*prefill.ordered_points, *decode.ordered_points)
+    maximum_design_batch = max(point.batch_size for point in all_design_points)
+    maximum_design_tokens = max(point.batch_size * point.suffix_length for point in all_design_points)
+    cells_list = []
+    for phase in ("prefill", "decode"):
+        for topology in topologies:
+            for weight_quantization in weight_quantizations:
+                for kv_cache_dtype in capability.dtype.kv_cache_dtypes:
+                    profile_key = (phase, topology, kv_cache_dtype)
+                    execution_profile = execution_profiles.get(profile_key)
+                    if execution_profile is None:
+                        capacity_key = (topology, kv_cache_dtype)
+                        capacity_model = capacity_models.get(capacity_key)
+                        if capacity_model is None:
+                            capacity_model = build_capacity_model(
+                                model_path=model_path,
+                                system=system,
+                                backend=backend,
+                                capability=capability,
+                                topology=topology,
+                                kv_cache_dtype=kv_cache_dtype,
+                                max_batch_size_hint=maximum_design_batch,
+                                max_num_tokens_hint=maximum_design_tokens,
+                            )
+                            capacity_models[capacity_key] = capacity_model
+                        execution_profile = build_execution_profile(
+                            model_path=model_path,
+                            system=system,
+                            backend=backend,
+                            capability=capability,
+                            topology=topology,
+                            kv_cache_dtype=kv_cache_dtype,
+                            design=designs[phase],
+                            block_size=options.kv_block_size,
+                            capacity_model=capacity_model,
+                        )
+                        execution_profiles[profile_key] = execution_profile
+                    for policy in policies:
+                        cells_list.append(
+                            FPMCell(
+                                cell_id=_cell_id(
+                                    backend=backend,
+                                    model_path=model_path,
+                                    system=system,
+                                    phase=phase,
+                                    topology=topology,
+                                    weight_quantization=weight_quantization,
+                                    kv_cache_dtype=kv_cache_dtype,
+                                    policy=policy,
+                                ),
+                                workload_kind=phase,
+                                topology=topology,
+                                weight_quantization=weight_quantization,
+                                kv_cache_dtype=kv_cache_dtype,
+                                backend_policy=policy,
+                                sampling_sha256=designs[phase].sha256,
+                                execution_profile=execution_profile,
+                                parallel_strategy=topology_strategy(topology, is_moe=capability.is_moe),
+                                gemm_quant_mode=capability.dtype.gemm_quant_mode,
+                                moe_quant_mode=capability.dtype.moe_quant_mode,
+                                fmha_quant_mode=capability.dtype.fmha_quant_mode,
+                                comm_quant_mode=capability.dtype.comm_quant_mode,
+                            )
+                        )
+    cells = tuple(cells_list)
     canonical = {
         "backend": backend,
         "model_path": model_path,

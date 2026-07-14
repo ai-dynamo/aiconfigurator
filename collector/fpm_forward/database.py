@@ -156,11 +156,13 @@ def aggregate_cell(plan: FPMCollectionPlan, cell: FPMCell, cell_dir: Path) -> li
                 raise ValueError(f"duplicate dp_rank={rank} for point={point}")
             by_point[point][rank] = latency
 
-    design = plan.prefill_design if cell.workload_kind == "prefill" else plan.decode_design
-    if len(by_point) != len(design.selected):
-        raise ValueError(
-            f"measured point count {len(by_point)} != selected count {len(design.selected)} for {cell.cell_id}"
-        )
+    target_count = cell.execution_profile.selected_point_count
+    if len(by_point) != target_count:
+        raise ValueError(f"measured point count {len(by_point)} != selected count {target_count} for {cell.cell_id}")
+    ordered_population = {point.key for point in cell.execution_profile.ordered_points}
+    unexpected = sorted(set(by_point) - ordered_population)
+    if unexpected:
+        raise ValueError(f"measured points are outside the frozen ordered population for {cell.cell_id}: {unexpected}")
     expected_ranks = set(range(cell.topology.dp))
     backend_version = get_collector_runtime(plan.backend).version
     capability = getattr(plan, "capability", None)
