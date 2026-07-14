@@ -45,10 +45,21 @@ pub struct DsaModuleOp {
     /// once BOTH the dsa and dsv4 Rust CP paths land.
     #[serde(default = "default_cp_size")]
     pub cp_size: u32,
+    /// GLM-5.2 shared-index amortization weight (Python `_full_frac`): the
+    /// exact fraction of indexer-computing layers. Per-layer cost is
+    /// `full_frac*full + (1-full_frac)*skip` using the directly-collected
+    /// skip-indexer table. 1.0 (DeepSeek-V3.2 / GLM-5, and pre-field opspecs)
+    /// keeps the pure-full path — the skip table is never touched.
+    #[serde(default = "default_full_frac")]
+    pub full_frac: f64,
 }
 
 fn default_cp_size() -> u32 {
     1
+}
+
+fn default_full_frac() -> f64 {
+    1.0
 }
 
 impl DsaModuleOp {
@@ -72,6 +83,7 @@ impl DsaModuleOp {
             architecture: architecture.into(),
             index_topk,
             cp_size: 1,
+            full_frac: 1.0,
         }
     }
 
@@ -82,11 +94,22 @@ impl DsaModuleOp {
         isl: u32,
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
+        let w = self.full_frac;
         // CP (round-robin sequence split) prefill takes the sparse-delta
         // composition path (Python `ContextDSAModule.query` -> `_query_cp`
-        // when `_cp_size > 1`).
+        // when `_cp_size > 1`). GLM-5.2 amortizes full/skip on the CP path
+        // too (both carry the same scale_factor, so the weighted sum of the
+        // already-scaled results is exact — Python `_amortize`).
         if self.cp_size > 1 {
-            return self.query_context_cp(db, batch_size, isl, prefix);
+            let full = self.query_context_cp(db, batch_size, isl, prefix, false)?;
+            if w >= 1.0 {
+                return Ok(full);
+            }
+            let skip = self.query_context_cp(db, batch_size, isl, prefix, true)?;
+            return Ok(PerformanceResult::new(
+                w * full.latency_ms + (1.0 - w) * skip.latency_ms,
+                full.source,
+            ));
         }
         // Query at `isl` (new-token count) for the exact `prefix` slice — NOT
         // `isl + prefix`. The perf-DB layer resolves one 4-axis RAW grid via
@@ -94,7 +117,17 @@ impl DsaModuleOp {
         // correction (it had no Python counterpart and under-counted context
         // latency ~75%). `dsa_backend="trtllm"` mirrors Python's non-CP
         // default (`_query_context_dsa_module_table(dsa_backend="trtllm")`).
-        let (latency, source) = query_context_table(db, self, batch_size, isl, prefix, "trtllm")?;
+        let q = |skip_indexer: bool| {
+            query_context_table(db, self, batch_size, isl, prefix, "trtllm", skip_indexer)
+        };
+        let (full, full_source) = q(false)?;
+        let (latency, source) = if w >= 1.0 {
+            (full, full_source)
+        } else {
+            // GLM-5.2 shared-index amortization (Python ContextDSAModule.query).
+            let (skip, skip_source) = q(true)?;
+            (w * full + (1.0 - w) * skip, full_source.combine(skip_source))
+        };
         Ok(PerformanceResult::new(latency, source)
             .clamp_non_negative()
             .scaled(self.scale_factor))
@@ -117,6 +150,7 @@ impl DsaModuleOp {
         batch_size: u32,
         isl: u32,
         prefix: u32,
+        skip_indexer: bool,
     ) -> Result<PerformanceResult, AicError> {
         let sparse = db.dsa.load_cp_sparse(&self.architecture, self.num_heads)?;
         let mut base = |per_card: u32| {
@@ -124,7 +158,7 @@ impl DsaModuleOp {
             // `query_context_dsa_module` dispatch (no explicit database_mode
             // => the database default), on the flashmla_kv slice (the kernel
             // used under CP); `float(...)` drops the source.
-            query_context_table(db, self, batch_size, per_card, prefix, "flashmla_kv")
+            query_context_table(db, self, batch_size, per_card, prefix, "flashmla_kv", skip_indexer)
                 .map(|(latency, _)| latency)
         };
         let mut ag = |elems: u64| {
@@ -138,7 +172,7 @@ impl DsaModuleOp {
             .query(db, 1)
             .map(|r| r.latency_ms)
         };
-        self.query_cp_with(&sparse, batch_size, isl, prefix, &mut base, &mut ag)
+        self.query_cp_with(&sparse, batch_size, isl, prefix, skip_indexer, &mut base, &mut ag)
     }
 
     /// CP (round-robin split) per-layer DSA composition. Verbatim mirror of
@@ -162,6 +196,7 @@ impl DsaModuleOp {
         b: u32,
         isl: u32,
         prefix: u32,
+        skip_indexer: bool,
         base: &mut dyn FnMut(u32) -> Result<f64, AicError>,
         ag: &mut dyn FnMut(u64) -> Result<f64, AicError>,
     ) -> Result<PerformanceResult, AicError> {
@@ -173,15 +208,21 @@ impl DsaModuleOp {
         // step, so an empty grid below means the table is absent entirely
         // (parquet not collected) — degrading silently to dsa_base would hide
         // that. Message shape mirrors Python's fail-loud contract.
-        let missing: Vec<&str> = [
-            ("mqa", &sparse.mqa),
-            ("topk_last", &sparse.topk_last),
-            ("topk_flat", &sparse.topk_flat),
-        ]
-        .into_iter()
-        .filter(|(_, grid)| grid.is_empty())
-        .map(|(name, _)| name)
-        .collect();
+        // skip_indexer layers carry NO indexer -> no mqa/topk deltas needed,
+        // so don't require the sparse tables for them (Python dsa.py:835-837).
+        let missing: Vec<&str> = if skip_indexer {
+            Vec::new()
+        } else {
+            [
+                ("mqa", &sparse.mqa),
+                ("topk_last", &sparse.topk_last),
+                ("topk_flat", &sparse.topk_flat),
+            ]
+            .into_iter()
+            .filter(|(_, grid)| grid.is_empty())
+            .map(|(name, _)| name)
+            .collect()
+        };
         if !missing.is_empty() {
             return Err(AicError::PerfDatabase(format!(
                 "DSA CP modeling needs sparse tables ['{}'] for {} (num_heads={}); \
@@ -208,12 +249,17 @@ impl DsaModuleOp {
         let tl_full = lookup_2d(tl_tab, isl, prefix)?;
         let tf_perc = lookup_2d(tf_tab, per_card, prefix)?;
         let mut latency = dsa_base;
-        if let (Some(mqa_full), Some(mqa_perc), Some(tl_full), Some(tf_perc)) =
-            (mqa_full, mqa_perc, tl_full, tf_perc)
-        {
-            let delta_mqa = mqa_full / f64::from(cp) - mqa_perc;
-            let delta_topk = tl_full / f64::from(cp) - tf_perc;
-            latency += delta_mqa + delta_topk;
+        // skip layers reuse a sibling's topk index: no per-layer mqa/topk, so
+        // no full/cp deltas — just the per-card skip base + the attention
+        // all-gathers (Python dsa.py:871-876).
+        if !skip_indexer {
+            if let (Some(mqa_full), Some(mqa_perc), Some(tl_full), Some(tf_perc)) =
+                (mqa_full, mqa_perc, tl_full, tf_perc)
+            {
+                let delta_mqa = mqa_full / f64::from(cp) - mqa_perc;
+                let delta_topk = tl_full / f64::from(cp) - tf_perc;
+                latency += delta_mqa + delta_topk;
+            }
         }
         // CP attention all-gathers, per current-chunk tokens (isl, not
         // isl+prefix; prefix KV is already replicated), bf16 (see the Python
@@ -224,7 +270,14 @@ impl DsaModuleOp {
         // MoE dispatch ops, not here.)
         let dims = dsa_dims(&self.architecture);
         let tokens = u64::from(b) * u64::from(isl);
-        let ag_kv = ag(tokens * dims.index_head_dim as u64)?;
+        // A skip-indexer (reuse) layer never runs the per-layer indexer, so it
+        // does not all-gather the DSA indexer key — only the MLA
+        // compressed-KV/LSE gather remains (Python dsa.py:895-902).
+        let ag_kv = if skip_indexer {
+            0.0
+        } else {
+            ag(tokens * dims.index_head_dim as u64)?
+        };
         let ag_lse = ag(tokens * (dims.kv_lora_rank + dims.qk_rope_head_dim) as u64)?;
         latency += ag_kv + ag_lse;
         Ok(PerformanceResult::new(latency, Source::Estimated).scaled(self.scale_factor))
@@ -236,9 +289,20 @@ impl DsaModuleOp {
         batch_size: u32,
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
+        let w = self.full_frac;
         // `dsa_backend="trtllm"` mirrors Python's generation default
         // (`_query_generation_dsa_module_table(dsa_backend="trtllm")`).
-        let (latency, source) = query_generation_table(db, self, batch_size, s, "trtllm")?;
+        let q = |skip_indexer: bool| {
+            query_generation_table(db, self, batch_size, s, "trtllm", skip_indexer)
+        };
+        let (full, full_source) = q(false)?;
+        let (latency, source) = if w >= 1.0 {
+            (full, full_source)
+        } else {
+            // GLM-5.2 shared-index amortization (decode side).
+            let (skip, skip_source) = q(true)?;
+            (w * full + (1.0 - w) * skip, full_source.combine(skip_source))
+        };
         Ok(PerformanceResult::new(latency, source)
             .clamp_non_negative()
             .scaled(self.scale_factor))
@@ -265,6 +329,7 @@ fn query_context_table(
     isl: u32,
     prefix: u32,
     dsa_backend: &str,
+    skip_indexer: bool,
 ) -> Result<(f64, Source), AicError> {
     let silicon = || {
         db.dsa.query_context(
@@ -279,17 +344,18 @@ fn query_context_table(
             prefix,
             op.index_topk,
             dsa_backend,
+            skip_indexer,
         )
     };
     match db.database_mode {
         DatabaseMode::Empirical => Ok((
-            context_empirical(db, op, b, isl, prefix, dsa_backend)?,
+            context_empirical(db, op, b, isl, prefix, dsa_backend, skip_indexer)?,
             Source::Empirical,
         )),
         DatabaseMode::Hybrid => match silicon() {
             Ok(latency) => Ok((latency, Source::Silicon)),
             Err(err) if err.is_missing_perf_data() => Ok((
-                context_empirical(db, op, b, isl, prefix, dsa_backend)?,
+                context_empirical(db, op, b, isl, prefix, dsa_backend, skip_indexer)?,
                 Source::Empirical,
             )),
             Err(err) => Err(err),
@@ -305,6 +371,7 @@ fn query_generation_table(
     b: u32,
     s: u32,
     dsa_backend: &str,
+    skip_indexer: bool,
 ) -> Result<(f64, Source), AicError> {
     let silicon = || {
         db.dsa.query_generation(
@@ -317,17 +384,18 @@ fn query_generation_table(
             op.gemm_quant_mode,
             &op.architecture,
             dsa_backend,
+            skip_indexer,
         )
     };
     match db.database_mode {
         DatabaseMode::Empirical => Ok((
-            generation_empirical(db, op, b, s, dsa_backend)?,
+            generation_empirical(db, op, b, s, dsa_backend, skip_indexer)?,
             Source::Empirical,
         )),
         DatabaseMode::Hybrid => match silicon() {
             Ok(latency) => Ok((latency, Source::Silicon)),
             Err(err) if err.is_missing_perf_data() => Ok((
-                generation_empirical(db, op, b, s, dsa_backend)?,
+                generation_empirical(db, op, b, s, dsa_backend, skip_indexer)?,
                 Source::Empirical,
             )),
             Err(err) => Err(err),
@@ -390,6 +458,7 @@ fn context_empirical(
     s: u32,
     prefix: u32,
     dsa_backend: &str,
+    skip_indexer: bool,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
     let dims = dsa_dims(&op.architecture);
@@ -409,6 +478,7 @@ fn context_empirical(
             s as i64,
             prefix as i64,
             num_heads as i64,
+            skip_indexer,
         )
     };
     let sol_time = sol(b as f64, s as f64, prefix as f64, op.num_heads as f64);
@@ -421,7 +491,7 @@ fn context_empirical(
         kv_quant: kv.name().to_string(),
         gemm_quant: gemm.name().to_string(),
     };
-    let slice = match db.dsa.context_raw_slice(&key, dsa_backend) {
+    let slice = match db.dsa.context_raw_slice(&key, dsa_backend, skip_indexer) {
         Ok(slice) => Some(slice),
         Err(err) if err.is_missing_perf_data() => None,
         Err(err) => return Err(err),
@@ -581,9 +651,11 @@ fn context_empirical(
     // Python keys the grid on (tag, system, backend, version, quants, arch,
     // dsa_backend, depth) + id(node); the cache here is per-database, and the
     // exact-head node identity is restored by suffixing num_heads.
+    // `skip` disambiguates the GLM-5.2 reuse-layer grids from the full ones.
+    let skip_tag = if skip_indexer { ":skip" } else { "" };
     let cache_key = if head_scoped {
         format!(
-            "{tag}:{}:{}:{}:{}:{dsa_backend}:{depth}:h{}",
+            "{tag}:{}:{}:{}:{}:{dsa_backend}:{depth}:h{}{skip_tag}",
             fmha.name(),
             kv.name(),
             gemm.name(),
@@ -592,7 +664,7 @@ fn context_empirical(
         )
     } else {
         format!(
-            "{tag}:{}:{}:{}:{}:{dsa_backend}:{depth}",
+            "{tag}:{}:{}:{}:{}:{dsa_backend}:{depth}{skip_tag}",
             fmha.name(),
             kv.name(),
             gemm.name(),
@@ -630,6 +702,7 @@ fn generation_empirical(
     b: u32,
     s: u32,
     dsa_backend: &str,
+    skip_indexer: bool,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
     let dims = dsa_dims(&op.architecture);
@@ -653,7 +726,7 @@ fn generation_empirical(
         kv_quant: kv.name().to_string(),
         gemm_quant: gemm.name().to_string(),
     };
-    let slice = match db.dsa.generation_raw_slice(&key, dsa_backend) {
+    let slice = match db.dsa.generation_raw_slice(&key, dsa_backend, skip_indexer) {
         Ok(slice) => Some(slice),
         // Match `grid_for`'s best-effort contract: unavailable table data is
         // reported by `estimate` as an empirical coverage miss.
@@ -664,8 +737,9 @@ fn generation_empirical(
     if let Some(head_grid) = slice.and_then(|slc| slc.get(&op.num_heads)) {
         // `num_heads` is a TP/model-shape identity: stay on the exact head
         // slice whenever it exists (Python `num_heads in data_slice`).
+        let skip_tag = if skip_indexer { ":skip" } else { "" };
         let cache_key = format!(
-            "gen_dsa_exact_heads:{}:{}:{}:{}:{dsa_backend}:h{}",
+            "gen_dsa_exact_heads:{}:{}:{}:{}:{dsa_backend}:h{}{skip_tag}",
             op.fmha_quant_mode.name(),
             kv.name(),
             gemm.name(),
@@ -683,8 +757,9 @@ fn generation_empirical(
             util_empirical::estimate(sol_time, &[b as f64, s as f64], grid.as_deref(), 1.0)?;
         Ok(latency)
     } else if let Some(slc) = slice {
+        let skip_tag = if skip_indexer { ":skip" } else { "" };
         let cache_key = format!(
-            "gen_dsa:{}:{}:{}:{}:{dsa_backend}",
+            "gen_dsa:{}:{}:{}:{}:{dsa_backend}{skip_tag}",
             op.fmha_quant_mode.name(),
             kv.name(),
             gemm.name(),
@@ -831,6 +906,7 @@ mod tests {
             architecture: "GlmMoeDsaForCausalLM".into(),
             index_topk: 2048,
             cp_size,
+            full_frac: 1.0,
         }
     }
 
@@ -871,6 +947,7 @@ mod tests {
                 1,
                 isl,
                 prefix,
+                false,
                 &mut |per_card| {
                     base_calls.push(per_card);
                     Ok(4300.0) // per-card monolithic base
@@ -908,6 +985,7 @@ mod tests {
                 1,
                 32768, // > grid max 16384
                 0,
+                false,
                 &mut |_| Ok(4300.0),
                 &mut |_| Ok(50.0),
             )

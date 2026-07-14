@@ -300,7 +300,6 @@ impl Dsv4ModuleOp {
             kv,
             fmha,
             gemm,
-            &self.architecture,
         ) {
             Ok(points) => Some(points),
             Err(err) if err.is_missing_perf_data() => None,
@@ -563,15 +562,18 @@ impl Dsv4ModuleOp {
             .scaled(self.scale_factor))
     }
 
+    /// No fmha argument: the generation table keys on kv dtype only and the
+    /// SOL dtype is derived from kv inside `query_generation` (PR #1337).
+    /// `self.fmha_quant_mode` stays on the op for the context path.
     fn generation_silicon(&self, db: &PerfDatabase, batch_size: u32, s: u32) -> Result<f64, AicError> {
         db.dsv4.query_generation(
+
             &db.system_spec,
             self.attn_kind,
             batch_size,
             s,
             self.num_heads,
             self.kv_cache_dtype,
-            self.fmha_quant_mode,
             self.gemm_quant_mode,
             &self.architecture,
             Some(self.sol_dims()),
@@ -625,7 +627,7 @@ impl Dsv4ModuleOp {
         let grid = db.util_grids.get_or_try_build(&key, || {
             match db
                 .dsv4
-                .generation_points(self.attn_kind, self.num_heads, kv, gemm, &self.architecture)
+                .generation_points(self.attn_kind, self.num_heads, kv, gemm)
             {
                 Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol)))),
                 // Typed coverage miss -> no grid (estimate() raises the

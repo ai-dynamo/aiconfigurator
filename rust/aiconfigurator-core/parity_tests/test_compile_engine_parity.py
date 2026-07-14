@@ -325,6 +325,29 @@ class TestCompileEngineMixedStepParity:
         py_val = _python_mixed(case)
         _assert_within("mixed_step", py_val, new_val, backend=case.backend_name)
 
+    @pytest.mark.parametrize(
+        "ctx_tokens,gen_tokens,isl,osl,prefix",
+        [
+            (512, 4, 4096, 128, 0),  # chunked prefill: ctx_tokens < isl
+            (512, 4, 4096, 128, 256),  # chunked + cached prefix
+            (300, 7, 1000, 64, 100),  # ragged chunk + prefix + decode overlap
+        ],
+    )
+    def test_mixed_step_chunked_prefill(self, ctx_tokens, gen_tokens, isl, osl, prefix) -> None:
+        """Chunked prefill (ctx_tokens < isl) was the largest pre-rewrite
+        composition gap: Python queries context attention at the FULL per-req
+        isl then divides by ceil(isl/ctx), the old Rust queried the chunk
+        directly. The rewritten three-pass mirror must match exactly."""
+        case = _SUBSET_BY_ID["minimax-m25-b200-vllm-019-isl1024-osl2"].values[0]
+        model, backend, database = _build_python_model(case)
+        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=isl, osl=osl, prefix=prefix)
+        py_val, _, _, _ = _quiet(
+            backend._get_mix_step_latency, model, database, rc, ctx_tokens, gen_tokens, isl, osl, prefix
+        )
+        handle = _compile_handle(case)
+        new_val = handle.mixed_step_latency(ctx_tokens, gen_tokens, isl, osl, prefix)
+        _assert_within("mixed_step_chunked", float(py_val), new_val, backend=case.backend_name)
+
 
 class TestCompileEngineDecodeStepParity:
     @pytest.mark.parametrize("case", _SUBSET_CASES)
@@ -333,6 +356,252 @@ class TestCompileEngineDecodeStepParity:
         new_val = handle.decode_step_latency(case.batch_size, case.isl, max(case.osl, 2))
         py_val = _python_decode(case)
         _assert_within("decode_step", py_val, new_val, backend=case.backend_name)
+
+
+# --------------------------------------------------------------------------- #
+# 2b. Imbalance-correction scale threading (session.rs used to hardcode 1.0).
+# --------------------------------------------------------------------------- #
+
+
+class TestImbalanceScaleParity:
+    """Non-1.0 seq/gen imbalance-correction scales must produce identical
+    Python and Rust numbers. Regression for the session.rs hardcode: the wire
+    accepted the scales but every RuntimeContext pinned them to 1.0, so any
+    task setting them diverged silently on the rust path."""
+
+    _CASE_ID = "minimax-m25-b200-vllm-019-isl1024-osl2"
+    _CTX_SCALE = 1.3
+    _GEN_SCALE = 0.85
+
+    def _case(self) -> EngineStepParityCase:
+        return _SUBSET_BY_ID[self._CASE_ID].values[0]
+
+    def test_static_scales_thread_through(self) -> None:
+        case = self._case()
+        model, backend, database = _build_python_model(case)
+        rc = config.RuntimeConfig(
+            batch_size=case.batch_size,
+            beam_width=1,
+            isl=case.isl,
+            osl=max(case.osl, 2),
+            prefix=case.prefix,
+            seq_imbalance_correction_scale=self._CTX_SCALE,
+            gen_seq_imbalance_correction_scale=self._GEN_SCALE,
+        )
+        ctx_lat, _, gen_lat, _, _, _ = _quiet(backend._run_static_breakdown, model, database, rc, "static", 1)
+        py_ctx = float(sum(ctx_lat.values()))
+        py_gen = float(sum(gen_lat.values()))
+
+        handle = _compile_handle(case)
+        new_ctx, new_gen, _ = handle.run_static(
+            batch_size=case.batch_size,
+            isl=case.isl,
+            osl=max(case.osl, 2),
+            prefix=case.prefix,
+            seq_imbalance_correction_scale=self._CTX_SCALE,
+            gen_seq_imbalance_correction_scale=self._GEN_SCALE,
+            stride=1,
+        )
+        _assert_within("static_ctx@scale", py_ctx, new_ctx, backend=case.backend_name)
+        _assert_within("static_gen@scale", py_gen, new_gen, backend=case.backend_name)
+
+        # The scales must actually bite: a scaled run differs from unscaled.
+        base_ctx, base_gen, _ = handle.run_static(
+            batch_size=case.batch_size, isl=case.isl, osl=max(case.osl, 2), prefix=case.prefix, stride=1
+        )
+        assert new_ctx != base_ctx, "ctx scale did not affect the rust static path"
+        assert new_gen != base_gen, "gen scale did not affect the rust static path"
+
+    def test_mixed_and_decode_scales_thread_through(self) -> None:
+        case = self._case()
+        model, backend, database = _build_python_model(case)
+        rc = config.RuntimeConfig(
+            batch_size=case.batch_size,
+            beam_width=1,
+            isl=case.isl,
+            osl=max(case.osl, 2),
+            prefix=case.prefix,
+            seq_imbalance_correction_scale=self._CTX_SCALE,
+            gen_seq_imbalance_correction_scale=self._GEN_SCALE,
+        )
+        py_mixed, _, _, _ = _quiet(
+            backend._get_mix_step_latency,
+            model,
+            database,
+            rc,
+            case.isl,
+            case.batch_size,
+            case.isl,
+            max(case.osl, 2),
+            case.prefix,
+        )
+        py_decode, _, _, _ = _quiet(
+            backend._get_genonly_step_latency,
+            model,
+            database,
+            rc,
+            case.batch_size,
+            case.isl,
+            max(case.osl, 2),
+        )
+
+        handle = _compile_handle(case)
+        new_mixed = handle.mixed_step_latency(
+            case.isl,
+            case.batch_size,
+            case.isl,
+            max(case.osl, 2),
+            case.prefix,
+            seq_imbalance_correction_scale=self._CTX_SCALE,
+            gen_seq_imbalance_correction_scale=self._GEN_SCALE,
+        )
+        new_decode = handle.decode_step_latency(
+            case.batch_size,
+            case.isl,
+            max(case.osl, 2),
+            gen_seq_imbalance_correction_scale=self._GEN_SCALE,
+        )
+        _assert_within("mixed_step@scale", float(py_mixed), new_mixed, backend=case.backend_name)
+        _assert_within("decode_step@scale", float(py_decode), new_decode, backend=case.backend_name)
+
+
+# --------------------------------------------------------------------------- #
+# 2c. SGLang WideEP (deepep_moe) — MLA + MoE + DeepEP dispatch routing.
+# --------------------------------------------------------------------------- #
+
+
+class TestWideEpDeepEpParity:
+    """SGLang WideEP DeepSeek (moe_backend=deepep_moe) end-to-end parity.
+
+    Covers three previously-divergent surfaces at once: the WideEP MLA
+    per-rank-heads table coordinate (tp=8 -> heads=16; the bridge used to emit
+    raw tp), the deepep MoE compute routing (Rust used to read `moe_perf`
+    where Python reads the wideep context/generation tables), and the DeepEP
+    dispatch flavor emission (the emitter used to map every sglang dispatch to
+    CustomAllReduce). Data lives on h200_sxm/sglang/0.5.6.post2 (the only
+    shipped version with the deepep dispatch parquets)."""
+
+    _MODEL = "deepseek-ai/DeepSeek-V3"
+    _SYSTEM = "h200_sxm"
+    _VERSION = "0.5.6.post2"
+
+    def _build(self):
+        from aiconfigurator.sdk import common
+
+        database = _quiet(perf_database.get_database, self._SYSTEM, "sglang", self._VERSION)
+        if database is None:
+            pytest.skip(f"no perf database for {self._SYSTEM}/sglang/{self._VERSION}")
+        model_config = config.ModelConfig(
+            tp_size=8,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            moe_backend="deepep_moe",
+            attention_backend="flashinfer",
+            gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+            moe_quant_mode=common.MoEQuantMode.fp8_block,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.fp8_block,
+        )
+        model = _quiet(get_model, self._MODEL, model_config, "sglang")
+        backend = get_backend("sglang")
+        spec_json = _quiet(
+            engine.build_engine_spec_json,
+            model,
+            model_path=self._MODEL,
+            system=self._SYSTEM,
+            backend="sglang",
+            backend_version=self._VERSION,
+            kv_block_size=None,
+            systems_path=None,
+            nextn=0,
+            nextn_accept_rates=None,
+            database=database,
+        )
+        import aiconfigurator_core
+
+        handle = engine.EngineHandle(bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json)))
+        return model, backend, database, handle
+
+    def test_wideep_static_parity(self) -> None:
+        model, backend, database, handle = self._build()
+        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=4, prefix=0)
+        ctx_lat, _, gen_lat, _, _, _ = _quiet(backend._run_static_breakdown, model, database, rc, "static", 1)
+        py_ctx, py_gen = float(sum(ctx_lat.values())), float(sum(gen_lat.values()))
+        new_ctx, new_gen, _ = handle.run_static(batch_size=1, isl=1024, osl=4, prefix=0, stride=1)
+        _assert_within("wideep_static_ctx", py_ctx, new_ctx, backend="sglang")
+        _assert_within("wideep_static_gen", py_gen, new_gen, backend="sglang")
+
+    def test_wideep_mixed_and_decode_parity(self) -> None:
+        model, backend, database, handle = self._build()
+        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=4, prefix=0)
+        py_mixed, _, _, _ = _quiet(backend._get_mix_step_latency, model, database, rc, 1024, 2, 1024, 4, 0)
+        py_decode, _, _, _ = _quiet(backend._get_genonly_step_latency, model, database, rc, 2, 1024, 4)
+        new_mixed = handle.mixed_step_latency(1024, 2, 1024, 4, 0)
+        new_decode = handle.decode_step_latency(2, 1024, 4)
+        _assert_within("wideep_mixed", float(py_mixed), new_mixed, backend="sglang")
+        _assert_within("wideep_decode", float(py_decode), new_decode, backend="sglang")
+
+
+# --------------------------------------------------------------------------- #
+# 2d. TRT-LLM WideEP (NVLink Two-Sided alltoall) — gb200.
+# --------------------------------------------------------------------------- #
+
+
+class TestTrtllmWideEpParity:
+    """TRT-LLM WideEP DeepSeek (enable_wideep, attention_dp=8) on gb200.
+
+    Covers the `TrtLLMWideEPMoEDispatch` port (prepare+dispatch pre /
+    combine post through the trtllm_alltoall table, kernel auto-selected as
+    NVLinkTwoSided via moe_backend="wideep") and the alltoall loader keying
+    (kernel_source/op_name/num_nodes — the pre-fix loader collapsed 1,556 of
+    2,096 gb200 rows). This path used to fail opspec conversion entirely
+    (`TrtLLMWideEPMoEDispatch` had no `_to_opspec` branch)."""
+
+    def _build(self):
+        from aiconfigurator.sdk import common
+
+        database = _quiet(perf_database.get_database, "gb200", "trtllm", "1.3.0rc10")
+        if database is None:
+            pytest.skip("no perf database for gb200/trtllm/1.3.0rc10")
+        model_config = config.ModelConfig(
+            tp_size=1,
+            attention_dp_size=8,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            enable_wideep=True,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        )
+        model = _quiet(get_model, "deepseek-ai/DeepSeek-V3", model_config, "trtllm")
+        backend = get_backend("trtllm")
+        spec_json = _quiet(
+            engine.build_engine_spec_json,
+            model,
+            model_path="deepseek-ai/DeepSeek-V3",
+            system="gb200",
+            backend="trtllm",
+            backend_version="1.3.0rc10",
+            kv_block_size=None,
+            systems_path=None,
+            nextn=0,
+            nextn_accept_rates=None,
+            database=database,
+        )
+        import aiconfigurator_core
+
+        handle = engine.EngineHandle(bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json)))
+        return model, backend, database, handle
+
+    def test_trtllm_wideep_static_parity(self) -> None:
+        model, backend, database, handle = self._build()
+        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=4, prefix=0)
+        ctx_lat, _, gen_lat, _, _, _ = _quiet(backend._run_static_breakdown, model, database, rc, "static", 1)
+        py_ctx, py_gen = float(sum(ctx_lat.values())), float(sum(gen_lat.values()))
+        new_ctx, new_gen, _ = handle.run_static(batch_size=1, isl=1024, osl=4, prefix=0, stride=1)
+        _assert_within("trtllm_wideep_static_ctx", py_ctx, new_ctx, backend="trtllm")
+        _assert_within("trtllm_wideep_static_gen", py_gen, new_gen, backend="trtllm")
 
 
 # --------------------------------------------------------------------------- #

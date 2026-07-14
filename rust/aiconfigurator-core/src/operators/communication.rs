@@ -60,6 +60,9 @@ impl CustomAllReduceOp {
     /// count, not bytes) and passes it directly to
     /// `query_custom_allreduce`. Mirror that here — the underlying table
     /// is keyed by element count, with dtype implicit in the quant mode.
+    /// Node-fan-out capping, beyond-node bandwidth scaling and the GB200
+    /// NVL72 -> NCCL reroute all live in the DB-level `_scaled` query
+    /// (mirroring Python's `_query_custom_allreduce_table` funnel).
     pub fn query(
         &self,
         db: &PerfDatabase,
@@ -72,7 +75,7 @@ impl CustomAllReduceOp {
             return Ok(PerformanceResult::new(0.0, Source::Empirical));
         }
         let per_rank_tokens = num_tokens.div_ceil(self.seq_split.max(1)); // CP: busiest rank
-        let message_size = (per_rank_tokens as u64) * (self.hidden_size as u64);
+        let message_size = (per_rank_tokens as f64) * (self.hidden_size as f64);
         let (latency, source) =
             query_custom_allreduce_table(db, self.quant, self.tp_size, message_size)?;
         Ok(PerformanceResult::new(latency, source)
@@ -97,14 +100,19 @@ fn query_custom_allreduce_table(
     db: &PerfDatabase,
     quant: CommQuantMode,
     tp_size: u32,
-    size: u64,
+    size: f64,
 ) -> Result<(f64, Source), AicError> {
+    // The silicon path is the DB-level `_scaled` query (fan-out capping +
+    // beyond-range bandwidth correction inside, incl. the GB200 NVL72
+    // reroute), mirroring Python `_query_custom_allreduce_table.get_silicon`.
+    let silicon =
+        |db: &PerfDatabase| db.communication.query_custom_allreduce_scaled(&db.system_spec, quant, tp_size, size);
     match db.database_mode {
         DatabaseMode::Empirical => Ok((
             custom_allreduce_empirical(db, quant, tp_size, size)?,
             Source::Empirical,
         )),
-        DatabaseMode::Hybrid => match custom_allreduce_silicon(db, quant, tp_size, size) {
+        DatabaseMode::Hybrid => match silicon(db) {
             Ok(latency) => Ok((latency, Source::Silicon)),
             Err(err) if err.is_missing_perf_data() => Ok((
                 custom_allreduce_empirical(db, quant, tp_size, size)?,
@@ -112,35 +120,8 @@ fn query_custom_allreduce_table(
             )),
             Err(err) => Err(err),
         },
-        _ => Ok((custom_allreduce_silicon(db, quant, tp_size, size)?, Source::Silicon)),
+        _ => Ok((silicon(db)?, Source::Silicon)),
     }
-}
-
-/// Python `_query_custom_allreduce_table.get_silicon` minus the GB200
-/// (`num_gpus_per_node == 72 && tp > 4`) redirect to NCCL, which the Rust
-/// silicon path has never carried (pre-existing divergence, reported, not
-/// silently changed here).
-fn custom_allreduce_silicon(
-    db: &PerfDatabase,
-    quant: CommQuantMode,
-    tp_size: u32,
-    size: u64,
-) -> Result<f64, AicError> {
-    let spec = &db.system_spec;
-    let per_node = spec.node.num_gpus_per_node;
-    let effective_tp = tp_size.min(per_node);
-    let mut latency = db
-        .communication
-        .query_custom_allreduce(quant, effective_tp, size)?;
-    if tp_size > per_node {
-        let base_bw = p2p_bandwidth(spec, per_node);
-        let target_bw = p2p_bandwidth(spec, tp_size);
-        let f_tp = tp_size as f64;
-        let f_pn = per_node as f64;
-        let scale = (f_tp - 1.0) / f_tp * f_pn / (f_pn - 1.0).max(1.0) * base_bw / target_bw;
-        latency *= scale;
-    }
-    Ok(latency)
 }
 
 /// Ring-allreduce SOL in ms. Mirrors Python
@@ -166,10 +147,10 @@ fn custom_allreduce_empirical(
     db: &PerfDatabase,
     quant: CommQuantMode,
     tp_size: u32,
-    size: u64,
+    size: f64,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
-    let sol_q = custom_allreduce_sol_ms(spec, tp_size, size as f64);
+    let sol_q = custom_allreduce_sol_ms(spec, tp_size, size);
     if tp_size <= 1 || sol_q <= 0.0 {
         // No communication for a single rank -> 0/SOL, not a data gap.
         return Ok(sol_q);
@@ -186,7 +167,7 @@ fn custom_allreduce_empirical(
             Err(err) => Err(err),
         }
     })?;
-    let query = [size as f64];
+    let query = [size];
     let (latency, _) = util_empirical::estimate(sol_q, &query, grid.as_deref(), 1.0)?;
     Ok(latency)
 }
@@ -242,8 +223,10 @@ impl NcclOp {
             return Ok(PerformanceResult::new(0.0, Source::Empirical));
         }
         let per_rank_tokens = num_tokens.div_ceil(self.seq_split.max(1)); // CP: busiest rank
-        // Python: message_size = ceil(x/seq_split) * num_elements_per_token (float).
-        let message_size = ((per_rank_tokens as f64) * self.hidden_size) as u64;
+        // Python: message_size = ceil(x/seq_split) * num_elements_per_token —
+        // kept as a FLOAT (fractional element counts are real: the gemma4 CP
+        // KV all-gather sizes per-token elements as kv_bytes / comm_bytes).
+        let message_size = (per_rank_tokens as f64) * self.hidden_size;
         let (latency, source) =
             query_nccl_table(db, self.dtype, self.num_gpus, &self.operation, message_size)?;
         Ok(PerformanceResult::new(latency, source)
@@ -259,14 +242,17 @@ fn query_nccl_table(
     dtype: CommQuantMode,
     num_gpus: u32,
     operation: &str,
-    message_size: u64,
+    message_size: f64,
 ) -> Result<(f64, Source), AicError> {
     match db.database_mode {
         DatabaseMode::Empirical => Ok((
             nccl_empirical(db, dtype, num_gpus, operation, message_size)?,
             Source::Empirical,
         )),
-        DatabaseMode::Hybrid => match nccl_silicon(db, dtype, num_gpus, operation, message_size) {
+        DatabaseMode::Hybrid => match db
+            .communication
+            .query_nccl_scaled(&db.system_spec, dtype, operation, num_gpus, message_size)
+        {
             Ok(latency) => Ok((latency, Source::Silicon)),
             Err(err) if err.is_missing_perf_data() => Ok((
                 nccl_empirical(db, dtype, num_gpus, operation, message_size)?,
@@ -274,38 +260,12 @@ fn query_nccl_table(
             )),
             Err(err) => Err(err),
         },
-        _ => Ok((nccl_silicon(db, dtype, num_gpus, operation, message_size)?, Source::Silicon)),
+        _ => Ok((
+            db.communication
+                .query_nccl_scaled(&db.system_spec, dtype, operation, num_gpus, message_size)?,
+            Source::Silicon,
+        )),
     }
-}
-
-/// Python `_query_nccl_table.get_silicon`: cap `num_gpus` to the max
-/// recorded fan-out, RAW lerp on the size curve, then bandwidth-scale for
-/// out-of-range fan-outs.
-fn nccl_silicon(
-    db: &PerfDatabase,
-    dtype: CommQuantMode,
-    num_gpus: u32,
-    operation: &str,
-    message_size: u64,
-) -> Result<f64, AicError> {
-    let max_recorded = db
-        .communication
-        .nccl_max_num_gpus(dtype, operation)?
-        .unwrap_or(num_gpus);
-    let effective = num_gpus.min(max_recorded);
-    let mut latency = db
-        .communication
-        .query_nccl(dtype, operation, effective, message_size)?;
-    if num_gpus > max_recorded {
-        let spec = &db.system_spec;
-        let max_bw = p2p_bandwidth(spec, max_recorded);
-        let req_bw = p2p_bandwidth(spec, num_gpus);
-        let f_n = num_gpus as f64;
-        let f_m = max_recorded as f64;
-        let scale = (f_n - 1.0) / f_n * f_m / (f_m - 1.0).max(1.0) * max_bw / req_bw;
-        latency *= scale;
-    }
-    Ok(latency)
 }
 
 /// Per-collective SOL in ms. Mirrors Python `_query_nccl_table.get_sol`:
@@ -344,10 +304,10 @@ fn nccl_empirical(
     dtype: CommQuantMode,
     num_gpus: u32,
     operation: &str,
-    message_size: u64,
+    message_size: f64,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
-    let sol_q = nccl_sol_ms(spec, dtype, num_gpus, operation, message_size as f64);
+    let sol_q = nccl_sol_ms(spec, dtype, num_gpus, operation, message_size);
     if num_gpus <= 1 || sol_q <= 0.0 {
         // No communication for a single rank -> 0, not a data gap.
         return Ok(sol_q);
@@ -374,7 +334,7 @@ fn nccl_empirical(
             Err(err) => Err(err),
         }
     })?;
-    let query = [message_size as f64];
+    let query = [message_size];
     let (latency, _) = util_empirical::estimate(sol_q, &query, grid.as_deref(), 1.0)?;
     Ok(latency)
 }
@@ -458,7 +418,7 @@ mod tests {
         ];
         for (tp, size, expected) in cases {
             let (latency, source) =
-                query_custom_allreduce_table(&db, CommQuantMode::Half, tp, size)
+                query_custom_allreduce_table(&db, CommQuantMode::Half, tp, size as f64)
                     .expect("empirical query");
             assert!(
                 (latency - expected).abs() < 1e-9,
@@ -476,7 +436,7 @@ mod tests {
         for mode in [DatabaseMode::Empirical, DatabaseMode::Hybrid] {
             let mut db = b200_vllm_db();
             db.database_mode = mode;
-            let result = query_custom_allreduce_table(&db, CommQuantMode::Half, 5, 1024);
+            let result = query_custom_allreduce_table(&db, CommQuantMode::Half, 5, 1024 as f64);
             assert!(
                 matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
                 "{mode:?}: got {result:?}"
@@ -498,7 +458,7 @@ mod tests {
         ];
         for (tp, size, expected) in cases {
             let (latency, source) =
-                query_custom_allreduce_table(&db, CommQuantMode::Half, tp, size)
+                query_custom_allreduce_table(&db, CommQuantMode::Half, tp, size as f64)
                     .expect("hybrid query");
             assert!(
                 (latency - expected).abs() < 1e-9,
@@ -529,7 +489,7 @@ mod tests {
             (2, "alltoall", 4096, 0.009470000000000001),
         ];
         for (num_gpus, op, msg, expected) in cases {
-            let (latency, source) = query_nccl_table(&db, CommQuantMode::Half, num_gpus, op, msg)
+            let (latency, source) = query_nccl_table(&db, CommQuantMode::Half, num_gpus, op, msg as f64)
                 .expect("empirical query");
             assert!(
                 (latency - expected).abs() < 1e-9,
@@ -547,7 +507,7 @@ mod tests {
         for mode in [DatabaseMode::Empirical, DatabaseMode::Hybrid] {
             let mut db = b200_vllm_db();
             db.database_mode = mode;
-            let result = query_nccl_table(&db, CommQuantMode::Half, 3, "all_reduce", 1024);
+            let result = query_nccl_table(&db, CommQuantMode::Half, 3, "all_reduce", 1024 as f64);
             assert!(
                 matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
                 "{mode:?}: got {result:?}"
@@ -563,14 +523,14 @@ mod tests {
         let mut db = b200_vllm_db();
         db.database_mode = DatabaseMode::Empirical;
         let (latency, source) =
-            query_nccl_table(&db, CommQuantMode::Half, 8, "broadcast", 1024).expect("no-op query");
+            query_nccl_table(&db, CommQuantMode::Half, 8, "broadcast", 1024 as f64).expect("no-op query");
         assert_eq!(latency, 0.0);
         assert_eq!(source, Source::Empirical);
         let (latency, _) =
-            query_nccl_table(&db, CommQuantMode::Half, 1, "all_reduce", 4096).expect("single rank");
+            query_nccl_table(&db, CommQuantMode::Half, 1, "all_reduce", 4096 as f64).expect("single rank");
         assert_eq!(latency, 0.0);
         // tp=1 allreduce likewise returns 0 in EMPIRICAL mode.
-        let (latency, _) = query_custom_allreduce_table(&db, CommQuantMode::Half, 1, 4096)
+        let (latency, _) = query_custom_allreduce_table(&db, CommQuantMode::Half, 1, 4096 as f64)
             .expect("single rank allreduce");
         assert_eq!(latency, 0.0);
     }
@@ -586,7 +546,7 @@ mod tests {
             (32, "all_reduce", 1_048_576, 0.3167646428571429),
         ];
         for (num_gpus, op, msg, expected) in cases {
-            let (latency, source) = query_nccl_table(&db, CommQuantMode::Half, num_gpus, op, msg)
+            let (latency, source) = query_nccl_table(&db, CommQuantMode::Half, num_gpus, op, msg as f64)
                 .expect("hybrid query");
             assert!(
                 (latency - expected).abs() < 1e-9,

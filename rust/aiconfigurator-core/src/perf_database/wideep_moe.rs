@@ -342,13 +342,20 @@ fn load_compute_parquet(sources: &[PerfSource]) -> Result<WideEpMoeGrids, AicErr
                 moe_tp_size: row.u32(moe_tp_size_col)?,
                 moe_ep_size: row.u32(moe_ep_size_col)?,
             };
-            // First-wins parity with Python loader, extended across shared-layer
-            // sources (earlier source wins).
+            // Last-wins parity with Python `load_wideep_moe_compute_data`
+            // (moe.py): it direct-assigns per coordinate with no
+            // `try/except KeyError` guard, so a later row overwrites an
+            // earlier one — both within a file and across the concatenated
+            // shared-layer sources (`_read_filtered_rows` appends in source
+            // order and the loader assigns in row order). Real shards carry
+            // duplicate keys with differing latencies (e.g. 270 keys in
+            // rtx_pro_6000_server/trtllm/1.3.0rc10), so first-wins here was a
+            // live numeric divergence, same class as the MLA-module fix in
+            // `mla.rs::load_module_parquet`.
             by_keys
                 .entry(key)
                 .or_default()
-                .entry(row.u32(num_tokens_col)?)
-                .or_insert(row.f64(latency_col)?);
+                .insert(row.u32(num_tokens_col)?, row.f64(latency_col)?);
         }
     }
     if !any_source || by_keys.is_empty() {
@@ -407,6 +414,40 @@ mod tests {
         assert_eq!(
             table.available_kernels().expect("kernels list"),
             vec!["wideep_compute_cutlass".to_string()]
+        );
+    }
+
+    #[test]
+    fn wideep_moe_duplicate_key_last_row_wins() {
+        // rtx_pro_6000_server/trtllm/1.3.0rc10/wideep_moe_perf.parquet carries
+        // 270 duplicate coordinates with differing latencies. Python's
+        // `load_wideep_moe_compute_data` direct-assigns (last row wins); this
+        // key's first occurrence is 0.11578880548477173, its last is
+        // 0.11609599590301514 — the loaded grid must hold the LAST value.
+        let root = PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator/systems/data/rtx_pro_6000_server/trtllm/1.3.0rc10");
+        let table = WideEpMoeTable::new(root);
+        let latency = table
+            .query_compute(
+                1,
+                7168,
+                2048,
+                8,
+                384,
+                384,
+                1,
+                2,
+                MoeQuantMode::Nvfp4,
+                "power_law_1.01",
+                "wideep_compute_cutlass",
+                &|t| t,
+            )
+            .expect("WideEP MoE compute query must succeed");
+        assert!(
+            (latency - 0.116_095_995_903_015_14).abs() < 1e-9,
+            "duplicate key must resolve last-wins (Python parity): got {latency}, \
+             first-wins would give 0.11578880548477173"
         );
     }
 }

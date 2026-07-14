@@ -164,6 +164,22 @@ pub struct MoeOp {
     /// `moe_torch_flow_min_latency` kernel is only valid for gated nvfp4
     /// MoE; non-gated paths (e.g. NemotronH) must skip it.
     pub is_gated: bool,
+    /// SGLang MoE backend (Python `MoE._moe_backend`). `Some("deepep_moe")`
+    /// routes the compute lookup to the wideep context/generation MoE tables
+    /// instead of `moe_perf` (operations/moe.py sglang branch). Absent in
+    /// pre-existing specs -> None -> the regular table.
+    #[serde(default)]
+    pub moe_backend: Option<String>,
+    /// EPLB enabled (Python `MoE._enable_eplb`). On the sglang branch the
+    /// PREFILL token count is corrected to `int(num_tokens * 0.8)`
+    /// (operations/moe.py: expert-parallel load balancing evens the
+    /// per-expert token distribution).
+    #[serde(default)]
+    pub enable_eplb: bool,
+    /// Context (prefill) op — selects the wideep CONTEXT MoE table under
+    /// deepep and gates the EPLB prefill correction (Python `MoE._is_context`).
+    #[serde(default)]
+    pub is_context: bool,
 }
 
 impl MoeOp {
@@ -191,6 +207,9 @@ impl MoeOp {
             quant_mode,
             workload_distribution: workload_distribution.into(),
             is_gated: true,
+            moe_backend: None,
+            enable_eplb: false,
+            is_context: false,
         }
     }
 
@@ -200,30 +219,48 @@ impl MoeOp {
         // `MoE.query` (`x = x * attention_dp_size`). Applied exactly once,
         // before the perf-DB resolution keys off the token count.
         let num_tokens = num_tokens.saturating_mul(self.attention_dp_size.max(1));
+        let is_sglang = db.backend == "sglang";
+        // SGLang EPLB prefill correction (Python operations/moe.py:
+        // `num_tokens_corrected = int(num_tokens * 0.8) if enable_eplb and
+        // is_context else num_tokens`, sglang branch only). Applied before
+        // BOTH the silicon resolution and the empirical estimate (Python
+        // corrects the token count ahead of the table query).
+        let num_tokens = if is_sglang && self.enable_eplb && self.is_context {
+            (num_tokens as f64 * 0.8) as u32
+        } else {
+            num_tokens
+        };
 
         // Database-mode dispatch, mirroring the Python `_query_moe_table`
         // tail (`database._query_silicon_or_hybrid`): EMPIRICAL always
         // estimates; HYBRID converts a typed silicon miss into the estimate;
         // SILICON is unchanged. The SOL diagnostic modes never reach the
         // compiled engine.
-        let (latency, source) = match db.database_mode {
-            DatabaseMode::Empirical => (self.empirical_latency(db, num_tokens)?, Source::Empirical),
-            DatabaseMode::Hybrid => match self.silicon_latency(db, num_tokens) {
-                Ok(latency) => (latency, Source::Silicon),
-                Err(err) if err.is_missing_perf_data() => {
-                    (self.empirical_latency(db, num_tokens)?, Source::Empirical)
-                }
-                Err(err) => return Err(err),
-            },
-            _ => (self.silicon_latency(db, num_tokens)?, Source::Silicon),
-        };
-        Ok(PerformanceResult::new(latency, source)
+        match db.database_mode {
+            DatabaseMode::Empirical => Ok(PerformanceResult::new(
+                self.empirical_latency(db, num_tokens)?,
+                Source::Empirical,
+            )
             .clamp_non_negative()
-            .scaled(self.scale_factor))
+            .scaled(self.scale_factor)),
+            DatabaseMode::Hybrid => match self.silicon_pr(db, num_tokens) {
+                Ok(result) => Ok(result),
+                Err(err) if err.is_missing_perf_data() => Ok(PerformanceResult::new(
+                    self.empirical_latency(db, num_tokens)?,
+                    Source::Empirical,
+                )
+                .clamp_non_negative()
+                .scaled(self.scale_factor)),
+                Err(err) => Err(err),
+            },
+            _ => self.silicon_pr(db, num_tokens),
+        }
     }
 
-    /// SILICON table resolution (the pre-empirical behaviour, unchanged).
-    fn silicon_latency(&self, db: &PerfDatabase, num_tokens: u32) -> Result<f64, AicError> {
+    /// SILICON resolution (deepep routing + low-latency probe + the default
+    /// grid, scale/clamp applied per branch — the audit-PR body, unchanged).
+    fn silicon_pr(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
+        let is_sglang = db.backend == "sglang";
         // The roofline SOL the perf-DB engine anchors its beyond-range
         // util-hold on (Python `_resolve_tokens` passes the same closure).
         // Coordinates arriving from the engine are always integral (table
@@ -232,6 +269,44 @@ impl MoeOp {
         // deleted op-level SOL-anchored overflow estimator (the engine's
         // `k_tail=1` util-hold handles beyond-range queries).
         let sol = |t: f64| self.sol_latency_ms(db, t.round() as u32);
+
+        // SGLang DeepEP (wideep) routes MoE compute to the wideep
+        // context/generation tables (Python operations/moe.py:
+        // `if moe_backend == "deepep_moe": moe_data = _wideep_*_moe_data`),
+        // resolved through the SAME `_resolve_tokens` semantics (singleton
+        // guard + MoE-roofline util-hold, threaded via `sol`).
+        if is_sglang && self.moe_backend.as_deref() == Some("deepep_moe") {
+            let latency = if self.is_context {
+                db.wideep.query_context_moe(
+                    num_tokens,
+                    self.hidden_size,
+                    self.inter_size,
+                    self.topk,
+                    self.num_experts,
+                    self.moe_tp_size,
+                    self.moe_ep_size,
+                    self.quant_mode,
+                    &self.workload_distribution,
+                    &sol,
+                )?
+            } else {
+                db.wideep.query_generation_moe(
+                    num_tokens,
+                    self.hidden_size,
+                    self.inter_size,
+                    self.topk,
+                    self.num_experts,
+                    self.moe_tp_size,
+                    self.moe_ep_size,
+                    self.quant_mode,
+                    &self.workload_distribution,
+                    &sol,
+                )?
+            };
+            return Ok(PerformanceResult::new(latency, Source::Silicon)
+                .clamp_non_negative()
+                .scaled(self.scale_factor));
+        }
 
         // Mirrors Python's MoE._query_moe_table TRT-LLM gate: for nvfp4
         // gated MoE at num_tokens <= 128, probe the
@@ -256,10 +331,12 @@ impl MoeOp {
                 &self.workload_distribution,
                 &sol,
             )? {
-                return Ok(ll);
+                return Ok(PerformanceResult::new(ll, Source::Silicon)
+                    .clamp_non_negative()
+                    .scaled(self.scale_factor));
             }
         }
-        db.moe.query(
+        let latency = db.moe.query(
             num_tokens,
             self.hidden_size,
             self.inter_size,
@@ -270,7 +347,10 @@ impl MoeOp {
             self.quant_mode,
             &self.workload_distribution,
             &sol,
-        )
+        )?;
+        Ok(PerformanceResult::new(latency, Source::Silicon)
+            .clamp_non_negative()
+            .scaled(self.scale_factor))
     }
 
     /// `SOL(query)/util` with the full transfer ladder. Mirrors Python
@@ -661,6 +741,9 @@ mod tests {
             workload_distribution: "power_law_1.2".into(),
             attention_dp_size,
             is_gated: true,
+            moe_backend: None,
+            enable_eplb: false,
+            is_context: false,
         }
     }
 
@@ -693,6 +776,9 @@ mod tests {
             workload_distribution: "power_law_1.2".into(),
             attention_dp_size: 1,
             is_gated: true,
+            moe_backend: None,
+            enable_eplb: false,
+            is_context: false,
         }
     }
 
@@ -836,6 +922,9 @@ mod tests {
             workload_distribution: "balanced".into(),
             attention_dp_size: 1,
             is_gated: true,
+            moe_backend: None,
+            enable_eplb: false,
+            is_context: false,
         };
         let ll = op.query(&db, 100).expect("ll-table empirical t=100");
         assert_oracle(&ll, 0.023113779703977197, Source::Empirical, "ll_own_t100");

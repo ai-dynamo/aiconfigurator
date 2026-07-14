@@ -53,10 +53,11 @@ pub struct WideEpMoeOp {
     pub workload_distribution: String,
     /// EPLB slots; defaults to `num_experts` (no EPLB redundancy).
     pub num_slots: u32,
-    /// UNUSED — retained for opspec wire-format compatibility. Kernel
-    /// selection now mirrors Python `TrtLLMWideEPMoE._select_kernel`
-    /// (architecture + quant preferred, table-availability fallback); Python
-    /// never lets the caller pick the compute kernel.
+    /// Wire-carried compile-time kernel hint. NOT used for the lookup:
+    /// Python's `_select_kernel(database, quant)` availability fallback only
+    /// sees loaded data, so its compile-time value is load-order dependent
+    /// (`moe_torch_flow` on a fresh database). The query below re-resolves
+    /// at query time exactly like Python's `TrtLLMWideEPMoE.query` does.
     pub kernel_source: String,
 }
 
@@ -124,7 +125,9 @@ impl WideEpMoeOp {
             .scaled(self.scale_factor))
     }
 
-    /// SILICON table resolution: resolved kernel + level-wise distribution
+    /// SILICON table resolution: query-time kernel selection (Python's
+    /// `_select_kernel(database, quant)` — architecture/quant preferred with
+    /// the loaded-table availability fallback) + level-wise distribution
     /// fallback in the table layer, token curve anchored on the WideEP MoE
     /// roofline (Python `get_silicon` threads the same `get_sol` closure
     /// through `OpInterpConfig`).
@@ -151,11 +154,36 @@ impl WideEpMoeOp {
         )
     }
 
+    /// Mirror of Python `TrtLLMWideEPMoE._select_kernel` at QUERY time:
+    /// 1. SM >= 100 (Blackwell) with fp8_block -> `deepgemm`;
+    /// 2. otherwise -> `moe_torch_flow` (Cutlass);
+    /// then keep the preferred kernel if collected, else fall back to the
+    /// first collected kernel (BTreeMap order — Python takes the first dict
+    /// key; identical for single-kernel shipped tables).
+    fn select_kernel(&self, db: &PerfDatabase) -> Result<String, AicError> {
+        let is_blackwell = db.system_spec.gpu.sm_version.unwrap_or(0) >= 100;
+        // Python: `"fp8_block" in quant_mode_str` (substring, not equality).
+        let is_fp8_block = self.quant_mode.name().contains("fp8_block");
+        let preferred = if is_blackwell && is_fp8_block {
+            "deepgemm"
+        } else {
+            "moe_torch_flow"
+        };
+        let available = db.wideep_moe.available_kernels()?;
+        if available.iter().any(|k| k == preferred) {
+            return Ok(preferred.to_string());
+        }
+        if let Some(first) = available.into_iter().next() {
+            return Ok(first);
+        }
+        Ok(preferred.to_string())
+    }
+
     /// `SOL(query)/util` over the op's OWN token curve (depth 1, no transfer
     /// ladder). Mirrors Python `_query_compute_table::get_empirical_from_sol`.
     fn empirical_latency(&self, db: &PerfDatabase, num_tokens: u32) -> Result<f64, AicError> {
-        let spec = &db.system_spec;
         let kernel = self.select_kernel(db)?;
+        let spec = &db.system_spec;
         let sol = |c: &[f64]| self.sol_latency_ms(spec, c[0].round() as u32);
         let sol_time = self.sol_latency_ms(spec, num_tokens);
 
@@ -203,30 +231,6 @@ impl WideEpMoeOp {
         let query = [num_tokens as f64];
         let (latency, _) = util_empirical::estimate(sol_time, &query, grid.as_deref(), 1.0)?;
         Ok(latency)
-    }
-
-    /// Mirror of Python `TrtLLMWideEPMoE._select_kernel`:
-    /// 1. SM >= 100 (Blackwell) with fp8_block -> `deepgemm`;
-    /// 2. otherwise -> `moe_torch_flow` (Cutlass);
-    /// then, when the table actually loaded, keep the preferred kernel if
-    /// collected, else fall back to the first collected kernel.
-    fn select_kernel(&self, db: &PerfDatabase) -> Result<String, AicError> {
-        let is_blackwell = db.system_spec.gpu.sm_version.unwrap_or(0) >= 100;
-        // Python: `"fp8_block" in quant_mode_str` (substring, not equality).
-        let is_fp8_block = self.quant_mode.name().contains("fp8_block");
-        let preferred = if is_blackwell && is_fp8_block {
-            "deepgemm"
-        } else {
-            "moe_torch_flow"
-        };
-        let available = db.wideep_moe.available_kernels()?;
-        if available.iter().any(|k| k == preferred) {
-            return Ok(preferred.to_string());
-        }
-        if let Some(first) = available.into_iter().next() {
-            return Ok(first);
-        }
-        Ok(preferred.to_string())
     }
 
     /// WideEP MoE roofline SOL (ms) mirroring Python
@@ -290,6 +294,9 @@ mod tests {
             quant_mode: MoeQuantMode::Nvfp4,
             workload_distribution: "power_law_1.01".into(),
             num_slots: 256,
+            // Wire hint only — the query re-resolves the kernel against the
+            // loaded table (here: `wideep_compute_cutlass`, the only
+            // collected kernel).
             kernel_source: "moe_torch_flow".into(),
         }
     }
@@ -382,5 +389,7 @@ mod tests {
             matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
             "expected the typed empirical miss, got {result:?}"
         );
+
     }
+
 }

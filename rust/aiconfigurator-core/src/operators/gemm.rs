@@ -10,8 +10,9 @@
 //!
 //! For `fp8_static` quant mode, subtracts `compute_scale` overhead from the
 //! GEMM latency (and additionally subtracts `scale_matrix` when the input
-//! is also low-precision). Latency is clamped to `>= 0` post-subtraction
-//! to mirror Python's `max(0.0, latency)` behavior.
+//! is also low-precision). Post-subtraction latency is floored at the GEMM's
+//! own SOL roofline — mirroring Python's `max(latency_floor, latency)` where
+//! `latency_floor = query_gemm(..., DatabaseMode.SOL)` — not at 0.
 
 use serde::{Deserialize, Serialize};
 use crate::common::enums::{DatabaseMode, GemmQuantMode};
@@ -78,20 +79,35 @@ impl GemmOp {
         let quant = quant_override.unwrap_or(self.quant_mode);
 
         let (mut latency, mut source) = query_gemm_table(db, quant, m, self.n, self.k)?;
+        let mut latency_floor = 0.0_f64;
 
         if quant == GemmQuantMode::Fp8Static {
-            let (cs_latency, cs_source) = query_compute_scale_table(db, quant, m, self.k)?;
+            // The component sources are irrelevant: the whole fp8_static
+            // path is tagged Estimated below regardless of mode.
+            let (cs_latency, _) = query_compute_scale_table(db, quant, m, self.k)?;
             latency -= cs_latency;
-            source = source.combine(cs_source);
 
             if self.low_precision_input {
-                let (sm_latency, sm_source) = query_scale_matrix_table(db, quant, m, self.k)?;
+                let (sm_latency, _) = query_scale_matrix_table(db, quant, m, self.k)?;
                 latency -= sm_latency;
-                source = source.combine(sm_source);
             }
+            // Python (`operations/gemm.py`): the subtraction leaves a path
+            // that still contains the GEMM; independently interpolated
+            // component tables can cross, but that path cannot be faster than
+            // the GEMM's own roofline. Floor at the SOL (NOT at 0), and tag
+            // the result "estimated" (fp8_static is modeled from dynamic FP8
+            // plus overhead tables, not measured directly).
+            latency_floor = crate::perf_database::gemm::gemm_sol_latency_ms(
+                &db.system_spec,
+                quant,
+                m as f64,
+                self.n as f64,
+                self.k as f64,
+            );
+            source = Source::Estimated;
         }
 
-        Ok(PerformanceResult::new(latency, source)
+        Ok(PerformanceResult::new(latency.max(latency_floor), source)
             .clamp_non_negative()
             .scaled(self.scale_factor))
     }

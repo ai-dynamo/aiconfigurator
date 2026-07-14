@@ -184,6 +184,9 @@ impl MsaModuleOp {
             s as i64,
             prefix as i64,
             self.num_heads as i64,
+            // MSA borrows the FULL DSA layer (Python's probe never sets
+            // skip_indexer).
+            false,
         );
         let probe = self.dsa_probe(dims.index_topk);
         let silicon = probe
