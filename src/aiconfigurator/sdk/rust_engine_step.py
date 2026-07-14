@@ -14,6 +14,7 @@ onto that handle and cache one handle per engine identity.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from importlib import resources as pkg_resources
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import Any
 
 from aiconfigurator.sdk.config import RuntimeConfig
 
+logger = logging.getLogger(__name__)
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
 
 
@@ -219,9 +221,29 @@ def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list
     return iterations
 
 
-def should_use_rust_engine_step(runtime_config: RuntimeConfig) -> bool:
+def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = None) -> bool:
+    """Route to the compiled engine only when it can give the SAME answer.
+
+    The compiled engine implements the SILICON path only (no util_empirical
+    layer), so HYBRID/EMPIRICAL databases must stay on the Python step:
+    wherever silicon data misses, Python fills in empirically while the
+    compiled engine would fail the config -- delegating keeps the two
+    backends answer-identical instead of capability-divergent (parity by
+    delegation; the empirical-layer port is tracked in issue #1333).
+    """
     backend = getattr(runtime_config, "engine_step_backend", None) or os.environ.get(ENGINE_STEP_BACKEND_ENV)
-    return str(backend or "python").lower() == "rust"
+    if str(backend or "python").lower() != "rust":
+        return False
+    if database is not None:
+        mode = getattr(database, "get_default_database_mode", lambda: None)()
+        if mode is not None and getattr(mode, "name", str(mode)) != "SILICON":
+            logger.debug(
+                "engine-step backend 'rust' requested but database_mode=%s; "
+                "using the python step (compiled engine is SILICON-only).",
+                getattr(mode, "name", mode),
+            )
+            return False
+    return True
 
 
 def estimate_static_latency_breakdown_with_rust(

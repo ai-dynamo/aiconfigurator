@@ -134,13 +134,14 @@ class TestAllreduceEdgeCases:
 class TestInitializationEdgeCases:
     """Test edge cases during PerfDatabase initialization."""
 
-    def test_extrapolation_during_init(self, tmp_path, monkeypatch, caplog):
-        """Test that extrapolation runs when ContextAttention's data is loaded.
+    def test_load_binds_raw_grid_without_pre_expansion(self, tmp_path, monkeypatch, caplog):
+        """ContextAttention.load_data binds the RAW grid, without densifying it.
 
-        Previously ``PerfDatabase.__init__`` warmed every op eagerly, so
-        extrapolation ran during construction. Now the load is lazy: we
-        explicitly trigger ``ContextAttention.load_data`` below (with
-        the loader patches still active) and assert on the result."""
+        Earlier the op pre-expanded the grid at load time (eager extrapolation
+        during ``PerfDatabase.__init__``). perf_interp removed that: interp and
+        util-hold happen at query time on the raw grid, so loading must leave
+        the four collected points untouched. Guards against re-introducing
+        load-time pre-expansion."""
         # Set up minimal system spec
         import yaml
 
@@ -224,8 +225,8 @@ class TestInitializationEdgeCases:
         db = PerfDatabase("test", "backend", "v1", str(tmp_path))
         ContextAttention.load_data(db)
 
-        # Check that extrapolation created new data points
-        # Should have more than the 4 original points
+        # No load-time pre-expansion: the four collected points are preserved
+        # verbatim (perf_interp interpolates/holds lazily at query time).
         total_points = 0
         for quant_mode in db._context_attention_data:
             for kv_cache in db._context_attention_data[quant_mode]:
@@ -242,38 +243,35 @@ class TestInitializationEdgeCases:
                                         ][s]
                                     )
 
-        assert total_points > 4, "Extrapolation should have created additional data points"
+        assert total_points == 4, "Load must preserve the raw grid; pre-expansion was removed"
 
 
 class TestGemmInterpolation:
     """Test GEMM-specific interpolation behavior."""
 
     def test_query_gemm_interpolation(self, comprehensive_perf_db):
-        """Test GEMM interpolation between known points."""
+        """An uncollected (n, k) shape between collected shapes resolves via
+        nearest-site util transfer and lands close to the fixture's formula.
+
+        The fixture's latency (0.1 + tiny linear terms) is overhead-dominated
+        and deliberately NOT SOL-shaped — the worst case for util transfer —
+        so single-digit % deviation from the formula is the expected floor
+        (real tables are SOL-correlated and transfer better)."""
         quant_mode = common.GEMMQuantMode.bfloat16
 
-        # Query a point that requires interpolation
-        # Our test data has points at m=[1,2,4,8,...], n=[128,256,...], k=[128,256,...]
+        # Fixture grid: m=[1,2,4,...], n=[128,256,...], k=[128,256,...]
         result = comprehensive_perf_db.query_gemm(
             3,
             192,
             192,
-            quant_mode,  # All values between grid points
+            quant_mode,  # (n, k) between collected shapes; m between sweep points
             database_mode=common.DatabaseMode.SILICON,
         )
 
-        # Should return a reasonable interpolated value
         assert result > 0
         assert result.source == "silicon"
-
-        # Should be between surrounding values
-        lower_bound = comprehensive_perf_db.query_gemm(
-            2, 128, 128, quant_mode, database_mode=common.DatabaseMode.SILICON
-        )
-        upper_bound = comprehensive_perf_db.query_gemm(
-            4, 256, 256, quant_mode, database_mode=common.DatabaseMode.SILICON
-        )
-        assert lower_bound < result < upper_bound
+        formula = 0.1 + 3 * 0.001 + 192 * 0.0001 + 192 * 0.00001
+        assert math.isclose(float(result), formula, rel_tol=0.10)
 
     def test_query_gemm_extrapolation(self, comprehensive_perf_db):
         """Test GEMM extrapolation beyond data range."""

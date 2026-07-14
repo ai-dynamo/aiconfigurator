@@ -27,7 +27,7 @@ use crate::common::enums::CommQuantMode;
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
 use super::{kernel_source_ok, resolve_op_sources};
-use super::interpolation::{interp_1d, nearest_neighbors};
+use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct CommunicationTable {
@@ -223,21 +223,35 @@ impl CommunicationTable {
     }
 }
 
+/// Resolve a 1-axis message-size curve on the perf_interp v2 engine: exact
+/// hit / RAW lerp in range (bandwidth-bound collectives are ~linear in
+/// size); beyond the collected range the boundary util is held (`k_tail=1`)
+/// and SOL carries the growth — the legacy raw two-point extrapolation could
+/// undershoot the launch floor or go negative below the smallest size.
+///
+/// SOL is a LINEAR message-size proxy (`sol(size) = size`). Python passes
+/// the actual collective roofline
+/// (`communication.py::_query_{custom_allreduce,nccl}_table.get_sol`), but
+/// for a fixed (op, num_gpus) slice that roofline is `const * size`, and the
+/// engine only ever consumes the RATIO `SOL(query)/SOL(anchor)` — so the
+/// proxy is exactly ratio-equivalent.
+///
+/// The query coordinate is passed as `f64` without truncation (Python does
+/// none). Table keys clamp to `u32` only as a defensive bound; every shipped
+/// comm table tops out at 512 MiB message sizes, well under `u32::MAX`.
 fn interp_message_size(by_size: &BTreeMap<u64, f64>, message_size: u64) -> Result<f64, AicError> {
-    if let Some(&latency) = by_size.get(&message_size) {
-        return Ok(latency);
-    }
     if by_size.is_empty() {
         return Err(AicError::PerfDatabase(
             "comm data has no message_size points".to_string(),
         ));
     }
-    let sizes: Vec<u32> = by_size.keys().map(|&s| s.min(u32::MAX as u64) as u32).collect();
-    let query = message_size.min(u32::MAX as u64) as u32;
-    let (lo, hi) = nearest_neighbors(query, &sizes, false)?;
-    let y_lo = by_size[&(lo as u64)];
-    let y_hi = by_size[&(hi as u64)];
-    Ok(interp_1d(lo as f64, hi as f64, y_lo, y_hi, query as f64))
+    let mut node = Node::branch();
+    for (&size, &latency) in by_size {
+        node.insert(&[size.min(u32::MAX as u64) as u32], latency);
+    }
+    let sol = |c: &[f64]| c[0];
+    let cfg = OpInterpConfig::grid(&["message_bytes"], &sol);
+    perf_interp::query(&cfg, &node, &[message_size as f64])
 }
 
 fn load_custom_allreduce_parquet(sources: &[PerfSource]) -> Result<CustomAllReduceGrids, AicError> {
@@ -409,6 +423,45 @@ mod tests {
         // `<vllm/0.19.0>/nccl_perf.parquet` which never existed.
         let table = CommunicationTable::new(b200_vllm_data_root(), b200_nccl_root(), None);
         let _ = table.load_nccl().expect("NCCL parquet must load from system-wide path");
+    }
+
+    /// Cross-language parity with the Python v2 engine. Expected values from:
+    ///
+    /// ```text
+    /// PYTHONPATH=src python3 -c "
+    /// from aiconfigurator.sdk.perf_database import PerfDatabase
+    /// from aiconfigurator.sdk import common
+    /// db = PerfDatabase('b200_sxm','vllm','0.19.0',
+    ///                   systems_root='src/aiconfigurator/systems', database_mode='SOL')
+    /// for msg in [384, 1073741824, 64]:
+    ///     r = db.query_nccl(common.CommQuantMode.half, 8, 'all_gather', msg,
+    ///                       database_mode=common.DatabaseMode.SILICON)
+    ///     print(msg, repr(float(r)))"
+    /// ```
+    ///
+    /// num_gpus=8 is the largest collected fan-out, so Python's silicon path
+    /// applies no multi-node scale factor and compares at the same layer as
+    /// this raw table query. msg=384 is an interior RAW lerp; 1 GiB is a
+    /// beyond-max util-hold (collected max 256 MiB); 64 B is a below-min
+    /// util-hold (collected min 256 B) — the linear-proxy SOL ratio equals
+    /// Python's collective-roofline ratio.
+    #[test]
+    fn nccl_query_matches_python_v2_engine() {
+        let table = CommunicationTable::new(b200_vllm_data_root(), b200_nccl_root(), None);
+        let cases: &[(u64, f64)] = &[
+            (384, 0.01559),
+            (1_073_741_824, 3.0412399999999997),
+            (64, 0.0038999999999999994),
+        ];
+        for &(msg, expected) in cases {
+            let got = table
+                .query_nccl(CommQuantMode::Half, "all_gather", 8, msg)
+                .expect("query must succeed");
+            assert!(
+                ((got - expected) / expected).abs() < 1e-9,
+                "msg={msg}: rust {got} vs python {expected}"
+            );
+        }
     }
 
     #[test]

@@ -9,23 +9,21 @@ import sys
 from itertools import pairwise
 from pathlib import Path
 
+import pytest
+
 from collector.case_generator import (
     get_attention_head_configs,
     get_moe_quantization_specs,
     moe_model_allows_quantization,
 )
-from collector.helper import create_test_case_id
 from collector.model_cases import (
-    CaseSelector,
-    OpCasePlan,
+    BASE_OP_CASES_DIR,
     build_collection_case_plan,
     default_architecture_cases_path,
-    default_sm_exceptions_path,
-    expected_failure_for_test_case,
-    filter_test_cases,
-    filter_test_cases_with_report,
     load_yaml_file,
 )
+
+pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SUPPORT_MATRIX_ROOT = REPO_ROOT / "src" / "aiconfigurator" / "systems" / "support_matrix"
@@ -47,14 +45,14 @@ def test_model_case_plan_merges_required_base_and_framework_specific_ops():
 
     assert plan.model_architecture == "DeepseekV3ForCausalLM"
     assert plan.model_cases_paths == [default_architecture_cases_path("DeepseekV3ForCausalLM")]
-    assert "gemm" in plan.op_cases
-    assert "attention_context" not in plan.op_cases
-    assert "attention_generation" not in plan.op_cases
-    assert "moe" in plan.op_cases
-    assert "mla_context" in plan.op_cases
-    assert "wideep_mla_context" in plan.op_cases
-    assert "wideep_moe" in plan.op_cases
-    assert "trtllm_moe_wideep" not in plan.op_cases
+    assert plan.has_op("gemm")
+    assert not plan.has_op("attention_context")
+    assert not plan.has_op("attention_generation")
+    assert "moe" in plan.selected_ops
+    assert "mla_context" in plan.selected_ops
+    assert "wideep_mla_context" not in plan.selected_ops
+    assert "wideep_moe" not in plan.selected_ops
+    assert "trtllm_moe_wideep" not in plan.selected_ops
 
 
 def test_attention_head_configs_preserve_real_model_structures_without_cross_mixing():
@@ -83,7 +81,8 @@ def test_attention_head_configs_preserve_real_model_structures_without_cross_mix
     ):
         configs = {
             (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-            for config in get_attention_head_configs(get_shape_sweeps("sglang")[0], phase=phase)
+            for sweep in get_shape_sweeps("sglang")
+            for config in get_attention_head_configs(sweep, phase=phase)
         }
 
         assert expected_model_structures <= configs
@@ -114,10 +113,8 @@ def test_targeted_attention_profile_uses_model_topology(monkeypatch):
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "Qwen/Qwen3-32B-FP8")
     configs = {
         (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-        for config in get_attention_head_configs(
-            get_attention_context_shape_sweeps("sglang")[0],
-            phase="context",
-        )
+        for sweep in get_attention_context_shape_sweeps("sglang")
+        for config in get_attention_head_configs(sweep, phase="context")
     }
 
     assert configs == {
@@ -130,15 +127,12 @@ def test_targeted_attention_profile_uses_model_topology(monkeypatch):
         (1, 1, 128, 0),
     }
 
-    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "moonshotai/Kimi-K2.5")
-    kimi_configs = {
-        (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-        for config in get_attention_head_configs(
-            get_attention_context_shape_sweeps("vllm")[0],
-            phase="context",
-        )
-    }
-    assert kimi_configs == {
+
+def test_retired_kimi_generic_attention_profile_was_redundant_for_legacy_full_grids(monkeypatch):
+    from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
+
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    retired_kimi_configs = {
         (64, 64, 128, 0),
         (32, 32, 128, 0),
         (16, 16, 128, 0),
@@ -147,6 +141,18 @@ def test_targeted_attention_profile_uses_model_topology(monkeypatch):
         (2, 2, 128, 0),
         (1, 1, 128, 0),
     }
+
+    for backend in ("sglang", "trtllm"):
+        for phase, get_shape_sweeps in (
+            ("context", get_attention_context_shape_sweeps),
+            ("generation", get_attention_generation_shape_sweeps),
+        ):
+            configs = {
+                (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
+                for sweep in get_shape_sweeps(backend)
+                for config in get_attention_head_configs(sweep, phase=phase)
+            }
+            assert retired_kimi_configs <= configs
 
 
 def test_added_model_attention_profiles_resolve_targeted_topology(monkeypatch):
@@ -170,10 +176,8 @@ def test_added_model_attention_profiles_resolve_targeted_topology(monkeypatch):
             monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
             configs = {
                 (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-                for config in get_attention_head_configs(
-                    get_attention_context_shape_sweeps("sglang")[0],
-                    phase="context",
-                )
+                for sweep in get_attention_context_shape_sweeps("sglang")
+                for config in get_attention_head_configs(sweep, phase="context")
             }
             assert configs == expected, model_path
 
@@ -200,10 +204,8 @@ def test_mimo_attention_profile_matches_aic_full_attention_window(monkeypatch):
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "XiaomiMiMo/MiMo-7B-Base")
     configs = {
         (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-        for config in get_attention_head_configs(
-            get_attention_context_shape_sweeps("vllm")[0],
-            phase="context",
-        )
+        for sweep in get_attention_context_shape_sweeps("vllm")
+        for config in get_attention_head_configs(sweep, phase="context")
     }
 
     assert configs == {
@@ -222,10 +224,8 @@ def test_qwen_vl_attention_profiles_stop_at_sdk_valid_tp16(monkeypatch):
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "Qwen/Qwen3-VL-32B-Instruct")
     configs = {
         (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
-        for config in get_attention_head_configs(
-            get_attention_context_shape_sweeps("vllm")[0],
-            phase="context",
-        )
+        for sweep in get_attention_context_shape_sweeps("vllm")
+        for config in get_attention_head_configs(sweep, phase="context")
     }
 
     assert configs == {
@@ -241,26 +241,40 @@ def test_full_encoder_attention_profiles_combine_defaults_and_model_deltas(monke
     from collector.case_generator import get_attention_encoder_head_configs, get_attention_encoder_shape_sweeps
 
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
-    sweep = get_attention_encoder_shape_sweeps("vllm")[0]
-    configs = get_attention_encoder_head_configs(sweep)
-    keys = {(config.num_heads, config.head_dim) for config in configs}
-    default_keys = {(num_heads, head_dim) for head_dim in sweep["head_dims"] for num_heads in sweep["head_counts"]}
+    for backend in ("sglang", "trtllm", "vllm"):
+        sweeps = get_attention_encoder_shape_sweeps(backend)
+        keys = {
+            (config.num_heads, config.head_dim)
+            for sweep in sweeps
+            for config in get_attention_encoder_head_configs(sweep)
+        }
+        default_keys = {
+            (num_heads, head_dim)
+            for sweep in sweeps
+            for head_dim in sweep["head_dims"]
+            for num_heads in sweep["head_counts"]
+        }
 
-    assert default_keys <= keys
-    assert keys - default_keys == {(1, 64), (1, 72)}
+        assert default_keys <= keys
+        assert keys - default_keys == {(1, 64), (1, 72)}
 
 
 def test_targeted_encoder_attention_profile_is_model_exact(monkeypatch):
     from collector.case_generator import get_attention_encoder_head_configs, get_attention_encoder_shape_sweeps
 
-    sweep = get_attention_encoder_shape_sweeps("vllm")[0]
     for model_path, head_dim in (
         ("Qwen/Qwen3-VL-4B-Instruct", 64),
         ("Qwen/Qwen3-VL-32B-Instruct", 72),
         ("Qwen/Qwen3-VL-235B-A22B-Instruct", 72),
+        ("moonshotai/Kimi-K2.5", 72),
+        ("nvidia/Kimi-K2.5-NVFP4", 72),
     ):
         monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
-        configs = get_attention_encoder_head_configs(sweep)
+        configs = [
+            config
+            for sweep in get_attention_encoder_shape_sweeps("vllm")
+            for config in get_attention_encoder_head_configs(sweep)
+        ]
 
         assert {(config.num_heads, config.head_dim) for config in configs} == {
             (16, head_dim),
@@ -273,32 +287,37 @@ def test_targeted_encoder_attention_profile_is_model_exact(monkeypatch):
 
 def test_base_gemm_cases_are_readable_shape_specs():
     plan = build_collection_case_plan(backend="sglang", model_path="Qwen/Qwen3-32B")
-    gemm_plan = plan.op_cases["gemm"]
-    context_plan = plan.op_cases["attention_context"]
-    generation_plan = plan.op_cases["attention_generation"]
+    assert plan.has_op("gemm")
+    assert plan.has_op("attention_context")
+    assert plan.has_op("attention_generation")
 
-    assert len(gemm_plan.include.case_specs) == 1
-    spec = gemm_plan.include.case_specs[0]
+    def base_specs(op_name):
+        data = load_yaml_file(BASE_OP_CASES_DIR / f"{op_name}.yaml")
+        return data["all_frameworks_op_cases"][op_name]["cases"]
+
+    gemm_specs = base_specs("gemm")
+    assert len(gemm_specs) == 1
+    spec = gemm_specs[0]
     assert spec["id"] == "base_transformer_gemm_shape_sweep"
     assert spec["token_counts"][:5] == [1, 2, 3, 4, 5]
     assert spec["feature_sizes"][:3] == [32, 64, 128]
 
-    assert context_plan.include.case_specs[0]["id"] == "base_attention_context_shape_sweep"
-    assert context_plan.include.case_specs[0]["kv_head_options"] == ["self", 1, 2, 4, 8]
-    assert generation_plan.include.case_specs[0]["id"] == "base_attention_generation_shape_sweep"
-    assert generation_plan.include.case_specs[0]["xqa_query_head_counts"][-1] == 128
-
-    filtered = filter_test_cases(
-        ["case0", "case1"], plan=gemm_plan, full_module_name="sglang.gemm", run_func_name="run_gemm"
-    )
-
-    assert filtered == ["case0", "case1"]
+    context_spec = base_specs("attention_context")[0]
+    assert context_spec["id"] == "base_attention_context_shape_sweep"
+    assert context_spec["kv_head_options"] == ["self", 1, 2, 4, 8]
+    generation_spec = base_specs("attention_generation")[0]
+    assert generation_spec["id"] == "base_attention_generation_shape_sweep"
+    assert generation_spec["xqa_query_head_counts"][-1] == 128
 
 
 def test_moe_model_quantization_policy_is_yaml_backed():
-    assert not moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "w4a8_mxfp4_mxfp8")
+    assert moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "w4a8_mxfp4_mxfp8")
     assert not moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", "bfloat16")
     assert not moe_model_allows_quantization("sglang", "Qwen/Qwen3-235B-A22B", "w4a8_mxfp4_mxfp8")
+    assert moe_model_allows_quantization("sglang", "nvidia/GLM-5.2-NVFP4", "nvfp4")
+    assert not moe_model_allows_quantization("sglang", "nvidia/GLM-5.2-NVFP4", "bfloat16")
+    assert moe_model_allows_quantization("sglang", "zai-org/GLM-5-FP8", "fp8_block")
+    assert not moe_model_allows_quantization("sglang", "zai-org/GLM-5-FP8", "nvfp4")
 
     assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a16_mxfp4")
     assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a8_mxfp4_mxfp8")
@@ -314,8 +333,8 @@ def test_moe_model_quantization_policy_is_yaml_backed():
 def test_dsv4_moe_quantization_policy_prunes_unrelated_modes():
     expected_by_backend = {
         "sglang": {
-            "deepseek-ai/DeepSeek-V4-Flash": set(),
-            "deepseek-ai/DeepSeek-V4-Pro": set(),
+            "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
+            "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
         },
@@ -352,6 +371,107 @@ def test_kimi_moe_quantization_is_artifact_specific():
         for model_path, expected in expected_by_artifact.items():
             allowed = {mode for mode in available_modes if moe_model_allows_quantization(backend, model_path, mode)}
             assert allowed == expected, (backend, model_path)
+
+    from collector.case_generator import get_moe_quantization_modes, get_moe_quantization_module_config
+
+    assert get_moe_quantization_module_config("sglang", "int4_wo", model_name="moonshotai/Kimi-K2.5") == {
+        "group_size": 32
+    }
+    sm90_modes = get_moe_quantization_modes("sglang", sm_version=90)
+    assert "int4_wo" in sm90_modes
+    assert "nvfp4" not in sm90_modes
+    assert "w4a16_mxfp4" in sm90_modes
+    # int4_wo opened to SM100/103 (2026-07-11): serving auto-selects
+    # flashinfer_trtllm for Kimi INT4 there (server_args.py:3736).
+    assert "int4_wo" in get_moe_quantization_modes("sglang", sm_version=100)
+    assert "nvfp4" in get_moe_quantization_modes("sglang", sm_version=100)
+
+
+def test_sglang_marlin_is_declared_only_for_weight_only_modes():
+    def backend_maps(value):
+        if isinstance(value, dict):
+            if "sglang_moe_backends" in value:
+                yield value["sglang_moe_backends"]
+            for child in value.values():
+                yield from backend_maps(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from backend_maps(child)
+
+    base = load_yaml_file(REPO_ROOT / "collector/cases/base_ops/moe.yaml")
+    maps = [base["common_case_values"]["moe_sglang"]["backends"]]
+    for path in (REPO_ROOT / "collector/cases/models").glob("*_cases.yaml"):
+        maps.extend(backend_maps(load_yaml_file(path)))
+
+    marlin_modes = {
+        mode for backends in maps for mode, mapping in backends.items() if "marlin" in json.dumps(mapping).lower()
+    }
+    # Marlin is a weight-only (bf16-activation) runner: INT4-WO everywhere it
+    # is declared, plus MXFP4 w4a16 on SM120 where SGLang 0.5.14 serving
+    # itself selects Marlin (server_args.py:3876-3887). NVFP4 and
+    # mxfp8-activation modes must never declare it (FP4/INT4 identity
+    # reversal).
+    assert marlin_modes == {"int4_wo", "w4a16_mxfp4"}
+
+
+@pytest.mark.unit
+def test_sglang_registry_marks_unvalidated_dsa_and_moe_platforms_explicitly():
+    from collector.sglang.registry import REGISTRY
+
+    sm90 = build_collection_case_plan(backend="sglang", full=True, sm_version=90)
+    sm100 = build_collection_case_plan(backend="sglang", full=True, sm_version=100)
+    entries = {entry.op: entry for entry in REGISTRY}
+
+    for op in ("dsa_context_module_skip_indexer", "dsa_generation_module_skip_indexer"):
+        assert op in sm90.selected_ops
+        assert op in sm100.selected_ops
+        assert entries[op].unverified_sms == (90, 120)
+
+    # SM103 unparked by the B300 hardware probe (2026-07-13, pipeline
+    # 57716023): sampled dsa cases ran clean across all three kernel buckets.
+    for op in ("dsa_context_module", "dsa_generation_module"):
+        assert entries[op].unverified_sms == (120,)
+
+    # The SM120 MoE bring-up audit (RTX 6000 Pro, 2026-07-05) cleared the moe
+    # maturity marker: every planned (quant mode x backend) family was probed
+    # on hardware with verified constructed-method provenance.
+    assert entries["moe"].unverified_sms == ()
+
+    # SM120 sparse-round audit (RTX 6000 Pro, 2026-07-06): the framework
+    # itself rejects the DSA/GLM-5 sparse family on SM120 (TRTLLM-GEN
+    # fmhaRunner "Unsupported architecture"; DeepGEMM attention.hpp:184;
+    # sgl-kernel sparse attention SM90a/SM100f-only), the CSA context pool
+    # derivation is fail-closed pending an SM120 Torch-indexer workspace
+    # policy, and the topk-calib producer is not yet SM120-variant-aware.
+    for op in (
+        "dsv4_csa_topk_calib",
+        "dsv4_paged_mqa_logits_module",
+        "glm5_mqa_logits_module",
+        "glm5_topk_module",
+        "glm5_dsa_attn_module",
+    ):
+        assert entries[op].unverified_sms == (120,)
+
+    # SM89 bring-up round 2 (L40S, 2026-07-07): stock 0.5.14 cannot run
+    # DSV4 on SM89 at all — the server_args DeepseekV4 hook leaves
+    # SGLANG_OPT_DEEPGEMM_HC_PRENORM default-True on non-SM120/non-HIP
+    # platforms while deep_gemm is unimported (NameError in both mHC
+    # directions), the compressed FlashMLA family has no SM89 target
+    # (in-kernel CUDA InternalError on every HCA/CSA-generation case), and
+    # the CSA context pool derivation is fail-closed below SM90.
+    assert entries["dsv4_csa_context_module"].unverified_sms == (89, 120)
+    for op in (
+        "mhc_module",
+        "dsv4_hca_context_module",
+        "dsv4_hca_generation_module",
+        "dsv4_csa_generation_module",
+    ):
+        assert entries[op].unverified_sms == (89,)
+
+    # Probed clean on SM120 and SM89 with only classified failure tails
+    # (GDN int32 kernel-limit raises, decode grid-Y boundary, top-cell
+    # OOMs): no markers.
+    assert entries["gdn"].unverified_sms == ()
 
 
 def test_deepseek_minimax_and_nemotron_moe_quantization_is_artifact_specific():
@@ -396,6 +516,7 @@ def test_gptoss_mxfp4_modes_are_additive_on_blackwell():
         }
 
     assert selected_modes("sglang", 100) == {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
+    assert selected_modes("sglang", 90) == {"w4a16_mxfp4"}
     assert selected_modes("trtllm", 90) == {"w4a16_mxfp4"}
     assert selected_modes("trtllm", 100) == {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
 
@@ -416,11 +537,16 @@ def test_sglang_mxfp4_quant_labels_select_explicit_activation_precision():
 def test_attention_shape_specs_are_yaml_backed_with_backend_overrides():
     from collector.case_generator import get_attention_context_shape_sweeps, get_attention_generation_shape_sweeps
 
-    sglang_context = get_attention_context_shape_sweeps("sglang")[0]
-    trtllm_context = get_attention_context_shape_sweeps("trtllm")[0]
-    vllm_context = get_attention_context_shape_sweeps("vllm")[0]
-    vllm_xpu_context = get_attention_context_shape_sweeps("vllm_xpu")[0]
-    vllm_generation = get_attention_generation_shape_sweeps("vllm")[0]
+    def by_id(sweeps, sweep_id):
+        return next(sweep for sweep in sweeps if sweep["id"] == sweep_id)
+
+    context_id = "base_attention_context_shape_sweep"
+    generation_id = "base_attention_generation_shape_sweep"
+    sglang_context = by_id(get_attention_context_shape_sweeps("sglang"), context_id)
+    trtllm_context = by_id(get_attention_context_shape_sweeps("trtllm"), context_id)
+    vllm_context = by_id(get_attention_context_shape_sweeps("vllm"), context_id)
+    vllm_xpu_context = by_id(get_attention_context_shape_sweeps("vllm_xpu"), context_id)
+    vllm_generation = by_id(get_attention_generation_shape_sweeps("vllm"), generation_id)
 
     assert sglang_context["head_dims"] == [64, 128, 192, 256]
     assert trtllm_context["head_dims"] == [64, 128, 192, 256]
@@ -527,8 +653,6 @@ def test_mla_collectors_dedupe_on_loader_physical_keys(monkeypatch):
             "KV_LORA_RANK": 512,
             "QK_NOPE_HEAD_DIM": 128,
             "QK_ROPE_HEAD_DIM": 64,
-            "MLA_PAGE_SIZE": 64,
-            "MAX_KV_LOC": ((2**31 - 1) // (512 + 64)) - 64,
         },
     )
     trtllm_adapter = _load_mla_adapter(
@@ -561,53 +685,25 @@ def test_mla_collectors_dedupe_on_loader_physical_keys(monkeypatch):
         assert 1 in {case[4] // case[6] for case in context_cases}
         assert 1 in {case[4] // case[6] for case in generation_cases}
 
+    large_generation_spec = SimpleNamespace(
+        model_name="large-generation-regression",
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        num_heads=128,
+        batch_size=1024,
+        input_len=4096,
+        is_context_phase=False,
+    )
+    assert sglang_adapter([large_generation_spec], dtype_list=("bf16",), tp_sizes=(1,), backend="fa3")
+
 
 def test_kimi_mla_plan_includes_generation_bmm_helpers():
     required_ops = {"mla_context", "mla_generation", "mla_bmm_gen_pre", "mla_bmm_gen_post"}
     for backend in ("sglang", "trtllm"):
         plan = build_collection_case_plan(backend=backend, model_path="moonshotai/Kimi-K2.5")
-        assert required_ops <= set(plan.op_cases)
-        for op_name in ("mla_context", "mla_generation"):
-            assert plan.op_cases[op_name].include.rules[0]["match"] == {"tp_size": {"in": [1, 2, 4, 8]}}
-        for op_name in ("mla_bmm_gen_pre", "mla_bmm_gen_post"):
-            assert plan.op_cases[op_name].include.rules[0]["match"] == {"num_heads": {"in": [64, 32, 16, 8]}}
-
-
-def test_kimi_targeted_mla_selector_keeps_consumer_local_head_grid(monkeypatch):
-    from types import SimpleNamespace
-
-    from collector.case_generator import get_context_mla_case_specs
-
-    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "moonshotai/Kimi-K2.5")
-    adapter = _load_mla_adapter(
-        "collector/trtllm/collect_mla.py",
-        {
-            "Scenario": lambda: SimpleNamespace(
-                q_lora_rank=1536,
-                kv_lora_rank=512,
-                qk_nope_head_dim=128,
-                qk_rope_head_dim=64,
-                v_head_dim=128,
-            ),
-            "_mla_tokens_per_block": lambda: 32,
-        },
-    )
-    generated = adapter(get_context_mla_case_specs(), dtype_list=("bf16",))
-    op_plan = build_collection_case_plan(
-        backend="trtllm",
-        model_path="moonshotai/Kimi-K2.5",
-    ).op_cases["mla_context"]
-    selected = filter_test_cases(
-        generated,
-        plan=op_plan,
-        full_module_name="trtllm.mla_context",
-        run_func_name="run_mla",
-    )
-
-    assert {case[4] for case in selected} == {64, 128}
-    assert {case[6] for case in selected} == {1, 2, 4, 8}
-    assert {case[4] // case[6] for case in selected} == {128, 64, 32, 16, 8}
-    assert any(case[4] == 64 and case[6] == 8 for case in selected)
+        assert required_ops <= plan.selected_ops
 
 
 def test_dsa_module_prefix_context_sweeps_are_yaml_backed():
@@ -623,7 +719,6 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
         get_moe_quantization_modes,
         get_moe_quantization_module_config,
         moe_model_allows_quantization,
-        moe_shape_satisfies_constraints,
     )
 
     assert get_moe_quantization_modes("vllm", sm_version=90, runtime_features={"per_block_fp8": True}) == [
@@ -640,7 +735,7 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
     assert get_moe_quantization_modes(
         "vllm",
         sm_version=120,
-        runtime_version="0.19.0",
+        runtime_version="0.24.0",
         runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
     ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "nvfp4", "w4a16_mxfp4"]
 
@@ -656,51 +751,6 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
     assert get_moe_quantization_module_config("vllm", "int4_wo", model_name="moonshotai/Kimi-K2.5") == {
         "group_size": 32
     }
-
-    assert moe_shape_satisfies_constraints(
-        "vllm",
-        "fp8_block",
-        hidden_size=4096,
-        inter_size=1536,
-        tensor_parallel_size=1,
-        topk=8,
-    )
-    assert not moe_shape_satisfies_constraints(
-        "vllm",
-        "fp8_block",
-        hidden_size=4100,
-        inter_size=1536,
-        tensor_parallel_size=1,
-        topk=8,
-    )
-    assert not moe_shape_satisfies_constraints(
-        "vllm",
-        "nvfp4",
-        hidden_size=4096,
-        inter_size=1536,
-        tensor_parallel_size=1,
-        topk=22,
-    )
-
-
-def test_vllm_sm120_nvfp4_moe_gap_is_an_sm_exception():
-    plan = build_collection_case_plan(backend="vllm", model_path="Qwen/Qwen3-235B-A22B", sm_version=120)
-    cases = [
-        ["bfloat16", [1, 2], 4096, 1536, 8, 128, 1, 1, "Qwen/Qwen3-235B-A22B", "balanced", 0.0],
-        ["nvfp4", [1, 2], 4096, 1536, 8, 128, 1, 1, "Qwen/Qwen3-235B-A22B", "balanced", 0.0],
-    ]
-
-    filtered, skipped = filter_test_cases_with_report(
-        cases,
-        plan=plan.op_cases["moe"],
-        full_module_name="vllm.moe",
-        run_func_name="run_moe_torch",
-        runtime_version="0.19.0",
-    )
-
-    assert filtered == [cases[0]]
-    assert skipped[0]["reason_type"] == "framework_version_unsupported"
-    assert "FlashInfer TRT-LLM FP4 MoE path" in skipped[0]["reason"]
 
 
 def test_vllm_xpu_moe_metadata_is_yaml_backed(monkeypatch):
@@ -787,7 +837,14 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
 
     sweep = get_mla_module_sweep_spec()
     dsa_specs = get_mla_module_model_specs(attention_type="dsa", apply_model_filter=False)
+    kimi_specs = get_mla_module_model_specs(
+        attention_type="mla",
+        backend="vllm",
+        wideep_mla=False,
+        apply_model_filter=False,
+    )
     wideep_specs = get_mla_module_model_specs(attention_type="mla", wideep_mla=True, apply_model_filter=False)
+    vllm_specs = get_mla_module_model_specs(backend="vllm")
 
     assert sweep.batch_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     assert sweep.sequence_lengths[-2:] == [8192, 16384]
@@ -811,6 +868,20 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("bfloat16", "bfloat16", "fp8_block"),
         ("bfloat16", "fp8", "fp8_block"),
     ]
+    assert [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100)
+    ] == [
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("fp8", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+        ("fp8", "fp8", "fp8_block"),
+        ("bfloat16", "bfloat16", "nvfp4"),
+        ("bfloat16", "fp8", "nvfp4"),
+        ("fp8", "fp8", "nvfp4"),
+    ]
     assert get_mla_module_sweep_spec("sglang").context_sequence_lengths[-2:] == [8192, 16384]
 
     vllm_sweep = get_mla_module_sweep_spec("vllm")
@@ -829,6 +900,32 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("bfloat16", "fp8", "fp8_block"),
     ]
 
+    # vLLM 0.24.0 FP8 prefill-query compute is declared for the dense-MLA
+    # prefill path only: the sparse DSA builders have no prefill-query
+    # quantization concept, so the fp8 compute combos are scoped
+    # attention_types: [mla] and a DSA plan must not expand them.
+    assert [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100, attention_type="dsa")
+    ] == [
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+        ("bfloat16", "bfloat16", "nvfp4"),
+        ("bfloat16", "fp8", "nvfp4"),
+    ]
+    assert [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100, attention_type="mla")
+    ] == [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100)
+    ]
+
+    with pytest.raises(ValueError, match="attention_type"):
+        get_mla_module_precision_specs("vllm", phase="context", sm_version=100, attention_type="dense")
+
     assert {spec.model_path for spec in dsa_specs} == {
         "deepseek-ai/DeepSeek-V3.2",
         "zai-org/GLM-5",
@@ -837,10 +934,20 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         "nvidia/GLM-5.2-NVFP4",
     }
     assert {spec.native_num_heads for spec in dsa_specs if spec.architecture == "GlmMoeDsaForCausalLM"} == {64}
+    assert {(spec.model_path, spec.architecture, spec.native_num_heads) for spec in kimi_specs} == {
+        ("moonshotai/Kimi-K2-Instruct", "DeepseekV3ForCausalLM", 64),
+        ("moonshotai/Kimi-K2.5", "KimiK25ForConditionalGeneration", 64),
+        ("nvidia/Kimi-K2.5-NVFP4", "KimiK25ForConditionalGeneration", 64),
+    }
     assert {spec.model_path for spec in wideep_specs} == {
         "deepseek-ai/DeepSeek-R1",
         "deepseek-ai/DeepSeek-V3",
         "nvidia/DeepSeek-V3.1-NVFP4",
+    }
+    assert {(spec.attention_type, spec.model_path, spec.architecture) for spec in vllm_specs} == {
+        ("mla", "deepseek-ai/DeepSeek-V3", "DeepseekV3ForCausalLM"),
+        ("dsa", "deepseek-ai/DeepSeek-V3.2", "DeepseekV32ForCausalLM"),
+        ("dsa", "zai-org/GLM-5", "GlmMoeDsaForCausalLM"),
     }
 
 
@@ -849,11 +956,23 @@ def test_mla_module_targeted_artifacts_keep_requested_checkpoint(monkeypatch):
 
     for model_path, attention_type, architecture in (
         ("nvidia/DeepSeek-V3.1-NVFP4", "mla", "DeepseekV3ForCausalLM"),
+        ("moonshotai/Kimi-K2-Instruct", "mla", "DeepseekV3ForCausalLM"),
+        ("moonshotai/Kimi-K2.5", "mla", "KimiK25ForConditionalGeneration"),
+        ("nvidia/Kimi-K2.5-NVFP4", "mla", "KimiK25ForConditionalGeneration"),
         ("nvidia/GLM-5-NVFP4", "dsa", "GlmMoeDsaForCausalLM"),
     ):
         monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
-        specs = get_mla_module_model_specs(attention_type=attention_type)
+        specs = get_mla_module_model_specs(attention_type=attention_type, backend="vllm")
         assert [(spec.model_path, spec.architecture) for spec in specs] == [(model_path, architecture)]
+
+
+def test_vllm_mla_module_artifacts_have_local_configs():
+    from collector.case_generator import get_mla_module_model_specs
+
+    config_root = REPO_ROOT / "src" / "aiconfigurator" / "model_configs"
+    for spec in get_mla_module_model_specs(backend="vllm", apply_model_filter=False):
+        config_path = config_root / f"{spec.model_path.replace('/', '--')}_config.json"
+        assert config_path.is_file(), f"{spec.model_path} would require a runtime Hub download"
 
 
 def test_shape_only_mla_alias_uses_canonical_model(monkeypatch):
@@ -873,14 +992,30 @@ def test_model_cases_path_can_infer_model_path():
 
     assert plan.model_path == "sgl-project/DeepSeek-V4-Flash-FP8"
     assert plan.model_architecture == "DeepseekV4ForCausalLM"
-    assert "dsv4_csa_context_module" in plan.op_cases
-    assert "dsv4_csa_topk_calib" in plan.op_cases
-    assert "mhc_module" in plan.op_cases
+    assert "dsv4_csa_context_module" in plan.selected_ops
+    assert "dsv4_csa_topk_calib" in plan.selected_ops
+    assert "mhc_module" in plan.selected_ops
     assert {
         "dsv4_paged_mqa_logits_module",
         "dsv4_hca_attn_module",
         "dsv4_csa_attn_module",
-    }.isdisjoint(plan.op_cases)
+    }.isdisjoint(plan.selected_ops)
+
+
+def test_plan_rejects_model_declared_ops_unknown_to_backend_registry(tmp_path):
+    """A typo in a model-declared op name must fail plan building loudly, not
+    silently collect nothing for the intended benchmark."""
+    case_file = tmp_path / "FakeArchForCausalLM_cases.yaml"
+    case_file.write_text(
+        "architecture: FakeArchForCausalLM\n"
+        "model_path: fake/model\n"
+        "model_ops:\n"
+        "  - attention_context\n"
+        "  - attention_contxt_typo\n"
+    )
+
+    with pytest.raises(ValueError, match="attention_contxt_typo"):
+        build_collection_case_plan(backend="vllm", model_cases_path=str(case_file))
 
 
 def test_dsv4_plan_only_uses_backend_specific_case_plan():
@@ -906,24 +1041,32 @@ def test_dsv4_plan_only_uses_backend_specific_case_plan():
 
     assert payload["ops"] == expected_ops
     assert "dsv4_csa_topk_calib" in payload["ops"]
-    assert "wideep_moe" in payload["ops"]
+    assert "wideep_moe" not in payload["ops"]
 
 
-def test_vllm_dsv4_collectors_are_registry_only():
+def test_vllm_024_schedules_consumed_dsv4_modules_only():
     from collector.vllm.registry import REGISTRY
 
-    dsv4_ops = {
+    consumed_dsv4_ops = {
         "dsv4_csa_context_module",
         "dsv4_hca_context_module",
         "dsv4_csa_generation_module",
         "dsv4_hca_generation_module",
-        "mhc_module",
     }
+    registry_only_ops = {"dsv4_paged_mqa_logits_module", "dsv4_hca_attn_module", "mhc_module"}
     plan = build_collection_case_plan(backend="vllm", model_path="sgl-project/DeepSeek-V4-Pro-FP8")
 
-    assert plan.ops == ["gemm", "moe"]
-    assert dsv4_ops.isdisjoint(plan.op_cases)
-    assert dsv4_ops <= {entry.op for entry in REGISTRY}
+    assert plan.ops == [
+        "dsv4_csa_context_module",
+        "dsv4_csa_generation_module",
+        "dsv4_hca_context_module",
+        "dsv4_hca_generation_module",
+        "gemm",
+        "moe",
+    ]
+    assert consumed_dsv4_ops <= plan.selected_ops
+    assert registry_only_ops.isdisjoint(plan.selected_ops)
+    assert consumed_dsv4_ops | registry_only_ops <= {entry.op for entry in REGISTRY}
 
 
 def test_model_architecture_can_select_case_file():
@@ -932,8 +1075,8 @@ def test_model_architecture_can_select_case_file():
     assert plan.model_path == "Qwen/Qwen3-235B-A22B"
     assert plan.model_architecture == "Qwen3MoeForCausalLM"
     assert plan.model_cases_paths == [default_architecture_cases_path("Qwen3MoeForCausalLM")]
-    assert "moe" in plan.op_cases
-    assert "mla_module" not in plan.op_cases
+    assert "moe" in plan.selected_ops
+    assert "mla_module" not in plan.selected_ops
 
 
 def test_model_path_alias_resolves_architecture_case_file():
@@ -942,29 +1085,71 @@ def test_model_path_alias_resolves_architecture_case_file():
     assert plan.model_path == "Qwen/Qwen3-235B-A22B-FP8"
     assert plan.model_architecture == "Qwen3MoeForCausalLM"
     assert plan.model_cases_paths == [default_architecture_cases_path("Qwen3MoeForCausalLM")]
-    assert "moe" in plan.op_cases
+    assert "moe" in plan.selected_ops
 
 
 def test_encoder_attention_plan_matches_sdk_model_and_backend_support():
     dense_plan = build_collection_case_plan(backend="sglang", model_path="Qwen/Qwen3-32B")
     assert dense_plan.ops == ["attention_context", "attention_generation", "gemm"]
-    assert "encoder_attention" not in dense_plan.op_cases
+    assert not dense_plan.has_op("encoder_attention")
 
     for backend in ("sglang", "trtllm", "vllm"):
-        assert (
-            "encoder_attention"
-            in build_collection_case_plan(
-                backend=backend,
-                model_path="Qwen/Qwen3-VL-32B-Instruct",
-            ).op_cases
-        )
-    assert (
-        "encoder_attention"
-        not in build_collection_case_plan(
-            backend="vllm_xpu",
+        assert build_collection_case_plan(
+            backend=backend,
             model_path="Qwen/Qwen3-VL-32B-Instruct",
-        ).op_cases
+        ).has_op("encoder_attention")
+    assert not build_collection_case_plan(
+        backend="vllm_xpu",
+        model_path="Qwen/Qwen3-VL-32B-Instruct",
+    ).has_op("encoder_attention")
+
+
+def test_vllm_024_model_plans_only_schedule_representable_attention_paths():
+    kimi_path = "moonshotai/Kimi-K2.5"
+    assert build_collection_case_plan(backend="vllm", model_path=kimi_path).ops == [
+        "encoder_attention",
+        "gemm",
+        "mla_context_module",
+        "mla_generation_module",
+        "moe",
+    ]
+    assert build_collection_case_plan(backend="vllm", model_path="moonshotai/Kimi-K2-Instruct").ops == [
+        "gemm",
+        "mla_context_module",
+        "mla_generation_module",
+        "moe",
+    ]
+    assert build_collection_case_plan(backend="sglang", model_path=kimi_path).ops == [
+        "gemm",
+        "mla_bmm_gen_post",
+        "mla_bmm_gen_pre",
+        "mla_context",
+        "mla_generation",
+        "moe",
+    ]
+    assert build_collection_case_plan(backend="trtllm", model_path=kimi_path).ops == [
+        "gemm",
+        "mla_bmm_gen_post",
+        "mla_bmm_gen_pre",
+        "mla_context",
+        "mla_generation",
+        "moe",
+        "trtllm_moe_wideep",
+    ]
+    assert build_collection_case_plan(backend="vllm_xpu", model_path=kimi_path).ops == ["gemm", "moe"]
+
+    models_with_unrepresentable_vllm_attention = (
+        "XiaomiMiMo/MiMo-V2-Flash",
+        "google/gemma-4-26B-A4B",
+        "openai/gpt-oss-120b",
+        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     )
+    legacy_plan = ["attention_context", "attention_generation", "gemm", "moe"]
+    for model_path in models_with_unrepresentable_vllm_attention:
+        assert build_collection_case_plan(backend="vllm", model_path=model_path).ops == ["gemm", "moe"]
+        assert build_collection_case_plan(backend="vllm_xpu", model_path=model_path).ops == ["gemm", "moe"]
+        for backend in ("sglang", "trtllm"):
+            assert build_collection_case_plan(backend=backend, model_path=model_path).ops == legacy_plan
 
 
 def test_compute_scale_is_selected_only_for_static_fp8_artifact():
@@ -973,15 +1158,15 @@ def test_compute_scale_is_selected_only_for_static_fp8_artifact():
 
     for backend in ("sglang", "trtllm", "vllm"):
         static_plan = build_collection_case_plan(backend=backend, model_path=static_model, sm_version=100)
-        assert "compute_scale" in static_plan.op_cases
-        assert "compute_scale" in build_collection_case_plan(backend=backend, full=True).op_cases
+        assert "compute_scale" in static_plan.selected_ops
+        assert "compute_scale" in build_collection_case_plan(backend=backend, full=True).selected_ops
 
         for model_path in non_static_models:
             plan = build_collection_case_plan(backend=backend, model_path=model_path, sm_version=100)
-            assert "compute_scale" not in plan.op_cases
+            assert "compute_scale" not in plan.selected_ops
 
     xpu_plan = build_collection_case_plan(backend="vllm_xpu", model_path=static_model)
-    assert "compute_scale" not in xpu_plan.op_cases
+    assert "compute_scale" not in xpu_plan.selected_ops
 
 
 def test_model_plans_do_not_request_ops_missing_from_backend_registry():
@@ -996,15 +1181,18 @@ def test_model_plans_do_not_request_ops_missing_from_backend_registry():
         model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
     )
 
-    assert "mla_context" not in deepseek_vllm.op_cases
-    assert "mla_generation" not in deepseek_vllm.op_cases
-    assert "mla_context_module" in deepseek_vllm.op_cases
-    assert "attention_context" in kimi_vllm.op_cases
-    assert "attention_generation" in kimi_vllm.op_cases
-    assert "mla_context" not in kimi_vllm.op_cases
-    assert "mla_generation" not in kimi_vllm.op_cases
-    assert "mamba2" not in nemotron_sglang.op_cases
-    assert "mamba2" in nemotron_trtllm.op_cases
+    assert not deepseek_vllm.has_op("mla_context")
+    assert not deepseek_vllm.has_op("mla_generation")
+    assert deepseek_vllm.has_op("mla_context_module")
+    assert not kimi_vllm.has_op("attention_context")
+    assert not kimi_vllm.has_op("attention_generation")
+    assert kimi_vllm.has_op("encoder_attention")
+    assert kimi_vllm.has_op("mla_context_module")
+    assert kimi_vllm.has_op("mla_generation_module")
+    assert not kimi_vllm.has_op("mla_context")
+    assert not kimi_vllm.has_op("mla_generation")
+    assert not nemotron_sglang.has_op("mamba2")
+    assert nemotron_trtllm.has_op("mamba2")
 
 
 def test_full_mode_aggregates_all_model_case_files():
@@ -1012,16 +1200,41 @@ def test_full_mode_aggregates_all_model_case_files():
 
     assert plan.model_path is None
     assert len(plan.model_cases_paths) >= 18
-    assert "wideep_mla_context" in plan.op_cases
-    assert "dsv4_csa_context_module" in plan.op_cases
-    assert "gdn" in plan.op_cases
+    assert "wideep_mla_context" not in plan.selected_ops
+    assert "dsv4_csa_context_module" in plan.selected_ops
+    assert "gdn" in plan.selected_ops
 
 
-def test_full_mode_unions_model_selectors_instead_of_last_model_wins():
+def test_full_mode_ops_are_a_union_of_model_plan_ops():
     for backend in ("sglang", "trtllm"):
-        plan = build_collection_case_plan(backend=backend, full=True)
-        for op in ("mla_context", "mla_generation", "mla_bmm_gen_pre", "mla_bmm_gen_post"):
-            assert plan.op_cases[op].include.all_cases, f"{backend}/{op} was narrowed by a later model document"
+        full_plan = build_collection_case_plan(backend=backend, full=True)
+        for model_path in ("deepseek-ai/DeepSeek-V3", "moonshotai/Kimi-K2.5", "Qwen/Qwen3-32B"):
+            model_plan = build_collection_case_plan(backend=backend, model_path=model_path)
+            assert model_plan.selected_ops <= full_plan.selected_ops, f"{backend}/{model_path}"
+
+
+def test_mla_module_metadata_preserves_legacy_backends_and_canonicalizes_vllm():
+    from collector.case_generator import get_mla_module_model_specs
+
+    original_artifacts = {
+        "deepseek-ai/DeepSeek-V3",
+        "deepseek-ai/DeepSeek-R1",
+        "nvidia/DeepSeek-V3.1-NVFP4",
+    }
+
+    def paths(backend):
+        return {
+            spec.model_path
+            for spec in get_mla_module_model_specs(
+                attention_type="mla",
+                backend=backend,
+                apply_model_filter=backend == "vllm",
+            )
+        }
+
+    assert paths("vllm") == {"deepseek-ai/DeepSeek-V3"}
+    assert paths("sglang") == original_artifacts
+    assert paths("trtllm") == original_artifacts
 
 
 def test_support_matrix_models_have_model_case_aliases():
@@ -1093,6 +1306,7 @@ def test_nemotron_ultra_quant_artifact_keeps_moe_path_but_reuses_mamba_profile(m
     mamba_cases = get_common_mamba2_test_cases()
 
     assert moe_cases and {case.model_name for case in moe_cases} == {"nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8"}
+    assert {case.hidden_size for case in moe_cases} == {2048, 8192}
     assert mamba_cases and {case.model_name for case in mamba_cases} == {
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
     }
@@ -1116,94 +1330,6 @@ def test_support_matrix_mamba_alias_generates_targeted_cases(monkeypatch):
 
     assert cases
     assert {case.model_name for case in cases} == {"nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"}
-
-
-def test_sm_exceptions_can_drop_framework_specific_op(tmp_path: Path):
-    exceptions = tmp_path / "sm100_exceptions.yaml"
-    exceptions.write_text(
-        """
-schema_version: 1
-sm_version: 100
-framework_specific_op_exceptions:
-  sglang:
-    wideep_moe:
-      drop: true
-""",
-        encoding="utf-8",
-    )
-
-    plan = build_collection_case_plan(
-        backend="sglang",
-        model_path="deepseek-ai/DeepSeek-V3",
-        sm_version=100,
-        sm_exceptions_path=str(exceptions),
-    )
-
-    assert plan.sm_version == 100
-    assert plan.sm_exceptions_path == exceptions.resolve()
-    assert "wideep_moe" not in plan.op_cases
-    assert "wideep_mla_context" in plan.op_cases
-
-
-def test_sm_exception_catalog_does_not_activate_unrelated_ops():
-    base_plan = build_collection_case_plan(backend="sglang", model_path="Qwen/Qwen3-32B")
-    sm120_plan = build_collection_case_plan(
-        backend="sglang",
-        model_path="Qwen/Qwen3-32B",
-        sm_version=120,
-    )
-
-    assert sm120_plan.ops == base_plan.ops == ["attention_context", "attention_generation", "gemm"]
-    assert "moe" not in sm120_plan.op_cases
-    assert "wideep_mla_context" not in sm120_plan.op_cases
-
-
-def test_gpu_type_resolves_default_sm_exception_file(tmp_path: Path, monkeypatch):
-    from collector import model_cases as model_case_module
-
-    exceptions = tmp_path / "sm100_exceptions.yaml"
-    exceptions.write_text(
-        """
-schema_version: 1
-sm_version: 100
-framework_specific_op_exceptions:
-  sglang:
-    wideep_moe:
-      drop: true
-""",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(model_case_module, "SM_EXCEPTIONS_DIR", tmp_path)
-
-    plan = model_case_module.build_collection_case_plan(
-        backend="sglang",
-        model_path="deepseek-ai/DeepSeek-V3",
-        gpu_type="b200_sxm",
-    )
-
-    assert plan.gpu_type == "b200_sxm"
-    assert plan.sm_version == 100
-    assert plan.sm_exceptions_path == default_sm_exceptions_path(100)
-    assert plan.sm_exceptions_path == exceptions
-    assert "wideep_moe" not in plan.op_cases
-
-
-def test_sm_exception_files_list_matching_gpu_types():
-    systems_dir = REPO_ROOT / "src" / "aiconfigurator" / "systems"
-    expected_gpu_types_by_sm = {}
-    for system_path in sorted(systems_dir.glob("*.yaml")):
-        system_data = load_yaml_file(system_path)
-        gpu = system_data.get("gpu", {})
-        if not isinstance(gpu, dict) or gpu.get("sm_version") is None:
-            continue
-        expected_gpu_types_by_sm.setdefault(int(gpu["sm_version"]), []).append(system_path.stem)
-
-    for sm_version, gpu_types in expected_gpu_types_by_sm.items():
-        exception_path = default_sm_exceptions_path(sm_version)
-        if not exception_path.exists():
-            continue
-        exception_data = load_yaml_file(exception_path)
-        assert exception_data.get("gpu_types") == gpu_types
 
 
 def test_collector_case_yaml_numeric_lists_are_sorted():
@@ -1230,449 +1356,3 @@ def test_collector_case_yaml_numeric_lists_are_sorted():
                 violations.append(f"{path.relative_to(REPO_ROOT)}:{'.'.join(yaml_path)} = {values}")
 
     assert violations == []
-
-
-def test_filter_test_cases_supports_case_ids_contains_and_indices():
-    cases = ["tp=1 ep=1", "tp=2 ep=1", "tp=4 ep=1", "tp=8 ep=1"]
-    case_id = create_test_case_id(cases[1], "run_moe_torch", "sglang.moe")
-    plan = OpCasePlan(
-        include=CaseSelector(case_ids={case_id}, contains={"tp=4"}, indices={3}),
-        exclude=CaseSelector(contains={"tp=8"}),
-    )
-
-    filtered = filter_test_cases(cases, plan=plan, full_module_name="sglang.moe", run_func_name="run_moe_torch")
-
-    assert filtered == ["tp=2 ep=1", "tp=4 ep=1"]
-
-
-def test_yaml_include_selector_can_narrow_a_new_op_plan(tmp_path: Path):
-    cases = ["case0", "case1", "case2"]
-    selected_case_id = create_test_case_id(cases[1], "run_gemm", "sglang.gemm")
-    model_cases = tmp_path / "SelectorArchitecture_cases.yaml"
-    model_cases.write_text(
-        f"""
-schema_version: 1
-architecture: SelectorArchitecture
-model_path: test/selector-model
-include_base: true
-base_ops:
-  - gemm
-all_frameworks_op_cases:
-  gemm:
-    case_ids:
-      - '{selected_case_id}'
-""",
-        encoding="utf-8",
-    )
-
-    plan = build_collection_case_plan(
-        backend="sglang",
-        model_cases_path=str(model_cases),
-    )
-    gemm_plan = plan.op_cases["gemm"]
-
-    assert not gemm_plan.include.all_cases
-    assert gemm_plan.include.case_ids == {selected_case_id}
-    assert filter_test_cases(
-        cases,
-        plan=gemm_plan,
-        full_module_name="sglang.gemm",
-        run_func_name="run_gemm",
-    ) == [cases[1]]
-
-
-def test_filter_test_cases_supports_index_ranges_and_limit():
-    cases = ["case0", "case1", "case2", "case3"]
-    plan = OpCasePlan(include=CaseSelector(index_ranges=[(1, 3)], limit=2))
-
-    filtered = filter_test_cases(cases, plan=plan, full_module_name="vllm.gemm", run_func_name="run_gemm")
-
-    assert filtered == ["case1", "case2"]
-
-
-def test_filter_test_cases_supports_structured_exception_rules():
-    cases = [
-        ["bfloat16", 1, 65536, 65536],
-        ["fp8", 1, 65536, 65536],
-        ["fp8", 16, 65536, 65536],
-    ]
-    plan = OpCasePlan(
-        exclude=CaseSelector(
-            rules=[
-                {
-                    "reason_type": "framework_version_unsupported",
-                    "version_prefixes": ["1.3.0rc10"],
-                    "fields": ["gemm_type", "token_count", "output_features", "input_features"],
-                    "match": {
-                        "gemm_type": "fp8",
-                        "token_count": {"lte": 8},
-                        "output_features": {"gte": 51200},
-                        "input_features": {"gte": 51200},
-                    },
-                }
-            ]
-        )
-    )
-
-    filtered = filter_test_cases(
-        cases,
-        plan=plan,
-        full_module_name="trtllm.gemm",
-        run_func_name="run_gemm",
-        runtime_version="1.3.0rc10",
-    )
-
-    assert filtered == [cases[0], cases[2]]
-
-
-def test_filter_test_cases_supports_not_in_structured_exception_rule():
-    cases = [
-        ["nvfp4", "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"],
-        ["nvfp4", "Qwen/Qwen3-235B-A22B"],
-        ["bfloat16", "Qwen/Qwen3-235B-A22B"],
-    ]
-    plan = OpCasePlan(
-        exclude=CaseSelector(
-            rules=[
-                {
-                    "reason_type": "framework_version_unsupported",
-                    "version_prefixes": ["0.5.10"],
-                    "fields": ["moe_type", "model_path"],
-                    "match": {
-                        "moe_type": "nvfp4",
-                        "model_path": {
-                            "not_in": [
-                                "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
-                                "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
-                            ]
-                        },
-                    },
-                }
-            ]
-        )
-    )
-
-    filtered = filter_test_cases(
-        cases,
-        plan=plan,
-        full_module_name="sglang.moe",
-        run_func_name="run_moe_torch",
-        runtime_version="0.5.10",
-    )
-
-    assert filtered == [cases[0], cases[2]]
-
-
-def test_filter_test_cases_reports_expected_sm_exception_reasons():
-    cases = [
-        ["bfloat16", 1, 65536, 65536],
-        ["fp8", 1, 65536, 65536],
-    ]
-    plan = OpCasePlan(
-        exclude=CaseSelector(
-            rules=[
-                {
-                    "reason_type": "framework_version_unsupported",
-                    "reason": "tiny-M FP8 large GEMM crashes on this framework build",
-                    "fields": ["gemm_type", "token_count", "output_features", "input_features"],
-                    "match": {"gemm_type": "fp8"},
-                }
-            ]
-        )
-    )
-
-    filtered, skipped = filter_test_cases_with_report(
-        cases,
-        plan=plan,
-        full_module_name="trtllm.gemm",
-        run_func_name="run_gemm",
-    )
-
-    assert filtered == [cases[0]]
-    assert skipped == [
-        {
-            "case_id": create_test_case_id(cases[1], "run_gemm", "trtllm.gemm"),
-            "index": 1,
-            "source": "sm_exception",
-            "selector": "rule",
-            "reason_type": "framework_version_unsupported",
-            "reason": "tiny-M FP8 large GEMM crashes on this framework build",
-        }
-    ]
-
-
-def test_sm89_exception_excludes_sglang_head_dim_256_context_attention_before_execution():
-    plan = build_collection_case_plan(
-        backend="sglang",
-        model_path="google/gemma-4-26B-A4B",
-        gpu_type="l40s",
-    )
-    case = [1, 256, 2, 1, 256, False, False, True, 1024]
-
-    for version in ("0.5.9", "0.5.10", "0.5.12"):
-        filtered, skipped = filter_test_cases_with_report(
-            [case],
-            plan=plan.op_cases["attention_context"],
-            full_module_name="sglang.attention_context",
-            run_func_name="run_attention_torch",
-            runtime_version=version,
-        )
-
-        assert filtered == []
-        assert skipped[0]["reason_type"] == "framework_version_unsupported"
-        assert "head_dim=256" in skipped[0]["reason"]
-
-    filtered, skipped = filter_test_cases_with_report(
-        [case],
-        plan=plan.op_cases["attention_context"],
-        full_module_name="sglang.attention_context",
-        run_func_name="run_attention_torch",
-        runtime_version="0.5.8",
-    )
-    assert filtered == [case]
-    assert skipped == []
-
-
-def test_expected_failure_matching_does_not_consider_exclude_selector():
-    case = ["remaining"]
-    plan = OpCasePlan(exclude=CaseSelector(indices={1}))
-
-    assert (
-        expected_failure_for_test_case(
-            case,
-            plan=plan,
-            full_module_name="sglang.unmigrated_op",
-            run_func_name="run_case",
-            index=1,
-        )
-        is None
-    )
-
-
-def test_sm120_exception_filters_trtllm_gptoss_mxfp4():
-    plan = build_collection_case_plan(
-        backend="trtllm",
-        model_path="openai/gpt-oss-120b",
-        gpu_type="rtx_pro_6000_server",
-    )
-    case = [
-        "w4a16_mxfp4",
-        [1, 2, 4],
-        2880,
-        2880,
-        4,
-        128,
-        1,
-        1,
-        False,
-        "openai/gpt-oss-120b",
-        "power_law",
-        1.01,
-    ]
-
-    filtered, skipped = filter_test_cases_with_report(
-        [case],
-        plan=plan.op_cases["moe"],
-        full_module_name="trtllm.moe",
-        run_func_name="run_moe_torch",
-        runtime_version="1.3.0rc10",
-    )
-
-    assert filtered == []
-    assert skipped == [
-        {
-            "case_id": create_test_case_id(case, "run_moe_torch", "trtllm.moe"),
-            "index": 0,
-            "source": "sm_exception",
-            "selector": "rule",
-            "reason_type": "framework_version_unsupported",
-            "reason": "TRT-LLM 1.3.0rc5/rc10 TRTLLMGenFusedMoE rejects GPT-OSS MXFP4 paths on SM120.",
-        }
-    ]
-    filtered, skipped = filter_test_cases_with_report(
-        [case],
-        plan=plan.op_cases["moe"],
-        full_module_name="trtllm.moe",
-        run_func_name="run_moe_torch",
-        runtime_version="1.3.0rc4",
-    )
-    assert filtered == [case]
-    assert skipped == []
-
-
-def test_sm100_exception_filters_trtllm_int4_wo():
-    plan = build_collection_case_plan(
-        backend="trtllm",
-        model_path="moonshotai/Kimi-K2.5",
-        gpu_type="b200_sxm",
-    )
-    case = [
-        "int4_wo",
-        [1],
-        7168,
-        2048,
-        8,
-        384,
-        8,
-        1,
-        False,
-        "moonshotai/Kimi-K2.5",
-        "power_law",
-        1.2,
-    ]
-
-    filtered, skipped = filter_test_cases_with_report(
-        [case],
-        plan=plan.op_cases["moe"],
-        full_module_name="trtllm.moe",
-        run_func_name="run_moe_torch",
-        runtime_version="1.3.0rc10",
-    )
-
-    assert filtered == []
-    assert skipped == [
-        {
-            "case_id": create_test_case_id(case, "run_moe_torch", "trtllm.moe"),
-            "index": 0,
-            "source": "sm_exception",
-            "selector": "rule",
-            "reason_type": "framework_version_unsupported",
-            "reason": (
-                "TRT-LLM 1.3.0rc10 SM100 CutlassFusedMoE rejects plain W4A16/int4_wo "
-                "in create_moe with ValueError Unsupported quantization mode [1]."
-            ),
-        }
-    ]
-    filtered, skipped = filter_test_cases_with_report(
-        [case],
-        plan=plan.op_cases["moe"],
-        full_module_name="trtllm.moe",
-        run_func_name="run_moe_torch",
-        runtime_version="1.3.0rc9",
-    )
-    assert filtered == [case]
-    assert skipped == []
-
-
-def test_filter_test_cases_supports_computed_rule_conditions():
-    cases = [
-        [1, 4096, 64, 4, 128, False, False, False],
-        [1, 4096, 64, 2, 128, False, False, False],
-        [2, 8192, 96, 96, 128, True, True, True],
-    ]
-    plan = OpCasePlan(
-        exclude=CaseSelector(
-            rules=[
-                {
-                    "reason_type": "hardware_unsupported",
-                    "fields": [
-                        "batch_size",
-                        "sequence_length",
-                        "num_heads",
-                        "num_key_value_heads",
-                        "head_dim",
-                        "use_fp8_kv_cache",
-                        "use_fp8_context_fmha",
-                        "is_context_phase",
-                    ],
-                    "conditions": [
-                        {
-                            "ratio": {
-                                "numerator": "num_heads",
-                                "denominator": "num_key_value_heads",
-                                "gt": 16,
-                            }
-                        }
-                    ],
-                },
-                {
-                    "reason_type": "framework_version_unsupported",
-                    "fields": [
-                        "batch_size",
-                        "sequence_length",
-                        "num_heads",
-                        "num_key_value_heads",
-                        "head_dim",
-                        "use_fp8_kv_cache",
-                        "use_fp8_context_fmha",
-                        "is_context_phase",
-                    ],
-                    "match": {"use_fp8_context_fmha": True},
-                    "conditions": [
-                        {
-                            "product": {
-                                "fields": ["batch_size", "sequence_length"],
-                                "gte": 16384,
-                            }
-                        }
-                    ],
-                },
-            ]
-        )
-    )
-
-    filtered = filter_test_cases(
-        cases,
-        plan=plan,
-        full_module_name="trtllm.attention_context",
-        run_func_name="run_attention_torch",
-        runtime_version="1.3.0rc10",
-    )
-
-    assert filtered == [cases[0]]
-
-
-def test_known_exceptions_classify_runtime_failures(tmp_path: Path):
-    exceptions = tmp_path / "sm120_exceptions.yaml"
-    exceptions.write_text(
-        """
-schema_version: 1
-sm_version: 120
-known_exceptions:
-  - framework: sglang
-    op: moe
-    reason_type: framework_version_unsupported
-    source: collector/sglang/collect_moe.py
-    case_fields:
-      - moe_type
-      - num_tokens
-      - hidden_size
-      - inter_size
-      - topk
-      - num_experts
-      - tensor_parallel_size
-      - expert_parallel_size
-      - model_path
-    reason: expected SM120 shared-memory overflow
-    threshold_groups:
-      - label: Qwen3
-        match: {hidden_size: 2048, inter_size: 768, topk: 8, num_experts: 128}
-        thresholds:
-          - {tensor_parallel_size: 4, expert_parallel_size: 16, num_tokens_gte: 16}
-""",
-        encoding="utf-8",
-    )
-    plan = build_collection_case_plan(
-        backend="sglang",
-        model_path="Qwen/Qwen3-30B-A3B",
-        sm_exceptions_path=str(exceptions),
-    )
-    case = ["fp8_block", 32, 2048, 768, 8, 128, 4, 16, "Qwen/Qwen3-30B-A3B"]
-
-    expected = expected_failure_for_test_case(
-        case,
-        plan=plan.op_cases["moe"],
-        full_module_name="sglang.moe",
-        run_func_name="run_moe_torch",
-        runtime_version="0.5.10",
-    )
-
-    assert expected == {
-        "case_id": create_test_case_id(case, "run_moe_torch", "sglang.moe"),
-        "source": "known_exception",
-        "selector": "rule",
-        "reason_type": "framework_version_unsupported",
-        "reason": "expected SM120 shared-memory overflow",
-        "reference_source": "collector/sglang/collect_moe.py",
-        "label": "Qwen3",
-    }

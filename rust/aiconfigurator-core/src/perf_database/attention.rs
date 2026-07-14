@@ -18,6 +18,14 @@
 //! (MHA sentinel), matching Python's `n_kv_lookup` rule. `window_size`
 //! defaults to `0` for backends whose collectors don't record it.
 //!
+//! Queries resolve on the RAW grids via the shared perf_interp v2 engine
+//! (`perf_interp.rs`, mirroring Python `sdk/perf_interp`): context/encoder
+//! use the Grid resolver with sqrt-space blending on the seq axis
+//! (`context_attention_config`); generation uses the RAW Grid resolver
+//! (`generation_attention_config`). Past the collected range — including the
+//! truncated large-seq x large-batch staircase corner — the engine holds the
+//! boundary util and lets the analytic SOL carry the growth.
+//!
 //! The query methods on this table return raw interpolated latency in ms.
 //! The operator layer wraps these with prefix correction, SOL/EMPIRICAL
 //! fallbacks, and extra fused-op accounting (qk_norm, rope, kv writes).
@@ -31,9 +39,8 @@ use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
 use super::{kernel_source_ok, resolve_op_sources};
-use super::interpolation::{
-    interp_1d, interp_2d_1d_grid, interp_2d_1d_grid_strict, nearest_neighbors, Grid3,
-};
+use super::interpolation::Grid3;
+use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct AttentionTable {
@@ -50,16 +57,17 @@ pub struct AttentionTable {
     encoder: OnceLock<Result<EncoderGrids, AicError>>,
 }
 
+/// Engine-ready tables: per discrete key, the raw nested grid as a `Node`.
 struct ContextGrids {
-    by_keys: BTreeMap<ContextKey, Grid3<f64>>,
+    by_keys: BTreeMap<ContextKey, Node>,
 }
 
 struct GenerationGrids {
-    by_keys: BTreeMap<GenerationKey, Grid3<f64>>,
+    by_keys: BTreeMap<GenerationKey, Node>,
 }
 
 struct EncoderGrids {
-    by_keys: BTreeMap<EncoderKey, Grid3<f64>>,
+    by_keys: BTreeMap<EncoderKey, Node>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -146,9 +154,23 @@ impl AttentionTable {
             head_size,
             window_size,
         };
-        let grid = grids.by_keys.get(&key).ok_or_else(|| missing_key(&self.data_root, &key))?;
-        // Python uses (n, full_s, b) as the (x, y, z) axes for interp_3d.
-        interp_2d_1d_grid(grid, n, full_seq_tokens, b)
+        let node = grids.by_keys.get(&key).ok_or_else(|| missing_key(&self.data_root, &key))?;
+        // Python `perf_interp.context_attention_config`: Grid resolver,
+        // sqrt-space blend on the seq axis only (~seq^2 curvature; heads and
+        // batch are ~linear). Past the staircase frontier (large seq x large
+        // batch, uncollected) the engine holds the boundary util and lets SOL
+        // carry the growth. The sol_fn mirrors the Python wiring: samples are
+        // full attention, so it is evaluated at prefix=0 with the slice's own
+        // kv-head/window/head-size setup; c = [n, full_s, b].
+        let spec = &self.system_spec;
+        let n_kv_lookup = key.n_kv_lookup;
+        let sol = move |c: &[f64]| {
+            context_attention_sol_ms(
+                spec, n_kv_lookup, head_size, window_size, kv_quant, fmha_quant, c[0], c[1], c[2],
+            )
+        };
+        let cfg = OpInterpConfig::grid_sqrt_axis(&["num_heads", "seq_len", "batch"], 1, &sol);
+        perf_interp::query(&cfg, node, &[n as f64, full_seq_tokens as f64, b as f64])
     }
 
     /// Raw interpolated generation attention latency in ms.
@@ -172,19 +194,25 @@ impl AttentionTable {
             head_size,
             window_size,
         };
-        let grid = grids
+        let node = grids
             .by_keys
             .get(&key)
             .ok_or_else(|| missing_gen_key(&self.data_root, &key))?;
-        // Mirror Python `GenerationAttention._query_generation_attention_table`
-        // `get_silicon`: average 5 interp samples over s ∈ [0.9s, 1.1s].
+        // Python `perf_interp.generation_attention_config`: Grid resolver, RAW
+        // blend everywhere (~linear in seq), axes [num_heads][batch][seq_len].
+        // The ±10% 5-sample seq averaging is op-level smoothing (decode s
+        // drifts across a request) and lives at this wrapper level in Python
+        // too — each sample resolves independently via the engine:
         //   s_min = max(1, int(s*0.9)); s_max = max(s_min, int(s*1.1))
         //   s_samples[i] = s_min + (s_max - s_min) * i // (sample_cnt - 1)
-        // Each sample calls `interp_3d(n, b, s_i, ...)` which is 1-D over n
-        // and bilinear over (b, s) — hence `interp_2d_1d_grid_strict(grid, n,
-        // b, s_i)` with the `[n][b][s]` grid. `interp_3d` uses
-        // `allow_singleton_axes=False`, so the strict variant surfaces the same
-        // `_require_3d_axis_coverage` error on degenerate grids.
+        let spec = &self.system_spec;
+        let n_kv_lookup = key.n_kv_lookup;
+        let sol = move |c: &[f64]| {
+            generation_attention_sol_ms(
+                spec, n_kv_lookup, head_size, window_size, kv_quant, c[0], c[1], c[2],
+            )
+        };
+        let cfg = OpInterpConfig::grid(&["num_heads", "batch", "seq_len"], &sol);
         let s = kv_seq_tokens;
         let s_min = ((s as f64 * 0.9) as u32).max(1);
         let s_max = ((s as f64 * 1.1) as u32).max(s_min);
@@ -193,7 +221,7 @@ impl AttentionTable {
         for i in 0..SAMPLE_CNT {
             // Match Python integer arithmetic: multiply before integer divide.
             let s_i = s_min + ((u64::from(s_max - s_min) * u64::from(i)) / u64::from(SAMPLE_CNT - 1)) as u32;
-            latency_sum += interp_2d_1d_grid_strict(grid, n, b, s_i, "3-D bilinear interpolation")?;
+            latency_sum += perf_interp::query(&cfg, node, &[n as f64, b as f64, s_i as f64])?;
         }
         Ok(latency_sum / SAMPLE_CNT as f64)
     }
@@ -212,42 +240,55 @@ impl AttentionTable {
             fmha_quant: fmha_quant.name().to_string(),
             head_size,
         };
-        let grid = grids
+        let node = grids
             .by_keys
             .get(&key)
             .ok_or_else(|| missing_encoder_key(&self.data_root, &key))?;
-        interp_2d_1d_grid(grid, n, s, b)
+        // Encoder is full N^2 (~seq^2 along seq, ~linear along heads/batch);
+        // Python reuses `context_attention_config` = sqrt on the seq axis
+        // only, raw elsewhere. The SOL differs from context: non-causal (no
+        // /2) and no KV-cache read.
+        let spec = &self.system_spec;
+        let sol =
+            move |c: &[f64]| encoder_attention_sol_ms(spec, head_size, fmha_quant, c[0], c[1], c[2]);
+        let cfg = OpInterpConfig::grid_sqrt_axis(&["num_heads", "seq_len", "batch"], 1, &sol);
+        perf_interp::query(&cfg, node, &[n as f64, s as f64, b as f64])
     }
 
     fn load_context(&self) -> Result<&ContextGrids, AicError> {
         let cell = self.context.get_or_init(|| {
-            load_context_parquet(&self.context_sources)
+            let raw = load_context_parquet(&self.context_sources)?;
+            // No load-time SOL clamp: Python's `_correct_data` historically
+            // skipped context attention, and v2 keeps that.
+            Ok(ContextGrids {
+                by_keys: raw.into_iter().map(|(k, g)| (k, grid3_to_node(&g))).collect(),
+            })
         });
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_generation(&self) -> Result<&GenerationGrids, AicError> {
         let cell = self.generation.get_or_init(|| {
-            let mut grids = load_generation_parquet(&self.generation_sources)?;
-            // Mirror Python `GenerationAttention.load_data` order:
-            //   1. clamp to SOL (`_correct_sol`)
-            //   2. densify the grid (`_extrapolate` -> `extrapolate_data_grid`)
-            //   3. re-clamp to SOL (interpolated points can land below SOL)
-            // Context-phase attention is intentionally NOT clamped here —
-            // Python's `_correct_data` historically skipped it.
-            clamp_generation_attention_grids_to_sol(&self.system_spec, &mut grids);
-            for grid in grids.by_keys.values_mut() {
-                densify_generation_grid(grid);
-            }
-            clamp_generation_attention_grids_to_sol(&self.system_spec, &mut grids);
-            Ok(grids)
+            let mut raw = load_generation_parquet(&self.generation_sources)?;
+            // Mirror Python `GenerationAttention.load_data`: clamp the raw
+            // measured rows to SOL (`_correct_sol`) — and nothing else. The
+            // v1 load-time grid densification is gone; queries resolve on the
+            // RAW table via the perf_interp engine, so the table IS the raw
+            // (clamped) data.
+            clamp_generation_attention_grids_to_sol(&self.system_spec, &mut raw);
+            Ok(GenerationGrids {
+                by_keys: raw.into_iter().map(|(k, g)| (k, grid3_to_node(&g))).collect(),
+            })
         });
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_encoder(&self) -> Result<&EncoderGrids, AicError> {
         let cell = self.encoder.get_or_init(|| {
-            load_encoder_parquet(&self.encoder_sources)
+            let raw = load_encoder_parquet(&self.encoder_sources)?;
+            Ok(EncoderGrids {
+                by_keys: raw.into_iter().map(|(k, g)| (k, grid3_to_node(&g))).collect(),
+            })
         });
         cell.as_ref().map_err(clone_err)
     }
@@ -262,11 +303,25 @@ fn normalize_kv(n: u32, n_kv: u32) -> u32 {
     }
 }
 
+fn grid3_to_node(grid: &Grid3<f64>) -> Node {
+    let mut node = Node::branch();
+    for (&x, by_y) in grid {
+        for (&y, by_z) in by_y {
+            for (&z, &lat) in by_z {
+                node.insert(&[x, y, z], lat);
+            }
+        }
+    }
+    node
+}
+
 /// Load the context-attention table from an ordered, priority-sorted source
 /// list. Sources are read in order; the first source containing a key wins
 /// (`or_insert`). Missing files are skipped; an error is returned only when no
 /// source yields rows.
-fn load_context_parquet(sources: &[PerfSource]) -> Result<ContextGrids, AicError> {
+fn load_context_parquet(
+    sources: &[PerfSource],
+) -> Result<BTreeMap<ContextKey, Grid3<f64>>, AicError> {
     let mut by_keys: BTreeMap<ContextKey, Grid3<f64>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
@@ -320,13 +375,15 @@ fn load_context_parquet(sources: &[PerfSource]) -> Result<ContextGrids, AicError
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
-    Ok(ContextGrids { by_keys })
+    Ok(by_keys)
 }
 
 /// Load the generation-attention table from an ordered, priority-sorted source
 /// list. Same first-wins-across-sources + missing-file-skip semantics as
 /// [`load_context_parquet`].
-fn load_generation_parquet(sources: &[PerfSource]) -> Result<GenerationGrids, AicError> {
+fn load_generation_parquet(
+    sources: &[PerfSource],
+) -> Result<BTreeMap<GenerationKey, Grid3<f64>>, AicError> {
     let mut by_keys: BTreeMap<GenerationKey, Grid3<f64>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
@@ -383,189 +440,124 @@ fn load_generation_parquet(sources: &[PerfSource]) -> Result<GenerationGrids, Ai
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
-    Ok(GenerationGrids { by_keys })
+    Ok(by_keys)
 }
 
-// Extrapolation target lattices — verbatim from Python
-// `aiconfigurator.sdk.operations.attention`
-// (`_GENERATION_ATTENTION_TARGET_{X,Y,Z}`). For generation attention the
-// grid is `data[x][y][z]` with x=n (num_heads), y=b (batch_size), z=s
-// (sequence_tokens).
-const GENERATION_TARGET_X: [u32; 24] = [
-    1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96, 128,
-];
-const GENERATION_TARGET_Y: [u32; 14] =
-    [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192];
-const GENERATION_TARGET_Z: [u32; 20] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072,
-    262144, 16_777_216,
-];
-
-/// In-place port of Python `interpolation.extrapolate_data_grid` for the
-/// generation-attention grid (`sqrt_y_value=False`). Densifies the grid to
-/// the target lattice in z -> y -> x order so later queries interpolate only.
+/// Speed-of-light context-attention latency in ms, at prefix=0.
 ///
-/// Grid layout is `[x][y][z]` = `[n][b][s]`: x=n (outer), y=b (middle),
-/// z=s (inner). The target-list filtering mirrors Python's
-/// `_extrapolate`: x uses only targets `>= min(measured n)` (`filtered_x`).
-fn densify_generation_grid(grid: &mut Grid3<f64>) {
-    if grid.is_empty() {
-        return;
+/// Mirrors Python's `ContextAttention._query_context_attention_table::get_sol`
+/// as wired into the perf_interp sol_fn: table rows are full attention, so the
+/// formula is evaluated at prefix=0 with `full_s == s` (the table's seq axis).
+/// `n_kv_lookup == 0` means MHA (n_kv tracks n); a positive `window_size`
+/// smaller than the seq cuts the O(s^2) causal work to O(s*w).
+#[allow(clippy::too_many_arguments)]
+fn context_attention_sol_ms(
+    spec: &SystemSpec,
+    n_kv_lookup: u32,
+    head_size: u32,
+    window_size: u32,
+    kv_quant: KvCacheQuantMode,
+    fmha_quant: FmhaQuantMode,
+    n: f64,
+    s: f64,
+    b: f64,
+) -> f64 {
+    let bf16_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
+    if bf16_flops <= 0.0 {
+        return 0.0;
     }
-    let min_x = *grid.keys().next().expect("grid is non-empty");
-    let filtered_x: Vec<u32> = GENERATION_TARGET_X.iter().copied().filter(|&x| x >= min_x).collect();
+    let h = head_size as f64;
+    let w = window_size as f64;
+    let n_kv = if n_kv_lookup == 0 { n } else { n_kv_lookup as f64 };
+    let ops = if window_size > 0 && s > w {
+        2.0 * b * s * w * n * h * 2.0
+    } else {
+        // the /2 is the causal-mask halving of the s^2 score matrix
+        2.0 * b * (s * s) * n * h * 2.0 / 2.0
+    };
+    // Q read + output write (bf16) + KV write at kv-cache precision.
+    let mem_bytes =
+        2.0 * b * (n * s * h + n * s * h) + kv_quant.mapping().memory * b * (2.0 * n_kv * s * h);
+    let sol_math = ops / bf16_flops * 1000.0 / fmha_quant.mapping().compute;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    sol_math.max(sol_mem)
+}
 
-    // --- z-direction: for each existing x, for each existing y, fill z ---
-    let x_keys: Vec<u32> = grid.keys().copied().collect();
-    for x in x_keys {
-        let y_keys: Vec<u32> = grid[&x].keys().copied().collect();
-        for y in y_keys {
-            let z_keys: Vec<u32> = grid[&x][&y].keys().copied().collect();
-            if z_keys.len() <= 1 {
-                continue;
-            }
-            for &z in GENERATION_TARGET_Z.iter() {
-                if grid[&x][&y].contains_key(&z) {
-                    continue;
-                }
-                let Ok((z_left, z_right)) = nearest_neighbors(z, &z_keys, false) else {
-                    continue;
-                };
-                let (Some(&v_left), Some(&v_right)) =
-                    (grid[&x][&y].get(&z_left), grid[&x][&y].get(&z_right))
-                else {
-                    continue;
-                };
-                let value = interp_1d(z_left as f64, z_right as f64, v_left, v_right, z as f64);
-                grid.get_mut(&x).unwrap().get_mut(&y).unwrap().insert(z, value);
-            }
-        }
+/// Speed-of-light encoder-attention latency in ms.
+///
+/// Mirrors Python's `EncoderAttention._query_encoder_attention_table::get_sol`:
+/// non-causal full N^2 (no /2), no KV-cache read — Q/K/V read + output write
+/// in bf16 only.
+fn encoder_attention_sol_ms(
+    spec: &SystemSpec,
+    head_size: u32,
+    fmha_quant: FmhaQuantMode,
+    n: f64,
+    s: f64,
+    b: f64,
+) -> f64 {
+    let bf16_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
+    if bf16_flops <= 0.0 {
+        return 0.0;
     }
-
-    // --- y-direction: for each existing x, fill missing target y's ---
-    let x_keys: Vec<u32> = grid.keys().copied().collect();
-    for x in x_keys {
-        for &y in GENERATION_TARGET_Y.iter() {
-            if grid[&x].contains_key(&y) {
-                continue;
-            }
-            // Re-read current y keys each iteration so freshly added y's count.
-            let y_keys: Vec<u32> = grid[&x].keys().copied().collect();
-            if y_keys.len() < 2 {
-                break;
-            }
-            let Ok((y_left, y_right)) = nearest_neighbors(y, &y_keys, false) else {
-                continue;
-            };
-            if !grid[&x].contains_key(&y_left) || !grid[&x].contains_key(&y_right) {
-                continue;
-            }
-            // Iterate z over sorted keys of y_left, only where present in both.
-            let z_list: Vec<u32> = grid[&x][&y_left].keys().copied().collect();
-            let mut new_row: BTreeMap<u32, f64> = BTreeMap::new();
-            for z in z_list {
-                let (Some(&yl), Some(&yr)) =
-                    (grid[&x][&y_left].get(&z), grid[&x][&y_right].get(&z))
-                else {
-                    continue;
-                };
-                let value = interp_1d(y_left as f64, y_right as f64, yl, yr, y as f64);
-                new_row.insert(z, value);
-            }
-            grid.get_mut(&x).unwrap().insert(y, new_row);
-        }
-    }
-
-    // --- x-direction: fill missing filtered_x slices ---
-    for &x in filtered_x.iter() {
-        if grid.contains_key(&x) {
-            continue;
-        }
-        // Re-read current x keys each iteration so freshly added x's count.
-        let x_keys: Vec<u32> = grid.keys().copied().collect();
-        if x_keys.len() < 2 {
-            break;
-        }
-        let Ok((x_left, x_right)) = nearest_neighbors(x, &x_keys, false) else {
-            continue;
-        };
-        if !grid.contains_key(&x_left) || !grid.contains_key(&x_right) {
-            continue;
-        }
-        // Iterate y over sorted keys of x_left, only where present in both.
-        let y_list: Vec<u32> = grid[&x_left].keys().copied().collect();
-        let mut new_slice: BTreeMap<u32, BTreeMap<u32, f64>> = BTreeMap::new();
-        for y in y_list {
-            if !grid[&x_left].contains_key(&y) || !grid[&x_right].contains_key(&y) {
-                continue;
-            }
-            let z_list: Vec<u32> = grid[&x_left][&y].keys().copied().collect();
-            let mut new_row: BTreeMap<u32, f64> = BTreeMap::new();
-            for z in z_list {
-                let (Some(&xl), Some(&xr)) =
-                    (grid[&x_left][&y].get(&z), grid[&x_right][&y].get(&z))
-                else {
-                    continue;
-                };
-                let value = interp_1d(x_left as f64, x_right as f64, xl, xr, x as f64);
-                new_row.insert(z, value);
-            }
-            new_slice.insert(y, new_row);
-        }
-        grid.insert(x, new_slice);
-    }
+    let h = head_size as f64;
+    let ops = 2.0 * b * s * s * n * h * 2.0; // 2 for fma, 2 for q*k^t + *v
+    let mem_bytes = 2.0 * b * (3.0 * n * s * h + n * s * h); // Q/K/V read + output write, bf16
+    let sol_math = ops / bf16_flops * 1000.0 / fmha_quant.mapping().compute;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    sol_math.max(sol_mem)
 }
 
 /// Speed-of-light generation-attention latency in ms.
 ///
-/// Mirrors Python's `GenerationAttention._query_generation_attention_table::get_sol`.
-/// `n_kv_lookup == 0` means MHA (n_kv == n); use `n` for the actual K/V head
-/// count. `window_size > 0` clamps `kv_len` to `min(s-1, window_size)`.
+/// Mirrors Python's `GenerationAttention._query_generation_attention_table::get_sol`
+/// as wired into the perf_interp sol_fn: c = [n, b, s]. `n_kv_lookup == 0`
+/// means MHA (n_kv tracks n); `window_size > 0` clamps `kv_len` to
+/// `min(s-1, window_size)`.
 fn generation_attention_sol_ms(
     spec: &SystemSpec,
     n_kv_lookup: u32,
-    n: u32,
     head_size: u32,
     window_size: u32,
     kv_quant: KvCacheQuantMode,
-    b: u32,
-    s: u32,
+    n: f64,
+    b: f64,
+    s: f64,
 ) -> f64 {
-    let n_kv = if n_kv_lookup == 0 { n } else { n_kv_lookup };
+    let bf16_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
+    if bf16_flops <= 0.0 {
+        return 0.0;
+    }
+    let n_kv = if n_kv_lookup == 0 { n } else { n_kv_lookup as f64 };
     let kv_len = if window_size > 0 {
-        s.saturating_sub(1).min(window_size)
+        (s - 1.0).min(window_size as f64)
     } else {
-        s.saturating_sub(1)
+        s - 1.0
     };
     let quant_mode_gen_compute = if kv_quant == KvCacheQuantMode::Fp8 {
         FmhaQuantMode::Fp8.mapping().compute
     } else {
         FmhaQuantMode::Bfloat16.mapping().compute
     };
-    let b_f = b as f64;
-    let n_f = n as f64;
-    let h_f = head_size as f64;
-    let n_kv_f = n_kv as f64;
-    let kv_len_f = kv_len as f64;
+    let h = head_size as f64;
     let kv_mem = kv_quant.mapping().memory;
-    let ops = 2.0 * b_f * n_f * h_f * 2.0 * kv_len_f;
-    let mem_bytes =
-        b_f * (n_f * h_f * 2.0 + 2.0 * n_kv_f * kv_len_f * h_f * kv_mem + n_f * h_f * 2.0);
-    let bf16_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
-    if bf16_flops <= 0.0 {
-        return 0.0;
-    }
-    let sol_math = ops / bf16_flops * 1000.0 / quant_mode_gen_compute.max(1e-9);
+    let ops = 2.0 * b * n * h * 2.0 * kv_len;
+    let mem_bytes = b * (n * h * 2.0 + 2.0 * n_kv * kv_len * h * kv_mem + n * h * 2.0);
+    let sol_math = ops / bf16_flops * 1000.0 / quant_mode_gen_compute;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
     sol_math.max(sol_mem)
 }
 
-/// In-place SOL clamp for every entry in the generation-attention grid set.
-fn clamp_generation_attention_grids_to_sol(spec: &SystemSpec, grids: &mut GenerationGrids) {
+/// In-place SOL clamp for every raw row in the generation-attention grid set.
+/// Mirrors Python `GenerationAttention._correct_sol` (which v2 keeps).
+fn clamp_generation_attention_grids_to_sol(
+    spec: &SystemSpec,
+    grids: &mut BTreeMap<GenerationKey, Grid3<f64>>,
+) {
     if spec.gpu.bfloat16_tc_flops.unwrap_or(0.0) <= 0.0 {
         return;
     }
-    for (key, grid) in grids.by_keys.iter_mut() {
+    for (key, grid) in grids.iter_mut() {
         let Some(kv_quant) = kv_cache_quant_by_name(&key.kv_quant) else {
             continue;
         };
@@ -576,12 +568,12 @@ fn clamp_generation_attention_grids_to_sol(spec: &SystemSpec, grids: &mut Genera
                     let sol = generation_attention_sol_ms(
                         spec,
                         key.n_kv_lookup,
-                        n,
                         key.head_size,
                         key.window_size,
                         kv_quant,
-                        b,
-                        s,
+                        n as f64,
+                        b as f64,
+                        s as f64,
                     );
                     if sol > *latency {
                         *latency = sol;
@@ -605,7 +597,9 @@ fn kv_cache_quant_by_name(name: &str) -> Option<KvCacheQuantMode> {
 /// Load the encoder-attention table from an ordered, priority-sorted source
 /// list. Same first-wins-across-sources + missing-file-skip semantics as
 /// [`load_context_parquet`].
-fn load_encoder_parquet(sources: &[PerfSource]) -> Result<EncoderGrids, AicError> {
+fn load_encoder_parquet(
+    sources: &[PerfSource],
+) -> Result<BTreeMap<EncoderKey, Grid3<f64>>, AicError> {
     let mut by_keys: BTreeMap<EncoderKey, Grid3<f64>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
@@ -651,7 +645,7 @@ fn load_encoder_parquet(sources: &[PerfSource]) -> Result<EncoderGrids, AicError
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
-    Ok(EncoderGrids { by_keys })
+    Ok(by_keys)
 }
 
 fn missing_key(data_root: &Path, key: &ContextKey) -> AicError {
@@ -711,21 +705,23 @@ mod tests {
         SystemSpec::load(&systems_yaml).expect("gb200.yaml must parse")
     }
 
+    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails
     #[test]
-    fn generation_query_ragged_corner_matches_python() {
-        // Pins the exact regime this parity fix targets: large batch x long kv,
-        // off-measured-grid, requiring densification + 5-sample s-averaging.
-        // Before the fix Rust returned ~0.3673 here (single-interp, [n][s][b]
-        // grid); Python returns 0.45830706 (5-sample avg over the densified
-        // [n][b][s] grid). Verified against
-        // `PerfDatabase.query_generation_attention` on gb200/vllm/0.19.0.
+    fn generation_query_ragged_corner_matches_python_v2_engine() {
+        // Ragged-corner regime: large batch x long kv, off-measured-grid —
+        // v2 resolves it on the RAW [n][b][s] grid (no densification), with
+        // the truncated corner handled by boundary-util hold, then 5-sample
+        // s-averaging at the wrapper level. Expected value generated from
+        // Python `db.query_generation_attention(256, 2561, 32, 8, bfloat16,
+        // SILICON, window_size=0, head_size=128)` on gb200/vllm/0.19.0.
         let table = AttentionTable::new(gb200_vllm_data_root(), gb200_spec());
         let latency = table
             .query_generation(256, 2561, 32, 8, 128, 0, KvCacheQuantMode::Bfloat16)
             .expect("ragged-corner query must succeed");
+        let expected = 0.4923998240128304;
         assert!(
-            (latency - 0.45830706201571336).abs() < 1e-6,
-            "expected Python-parity ragged-corner latency 0.4583, got {latency}"
+            ((latency - expected) / expected).abs() < 1e-9,
+            "rust {latency} vs python {expected}"
         );
     }
 
@@ -752,47 +748,61 @@ mod tests {
         );
     }
 
+    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails
     #[test]
-    fn generation_grid_densification_matches_python() {
-        // Regression guard for the ragged/extrapolation parity fix. Python's
-        // `GenerationAttention.load_data` runs clamp -> extrapolate_data_grid ->
-        // re-clamp; the densified grid value at (n=32, b=256, s=2048|4096) for
-        // the gb200/vllm/0.19.0 bfloat16 / n_kv_lookup=8 / head=128 key must
-        // match Python's pre-filled lattice (verified against a live
-        // `extrapolate_data_grid` run). These s values are off-measured-grid in
-        // the b=256 column, so they exercise the z-direction fill specifically.
-        let table = AttentionTable::new(gb200_vllm_data_root(), gb200_spec());
-        let grids = table.load_generation().expect("generation grids must load");
-        let key = GenerationKey {
-            kv_quant: "bfloat16".to_string(),
-            n_kv_lookup: 8,
-            head_size: 128,
-            window_size: 0,
-        };
-        let grid = grids.by_keys.get(&key).expect("gb200 vllm bfloat16 key present");
-        let v2048 = grid[&32][&256][&2048];
-        let v4096 = grid[&32][&256][&4096];
-        assert!((v2048 - 0.368_437_310_06).abs() < 1e-6, "densified s=2048 got {v2048}");
-        assert!((v4096 - 0.727_775_951_23).abs() < 1e-6, "densified s=4096 got {v4096}");
-    }
-
-    #[test]
-    fn generation_attention_query_matches_python() {
+    fn generation_attention_query_matches_python_v2_engine() {
         // batch=32 isl=1 n=64 n_kv=4 head_dim=128 kv=fp8 step=1 (stored
-        // sequence_tokens = isl + step = 2). Python's
-        // `_query_generation_attention_table` averages 5 interp samples over
+        // sequence_tokens = isl + step = 2). The 5-sample averaging spans
         // s ∈ [max(1,int(2*0.9)), max(..,int(2*1.1))] = [1, 2], i.e.
-        // s_samples = [1, 1, 1, 1, 2] over the densified grid. The result is
-        // therefore the 5-sample mean, not the raw step=1 leaf. Verified
-        // against `PerfDatabase.query_generation_attention` (= 0.0086442669).
+        // s_samples = [1, 1, 1, 1, 2]; s=1 is below the collected range, so
+        // it resolves via boundary-util hold on the RAW grid. Expected value
+        // generated from Python `db.query_generation_attention(32, 2, 64, 4,
+        // fp8, SILICON, 0, 128)` on b200_sxm/vllm/0.19.0.
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let latency = table
             .query_generation(32, 2, 64, 4, 128, 0, KvCacheQuantMode::Fp8)
             .expect("query must succeed");
+        let expected = 0.008451361751014535;
         assert!(
-            (latency - 0.008644266923268636).abs() < 1e-9,
-            "expected 5-sample-averaged latency, got {latency}"
+            ((latency - expected) / expected).abs() < 1e-9,
+            "rust {latency} vs python {expected}"
         );
+    }
+
+    /// Values generated from the Python v2 engine on the same table
+    /// (`db.query_context_attention(b, s, 0, 64, 1, fp8, bfloat16, SILICON,
+    /// window_size=0, head_size=128)` on b200_sxm/vllm/0.19.0): an exact hit,
+    /// a seq interpolation (sqrt-space blend between s=10240 and s=12288),
+    /// and a batch past the staircase frontier (b=64 where s=16384 collects
+    /// only up to b=8 -> boundary-util hold). The two engines must agree
+    /// because they implement the same resolution chain.
+    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails
+    #[test]
+    fn context_attention_query_matches_python_v2_engine() {
+        let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
+        let cases: &[(u32, u32, f64)] = &[
+            (8, 16384, 19.820667266845703),  // exact hit
+            (8, 12000, 11.515825737734879),  // seq interp (sqrt blend)
+            (64, 16384, 158.56533813476562), // batch beyond staircase (util-hold)
+        ];
+        for &(b, s, expected) in cases {
+            let got = table
+                .query_context(
+                    b,
+                    s,
+                    64,
+                    1,
+                    128,
+                    0,
+                    KvCacheQuantMode::Fp8,
+                    FmhaQuantMode::Bfloat16,
+                )
+                .unwrap();
+            assert!(
+                ((got - expected) / expected).abs() < 1e-9,
+                "(b={b},s={s}): rust {got} vs python {expected}"
+            );
+        }
     }
 
     #[test]
@@ -840,23 +850,41 @@ mod tests {
         }
     }
 
+    /// Values generated from the Python v2 engine on the same table
+    /// (`db.query_encoder_attention(b, s, 16, 64, bfloat16, SILICON)` on
+    /// b200_sxm/vllm/0.19.0): an exact hit, a seq interpolation (sqrt-space
+    /// blend between s=1296 and s=1500), and a batch past the staircase
+    /// frontier (b=64 where s=65536 collects only up to b=2 -> boundary-util
+    /// hold).
+    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails
     #[test]
-    fn encoder_attention_loads_on_vllm_b200() {
-        // b200_sxm/vllm/0.19.0 ships encoder_attention_perf.parquet (added in
-        // #1210, "add non causal attention data"), so the lazy loader resolves
-        // the table and the query returns a real latency. (This case used to
-        // assert a clean error back when the file was absent; the fixture now
-        // exercises the encoder load path instead. The missing-data error path
-        // is covered by `gemm_missing_data_root_errors_on_query` and
-        // `compute_scale_absent_on_vllm_b200_errors_clearly`.)
+    fn encoder_attention_query_matches_python_v2_engine() {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
-        let latency = table
-            .query_encoder(1, 1024, 16, 64, FmhaQuantMode::Bfloat16)
-            .expect("encoder query must succeed once encoder data is present");
-        assert!(
-            latency > 0.0,
-            "expected a positive encoder latency, got {latency}"
-        );
+        let cases: &[(u32, u32, f64)] = &[
+            (1, 1024, 0.03258133431275686), // exact hit
+            (2, 1400, 0.0779337721462867),  // seq interp (sqrt blend)
+            (64, 65536, 9775.049479166666), // batch beyond staircase (util-hold)
+        ];
+        for &(b, s, expected) in cases {
+            let got = table
+                .query_encoder(b, s, 16, 64, FmhaQuantMode::Bfloat16)
+                .unwrap();
+            assert!(
+                ((got - expected) / expected).abs() < 1e-9,
+                "(b={b},s={s}): rust {got} vs python {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn encoder_attention_missing_head_size_errors() {
+        // vLLM b200 encoder attention collects head_dim 64/72/80 only; an
+        // uncollected head size is a genuine missing key.
+        let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
+        match table.query_encoder(1, 1024, 16, 128, FmhaQuantMode::Bfloat16) {
+            Err(AicError::PerfDatabase(_)) => {}
+            other => panic!("expected PerfDatabase error, got {other:?}"),
+        }
     }
 
     #[test]

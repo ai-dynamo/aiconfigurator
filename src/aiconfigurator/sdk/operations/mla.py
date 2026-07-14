@@ -36,7 +36,7 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common, perf_interp
 from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
@@ -63,50 +63,6 @@ def _cache_key(database: PerfDatabase) -> tuple:
     )
 
 
-# Shared extrapolation target lists — lifted verbatim from the legacy
-# ``PerfDatabase.__init__`` blocks (lines 2984-3206 pre-migration).
-#
-# fmt: off
-_REGULAR_CONTEXT_MLA_TARGET_Y: list[int] = (
-    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-    + [4096 + i * 2048 for i in range(14)]
-    + [32768 + 16384 * i for i in range(6)]
-    + [131072 + 32768 * i for i in range(12)]
-    + [524288 + 65536 * i for i in range(9)]
-)  # s
-_REGULAR_CONTEXT_MLA_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048,
-]  # b
-
-_WIDEEP_CONTEXT_MLA_TARGET_Y: list[int] = (
-    [16, 32, 64, 128, 256, 512, 1024, 2048]
-    + [4096 + i * 2048 for i in range(14)]
-    + [32768 + 16384 * i for i in range(6)]
-    + [131072 + 32768 * i for i in range(12)]
-    + [524288 + 65536 * i for i in range(9)]
-)  # s — note: starts at 16, not 1
-_WIDEEP_CONTEXT_MLA_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048,
-]  # b
-
-_GENERATION_MLA_TARGET_Y: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192,
-]  # b
-_GENERATION_MLA_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
-    16384, 32768, 65536, 131072, 262144, 2097152 * 8,
-]  # s
-
-_CONTEXT_MLA_MODULE_TARGET_Y: list[int] = (
-    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-    + [4096 + i * 2048 for i in range(14)]
-    + [32768 + 16384 * i for i in range(6)]
-    + [131072 + 32768 * i for i in range(12)]
-    + [524288 + 65536 * i for i in range(9)]
-)  # s — same as regular context MLA
-_CONTEXT_MLA_MODULE_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048,
-]  # b — same as regular context MLA
 # fmt: on
 
 
@@ -161,7 +117,7 @@ class ContextMLA(Operation):
             cls._data_cache[key] = LoadedOpData(
                 load_context_mla_data(sources), PerfDataFilename.context_mla, primary_path
             )
-            cls._extrapolate(cls._data_cache[key])
+            # No load-time grid pre-expansion: queries resolve on the RAW grid via perf_interp.
             cls._record_load()
 
         if "_context_mla_data" not in database.__dict__:
@@ -170,23 +126,6 @@ class ContextMLA(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 2-level (quant_mode → kv_cache_dtype → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for quant_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[quant_mode]:
-                num_heads_list = list(data_wrapper[quant_mode][kv_cache_dtype].keys())
-                data_dict = data_wrapper[quant_mode][kv_cache_dtype]
-                interpolation.extrapolate_data_grid(
-                    data_dict=data_dict,
-                    target_x_list=num_heads_list,
-                    target_y_list=_REGULAR_CONTEXT_MLA_TARGET_Y,
-                    target_z_list=_REGULAR_CONTEXT_MLA_TARGET_Z,
-                    sqrt_y_value=True,
-                )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_context_mla)
@@ -280,9 +219,13 @@ class ContextMLA(Operation):
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             mla_dict = util_empirical.require_data_slice(data_wrapper, fmha_quant_mode, kvcache_quant_mode)
-            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            # Context MLA ~ seq^2 -> context grid (sqrt on seq only); samples are prefix=0.
+            config = perf_interp.context_grid_config(
+                sol_fn=lambda n_v, s_v, b_v: get_sol(b_v, s_v, 0, n_v, kvcache_quant_mode, fmha_quant_mode)[0]
+            )
+            result = perf_interp.query(config, mla_dict, num_heads, full_s, b)
+            latency = perf_interp.get_value(result, "latency") * prefix_correction
+            energy = perf_interp.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -375,7 +318,7 @@ class GenerationMLA(Operation):
             cls._data_cache[key] = LoadedOpData(
                 load_generation_mla_data(sources), PerfDataFilename.generation_mla, primary_path
             )
-            cls._extrapolate(cls._data_cache[key])
+            # No load-time grid pre-expansion: queries resolve on the RAW grid via perf_interp.
             cls._record_load()
 
         if "_generation_mla_data" not in database.__dict__:
@@ -384,21 +327,6 @@ class GenerationMLA(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 1-level (kv_cache_dtype → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for kv_cache_dtype in data_wrapper:
-            tp_list = list(data_wrapper[kv_cache_dtype].keys())
-            data_dict = data_wrapper[kv_cache_dtype]
-            interpolation.extrapolate_data_grid(
-                data_dict=data_dict,
-                target_x_list=tp_list,
-                target_y_list=_GENERATION_MLA_TARGET_Y,
-                target_z_list=_GENERATION_MLA_TARGET_Z,
-            )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_generation_mla)
@@ -471,9 +399,13 @@ class GenerationMLA(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             mla_dict = util_empirical.require_data_slice(data_wrapper, kvcache_quant_mode)
-            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
+            # Generation MLA ~ linear in seq -> raw generation grid.
+            config = perf_interp.generation_grid_config(
+                sol_fn=lambda n_v, b_v, s_v: get_sol(b_v, s_v, n_v, kvcache_quant_mode)[0]
+            )
+            result = perf_interp.query(config, mla_dict, num_heads, b, s)
+            latency = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -636,22 +568,17 @@ class MLABmm(Operation):
                 "mla_gen_pre" if if_pre else "mla_gen_post",
                 num_heads,
             )
-            num_left, num_right = interpolation.nearest_1d_point_helper(
-                num_tokens,
-                list(mla_bmm_dict.keys()),
-                inner_only=False,
+            # 1-D tokens curve on the raw table: RAW lerp in range (BMM is
+            # ~linear in tokens); boundary util-hold beyond it via the BMM SOL
+            # (replaces the legacy raw two-point extrapolation).
+            config = perf_interp.OpInterpConfig(
+                axes=("num_tokens",),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda t: get_sol(t, num_heads, quant_mode, if_pre)[0],
             )
-            result = interpolation.interp_1d(
-                [num_left, num_right],
-                [mla_bmm_dict[num_left], mla_bmm_dict[num_right]],
-                num_tokens,
-            )
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
+            result = perf_interp.query(config, mla_bmm_dict, num_tokens)
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(lat, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -755,8 +682,7 @@ class MLAModule(Operation):
                 load_generation_mla_module_data(gen_sources), PerfDataFilename.mla_generation_module, gen_path
             )
 
-            cls._extrapolate_context(cls._context_data_cache[key])
-            cls._extrapolate_generation(cls._generation_data_cache[key])
+            # No load-time grid pre-expansion: queries resolve on the RAW grid via perf_interp.
             cls._record_load()
 
         if "_context_mla_module_data" not in database.__dict__:
@@ -768,40 +694,6 @@ class MLAModule(Operation):
     def clear_cache(cls) -> None:
         cls._context_data_cache.clear()
         cls._generation_data_cache.clear()
-
-    @classmethod
-    def _extrapolate_context(cls, data_wrapper) -> None:
-        """3-level (fmha_mode → kv_dtype → gemm_mode → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for fmha_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[fmha_mode]:
-                for gemm_mode in data_wrapper[fmha_mode][kv_cache_dtype]:
-                    data_dict = data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode]
-                    num_heads_list = list(data_dict.keys())
-                    interpolation.extrapolate_data_grid(
-                        data_dict=data_dict,
-                        target_x_list=num_heads_list,
-                        target_y_list=_CONTEXT_MLA_MODULE_TARGET_Y,
-                        target_z_list=_CONTEXT_MLA_MODULE_TARGET_Z,
-                    )
-
-    @classmethod
-    def _extrapolate_generation(cls, data_wrapper) -> None:
-        """3-level (fmha_mode → kv_dtype → gemm_mode → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for fmha_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[fmha_mode]:
-                for gemm_mode in data_wrapper[fmha_mode][kv_cache_dtype]:
-                    data_dict = data_wrapper[fmha_mode][kv_cache_dtype][gemm_mode]
-                    num_heads_list = list(data_dict.keys())
-                    interpolation.extrapolate_data_grid(
-                        data_dict=data_dict,
-                        target_x_list=num_heads_list,
-                        target_y_list=_GENERATION_MLA_TARGET_Y,
-                        target_z_list=_GENERATION_MLA_TARGET_Z,
-                    )
 
     # ------------------------------------------------------------------
     # Query tables (formerly PerfDatabase.query_context_mla_module /
@@ -905,9 +797,13 @@ class MLAModule(Operation):
                 kvcache_quant_mode,
                 gemm_quant_mode,
             )
-            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            # Context MLA module ~ seq^2 -> context grid (sqrt on seq only); samples are prefix=0.
+            config = perf_interp.context_grid_config(
+                sol_fn=lambda n_v, s_v, b_v: get_sol(b_v, s_v, 0, n_v, kvcache_quant_mode, fmha_quant_mode)[0]
+            )
+            result = perf_interp.query(config, mla_dict, num_heads, full_s, b)
+            latency = perf_interp.get_value(result, "latency") * prefix_correction
+            energy = perf_interp.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -928,7 +824,6 @@ class MLAModule(Operation):
         s: int,
         num_heads: int,
         kv_cache_dtype: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode = common.FMHAQuantMode.bfloat16,
         gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
     ):
@@ -972,7 +867,6 @@ class MLAModule(Operation):
                 wrapper.raise_if_not_loaded()
                 return util_empirical.require_data_slice(
                     wrapper,
-                    fmha_quant_mode,
                     kv_cache_dtype,
                     gemm_quant_mode,
                 )
@@ -983,7 +877,6 @@ class MLAModule(Operation):
                     database.system,
                     database.backend,
                     database.version,
-                    fmha_quant_mode.name,
                     kv_cache_dtype.name,
                     gemm_quant_mode.name,
                 ),
@@ -1012,13 +905,16 @@ class MLAModule(Operation):
             data_wrapper.raise_if_not_loaded()
             mla_dict = util_empirical.require_data_slice(
                 data_wrapper,
-                fmha_quant_mode,
                 kv_cache_dtype,
                 gemm_quant_mode,
             )
-            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
+            # Generation MLA module ~ linear in seq -> raw generation grid.
+            config = perf_interp.generation_grid_config(
+                sol_fn=lambda n_v, b_v, s_v: get_sol(b_v, s_v, n_v, kv_cache_dtype)[0]
+            )
+            result = perf_interp.query(config, mla_dict, num_heads, b, s)
+            latency = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -1060,7 +956,6 @@ class MLAModule(Operation):
                 s=s,
                 num_heads=self._num_heads,
                 kv_cache_dtype=self._kvcache_quant_mode,
-                fmha_quant_mode=self._fmha_quant_mode,
                 gemm_quant_mode=self._gemm_quant_mode,
             )
 
@@ -1133,7 +1028,7 @@ class WideEPGenerationMLA(Operation):
                     PerfDataFilename.wideep_generation_mla,
                     primary_path,
                 )
-                cls._extrapolate(cls._data_cache[key])
+                # No load-time grid pre-expansion: queries resolve on the RAW grid via perf_interp.
             cls._record_load()
 
         if "_wideep_generation_mla_data" not in database.__dict__:
@@ -1142,22 +1037,6 @@ class WideEPGenerationMLA(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 2-level (kernel_source → kv_cache_dtype → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for kernel_source in data_wrapper:
-            for kv_cache_dtype in data_wrapper[kernel_source]:
-                tp_list = list(data_wrapper[kernel_source][kv_cache_dtype].keys())
-                data_dict = data_wrapper[kernel_source][kv_cache_dtype]
-                interpolation.extrapolate_data_grid(
-                    data_dict=data_dict,
-                    target_x_list=tp_list,
-                    target_y_list=_GENERATION_MLA_TARGET_Y,
-                    target_z_list=_GENERATION_MLA_TARGET_Z,
-                )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_wideep_generation_mla)
@@ -1176,6 +1055,15 @@ class WideEPGenerationMLA(Operation):
         database_mode: common.DatabaseMode | None = None,
     ):
         """Query WideEP generation MLA table. Verbatim port of the legacy body."""
+        # Decode attention compute dtype follows the kv-cache dtype; the fmha
+        # label is inert for generation (kernel tables key on kv dtype).
+        # Derive the SOL dtype from kv so label changes cannot move decode SOL
+        # -- mirrors query_generation_mla's get_sol.
+        fmha_quant_mode = (
+            common.FMHAQuantMode.fp8
+            if kvcache_quant_mode == common.KVCacheQuantMode.fp8
+            else common.FMHAQuantMode.bfloat16
+        )
 
         def get_sol(
             b: int,
@@ -1306,9 +1194,14 @@ class WideEPGenerationMLA(Operation):
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
             mla_dict = util_empirical.require_data_slice(attn_data, kvcache_quant_mode)
-            result = interpolation.interp_3d(num_heads, b, s, mla_dict, "bilinear", database._extracted_metrics_cache)
-            latency = result["latency"]
-            energy = result.get("energy", 0.0)
+            # Raw generation grid; the table is keyed by num_heads while the SOL
+            # takes tp_size, so the sol_fn maps n_v -> 128 // n_v.
+            config = perf_interp.generation_grid_config(
+                sol_fn=lambda n_v, b_v, s_v: get_sol(b_v, s_v, 128 // n_v, kvcache_quant_mode, fmha_quant_mode)[0]
+            )
+            result = perf_interp.query(config, mla_dict, num_heads, b, s)
+            latency = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -1407,7 +1300,7 @@ class WideEPContextMLA(Operation):
                     PerfDataFilename.wideep_context_mla,
                     primary_path,
                 )
-                cls._extrapolate(cls._data_cache[key])
+                # No load-time grid pre-expansion: queries resolve on the RAW grid via perf_interp.
             cls._record_load()
 
         if "_wideep_context_mla_data" not in database.__dict__:
@@ -1416,24 +1309,6 @@ class WideEPContextMLA(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the 3-level (kernel_source → quant_mode → kv_cache_dtype → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-        for kernel_source in data_wrapper:
-            for quant_mode in data_wrapper[kernel_source]:
-                for kv_cache_dtype in data_wrapper[kernel_source][quant_mode]:
-                    num_heads_list = list(data_wrapper[kernel_source][quant_mode][kv_cache_dtype].keys())
-                    data_dict = data_wrapper[kernel_source][quant_mode][kv_cache_dtype]
-                    interpolation.extrapolate_data_grid(
-                        data_dict=data_dict,
-                        target_x_list=num_heads_list,
-                        target_y_list=_WIDEEP_CONTEXT_MLA_TARGET_Y,
-                        target_z_list=_WIDEEP_CONTEXT_MLA_TARGET_Z,
-                        sqrt_y_value=True,
-                    )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_wideep_context_mla)
@@ -1590,9 +1465,14 @@ class WideEPContextMLA(Operation):
             mla_dict = util_empirical.require_data_slice(attn_data, fmha_quant_mode, kvcache_quant_mode)
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            result = interpolation.interp_3d(num_heads, full_s, b, mla_dict, "cubic", database._extracted_metrics_cache)
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            # Context grid (sqrt on seq only); table keyed by num_heads, SOL takes
+            # tp_size -> map n_v -> 128 // n_v; samples are prefix=0.
+            config = perf_interp.context_grid_config(
+                sol_fn=lambda n_v, s_v, b_v: get_sol(b_v, s_v, 0, 128 // n_v, kvcache_quant_mode, fmha_quant_mode)[0]
+            )
+            result = perf_interp.query(config, mla_dict, num_heads, full_s, b)
+            latency = perf_interp.get_value(result, "latency") * prefix_correction
+            energy = perf_interp.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -2015,16 +1895,19 @@ def load_generation_mla_module_data(mla_module_file: str):
     batch_size, isl, tp_size, step, latency [, power]
 
     Dict structure:
-        data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][num_heads][b][s]
+        data[kv_cache_quant_mode][gemm_quant_mode][num_heads][b][s]
+
+    The ``mla_dtype`` column is ignored: decode MLA compute dtype follows the
+    KV cache dtype (collectors hardcode ``bfloat16`` in that column), so it is
+    not a real axis — mirroring ``load_generation_mla_data``, which likewise
+    drops it.
     """
     rows = _read_filtered_rows(mla_module_file)
     if rows is None:
         logger.debug(f"MLA generation module data file {mla_module_file} not found.")
         return None
 
-    mla_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
-    )
+    mla_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
 
     has_power = len(rows) > 0 and "power" in rows[0]
 
@@ -2036,11 +1919,10 @@ def load_generation_mla_module_data(mla_module_file: str):
         power = float(row.get("power", 0.0)) if has_power else 0.0
         energy = power * latency
 
-        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
-        mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][b][s] = {
+        mla_data[kv_dtype][gemm_mode][num_heads][b][s] = {
             "latency": latency,
             "power": power,
             "energy": energy,

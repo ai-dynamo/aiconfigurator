@@ -251,9 +251,14 @@ def _is_known_framework_incompatible_gap(
     ):
         return True
 
+    # Version-agnostic: vLLM has no consumable path for the native DeepSeek-V4
+    # w4a8_mxfp4_mxfp8 MoE label on any collected version (0.24.0 selects
+    # W4A16 on SM90 vs W4A8 on Blackwell and the SDK MoE key carries no
+    # system dimension — see the DeepseekV4ForCausalLM case yaml). Pinning
+    # this to 0.19.0 made the same deterministic gap regress to plain FAIL
+    # on newer databases.
     if (
         backend == common.BackendName.vllm.value
-        and version == "0.19.0"
         and "DeepSeek-V4" in model
         and (
             "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized

@@ -34,10 +34,13 @@ from aiconfigurator.sdk.models.helpers import (
     _architecture_to_model_family,
     _get_model_info,
     _infer_quant_modes_from_raw_config,
+    attention_op_keys,
     calc_expectation,
     check_is_moe,
     get_model_family,
-    resolve_context_fmha_compat,
+    resolve_context_fmha_by_data,
+    resolve_dsv4_moe_arch,
+    resolve_dsv4_moe_arch_mode,
 )
 
 # Auto-import every other module in this package so ``@register_model``
@@ -160,9 +163,12 @@ __all__ = [
     "_architecture_to_model_family",
     "_get_model_info",
     "_infer_quant_modes_from_raw_config",
+    "attention_op_keys",
     "calc_expectation",
     "check_is_moe",
     "get_model",
     "get_model_family",
-    "resolve_context_fmha_compat",
+    "resolve_context_fmha_by_data",
+    "resolve_dsv4_moe_arch",
+    "resolve_dsv4_moe_arch_mode",
 ]

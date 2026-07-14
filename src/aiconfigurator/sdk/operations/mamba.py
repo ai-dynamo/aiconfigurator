@@ -31,7 +31,8 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common, perf_interp
+from aiconfigurator.sdk.errors import InterpolationDataNotAvailableError
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
@@ -162,10 +163,10 @@ class Mamba2Kernel(Operation):
         if not getattr(mamba2_data, "loaded", False):
             mamba2_data = {}
 
-        def get_sol() -> tuple[float, float, float]:
+        def get_sol(b: int = batch_size, s: int | None = seq_len) -> tuple[float, float, float]:
             d_inner = nheads * head_dim
             conv_dim = d_inner + 2 * n_groups * d_state
-            x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
+            x = (b * s) if phase == "context" and s else b
             if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
                 conv_read_bytes = x * conv_dim * (d_conv + 1) * 2
                 conv_write_bytes = x * conv_dim * 2
@@ -202,23 +203,26 @@ class Mamba2Kernel(Operation):
         if phase == "context":
             if seq_len is None or seq_len <= 0:
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            # 2-axis RAW grid (memory-bound ~linear per axis); beyond-range is
+            # util-hold via the kernel SOL. DEGRADATION CONTRACT preserved: a
+            # genuine data miss falls back to plain SOL (returns, not raises).
+            config = perf_interp.OpInterpConfig(
+                axes=("batch", "seq_len"),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda b_v, s_v: get_sol(b_v, s_v)[0],
+            )
             try:
-                result = interpolation.interp_2d_linear(batch_size, seq_len, table, database._extracted_metrics_cache)
-            except (KeyError, ValueError):
+                result = perf_interp.query(config, table, batch_size, seq_len)
+            except (InterpolationDataNotAvailableError, KeyError, ValueError):
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             return database._interp_pr(
-                result["latency"],
-                energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
+                perf_interp.get_value(result, "latency"),
+                energy=perf_interp.get_value(result, "energy"),
             )
         else:
-            try:
-                batch_left, batch_right = interpolation.nearest_1d_point_helper(
-                    batch_size, list(table.keys()), inner_only=False
-                )
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
-            # Ensure we pass entry dicts {latency, power, energy}; handle legacy nested batch_size -> seq_len -> entry
+            # Normalize to a flat {batch: entry} curve first (legacy tables nest
+            # batch -> seq -> entry; generation rows have a single seq), then a
+            # 1-axis RAW engine query with SOL-fallback degradation.
             def _mamba2_gen_entry(val):
                 if isinstance(val, dict) and "latency" in val:
                     return val
@@ -228,21 +232,18 @@ class Mamba2Kernel(Operation):
                         return inner
                 return None
 
-            y_left = _mamba2_gen_entry(table[batch_left])
-            y_right = _mamba2_gen_entry(table[batch_right])
-            if y_left is None or y_right is None:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            result = interpolation.interp_1d(
-                [batch_left, batch_right],
-                [y_left, y_right],
-                batch_size,
+            curve = {bb: entry for bb, entry in ((bb, _mamba2_gen_entry(v)) for bb, v in table.items()) if entry}
+            config = perf_interp.OpInterpConfig(
+                axes=("batch",),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda b_v: get_sol(b_v, seq_len)[0],
             )
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", result.get("power", 0.0) * lat)
-            else:
-                lat = result
-                energy = 0.0
+            try:
+                result = perf_interp.query(config, curve, batch_size)
+            except (InterpolationDataNotAvailableError, KeyError, ValueError):
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(lat, energy=energy)
 
     # ------------------------------------------------------------------
@@ -376,8 +377,8 @@ class GDNKernel(Operation):
         if not getattr(gdn_data, "loaded", False):
             gdn_data = {}
 
-        def get_sol() -> tuple[float, float, float]:
-            x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
+        def get_sol(b: int = batch_size, s: int | None = seq_len) -> tuple[float, float, float]:
+            x = (b * s) if phase == "context" and s else b
             if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
                 conv_channels = num_k_heads * head_k_dim + num_v_heads * head_v_dim
                 read_bytes = x * conv_channels * (d_conv + 1) * 2
@@ -390,23 +391,23 @@ class GDNKernel(Operation):
                 # (no dtype override), so matches input dtype: FP16/BF16 → 2 bytes.
                 chunk_size = 64  # flash-linear-attention default for chunk_gated_delta_rule
                 state_size = num_v_heads * head_k_dim * head_v_dim
-                num_chunks = (seq_len // chunk_size) if seq_len else 0
-                h_chunks_bytes = num_chunks * state_size * 2 * batch_size
+                num_chunks = (s // chunk_size) if s else 0
+                h_chunks_bytes = num_chunks * state_size * 2 * b
                 read_bytes = (
                     x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2
-                    + state_size * 2 * batch_size
+                    + state_size * 2 * b
                     + h_chunks_bytes  # chunk_o reads h_chunks from global memory
                 )
                 write_bytes = (
                     x * num_v_heads * head_v_dim * 2
-                    + state_size * 2 * batch_size
+                    + state_size * 2 * b
                     + h_chunks_bytes  # chunk_delta_h writes h_chunks to global memory
                 )
             elif kernel_source == "fused_sigmoid_gating_delta_rule_update":
                 # GDN single-step decode. State stored as BF16 in global memory.
                 state_size = num_v_heads * head_k_dim * head_v_dim
-                read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 2 * batch_size
-                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 2 * batch_size
+                read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 2 * b
+                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 2 * b
             else:
                 read_bytes = x * d_model * 2
                 write_bytes = x * d_model * 2
@@ -418,42 +419,67 @@ class GDNKernel(Operation):
 
         model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
         try:
-            by_phase = gdn_data[kernel_source]
+            by_key = gdn_data[kernel_source][phase]
         except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        try:
-            by_key = by_phase[phase]
-        except KeyError:
-            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            by_key = {}
         if model_key not in by_key:
-            # Nearest config by d_model, then num_v_heads as secondary discriminator
-            keys_same_d_model = [k for k in by_key if k[0] == d_model]
-            if keys_same_d_model:
-                model_key = min(keys_same_d_model, key=lambda k: abs(k[3] - num_v_heads))
-            else:
+            alias_sources = ()
+            if database.backend == "vllm" and database.version == "0.24.0":
+                if phase == "context" and kernel_source == "chunk_gated_delta_rule":
+                    alias_sources = (
+                        "chunk_gated_delta_rule_flashinfer",
+                        "chunk_gated_delta_rule_triton",
+                        "chunk_gated_delta_rule_cutedsl",
+                    )
+                elif phase == "generation" and kernel_source == "fused_sigmoid_gating_delta_rule_update":
+                    alias_sources = ("fused_recurrent_gated_delta_rule_packed_decode",)
+
+            exact_aliases = []
+            for alias_source in alias_sources:
+                try:
+                    alias_by_key = gdn_data[alias_source][phase]
+                except KeyError:
+                    continue
+                if model_key in alias_by_key:
+                    exact_aliases.append(alias_by_key)
+
+            if len(exact_aliases) == 1:
+                by_key = exact_aliases[0]
+            elif exact_aliases:
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            else:
+                # Preserve the legacy fallback only within the logical source;
+                # physical aliases must match the complete model shape.
+                keys_same_d_model = [k for k in by_key if k[0] == d_model]
+                if keys_same_d_model:
+                    model_key = min(keys_same_d_model, key=lambda k: abs(k[3] - num_v_heads))
+                else:
+                    return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
 
         table = by_key[model_key]
 
         if phase == "context":
             if seq_len is None or seq_len <= 0:
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            # 2-axis RAW grid (memory-bound ~linear per axis); beyond-range is
+            # util-hold via the kernel SOL. DEGRADATION CONTRACT preserved: a
+            # genuine data miss falls back to plain SOL (returns, not raises).
+            config = perf_interp.OpInterpConfig(
+                axes=("batch", "seq_len"),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda b_v, s_v: get_sol(b_v, s_v)[0],
+            )
             try:
-                result = interpolation.interp_2d_linear(batch_size, seq_len, table, database._extracted_metrics_cache)
-            except (KeyError, ValueError):
+                result = perf_interp.query(config, table, batch_size, seq_len)
+            except (InterpolationDataNotAvailableError, KeyError, ValueError):
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             return database._interp_pr(
-                result["latency"],
-                energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
+                perf_interp.get_value(result, "latency"),
+                energy=perf_interp.get_value(result, "energy"),
             )
         else:
-            try:
-                batch_left, batch_right = interpolation.nearest_1d_point_helper(
-                    batch_size, list(table.keys()), inner_only=False
-                )
-            except (KeyError, ValueError):
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-
+            # See mamba2: normalize legacy nesting to {batch: entry}, then a
+            # 1-axis RAW engine query with SOL-fallback degradation.
             def _gdn_gen_entry(val):
                 if isinstance(val, dict) and "latency" in val:
                     return val
@@ -463,21 +489,18 @@ class GDNKernel(Operation):
                         return inner
                 return None
 
-            y_left = _gdn_gen_entry(table[batch_left])
-            y_right = _gdn_gen_entry(table[batch_right])
-            if y_left is None or y_right is None:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-            result = interpolation.interp_1d(
-                [batch_left, batch_right],
-                [y_left, y_right],
-                batch_size,
+            curve = {bb: entry for bb, entry in ((bb, _gdn_gen_entry(v)) for bb, v in table.items()) if entry}
+            config = perf_interp.OpInterpConfig(
+                axes=("batch",),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda b_v: get_sol(b_v, seq_len)[0],
             )
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", result.get("power", 0.0) * lat)
-            else:
-                lat = result
-                energy = 0.0
+            try:
+                result = perf_interp.query(config, curve, batch_size)
+            except (InterpolationDataNotAvailableError, KeyError, ValueError):
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(lat, energy=energy)
 
     # ------------------------------------------------------------------
@@ -748,6 +771,18 @@ def load_mamba2_data(mamba2_file: str):
     return result
 
 
+# The GDN decode-recurrence kernel name drifted across sglang releases
+# (0.5.10 recorded fused_recurrent_gated_delta_rule; 0.5.14 records the
+# executed fused_recurrent_gated_delta_rule_packed_decode). Consumers (the
+# qwen35 GDNKernel op and the Rust port) query one canonical modeling
+# identity; normalize the LOOKUP key here so every version's measured decode
+# rows are reachable. The parquet keeps the executed-kernel truth.
+_GDN_DECODE_RECURRENCE_ALIASES = {
+    "fused_recurrent_gated_delta_rule": "fused_sigmoid_gating_delta_rule_update",
+    "fused_recurrent_gated_delta_rule_packed_decode": "fused_sigmoid_gating_delta_rule_update",
+}
+
+
 def load_gdn_data(gdn_file: str):
     """
     Load GDN (Gated DeltaNet) kernel performance data from gdn_perf.txt.
@@ -778,7 +813,7 @@ def load_gdn_data(gdn_file: str):
         logger.debug("Legacy database format detected (gdn) - power will default to 0.0")
 
     for row in rows:
-        kernel_source = row["kernel_source"]
+        kernel_source = _GDN_DECODE_RECURRENCE_ALIASES.get(row["kernel_source"], row["kernel_source"])
         phase = row["phase"]
         batch_size = int(row["batch_size"])
         seq_len = int(row["seq_len"])

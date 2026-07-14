@@ -200,6 +200,20 @@ SMOKE_CASES = [
         EngineStepParityCase(model_path="zai-org/GLM-5"),
         id="glm5-b200-vllm-019-isl1024-osl2",
     ),
+    # Tripwire for the DSA kernel_source bucket contract (review B1, both
+    # halves): sglang 0.5.14 records executed-kernel names whose bucket
+    # classification must match between the Python and Rust loaders — a
+    # long-context bf16-KV DSA query diverges ~30% if either side falls back
+    # to the bare substring rule.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="zai-org/GLM-5",
+            backend_name="sglang",
+            backend_version="0.5.14",
+            isl=16384,
+        ),
+        id="glm5-b200-sglang-0514-isl16384-osl2",
+    ),
     # Phase 4 D7-F: backend coverage for newly-ported families. The
     # builders are backend-independent (the per-backend conditional
     # `_attn_dp` / `_tp_allreduce` branches are handled inside each

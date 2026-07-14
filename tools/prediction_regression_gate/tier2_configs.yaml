@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Tier-2 scheduling-defense configs.
+#
+# Each entry is one cli_estimate call. This tier defends the scheduling layer
+# (IFB batching, disagg rate matching, speculative decoding, prefix caching,
+# VL encoder, memory feasibility) that tier-1's run_static sampling bypasses
+# on purpose. Keep it small and feature-shaped: one config per scheduling
+# behavior, NOT per hardware/model/quant combo — tier 1 owns those axes.
+#
+# backend_version is left unset (latest local data); production semantics
+# (SILICON, shared layer ON) apply. run_tier2.py snapshots the results per
+# revision; report.py diffs the old and new snapshots.
+
+configs:
+  # --- agg IFB scheduling: concurrency response on one dense combo ---
+  - id: dense_agg_c8
+    kwargs: {model_path: Qwen/Qwen3-32B, system_name: h200_sxm, backend_name: trtllm,
+             mode: agg, tp_size: 4, batch_size: 8, isl: 4096, osl: 1024}
+  - id: dense_agg_c64
+    kwargs: {model_path: Qwen/Qwen3-32B, system_name: h200_sxm, backend_name: trtllm,
+             mode: agg, tp_size: 4, batch_size: 64, isl: 4096, osl: 1024}
+  - id: dense_agg_c256
+    kwargs: {model_path: Qwen/Qwen3-32B, system_name: h200_sxm, backend_name: trtllm,
+             mode: agg, tp_size: 4, batch_size: 256, isl: 4096, osl: 1024}
+
+  # --- agg context-budget scheduling under long input ---
+  - id: dense_agg_long_isl
+    kwargs: {model_path: meta-llama/Meta-Llama-3.1-70B, system_name: h200_sxm, backend_name: trtllm,
+             mode: agg, tp_size: 4, batch_size: 32, isl: 16384, osl: 512}
+
+  # --- MoE agg with attention-DP + wide-EP layout ---
+  - id: moe_agg_adp_wideep
+    kwargs: {model_path: deepseek-ai/DeepSeek-R1, system_name: b200_sxm, backend_name: trtllm,
+             mode: agg, tp_size: 1, attention_dp_size: 8, moe_tp_size: 1, moe_ep_size: 8,
+             batch_size: 64, isl: 4096, osl: 1024}
+  - id: moe_agg_gptoss
+    kwargs: {model_path: openai/gpt-oss-120b, system_name: b200_sxm, backend_name: trtllm,
+             mode: agg, tp_size: 4, moe_tp_size: 1, moe_ep_size: 4,
+             batch_size: 64, isl: 4096, osl: 1024}
+
+  # --- disagg rate matching (asymmetric prefill/decode worker pools) ---
+  - id: dense_disagg_ratematch
+    kwargs: {model_path: meta-llama/Meta-Llama-3.1-70B, system_name: h200_sxm, backend_name: trtllm,
+             mode: disagg, isl: 4096, osl: 1024,
+             prefill_tp_size: 4, prefill_batch_size: 4, prefill_num_workers: 1,
+             decode_tp_size: 4, decode_batch_size: 64, decode_num_workers: 2}
+  - id: moe_disagg_wideep
+    kwargs: {model_path: deepseek-ai/DeepSeek-R1, system_name: b200_sxm, backend_name: trtllm,
+             mode: disagg, isl: 4096, osl: 1024,
+             prefill_tp_size: 1, prefill_attention_dp_size: 8, prefill_moe_tp_size: 1, prefill_moe_ep_size: 8,
+             prefill_batch_size: 8, prefill_num_workers: 1,
+             decode_tp_size: 1, decode_attention_dp_size: 8, decode_moe_tp_size: 1, decode_moe_ep_size: 8,
+             decode_batch_size: 128, decode_num_workers: 2}
+  - id: sglang_dense_disagg
+    kwargs: {model_path: Qwen/Qwen3-32B, system_name: h100_sxm, backend_name: sglang,
+             mode: disagg, isl: 4096, osl: 1024,
+             prefill_tp_size: 4, prefill_batch_size: 4, prefill_num_workers: 1,
+             decode_tp_size: 4, decode_batch_size: 64, decode_num_workers: 2}
+
+  # --- speculative decoding acceptance math (MTP) ---
+  - id: mtp_nextn1
+    kwargs: {model_path: deepseek-ai/DeepSeek-R1, system_name: b200_sxm, backend_name: trtllm,
+             mode: agg, tp_size: 1, attention_dp_size: 8, moe_tp_size: 1, moe_ep_size: 8,
+             batch_size: 64, isl: 4096, osl: 1024, nextn: 1}
+  - id: mtp_nextn2
+    kwargs: {model_path: deepseek-ai/DeepSeek-R1, system_name: b200_sxm, backend_name: trtllm,
+             mode: agg, tp_size: 1, attention_dp_size: 8, moe_tp_size: 1, moe_ep_size: 8,
+             batch_size: 64, isl: 4096, osl: 1024, nextn: 2}
+
+  # --- prefix caching ---
+  - id: prefix_cache
+    kwargs: {model_path: Qwen/Qwen3-32B, system_name: h200_sxm, backend_name: trtllm,
+             mode: agg, tp_size: 4, batch_size: 32, isl: 8192, osl: 1024, prefix: 4096}
+
+  # --- VL encoder path ---
+  - id: vl_encoder
+    kwargs: {model_path: Qwen/Qwen3-VL-32B-Instruct, system_name: h200_sxm, backend_name: trtllm,
+             mode: agg, tp_size: 4, batch_size: 16, isl: 2048, osl: 512,
+             image_height: 1024, image_width: 1024, num_images: 1}
+
+  # --- backend coverage for the agg scheduler variants ---
+  - id: vllm_dense_agg
+    kwargs: {model_path: meta-llama/Meta-Llama-3.1-70B, system_name: h200_sxm, backend_name: vllm,
+             mode: agg, tp_size: 4, batch_size: 64, isl: 4096, osl: 1024}
+  - id: sglang_dense_agg
+    kwargs: {model_path: Qwen/Qwen3-32B, system_name: h100_sxm, backend_name: sglang,
+             mode: agg, tp_size: 4, batch_size: 64, isl: 4096, osl: 1024}
+
+  # --- memory feasibility boundary (expected to stay infeasible) ---
+  - id: oom_boundary_405b_tp1
+    kwargs: {model_path: meta-llama/Meta-Llama-3.1-405B, system_name: h100_sxm, backend_name: trtllm,
+             mode: agg, tp_size: 1, batch_size: 8, isl: 4096, osl: 512}

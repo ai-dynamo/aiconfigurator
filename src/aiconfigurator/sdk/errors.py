@@ -43,6 +43,16 @@ class UnsupportedWideepConfigError(ValueError):
     """
 
 
+class InterpolationDataNotAvailableError(ValueError):
+    """Raised when interpolation cannot produce a real value from available data.
+
+    Subclasses ``ValueError`` so existing callers that catch ``ValueError``
+    keep working. The perf-DB layer catches this specific class to classify
+    the failure as "missing silicon data" without swallowing genuine
+    programming bugs that raise plain ``ValueError`` deeper in the stack.
+    """
+
+
 class PerfDataNotAvailableError(RuntimeError):
     """Raised when required performance data is missing or unsupported for a requested mode.
 

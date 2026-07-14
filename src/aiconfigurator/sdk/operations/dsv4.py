@@ -23,7 +23,7 @@ Four op classes migrate from ``_legacy.py`` into ``operations/dsv4.py``:
 
 No SOL clamping in the legacy ``_correct_data`` for DSV4 (the per-attn
 SOL formula runs inside the query path). No grid extrapolation either —
-``_dsv4_robust_3d_lookup`` handles interpolation/fallback at query time.
+Interpolation/fallback is handled by ``perf_interp`` at query time.
 
 Cache key matches every other migrated op:
 ``(systems_root, system, backend, version, enable_shared_layer)``.
@@ -31,17 +31,15 @@ Cache key matches every other migrated op:
 
 from __future__ import annotations
 
-import copy
 import logging
 import os
 from collections import defaultdict
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar, Optional
 
 import numpy as np
 
-from aiconfigurator.sdk import common, interpolation
-from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+from aiconfigurator.sdk import common, perf_interp
+from aiconfigurator.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
 
@@ -86,149 +84,6 @@ def _deep_merge_dsv4_dicts(dest, src):
     return dest
 
 
-def _dsv4_robust_3d_lookup(self, dict_, x, y, z, *, batch_axis: str = "z"):
-    """DeepSeek-V4 3D lookup: exact, cubic, then sampled-batch fallback.
-
-    Generic ``_interp_3d`` raises ``QhullError`` when the point cloud has
-    a degenerate axis (e.g. the DSV4 sweep caps b=1 at s=8192, so the
-    b axis is flat near that query point).
-
-      1. Try an exact ``dict[x][y][z]`` lookup — handles the common case
-         of querying at a measured bench point.
-      2. Try the existing cubic interpolation path.
-      3. If interpolation fails and batches on both sides of the query cover
-         its sequence length, interpolate along sequence within each batch and
-         then across batch.
-      4. Otherwise, use the largest sampled batch no larger than the query
-         batch, interpolate/extrapolate along sequence length, and scale by
-         batch. ``batch_axis`` selects whether fallback treats ``y`` or ``z``
-         as the batch axis.
-
-    First positional arg is named ``self`` to match the legacy signature so
-    existing test stubs (``PerfDatabase._lookup_dsv4_sparse_kernel`` style)
-    keep working.
-    """
-    if batch_axis not in ("y", "z"):
-        raise ValueError(f"unsupported DeepSeek-V4 fallback {batch_axis=}; expected 'y' or 'z'")
-
-    # Use .get() chain instead of [] indexing: dict_ may be a (nested)
-    # defaultdict, so [] reads would create spurious empty branches that
-    # later poison _interp_3d's grid traversal.
-    level1 = dict_.get(x) if isinstance(dict_, dict) else None
-    level2 = level1.get(y) if isinstance(level1, dict) else None
-    exact = level2.get(z) if isinstance(level2, dict) else None
-    if isinstance(exact, dict) and "latency" in exact:
-        return exact
-
-    def _finite_result(result):
-        if not isinstance(result, dict):
-            return False
-        value = result.get("latency")
-        return value is not None and bool(np.all(np.isfinite(np.asarray(value))))
-
-    try:
-        result = interpolation.interp_3d(x, y, z, dict_, "cubic", self._extracted_metrics_cache)
-        if _finite_result(result):
-            return result
-    except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError):
-        pass
-
-    # Fallback: real DeepSeek-V4 data is sampled at batches like 1/2/4/8.
-    # First interpolate between lower/upper batches when both batch curves
-    # cover the query sequence. This preserves launch-overhead plateaus; simply
-    # scaling the lower batch can nearly double latency between b=4 and b=8.
-    # When no upper batch covers the sequence, retain the legacy behavior:
-    # prefer the largest batch <= query batch and scale it by batch, only
-    # extrapolating along sequence if no lower batch covers it.
-    sub = dict_.get(x) if isinstance(dict_, dict) else None
-    if isinstance(sub, dict):
-        query_s, query_b = (z, y) if batch_axis == "y" else (y, z)
-
-        def _all_batch_points():
-            if batch_axis == "y":
-                return sorted(bp for bp, sd in sub.items() if isinstance(sd, dict))
-            return sorted({bp for sd in sub.values() if isinstance(sd, dict) for bp in sd})
-
-        def _leaf_at(s, b):
-            first_key, second_key = (b, s) if batch_axis == "y" else (s, b)
-            level = sub.get(first_key)
-            return level.get(second_key) if isinstance(level, dict) else None
-
-        def _seq_points_at_batch(b):
-            if batch_axis == "y":
-                level = sub.get(b)
-                return sorted(level.keys()) if isinstance(level, dict) else []
-            return sorted(s for s, sd in sub.items() if isinstance(sd, dict) and b in sd)
-
-        def _lookup_at_batch(bp, *, allow_extrapolate: bool):
-            exact_at_batch = _leaf_at(query_s, bp)
-            if exact_at_batch is not None:
-                return exact_at_batch
-            ss = _seq_points_at_batch(bp)
-            if len(ss) < 2:
-                return None
-            if not allow_extrapolate and not (ss[0] <= query_s <= ss[-1]):
-                return None
-            sl, sr = interpolation.nearest_1d_point_helper(query_s, ss, inner_only=not allow_extrapolate)
-            left = _leaf_at(sl, bp)
-            right = _leaf_at(sr, bp)
-            if not isinstance(left, dict) or not isinstance(right, dict):
-                return None
-            return {
-                field: interpolation.interp_1d([sl, sr], [left.get(field, 0.0), right.get(field, 0.0)], query_s)
-                for field in ("latency", "power", "energy")
-            }
-
-        batch_points = _all_batch_points()
-        covered = {}
-        for bp in batch_points:
-            try:
-                leaf = _lookup_at_batch(bp, allow_extrapolate=False)
-                if _finite_result(leaf):
-                    covered[bp] = leaf
-            except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError):
-                continue
-
-        lower_batches = [bp for bp in covered if bp <= query_b]
-        upper_batches = [bp for bp in covered if bp >= query_b]
-        if lower_batches and upper_batches:
-            lower_b = max(lower_batches)
-            upper_b = min(upper_batches)
-            if lower_b == upper_b:
-                return covered[lower_b]
-            lower = covered[lower_b]
-            upper = covered[upper_b]
-            result = {
-                field: interpolation.interp_1d(
-                    [lower_b, upper_b],
-                    [lower.get(field, 0.0), upper.get(field, 0.0)],
-                    query_b,
-                )
-                for field in ("latency", "power", "energy")
-            }
-            if _finite_result(result):
-                return result
-
-        lower_batch_points = sorted((bp for bp in batch_points if bp <= query_b), reverse=True)
-        for allow_extrapolate in (False, True):
-            for bp in lower_batch_points:
-                try:
-                    leaf = _lookup_at_batch(bp, allow_extrapolate=allow_extrapolate)
-                    if leaf is None:
-                        continue
-                    result = {f: leaf.get(f, 0.0) * query_b / bp for f in ("latency", "power", "energy")}
-                    if _finite_result(result):
-                        return result
-                except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError):
-                    continue
-
-    if batch_axis == "y":
-        raise interpolation.InterpolationDataNotAvailableError(
-            f"DeepSeek-V4 robust lookup failed (tp={x}, b={y}, s={z})"
-        )
-    raise interpolation.InterpolationDataNotAvailableError(f"DeepSeek-V4 robust lookup failed (tp={x}, s={y}, b={z})")
-
-
 def _dsv4_resolve_head_key(quant_data, num_heads):
     """SCHEME A head-key resolution.
 
@@ -252,80 +107,6 @@ def _dsv4_resolve_head_key(quant_data, num_heads):
         le = [k for k in head_keys if k <= num_heads]
         return max(le) if le else min(head_keys)
     return None
-
-
-def _dsv4_lookup_prefix_resolved(database, cr_dict, prefix, s, b):
-    """SCHEME A prefix-resolved silicon lookup.
-
-    ``cr_dict`` is ``{prefix: {s: {b: leaf}}}``.  At a measured prefix we wrap
-    the ``{s: {b}}`` slice and run the robust 3D lookup (exact -> cubic ->
-    sampled-batch fallback) with the prefix as the leading axis.  Off-grid
-    prefixes are linearly interpolated between the two nearest prefix anchors
-    that can answer the (s, b) query.  Returns a leaf dict or ``None``.
-    """
-    if cr_dict is None:
-        return None
-    if not isinstance(cr_dict, Mapping):
-        raise TypeError(f"Malformed DeepSeek-V4 prefix table: expected a mapping, got {type(cr_dict).__name__}.")
-    if not cr_dict:
-        return None
-    for prefix_value, sb_slice in cr_dict.items():
-        if sb_slice is not None and not isinstance(sb_slice, Mapping):
-            raise TypeError(
-                "Malformed DeepSeek-V4 prefix slice: expected a mapping at "
-                f"prefix={prefix_value}, got {type(sb_slice).__name__}."
-            )
-
-    def _finite(result):
-        if not isinstance(result, dict):
-            return False
-        value = result.get("latency")
-        return value is not None and bool(np.all(np.isfinite(np.asarray(value))))
-
-    def _lookup_at_prefix(prefix_value):
-        sb_slice = cr_dict.get(prefix_value)
-        if sb_slice is None:
-            return None
-        wrapped = {prefix_value: sb_slice}
-        try:
-            result = _dsv4_robust_3d_lookup(database, wrapped, prefix_value, s, b)
-        except (PerfDataNotAvailableError, interpolation.InterpolationDataNotAvailableError):
-            return None
-        return result if _finite(result) else None
-
-    prefix = int(prefix)
-    if prefix in cr_dict:
-        exact = _lookup_at_prefix(prefix)
-        if exact is not None:
-            return exact
-
-    prefix_points = sorted(p for p, sl in cr_dict.items() if isinstance(sl, dict))
-    if not prefix_points:
-        return None
-    if len(prefix_points) == 1:
-        return _lookup_at_prefix(prefix_points[0])
-
-    result_by_prefix = {}
-    for p in prefix_points:
-        r = _lookup_at_prefix(p)
-        if r is not None:
-            result_by_prefix[p] = r
-    if not result_by_prefix:
-        return None
-    keys = sorted(result_by_prefix)
-    if prefix in result_by_prefix:
-        return result_by_prefix[prefix]
-    if len(keys) == 1 or prefix <= keys[0]:
-        return result_by_prefix[keys[0]]
-    if prefix >= keys[-1]:
-        return result_by_prefix[keys[-1]]
-    left = max(k for k in keys if k < prefix)
-    right = min(k for k in keys if k > prefix)
-    rl, rr = result_by_prefix[left], result_by_prefix[right]
-    return {
-        field: interpolation.interp_1d([left, right], [rl.get(field, 0.0), rr.get(field, 0.0)], prefix)
-        for field in ("latency", "power", "energy")
-    }
 
 
 def _deepseek_v4_attention_sol(
@@ -659,10 +440,9 @@ class DeepSeekV4MHCModule(Operation):
             def _lookup_single(op_name: str) -> PerformanceResult:
                 # Validate bucket presence before chained indexing; mhc_data is
                 # a nested defaultdict, so `mhc_data[op][hc_mult][hidden_size]`
-                # would silently materialize empty dicts and then fall through
-                # to _nearest_1d_point_helper with an empty key list, surfacing
-                # as an opaque AssertionError instead of a structured
-                # PerfDataNotAvailableError.
+                # would silently materialize empty dicts and then query an
+                # empty table, surfacing as an opaque miss instead of a
+                # structured PerfDataNotAvailableError.
                 if (
                     op_name not in mhc_data
                     or hc_mult not in mhc_data[op_name]
@@ -673,10 +453,16 @@ class DeepSeekV4MHCModule(Operation):
                         f"No mHC silicon data for op='{op_name}', hc_mult={hc_mult}, hidden_size={hidden_size}."
                     )
                 mhc_dict = mhc_data[op_name][hc_mult][hidden_size]
-                left, right = interpolation.nearest_1d_point_helper(num_tokens, list(mhc_dict.keys()), inner_only=False)
-                result = interpolation.interp_1d([left, right], [mhc_dict[left], mhc_dict[right]], num_tokens)
-                latency = result["latency"] if isinstance(result, dict) else result
-                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+                # 1-D tokens curve: RAW lerp in range; boundary util-hold via
+                # the per-op mHC SOL beyond it.
+                config = perf_interp.OpInterpConfig(
+                    axes=("num_tokens",),
+                    resolver=perf_interp.Grid(),
+                    sol_fn=lambda t: get_sol(t, op_name)[0],
+                )
+                result = perf_interp.query(config, mhc_dict, num_tokens)
+                latency = perf_interp.get_value(result, "latency")
+                energy = perf_interp.get_value(result, "energy")
                 return database._interp_pr(latency, energy=energy)
 
             # Silicon tables only store "pre" and "post" rows. For op=="both"
@@ -872,11 +658,9 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             ]
             cls._data_cache[key] = _load_dsv4_split(ctx_split)
             ctx_merged = cls._data_cache[key]
-            cls._raw_data_cache[key] = (
-                LoadedOpData(copy.deepcopy(ctx_merged.data), ctx_merged.op_name_enum, ctx_merged.filepath)
-                if ctx_merged is not None
-                else None
-            )
+            # perf_interp resolves on the raw merged table directly; the raw
+            # wrapper is kept as a plain alias for backward compatibility.
+            cls._raw_data_cache[key] = ctx_merged
 
             def _load_sparse(filename_enum):
                 primary_path = os.path.join(data_dir, filename_enum.value)
@@ -922,15 +706,29 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
     ) -> Optional[float]:
         """Look up a sparse-kernel latency at (kernel, bs, isl, past_kv, tp).
 
-        Strategy:
-          1. Exact (bs, isl, past_kv, tp) hit  → return latency
-          2. Cubic 3D interpolation on (past_kv, isl, bs) within the fixed tp slice
-          3. If cubic fails, use the largest sampled batch no larger than the query
-             batch that covers isl, interpolate on (past_kv, isl), then scale by batch.
-        Returns None if the kernel CSV is not loaded.
-        """
-        from collections import defaultdict
+        The (past_kv, isl, bs) grid resolves on perf_interp with a scored-pair
+        SOL, work ~ bs * (past_kv * isl + isl^2 / 2) -- the attention-family
+        pair count these kernels compute over (causal indexer logits / sparse
+        attention). This is the CP model's own stated premise ("super-linear
+        sub-kernels", linear in batch), and it is what the data shows: util
+        under isl^2 flattens from isl~2048, and holding it predicts the held-
+        out isl=8192 point at -0% where the old raw-linear isl trend was -58%
+        (flat clamp -86%). Returns None when the kernel table is absent or
+        has no anchor.
 
+        SCOPE: the quadratic pair-count SOL is valid ONLY for
+        ``paged_mqa_logits`` (causal indexer logits). The sidecar dict also
+        carries ``hca_attn`` -- a WINDOWED kernel whose work is window-capped
+        (linear beyond the window); a quadratic SOL would badly over-predict
+        any beyond-range resolve for it. Guard so the next caller does not
+        inherit the wrong physics silently (review: PR #1303).
+        """
+        if kernel != "paged_mqa_logits":
+            raise ValueError(
+                f"_lookup_sparse_kernel: kernel {kernel!r} is not supported -- the "
+                "quadratic pair-count SOL is only valid for 'paged_mqa_logits'; "
+                "windowed kernels (hca_attn) need their own record."
+            )
         all_data = getattr(database, "_dsv4_sparse_kernel_data", None)
         if all_data is None or kernel not in all_data:
             return None
@@ -943,7 +741,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         if tp_size in per_tp:
             per_tp_dict = per_tp[tp_size]
         elif 1 in per_tp:
-            # paged_mqa_logits is collected at tp=1 only — kernel work itself
+            # paged_mqa_logits is collected at tp=1 only -- kernel work itself
             # is TP-independent so we fall back when caller asks for tp>1.
             per_tp_dict = per_tp[1]
         else:
@@ -951,104 +749,17 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         if not per_tp_dict:
             return None
 
-        def _finite_latency(value):
-            return value is not None and bool(np.all(np.isfinite(np.asarray(value))))
-
-        if past_kv in per_tp_dict and isl in per_tp_dict[past_kv] and bs in per_tp_dict[past_kv][isl]:
-            latency = per_tp_dict[past_kv][isl][bs]["latency"]
-            if _finite_latency(latency):
-                return float(np.asarray(latency))
-
-        try:
-            result = interpolation.interp_3d(past_kv, isl, bs, per_tp_dict, "cubic", database._extracted_metrics_cache)
-            latency = result.get("latency") if isinstance(result, dict) else None
-            if _finite_latency(latency):
-                return float(np.asarray(latency))
-        except Exception:
-            pass
-
-        batch_points = sorted(
-            {
-                sampled_b
-                for isl_dict in per_tp_dict.values()
-                if isinstance(isl_dict, dict)
-                for isl_data in isl_dict.values()
-                if isinstance(isl_data, dict)
-                for sampled_b in isl_data
-                if sampled_b <= bs
-            },
-            reverse=True,
+        config = perf_interp.OpInterpConfig(
+            axes=("past_kv", "seq_len", "batch"),
+            resolver=perf_interp.Grid(),
+            sol_fn=lambda p_v, i_v, b_v: float(b_v) * (float(p_v) * i_v + i_v * i_v / 2.0),
         )
-
-        def _lookup_at_batch(bp, *, allow_extrapolate: bool):
-            batch_slice = defaultdict(dict)
-            for sampled_past, isl_dict in per_tp_dict.items():
-                if not isinstance(isl_dict, dict):
-                    continue
-                for sampled_isl, isl_data in isl_dict.items():
-                    if isinstance(isl_data, dict) and bp in isl_data:
-                        batch_slice[sampled_past][sampled_isl] = isl_data[bp]
-
-            if not batch_slice:
-                return None
-
-            try:
-                latency = interpolation.interp_2d_linear(past_kv, isl, batch_slice, database._extracted_metrics_cache)[
-                    "latency"
-                ]
-                if _finite_latency(latency):
-                    return latency
-            except Exception:
-                pass
-
-            def _lookup_isl_at_past(sampled_past):
-                isl_dict = batch_slice.get(sampled_past)
-                if not isinstance(isl_dict, dict):
-                    return None
-                if isl in isl_dict:
-                    return isl_dict[isl].get("latency")
-                isl_points = sorted(s for s, leaf in isl_dict.items() if isinstance(leaf, dict) and "latency" in leaf)
-                if len(isl_points) < 2:
-                    return None
-                if not allow_extrapolate and not (isl_points[0] <= isl <= isl_points[-1]):
-                    return None
-                left, right = interpolation.nearest_1d_point_helper(isl, isl_points, inner_only=not allow_extrapolate)
-                latency = interpolation.interp_1d(
-                    [left, right],
-                    [isl_dict[left].get("latency"), isl_dict[right].get("latency")],
-                    isl,
-                )
-                return latency
-
-            if past_kv in batch_slice:
-                return _lookup_isl_at_past(past_kv)
-
-            past_points = sorted(
-                sampled_past for sampled_past in batch_slice if _lookup_isl_at_past(sampled_past) is not None
-            )
-            if len(past_points) < 2:
-                return None
-            if not allow_extrapolate and not (past_points[0] <= past_kv <= past_points[-1]):
-                return None
-            left, right = interpolation.nearest_1d_point_helper(past_kv, past_points, inner_only=not allow_extrapolate)
-            left_latency = _lookup_isl_at_past(left)
-            right_latency = _lookup_isl_at_past(right)
-            if left_latency is None or right_latency is None:
-                return None
-            return interpolation.interp_1d([left, right], [left_latency, right_latency], past_kv)
-
-        for allow_extrapolate in (False, True):
-            for bp in batch_points:
-                try:
-                    latency = _lookup_at_batch(bp, allow_extrapolate=allow_extrapolate)
-                    if latency is None:
-                        continue
-                    latency = latency * bs / bp
-                    if _finite_latency(latency):
-                        return latency
-                except Exception:
-                    continue
-        return None
+        try:
+            result = perf_interp.query(config, per_tp_dict, past_kv, isl, bs)
+        except InterpolationDataNotAvailableError:
+            return None
+        latency = perf_interp.get_value(result, "latency")
+        return float(latency) if np.isfinite(latency) else None
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_context_deepseek_v4_attention_module)
@@ -1216,23 +927,34 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 )
 
             # SCHEME A: cr_dict is prefix-resolved -> {prefix: {s: {b: leaf}}}.
-            # Look the measured silicon up at the requested prefix (interpolating
-            # over the prefix axis when the exact prefix was not benched).
-            result = _dsv4_lookup_prefix_resolved(database, cr_dict, prefix, s, b)
-            if result is None:
+            # RAW 3-axis grid: the CSA leave-one-out (gb200) showed plain linear
+            # crossing at 1.72% median (regime-aware 1.92%; knee-just-above plain
+            # +0.57% vs regime -2.94%), so no regime special-casing. A prefix
+            # beyond the collected range is util-hold — the prefix-aware SOL
+            # carries the effect (the empirical path anchors the same way) —
+            # replacing the legacy clamp-at-boundary.
+            config = perf_interp.OpInterpConfig(
+                axes=("prefix", "seq_len", "batch"),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda p_v, s_v, b_v: get_sol(b_v, s_v, p_v)[0],
+            )
+            try:
+                result = perf_interp.query(config, cr_dict, prefix, s, b)
+            except InterpolationDataNotAvailableError as exc:
                 raise PerfDataNotAvailableError(
                     f"DeepSeek-V4 prefix-resolved context attention module data not available for "
                     f"{b=}, {s=}, {prefix=}, {num_heads=}, {compress_ratio=}."
-                )
-            latency = float(result["latency"])
-            energy = float(result.get("energy", 0.0))
+                ) from exc
+            latency = float(perf_interp.get_value(result, "latency"))
+            energy = float(perf_interp.get_value(result, "energy"))
 
             # SCHEME A: for CSA (compress_ratio==4) ONLY, subtract the measured
             # topK DELTA = flat_ms - top_last_ms (degenerate collector topK vs
             # representative silicon topK). HCA (cr==128) is left untouched.
             if compress_ratio == 4 and _TOPK_CORRECTION_ENABLED:
                 calib = _get_dsv4_topk_calib(database)
-                delta = _dsv4_topk_delta_ms(calib, int(prefix), int(s), int(b))
+                # Context topk runs the v1 selector (producer phase-qualifies).
+                delta = _dsv4_topk_delta_ms((calib or {}).get("v1"), int(prefix), int(s), int(b))
                 corrected_latency = max(0.0, latency - delta)
                 if latency > 0.0 and energy:
                     energy *= corrected_latency / latency
@@ -1305,6 +1027,30 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
     # ------------------------------------------------------------------
     _csa_topk_abs_cache: ClassVar[dict] = {}
 
+    # Production chunked-prefill executes mqa as a chunk sequence; the pair
+    # count is additive over chunks, so full-isl mqa decomposes EXACTLY into
+    # in-grid lookups (isl <= sweep max 8192, past_kv collected to ~1M):
+    #   mqa(isl, past) = sum_k mqa(chunk_k, past + offset_k)
+    # This replaces the previous 16x util-hold extrapolation of a single
+    # full-isl lookup (review: PR #1303 pt.1) and matches what the runtime
+    # actually launches.
+    _MQA_CHUNK_TOKENS = 8192
+
+    @classmethod
+    def _mqa_chunked(
+        cls, database: PerfDatabase, b: int, isl: int, past0: int, tp_size: int, native_heads: int
+    ) -> Optional[float]:
+        total = 0.0
+        for offset in range(0, isl, cls._MQA_CHUNK_TOKENS):
+            clen = min(cls._MQA_CHUNK_TOKENS, isl - offset)
+            part = cls._lookup_sparse_kernel(
+                database, "paged_mqa_logits", b, clen, past0 + offset, tp_size, native_heads
+            )
+            if part is None:
+                return None
+            total += part
+        return total
+
     def _query_cp(self, database: PerfDatabase, b: int, isl: int, prefix: int) -> PerformanceResult:
         cp = self._cp_size
         per_card = max(1, -(-isl // cp))  # ceil: busiest CP rank = critical path
@@ -1323,12 +1069,18 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             # Look up at the REAL batch b (paged_mqa_logits interpolates the bs
             # axis; csa_topk keeps every collected bs), so the delta matches the
             # batch-b base WITHOUT an external x b linearity assumption.
-            mqa_full = self._lookup_sparse_kernel(
-                database, "paged_mqa_logits", b, isl, prefix, self._tp_size, self._native_heads
-            )
-            mqa_perc = self._lookup_sparse_kernel(
-                database, "paged_mqa_logits", b, per_card, prefix, self._tp_size, self._native_heads
-            )
+            if not _TOPK_CORRECTION_ENABLED:
+                # The CP composition subtracts top_last(per_card) against a base
+                # whose standard module query already had the flat-vs-top_last
+                # DELTA removed; with the correction disabled the result keeps a
+                # flat(per_card) - top_last(per_card) over-estimate.
+                logger.warning(
+                    "AIC_DSV4_TOPK_CORRECTION=0 with cp_size>1: the CP composition "
+                    "assumes the topk DELTA correction is applied to the base; "
+                    "disabling it leaves a per-card flat-vs-top_last over-estimate."
+                )
+            mqa_full = self._mqa_chunked(database, b, isl, prefix, self._tp_size, self._native_heads)
+            mqa_perc = self._mqa_chunked(database, b, per_card, prefix, self._tp_size, self._native_heads)
             tl_full = self._csa_topk_top_last(database, isl, prefix, self._native_heads, b)
             tl_perc = self._csa_topk_top_last(database, per_card, prefix, self._native_heads, b)
             # Fail loud (like GLM-5 ContextDSAModule._query_cp): the CSA CP deltas
@@ -1396,7 +1148,8 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             df = pd.read_parquet(path)
             if "num_heads" in df:
                 df = df[df["num_heads"] == native_heads]
-            tl = df[df["score_mode"].astype(str) == "top_last"]
+            # CP is a context-branch consumer; context topk is the v1 selector.
+            tl = df[df["score_mode"].astype(str) == "v1_top_last"]
             for _, r in tl.iterrows():
                 by_bs.setdefault(int(r["batch_size"]), {})[(int(r["isl"]), int(r["step"]))] = float(r["latency"])
         cls._csa_topk_abs_cache[key] = by_bs
@@ -1490,6 +1243,15 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_generation_deepseek_v4_attention_module``."""
         cls.load_data(database)
+        # Decode attention compute dtype follows the kv-cache dtype; the fmha
+        # label is inert for generation (the table keys on kv dtype).  Derive
+        # the SOL dtype from kv so label changes cannot move decode SOL --
+        # mirrors query_generation_mla's get_sol.
+        fmha_quant_mode = (
+            common.FMHAQuantMode.fp8
+            if kvcache_quant_mode == common.KVCacheQuantMode.fp8
+            else common.FMHAQuantMode.bfloat16
+        )
 
         def get_sol(b_: int = b, s_: int = s) -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(
@@ -1581,19 +1343,25 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     f"No DeepSeek-V4 generation attention silicon data for num_heads={num_heads}, "
                     f"compress_ratio={compress_ratio}, loaded cr keys={list(quant_data[head_axis].keys())}."
                 )
-            # SCHEME A generation dict is {head}{cr}{b}{s_total}; wrap with the
-            # head key and let the robust lookup walk (head -> b -> s_total).
-            wrapped = {head_axis: deepseek_v4_dict}
-            result = _dsv4_robust_3d_lookup(database, wrapped, head_axis, b, s, batch_axis="y")
-            latency = float(result["latency"])
-            energy = float(result.get("energy", 0.0))
+            # SCHEME A generation dict is {b: {s_total: leaf}} after head/cr
+            # slicing -> 2-axis RAW grid (decode ~linear in s_total); beyond the
+            # collected range is util-hold via the decode SOL.
+            config = perf_interp.OpInterpConfig(
+                axes=("batch", "seq_len"),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda b_v, s_v: get_sol(b_v, s_v)[0],
+            )
+            result = perf_interp.query(config, deepseek_v4_dict, b, s)
+            latency = float(perf_interp.get_value(result, "latency"))
+            energy = float(perf_interp.get_value(result, "energy"))
 
             # SCHEME A: subtract the topK DELTA for CSA (cr==4) only. Decode is
             # q_len=1 with past_kv = s_total - 1.
             if compress_ratio == 4 and _TOPK_CORRECTION_ENABLED:
                 calib = _get_dsv4_topk_calib(database)
                 decode_prefix = max(int(s) - 1, 0)
-                delta = _dsv4_topk_delta_ms(calib, decode_prefix, 1, int(b))
+                # Generation topk runs the v2 selector (producer phase-qualifies).
+                delta = _dsv4_topk_delta_ms((calib or {}).get("v2"), decode_prefix, 1, int(b))
                 corrected_latency = max(0.0, latency - delta)
                 if latency > 0.0 and energy:
                     energy *= corrected_latency / latency
@@ -1798,18 +1566,18 @@ class DeepSeekV4MegaMoEModule(Operation):
                 f"{moe_tp_size=}, {moe_ep_size=}."
             ) from exc
 
-        num_left, num_right = interpolation.nearest_1d_point_helper(
-            num_tokens, list(token_dict.keys()), inner_only=False
+        # 1-D tokens curve. No analytic SOL is implemented for the fused
+        # MegaMoE module, but util-hold only needs the SOL RATIO: routed-expert
+        # work scales ~linearly with tokens at fixed topk/experts/hidden, so a
+        # linear token proxy is ratio-equivalent (see the DeepEP note).
+        config = perf_interp.OpInterpConfig(
+            axes=("num_tokens",),
+            resolver=perf_interp.Grid(),
+            sol_fn=lambda t: float(t),
         )
-        result = interpolation.interp_1d(
-            [num_left, num_right], [token_dict[num_left], token_dict[num_right]], num_tokens
-        )
-        if isinstance(result, dict):
-            latency = float(result["latency"])
-            energy = float(result["energy"])
-        else:
-            latency = float(result)
-            energy = 0.0
+        result = perf_interp.query(config, token_dict, num_tokens)
+        latency = float(perf_interp.get_value(result, "latency"))
+        energy = float(perf_interp.get_value(result, "energy"))
         return PerformanceResult(latency, energy=energy)
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
@@ -1949,45 +1717,56 @@ def _dsv4_normalize_dtype(name: str) -> str:
 # Small topK path falls into its O(n^2) tie-break). That inflates the measured
 # module latency vs real silicon, where logits are spread. We measured the topK
 # time standalone under a degenerate "flat" construction and a representative
-# "top_last" construction for every (prefix, isl, batch_size) shape, and store
-# as two rows (score_mode=flat | top_last, each a single latency) per shape in
-# dsv4_csa_topk_calib_perf; DELTA = flat.latency - top_last.latency. At query
-# time we SUBTRACT DELTA from the CSA (compress_ratio==4) module latency only.
+# "top_last" construction for every (prefix, isl, batch_size) shape, phase-
+# qualified (context runs the v1 selector, generation v2), stored as four rows
+# (score_mode=v{1,2}_{flat,top_last}) per shape in dsv4_csa_topk_calib_perf;
+# DELTA = flat.latency - top_last.latency per variant. At query time we
+# SUBTRACT the matching variant's DELTA from the CSA (compress_ratio==4)
+# module latency only.
 # Gate: AIC_DSV4_TOPK_CORRECTION (default on; set "0" to disable).
 # ───────────────────────────────────────────────────────────────────────
 _TOPK_CORRECTION_ENABLED = os.environ.get("AIC_DSV4_TOPK_CORRECTION", "1") != "0"
 
 
 def _build_topk_calib_from_rows(by_mode):
-    """Pair the flat / top_last rows the sparse-op loader produced into the topK
-    DELTA table ``{'exact': {(step, isl, bs): delta_ms},
-                   'by_pi': {(step, isl): [(bs, delta_ms), ...]}}`` or ``None``.
+    """Pair flat / top_last rows into per-variant topK DELTA tables.
+
+    Returns ``{"v1": table_or_None, "v2": table_or_None}`` (or ``None`` when
+    nothing pairs), where each table is ``{'exact': {(step, isl, bs): delta_ms},
+    'by_pi': {(step, isl): [(bs, delta_ms), ...]}}``.
 
     ``by_mode`` is the ``_TOPK_CALIB_KEYS`` nesting
-    ``data[step][isl][bs][score_mode] = {"latency": ms}``. The calibration is
-    stored as two rows per shape — ``score_mode=flat`` is the degenerate
-    worst-case the module CSV captured, ``top_last`` the representative one —
+    ``data[step][isl][bs][score_mode] = {"latency": ms}``. The producer emits
+    phase-qualified score modes — context topk runs the v1 selector and
+    generation runs v2, each measured under a degenerate ``flat`` and a
+    representative ``top_last`` score distribution (four rows per shape) —
     and DELTA = flat.latency - top_last.latency.
     """
     if not by_mode:
         return None
-    exact = {}
-    by_pi = {}
-    for step, isl_d in by_mode.items():
-        for isl, bs_d in isl_d.items():
-            for bs, mode_d in bs_d.items():
-                flat = mode_d.get("flat")
-                top_last = mode_d.get("top_last")
-                if not isinstance(flat, dict) or not isinstance(top_last, dict):
-                    continue
-                delta = max(0.0, float(flat["latency"]) - float(top_last["latency"]))
-                exact[(step, isl, bs)] = delta
-                by_pi.setdefault((step, isl), []).append((bs, delta))
-    if not exact:
+    out = {}
+    for variant in ("v1", "v2"):
+        exact = {}
+        by_pi = {}
+        for step, isl_d in by_mode.items():
+            for isl, bs_d in isl_d.items():
+                for bs, mode_d in bs_d.items():
+                    flat = mode_d.get(f"{variant}_flat")
+                    top_last = mode_d.get(f"{variant}_top_last")
+                    if not isinstance(flat, dict) or not isinstance(top_last, dict):
+                        continue
+                    delta = max(0.0, float(flat["latency"]) - float(top_last["latency"]))
+                    exact[(step, isl, bs)] = delta
+                    by_pi.setdefault((step, isl), []).append((bs, delta))
+        if not exact:
+            out[variant] = None
+            continue
+        for k in by_pi:
+            by_pi[k].sort()
+        out[variant] = {"exact": exact, "by_pi": by_pi}
+    if not any(out.values()):
         return None
-    for k in by_pi:
-        by_pi[k].sort()
-    return {"exact": exact, "by_pi": by_pi}
+    return out
 
 
 def _dsv4_interp_1d_from_points(points, x):

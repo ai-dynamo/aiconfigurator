@@ -75,9 +75,53 @@ common_case_values:
     - inter_size % tensor_parallel_size == 0
     - tensor_parallel_size < max_tp_exclusive when max_tp_exclusive is set
   moe_sglang:
+    backends:
+      default: {default: triton}
+      bfloat16: {default: triton}
+      fp8_block: {default: triton}
+      # SM100/103: pinned SGLang 0.5.14 serving auto-selects flashinfer_trtllm
+      # for Kimi K2/K2.5 INT4 (server_args.py:3736 -> CompressedTensorsMxInt4MoE).
+      # B200 hardware validation: 2026-07-11 Kimi-filtered moe pipeline run.
+      # SM89/SM90/SM120: the forcing block above sits under
+      # `if is_sm100_supported()` (server_args.py:3684), which is capability
+      # major == [10] exactly (utils/common.py:282) — so on SM89/90/120 the
+      # runner backend stays auto and get_moe_scheme falls through the
+      # flashinfer_trtllm/hip/triton gates to CompressedTensorsWNA16MoE
+      # (compressed_tensors.py:676-698), whose create_moe_runner
+      # unconditionally selects Marlin (compressed_tensors_wNa16_moe.py:412-416,
+      # min_capability 80 = Ampere+). No other server_args branch touches
+      # compressed-tensors int4 on these SMs (3787 is DeepseekV4-only, 5099
+      # modelopt_fp4-only). All at image source 49e384ce. SM89 hardware
+      # precedent: l40s 0.5.10 shipped 19,035 Marlin int4 moe rows.
+      int4_wo: {89: marlin, 90: marlin, 100: flashinfer_trtllm, 103: flashinfer_trtllm, 120: marlin}
+      # NVFP4 SM120: serving auto resolves to FLASHINFER_TRTLLM
+      # (modelopt_quant.py:2317-2323 — capability (12,0) is outside the
+      # (8,0)..(10,0) Marlin fallback), but the trtllm-gen batched FP4 GEMM
+      # has no SM120 kernel (RTX 6000 Pro probe 2026-07-05:
+      # trtllm_batched_gemm_runner.cu:286 "Error occurred when running
+      # GEMM"). flashinfer_cutlass is the only runnable high-level FusedMoE
+      # NVFP4 path on SM120 and requires the explicit
+      # --moe-runner-backend flashinfer_cutlass in serving.
+      nvfp4: {100: flashinfer_trtllm, 103: flashinfer_trtllm, 120: flashinfer_cutlass}
+      # SGLang 0.5.14 server_args leaves SM90 GPT-OSS on auto, whose
+      # Mxfp4MoEMethod resolves to Triton; SM100/103 select FlashInfer MXFP4.
+      # SM120 serving explicitly selects Marlin ("trtllm-gen only supports
+      # SM100", server_args.py:3876-3887 at image source 49e384ce), and the
+      # MXFP4 Marlin repack path itself asserts SM90-or-SM120
+      # (mxfp4.py:520-521). SM89 also stays on auto (no mxfp4 branch fires
+      # at server_args.py:3876-3898; Mxfp4Config.get_min_capability() is 80)
+      # and resolves to the same Triton default as SM90; the L40S probe
+      # 2026-07-07 ran the GPT-OSS w4a16 Triton case on SM89 hardware.
+      w4a16_mxfp4: {89: triton, 90: triton, 100: flashinfer_mxfp4, 103: flashinfer_mxfp4, 120: marlin}
+      w4a8_mxfp4_mxfp8: {100: flashinfer_mxfp4, 103: flashinfer_mxfp4}
     quantization_modes:
     - name: bfloat16
     - name: int4_wo
+      min_sm: 89
+      # Resolved per the bring-up TODO (owner decision 2026-07-11): serving
+      # supports Kimi INT4 on SM100/103 via flashinfer_trtllm
+      # (server_args.py:3736), so the unsanctioned max_sm_exclusive gate is
+      # dropped and the backends map above pins the serving-true kernel.
       allowed_model_paths:
       - moonshotai/Kimi-K2.5
       module_config:
@@ -86,13 +130,40 @@ common_case_values:
       min_sm: 90
     - name: nvfp4
       min_sm: 100
-    - name: w4a16_mxfp4
-      min_sm: 100
       allowed_model_paths:
+      - nvidia/DeepSeek-V3.1-NVFP4
+      - nvidia/GLM-5-NVFP4
+      - nvidia/GLM-5.2-NVFP4
+      - nvidia/Kimi-K2.5-NVFP4
+      - nvidia/MiniMax-M2.5-NVFP4
+      - nvidia/MiniMax-M2.7-NVFP4
+      - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+      - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+      - Qwen/Qwen3-235B-A22B
+      - nvidia/Qwen3-235B-A22B-NVFP4
+    - name: w4a16_mxfp4
+      # Weight-only MXFP4 follows the FP8-era hardware floor, not SM90:
+      # serving accepts mxfp4 checkpoints from SM80 up
+      # (mxfp4.py get_min_capability() == 80) and SM89 auto resolves to the
+      # same Triton runner as SM90 (no server_args special-case below
+      # SM100). L40S probe 2026-07-07: the GPT-OSS w4a16 Triton case runs
+      # on SM89 hardware. The dtype floor stays the capabilities.yaml
+      # w4a16_mxfp4: 89 hardware fact.
+      min_sm: 89
+      allowed_model_paths:
+      - deepseek-ai/DeepSeek-V4-Pro
       - openai/gpt-oss-20b
       - openai/gpt-oss-120b
     - name: w4a8_mxfp4_mxfp8
       min_sm: 100
+      # SGLang 0.5.14 has no SM120 mxfp8-activation MXFP4 path: the
+      # flashinfer_mxfp4 method accepts only SM90 (cutlass) or SM100
+      # (trtllm-gen) (mxfp4.py:344-360 at image source 49e384ce), and SM120
+      # serving instead routes GPT-OSS/DSV4 MXFP4 checkpoints to Marlin
+      # (server_args.py:3876-3887, 3786-3791), whose weight-only bf16
+      # activation is the distinct w4a16_mxfp4 identity. SM103 keeps the
+      # SM100 trtllm-gen entry above.
+      max_sm_exclusive: 120
       allowed_model_paths:
       - deepseek-ai/DeepSeek-V4-Flash
       - deepseek-ai/DeepSeek-V4-Pro
@@ -126,6 +197,13 @@ common_case_values:
       - openai/gpt-oss-20b
       - openai/gpt-oss-120b
   moe_vllm:
+    # vLLM 0.24 represents either routed-expert TP or EP. Enabling EP flattens
+    # the requested parallel world into EP rather than preserving TP x EP.
+    parallel_topologies:
+    - tensor_parallel_sizes: [1, 2, 4, 8, 16, 32]
+      expert_parallel_sizes: [1]
+    - tensor_parallel_sizes: [1]
+      expert_parallel_sizes: [2, 4, 8, 16, 32, 64, 128, 256]
     quantization_modes:
     - name: bfloat16
     - name: int4_wo
@@ -136,7 +214,11 @@ common_case_values:
     - name: fp8
       min_sm_exclusive: 86
     - name: fp8_block
-      min_sm: 90
+      # Same floor as the fp8_block dtype in capabilities.yaml: vLLM's fused
+      # MoE dispatches block-fp8 below SM90 to Triton experts (the DeepGEMM/
+      # cutlass/flashinfer tiers are SM90/SM100+), verified on L40S with
+      # kernel_source=vllm_fp8moe_triton_tritonexperts recorded per row.
+      min_sm: 89
       requires_runtime_feature: per_block_fp8
     - name: nvfp4
       min_sm: 100
@@ -144,24 +226,6 @@ common_case_values:
     - name: w4a16_mxfp4
       requires_runtime_feature: mxfp4
       requires_model_quantization_config: true
-    shape_constraints:
-    - mode: fp8_block
-      divisible_by:
-        hidden_size: 128
-        local_inter_size: 128
-    - mode: nvfp4
-      divisible_by:
-        hidden_size: 512
-        local_inter_size: 64
-      max_topk: 10
-    - mode: w4a16_mxfp4
-      divisible_by:
-        hidden_size: 32
-        local_inter_size: 32
-    - mode: int4_wo
-      divisible_by:
-        hidden_size: 32
-        local_inter_size: 32
   moe_vllm_xpu:
     token_counts:
     - 1

@@ -317,6 +317,7 @@ mod tests {
             moe_quant: MoeQuantMode::Fp8Block,
             attn_cp_size: 1,
             is_context: false,
+            sms: 12,
         }
     }
 
@@ -377,6 +378,7 @@ mod tests {
             gemm_quant_mode: GemmQuantMode::Fp8Block,
             architecture: "DeepseekV32ForCausalLM".into(),
             index_topk: 2048,
+            cp_size: 1,
         }
     }
 
@@ -392,6 +394,17 @@ mod tests {
             fmha_quant_mode: FmhaQuantMode::Fp8,
             gemm_quant_mode: GemmQuantMode::Fp8Block,
             architecture: "DeepseekV4ForCausalLM".into(),
+            cp_size: 1,
+            window_size: None,
+            hidden_size: 7168,
+            q_lora_rank: 1536,
+            o_lora_rank: 1024,
+            head_dim: 512,
+            rope_head_dim: 64,
+            index_n_heads: 64,
+            index_head_dim: 128,
+            index_topk: 1024,
+            o_groups: Some(16),
         }
     }
 
@@ -403,6 +416,8 @@ mod tests {
             hc_mult: 4,
             hidden_size: 7168,
             architecture: "DeepseekV4ForCausalLM".into(),
+            sinkhorn_iters: 20,
+            quant_mode: GemmQuantMode::Bfloat16,
         }
     }
 
@@ -445,6 +460,7 @@ mod tests {
             kv_cache_dtype: KvCacheQuantMode::Fp8,
             fmha_quant_mode: FmhaQuantMode::Fp8,
             attn_backend: "flashinfer".into(),
+            cp_size: 1,
         }
     }
 

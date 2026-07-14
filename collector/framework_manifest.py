@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from packaging.version import InvalidVersion, Version
 
 MANIFEST_PATH = Path(__file__).with_name("framework_manifest.yaml")
 
@@ -65,6 +66,44 @@ def get_collector_runtime(
     )
 
 
+def require_collector_runtime(
+    framework: str,
+    installed_version: str,
+    *,
+    requested_ops: set[str],
+    wideep_ops: set[str] | None = None,
+    path: str | Path = MANIFEST_PATH,
+) -> CollectorRuntime:
+    """Select the requested workload runtime and enforce its exact public version."""
+    wideep_ops = wideep_ops or set()
+    requested_wideep = requested_ops & wideep_ops
+    requested_stock = not requested_ops or bool(requested_ops - wideep_ops)
+    runtime = get_collector_runtime(framework, path=path)
+
+    if requested_wideep:
+        wideep_runtime = get_collector_runtime(framework, workload="wideep", path=path)
+        if requested_stock and runtime.version != wideep_runtime.version:
+            raise RuntimeError(
+                f"Stock {framework} and WideEP ops require different runtime versions "
+                f"({runtime.version} != {wideep_runtime.version}); run them in separate containers"
+            )
+        runtime = wideep_runtime
+
+    try:
+        installed_public = Version(installed_version).public
+    except InvalidVersion as error:
+        raise RuntimeError(f"Invalid installed {framework} version {installed_version!r}") from error
+
+    expected_public = Version(runtime.version).public
+    if installed_public != expected_public:
+        workload = "WideEP" if runtime.workload == "wideep" else "stock"
+        raise RuntimeError(
+            f"{framework} {workload} collector requires exactly {runtime.version}, found {installed_version}; "
+            f"use {runtime.image()}"
+        )
+    return runtime
+
+
 def validate_manifest(manifest: dict[str, Any]) -> None:
     if manifest.get("schema_version") != 1:
         raise ValueError("collector framework manifest schema_version must be 1")
@@ -82,11 +121,6 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         if framework not in frameworks:
             raise ValueError(f"wideep.{framework} does not have a matching framework entry")
         _validate_runtime_spec(f"wideep.{framework}", spec)
-        if spec["version"] != frameworks[framework]["version"]:
-            raise ValueError(
-                f"wideep.{framework}.version must match frameworks.{framework}.version "
-                f"({spec['version']} != {frameworks[framework]['version']})"
-            )
         if not spec.get("collector_dir"):
             raise ValueError(f"wideep.{framework}.collector_dir is required")
 

@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "Prediction Regression Gate"
+
+# Old-vs-new regression gate (docs/design/prediction_regression_gate_design.md):
+# collect a run_static + scheduling snapshot on the base revision and on the
+# head revision (in parallel, each side with its own copy of the harness),
+# then diff. OK -> not-OK transitions block; drift and coverage changes are
+# reported for review.
+#
+# Rollout was two PRs: PR 1 shipped the harness with workflow_dispatch only;
+# this is PR 2, which enables the pull_request trigger (the "AIC Prediction
+# Regression Gate" job below is the required check) and demotes the old
+# accuracy-regression job to a nightly schedule. Reverting this PR restores
+# the dispatch-only state without touching the harness.
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      old-ref:
+        description: "Old revision to compare against (default: main)"
+        required: false
+        default: ""
+
+concurrency:
+  # PR runs: cancel stale runs per ref. Manual dispatches: unique group per
+  # run so two concurrent validations never cancel each other.
+  group: gate-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  refs:
+    name: Resolve revisions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      old: ${{ steps.resolve.outputs.old }}
+    steps:
+      - name: Resolve old revision
+        id: resolve
+        env:
+          OLD_REF_INPUT: ${{ inputs.old-ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            OLD_REF="${BASE_SHA}"
+          else
+            OLD_REF="${OLD_REF_INPUT:-main}"
+          fi
+          echo "old=${OLD_REF}" >> "$GITHUB_OUTPUT"
+          echo "Old revision: ${OLD_REF}"
+
+  collect:
+    name: Collect snapshot (${{ matrix.side }})
+    needs: refs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [old, new]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # New side: default checkout (PR merge ref / dispatched ref).
+          ref: ${{ matrix.side == 'old' && needs.refs.outputs.old || '' }}
+          lfs: true
+          persist-credentials: false
+
+      - name: Git LFS Pull
+        run: git lfs pull
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Split-era revisions need the payload-bearing Maturin core installed
+          # first; newer revisions bundle it in the root package.
+          if grep -q 'build-backend = "maturin"' src/aiconfigurator-core/pyproject.toml 2>/dev/null; then
+            python -m pip install -e src/aiconfigurator-core
+          fi
+          python -m pip install -e ".[dev]"
+
+      - name: Collect tier-1 + tier-2 snapshot
+        run: |
+          mkdir -p /tmp/gate-snapshot
+          if [ ! -f tools/prediction_regression_gate/collect_static.py ]; then
+            echo "revision has no prediction-regression-gate harness; uploading empty snapshot"
+            touch /tmp/gate-snapshot/NO_HARNESS.txt
+            exit 0
+          fi
+          python tools/prediction_regression_gate/collect_static.py \
+            --output-dir /tmp/gate-snapshot \
+            --jobs "$(nproc)"
+          python tools/prediction_regression_gate/run_tier2.py --output-dir /tmp/gate-snapshot
+          python tools/accuracy_tracking/run_silicon.py --output-dir /tmp/gate-snapshot
+
+      - name: Upload snapshot
+        # always(): a failed collection still uploads the partial snapshot as
+        # debugging evidence (the job itself stays red; report needs both sides).
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-${{ matrix.side }}
+          path: /tmp/gate-snapshot
+          retention-days: 30
+
+  report:
+    name: AIC Prediction Regression Gate
+    needs: collect
+    # Fail closed: this job is the required check (PR 2). Without if: always()
+    # a failed collect would SKIP this job, and a skipped required check counts
+    # as passing in branch protection — the gate would silently pass on exactly
+    # the PRs that break collection.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Fail closed if collection failed
+        if: needs.collect.result != 'success'
+        run: |
+          echo "::error::collection did not succeed (result: ${{ needs.collect.result }}); failing the gate"
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Download snapshots
+        uses: actions/download-artifact@v7
+        with:
+          pattern: gate-*
+          path: /tmp/snapshots
+
+      - name: Compare and gate
+        run: |
+          python tools/prediction_regression_gate/report.py \
+            --old /tmp/snapshots/gate-old \
+            --new /tmp/snapshots/gate-new \
+            --report-dir /tmp/gate-report
+
+      - name: Add summary
+        if: always()
+        run: |
+          if [ -f /tmp/gate-report/summary.md ]; then
+            cat /tmp/gate-report/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: prediction-regression-gate-report
+          path: /tmp/gate-report
+          if-no-files-found: ignore
+          retention-days: 30

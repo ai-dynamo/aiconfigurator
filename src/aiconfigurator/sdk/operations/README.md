@@ -302,10 +302,11 @@ A few things that look reasonable but break the lazy invariant:
 - `operations/gemm.py` — the cleanest fully-migrated example. Read
   `GEMM.load_data` and `GEMM._query_gemm_table` for the canonical
   pattern.
-- `aiconfigurator/sdk/interpolation.py` — all the numeric helpers
-  (`interp_1d`, `interp_3d`, `extrapolate_data_grid`,
-  `nearest_1d_point_helper`, `validate_interpolation_result`,
-  `interp_context_topk_piecewise_from_raw`, …).
+- `aiconfigurator/sdk/interpolation.py` — the numeric helpers
+  (`interp_1d`, `interp_3d`, `nearest_1d_point_helper`,
+  `validate_interpolation_result`, …). 3-axis+ op queries route through
+  `aiconfigurator/sdk/perf_interp/` (declarative per-op configs + shared
+  resolver); interpolation.py remains for 1-D/2-D tables (comm, bmm, scales).
 - `aiconfigurator/sdk/perf_database.py` — `PerfDatabase`,
   `_LazySupportMatrix` (the dict-like view powering
   `database.supported_quant_mode`), `LoadedOpData`, the query entry

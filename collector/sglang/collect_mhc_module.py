@@ -8,6 +8,8 @@
 # capable image or put a matching SGLang source tree on PYTHONPATH.
 from __future__ import annotations
 
+__compat__ = "sglang==0.5.14"
+
 import argparse
 import copy
 import gc
@@ -22,7 +24,6 @@ from importlib.metadata import version as get_version
 import torch
 
 os.environ.setdefault("SGLANG_APPLY_CONFIG_BACKUP", "none")
-os.environ.setdefault("SGLANG_OPT_DEEPGEMM_HC_PRENORM", "0")
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if THIS_DIR not in sys.path:
@@ -198,7 +199,6 @@ def _load_one_layer_runner(
         max_running_requests=16,
         max_prefill_tokens=4096,
     )
-    server_args.enable_piecewise_cuda_graph = False
     server_args.attention_backend = "dsv4"
 
     print(f"[mhc-collector] model_path {model_path} -> {local_model_path}")
@@ -238,8 +238,8 @@ def _mhc_call_args(layer):
     # A real DSV4 layer executes mHC once before attention and once before FFN.
     # This collector folds both calls into the reported pre/post op.
     return (
-        (layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base),
-        (layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base),
+        (layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base, layer.input_layernorm),
+        (layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base, layer.post_attention_layernorm),
     )
 
 
@@ -257,13 +257,16 @@ def _make_kernel(layer, op: str, residual: torch.Tensor):
         call_args = _mhc_call_args(layer)
 
         def kernel():
-            return [layer.hc_pre(residual, *args) for args in call_args]
+            return [layer.hc_pre(residual, fn, scale, base, norm=norm) for fn, scale, base, norm in call_args]
 
         return kernel
 
     if op == "post":
         with torch.no_grad():
-            post_inputs = [_hc_pre_post_inputs(layer.hc_pre(residual, *args)) for args in _mhc_call_args(layer)]
+            post_inputs = [
+                _hc_pre_post_inputs(layer.hc_pre(residual, fn, scale, base, norm=norm))
+                for fn, scale, base, norm in _mhc_call_args(layer)
+            ]
         torch.cuda.synchronize()
 
         def kernel():
@@ -314,9 +317,10 @@ def _log_result(
     latency_ms: float,
     version: str,
     device_name: str,
+    kernel_source: str,
     power_stats: dict | None,
 ) -> None:
-    log_perf(
+    if not log_perf(
         item_list=[
             {
                 "architecture": "DeepseekV4ForCausalLM",
@@ -332,10 +336,11 @@ def _log_result(
         version=version,
         device_name=device_name,
         op_name=op,
-        kernel_source="sglang_mhc",
+        kernel_source=kernel_source,
         perf_filename=_resolve_perf_path(output_path, perf_filename),
         power_stats=power_stats,
-    )
+    ):
+        raise RuntimeError("Failed to persist SGLang mHC performance row")
 
 
 def run_mhc_module(
@@ -354,27 +359,61 @@ def run_mhc_module(
         raise ValueError("num_iterations must be at least 3")
 
     token_cases = [int(num_tokens) for num_tokens in (num_tokens_cases or _default_num_tokens(model_path))]
-    model_runner = _load_one_layer_runner(
-        model_path,
-        device=device,
-        mem_fraction_static=mem_fraction_static,
-    )
-
-    layer = model_runner.model.model.layers[0]
-    hidden_size = _hidden_size(layer)
-    version = get_version("sglang")
-    device_name = torch.cuda.get_device_name(device)
     results: list[dict[str, float]] = []
-
-    print(
-        "[mhc-collector] "
-        f"hc_mult={layer.hc_mult}, hidden_size={hidden_size}, "
-        f"tilelang_pre={os.environ.get('SGLANG_OPT_USE_TILELANG_MHC_PRE', 'default')}, "
-        f"tilelang_post={os.environ.get('SGLANG_OPT_USE_TILELANG_MHC_POST', 'default')}"
-    )
+    error_count = 0
+    model_runner = None
 
     try:
+        # Load inside the guarded region: a mid-init failure (e.g. after
+        # SGLang created its TP/world groups but before finishing) must still
+        # reach the teardown below, or the next task in this worker inherits
+        # half-initialized module globals.
+        model_runner = _load_one_layer_runner(
+            model_path,
+            device=device,
+            mem_fraction_static=mem_fraction_static,
+        )
+
+        layer = model_runner.model.model.layers[0]
+        hidden_size = _hidden_size(layer)
+        version = get_version("sglang")
+        device_name = torch.cuda.get_device_name(device)
+
+        # Print the RESOLVED kernel-selection env values, not only the raw
+        # process environment: MHC-PRENORM-ENV history shows the module-level
+        # default and the central collect_sglang() setdefault can disagree, and
+        # the H20 log that omitted the resolved prenorm value could not prove
+        # which kernel won.
+        from sglang.srt.environ import envs as _envs
+
+        print(
+            "[mhc-collector] "
+            f"hc_mult={layer.hc_mult}, hidden_size={hidden_size}, "
+            f"tilelang_pre={os.environ.get('SGLANG_OPT_USE_TILELANG_MHC_PRE', 'default')}, "
+            f"tilelang_post={os.environ.get('SGLANG_OPT_USE_TILELANG_MHC_POST', 'default')}, "
+            f"resolved_tilelang_pre={_envs.SGLANG_OPT_USE_TILELANG_MHC_PRE.get()}, "
+            f"resolved_tilelang_post={_envs.SGLANG_OPT_USE_TILELANG_MHC_POST.get()}, "
+            f"resolved_deepgemm_hc_prenorm={_envs.SGLANG_OPT_DEEPGEMM_HC_PRENORM.get()}"
+        )
+
         for op in ops:
+            from sglang.srt.environ import envs
+
+            if op == "pre":
+                if envs.SGLANG_OPT_USE_TILELANG_MHC_PRE.get():
+                    kernel_source = "sglang_tilelang_mhc_pre"
+                elif envs.SGLANG_OPT_DEEPGEMM_HC_PRENORM.get():
+                    kernel_source = "sglang_deepgemm_mhc_pre"
+                else:
+                    kernel_source = "sglang_torch_mhc_pre"
+            elif op == "post":
+                kernel_source = (
+                    "sglang_tilelang_mhc_post"
+                    if envs.SGLANG_OPT_USE_TILELANG_MHC_POST.get()
+                    else "sglang_torch_mhc_post"
+                )
+            else:
+                raise ValueError(f"unsupported mHC op: {op}")
             for num_tokens in token_cases:
                 try:
                     residual = _make_residual(layer, num_tokens, device)
@@ -386,6 +425,7 @@ def run_mhc_module(
                     )
                 except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
                     print(f"  OOM: op={op}, num_tokens={num_tokens}; skipping")
+                    error_count += 1
                     torch.cuda.empty_cache()
                     continue
                 except RuntimeError as err:
@@ -393,6 +433,7 @@ def run_mhc_module(
                     # unsupported shapes) should skip the single case rather than
                     # abort the whole sweep.
                     print(f"  RuntimeError: op={op}, num_tokens={num_tokens}; skipping ({err})")
+                    error_count += 1
                     torch.cuda.empty_cache()
                     continue
 
@@ -409,6 +450,7 @@ def run_mhc_module(
                     latency_ms=latency_ms,
                     version=version,
                     device_name=device_name,
+                    kernel_source=kernel_source,
                     power_stats=bench_result.get("power_stats"),
                 )
                 results.append(
@@ -425,8 +467,32 @@ def run_mhc_module(
                 gc.collect()
     finally:
         del model_runner
+        from sglang.srt.distributed.parallel_state import (
+            destroy_distributed_environment,
+            destroy_model_parallel,
+        )
+        from sglang.srt.eplb import expert_location as _expert_location
+
+        # Mirror SGLang 0.5.14 cleanup_dist_env_and_memory: destroying only the
+        # torch process group leaves parallel_state._WORLD pointing at a dead
+        # group, so the NEXT task in the same worker fails ModelRunner init
+        # with "not initialized in the world group map". H20 never sequenced
+        # two mHC tasks through one worker (4 tasks over 8 GPU workers); the
+        # single-worker B200 smoke exposed it. Teardown errors still propagate
+        # and fail the worker rather than hiding retained groups.
+        destroy_model_parallel()
+        destroy_distributed_environment()
+        # SGLang has no public reset for this module global (its serving
+        # process never re-creates a ModelRunner); set_global_... asserts None,
+        # so a second in-worker task fails init unless it is returned to the
+        # module's pre-init state here.
+        _expert_location._global_expert_location_metadata = None
         torch.cuda.empty_cache()
         gc.collect()
+    summary = f"ok={len(results)} error={error_count} skip=0 total={len(results) + error_count}"
+    print(f"[mhc-collector] {summary}")
+    if not results or error_count > 0:
+        raise RuntimeError(f"mHC sweep failed: {summary}")
     return results
 
 

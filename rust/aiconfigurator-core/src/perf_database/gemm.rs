@@ -23,7 +23,8 @@ use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
 use super::{kernel_source_ok, resolve_op_sources};
-use super::interpolation::{interp_1d, interp_2d_1d_grid, nearest_neighbors, Grid3};
+use super::interpolation::Grid3;
+use super::perf_interp::{self, Node, OpInterpConfig, Resolver, SiteIndex, ValueTransform};
 use crate::perf_database::parquet_loader::PerfReader;
 
 /// GEMM-family perf-data owner for one `<system>/<backend>/<version>` slice.
@@ -44,7 +45,7 @@ pub struct GemmTable {
     gemm_sources: Vec<PerfSource>,
     compute_scale_sources: Vec<PerfSource>,
     scale_matrix_sources: Vec<PerfSource>,
-    gemm: OnceLock<Result<GemmGrids, AicError>>,
+    gemm: OnceLock<Result<GemmEngineGrids, AicError>>,
     compute_scale: OnceLock<Result<TwoDGrids, AicError>>,
     scale_matrix: OnceLock<Result<TwoDGrids, AicError>>,
 }
@@ -54,9 +55,15 @@ struct GemmGrids {
     by_quant: BTreeMap<String, Grid3<f64>>,
 }
 
+/// Engine-ready GEMM tables: per quant, the nested table plus the scattered
+/// (n, k)-site index, both built once at load (tables are immutable).
+struct GemmEngineGrids {
+    by_quant: BTreeMap<String, (Node, SiteIndex)>,
+}
+
 /// 2-D scale tables keyed by quant name -> m -> k -> latency_ms.
 struct TwoDGrids {
-    by_quant: BTreeMap<String, BTreeMap<u32, BTreeMap<u32, f64>>>,
+    by_quant: BTreeMap<String, Node>,
 }
 
 impl GemmTable {
@@ -94,12 +101,11 @@ impl GemmTable {
 
     /// Query GEMM latency (ms) for the given shape and quant mode.
     ///
-    /// Mirrors the SILICON path of `GEMM._query_gemm_table`:
-    /// 1. Exact hit on `(m, n, k)` if present.
-    /// 2. 1-D interpolation along `m` when `(n, k)` exists in two or more
-    ///    `m` slices.
-    /// 3. 3-D fallback via `interp_2d_1d_grid` (bilinear over `(n, k)`,
-    ///    linear over `m`).
+    /// Mirrors the perf_interp v2 path of `GEMM._query_gemm_table`
+    /// (`gemm_config`): (n, k) are scattered collected shapes, each owning
+    /// an m-curve. Exact site -> its own curve (exact point / lerp /
+    /// k_tail=3 util-hold beyond the sweep); unknown shape -> log2-IDW util
+    /// transfer from <=4 covering neighbour sites within 2.0 octaves.
     pub fn query(&self, quant: GemmQuantMode, m: u32, n: u32, k: u32) -> Result<f64, AicError> {
         let grids = self.load_gemm()?;
         // `fp8_static` is a behavioral mode that reuses `fp8` perf tables,
@@ -108,47 +114,17 @@ impl GemmTable {
         // normalization in their respective query methods.
         let lookup_quant = normalize_fp8_static_quant(quant);
         let quant_name = lookup_quant.name();
-        let grid = grids.by_quant.get(quant_name).ok_or_else(|| {
+        let (_, index) = grids.by_quant.get(quant_name).ok_or_else(|| {
             AicError::PerfDatabase(format!(
                 "GEMM perf data missing for quant '{quant_name}' at {}; available: {:?}",
                 self.data_root.display(),
                 grids.by_quant.keys().collect::<Vec<_>>(),
             ))
         })?;
-
-        // Exact hit.
-        if let Some(by_n) = grid.get(&m) {
-            if let Some(by_k) = by_n.get(&n) {
-                if let Some(&latency) = by_k.get(&k) {
-                    return Ok(latency);
-                }
-            }
-        }
-
-        // 1-D interpolation along m when (n, k) lives in >=2 slices.
-        let m_with_nk: Vec<u32> = grid
-            .iter()
-            .filter_map(|(&mv, by_n)| {
-                by_n.get(&n)
-                    .and_then(|by_k| by_k.get(&k))
-                    .map(|_| mv)
-            })
-            .collect();
-        if m_with_nk.len() >= 2 {
-            let (m_left, m_right) = nearest_neighbors(m, &m_with_nk, false)?;
-            let y_left = grid[&m_left][&n][&k];
-            let y_right = grid[&m_right][&n][&k];
-            return Ok(interp_1d(
-                m_left as f64,
-                m_right as f64,
-                y_left,
-                y_right,
-                m as f64,
-            ));
-        }
-
-        // 3-D fallback.
-        interp_2d_1d_grid(grid, m, n, k)
+        let spec = &self.system_spec;
+        let sol = move |c: &[f64]| gemm_sol_latency_ms(spec, lookup_quant, c[0], c[1], c[2]);
+        let cfg = gemm_engine_config(&sol);
+        index.resolve(&cfg, &[m as f64, n as f64, k as f64])
     }
 
     /// Query compute-scale latency (ms) — used by `fp8_static` GEMM only.
@@ -156,6 +132,10 @@ impl GemmTable {
     /// Like the main GEMM table, the compute_scale data is keyed by `fp8`
     /// (not `fp8_static`) in the perf-DB; normalize before lookup to mirror
     /// Python's `GEMM._normalize_for_lookup`.
+    ///
+    /// compute_scale stores a quantization-overhead DELTA: beyond the grid
+    /// it is deliberately held FLAT at the clamped boundary (Python
+    /// `_query_compute_scale_table` contract).
     pub fn query_compute_scale(
         &self,
         quant: GemmQuantMode,
@@ -164,12 +144,19 @@ impl GemmTable {
     ) -> Result<f64, AicError> {
         let grids = self.load_compute_scale()?;
         let lookup = normalize_fp8_static_quant(quant);
-        query_two_d(&grids.by_quant, lookup.name(), m, k, &self.data_root)
+        let spec = &self.system_spec;
+        // sol_mem = 2 m k / bw * 1000 (read + write of the activation)
+        let sol = move |c: &[f64]| 2.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0;
+        query_scale_table(&grids.by_quant, lookup.name(), m, k, &sol, false, &self.data_root)
     }
 
     /// Query scale-matrix latency (ms) — used by `fp8_static` GEMM only.
     /// Same `fp8_static -> fp8` normalization as the GEMM and
     /// compute_scale lookups.
+    ///
+    /// scale_matrix is a real memory kernel: outside the grid the boundary
+    /// utilization is frozen and SOL(q)/SOL(boundary) carries the growth
+    /// (Python `_query_scale_matrix_table` contract).
     pub fn query_scale_matrix(
         &self,
         quant: GemmQuantMode,
@@ -178,10 +165,12 @@ impl GemmTable {
     ) -> Result<f64, AicError> {
         let grids = self.load_scale_matrix()?;
         let lookup = normalize_fp8_static_quant(quant);
-        query_two_d(&grids.by_quant, lookup.name(), m, k, &self.data_root)
+        let spec = &self.system_spec;
+        let sol = move |c: &[f64]| 3.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0;
+        query_scale_table(&grids.by_quant, lookup.name(), m, k, &sol, true, &self.data_root)
     }
 
-    fn load_gemm(&self) -> Result<&GemmGrids, AicError> {
+    fn load_gemm(&self) -> Result<&GemmEngineGrids, AicError> {
         let cell = self.gemm.get_or_init(|| {
             let mut grids = load_gemm_parquet(&self.gemm_sources)?;
             // Mirror Python `GEMM._correct_sol`: clamp every stored grid
@@ -196,7 +185,17 @@ impl GemmTable {
             // queries run. Off-grid interpolation/extrapolation therefore
             // sees the same monotone-bounded inputs as Python.
             clamp_gemm_grids_to_sol(&self.system_spec, &mut grids);
-            Ok(grids)
+            // Build the engine table + (n, k)-site index once per quant.
+            let by_quant = grids
+                .by_quant
+                .into_iter()
+                .map(|(quant_name, grid)| {
+                    let node = grid3_to_node(&grid);
+                    let index = SiteIndex::build(&[1, 2], 0, &node);
+                    (quant_name, (node, index))
+                })
+                .collect();
+            Ok(GemmEngineGrids { by_quant })
         });
         cell.as_ref().map_err(|err| clone_err(err))
     }
@@ -230,14 +229,12 @@ impl GemmTable {
 pub(crate) fn gemm_sol_latency_ms(
     spec: &SystemSpec,
     quant: GemmQuantMode,
-    m: u32,
-    n: u32,
-    k: u32,
+    m: f64,
+    n: f64,
+    k: f64,
 ) -> f64 {
     let mapping = quant.mapping();
-    let m_f = m as f64;
-    let n_f = n as f64;
-    let k_f = k as f64;
+    let (m_f, n_f, k_f) = (m, n, k);
     let tc_flops = tc_flops_for_compute(spec, mapping.compute);
     let sol_math = 2.0 * m_f * n_f * k_f / tc_flops * 1000.0;
     let sol_mem = mapping.memory * (m_f * n_f + m_f * k_f + n_f * k_f)
@@ -274,7 +271,7 @@ fn clamp_gemm_grids_to_sol(spec: &SystemSpec, grids: &mut GemmGrids) {
         for (&m, by_n) in grid.iter_mut() {
             for (&n, by_k) in by_n.iter_mut() {
                 for (&k, latency) in by_k.iter_mut() {
-                    let sol = gemm_sol_latency_ms(spec, quant, m, n, k);
+                    let sol = gemm_sol_latency_ms(spec, quant, m as f64, n as f64, k as f64);
                     if sol > *latency {
                         *latency = sol;
                     }
@@ -314,85 +311,95 @@ fn normalize_fp8_static_quant(quant: GemmQuantMode) -> GemmQuantMode {
     }
 }
 
-fn query_two_d(
-    by_quant: &BTreeMap<String, BTreeMap<u32, BTreeMap<u32, f64>>>,
+/// The GEMM engine record: (n, k) sites (axes 1, 2), m-curve (axis 0),
+/// mirroring Python `perf_interp.gemm_config`.
+fn gemm_engine_config<'a>(sol: &'a dyn Fn(&[f64]) -> f64) -> OpInterpConfig<'a> {
+    OpInterpConfig {
+        axes: &["m", "n", "k"],
+        resolver: Resolver::ScatteredSites {
+            site_axes: vec![1, 2],
+            curve_axis: 0,
+            nn_sites: 4,
+            max_site_distance: Some(2.0),
+            require_curve_coverage: true,
+            k_tail: 3,
+        },
+        sol_fn: sol,
+        value_transform: ValueTransform::Raw,
+        transform_axis: None,
+    }
+}
+
+fn grid3_to_node(grid: &Grid3<f64>) -> Node {
+    let mut node = Node::branch();
+    for (&m, by_n) in grid {
+        for (&n, by_k) in by_n {
+            for (&k, &lat) in by_k {
+                node.insert(&[m, n, k], lat);
+            }
+        }
+    }
+    node
+}
+
+/// Scale-table (compute_scale / scale_matrix) query: clamp `(m, k)` into the
+/// collected envelope FIRST (legacy contract), resolve the interior on the
+/// engine (RAW 2-axis grid), then either hold FLAT at the boundary
+/// (compute_scale: a quantization DELTA) or re-scale by SOL(q)/SOL(boundary)
+/// (scale_matrix: a real memory kernel). Mirrors Python
+/// `_query_compute_scale_table` / `_query_scale_matrix_table`.
+fn query_scale_table(
+    by_quant: &BTreeMap<String, Node>,
     quant_name: &str,
     m: u32,
     k: u32,
+    sol: &dyn Fn(&[f64]) -> f64,
+    sol_ratio_beyond_grid: bool,
     data_root: &Path,
 ) -> Result<f64, AicError> {
-    let grid = by_quant.get(quant_name).ok_or_else(|| {
+    let node = by_quant.get(quant_name).ok_or_else(|| {
         AicError::PerfDatabase(format!(
             "perf data missing for quant '{quant_name}' at {}; available: {:?}",
             data_root.display(),
             by_quant.keys().collect::<Vec<_>>(),
         ))
     })?;
-    if let Some(by_k) = grid.get(&m) {
-        if let Some(&latency) = by_k.get(&k) {
-            return Ok(latency);
+    let Node::Branch(rows) = node else {
+        return Err(AicError::PerfDatabase("malformed scale table".to_string()));
+    };
+    if rows.is_empty() {
+        return Err(AicError::PerfDatabase(format!(
+            "empty scale table for quant '{quant_name}'"
+        )));
+    }
+    let m_keys: Vec<u32> = rows.keys().copied().collect();
+    let m_c = m.clamp(m_keys[0], m_keys[m_keys.len() - 1]);
+    let mut k_min = u32::MAX;
+    let mut k_max = 0u32;
+    for row in rows.values() {
+        if let Node::Branch(cols) = row {
+            if let (Some(&lo), Some(&hi)) = (cols.keys().next(), cols.keys().next_back()) {
+                k_min = k_min.min(lo);
+                k_max = k_max.max(hi);
+            }
         }
     }
-    // 1-D interpolation along m when k matches in >=2 slices.
-    let m_with_k: Vec<u32> = grid
-        .iter()
-        .filter_map(|(&mv, by_k)| by_k.get(&k).map(|_| mv))
-        .collect();
-    if m_with_k.len() >= 2 {
-        let (m_left, m_right) = nearest_neighbors(m, &m_with_k, false)?;
-        return Ok(interp_1d(
-            m_left as f64,
-            m_right as f64,
-            grid[&m_left][&k],
-            grid[&m_right][&k],
-            m as f64,
-        ));
+    let k_c = k.clamp(k_min, k_max);
+
+    let cfg = OpInterpConfig::grid(&["m", "k"], sol);
+    let lat = perf_interp::query(&cfg, node, &[m_c as f64, k_c as f64])?;
+    if !sol_ratio_beyond_grid || (m_c == m && k_c == k) {
+        return Ok(lat);
     }
-    // Bilinear fallback over (m, k). Use `inner_only=false` so an out-of-range
-    // query collapses/extrapolates instead of erroring. Python's
-    // `_query_compute_scale_table` / `_query_scale_matrix_table` (gemm.py
-    // ~531-545) clamp `m` and `k` into the table envelope before
-    // `interp_2d_linear`. For an in-range query, `inner_only=false` and the
-    // clamp are identical; for the single-point axis that triggers the parity
-    // regression (e.g. m-axis `[128]`), `nearest_neighbors` returns `(128, 128)`
-    // either way, so the result matches Python's clamp. (They would diverge only
-    // for a multi-point axis queried out of range — extrapolate here vs clamp in
-    // Python — which the scale tables do not currently exercise.)
-    let m_keys: Vec<u32> = grid.keys().copied().collect();
-    let (m_left, m_right) = nearest_neighbors(m, &m_keys, false)?;
-    let left_row = grid.get(&m_left).unwrap();
-    let right_row = grid.get(&m_right).unwrap();
-    let k_keys: Vec<u32> = left_row
-        .keys()
-        .copied()
-        .filter(|kv| right_row.contains_key(kv))
-        .collect();
-    let (k_left, k_right) = nearest_neighbors(k, &k_keys, false)?;
-    let q00 = left_row[&k_left];
-    let q01 = left_row[&k_right];
-    let q10 = right_row[&k_left];
-    let q11 = right_row[&k_right];
-    if m_left == m_right && k_left == k_right {
-        return Ok(q00);
+    // Outside the grid, freeze utilization at the clamped boundary:
+    // L(q) = L(boundary) * SOL(q)/SOL(boundary).
+    let boundary_sol = sol(&[m_c as f64, k_c as f64]);
+    let query_sol = sol(&[m as f64, k as f64]);
+    if boundary_sol > 0.0 && query_sol > 0.0 {
+        Ok(lat * (query_sol / boundary_sol))
+    } else {
+        Ok(lat)
     }
-    if m_left == m_right {
-        return Ok(interp_1d(k_left as f64, k_right as f64, q00, q01, k as f64));
-    }
-    if k_left == k_right {
-        return Ok(interp_1d(m_left as f64, m_right as f64, q00, q10, m as f64));
-    }
-    Ok(super::interpolation::bilinear(
-        m_left as f64,
-        m_right as f64,
-        k_left as f64,
-        k_right as f64,
-        q00,
-        q01,
-        q10,
-        q11,
-        m as f64,
-        k as f64,
-    ))
 }
 
 /// Load the GEMM table from an ordered, priority-sorted source list. Sources are
@@ -456,7 +463,7 @@ fn load_gemm_parquet(sources: &[PerfSource]) -> Result<GemmGrids, AicError> {
 /// Same first-wins-across-sources + missing-file-skip semantics as
 /// [`load_gemm_parquet`].
 fn load_two_d_parquet(sources: &[PerfSource]) -> Result<TwoDGrids, AicError> {
-    let mut by_quant: BTreeMap<String, BTreeMap<u32, BTreeMap<u32, f64>>> = BTreeMap::new();
+    let mut raw: BTreeMap<String, BTreeMap<u32, BTreeMap<u32, f64>>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -477,8 +484,7 @@ fn load_two_d_parquet(sources: &[PerfSource]) -> Result<TwoDGrids, AicError> {
             }
             // First-wins parity (compute_scale / scale_matrix tables in Python),
             // extended across shared-layer sources.
-            by_quant
-                .entry(row.str_owned(quant_dtype_col)?)
+            raw.entry(row.str_owned(quant_dtype_col)?)
                 .or_default()
                 .entry(row.u32(m_col)?)
                 .or_default()
@@ -486,13 +492,25 @@ fn load_two_d_parquet(sources: &[PerfSource]) -> Result<TwoDGrids, AicError> {
                 .or_insert(row.f64(latency_col)?);
         }
     }
-    if !any_source || by_quant.is_empty() {
+    if !any_source || raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no rows loaded from {} source(s) (first: {})",
             sources.len(),
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
+    let by_quant = raw
+        .into_iter()
+        .map(|(quant, rows)| {
+            let mut node = Node::branch();
+            for (m, cols) in rows {
+                for (k, lat) in cols {
+                    node.insert(&[m, k], lat);
+                }
+            }
+            (quant, node)
+        })
+        .collect();
     Ok(TwoDGrids { by_quant })
 }
 
@@ -629,6 +647,31 @@ mod tests {
         let first = table.query(GemmQuantMode::Bfloat16, 32768, 65536, 16384).unwrap();
         let second = table.query(GemmQuantMode::Bfloat16, 32768, 65536, 16384).unwrap();
         assert_eq!(first, second);
+    }
+
+    /// Values generated from the Python v2 engine on the same table
+    /// (`db.query_gemm(..., SILICON)` on b200_sxm/vllm/0.19.0, bfloat16):
+    /// exact hit, m-interp on a collected (n,k) site, m util-hold beyond the
+    /// sweep, and an unknown (n,k) site via neighbour util transfer. The two
+    /// engines must agree because they implement the same resolution chain.
+    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails
+    #[test]
+    fn gemm_query_matches_python_v2_engine() {
+        let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
+        let q = GemmQuantMode::Bfloat16;
+        let cases: &[(u32, u32, u32, f64)] = &[
+            (256, 32, 32, 0.00186666660011),
+            (259, 32, 32, 0.00184757819233),
+            (10_000_000, 32, 32, 1.51111355145),
+            (256, 128, 96, 0.00187964537818),
+        ];
+        for &(m, n, k, expected) in cases {
+            let got = table.query(q, m, n, k).unwrap();
+            assert!(
+                ((got - expected) / expected).abs() < 1e-9,
+                "({m},{n},{k}): rust {got} vs python {expected}"
+            );
+        }
     }
 
     #[test]

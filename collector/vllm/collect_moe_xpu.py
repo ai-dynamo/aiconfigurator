@@ -14,7 +14,11 @@ import os
 
 import torch
 import torch.nn.functional as F
-from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
+
+try:
+    from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
+except ImportError:
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
 from collector.case_generator import (

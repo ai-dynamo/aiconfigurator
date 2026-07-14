@@ -46,7 +46,7 @@ from collections import defaultdict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common, perf_interp
 from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
@@ -571,73 +571,6 @@ class MoE(Operation):
             latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, util_scale=util_scale, provenance=prov)
             return latency
 
-        def _estimate_overflow_with_last_token_util(
-            query_tokens: int,
-            moe_dict: dict,
-            hidden_size: int,
-            inter_size: int,
-            topk: int,
-            num_experts: int,
-            moe_tp_size: int,
-            moe_ep_size: int,
-            quant_mode: common.MoEQuantMode,
-            workload_distribution: str,
-        ) -> PerformanceResult:
-            """Estimate overflow latency using utilization at the largest collected token.
-            Call only when query_tokens > max(moe_dict.keys()).
-            """
-            token_points = sorted(moe_dict.keys())
-            last_token = token_points[-1]
-            last_point = moe_dict[last_token]
-            if isinstance(last_point, dict):
-                last_latency = float(last_point["latency"])
-                last_power = float(last_point.get("power", 0.0))
-                last_energy = float(last_point.get("energy", 0.0))
-            else:
-                last_latency = float(last_point)
-                last_power = 0.0
-                last_energy = 0.0
-
-            sol_last = get_sol(
-                last_token,
-                hidden_size,
-                inter_size,
-                topk,
-                num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                quant_mode,
-                workload_distribution,
-            )[0]
-            sol_query = get_sol(
-                query_tokens,
-                hidden_size,
-                inter_size,
-                topk,
-                num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                quant_mode,
-                workload_distribution,
-            )[0]
-
-            # This is an effective SOL/measured calibration factor, not a
-            # bounded physical efficiency. Preserve values above one; they can
-            # reflect hardware/kernel effects absent from the analytic SOL.
-            util = max(sol_last / last_latency, 1e-8)
-            est_latency = sol_query / util
-
-            est_energy = 0.0
-            if last_power > 0:
-                est_energy = last_power * est_latency
-            elif last_energy > 0:
-                est_energy = last_energy * (est_latency / last_latency)
-
-            # Overflow estimate anchored on the last silicon point's utilization
-            # and scaled by SOL ratio. It is still silicon-derived, not a pure
-            # formula fallback, so keep the source tag aligned with _interp_pr.
-            return database._interp_pr(est_latency, energy=est_energy)
-
         def _require_moe_token_points(
             moe_dict: dict,
             query_tokens: int,
@@ -716,6 +649,35 @@ class MoE(Operation):
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
+                def _resolve_tokens(moe_dict, query_tokens, used_workload_distribution):
+                    # Guard first: singleton-underflow must stay a structured miss
+                    # (a 1024-token row cannot define the low-token launch floor).
+                    _require_moe_token_points(moe_dict, query_tokens, used_workload_distribution)
+                    # 1-D tokens curve on the raw table: RAW lerp in range; beyond
+                    # the last collected token the engine holds the boundary util
+                    # (k_tail=1) and lets the MoE SOL carry the growth — exactly
+                    # what the retired hand-rolled overflow estimator did
+                    # (util above 1 preserved; energy scaled with latency).
+                    config = perf_interp.OpInterpConfig(
+                        axes=("num_tokens",),
+                        resolver=perf_interp.Grid(),
+                        sol_fn=lambda t: get_sol(
+                            t,
+                            hidden_size,
+                            inter_size,
+                            topk,
+                            num_experts,
+                            moe_tp_size,
+                            moe_ep_size,
+                            quant_mode,
+                            workload_distribution,
+                        )[0],
+                    )
+                    result = perf_interp.query(config, moe_dict, query_tokens)
+                    lat = perf_interp.get_value(result, "latency")
+                    energy = perf_interp.get_value(result, "energy")
+                    return database._interp_pr(lat, energy=energy)
+
                 if database.backend == common.BackendName.sglang.value:
                     # deepep_moe is for sglang wideep only
                     # Apply num_tokens correction when eplb is enabled (only during prefill)
@@ -744,41 +706,7 @@ class MoE(Operation):
                         moe_tp_size,
                         moe_ep_size,
                     )
-                    token_points = _require_moe_token_points(
-                        moe_dict,
-                        num_tokens_corrected,
-                        used_workload_distribution,
-                    )
-                    if num_tokens_corrected > token_points[-1]:
-                        return _estimate_overflow_with_last_token_util(
-                            num_tokens_corrected,
-                            moe_dict,
-                            hidden_size,
-                            inter_size,
-                            topk,
-                            num_experts,
-                            moe_tp_size,
-                            moe_ep_size,
-                            quant_mode,
-                            workload_distribution,
-                        )
-                    num_left, num_right = interpolation.nearest_1d_point_helper(
-                        num_tokens_corrected,
-                        list(moe_dict.keys()),
-                        inner_only=False,
-                    )
-                    result = interpolation.interp_1d(
-                        [num_left, num_right],
-                        [moe_dict[num_left], moe_dict[num_right]],
-                        num_tokens_corrected,
-                    )
-                    if isinstance(result, dict):
-                        lat = result["latency"]
-                        energy = result.get("energy", 0.0)
-                    else:
-                        lat = result
-                        energy = 0.0
-                    return database._interp_pr(lat, energy=energy)
+                    return _resolve_tokens(moe_dict, num_tokens_corrected, used_workload_distribution)
                 elif database.backend == common.BackendName.trtllm.value:
                     if database._moe_data is None and database._moe_low_latency_data is None:
                         raise PerfDataNotAvailableError(
@@ -849,37 +777,7 @@ class MoE(Operation):
                             moe_tp_size,
                             moe_ep_size,
                         )
-                    token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
-                    if num_tokens > token_points[-1]:
-                        return _estimate_overflow_with_last_token_util(
-                            num_tokens,
-                            moe_dict,
-                            hidden_size,
-                            inter_size,
-                            topk,
-                            num_experts,
-                            moe_tp_size,
-                            moe_ep_size,
-                            quant_mode,
-                            workload_distribution,
-                        )
-                    num_left, num_right = interpolation.nearest_1d_point_helper(
-                        num_tokens,
-                        list(moe_dict.keys()),
-                        inner_only=False,
-                    )
-                    result = interpolation.interp_1d(
-                        [num_left, num_right],
-                        [moe_dict[num_left], moe_dict[num_right]],
-                        num_tokens,
-                    )
-                    if isinstance(result, dict):
-                        lat = result["latency"]
-                        energy = result.get("energy", 0.0)
-                    else:
-                        lat = result
-                        energy = 0.0
-                    return database._interp_pr(lat, energy=energy)
+                    return _resolve_tokens(moe_dict, num_tokens, used_workload_distribution)
                 elif database.backend == common.BackendName.vllm.value:
                     database._moe_data.raise_if_not_loaded()
                     quant_data = util_empirical.require_data_slice(database._moe_data, quant_mode)
@@ -896,33 +794,7 @@ class MoE(Operation):
                         moe_tp_size,
                         moe_ep_size,
                     )
-                    token_points = _require_moe_token_points(moe_dict, num_tokens, used_workload_distribution)
-                    if num_tokens > token_points[-1]:
-                        return _estimate_overflow_with_last_token_util(
-                            num_tokens,
-                            moe_dict,
-                            hidden_size,
-                            inter_size,
-                            topk,
-                            num_experts,
-                            moe_tp_size,
-                            moe_ep_size,
-                            quant_mode,
-                            workload_distribution,
-                        )
-                    num_left, num_right = interpolation.nearest_1d_point_helper(
-                        num_tokens, list(moe_dict.keys()), inner_only=False
-                    )
-                    result = interpolation.interp_1d(
-                        [num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens
-                    )
-                    if isinstance(result, dict):
-                        latency = result["latency"]
-                        energy = result.get("energy", 0.0)
-                    else:
-                        latency = result
-                        energy = 0.0
-                    return database._interp_pr(latency, energy=energy)
+                    return _resolve_tokens(moe_dict, num_tokens, used_workload_distribution)
                 else:
                     raise NotImplementedError(f"backend {database.backend} not supported for moe")
 
@@ -1129,10 +1001,16 @@ class MoEDispatch(Operation):
             return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0, source="empirical")
         else:
             data = database._wideep_deepep_ll_data[node_num][hidden_size][topk][num_experts]
-            num_left, num_right = interpolation.nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
-            result = interpolation.interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
-            lat = result["latency"] if isinstance(result, dict) else result
-            energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+            # 1-D tokens curve. Dispatch has no implemented roofline, but util-hold
+            # only needs the SOL *ratio*: dispatch bytes scale ~linearly with
+            # tokens (hidden/topk fixed per slice), so a linear proxy is
+            # ratio-equivalent to any bandwidth roofline.
+            config = perf_interp.OpInterpConfig(
+                axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=lambda t: float(t)
+            )
+            result = perf_interp.query(config, data, num_tokens)
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
 
     @classmethod
@@ -1171,17 +1049,28 @@ class MoEDispatch(Operation):
         else:
             if node_num == 1 and sms == 20:  # only collect sm=20 for now
                 data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
-                num_left, num_right = interpolation.nearest_1d_point_helper(
-                    num_tokens, list(data.keys()), inner_only=False
+                # 1-D tokens curve; linear token proxy SOL (see deepep_ll note).
+                config = perf_interp.OpInterpConfig(
+                    axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=lambda t: float(t)
                 )
-                result = interpolation.interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
-                lat = result["latency"] if isinstance(result, dict) else result
-                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+                result = perf_interp.query(config, data, num_tokens)
+                lat = perf_interp.get_value(result, "latency")
+                energy = perf_interp.get_value(result, "energy")
             else:
                 data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
-                result = interpolation.interp_2d_linear(sms, num_tokens, data, database._extracted_metrics_cache)
-                lat = result["latency"] if isinstance(result, dict) else result
-                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+                # 2-axis grid (sms, tokens). Only sm=20 is collected today, so an
+                # off-grid sms snaps to the nearest collected value (the legacy
+                # 2-D scattered interp simply failed on a single-sms cloud);
+                # tokens use the linear proxy SOL (see the DeepEP ll note; SOL is
+                # constant in sms — no data supports an sms scaling story yet).
+                config = perf_interp.OpInterpConfig(
+                    axes=("sms", "num_tokens"),
+                    resolver=perf_interp.Grid(),
+                    sol_fn=lambda _sm, t: float(t),
+                )
+                result = perf_interp.query(config, data, sms, num_tokens)
+                lat = perf_interp.get_value(result, "latency")
+                energy = perf_interp.get_value(result, "energy")
             return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
 
     # ------------------------------------------------------------------
@@ -1887,23 +1776,28 @@ class TrtLLMWideEPMoE(Operation):
                 moe_ep_size,
             )
 
-            num_left, num_right = interpolation.nearest_1d_point_helper(
-                num_tokens,
-                list(moe_dict.keys()),
-                inner_only=False,
+            # 1-D tokens curve: RAW lerp in range; boundary util-hold via the
+            # wideep-MoE roofline beyond it (the SOL's weight-read term keeps
+            # small-token holds above the launch/weight floor).
+            config = perf_interp.OpInterpConfig(
+                axes=("num_tokens",),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda t: get_sol(
+                    t,
+                    hidden_size,
+                    inter_size,
+                    topk,
+                    num_experts,
+                    num_slots,
+                    moe_tp_size,
+                    moe_ep_size,
+                    quant_mode,
+                    workload_distribution,
+                )[0],
             )
-            result = interpolation.interp_1d(
-                [num_left, num_right],
-                [moe_dict[num_left], moe_dict[num_right]],
-                num_tokens,
-            )
-
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
+            result = perf_interp.query(config, moe_dict, num_tokens)
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
 
             return database._interp_pr(lat, energy=energy)
 
@@ -2356,23 +2250,16 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 moe_ep_size,
             )
 
-            num_left, num_right = interpolation.nearest_1d_point_helper(
-                num_tokens,
-                list(alltoall_dict.keys()),
-                inner_only=False,
+            # 1-D tokens curve: RAW lerp in range; boundary util-hold via the
+            # alltoall communication SOL beyond it.
+            config = perf_interp.OpInterpConfig(
+                axes=("num_tokens",),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda t: get_sol(t, hidden_size, topk, num_experts, moe_ep_size, quant_mode, node_num)[0],
             )
-            result = interpolation.interp_1d(
-                [num_left, num_right],
-                [alltoall_dict[num_left], alltoall_dict[num_right]],
-                num_tokens,
-            )
-
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
+            result = perf_interp.query(config, alltoall_dict, num_tokens)
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
 
             return database._interp_pr(lat, energy=energy)
 

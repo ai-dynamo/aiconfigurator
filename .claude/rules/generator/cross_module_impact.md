@@ -1,3 +1,10 @@
+---
+description: >
+  Cross-module impact map for generator changes.
+paths:
+  - "src/aiconfigurator/generator/**"
+---
+
 # Cross-Module Impact Map
 
 When modifying the generator, check this map to identify affected modules outside

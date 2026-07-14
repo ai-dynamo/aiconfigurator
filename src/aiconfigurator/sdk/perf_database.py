@@ -16,10 +16,9 @@ from typing import ClassVar, Optional
 
 import yaml
 
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, perf_interp
 from aiconfigurator.sdk.common import PerfDataFilename, parse_support_matrix_version
-from aiconfigurator.sdk.errors import PerfDataNotAvailableError
-from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
+from aiconfigurator.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
 from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.system_spec import SystemSpec
 
@@ -154,6 +153,54 @@ def has_perf_data_not_available_cause(error: BaseException) -> bool:
         elif not current.__suppress_context__ and current.__context__ is not None:
             stack.append(current.__context__)
     return False
+
+
+# Instance attribute(s) holding the raw table(s) behind each fmha-keyed context
+# op. Every listed table is keyed [fmha][kv_cache]... at its top two levels, so
+# joint (fmha, kv) slice presence can be checked uniformly. Ops absent from
+# this map (e.g. wideep_context_mla: [kernel_source][quant], no kv axis) fall
+# back to the flat supported list.
+_CONTEXT_FMHA_OP_TABLES: dict[str, tuple[str, ...]] = {
+    "context_attention": ("_context_attention_data",),
+    "context_mla": ("_context_mla_data", "_context_mla_module_data"),
+    "context_mla_granular": ("_context_mla_data",),
+    "dsa_context_module": ("_context_dsa_module_data",),
+    "deepseek_v4_context_module": ("_context_deepseek_v4_attention_module_data",),
+}
+
+
+def context_fmha_supported_modes(database, ctx_op: str, kv_cache_mode) -> list[str]:
+    """FMHA mode names with perf data for ``ctx_op``, restricted to slices that
+    exist JOINTLY with ``kv_cache_mode``.
+
+    The flat ``supported_quant_mode[ctx_op]`` list unions fmha keys across kv
+    slices (and across granular+module tables for ``context_mla``), so an fmha
+    mode collected only under a different kv dtype — e.g. the fp8 fmha slice
+    that exists solely under kv=fp8 — would look available for a bf16-kv role
+    and then miss at query time.  Returns ``[]`` when there is no information
+    (missing op/table); falls back to the flat list when the op has no kv axis
+    or the database exposes no raw tables (test stubs).
+    """
+    supported = getattr(database, "supported_quant_mode", {}) or {}
+    flat = supported.get(ctx_op, []) or []  # triggers the lazy load of the op's table(s)
+    if not flat:
+        return []
+    table_attrs = _CONTEXT_FMHA_OP_TABLES.get(ctx_op)
+    if table_attrs is None or kv_cache_mode is None:
+        return list(flat)
+    modes: set[str] = set()
+    saw_table = False
+    for attr in table_attrs:
+        data = getattr(database, attr, None)
+        if not data:
+            continue
+        saw_table = True
+        for fmha_key in data:
+            if kv_cache_mode in data[fmha_key]:
+                modes.add(fmha_key.name if hasattr(fmha_key, "name") else str(fmha_key))
+    if not saw_table:
+        return list(flat)
+    return sorted(modes)
 
 
 @functools.cache
@@ -435,6 +482,7 @@ def get_database(
     systems_paths: str | list[str] | None = None,
     allow_missing_data: bool = False,
     database_mode: str | None = None,
+    shared_layer: bool | None = None,
 ) -> PerfDatabase | None:
     """
     Get the database for a given system, backend and version.
@@ -454,6 +502,11 @@ def get_database(
             the shared layer (sibling-row inheritance, including
             `kernel_source=default` fallback rows) so missing shapes are filled
             from older collected data; explicit formula-only modes keep it off.
+        shared_layer: explicit shared-layer override. ``None`` (default) derives
+            the flag from ``database_mode``; ``False`` restricts loading to the
+            active backend/version's own rows even under SILICON; ``True``
+            forces sibling inheritance on. Overridden templates are cached
+            separately from derived ones.
 
     Returns:
         PerfDatabase for the given system, backend, version.
@@ -467,7 +520,11 @@ def get_database(
         logger.error(f"No database version available for {system=}, {backend=}")
         return None
 
-    shared_flag = _shared_layer_enabled(database_mode)
+    shared_flag = _shared_layer_enabled(database_mode) if shared_layer is None else bool(shared_layer)
+    # Only pass the override kwarg when explicitly set: PerfDatabase derives the
+    # same flag from database_mode otherwise, and tests monkeypatch PerfDatabase
+    # with fakes that predate the kwarg.
+    extra_database_kwargs = {} if shared_layer is None else {"shared_layer": shared_flag}
     missing_data_candidate = None
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
@@ -497,6 +554,7 @@ def get_database(
                         version,
                         systems_root,
                         database_mode=database_mode,
+                        **extra_database_kwargs,
                     )
                     databases_cache[cache_key][backend][version] = database
                     return database
@@ -522,7 +580,9 @@ def get_database(
         except KeyError:
             logger.info(f"Loading estimate-only database for {system=}, {backend=}, {version=}")
             try:
-                database = PerfDatabase(system, backend, version, systems_root, database_mode=database_mode)
+                database = PerfDatabase(
+                    system, backend, version, systems_root, database_mode=database_mode, **extra_database_kwargs
+                )
                 databases_cache[cache_key][backend][version] = database
                 return database
             except Exception:
@@ -554,7 +614,6 @@ def _cached_configured_database_view(
     view._root_database_template = root_template
     view._default_database_mode = mode
     view._transfer_policy = policy
-    view._extracted_metrics_cache = {}
     view._is_query_view = True
 
     # Lazy support resolution binds loaded op tables onto its database. Rebind
@@ -575,13 +634,14 @@ def _get_configured_database_view(
     database: PerfDatabase,
     mode: str | common.DatabaseMode | None,
     transfer_policy=None,
+    shared_layer: bool | None = None,
 ) -> PerfDatabase:
     """Return a cached configured copy rooted at the original data template."""
     normalized_mode = _normalize_database_mode(mode)
     policy = common.resolve_transfer_policy(transfer_policy)
     root_template = getattr(database, "_root_database_template", database)
 
-    expected_shared_layer = _shared_layer_enabled(normalized_mode.name)
+    expected_shared_layer = _shared_layer_enabled(normalized_mode.name) if shared_layer is None else bool(shared_layer)
     if root_template.enable_shared_layer != expected_shared_layer:
         raise ValueError(
             f"Cannot create a {normalized_mode.name} query view from a database template with "
@@ -600,6 +660,7 @@ def get_database_view(
     allow_missing_data: bool = False,
     database_mode: str | common.DatabaseMode | None = None,
     transfer_policy=None,
+    shared_layer: bool | None = None,
 ) -> PerfDatabase | None:
     """Return an isolated, lightweight query view over a cached database.
 
@@ -609,7 +670,9 @@ def get_database_view(
     read-only perf tables while owning its interpolation cache and lazy
     support-matrix binding. ``database_mode`` is also forwarded to
     :func:`get_database` so EMPIRICAL/SOL views do not accidentally inherit the
-    shared SILICON data layer.
+    shared SILICON data layer. ``shared_layer`` explicitly overrides the
+    mode-derived shared-layer flag (see :func:`get_database`); regression
+    harnesses pass ``False`` to pin SILICON queries to per-version data.
     """
     mode = _normalize_database_mode(database_mode)
     database_kwargs = {
@@ -618,13 +681,14 @@ def get_database_view(
         "version": version,
         "allow_missing_data": allow_missing_data,
         "database_mode": mode.name,
+        "shared_layer": shared_layer,
     }
     if systems_paths is not None:
         database_kwargs["systems_paths"] = systems_paths
     database = get_database(**database_kwargs)
     if database is None:
         return None
-    return _get_configured_database_view(database, mode, transfer_policy)
+    return _get_configured_database_view(database, mode, transfer_policy, shared_layer=shared_layer)
 
 
 DatabaseRef = tuple[str, str, str, str]
@@ -1059,6 +1123,7 @@ class _LazySupportMatrix:
             "context_attention",
             "generation_attention",
             "context_mla",
+            "context_mla_granular",
             "generation_mla",
             "dsa_context_module",
             "dsa_generation_module",
@@ -1078,6 +1143,7 @@ class _LazySupportMatrix:
             "context_attention",
             "generation_attention",
             "context_mla",
+            "context_mla_granular",
             "generation_mla",
             "dsa_context_module",
             "dsa_generation_module",
@@ -1092,6 +1158,7 @@ class _LazySupportMatrix:
             "context_attention",
             "generation_attention",
             "context_mla",
+            "context_mla_granular",
             "generation_mla",
             "dsa_context_module",
             "dsa_generation_module",
@@ -1181,23 +1248,26 @@ class _LazySupportMatrix:
                 getattr(db, "_context_mla_module_data", None),
             )
 
+        if key == "context_mla_granular":
+            # Granular-table-only capability: the trtllm wideep context path
+            # queries the granular context_mla table directly (no module
+            # primary), so module-only slices must not count for it.
+            from aiconfigurator.sdk.operations.mla import ContextMLA
+
+            ContextMLA.load_data(db)
+            return _enum_key_names(getattr(db, "_context_mla_data", None))
+
         if key == "generation_mla":
             from aiconfigurator.sdk.operations.mla import GenerationMLA, MLAModule
 
             GenerationMLA.load_data(db)
             MLAModule.load_data(db)
-            # Granular data is keyed [kv_cache]...; module data is keyed
-            # [fmha][kv_cache][gemm]... so kv modes are at the second level there.
-            kv_modes: set[str] = set()
-            granular = getattr(db, "_generation_mla_data", None)
-            if granular:
-                kv_modes.update(_enum_key_names(granular))
-            module = getattr(db, "_generation_mla_module_data", None)
-            if module:
-                for fmha_mode in module:
-                    for kv_mode in module[fmha_mode]:
-                        kv_modes.add(kv_mode.name if hasattr(kv_mode, "name") else str(kv_mode))
-            return sorted(kv_modes)
+            # Both granular and module data key on kv_cache_dtype at the top
+            # level (generation MLA has no fmha axis).
+            return _merge_key_names(
+                getattr(db, "_generation_mla_data", None),
+                getattr(db, "_generation_mla_module_data", None),
+            )
 
         if key == "dsa_context_module":
             from aiconfigurator.sdk.operations.dsa import ContextDSAModule
@@ -1392,6 +1462,7 @@ class PerfDatabase:
         version: str,
         systems_root: str = "./systems",
         database_mode: str | None = None,
+        shared_layer: bool | None = None,
     ) -> None:
         """
         Initialize the perf database.
@@ -1403,12 +1474,17 @@ class PerfDatabase:
                 formula-only modes keep it off. Doesn't change which rows are
                 interpolated at query time; that's controlled by
                 `set_default_database_mode`.
+            shared_layer: explicit shared-layer override. ``None`` (default)
+                derives the flag from ``database_mode`` as described above;
+                ``False`` loads only the active backend/version's own rows even
+                under SILICON (used by regression harnesses to pin per-version
+                behavior); ``True`` forces sibling inheritance on.
         """
         self.system = system
         self.backend = backend
         self.version = version
         self.systems_root = systems_root
-        self._shared_layer_mode = _shared_layer_enabled(database_mode)
+        self._shared_layer_mode = _shared_layer_enabled(database_mode) if shared_layer is None else bool(shared_layer)
         # Which empirical transfer kinds are permitted (HYBRID/EMPIRICAL only). All on by
         # default = current behaviour; set_transfer_policy() narrows it for fine-grained
         # HYBRID control. Read at query time by op get_empirical, so it can be retuned on
@@ -1417,9 +1493,6 @@ class PerfDatabase:
         with open(os.path.join(systems_root, system + ".yaml")) as f:
             self.system_spec = SystemSpec(yaml.load(f, Loader=yaml.SafeLoader))
         self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
-
-        # Cache for extracted metric data to avoid repeated extraction in _interp_3d
-        self._extracted_metrics_cache = {}
 
         # Manifest entries grouped by op_file. Used by ``_build_op_sources``
         # (lazy-load path inside each op class) to discover which sibling
@@ -1468,22 +1541,13 @@ class PerfDatabase:
         def _generation_mla_kv_modes() -> list[str]:
             """Collect kv_cache_dtype names for generation MLA from both sources.
 
-            Granular data is keyed [kv_cache]... so top-level keys are kv modes.
-            Module data is keyed [fmha][kv_cache][gemm]... so kv modes are
-            at the second level.
+            Both granular and module data key on kv_cache_dtype at the top
+            level (generation MLA has no fmha axis).
             """
-            kv_modes: set[str] = set()
-            # Granular: top-level keys are kv_cache_dtype
-            granular = getattr(self, "_generation_mla_data", None)
-            if granular:
-                kv_modes.update(_enum_key_names(granular))
-            # Module: kv_cache_dtype is at the second level
-            module = getattr(self, "_generation_mla_module_data", None)
-            if module:
-                for fmha_mode in module:
-                    for kv_mode in module[fmha_mode]:
-                        kv_modes.add(kv_mode.name if hasattr(kv_mode, "name") else str(kv_mode))
-            return sorted(kv_modes)
+            return _merge_key_names(
+                getattr(self, "_generation_mla_data", None),
+                getattr(self, "_generation_mla_module_data", None),
+            )
 
         def _dsv4_megamoe_modes(data: dict | None) -> list[str]:
             """Collect MoE quant-mode names from DSv4 MegaMoE data.
@@ -1524,6 +1588,7 @@ class PerfDatabase:
                     getattr(self, "_context_mla_data", None),
                     getattr(self, "_context_mla_module_data", None),
                 ),
+                "context_mla_granular": _enum_key_names(getattr(self, "_context_mla_data", None)),
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
@@ -1551,6 +1616,7 @@ class PerfDatabase:
                     getattr(self, "_context_mla_data", None),
                     getattr(self, "_context_mla_module_data", None),
                 ),
+                "context_mla_granular": _enum_key_names(getattr(self, "_context_mla_data", None)),
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
@@ -1573,6 +1639,7 @@ class PerfDatabase:
                     getattr(self, "_context_mla_data", None),
                     getattr(self, "_context_mla_module_data", None),
                 ),
+                "context_mla_granular": _enum_key_names(getattr(self, "_context_mla_data", None)),
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
@@ -1764,7 +1831,7 @@ class PerfDatabase:
 
     def clear_runtime_caches(self) -> None:
         """Clear cached query/interpolation state while preserving loaded op data."""
-        self._extracted_metrics_cache.clear()
+        perf_interp.clear_caches()
         _cached_configured_database_view.cache_clear()
         for attr_name in dir(self):
             attr = getattr(self, attr_name)
@@ -2050,7 +2117,6 @@ class PerfDatabase:
         s: int,
         num_heads: int,
         kv_cache_dtype: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode = common.FMHAQuantMode.bfloat16,
         gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
@@ -2063,7 +2129,6 @@ class PerfDatabase:
             s,
             num_heads,
             kv_cache_dtype,
-            fmha_quant_mode,
             gemm_quant_mode,
             database_mode,
         )

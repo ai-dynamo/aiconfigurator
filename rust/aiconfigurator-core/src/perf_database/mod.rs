@@ -59,6 +59,7 @@ pub mod mhc;
 pub mod mla;
 pub mod moe;
 pub mod parquet_loader;
+pub mod perf_interp;
 pub mod state_space;
 pub mod wideep;
 pub mod wideep_mla;
@@ -170,8 +171,7 @@ impl PerfDatabase {
             // their roots stay as the direct system-wide dirs.
             gemm: GemmTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
             attention: AttentionTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
-            system_spec: spec,
-            mla: MlaTable::with_sources(data_root.clone(), perf_db_sources),
+            mla: MlaTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
             moe: MoeTable::with_sources(data_root.clone(), perf_db_sources),
             communication: CommunicationTable::with_sources(
                 data_root.clone(),
@@ -183,9 +183,15 @@ impl PerfDatabase {
             dsv4: Dsv4Table::with_sources(data_root.clone(), perf_db_sources),
             mhc: MhcTable::with_sources(data_root.clone(), perf_db_sources),
             wideep: WideEpTable::with_sources(data_root.clone(), perf_db_sources),
-            wideep_mla: WideEpMlaTable::with_sources(data_root.clone(), perf_db_sources),
+            wideep_mla: WideEpMlaTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
             wideep_moe: WideEpMoeTable::with_sources(data_root.clone(), perf_db_sources),
-            state_space: StateSpaceTable::with_sources(data_root.clone(), perf_db_sources),
+            state_space: StateSpaceTable::with_sources(
+                data_root.clone(),
+                backend,
+                version,
+                perf_db_sources,
+            ),
+            system_spec: spec,
             data_root,
         })
     }

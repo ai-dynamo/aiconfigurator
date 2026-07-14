@@ -20,13 +20,12 @@ enable_shared_layer)``, same as GEMM (and every other migrated op).
 
 from __future__ import annotations
 
-import copy
 import logging
 import math
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator.sdk import common, interpolation
+from aiconfigurator.sdk import common, perf_interp
 from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator.sdk.operations import util_empirical
 from aiconfigurator.sdk.operations.base import Operation, _read_filtered_rows
@@ -192,33 +191,6 @@ def _gen_headsize_ref_grid(database, kvcache_quant_mode, n_kv_lookup, target_hs,
 # Extrapolation target grids — lifted verbatim from the legacy blocks in
 # ``PerfDatabase.__init__`` so behavior stays bit-identical.
 
-# fmt: off
-_CONTEXT_ATTENTION_TARGET_X: list[int] = [
-    1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48,
-    56, 72, 96, 128,
-]  # n
-_CONTEXT_ATTENTION_TARGET_Y: list[int] = (
-    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-    + [4096 + i * 2048 for i in range(14)]
-    + [32768 + 16384 * i for i in range(6)]
-    + [131072 + 32768 * i for i in range(12)]
-    + [524288 + 65536 * i for i in range(9)]
-)  # s
-_CONTEXT_ATTENTION_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 384, 1024, 2048,
-]  # b
-
-_GENERATION_ATTENTION_TARGET_X: list[int] = [
-    1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48,
-    56, 72, 96, 128,
-]  # n
-_GENERATION_ATTENTION_TARGET_Y: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192,
-]  # b
-_GENERATION_ATTENTION_TARGET_Z: list[int] = [
-    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
-    32768, 65536, 131072, 262144, 2097152 * 8,
-]  # s
 # fmt: on
 
 
@@ -310,7 +282,9 @@ class ContextAttention(Operation):
                 load_context_attention_data(sources), PerfDataFilename.context_attention, primary_path
             )
 
-            cls._extrapolate(cls._data_cache[key])
+            # No load-time grid pre-expansion: queries resolve on the RAW grid via
+            # perf_interp (sqrt-space blend; the truncated large-seq x large-batch
+            # corner is ordinary out-of-range util-hold).
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -320,29 +294,6 @@ class ContextAttention(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the legacy 4-level (quant_mode → kv_cache_dtype → num_kv_heads
-        → head_size → window_size → grid) extrapolation."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-
-        for quant_mode in data_wrapper:
-            for kv_cache_dtype in data_wrapper[quant_mode]:
-                for num_kv_heads in data_wrapper[quant_mode][kv_cache_dtype]:
-                    for head_size in data_wrapper[quant_mode][kv_cache_dtype][num_kv_heads]:
-                        for window_size in data_wrapper[quant_mode][kv_cache_dtype][num_kv_heads][head_size]:
-                            data_dict = data_wrapper[quant_mode][kv_cache_dtype][num_kv_heads][head_size][window_size]
-                            min_x = min(data_dict.keys())
-                            filtered_x = [i for i in _CONTEXT_ATTENTION_TARGET_X if i >= min_x]
-                            interpolation.extrapolate_data_grid(
-                                data_dict=data_dict,
-                                target_x_list=filtered_x,
-                                target_y_list=_CONTEXT_ATTENTION_TARGET_Y,
-                                target_z_list=_CONTEXT_ATTENTION_TARGET_Z,
-                                sqrt_y_value=True,
-                            )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_context_attention)
@@ -504,8 +455,8 @@ class ContextAttention(Operation):
             # Use the real windowed slice when present -- validation shows it beats a
             # window=0 + SOL-ratio reconstruction (the latter is ~25-77% off vs measured
             # windowed data). When the windowed slice is absent or too sparse to
-            # interpolate, interp_3d fails accurately (raises) and HYBRID/EMPIRICAL fall
-            # back to get_empirical's window=0 + SOL derivation.
+            # interpolate, perf_interp fails accurately (raises) and HYBRID/EMPIRICAL
+            # fall back to get_empirical's window=0 + SOL derivation.
             attention_dict = util_empirical.require_data_slice(
                 data_wrapper,
                 fmha_quant_mode,
@@ -514,16 +465,27 @@ class ContextAttention(Operation):
                 head_size,
                 window_size,
             )
-            result = interpolation.interp_3d(
-                n,
-                full_s,
-                b,
-                attention_dict,
-                "cubic",
-                database._extracted_metrics_cache,
+            # Resolve on the raw (n, full_s, batch) grid: sqrt-space blend for the
+            # ~seq^2 curvature; past the staircase frontier (large seq x large
+            # batch, uncollected) the engine holds the boundary util and lets the
+            # SOL carry the growth. Samples are full attention, so the sol_fn is
+            # evaluated at prefix=0 with the slice's own kv-head/window setup.
+            config = perf_interp.context_attention_config(
+                sol_fn=lambda n_v, s_v, b_v: get_sol(
+                    b_v,
+                    s_v,
+                    0,
+                    n_v,
+                    n_v if n_kv_lookup == 0 else n_kv_lookup,
+                    head_size,
+                    window_size,
+                    kvcache_quant_mode,
+                    fmha_quant_mode,
+                )[0]
             )
-            latency = result["latency"] * prefix_correction
-            energy = result.get("energy", 0.0) * prefix_correction
+            result = perf_interp.query(config, attention_dict, n, full_s, b)
+            latency = perf_interp.get_value(result, "latency") * prefix_correction
+            energy = perf_interp.get_value(result, "energy") * prefix_correction
             return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
@@ -664,14 +626,10 @@ class GenerationAttention(Operation):
             )
 
             cls._correct_sol(database, cls._data_cache[key])
-            cls._raw_data_cache[key] = copy.deepcopy(cls._data_cache[key])
-            cls._extrapolate(cls._data_cache[key])
-            # Re-clamp after extrapolation: interpolated/extrapolated grid
-            # points can land below the SOL bound. The legacy init path ran
-            # ``_correct_data()`` a second time which caught these; replicate
-            # that here so standalone ``load_data`` callers get the same
-            # physically-consistent floor.
-            cls._correct_sol(database, cls._data_cache[key])
+            # No load-time grid pre-expansion: queries resolve on the RAW table
+            # via perf_interp, so the table IS the raw data (the former deepcopy
+            # for _raw_generation_attention_data is now just an alias).
+            cls._raw_data_cache[key] = cls._data_cache[key]
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -729,26 +687,6 @@ class GenerationAttention(Operation):
                                             ] = float(sol)
                                         else:
                                             data_wrapper[quant_mode][n_kv][head_size][window_size][n][b][s] = float(sol)
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Apply the legacy 4-level extrapolation grid."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-
-        for kv_cache_dtype in data_wrapper:
-            for num_kv_heads in data_wrapper[kv_cache_dtype]:
-                for head_size in data_wrapper[kv_cache_dtype][num_kv_heads]:
-                    for window_size in data_wrapper[kv_cache_dtype][num_kv_heads][head_size]:
-                        data_dict = data_wrapper[kv_cache_dtype][num_kv_heads][head_size][window_size]
-                        min_x = min(data_dict.keys())
-                        filtered_x = [i for i in _GENERATION_ATTENTION_TARGET_X if i >= min_x]
-                        interpolation.extrapolate_data_grid(
-                            data_dict=data_dict,
-                            target_x_list=filtered_x,
-                            target_y_list=_GENERATION_ATTENTION_TARGET_Y,
-                            target_z_list=_GENERATION_ATTENTION_TARGET_Z,
-                        )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_generation_attention)
@@ -888,7 +826,7 @@ class GenerationAttention(Operation):
             n_kv_lookup = n_kv if n_kv != n else 0
 
             # Use the real windowed slice when present (more accurate than a window=0 +
-            # SOL reconstruction); when absent/too sparse, interp_3d raises and
+            # SOL reconstruction); when absent/too sparse, perf_interp raises and
             # HYBRID/EMPIRICAL fall back to get_empirical's window=0 + SOL derivation.
             attention_dict = util_empirical.require_data_slice(
                 data_wrapper,
@@ -896,6 +834,20 @@ class GenerationAttention(Operation):
                 n_kv_lookup,
                 head_size,
                 window_size,
+            )
+            # Generation is ~linear in seq -> RAW grid resolve on the raw table.
+            # The +-10% seq-sample averaging is op-level smoothing (decode s
+            # drifts across a request) and is kept as-is.
+            config = perf_interp.generation_attention_config(
+                sol_fn=lambda n_v, b_v, s_v: get_sol(
+                    b_v,
+                    s_v,
+                    n_v,
+                    (n_v if n_kv_lookup == 0 else n_kv_lookup),
+                    head_size,
+                    window_size,
+                    kvcache_quant_mode,
+                )[0]
             )
             s_min = max(1, int(s * 0.9))
             s_max = max(s_min, int(s * 1.1))
@@ -905,9 +857,9 @@ class GenerationAttention(Operation):
             latency_sum = 0.0
             energy_sum = 0.0
             for s_i in s_samples:
-                r = interpolation.interp_3d(n, b, s_i, attention_dict, "bilinear", database._extracted_metrics_cache)
-                latency_sum += float(r["latency"])
-                energy_sum += float(r.get("energy", 0.0))
+                r = perf_interp.query(config, attention_dict, n, b, s_i)
+                latency_sum += perf_interp.get_value(r, "latency")
+                energy_sum += perf_interp.get_value(r, "energy")
 
             latency = latency_sum / sample_cnt
             energy = energy_sum / sample_cnt
@@ -976,7 +928,7 @@ class EncoderAttention(Operation):
     Owns ``_data_cache: {key: LoadedOpData}`` for the encoder attention CSV.
     Schema is simpler than context attention: MHA only (no n_kv), no KV cache
     (no kvcache_quant_mode), no sliding window. No SOL clamp. Grid extrapolation
-    reuses ``_CONTEXT_ATTENTION_TARGET_*``.
+    resolves on the raw grid via perf_interp.
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -1029,7 +981,7 @@ class EncoderAttention(Operation):
                 load_encoder_attention_data(sources), PerfDataFilename.encoder_attention, primary_path
             )
 
-            cls._extrapolate(cls._data_cache[key])
+            # No load-time grid pre-expansion: queries resolve on the RAW grid via perf_interp.
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -1039,26 +991,6 @@ class EncoderAttention(Operation):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    @classmethod
-    def _extrapolate(cls, data_wrapper) -> None:
-        """Densify the (n, s, b) grid. Reuses ``_CONTEXT_ATTENTION_TARGET_*``
-        since the encoder query shape matches context attention exactly."""
-        if data_wrapper is None or not getattr(data_wrapper, "loaded", False):
-            return
-
-        for quant_mode in data_wrapper:
-            for head_size in data_wrapper[quant_mode]:
-                data_dict = data_wrapper[quant_mode][head_size]
-                min_x = min(data_dict.keys())
-                filtered_x = [i for i in _CONTEXT_ATTENTION_TARGET_X if i >= min_x]
-                interpolation.extrapolate_data_grid(
-                    data_dict=data_dict,
-                    target_x_list=filtered_x,
-                    target_y_list=_CONTEXT_ATTENTION_TARGET_Y,
-                    target_z_list=_CONTEXT_ATTENTION_TARGET_Z,
-                    sqrt_y_value=True,
-                )
 
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_encoder_attention)
@@ -1129,8 +1061,15 @@ class EncoderAttention(Operation):
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
             attention_dict = util_empirical.require_data_slice(data_wrapper, fmha_quant_mode, head_size)
-            result = interpolation.interp_3d(n, s, b, attention_dict, "cubic", database._extracted_metrics_cache)
-            return database._interp_pr(result["latency"], energy=result.get("energy", 0.0))
+            # Encoder is full N^2 (~seq^2 along seq, ~linear along heads/batch):
+            # context_attention_config = sqrt on the seq axis only, raw elsewhere.
+            config = perf_interp.context_attention_config(
+                sol_fn=lambda n_v, s_v, b_v: get_sol(b_v, s_v, n_v, head_size, fmha_quant_mode)[0]
+            )
+            result = perf_interp.query(config, attention_dict, n, s, b)
+            latency = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
+            return database._interp_pr(latency, energy=energy)
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,
