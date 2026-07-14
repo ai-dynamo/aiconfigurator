@@ -508,6 +508,96 @@ impl Dsv4Table {
         }
     }
 
+    /// Collected context-module points `(prefix, s, b) -> latency` for the
+    /// operator-layer util-calibration grid (Python
+    /// `_query_context_attn_table::get_empirical`'s `_slice()`:
+    /// `require_data_slice(data, fmha, kv, gemm)` -> head resolution ->
+    /// `require_data_slice(quant_data, head, compress_ratio)`). Slices exactly
+    /// like the silicon query ([`select_resolved`], which additionally keys on
+    /// `architecture` — Python's loader merges architectures at load; shipped
+    /// files carry one). Missing slice / empty node is a typed miss.
+    pub fn context_points(
+        &self,
+        attn_kind: AttnKind,
+        local_heads: u32,
+        kv_quant: KvCacheQuantMode,
+        fmha_quant: FmhaQuantMode,
+        gemm_quant: GemmQuantMode,
+        architecture: &str,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = match attn_kind {
+            AttnKind::Csa => self.load_csa_context()?,
+            AttnKind::Hca => self.load_hca_context()?,
+        };
+        let node = select_resolved(grids, architecture, fmha_quant, kv_quant, gemm_quant, local_heads)?;
+        let points = perf_interp::node_points(node);
+        if points.is_empty() {
+            return Err(AicError::PerfDatabase(format!(
+                "DSV4 context module data empty for local_heads={local_heads}, \
+                 attn_kind={attn_kind:?}, architecture='{architecture}'"
+            )));
+        }
+        Ok(points)
+    }
+
+    /// Collected generation-module points `(b, s_total) -> latency` for the
+    /// operator-layer util-calibration grid (Python
+    /// `_query_generation_attn_table::get_empirical`'s `_slice()`:
+    /// `require_data_slice(data, kv, gemm)` -> head resolution ->
+    /// `require_data_slice(quant_data, head, compress_ratio)`).
+    ///
+    /// Python's GENERATION loader keys `[kv][gemm][head]` with NO fmha level
+    /// (the CSV `mla_dtype` column is ignored on load), while the Rust table
+    /// keys it from the column: gather every matching `(arch, kv, gemm)` key
+    /// regardless of fmha. Shipped files carry one `mla_dtype` per
+    /// `(kv, gemm)`; if several existed Python would last-wins-merge shared
+    /// cells while this concatenation keeps both (the util grid then prefers
+    /// the first at an exact duplicate) — flagged here, not silently
+    /// divergent, because no shipped table hits it.
+    pub fn generation_points(
+        &self,
+        attn_kind: AttnKind,
+        local_heads: u32,
+        kv_quant: KvCacheQuantMode,
+        gemm_quant: GemmQuantMode,
+        architecture: &str,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = match attn_kind {
+            AttnKind::Csa => self.load_csa_generation()?,
+            AttnKind::Hca => self.load_hca_generation()?,
+        };
+        let mut by_head: BTreeMap<u32, Vec<&Node>> = BTreeMap::new();
+        for (key, per_head) in &grids.by_keys {
+            if key.architecture == architecture
+                && key.kv_quant == kv_quant.name()
+                && key.gemm_quant == gemm_quant.name()
+            {
+                for (&head, node) in per_head {
+                    by_head.entry(head).or_default().push(node);
+                }
+            }
+        }
+        let head = resolve_head_key(&by_head, local_heads).ok_or_else(|| {
+            AicError::PerfDatabase(format!(
+                "DSV4 generation module data missing for local_heads={local_heads}, \
+                 attn_kind={attn_kind:?}, kv='{}', gemm='{}', architecture='{architecture}'",
+                kv_quant.name(),
+                gemm_quant.name()
+            ))
+        })?;
+        let points: Vec<(Vec<f64>, f64)> = by_head[&head]
+            .iter()
+            .flat_map(|node| perf_interp::node_points(node))
+            .collect();
+        if points.is_empty() {
+            return Err(AicError::PerfDatabase(format!(
+                "DSV4 generation module data empty for local_heads={local_heads}, \
+                 attn_kind={attn_kind:?}, architecture='{architecture}'"
+            )));
+        }
+        Ok(points)
+    }
+
     /// Absolute top_last topk latency at `(isl, step)` for batch `b`. CP
     /// composition only — reads the RAW top_last rows the calib loader
     /// retains alongside the DELTA pairs (Python `_csa_topk_top_last` /
@@ -974,7 +1064,7 @@ fn compressed_context_pairs(batch: i128, query_len: i128, prefix: i128, ratio: i
 /// `dims.local_o_groups` is the rank-local group count Python passes as
 /// `o_groups` (see [`Dsv4SolDims`]).
 #[allow(clippy::too_many_arguments)]
-fn dsv4_attention_sol_ms(
+pub(crate) fn dsv4_attention_sol_ms(
     spec: &SystemSpec,
     dims: &Dsv4SolDims,
     compress_ratio: i64,

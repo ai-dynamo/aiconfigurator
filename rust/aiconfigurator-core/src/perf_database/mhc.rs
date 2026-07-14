@@ -129,6 +129,43 @@ impl MhcTable {
         query_token_curve(by_tokens, num_tokens as f64, &|t| sol(op, t))
     }
 
+    /// Collected `(num_tokens,) -> latency` points for one RESOLVED op half
+    /// (`pre` / `post`), for the operator-layer util-calibration grid (Python
+    /// `_query_mhc_table::get_empirical`'s
+    /// `require_data_slice(mhc_data, op_name, hc_mult, hidden_size)` +
+    /// `iter_grid(..., depth=1)`). Missing key / empty curve is a typed
+    /// `PerfDatabase` miss; the `both` composition lives in the operator
+    /// (Python sums `_emp_for_op("pre") + _emp_for_op("post")`).
+    pub fn module_points(
+        &self,
+        op: &str,
+        hc_mult: u32,
+        hidden_size: u32,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load()?;
+        let key = MhcKey {
+            op_name: op.to_string(),
+            hc_mult,
+            hidden_size,
+        };
+        let by_tokens = grids.by_keys.get(&key).ok_or_else(|| {
+            AicError::PerfDatabase(format!(
+                "MHC module data missing for {key:?} at {}",
+                self.data_root.display()
+            ))
+        })?;
+        if by_tokens.is_empty() {
+            return Err(AicError::PerfDatabase(format!(
+                "MHC module data empty for {key:?} at {}",
+                self.data_root.display()
+            )));
+        }
+        Ok(by_tokens
+            .iter()
+            .map(|(&tokens, &latency)| (vec![f64::from(tokens)], latency))
+            .collect())
+    }
+
     fn load(&self) -> Result<&MhcGrids, AicError> {
         let cell = self
             .module

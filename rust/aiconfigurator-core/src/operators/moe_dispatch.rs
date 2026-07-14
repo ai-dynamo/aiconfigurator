@@ -637,7 +637,7 @@ mod tests {
             &[(2, 16, 64, 100.0), (8, 16, 64, 900.0)],
         );
         let mut db = b200_sglang_db(); // b200_sxm: num_gpus_per_node = 8
-        db.wideep = crate::perf_database::wideep::WideEpTable::new(tmp.path().to_path_buf());
+        db.tables_mut().wideep = crate::perf_database::wideep::WideEpTable::new(tmp.path().to_path_buf());
 
         // num_gpus = moe_tp * moe_ep = 16 -> node_num = 16 / 8 = 2.
         let got = deepep_op(16, true, DispatchFlavor::DeepEpNormal)
@@ -688,7 +688,7 @@ mod tests {
             &[(1, 64, 30.0, 20.0)], // full sum = 50us
         );
         let mut db = b200_sglang_db();
-        db.wideep = crate::perf_database::wideep::WideEpTable::new(tmp.path().to_path_buf());
+        db.tables_mut().wideep = crate::perf_database::wideep::WideEpTable::new(tmp.path().to_path_buf());
 
         // Context (DeepEP normal): pre == combine == full point sum.
         let pre = deepep_op(8, true, DispatchFlavor::DeepEpNormal)

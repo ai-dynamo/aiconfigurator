@@ -414,6 +414,57 @@ impl DsaTable {
         )
     }
 
+    /// RAW context slice `[num_heads][prefix][isl][batch]` for the exact
+    /// (arch, quants) key, with Python `_select_dsa_backend`'s fallback chain
+    /// applied. This is the calibration view the util-empirical path reads:
+    /// with load-time pre-expansion gone, Python's `_raw_context_dsa_module_data`
+    /// is a plain alias of the loaded table, and these grids ARE that table.
+    /// Typed `AicError::PerfDatabase` when the table/slice is missing — the
+    /// operator maps it to a typed coverage miss, mirroring Python
+    /// `_raw_slice` raising `PerfDataNotAvailableError`.
+    pub fn context_raw_slice(
+        &self,
+        key: &DsaKey,
+        dsa_backend: &str,
+    ) -> Result<&DsaHeadGrid, AicError> {
+        let grids = self.load_context()?;
+        grids
+            .by_keys
+            .get(key)
+            .and_then(|by_backend| select_dsa_backend(by_backend, dsa_backend))
+            .ok_or_else(|| {
+                missing(
+                    "raw context DSA module",
+                    &self.data_root,
+                    format!("{key:?} (dsa_backend={dsa_backend})"),
+                )
+            })
+    }
+
+    /// RAW generation slice for the exact (arch, quants) key, backend-selected
+    /// like [`Self::context_raw_slice`]. The load-time (isl, step) -> seq
+    /// collapse stores `step = 0, isl = seq`, so the returned grid reads as
+    /// `[num_heads][0][seq][batch]` — the same measured rows Python's
+    /// `_raw_generation_dsa_module_data` alias exposes as `[num_heads][b][s]`.
+    pub fn generation_raw_slice(
+        &self,
+        key: &DsaKey,
+        dsa_backend: &str,
+    ) -> Result<&DsaHeadGrid, AicError> {
+        let grids = self.load_generation()?;
+        grids
+            .by_keys
+            .get(key)
+            .and_then(|by_backend| select_dsa_backend(by_backend, dsa_backend))
+            .ok_or_else(|| {
+                missing(
+                    "raw generation DSA module",
+                    &self.data_root,
+                    format!("{key:?} (dsa_backend={dsa_backend})"),
+                )
+            })
+    }
+
     fn load_context(&self) -> Result<&DsaGrids, AicError> {
         let cell = self
             .context
@@ -537,7 +588,7 @@ fn indexer_cache_entry_bytes(index_head_dim: i64) -> i64 {
 /// attention group (fmha_quant) whose exact KV pair count is
 /// `sum_{i=0..s-1} min(prefix+i+1, index_topk)`.
 #[allow(clippy::too_many_arguments)]
-fn dsa_context_sol_ms(
+pub(crate) fn dsa_context_sol_ms(
     spec: &SystemSpec,
     dims: &DsaDims,
     index_topk: i64,
@@ -632,7 +683,7 @@ fn dsa_context_sol_ms(
 /// `GenerationDSAModule._query_generation_dsa_module_table::get_sol`
 /// (1 token per request; the attention group is hardcoded bfloat16 in
 /// Python — `fmha_mode = FMHAQuantMode.bfloat16` — so no fmha arg here).
-fn dsa_generation_sol_ms(
+pub(crate) fn dsa_generation_sol_ms(
     spec: &SystemSpec,
     dims: &DsaDims,
     kv_quant: KvCacheQuantMode,

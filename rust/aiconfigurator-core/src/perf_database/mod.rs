@@ -11,6 +11,7 @@
 //! the WideEP/DeepEP all-to-all variants.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::common::enums::{DatabaseMode, TransferPolicy};
 use crate::common::error::AicError;
@@ -80,13 +81,10 @@ pub use wideep::WideEpTable;
 pub use wideep_mla::WideEpMlaTable;
 pub use wideep_moe::WideEpMoeTable;
 
-/// Modular performance database for a specific
-/// `<system>/<backend>/<version>` tuple.
-///
-/// `load` does the cheap work: resolves the data directory from the system
-/// YAML and constructs empty per-family tables. The first query on each
-/// family triggers the CSV read.
-pub struct PerfDatabase {
+/// The loaded per-family perf tables for one `<system>/<backend>/<version>`
+/// tuple — the mode-independent, immutable-after-load data half of
+/// [`PerfDatabase`]. Shared (via `Arc`) between mode views.
+pub struct PerfTables {
     pub system: String,
     pub backend: String,
     pub version: String,
@@ -104,6 +102,23 @@ pub struct PerfDatabase {
     pub wideep_mla: WideEpMlaTable,
     pub wideep_moe: WideEpMoeTable,
     pub state_space: StateSpaceTable,
+}
+
+/// Modular performance database for a specific
+/// `<system>/<backend>/<version>` tuple.
+///
+/// `load` does the cheap work: resolves the data directory from the system
+/// YAML and constructs empty per-family tables. The first query on each
+/// family triggers the CSV read.
+///
+/// Structurally this is a mode-configured VIEW over shared [`PerfTables`]
+/// (mirroring Python's configured query views): the tables deref through, so
+/// `db.gemm` / `db.system_spec` read as before, while `database_mode` /
+/// `transfer_policy` are per-view. [`PerfDatabase::silicon_view`] derives the
+/// SILICON view `FallbackOp` (and MSA's cross-op DSA probe) evaluate against
+/// under HYBRID.
+pub struct PerfDatabase {
+    tables: Arc<PerfTables>,
     /// Query mode (Python's `database._default_database_mode`). SILICON
     /// queries collected tables only; HYBRID falls back to the util-space
     /// empirical layer on a typed silicon miss; EMPIRICAL always answers
@@ -114,12 +129,20 @@ pub struct PerfDatabase {
     pub transfer_policy: TransferPolicy,
     /// Memo of built util-calibration grids, keyed by op/slice identity
     /// (see `operators::util_empirical`). Tables are immutable after load and
-    /// mode/policy are fixed per database instance, so the cache never needs
-    /// invalidation.
-    pub util_grids: UtilGridCache,
+    /// grid keys name their slice, so the memo is shared across mode views
+    /// and never needs invalidation.
+    pub util_grids: Arc<UtilGridCache>,
     /// Memo of zero-aware delta lookups (the `compute_scale` empirical
     /// mechanism); same keying/lifetime rationale as `util_grids`.
-    pub delta_lookups: DeltaLookupCache,
+    pub delta_lookups: Arc<DeltaLookupCache>,
+}
+
+impl std::ops::Deref for PerfDatabase {
+    type Target = PerfTables;
+
+    fn deref(&self) -> &PerfTables {
+        &self.tables
+    }
 }
 
 impl PerfDatabase {
@@ -178,7 +201,7 @@ impl PerfDatabase {
             .oneccl_version
             .as_ref()
             .map(|v| system_data_root.join("oneccl").join(v));
-        Ok(Self {
+        let tables = PerfTables {
             system: system.to_string(),
             backend: backend.to_string(),
             version: version.to_string(),
@@ -211,10 +234,13 @@ impl PerfDatabase {
             ),
             system_spec: spec,
             data_root,
+        };
+        Ok(Self {
+            tables: Arc::new(tables),
             database_mode: DatabaseMode::default(),
             transfer_policy: TransferPolicy::ALL,
-            util_grids: UtilGridCache::new(),
-            delta_lookups: DeltaLookupCache::new(),
+            util_grids: Arc::new(UtilGridCache::new()),
+            delta_lookups: Arc::new(DeltaLookupCache::new()),
         })
     }
 
@@ -225,6 +251,32 @@ impl PerfDatabase {
         self.database_mode = database_mode;
         self.transfer_policy = transfer_policy;
         self
+    }
+
+    /// Test-only mutable access to the shared tables (panics if the view has
+    /// been cloned — synthetic-table injection must happen before any
+    /// `silicon_view`). Production code never mutates loaded tables.
+    #[cfg(test)]
+    pub(crate) fn tables_mut(&mut self) -> &mut PerfTables {
+        Arc::get_mut(&mut self.tables).expect("tables Arc must be unique for test mutation")
+    }
+
+    /// The SILICON view over the same loaded tables (cheap: `Arc` clones).
+    ///
+    /// Mirrors Python `FallbackOp.query`'s
+    /// `_get_configured_database_view(database, SILICON, transfer_policy)`:
+    /// under HYBRID the primary op is evaluated silicon-only so the module
+    /// table's absence falls to the granular fallback chain instead of being
+    /// hybrid-estimated at module level. Also used by MSA's cross-op DSA
+    /// utilisation probe.
+    pub fn silicon_view(&self) -> PerfDatabase {
+        PerfDatabase {
+            tables: Arc::clone(&self.tables),
+            database_mode: DatabaseMode::Silicon,
+            transfer_policy: self.transfer_policy,
+            util_grids: Arc::clone(&self.util_grids),
+            delta_lookups: Arc::clone(&self.delta_lookups),
+        }
     }
 }
 

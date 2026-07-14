@@ -326,7 +326,22 @@ impl Op {
                 // skip subsequent retries — we don't bother here because the
                 // hot-path penalty is one `OnceLock::get` per call on a
                 // populated path and one retry on a missing one.)
-                match op.primary.query(db, ctx) {
+                //
+                // Under HYBRID the primary is evaluated against a SILICON
+                // view (Python swaps in `_get_configured_database_view(db,
+                // SILICON, transfer_policy)`): a missing module table must
+                // fall to the granular fallback chain, not be hybrid-
+                // estimated at module level. The fallback ops then run
+                // against the ORIGINAL (hybrid) database.
+                let silicon_db;
+                let primary_db: &PerfDatabase =
+                    if db.database_mode == crate::common::enums::DatabaseMode::Hybrid {
+                        silicon_db = db.silicon_view();
+                        &silicon_db
+                    } else {
+                        db
+                    };
+                match op.primary.query(primary_db, ctx) {
                     Ok(r) => Ok(r),
                     Err(AicError::PerfDatabase(_)) | Err(AicError::Io { .. }) => {
                         let mut total = 0.0_f64;
