@@ -9,10 +9,14 @@ available. The module owns SGLang-specific kernel selection, quantization
 helpers, SM filters, and perf logging.
 """
 
-__compat__ = "sglang>=0.5.10rc0"
+__compat__ = "sglang==0.5.14"
 
 import os
 import random
+
+# SGLang reads this flag while importing ``deep_gemm_wrapper.compile_utils``.
+# Set it before any SGLang imports so a task compiles only its requested M.
+os.environ.setdefault("SGLANG_JIT_DEEPGEMM_PRECOMPILE", "0")
 
 import pkg_resources
 import torch
@@ -27,7 +31,6 @@ from collector.case_generator import get_gemm_case_specs
 try:
     from flashinfer import fp4_quantize as flashinfer_fp4_quantize
     from flashinfer import mm_fp4 as flashinfer_mm_fp4
-    from flashinfer import shuffle_matrix_sf_a as flashinfer_shuffle_sf_a
 
     HAS_FLASHINFER_FP4 = True
 except ImportError:
@@ -40,10 +43,6 @@ from sglang.srt.layers.deep_gemm_wrapper import (
 from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
 
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
-
-# Disable DeepGEMM JIT precompilation (compiles ALL M values per unique N,K pair).
-# The collector only needs the specific M being tested.
-os.environ.setdefault("SGLANG_JIT_DEEPGEMM_PRECOMPILE", "0")
 
 
 def get_gemm_test_cases():
@@ -76,6 +75,14 @@ def get_gemm_test_cases():
         n = gemm_common_testcase.n
         k = gemm_common_testcase.k
         for gemm_type in gemm_list:
+            # FIXME(kernel-limit, 2026-07-05): inherited pre-#1302 claim that
+            # DeepGEMM fp8_block (128x128 block scales) and the FlashInfer
+            # NVFP4 layout cannot represent n<128 or k<128. Removing it adds
+            # 6,216 (n,k,x) specs per affected mode on BOTH platforms (SM90
+            # fp8_block included), so it is a shared coverage-contract change
+            # that must not ride along a Blackwell fix; re-verify against
+            # framework source on the next version bump and either convert to
+            # a probe-and-raise or delete.
             if (gemm_type == "nvfp4" or gemm_type == "fp8_block") and (n < 128 or k < 128):
                 continue
 
@@ -144,16 +151,38 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
     ], "not support gemm type"
     torch.cuda.set_device(device)
     M = batch_size  # noqa: N806
-
-    def round_up(x, m):
-        return (x + m - 1) // m * m
+    sm_version = get_sm_version()
+    fp4_backend = None
+    if gemm_type == "nvfp4":
+        if not HAS_FLASHINFER_FP4:
+            raise RuntimeError("SGLang NVFP4 GEMM requires FlashInfer FP4 quantization support")
+        if N % 128 != 0 or K % 64 != 0:
+            # The 0.5.14 FlashInfer path consumes the modelopt 128x4
+            # block-scale layout without synthetic padding; misaligned weights
+            # cannot be quantized into that layout. The current shared sweep
+            # contains no such shape (B200 audit 2026-07-05: 0/483 unique
+            # (n,k) misaligned), so this guard exists to classify rather than
+            # silently drop any future misaligned case.
+            raise ValueError(
+                f"SGLang NVFP4 dense GEMM requires n % 128 == 0 and k % 64 == 0 "
+                f"for the modelopt block-scale layout, got n={N}, k={K}"
+            )
+        # Mirrors SGLang 0.5.14 initialize_fp4_gemm_config
+        # (python/sglang/srt/layers/quantization/fp4_utils.py:148-161 at image
+        # source 49e384ce): "auto" resolves to flashinfer_cutedsl (mm_fp4
+        # backend "cute-dsl") when is_sm100_supported() (major 10 -> SM100 and
+        # SM103), marlin on SM80-89, and flashinfer_cutlass (mm_fp4 backend
+        # "cutlass") otherwise, which is the SM120 path.
+        if sm_version in {100, 103}:
+            fp4_backend = "cute-dsl"
+        elif sm_version == 120:
+            fp4_backend = "cutlass"
+        else:
+            raise ValueError(f"SGLang NVFP4 dense GEMM is not implemented for SM{sm_version}")
 
     def create_gemm():
         dtype = torch.bfloat16
         if gemm_type == "nvfp4":
-            if not HAS_FLASHINFER_FP4:
-                return None
-
             # Prepare source data: Activation A [M, K] in BF16
             a_bf16 = torch.randn((M, K), device=device, dtype=dtype)
 
@@ -165,27 +194,18 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
             b_global_scale = torch.tensor([1.0], device=device, dtype=torch.float32)
             alpha = 1.0 / (a_global_scale * b_global_scale)
 
-            # Pre-quantize and Shuffle Weight B (load time process)
-            b_fp4_linear, b_sf_linear = flashinfer_fp4_quantize(
-                b_bf16_dummy, b_global_scale, is_sf_swizzled_layout=False
+            # SGLang 0.5.14 selects CuTeDSL on SM100/103 and CUTLASS on
+            # SM120. Both consume the modelopt swizzled scale layout; the
+            # shuffle_matrix_a/sf_a layout belongs to the TRTLLM backend.
+            b_fp4, b_sf = flashinfer_fp4_quantize(
+                b_bf16_dummy,
+                b_global_scale,
+                is_sf_swizzled_layout=True,
             )
-
-            from flashinfer import shuffle_matrix_a as flashinfer_shuffle_a
-
-            epilogue_tile_m = 128
             del b_bf16_dummy
-            b_fp4_shuffled = flashinfer_shuffle_a(b_fp4_linear, epilogue_tile_m)
-            del b_fp4_linear
-            b_sf_shuffled = flashinfer_shuffle_sf_a(b_sf_linear.view(torch.uint8), epilogue_tile_m).view(
-                torch.float8_e4m3fn
-            )
-            del b_sf_linear
-            b_fp4_final = b_fp4_shuffled.t()
-            del b_fp4_shuffled
-            b_sf_final = b_sf_shuffled.t()
-            del b_sf_shuffled
-
-            out = torch.empty((M, round_up(N, 128)), device=device, dtype=dtype)
+            b_fp4 = b_fp4.t()
+            b_sf = b_sf.t()
+            out = torch.empty((M, N), device=device, dtype=dtype)
 
             def gemm_op():
                 # Dynamic Quantization of Activation + GEMM
@@ -193,7 +213,14 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
                     a_bf16, a_global_scale, is_sf_swizzled_layout=True
                 )
                 return flashinfer_mm_fp4(
-                    a_fp4_dynamic, b_fp4_final, a_sf_dynamic, b_sf_final, alpha, dtype, backend="cutlass", out=out
+                    a_fp4_dynamic,
+                    b_fp4,
+                    a_sf_dynamic,
+                    b_sf,
+                    alpha,
+                    dtype,
+                    backend=fp4_backend,
+                    out=out,
                 )
 
             return gemm_op
@@ -299,7 +326,18 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
         finally:
             torch.cuda.nvtx.range_pop()
 
-        log_perf(
+        kernel_source = {
+            "bfloat16": "sglang_torch_linear",
+            "fp8": "sglang_sgl_kernel_fp8_scaled_mm",
+            "fp8_block": "sglang_deepgemm_gemm_nt_f8f8bf16",
+        }.get(gemm_type)
+        if gemm_type == "nvfp4":
+            kernel_source = (
+                "sglang_flashinfer_cutedsl_nvfp4" if fp4_backend == "cute-dsl" else "sglang_flashinfer_cutlass_nvfp4"
+            )
+        if kernel_source is None:
+            raise RuntimeError(f"No SGLang kernel source resolved for GEMM type {gemm_type!r}")
+        if not log_perf(
             item_list=[
                 {"gemm_dtype": gemm_type, "m": M, "n": N, "k": K, "latency": results["latency_ms"] / len(op_list)}
             ],
@@ -307,10 +345,11 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
             version=pkg_resources.get_distribution("sglang").version,
             device_name=torch.cuda.get_device_name(device),
             op_name="gemm",
-            kernel_source="sglang",
+            kernel_source=kernel_source,
             perf_filename=perf_filename,
             power_stats=results["power_stats"],
-        )
+        ):
+            raise RuntimeError(f"Failed to persist SGLang GEMM performance row to {perf_filename}")
     finally:
         op_list.clear()
         torch.cuda.empty_cache()

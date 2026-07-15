@@ -13,7 +13,7 @@ areas:
     github_team: "@ai-dynamo/aiconfigurator-runtime"
     path_globs:
       - src/
-      - rust/               # new since the hand-written file
+      - aic-core/            # rust core relocated here by main #1322 (was rust/)
       - collector/
       - tools/sanity_check/
       - tools/simple_sdk_demo/
@@ -65,7 +65,7 @@ shared:
     owners: [generators, docs]
   - glob: src/aiconfigurator/cli/
     owners: [generators, docs]
-  - glob: rust/
+  - glob: aic-core/
     owners: [runtime, docs]
   - glob: collector/
     owners: [runtime, docs]

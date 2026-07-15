@@ -23,7 +23,7 @@
 
 # === runtime  (@ai-dynamo/aiconfigurator-runtime) ===
 /src/                             @ai-dynamo/aiconfigurator-runtime
-/rust/                            @ai-dynamo/aiconfigurator-runtime
+/aic-core/                        @ai-dynamo/aiconfigurator-runtime
 /collector/                       @ai-dynamo/aiconfigurator-runtime
 
 # === generators  (@ai-dynamo/aiconfigurator-generators) ===
@@ -67,7 +67,6 @@
 
 # --- Shared ownership: multi-team (any one approves; wins via last-match) ---
 /src/                             @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
-/rust/                            @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 /tests/                           @ai-dynamo/aiconfigurator-runtime @ai-dynamo/aiconfigurator-generators @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
 /tools/                           @ai-dynamo/aiconfigurator-generators @ai-dynamo/maintainers-aiconfigurator
 /docker/                          @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
@@ -76,6 +75,7 @@
 /.claude/                         @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
 /.github/                         @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
 /AGENTS.md                        @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
+/aic-core/                        @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 /.gitignore                       @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
 /CODEOWNERS                       @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
 /Cargo.toml                       @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator

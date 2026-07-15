@@ -44,7 +44,7 @@ def test_representative_routing_contract() -> None:
         "@ai-dynamo/aiconfigurator-generators",
         MAINTAINERS,
     }
-    assert _owners("rust/aiconfigurator-core/Cargo.toml") == {
+    assert _owners("aic-core/rust/aiconfigurator-core/Cargo.toml") == {
         "@ai-dynamo/aiconfigurator-runtime",
         MAINTAINERS,
     }

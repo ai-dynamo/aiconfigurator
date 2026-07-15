@@ -10,6 +10,15 @@ configs with Dynamo + trtllm 1.0.0rc4 worker.
 If you want to go through the process, you can try belowing commands. However, you need to prepare the env by yourself such as installing a specific trtllm version.
 This process is not well verified, you need to debug sometimes.
 
+For a framework-version or GPU-platform upgrade, follow the
+[Collector Upgrade Playbook](../docs/perf_database/collector-upgrade-playbook.md).
+The repo-tracked [`aic-auto-collect`](../.claude/skills/aic-auto-collect/SKILL.md)
+skill applies that workflow during long, resumable collection runs.
+SGLang 0.5.14 Hopper/Blackwell follow-up work must also consult the
+platform alignment ledger, a local campaign record kept outside the repo
+(`docs/perf_database/sglang-0.5.14-hopper-blackwell-ledger.md` in the
+campaign workspace).
+
 # Preparation
 Before collecting the data, make sure you own the whole node and no interfierence happens.
 Next, please enable persistent-mode and lock frequency of the node. Make sure the cooling system of the node is working well.
@@ -143,9 +152,8 @@ wideep/*/registry.py — WideEP-only ops appended when the v2 plan requests them
 network/             — collective communication collectors and Slurm network jobs
 ```
 
-WideEP entries in `framework_manifest.yaml` must keep the same framework version
-as their non-WideEP framework entry. If a WideEP collector needs a special image,
-put only the image override in the WideEP entry and keep the version aligned.
+WideEP entries in `framework_manifest.yaml` describe independent runtimes.
+`collect.py` requires the exact public version and rejects mixed-pin runs.
 
 ## File Naming Convention
 
@@ -397,17 +405,25 @@ Running without `--resume` always starts fresh (overwrites old checkpoint).
 
 ## For SGLang
 
-Suggest to start from lmsysorg docker image. Say, for 0.5.6.post2, we can use lmsysorg/sglang:v0.5.6.post2-cu126
+Use the pinned stock image, `lmsysorg/sglang:v0.5.14` (or its `-cu130`
+variant), for normal SGLang collection.
+
 ```bash
 python3 collect.py --backend sglang
 ```
-This collects all SGLang ops in a single pass, including:
+
+This collects the stock SGLang ops, including:
+
 - GEMM operations (FP8, BF16, INT8, INT4)
 - MLA (Multi-head Latent Attention) for context and generation
 - MLA BMM (Batch Matrix Multiplication) operations
 - MoE (Mixture of Experts) operations
 - Normal attention operations
-- WideEP / DeepSeek-specific collectors (MLA, MLP, DeepEP MoE)
+
+The retained `wideep_moe` op remains pinned to its separate SGLang 0.5.10 image
+and is not part of the stock model plans. Request it explicitly in a separate
+run. WideEP MLA is not registered because its legacy wrapper now reaches the
+stock 0.5.14-only module implementation.
 
 ### DeepEP multi-node collector
 For **DeepSeek V3** models with DeepEP MoE, inter-node communication data requires a separate multi-node setup:

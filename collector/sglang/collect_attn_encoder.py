@@ -12,7 +12,7 @@ SM dispatch mirrors ``VisionAttention._determine_attention_backend``:
 Quant: bf16 only. SGLang upstream does not support fp8 ViT FMHA.
 """
 
-__compat__ = "sglang>=0.5.11"
+__compat__ = "sglang==0.5.14"
 
 from typing import NamedTuple
 
@@ -182,7 +182,7 @@ def run_encoder_attention_torch(
 
     latency = results["latency_ms"]
 
-    log_perf(
+    if not log_perf(
         item_list=[
             {
                 "batch_size": batch_size,
@@ -200,7 +200,8 @@ def run_encoder_attention_torch(
         kernel_source=backend_tag,
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
-    )
+    ):
+        raise RuntimeError(f"Failed to persist SGLang encoder attention performance row to {perf_filename}")
 
     return Timing(latency * 1e-3)
 

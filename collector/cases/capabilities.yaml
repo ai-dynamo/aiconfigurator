@@ -27,14 +27,31 @@ dtype_min_sm:
   int4_wo: 0
   fp8: 89
   fp8_static: 89
-  fp8_block: 90
+  # Block-scaled fp8 is a software layout over the same fp8 tensor cores that
+  # exist from SM89 (Ada): vLLM 0.24.0 dispatches it below SM90 through the
+  # Marlin/Triton tiers of _POSSIBLE_FP8_BLOCK_KERNELS (model_executor/
+  # kernels/linear/__init__.py:319-330), verified end-to-end on L40S.
+  fp8_block: 89
   nvfp4: 100
   w4a16_mxfp4: 89
   w4a8_mxfp4_mxfp8: 100
 
 op_min_sm:
   # DSA/NSA module collectors depend on SM90+ kernel libraries on all backends.
+  # The skip-indexer variants still run the same sparse attention kernel
+  # family (SM90a/SM100f+), so they share the floor.
   dsa_context_module: 90
   dsa_generation_module: 90
+  dsa_context_module_skip_indexer: 90
+  dsa_generation_module_skip_indexer: 90
+  # The DSV4/GLM-5 sparse sub-kernel collectors depend on the same SM90+
+  # kernel libraries (DeepGEMM fp8_mqa_logits, FlashMLA sparse, jit topk).
+  dsv4_paged_mqa_logits_module: 90
+  dsv4_hca_attn_module: 90
+  dsv4_csa_attn_module: 90
+  dsv4_csa_topk_calib: 90
+  glm5_mqa_logits_module: 90
+  glm5_topk_module: 90
+  glm5_dsa_attn_module: 90
   # compute_scale measures FP8 quantization overhead.
   compute_scale: 89

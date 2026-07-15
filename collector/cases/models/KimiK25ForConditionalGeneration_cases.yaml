@@ -11,31 +11,40 @@ model_paths:
 include_base: true
 base_ops:
   - gemm
-framework_specific_base_ops:
-  vllm:
-    - attention_context
-    - attention_generation
+model_specific_base_ops:
+  moonshotai/Kimi-K2.5:
+    vllm:
+      - encoder_attention
+  nvidia/Kimi-K2.5-NVFP4:
+    vllm:
+      - encoder_attention
 description: >
   Kimi-K2.5 hybrid MLA/MoE model-centric collection plan.
 
 model_case_values:
-  attention:
-    - id: kimi_k25_vllm_attention
+  encoder_attention:
+    - id: kimi_k25_moonvit_encoder_attention
       model_path: moonshotai/Kimi-K2.5
       model_aliases:
-        - moonshotai/Kimi-K2-Instruct
         - nvidia/Kimi-K2.5-NVFP4
-      num_attention_heads: 64
-      num_key_value_heads: 64
-      head_dim: 128
-      window_size: 0
-      tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
+      num_attention_heads: 16
+      head_dim: 72
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
   moe:
     - model_path: moonshotai/Kimi-K2-Instruct
       hidden_size: 7168
       inter_size: 2048
       topk: 8
       num_experts: 384
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.827
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_num_expert_group: 1
+      sglang_moe_topk_group: 1
+      sglang_moe_backends:
+        fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
       wideep: true
       framework_quantization:
         sglang:
@@ -49,6 +58,15 @@ model_case_values:
       inter_size: 2048
       topk: 8
       num_experts: 384
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.827
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_num_expert_group: 1
+      sglang_moe_topk_group: 1
+      sglang_moe_backends:
+        int4_wo: {90: marlin}
       wideep: true
       framework_quantization:
         sglang:
@@ -62,6 +80,13 @@ model_case_values:
       inter_size: 2048
       topk: 8
       num_experts: 384
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.827
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_num_expert_group: 1
+      sglang_moe_topk_group: 1
       wideep: true
       framework_quantization:
         sglang:
@@ -76,8 +101,8 @@ model_case_values:
         - moonshotai/Kimi-K2-Instruct
         - nvidia/Kimi-K2.5-NVFP4
       # The current SGLang/TRT-LLM AIC MLA consumer queries the historical
-      # DeepSeek-compatible 128-head table. vLLM's native 64-head attention
-      # shape is represented separately by the attention profile above.
+      # DeepSeek-compatible 128-head table. vLLM uses the framework-native
+      # MLA module collector described by mla_module below.
       num_heads: 128
       q_lora_rank: 1536
       kv_lora_rank: 512
@@ -97,11 +122,30 @@ model_case_values:
       qk_rope_head_dim: 64
       v_head_dim: 128
 
+framework_specific_model_case_values:
+  vllm:
+    mla_module:
+      - model_path: moonshotai/Kimi-K2-Instruct
+        attention_type: mla
+        architecture: DeepseekV3ForCausalLM
+        native_num_heads: 64
+      - model_paths:
+          - moonshotai/Kimi-K2.5
+          - nvidia/Kimi-K2.5-NVFP4
+        attention_type: mla
+        architecture: KimiK25ForConditionalGeneration
+        native_num_heads: 64
+
 all_frameworks_op_cases:
   moe:
     cases: all
 
 framework_specific_op_cases:
+  vllm:
+    mla_context_module:
+      cases: all
+    mla_generation_module:
+      cases: all
   trtllm:
     mla_context:
       cases: all

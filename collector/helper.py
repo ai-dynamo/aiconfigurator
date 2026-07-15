@@ -35,6 +35,19 @@ import numpy as np
 # Exit codes
 EXIT_CODE_RESTART = 10  # Exit code to indicate restart is needed
 
+
+class WorkerRestartSignal:
+    """Return-value sentinel: task finished, recycle the worker process.
+
+    Collector entrypoints legitimately return plain ints (row counts), so the
+    executor must never interpret an int as a restart request — a task that
+    logged exactly EXIT_CODE_RESTART rows would silently recycle its worker.
+    Return WORKER_RESTART (or sys.exit(EXIT_CODE_RESTART)) instead.
+    """
+
+
+WORKER_RESTART = WorkerRestartSignal()
+
 # Global NVML state per worker process
 _NVML_INITIALIZED = False
 _NVML_LOCK = threading.Lock()
@@ -453,6 +466,18 @@ _LOGGING_CONFIGURED = False
 _LOG_DIR = None
 
 
+def log_scope_dirname(scope) -> str:
+    """Join the op scope for the log-directory name, capped for the filesystem.
+
+    A long --ops list must not crash logging setup: filenames are limited to
+    255 bytes on common filesystems, so summarize past the cap.
+    """
+    name = "+".join(scope)
+    if len(name) > 80:
+        name = f"{scope[0]}+{len(scope) - 1}ops"
+    return name
+
+
 def setup_logging(scope=["all"], debug=False, worker_id=None):
     """
     Setup structured logging - auto-configures based on process type
@@ -537,7 +562,7 @@ def setup_logging(scope=["all"], debug=False, worker_id=None):
 
     # Create log directory
     time_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    _LOG_DIR = Path(f"{'+'.join(scope)}_{time_stamp}")
+    _LOG_DIR = Path(f"{log_scope_dirname(scope)}_{time_stamp}")
     if not _LOG_DIR.is_dir():
         _LOG_DIR.mkdir()
 
@@ -660,7 +685,7 @@ def log_perf(
     kernel_source: str,
     perf_filename: str,
     power_stats: dict | None = None,
-):
+) -> bool:
     lock_file = perf_filename + ".lock"
 
     # Try for 1 sec (10 * 0.1s)
@@ -676,7 +701,7 @@ def log_perf(
 
     if not got_lock:
         print(f"Skipping log: can not get lock for {perf_filename}")
-        return
+        return False
 
     try:
         with open(perf_filename, "a", newline="") as f:
@@ -719,10 +744,13 @@ def log_perf(
             os.fsync(f.fileno())
     except Exception as e:
         print(f"Error writing log: {e}")
+        return False
     finally:
         # Delete the lock file, even if writing crashed
         if got_lock and os.path.exists(lock_file):
             os.unlink(lock_file)
+
+    return True
 
 
 def convert_perf_csv_to_parquet(

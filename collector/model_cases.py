@@ -24,6 +24,7 @@ There is intentionally no per-case selector or exception rule engine here.
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -358,6 +359,28 @@ def _selected_base_ops(
     return selected
 
 
+def _backend_registry_ops(backend: str) -> set[str] | None:
+    """Ops the backend (and its wideep namespace) can actually dispatch.
+
+    Registries import only ``collector.registry_types``, so loading them here
+    is framework-free. Returns None for a backend without a registry module,
+    leaving validation to the executor.
+    """
+    try:
+        registry = importlib.import_module(f"collector.{backend}.registry")
+    except ImportError:
+        return None
+    ops = {entry.op for entry in getattr(registry, "REGISTRY", [])}
+    ops.update(entry.op for entry in getattr(registry, "REGISTRY_XPU", []))
+    try:
+        wideep_registry = importlib.import_module(f"collector.wideep.{backend}.registry")
+    except ImportError:
+        pass
+    else:
+        ops.update(entry.op for entry in getattr(wideep_registry, "REGISTRY", []))
+    return ops
+
+
 def build_collection_case_plan(
     *,
     backend: str,
@@ -386,6 +409,19 @@ def build_collection_case_plan(
         _merge_case_file(selected, base_data, backend, allowed_ops=selected_base_ops)
     for data in model_data:
         _merge_case_file(selected, data, backend)
+
+    # Model-declared op names are only ever matched against the backend
+    # registry downstream, and unmatched names silently collect nothing —
+    # a typo would look like a clean run for the intended benchmark. Fail
+    # loudly here instead, symmetric with the base_ops validation above.
+    registry_ops = _backend_registry_ops(backend)
+    if registry_ops is not None:
+        unknown = selected - registry_ops
+        if unknown:
+            raise ValueError(
+                f"Model case files declare ops unknown to the {backend} registry "
+                f"(including its wideep registry): {sorted(unknown)}"
+            )
 
     resolved_sm_version = resolve_sm_version(gpu_type=gpu_type, sm_version=sm_version)
     return CollectionCasePlan(

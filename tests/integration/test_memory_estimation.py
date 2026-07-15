@@ -9,7 +9,7 @@ memory model + the OfFree/OfTotal budget math), which the unit tests in
 breakdown. This is NOT a Python-vs-Rust parity test: the Rust
 ``estimate_kv_cache`` is a pure forwarder into this same Python code, so there is
 no independent Rust implementation to compare against -- that round-trip is
-covered separately by ``rust/aiconfigurator-core/tests/memory_round_trip.rs``.
+covered separately by ``aic-core/rust/aiconfigurator-core/tests/memory_round_trip.rs``.
 
 Native cases (Qwen3-32B on h200_sxm, TRT-LLM OfFree and vLLM OfTotal), asserting:
 

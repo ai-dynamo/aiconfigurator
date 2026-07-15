@@ -20,10 +20,10 @@ Before making any change under `collector/**` MUST read:
 - For case YAML work: `.claude/rules/collector/case_authoring.md`
 
 For adding a new Collector operation, additionally follow
-`.agents/skills/aic-collector-op-development/SKILL.md` (consumer-contract,
-case-identity, deduplication, and validation gates). Where that skill
-references the retired sm_exceptions/selector machinery, the
-`.claude/rules/collector/` files take precedence.
+`.claude/skills/aic-collector-op-development/SKILL.md` (consumer-contract,
+case-identity, deduplication, and validation gates). Skills are procedural
+runbooks; if a skill and a `.claude/rules/` file ever disagree, the rule
+file wins.
 
 ## Cursor Cloud specific instructions
 
@@ -36,7 +36,7 @@ AIConfigurator is a Python CLI/SDK tool for optimizing LLM inference deployment 
 Dependencies are managed via `uv` with a `uv.lock` lockfile. The virtual environment lives at `.venv/`. All commands below assume `.venv/bin/` is on PATH or you prefix with `.venv/bin/`.
 
 - **Install/refresh deps:** `python3 -m uv sync --extra dev`
-- **Git LFS:** The performance database files under `src/aiconfigurator/systems/data/**/*.txt` are tracked with Git LFS. Run `git lfs pull` after cloning. If LFS pull fails (e.g., `github-cloud.githubusercontent.com` is blocked), the CLI `generate` and `support` modes still work. The `default` mode requires real LFS data.
+- **Git LFS:** The performance database files under `aic-core/src/aiconfigurator_core/systems/data/**/*.txt` are tracked with Git LFS. Run `git lfs pull` after cloning. If LFS pull fails (e.g., `github-cloud.githubusercontent.com` is blocked), the CLI `generate` and `support` modes still work. The `default` mode requires real LFS data.
 
 ### Lint / Test / Run
 

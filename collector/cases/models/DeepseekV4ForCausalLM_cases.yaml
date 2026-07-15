@@ -24,25 +24,39 @@ model_case_values:
       inter_size: 2048
       topk: 6
       num_experts: 256
+      sglang_moe_swiglu_limit: 10.0
+      sglang_moe_scoring_func: sqrtsoftplus
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 1.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_backends:
+        w4a8_mxfp4_mxfp8: {100: flashinfer_mxfp4, 103: flashinfer_mxfp4}
       wideep: true
       framework_quantization:
         sglang:
-          # The pinned SGLang 0.5.10 predates the DeepSeek-V4-specific MXFP4
-          # method (added in 0.5.12). Do not run its GPT-OSS method under a
-          # DSV4 label; enable this only with a separately validated upgrade.
-          allowed_modes: []
+          allowed_modes:
+            - w4a8_mxfp4_mxfp8
         trtllm:
           allowed_modes:
             - w4a8_mxfp4_mxfp8
         vllm:
-          # The pinned vLLM 0.19.0 collector has no DeepSeek-V4 MXFP4/MXFP8
-          # implementation. Keep the native artifact out of its queue.
+          # vLLM 0.24.0 selects W4A16 on SM90 but W4A8 on Blackwell for this
+          # artifact. The SDK currently requests only W4A8 and its MoE key has
+          # no system/backend dimension, so neither label is consumable across
+          # platforms yet.
           allowed_modes: []
     - model_path: sgl-project/DeepSeek-V4-Flash-FP8
       hidden_size: 4096
       inter_size: 2048
       topk: 6
       num_experts: 256
+      sglang_moe_swiglu_limit: 10.0
+      sglang_moe_scoring_func: sqrtsoftplus
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 1.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
       wideep: true
       framework_quantization:
         sglang:
@@ -52,6 +66,12 @@ model_case_values:
           allowed_modes:
             - fp8_block
         vllm:
+          # The artifact config omits expert_dtype and vLLM defaults it to
+          # FP4, but vLLM 0.24's DeepSeek-V4 quant config has a native
+          # fp8-expert branch — serving works with the documented override
+          # `--hf-overrides '{"expert_dtype": "fp8"}'` (models/deepseek_v4/
+          # quant_config.py @0.24.0). The benchmark constructs Fp8Config from
+          # the label with synthetic weights, matching that serving path.
           allowed_modes:
             - fp8_block
     - model_path: deepseek-ai/DeepSeek-V4-Pro
@@ -59,20 +79,44 @@ model_case_values:
       inter_size: 3072
       topk: 6
       num_experts: 384
+      sglang_moe_swiglu_limit: 10.0
+      sglang_moe_scoring_func: sqrtsoftplus
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_backends:
+        w4a8_mxfp4_mxfp8: {100: flashinfer_mxfp4, 103: flashinfer_mxfp4}
       wideep: true
       framework_quantization:
         sglang:
-          allowed_modes: []
+          # Owner decision (2026-07-05): do not collect the native-FP4 Pro
+          # artifact as w4a16_mxfp4. The shared SM90 w4a16 backend map is
+          # triton (GPT-OSS truth), under which SGLang 0.5.14 constructs plain
+          # Fp8MoEMethod for is_fp4_experts and every case fails closed;
+          # SM100/103 production scheduling uses the w4a8 TRTLLM-gen path
+          # kept below. To restore support, re-add w4a16_mxfp4 here and pin
+          # sglang_moe_backends w4a16_mxfp4 {90: flashinfer_mxfp4} (the native
+          # cutlass mixed-input path, FlashInfer #3084).
+          allowed_modes:
+            - w4a8_mxfp4_mxfp8
         trtllm:
           allowed_modes:
             - w4a8_mxfp4_mxfp8
         vllm:
+          # See the native Flash consumer-contract note above.
           allowed_modes: []
     - model_path: sgl-project/DeepSeek-V4-Pro-FP8
       hidden_size: 7168
       inter_size: 3072
       topk: 6
       num_experts: 384
+      sglang_moe_swiglu_limit: 10.0
+      sglang_moe_scoring_func: sqrtsoftplus
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
       wideep: true
       framework_quantization:
         sglang:
@@ -82,6 +126,8 @@ model_case_values:
           allowed_modes:
             - fp8_block
         vllm:
+          # See the Flash converted-artifact note above (same expert_dtype
+          # omission; same `--hf-overrides` serving path).
           allowed_modes:
             - fp8_block
   mhc:
@@ -272,10 +318,16 @@ framework_specific_op_cases:
     # the default model plan.
     mhc_module:
       cases: all
-    wideep_moe:
+  vllm:
+    # These four full-module paths are consumed by the production DSV4 model.
+    # Standalone sparse kernels and mHC remain registry-only because their
+    # current consumer contract/schedule does not represent vLLM 0.24.0's
+    # fused TileLang post->pre+norm and boundary/head calls.
+    dsv4_csa_context_module:
       cases: all
-
-# vLLM DSV4 collectors remain available through the registry/direct module
-# entrypoints, but are not in the default model plan until the manifest runtime
-# satisfies their compatibility floor and prefix-aware context collection is
-# implemented.
+    dsv4_hca_context_module:
+      cases: all
+    dsv4_csa_generation_module:
+      cases: all
+    dsv4_hca_generation_module:
+      cases: all

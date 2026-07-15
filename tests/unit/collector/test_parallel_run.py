@@ -62,10 +62,20 @@ def _task_fn(label, behavior, device):
     """Dispatch based on *behavior* encoded in each task's params."""
     if behavior == "exit_restart":
         sys.exit(EXIT_CODE_RESTART)
+    elif behavior == "return_restart":
+        from helper import WORKER_RESTART
+
+        return WORKER_RESTART
+    elif behavior == "return_restart_int":
+        # A plain int equal to EXIT_CODE_RESTART is an ordinary result (e.g. a
+        # logged-row count) and must NOT trigger a worker recycle.
+        return EXIT_CODE_RESTART
     elif behavior == "sigabrt":
         os.kill(os.getpid(), signal.SIGABRT)
     elif behavior == "error":
         raise ValueError(f"simulated: {label}")
+    elif behavior == "oom":
+        raise sys.modules["torch"].OutOfMemoryError(f"simulated: {label}")
     # "normal": return silently
 
 
@@ -193,6 +203,12 @@ class TestCudaFatalExceptionDetection:
 
         assert _collect_mod._is_cuda_fatal_exception(torch_mod.AcceleratorError("boom"), torch_mod)
 
+    def test_torch_out_of_memory_error_is_fatal(self):
+        torch_mod = MagicMock()
+        torch_mod.OutOfMemoryError = type("OutOfMemoryError", (Exception,), {})
+
+        assert _collect_mod._is_cuda_fatal_exception(torch_mod.OutOfMemoryError("boom"), torch_mod)
+
     @pytest.mark.parametrize(
         "message",
         [
@@ -250,6 +266,24 @@ class TestExitCodeRestart:
         errors = _run_and_assert_all_done(tasks, 2, tmp_path, module_name="restart_all")
         assert _crash_errors(errors) == []
 
+    def test_returned_restart_signal_uses_the_same_success_path(self, tmp_path):
+        tasks = _tasks([(f"t{i}", "return_restart") for i in range(6)])
+        errors = _run_and_assert_all_done(tasks, 2, tmp_path, module_name="return_restart_all")
+
+        assert _crash_errors(errors) == []
+        assert _load_done_ids(tmp_path, "return_restart_all") == {f"t{i}" for i in range(6)}
+        assert _load_failed_ids(tmp_path, "return_restart_all") == set()
+
+    def test_plain_int_result_equal_to_exit_code_is_not_a_restart(self, tmp_path):
+        """A task returning the int 10 (e.g. a logged-row count) completes
+        normally without recycling its worker."""
+        tasks = _tasks([("count_a", "return_restart_int"), ("count_b", "normal")])
+        errors = _run_and_assert_all_done(tasks, 1, tmp_path, module_name="int_result_not_restart")
+
+        assert _crash_errors(errors) == []
+        assert _load_done_ids(tmp_path, "int_result_not_restart") == {"count_a", "count_b"}
+        assert _load_failed_ids(tmp_path, "int_result_not_restart") == set()
+
     def test_interleaved_restart_and_normal(self, tmp_path):
         tasks = _tasks(
             [
@@ -301,6 +335,18 @@ class TestTaskExceptions:
         assert task_errors[0]["classification"] == "unexpected"
         # Plain tuple tasks carry no model/dtype attributes: no group label.
         assert task_errors[0]["group"] is None
+
+    def test_oom_records_once_and_restarts_worker(self, tmp_path, monkeypatch):
+        oom_error = type("OutOfMemoryError", (Exception,), {})
+        monkeypatch.setattr(sys.modules["torch"], "OutOfMemoryError", oom_error, raising=False)
+        tasks = _tasks([("oom", "oom"), ("after", "normal")])
+
+        errors = _run_and_assert_all_done(tasks, 1, tmp_path, module_name="oom_restart")
+
+        assert len([error for error in errors if error.get("error_type") == "OutOfMemoryError"]) == 1
+        assert _crash_errors(errors) == []
+        assert _load_done_ids(tmp_path, "oom_restart") == {"after"}
+        assert _load_failed_ids(tmp_path, "oom_restart") == {"oom"}
 
 
 class TestFailureGroups:

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
 import importlib.util
 import sys
 import types
@@ -125,7 +126,7 @@ def _install_vllm_stubs(monkeypatch):
         "vllm.model_executor.layers.fused_moe.layer",
         determine_expert_map=_noop,
     )
-    _stub_module(monkeypatch, "vllm.version", __version__="0.19.0")
+    _stub_module(monkeypatch, "vllm.version", __version__="0.24.0")
     _stub_module(
         monkeypatch,
         "collector.helper",
@@ -269,10 +270,14 @@ def test_vllm_moe_getter_dedupes_equal_resolved_invocations(monkeypatch):
         "model-a": {"activation": "silu", "has_bias": False},
         "model-b": {"activation": "silu", "has_bias": False},
     }
-    monkeypatch.setattr(module, "get_common_moe_test_cases", lambda: common_cases)
+    monkeypatch.setattr(module, "get_common_moe_test_cases", lambda **_kwargs: common_cases)
     monkeypatch.setattr(module, "get_moe_quantization_modes", lambda *_args, **_kwargs: ["w4a16_mxfp4"])
     monkeypatch.setattr(module, "moe_model_allows_quantization", lambda *_args: True)
-    monkeypatch.setattr(module, "moe_shape_satisfies_constraints", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        module,
+        "_load_model_moe_config",
+        lambda _model_name: {"model_type": "qwen3_moe", "hidden_act": "silu", "norm_topk_prob": True},
+    )
     monkeypatch.setattr(
         module,
         "get_moe_quantization_module_config",
@@ -298,10 +303,14 @@ def test_vllm_moe_getter_rejects_consumer_key_collision(monkeypatch):
         "model-a": {"activation": "silu", "has_bias": False},
         "model-c": {"activation": "swigluoai", "has_bias": True},
     }
-    monkeypatch.setattr(module, "get_common_moe_test_cases", lambda: common_cases)
+    monkeypatch.setattr(module, "get_common_moe_test_cases", lambda **_kwargs: common_cases)
     monkeypatch.setattr(module, "get_moe_quantization_modes", lambda *_args, **_kwargs: ["w4a16_mxfp4"])
     monkeypatch.setattr(module, "moe_model_allows_quantization", lambda *_args: True)
-    monkeypatch.setattr(module, "moe_shape_satisfies_constraints", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        module,
+        "_load_model_moe_config",
+        lambda _model_name: {"model_type": "qwen3_moe", "hidden_act": "silu", "norm_topk_prob": True},
+    )
     monkeypatch.setattr(
         module,
         "get_moe_quantization_module_config",
@@ -339,9 +348,6 @@ def test_vllm_repository_moe_getter_has_unique_consumer_keys(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     _install_vllm_stubs(monkeypatch)
     module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
-    monkeypatch.setattr(module, "per_block_cast_to_fp8", _noop)
-    monkeypatch.setattr(module, "_nvfp4_available", True)
-    monkeypatch.setattr(module, "_mxfp4_available", True)
 
     consumer_keys = []
     for case in module.get_moe_test_cases():
@@ -357,6 +363,54 @@ def test_vllm_repository_moe_getter_has_unique_consumer_keys(monkeypatch):
     assert len(consumer_keys) == len(set(consumer_keys))
 
 
+def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkeypatch):
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    monkeypatch.setattr(module, "get_sm_version", lambda: 90)
+
+    cases = module.get_moe_test_cases()
+    native_dsv4_models = {
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "deepseek-ai/DeepSeek-V4-Pro",
+    }
+    converted_dsv4_models = {
+        "sgl-project/DeepSeek-V4-Flash-FP8",
+        "sgl-project/DeepSeek-V4-Pro-FP8",
+    }
+
+    assert len(cases) == 1887
+    assert sum(len(case[1]) for case in cases) == 50949
+    # Native artifacts stay excluded (their w4a8_mxfp4_mxfp8 label has no
+    # consumable vLLM path); the converted FP8 artifacts are collected as
+    # fp8_block only — the layout vLLM serves with the documented
+    # expert_dtype override.
+    assert not any(case[8] in native_dsv4_models for case in cases)
+    converted_modes = {case[0] for case in cases if case[8] in converted_dsv4_models}
+    assert converted_modes == {"fp8_block"}
+
+
+@pytest.mark.parametrize(
+    ("model_path", "moe_type"),
+    [
+        ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "bfloat16"),
+        ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", "fp8"),
+    ],
+)
+def test_vllm_nemotron_ultra_uses_latent_moe_width(monkeypatch, model_path, moe_type):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    monkeypatch.setattr(module, "get_sm_version", lambda: 90)
+
+    cases = module.get_moe_test_cases()
+
+    assert len(cases) == 42
+    assert sum(len(case[1]) for case in cases) == 1134
+    assert {case[0] for case in cases} == {moe_type}
+    assert {case[2] for case in cases} == {2048}
+
+
 @pytest.mark.parametrize(
     "model_path",
     [
@@ -368,7 +422,108 @@ def test_vllm_nemotron_topk22_nvfp4_artifacts_are_not_scheduled(monkeypatch, mod
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
     _install_vllm_stubs(monkeypatch)
     module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
-    monkeypatch.setattr(module, "per_block_cast_to_fp8", _noop)
-    monkeypatch.setattr(module, "_nvfp4_available", True)
 
     assert module.get_moe_test_cases() == []
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+    ],
+)
+def test_nemotron_ultra_declares_backend_specific_moe_geometry(monkeypatch, model_path):
+    from collector.case_generator import get_common_moe_test_cases
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+
+    assert {case.hidden_size for case in get_common_moe_test_cases()} == {2048, 8192}
+    assert {case.hidden_size for case in get_common_moe_test_cases(backend="vllm")} == {2048}
+    assert {case.hidden_size for case in get_common_moe_test_cases(backend="sglang")} == {8192}
+    assert {case.hidden_size for case in get_common_moe_test_cases(backend="trtllm")} == {8192}
+
+
+def test_vllm_moe_declares_representable_parallel_topologies(monkeypatch):
+    from collector.case_generator import get_common_moe_test_cases
+
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    cases = get_common_moe_test_cases(backend="vllm")
+    topologies = {(case.tp, case.ep) for case in cases}
+
+    assert all(tp == 1 or ep == 1 for tp, ep in topologies)
+    assert any(tp > 1 and ep == 1 for tp, ep in topologies)
+    assert any(tp == 1 and ep > 1 for tp, ep in topologies)
+
+
+def test_vllm_moe_cuda_graph_fails_closed():
+    tree = ast.parse((REPO_ROOT / "collector/vllm/collect_moe.py").read_text())
+    run_moe = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_moe_torch")
+    benchmark_calls = [
+        node
+        for node in ast.walk(run_moe)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "benchmark_with_power"
+    ]
+
+    assert len(benchmark_calls) == 1
+    assert all(keyword.arg != "allow_graph_fail" for keyword in benchmark_calls[0].keywords)
+
+
+def test_vllm_moe_resolves_dynamic_experts_inside_token_loop():
+    tree = ast.parse((REPO_ROOT / "collector/vllm/collect_moe.py").read_text())
+    run_moe = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_moe_torch")
+    token_loop = next(
+        node
+        for node in ast.walk(run_moe)
+        if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id == "num_tokens"
+    )
+
+    selected_leaf_calls = [
+        node
+        for node in ast.walk(token_loop)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_select_experts_impl"
+    ]
+    source_assignments = [
+        node
+        for node in ast.walk(token_loop)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "source" for target in node.targets)
+    ]
+
+    assert len(selected_leaf_calls) == 1
+    assert len(source_assignments) == 2
+
+
+@pytest.mark.parametrize(
+    ("group_fields", "message"),
+    [
+        ({"topk_group": 4}, "missing n_group"),
+        ({"n_group": 8}, "missing topk_group"),
+        ({"n_group": "invalid", "topk_group": 1}, "requires integer group fields"),
+        ({"n_group": 0, "topk_group": 1}, "invalid n_group=0"),
+        ({"n_group": 4, "topk_group": 8}, "invalid n_group=4, topk_group=8"),
+    ],
+)
+def test_vllm_grouped_topk_config_fails_closed(monkeypatch, group_fields, message):
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    model_config = {"model_type": "deepseek_v3", "hidden_act": "silu", **group_fields}
+    monkeypatch.setattr(module, "_load_model_moe_config", lambda _model_name: model_config)
+
+    with pytest.raises(ValueError, match=message):
+        module._resolve_moe_runtime_config("model", {})
+
+
+def test_vllm_standard_topk_does_not_require_group_fields(monkeypatch):
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    monkeypatch.setattr(module, "_load_model_moe_config", lambda _model_name: {"model_type": "qwen3_moe"})
+
+    runtime_config = module._resolve_moe_runtime_config("model", {})
+
+    assert runtime_config["use_grouped_topk"] is False
+    assert runtime_config["num_expert_group"] is None
+    assert runtime_config["topk_group"] is None
