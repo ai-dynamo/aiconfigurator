@@ -1,0 +1,10 @@
+schema_version: 1
+provenance: legacy
+runtime:
+  framework: sglang
+  version: 0.5.14
+tables:
+  context_attention_perf:
+    status: complete
+  generation_attention_perf:
+    status: complete

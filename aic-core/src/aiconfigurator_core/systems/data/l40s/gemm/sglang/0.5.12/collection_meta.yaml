@@ -1,0 +1,8 @@
+schema_version: 1
+provenance: legacy
+runtime:
+  framework: sglang
+  version: 0.5.12
+tables:
+  gemm_perf:
+    status: complete

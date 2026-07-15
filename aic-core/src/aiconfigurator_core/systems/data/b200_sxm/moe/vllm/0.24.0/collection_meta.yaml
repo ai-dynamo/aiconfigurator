@@ -1,0 +1,8 @@
+schema_version: 1
+provenance: legacy
+runtime:
+  framework: vllm
+  version: 0.24.0
+tables:
+  moe_perf:
+    status: complete
